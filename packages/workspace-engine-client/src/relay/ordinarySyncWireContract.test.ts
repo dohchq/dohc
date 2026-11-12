@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { ProtocolShapeError } from "../wireSchema";
-import { decodeHeldContributions, decodeHostedSyncResult, decodeOrdinarySyncResult, hostedWindowCovers } from "./ordinarySyncWireContract";
+import { readOrdinaryPublicationState } from "./ordinaryPublicationState";
+import {
+  MAX_PUBLICATION_STAGE_KEYS, decodeHeldContributions, decodeHostedSyncResult, decodeOrdinaryPublicationState,
+  decodeOrdinarySyncResult, hostedWindowCovers,
+} from "./ordinarySyncWireContract";
 import { canonicalJson } from "./releasedLineageBinding";
 import vectors from "./releasedLineageBindingVectors.json" with { type: "json" };
 
@@ -437,5 +441,56 @@ describe("held document contribution artifact", () => {
     ["less merged work than its commitment names", named({ ...artifact, mergedContributionIds: [] })],
   ] as const)("rejects %s", (_case, [bytes, inspection]) => {
     expect(() => decodeHeldContributions(bytes, current(inspection))).toThrow(ProtocolShapeError);
+  });
+});
+
+describe("ordinary publication state", () => {
+  const written = { stageKey: "reply", state: "present", outcome: "written", threadId: "thread", coordinates: [
+    { originId: "origin", originSeq: 3, state: "pushed" }, { originId: "origin", originSeq: 4, state: "pending" },
+    { originId: "origin", originSeq: 5, state: "refused" },
+  ] };
+  const lost = { stageKey: "decision", state: "present", outcome: "lost", threadId: "thread", winnerMessageId: "other", coordinates: [] };
+  const absent = { stageKey: "post", state: "absent" };
+  const keys = ["reply", "decision", "post"];
+
+  it("decodes absent, written, and lost stages in the order asked", () => {
+    expect(decodeOrdinaryPublicationState({ stages: [written, lost, absent] }, keys)).toEqual({ stages: [written, lost, absent] });
+    const noOp = { stageKey: "decision", state: "present", outcome: "no-op", threadId: "thread", coordinates: [] };
+    expect(decodeOrdinaryPublicationState({ stages: [noOp] }, ["decision"])).toEqual({ stages: [noOp] });
+    expect(decodeOrdinaryPublicationState({ stages: [] }, [])).toEqual({ stages: [] });
+  });
+
+  it.each([
+    ["an extra field", { stages: [{ ...written, extra: true }, lost, absent] }],
+    ["an extra coordinate field", { stages: [{ ...written, coordinates: [{ ...written.coordinates[0], extra: 1 }] }, lost, absent] }],
+    ["an absent stage with a receipt", { stages: [written, lost, { ...absent, outcome: "written" }] }],
+    ["an unknown state", { stages: [written, lost, { ...absent, state: "unknown" }] }],
+    ["an unknown outcome", { stages: [{ ...written, outcome: "saved" }, lost, absent] }],
+    ["an unknown coordinate state", { stages: [{ ...written, coordinates: [{ ...written.coordinates[0], state: "acked" }] }, lost, absent] }],
+    ["a negative sequence", { stages: [{ ...written, coordinates: [{ ...written.coordinates[0], originSeq: -1 }] }, lost, absent] }],
+    ["an empty thread", { stages: [{ ...written, threadId: "" }, lost, absent] }],
+    ["a missing stage", { stages: [written, lost] }],
+    ["stages out of order", { stages: [lost, written, absent] }],
+    ["a winner on a written stage", { stages: [{ ...written, winnerMessageId: "other" }, lost, absent] }],
+    ["journal rows on a lost stage", { stages: [written, { ...lost, coordinates: written.coordinates }, absent] }],
+  ] as const)("rejects %s", (_case, value) => {
+    expect(() => decodeOrdinaryPublicationState(value, keys)).toThrow(ProtocolShapeError);
+  });
+
+  it("asks the bound workspace for the stage keys and decodes the answer", async () => {
+    const calls: unknown[] = [];
+    const requester = {
+      async request(method: string, params: unknown, options?: unknown) {
+        calls.push({ method, params, options });
+        return { stages: [written, lost, absent] };
+      },
+    };
+    await expect(readOrdinaryPublicationState(requester, "handle" as never, keys, { deadlineMs: 5 }))
+      .resolves.toEqual({ stages: [written, lost, absent] });
+    expect(calls).toEqual([{ method: "sync.ordinary.publicationState", params: { stageKeys: keys },
+      options: { deadlineMs: 5, workspace: "handle" } }]);
+    await expect(readOrdinaryPublicationState(requester, "handle" as never,
+      Array.from({ length: MAX_PUBLICATION_STAGE_KEYS + 1 }, (_, index) => `stage-${index}`))).rejects.toThrow(RangeError);
+    expect(calls).toHaveLength(1);
   });
 });

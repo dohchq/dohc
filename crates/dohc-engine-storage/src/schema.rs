@@ -227,6 +227,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "agent_run_records",
     "run_message_links",
     "chat_dispatch_pause",
+    "chat_stage_receipts",
     // R12 search tables. The two FTS5 virtual tables show up in sqlite_schema
     // with type='table', so the same presence probe applies. Their internal
     // FTS5 shadow tables are not listed.

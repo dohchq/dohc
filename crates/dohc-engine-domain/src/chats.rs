@@ -40,6 +40,7 @@
 mod dispatch;
 mod pending_replay;
 mod reactions;
+mod receipts;
 mod stream;
 mod thread_projection;
 
@@ -47,6 +48,10 @@ pub use pending_replay::{
     replay_pending_chat_coordinates_for_change, replay_ready_pending_chat_coordinates,
 };
 pub use reactions::{is_reaction_emoji_verbatim, normalize_reaction_author_id, reaction_id_for};
+pub use receipts::{
+    ChatCoordinatePublication, ChatCoordinateState, ChatStageOutcome, ChatStagePublication,
+    ChatStageReceipt, MAX_PUBLICATION_STAGE_KEYS,
+};
 pub use stream::{
     AGENT_REPLY_EXCERPT_CHARS, STREAM_LIMIT_DEFAULT, StreamAgentReply, StreamAgentRequest,
     StreamAgentRequestState, StreamItem, StreamPage, StreamPosition, StreamPost, StreamReplier,
@@ -2822,6 +2827,9 @@ pub struct LinkedChatStore<'a> {
     /// Group automation claims this handle's committed writes took, for the
     /// caller to announce after commit.
     automation_claims: Vec<crate::AutomationClaim>,
+    /// Whether keyed writes record a stage receipt. Only callers that read
+    /// publication state ask for one.
+    stage_receipts: bool,
 }
 
 impl<'a> LinkedChatStore<'a> {
@@ -2830,12 +2838,20 @@ impl<'a> LinkedChatStore<'a> {
         LinkedChatStore {
             store,
             automation_claims: Vec::new(),
+            stage_receipts: false,
         }
     }
 
     /// The Group automation claims committed writes took since the last call.
     /// A message this computer stores, written here or replayed from a parked
     /// coordinate, is claimed in the transaction that stores it.
+    /// Record a stage receipt for each keyed thread start, send, resolve, and
+    /// reaction set this handle writes.
+    pub fn record_stage_receipts(&mut self, record: bool) -> &mut Self {
+        self.stage_receipts = record;
+        self
+    }
+
     pub fn take_automation_claims(&mut self) -> Vec<crate::AutomationClaim> {
         std::mem::take(&mut self.automation_claims)
     }
@@ -3492,6 +3508,7 @@ impl<'a> LinkedChatStore<'a> {
 
         let mut input = input.clone();
         input.thread_id = thread_id;
+        let stage_receipt = self.stage_receipts;
         let title_c = title.clone();
         let body_c = body.clone();
         let display_c = display_name.clone();
@@ -3499,6 +3516,9 @@ impl<'a> LinkedChatStore<'a> {
         let origin_c = origin.clone();
         let attachments_c = attachments.clone();
         let outcome = self.write_chat_with_claims(&input.workspace_id, faults, |tx, claims| {
+            let mark = (stage_receipt && input.request_id.is_some())
+                .then(|| receipts::journal_mark(tx, &input.workspace_id))
+                .transpose()?;
             let channel = require_channel(tx, &input.workspace_id, &input.channel_id)?;
             let channel_wire_id =
                 wire_id_for_channel_id(tx, &input.workspace_id, &channel.channel_id)?;
@@ -3725,6 +3745,18 @@ impl<'a> LinkedChatStore<'a> {
                 claims,
             )?;
             record_request(tx, input.request_id.as_deref(), &payload_hash, now)?;
+            if let (Some(stage_key), Some(mark)) = (input.request_id.as_deref(), &mark) {
+                receipts::record_receipt(
+                    tx,
+                    &input.workspace_id,
+                    stage_key,
+                    receipts::ChatStageOutcome::Written,
+                    thread_id,
+                    None,
+                    mark,
+                    receipts::StageResult::Message,
+                )?;
+            }
             bump_chat_conversation_revision(tx, &input.workspace_id, thread_id)?;
             let message = ChatMessage {
                 author_actor_key: author_actor_key.map(str::to_owned),
@@ -3883,6 +3915,7 @@ impl<'a> LinkedChatStore<'a> {
         }
 
         let input = input.clone();
+        let stage_receipt = self.stage_receipts;
         let display_c = display_name.clone();
         let author_user_c = author_user_id.clone();
         let origin_c = origin.clone();
@@ -3890,6 +3923,9 @@ impl<'a> LinkedChatStore<'a> {
         let parent_c = parent.clone();
         let attachments_c = attachments.clone();
         let outcome = self.write_chat_with_claims(&input.workspace_id, faults, |tx, claims| {
+            let mark = (stage_receipt && input.request_id.is_some())
+                .then(|| receipts::journal_mark(tx, &input.workspace_id))
+                .transpose()?;
             require_thread(tx, &input.workspace_id, &input.thread_id)?;
             if let Some(parent_id) = &parent_c
                 && !thread_has_message(tx, &input.workspace_id, &input.thread_id, parent_id)?
@@ -4088,6 +4124,18 @@ impl<'a> LinkedChatStore<'a> {
                 claims,
             )?;
             record_request(tx, input.request_id.as_deref(), &payload_hash, now)?;
+            if let (Some(stage_key), Some(mark)) = (input.request_id.as_deref(), &mark) {
+                receipts::record_receipt(
+                    tx,
+                    &input.workspace_id,
+                    stage_key,
+                    receipts::ChatStageOutcome::Written,
+                    &input.thread_id,
+                    None,
+                    mark,
+                    receipts::StageResult::Message,
+                )?;
+            }
             bump_chat_conversation_revision(tx, &input.workspace_id, &input.thread_id)?;
             let message = ChatMessage {
                 author_actor_key: author_actor_key.map(str::to_owned),
@@ -4163,16 +4211,45 @@ impl<'a> LinkedChatStore<'a> {
                 return Err(DomainError::IdempotencyKeyReuseMismatch);
             }
             return self.store.read_with(|conn| {
-                require_decision(conn, &input.workspace_id, &thread_id, &input.message_id)
+                let stored =
+                    receipts::replayed_decision(conn, &input.workspace_id, &input.request_id)?;
+                match stored {
+                    Some(decision) => Ok(decision),
+                    None => {
+                        require_decision(conn, &input.workspace_id, &thread_id, &input.message_id)
+                    }
+                }
             });
         }
 
         let input = input.clone();
+        let stage_receipt = self.stage_receipts;
         let outcome = self.write_with_pending_chat_replay(&input.workspace_id, faults, |tx| {
+            let mark = stage_receipt
+                .then(|| receipts::journal_mark(tx, &input.workspace_id))
+                .transpose()?;
             require_thread(tx, &input.workspace_id, &thread_id)?;
             let current = require_decision(tx, &input.workspace_id, &thread_id, &input.message_id)?;
             if current.state == ChatDecisionState::Resolved {
                 record_request(tx, Some(&input.request_id), &payload_hash, current.at_ms)?;
+                if let Some(mark) = &mark {
+                    let (outcome, winner) = match current.resolved_by_message_id.as_deref() {
+                        Some(winner) if winner == input.resolved_by_message_id => {
+                            (receipts::ChatStageOutcome::NoOp, None)
+                        }
+                        winner => (receipts::ChatStageOutcome::Lost, winner),
+                    };
+                    receipts::record_receipt(
+                        tx,
+                        &input.workspace_id,
+                        &input.request_id,
+                        outcome,
+                        &thread_id,
+                        winner,
+                        mark,
+                        receipts::StageResult::Decision(&current),
+                    )?;
+                }
                 return Ok(current);
             }
             let chosen = validate_chosen_option(&current.options, input.chosen_option.as_deref())?;
@@ -4200,7 +4277,21 @@ impl<'a> LinkedChatStore<'a> {
                 at_ms,
             )?;
             record_request(tx, Some(&input.request_id), &payload_hash, at_ms)?;
-            require_decision(tx, &input.workspace_id, &thread_id, &input.message_id)
+            let decision =
+                require_decision(tx, &input.workspace_id, &thread_id, &input.message_id)?;
+            if let Some(mark) = &mark {
+                receipts::record_receipt(
+                    tx,
+                    &input.workspace_id,
+                    &input.request_id,
+                    receipts::ChatStageOutcome::Written,
+                    &thread_id,
+                    None,
+                    mark,
+                    receipts::StageResult::Decision(&decision),
+                )?;
+            }
+            Ok(decision)
         })?;
         committed(outcome)
     }

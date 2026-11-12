@@ -72,6 +72,15 @@ export {
   type VersionedTextReadValue,
 } from "./versioned/versionedWireContract";
 
+export { readOrdinaryPublicationState } from "./relay/ordinaryPublicationState";
+export {
+  MAX_PUBLICATION_STAGE_KEYS,
+  ORDINARY_PUBLICATION_STATE_METHOD,
+  decodeOrdinaryPublicationState,
+  type OrdinaryPublicationState,
+  type OrdinaryStagePublication,
+} from "./relay/ordinarySyncWireContract";
+
 export {
   KEY_ENVELOPE_METHOD,
   decodeKeyEnvelopeResult,

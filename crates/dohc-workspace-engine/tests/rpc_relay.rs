@@ -4683,3 +4683,163 @@ async fn ended_session_integrated_empty_queue_at_workspace_open() {
 async fn ended_session_integrated_empty_queue_after_crash() {
     assert_open_document_artifact_recovery_inner("integrated-crash", true, false, false).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ordinary_publication_state_follows_a_keyed_post_through_push() {
+    let relay = FakeRelay::start(RelayState::default());
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let workspace_id = "rpc-publication-state";
+    let handle = open_workspace(&transport, &scratch, &relay, 1, workspace_id).await;
+    let mut id = 1;
+    seed_main(&transport, &handle, &mut id, workspace_id).await;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.create",
+        json!({ "channelId": "channel", "name": "Shared", "kind": "channel", "nowMs": 10 }),
+    )
+    .await;
+    id += 1;
+    call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        keyed_request(
+            id,
+            "chats.threads.start",
+            Some(handle.clone()),
+            "stage-post",
+            json!({
+                "channelId": "channel", "threadId": "thread", "messageId": "opening",
+                "authorKind": "human", "authorDisplayName": "Ada", "authorUserId": "ada",
+                "body": "Posted from a phone", "needsDecision": false, "nowMs": 20,
+                "stageReceipt": true,
+            }),
+        ),
+    )
+    .await
+    .expect("keyed post");
+    // A desktop write keeps its key but asks for no receipt.
+    id += 1;
+    call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        keyed_request(
+            id,
+            "chats.messages.send",
+            Some(handle.clone()),
+            "desktop-send",
+            json!({
+                "threadId": "thread", "messageId": "desktop-reply",
+                "authorKind": "human", "authorDisplayName": "Ada", "authorUserId": "ada",
+                "body": "Sent from a desktop", "nowMs": 21,
+            }),
+        ),
+    )
+    .await
+    .expect("desktop send");
+    id += 1;
+    let unkeyed = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                id,
+                "chats.messages.send",
+                Some(handle.clone()),
+                json!({
+                    "threadId": "thread", "messageId": "unkeyed-reply",
+                    "authorKind": "human", "authorDisplayName": "Ada", "authorUserId": "ada",
+                    "body": "No key", "nowMs": 22, "stageReceipt": true,
+                }),
+            ),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(unkeyed.code, ErrorCode::InvalidParams);
+    assert_eq!(unkeyed.message, "stage-receipt-requires-idempotency-key");
+
+    let stages = |answer: Value| answer["stages"].as_array().cloned().expect("stages");
+    let asked = json!({ "stageKeys": ["stage-post", "stage-missing", "desktop-send"] });
+    let pending = stages(
+        call(
+            &transport,
+            &handle,
+            &mut id,
+            "sync.ordinary.publicationState",
+            asked.clone(),
+        )
+        .await,
+    );
+    assert_eq!(pending[1], json!({ "stageKey": "stage-missing", "state": "absent" }));
+    assert_eq!(
+        pending[2],
+        json!({ "stageKey": "desktop-send", "state": "absent" }),
+        "a keyed write without stageReceipt records none"
+    );
+    assert_eq!(pending[0]["state"], "present");
+    assert_eq!(pending[0]["outcome"], "written");
+    assert_eq!(pending[0]["threadId"], "thread");
+    assert!(pending[0].get("winnerMessageId").is_none());
+    let coordinates = pending[0]["coordinates"].as_array().cloned().expect("coordinates");
+    assert!(!coordinates.is_empty());
+    assert!(
+        coordinates.iter().all(|coordinate| coordinate["state"] == "pending"),
+        "{coordinates:?}"
+    );
+
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.claim",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    loop {
+        let pushed = call(
+            &transport,
+            &handle,
+            &mut id,
+            "sync.push",
+            json!({ "workspaceId": workspace_id }),
+        )
+        .await;
+        if pushed["hasMore"] != json!(true) {
+            break;
+        }
+    }
+    let pushed = stages(
+        call(
+            &transport,
+            &handle,
+            &mut id,
+            "sync.ordinary.publicationState",
+            asked,
+        )
+        .await,
+    );
+    let coordinates = pushed[0]["coordinates"].as_array().cloned().expect("coordinates");
+    assert!(
+        coordinates.iter().all(|coordinate| coordinate["state"] == "pushed"),
+        "reading the receiving acknowledgement or a stale cursor -> pushed rows stay pending: {coordinates:?}"
+    );
+
+    for params in [
+        json!({ "stageKeys": [""] }),
+        json!({ "stageKeys": ["bad\u{7}key"] }),
+        json!({ "stageKeys": (0..=256).map(|index| format!("stage-{index}")).collect::<Vec<_>>() }),
+        json!({ "stageKeys": [], "workspaceId": workspace_id }),
+        json!({}),
+    ] {
+        id += 1;
+        let error = transport
+            .call(
+                RequestContext::unbounded(),
+                request(id, "sync.ordinary.publicationState", Some(handle.clone()), params.clone()),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidParams, "{params}");
+    }
+}

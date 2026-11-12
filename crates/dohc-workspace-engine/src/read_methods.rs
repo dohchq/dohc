@@ -7,6 +7,7 @@ const READS: &[&str] = &[
     "conflicts.list",
     "moments.get",
     "moments.list",
+    "sync.ordinary.publicationState",
     "versionedText.list",
     "versions.active",
     "versions.compareFiles",

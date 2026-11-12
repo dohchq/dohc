@@ -3,9 +3,9 @@ use super::{
     base32_lowercase_no_padding, bump_chat_conversation_revision, chat_after, collect, committed,
     follow_thread_implicitly, insert_local_replication_op, is_js_trim_ws,
     local_replication_coordinate, lookup_request, map_reaction_row, nfc, non_empty,
-    normalize_display_name, normalize_replicated_chat_id, persisted_safe_integer, record_request,
-    relay_log_has_authored_message, requested_name, require_thread, thread_has_message,
-    validate_message_id,
+    normalize_display_name, normalize_replicated_chat_id, persisted_safe_integer, receipts,
+    record_request, relay_log_has_authored_message, requested_name, require_thread,
+    thread_has_message, validate_message_id,
 };
 use crate::error::DomainError;
 use crate::store::hash_fields;
@@ -465,19 +465,28 @@ impl<'a> LinkedChatStore<'a> {
                 return Err(DomainError::IdempotencyKeyReuseMismatch);
             }
             return self.store.read_with(|conn| {
-                require_reaction_cell(
-                    conn,
-                    &input.workspace_id,
-                    &input.message_id,
-                    &emoji,
-                    &author_id,
-                )
+                let stored =
+                    receipts::replayed_reaction(conn, &input.workspace_id, &input.request_id)?;
+                match stored {
+                    Some(reaction) => Ok(reaction),
+                    None => require_reaction_cell(
+                        conn,
+                        &input.workspace_id,
+                        &input.message_id,
+                        &emoji,
+                        &author_id,
+                    ),
+                }
             });
         }
 
         let mut input = input.clone();
         input.replication_author_id = replication_author_id;
+        let stage_receipt = self.stage_receipts;
         let outcome = self.write_with_pending_chat_replay(&input.workspace_id, faults, |tx| {
+            let mark = stage_receipt
+                .then(|| receipts::journal_mark(tx, &input.workspace_id))
+                .transpose()?;
             require_thread(tx, &input.workspace_id, &thread_id)?;
             if !thread_has_message(tx, &input.workspace_id, &thread_id, &input.message_id)? {
                 return Err(DomainError::chat(
@@ -569,13 +578,26 @@ impl<'a> LinkedChatStore<'a> {
                 )?;
             }
             record_request(tx, Some(&input.request_id), &payload_hash, at_ms)?;
-            require_reaction_cell(
+            let reaction = require_reaction_cell(
                 tx,
                 &input.workspace_id,
                 &input.message_id,
                 &emoji,
                 &author_id,
-            )
+            )?;
+            if let Some(mark) = &mark {
+                receipts::record_receipt(
+                    tx,
+                    &input.workspace_id,
+                    &input.request_id,
+                    receipts::ChatStageOutcome::Written,
+                    &thread_id,
+                    None,
+                    mark,
+                    receipts::StageResult::Reaction(&reaction),
+                )?;
+            }
+            Ok(reaction)
         })?;
         committed(outcome)
     }

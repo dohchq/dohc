@@ -109,6 +109,21 @@ pub(super) fn required_idempotency_key(request_id: Option<String>) -> Result<Str
         .ok_or_else(|| WireError::new(ErrorCode::InvalidParams, "idempotency-key-required"))
 }
 
+/// A stage receipt is keyed by the request's idempotency key, so asking for
+/// one needs a key.
+pub(super) fn require_stage_receipt_key(
+    stage_receipt: bool,
+    request_id: Option<&str>,
+) -> Result<(), WireError> {
+    if stage_receipt && request_id.is_none() {
+        return Err(WireError::new(
+            ErrorCode::InvalidParams,
+            "stage-receipt-requires-idempotency-key",
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn validate_request_ids(
     request: &dohc_engine_protocol::wire::Request,
 ) -> Result<(), WireError> {

@@ -93,6 +93,58 @@ export function decodeOrdinarySyncResult<M extends OrdinarySyncMethod>(
   return decoded.success as OrdinarySyncMethodResultMap[M];
 }
 
+export const ORDINARY_PUBLICATION_STATE_METHOD = "sync.ordinary.publicationState";
+/** The most stage keys one publication-state request may name. */
+export const MAX_PUBLICATION_STAGE_KEYS = 256;
+
+// A committed stage's receipt, or `absent` when no stage with the key
+// committed in the workspace. Each journal row the stage added is `refused`
+// when a refusal is recorded for it, `pushed` at or below its origin's push
+// cursor, and `pending` otherwise.
+const StagePublication = Schema.Union([
+  mutableStruct({ stageKey: Text, state: Schema.Literal("absent") }),
+  mutableStruct({
+    stageKey: Text,
+    state: Schema.Literal("present"),
+    outcome: Schema.Literals(["written", "no-op", "lost"]),
+    threadId: Text,
+    winnerMessageId: Schema.optionalKey(Text),
+    coordinates: Schema.mutable(Schema.Array(mutableStruct({
+      originId: Text,
+      originSeq: Count,
+      state: Schema.Literals(["pushed", "pending", "refused"]),
+    }))),
+  }),
+]);
+const OrdinaryPublicationStateSchema = mutableStruct({ stages: Schema.mutable(Schema.Array(StagePublication)) });
+
+export type OrdinaryPublicationState = (typeof OrdinaryPublicationStateSchema)["Type"];
+export type OrdinaryStagePublication = OrdinaryPublicationState["stages"][number];
+
+/**
+ * A `sync.ordinary.publicationState` answer for `stageKeys`: one stage per
+ * key, in the order asked, with no field the contract does not name. Only a
+ * lost stage names a winner, and only a written stage lists journal rows.
+ */
+export function decodeOrdinaryPublicationState(value: unknown, stageKeys: readonly string[]): OrdinaryPublicationState {
+  const method = ORDINARY_PUBLICATION_STATE_METHOD;
+  const decoded = Schema.decodeUnknownResult(OrdinaryPublicationStateSchema, { onExcessProperty: "error" })(value);
+  if (Result.isFailure(decoded)) {
+    throw new ProtocolShapeError(`${method} result: ${decoded.failure.message}`);
+  }
+  const { stages } = decoded.success;
+  if (stages.length !== stageKeys.length || stages.some((stage, index) => stage.stageKey !== stageKeys[index])) {
+    throw new ProtocolShapeError(`${method} result: stages do not match the stage keys asked`);
+  }
+  for (const stage of stages) {
+    if (stage.state === "present" && ((stage.winnerMessageId !== undefined && stage.outcome !== "lost") ||
+      (stage.outcome !== "written" && stage.coordinates.length > 0))) {
+      throw new ProtocolShapeError(`${method} result: ${stage.outcome} stage does not match its receipt`);
+    }
+  }
+  return decoded.success;
+}
+
 const Digest = Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/));
 // A document the hosted replica holds for retained work a released chain
 // left, named by its binding's digest; the binding itself is in the

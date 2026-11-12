@@ -1,12 +1,12 @@
 use dohc_engine_domain::{
-    ChatActorKind, ChatChannelKind, ChatReactionState, ChatThreadLane, CreateFileThread,
-    FollowState, FollowTargetKind, LinkedChatStore, LocalAttachmentInput, NoFaults,
-    ResolveDecision, SendMessage, SetFollow, SetReaction, StartChannelThread, attachment_id_for,
-    reaction_id_for,
+    ChatActorKind, ChatChannelKind, ChatCoordinateState, ChatReactionState, ChatStageOutcome,
+    ChatThreadLane, CreateFileThread, FollowState, FollowTargetKind, LinkedChatStore,
+    LocalAttachmentInput, NoFaults, ResolveDecision, SendMessage, SetFollow, SetReaction,
+    StartChannelThread, attachment_id_for, reaction_id_for,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 
 const WS: &str = "b2-round3";
 const NO_FAULTS: NoFaults = NoFaults;
@@ -2026,4 +2026,592 @@ fn agent_read_negative_coordinate_noops_without_revision() {
     );
     assert_eq!(state.last_read_message_id, "");
     assert_eq!(state.revision, 0);
+}
+
+// ------------------------------------------------------------ stage receipts
+
+/// A chat handle that records a stage receipt for each keyed write.
+fn receipted(store: &mut EngineStore) -> LinkedChatStore<'_> {
+    let mut chats = LinkedChatStore::new(store);
+    chats.record_stage_receipts(true);
+    chats
+}
+
+type JournalRow = (String, i64, String);
+type Receipt = (String, String, Option<String>, Vec<(String, i64)>);
+
+fn local_journal(store: &EngineStore) -> Vec<JournalRow> {
+    store
+        .read_with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT origin_id, origin_seq, op_kind FROM replication_log \
+                 WHERE workspace_id = ?1 AND imported = 0 ORDER BY origin_id, origin_seq",
+            )?;
+            let rows = stmt
+                .query_map([WS], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect::<Result<Vec<_>, _>>();
+            rows
+        })
+        .expect("journal")
+}
+
+fn added_rows(before: &[JournalRow], after: &[JournalRow]) -> Vec<JournalRow> {
+    after
+        .iter()
+        .filter(|row| !before.contains(row))
+        .cloned()
+        .collect()
+}
+
+fn coordinates_of(rows: &[JournalRow]) -> Vec<(String, i64)> {
+    rows.iter()
+        .map(|(origin_id, origin_seq, _)| (origin_id.clone(), *origin_seq))
+        .collect()
+}
+
+fn kinds_of(rows: &[JournalRow]) -> Vec<&str> {
+    rows.iter().map(|(_, _, kind)| kind.as_str()).collect()
+}
+
+fn receipt(store: &EngineStore, stage_key: &str) -> Option<Receipt> {
+    let row: Option<(String, String, Option<String>, String)> = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT outcome, thread_id, winner_message_id, coordinates_json \
+                 FROM chat_stage_receipts WHERE workspace_id = ?1 AND stage_key = ?2",
+                params![WS, stage_key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+        })
+        .expect("receipt");
+    row.map(|(outcome, thread_id, winner, coordinates)| {
+        let coordinates: Vec<serde_json::Value> =
+            serde_json::from_str(&coordinates).expect("coordinates");
+        let coordinates = coordinates
+            .iter()
+            .map(|coordinate| {
+                (
+                    coordinate["originId"].as_str().expect("origin").to_owned(),
+                    coordinate["originSeq"].as_i64().expect("sequence"),
+                )
+            })
+            .collect();
+        (outcome, thread_id, winner, coordinates)
+    })
+}
+
+fn receipt_count(store: &EngineStore) -> i64 {
+    store
+        .read_with(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM chat_stage_receipts", [], |row| {
+                row.get(0)
+            })
+        })
+        .expect("receipt count")
+}
+
+fn keyed_post(key: &str, thread_id: &str, message_id: &str, at_ms: i64) -> StartChannelThread {
+    StartChannelThread {
+        automation: None,
+        workspace_id: WS.to_owned(),
+        channel_id: "channel".to_owned(),
+        thread_id: thread_id.to_owned(),
+        message_id: message_id.to_owned(),
+        title: None,
+        lane: ChatThreadLane::Posts,
+        own_thread: false,
+        author_kind: ChatActorKind::Human,
+        author_display_name: "Ada".to_owned(),
+        author_owner_display_name: None,
+        author_user_id: Some("ada".to_owned()),
+        origin: None,
+        body: format!("opening {message_id}"),
+        needs_decision: true,
+        options: Vec::new(),
+        attachments: Vec::new(),
+        author_agent_id: None,
+        author_reported: None,
+        work: None,
+        wake_agent_ids: Vec::new(),
+        now_ms: at_ms,
+        request_id: Some(key.to_owned()),
+    }
+}
+
+fn keyed_reply(key: &str, message_id: &str, author: &str, at_ms: i64) -> SendMessage {
+    SendMessage {
+        automation: None,
+        workspace_id: WS.to_owned(),
+        thread_id: "thread".to_owned(),
+        message_id: message_id.to_owned(),
+        author_kind: ChatActorKind::Human,
+        author_display_name: author.to_owned(),
+        author_owner_display_name: None,
+        author_user_id: Some(author.to_owned()),
+        parent_message_id: Some("opening".to_owned()),
+        origin: None,
+        body: format!("reply {message_id}"),
+        needs_decision: false,
+        options: Vec::new(),
+        attachments: Vec::new(),
+        author_agent_id: None,
+        author_reported: None,
+        work: None,
+        wake_agent_ids: Vec::new(),
+        now_ms: at_ms,
+        request_id: Some(key.to_owned()),
+    }
+}
+
+fn keyed_resolve(key: &str, resolver: &str, at_ms: i64) -> ResolveDecision {
+    ResolveDecision {
+        workspace_id: WS.to_owned(),
+        thread_id: "thread".to_owned(),
+        message_id: "opening".to_owned(),
+        resolved_by_message_id: resolver.to_owned(),
+        chosen_option: None,
+        now_ms: at_ms,
+        request_id: key.to_owned(),
+    }
+}
+
+fn keyed_reaction(key: &str, author: &str, state: ChatReactionState, at_ms: i64) -> SetReaction {
+    SetReaction {
+        workspace_id: WS.to_owned(),
+        thread_id: "thread".to_owned(),
+        message_id: "opening".to_owned(),
+        emoji: "👍".to_owned(),
+        author_id: author.to_owned(),
+        replication_author_id: Some(author.to_owned()),
+        author_kind: ChatActorKind::Human,
+        author_display_name: author.to_owned(),
+        state,
+        now_ms: at_ms,
+        request_id: key.to_owned(),
+    }
+}
+
+#[test]
+fn keyed_post_receipt_lists_every_journal_row_the_post_added() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    let before = local_journal(&store);
+    let (thread, _) = receipted(&mut store)
+        .start_channel_thread(&keyed_post("post", "thread", "opening", 20), &NO_FAULTS)
+        .expect("post");
+    let added = added_rows(&before, &local_journal(&store));
+    for kind in ["chat.message.append", "chat.follow.set", "chat.decision.set"] {
+        assert!(kinds_of(&added).contains(&kind), "{kind} missing from {added:?}");
+    }
+    assert_eq!(
+        receipt(&store, "post"),
+        Some((
+            "written".to_owned(),
+            thread.thread_id,
+            None,
+            coordinates_of(&added)
+        )),
+        "counting only the message row -> the structure, follow, and decision rows publish unwatched."
+    );
+
+    start(&mut store, "unkeyed", "unkeyed-opening", 30, false);
+    assert_eq!(receipt_count(&store), 1, "an unkeyed write has no stage to receipt");
+}
+
+#[test]
+fn keyed_chat_lane_post_receipt_names_the_thread_it_joined() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    let mut first = keyed_post("first", "lane-a", "first-message", 20);
+    first.lane = ChatThreadLane::Chat;
+    first.needs_decision = false;
+    let mut second = keyed_post("second", "lane-b", "second-message", 30);
+    second.lane = ChatThreadLane::Chat;
+    second.needs_decision = false;
+    let mut chats = receipted(&mut store);
+    chats.start_channel_thread(&first, &NO_FAULTS).expect("first");
+    let (joined, _) = chats.start_channel_thread(&second, &NO_FAULTS).expect("second");
+    assert_eq!(joined.thread_id, "lane-a");
+    assert_eq!(
+        receipt(&store, "second").map(|receipt| receipt.1),
+        Some("lane-a".to_owned()),
+        "recording the requested thread id -> recovery looks for a thread that never existed."
+    );
+}
+
+#[test]
+fn keyed_reply_receipts_list_their_own_follow_and_attachment_rows() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    start(&mut store, "thread", "opening", 20, false);
+
+    let before = local_journal(&store);
+    let mut first = keyed_reply("reply-1", "bea-1", "bea", 30);
+    first.attachments = vec![attachment("alpha")];
+    receipted(&mut store)
+        .send_message(&first, &NO_FAULTS)
+        .expect("first reply");
+    let first_rows = added_rows(&before, &local_journal(&store));
+    for kind in ["chat.message.append", "chat.follow.set", "chat.attachment.add"] {
+        assert!(kinds_of(&first_rows).contains(&kind), "{kind} missing from {first_rows:?}");
+    }
+    assert_eq!(
+        receipt(&store, "reply-1").map(|receipt| receipt.3),
+        Some(coordinates_of(&first_rows))
+    );
+
+    let before = local_journal(&store);
+    receipted(&mut store)
+        .send_message(&keyed_reply("reply-2", "bea-2", "bea", 40), &NO_FAULTS)
+        .expect("second reply");
+    let second_rows = added_rows(&before, &local_journal(&store));
+    assert_eq!(kinds_of(&second_rows), vec!["chat.message.append"]);
+    assert_eq!(
+        receipt(&store, "reply-2"),
+        Some((
+            "written".to_owned(),
+            "thread".to_owned(),
+            None,
+            coordinates_of(&second_rows)
+        )),
+        "listing a follow the author already had -> the stage waits on another stage's row."
+    );
+}
+
+#[test]
+fn reaction_receipt_replays_its_original_cell_after_a_later_change() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    start(&mut store, "thread", "opening", 20, false);
+    let before = local_journal(&store);
+    let added = receipted(&mut store)
+        .set_reaction(&keyed_reaction("add", "cy", ChatReactionState::Added, 30), &NO_FAULTS)
+        .expect("add");
+    let rows = added_rows(&before, &local_journal(&store));
+    assert_eq!(kinds_of(&rows), vec!["chat.reaction.set", "chat.follow.set"]);
+    let recorded = receipt(&store, "add");
+    assert_eq!(
+        recorded,
+        Some(("written".to_owned(), "thread".to_owned(), None, coordinates_of(&rows)))
+    );
+
+    receipted(&mut store)
+        .set_reaction(&keyed_reaction("remove", "cy", ChatReactionState::Removed, 40), &NO_FAULTS)
+        .expect("remove");
+    let journal = local_journal(&store);
+    let receipts = receipt_count(&store);
+    let replayed = receipted(&mut store)
+        .set_reaction(&keyed_reaction("add", "cy", ChatReactionState::Added, 999), &NO_FAULTS)
+        .expect("replay");
+    assert_eq!(
+        replayed, added,
+        "replaying the current cell -> a retried add answers the later remove."
+    );
+    assert_eq!(local_journal(&store), journal);
+    assert_eq!(receipt_count(&store), receipts);
+    assert_eq!(receipt(&store, "add"), recorded);
+}
+
+#[test]
+fn resolve_receipts_keep_written_lost_and_no_op_after_the_cell_changes() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    start(&mut store, "thread", "opening", 20, true);
+
+    let before = local_journal(&store);
+    let written = receipted(&mut store)
+        .resolve_decision(&keyed_resolve("answer-one", "reply-one", 30), &NO_FAULTS)
+        .expect("written");
+    let rows = added_rows(&before, &local_journal(&store));
+    assert_eq!(kinds_of(&rows), vec!["chat.decision.set"]);
+    assert_eq!(
+        receipt(&store, "answer-one"),
+        Some(("written".to_owned(), "thread".to_owned(), None, coordinates_of(&rows)))
+    );
+
+    let journal = local_journal(&store);
+    let lost = receipted(&mut store)
+        .resolve_decision(&keyed_resolve("answer-two", "reply-two", 40), &NO_FAULTS)
+        .expect("lost");
+    assert_eq!(lost, written);
+    assert_eq!(
+        receipt(&store, "answer-two"),
+        Some((
+            "lost".to_owned(),
+            "thread".to_owned(),
+            Some("reply-one".to_owned()),
+            Vec::new()
+        )),
+        "recording an existing winner as written -> the losing answer reports saved."
+    );
+    receipted(&mut store)
+        .resolve_decision(&keyed_resolve("answer-again", "reply-one", 50), &NO_FAULTS)
+        .expect("no-op");
+    assert_eq!(
+        receipt(&store, "answer-again"),
+        Some(("no-op".to_owned(), "thread".to_owned(), None, Vec::new())),
+        "the reply that already won did not lose"
+    );
+    assert_eq!(local_journal(&store), journal);
+
+    // Another copy's later resolution replaces the cell.
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute(
+                "UPDATE chat_decisions SET resolved_by_message_id = 'reply-three', at_ms = 500 \
+                 WHERE workspace_id = ?1 AND message_id = 'opening'",
+                [WS],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("later resolution");
+    let receipts = receipt_count(&store);
+    let mut chats = receipted(&mut store);
+    assert_eq!(
+        chats
+            .resolve_decision(&keyed_resolve("answer-two", "reply-two", 999), &NO_FAULTS)
+            .expect("replayed lost"),
+        written,
+        "replaying the current cell -> a lost answer names a winner it never saw."
+    );
+    assert_eq!(
+        chats
+            .resolve_decision(&keyed_resolve("answer-one", "reply-one", 999), &NO_FAULTS)
+            .expect("replayed written"),
+        written
+    );
+    assert_eq!(local_journal(&store), journal);
+    assert_eq!(receipt_count(&store), receipts);
+    assert_eq!(
+        receipt(&store, "answer-two").and_then(|receipt| receipt.2),
+        Some("reply-one".to_owned())
+    );
+}
+
+#[test]
+fn each_keyed_chat_write_commits_its_receipt_with_the_write() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let path = engine_db_path(&scratch).expect("db path");
+    let mut store = EngineStore::open(&path, 1).expect("store");
+    seed_channel(&mut store);
+    let post = keyed_post("post", "thread", "opening", 20);
+    let reply = keyed_reply("reply", "bea-reply", "bea", 30);
+    let answer = keyed_resolve("answer", "bea-reply", 40);
+    let reaction = keyed_reaction("react", "cy", ChatReactionState::Added, 50);
+    let stages = ["post", "reply", "answer", "react"];
+    for (index, stage) in stages.into_iter().enumerate() {
+        for point in [
+            FaultPoint::StorageBeforePersist,
+            FaultPoint::StorageAfterCommitBeforeAck,
+        ] {
+            let faults = ScriptedFaults::crash_at(point);
+            let before = local_journal(&store);
+            let mut chats = receipted(&mut store);
+            let failed = match index {
+                0 => chats.start_channel_thread(&post, faults.as_ref()).map(|_| ()),
+                1 => chats.send_message(&reply, faults.as_ref()).map(|_| ()),
+                2 => chats.resolve_decision(&answer, faults.as_ref()).map(|_| ()),
+                _ => chats.set_reaction(&reaction, faults.as_ref()).map(|_| ()),
+            };
+            assert_eq!(failed.unwrap_err().code(), "persist-failed");
+            assert!(faults.fired());
+            let committed = point == FaultPoint::StorageAfterCommitBeforeAck;
+            assert_eq!(
+                receipt(&store, stage).is_some(),
+                committed,
+                "writing {stage}'s receipt outside its transaction -> a crash keeps one without the other."
+            );
+            assert_eq!(local_journal(&store) != before, committed, "{stage}");
+        }
+    }
+    drop(store);
+
+    let mut store = EngineStore::open(&path, 2).expect("reopen");
+    let journal = local_journal(&store);
+    let receipts: Vec<Option<Receipt>> =
+        stages.iter().map(|stage| receipt(&store, stage)).collect();
+    let mut chats = receipted(&mut store);
+    chats.start_channel_thread(&post, &NO_FAULTS).expect("post retry");
+    chats.send_message(&reply, &NO_FAULTS).expect("reply retry");
+    chats.resolve_decision(&answer, &NO_FAULTS).expect("answer retry");
+    chats.set_reaction(&reaction, &NO_FAULTS).expect("reaction retry");
+    assert_eq!(local_journal(&store), journal, "a retry after reopen writes nothing");
+    for (stage, recorded) in stages.iter().zip(receipts) {
+        let recorded = recorded.expect("receipt after reopen");
+        assert_eq!(recorded.0, "written", "{stage}");
+        assert!(!recorded.3.is_empty(), "{stage}");
+        assert_eq!(receipt(&store, stage), Some(recorded));
+    }
+}
+
+#[test]
+fn publication_state_reads_each_coordinate_against_its_origin_cursor_and_refusals() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    receipted(&mut store)
+        .start_channel_thread(&keyed_post("post", "thread", "opening", 20), &NO_FAULTS)
+        .expect("post");
+    let mut chats = receipted(&mut store);
+    chats
+        .resolve_decision(&keyed_resolve("answer-one", "reply-one", 30), &NO_FAULTS)
+        .expect("answer");
+    chats
+        .resolve_decision(&keyed_resolve("answer-two", "reply-two", 40), &NO_FAULTS)
+        .expect("lost answer");
+    let posted = receipt(&store, "post").expect("post receipt").3;
+    assert!(posted.len() >= 3, "{posted:?}");
+    let origin = posted[0].0.clone();
+
+    let keys = |keys: &[&str]| keys.iter().map(|key| (*key).to_owned()).collect::<Vec<_>>();
+    let states = |store: &mut EngineStore, key: &str| {
+        let answer = receipted(store)
+            .publication_state(WS, &keys(&[key]))
+            .expect("publication state");
+        answer[0]
+            .receipt
+            .as_ref()
+            .expect("present")
+            .coordinates
+            .iter()
+            .map(|coordinate| coordinate.state)
+            .collect::<Vec<_>>()
+    };
+
+    let answer = receipted(&mut store)
+        .publication_state(WS, &keys(&["post", "answer-two", "missing"]))
+        .expect("publication state");
+    assert_eq!(
+        answer.iter().map(|stage| stage.stage_key.as_str()).collect::<Vec<_>>(),
+        vec!["post", "answer-two", "missing"]
+    );
+    assert!(answer[2].receipt.is_none(), "a stage that never committed is absent");
+    let lost = answer[1].receipt.as_ref().expect("lost receipt");
+    assert_eq!(lost.outcome, ChatStageOutcome::Lost);
+    assert_eq!(lost.winner_message_id.as_deref(), Some("reply-one"));
+    assert!(lost.coordinates.is_empty(), "a lost stage needs no publication");
+    let post = answer[0].receipt.as_ref().expect("post receipt");
+    assert_eq!(post.outcome, ChatStageOutcome::Written);
+    assert_eq!(post.thread_id, "thread");
+    assert!(
+        post.coordinates
+            .iter()
+            .all(|coordinate| coordinate.state == ChatCoordinateState::Pending),
+        "an origin without a push cursor has pushed nothing"
+    );
+
+    // Pushed through the second row: the first is below the cursor, the
+    // second equal to it, and the rest above.
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute(
+                "INSERT INTO sync_relay_push_state (workspace_id, origin_id, pushed_seq) VALUES (?1, ?2, ?3)",
+                params![WS, origin, posted[1].1],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("cursor");
+    let mut expected = vec![ChatCoordinateState::Pushed, ChatCoordinateState::Pushed];
+    expected.resize(posted.len(), ChatCoordinateState::Pending);
+    assert_eq!(states(&mut store, "post"), expected);
+
+    // A refusal wins over the cursor, from a notice or from a settlement
+    // admission that outlives the notice.
+    let last = posted.len() - 1;
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute(
+                "INSERT INTO replication_pending_refusals \
+                 (workspace_id, origin_id, origin_seq, op_kind, reason_code, reason_message) \
+                 SELECT workspace_id, origin_id, origin_seq, op_kind, 'invalid-input', 'refused' \
+                 FROM replication_log WHERE workspace_id = ?1 AND origin_id = ?2 AND origin_seq = ?3",
+                params![WS, origin, posted[0].1],
+            )
+            .map_err(StorageError::persist_public)?;
+            tx.execute(
+                "INSERT INTO live_settlement_publication_admissions \
+                 (workspace_id, origin_id, origin_seq, moment_id, admission_json) \
+                 VALUES (?1, ?2, ?3, 'moment', '{\"status\":\"refused\",\"settlementId\":\"s\",\"reason\":\"r\"}')",
+                params![WS, origin, posted[last].1],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("refusals");
+    expected[0] = ChatCoordinateState::Refused;
+    expected[last] = ChatCoordinateState::Refused;
+    assert_eq!(states(&mut store, "post"), expected);
+
+    // Each coordinate reads its own origin's cursor, and a receipt belongs
+    // to its workspace.
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute_batch(&format!(
+                "INSERT INTO chat_stage_receipts \
+                 (workspace_id, stage_key, outcome, thread_id, coordinates_json) VALUES \
+                 ('{WS}', 'multi', 'written', 'thread', \
+                  '[{{\"originId\":\"other-a\",\"originSeq\":4}},{{\"originId\":\"other-b\",\"originSeq\":0}}]'), \
+                 ('another-workspace', 'missing', 'written', 'thread', '[]'); \
+                 INSERT INTO sync_relay_push_state (workspace_id, origin_id, pushed_seq) VALUES \
+                 ('{WS}', 'other-a', 4), ('another-workspace', 'other-b', 9);"
+            ))
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("other origins");
+    assert_eq!(
+        states(&mut store, "multi"),
+        vec![ChatCoordinateState::Pushed, ChatCoordinateState::Pending],
+        "reading one cursor for every origin -> another origin's row reads as pushed."
+    );
+    let scoped = receipted(&mut store)
+        .publication_state(WS, &keys(&["missing"]))
+        .expect("scoped");
+    assert!(scoped[0].receipt.is_none(), "another workspace's receipt is not this one's");
+    let elsewhere = receipted(&mut store)
+        .publication_state("another-workspace", &keys(&["post"]))
+        .expect("elsewhere");
+    assert!(elsewhere[0].receipt.is_none());
+
+    let too_many: Vec<String> = (0..=dohc_engine_domain::MAX_PUBLICATION_STAGE_KEYS)
+        .map(|index| format!("stage-{index}"))
+        .collect();
+    assert!(matches!(
+        receipted(&mut store).publication_state(WS, &too_many),
+        Err(dohc_engine_domain::DomainError::InvalidInput { .. })
+    ));
+}
+
+#[test]
+fn a_keyed_write_without_a_stage_receipt_records_none() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .start_channel_thread(&keyed_post("post", "thread", "opening", 20), &NO_FAULTS)
+        .expect("post");
+    chats
+        .send_message(&keyed_reply("reply", "bea-reply", "bea", 30), &NO_FAULTS)
+        .expect("reply");
+    chats
+        .resolve_decision(&keyed_resolve("answer", "bea-reply", 40), &NO_FAULTS)
+        .expect("answer");
+    chats
+        .set_reaction(&keyed_reaction("react", "cy", ChatReactionState::Added, 50), &NO_FAULTS)
+        .expect("reaction");
+    assert_eq!(
+        receipt_count(&store),
+        0,
+        "recording a receipt for every keyed write -> each desktop post pays for phone publication state."
+    );
+    let keys: Vec<String> = ["post", "reply", "answer", "react"]
+        .iter()
+        .map(|key| (*key).to_owned())
+        .collect();
+    let answer = LinkedChatStore::new(&mut store)
+        .publication_state(WS, &keys)
+        .expect("publication state");
+    assert!(answer.iter().all(|stage| stage.receipt.is_none()));
 }
