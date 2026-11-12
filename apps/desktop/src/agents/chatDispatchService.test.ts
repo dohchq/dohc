@@ -4585,13 +4585,24 @@ describe("chatDispatchService", () => {
     const { threadId, runId, process } = await startAutomationRun(fixture);
 
     expect(fixture.service.endRunQuietly(WORKSPACE_ID, runId, threadId)).toBeNull();
-    // A failed read is tried again before the run's end is saved.
-    const lookupError = new Error("daemon restarted during listRunMessages");
-    if (readFails) fixture.rejectNextRunMessageLookup!(lookupError);
-    process.emitExit(0);
-    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    if (readFails) {
+      // A failed read holds the run's end, unsaved, until a recovery scan
+      // reads again.
+      vi.useFakeTimers();
+      const lookupError = new Error("daemon restarted during listRunMessages");
+      fixture.rejectNextRunMessageLookup!(lookupError);
+      process.emitExit(0);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fixture.errors).toContain(lookupError);
+      expect(fixture.service.hasLiveRun(WORKSPACE_ID)).toBe(true);
+      expect((await fixture.dispatch.getRunRecord(runId))?.endedAtMs).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_RECOVERY_BACKOFF_MS);
+      vi.useRealTimers();
+    } else {
+      process.emitExit(0);
+      await fixture.service.scanWorkspace(WORKSPACE_ID);
+    }
     await vi.waitFor(() => expect(fixture.service.hasLiveRun(WORKSPACE_ID)).toBe(false));
-    if (readFails) expect(fixture.errors).toContain(lookupError);
 
     expect(await fixture.dispatch.getRunRecord(runId)).toMatchObject({ exitCode: 0, failureHandled: false });
     expect(fixture.notices).toEqual([]);
@@ -4605,6 +4616,32 @@ describe("chatDispatchService", () => {
     await fixture.service.scanWorkspace(WORKSPACE_ID);
     expect(await fixture.dispatch.getRunRecord(runId)).toMatchObject({ failureHandled: false });
     expect(fixture.notices).toEqual([]);
+  });
+
+  it.each([false, true])("saves a quiet run's end when dohc quits before it reads again, posted: %s", async (posted) => {
+    const fixture = await createFixture({ runner: { command: "", profile: quietProfile } });
+    const { threadId, runId, process } = await startAutomationRun(fixture);
+    expect(fixture.service.endRunQuietly(WORKSPACE_ID, runId, threadId)).toBeNull();
+    const reply = posted ? await linkAgentReply(fixture, threadId, runId) : undefined;
+    vi.useFakeTimers();
+    const lookupError = new Error("daemon restarted during listRunMessages");
+    fixture.rejectNextRunMessageLookup!(lookupError);
+    process.emitExit(0);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fixture.errors).toContain(lookupError);
+    vi.useRealTimers();
+
+    await fixture.service.stop();
+    expect(await fixture.dispatch.getRunRecord(runId)).toMatchObject({ exitCode: 0, failureHandled: false, endedAtMs: expect.any(Number) });
+
+    // After the restart, only a run that posted gets its notice, and neither is marked failed.
+    fixture.service = createChatDispatchService(fixture.serviceOptions);
+    await activate(fixture);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    expect(await fixture.dispatch.getRunRecord(runId)).toMatchObject({ exitCode: 0, failureHandled: false });
+    expect(fixture.notices).toEqual(posted
+      ? [expect.objectContaining({ body: "", target: expect.objectContaining({ message: reply }) })]
+      : []);
   });
 
   it("still fails an automation's run that ends without a reply and without saying it had nothing", async () => {

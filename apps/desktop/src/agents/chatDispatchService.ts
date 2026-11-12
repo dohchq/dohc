@@ -717,6 +717,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           reportError(error);
           // Whether a quiet run posted decides its notice, and only this
           // live run knows it was quiet, so it keeps its slot and reads again.
+          // A quit before then saves its end in stop().
           if (intent.exitCode === 0 && live.quiet) {
             scheduleRecoveryScan(live.workspace);
             return false;
@@ -2267,6 +2268,26 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       ),
       pumpAtStop?.catch(() => undefined) ?? Promise.resolve(),
     ]);
+    // A quiet run still waiting to read whether it posted is saved now, while
+    // dohc knows it was quiet. If the read fails again, it counts as no reply.
+    const quietEnds = await Promise.allSettled([...liveRuns.values()]
+      .filter((live) => live.quiet && !live.terminalDurable && live.terminalIntent?.kind === "complete" && live.terminalIntent.exitCode === 0)
+      .map(async (live) => {
+        const dispatch = options.dispatchStoreFor(live.workspace);
+        const { runId } = live.claim.run;
+        let posted = false;
+        try {
+          posted = (await dispatch.listRunMessages(live.workspace.workspaceId, runId, durableDispatchRequest)).length > 0;
+        } catch (error) {
+          reportError(error);
+        }
+        if (posted) await oweRunNotice(live.workspace, runId);
+        await dispatch.completeRun({ runId, exitCode: 0 });
+        live.terminalDurable = true;
+      }));
+    for (const result of quietEnds) {
+      if (result.status === "rejected") reportError(result.reason);
+    }
     const preRunFailures = [...pendingPreRunFailures.values()];
     for (const test of selfTests.values()) {
       test.settled = true;
