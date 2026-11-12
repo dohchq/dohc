@@ -171,6 +171,9 @@ describe.skipIf(engine.missing)("ordinary relay scenarios", () => {
     3 * REAL_DAEMON_DEADLINE_MS,
   );
 
+  // A pull page runs every delete before every write. A device that joins
+  // after a rename receives the delete of the old name before the write that
+  // would create its folder.
   it("joins after a page in a folder was renamed in dohc", async () => {
     const workspaceId = `two-daemon-join-after-rename-${randomUUID()}`;
     const rootA = await createTestScratch("dohc-join-after-rename-a-");
