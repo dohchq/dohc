@@ -29,6 +29,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type ReactNode,
 } from "react";
 import type {
   CaptureFileHold,
@@ -592,6 +593,28 @@ function InvalidSitePathFallback({
   }, [activeTab, onClose]);
 
   return null;
+}
+
+/**
+ * A record's body in a Collection tab's record panel. While it is on the page, the shell knows which record's
+ * file that tab's group edits. The body keeps its actions in a row of its own.
+ */
+function RecordBody(props: {
+  bodies: { current: Map<string, { tab: WorkbenchTab; path: string }> };
+  groupId: string;
+  tab: WorkbenchTab;
+  path: string;
+  children: ReactNode;
+}) {
+  const { bodies, groupId, tab, path } = props;
+  useEffect(() => {
+    const body = { tab, path };
+    bodies.current.set(groupId, body);
+    return () => {
+      if (bodies.current.get(groupId) === body) bodies.current.delete(groupId);
+    };
+  }, [bodies, groupId, tab, path]);
+  return <OwnActionsRow>{props.children}</OwnActionsRow>;
 }
 
 // Lists the drafts main keeps for the workspace again. A failed read files a
@@ -7177,10 +7200,11 @@ export function DesktopWorkspaceShell(props: {
                     }}
                     initialRecordPanelWidth={wb.recordPanelWidth}
                     onRecordPanelWidthChange={(width) => mutateWb((state) => setRecordPanelWidth(state, width))}
-                    renderRecordBody={tab && editorCallbacks ? (path) => {
-                      recordBodies.current.set(editorGroup.id, { tab, path });
-                      return <OwnActionsRow>{fileInspector(path, editorCallbacks, undefined, true)}</OwnActionsRow>;
-                    } : undefined}
+                    renderRecordBody={tab && editorCallbacks ? (path) => (
+                      <RecordBody bodies={recordBodies} groupId={editorGroup.id} tab={tab} path={path}>
+                        {fileInspector(path, editorCallbacks, undefined, true)}
+                      </RecordBody>
+                    ) : undefined}
                     // What a record's body holds unsaved is saved before the record leaves the panel, as before a file tab closes.
                     settleRecordBody={tab ? (then) => commitAfterTabFlush(
                       editorGroup.id,

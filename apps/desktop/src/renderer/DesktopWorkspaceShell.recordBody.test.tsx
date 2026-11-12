@@ -18,6 +18,10 @@ import { STORED_STATE, enterMarkdownSource, holdHistory, makeBridge, renderShell
 vi.mock("./CollectionPage", () => ({
   CollectionPage: (props: CollectionPageProps) => {
     const [open, setOpen] = useState(true);
+    const [asked, setAsked] = useState(false);
+    const body = open ? props.renderRecordBody?.("a.md") : null;
+    // A body the page then asks the shell for and does not draw, as a render React throws away would.
+    if (asked) props.renderRecordBody?.("b.md");
     return (
       <div data-testid="collection-page">
         <output aria-label="Open record">{props.initialOpenRecord ?? "none"}</output>
@@ -26,7 +30,8 @@ vi.mock("./CollectionPage", () => ({
         <button onClick={() => props.onOpenRecordChange?.("rec_a")}>Open record a</button>
         <button onClick={() => props.onRecordPanelWidthChange?.(640)}>Widen the panel</button>
         <button onClick={() => props.settleRecordBody?.(() => { setOpen(false); props.onOpenRecordChange?.(null); })}>Close the record</button>
-        {open ? <aside aria-label="Record a">{props.renderRecordBody?.("a.md")}</aside> : null}
+        <button onClick={() => setAsked(true)}>Ask for a body and draw none</button>
+        {open ? <aside aria-label="Record a">{body}</aside> : null}
       </div>
     );
   },
@@ -156,7 +161,10 @@ it("takes Ctrl+/ for the body's Source only while focus is in the body", async (
   await waitFor(() => expect(toggle().textContent).toBe("Source"));
 });
 
-it("saves the text typed in a record's body before the record's file opens in another editor group", async () => {
+it.each([
+  { asks: "saves the text typed in a record's body before the record's file opens in another editor group", askFirst: false },
+  { asks: "counts only the body a Collection's tab draws as open, and not one its page asked for and did not draw", askFirst: true },
+])("$asks", async ({ askFirst }) => {
   const { bridge } = collectionShell({
     ...STORED_STATE,
     editorGroups: [
@@ -166,6 +174,7 @@ it("saves the text typed in a record's body before the record's file opens in an
     activeEditorGroup: "primary",
   });
   const { user } = await typeInBody();
+  if (askFirst) fireEvent.click(screen.getByRole("button", { name: "Ask for a body and draw none" }));
   const save = deferred<{ status: "written"; contentHash: string }>();
   const write = vi.fn(() => save.promise);
   bridge.writeWorkspaceText = write;
