@@ -448,7 +448,7 @@ describe("engine markdown source view", () => {
     await waitFor(() => expect(screen.getByTestId("markdown-save-state").dataset.state).toBe("read-only"));
     const marker = screen.getByTestId("markdown-save-state");
     expect(marker.textContent).toBe("Read-only");
-    expect(marker.getAttribute("title")).toBe("Your access to this document ended.");
+    expect(marker.getAttribute("title")).toBe("Your access to this page ended.");
     expect((screen.getByTestId("page-title") as HTMLTextAreaElement).readOnly).toBe(true);
     expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
   });
@@ -776,7 +776,7 @@ describe("engine markdown source view", () => {
     act(() => pushSaveState("read-only", 0));
     expect(readOnly).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe(
-      "Your access to this document ended.",
+      "Your access to this page ended.",
     );
     expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
     await waitFor(() =>
