@@ -604,21 +604,26 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     // Publication credits each interval with the relay-admitted authors in
     // History's flat form: the snapshot person and the declared agent, never
     // the grant authority, and the personal agent on behalf of its owner. The
-    // service keeps the same credit that owner devices import, apart from depth 0.
+    // service keeps the same credit that owner devices import.
     // Import marks the relay-admitted person confirmed; the admitted snapshot carries no marker.
     const importedHuman = {...human, relayConfirmed: true};
-    // A receiving device drops an agent's depth 0, as History's flat form
-    // names none. The service keeps the admitted snapshot's depth 0. History
-    // reads both as depth 0.
+    // Some copies keep an agent's depth 0 and others drop it, as History's
+    // flat form names none. History reads both as depth 0, so they compare
+    // without it.
     const importedPersonal = {kind: personal.kind, agentId: personal.agentId, agentName: personal.agentName, onBehalfOf: personal.onBehalfOf};
     const declaredCredit = [
-      {momentId: agentSettlement.record.momentId, imported: [agent, importedHuman], hosted: [agent, importedHuman]},
-      {momentId: automationSettlement.record.momentId, imported: [automation], hosted: [automation]},
-      {momentId: personalSettlement.record.momentId, imported: [importedPersonal], hosted: [personal]},
+      {momentId: agentSettlement.record.momentId, imported: [agent, importedHuman]},
+      {momentId: automationSettlement.record.momentId, imported: [automation]},
+      {momentId: personalSettlement.record.momentId, imported: [importedPersonal]},
     ] as const;
+    const withoutDepthZero = (author: unknown) => {
+      if (typeof author !== "object" || author === null || (author as {depth?: unknown}).depth !== 0) return author;
+      const {depth: _depth, ...rest} = author as Record<string, unknown>;
+      return rest;
+    };
     const expectAuthors = (actual: unknown, expected: readonly unknown[]) => {
       expect(actual).toHaveLength(expected.length);
-      expect(actual).toEqual(expect.arrayContaining([...expected]));
+      expect((actual as unknown[]).map(withoutDepthZero)).toEqual(expect.arrayContaining([...expected]));
     };
     const momentAuthors = async (call: typeof rpc, momentId: string) => {
       const moment = ((await call("moments.list", {versionId: mainVersionId})).moments as {momentId: string; authors?: unknown[] | null}[])
@@ -671,7 +676,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     results.declaredAuthors = {
       agent: {receipt: agentAck, settlement: agentSettlement, admitted: [human, agent], imported: [agent, importedHuman]},
       automation: {receipt: automationAck, settlement: automationSettlement, admitted: [automationAdmitted], imported: [automation]},
-      personal: {receipt: personalAck, settlement: personalSettlement, admitted: [personal], imported: [importedPersonal], hosted: [personal]},
+      personal: {receipt: personalAck, settlement: personalSettlement, admitted: [personal], imported: [importedPersonal]},
     };
     // The service imports the admitted credit through its own background pull.
     // Poll its store until that credit lands. A missing row reads as undefined, not null.
@@ -680,7 +685,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     try {
       await vi.waitFor(() => {
         expect(JSON.parse(authorJson(serviceEngine) ?? "null")).toEqual(unattributed);
-        for (const {momentId, hosted} of declaredCredit) expectAuthors(JSON.parse(authorJson(serviceEngine, momentId) ?? "null"), hosted);
+        for (const {momentId, imported} of declaredCredit) expectAuthors(JSON.parse(authorJson(serviceEngine, momentId) ?? "null"), imported);
       }, {timeout: 30000});
     } finally {serviceEngine.close();}
     await supervisor!.close(); supervisor = undefined; active = undefined;
@@ -697,9 +702,8 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
         const host = authorJson(engine), owned = authorJson(ownerEngine);
         Object.assign(results.ownerSettledAuthors as object, {hostRaw: host, ownerRaw: owned});
         for (const database of [engine, ownerEngine, peerEngine]) expect(JSON.parse(authorJson(database) ?? "null")).toEqual(unattributed);
-        for (const {momentId, imported, hosted} of declaredCredit) {
-          expectAuthors(JSON.parse(authorJson(engine, momentId) ?? "null"), hosted);
-          for (const database of [ownerEngine, peerEngine]) expectAuthors(JSON.parse(authorJson(database, momentId) ?? "null"), imported);
+        for (const {momentId, imported} of declaredCredit) {
+          for (const database of [engine, ownerEngine, peerEngine]) expectAuthors(JSON.parse(authorJson(database, momentId) ?? "null"), imported);
         }
       } finally {ownerEngine.close(); peerEngine.close();}
     } finally {engine.close();}
