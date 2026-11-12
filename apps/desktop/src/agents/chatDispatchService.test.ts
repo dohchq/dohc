@@ -49,6 +49,7 @@ import {
   RUNNER_OUTLIVED_STOP,
   SELF_TEST_RESTRICTED_DETAIL,
   createChatDispatchService,
+  replyExcerpt,
   type ChatDispatchPresenceInput,
   type ChatDispatchService,
   type ChatDispatchWorkspace,
@@ -153,6 +154,8 @@ interface FixtureOptions {
   hasPendingRunMessageLink?: (workspaceId: string, runId: string) => boolean;
   // Each post of a run notice takes the next error, if any, and fails.
   noticeFailures?: Error[];
+  // The workspace's sync is paused.
+  syncPaused?: boolean;
   // Each record of an owed notice takes the next error, if any, and fails.
   owedAddFailures?: Error[];
   // The workspace starts in Restricted Mode.
@@ -693,6 +696,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
         if (failure) throw failure;
         if (!notices.some((notice) => notice.noticeId === input.noticeId)) notices.push(input);
       },
+      syncing: () => options.syncPaused !== true,
       owed: {
         ...owedRunNotices,
         add: async (workspaceId, runId) => {
@@ -928,7 +932,7 @@ describe("chatDispatchService", () => {
       ? "Agent replies need Node.js. Install Node.js, restart dohc, then try again."
       : exitCode !== 0
         ? `Its run ended with an error.${replied ? " Mention @Nova to ask again." : ""}`
-        : replied ? "" : "Its run ended without a reply.");
+        : replied ? "Finished the work." : "Its run ended without a reply.");
   });
 
   it.each([0, 7])("recovers the saved Node.js notice after restart, exit %s", async (exitCode) => {
@@ -949,6 +953,7 @@ describe("chatDispatchService", () => {
       runNotices: {
         post: async (notice) => { fixture.notices.push(notice); },
         owed: createOwedRunNotices(() => fixture.owedRunNoticesPath),
+        syncing: () => true,
       },
     });
     vi.unstubAllEnvs();
@@ -2584,18 +2589,70 @@ describe("chatDispatchService", () => {
       noticeId: `agent-run:${WORKSPACE_ID}:${claim.run.runId}`,
       kind: "agent-run",
       title: "Nova replied in \"Plan day 2\"",
-      body: "",
+      body: "Finished the work.",
       target: { thread: trigger.threadId, run: claim.run.runId, message: reply },
     }]);
   });
 
-  it("reads the thread's title from its own channel, and names no thread when that read fails", async () => {
+  it("names a group's conversation by its group and the agent's own chat by nothing, with the reply's opening words", async () => {
+    const fixture = await createFixture();
+    const group = await fixture.chat.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const own = await fixture.chat.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "default", name: "Nova" });
+    const threads: string[] = [];
+    for (const channelId of [group.id, own.id]) {
+      const { thread } = await fixture.chat.startChannelThread({
+        authorActorKey: null, workspaceId: WORKSPACE_ID, channelId, lane: "chat", wakeAgentIds: ["default"],
+        author: { kind: "human", displayName: "Sam" }, authorUserId: "user_local", body: "@Nova Book the train.",
+      });
+      threads.push(thread.id);
+    }
+    await activate(fixture);
+    for (const [index, threadId] of threads.entries()) {
+      const claim = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0];
+      if (!claim) throw new Error("Expected a live run.");
+      await linkAgentReply(fixture, threadId, claim.run.runId, "## Booked\n\nThe **9:40** train, in [itinerary.md](trip/itinerary.md).");
+      fixture.spawnCalls[index]!.process.emitExit(0);
+      await fixture.service.scanWorkspace(WORKSPACE_ID);
+    }
+
+    expect(fixture.notices.map(({ title, body }) => ({ title, body }))).toEqual([
+      { title: "Nova replied in #general", body: "Booked: The 9:40 train, in itinerary.md." },
+      { title: "Nova replied", body: "Booked: The 9:40 train, in itinerary.md." },
+    ]);
+  });
+
+  it.each([
+    ["- [x] Moved `trip_plan.md`\n- Added ~~two~~ __three__ stops", "Moved trip_plan.md Added two three stops"],
+    ["> Quoted\n1. First\n2) Second", "Quoted First Second"],
+    ["Run this:\n```sh\npnpm build\n```\nThen ![chart](a.png) shows it.", "Run this: Then chart shows it."],
+    ["```\nonly code\n```", ""],
+    ["Updated `__init__.py` and ``a`b``.", "Updated __init__.py and a`b."],
+    [`# Done ${" #".repeat(20000)}x`, "Done:"],
+    [`Long ${"word ".repeat(60)}`, `Long ${"word ".repeat(30)}word…`],
+  ])("keeps a reply's words as one plain line: %j", (markdown, excerpt) => {
+    expect(replyExcerpt(markdown)).toBe(excerpt);
+  });
+
+  it("keeps a reply's notice on this computer while the workspace's sync is paused", async () => {
+    const fixture = await createFixture({ syncPaused: true });
+    await createAgentThread(fixture, { title: "Plan day 2", body: "Plan it.", authorUserId: "user_local" });
+    await activate(fixture);
+    const claim = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0];
+    if (!claim) throw new Error("Expected a live run.");
+    await linkAgentReply(fixture, claim.run.threadId, claim.run.runId, "Booked.");
+    fixture.spawnCalls[0]!.process.emitExit(0);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+    expect(fixture.notices).toEqual([expect.objectContaining({ body: "Booked.", onlyHere: true })]);
+  });
+
+  it("reads where a run answered from its thread, and names no place when that read fails", async () => {
     const fixture = await createFixture();
     await createAgentThread(fixture, { title: "Plan day 2", body: "Plan it.", authorUserId: "user_local" });
     await createAgentThread(fixture, { title: "Plan day 3", body: "Plan it.", authorUserId: "user_local" });
     await activate(fixture);
     const listThreads = vi.spyOn(fixture.chat, "listThreads");
-    vi.spyOn(fixture.chat, "listChannelThreads").mockRejectedValueOnce(new Error("engine busy"));
+    vi.spyOn(fixture.chat, "getThread").mockRejectedValueOnce(new Error("engine busy"));
 
     fixture.spawnCalls[0]!.process.emitExit(0);
     await fixture.service.scanWorkspace(WORKSPACE_ID);
@@ -3651,7 +3708,7 @@ describe("chatDispatchService", () => {
       const posted: typeof fixture.notices = [];
       fixture.service = createChatDispatchService({
         ...fixture.serviceOptions,
-        runNotices: { post: async (notice) => { posted.push(notice); }, owed: fixture.owedRunNotices },
+        runNotices: { post: async (notice) => { posted.push(notice); }, owed: fixture.owedRunNotices, syncing: () => true },
       });
 
       await activate(fixture);
@@ -4646,7 +4703,7 @@ describe("chatDispatchService", () => {
     await fixture.service.scanWorkspace(WORKSPACE_ID);
     expect(await fixture.dispatch.getRunRecord(runId)).toMatchObject({ exitCode: 0, failureHandled: false });
     expect(fixture.notices).toEqual(posted !== "none"
-      ? [expect.objectContaining({ body: "", target: expect.objectContaining({ message: reply }) })]
+      ? [expect.objectContaining({ body: "Finished the work.", target: expect.objectContaining({ message: reply }) })]
       : []);
   });
 
@@ -4681,7 +4738,7 @@ describe("chatDispatchService", () => {
     await replying.service.scanWorkspace(WORKSPACE_ID);
     await vi.waitFor(() => expect(replying.service.hasLiveRun(WORKSPACE_ID)).toBe(false));
     expect(replying.errors).toContain(lookupError);
-    expect(replying.notices).toEqual([expect.objectContaining({ body: "", target: expect.objectContaining({ message: reply }) })]);
+    expect(replying.notices).toEqual([expect.objectContaining({ body: "Finished the work.", target: expect.objectContaining({ message: reply }) })]);
     expect(await replying.dispatch.getRunRecord(replied.runId)).toMatchObject({ exitCode: 0, failureHandled: false });
   });
 

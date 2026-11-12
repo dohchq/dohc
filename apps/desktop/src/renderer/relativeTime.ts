@@ -8,6 +8,20 @@ export function relativeTime(thenMs: number): string {
   if (deltaMinutes < 60) return `${deltaMinutes}m ago`;
   const deltaHours = Math.floor(deltaMinutes / 60);
   if (deltaHours < 24) return `${deltaHours}h ago`;
+  return shortDate(thenMs);
+}
+
+// The same time for a row's corner, where it sits beside a title: "now",
+// "5m", "6h", then the date.
+export function cornerTime(thenMs: number): string {
+  const deltaMinutes = Math.floor(Math.max(0, Date.now() - thenMs) / 60_000);
+  if (deltaMinutes < 1) return "now";
+  if (deltaMinutes < 60) return `${deltaMinutes}m`;
+  const deltaHours = Math.floor(deltaMinutes / 60);
+  return deltaHours < 24 ? `${deltaHours}h` : shortDate(thenMs);
+}
+
+function shortDate(thenMs: number): string {
   return new Date(thenMs).toLocaleDateString(undefined, {
     month: "short",
     day: "numeric",

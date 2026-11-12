@@ -97,11 +97,34 @@ function endedRunTitle(outcome: Exclude<RunOutcome, FailedOutcome>, agentName: s
   }[outcome];
 }
 
-// "Atlas didn't reply in "Plan day 2"". What happened comes first and the
-// thread last, so a clamp cuts only the thread's name.
-function runNoticeTitle(what: string, thread: string): string {
-  if (!thread) return what;
-  return `${what} in "${cutText(thread, NOTICE_TITLE_MAX_CHARS - [...`${what} in ""`].length)}"`;
+// "Atlas didn't reply in "Plan day 2"" or "Atlas replied in #trip". What
+// happened comes first and the place last, so a clamp cuts only its name.
+type RunPlace = { post: string } | { group: string } | null;
+function runNoticeTitle(what: string, place: RunPlace): string {
+  if (place === null) return what;
+  const room = NOTICE_TITLE_MAX_CHARS - [...`${what} in ""`].length;
+  return "post" in place ? `${what} in "${cutText(place.post, room)}"` : `${what} in #${cutText(place.group, room)}`;
+}
+
+const REPLY_EXCERPT_MAX_CHARS = 160;
+const REPLY_EXCERPT_READ_CHARS = 2000;
+// The reply's opening words as one plain line, the body of its notice.
+// Markdown marks, code blocks and link targets go; their words stay, and
+// inline code stays as written. A heading ends with a colon, so "## Booked"
+// leads what follows it. Only the reply's start is read, so a long reply
+// costs no more than a short one.
+export function replyExcerpt(markdown: string): string {
+  const text = markdown
+    .slice(0, REPLY_EXCERPT_READ_CHARS)
+    .replace(/[\uD800-\uDBFF]$/, "")
+    .replace(/```[^\n]*\n?[\s\S]*?(?:```|$)/gu, " ")
+    .replace(/!?\[([^\]\n]*)\]\([^)\n]*\)/gu, "$1")
+    .replace(/^[ \t]{0,3}#{1,6}[ \t]+(.*?)[ \t#]*$/gmu, (_, heading: string) => /[.:!?]$/u.test(heading) ? heading : `${heading}:`)
+    .replace(/^[ \t]{0,3}(?:>[ \t]?|[-*+][ \t]+(?:\[[ xX]\][ \t]+)?|\d+[.)][ \t]+)/gmu, "")
+    .replace(/(`+)([^\n]*?)\1|\*\*|__|~~|`/gu, (_, ticks?: string, code?: string) => ticks ? code ?? "" : "")
+    .replace(/[\s\u0000-\u001f\u007f]+/gu, " ")
+    .trim();
+  return cutText(text, REPLY_EXCERPT_MAX_CHARS);
 }
 
 // Why a run didn't reply, as one sentence: the notice's body and the second
@@ -255,6 +278,8 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   runNotices?: {
     post(input: PostNoticeInput): Promise<void>;
     owed: OwedRunNotices;
+    // Whether the workspace syncs now, rather than having its sync paused.
+    syncing(workspaceId: string): boolean;
   };
 }
 
@@ -921,9 +946,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     const words: { lead: string; reason: string; nextStep?: ChatDispatchNextStep } = isFailedOutcome(outcome)
       ? await failureWords(workspace, run, outcome, agent)
       : { lead: endedRunTitle(outcome, agent?.name), reason: "" };
-    // The toast and Notices row end with the step under the message, worded
-    // for the chat it shows in. Only a very long agent name reaches the cut.
-    let body = words.reason;
+    // A reply's notice shows its opening words. The toast and Notices row of
+    // a failure end with the step under the message, worded for the chat it
+    // shows in. Only a very long agent name reaches the cut.
+    let body = reply === undefined ? words.reason : await replyBody(workspace, reply);
     if (words.nextStep) {
       try {
         const { channel } = await options.chatStoreFor(workspace).getThread({ workspaceId, threadId: run.threadId });
@@ -937,9 +963,12 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       workspaceId,
       noticeId: `agent-run:${workspaceId}:${run.runId}`,
       kind: "agent-run",
-      title: runNoticeTitle(words.lead, await threadTitle(workspace, run.threadId)),
+      title: runNoticeTitle(words.lead, await runPlace(workspace, run.threadId)),
       body,
       target: { thread: run.threadId, run: run.runId, ...(reply !== undefined ? { message: reply } : {}) },
+      // While sync is paused, a run's notice and its reply's words stay on
+      // this computer.
+      ...(options.runNotices.syncing(workspaceId) ? {} : { onlyHere: true as const }),
     });
   }
 
@@ -989,16 +1018,26 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     return { ...words, nextStep };
   }
 
-  // The thread's title, read from its own channel's threads. An empty title
-  // when that read fails or the thread has no channel: the notice still goes.
-  async function threadTitle(workspace: ChatDispatchWorkspace, threadId: string): Promise<string> {
+  // Where the run answered: a post by its title, a group's conversation by
+  // the group. The agent's own chat needs no place, since its name leads the
+  // title. Null when the read fails: the notice still goes.
+  async function runPlace(workspace: ChatDispatchWorkspace, threadId: string): Promise<RunPlace> {
     try {
-      const store = options.chatStoreFor(workspace);
-      const { workspaceId } = workspace;
-      const channelId = await store.findThreadChannelId({ workspaceId, threadId });
-      if (!channelId) return "";
-      const threads = await store.listChannelThreads({ workspaceId, channelId });
-      return threads.find((summary) => summary.thread.id === threadId)?.thread.title.replace(/\s+/gu, " ").trim() ?? "";
+      const { thread, channel } = await options.chatStoreFor(workspace).getThread({ workspaceId: workspace.workspaceId, threadId });
+      const title = thread.lane === "posts" ? thread.title.replace(/\s+/gu, " ").trim() : "";
+      if (title) return { post: title };
+      return channel?.kind === "channel" ? { group: channel.name.replace(/\s+/gu, " ").trim() } : null;
+    } catch (error) {
+      reportError(error);
+      return null;
+    }
+  }
+
+  // A reply's opening words. Empty when the read fails: the notice still goes.
+  async function replyBody(workspace: ChatDispatchWorkspace, messageId: string): Promise<string> {
+    try {
+      const message = await options.chatStoreFor(workspace).getMessage({ workspaceId: workspace.workspaceId, messageId });
+      return replyExcerpt(message.body);
     } catch (error) {
       reportError(error);
       return "";
