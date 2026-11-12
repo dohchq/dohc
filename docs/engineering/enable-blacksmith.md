@@ -11,8 +11,9 @@ With both runner variables unset, PR checks and default manual dispatch use GitH
 A manual dispatch with `runner_provider=blacksmith` opts that run into Blacksmith while the switch stays off.
 Confinement always uses GitHub's `ubuntu-24.04` image.
 
-Set `BLACKSMITH_BUILD_VCPUS` to `4` or `8` to move only shared preparation and Rust build to that Blacksmith size.
-An absent, empty, or other value leaves those jobs on GitHub. Manual `runner_provider=blacksmith-builds` selects only those jobs using `runner_size`.
+Set `BLACKSMITH_BUILD_VCPUS` to `4` or `8` to move only the shared JavaScript build (`shared preparation`) to Blacksmith.
+An absent, empty, or other value leaves that job on GitHub. Manual `runner_provider=blacksmith-builds` selects only that job using `runner_size`.
+The Rust archive stays on the same runner type as its test jobs because tests read build-time paths.
 The full-gate switch and manual `blacksmith` selection keep their existing runner sizes; manual build-only selection overrides the build variable's size.
 
 Inspect the switch:

@@ -480,9 +480,9 @@ test("manual Blacksmith selection leaves automatic and default runs unchanged", 
   }
 });
 
-test("build-only runner selection affects only preparation and the Rust archive in every mode", () => {
+test("build-only runner selection affects only shared preparation in every mode", () => {
   const {jobs} = load(workflow);
-  for (const enabled of ["", "false", "true"]) for (const buildSize of ["", "4", "8", "0", "16", "true"]) {
+  for (const enabled of ["", "false", "true"]) for (const buildSize of ["", "4", "8", " 4", "0", "16", "true"]) {
     for (const event of ["pull_request", "workflow_dispatch"]) for (const provider of ["github", "blacksmith", "blacksmith-builds", "unknown"]) {
       for (const size of ["4", "8", "32", ""]) {
         const context = workflowContext({enabled, buildSize, event, provider, size});
@@ -493,7 +493,7 @@ test("build-only runner selection affects only preparation and the Rust archive 
           let expected = "ubuntu-24.04";
           if (!name.startsWith("confinement-")) {
             if (all) expected = `blacksmith-${["changes", "verification"].includes(name) ? "2" : selectedSize}vcpu-ubuntu-2404`;
-            else if (["javascript-prepare", "rust-archive"].includes(name) && (manualBuilds || ["4", "8"].includes(buildSize))) {
+            else if (name === "javascript-prepare" && (manualBuilds || ["4", "8"].includes(buildSize))) {
               expected = `blacksmith-${manualBuilds ? size === "8" ? "8" : "4" : buildSize}vcpu-ubuntu-2404`;
             }
           }
@@ -550,7 +550,7 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
 
 test("confinement jobs reuse identified artifacts without occupying worker runners", () => {
   const {jobs} = load(workflow), prepare = jobs["javascript-prepare"];
-  assert.equal(prepare["runs-on"], jobs["rust-archive"]["runs-on"]);
+  assert.equal(jobs["rust-archive"]["runs-on"], jobs["rust-tests"]["runs-on"]);
   const preparedUpload = prepare.steps.findIndex(step => step.with?.name === "javascript-prepared-${{ github.run_attempt }}");
   assert.ok(prepare.steps.findIndex(step => step.uses?.startsWith("taiki-e/install-action@")) > preparedUpload);
   assert.ok(prepare.steps.findIndex(step => step.name === "Archive compiler confinement test binaries") > preparedUpload);
