@@ -6315,6 +6315,30 @@ it("pushes a live document's settled edit on the next pass while another documen
   expect(o.host.settled(o.other)).toBe(false);
 });
 
+// A review of the fix above: one check served both "may this target capture
+// now" and "does it hold its workspace back", and its second half let a
+// target that still holds an owner for another document capture on every
+// pass. Proves: a target whose capture keeps failing waits out its backoff
+// before it captures again, though an owner it activated before is still held.
+it("waits out its backoff before capturing again while it still holds an owner for another document", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace];
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  // Its stored activation no longer names the document its owner holds, as after a new lineage.
+  const read = ServiceActivationStore.prototype.read;
+  vi.spyOn(ServiceActivationStore.prototype, "read").mockImplementation(function (this: ServiceActivationStore, ...args) {
+    return args[1] === o.sibling.path ? undefined : read.apply(this, args);
+  });
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.refuseCapture(new Error("Capture failed."));
+  const captures = () => o.client().captureOwnerActivation.mock.calls.length, before = captures();
+  // The first failure retries on the next pass; the second waits a second before the next try.
+  await vi.waitFor(() => expect(captures()).toBeGreaterThanOrEqual(before + 2));
+  const waiting = captures();
+  await o.nextPass(); await o.nextPass();
+  expect(captures(), "A target waiting out its backoff must not capture again.").toBe(waiting);
+});
+
 // Sol's review: departed documents the engine cannot park, more than an
 // answer fits, filled every departed list from the first, so a document
 // after them was never named once the engine parked it, and the host kept
