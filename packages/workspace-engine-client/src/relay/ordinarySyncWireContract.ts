@@ -119,7 +119,6 @@ const StagePublication = Schema.Union([
 const OrdinaryPublicationStateSchema = mutableStruct({ stages: Schema.mutable(Schema.Array(StagePublication)) });
 
 export type OrdinaryPublicationState = (typeof OrdinaryPublicationStateSchema)["Type"];
-export type OrdinaryStagePublication = OrdinaryPublicationState["stages"][number];
 
 /**
  * A `sync.ordinary.publicationState` answer for `stageKeys`: one stage per

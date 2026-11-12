@@ -4771,7 +4771,10 @@ async fn ordinary_publication_state_follows_a_keyed_post_through_push() {
         )
         .await,
     );
-    assert_eq!(pending[1], json!({ "stageKey": "stage-missing", "state": "absent" }));
+    assert_eq!(
+        pending[1],
+        json!({ "stageKey": "stage-missing", "state": "absent" })
+    );
     assert_eq!(
         pending[2],
         json!({ "stageKey": "desktop-send", "state": "absent" }),
@@ -4781,10 +4784,15 @@ async fn ordinary_publication_state_follows_a_keyed_post_through_push() {
     assert_eq!(pending[0]["outcome"], "written");
     assert_eq!(pending[0]["threadId"], "thread");
     assert!(pending[0].get("winnerMessageId").is_none());
-    let coordinates = pending[0]["coordinates"].as_array().cloned().expect("coordinates");
+    let coordinates = pending[0]["coordinates"]
+        .as_array()
+        .cloned()
+        .expect("coordinates");
     assert!(!coordinates.is_empty());
     assert!(
-        coordinates.iter().all(|coordinate| coordinate["state"] == "pending"),
+        coordinates
+            .iter()
+            .all(|coordinate| coordinate["state"] == "pending"),
         "{coordinates:?}"
     );
 
@@ -4819,9 +4827,14 @@ async fn ordinary_publication_state_follows_a_keyed_post_through_push() {
         )
         .await,
     );
-    let coordinates = pushed[0]["coordinates"].as_array().cloned().expect("coordinates");
+    let coordinates = pushed[0]["coordinates"]
+        .as_array()
+        .cloned()
+        .expect("coordinates");
     assert!(
-        coordinates.iter().all(|coordinate| coordinate["state"] == "pushed"),
+        coordinates
+            .iter()
+            .all(|coordinate| coordinate["state"] == "pushed"),
         "reading the receiving acknowledgement or a stale cursor -> pushed rows stay pending: {coordinates:?}"
     );
 
@@ -4836,7 +4849,12 @@ async fn ordinary_publication_state_follows_a_keyed_post_through_push() {
         let error = transport
             .call(
                 RequestContext::unbounded(),
-                request(id, "sync.ordinary.publicationState", Some(handle.clone()), params.clone()),
+                request(
+                    id,
+                    "sync.ordinary.publicationState",
+                    Some(handle.clone()),
+                    params.clone(),
+                ),
             )
             .await
             .unwrap_err();

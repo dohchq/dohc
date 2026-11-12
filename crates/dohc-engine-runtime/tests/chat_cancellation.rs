@@ -169,7 +169,9 @@ async fn cancelled_core_chat_mutations_leave_channels_threads_messages_and_revis
         Err(RuntimeError::Cancelled)
     ));
     assert!(matches!(
-        actor.chat_message_send(message.clone(), None, false, token).await,
+        actor
+            .chat_message_send(message.clone(), None, false, token)
+            .await,
         Err(RuntimeError::Cancelled)
     ));
 

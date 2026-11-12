@@ -1855,7 +1855,10 @@ impl EngineService {
                 .iter()
                 .any(|key| key.is_empty() || key.chars().any(char::is_control))
         {
-            return Err(WireError::new(ErrorCode::InvalidParams, "invalid-stage-keys"));
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "invalid-stage-keys",
+            ));
         }
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);

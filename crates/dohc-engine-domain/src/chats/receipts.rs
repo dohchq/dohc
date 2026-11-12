@@ -270,7 +270,9 @@ fn stored_result(
         )
         .optional()
         .map_err(DomainError::sql_corrupt)?;
-    stored.map(|json| json.ok_or_else(corrupt_receipt)).transpose()
+    stored
+        .map(|json| json.ok_or_else(corrupt_receipt))
+        .transpose()
 }
 
 pub(super) fn replayed_decision(
