@@ -9,6 +9,10 @@ x-service: &service
   read_only: true
   tmpfs: [/tmp]
   networks: [dohc]
+  # The services write a line for each request. Docker keeps the newest 50 MB per container.
+  logging:
+    driver: json-file
+    options: {max-size: 10m, max-file: "5"}
 
 x-database: &database
   POSTGRES_DB: ${POSTGRES_DB:-dohc}

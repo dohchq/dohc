@@ -67,6 +67,23 @@ export function isMcpCorsPath(pathname: string): boolean {
     pathname === AUTHORIZATION_SERVER_METADATA || pathname === REGISTER || pathname === TOKEN;
 }
 
+const SIGN_IN_ROUTES = [AUTHORIZATION_SERVER_METADATA, REGISTER, AUTHORIZE, DECISION, SIGN_IN, SIGN_OUT, PERSONAL_DECISION, TOKEN] as const;
+/** The request log's patterns for MCP addresses and agent sign-in: the link secret or workspace in an address stays out. */
+export const MCP_ROUTE_PATTERNS = [
+  "/mcp/s/:secret", "/mcp/agent/w/:workspaceId",
+  "/.well-known/oauth-protected-resource/mcp/s/:secret", "/.well-known/oauth-protected-resource/mcp/agent/w/:workspaceId",
+  ...SIGN_IN_ROUTES,
+] as const;
+
+/** The request log's pattern for an MCP or agent sign-in path, or null for any other path. */
+export function mcpRoutePattern(pathname: string): (typeof MCP_ROUTE_PATTERNS)[number] | null {
+  if (pathname.startsWith(MCP_PATH_PREFIX)) return "/mcp/s/:secret";
+  if (pathname.startsWith(PERSONAL_MCP_PATH_PREFIX)) return "/mcp/agent/w/:workspaceId";
+  if (pathname.startsWith(`${RESOURCE_METADATA}${MCP_PATH_PREFIX}`)) return "/.well-known/oauth-protected-resource/mcp/s/:secret";
+  if (pathname.startsWith(`${RESOURCE_METADATA}${PERSONAL_MCP_PATH_PREFIX}`)) return "/.well-known/oauth-protected-resource/mcp/agent/w/:workspaceId";
+  return SIGN_IN_ROUTES.find((route) => route === pathname) ?? null;
+}
+
 /** The link secret an MCP address names, or null. */
 export function mcpLinkSecret(pathname: string): string | null {
   const secret = pathname.startsWith(MCP_PATH_PREFIX) ? pathname.slice(MCP_PATH_PREFIX.length) : "";

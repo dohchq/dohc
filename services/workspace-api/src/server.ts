@@ -2,6 +2,7 @@ import { toNodeHandler } from "better-auth/node";
 import { createServer, type Server } from "node:http";
 import type { Socket } from "node:net";
 import { sanitizeAuthHeaders } from "./clientAddress";
+import { WORKSPACE_API_REQUEST_LOG } from "./requestLog";
 
 export interface RequestTimeouts {
   /** How long a client has to send its request headers. */
@@ -28,10 +29,21 @@ export function createWorkspaceServer(
   trustedProxies: ReadonlySet<string>,
   timeouts: RequestTimeouts = REQUEST_TIMEOUTS,
 ): Server {
-  const handler = toNodeHandler(handle);
   const server = createServer(
     { headersTimeout: timeouts.headersMs, requestTimeout: timeouts.requestMs, connectionsCheckingInterval: timeouts.checkEveryMs },
     (request, response) => {
+      const arrivedAtMs = Date.now();
+      // The request the router saw, whose route it marked.
+      let routed: Request | undefined;
+      let logged = false;
+      const log = () => {
+        if (logged) return;
+        logged = true;
+        WORKSPACE_API_REQUEST_LOG.write(routed, request.method ?? "GET", response.statusCode, arrivedAtMs);
+      };
+      // An answer counts once its headers are sent, even when its client leaves before the body ends.
+      response.once("finish", log);
+      response.once("close", () => { if (response.headersSent) log(); });
       // Node closes a connection idle past `idleMs` unless something listens
       // for its timeout. This keeps one open while the router works on its
       // answer, and closes one whose answer stopped moving. On the server, a
@@ -49,7 +61,10 @@ export function createWorkspaceServer(
       }
       // The adapter rejects a request it can't read before the router sees it.
       // The router answers every other failure itself.
-      handler(request, response).catch(() => {
+      toNodeHandler((web: Request) => {
+        routed = web;
+        return handle(web);
+      })(request, response).catch(() => {
         if (response.headersSent || response.destroyed) response.destroy();
         else response.writeHead(400).end();
       });

@@ -633,3 +633,17 @@ node tools/self-host/bootstrap.mjs upgrade --image dohc-self-host:NEW_VERSION
 The upgrade preserves volumes and secrets and saves the previous configuration privately.
 It can apply database migrations. If it fails, preserve the data and follow the recovery procedure.
 On a large relay log, the first start after an upgrade can take several minutes.
+
+### Request logs
+
+`workspace-api`, `sync-relay` and `share-web` each write one line per answered request: when it arrived, the method, the route and the status.
+For example: `[share-web] request 2026-11-12T11:02:03.456Z GET /s/* 200`.
+A line names the route's pattern, never the address that was requested, so link secrets, sign-in tokens and session ids stay out of it.
+It also omits the caller's IP address and every header.
+A path that matches no route logs as `unmatched`, a request to a published app as `app`, and the relay's service-to-service traffic as `replication`.
+
+Docker keeps the newest 50 MB of each service's lines (`logging` in `docker-compose.self-host.yml`).
+That limit is by size, not age: on a quiet server it can hold months of lines.
+Recreating a container deletes its lines.
+To keep more or less, change `max-size` and `max-file` there.
+The lines still show when each route was used, such as when a share link was opened, so keep them only as long as you need them.
