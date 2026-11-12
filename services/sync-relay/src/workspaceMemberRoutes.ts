@@ -261,7 +261,8 @@ export function createWorkspaceMemberRoutes(options: {
       }
       case "members-level": {
         if (!isShareAccessValue(input.level)) throw badRequest('level must be "view", "comment", or "edit"');
-        settle(storage.setWorkspaceMemberLevel({ workspaceId, actorUserId: userId, level: input.level }), workspaceId);
+        const workspaceName = parseWorkspaceName(input.workspaceName);
+        settle(storage.setWorkspaceMemberLevel({ workspaceId, actorUserId: userId, level: input.level, workspaceName, newShareId: options.newShareId, nowMs }), workspaceId);
         return respondWithView(workspaceId, userId);
       }
       case "members-role": {
