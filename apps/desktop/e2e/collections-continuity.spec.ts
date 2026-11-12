@@ -60,7 +60,8 @@ test("a collection saves edits, follows its folder rename, and closes on deletio
     // The record opens in the panel beside the table, with its live document as its body.
     await page.getByRole("button", { name: "Open Launch plan" }).click();
     const record = page.getByTestId("collection-record-panel");
-    await expect(record.getByRole("heading", { name: "Launch plan" })).toBeVisible();
+    // The panel's own heading. The record's page text starts with a heading of the same words.
+    await expect(record.getByRole("heading", { name: "Launch plan", level: 2 })).toBeVisible();
     await expect
       .poll(() => readFile(join(temp.rootPath, "tasks/plan.md"), "utf8"))
       .toMatch(/^Completed: true$/m);
@@ -109,7 +110,7 @@ test("a cell edit saves while its record is open in another editor group", async
     await expect(group(2).getByTestId("markdown-editor")).toHaveAttribute("contenteditable", "true");
     // The Collection's tab kept its open record, so the same record shows in group 1's panel and in group 2's tab.
     const record = group(1).getByTestId("collection-record-panel");
-    await expect(record.getByRole("heading", { name: "Launch plan" })).toBeVisible();
+    await expect(record.getByRole("heading", { name: "Launch plan", level: 2 })).toBeVisible();
 
     await group(1).getByRole("grid").getByRole("checkbox").click();
     await expect
