@@ -7452,6 +7452,10 @@ mod tests {
         target
     }
 
+    /// A file a Windows permission test writes, and how the engine writes it.
+    #[cfg(windows)]
+    type ScratchWrite = (&'static str, fn(&Scratch));
+
     #[cfg(windows)]
     fn write_new_by_job(scratch: &Scratch) {
         let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
@@ -7488,7 +7492,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn replacing_a_private_file_keeps_its_dacl() {
-        let writes: [(&str, fn(&Scratch)); 3] = [
+        let writes: [ScratchWrite; 3] = [
             ("notes.md", write_new_by_job),
             (".env", write_new_by_secret_job),
             ("notes.md", write_new_by_replace),
@@ -7509,7 +7513,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn replacing_a_file_with_an_inherited_dacl_keeps_it() {
-        let writes: [(&str, fn(&Scratch)); 3] = [
+        let writes: [ScratchWrite; 3] = [
             ("notes.md", write_new_by_job),
             (".env", write_new_by_secret_job),
             ("notes.md", write_new_by_replace),
@@ -7547,7 +7551,7 @@ mod tests {
             let root = std::fs::canonicalize(&scratch.root).unwrap();
             replace_file_whole(&root, ".env", ".dohc-write-1.tmp", b"new").unwrap();
         }
-        let writes: [(&str, fn(&Scratch)); 3] = [
+        let writes: [ScratchWrite; 3] = [
             ("job", by_job),
             ("secret job", write_new_by_secret_job),
             ("replace", by_replace),
