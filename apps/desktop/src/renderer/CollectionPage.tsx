@@ -580,14 +580,16 @@ export function CollectionPage({
   const rowsOut = useRef(0);
   const rowsMade = useRef<string[]>([]);
   const rowsDue = useRef(false);
-  // The records new rows made that no row on screen shows get one notice, so a burst of rows gets one.
+  const [rowsRead, setRowsRead] = useState(0);
+  // The records new rows made that no row on screen shows get one notice, so a burst of rows gets one. It waits
+  // for the read that started after the last of them was written, which `rowsRead` counts.
   useEffect(() => {
     if (!rowsDue.current || state.status !== "ready" || rowsOut.current > 0) return;
     rowsDue.current = false;
     const side = tableSide.current;
     const unseen = rowsMade.current.splice(0).filter((recordId) => side !== null && !side.shows(recordId)).length;
     if (unseen > 0) onNotice(unseen === 1 ? "Created a record. It is not among the records on screen." : `Created ${unseen} records. They are not among the records on screen.`);
-  }, [state.status, state.records]);
+  }, [rowsRead, state.status]);
   // The record made a moment ago from a board, a calendar, or New record beside one, which opens in the panel with its name ready to type.
   const [justMade, setJustMade] = useState<string | null>(null);
   const openMade = useRef<(recordId: string) => void>(() => undefined);
@@ -670,14 +672,26 @@ export function CollectionPage({
         out = false;
         if (rowsOut.current > 0 || !pageOpen.current) return;
         // The view reads its records, and the table then says which of the records the rows made no row on screen shows.
-        rowsDue.current = true;
-        void store.refresh();
+        const read = () => {
+          if (!pageOpen.current) return;
+          rowsDue.current = true;
+          setRowsRead((count) => count + 1);
+        };
+        void store.refresh().then(read, read);
       };
       now.onNewRecord(collectionPath, (record) => {
         // The file is made. Each typed value is written as an edit of a cell is, whether or not the page is still
         // open. A write that fails is in the list of unsaved changes, with its value and its Try again.
-        for (const { field, value } of entries) now.enqueueCellChange({ recordId: record.recordId, recordPath: record.path, field, value });
-        ended(record.recordId);
+        // The creation ends once its values are written, or kept in that list: a read before then finds the record
+        // without them, where its own name would not put it.
+        let writes = entries.length;
+        if (writes === 0) ended(record.recordId);
+        for (const { field, value } of entries) {
+          now.enqueueCellChange({ recordId: record.recordId, recordPath: record.path, field, value }, undefined, () => {
+            writes -= 1;
+            if (writes === 0) ended(record.recordId);
+          });
+        }
       }, {
         ...(named === null ? {} : { title: text(values[named] ?? null) }),
         open: false,

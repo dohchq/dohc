@@ -3630,6 +3630,36 @@ describe("a new record in the table", () => {
     expectFreshRow();
   });
 
+  it("says a created record is out of view only once its typed values are written, since they decide where the view puts it", async () => {
+    const bridge = makeBridge([record("rec-1", "Plan")], TWO_FIELDS);
+    bridge.queryCollectionRecords.mockResolvedValue({
+      collection: { path: "tasks", objectId: "object-test", status: "valid", reasons: [] },
+      records: [record("rec-1", "Plan")],
+      groups: null,
+      nextCursor: { sortValues: [], recordPath: "tasks/Plan.md", recordId: "rec-1" },
+    });
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-zebra");
+    docMock.current = engineDocState({ available: true, doc });
+    const onNewRecord = vi.fn<CollectionPageProps["onNewRecord"]>();
+    const onNotice = vi.fn();
+    vi.stubGlobal("dohcDesktop", bridge);
+    const page = render(pageWithHost(onNewRecord, undefined, { onNotice }));
+    await screen.findByText("Plan");
+    await startRow("Zebra", "Enter");
+    act(() => onNewRecord.mock.calls[0]![1]!({ path: "tasks/Zebra.md", recordId: "rec-zebra" }));
+    // The title is still being written. A read now finds a record with no name yet.
+    await act(async () => { for (let turn = 0; turn < 20; turn += 1) await Promise.resolve(); });
+    expect(onNotice).not.toHaveBeenCalled();
+    // The write lands, and the read after it decides what to say.
+    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saving" } });
+    page.rerender(pageWithHost(onNewRecord, undefined, { onNotice }));
+    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saved-here" } });
+    page.rerender(pageWithHost(onNewRecord, undefined, { onNotice }));
+    await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Created a record. It is not among the records on screen."));
+    expect(onNotice).toHaveBeenCalledOnce();
+  });
+
   it("says nothing of a created record that a row on screen shows, and says one record where one is out of view", async () => {
     const bridge = makeBridge([record("rec-1", "Plan")], TWO_FIELDS);
     const onNewRecord = vi.fn<CollectionPageProps["onNewRecord"]>();

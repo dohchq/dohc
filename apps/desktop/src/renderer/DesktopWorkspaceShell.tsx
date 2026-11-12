@@ -4532,7 +4532,13 @@ export function DesktopWorkspaceShell(props: {
   }, [mutateWb]);
 
   // Human and agent creation share the same record identity and recovery path.
+  // The names new records hold that the listing does not show yet: one being made, and one whose file exists
+  // (made, or made in part) until a listing has it. A later record named alike then takes the next free name.
   const pendingRecordPaths = useRef(new Set<string>());
+  useEffect(() => {
+    const listed = new Set(files.map((file) => file.path.toLowerCase()));
+    for (const path of pendingRecordPaths.current) if (listed.has(path.toLowerCase())) pendingRecordPaths.current.delete(path);
+  }, [files]);
   // Whether this shell is still the window's. A creation that answers after it closed paints nothing here.
   const shellOpen = useRef(true);
   useLayoutEffect(() => {
@@ -4548,6 +4554,8 @@ export function DesktopWorkspaceShell(props: {
       const reservedPath = nextPagePath(collectionPath, stem, occupied, bridge().platform);
       const name = reservedPath.slice(collectionPath.length + 1, -3);
       pendingRecordPaths.current.add(reservedPath);
+      // A name no file took is free again once the creation ends. One a file took stays held until a listing shows the file.
+      let made = false;
       // The window shows another workspace by now: this shell closed, or took another workspace. It paints nothing more.
       const moved = () => workspaceSelection.current !== selection || !shellOpen.current;
       /**
@@ -4588,12 +4596,17 @@ export function DesktopWorkspaceShell(props: {
         }
         if ("kind" in result) {
           const partial = result;
+          for (const path of partial.created) pendingRecordPaths.current.add(path);
+          made ||= partial.created.length > 0;
           const next = partial.retry.mode === "resume" ? () => void execute(partial.retry.recordId) : null;
           // The file exists and the record is not finished. Files with no way to finish them stay in the notice too, whose details name them.
           const shown = shownInPage(creationPartialNotice(partial), next, true);
           if (!moved() && (!shown || next === null)) reportShellError("dohc could not finish this record.", new CreationPartialError(partial), next);
           return;
         }
+        // The record's file exists from here, whatever the relay says of it.
+        pendingRecordPaths.current.add(result.path);
+        made = true;
         if (result.delivery === "refused") {
           // The relay refused the record. The listing and the share's access are read for what the refusal says,
           // and whatever they answer, and whichever workspace the window shows by then, the refusal reaches the
@@ -4618,7 +4631,7 @@ export function DesktopWorkspaceShell(props: {
         if (options.open !== false) openFile(result.path);
       };
       try { await execute(); }
-      finally { pendingRecordPaths.current.delete(reservedPath); }
+      finally { if (!made) pendingRecordPaths.current.delete(reservedPath); }
     },
     [files, folders, openFile, refreshFiles, reportShellError, workspaceId, !!shareView],
   );

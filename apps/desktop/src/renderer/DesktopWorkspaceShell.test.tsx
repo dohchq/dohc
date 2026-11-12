@@ -456,6 +456,28 @@ describe("collection folders", () => {
     </>
   );
 
+  it("keeps the name of a record that exists in part, and of one just made, from the next rows until the listing shows its file", async () => {
+    resetCollectionFieldWritesForTests();
+    const bridge = makeBridge(Promise.resolve(null));
+    // The first record's file is made and the record is not finished. The others are made. The listing shows none of their files yet.
+    bridge.createCollectionRecord
+      .mockResolvedValueOnce({ kind: "partial", created: ["tasks/Milk.md"], failedStage: "index", reason: "index unavailable",
+        retry: { mode: "resume", recordId: "rec_abcdefghijklmnopqrstuvwxyz", instruction: "Try again to finish this record." } })
+      .mockImplementation(async (payload) => ({ path: `${payload.collectionPath}/${payload.name}.md`, recordId: "rec_bcdefghijklmnopqrstuvwxyza" }));
+    const typeRow = await openTasksWithTitle(bridge, () => renderShell(bridge));
+    await typeRow("Milk", "Enter");
+    await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(1));
+    await screen.findByText(/dohc created the record file but could not finish the record/);
+    await typeRow("Milk", "Enter");
+    await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(2));
+    expect(bridge.createCollectionRecord.mock.calls[1]![0].name).toBe("Milk 2");
+    await waitFor(() => expect(retainedCollectionFieldWritePaths(WORKSPACE.workspaceId)).toContain("tasks/Milk 2.md"));
+    await typeRow("Milk", "Enter");
+    await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(3));
+    expect(bridge.createCollectionRecord.mock.calls[2]![0].name).toBe("Milk 3");
+    resetCollectionFieldWritesForTests();
+  });
+
   it("writes a new record's typed values, and reports the listing on its own, when the file listing fails after the record is made", async () => {
     resetCollectionFieldWritesForTests();
     const bridge = makeBridge(Promise.resolve(null));
