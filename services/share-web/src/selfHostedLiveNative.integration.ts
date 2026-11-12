@@ -604,15 +604,17 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     // Publication credits each interval with the relay-admitted authors in
     // History's flat form: the snapshot person and the declared agent, never
     // the grant authority, and the personal agent on behalf of its owner. The
-    // service keeps the same credit that owner devices import.
+    // service keeps the same credit that owner devices import, apart from depth 0.
     // Import marks the relay-admitted person confirmed; the admitted snapshot carries no marker.
     const importedHuman = {...human, relayConfirmed: true};
-    // History's flat form names no depth for an agent at depth 0.
+    // A receiving device drops an agent's depth 0, as History's flat form
+    // names none. The service keeps the admitted snapshot's depth 0. History
+    // reads both as depth 0.
     const importedPersonal = {kind: personal.kind, agentId: personal.agentId, agentName: personal.agentName, onBehalfOf: personal.onBehalfOf};
     const declaredCredit = [
-      {momentId: agentSettlement.record.momentId, imported: [agent, importedHuman]},
-      {momentId: automationSettlement.record.momentId, imported: [automation]},
-      {momentId: personalSettlement.record.momentId, imported: [importedPersonal]},
+      {momentId: agentSettlement.record.momentId, imported: [agent, importedHuman], hosted: [agent, importedHuman]},
+      {momentId: automationSettlement.record.momentId, imported: [automation], hosted: [automation]},
+      {momentId: personalSettlement.record.momentId, imported: [importedPersonal], hosted: [personal]},
     ] as const;
     const expectAuthors = (actual: unknown, expected: readonly unknown[]) => {
       expect(actual).toHaveLength(expected.length);
@@ -669,7 +671,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     results.declaredAuthors = {
       agent: {receipt: agentAck, settlement: agentSettlement, admitted: [human, agent], imported: [agent, importedHuman]},
       automation: {receipt: automationAck, settlement: automationSettlement, admitted: [automationAdmitted], imported: [automation]},
-      personal: {receipt: personalAck, settlement: personalSettlement, admitted: [personal], imported: [importedPersonal]},
+      personal: {receipt: personalAck, settlement: personalSettlement, admitted: [personal], imported: [importedPersonal], hosted: [personal]},
     };
     // The service imports the admitted credit through its own background pull.
     // Poll its store until that credit lands. A missing row reads as undefined, not null.
@@ -678,7 +680,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     try {
       await vi.waitFor(() => {
         expect(JSON.parse(authorJson(serviceEngine) ?? "null")).toEqual(unattributed);
-        for (const {momentId, imported} of declaredCredit) expectAuthors(JSON.parse(authorJson(serviceEngine, momentId) ?? "null"), imported);
+        for (const {momentId, hosted} of declaredCredit) expectAuthors(JSON.parse(authorJson(serviceEngine, momentId) ?? "null"), hosted);
       }, {timeout: 30000});
     } finally {serviceEngine.close();}
     await supervisor!.close(); supervisor = undefined; active = undefined;
@@ -695,8 +697,9 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
         const host = authorJson(engine), owned = authorJson(ownerEngine);
         Object.assign(results.ownerSettledAuthors as object, {hostRaw: host, ownerRaw: owned});
         for (const database of [engine, ownerEngine, peerEngine]) expect(JSON.parse(authorJson(database) ?? "null")).toEqual(unattributed);
-        for (const {momentId, imported} of declaredCredit) {
-          for (const database of [engine, ownerEngine, peerEngine]) expectAuthors(JSON.parse(authorJson(database, momentId) ?? "null"), imported);
+        for (const {momentId, imported, hosted} of declaredCredit) {
+          expectAuthors(JSON.parse(authorJson(engine, momentId) ?? "null"), hosted);
+          for (const database of [ownerEngine, peerEngine]) expectAuthors(JSON.parse(authorJson(database, momentId) ?? "null"), imported);
         }
       } finally {ownerEngine.close(); peerEngine.close();}
     } finally {engine.close();}
