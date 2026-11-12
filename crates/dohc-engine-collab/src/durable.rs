@@ -2623,9 +2623,8 @@ pub(crate) fn record_authorized_update_in_tx(
 /// the first update without the version.
 ///
 /// `false` means an owner binding or a restore holds the document, so the
-/// write would be refused: the caller does not claim it yet, and a later
-/// claim moment adds the version. A document that needs no write, or that
-/// [`encode_origination_base_in_tx`] would decline, answers `true`.
+/// write would be refused and the caller does not claim it. A document that
+/// needs no write, or that is missing updates, answers `true` without one.
 pub fn add_missing_schema_version_in_tx(
     tx: &Transaction<'_>,
     key: &DocKey,
