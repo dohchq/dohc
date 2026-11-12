@@ -821,12 +821,13 @@ describe("a Data Collection's table", () => {
   it("holds the menu's commands while a new record is open in the panel and says why, except what needs no records", async () => {
     const handlers = { onReviewSchema: vi.fn(), onOpenSource: vi.fn(), onArchive: vi.fn() };
     const onToggle = vi.fn();
-    setup({ ...handlers, dataset: needingPanel(dataset()), automations: { open: false, count: 0, onToggle, close: vi.fn() } }); await screen.findByText("Alice");
+    setup({ ...handlers, dataset: needingPanel(dataset()), automations: { open: false, count: 2, onToggle, close: vi.fn() } }); await screen.findByText("Alice");
     fireEvent.click(screen.getAllByRole("button", { name: "New record" })[0]!);
-    for (const name of ["Fields and names", "Refresh", "Archive"]) {
+    // The new record holds the side panel, so the ⚡ panel waits with the rest: opened behind it, it could not be closed.
+    for (const name of ["Fields and names", "Refresh", "Archive", /^Automations/]) {
       const row = command(name);
-      expect(row.getAttribute("aria-disabled"), name).toBe("true");
-      expect(document.getElementById(row.getAttribute("aria-describedby")!)!.textContent, name).toBe("Create or cancel the new record first.");
+      expect(row.getAttribute("aria-disabled"), String(name)).toBe("true");
+      expect(document.getElementById(row.getAttribute("aria-describedby")!)!.textContent, String(name)).toBe("Create or cancel the new record first.");
       fireEvent.click(row);
     }
     expect(handlers.onReviewSchema).not.toHaveBeenCalled(); expect(handlers.onArchive).not.toHaveBeenCalled();
@@ -835,7 +836,12 @@ describe("a Data Collection's table", () => {
     expect(screen.getByLabelText<HTMLInputElement>("Search collection").disabled).toBe(true);
     expect(command("Open source").getAttribute("aria-disabled")).toBeNull();
     fireEvent.click(command("Open source")); expect(handlers.onOpenSource).toHaveBeenCalledOnce();
-    fireEvent.click(command("Automations")); expect(onToggle).toHaveBeenCalledOnce();
+    expect(screen.getByTestId<HTMLButtonElement>("collection-automations-button").disabled).toBe(true);
+    expect(onToggle).not.toHaveBeenCalled();
+    // Once the new record is cancelled, the ⚡ panel opens again.
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.getByTestId<HTMLButtonElement>("collection-automations-button").disabled).toBe(false);
+    fireEvent.click(command(/^Automations/)); expect(onToggle).toHaveBeenCalledOnce();
   });
   const pendingView = { viewId: id(30), name: "Pending", kind: "table" as const, search: "", filters: [], sort: null };
   const statusBoard = { viewId: id(31), name: "By status", kind: "board" as const, search: "", filters: [], sort: null, groupBy: status };

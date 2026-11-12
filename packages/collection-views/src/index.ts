@@ -24,13 +24,8 @@ export {
   type CollectionCellChange,
   type CollectionOptionCreate,
   type TableAbandonedDraft,
-  type TableCellStatus,
-  type TableCellStatuses,
   type TableFieldMark,
-  type TableHostCell,
   type TableNewRecord,
-  type TableNewRecordStop,
-  type TableUnsavedRow,
   type TableViewProps,
 } from "./table/TableView";
 export { BoardView, type BoardViewProps } from "./board/BoardView";
@@ -40,7 +35,5 @@ export {
   type CalendarViewProps,
 } from "./calendar/CalendarView";
 export {
-  CellStatusNote,
   RecordProperties,
-  type RecordPropertiesProps,
 } from "./record/RecordProperties";

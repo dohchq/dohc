@@ -8,7 +8,8 @@ import type { CollectionRecord, CollectionRecordGroup, CollectionSchema, Collect
 import type { GetCollectionResult, QueryCollectionRecordsPayload, QueryCollectionRecordsResult, WorkspaceActivityEvent } from "../ipc/bridgeContract";
 import { CollectionPage, FIND_RECORD_LIMIT, FIND_RECORD_PAGE, type CollectionPageProps } from "./CollectionPage";
 import { resetAutomationButtonsForTests } from "./collections/useAutomationButtons";
-import { beginCollectionWriteOperation, CollectionFieldWriteHost, resetCollectionFieldWritesForTests } from "./collections/recordFieldWrites";
+import { beginCollectionWriteOperation, CollectionFieldWriteHost, collectionWriteFailures, resetCollectionFieldWritesForTests, retainedCollectionFieldWritePaths } from "./collections/recordFieldWrites";
+import { closeCollectionChangeShellsForTests, openCollectionChangeShell } from "./collectionChangeShells";
 import type { CollectionCellChange } from "@dohc/collection-views";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 import { deferred } from "../testing/deferred";
@@ -806,6 +807,28 @@ describe("a document record's panel", () => {
 });
 
 describe("text left in an editor that goes away with no press", () => {
+  // The window shows the page's workspace, whose shell takes its notices, unless a test closes it.
+  beforeEach(() => void openCollectionChangeShell("ws-1", { onError: () => undefined }));
+  afterEach(() => closeCollectionChangeShellsForTests());
+  it("keeps text its field cannot take in the list of unsaved changes when the window shows another workspace by then, since no shell is left to take a notice", async () => {
+    liveDoc();
+    const onError = vi.fn();
+    const view = renderPage(makeBridge([task("rec-1", "Plan")], { ...TASKS, fields: [...TASKS.fields, { name: "estimate", type: "number" }] }), { onError });
+    await screen.findByRole("button", { name: "Open Plan" });
+    fireEvent.click(cell("estimate"));
+    fireEvent.change(cellInput(), { target: { value: "12 apples" } });
+    // The window switches workspaces: this workspace's shell closes before the page's editors go.
+    closeCollectionChangeShellsForTests();
+    closePage(view);
+    expect(onError).not.toHaveBeenCalled();
+    expect(enqueued.changes).toEqual([]);
+    expect(collectionWriteFailures().map((failure) => ({ workspaceId: failure.workspaceId, path: failure.change.recordPath, field: failure.change.field, value: failure.change.value, recoveryOnly: failure.recoveryOnly })))
+      .toEqual([{ workspaceId: "ws-1", path: "tasks/Plan.md", field: "estimate", value: "12 apples", recoveryOnly: true }]);
+    expect(collectionWriteFailures()[0]!.message).toBe("dohc did not save what you typed in the estimate field of Plan. Enter a value estimate can take. Copy what you typed before discarding it.");
+    // It belongs to the record's file, so Stop and restore knows of it.
+    expect(retainedCollectionFieldWritePaths("ws-1")).toEqual(["tasks/Plan.md"]);
+  });
+
   const typeInto = (input: HTMLInputElement, text: string) => fireEvent.change(input, { target: { value: text } });
   /** Opens one of the three editors on the record "Plan", and answers its input. */
   const editors = {

@@ -131,7 +131,8 @@ export interface CollectionFrameProps extends Omit<HTMLAttributes<HTMLElement>, 
   search?: { value: string; onChange: (value: string) => void; onSubmit: () => void; disabled?: boolean };
   /** The page's own buttons, between the search and the Automations button. */
   actions?: readonly CollectionFrameAction[];
-  automations?: { open: boolean; count: number; onToggle: () => void };
+  /** `disabled`: what holds the side panel must end before the ⚡ panel can take it. */
+  automations?: { open: boolean; count: number; onToggle: () => void; disabled?: boolean };
   newRecord?: { onClick: (opener: HTMLElement) => void; disabled?: boolean };
   /** The actions menu's accessible name and tooltip. */
   menuLabel: string;
@@ -184,7 +185,7 @@ export function CollectionFrame({
             </SecondaryButton>
           ))}
           {automations && (automations.count > 0 || automations.open) ? (
-            <GhostButton size="toolbar" data-testid="collection-automations-button" aria-pressed={automations.open} onClick={automations.onToggle}>
+            <GhostButton size="toolbar" data-testid="collection-automations-button" aria-pressed={automations.open} disabled={automations.disabled} onClick={automations.onToggle}>
               <Zap size={14} strokeWidth={1.9} aria-hidden />
               Automations
               {automations.count > 0 ? <span className="text-[12px] tabular-nums text-subtle">{automations.count}</span> : null}

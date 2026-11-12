@@ -517,6 +517,21 @@ export function retainUnsavedCollectionRecord(
   notify();
 }
 
+/**
+ * Keeps text a person typed in a record's field that dohc did not save, in
+ * the retained list of its own workspace, when the workspace's shell is not
+ * open to take a notice. It is never sent: the person copies it, then
+ * discards it.
+ */
+export function retainUnsavedFieldText(workspaceId: string, collectionPath: string, change: Pick<CollectionCellChange, "recordId" | "recordPath" | "field">, text: string, message: string): void {
+  nextWriteId += 1;
+  failures = [...failures, {
+    id: nextWriteId, workspaceId, collectionPath, lineage: collectionWriteLineage(workspaceId), message: `${message} ${COPY_UNSAVED_RECORD}`, recoveryOnly: true,
+    change: { ...change, value: text },
+  }];
+  notify();
+}
+
 export function setCollectionFieldWriteAccess(workspaceId: string, refusal: string | null): void {
   if ((accessRefusals.get(workspaceId) ?? null) === refusal) return;
   if (refusal === null) accessRefusals.delete(workspaceId);

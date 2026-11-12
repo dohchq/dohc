@@ -260,15 +260,12 @@ interface Live {
   query: Query;
   load(next: Query, history?: Array<TransactionalCursor | null>): Promise<void>;
   openCreate(opener: HTMLElement | null): void;
-  /** The fields the table's new row takes a value in, by id. */
-  creatable: ReadonlySet<string>;
   /** Gives a field of the new record in the panel a value. */
   changeDraft(fieldId: string, value: AppBackendJson): void;
   /** What people call the table. */
   tableName: string;
   /** A file of the new record in the panel started or stopped uploading. */
   uploading(fieldId: string, busy: boolean): void;
-  /** Says a record the table's new row made has no row on screen. */
   /** Keeps what a new row held and dohc did not save, by field id, with why. */
   keepUnsaved(words: string, values: Readonly<Record<string, CollectionValue>>, text?: { field: string; text: string }): void;
   scope: CollectionResourceScope;
@@ -338,7 +335,6 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   const [awaiting, setAwaiting] = useState<number | null>(null), awaitingRef = useRef<number | null>(null);
   // Why the Collection did not take the panel's new record.
   const [formRefusal, setFormRefusal] = useState<string | null>(null);
-  // The table's new row, while its save is with the queue: the change, and what tells the row how it ended.
   // The creates the table's new rows handed to the queue and it has not settled, by change. Several can be out at once.
   const rowCreates = useRef(new Set<number>());
   // The records those rows made, each with the queue's count of outcomes when it was confirmed. A read that
@@ -1037,7 +1033,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   if (openKey !== null && details !== null && !rows.has(openKey)) liveRows.set(openKey, details);
   if (editor) liveRows.set(NEW_RECORD, { id: NEW_RECORD, version: 0, values: Object.fromEntries(form.map(entry => [entry.field.fieldId, entry.value])) });
   live.current = { rows: liveRows, openRecord: openPanel, fields, editable: new Set(editableIds), editOperation, held: disabled || editor !== null, query, load, openCreate, scope, offline, read,
-    creatable: new Set(creatableIds), changeDraft, tableName: table.name, uploading, keepUnsaved, resources: { uploadFile: props.uploadFile, readFile: props.readFile, resolveRelation: props.resolveRelation }, onError };
+    changeDraft, tableName: table.name, uploading, keepUnsaved, resources: { uploadFile: props.uploadFile, readFile: props.readFile, resolveRelation: props.resolveRelation }, onError };
   const rowHosted = !visual && page !== null && canCreate === true && !needsPanel;
   // What needs the person and has no cell to say so: on a board or calendar, on another page of records, or in a
   // field the table no longer shows or changes.
@@ -1161,7 +1157,8 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       ...(undo && !offline ? [{ id: "undo", label: "Undo last edit", icon: icon(Undo2), disabled: writeDisabled || queue.size > 0, onClick: undoLast }] : []),
       ...(onCustomAction ? operations.filter(operation => operation.kind === "action").map(operation => ({ id: operation.operationId, label: operation.label, disabled: writeDisabled, onClick: () => onCustomAction(operation.operationId) })) : []),
     ]}
-    automations={props.automations}
+    // A new record in the panel holds the side panel until it is created or cancelled, so the ⚡ panel waits.
+    automations={props.automations && { ...props.automations, disabled: editor !== null }}
     // In a table that takes a new row, the button starts it. Elsewhere the new record opens in the panel.
     newRecord={canCreate ? { disabled: writeDisabled || editor !== null, onClick: opener => { if (rowHosted) tableSide.current?.start(); else openCreate(opener); } } : undefined}
     menuLabel="Manage Collection"
@@ -1172,7 +1169,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
         { id: "refresh", label: "Refresh", icon: icon(RefreshCw), disabled: paused, reason: why(), onSelect: () => props.onRefresh ? props.onRefresh() : void load(query) },
       ] },
       { label: "Collection", commands: [
-        props.automations && { id: "automations", label: "Automations", icon: icon(Zap), count: props.automations.count, onSelect: props.automations.onToggle },
+        props.automations && { id: "automations", label: "Automations", icon: icon(Zap), count: props.automations.count, disabled: editor !== null, reason: editor !== null ? NEW_RECORD_OPEN : undefined, onSelect: props.automations.onToggle },
         props.onCustomize && { id: "customize", label: "Customize…", icon: icon(SlidersHorizontal), disabled: paused, reason: why(), onSelect: props.onCustomize },
         canCreateForm && props.onCreateForm && { id: "form", label: "Create form", icon: icon(FileInput), disabled: writeDisabled || editor !== null, reason: why(true), onSelect: props.onCreateForm },
         props.onManageAccess && { id: "access", label: "Manage access", icon: icon(Shield), disabled: paused, reason: why(), onSelect: props.onManageAccess },

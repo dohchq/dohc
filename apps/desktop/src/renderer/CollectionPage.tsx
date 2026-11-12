@@ -49,6 +49,7 @@ import {
   currentCollectionWriteLineage,
   enqueueCollectionFieldWrite,
   retainUnsavedCollectionRecord,
+  retainUnsavedFieldText,
   useCollectionWriteLineage,
   useCollectionWritesPaused,
   useCollectionWriteStatus,
@@ -642,12 +643,13 @@ export function CollectionPage({
      * workspace, and once it shows another, the list of unsaved Collection
      * changes, which outlives the shell and keeps entries by workspace.
      */
-    const keep = (values: Readonly<Record<string, CollectionValue>>, typed: string, reason: string, retry: (() => void) | null, left?: { field: string; text: string }) => {
+    // `made`: the record's file exists and the record is not finished, which `reason` says. Nothing then says it was not created.
+    const keep = (values: Readonly<Record<string, CollectionValue>>, typed: string, reason: string, retry: (() => void) | null, left?: { field: string; text: string }, made = false) => {
       if (collectionChangeShell(workspaceId)) {
-        const message = `dohc did not create a record in ${rowHost.current.collectionName}. ${reason} You typed: ${typed}`;
+        const message = made ? `${reason} You typed: ${typed}` : `dohc did not create a record in ${rowHost.current.collectionName}. ${reason} You typed: ${typed}`;
         rowHost.current.onError(message, new TextNotSavedError(message, typed), retry);
         // The kept row holds everything typed: its values, and text an editor held that its field cannot take, under that field.
-      } else retainUnsavedCollectionRecord(workspaceId, collectionPath, left ? { ...values, [left.field]: left.text } : values, `dohc did not create this record. ${reason}`);
+      } else retainUnsavedCollectionRecord(workspaceId, collectionPath, left ? { ...values, [left.field]: left.text } : values, made ? reason : `dohc did not create this record. ${reason}`);
     };
     const save: TableNewRecord["save"] = (values) => {
       const now = rowHost.current;
@@ -702,7 +704,7 @@ export function CollectionPage({
           // No row is left to say why, so what it held is kept with the failure. A file that exists and is not
           // finished keeps the shell's own resume, which writes these values when it finishes. Where nothing
           // was made, Try again makes the record again.
-          keep(values, typed, failure.reason, failure.retry ?? (failure.partial ? null : () => void save(values)));
+          keep(values, typed, failure.reason, failure.retry ?? (failure.partial ? null : () => void save(values)), undefined, failure.partial);
           return true;
         },
       });
@@ -822,10 +824,17 @@ export function CollectionPage({
       leftWith.current.enqueueCellChange({ recordId: record.id, recordPath: record.path, field, value });
       return;
     }
+    const said = `dohc did not save what you typed in the ${field} field of ${recordLabel(record)}. ${refusal}`;
+    // The window shows another workspace by now, so this workspace's shell takes no notice. The list of unsaved
+    // changes outlives it, and keeps the text for its own workspace.
+    if (!collectionChangeShell(workspaceId)) {
+      retainUnsavedFieldText(workspaceId, collectionPath, { recordId: record.id, recordPath: record.path, field }, text, said);
+      return;
+    }
     // The text comes last, so a long one is all a cut takes from the message. Copy details has all of it.
-    const message = `dohc did not save what you typed in the ${field} field of ${recordLabel(record)}. ${refusal} You typed: ${text}`;
+    const message = `${said} You typed: ${text}`;
     leftWith.current.onError(message, new TextNotSavedError(message, text));
-  }, [workspaceId]);
+  }, [workspaceId, collectionPath]);
   const saveLeftCell = useCallback((draft: TableAbandonedDraft) => {
     const record = knownRecords.current.get(draft.recordId);
     if (record) saveLeftText(record, draft.field, draft.text, draft.value);

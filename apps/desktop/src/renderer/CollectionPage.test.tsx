@@ -3481,7 +3481,7 @@ describe("a new record in the table", () => {
     expectFreshRow();
     expect(onError).toHaveBeenCalledOnce();
     const [message, error, retry] = onError.mock.calls[0]!;
-    expect(message).toBe("dohc did not create a record in Tasks. dohc created the record file but could not finish the record. You typed: title: Milk");
+    expect(message).toBe("dohc created the record file but could not finish the record. You typed: title: Milk");
     expect(error).toBeInstanceOf(TextNotSavedError);
     expect(retry).toBe(resume);
     expect(resume).not.toHaveBeenCalled();
@@ -3508,7 +3508,7 @@ describe("a new record in the table", () => {
     // A notice has the typed values, and its Try again is the same resume.
     expect(onError).toHaveBeenCalledOnce();
     const [message, error, retry] = onError.mock.calls[0]!;
-    expect(message).toBe("dohc did not create a record in Tasks. dohc created the record file but could not finish the record. You typed: title: Milk");
+    expect(message).toBe("dohc created the record file but could not finish the record. You typed: title: Milk");
     expect(error).toBeInstanceOf(TextNotSavedError);
     expect(retry).toBe(resume);
   });
