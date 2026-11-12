@@ -1,5 +1,6 @@
 import type { SqliteDb } from "./types";
 import {initializeOrdinaryActivationBasis} from "./ordinaryActivationBasis";
+import {rebuildTables} from "./rebuildTables";
 
 export const SERVICE_ACTIVATIONS = "sync_relay_service_activations";
 export const LIVE_DELIVERY_OWNER_HISTORY = "sync_relay_live_delivery_owner_history";
@@ -141,7 +142,11 @@ export function initializeServiceActivationSchema(db: SqliteDb): void {
       throw new Error("Service activation storage is damaged.");
     }
     assertConstraints(db);
-    rebuildWithoutShare(db);
+    // Foreign keys stay on in the relay's schema transaction. Deferred checks
+    // verify the predecessor chain and each history row's activation when it
+    // commits. Every column but `share_id` returns.
+    db.exec("PRAGMA defer_foreign_keys=ON");
+    rebuildTables(db, [SERVICE_ACTIVATIONS, LIVE_DELIVERY_OWNER_HISTORY], table => table === SERVICE_ACTIVATIONS ? sql : historySql);
   } else if (!current && marked(V1_MIGRATION)) {
     if (!exact(db, SERVICE_ACTIVATIONS, "table", v1Sql) || present(LIVE_DELIVERY_OWNER_HISTORY)) throw new Error("Service activation storage is damaged.");
     assertV1Constraints(db);
@@ -164,25 +169,6 @@ export function initializeServiceActivationSchema(db: SqliteDb): void {
   for (const migration of [V2_MIGRATION, MIGRATION]) {
     if (!marked(migration)) db.prepare("INSERT INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES (?,?)").run(migration, Date.now());
   }
-}
-
-// Runs inside the relay's schema transaction, where foreign keys stay on.
-// Dropping the activations would cascade into their archived history, so both
-// tables move through temporary copies, history dropped first. Each keeps every
-// column but `share_id`. Deferred checks verify the predecessor chain and each
-// history row's activation when the transaction commits.
-function rebuildWithoutShare(db: SqliteDb): void {
-  const tables = [SERVICE_ACTIVATIONS, LIVE_DELIVERY_OWNER_HISTORY] as const;
-  const columns = tables.map(table => db.prepare(`SELECT name FROM pragma_table_info('${table}') WHERE name<>'share_id' ORDER BY cid`).all()
-    .map(row => String(row.name)).join(","));
-  db.exec("PRAGMA defer_foreign_keys=ON");
-  for (const table of tables) db.exec(`CREATE TEMP TABLE ${table}_previous AS SELECT * FROM main.${table}`);
-  for (const table of [...tables].reverse()) db.exec(`DROP TABLE main.${table}`);
-  db.exec(sql);
-  db.exec(historySql);
-  for (const [index, table] of tables.entries()) db.exec(`INSERT INTO main.${table}(${columns[index]}) SELECT ${columns[index]} FROM temp.${table}_previous`);
-  for (const table of tables) db.exec(`DROP TABLE temp.${table}_previous`);
-  for (const index of Object.values(indexes)) db.exec(index);
 }
 
 /** The v2 and current layouts share these indexes and constraints. */
