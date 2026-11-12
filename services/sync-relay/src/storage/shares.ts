@@ -48,6 +48,7 @@ import {
   type KeptServiceActivation,
 } from "./serviceHostEnrollment";
 import { retireAgentConnectionsInTransaction } from "./agentConnections";
+import { claimWorkspaceInvitesInTransaction } from "./workspaceMembers";
 
 function dependentGrantIdsMatch(
   dependents: readonly SyncRelayShareGrantRow[],
@@ -790,6 +791,7 @@ export function claimPendingSharesForEmail(
     // A request that passed the fence before deletion began must not claim
     // an invite sent to the address afterward.
     if (accountIsFenced(storage, userId)) return 0;
+    claimWorkspaceInvitesInTransaction(storage, normalized, userId, Date.now());
     const result = storage.db
       .prepare(
         `UPDATE sync_relay_share_grants
