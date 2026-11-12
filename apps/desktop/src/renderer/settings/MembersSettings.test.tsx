@@ -249,6 +249,45 @@ describe("Members page", () => {
     expect(screen.getByRole("switch", { name: "Invite link" }).getAttribute("aria-checked")).toBe("true");
   });
 
+  it("still reads the page again after overlapping changes when a change from another workspace answers last", async () => {
+    const linkOff = { inviteLink: { enabled: false, url: null } };
+    bridge.workspaceMembers.mockImplementation(async () => ({ status: "ready", view: ownerView(linkOff) }));
+    const { rerender } = renderMembers();
+    await screen.findByTestId("settings-members-page");
+    const old = deferred<MembersResult>();
+    bridge.workspaceMembers.mockReturnValueOnce(old.promise);
+    await userEvent.click(screen.getByRole("switch", { name: "Invite link" }));
+    rerender({ workspaceId: "ws-2" });
+    await screen.findByTestId("settings-members-page");
+    const link = deferred<MembersResult>();
+    const level = deferred<MembersResult>();
+    bridge.workspaceMembers.mockReturnValueOnce(link.promise).mockReturnValueOnce(level.promise);
+    await userEvent.click(screen.getByRole("switch", { name: "Invite link" }));
+    await userEvent.click(screen.getByRole("radio", { name: "Edit" }));
+    const both = ownerView({ workspaceId: "ws-2", memberLevel: "edit" });
+    bridge.workspaceMembers.mockImplementation(async () => ({ status: "ready", view: both }));
+    await act(async () => link.resolve({ status: "ready", view: both }));
+    await act(async () => level.resolve({ status: "ready", view: ownerView({ ...linkOff, workspaceId: "ws-2", memberLevel: "edit" }) }));
+    await act(async () => old.resolve({ status: "ready", view: ownerView() }));
+    expect(requests().at(-1)).toEqual({ action: "list" });
+    expect(await screen.findByTestId("settings-members-link-url")).toBeTruthy();
+  });
+
+  it("keeps saying the account left when a change overlapped Leave", async () => {
+    bridge.workspaceMembers.mockImplementation(async () => ({ status: "ready", view: adminView() }));
+    renderMembers();
+    await screen.findByTestId("settings-members-page");
+    const level = deferred<MembersResult>();
+    bridge.workspaceMembers.mockReturnValueOnce(level.promise);
+    await userEvent.click(screen.getByRole("radio", { name: "Edit" }));
+    bridge.workspaceMembers.mockImplementation(async ({ request }) => request.action === "leave" ? { status: "done" } : { status: "refused" });
+    await userEvent.click(screen.getByTestId("settings-members-leave-open"));
+    await userEvent.click(screen.getByTestId("settings-members-confirm"));
+    await act(async () => level.resolve({ status: "ready", view: adminView() }));
+    expect(requests().at(-1)).toEqual({ action: "list" });
+    expect((await screen.findByTestId("settings-members-left")).textContent).toBe("You left Community.");
+  });
+
   it("warns that copies stay before removing someone, and removes only on confirm", async () => {
     renderMembers();
     await screen.findByTestId("settings-members-page");
