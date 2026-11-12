@@ -102,6 +102,9 @@ import {
   EXPLORER_MODES,
   ABOUT_MAX_WIDTH,
   ABOUT_MIN_WIDTH,
+  MAX_OPEN_RECORD_CHARS,
+  RECORD_PANEL_MAX_WIDTH,
+  RECORD_PANEL_MIN_WIDTH,
   OPEN_EDITORS_MAX_HEIGHT,
   OPEN_EDITORS_MIN_HEIGHT,
   SIDEBAR_MAX_WIDTH,
@@ -6498,6 +6501,22 @@ export const WorkspaceUiState = z.object({
       { message: "Too many collection view entries." },
     )
     .optional(),
+  // The record each Collection tab shows open in its panel, keyed by the tab's path.
+  openRecords: z
+    .record(PATH_STRING, z.string().min(1).max(MAX_OPEN_RECORD_CHARS))
+    .refine(
+      (records) => Object.keys(records).length <= MAX_OPEN_TABS,
+      { message: "Too many open record entries." },
+    )
+    .optional(),
+  // The record panel's width. The catch keeps a foreign width from failing the file.
+  recordPanelWidth: z
+    .number()
+    .int()
+    .min(RECORD_PANEL_MIN_WIDTH)
+    .max(RECORD_PANEL_MAX_WIDTH)
+    .optional()
+    .catch(undefined),
 }).superRefine((state, context) => {
   const groupIds = new Set<string>();
   const singletonOwners = new Set<string>();

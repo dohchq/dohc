@@ -58,6 +58,11 @@ import {
   mergeSavedTabs,
   recordRecentFile,
   setCollectionActiveView,
+  setCollectionOpenRecord,
+  setRecordPanelWidth,
+  RECORD_PANEL_DEFAULT_WIDTH,
+  RECORD_PANEL_MAX_WIDTH,
+  RECORD_PANEL_MIN_WIDTH,
   remapWorkbenchPaths,
   replaceTab,
   resizeEditorGroups,
@@ -1687,4 +1692,79 @@ it("uses the dataset.json address for Collection tabs and rejects old ID-only ad
   expect(parseTab(transactionalCollectionTabPath(datasetPath, tableId))).toMatchObject({ kind: "transactionalCollection", datasetPath, tableId });
   expect(parseTab(transactionalCollectionTabPath("00000000-0000-4000-8000-000000000001", tableId)).kind).toBe("removed");
   expect(parseTab(transactionalCollectionTabPath("../dataset.json", tableId)).kind).toBe("removed");
+});
+
+describe("the record a Collection tab shows open, and the record panel's width", () => {
+  const data = transactionalCollectionTabPath("data/dataset.json", "123e4567-e89b-42d3-a456-426614174002");
+  const tasks = collectionTabPath("tasks");
+
+  it("stores, replaces, and clears the open record per tab", () => {
+    let state = withTabs(data, tasks);
+    state = setCollectionOpenRecord(state, data, "7");
+    state = setCollectionOpenRecord(state, tasks, "tasks/a.md");
+    expect(state.openRecords).toEqual({ [data]: "7", [tasks]: "tasks/a.md" });
+    // Storing the same record again changes nothing.
+    expect(setCollectionOpenRecord(state, data, "7")).toBe(state);
+    state = setCollectionOpenRecord(state, data, '"key"');
+    expect(state.openRecords[data]).toBe('"key"');
+    state = setCollectionOpenRecord(state, data, null);
+    expect(state.openRecords).toEqual({ [tasks]: "tasks/a.md" });
+    expect(setCollectionOpenRecord(state, data, null)).toBe(state);
+  });
+
+  it("drops a tab's open record once no group shows the tab", () => {
+    let state = setCollectionOpenRecord(withTabs("a.md", data), data, "7");
+    state = moveTabToNewGroup(state, DEFAULT_EDITOR_GROUP_ID, "a.md", "right");
+    state = openTab(state, data, "right");
+    // The tab is open in two groups, so closing one keeps its record.
+    state = closeTab(state, DEFAULT_EDITOR_GROUP_ID, data);
+    expect(state.openRecords).toEqual({ [data]: "7" });
+    state = closeTab(state, "right", data);
+    expect(state.openRecords).toEqual({});
+
+    let grouped = setCollectionOpenRecord(withTabs("a.md", data), data, "7");
+    grouped = moveTabToNewGroup(grouped, DEFAULT_EDITOR_GROUP_ID, data, "right");
+    expect(closeEditorGroup(grouped, "right").openRecords).toEqual({});
+  });
+
+  it("follows a Collection's tab through a rename and goes with a deleted one", () => {
+    let state = setCollectionOpenRecord(withTabs(tasks, "a.md"), tasks, "tasks/a.md");
+    state = remapWorkbenchPaths(state, (path) => (path === "tasks" ? "org/tasks" : path));
+    expect(state.openRecords).toEqual({ [collectionTabPath("org/tasks")]: "tasks/a.md" });
+    expect(remapWorkbenchPaths(state, (path) => (path === "org/tasks" ? null : path)).openRecords).toEqual({});
+  });
+
+  it("clamps and stores the panel's width", () => {
+    const state = defaultWorkbenchState();
+    expect(state.recordPanelWidth).toBe(RECORD_PANEL_DEFAULT_WIDTH);
+    expect(setRecordPanelWidth(state, RECORD_PANEL_DEFAULT_WIDTH)).toBe(state);
+    expect(setRecordPanelWidth(state, 500.4).recordPanelWidth).toBe(500);
+    expect(setRecordPanelWidth(state, 10).recordPanelWidth).toBe(RECORD_PANEL_MIN_WIDTH);
+    expect(setRecordPanelWidth(state, 99_999).recordPanelWidth).toBe(RECORD_PANEL_MAX_WIDTH);
+    expect(setRecordPanelWidth(state, Number.NaN)).toBe(state);
+  });
+
+  it("survives a restart through the saved layout, for tabs that restore", () => {
+    let state = setCollectionOpenRecord(withTabs(data, "a.md"), data, "7");
+    state = setRecordPanelWidth(state, 512);
+    const saved = serializeUiState(state);
+    expect(SetWorkspaceUiStatePayload.safeParse({ workspaceId: "workspace-a", state: saved }).success).toBe(true);
+    const restored = parseUiState(JSON.parse(JSON.stringify(saved)));
+    expect(restored.openRecords).toEqual({ [data]: "7" });
+    expect(restored.recordPanelWidth).toBe(512);
+    // A layout saved before the panel opens with none, at the default width.
+    const { openRecords: _records, recordPanelWidth: _width, ...before } = saved;
+    expect(parseUiState(before).openRecords).toEqual({});
+    expect(parseUiState(before).recordPanelWidth).toBe(RECORD_PANEL_DEFAULT_WIDTH);
+  });
+
+  it("restores no record for a tab that is not open, a foreign value, or a foreign width", () => {
+    const saved = serializeUiState(withTabs(data));
+    const foreign = parseUiState({ ...saved, recordPanelWidth: "wide", openRecords: { [data]: 7, [tasks]: "tasks/a.md", "": "x" } });
+    expect(foreign.openRecords).toEqual({});
+    expect(foreign.recordPanelWidth).toBe(RECORD_PANEL_DEFAULT_WIDTH);
+    expect(parseUiState({ ...saved, openRecords: [data] }).openRecords).toEqual({});
+    expect(parseUiState({ ...saved, openRecords: { [data]: "x".repeat(5000) } }).openRecords).toEqual({});
+    expect(parseUiState({ ...saved, recordPanelWidth: 5 }).recordPanelWidth).toBe(RECORD_PANEL_MIN_WIDTH);
+  });
 });

@@ -443,6 +443,13 @@ export interface WorkbenchState {
   // path (Phase 2 collections). Per-user local state: closing the tab or
   // restarting the app must not reset the open view.
   collectionViews: Record<string, string>;
+  // The record each Collection tab shows open in its panel, keyed by the
+  // tab's path. The value names the record as its Collection page does: a
+  // Data record's key. A tab with no entry shows no panel. Closing the tab
+  // drops its entry.
+  openRecords: Record<string, string>;
+  // The record panel's width, for every Collection tab in the workspace.
+  recordPanelWidth: number;
 }
 
 type EditorTransitionActivation = "target" | "preserve";
@@ -453,6 +460,11 @@ export const SIDEBAR_DEFAULT_WIDTH = 240;
 export const ABOUT_MIN_WIDTH = 240;
 export const ABOUT_MAX_WIDTH = 2400;
 export const ABOUT_DEFAULT_WIDTH = 320;
+// The record panel beside a Collection's table. The page that shows it also
+// keeps room for the table, so the widest panel is narrower in a small window.
+export const RECORD_PANEL_MIN_WIDTH = 320;
+export const RECORD_PANEL_MAX_WIDTH = 960;
+export const RECORD_PANEL_DEFAULT_WIDTH = 380;
 // Open-editors rows are 28px (h-7). The default shows 4.5 rows — the half row
 // at the cutoff signals there is more to scroll; the min keeps two rows
 // grabbable and the max is generous (tall portrait monitors) like the rails.
@@ -474,6 +486,8 @@ export const MAX_RECENT_FILES = 20;
 // Bounds the persisted collection-view map (pinned precedent: a payload
 // bound, not a UX target — at the bound the oldest entry gives way).
 export const MAX_COLLECTION_VIEWS = 100;
+// Bounds a stored record reference, as a path is bounded.
+export const MAX_OPEN_RECORD_CHARS = 4096;
 
 export function defaultWorkbenchState(): WorkbenchState {
   return {
@@ -492,6 +506,8 @@ export function defaultWorkbenchState(): WorkbenchState {
     recentFiles: [],
     explorerMode: "home",
     collectionViews: {},
+    openRecords: {},
+    recordPanelWidth: RECORD_PANEL_DEFAULT_WIDTH,
   };
 }
 
@@ -503,6 +519,11 @@ export function clampSidebarWidth(width: number): number {
 export function clampAboutWidth(width: number): number {
   if (!Number.isFinite(width)) return ABOUT_DEFAULT_WIDTH;
   return Math.min(ABOUT_MAX_WIDTH, Math.max(ABOUT_MIN_WIDTH, Math.round(width)));
+}
+
+export function clampRecordPanelWidth(width: number): number {
+  if (!Number.isFinite(width)) return RECORD_PANEL_DEFAULT_WIDTH;
+  return Math.min(RECORD_PANEL_MAX_WIDTH, Math.max(RECORD_PANEL_MIN_WIDTH, Math.round(width)));
 }
 
 export function clampOpenEditorsHeight(height: number): number {
@@ -814,11 +835,22 @@ export function closeTab(
   groupId: string,
   path: string,
 ): WorkbenchState {
-  return replaceGroup(
+  return dropClosedTabRecords(replaceGroup(
     state,
     groupId,
     (group) => detachTabFromGroup(group, path)?.group ?? group,
+  ));
+}
+
+// A tab's open record goes with the tab, once no group shows it.
+function dropClosedTabRecords(state: WorkbenchState): WorkbenchState {
+  const closed = Object.keys(state.openRecords).filter(
+    (path) => !state.editorGroups.some((group) => group.tabs.some((tab) => tab.path === path)),
   );
+  if (closed.length === 0) return state;
+  const openRecords = { ...state.openRecords };
+  for (const path of closed) delete openRecords[path];
+  return { ...state, openRecords };
 }
 
 // Reorder one group's tabs. The target index clamps into that group.
@@ -1071,7 +1103,7 @@ export function closeEditorGroup(
     state.activeEditorGroup === groupId
       ? (editorGroups[index] ?? editorGroups[index - 1]).id
       : state.activeEditorGroup;
-  return { ...state, editorGroups, activeEditorGroup };
+  return dropClosedTabRecords({ ...state, editorGroups, activeEditorGroup });
 }
 
 // Selecting the already-active view toggles the panel (the old explicit
@@ -1196,6 +1228,31 @@ export function setCollectionActiveView(
   return { ...state, collectionViews };
 }
 
+// Remembers the record a Collection tab shows open in its panel. null closes
+// the panel. At the bound the oldest entry gives way, as for collectionViews.
+export function setCollectionOpenRecord(
+  state: WorkbenchState,
+  tabPath: string,
+  record: string | null,
+): WorkbenchState {
+  if (record === null) {
+    if (!Object.hasOwn(state.openRecords, tabPath)) return state;
+    const openRecords = { ...state.openRecords };
+    delete openRecords[tabPath];
+    return { ...state, openRecords };
+  }
+  if (state.openRecords[tabPath] === record) return state;
+  const openRecords = { ...state.openRecords, [tabPath]: record };
+  const paths = Object.keys(openRecords);
+  if (paths.length > MAX_OPEN_TABS) delete openRecords[paths[0]];
+  return { ...state, openRecords };
+}
+
+export function setRecordPanelWidth(state: WorkbenchState, width: number): WorkbenchState {
+  const clamped = clampRecordPanelWidth(width);
+  return clamped === state.recordPanelWidth ? state : { ...state, recordPanelWidth: clamped };
+}
+
 export function togglePinned(state: WorkbenchState, path: string): WorkbenchState {
   return {
     ...state,
@@ -1258,14 +1315,21 @@ export function remapWorkbenchPaths(
       collectionViews[next] = view;
     }
   }
-  return {
+  // An open record follows its tab to the tab's new path, and goes with a tab the move closed.
+  const openRecords: Record<string, string> = {};
+  for (const [path, record] of Object.entries(state.openRecords)) {
+    const next = projectTab(path);
+    if (next !== null && !Object.hasOwn(openRecords, next)) openRecords[next] = record;
+  }
+  return dropClosedTabRecords({
     ...state,
     editorGroups,
     expandedFolders: remapList(state.expandedFolders),
     pinned: remapList(state.pinned),
     recentFiles: remapList(state.recentFiles),
     collectionViews,
-  };
+    openRecords,
+  });
 }
 
 // Restored tabs can outlive their files: a version rollback, an external
@@ -1333,6 +1397,8 @@ export function serializeUiState(state: WorkbenchState): WorkspaceUiState {
     recentFiles: state.recentFiles,
     explorerMode: state.explorerMode,
     collectionViews: state.collectionViews,
+    openRecords: state.openRecords,
+    recordPanelWidth: clampRecordPanelWidth(state.recordPanelWidth),
   };
 }
 
@@ -1487,6 +1553,7 @@ export function parseUiState(raw: unknown): WorkbenchState {
   const rawAboutVisible = own("aboutVisible");
   const rawAboutWidth = own("aboutWidth");
   const rawOpenEditorsHeight = own("openEditorsHeight");
+  const rawRecordPanelWidth = own("recordPanelWidth");
   return {
     activeView: isActivityViewId(rawView) ? rawView : defaults.activeView,
     sidebarVisible:
@@ -1516,7 +1583,27 @@ export function parseUiState(raw: unknown): WorkbenchState {
     recentFiles: collectPaths(own("recentFiles"), MAX_RECENT_FILES),
     explorerMode: EXPLORER_MODES.find((mode) => mode === own("explorerMode")) ?? defaults.explorerMode,
     collectionViews: collectCollectionViews(own("collectionViews")),
+    // Only a tab that restored shows its record again.
+    openRecords: collectOpenRecords(own("openRecords"), new Set(normalizedGroups.flatMap((group) => group.tabs.map((tab) => tab.path)))),
+    recordPanelWidth:
+      typeof rawRecordPanelWidth === "number"
+        ? clampRecordPanelWidth(rawRecordPanelWidth)
+        : defaults.recordPanelWidth,
   };
+}
+
+// The collectCollectionViews posture for the open records: own string
+// entries of restored tabs only, both sides bounded.
+function collectOpenRecords(raw: unknown, tabs: ReadonlySet<string>): Record<string, string> {
+  const out: Record<string, string> = Object.create(null);
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return out;
+  const record = raw as Record<string, unknown>;
+  for (const path of tabs) {
+    if (!Object.hasOwn(record, path)) continue;
+    const open = record[path];
+    if (typeof open === "string" && open.length > 0 && open.length <= MAX_OPEN_RECORD_CHARS) out[path] = open;
+  }
+  return out;
 }
 
 // Bounded map collector for parseUiState, the collectPaths posture applied to

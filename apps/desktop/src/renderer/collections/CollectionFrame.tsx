@@ -136,7 +136,7 @@ export interface CollectionFrameProps extends Omit<HTMLAttributes<HTMLElement>, 
   /** The actions menu's accessible name and tooltip. */
   menuLabel: string;
   menu: readonly CollectionFrameMenuSection[];
-  /** A panel docked at the right of the view, such as automations. */
+  /** A panel docked at the right of the view: automations, or the open record. */
   panel?: ReactNode;
   children: ReactNode;
 }
@@ -204,7 +204,8 @@ export function CollectionFrame({
           ) : null}
         </div>
       </div>
-      <div className="flex min-h-0 flex-1">
+      {/* The row places a panel that lies over the view, where the page is too narrow for both. */}
+      <div className="relative flex min-h-0 flex-1">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">{children}</div>
         {panel}
       </div>

@@ -49,5 +49,9 @@
   "explorerMode": "home",
   "collectionViews": {
     "notes/旅": "board"
-  }
+  },
+  "openRecords": {
+    "tab://data-collection/data%2Fdataset.json/123e4567-e89b-42d3-a456-426614174002": "7"
+  },
+  "recordPanelWidth": 420
 }
