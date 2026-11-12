@@ -7,7 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { CalendarDays, Database, Plus, SquareKanban, Table2 } from "lucide-react";
+import { LayoutList, PanelsTopLeft, SlidersHorizontal, Zap } from "lucide-react";
 import {
   BoardView,
   CalendarView,
@@ -30,10 +30,10 @@ import type {
 import type { WorkspaceActivityEvent } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { createActivityCoalescer } from "./workspaceActivityCoalescer";
-import { GhostButton, PrimaryButton, SecondaryButton } from "./ui/controls";
-import { MoreMenu } from "./ui/MoreMenu";
+import { SecondaryButton } from "./ui/controls";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import { CollectionCustomizeDialog, documentCollectionFiles } from "./collections/CollectionCustomizeDialog";
+import { CollectionFrame, type CollectionFrameViews, type NewCollectionView } from "./collections/CollectionFrame";
 import { FieldsDialog } from "./collections/FieldsDialog";
 import { ViewsDialog } from "./collections/ViewsDialog";
 import {
@@ -43,7 +43,7 @@ import {
   useCollectionWriteStatus,
 } from "./collections/recordFieldWrites";
 import { rewriteCollectionSchema } from "./collections/schemaWrite";
-import { setOptionColor } from "./collections/schemaAuthoring";
+import { addView, deleteView, renameView, setOptionColor } from "./collections/schemaAuthoring";
 import { withErrorWords } from "../ipc/errorWords";
 import { openLink } from "./linkActivation";
 import { useCollectionFieldMarks, useTableFieldMarks } from "./collections/collectionFieldMarks";
@@ -51,7 +51,6 @@ import {
   AUTOMATIONS_FILE,
   automationCount,
   automationsFileMade,
-  AutomationsButton,
   AutomationsPanel,
   useCollectionAutomations,
   type AutomationFocus,
@@ -109,22 +108,6 @@ export interface CollectionPageProps {
   automationFocus: AutomationFocus | null;
   onAutomationFocused: () => void;
 }
-
-function NewRecordButton({ onClick }: { onClick: () => void }) {
-  return (
-    <PrimaryButton
-      type="button"
-      data-testid="collection-new-record"
-      onClick={onClick}
-      className="inline-flex items-center gap-2 pl-2"
-    >
-      <Plus size={14} strokeWidth={1.9} aria-hidden />
-      New record
-    </PrimaryButton>
-  );
-}
-
-const VIEW_KIND_ICONS = { table: Table2, board: SquareKanban, calendar: CalendarDays } as const;
 
 // A url cell's link opens the way a link in a chat or a document does.
 const openCellLink = (url: string) => void openLink(url);
@@ -569,6 +552,51 @@ export function CollectionPage({
     [changeOptionColor, groupBy],
   );
 
+  // The tab strip's view changes: each is one schema rewrite, as the Views
+  // dialog's are. Which view is open stays the shell's state, so the page
+  // follows a new, renamed or deleted view there.
+  const openViewName = useRef(activeViewName);
+  openViewName.current = activeViewName;
+  const createView = useCallback(
+    async (view: NewCollectionView): Promise<string | null> => {
+      const failure = await applySchemaChange((current) =>
+        addView(current, {
+          name: view.name,
+          kind: view.kind,
+          groupBy: view.kind === "board" ? view.groupBy ?? null : null,
+          sort: [],
+          visibleFields: null,
+          dateField: view.kind === "calendar" ? view.dateField ?? null : null,
+        }),
+      );
+      if (failure === null) onActiveViewChange(view.name);
+      return failure;
+    },
+    [applySchemaChange, onActiveViewChange],
+  );
+  const renameOpenView = useCallback(
+    async (from: string, to: string): Promise<string | null> => {
+      const failure = await applySchemaChange((current) => renameView(current, from, to));
+      if (failure === null && openViewName.current === from) onActiveViewChange(to);
+      return failure;
+    },
+    [applySchemaChange, onActiveViewChange],
+  );
+  const removeView = useCallback(
+    function remove(name: string) {
+      const dialog = currentSchemaDialog.current;
+      void applySchemaChange((current) => deleteView(current, name)).then((failure) => {
+        if (failure === null) {
+          if (openViewName.current === name) onActiveViewChange(null);
+          // applySchemaChange reports a failure itself only when a dialog changed.
+        } else if (currentSchemaDialog.current === dialog) {
+          onError(failure, new Error(failure), () => remove(name));
+        }
+      });
+    },
+    [applySchemaChange, onActiveViewChange, onError],
+  );
+
   // A typed select value not in the options yet: the whole edit enters the
   // global queue synchronously — before any schema IPC — so navigation and
   // lineage gates see it. The queue writes the option to the schema first,
@@ -641,6 +669,7 @@ export function CollectionPage({
   }
 
   const schema = details.schema;
+  const name = schema.name ?? collectionPath.split("/").at(-1) ?? collectionPath;
 
   // The ⚡ panel docks at the right of whatever the page shows.
   const automationsPanel = automationsOpen ? (
@@ -663,40 +692,9 @@ export function CollectionPage({
     />
   ) : null;
 
-  // Automations and Fields set up a Collection, so they stay in the header
-  // even before it has records.
-  const collectionName = (
-    <h1 className="m-0 flex min-w-0 items-center gap-2 text-base font-semibold text-ink">
-      <span aria-hidden className="grid size-6 shrink-0 place-items-center rounded-md bg-panel-2 text-muted">
-        <Database size={14} strokeWidth={1.9} />
-      </span>
-      <span className="truncate">{schema.name ?? collectionPath.split("/").at(-1)}</span>
-    </h1>
-  );
-  const setupButtons = (
-    <>
-      <AutomationsButton
-        toolbar
-        open={automationsOpen}
-        count={automationCount(automations.file)}
-        onClick={() => (automationsOpen ? setCloseAsk((ask) => ask + 1) : setAutomationsOpen(true))}
-      />
-      {!readOnly ? <GhostButton
-        size="toolbar"
-        data-testid="collection-fields-button"
-        onClick={() => setFieldsOpen(true)}
-      >
-        Fields
-      </GhostButton> : null}
-      <MoreMenu
-        label="Collection actions"
-        items={[{ label: "Customize…", onSelect: () => setCustomizing(true) }]}
-      />
-    </>
-  );
   const customizeDialog = customizing ? (
     <CollectionCustomizeDialog
-      name={schema.name ?? collectionPath.split("/").at(-1) ?? collectionPath}
+      name={name}
       files={documentCollectionFiles(collectionPath, automationsFileMade(automations.file))}
       onOpenFile={onOpenFile}
       onClose={() => setCustomizing(false)}
@@ -726,75 +724,68 @@ export function CollectionPage({
   const dateFields = schema.fields.filter((field) => field.type === "date");
   const calendarReady = kind === "calendar" && (dateFields.find((field) => field.name === activeView?.dateField) ?? dateFields[0])?.name;
 
+  const toggleAutomations = () => (automationsOpen ? setCloseAsk((ask) => ask + 1) : setAutomationsOpen(true));
+  // Every record the page holds, in rows or in a board's columns. More can load while a cursor remains.
+  const loaded = new Set([...state.records, ...(state.groups?.flatMap((group) => group.records) ?? [])].map((record) => record.path)).size;
+  const more = state.nextCursor !== null;
+  // Someone who cannot change the Collection switches views and saves none.
+  const frameViews: CollectionFrameViews | undefined = readOnly ? undefined : {
+    // A board groups by stored values, and a button stores none.
+    groupFields: schema.fields.filter((field) => field.type !== "button").map((field) => ({ id: field.name, name: field.name })),
+    dateFields: dateFields.map((field) => ({ id: field.name, name: field.name })),
+    onAddDateField: () => setFieldsOpen("date"),
+    create: createView,
+    rename: renameOpenView,
+    remove: removeView,
+    // Deleting a view drops its configuration with no reverse path, so the menu asks twice.
+    confirmDelete: true,
+  };
+
   return (
-    <div
-      data-testid="collection-page"
-      className="flex min-h-0 flex-1 flex-col bg-bg"
+    <CollectionFrame
+      name={name}
+      count={`${loaded}${more ? "+" : ""} ${loaded === 1 && !more ? "record" : "records"}`}
+      status={state.status === "error" ? (
+        <>
+          <span className="truncate text-[12px] text-danger">
+            dohc could not read this collection's records. {state.error}
+          </span>
+          <SecondaryButton size="compact" onClick={() => void store.refresh()}>
+            Retry
+          </SecondaryButton>
+        </>
+      ) : writesPaused ? (
+        <span
+          data-testid="collection-writes-paused"
+          className="truncate text-[12px] text-muted"
+        >
+          Editing is paused while dohc changes files in this workspace.
+        </span>
+      ) : writeError ? (
+        <span data-testid="collection-write-error" className="truncate text-[12px] text-danger">
+          {writeError}
+        </span>
+      ) : null}
+      // A Collection with no saved view shows its default table as the one tab.
+      tabs={views.length > 0 ? views.map((view) => ({ id: view.name, name: view.name, kind: view.kind, saved: true })) : [{ id: "", name: "Table", kind: "table" }]}
+      activeTabId={activeView?.name ?? ""}
+      onSelectTab={(id) => { if (id !== "") onActiveViewChange(id); }}
+      views={frameViews}
+      automations={{ open: automationsOpen, count: automationCount(automations.file), onToggle: toggleAutomations }}
+      newRecord={readOnly ? undefined : { onClick: newRecord }}
+      menuLabel="Collection actions"
+      menu={[
+        { label: "View", commands: [
+          !readOnly && { id: "fields", label: "Fields", icon: <LayoutList size={14} strokeWidth={1.9} aria-hidden />, testId: "collection-fields-button", onSelect: () => setFieldsOpen(true) },
+          !readOnly && { id: "views", label: "Views", icon: <PanelsTopLeft size={14} strokeWidth={1.9} aria-hidden />, testId: "collection-views-button", onSelect: () => setViewsOpen(true) },
+        ] },
+        { label: "Collection", commands: [
+          { id: "automations", label: "Automations", icon: <Zap size={14} strokeWidth={1.9} aria-hidden />, count: automationCount(automations.file), onSelect: toggleAutomations },
+          { id: "customize", label: "Customize…", icon: <SlidersHorizontal size={14} strokeWidth={1.9} aria-hidden />, onSelect: () => setCustomizing(true) },
+        ] },
+      ]}
+      panel={automationsPanel}
     >
-      <div className="flex shrink-0 items-center gap-2 px-5 pt-4">
-        {collectionName}
-        <span className="flex-1" />
-        {state.status === "error" ? (
-          <>
-            <span className="truncate text-[12px] text-danger">
-              dohc could not read this collection's records. {state.error}
-            </span>
-            <SecondaryButton size="compact" onClick={() => void store.refresh()}>
-              Retry
-            </SecondaryButton>
-          </>
-        ) : writesPaused ? (
-          <span
-            data-testid="collection-writes-paused"
-            className="truncate text-[12px] text-muted"
-          >
-            Editing is paused while dohc changes files in this workspace.
-          </span>
-        ) : writeError ? (
-          <span data-testid="collection-write-error" className="truncate text-[12px] text-danger">
-            {writeError}
-          </span>
-        ) : null}
-      </div>
-      <div className="flex shrink-0 items-center gap-1 border-b border-line px-3 pt-2">
-        {views.length > 1 ? (
-          <div
-            data-testid="collection-view-switcher"
-            className="dohc-tab-strip flex min-w-0 items-center self-stretch overflow-x-auto overflow-y-hidden"
-          >
-            {views.map((view) => {
-              const Icon = VIEW_KIND_ICONS[view.kind];
-              const active = view.name === (activeView?.name ?? "");
-              return (
-                <button
-                  key={view.name}
-                  type="button"
-                  aria-pressed={active}
-                  onClick={() => onActiveViewChange(view.name)}
-                  className={`flex h-10 shrink-0 items-center gap-2 border-b-2 px-2 text-[13px] font-medium transition-colors duration-75 ${
-                    active ? "border-ink text-ink" : "border-transparent text-muted hover:text-ink"
-                  }`}
-                >
-                  <Icon size={14} strokeWidth={1.9} aria-hidden />
-                  {view.name}
-                </button>
-              );
-            })}
-          </div>
-        ) : null}
-        <span className="flex-1" />
-        <div className="flex shrink-0 items-center gap-1 pb-1">
-          {setupButtons}
-          {!readOnly ? <GhostButton
-            size="toolbar"
-            data-testid="collection-views-button"
-            onClick={() => setViewsOpen(true)}
-          >
-            Views
-          </GhostButton> : null}
-          {!readOnly ? <span className="ml-1"><NewRecordButton onClick={newRecord} /></span> : null}
-        </div>
-      </div>
       {drainCapped ? (
         <div
           data-testid="collection-drain-cap"
@@ -811,7 +802,6 @@ export function CollectionPage({
           {record.creationCanDiscard === true && !readOnly ? <SecondaryButton onClick={() => void discardDraft(record)}>Discard draft</SecondaryButton> : null}
         </div>)}
       </div> : null}
-      <div className="flex min-h-0 flex-1">
       <div className="min-h-0 min-w-0 flex-1 overflow-auto">
         {boardReady ? (
           <BoardView
@@ -861,8 +851,6 @@ export function CollectionPage({
           />
         )}
       </div>
-      {automationsPanel}
-      </div>
       {fieldsDialog}
       {customizeDialog}
       {viewsOpen && !readOnly ? (
@@ -878,6 +866,6 @@ export function CollectionPage({
           }}
         />
       ) : null}
-    </div>
+    </CollectionFrame>
   );
 }

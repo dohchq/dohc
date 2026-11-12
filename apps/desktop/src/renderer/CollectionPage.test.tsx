@@ -350,6 +350,17 @@ function renderPage(
   return render(pageWithHost(onNewRecord, onOpenRecord, view));
 }
 
+/** Opens the page's one actions menu. */
+function openActions() {
+  fireEvent.click(screen.getByRole("button", { name: "Collection actions" }));
+}
+/** Runs a command the page keeps in its actions menu, by the command's test id. */
+function runAction(testId: string) {
+  openActions();
+  fireEvent.click(screen.getByTestId(testId));
+}
+const viewTab = (name: string) => within(screen.getByTestId("collection-view-switcher")).getByRole("button", { name });
+
 // The first record's cell in the table: the Open gutter is cell 0, then one cell per field.
 function fieldCell(fieldIndex: number): HTMLElement {
   const cell = screen.getByRole("grid").querySelectorAll<HTMLElement>('[role="row"][data-index="0"] [role="gridcell"]')[fieldIndex + 1];
@@ -475,8 +486,14 @@ describe("CollectionPage", () => {
     renderPage(bridge, undefined, undefined, { readOnly: true });
     await screen.findByText("Shared task");
     expect(screen.queryByTestId("collection-new-record")).toBeNull();
+    // The view still shows as a tab, with nothing that saves a view.
+    expect(viewTab("Table").getAttribute("aria-pressed")).toBe("true");
+    expect(screen.queryByRole("button", { name: "Add a view" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "View actions" })).toBeNull();
+    openActions();
     expect(screen.queryByTestId("collection-fields-button")).toBeNull();
     expect(screen.queryByTestId("collection-views-button")).toBeNull();
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Automations", "Customize…"]);
     expect(bridge.listAutomationButtons).not.toHaveBeenCalled();
     expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
   });
@@ -570,8 +587,14 @@ describe("CollectionPage", () => {
     const grid = await screen.findByRole("grid");
     expect(within(grid).getAllByRole("columnheader").length).toBeGreaterThan(0);
     expect(screen.queryByText("No records in this collection yet.")).toBeNull();
-    expect(screen.getByTestId("collection-fields-button")).toBeDefined();
-    expect(screen.getByTestId("collection-views-button")).toBeDefined();
+    // Fields and Views set up a Collection, so its menu has them before it has records.
+    openActions();
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Fields", "Views", "Automations", "Customize…"]);
+    expect(screen.getByTestId("collection-fields-button")).toBe(screen.getByRole("menuitem", { name: "Fields" }));
+    expect(screen.getByTestId("collection-views-button")).toBe(screen.getByRole("menuitem", { name: "Views" }));
+    openActions();
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(screen.getByTestId("collection-record-count").textContent).toBe("0 records");
 
     fireEvent.click(within(grid).getByRole("button", { name: "New record" }));
     fireEvent.click(screen.getByTestId("collection-new-record"));
@@ -655,6 +678,26 @@ describe("CollectionPage", () => {
     expect(bridge.listCollectionAutomations.mock.calls.length).toBe(reads);
     act(() => bridge.emitWorkspaceActivity({ workspaceId: "ws-1", paths: ["tasks/automations.yaml"] }));
     await waitFor(() => expect(bridge.listCollectionAutomations.mock.calls.length).toBe(reads + 1));
+  });
+
+  it("keeps Automations in the actions menu, and shows its button only with automations or an open panel", async () => {
+    const bridge = makeBridge([record("rec-1", "Plan")]);
+    Object.assign(bridge, {
+      onAutomationRunsChanged: () => () => undefined,
+      onAutomationHoldsChanged: () => () => undefined,
+    });
+    renderPage(bridge);
+    await screen.findByText("Plan");
+    expect(screen.queryByTestId("collection-automations-button")).toBeNull();
+    openActions();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Automations" }));
+    expect(await screen.findByTestId("collection-automations-panel")).toBeTruthy();
+    // With the panel open, its button shows, pressed, and closes it.
+    const button = screen.getByTestId("collection-automations-button");
+    expect(button.getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(button);
+    await waitFor(() => expect(screen.queryByTestId("collection-automations-panel")).toBeNull());
+    expect(screen.queryByTestId("collection-automations-button")).toBeNull();
   });
 
   it("forgets a notice's ask when the panel closes, so the next open shows the list", async () => {
@@ -1088,6 +1131,29 @@ describe("view persistence", () => {
     });
   });
 
+  it("shows every saved view as a tab, the open one pressed, and counts the records beside the name", async () => {
+    const bridge = makeBridge([record("rec-1", "Plan")], TWO_VIEW_SCHEMA);
+    renderPage(bridge, undefined, undefined, { activeViewName: "Sorted" });
+    await screen.findByText("Plan");
+    // The open tab also holds its menu's button, which is not a tab.
+    expect(within(screen.getByTestId("collection-view-switcher")).getAllByRole("button").filter((tab) => tab.hasAttribute("aria-pressed")).map((tab) => [tab.textContent, tab.getAttribute("aria-pressed")]))
+      .toEqual([["All", "false"], ["Sorted", "true"]]);
+    expect(screen.getByRole("heading", { level: 1, name: "Tasks" })).toBeTruthy();
+    expect(screen.getByTestId("collection-record-count").textContent).toBe("1 record");
+  });
+
+  it("shows one Table tab for a Collection with no saved view", async () => {
+    const onActiveViewChange = vi.fn();
+    renderPage(makeBridge([record("rec-1", "Plan")]), undefined, undefined, { onActiveViewChange });
+    await screen.findByText("Plan");
+    const tabs = within(screen.getByTestId("collection-view-switcher")).getAllByRole("button");
+    expect(tabs.map((tab) => [tab.textContent, tab.getAttribute("aria-pressed")])).toEqual([["Table", "true"]]);
+    // The default table is not a saved view: it has no menu, and pressing it stores no choice.
+    expect(screen.queryByRole("button", { name: "View actions" })).toBeNull();
+    fireEvent.click(tabs[0]!);
+    expect(onActiveViewChange).not.toHaveBeenCalled();
+  });
+
   it("reports a view switch so the shell can persist it", async () => {
     const bridge = makeBridge([record("rec-1", "Plan")], TWO_VIEW_SCHEMA);
     const onActiveViewChange = vi.fn();
@@ -1143,7 +1209,7 @@ describe("collection authoring", () => {
     renderPage(bridge);
     await screen.findByText("Plan");
 
-    fireEvent.click(screen.getByTestId("collection-fields-button"));
+    runAction("collection-fields-button");
     fireEvent.change(screen.getByLabelText("Field name"), {
       target: { value: "Status" },
     });
@@ -1183,7 +1249,7 @@ describe("collection authoring", () => {
     renderPage(bridge);
     await screen.findByText("Plan");
 
-    fireEvent.click(screen.getByTestId("collection-fields-button"));
+    runAction("collection-fields-button");
     // Renaming ships with the record-key rewrite: no edit affordance on
     // non-select fields, and the name input stays disabled.
     expect(screen.queryByLabelText("Edit field title")).toBeNull();
@@ -1370,7 +1436,7 @@ describe("collection authoring", () => {
     renderPage(bridge);
     await screen.findByText("Plan");
 
-    fireEvent.click(screen.getByTestId("collection-views-button"));
+    runAction("collection-views-button");
     fireEvent.change(screen.getByLabelText("View name"), {
       target: { value: "Board" },
     });
@@ -1424,6 +1490,110 @@ describe("collection authoring", () => {
     expect(lastWrittenSchema(bridge).schema.views).toEqual([]);
   });
 
+  it("adds a view from the + beside the tabs through one schema rewrite, and opens it", async () => {
+    const bridge = makeBridge([selectRecord()], SELECT_SCHEMA);
+    const onActiveViewChange = vi.fn();
+    renderPage(bridge, undefined, undefined, { onActiveViewChange });
+    await screen.findByText("Plan");
+
+    fireEvent.click(screen.getByRole("button", { name: "Add a view" }));
+    const popover = within(screen.getByRole("dialog", { name: "Add a view" }));
+    fireEvent.click(popover.getByRole("radio", { name: "Board" }));
+    expect(within(popover.getByLabelText("Group by")).getAllByRole("option").map((option) => option.textContent)).toEqual(["title", "status"]);
+    fireEvent.change(popover.getByLabelText("Group by"), { target: { value: "status" } });
+    fireEvent.change(popover.getByLabelText("Name"), { target: { value: "By status" } });
+    fireEvent.click(popover.getByRole("button", { name: "Create view" }));
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce());
+    expect(bridge.writeWorkspaceText.mock.calls[0]![0]).toMatchObject({ relativePath: "tasks/collection.yaml", expectedContentHash: hashFor(0) });
+    expect(lastWrittenSchema(bridge).schema.views).toEqual([
+      { name: "By status", kind: "board", groupBy: "status", sort: [], visibleFields: null, dateField: null },
+    ]);
+    await waitFor(() => expect(onActiveViewChange).toHaveBeenCalledExactlyOnceWith("By status"));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Add a view" })).toBeNull());
+    // The tab shows once the page reads the schema again.
+    expect((await screen.findByRole("button", { name: "By status" })).getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("adds a calendar on the Collection's date field, and opens Fields on a new Date field when it has none", async () => {
+    const dated: CollectionSchema = { ...SELECT_SCHEMA, fields: [...SELECT_SCHEMA.fields, { name: "due", type: "date" }] };
+    const bridge = makeBridge([selectRecord()], dated);
+    const first = renderPage(bridge);
+    await screen.findByText("Plan");
+    fireEvent.click(screen.getByRole("button", { name: "Add a view" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Calendar" }));
+    expect((screen.getByLabelText("Date field") as HTMLSelectElement).value).toBe("due");
+    fireEvent.click(screen.getByRole("button", { name: "Create view" }));
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce());
+    expect(lastWrittenSchema(bridge).schema.views).toEqual([
+      { name: "Calendar", kind: "calendar", groupBy: null, sort: [], visibleFields: null, dateField: "due" },
+    ]);
+    first.unmount();
+
+    const undated = makeBridge([selectRecord()], SELECT_SCHEMA);
+    renderPage(undated);
+    await screen.findByText("Plan");
+    fireEvent.click(screen.getByRole("button", { name: "Add a view" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Calendar" }));
+    expect(screen.getByText("This Collection has no date field.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Create view" }));
+    expect(screen.getByRole("alert").textContent).toBe("A calendar needs a date field. Add one first.");
+    expect(undated.writeWorkspaceText).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Add a date field" }));
+    const fields = await screen.findByTestId("collection-fields-dialog");
+    expect((within(fields).getByLabelText("Field type") as HTMLSelectElement).value).toBe("date");
+  });
+
+  it("renames and deletes a view from its tab's menu through schema rewrites, and follows the open view", async () => {
+    const bridge = makeBridge([record("rec-1", "Plan")], TWO_VIEW_SCHEMA);
+    const onActiveViewChange = vi.fn();
+    const page = renderPage(bridge, undefined, undefined, { activeViewName: "Sorted", onActiveViewChange });
+    await screen.findByText("Plan");
+
+    fireEvent.click(screen.getByRole("button", { name: "View actions" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
+    const rename = within(screen.getByRole("dialog", { name: "Rename Sorted" }));
+    fireEvent.change(rename.getByLabelText("Name"), { target: { value: "Newest" } });
+    fireEvent.click(rename.getByRole("button", { name: "Rename" }));
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce());
+    expect(lastWrittenSchema(bridge).schema.views.map((view) => view.name)).toEqual(["All", "Newest"]);
+    // The open view keeps its sort, and the shell keeps it open under its new name.
+    expect(lastWrittenSchema(bridge).schema.views[1]!.sort).toEqual([{ field: "title", direction: "desc" }]);
+    await waitFor(() => expect(onActiveViewChange).toHaveBeenCalledExactlyOnceWith("Newest"));
+    page.rerender(pageWithHost(undefined, undefined, { activeViewName: "Newest", onActiveViewChange }));
+    expect((await screen.findByRole("button", { name: "Newest" })).getAttribute("aria-pressed")).toBe("true");
+
+    // Deleting drops the view's configuration, so the menu asks a second time.
+    fireEvent.click(screen.getByRole("button", { name: "View actions" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+    expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Confirm delete" }));
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2));
+    expect(lastWrittenSchema(bridge).schema.views.map((view) => view.name)).toEqual(["All"]);
+    await waitFor(() => expect(onActiveViewChange).toHaveBeenLastCalledWith(null));
+  });
+
+  it("says in the popover why a view could not be added, and reports a delete that failed", async () => {
+    const bridge = makeBridge([record("rec-1", "Plan")], TWO_VIEW_SCHEMA);
+    const onError = vi.fn();
+    renderPage(bridge, undefined, undefined, { onError });
+    await screen.findByText("Plan");
+    bridge.writeWorkspaceText.mockResolvedValue({ status: "conflict" } as never);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add a view" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create view" }));
+    expect((await screen.findByRole("alert")).textContent).toBe("This collection changed while you were editing. Try again.");
+    expect(screen.getByRole("dialog", { name: "Add a view" })).toBeTruthy();
+    expect(onError).not.toHaveBeenCalled();
+    fireEvent.keyDown(screen.getByRole("dialog", { name: "Add a view" }), { key: "Escape" });
+
+    fireEvent.click(screen.getByRole("button", { name: "View actions" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Confirm delete" }));
+    await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    expect(onError.mock.calls[0]![0]).toBe("This collection changed while you were editing. Try again.");
+    expect(onError.mock.calls[0]![2]).toBeTypeOf("function");
+  });
+
   it("lists a button field, offers Button as a new field, and never as a board group", async () => {
     const bridge = makeBridge([selectRecord()], {
       ...SELECT_SCHEMA,
@@ -1432,7 +1602,7 @@ describe("collection authoring", () => {
     renderPage(bridge);
     await screen.findByText("Plan");
 
-    fireEvent.click(screen.getByTestId("collection-fields-button"));
+    runAction("collection-fields-button");
     const fields = screen.getByTestId("collection-fields-dialog");
     expect(within(fields).getByText("Mark paid")).toBeDefined();
     expect(within(fields).getAllByText("Button").length).toBeGreaterThan(0);
@@ -1440,7 +1610,7 @@ describe("collection authoring", () => {
     expect(types.map((option) => option.getAttribute("value"))).toContain("button");
     fireEvent.keyDown(document, { key: "Escape" });
 
-    fireEvent.click(screen.getByTestId("collection-views-button"));
+    runAction("collection-views-button");
     fireEvent.change(screen.getByLabelText("View kind"), {
       target: { value: "board" },
     });
@@ -2609,7 +2779,8 @@ describe("Button fields", () => {
     });
     vi.stubGlobal("dohcDesktop", bridge);
     render(pageWithHost());
-    fireEvent.click(await screen.findByTestId("collection-fields-button"));
+    await screen.findByRole("button", { name: "Collection actions" });
+    runAction("collection-fields-button");
     const dialog = await screen.findByTestId("collection-fields-dialog");
     expect(within(dialog).getByRole("option", { name: "Button" })).toBeTruthy();
     expect(within(dialog).queryByRole("button", { name: "Choose what it does: Mark paid" })).toBeNull();

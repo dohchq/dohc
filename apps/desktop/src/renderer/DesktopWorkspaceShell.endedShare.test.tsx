@@ -100,13 +100,31 @@ function focusAfterMinimum() {
   fireEvent.focus(window);
 }
 
+/** Opens the Collection's actions menu, which holds Fields and Views, when it is closed. */
+function openCollectionActions() {
+  if (!screen.queryByRole("menu", { name: "Collection actions" })) fireEvent.click(screen.getByRole("button", { name: "Collection actions" }));
+}
+/** Whether the actions menu offers a command. The menu is opened to look, then closed. */
+function offersCollectionAction(testId: string): boolean {
+  openCollectionActions();
+  const offered = screen.queryByTestId(testId) !== null;
+  fireEvent.click(screen.getByRole("button", { name: "Collection actions" }));
+  return offered;
+}
+/** Runs a command of the actions menu, once the page shows the Collection can be changed. */
+async function runCollectionAction(testId: string) {
+  await screen.findByTestId("collection-new-record");
+  openCollectionActions();
+  fireEvent.click(screen.getByTestId(testId));
+}
+
 async function assertReadableAndReadOnly(bridge: ReturnType<typeof collectionBridge>) {
   await waitFor(() => expect(screen.getByTestId("shared-view-banner").textContent).toContain(ENDED_SENTENCE));
   expect(await screen.findByText("Retained task")).toBeTruthy();
   await waitFor(() => expect(screen.getAllByTestId("tree-row").find(row => row.dataset.path === "tasks")?.dataset.collection).toBe("true"));
   expect(screen.queryByTestId("share-changes-send")).toBeNull();
   expect(screen.queryByTestId("shared-view-refresh")).toBeNull();
-  expect(screen.queryByTestId("collection-fields-button")).toBeNull();
+  expect(offersCollectionAction("collection-fields-button")).toBe(false);
   expect(screen.queryByTestId("collection-new-record")).toBeNull();
   expect(screen.queryByRole("button", { name: "Retained task" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Finish for Retained task" })).toBeNull();
@@ -409,8 +427,8 @@ describe("ended Edit Collection shares", () => {
       await act(async () => focusAfterMinimum());
       expect(bridge.getWorkspaceRegistry.mock.calls.length).toBe(registryReads + 1);
       expect(screen.queryByTestId("collection-new-record")).toBeNull();
-      expect(screen.queryByTestId("collection-fields-button")).toBeNull();
-      expect(screen.queryByTestId("collection-views-button")).toBeNull();
+      expect(offersCollectionAction("collection-fields-button")).toBe(false);
+      expect(offersCollectionAction("collection-views-button")).toBe(false);
       expect(screen.queryByTestId("share-changes-send")).toBeNull();
       expect(screen.getByText("Retained task")).toBeTruthy();
       await act(() => vi.advanceTimersByTimeAsync(10_000));
@@ -464,7 +482,7 @@ describe("ended Edit Collection shares", () => {
     });
     vi.stubGlobal("dohcDesktop", bridge);
     render(shell(bridge, EDIT_SHARE));
-    fireEvent.click(await screen.findByTestId("collection-fields-button"));
+    await runCollectionAction("collection-fields-button");
     const dialog = await screen.findByTestId("collection-fields-dialog");
     fireEvent.change(within(dialog).getByRole("textbox", { name: "Field name" }), { target: { value: "Extra" } });
     const write = deferred<Awaited<ReturnType<typeof bridge.writeWorkspaceText>>>();
@@ -485,7 +503,7 @@ describe("ended Edit Collection shares", () => {
     bridge.checkSharedViewAccess.mockResolvedValue({ status: "current", access: "edit" });
     vi.stubGlobal("dohcDesktop", bridge);
     render(shell(bridge, EDIT_SHARE));
-    await screen.findByTestId("collection-fields-button");
+    await screen.findByTestId("collection-new-record");
     await act(async () => {});
     const before = bridge.checkSharedViewAccess.mock.calls.length;
     await act(async () => bridge.emitShareDirectWritesPushed({ workspaceId: EDIT_SHARE.workspaceId, result: {
@@ -502,7 +520,7 @@ describe("ended Edit Collection shares", () => {
       const view = render(shell(bridge, EDIT_SHARE));
       await screen.findByRole("button", { name: "Retained task" });
       expect(screen.getByTestId("share-changes-send")).toBeTruthy();
-      expect(screen.getByTestId("collection-fields-button")).toBeTruthy();
+      expect(offersCollectionAction("collection-fields-button")).toBe(true);
       expect(screen.getByTestId("collection-new-record")).toBeTruthy();
       expect(await screen.findByRole("button", { name: "Finish for Retained task" })).toBeTruthy();
       fireEvent.click(screen.getByTestId("collection-automations-button"));
@@ -543,13 +561,14 @@ describe("ended Edit Collection shares", () => {
     const bridge = collectionBridge();
     vi.stubGlobal("dohcDesktop", bridge);
     const view = render(shell(bridge, EDIT_SHARE));
-    fireEvent.click(await screen.findByTestId(`collection-${kind}-button`));
+    await runCollectionAction(`collection-${kind}-button`);
     await screen.findByTestId(`collection-${kind}-dialog`);
     view.rerender(shell(bridge, ENDED_SHARE));
     await waitFor(() => expect(screen.queryByTestId(`collection-${kind}-dialog`)).toBeNull());
     expect(screen.getByText("Retained task")).toBeTruthy();
     view.rerender(shell(bridge, { ...EDIT_SHARE, shareView: { ...EDIT_SHARE.shareView! } }));
-    await screen.findByTestId(`collection-${kind}-button`);
+    await screen.findByTestId("collection-new-record");
+    expect(offersCollectionAction(`collection-${kind}-button`)).toBe(true);
     expect(screen.queryByTestId(`collection-${kind}-dialog`)).toBeNull();
   });
 
@@ -572,7 +591,7 @@ describe("ended Edit Collection shares", () => {
     view.rerender(shell(bridge, restored));
     await screen.findByRole("button", { name: "Retained task" });
     expect(screen.getByTestId("collection-new-record")).toBeTruthy();
-    expect(screen.getByTestId("collection-fields-button")).toBeTruthy();
+    expect(offersCollectionAction("collection-fields-button")).toBe(true);
     expect(screen.getByTestId("shared-view-refresh")).toBeTruthy();
     expect(screen.getByTestId("share-changes-send")).toBeTruthy();
     expect(screen.getByTestId("shared-view-banner").textContent).not.toContain(ENDED_SENTENCE);
@@ -726,7 +745,7 @@ describe("ended Edit Collection shares", () => {
     bridge.writeWorkspaceText.mockImplementationOnce(() => write.promise);
     vi.stubGlobal("dohcDesktop", bridge);
     const view = render(shell(bridge, EDIT_SHARE));
-    fireEvent.click(await screen.findByTestId(`collection-${kind}-button`));
+    await runCollectionAction(`collection-${kind}-button`);
     const dialog = await screen.findByTestId(`collection-${kind}-dialog`);
     fireEvent.change(within(dialog).getByRole("textbox", { name: kind === "fields" ? "Field name" : "View name" }), { target: { value: "Extra" } });
     fireEvent.click(screen.getByTestId(kind === "fields" ? "collection-add-field" : "collection-add-view"));
@@ -734,8 +753,10 @@ describe("ended Edit Collection shares", () => {
     view.rerender(shell(bridge, ENDED_SHARE));
     await waitFor(() => expect(screen.queryByTestId(`collection-${kind}-dialog`)).toBeNull());
     view.rerender(shell(bridge, { ...EDIT_SHARE, shareView: { ...EDIT_SHARE.shareView! } }));
-    await screen.findByTestId(`collection-${kind}-button`);
+    await screen.findByTestId("collection-new-record");
+    expect(offersCollectionAction(`collection-${kind}-button`)).toBe(true);
     expect(screen.queryByTestId(`collection-${kind}-dialog`)).toBeNull();
+    openCollectionActions();
     fireEvent.click(screen.getByTestId(`collection-${kind}-button`));
     await screen.findByTestId(`collection-${kind}-dialog`);
     await act(async () => { write.reject(new Error("Your access to this share ended.")); });
