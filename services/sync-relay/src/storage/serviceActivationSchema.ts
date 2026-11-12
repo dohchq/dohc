@@ -1,5 +1,6 @@
 import type { SqliteDb } from "./types";
 import {initializeOrdinaryActivationBasis} from "./ordinaryActivationBasis";
+import {initializeOrdinaryCheckpoints} from "./ordinaryActivationCheckpoint";
 import {rebuildTables} from "./rebuildTables";
 
 export const SERVICE_ACTIVATIONS = "sync_relay_service_activations";
@@ -129,6 +130,7 @@ const exact = (db: SqliteDb, name: string, type: string, expected: string) => {
 
 export function initializeServiceActivationSchema(db: SqliteDb): void {
   initializeOrdinaryActivationBasis(db);
+  initializeOrdinaryCheckpoints(db);
   const marked = (migration: string) => db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(migration) !== undefined;
   const present = (name: string) => db.prepare("SELECT 1 FROM sqlite_schema WHERE name=?").get(name) !== undefined;
   const create = () => {
