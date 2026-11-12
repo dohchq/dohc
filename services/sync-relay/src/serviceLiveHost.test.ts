@@ -7894,7 +7894,7 @@ it("visits a note with an edit no signal announced within the idle interval on a
   h.waiting.add(note);
   await paced.until(h.f, () => h.drained.includes(note));
   expect(h.drained).toEqual([note]);
-  console.info(`Idle host, 24 notes: pause ${pause} ms, an unannounced edit drained after ${paced.clock.nowMs() - queued} ms`);
+  console.info(`Idle host, 24 notes: pause ${pause} ms, the note with an unannounced edit visited after ${paced.clock.nowMs() - queued} ms`);
   expect(paced.clock.nowMs() - queued).toBeLessThanOrEqual(paced.ceiling);
 });
 
