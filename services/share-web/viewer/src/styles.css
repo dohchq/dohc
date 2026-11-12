@@ -221,7 +221,6 @@ nav { padding: 24px 16px; border-right: 1px solid var(--viewer-line); background
 .link-page .file-status, .link-page .content > .muted { margin: 0 0 12px; color: var(--viewer-muted); }
 .link-page div.download-card { display: flex; max-width: 360px; flex-direction: column; align-items: center; gap: 12px; margin: auto; border: 0; padding: 24px; background: none; color: var(--viewer-muted); text-align: center; }
 .link-page div.download-card p { margin: 0; }
-.link-page div.download-card .tile { width: 48px; height: 48px; border-radius: 12px; }
 .link-page div.download-card a { color: var(--viewer-ink); }
 .empty-state { display: flex; max-width: 340px; flex-direction: column; align-items: center; gap: 12px; margin: auto; padding: 24px; color: var(--viewer-muted); text-align: center; }
 .empty-state svg { color: var(--viewer-line-strong); }

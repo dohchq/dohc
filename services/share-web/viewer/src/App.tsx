@@ -915,8 +915,8 @@ function DownloadCard(props: { file: SharedFile; session: string }) {
     }
   };
   return (
+    // No glyphs here: a file that opens as a download shows no SVG at all, so a shared SVG is plainly never drawn.
     <div className="download-card">
-      <span className="tile"><Icon name="file" size={20} /></span>
       <p>{isSvg(props.file.path) ? "SVG files open as downloads." : "This file opens as a download."}</p>
       <a
         className="handoff-button secondary"
@@ -927,7 +927,6 @@ function DownloadCard(props: { file: SharedFile; session: string }) {
           void download();
         }}
       >
-        <Icon name="download" size={14} />
         Download file
       </a>
       {downloadFailed ? (
