@@ -818,10 +818,13 @@ export function mayPublish(storage: SyncRelayStorage, record: OperationRecord): 
 }
 
 /**
- * When a copy opens, at startup too, replays each unfinished write's stages
- * that never committed, from its stored command, while its account may still
- * publish it. A write that can't replay now stays as it is, and is reported
- * unless it lost its access or its target.
+ * When a copy has caught up, replays each unfinished write's stages that
+ * never committed, from its stored command, while its account may still
+ * publish it. Answers whether every write is done with: replayed, skipped
+ * because its account lost access or its thread is hidden, already
+ * committed by its receipts, refused, or left to a request working on it.
+ * A failure that may pass, such as an unreadable receipt, is reported and
+ * leaves the replay owed.
  */
 export async function replayUnfinishedWrites(input: {
   storage: SyncRelayStorage;
@@ -829,17 +832,19 @@ export async function replayUnfinishedWrites(input: {
   records: readonly OperationRecord[];
   nowMs(): number;
   onError(error: unknown): void;
-}): Promise<void> {
+}): Promise<boolean> {
   const { storage, copy } = input;
+  const unfinished = (record: OperationRecord) => storage.listUnfinishedAccountOperations({ workspaceId: copy.workspaceId, incarnation: copy.incarnation })
+    .find((each) => each.accountId === record.accountId && each.operationId === record.operationId);
+  let done = true;
   for (const listed of input.records) {
-    // A request working on the write now finishes it itself; the copy's open doesn't wait for it.
+    // A request working on the write now finishes it itself; the copy doesn't wait for it.
     if (listed.incarnation !== copy.incarnation || storedWrite(listed.command) === null ||
       operationLocks.has(lockKey(listed.accountId, listed.operationId))) continue;
     try {
       await withOperationLock(listed.accountId, listed.operationId, async () => {
         // A request may have finished it while this waited.
-        const record = storage.listUnfinishedAccountOperations({ workspaceId: copy.workspaceId, incarnation: copy.incarnation })
-          .find((each) => each.accountId === listed.accountId && each.operationId === listed.operationId);
+        const record = unfinished(listed);
         const stored = record === undefined ? null : storedWrite(record.command);
         if (record === undefined || stored === null) return;
         const authorize = async () => {
@@ -850,6 +855,9 @@ export async function replayUnfinishedWrites(input: {
     } catch (error) {
       if (error instanceof RelayError || error instanceof TargetMissing || copy.signal.aborted) continue;
       input.onError(error);
+      // A stage the engine refused left the write refused, which is done with; anything else stays owed.
+      if (unfinished(listed) !== undefined) done = false;
     }
   }
+  return done;
 }

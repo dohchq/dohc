@@ -2757,7 +2757,7 @@ describe("the automation replicas", () => {
 
   // A copy with an unwritten phone write, stopped, then restarted with `backlog` pull pages beyond one to catch up on.
   // Each step pulls at most 4 rounds of 8 pages.
-  async function restartedBehind(backlog: number) {
+  async function restartedBehind(backlog: number, options: { receipts?: Error; errors?: unknown[] } = {}) {
     const { storage, log } = await relay();
     const engine = fakeEngine();
     const wanted = () => new Map<string, readonly CopyReason[]>([[WORKSPACE, ["account"]]]);
@@ -2777,13 +2777,31 @@ describe("the automation replicas", () => {
     // The relay moved on while the server was stopped.
     log(1);
     engine.backlog(backlog);
+    if (options.receipts) engine.receipts(options.receipts);
     const before = engine.sent.length;
-    const restarted = await stepped(storage, wanted, { root: first.root });
+    const errors = options.errors;
+    const restarted = await stepped(storage, wanted, { root: first.root, ...(errors ? { onError: (error: unknown) => { errors.push(error); } } : {}) });
     const methods = () => engine.sent.slice(before).map((request) => request.method);
     const replays = () => methods().filter((method) => method === "chats.threads.start").length;
     return { engine, restarted, methods, replays };
   }
   const STEP_PAGES = 4 * 8;
+
+  it("keeps a replay that failed owed, and replays at a later pass of the same copy, once", async () => {
+    const errors: unknown[] = [];
+    // The receipts can't be read when the restarted copy first catches up.
+    const { engine, restarted, replays } = await restartedBehind(0, { receipts: new Error("the engine is busy"), errors });
+    expect(replays(), "nothing replayed while its receipts couldn't be read").toBe(0);
+    expect(errors).toContainEqual(new Error("the engine is busy"));
+    const handle = restarted.running.replica(WORKSPACE)!.workspace;
+
+    engine.receipts(new Map());
+    await restarted.pass();
+    expect(replays(), "the next pass replays it").toBe(1);
+    expect(restarted.running.replica(WORKSPACE)?.workspace, "on the same copy").toBe(handle);
+    await restarted.pass();
+    expect(replays(), "and only once").toBe(1);
+  });
 
   it("replays once publication's own step finishes catching the copy up, then pushes", async () => {
     // Open and the pass's pull each take a step's pages; publication's step takes the last.
@@ -2812,6 +2830,48 @@ describe("the automation replicas", () => {
     expect(methods().lastIndexOf("sync.push"), "then pushed").toBeGreaterThan(replayedAt);
     await restarted.pass();
     expect(replays(), "once").toBe(1);
+  });
+
+  it("replays an owed write only after a full sync, when a later sync failed before pulling its file's move to a secret path", async () => {
+    for (const moved of [true, false]) {
+      const { storage } = await relay();
+      const engine = fakeEngine();
+      const errors: unknown[] = [];
+      const wanted = () => new Map<string, readonly CopyReason[]>([[WORKSPACE, ["account"]]]);
+      const first = await stepped(storage, wanted);
+      const opened = first.running.replica(WORKSPACE)!;
+      const chats = new ChatsLiveAdapter(engine.chats, opened.workspace, { workspaceId: WORKSPACE });
+      engine.filePaths.set("object-plan", "docs/plan.md");
+      const onPage = await chats.createThread({ workspaceId: WORKSPACE, title: "Plan", linkedFile: { objectId: "object-plan", pathHint: "docs/plan.md" } });
+      const ids = phoneWriteIds("owner", WORKSPACE, "unsent");
+      const author = { accountId: "owner", displayName: "Owner", actorKey: null };
+      const write: WriteCommand = { kind: "reply", threadId: onPage.id, messageId: ids.messageId("reply"), body: "Ship it" };
+      storage.recordAccountOperation({ accountId: "owner", operationId: "unsent",
+        binding: { workspaceId: WORKSPACE, operation: "reply", args: { operationId: "unsent" } }, incarnation: opened.incarnation,
+        replicationEpoch: "epoch-1", streamIdentity: "stream-1", writesMessage: true, nowMs: 0,
+        command: JSON.parse(JSON.stringify({ stages: publicationStages(write, author, ids.key), write, author })) as JsonValue });
+      await first.running.close();
+      // The restarted copy catches up, but its receipts can't be read, so the replay stays owed.
+      engine.receipts(new Error("the engine is busy"));
+      const restarted = await stepped(storage, wanted, { root: first.root, onError: (error) => { errors.push(error); } });
+      const sends = () => engine.sent.filter((request) => request.method === "chats.messages.send").length;
+      expect(sends()).toBe(0);
+      engine.receipts(new Map());
+
+      // A visit's sync fails before it pulls, while the relay may have moved the page to a secret path.
+      if (moved) engine.movedOnRelay(new Map([["object-plan", ".env"]]));
+      engine.failPush(new Error("the relay is unreachable"));
+      const replica = restarted.running.replica(WORKSPACE)!;
+      await expect(replica.sync()).rejects.toThrow();
+      await restarted.pass();
+      expect(sends(), `moved: ${moved}; the copy is behind the relay, so nothing replays`).toBe(0);
+
+      // A full sync catches it up again and asks for the pass that replays, into a thread still visible.
+      engine.failPush(false);
+      await replica.sync();
+      await restarted.pass();
+      expect(sends(), `moved: ${moved}`).toBe(moved ? 0 : 1);
+    }
   });
 
   it("doesn't replay a phone write into a thread whose file the relay made secret while the copy was stopped, and settles it as unsent", async () => {
