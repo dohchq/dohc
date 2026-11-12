@@ -2028,6 +2028,8 @@ describe("CLI socket server", () => {
         ["show", { target: "general", peek: false }],
         ["export", { actor: "human", scope: { kind: "all" }, outDir: "inside-export" }],
         ["watch", { timeoutMs: 0 }],
+        ["link", { target: { kind: "group", group: "general" } }],
+        ["link", { target: { kind: "path", path: "a.md" } }],
       ];
       for (const cwd of [inShare, join(workspaceRoot, "shared-with-me")]) {
         for (const [verb, args] of chatCommands) {
