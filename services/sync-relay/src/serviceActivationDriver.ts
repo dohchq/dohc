@@ -127,6 +127,8 @@ export class ServiceActivationDriver {
   readonly #enrolled=new Map<string,string>();
   // Owner refusals received but not yet recorded, kept across every owner this driver replaces.
   readonly #refusals=new OwnerKnownRefusals();
+  // Whether a wait for the validation slot a capture found busy is running. It wakes the pass that captures again.
+  #awaitingCapacity=false;
   constructor(readonly options:{trustedAccount: OwnerOutboxAdmission["trustedAccount"];storage:SyncRelayStorage;history:LiveJournalHistoryAuthority;client:EngineClient;host:LiveHostConnectionCoordinate;
     /** An attached workspace whose replica checked its origin. Activation, restore and departures reach no other. */
     workspace(workspaceId:string):{handle:string;replica:ServiceActivationReplica;identity:ServiceKeptEditsIdentity}|undefined;config:ServiceActivationConfig;
@@ -134,7 +136,11 @@ export class ServiceActivationDriver {
     /** The engine's settlement bound, which also bounds a retirement's applications. Configuration admission requires it. */
     maxApplications?:number;
     assertCurrent():void;registered():void;
-    runDocument<T>(document:LiveDocumentKey,signal:AbortSignal,operation:()=>Promise<T>):Promise<T>;}){
+    runDocument<T>(document:LiveDocumentKey,signal:AbortSignal,operation:()=>Promise<T>):Promise<T>;
+    /** Ends with the host, and ends the wait for a validation slot with it. */
+    lifetime:AbortSignal;
+    /** Runs another pass soon: validation may have a slot for a capture it found busy. */
+    wake():void;}){
     this.#store=options.storage.createServiceActivationStore(options.history);
     this.#delivery=options.storage.createLiveCommittedDeliveryStore(options.history);
     this.#targets=options.config.targets;
@@ -206,6 +212,20 @@ export class ServiceActivationDriver {
   blocked(target:ServiceActivationTarget):ServiceActivationBlock|undefined{
     const block=this.#blocked.get(targetKey(target));
     return block?.reason==="released-lineage-unsettled"?undefined:block?.reason;
+  }
+  /** How many of the workspace's targets a hosted pass left held. A later pull's held list frees them. */
+  heldIn(workspaceId:string){
+    let count=0;
+    for(const key of this.#held.keys())if(JSON.parse(key)[0]===workspaceId)count++;
+    return count;
+  }
+  // Waits outside the pass for the validation slot a capture found busy, then wakes a pass that captures again.
+  // One wait serves every target: they share the slot. A validator that offers no wait leaves the retry to the next periodic pass.
+  #awaitCapacity(){
+    const o=this.options,wait=o.config.validateActivation.waitForCapacity;
+    if(!wait || this.#awaitingCapacity || o.lifetime.aborted)return;
+    this.#awaitingCapacity=true;
+    wait(o.lifetime).then(()=>{this.#awaitingCapacity=false;o.wake();},()=>{this.#awaitingCapacity=false;});
   }
   /** Why the hosted pass left this target held, until a capture succeeds. */
   holdReason(target:ServiceActivationTarget):ServiceHostedHold["reason"]|undefined{return this.#held.get(targetKey(target));}
@@ -653,7 +673,7 @@ export class ServiceActivationDriver {
         update=Math.min(this.#latestUpdate(target),pulled.head);
       }
       // A capture that needs validation waits for a free slot, checked just before it captures, and the wait counts nothing against the document.
-      if(!saved && c.validateActivation.hasCapacity?.()===false)return validationBusy;
+      if(!saved && c.validateActivation.hasCapacity?.()===false){this.#awaitCapacity();return validationBusy;}
       this.#loaded.add(key);
       let capture:NativeOwnerActivation;
       try{capture=await o.client.captureOwnerActivation(request(),target.path,c.maxCaptureBytes,signal,saved?.activationId);}
@@ -682,6 +702,7 @@ export class ServiceActivationDriver {
           // A cut that keeps going stale would repeat the capture on every pass, so it waits as a failure does.
           // Only the capture lies between the slot check and validation, so a busy answer counts nothing.
           if(error instanceof ServiceActivationStaleCut)this.#fail(key);
+          if(error instanceof ServiceActivationBusy)this.#awaitCapacity();
           return {kind:"pending" as const,reason:error instanceof ServiceActivationStaleCut?"Hosted replication advanced before activation.":error.message};
         }
         this.#staleLeases.delete(key);

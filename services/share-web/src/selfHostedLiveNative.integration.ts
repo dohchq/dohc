@@ -793,9 +793,12 @@ async function openSelfHostProof(name: string) {
     const store = join(hostRoot, hash(Buffer.from(JSON.stringify(["hosted-v1", history.namespace, "workspace", identity.replicationEpoch, identity.streamIdentity]))));
     // What the supervisor tells the operator.
     const reports: string[] = [];
+    // The activation passes every daemon of this proof has ended.
+    let passes = 0;
     const startSupervisor = async () => {
       supervisor = await startSelfHostedLiveHost({trustedAccount: (accountId: string) => ({accountId, name: accountId}), storage, history, frameChanges, root: hostRoot, engineExecutable: executable,
-        relayOrigin: "https://service-activation-relay.example.test", key: Buffer.from(ticketKey), onError: error => {reports.push(error instanceof Error ? error.message : String(error));}});
+        relayOrigin: "https://service-activation-relay.example.test", key: Buffer.from(ticketKey), onError: error => {reports.push(error instanceof Error ? error.message : String(error));},
+        startHost: options => startServiceLiveHost({...options, onPass: () => {passes++;}})});
       enrollment = createServiceHostEnrollmentRoutes({storage, history, host: supervisor, resolveActor});
     };
     const activation = (path = "docs/a.md") => activations.read("workspace", path, 1_000_000);
@@ -918,6 +921,8 @@ async function openSelfHostProof(name: string) {
         .get(object) as {state: string; reason: string | null} | undefined),
       /** Engine RPCs the service host started. */
       started: (method: string) => harness.calls.filter(call => call.method === method && call.status === "started").length,
+      /** How many activation passes the service host has ended. */
+      passes: () => passes,
       /** The rows the service host wrote that the relay does not have. */
       unpushed: () => serviceRead(engine => engine.prepare("SELECT origin_id,origin_seq,op_kind,payload_json FROM replication_log WHERE workspace_id='workspace' AND imported=0")
         .all() as {origin_id: string; origin_seq: number; op_kind: string; payload_json: string}[])
@@ -939,6 +944,12 @@ async function openSelfHostProof(name: string) {
   }
 }
 type SelfHostProof = Awaited<ReturnType<typeof openSelfHostProof>>["proof"];
+// Resolves once the service host ended twelve more passes. Each waits 250 ms, so they outlast a two-second reconciliation.
+// A quiet workspace pulls only for a relay change, so a count of its pulls says nothing of how many passes ran.
+async function twelvePasses(proof: SelfHostProof) {
+  const passes = proof.passes();
+  await vi.waitFor(() => expect(proof.passes()).toBeGreaterThan(passes + 12), {timeout: 30000});
+}
 
 async function withSelfHostProof(name: string, run: (proof: SelfHostProof) => Promise<Record<string, unknown>>) {
   const {proof, close} = await openSelfHostProof(name);
@@ -1373,10 +1384,8 @@ it("resumes a document its owner edited while live editing was stopped as a succ
   await vi.waitFor(() => expect(readFileSync(join(proof.store, "docs/a.md"), "utf8")).toBe(markdown), {timeout: 10000});
   expect(proof.hosted()).toEqual({state: "ready", reason: null});
   expect(readdirSync(proof.hostRoot).sort()).toEqual([".recovery", basename(proof.store)].sort());
-  // Later passes capture nothing more, while its workspace keeps pulling. Each
-  // pass pulls once and waits 250 ms, so twelve outlast a two-second reconciliation.
-  const pulls = harness.pulls.length;
-  await vi.waitFor(() => expect(harness.pulls.length).toBeGreaterThan(pulls + 12), {timeout: 30000});
+  // Later passes capture nothing more.
+  await twelvePasses(proof);
   expect(attempts()).toBe(before + 1);
   // The operator is told of nothing they need to do.
   expect(proof.reports.filter(report => report.startsWith("Live editing of docs/a.md"))).toEqual([]);
@@ -1385,7 +1394,7 @@ it("resumes a document its owner edited while live editing was stopped as a succ
 
 // The relay side of an owner open. Revoking the Edit share retires a document
 // without a Stop, while a sibling its owner opened stays hosted by their demand
-// and keeps the workspace pulling. An edit the owner makes afterwards reaches
+// and keeps the workspace attached. An edit the owner makes afterwards reaches
 // the relay but no session host, and nothing hosts the document again until an
 // owner open reaches the route. That open enrolls it again, and a successor
 // holds the edit. The desktop side, with the edit queued on the owner's
@@ -1408,10 +1417,8 @@ it("keeps a document retired without a Stop parked until an owner open reaches t
   // The owner keeps editing on their device, where no session host admits the edit.
   await proof.ownerEdit(doc => doc.getMap("frontmatter").set("whileRetired", "ordinary-owner"));
   const attempts = () => proof.started("captureOwnerActivation"), before = attempts();
-  // Until asked, passes capture nothing while docs/b.md keeps its workspace pulling.
-  // Each pass pulls once and waits 250 ms, so twelve outlast a two-second reconciliation.
-  const pulls = harness.pulls.length;
-  await vi.waitFor(() => expect(harness.pulls.length).toBeGreaterThan(pulls + 12), {timeout: 30000});
+  // Until asked, passes capture nothing while docs/b.md keeps its workspace attached.
+  await twelvePasses(proof);
   expect(attempts()).toBe(before);
   expect(await proof.documents()).toEqual([proof.ready("docs/b.md")]);
   expect(proof.hosted()?.state).toBe("parked");
@@ -1476,9 +1483,8 @@ it("retires a paused document's activation at once, and Resume starts a successo
     expect(proof.activations()).toEqual([retired, expect.objectContaining({predecessor_activation_id: P, completed: 1})]);
   }, {timeout: 30000});
   expect(attempts()).toBe(captured + 1);
-  // Later passes capture nothing more, while its workspace keeps pulling, and the operator is told of nothing they need to do.
-  const pulls = harness.pulls.length;
-  await vi.waitFor(() => expect(harness.pulls.length).toBeGreaterThan(pulls + 12), {timeout: 30000});
+  // Later passes capture nothing more, and the operator is told of nothing they need to do.
+  await twelvePasses(proof);
   expect(attempts()).toBe(captured + 1);
   expect(proof.reports.filter(report => report.startsWith("Live editing of docs/a.md"))).toEqual([]);
   expect(proof.storage.readServiceHostEnrollment("workspace", "docs/a.md")).toMatchObject({ownerStop: null, enabled: true, retired: false});
@@ -1543,9 +1549,9 @@ it("blocks a document written only as text, and activates it once its owner open
   await vi.waitFor(async () => expect(await proof.documents()).toContainEqual(refused), {timeout: 30000});
   expect(failures().at(-1)).toContain("live-document-without-lineage");
   expect(failures().filter(message => !message?.includes("hosted-document-unready"))).toEqual([expect.stringContaining("live-document-without-lineage")]);
-  // Later passes leave it alone, while its workspace keeps pulling.
-  const blocked = attempts(), pulls = harness.pulls.length;
-  await vi.waitFor(() => expect(harness.pulls.length).toBeGreaterThan(pulls + 12), {timeout: 30000});
+  // Later passes leave it alone.
+  const blocked = attempts();
+  await twelvePasses(proof);
   expect(attempts()).toBe(blocked);
   expect(proof.reports.filter(report => report.startsWith("Live editing of docs/plain.md"))).toEqual([
     `Live editing of docs/plain.md in workspace workspace cannot start: the document has no live-editing history. It starts once its owner opens it in dohc on a desktop. Its store is kept at ${proof.store}.`]);
