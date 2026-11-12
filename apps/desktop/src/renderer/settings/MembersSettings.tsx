@@ -541,24 +541,29 @@ export function MembersPage(props: {
               </>
             )}
           >
-            {/* The spinner's place is kept while idle, so the control never moves. */}
-            <span aria-hidden className="grid size-3 shrink-0 place-items-center">
-              {busy("level") ? <LoaderCircle data-testid="settings-members-level-busy" size={12} className="animate-spin text-subtle" /> : null}
+            {/* The spinner sits in the gap before the control and takes no
+                room, so the control never moves and lines up with the words
+                when it wraps under them. */}
+            <span className="relative flex">
+              {busy("level") ? (
+                <LoaderCircle data-testid="settings-members-level-busy" aria-hidden size={12}
+                  className="absolute right-full top-1/2 mr-1.5 -translate-y-1/2 animate-spin text-subtle" />
+              ) : null}
+              <SegmentedControl
+                label="Member level"
+                testId="settings-members-level-control"
+                value={level}
+                disabled={busy("level")}
+                options={[
+                  { value: "view", label: "View" },
+                  { value: "comment", label: "Comment" },
+                  { value: "edit", label: "Edit" },
+                ]}
+                onChange={(next) => {
+                  if (next !== view.memberLevel) void run({ action: "level", level: next });
+                }}
+              />
             </span>
-            <SegmentedControl
-              label="Member level"
-              testId="settings-members-level-control"
-              value={level}
-              disabled={busy("level")}
-              options={[
-                { value: "view", label: "View" },
-                { value: "comment", label: "Comment" },
-                { value: "edit", label: "Edit" },
-              ]}
-              onChange={(next) => {
-                if (next !== view.memberLevel) void run({ action: "level", level: next });
-              }}
-            />
           </SettingRow>
         </SettingsSection>
       ) : (
@@ -621,23 +626,25 @@ export function MembersPage(props: {
         </>
       ) : null}
 
-      <SettingsSection>
-        {can.endForEveryone && !alone ? (
+      {can.endForEveryone && !alone ? (
+        <SettingsSection>
           <SettingRow title="End membership" testId="settings-members-end"
             description="Everyone except you loses access. Your workspace stays on this computer.">
             <SecondaryButton data-testid="settings-members-end-open" disabled={busy("end")} onClick={() => setConfirm({ kind: "end" })}>
               {busy("end") ? "Ending…" : "End membership"}
             </SecondaryButton>
           </SettingRow>
-        ) : can.leave ? (
+        </SettingsSection>
+      ) : can.leave ? (
+        <SettingsSection>
           <SettingRow title="Leave this workspace" testId="settings-members-leave"
             description="You lose access until someone invites you again.">
             <SecondaryButton data-testid="settings-members-leave-open" disabled={busy("leave")} onClick={() => setConfirm({ kind: "leave" })}>
               {busy("leave") ? "Leaving…" : "Leave"}
             </SecondaryButton>
           </SettingRow>
-        ) : null}
-      </SettingsSection>
+        </SettingsSection>
+      ) : null}
 
       {confirm ? <MembersConfirm confirm={confirm} workspaceName={view.workspaceName} onCancel={() => setConfirm(null)}
         onConfirm={() => {
