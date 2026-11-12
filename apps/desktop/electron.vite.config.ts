@@ -5,6 +5,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import type { Plugin } from "vite";
+import { singleReact } from "../../tools/single-react";
 import { EXCALIDRAW_ASSET_FOLDER } from "./src/renderer/excalidrawFonts";
 
 // Electron 43.3.0 ships Chromium 150 and Node 24.18. electron-vite 5.0.0
@@ -205,7 +206,7 @@ export default defineConfig(({ mode }) => {
     },
     renderer: {
       root: "src/renderer",
-      plugins: [effectFree("renderer"), react(), tailwindcss(), excalidrawFonts()],
+      plugins: [effectFree("renderer"), react(), tailwindcss(), excalidrawFonts(), singleReact()],
       resolve: { alias: rendererAlias },
       build: {
         target: electronRendererTarget,

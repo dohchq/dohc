@@ -2,6 +2,7 @@ import react from "@vitejs/plugin-react";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
+import { singleReact } from "../../../tools/single-react.ts";
 import { VIEWER_PAGES, viewerPage } from "./src/pages.ts";
 
 const viewerRoot = fileURLToPath(new URL(".", import.meta.url));
@@ -22,7 +23,9 @@ export default defineConfig({
         });
       },
     },
+    singleReact(),
   ],
+  resolve: { dedupe: ["react", "react-dom"] },
   build: {
     outDir: resolve(viewerRoot, "dist"),
     emptyOutDir: true,
