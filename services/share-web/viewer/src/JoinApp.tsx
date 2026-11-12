@@ -66,12 +66,12 @@ async function joinRequest(path: string, token: string, signal: AbortSignal): Pr
   throw new JoinRefused(code === "signed_out" || code === "link_off" || code === "removed" || code === "full" ? code : "unavailable");
 }
 
-const REFUSED: Record<Exclude<JoinRefusal, "signed_out" | "unavailable">, {title: string; body: string}> = {
-  link_off: {title: "This invite link no longer works",
+const REFUSED: Record<Exclude<JoinRefusal, "signed_out" | "unavailable">, {icon: IconName; title: string; body: string}> = {
+  link_off: {icon: "unlink", title: "This invite link no longer works",
     body: "The owner or an admin turned it off or reset it. Ask them for the current link, or for an invite by email."},
-  removed: {title: "You were removed from this workspace",
+  removed: {icon: "x", title: "You were removed from this workspace",
     body: "An owner or admin removed this account. To come back, ask them to let you back in."},
-  full: {title: "This workspace is full",
+  full: {icon: "users", title: "This workspace is full",
     body: "It already has 1,000 people. Ask the owner or an admin to make room."},
 };
 
@@ -181,8 +181,10 @@ export default function JoinApp(props: {token: string | null}) {
         <p>{NEXT_STEPS}</p>
         <p className="join-aside">Signed in as <span className="join-name">{stage.account.name}</span>.</p>
       </Page>;
-    case "refused":
-      return <Page icon="unlink" failed title={REFUSED[stage.code].title}><p>{REFUSED[stage.code].body}</p></Page>;
+    case "refused": {
+      const {icon, title, body} = REFUSED[stage.code];
+      return <Page icon={icon} failed title={title}><p>{body}</p></Page>;
+    }
     case "unreachable":
       return <Page icon="alert" failed title="dohc could not check this invite link">
         <ErrorLine message={error ?? UNREACHABLE} onRetry={load} busy={busy} />
