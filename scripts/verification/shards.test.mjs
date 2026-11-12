@@ -714,7 +714,8 @@ for (const [scope, finalJob, target, ceiling] of [["js", "typecheck + tests", 30
     writeTimingReceipts(root, scope, commit);
     t.mock.method(console, "log", () => {});
     t.mock.method(console, "warn", () => {});
-    for (const seconds of [target, target + 1, ceiling + 1]) {
+    // ceiling + 32 stays over the ceiling after a 31 s transfer is taken out.
+    for (const seconds of [target, target + 1, ceiling + 1, ceiling + 31, ceiling + 32]) {
       for (const [label, transfer, marker, step, runnerWait = 0] of [["30", 30, true, true], ["31", 31, true, true],
         ["missing wait file", 31, false, true], ["missing download step", 31, true, false],
         ["missing both", 31, false, false], ["invalid marker", 31, "invalid", true],
@@ -735,7 +736,8 @@ for (const [scope, finalJob, target, ceiling] of [["js", "typecheck + tests", 30
           if (marker) writeFileSync(path, marker === "invalid" ? "{" : JSON.stringify({ finishedAt: marker === "stale"
             ? new Date(Date.parse(final.started_at) - 1).toISOString() : marker === "future" ? new Date(end + 1).toISOString() : waitedAt }));
           const expected = known => ({ transferSeconds: known ? transfer : null, contended: runnerWait > 30 || known && transfer > 30,
-            timing: seconds <= target ? "within budget" : runnerWait > 30 || known && transfer > 30 ? "unmeasured" : seconds <= ceiling ? "over target" : "over budget" });
+            timing: seconds <= target ? "within budget" : runnerWait > 30 || known && transfer > 30 && seconds - transfer <= ceiling ? "unmeasured"
+              : seconds <= ceiling ? "over target" : "over budget" });
           const aggregateExpected = expected(marker === true), completedExpected = expected(step);
           const run = aggregateCloud(scope, root.replaceAll("\\", "/"), { env, outputDirectory, now: () => end, readJobs: async () => rows });
           if (aggregateExpected.timing === "over budget") await assert.rejects(run, /exceeding/u); else await run;

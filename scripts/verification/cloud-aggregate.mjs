@@ -88,7 +88,9 @@ function gateTiming(scope, required, metadata = required, transferSeconds = null
   const contended = longest.runnerWaitSeconds > 30 || transferSeconds > 30, seconds = spanSeconds;
   const targetSeconds = scope === "js" ? 300 : 600;
   const budgetSeconds = scope === "js" ? 400 : 700;
-  const timing = seconds <= targetSeconds ? "within budget" : contended ? "unmeasured" : seconds <= budgetSeconds ? "over target" : "over budget";
+  // A pull request's own receipts set the transfer's size, so a slow transfer excuses only its own seconds.
+  const excused = longest.runnerWaitSeconds > 30 || transferSeconds > 30 && seconds - transferSeconds <= budgetSeconds;
+  const timing = seconds <= targetSeconds ? "within budget" : excused ? "unmeasured" : seconds <= budgetSeconds ? "over target" : "over budget";
   const delay = [longest.runnerWaitSeconds > 30 ? `longest runner wait ${longest.name}: ${longest.runnerWaitSeconds}s` : null,
     transferSeconds > 30 ? `receipt transfer took ${transferSeconds}s` : null].filter(Boolean).join("; ");
   return { spanSeconds, seconds, targetSeconds, budgetSeconds, transferSeconds, contended, timing, jobs,
@@ -97,7 +99,7 @@ function gateTiming(scope, required, metadata = required, transferSeconds = null
 }
 
 function requireBudget(scope, timing) {
-  if (timing.timing === "over budget") throw Object.assign(new Error(`The complete ${scope} gate took ${timing.seconds}s, exceeding its ${timing.budgetSeconds}s budget including final reporting.`), { timing });
+  if (timing.timing === "over budget") throw Object.assign(new Error(`The complete ${scope} gate took ${timing.seconds}s, exceeding its ${timing.budgetSeconds}s budget including final reporting${timing.transferSeconds > 30 ? `, even without its ${timing.transferSeconds}s receipt transfer` : ""}.`), { timing });
   return timing;
 }
 

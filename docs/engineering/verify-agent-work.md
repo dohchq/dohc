@@ -145,7 +145,8 @@ Rust also counts waits of non-skipped JavaScript worker matrix jobs because its 
 At or below the target, timing is `"within budget"`.
 Above the target, an uncontended run reports `"over target"` and passes with a warning through the ceiling, inclusive.
 Above the ceiling, an uncontended run reports `"over budget"` and fails.
-A contended run above the target reports `"unmeasured"`, warns with the runner wait or receipt transfer, and does not fail for time, even above the ceiling.
+A run above the target with a runner wait above 30 s reports `"unmeasured"`, warns with the wait, and does not fail for time, even above the ceiling.
+A receipt transfer above 30 s excuses only its own seconds: the run reports `"unmeasured"` if it is at or under the ceiling without the transfer, and fails otherwise.
 Only final verification emits timing warning annotations and writes their step summary lines; aggregates retain warnings in their receipts.
 Failed tests, incomplete inventory or coverage, wrong commits, and missing, duplicated, cancelled, or failed jobs still fail.
 Aggregate receipts include confinement and remain `complete: false` until final verification checks the reporting jobs' completed times.
