@@ -10,7 +10,10 @@ import type { CopyReason } from "./storage/automationWorkspaces";
 // of them, so automations always keep the rest. One account holds at most
 // ACCOUNT_VISITS_PER_ACCOUNT visits at once, so it cannot take the accounts'
 // share, and one caller at most ACCOUNT_VISITS_PER_CALLER, so one phone or
-// agent cannot take its account's.
+// agent cannot take its account's. A phone write that may still publish
+// keeps its copy in the accounts' share too: the workspaces an account
+// visits and those its writes keep come to ACCOUNT_VISITS_PER_ACCOUNT at
+// most together. A copy whose writes have all stalled takes no place.
 
 /** The workspaces account visits may hold open at once, of AUTOMATION_SERVER_MAX_WORKSPACES. */
 export const ACCOUNT_VISIT_WORKSPACES = 48;
@@ -52,6 +55,7 @@ export interface ServerCopiesOptions extends Omit<ReplicaOptions, "wanted"> {
 export type ServerCopies = Awaited<ReturnType<typeof startServerCopies>>;
 
 interface Visit {
+  ownerUserId: string;
   actions: number;
   accountActions: number;
   /** When a copy nothing else needed stopped being needed and left, to put back after an automation visit. */
@@ -67,19 +71,63 @@ export async function startServerCopies(options: ServerCopiesOptions) {
   const waiters = new Set<() => void>();
   const recheck = () => { for (const check of [...waiters]) check(); };
 
+  // The workspaces each account's visits hold now.
+  function visitedBy(): Map<string, Set<string>> {
+    const held = new Map<string, Set<string>>();
+    for (const [workspaceId, visit] of visits) {
+      if (visit.accountActions === 0) continue;
+      const mine = held.get(visit.ownerUserId) ?? new Set<string>();
+      mine.add(workspaceId);
+      held.set(visit.ownerUserId, mine);
+    }
+    return held;
+  }
+
+  /**
+   * The copies whose phone writes may still publish that have a place now:
+   * those a visit or automations already hold, then, those with a write not
+   * yet stalled first, others within the accounts' share and each account's
+   * limit, counted with the workspaces its visits hold. With them, `held`
+   * names each account's workspaces. One past them, and one whose writes
+   * all stalled, keeps its folder and waits for a visit or a place.
+   */
+  function publicationPlaces(running: ReadonlySet<string>): { places: Set<string>; held: Map<string, Set<string>> } {
+    const places = new Set<string>();
+    const held = visitedBy();
+    let accountHeld = [...visits].filter(([id, visit]) => visit.accountActions > 0 && !running.has(id)).length;
+    for (const { workspaceId, ownerUserId, active } of storage.publishingCopies()) {
+      if (running.has(workspaceId) || visits.has(workspaceId)) {
+        places.add(workspaceId);
+        continue;
+      }
+      const mine = held.get(ownerUserId) ?? new Set<string>();
+      if (!active || mine.size >= ACCOUNT_VISITS_PER_ACCOUNT || accountHeld >= ACCOUNT_VISIT_WORKSPACES) continue;
+      mine.add(workspaceId);
+      held.set(ownerUserId, mine);
+      accountHeld += 1;
+      places.add(workspaceId);
+    }
+    return { places, held };
+  }
+
   function wanted(): Map<string, CopyReason[]> {
     const running = automations?.running() ?? [];
     const runs = new Set(running);
+    const publishing = publicationPlaces(runs).places;
     // An admitted visit keeps its place: a workspace that needs the server since waits for it.
-    const ids = [...new Set([...visits.keys(), ...running])].slice(0, AUTOMATION_SERVER_MAX_WORKSPACES);
+    const ids = [...new Set([...visits.keys(), ...running, ...publishing])].slice(0, AUTOMATION_SERVER_MAX_WORKSPACES);
     return new Map(ids.map((workspaceId) => {
       const visit = visits.get(workspaceId);
       const reasons: CopyReason[] = [];
       if (runs.has(workspaceId) || (visit !== undefined && visit.actions > visit.accountActions)) reasons.push("automation");
       if (visit !== undefined && visit.accountActions > 0) reasons.push("account");
+      if (publishing.has(workspaceId)) reasons.push("publication");
       return [workspaceId, reasons];
     }));
   }
+
+  // A restart keeps every copy the phone's unsent writes need, before the first pass decides what to keep.
+  storage.restorePublicationReasons();
 
   const replicas = await (options.startReplicas ?? startAutomationReplicas)({
     ...options,
@@ -103,22 +151,27 @@ export async function startServerCopies(options: ServerCopiesOptions) {
 
   /** Refuses a visit past the server's places, the accounts' share of them, or its account's or caller's limit. */
   function admit(ownerUserId: string, workspaceId: string, visitor: CopyVisitor): void {
-    const visit = visits.get(workspaceId);
     const running = new Set(automations?.wanted().slice(0, AUTOMATION_SERVER_MAX_WORKSPACES) ?? []);
-    // A workspace holds a place while its automations run here or a visit holds it, whether or not its copy is open yet.
-    const occupied = new Set([...running, ...visits.keys()]);
+    const { places: publishing, held } = publicationPlaces(running);
+    // A workspace holds a place while its automations run here, a visit holds it, or its phone writes publish, whether
+    // or not its copy is open yet.
+    const occupied = new Set([...running, ...visits.keys(), ...publishing]);
     if (!occupied.has(workspaceId) && occupied.size >= AUTOMATION_SERVER_MAX_WORKSPACES) {
       throw busy(visitor, "Your server has as many workspaces open as it can. Try again later.");
     }
     if (visitor.reason !== "account") return;
-    if ((ownerVisits.get(ownerUserId) ?? 0) >= ACCOUNT_VISITS_PER_ACCOUNT) {
+    // The workspaces the account's visits and its phone writes hold count once each.
+    const mine = held.get(ownerUserId) ?? new Set<string>();
+    if ((ownerVisits.get(ownerUserId) ?? 0) >= ACCOUNT_VISITS_PER_ACCOUNT ||
+      (!mine.has(workspaceId) && mine.size >= ACCOUNT_VISITS_PER_ACCOUNT)) {
       throw busy(visitor, "Your account is already reading as many workspaces as it can. Try again later.");
     }
     if ((callerVisits.get(visitor.caller) ?? 0) >= ACCOUNT_VISITS_PER_CALLER) {
       throw busy(visitor, "This sign-in is already reading as many workspaces as it can. Try again later.");
     }
-    const accountHeld = [...visits].filter(([id, held]) => held.accountActions > 0 && !running.has(id)).length;
-    if (!running.has(workspaceId) && (visit?.accountActions ?? 0) === 0 && accountHeld >= ACCOUNT_VISIT_WORKSPACES) {
+    const accountHeld = new Set([...[...visits].filter(([, visit]) => visit.accountActions > 0).map(([id]) => id), ...publishing]);
+    for (const id of running) accountHeld.delete(id);
+    if (!running.has(workspaceId) && !accountHeld.has(workspaceId) && accountHeld.size >= ACCOUNT_VISIT_WORKSPACES) {
       throw busy(visitor, "Your server has as many workspaces open as it can. Try again later.");
     }
   }
@@ -179,6 +232,7 @@ export async function startServerCopies(options: ServerCopiesOptions) {
     // copy's wait to leave starts again when the visit ends.
     const visit = visits.get(workspaceId);
     visits.set(workspaceId, {
+      ownerUserId,
       actions: (visit?.actions ?? 0) + 1,
       accountActions: (visit?.accountActions ?? 0) + (account ? 1 : 0),
       times: account ? null : visit ? visit.times : kept === undefined || kept.unwantedSinceMs === null ? null

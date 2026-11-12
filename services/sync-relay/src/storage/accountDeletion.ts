@@ -2,6 +2,7 @@ import { accountDeletionIdentity, type AccountDeletionScope } from "@dohc/worksp
 import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import { normalizeEmail } from "@dohc/workspace-auth/signUp";
 import { noticeIdFrom } from "./notices";
+import { ACCOUNT_OPERATIONS } from "./operationRecords";
 import { revokeShareInTransaction } from "./shares";
 import { retireUncoveredServiceActivations, serviceHostEnrollmentsCoveredByShare } from "./serviceHostEnrollment";
 import type { StorageContext } from "./context";
@@ -124,7 +125,8 @@ export function purgeAccountRows(storage: StorageContext, userId: string, email:
       const columns = storage.db.prepare("PRAGMA table_info(" + identifier(table) + ")").all().map(row => String(row.name));
       if (table === "sync_relay_account_deletions" || table === "sync_relay_ended_shares" || table === "sync_relay_deleted_workspaces") continue;
       for (const workspace of manifest.workspaces) {
-        if (columns.includes("workspace_id")) storage.db.prepare("DELETE FROM " + identifier(table) + " WHERE workspace_id=?").run(workspace.workspaceId);
+        // Deleting the workspace row leaves another account's operations as tombstones.
+        if (columns.includes("workspace_id") && table !== ACCOUNT_OPERATIONS) storage.db.prepare("DELETE FROM " + identifier(table) + " WHERE workspace_id=?").run(workspace.workspaceId);
         if (columns.includes("recipient_share_id")) for (const shareId of manifest.shareIds) storage.db.prepare("DELETE FROM " + identifier(table) + " WHERE recipient_share_id=?").run(shareId);
       }
       if (columns.includes("principal_key")) for (const grant of received) {
@@ -143,7 +145,7 @@ export function purgeAccountRows(storage: StorageContext, userId: string, email:
         const prefix = noticeIdFrom(userId, "");
         storage.db.prepare("DELETE FROM " + identifier(table) + " WHERE substr(notice_id,1,?)=?").run(prefix.length, prefix);
       }
-      const identityColumns = columns.filter(column => column.endsWith("user_id") || column === "principal_id");
+      const identityColumns = columns.filter(column => column.endsWith("user_id") || column === "principal_id" || column === "account_id");
       for (const column of identityColumns) storage.db.prepare("DELETE FROM " + identifier(table) + " WHERE " + identifier(column) + "=?").run(userId);
       if (columns.includes("principal_email")) storage.db.prepare("DELETE FROM " + identifier(table) + " WHERE lower(principal_email)=?").run(normalizeEmail(email));
     }

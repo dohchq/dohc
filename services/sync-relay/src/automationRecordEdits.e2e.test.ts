@@ -490,7 +490,8 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
     return run;
   };
   let hostedReplica: AutomationReplica = {...replica, ownerUserId: "owner", incarnation: row.incarnation, reasons: row.reasons, startedAtMs: row.startedAtMs,
-    metadataDir, withRecordWork, pulledHead: storage.automationWorkspaceLogHead(WORKSPACE), sync: () => withRecordWork(async () => {await copy.sync(); hooks?.onPulled?.(WORKSPACE, []);})};
+    metadataDir, withRecordWork, pulledHead: storage.automationWorkspaceLogHead(WORKSPACE), sync: () => withRecordWork(async () => {await copy.sync(); hooks?.onPulled?.(WORKSPACE, []);}),
+    step: async () => true};
   let executor: CollectionAutomations | undefined;
   const serverOptions: Parameters<typeof startAutomationServer>[0] = {storage, server: serverHost,
     createExecutor: options => {executor = new CollectionAutomations(options); return executor;},
@@ -696,7 +697,8 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
   await mkdir(freshMetadataDir, {recursive: true});
   hostedReplica = {...afterRestore, workspaceId: WORKSPACE, signal: afterRestore.lifetime, ownerUserId: "owner",
     incarnation: row.incarnation, reasons: row.reasons, startedAtMs: row.startedAtMs, metadataDir: freshMetadataDir, withRecordWork,
-    pulledHead: storage.automationWorkspaceLogHead(WORKSPACE), sync: () => withRecordWork(async () => {await afterRestore.sync(); hooks?.onPulled?.(WORKSPACE, []);})};
+    pulledHead: storage.automationWorkspaceLogHead(WORKSPACE), sync: () => withRecordWork(async () => {await afterRestore.sync(); hooks?.onPulled?.(WORKSPACE, []);}),
+    step: async () => true};
   running = await startAutomationServer(serverOptions);
   cleanup.push(() => running.close());
   hooks!.onChanged?.(WORKSPACE);
@@ -797,7 +799,7 @@ it.skipIf(engine.missing)("finds a filtered record without refreshing or enrolli
   let laneEntries = 0;
   const replica: AutomationReplica = {...copy, workspaceId: WORKSPACE, ownerUserId: "owner", root: localRoot, metadataDir: join(localRoot, ".dohc/bench"),
     signal: copy.lifetime, incarnation: 1, reasons: ["automation"], startedAtMs: Date.now(), pulledHead: 0,
-    sync: async () => undefined, withRecordWork: async work => {laneEntries++; return work();}};
+    sync: async () => undefined, step: async () => true, withRecordWork: async work => {laneEntries++; return work();}};
   const bindingReads = vi.spyOn(storage, "automationRecordBinding");
   const capture = vi.fn(async (): Promise<never> => {throw Error("Find must not capture the owner host");});
   const errors: Array<{context: string; error: unknown}> = [];

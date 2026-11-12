@@ -30,6 +30,7 @@ import { initializeCollectionWriteSchema } from "./collectionWrites";
 import { initializeAutomationPressSchema } from "./automationPresses";
 import { initializeAutomationWorkspaceSchema, initializeLiveClaimIndex } from "./automationWorkspaces";
 import { initializeAccountWorkspaceSchema } from "./accountWorkspaces";
+import { initializeOperationRecordSchema } from "./operationRecords";
 import { initializeCurrentFileKeySchema } from "./currentFiles";
 import { initializePushSchema } from "./pushSchema";
 import { initializePushDeliveries } from "./pushDeliveries";
@@ -1343,6 +1344,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     initializeAutomationPressSchema(db);
     initializeAutomationWorkspaceSchema(db);
     initializeAccountWorkspaceSchema(db);
+    initializeOperationRecordSchema(db);
     initializePushSchema(db);
     initializePushDeliveries(db);
     initializeLiveClaimIndex(db);

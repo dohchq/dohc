@@ -78,6 +78,12 @@ export {
   type KeyEnvelopeDownloadResult,
   type KeyEnvelopeUploadResult,
 } from "./relay/keyEnvelopeWireContract";
+export { readOrdinaryPublicationState } from "./relay/ordinaryPublicationState";
+export {
+  MAX_PUBLICATION_STAGE_KEYS,
+  decodeOrdinaryPublicationState,
+  type OrdinaryPublicationState,
+} from "./relay/ordinarySyncWireContract";
 
 export { AUTOMATION_CLAIMED_EVENT, MAX_GRANULAR_CHAT_QUERY_CHARS, WORKSPACE_METHOD, decodeAutomationGroupHandover, decodeCollectionValue, decodeWorkspaceResult, encodeCollectionValue, type AutomationChangeKind, type AutomationClaim, type AutomationClaimMessage, type AutomationClaimSummary, type AutomationGroupHandover, type AutomationGroupRelayRecord, type AutomationPressActor, type AutomationReleaseGroupsResult, type AutomationWatchGroupsParams, type CaptureMoveFileResult, type CaptureRecoveryImportParams, type CaptureRecoveryImportResult, type CollectionPendingAdoptionCursor, type CollectionPendingAdoptionsPage, type ConflictFileState, type ConflictRecord, type GranularChatMessageSearchResponse, type GranularChatMessageSearchResult, type HeldChange, type KeptCopy, type KeptCopySaveResult, type RetainedCopiesDeleteResult, type RetainedCopiesListResult, type RetainedCopiesSummary, type RetainedCopy, type SearchQueryPageParams, type SearchResult, type SharedChangeAuthor, type WatcherStatusResult } from "./workspace/workspaceWireContract";
 

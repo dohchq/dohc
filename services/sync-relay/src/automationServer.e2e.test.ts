@@ -169,6 +169,7 @@ it.skipIf(engine.missing)("the server runs a schedule with the owner daemon stop
     root: join(root, "server", "workspace"), metadataDir, client: copy.client, workspace: copy.workspace, signal: copy.lifetime,
     nextRequestId: copy.nextRequestId,
     withRecordWork: work => work(),
+    step: async () => true,
     sync: async () => { hooks?.onPulled?.(WORKSPACE, await copy.sync()); },
   };
   const running = await startAutomationServer({
