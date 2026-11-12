@@ -661,11 +661,15 @@ it("applies Pause after host release and fences Stop immediately", async () => {
   expect(f.resume()).toMatchObject({enabled: true, ownerStop: null});
   expect(f.release()).toBeNull();
   f.setEnabled(false);
-  expect(f.release()).toMatchObject({...enrolled, enabled: false, retired: false, ownerStop: "pause", hostDrainedAtMs: 25, updatedAtMs: 25});
+  expect(f.release()).toMatchObject({...enrolled, enabled: false, retired: false, ownerStop: "pause", ownerDemand: true, demandAtMs: 20,
+    hostDrainedAtMs: 25, updatedAtMs: 25});
   expect(f.release("stopped-object")).toMatchObject({hostDrainedAtMs: 25});
   expect(f.storage.readServiceHostEnrollment(scope.workspaceId, "docs/stopped.md")).toMatchObject({enabled: false, retired: true, ownerStop: "retire"});
-  // Revocation retires a paused document too, and it stays paused.
+  // The Resume's demand keeps a paused document past revocation. Without that demand, revocation retires it, and it stays paused.
   f.raw.prepare("UPDATE sync_relay_share_grants SET status='revoked',revoked_at_ms=30 WHERE share_id IN (?,'stopped-share')").run(scope.shareId);
+  expect(f.release()).toBeNull();
+  f.raw.prepare("UPDATE sync_relay_service_host_enrollments SET owner_demand=0,demand_at_ms=NULL WHERE workspace_id=? AND object_id=?")
+    .run(scope.workspaceId, enrolled.objectId);
   expect(f.release()).toMatchObject({enabled: false, retired: true, ownerStop: "pause"});
   expect(f.storage.hasKeptServiceHostEnrollment(scope.workspaceId, enrolled.path)).toBe(true);
   expect(f.storage.hasKeptServiceHostEnrollment(scope.workspaceId, "docs/stopped.md")).toBe(true);
