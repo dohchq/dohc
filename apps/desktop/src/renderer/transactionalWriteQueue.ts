@@ -75,8 +75,8 @@ export interface WriteQueueHost extends WriteQueueRules, Pick<CollectionChangeRe
 export type WriteAttention =
   | { kind: "unconfirmed"; write: QueuedWrite }
   | { kind: "waiting"; write: QueuedWrite; reason: string }
-  | { kind: "held"; recordKey: string; recordId: string | number; fieldId: string; fieldName: string; value: AppBackendJson; reason: string }
-  | { kind: "record"; id: number; values: Readonly<Record<string, Typed>>; reason: string }
+  | { kind: "held"; recordKey: string; recordId: string | number; fieldId: string; fieldName: string; value: AppBackendJson; reason: string; uncertain?: true }
+  | { kind: "record"; id: number; values: Readonly<Record<string, Typed>>; reason: string; uncertain?: true }
   | { kind: "deletion"; id: number; recordId: string | number; name: string; reason: string };
 
 /** One open page's view of its table's queue. */
@@ -114,7 +114,9 @@ const DISCARDED = "dohc could not confirm this change, and you discarded it. Che
 /** What a table's row in Notices says of the changes that need the person: how many dohc could not confirm, did not save and did not delete, and how many wait. */
 function reminderWords(tableName: string, items: readonly WriteAttention[]): string {
   const of = (kind: WriteAttention["kind"]) => items.filter(item => item.kind === kind).length;
-  const unconfirmed = of("unconfirmed"), waiting = of("waiting"), unsaved = of("held") + of("record");
+  // A value or new record kept from a change that may have saved is not said to be unsaved.
+  const kept = items.filter(item => item.kind === "held" || item.kind === "record"), unsure = kept.filter(item => item.uncertain).length;
+  const unconfirmed = of("unconfirmed") + unsure, waiting = of("waiting"), unsaved = kept.length - unsure;
   const deleted = items.flatMap(item => item.kind === "deletion" ? [item.name] : []);
   const changes = (count: number) => count === 1 ? "a change" : `${count} changes`;
   const did: string[] = [];
@@ -131,7 +133,8 @@ function reminderWords(tableName: string, items: readonly WriteAttention[]): str
   return `${sentences.join(" ")} Open it to check its records.`;
 }
 
-type Held = { id: number; recordId: string | number; fieldName: string; value: AppBackendJson; reason: string };
+/** `uncertain`: the change was sent and the host did not answer that it ran nothing, so it may have saved. */
+type Held = { id: number; recordId: string | number; fieldName: string; value: AppBackendJson; reason: string; uncertain?: true };
 type Deletion = { id: number; recordKey: string; recordId: string | number; name: string; reason: string };
 type Settled = { id: number; seq: number; status: TableCellStatus };
 type Shown = { signature: string; status: TableCellStatus };
@@ -216,7 +219,7 @@ export class WriteQueue {
   /** Values dohc did not save, kept for the person until they dismiss them. */
   private readonly held: CellMap<Held> = new Map();
   /** New records dohc did not save, kept the same way. */
-  private readonly records: Array<{ id: number; values: Readonly<Record<string, Typed>>; reason: string }> = [];
+  private readonly records: Array<{ id: number; values: Readonly<Record<string, Typed>>; reason: string; uncertain?: true }> = [];
   /** Deletions that did not happen, kept the same way. A deletion has no value to keep, so this is its only trace. */
   private deletions: Deletion[] = [];
   private shown: CellMap<Shown> = new Map();
@@ -384,7 +387,7 @@ export class WriteQueue {
       if (write.state === "unconfirmed") waiting.push({ kind: "unconfirmed", write });
       else if (reason !== undefined) waiting.push({ kind: "waiting", write, reason });
     }
-    for (const [recordKey, fields] of this.held) for (const [fieldId, held] of fields) waiting.push({ kind: "held", recordKey, fieldId, recordId: held.recordId, fieldName: held.fieldName, value: held.value, reason: held.reason });
+    for (const [recordKey, fields] of this.held) for (const [fieldId, held] of fields) waiting.push({ kind: "held", recordKey, fieldId, recordId: held.recordId, fieldName: held.fieldName, value: held.value, reason: held.reason, ...(held.uncertain ? { uncertain: true as const } : {}) });
     for (const record of this.records) waiting.push({ kind: "record", ...record });
     for (const { id, recordId, name, reason } of this.deletions) waiting.push({ kind: "deletion", id, recordId, name, reason });
     return waiting;
@@ -706,13 +709,15 @@ export class WriteQueue {
     }
     const fields = Object.entries(write.values);
     if (fields.length === 0) return;
-    if (!write.record) { this.records.push({ id: write.id, values: write.values, reason }); return; }
+    // A change that was sent may have saved, unless the host answered that it ran nothing.
+    const doubt = write.request && !ranNothing ? { uncertain: true as const } : {};
+    if (!write.record) { this.records.push({ id: write.id, values: write.values, reason, ...doubt }); return; }
     const { key, id } = write.record;
     for (const [fieldId, typed] of fields) {
       // A later change to the cell, or a later value kept on it, replaced this one.
       if ((this.held.get(key)?.get(fieldId)?.id ?? 0) > write.id || this.writes.some(later => later.id > write.id && later.record?.key === key && Object.hasOwn(later.values, fieldId))) continue;
       const fieldName = this.rules?.fields.find(field => field.fieldId === fieldId)?.name ?? typed.under.name;
-      put(this.held, key, fieldId, { id: write.id, recordId: id, fieldName, value: typed.value, reason });
+      put(this.held, key, fieldId, { id: write.id, recordId: id, fieldName, value: typed.value, reason, ...doubt });
     }
   }
 

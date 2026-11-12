@@ -814,6 +814,52 @@ describe("a deletion that did not happen", () => {
     expect(shell.onError.mock.calls.some(([words]) => String(words).includes("did not delete"))).toBe(false);
   });
 
+  it("is still claimed when the Collection refuses Try again after a first try with no answer, since the host looks for the first try's receipt before it refuses", async () => {
+    const rules = host(), { queue, close } = open(rules);
+    const gone = queue.enqueue({ kind: "delete", record: row(1, 2), name: "Alice", operationId: "delete", label: "Deleted the record" });
+    close();
+    rules.calls[0]!.answer.reject(new Error("Lost reply"));
+    await vi.waitFor(() => expect(queue.find(gone)?.state).toBe("unconfirmed"));
+    queue.retry(gone);
+    rules.calls[1]!.answer.reject(refusal("Paid records stay."));
+    await vi.waitFor(() => expect(queue.attention()).toEqual([{ kind: "deletion", id: gone, recordId: 1, name: "Alice", reason: "The Collection refused this change. Paid records stay." }]));
+  });
+
+  it.each([
+    ["an edit", (queue: ReturnType<typeof open>["queue"]) => queue.enqueue(edit(row(1, 2), name, "Alicia")), "held"],
+    ["a new record", (queue: ReturnType<typeof open>["queue"]) => queue.enqueue({ kind: "create", record: null, operationId: "create", values: { name: { value: "Bob", under: name } }, label: "Created a record" }), "record"],
+  ] as const)("says dohc could not confirm %s whose first try got no answer and whose Try again is refused for replaced rules, never that it did not save it", async (_what, make, kind) => {
+    const rules = host(), { queue, close } = open(rules);
+    const lost = make(queue);
+    close();
+    rules.calls[0]!.answer.reject(new Error("Lost reply"));
+    await vi.waitFor(() => expect(queue.find(lost)?.state).toBe("unconfirmed"));
+    queue.retry(lost);
+    rules.calls[1]!.answer.reject(replaced());
+    await vi.waitFor(() => expect(queue.find(lost)).toBeUndefined());
+    // What the person gave stays, marked as a change that may have saved.
+    expect(queue.attention()).toEqual([expect.objectContaining({ kind, reason: RULES_CHANGED, uncertain: true })]);
+    shell.close();
+    const back = openShell();
+    expect(back.onError).toHaveBeenCalledTimes(1);
+    expect(back.onError.mock.calls[0]![0]).toBe("dohc could not confirm a change to People. Open it to check its records.");
+    expect(back.onError.mock.calls[0]![2]).toBeNull();
+  });
+
+  it("says the same of a change the person discarded, and counts a value dohc certainly did not save apart from it", async () => {
+    const rules = host(), { queue, close } = open(rules);
+    const lost = queue.enqueue(edit(row(1, 2), name, "Alicia"));
+    queue.hold(row(2, 4), name, "typed", "This edit was still open, so dohc did not save it.");
+    close();
+    rules.calls[0]!.answer.reject(new Error("Lost reply"));
+    await vi.waitFor(() => expect(queue.find(lost)?.state).toBe("unconfirmed"));
+    queue.discard(lost);
+    expect(queue.attention().map(item => [item.kind, "recordId" in item && item.recordId, "uncertain" in item])).toEqual([["held", 2, false], ["held", 1, true]]);
+    shell.close();
+    const back = openShell();
+    expect(back.onError.mock.calls[0]![0]).toBe("dohc could not confirm a change to People, and did not save 1 more. Open it to check its records.");
+  });
+
   it("is named by its record's id when the page gave no name, counted with the others, and replaced by a new deletion of its record", async () => {
     const rules = host(), { queue, close } = open(rules);
     queue.enqueue({ kind: "delete", record: row(1, 2), name: "Alice", operationId: "delete", label: "Deleted the record" });
