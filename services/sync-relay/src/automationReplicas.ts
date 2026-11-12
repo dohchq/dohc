@@ -203,8 +203,9 @@ export async function startAutomationReplicas(options: {
    * Settles the phone's unfinished writes in one incarnation's folder before
    * the folder goes. The copy is closed first, so nothing pushes after the
    * receipts are read: they are read from the folder, opened for that alone.
-   * Throws when they couldn't be read, and the caller keeps the folder for
-   * the retry its failure asks for.
+   * Throws when they couldn't be read. Retirement and the orphan sweep then
+   * keep the folder for the retry; account deletion reports it and removes
+   * the folder anyway.
    */
   async function settleCopy(workspaceId: string, incarnation: number, reason: RefusalReason): Promise<void> {
     const records = storage.listUnfinishedAccountOperations({workspaceId, incarnation});

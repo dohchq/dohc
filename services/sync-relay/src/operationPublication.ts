@@ -395,9 +395,10 @@ export async function publishOperation(input: {
 /**
  * Settles writes whose folder is closed and about to go: nothing can
  * publish from it again, so each ends saved or refused. Every receipt is
- * read first. A read that fails throws, and the caller keeps the folder and
- * tries again. `read` is null when the folder is already gone, which leaves
- * no receipt.
+ * read first. A read that fails throws: retirement and the orphan sweep keep
+ * the folder and try again, and account deletion reports it and removes the
+ * folder anyway. `read` is null when the folder is already gone, which
+ * leaves no receipt.
  */
 export async function settleOperations(
   storage: PublicationStorage,
