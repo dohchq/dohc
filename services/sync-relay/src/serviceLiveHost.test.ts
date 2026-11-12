@@ -6316,20 +6316,23 @@ it("pushes a live document's settled edit on the next pass while another documen
 });
 
 // A review of the fix above: one check served both "may this target capture
-// now" and "does it hold its workspace back", and its second half let a
-// target that still holds an owner for another document capture on every
-// pass. Proves: a target whose capture keeps failing waits out its backoff
-// before it captures again, though an owner it activated before is still held.
+// now" and "does it hold its workspace back", and its second half would let a
+// target that still holds an owner for another document capture on every pass.
+// No known path leaves such an owner; the test builds that state directly to
+// pin the rule that a capture's backoff depends on time alone.
 it("waits out its backoff before capturing again while it still holds an owner for another document", async () => {
   const o = await emptyServiceHost(), workspaces = [o.workspace];
   await o.host.update({workspaces, documents: [o.sibling], ...stay});
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
-  // Its stored activation no longer names the document its owner holds, as after a new lineage.
+  // Its stored activation no longer names the document its owner holds.
   const read = ServiceActivationStore.prototype.read;
   vi.spyOn(ServiceActivationStore.prototype, "read").mockImplementation(function (this: ServiceActivationStore, ...args) {
-    return args[1] === o.sibling.path ? undefined : read.apply(this, args);
+    return args[1] === o.sibling.path ? null : read.apply(this, args);
   });
   vi.spyOn(console, "error").mockImplementation(() => {});
+  // A frozen clock keeps the wait from lapsing during the check; passes still run on real timers.
+  const now = Date.now();
+  vi.spyOn(Date, "now").mockReturnValue(now);
   o.refuseCapture(new Error("Capture failed."));
   const captures = () => o.client().captureOwnerActivation.mock.calls.length, before = captures();
   // The first failure retries on the next pass; the second waits a second before the next try.
