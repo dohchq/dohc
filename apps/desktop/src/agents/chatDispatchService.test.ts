@@ -4703,7 +4703,7 @@ describe("chatDispatchService", () => {
     await fixture.service.scanWorkspace(WORKSPACE_ID);
     expect(await fixture.dispatch.getRunRecord(runId)).toMatchObject({ exitCode: 0, failureHandled: false });
     expect(fixture.notices).toEqual(posted !== "none"
-      ? [expect.objectContaining({ body: "", target: expect.objectContaining({ message: reply }) })]
+      ? [expect.objectContaining({ body: "Finished the work.", target: expect.objectContaining({ message: reply }) })]
       : []);
   });
 
@@ -4738,7 +4738,7 @@ describe("chatDispatchService", () => {
     await replying.service.scanWorkspace(WORKSPACE_ID);
     await vi.waitFor(() => expect(replying.service.hasLiveRun(WORKSPACE_ID)).toBe(false));
     expect(replying.errors).toContain(lookupError);
-    expect(replying.notices).toEqual([expect.objectContaining({ body: "", target: expect.objectContaining({ message: reply }) })]);
+    expect(replying.notices).toEqual([expect.objectContaining({ body: "Finished the work.", target: expect.objectContaining({ message: reply }) })]);
     expect(await replying.dispatch.getRunRecord(replied.runId)).toMatchObject({ exitCode: 0, failureHandled: false });
   });
 
