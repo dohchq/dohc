@@ -413,7 +413,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       const loaded = parsePage(response.result, read.fieldIds);
       setPage(loaded); setQuery(next); setPrevious(history);
       settle();
-      view.readShown(shows, loaded.rows);
+      showRead(shows, loaded.rows);
       shown = loaded.rows;
     } catch (cause) {
       if (alive.current && sequence.current === mine && !abort.signal.aborted) {
@@ -425,7 +425,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     }
     // The open record stays open on another page of records, a search or a sort. The read no longer holds
     // the page, so a record it left out is read by its key.
-    if (shown) showOpenRecord(shown, shows);
+    if (shown) showOpenRecord(shown);
   }
   // The words state the wait when it began, so once it ends the page says so.
   useEffect(() => {
@@ -559,8 +559,8 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       const loaded = parsePage(response.result, read.fieldIds);
       setPage(loaded);
       settle();
-      showOpenRecord(loaded.rows, shows);
-      view.readShown(shows, loaded.rows);
+      showOpenRecord(loaded.rows);
+      showRead(shows, loaded.rows);
     } catch (cause) {
       // Otherwise nothing to say: the change happened elsewhere, and the page still shows its last read.
       if (failure === undefined || !alive.current || sequence.current !== mine || abort.signal.aborted) return;
@@ -572,18 +572,33 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
    * The open record shows what a read found of it. One the read left out, as
    * a Calendar record moved to another month or a record on another page, is
    * read by its key, and one that is gone says so instead of showing its old
-   * values. `shows`: what the queue gave when the read started.
+   * values.
    */
-  function showOpenRecord(rows: readonly TransactionalRow[], shows: number): void {
+  function showOpenRecord(rows: readonly TransactionalRow[]): void {
     const key = openKeyRef.current;
     if (key === null) return;
     // This read is newer than a by-key read still in flight, which then changes nothing.
     openRecordRead.current?.abort();
     const found = rows.find(row => JSON.stringify(row.id) === key);
-    if (!found) { void readOpenRecord(key, shows); return; }
+    if (!found) { void readOpenRecord(key); return; }
     setDetails(found); setDetailsUnavailable(null);
   }
-  async function readOpenRecord(key: string, shows: number): Promise<void> {
+  /**
+   * Tells the queue the page shows a read's records, which ends the time of confirmed values on their
+   * cells. An open record the read left out has no row to show them, so it takes them first, with the
+   * version its receipt gave. `shows`: what the queue gave when the read started.
+   */
+  function showRead(shows: number, rows: readonly TransactionalRow[]): void {
+    const key = openKeyRef.current;
+    if (key !== null && !rows.some(row => JSON.stringify(row.id) === key)) {
+      const { values, version } = view.confirmed(shows, key);
+      if (version !== undefined || Object.keys(values).length > 0) {
+        setDetails(last => last && JSON.stringify(last.id) === key ? { ...last, version: version ?? last.version, values: { ...last.values, ...values } } : last);
+      }
+    }
+    view.readShown(shows, rows);
+  }
+  async function readOpenRecord(key: string): Promise<void> {
     if (!read || !alive.current || locked.current) return;
     const fieldId = table?.primaryKeyFieldId;
     // A key the host kept is foreign text until it reads as a record's id.
@@ -605,11 +620,8 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       const found = parsePage(response.result, read.fieldIds).rows.find(row => JSON.stringify(row.id) === key);
       if (!found) { setDetailsUnavailable({ id: key, text: "This record is no longer in this Collection." }); return; }
       setDetails(found); setDetailsUnavailable(null);
-      // The read that left the record out kept its confirmed values on its fields. This read shows them,
-      // as of that read's start, which is no later than this one's.
-      view.readShown(shows, [found]);
     } catch {
-      // A record the panel already shows keeps its last values, and those the Collection confirmed since:
+      // A record the panel already shows keeps its last values, with those the Collection confirmed since:
       // the next change or Refresh reads again. One it has nothing to show of says so.
       if (current() && detailsRef.current === null) setDetailsUnavailable({ id: key, text: "dohc could not read this record. Close it, then open it again." });
     }
@@ -1075,7 +1087,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     {busy ? page ? <p role="status" className="m-0 px-5 text-[12px] text-muted first:pt-3">Loading records…</p> : <SkeletonRows label="Loading records…" className="first:mt-3" /> : null}
     {visual && shownView?.kind === "calendar" && !shownView.dateField ? <CalendarNeedsDateField disabled={writeDisabled || editor !== null} onAddDateField={props.onAddDateField} />
     : visual && shownView ? <div className="flex min-h-0 flex-1 flex-col px-5 pb-3 first:pt-3"><Suspense fallback={<SkeletonRows label="Opening view…" />}><TransactionalCollectionViews key={JSON.stringify([activeViewKey,query.search,visualEpoch])} view={shownView} fields={fields} search={query.search} refresh={visualRefresh} changed={visualChanged} rules={contractKey}
-      onReadInPlace={rows => { const shows = Number.isFinite(visualRead.current) ? visualRead.current : -1; visualRead.current = Number.POSITIVE_INFINITY; showOpenRecord(rows, shows); view.readShown(shows, rows); }}
+      onReadInPlace={rows => { const shows = Number.isFinite(visualRead.current) ? visualRead.current : -1; visualRead.current = Number.POSITIVE_INFINITY; showOpenRecord(rows); showRead(shows, rows); }}
       disabled={busy || resourceBusy || editor !== null} onBusy={setVisualBusy} onError={failLoad} onLoaded={settle}
       read={(input,signal)=>{ visualRead.current = Math.min(visualRead.current, view.readStarted()); return invoke(request(read,input,crypto.randomUUID()),signal); }}
       openRecord={openKey} onOpen={openPanel}

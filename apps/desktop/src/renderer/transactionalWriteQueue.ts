@@ -95,7 +95,13 @@ export interface WriteQueuePage {
   open(): () => void;
   /** Call when a read of records starts, and pass what it returns to `readShown`. A saved offline page shows no change. */
   readStarted(): number;
-  /** The page shows the records a read returned. A confirmed value of a record the read left out stays on its cell. */
+  /**
+   * What the Collection confirmed for a record and a read that started at `token` would show: its changed
+   * values, and its version when a receipt gave one. A page takes them for a record it shows that the read
+   * left out, before `readShown` ends their time on the cells.
+   */
+  confirmed(token: number, recordKey: string): { values: Record<string, AppBackendJson>; version?: number };
+  /** The page shows the records a read returned. */
   readShown(token: number, rows: readonly TransactionalRow[]): void;
 }
 
@@ -292,14 +298,16 @@ export class WriteQueue {
         };
       },
       readStarted: () => page.host?.offline ? -1 : this.seq,
+      confirmed: (token, recordKey) => {
+        const values: Record<string, AppBackendJson> = {};
+        for (const [fieldId, settled] of page.settled.get(recordKey) ?? []) if (settled.seq <= token) values[fieldId] = settled.status.value as AppBackendJson;
+        const known = this.versions.get(recordKey);
+        return known && known.seq <= token ? { values, version: known.version } : { values };
+      },
       readShown: (token, rows) => {
         page.readAsked = false;
         page.seen = Math.max(page.seen, token);
-        // A read shows a confirmed value only on a record it returns. A record it leaves out, as one open from
-        // another page of records, keeps the value until a read returns that record.
-        for (const row of rows) {
-          const recordKey = JSON.stringify(row.id), fields = page.settled.get(recordKey);
-          if (!fields) continue;
+        for (const [recordKey, fields] of page.settled) {
           for (const [fieldId, settled] of fields) if (settled.seq <= token) fields.delete(fieldId);
           if (fields.size === 0) page.settled.delete(recordKey);
         }

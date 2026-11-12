@@ -64,6 +64,8 @@ export interface RecordPanelProps {
    * Receives a name still being typed when its input goes, neither saved
    * nor cancelled: with the panel, with the right to rename, or because
    * another field became the name. The host keeps it and sends nothing.
+   * A press elsewhere, as on Close or on another record, leaves the input
+   * first, which saves the name.
    */
   onNameAbandoned?: (text: string) => void;
   /** What shows under the name, such as a change to it the host has not confirmed. */

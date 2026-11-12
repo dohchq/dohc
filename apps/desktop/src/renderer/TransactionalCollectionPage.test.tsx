@@ -1121,22 +1121,23 @@ describe("a Data Collection's record panel and forms", () => {
     expect(document.activeElement).toBe(open);
   });
 
-  it("keeps a name being typed on its own record when another record takes the panel, and when the panel closes, and sends neither", async () => {
+  it("saves a name being typed on its own record when a press on another record takes the panel, and keeps one unsent when the panel goes with no press", async () => {
     const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => ({ result: request.operationId === read ? twoRecords() : receipt() }));
     const { props, rerender } = setup({ invoke }); await screen.findByText("Alice");
     openPanel();
     typeName("Alicia");
+    // A press on another record's Open leaves the name first, which saves it by a cell's rules, on the record it was typed for.
+    fireEvent.blur(within(panel()).getByRole("textbox", { name: "Name" }));
     fireEvent.click(screen.getByRole("button", { name: "Open Bea" }));
     expect(within(panel()).getByRole("heading").textContent).toBe("Bea");
-    expect([mark("Name", 0), why("Name", 0), mark("Name", 1)]).toEqual(["refused", LEFT_OPEN, null]);
-    expect(cell("Name", 0).textContent).toContain("Alicia");
+    await waitFor(() => expect(sent(invoke, edit).map(request => request.input)).toEqual([{ id: 1, expectedVersion: 2, values: { [name]: "Alicia" } }]));
     typeName("Beatrice");
     // The ⚡ panel takes the record's place. No press landed away from the name, so nothing saved it.
     rerender(<TransactionalCollectionPage {...props} automations={{ open: true, count: 1, onToggle: vi.fn(), close: vi.fn() }} panel={<aside aria-label="Automations" />} />);
     expect(screen.getAllByRole("complementary").map(side => side.getAttribute("aria-label"))).toEqual(["Automations"]);
     expect([mark("Name", 1), why("Name", 1)]).toEqual(["refused", LEFT_OPEN]);
     expect(cell("Name", 1).textContent).toContain("Beatrice");
-    expect(sent(invoke, edit)).toHaveLength(0);
+    expect(sent(invoke, edit)).toHaveLength(1);
   });
 
   it("keeps the record one copy of a tab still shows in the tab's saved entry when another copy closes its own, and never makes one copy follow the other", async () => {
@@ -1237,7 +1238,7 @@ describe("a Data Collection's record panel and forms", () => {
       await waitFor(() => expect(sent(invoke, edit)[0]?.input).toEqual({ id: 2, expectedVersion: 4, values: { [amount]: 8 } }));
     });
 
-    it("keeps a confirmed value on its field until a read of that record shows it: after the table's read leaves the record out, and after the read of the record fails", async () => {
+    it("keeps a confirmed value on its field, with no word that it is still saving: after the table's read leaves the record out, and after the read of the record fails", async () => {
       const lookups: Array<ReturnType<typeof deferred<{ result: AppBackendJson }>>> = [];
       const invoke = vi.fn((request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
         if (!byKey(request)) return Promise.resolve({ result: request.operationId === read ? page() : { id: 2, version: 5, priorValues: { [amount]: 7 } } });
@@ -1252,17 +1253,20 @@ describe("a Data Collection's record panel and forms", () => {
       // The change is confirmed, the table's records are read again without the record, and the read of the record has not answered.
       await waitFor(() => expect(lookups).toHaveLength(2));
       expect(property("Amount").textContent).toContain("8");
+      expect(propertyMark("Amount")).toBeNull();
       // That read fails. The field still shows what the Collection confirmed.
       await act(async () => lookups[1]!.reject(new Error("Lost reply")));
       expect(property("Amount").textContent).toContain("8");
-      expect(screen.getByRole("complementary", { name: "Bea" })).toBeTruthy();
-      // The next read of the record shows the value, and the field says nothing more of the change.
-      rerender(<TransactionalCollectionPage {...props} recordsChanged={1} />);
-      await waitFor(() => expect(lookups).toHaveLength(3));
-      expect(propertyMark("Amount")).toBe("pending");
-      await act(async () => lookups[2]!.resolve({ result: { rows: [{ id: 2, version: 5, values: { [name]: "Bea", [amount]: 8, [status]: "New" } }], nextCursor: null } }));
       expect(propertyMark("Amount")).toBeNull();
-      expect(property("Amount").textContent).toContain("8");
+      expect(screen.getByRole("complementary", { name: "Bea" })).toBeTruthy();
+      // The record's next change goes with the version its receipt gave, not the one the failed read never brought.
+      typeInPanel("Amount", "9");
+      await waitFor(() => expect(sent(invoke, edit).at(-1)?.input).toEqual({ id: 2, expectedVersion: 5, values: { [amount]: 9 } }));
+      // A later read of the record shows it.
+      await waitFor(() => expect(lookups).toHaveLength(3));
+      await act(async () => lookups[2]!.resolve({ result: { rows: [{ id: 2, version: 6, values: { [name]: "Bea", [amount]: 9, [status]: "New" } }], nextCursor: null } }));
+      expect(propertyMark("Amount")).toBeNull();
+      expect(property("Amount").textContent).toContain("9");
     });
 
     it("says in one line that a record is gone, could not be read, or was never one, and offers Close", async () => {

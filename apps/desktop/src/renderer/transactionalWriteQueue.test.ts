@@ -164,7 +164,7 @@ describe("the version a record's next change goes with", () => {
 });
 
 describe("a confirmed value a page's records do not show yet", () => {
-  it("stays on the cell of a record a read leaves out, and goes once a read returns that record", async () => {
+  it("goes from every cell once a read that started after it is shown, and is given first for a record that read leaves out", async () => {
     const rules = host(), { queue, page } = open(rules);
     queue.enqueue(edit(row(1, 2), name, "Alicia"));
     queue.enqueue(edit(row(2, 4), name, "Beatrice"));
@@ -172,14 +172,16 @@ describe("a confirmed value a page's records do not show yet", () => {
     await vi.waitFor(() => expect(rules.calls).toHaveLength(2));
     rules.calls[1]!.answer.resolve({ result: { id: 2, version: 5 } });
     await vi.waitFor(() => expect(rules.read).toHaveBeenCalled());
-    // The read returns record 1 only, as when record 2 is on another page of records.
+    // The read returns record 1 only, as when record 2 is on another page of records. A page that shows
+    // record 2 elsewhere takes what the Collection confirmed for it before the read is shown.
     const started = page.readStarted();
+    expect(page.statuses.get("2", "name")).toMatchObject({ state: "pending", value: "Beatrice" });
+    expect(page.confirmed(started, "2")).toEqual({ values: { name: "Beatrice" }, version: 5 });
     page.readShown(started, [row(1, 3)]);
     expect(state(page, 1, name)).toBeUndefined();
-    expect(page.statuses.get("2", "name")).toMatchObject({ state: "pending", value: "Beatrice" });
-    // A read of record 2 alone shows it.
-    page.readShown(started, [row(2, 5)]);
+    // The page keeps nothing for a record its reads do not return.
     expect(state(page, 2, name)).toBeUndefined();
+    expect(page.confirmed(started, "2").values).toEqual({});
   });
 
   it("stays through a read of its record that started before the change was confirmed", async () => {
@@ -188,6 +190,7 @@ describe("a confirmed value a page's records do not show yet", () => {
     queue.enqueue(edit(row(2, 4), name, "Beatrice"));
     rules.calls[0]!.answer.resolve({ result: { id: 2, version: 5 } });
     await vi.waitFor(() => expect(rules.read).toHaveBeenCalled());
+    expect(page.confirmed(before, "2")).toEqual({ values: {} });
     page.readShown(before, [row(2, 4)]);
     expect(state(page, 2, name)).toBe("pending");
     page.readShown(page.readStarted(), [row(2, 5)]);
