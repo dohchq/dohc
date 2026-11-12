@@ -5,7 +5,7 @@ import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { assertTaskCoverage, javascriptGroups, javascriptTasks, nativeTestFiles, partitionJavascript, partitionTasks } from "./shards.mjs";
 import { readWorkspacePackages } from "./selection.mjs";
-import { aggregateCloud, aggregateJavascript, aggregateRust, completedGateTiming, waitForGate } from "./cloud-aggregate.mjs";
+import { CLOUD_JOB_GRAPH, aggregateCloud, aggregateJavascript, aggregateRust, completedGateTiming, waitForGate } from "./cloud-aggregate.mjs";
 import { JS_SHARDS } from "./cloud.mjs";
 import { RUST_ARCHIVE_PROOFS, RUST_POLICY_STEPS, RUST_READER_SHARD, RUST_SHARDS, RUST_TEST_PROOFS, passedRustTests, rustTestInventory } from "./cloud-rust.mjs";
 import { waitForPreparation } from "./wait-preparation.mjs";
@@ -202,6 +202,11 @@ const apiResponse = (value, status = 200, etag = '"fixture"') => new Response(st
   status, headers: { etag, "x-ratelimit-limit": "1000", "x-ratelimit-remaining": "997", "x-ratelimit-used": "3" },
 });
 const withoutWaits = () => passingCloudJobs().map(job => ({ ...job, created_at: job.started_at }));
+
+test("the timing fixture covers every current workflow job name exactly once", () => {
+  const expected = Object.values(CLOUD_JOB_GRAPH).flatMap(job => job.names).sort();
+  assert.deepEqual(passingCloudJobs().filter(job => expected.includes(job.name)).map(job => job.name).sort(), expected);
+});
 
 test("the saved passing run measures gate spans and confinement execution separately", () => {
   const jobs = passingCloudJobs();

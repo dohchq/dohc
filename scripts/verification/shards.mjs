@@ -6,7 +6,7 @@ import { desktopProofTags } from "./verify.mjs";
 
 const slash = path => path.replaceAll("\\", "/");
 const fileId = path => slash(relative(repoRoot, path));
-export const JS_SHARDS = 14;
+export const JS_SHARDS = 16;
 
 const databasePackages = new Set(["@dohc/workspace-postgres", "@dohc/workspace-auth", "@dohc/workspace-api", "@dohc/share-web"]);
 

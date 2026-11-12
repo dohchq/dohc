@@ -103,8 +103,8 @@ The person deletes the delivery folder when they finish. That removes only its c
 One verification owner records passing evidence for every selected gate in the PR.
 PR checks run the selected gates on GitHub-hosted `ubuntu-24.04` runners for ready same-repository PRs.
 When their passing evidence covers the head, it replaces running the gates locally. Drafts and forks start no automatic checks.
-PR checks distribute the complete selected JavaScript inventory across 14 workers.
-Worker 0 runs inside the JavaScript aggregate; workers 1–13 run as matrix jobs.
+PR checks distribute the complete selected JavaScript inventory across 16 workers.
+Worker 0 runs inside the JavaScript aggregate; workers 1–15 run as matrix jobs.
 Shared preparation uses the same runner pool as the JavaScript workers. It builds and publishes desktop artifacts and a nextest archive for the compiler proofs.
 Compiler and relay confinement run in separate jobs on GitHub's `ubuntu-24.04` image, using binaries from that preparation pool.
 Both install Rust to check the prepared engine fingerprint. Relay checks only that engine and builds its runtime bundles.
@@ -117,6 +117,7 @@ The Rust gate builds one test archive, runs its complete inventory across 12 sha
 Ordinary Rust tests use nextest's `hash:N/12` partitions. Shard 5 also runs the reader proofs, beside its lighter ordinary workload.
 The completed verdict requires those proofs exactly once on that shard.
 Rust test jobs wait for their archive and the JavaScript worker matrix to limit concurrent jobs. JavaScript reporting runs alongside them.
+The graph permits at most 20 concurrent jobs: 16 JavaScript workers, Rust build, Rust policy, and both confinement jobs after preparation ends.
 A failed JavaScript worker does not suppress Rust's verdict. Each gate still requires shared preparation and confinement to pass.
 Each aggregate requires passing receipts for every assigned task. `PR verification` also checks completed job times and head commits.
 A local `pnpm verify:pr` still runs the whole selected gate.

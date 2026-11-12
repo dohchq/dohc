@@ -591,7 +591,7 @@ test("job names match the workflow graph and timeout backstops", () => {
 
 test("cloud matrices run every JavaScript and Rust shard with separate evidence", () => {
   const {jobs} = load(workflow);
-  assert.equal(JS_SHARDS, 14);
+  assert.equal(JS_SHARDS, 16);
   assert.equal(RUST_SHARDS, 12);
   for (const [name, count, finalJob, scope, command] of [
     ["javascript-workers", JS_SHARDS, "javascript", "js-worker", "node scripts/verification/cloud.mjs worker 0"],
@@ -609,6 +609,22 @@ test("cloud matrices run every JavaScript and Rust shard with separate evidence"
     const wait = reporting.findIndex(step => step.run?.startsWith("node scripts/verification/cloud-aggregate.mjs wait "));
     assert.ok(run >= 0 && ownReceipt > run && wait > ownReceipt, "partition zero must execute and publish its receipt before reporting waits");
   }
+});
+
+test("the workflow graph stays within twenty concurrent jobs", () => {
+  const {jobs} = load(workflow), names = Object.keys(jobs);
+  const ancestors = name => {
+    const needs = jobs[name].needs ?? [];
+    return new Set((Array.isArray(needs) ? needs : [needs]).flatMap(parent => [parent, ...ancestors(parent)]));
+  };
+  const before = new Map(names.map(name => [name, ancestors(name)]));
+  let peak = 0;
+  for (let mask = 1; mask < 2 ** names.length; mask++) {
+    const simultaneous = names.filter((_, index) => mask & 2 ** index);
+    if (simultaneous.some(name => simultaneous.some(other => before.get(name).has(other)))) continue;
+    peak = Math.max(peak, simultaneous.reduce((n, name) => n + (jobs[name].strategy?.matrix?.shard?.length ?? 1), 0));
+  }
+  assert.equal(peak, 20);
 });
 
 test("cloud selection uses the tested Git checkout and evidence has bounded retention", () => {
