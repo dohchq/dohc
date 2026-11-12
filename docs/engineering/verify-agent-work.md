@@ -114,7 +114,7 @@ If confinement fails, select **Re-run all jobs**. Artifacts belong to a run atte
 Workers run pure tests during preparation. Native tests start after the prepared artifacts pass validation.
 Workers have two execution slots during preparation and three afterward. Desktop and accounts browser proofs reserve two slots; other groups reserve one.
 The Rust gate builds one test archive, runs its complete inventory across 16 shards, and checks policy separately.
-Ordinary Rust tests use nextest's `hash:N/16` partitions. Shard 5 also runs the reader proofs, with nextest partition `hash:6/16`.
+Ordinary Rust tests use nextest's `hash:N/16` partitions. Shard 7 also runs the reader proofs, with nextest partition `hash:8/16`.
 The completed verdict requires those proofs exactly once on that shard.
 Rust test jobs wait for their archive and the JavaScript worker matrix to limit concurrent jobs. JavaScript reporting runs alongside them.
 The graph permits at most 20 concurrent jobs: 16 JavaScript workers, Rust build, Rust policy, and both confinement jobs after preparation ends.

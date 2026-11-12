@@ -163,11 +163,13 @@ test("Rust receipts require every policy row and exactly the full passing test i
   }
 });
 
-test("reader proofs retain their measured placement", () => {
-  // Historical twelve-partition execution times, excluding setup and transfer.
-  const ordinary = [124.911, 144.876, 183.461, 138.352, 126.076, 96.029, 149.624, 135.491, 170.892, 155.824, 166.976, 158.163];
-  const reader = 85.778;
-  assert.equal(RUST_READER_SHARD, 5);
+test("reader proofs fit beside the lightest measured partition", () => {
+  // Run 43146936367 execution times, excluding setup and transfer.
+  const ordinary = [100.565, 100.646, 101.444, 90.850, 106.928, 97.463, 86.707, 81.165,
+    147.591, 83.168, 129.489, 130.209, 135.764, 82.801, 114.591, 99.180];
+  const reader = 49.474;
+  assert.equal(ordinary.length, RUST_SHARDS);
+  assert.equal(RUST_READER_SHARD, ordinary.indexOf(Math.min(...ordinary)));
   assert.ok(ordinary[RUST_READER_SHARD] + reader <= Math.max(...ordinary), "reader proofs must fit within the longest ordinary partition");
 });
 
