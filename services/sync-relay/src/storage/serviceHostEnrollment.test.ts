@@ -34,15 +34,20 @@ async function fixture(quota?: number) {
   const authorize = (bearer: string, changes = {}) => authorizeServiceHostReplication(f.storage, {...key, workspaceId: scope.workspaceId,
     bearer, method: "GET", pathname: `/sync/${scope.workspaceId}/hosted/log`, ...changes});
   // Rows only, on one connection, so a test seeding many workspaces can commit them together.
-  function seed(workspaceId: string, objectId: string, path: string, shareId: string) {
+  // The share has an active Edit grant unless `edit` is false.
+  function seed(workspaceId: string, objectId: string, path: string, shareId: string, edit = true) {
     f.raw.prepare(`INSERT OR IGNORE INTO sync_relay_workspaces(workspace_id,owner_user_id,created_at_ms,replication_epoch,stream_identity,epoch_log_floor)
       VALUES (?,'owner-1',0,'epoch','stream',0)`).run(workspaceId);
     f.raw.prepare(`INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms)
       VALUES (?,?,1,?,'main',?,?,'text',1,1)`).run(workspaceId, objectId, `moment-${objectId}`, path, "b".repeat(64));
     f.raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES (?,?,'owner-1',?,0)")
       .run(shareId, workspaceId, JSON.stringify({paths: ["docs"], versionId: null}));
+    if (edit) grant(`${shareId}-edit`, shareId);
   }
-  return {...f, input, enroll, setEnabled, resume, release, pause, stop, authorize, seed};
+  // An active grant on the share, Edit unless `access` says otherwise.
+  const grant = (grantId: string, shareId: string, access = "edit") => f.raw.prepare(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,
+    principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id) VALUES (?,?,'user','seeded-reader',NULL,?,1,'active',0,NULL,NULL)`).run(grantId, shareId, access);
+  return {...f, input, enroll, setEnabled, resume, release, pause, stop, authorize, seed, grant};
 }
 
 it("retains original document, share and credential across pause, new invitation and reopen", async () => {
@@ -53,6 +58,7 @@ it("retains original document, share and credential across pause, new invitation
   expect(f.authorize(bearer)).toBeNull();
   f.raw.prepare("UPDATE sync_relay_share_grants SET status='revoked',revoked_at_ms=20 WHERE share_id=?").run(scope.shareId);
   f.raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) SELECT 'replacement',workspace_id,granter_user_id,selector_json,30 FROM sync_relay_shares WHERE share_id=?").run(scope.shareId);
+  f.grant("replacement-edit", "replacement");
   // The new share leaves the Pause. Only Resume clears it.
   expect(f.enroll({shareId: "replacement", nowMs: 30})).toMatchObject({enabled: false, ownerStop: "pause"});
   const resumed = f.resume({nowMs: 30});
@@ -90,6 +96,25 @@ it("fences a paused document's admission at once, keeps its credential until its
   expect(() => f.enroll()).toThrow("obsolete");
   expect(() => f.resume()).toThrow("obsolete");
   expect(f.setEnabled(false)?.ownerStop).toBe("pause");
+});
+
+// Proves: a share enrolls a document only while it holds an active Edit
+// grant. Revoked, or at View, the share writes nothing and charges no quota.
+// With its Edit grant active, the same share enrolls the document.
+it("refuses a share whose grant is revoked or View without a write or quota charge, and enrolls with its active Edit grant", async () => {
+  const f = await fixture();
+  const usage = () => Number(f.raw.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id=?").get(scope.workspaceId)!.usage_bytes);
+  const setGrant = (change: string) => f.raw.prepare(`UPDATE sync_relay_share_grants SET ${change} WHERE grant_id=?`).run(scope.grantId);
+  const before = usage();
+  setGrant("status='revoked',revoked_at_ms=5");
+  expect(() => f.enroll()).toThrow("owner edit share");
+  setGrant("status='active',revoked_at_ms=NULL,access='view'");
+  expect(() => f.enroll()).toThrow("owner edit share");
+  expect(f.raw.prepare(`SELECT count(*) AS count FROM ${SERVICE_HOST_ENROLLMENTS}`).get()!.count).toBe(0);
+  expect(usage()).toBe(before);
+  setGrant("access='edit'");
+  expect(f.enroll()).toMatchObject({enabled: true, retired: false, shareId: scope.shareId});
+  expect(usage()).toBeGreaterThan(before);
 });
 
 it("checks guards inside the transaction and charges quota exactly once", async () => {
@@ -640,7 +665,7 @@ it("applies Pause after host release and fences Stop immediately", async () => {
   expect(f.release("stopped-object")).toMatchObject({hostDrainedAtMs: 25});
   expect(f.storage.readServiceHostEnrollment(scope.workspaceId, "docs/stopped.md")).toMatchObject({enabled: false, retired: true, ownerStop: "retire"});
   // Revocation retires a paused document too, and it stays paused.
-  f.raw.prepare("UPDATE sync_relay_share_grants SET status='revoked',revoked_at_ms=30 WHERE share_id=?").run(scope.shareId);
+  f.raw.prepare("UPDATE sync_relay_share_grants SET status='revoked',revoked_at_ms=30 WHERE share_id IN (?,'stopped-share')").run(scope.shareId);
   expect(f.release()).toMatchObject({enabled: false, retired: true, ownerStop: "pause"});
   expect(f.storage.hasKeptServiceHostEnrollment(scope.workspaceId, enrolled.path)).toBe(true);
   expect(f.storage.hasKeptServiceHostEnrollment(scope.workspaceId, "docs/stopped.md")).toBe(true);
@@ -909,7 +934,7 @@ it("keeps only the restored note live, not a replacement or sibling", async () =
 // activation, as the fixture's note has.
 function activatedSibling(f: Awaited<ReturnType<typeof activated>>) {
   const lineageClaimId = "c".repeat(64), activationId = `ordinary-activation-${"c".repeat(64)}`, path = "docs/b.md";
-  f.seed(scope.workspaceId, "sibling", path, "sibling-share");
+  f.seed(scope.workspaceId, "sibling", path, "sibling-share", false);
   const copy = (table: string, where: string, from: string, changes: Record<string, string>) => {
     const columns = f.raw.prepare(`SELECT name FROM pragma_table_info('${table}') ORDER BY cid`).all().map(row => String(row.name));
     f.raw.prepare(`INSERT INTO ${table}(${columns}) SELECT ${columns.map(column => column in changes ? "?" : column)} FROM ${table} WHERE ${where}=?`)

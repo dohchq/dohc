@@ -447,6 +447,26 @@ it("answers readiness from activation metadata as the full read does, for pendin
   expect(same()).toBe("ready");
 });
 
+// Proves: readiness checks a ready document's binding from metadata, preparing
+// no statement that reads a baseline, a state or a blob, and that check still
+// answers preparing once the document's live lineage closes.
+it("checks a ready document's binding without reading baseline or state bytes, and answers preparing once its lineage closes", async () => {
+  const f = await fixture(), enrolled = f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
+  retainServiceActivation(f.raw, namespace, true);
+  f.host.ready.mockReturnValue(true);
+  const {state} = serviceHostReadiness({storage: f.storage, history: f.history, host: f.host, activation: f.storage.createServiceActivationStore(f.history)});
+  const prepare = vi.spyOn((f.storage as StorageContext).db, "prepare");
+  expect(state(enrolled).status).toBe("ready");
+  const statements = prepare.mock.calls.map(([sql]) => sql);
+  prepare.mockRestore();
+  expect(statements.some(sql => sql.includes("sync_relay_live_documents"))).toBe(true);
+  // The two tables that hold a document's bytes, read whole, read them too.
+  const whole = /SELECT\s+(\w+\.)?\*\s+FROM\s+(sync_relay_live_documents|sync_relay_service_activations)\b/i;
+  expect(statements.filter(sql => /baseline_bytes|state_bytes|sync_relay_blobs/i.test(sql) || whole.test(sql))).toEqual([]);
+  f.raw.exec("UPDATE sync_relay_live_documents SET admission_state='closed'");
+  expect(state(enrolled).status).toBe("preparing");
+});
+
 // Proves: a damaged stored activation binding makes its own row unavailable
 // and leaves the rest of the readiness list served.
 it("lists a document with a damaged activation binding as unavailable and still serves the healthy one", async () => {

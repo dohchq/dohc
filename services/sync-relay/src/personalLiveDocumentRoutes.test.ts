@@ -116,6 +116,68 @@ it("ends a held open when its owner signs the agent out, and answers one whose a
   expect(f.route.held()).toEqual({ waiters: 0, documents: 0 });
 });
 
+// Proves: the owner narrowing an agent's reach below Edit ends its held open
+// as the change commits, at Comment and at View. Edit set again keeps it held.
+it("ends a held open when its agent's reach drops to Comment or to View, and keeps one whose agent stays at Edit", async () => {
+  const f = await fixture(), commenter = f.agent("to-comment"), viewer = f.agent("to-view"), editor = f.agent("stays-edit");
+  const toComment = commenter.open(), toView = viewer.open(), stays = editor.open();
+  await f.holding(3, 1);
+  await f.reach(commenter.agentId, "comment");
+  await expectCode(await toComment, 403, "personal_agent_edit_needed");
+  await f.reach(viewer.agentId, "view");
+  await expectCode(await toView, 403, "personal_agent_edit_needed");
+  await f.reach(editor.agentId, "edit");
+  expect(f.route.held()).toEqual({ waiters: 1, documents: 1 });
+  f.ready();
+  f.route.evaluateWaiting();
+  expect(await body(await stays, 200)).toEqual(ready);
+});
+
+// Proves: an open whose hold ended gives up its waiter and slot at once,
+// while the fence read after it still waits on Postgres. An agent that keeps
+// Edit stays held until the document is ready.
+it("frees an ended open's slot before its slow fence read answers, and holds an open whose agent keeps Edit", async () => {
+  const f = await fixture(), narrowed = f.agent("narrowed"), editor = f.agent("editor");
+  const ended = narrowed.open(), stays = editor.open();
+  await f.holding(2, 1);
+  let answer!: () => void;
+  f.fence.slow = new Promise(resolve => { answer = resolve; });
+  await f.reach(narrowed.agentId, "comment");
+  await f.holding(1, 1);
+  answer();
+  await expectCode(await ended, 403, "personal_agent_edit_needed");
+  f.ready();
+  f.route.evaluateWaiting();
+  expect(await body(await stays, 200)).toEqual(ready);
+});
+
+// Proves: while the running-work registry is down nothing could end a held
+// open, so the committed open answers preparing at once. Once it is up, the
+// same open is held until the document is ready.
+it("answers preparing at once while the running-work registry is down, and holds the open once it is up", async () => {
+  const f = await fixture(), a = f.agent("editor");
+  f.fence.listener!.onDown();
+  expect(await body(await a.open(), 202)).toEqual(preparing);
+  expect(f.read()).toMatchObject({ enabled: true, demandAtMs: 2_000 });
+  expect(f.route.held()).toEqual({ waiters: 0, documents: 0 });
+  await f.registryUp();
+  const held = a.open();
+  await f.holding(1, 1);
+  f.ready();
+  f.route.evaluateWaiting();
+  expect(await body(await held, 200)).toEqual(ready);
+});
+
+// Proves: a path with no current document is a terminal answer that writes
+// nothing. The document's own path answers with its binding.
+it("answers document-unavailable for a path with no current document without writing, and ready at the document's path", async () => {
+  const f = await fixture(), a = f.agent("editor");
+  f.ready();
+  await expectCode(await a.open({ workspaceId: scope.workspaceId, path: "docs/missing.md" }), 409, "document-unavailable");
+  expect(f.storage.listServiceHostEnrollments()).toEqual([]);
+  expect(await body(await a.open(), 200)).toEqual(ready);
+});
+
 // Proves: past the relay's held-open limit, an open has still committed and
 // answers at once. Below it, the open waits for the document.
 it("answers at once past the relay's held-open limit, and holds an open below it", async () => {

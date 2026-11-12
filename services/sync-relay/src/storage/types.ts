@@ -806,6 +806,8 @@ export interface SyncRelayStorage {
   close(): void;
   invalidate(): void;
   resolveCurrentLiveDocumentBinding(input: CurrentLiveBindingRequest, activation?: ServiceActivationAccess): CurrentLiveBindingResult;
+  /** The same check from the live row's metadata, reading no baseline bytes. */
+  resolveCurrentLiveDocumentBindingFromMetadata(input: CurrentLiveBindingRequest): CurrentLiveBindingResult;
   automationRecordWriteAllowed(input: {workspaceId: string; ownerUserId: string; currentPath: string;
     declaration: import("@dohc/live-session-contract/live-authorship").AutomationDeclaration;
     authority: {readonly hostPressId: string; readonly automationId: string} | {readonly grantId: string; readonly grantGeneration: number}}): boolean;

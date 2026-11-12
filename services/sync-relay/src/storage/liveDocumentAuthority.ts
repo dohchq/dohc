@@ -240,6 +240,27 @@ function readLiveDocumentAuthority(db: SqliteDb, document: LiveDocumentKey): Sto
   return decodeLiveDocumentAuthority(db, document, row);
 }
 
+/**
+ * What the binding check needs of the document's live row: its binding, its
+ * lineage and admission, and its baseline's sequence. It reads no baseline
+ * bytes, so their integrity stays with the readers that use them.
+ */
+function readLiveDocumentBinding(db: SqliteDb, document: LiveDocumentKey): StoredLiveBinding | null {
+  const row = db.prepare(`SELECT workspace_id, main_version_id, object_id, lineage_claim_id, current_path, restore_fence_generation,
+      lineage_state, admission_state, baseline_moment_relay_seq FROM sync_relay_live_documents
+    WHERE workspace_id = ? AND main_version_id = ? AND object_id = ?
+      AND (lineage_state = 'current' OR lineage_claim_id = ?)
+    ORDER BY lineage_state = 'current' DESC LIMIT 1`)
+    .get(document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId);
+  if (!row) return null;
+  const binding = parseLiveObjectBinding({ workspaceId: row.workspace_id, mainVersionId: row.main_version_id, objectId: row.object_id,
+    lineageClaimId: row.lineage_claim_id, currentPath: row.current_path, selectorPaths: [row.current_path],
+    restoreFenceGeneration: row.restore_fence_generation });
+  authorityIntegrity(binding.mainVersionId === "main" && binding.workspaceId === document.workspaceId && binding.objectId === document.objectId);
+  return { binding, current: row.lineage_state === "current", open: row.admission_state === "open",
+    baselineSequence: authorityInteger(row.baseline_moment_relay_seq, 1) };
+}
+
 export function decodeLiveDocumentAuthority(db: SqliteDb, document: LiveDocumentKey, row: Record<string, unknown>): StoredLiveDocumentAuthority {
   const stored = decodeLiveDocumentAuthorityStructure(db, document, row);
   authorityIntegrity(createHash("sha256").update(stored.baselineBytes).digest("hex") === stored.baselineDigest);
@@ -331,6 +352,16 @@ export function resolveCurrentLiveDocumentBinding(storage: StorageContext, input
     const request = snapshotCurrentBindingRequest(input);
     return storage.readLiveAuthority(() => currentLiveDocumentBinding(storage, request, activation));
   }
+
+/**
+ * The check `resolveCurrentLiveDocumentBinding` makes, from the live row's
+ * metadata alone. Readiness asks it of every listed document; the callers that
+ * use the baseline read its bytes and check them.
+ */
+export function resolveCurrentLiveDocumentBindingFromMetadata(storage: StorageContext, input: CurrentLiveBindingRequest): CurrentLiveBindingResult {
+  const request = snapshotCurrentBindingRequest(input);
+  return storage.readLiveAuthority(() => currentLiveDocumentBinding(storage, request, undefined, readLiveDocumentBinding));
+}
 
 export type LiveObjectHostBindingResult =
   | { readonly kind: "current"; readonly binding: LiveObjectBinding; readonly host: LiveHostConnectionCoordinate }
@@ -713,15 +744,15 @@ export function currentLiveDocumentMoment(storage: StorageContext, document: Liv
     return latest;
   }
 
-export function currentLiveDocumentBinding(storage: StorageContext, { document, actor }: CurrentLiveBindingRequest, activation?: ServiceActivationAccess): CurrentLiveBindingResult {
+export function currentLiveDocumentBinding(storage: StorageContext, { document, actor }: CurrentLiveBindingRequest, activation?: ServiceActivationAccess,
+    read: (db: SqliteDb, document: LiveDocumentKey) => StoredLiveBinding | null = readLiveDocumentAuthority): CurrentLiveBindingResult {
     const host = readLiveHostControl(storage.db);
     if (host !== null) assertCurrentAuthorityHost(storage.db, host);
     if (host === null || host.admissionState !== "open" || host.transition !== null) {
       return { kind: "refused", reason: "host-unavailable" };
     }
     authorityIntegrity(host.registeredInstanceId !== null && host.registeredConnectionId !== null);
-    const stored = readLiveDocumentAuthority(storage.db, document);
-    return authorizeLiveDocument(storage, { document, actor }, host, stored, activation);
+    return authorizeLiveDocument(storage, { document, actor }, host, read(storage.db, document), activation);
   }
 
 export function authorizeLiveDocument(storage: StorageContext, { document, actor }: CurrentLiveBindingRequest, host: HostControlSnapshot,

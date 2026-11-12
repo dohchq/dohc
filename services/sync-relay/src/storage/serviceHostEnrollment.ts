@@ -173,11 +173,12 @@ export type EnsureOwnedLiveDocumentInput = EnsureOwnedLiveDocumentCommon & (
   /** The agent's credential at the fence its request read. The transaction reads its authority and reach again. */
   | {intent: "personal-open"; personal: PersonalCredential});
 /** A hosting answer that is the caller's to act on, not an error in the request. */
-export type LiveHostingRefusalReason = "paused" | "live_paused_by_owner" | "live_host_full";
+export type LiveHostingRefusalReason = "paused" | "live_paused_by_owner" | "live_host_full" | "document-unavailable";
 export class LiveHostingRefusal extends Error {
   constructor(readonly reason: LiveHostingRefusalReason) {
     super(reason === "live_host_full" ? "The server has no room for more live documents."
-      : reason === "paused" ? "Live editing is stopped for this document. Resume it to continue." : "The owner stopped live editing for this document.");
+      : reason === "paused" ? "Live editing is stopped for this document. Resume it to continue."
+      : reason === "document-unavailable" ? "The document is no longer at this path." : "The owner stopped live editing for this document.");
   }
 }
 export interface ServiceHostHeldActivation {
@@ -308,21 +309,22 @@ function assertCurrent(storage: StorageContext, enrollment: ServiceHostEnrollmen
     throw relayError("conflict", "Service host enrollment belongs to an obsolete workspace identity.");
   }
 }
-/** A share intent needs the owner's Edit share to cover the path. */
+/** A share intent needs the owner's share to cover the path and hold an active Edit grant. */
 function assertShareCovers(storage: StorageContext, input: {workspaceId: string; path: string; shareId: string; ownerUserId: string}): void {
   const share = storage.getShare(input.shareId);
   if (!share || share.workspaceId !== input.workspaceId || share.granterUserId !== input.ownerUserId) throw notFound();
   const parsed = parseStoredAnyShareSelectorJson(share.selectorJson);
   const effective = parsed && effectiveShareSelector(parsed, "edit");
-  if (!effective || !isLiveEditShareSelector(effective) || !canonicalLiveSelector(share, effective) || visibleSharePath(effective, input.path) !== input.path) {
+  const granted = storage.db.prepare(`SELECT 1 FROM sync_relay_shares s WHERE s.share_id=? AND ${ACTIVE_EDIT_GRANT}`).get(input.shareId) !== undefined;
+  if (!granted || !effective || !isLiveEditShareSelector(effective) || !canonicalLiveSelector(share, effective) || visibleSharePath(effective, input.path) !== input.path) {
     throw badRequest("Service host enrollment requires an owner edit share covering this path.");
   }
 }
-/** The current rich document at the path on main. */
-function currentMainDocument(storage: StorageContext, input: {workspaceId: string; path: string}): string {
+/** The current rich document at the path on main. An agent's open hears its absence as an answer. */
+function currentMainDocument(storage: StorageContext, input: {workspaceId: string; path: string}, answered = false): string {
   const objectId = storage.objectIdAtPathInVersion({workspaceId: input.workspaceId, versionId: "main", path: input.path});
   if (!objectId || !currentLiveDocumentMoment(storage, {workspaceId: input.workspaceId, mainVersionId: "main", objectId, lineageClaimId: "0".repeat(64)}, input.path)) {
-    throw relayError("conflict", "Service host enrollment requires a current main document.");
+    throw answered ? new LiveHostingRefusal("document-unavailable") : relayError("conflict", "Service host enrollment requires a current main document.");
   }
   return objectId;
 }
@@ -450,14 +452,14 @@ function ensureInsideTransaction(storage: StorageContext, input: EnsureOwnedLive
   const full = () => input.intent === "personal-open" || input.intent === "owner-open" ? new LiveHostingRefusal("live_host_full") : relayError("quota_exceeded", CAPACITY_FULL);
   const held = input.intent === "owner-resume" ? input.held : undefined;
   const current = read(storage, workspaceId, path);
-  const moved = (objectId: string | null) => objectId !== null &&
+  const moved = (objectId: string | undefined) => objectId !== undefined &&
     storage.db.prepare(`SELECT 1 FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=? AND object_id=?`).get(workspaceId, objectId) !== undefined;
   // Owner intents act only on a document hosted before, whose owner binding the desktop holds.
   if (!current && owner) {
     if (moved(storage.objectIdAtPathInVersion({workspaceId, versionId: "main", path}))) throw relayError("conflict", MOVED);
     throw notFound();
   }
-  const objectId = currentMainDocument(storage, {workspaceId, path});
+  const objectId = currentMainDocument(storage, {workspaceId, path}, input.intent === "personal-open");
   if (current) {
     assertCurrent(storage, current, ownerUserId);
     if (current.objectId !== objectId) throw relayError("conflict", "Service host enrollment path belongs to another document.");

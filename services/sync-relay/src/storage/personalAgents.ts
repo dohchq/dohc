@@ -719,7 +719,7 @@ export type PersonalAgentChangeResult =
     ok: true;
     agent: PersonalAgentRow;
     revision: number;
-    /** Running work here ends: the agent's credentials ended, or the workspace left its reach. */
+    /** Running work here ends: the agent's credentials ended, or the workspace left its reach or dropped a level. */
     endedWorkspaceIds: string[];
     /** Parked waits here re-check, and pick up a workspace new to reach. */
     wakeWorkspaceIds: string[];
@@ -760,8 +760,9 @@ export function changePersonalAgent(storage: StorageContext, input: {
         break;
       case "reach": {
         if (!reachIsOwned(storage, input.ownerUserId, input.change.reach)) return { ok: false, reason: "invalid" };
-        const kept = new Set(input.change.reach.map(entry => entry.workspaceId));
-        ended = before.filter(workspaceId => !kept.has(workspaceId));
+        const rank = new Map(input.change.reach.map(entry => [entry.workspaceId, PERSONAL_REACH_LEVELS.indexOf(entry.level)]));
+        ended = agent.reach.filter(entry => (rank.get(entry.workspaceId) ?? -1) < PERSONAL_REACH_LEVELS.indexOf(entry.level))
+          .map(entry => entry.workspaceId);
         added = writeReach(storage, agent.agentId, input.change.reach);
         appendPersonalDms(storage, agent.agentId, added, Math.trunc(input.nowMs));
         storage.db.prepare("DELETE FROM sync_relay_personal_agent_authorizations WHERE agent_id = ? AND status != 'redeemed'")

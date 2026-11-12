@@ -568,6 +568,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return liveDocumentAuthorityStorage.resolveCurrentLiveDocumentBinding(this, input, activation);
   }
 
+  resolveCurrentLiveDocumentBindingFromMetadata(input: CurrentLiveBindingRequest): CurrentLiveBindingResult {
+    return liveDocumentAuthorityStorage.resolveCurrentLiveDocumentBindingFromMetadata(this, input);
+  }
+
   automationRecordWriteAllowed(input: Parameters<SyncRelayStorage["automationRecordWriteAllowed"]>[0]): boolean {
     const {authority, ...target} = input;
     return this.readTx(() => "hostPressId" in authority ? automationPressStorage.automationPressAdmissionAllowed(this, {...target, ...authority})

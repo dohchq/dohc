@@ -196,8 +196,8 @@ export type ServiceHostDocumentState =
   | {path: string; objectId: string; status: "paused" | "preparing" | "unavailable"; reason?: string}
   | {path: string; objectId: string; status: "ready"; document: {binding: LiveObjectBinding; relayDatabaseNamespace: string}};
 /**
- * Each enrolled document's readiness, from its row, the host, and its current
- * activation's metadata. It reads no activation bytes.
+ * Each enrolled document's readiness, from its row, the host, and the metadata
+ * of its current activation and live document. It reads no state or baseline bytes.
  */
 export function serviceHostReadiness(options: {
   storage: SyncRelayStorage; history: LiveJournalHistoryAuthority; host: ServiceHostReadinessHost;
@@ -232,7 +232,7 @@ export function serviceHostReadiness(options: {
     }
     if (!saved?.completed) return {...base, status: host.unavailable ? "unavailable" : "preparing"};
     const document = {workspaceId: row.workspaceId, mainVersionId: "main", objectId: saved.objectId, lineageClaimId: saved.lineageClaimId};
-    const current = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: row.ownerUserId}});
+    const current = storage.resolveCurrentLiveDocumentBindingFromMetadata({document, actor: {kind: "owner", userId: row.ownerUserId}});
     if (current.kind !== "current" || !host.ready(document)) return {...base, status: host.unavailable ? "unavailable" : "preparing"};
     return {...base, path: current.binding.currentPath, status: "ready", document: {binding: current.binding, relayDatabaseNamespace: history.namespace}};
   }

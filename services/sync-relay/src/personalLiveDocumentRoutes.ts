@@ -185,40 +185,41 @@ export function createPersonalLiveDocumentRoute(input: {
       row = storage.ensureOwnedLiveDocument({ intent: "personal-open", personal: credential(current), workspaceId, path,
         nowMs: nowMs(), guard: () => request.signal.throwIfAborted() });
     } catch (error) {
-      if (error instanceof LiveHostingRefusal) {
-        return answerResponse({ status: "refused", reason: error.reason === "live_host_full" ? "live_host_full" : "live_paused_by_owner" });
-      }
+      if (error instanceof LiveHostingRefusal) return answerResponse({ status: "refused", reason: error.reason });
       throw error;
     }
     const now = evaluate(row.workspaceId, row.objectId);
     if (now !== null) return answerResponse(now);
-    // Past either limit, the open has still committed, and answers at once.
+    // Past either limit, or without the registry to end it, the open has still committed, and answers at once.
     const { agentId } = current;
     if (held >= maxWaiters || (heldByAgent.get(agentId) ?? 0) >= perAgent) return answerResponse({ status: "preparing" });
-    held++;
-    take(heldByAgent, agentId);
     // Running work ending: Sign out, a narrowed reach, or a newer fence.
     const ended = new AbortController();
-    let unregister: (() => void) | undefined;
+    let unregister: () => void;
     try {
       unregister = input.personalAgents.register({
         agentId, ownerUserId: current.ownerUserId, connectionId: current.connectionId, fenceEpoch: current.fenceEpoch,
         workspaceIds: [workspaceId], kind: "wait", terminate: () => ended.abort(),
       });
-      const settled = await hold(row.workspaceId, row.objectId, AbortSignal.any([request.signal, ended.signal]));
-      if (request.signal.aborted) throw notFound();
-      if (!ended.signal.aborted) return answerResponse(settled ?? { status: "preparing" });
-      // Its access changed while it waited, so it is read again before any answer leaves.
-      const fresh = await linkAuthority.freshPersonal(current);
-      const reach = storage.readPersonalReach(credential(fresh), workspaceId, nowMs());
-      if (!reach) throw relayError("personal_agent_out_of_reach");
-      if (reach.level !== "edit") throw relayError("personal_agent_edit_needed");
-      return answerResponse(evaluate(row.workspaceId, row.objectId) ?? { status: "preparing" });
-    } finally {
-      unregister?.();
+    } catch {
+      return answerResponse({ status: "preparing" });
+    }
+    held++;
+    take(heldByAgent, agentId);
+    // The hold's slot and registration end with it, before anything else is read.
+    const settled = await hold(row.workspaceId, row.objectId, AbortSignal.any([request.signal, ended.signal])).finally(() => {
+      unregister();
       held--;
       release(heldByAgent, agentId);
-    }
+    });
+    if (request.signal.aborted) throw notFound();
+    if (!ended.signal.aborted) return answerResponse(settled ?? { status: "preparing" });
+    // Its access changed while it waited, so it is read again before any answer leaves.
+    const fresh = await linkAuthority.freshPersonal(current);
+    const reach = storage.readPersonalReach(credential(fresh), workspaceId, nowMs());
+    if (!reach) throw relayError("personal_agent_out_of_reach");
+    if (reach.level !== "edit") throw relayError("personal_agent_edit_needed");
+    return answerResponse(evaluate(row.workspaceId, row.objectId) ?? { status: "preparing" });
   }
 
   return Object.assign(async (request: Request): Promise<Response> => {

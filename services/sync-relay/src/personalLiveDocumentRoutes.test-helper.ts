@@ -14,7 +14,7 @@ import type { ServiceActivationBlock } from "./serviceActivationDriver";
 import type { ServiceHostedHold } from "./serviceHostedReplication";
 import { createLiveJournalHistoryAuthority } from "./storage/liveJournalHistory";
 import { SERVICE_HOST_ENROLLMENTS } from "./storage/serviceHostEnrollment";
-import { LINK_KEY, RELAY_EXCHANGE_KEY, SHARE_WEB_ORIGIN, testHandler } from "./testing";
+import { LINK_KEY, RELAY_EXCHANGE_KEY, request, SHARE_WEB_ORIGIN, testHandler } from "./testing";
 
 const namespace = "personal-live-route-test";
 const hostId = "self-host-personal-live-route-test";
@@ -23,8 +23,11 @@ const RESOURCE = `${SHARE_WEB_ORIGIN}/mcp/agent/w/${scope.workspaceId}`;
 /** The Postgres fence as the relay reads it: every account at epoch 0, until it is down. */
 class Fence implements CredentialFence {
   down = false;
+  /** While set, each epoch read waits for it, as a slow Postgres does. */
+  slow: Promise<void> | undefined;
   listener: CredentialFenceListener | undefined;
   async readEpoch(): Promise<number> {
+    await this.slow;
     this.assertUp();
     return 0;
   }
@@ -78,8 +81,12 @@ export async function personalRouteFixture(defer: (close: () => Promise<void> | 
   const fence = new Fence();
   const h = testHandler(f.storage, { credentialFence: fence, relayExchangeKey: RELAY_EXCHANGE_KEY });
   defer(() => h.dispose());
-  fence.listener!.onUp();
-  await vi.waitFor(() => h.personalAgents.register(probe())());
+  /** The fence listener is up and has caught up, so running work can register. */
+  async function registryUp() {
+    fence.listener!.onUp();
+    await vi.waitFor(() => h.personalAgents.register(probe())());
+  }
+  await registryUp();
   const route = createPersonalLiveDocumentRoute({
     storage: f.storage, linkAuthority: h.linkAuthority, personalAgents: h.personalAgents, limiter: h.personalLimiter, nowMs: () => 2_000,
     ...(options.live === false ? {} : { live: { host, history, hostId } }),
@@ -121,9 +128,16 @@ export async function personalRouteFixture(defer: (close: () => Promise<void> | 
   }
 
   return {
-    ...f, host, blocked, route, h, fence, agent,
+    ...f, host, blocked, route, h, fence, agent, registryUp,
     input: { workspaceId: scope.workspaceId, ownerUserId: "owner-1", shareId: scope.shareId, path: binding.currentPath, nowMs: 10, guard() {} },
     read: () => f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath),
+    /** The owner sets the agent's reach in the workspace to `level`, as Settings › Agents does. */
+    async reach(agentId: string, level: "view" | "comment" | "edit") {
+      const response = await h(request("owner-1", `/sync/personal-agents/${agentId}/reach`, {
+        method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ reach: [{ workspaceId: scope.workspaceId, level }] }),
+      }));
+      expect(response.status, await response.text()).toBe(200);
+    },
     /** The host completed the document's activation and holds it. */
     ready() {
       retainServiceActivation(f.raw, namespace, true);

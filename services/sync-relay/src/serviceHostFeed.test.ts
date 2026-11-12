@@ -149,8 +149,10 @@ it("serves hosted rows unchanged and refuses private files, their blobs and coor
 
 it("keeps documents shared only with View or Comment access out of the feed", async () => {
   const f = await fixture();
-  f.share("view-share", ["view"], "view");
+  // Enrolling needs Edit, so the share drops to View after it enrolls.
+  f.share("view-share", ["view"], "edit");
   f.enroll("view/c.md", "view-share");
+  f.setGrant("view-share", "access='view'");
   expect((await f.page()).scope.documents.map(row => row.objectId)).toEqual([binding.objectId]);
   expect(f.objects(await f.read())).not.toContain("object-view");
   expect(await f.blobStatus(C.sha256)).toBe(404);
