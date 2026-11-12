@@ -19,6 +19,7 @@ import {
   useCollectionStore,
   type CollectionCellChange,
   type CollectionOptionCreate,
+  type TableAbandonedDraft,
 } from "@dohc/collection-views";
 import type {
   CollectionQueryCursor,
@@ -41,6 +42,7 @@ import { CollectionFrame, type CollectionFrameViews, type NewCollectionView } fr
 import { FieldsDialog } from "./collections/FieldsDialog";
 import { ViewsDialog } from "./collections/ViewsDialog";
 import {
+  collectionWritesPaused,
   enqueueCollectionFieldWrite,
   useCollectionWriteLineage,
   useCollectionWritesPaused,
@@ -575,10 +577,40 @@ export function CollectionPage({
   const draftActions = useRequestSequence([workspaceId, collectionPath, readOnly]);
   const draftAccess = useRef({ readOnly, accessEnded, writeRefusal });
   draftAccess.current = { readOnly, accessEnded, writeRefusal };
+  /** Why this page may not write now, or null where it may. */
+  const accessRefusal = () => !draftAccess.current.readOnly && !draftAccess.current.accessEnded ? null
+    : draftAccess.current.writeRefusal ?? (draftAccess.current.accessEnded ? "Your access to this share ended."
+      : "Your access to this share changed. Ask for Edit access, then reopen the share.");
+  // Each record as the page last had it, so text left in a cell whose record a refresh took still has its record's name and file.
+  const knownRecords = useRef(new Map<string, CollectionRecord>());
+  useEffect(() => {
+    for (const record of [...state.records, ...(state.groups?.flatMap((group) => group.records) ?? [])]) knownRecords.current.set(record.id, record);
+  }, [state.records, state.groups]);
+  const leftWith = useRef({ enqueueCellChange, onError });
+  leftWith.current = { enqueueCellChange, onError };
+  /**
+   * Text still in an editor that went away with no press, as with its tab or its record. It is saved as a press
+   * away saves it. What its field cannot take, or this page may not write, is reported with the text and never sent.
+   */
+  const saveLeftText = useCallback((record: CollectionRecord, field: string, text: string, value: CollectionValue | undefined) => {
+    const refusal = accessRefusal()
+      ?? (collectionWritesPaused(workspaceId) ? "Editing was paused while dohc changed files in this workspace. Type it again." : null)
+      ?? (value === undefined ? `Enter a value ${field} can take.` : null);
+    if (refusal === null && value !== undefined) {
+      leftWith.current.enqueueCellChange({ recordId: record.id, recordPath: record.path, field, value });
+      return;
+    }
+    // The text comes last, so a long one is all a cut takes.
+    const message = `dohc did not save what you typed in the ${field} field of ${recordLabel(record)}. ${refusal} You typed: ${text}`;
+    leftWith.current.onError(message, new Error(message));
+  }, [workspaceId]);
+  const saveLeftCell = useCallback((draft: TableAbandonedDraft) => {
+    const record = knownRecords.current.get(draft.recordId);
+    if (record) saveLeftText(record, draft.field, draft.text, draft.value);
+  }, [saveLeftText]);
   const retryDrafts = async () => {
-    if (draftAccess.current.readOnly) {
-      const message = draftAccess.current.writeRefusal ?? (draftAccess.current.accessEnded ? "Your access to this share ended."
-        : "Your access to this share changed. Ask for Edit access, then reopen the share.");
+    const message = accessRefusal();
+    if (draftAccess.current.readOnly && message !== null) {
       onError(message, new Error(message));
       return;
     }
@@ -915,6 +947,10 @@ export function CollectionPage({
         onNameChange={nameField && record ? (value) => {
           enqueueCellChange({ recordId: record.id, recordPath: record.path, field: nameField.name, value: value || null });
         } : undefined}
+        // A name the input still shows as it was is no change, as for a press away.
+        onNameAbandoned={nameField && record ? (text) => {
+          if (text !== stored) saveLeftText(record, nameField.name, text, text || null);
+        } : undefined}
         onOpenAsPage={record === null ? undefined : () => afterBodySaved(() => onOpenRecord(record.path))}
         commands={commands}
         loading={record === null && recordProblem === undefined}
@@ -929,6 +965,7 @@ export function CollectionPage({
             visibleFields={null}
             omitFields={nameField ? [nameField.name] : undefined}
             onCellChange={readOnly ? undefined : enqueueCellChange}
+            onDraftAbandoned={(draft) => saveLeftText(record, draft.field, draft.text, draft.value)}
             editingDisabled={readOnly || writesPaused}
             acknowledgedWriteId={acknowledgedWriteId}
             subscribeToDiscardedWrites={subscribeToDiscardedWrites}
@@ -1044,6 +1081,7 @@ export function CollectionPage({
             visibleFields={activeView?.visibleFields ?? null}
             onSortChange={(sort) => void store.setQuery({ sort })}
             onCellChange={readOnly ? undefined : enqueueCellChange}
+            onDraftAbandoned={saveLeftCell}
             editingDisabled={readOnly || writesPaused}
             acknowledgedWriteId={acknowledgedWriteId}
             subscribeToDiscardedWrites={subscribeToDiscardedWrites}

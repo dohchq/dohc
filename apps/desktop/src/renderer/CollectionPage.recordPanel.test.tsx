@@ -8,7 +8,8 @@ import type { CollectionRecord, CollectionRecordGroup, CollectionSchema, Collect
 import type { GetCollectionResult, QueryCollectionRecordsPayload, QueryCollectionRecordsResult, WorkspaceActivityEvent } from "../ipc/bridgeContract";
 import { CollectionPage, FIND_RECORD_LIMIT, FIND_RECORD_PAGE, type CollectionPageProps } from "./CollectionPage";
 import { resetAutomationButtonsForTests } from "./collections/useAutomationButtons";
-import { CollectionFieldWriteHost, resetCollectionFieldWritesForTests } from "./collections/recordFieldWrites";
+import { beginCollectionWriteOperation, CollectionFieldWriteHost, resetCollectionFieldWritesForTests } from "./collections/recordFieldWrites";
+import type { CollectionCellChange } from "@dohc/collection-views";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 
 // A document Collection's record, open in the panel beside its view. The
@@ -36,6 +37,18 @@ vi.mock("./collab/useEngineDoc", () => ({
     return docMock.current;
   },
 }));
+// The write queue is real. Each change the page hands it is also kept here, so a test can count them.
+const enqueued = vi.hoisted(() => ({ changes: [] as CollectionCellChange[] }));
+vi.mock("./collections/recordFieldWrites", async (original) => {
+  const actual = await original<typeof import("./collections/recordFieldWrites")>();
+  return {
+    ...actual,
+    enqueueCollectionFieldWrite: (...args: Parameters<typeof actual.enqueueCollectionFieldWrite>) => {
+      enqueued.changes.push(args[2]);
+      return actual.enqueueCollectionFieldWrite(...args);
+    },
+  };
+});
 vi.mock("./collections/recordSourceCheck", () => ({
   useRecordSourceCheck: () => ({ state: "clear", contentHash: "c".repeat(64) }),
 }));
@@ -96,6 +109,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
   docMock.current = null;
   resetCollectionFieldWritesForTests();
+  enqueued.changes = [];
   for (const [name, descriptor] of Object.entries(offsets)) {
     if (descriptor) Object.defineProperty(HTMLElement.prototype, name, descriptor);
   }
@@ -221,6 +235,11 @@ const propertyValue = (field: string) => within(property(field)).getAllByRole("b
 const propertyEditor = (field: string) => property(field).querySelector<HTMLElement>("[data-cell-editor]");
 const propertyInput = (field: string) => propertyEditor(field)!.querySelector<HTMLInputElement>("input")!;
 const nameButton = () => within(within(panel()).getByRole("heading")).getByRole("button");
+const nameInput = () => within(panel()).getByRole<HTMLInputElement>("textbox", { name: "title" });
+/** The input of the table's open cell editor. */
+const cellInput = () => grid().querySelector<HTMLInputElement>("[data-cell-editor] input")!;
+/** Takes the Collection's page off the screen with no press, as closing its tab from the keyboard does. The write host stays. */
+const closePage = (view: ReturnType<typeof renderPage>) => view.rerender(<>{null}<CollectionFieldWriteHost /></>);
 const shownBody = () => within(panel()).getByTestId("record-body");
 
 describe("a document record's panel", () => {
@@ -625,5 +644,121 @@ describe("a document record's panel", () => {
     expect(sides()).toEqual(["Plan"]);
     act(() => waiting.pop()!());
     expect(sides()).toEqual(["Automations"]);
+  });
+});
+
+describe("text left in an editor that goes away with no press", () => {
+  const typeInto = (input: HTMLInputElement, text: string) => fireEvent.change(input, { target: { value: text } });
+  /** Opens one of the three editors on the record "Plan", and answers its input. */
+  const editors = {
+    "the table's cell": () => {
+      fireEvent.click(cell("notes"));
+      return cellInput();
+    },
+    "a field's row in the panel": () => {
+      open("Plan");
+      fireEvent.click(propertyValue("notes"));
+      return propertyInput("notes");
+    },
+    "the heading's name": () => {
+      open("Plan");
+      fireEvent.click(nameButton());
+      return nameInput();
+    },
+  };
+  type Editor = keyof typeof editors;
+  const each = Object.keys(editors) as Editor[];
+  const field = (editor: Editor) => (editor === "the heading's name" ? "title" : "notes");
+  const NUMBERED: CollectionSchema = { ...TASKS, fields: [...TASKS.fields, { name: "estimate", type: "number" }] };
+
+  it.each(each)("saves what was typed in %s when the page closes, once, to the record and field the editor opened on, and the write lands after the page is gone", async (editor) => {
+    const doc = liveDoc();
+    const view = renderPage(makeBridge([task("rec-1", "Plan"), task("rec-2", "Socks")]));
+    await screen.findByRole("button", { name: "Open Plan" });
+    typeInto(editors[editor](), "Buy wool");
+    expect(enqueued.changes).toEqual([]);
+
+    closePage(view);
+    expect(screen.queryByRole("grid")).toBeNull();
+    expect(enqueued.changes).toEqual([{ recordId: "rec-1", recordPath: "tasks/Plan.md", field: field(editor), value: "Buy wool" }]);
+    // The write host outlives the page, and writes what the page handed it as it closed.
+    await waitFor(() => expect(doc.getMap("frontmatter").get(field(editor))).toBe("Buy wool"));
+  });
+
+  it.each(each)("saves an edit of %s that a key saved once only, and nothing of one Escape cancelled", async (editor) => {
+    liveDoc();
+    const view = renderPage(makeBridge([task("rec-1", "Plan")]));
+    await screen.findByRole("button", { name: "Open Plan" });
+    const saved = editors[editor]();
+    typeInto(saved, "Buy wool");
+    fireEvent.keyDown(saved, { key: "Enter" });
+    expect(enqueued.changes).toHaveLength(1);
+
+    // The same editor again, on the same record. Its panel is open by now, so only the editor opens.
+    if (editor === "the table's cell") fireEvent.click(cell("notes"));
+    else fireEvent.click(editor === "the heading's name" ? nameButton() : propertyValue("notes"));
+    const cancelled = editor === "the table's cell" ? cellInput() : editor === "the heading's name" ? nameInput() : propertyInput("notes");
+    typeInto(cancelled, "Never mind");
+    fireEvent.keyDown(cancelled, { key: "Escape" });
+    closePage(view);
+    expect(enqueued.changes).toEqual([{ recordId: "rec-1", recordPath: "tasks/Plan.md", field: field(editor), value: "Buy wool" }]);
+  });
+
+  it("saves what was typed in a cell whose record a refresh took from the table, to that record's own file", async () => {
+    liveDoc("rec-2");
+    const bridge = makeBridge([task("rec-1", "Plan"), task("rec-2", "Socks")]);
+    renderPage(bridge);
+    await screen.findByRole("button", { name: "Open Socks" });
+    fireEvent.click(cell("notes", 1));
+    typeInto(cellInput(), "Darn them");
+    bridge.records.pop();
+    act(() => bridge.changed());
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Open Socks" })).toBeNull());
+    expect(enqueued.changes).toEqual([{ recordId: "rec-2", recordPath: "tasks/Socks.md", field: "notes", value: "Darn them" }]);
+  });
+
+  it("reports text its field cannot take with the record, the field and the text, once, and sends nothing", async () => {
+    liveDoc();
+    const onError = vi.fn();
+    const view = renderPage(makeBridge([task("rec-1", "Plan")], NUMBERED), { onError });
+    await screen.findByRole("button", { name: "Open Plan" });
+    fireEvent.click(cell("estimate"));
+    typeInto(cellInput(), "12x");
+    closePage(view);
+    const words = "dohc did not save what you typed in the estimate field of Plan. Enter a value estimate can take. You typed: 12x";
+    expect(onError).toHaveBeenCalledExactlyOnceWith(words, new Error(words));
+    expect(enqueued.changes).toEqual([]);
+  });
+
+  it.each(each)("reports what was typed in %s when the page may no longer write, once, and sends nothing", async (editor) => {
+    liveDoc();
+    const onError = vi.fn();
+    const view = renderPage(makeBridge([task("rec-1", "Plan")]), { onError });
+    await screen.findByRole("button", { name: "Open Plan" });
+    typeInto(editors[editor](), "Half typed");
+    // The owner ends the share under the open editor, which goes with the right to edit.
+    view.rerender(page({ onError, readOnly: true, accessEnded: true }));
+    const words = `dohc did not save what you typed in the ${field(editor)} field of Plan. Your access to this share ended. You typed: Half typed`;
+    expect(onError).toHaveBeenCalledExactlyOnceWith(words, new Error(words));
+    // The page closing later has nothing more to report.
+    closePage(view);
+    expect(onError).toHaveBeenCalledOnce();
+    expect(enqueued.changes).toEqual([]);
+  });
+
+  it("reports what was typed in an editor that goes with the page while dohc changes files, and sends nothing", async () => {
+    liveDoc();
+    const onError = vi.fn();
+    const view = renderPage(makeBridge([task("rec-1", "Plan")]), { onError });
+    await screen.findByRole("button", { name: "Open Plan" });
+    typeInto(editors["the table's cell"](), "Half typed");
+    // A file operation pauses the workspace's edits. The editor stays open, and its text is not sent.
+    const operation = beginCollectionWriteOperation("ws-1");
+    await screen.findByTestId("collection-writes-paused");
+    closePage(view);
+    operation.release();
+    const words = "dohc did not save what you typed in the notes field of Plan. Editing was paused while dohc changed files in this workspace. Type it again. You typed: Half typed";
+    expect(onError).toHaveBeenCalledExactlyOnceWith(words, new Error(words));
+    expect(enqueued.changes).toEqual([]);
   });
 });
