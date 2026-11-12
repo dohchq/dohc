@@ -169,7 +169,6 @@ export async function createNamedBrowserQuarantineProof(input: {relayUrl: string
       await browserExpect(peer.page.getByRole("button", {name: "Retry connection", exact: true})).toBeVisible({timeout: timeoutMs});
       await browserExpect(peer.editor).toHaveAttribute("contenteditable", "false");
       await browserExpect(peer.editor).toContainText(excerpt.trim());
-      await browserExpect(peer.page.getByLabel("Draft recovery", {exact: true})).toBeVisible();
       draftText = await peer.editor.innerText(); oldConnectionCount = connections.length;
       observations.offlineDraft = {originalBinding: original!.initialBinding, originalConnection: original!.id, draftText,
         delivery: captured!.begin, retained: {path: captured!.path, sha256: captured!.sha256}, state: noPendingAdmission("offline-draft")}; save();
@@ -180,6 +179,7 @@ export async function createNamedBrowserQuarantineProof(input: {relayUrl: string
       expect(noPendingAdmission("after-owner-restore").markdown).toBe("Hello\n");
       await peer.page.getByRole("button", {name: "Retry connection", exact: true}).click();
       await browserExpect(peer.page.getByRole("status")).toHaveText("Editing stopped. Review your draft before opening the current file.", {timeout: timeoutMs});
+      await browserExpect(peer.page.getByLabel("Draft recovery", {exact: true})).toBeVisible();
       await until(() => connections.length === oldConnectionCount + 1 && connections.at(-1)!.closed);
       const retry = connections.at(-1)!; expect(retry.initialBinding).toBeDefined();
       expect(original!.initialBinding!.restoreFenceGeneration).toBe(1); expect(retry.initialBinding!.restoreFenceGeneration).toBe(2);
