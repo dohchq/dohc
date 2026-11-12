@@ -607,10 +607,12 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     // service keeps the same credit that owner devices import.
     // Import marks the relay-admitted person confirmed; the admitted snapshot carries no marker.
     const importedHuman = {...human, relayConfirmed: true};
+    // History's flat form names no depth for an agent at depth 0.
+    const importedPersonal = {kind: personal.kind, agentId: personal.agentId, agentName: personal.agentName, onBehalfOf: personal.onBehalfOf};
     const declaredCredit = [
       {momentId: agentSettlement.record.momentId, imported: [agent, importedHuman]},
       {momentId: automationSettlement.record.momentId, imported: [automation]},
-      {momentId: personalSettlement.record.momentId, imported: [personal]},
+      {momentId: personalSettlement.record.momentId, imported: [importedPersonal]},
     ] as const;
     const expectAuthors = (actual: unknown, expected: readonly unknown[]) => {
       expect(actual).toHaveLength(expected.length);
@@ -667,7 +669,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     results.declaredAuthors = {
       agent: {receipt: agentAck, settlement: agentSettlement, admitted: [human, agent], imported: [agent, importedHuman]},
       automation: {receipt: automationAck, settlement: automationSettlement, admitted: [automationAdmitted], imported: [automation]},
-      personal: {receipt: personalAck, settlement: personalSettlement, admitted: [personal], imported: [personal]},
+      personal: {receipt: personalAck, settlement: personalSettlement, admitted: [personal], imported: [importedPersonal]},
     };
     // The service imports the admitted credit through its own background pull.
     // Poll its store until that credit lands. A missing row reads as undefined, not null.
