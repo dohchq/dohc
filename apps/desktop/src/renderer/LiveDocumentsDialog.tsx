@@ -6,12 +6,15 @@ import { CopyButton } from "./ui/CopyButton";
 import { EmptyState, SecondaryButton } from "./ui/controls";
 import { SkeletonLines } from "./ui/SkeletonRows";
 import { useRequestSequence } from "./useRequestSequence";
+import { keptEditsLabel } from "./liveQueueState";
 
 export type LiveDocumentRow = {
   path: string;
   status: "ready" | "preparing" | "paused" | "unavailable" | "retired";
-  reason?: "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage" | "live-edit-unadmitted" | "conflict-parent-withheld";
+  reason?: "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage" | "live-edit-unadmitted" | "conflict-parent-withheld" | "live-history-over-budget";
   canResume: boolean;
+  /** A retired row's: its owner's Pause or Stop retired it, not the server. */
+  stopped?: boolean;
   deferredStop?: {unsentEdits: number; editable: boolean};
   /** The server refused this document's edits for good, and dohc keeps them where `storedOn` says. */
   quarantine?: "paused" | "retrying" | "stopping" | "stopped-kept" | "not-written" | "cannot-write" | "copied" | "unreadable";
@@ -179,13 +182,10 @@ function mergeRows(
 }
 
 function statusLabel(row: LiveDocumentRow): string {
-  if (row.quarantine === "unreadable") return "Can't read edits";
-  if (row.quarantine === "paused" && row.earlier) return "Kept on the server";
-  if (row.quarantine === "paused" || row.quarantine === "copied") return "Paused";
-  if (row.quarantine === "retrying") return "Trying again";
-  if (row.quarantine === "stopping") return "Stopping";
-  if (row.quarantine === "stopped-kept") return "Stopped";
-  // not-written and cannot-write keep an earlier Stop's edits; the session says whether the document is live now.
+  // The note's editor reads the same states, so the two never disagree.
+  const kept = row.quarantine === undefined ? null
+    : keptEditsLabel({ recovery: row.quarantine, ...(row.saveOnly ? { saveOnly: true } : {}), ...(row.earlier ? { earlier: true } : {}) });
+  if (kept !== null) return kept;
   if (row.reason === "document-unavailable") return "File moved or removed";
   if (row.reason === "workspace-changed") return "Workspace changed";
   if (row.reason === "session-host-refused") return "Stopped by the server";
@@ -193,6 +193,7 @@ function statusLabel(row: LiveDocumentRow): string {
   if (row.reason === "live-document-without-lineage") return "Not started";
   if (row.reason === "live-edit-unadmitted") return "Server copy is missing an edit";
   if (row.reason === "conflict-parent-withheld") return "Can't resume";
+  if (row.reason === "live-history-over-budget") return "History too long";
   switch (row.status) {
     case "ready":
       return "Live";
@@ -201,7 +202,8 @@ function statusLabel(row: LiveDocumentRow): string {
     case "paused":
       return "Paused";
     case "retired":
-      return "Stopped";
+      // The server released it, and opening it here makes it live again.
+      return row.stopped === false ? "Not live" : "Stopped";
     default:
       return "Unavailable";
   }
@@ -481,7 +483,13 @@ export function LiveDocumentsDialog({
           setPendingStops(previous => new Map(previous).set(work.objectId, refusal));
           return;
         }
-        if (!isCurrent()) return;
+        // A server-only document's Stop the server isn't ready for gets the
+        // relay's restore-in-progress words, without its code.
+        const notReady = work.kind === "stop" && String(error).includes("Stop live editing is waiting.");
+        const waits = work.kind === "stop" && (notReady || isLiveStopWaiting(error));
+        // A Stop that waits is reported after this opening closes too, as a refused one is.
+        // The shell drops a report from a workspace that is no longer open.
+        if (!isCurrent() && !waits) return;
         // Only a failed read leaves the list unproven. A refused action and a
         // failed "more" both keep the rows the last successful read proved.
         if (work.kind === "reload" || mutated) setState({ kind: "unknown" });
@@ -495,10 +503,7 @@ export function LiveDocumentsDialog({
           perform(overtaken || mutated ? { kind: "reload" } : work);
           return true;
         };
-        // A server-only document's Stop the server isn't ready for gets the
-        // relay's restore-in-progress words, without its code.
-        const notReady = work.kind === "stop" && String(error).includes("Stop live editing is waiting.");
-        if (work.kind === "stop" && (notReady || isLiveStopWaiting(error))) {
+        if (work.kind === "stop" && waits) {
           onError(notReady ? LIVE_STOP_SERVER_NOT_READY : LIVE_STOP_WAITING, error, retry,
             {title: notReady ? `Live editing didn't stop for ${work.path}` : `Stopping live editing for ${work.path}`, objectId: work.objectId});
         } else onError(failureMessage(work, mutated), error, retry);
@@ -838,6 +843,12 @@ export function LiveDocumentsDialog({
                     {row.status === "retired"
                       ? "You can keep editing it in dohc, but your edits won't reach them."
                       : "You can keep editing it in dohc, but your edits may not reach them."}
+                  </p>
+                ) : null}
+                {/* Resume can't help because ordinary edits never give the document a new base, so the row doesn't offer it. */}
+                {row.reason === "live-history-over-budget" && !pendingStops.has(row.objectId) && !(busy?.kind === "stop" && busy.objectId === row.objectId) ? (
+                  <p className="m-0 basis-full text-[12px] text-muted">
+                    This document's edit history is too long for the server to check, so live editing can't start. You can keep editing it in dohc, and your edits keep syncing. People you shared it with can't edit it live.
                   </p>
                 ) : null}
                 {/* Resume and Stop can't help here, so the row offers neither. */}

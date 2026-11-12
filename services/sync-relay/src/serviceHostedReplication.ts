@@ -93,6 +93,8 @@ export class ServiceHostedReplication {
   get checked(): boolean { return this.#created; }
   /** Whether the last page's departed list, from the first to the last, names no document. */
   get departedNone(): boolean { return this.#departedNone; }
+  /** Whether the next pass lists held and departed documents from the first, and activation heard every page. */
+  get listsWrapped(): boolean { return this.#heldAfter === undefined && this.#departedAfter === undefined && !this.#unheard; }
   #check(signal: AbortSignal): void { signal.throwIfAborted(); this.connection.assertCurrent(); }
   async #request(method: string, params: Record<string, string | {kind: string; token: string}>, signal: AbortSignal) {
     this.#check(signal);

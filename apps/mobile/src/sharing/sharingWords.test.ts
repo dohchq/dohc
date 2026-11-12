@@ -1,7 +1,5 @@
 import { grantedWho, namesOf, receivedWho, sharingWords, type ShareGrant, type ShareLevel } from "@dohc/interface-words/sharing";
 import { confirmWords } from "@dohc/interface-words/confirmations";
-import { execFileSync } from "node:child_process";
-import { stripTypeScriptTypes } from "node:module";
 import { describe, expect, it } from "vitest";
 import { cutMiddle } from "./cutMiddle";
 
@@ -44,72 +42,18 @@ describe("the End share and Forget alerts", () => {
   });
 });
 
-// Until these words move into a package both apps import, the phone's must say what the desktop's say. This branch
-// sits on an older main, so the test takes the desktop's own functions from SharingView.tsx at the main commit the
-// words came from, strips their types, and runs them beside the phone's on the same shares.
-const DESKTOP_AT = "45b0de8020a59d47358a9aa1f00ace9d86d8b076";
-const desktopSource = execFileSync("git", ["show", `${DESKTOP_AT}:apps/desktop/src/renderer/workbench/SharingView.tsx`], { encoding: "utf8" });
-const functionNamed = (name: string) => {
-  const start = desktopSource.indexOf(`function ${name}(`);
-  const end = desktopSource.indexOf("\n}\n", start);
-  if (start < 0 || end < 0) throw new Error(`SharingView.tsx has no function ${name}`);
-  return desktopSource.slice(start, end + 2);
-};
-const lineStarting = (prefix: string) => {
-  const line = desktopSource.split("\n").find(each => each.startsWith(prefix));
-  if (!line) throw new Error(`SharingView.tsx has no ${prefix}`);
-  return line;
-};
-interface DesktopRow { readonly status: "active"; readonly via: "named" | "link"; readonly access: ShareLevel; readonly recipientEmail: string | null; readonly recipientUserId: null }
-interface DesktopWords {
-  grantedWho(group: { rows: readonly DesktopRow[] }): { text: string } | null;
-  endConfirmWords(group: { rows: readonly DesktopRow[] }, waiting: { count: number; senders: readonly string[] } | undefined): string;
-  fromWho(sender: string, full: string): { text: string; spoken?: string };
-  namesOf(names: readonly string[], none: string): string;
-  WORD_SHOWN: Record<string, string>;
-}
-const desktopFunctions = stripTypeScriptTypes([
-  lineStarting("const VERBS"), lineStarting("const verbOf"), lineStarting("const WORD_SHOWN"),
-  ...["countClauses", "linkClauses", "grantedWho", "fromWho", "recipientOf", "endsOnEnd", "recipientNames", "namesOf", "recipientsOf",
-    "endConfirmWords"].map(functionNamed),
-].join("\n"));
-const desktopWords = new Function("LEVELS", `${desktopFunctions}\nreturn { grantedWho, endConfirmWords, fromWho, namesOf, WORD_SHOWN };`)({ view: { label: "View" }, comment: { label: "Comment" }, edit: { label: "Edit" } }) as DesktopWords;
-const rowsOf = (grants: readonly ShareGrant[]) => ({
-  rows: grants.map((grant): DesktopRow => ({ status: "active", via: grant.via, access: grant.level, recipientEmail: grant.via === "link" ? null : grant.who, recipientUserId: null })),
-});
-
-describe("the desktop's Sharing words", () => {
-  const shares: readonly (readonly ShareGrant[])[] = [
-    [person("maya@example.com", "edit")], [link("view")], [link("comment")],
-    [person("a", "edit"), person("b", "view"), person("c", "edit")], [person("a", "edit"), person("b", "view"), person("c", "view")],
-    [person("a", "edit"), link("view")], [person("a", "view"), link("comment")], [link("view"), link("edit"), person("a", "edit")],
-    [link("view"), link("comment"), link("comment")], [person("a", "comment"), person("b", "comment")], [],
-  ];
-  it.each(shares.map(grants => [grantedWho(grants) ?? "nothing", grants] as const))("says %s as the desktop does", (_, grants) => {
-    expect(grantedWho(grants)).toBe(desktopWords.grantedWho(rowsOf(grants))?.text ?? null);
+describe("recipient names", () => {
+  it.each([
+    [[], "the recipient"], [["a"], "a"], [["a", "b"], "a and b"],
+    [["a", "b", "c"], "a, b and c"], [["a", "b", "c", "d"], "4 people"],
+  ] as const)("summarizes %j", (names, expected) => {
+    expect(namesOf(names, "the recipient")).toBe(expected);
   });
 
-  it("ends a share with the desktop's words, the phone's alert naming the file", () => {
-    for (const people of [["sam@example.com"], ["a", "b"], ["a", "b", "c", "d"]]) {
-      const grants = people.map(who => person(who, "edit"));
-      expect(`End this share? ${sharingWords.endBody(people)}`).toBe(desktopWords.endConfirmWords(rowsOf(grants), undefined));
-      for (const count of [1, 3]) {
-        const phone = `${sharingWords.endWaitingTitle("trip/a.md", count, people)} ${sharingWords.endWaitingBody(count)}`;
-        expect(phone.replace("End the share of trip/a.md", "End this share")).toBe(desktopWords.endConfirmWords(rowsOf(grants), { count, senders: people }));
-      }
-    }
-  });
-
-  it("names people, senders and statuses as the desktop does", () => {
-    for (const names of [[], ["a"], ["a", "b"], ["a", "b", "c"], ["a", "b", "c", "d"]]) {
-      expect(namesOf(names, "the recipient")).toBe(desktopWords.namesOf(names, "the recipient"));
-    }
-    const from = desktopWords.fromWho("Maya Chen", "Maya Chen (maya@example.com)");
-    expect(receivedWho("Maya Chen", null)).toEqual({ text: from.text, spoken: from.spoken });
-    // The live level is written inline in the desktop's ReceivedRow.
-    expect(desktopSource).toContain("{ text: `${sender} lets you ${verbOf(access)}`");
-    expect(receivedWho("Priya Raman", "comment").text).toBe("Priya Raman lets you comment");
-    expect(sharingWords.status).toEqual(desktopWords.WORD_SHOWN);
+  it("explains the retained copy for one or several recipients", () => {
+    expect(sharingWords.endBody(["Sam"])).toBe("Sam keeps a read-only copy and stops receiving updates.");
+    expect(sharingWords.endBody(["Sam", "Maya"]))
+      .toBe("Sam and Maya keep read-only copies and stop receiving updates.");
   });
 });
 

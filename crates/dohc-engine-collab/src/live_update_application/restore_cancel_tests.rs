@@ -22,7 +22,7 @@ fn fence_next(f: &mut Fixture, operation: &str) -> Result<NativeRestoreFenceRece
     input.terminal = terminal;
     input.applied_sequence = sequence;
     let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
-    f._owner.fence_restore(&mut f.store, None, input, coordinate, 40, &NoFaults)
+    f._owner.fence_restore(&mut f.store, None, input, coordinate, 40, &NoFaults, |_, _| Ok(()))
 }
 
 /// A restore of `fence` to the lineage's baseline.
@@ -177,7 +177,7 @@ fn a_cancelled_restore_retires_and_releases_at_its_fenced_generation() {
         );
         let coordinate = retirement_host();
         assert!(matches!(
-            f._owner.fence_restore_after_reconnect(&mut f.store, None, fence.operation.clone(), coordinate, 60, &NoFaults),
+            f._owner.fence_restore_after_reconnect(&mut f.store, None, fence.operation.clone(), coordinate, 60, &NoFaults, |_, _| Ok(())),
             Err(ApplicationError::Conflict)
         ));
         let preparation = baseline_preparation(&f, fence.clone());
@@ -850,7 +850,7 @@ fn a_replayed_fence_commits_a_durable_answer() {
     };
     let before = marker(&f);
     let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
-    let replayed = f._owner.fence_restore(&mut f.store, None, fence.operation.clone(), coordinate, 41, &NoFaults).unwrap();
+    let replayed = f._owner.fence_restore(&mut f.store, None, fence.operation.clone(), coordinate, 41, &NoFaults, |_, _| Ok(())).unwrap();
     assert_eq!(replayed, fence);
     assert!(marker(&f).is_some() && marker(&f) != before, "the replay wrote its marker");
 }

@@ -47,7 +47,8 @@ async function postgresReachable(): Promise<boolean> {
     await probe.connect();
     await probe.end();
     return true;
-  } catch {
+  } catch (error) {
+    if (process.env.DOHC_REQUIRE_POSTGRES === "1") throw error;
     return false;
   }
 }

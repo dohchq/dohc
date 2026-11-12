@@ -63,6 +63,16 @@ export const documentAgentNameSchema = z
 const historyUndoArgsSchema = z.object({ ...argsBase, operationId: HistoryOperationId, agent: documentAgentNameSchema.optional() }).strict();
 
 const groupsArgsSchema = z.object(argsBase).strict();
+// What a work link names: a Group, DM, or agent chat by name, #slug, or id; a
+// thread or message by id; or a file or Collection folder by path.
+const linkTargetSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("group"), group: z.string().min(1).max(512) }).strict(),
+  z.object({ kind: z.literal("thread"), thread: z.string().min(1).max(512) }).strict(),
+  z.object({ kind: z.literal("message"), message: z.string().min(1).max(512) }).strict(),
+  z.object({ kind: z.literal("path"), path: z.string().min(1).max(4_096) }).strict(),
+]);
+export type CliLinkTarget = z.infer<typeof linkTargetSchema>;
+const linkArgsSchema = z.object({ ...argsBase, target: linkTargetSchema }).strict();
 // The name and purpose limits are the New group dialog's.
 const groupCreateArgsSchema = z
   .object({
@@ -168,6 +178,11 @@ const replyArgsSchema = z
     body: z.string().min(1),
     agent: documentAgentNameSchema.optional(),
   })
+  .strict();
+// An automation's run ends with nothing to report and posts nothing. MCP's
+// reply tool sends it; no CLI command does.
+const nothingToReportArgsSchema = z
+  .object({ ...argsBase, runId: z.string().min(1).optional(), thread: z.string().min(1) })
   .strict();
 const reactArgsSchema = z
   .object({
@@ -288,6 +303,7 @@ const fileMoveArgsSchema = z.object({
   fromPath: documentPathArg,
   toPath: documentPathArg,
   overwrite: z.boolean().optional(),
+  confirmNotVersioned: z.boolean().optional(),
   agent: documentAgentNameSchema.optional(),
   requestId: requestIdSchema,
 }).strict();
@@ -295,6 +311,7 @@ const fileDuplicateArgsSchema = z.object({...argsBase, path: documentPathArg, ag
 const fileDeleteArgsSchema = z.object({
   ...argsBase,
   path: documentPathArg,
+  confirmNotVersioned: z.boolean().optional(),
   agent: documentAgentNameSchema.optional(),
   requestId: requestIdSchema,
 }).strict();
@@ -334,6 +351,13 @@ const keptCopiesArgsSchema = z.object(argsBase).strict();
 const saveKeptCopyArgsSchema = z
   .object({ ...argsBase, id: z.number().int() })
   .strict();
+// A protected file's change a sync replaced, kept on this computer under a
+// UUID. Restore writes it back; Discard removes it for good.
+const protectedCopyIdSchema = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+const restoreProtectedCopyArgsSchema = z
+  .object({ ...argsBase, id: protectedCopyIdSchema })
+  .strict();
+const discardProtectedCopyArgsSchema = restoreProtectedCopyArgsSchema;
 // Old file copies kept on a drive that cannot tell dohc whether a program
 // still has one open. A delete takes at most 100 listed copies and must
 // accept that a program still using one may lose what it writes next.
@@ -370,11 +394,17 @@ export const LIVE_DOCUMENT_REASON_STEPS = {
   "live-document-without-lineage": "Live editing can't start until the document is opened once in dohc. Open it, then Resume.",
   "live-edit-unadmitted": "The server hasn't applied an edit. Resume tries again.",
   "conflict-parent-withheld": "A conflict in the file was resolved, so live editing can't resume. Edits made in dohc may not reach people with the link.",
+  "live-history-over-budget": "The document's edit history is too long for the server to check, so live editing can't start. Edits still sync, but people it is shared with can't edit it live. Resume can't help.",
 } as const;
 const liveDocumentReasonSchema = z.enum(Object.keys(LIVE_DOCUMENT_REASON_STEPS) as [keyof typeof LIVE_DOCUMENT_REASON_STEPS, ...(keyof typeof LIVE_DOCUMENT_REASON_STEPS)[]]);
 
-// The owner's Live documents list. The cursor is the list's own nextCursor.
+// The owner's Live documents list, and its Stop and Resume for one document.
+// The cursor is the list's own nextCursor. A list row's objectId lets Stop
+// reach the server's document when this computer's file moved or is gone.
+const liveDocumentObjectIdSchema = z.string().min(1).max(512);
 const liveDocumentsArgsSchema = z.object({ ...argsBase, cursor: documentPathArg.optional() }).strict();
+const liveStopArgsSchema = z.object({ ...argsBase, path: documentPathArg, objectId: liveDocumentObjectIdSchema.optional() }).strict();
+const liveResumeArgsSchema = z.object({ ...argsBase, path: documentPathArg }).strict();
 
 const heldNoteChangeArgsSchema = z.discriminatedUnion("action", [
   z.object({...argsBase, path: documentPathArg, action: z.literal("review")}).strict(),
@@ -612,6 +642,7 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("appPublication"), args: z.object({ ...argsBase, request: OwnerAppPublicationRequest }).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("ownerAppResponses"), args: z.object({ ...argsBase, request: OwnerAppResponsesRequest }).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("groups"), args: groupsArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("link"), args: linkArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("groupCreate"), args: groupCreateArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("threads"), args: threadsArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("watch"), args: watchArgsSchema }).strict(),
@@ -620,6 +651,7 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("show"), args: showArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("post"), args: postArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("reply"), args: replyArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("nothingToReport"), args: nothingToReportArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("chatRetry"), args: chatRetryArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("react"), args: reactArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("grep"), args: grepArgsSchema }).strict(),
@@ -673,6 +705,8 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("sharedFilesHeld"), args: z.object(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("syncFailure"), args: z.object(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("saveKeptCopy"), args: saveKeptCopyArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("restoreProtectedCopy"), args: restoreProtectedCopyArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("discardProtectedCopy"), args: discardProtectedCopyArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("retainedCopies"), args: retainedCopiesArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("deleteRetainedCopies"), args: deleteRetainedCopiesArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("liveKeptEdits"), args: liveKeptEditsArgsSchema }).strict(),
@@ -681,6 +715,8 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("stopAgain"), args: stopAgainArgsSchema }).strict(),
   z.object({...requestBase, verb: z.literal("heldNoteChange"), args: heldNoteChangeArgsSchema}).strict(),
   z.object({ ...requestBase, verb: z.literal("liveDocuments"), args: liveDocumentsArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("liveStop"), args: liveStopArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("liveResume"), args: liveResumeArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentEdit"), args: documentEditArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentCreate"), args: documentCreateArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("fileChatStart"), args: fileChatStartArgsSchema }).strict(),
@@ -717,6 +753,7 @@ export const APP_RESPONSE_CAPABILITIES = {
 
 export const CLI_CAPABILITIES = {
   stopSync: ["workspace.sync.stop"],
+  link: ["work.reference.make"],
   chatLinks: ["chat.read"],
   chatFileMentions: ["chat.read"],
   linksEdges: ["links.edges"],
@@ -739,6 +776,7 @@ export const CLI_CAPABILITIES = {
   show: ["chat.show"],
   post: ["chat.post"],
   reply: ["chat.reply"],
+  nothingToReport: ["chat.reply"],
   chatRetry: ["agent.run.retry"],
   react: ["chat.react"],
   grep: ["chat.search"],
@@ -772,6 +810,8 @@ export const CLI_CAPABILITIES = {
   sharedFilesHeld: ["workspace.status"],
   syncFailure: ["workspace.status"],
   saveKeptCopy: ["file.kept.save"],
+  restoreProtectedCopy: ["file.protected.restore"],
+  discardProtectedCopy: ["file.protected.discard"],
   retainedCopies: ["file.retained.list"],
   deleteRetainedCopies: ["file.retained.delete"],
   liveKeptEdits: ["workspace.status"],
@@ -780,6 +820,8 @@ export const CLI_CAPABILITIES = {
   stopAgain: ["share.live.document.stop"],
   heldNoteChange: ["document.held.change"],
   liveDocuments: ["share.live.documents.list"],
+  liveStop: ["share.live.document.stop"],
+  liveResume: ["share.live.document.resume"],
   documentEdit: ["document.edit"],
   documentCreate: ["document.create"],
   fileChatStart: ["file.chat.start"],
@@ -1562,6 +1604,9 @@ const keptCopiesResultSchema = z.discriminatedUnion("ok", [
   z.object({
     ok: z.literal(true),
     outsideWriteCopies: z.array(z.tuple([z.string(), z.string(), z.string()])).optional(),
+    // A protected file's change a sync replaced: [path, id, keptAtMs]. The
+    // text stays on this computer; no answer carries it.
+    protectedCopies: z.array(z.tuple([z.string(), z.string(), z.number().int().nonnegative()])).optional(),
     keptCopies: z.array(z.object({
       id: z.number().int(),
       path: z.string().min(1),
@@ -1578,6 +1623,14 @@ const saveKeptCopyResultSchema = z.union([
   z.object({ ok: z.literal(true), status: z.literal("saved"), path: z.string().min(1) }).strict(),
   z.object({ ok: z.literal(true), status: z.literal("gone") }).strict(),
   z.object({ ok: z.literal(true), status: z.literal("no-valid-name") }).strict(),
+  rawFailureSchema,
+]);
+const restoreProtectedCopyResultSchema = z.union([
+  z.object({ ok: z.literal(true), status: z.literal("restored"), path: z.string().min(1) }).strict(),
+  rawFailureSchema,
+]);
+const discardProtectedCopyResultSchema = z.union([
+  z.object({ ok: z.literal(true), status: z.literal("discarded"), path: z.string().min(1) }).strict(),
   rawFailureSchema,
 ]);
 
@@ -1669,6 +1722,16 @@ const stopAgainResultSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(true), path: z.string().min(1), keptEdits: z.enum(["none", "recovered", "kept"]) }).strict(),
   rawFailureSchema,
 ]);
+// `already` when the server says the change was already made: live editing was
+// already stopped, or the document already live. Then nothing records who asked.
+const liveStopResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), path: z.string().min(1), keptEdits: z.enum(["none", "recovered", "kept"]), already: z.literal(true).optional() }).strict(),
+  rawFailureSchema,
+]);
+const liveResumeResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), path: z.string().min(1), already: z.literal(true).optional() }).strict(),
+  rawFailureSchema,
+]);
 
 // The Live documents dialog's rows. status is the server's; reason says why a
 // document is not live; canResume says whether Resume can start it again.
@@ -1679,7 +1742,7 @@ const liveDocumentsResultSchema = z.discriminatedUnion("ok", [
     ok: z.literal(true),
     documents: z.array(z.object({
       path: z.string().min(1),
-      objectId: z.string().min(1).max(512),
+      objectId: liveDocumentObjectIdSchema,
       status: z.enum(["ready", "preparing", "paused", "unavailable", "retired"]),
       reason: liveDocumentReasonSchema.optional(),
       canResume: z.boolean(),
@@ -1941,6 +2004,13 @@ export const cliResultSchemas = {
   ]),
   chatLinks: ChatLinksPage,
   chatFileMentions: ChatFileMentionsPage,
+  // `link` goes in a message body as it is, and shows as a chip that opens
+  // what it names for anyone who can see it.
+  link: z.object({
+    reference: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+    link: z.string().regex(/^@\[work:[A-Za-z0-9_-]{43}\]$/),
+    kind: z.enum(["chat", "thread", "message", "file", "collection"]),
+  }).strict(),
   linksEdges: LinksEdgesResult,
   linksIn: LinksInResult,
   linksResolve: LinksResolveResult,
@@ -1978,6 +2048,7 @@ export const cliResultSchemas = {
   show: showResultSchema,
   post: postResultSchema,
   reply: replyResultSchema,
+  nothingToReport: z.object({ threadId: z.string().min(1), nothingToReport: z.literal(true) }).strict(),
   chatRetry: chatRetryResultSchema,
   react: reactResultSchema,
   grep: grepResultSchema,
@@ -2034,6 +2105,8 @@ export const cliResultSchemas = {
     rawFailureSchema,
   ]),
   saveKeptCopy: saveKeptCopyResultSchema,
+  restoreProtectedCopy: restoreProtectedCopyResultSchema,
+  discardProtectedCopy: discardProtectedCopyResultSchema,
   retainedCopies: retainedCopiesResultSchema,
   deleteRetainedCopies: deleteRetainedCopiesResultSchema,
   liveKeptEdits: liveKeptEditsResultSchema,
@@ -2042,6 +2115,8 @@ export const cliResultSchemas = {
   stopAgain: stopAgainResultSchema,
   heldNoteChange: heldNoteChangeResultSchema,
   liveDocuments: liveDocumentsResultSchema,
+  liveStop: liveStopResultSchema,
+  liveResume: liveResumeResultSchema,
   documentEdit: documentEditResultSchema,
   documentCreate: documentCreateResultSchema,
   fileChatStart: fileChatStartResultSchema,

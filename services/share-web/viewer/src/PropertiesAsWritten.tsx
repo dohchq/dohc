@@ -35,15 +35,20 @@ export function useFrontmatterAsWritten(doc: Y.Doc): string {
 
 // The viewer has no property form, so the block shows exactly as written:
 // every comment, anchor, and key an agent reading the file receives.
-export function PropertiesAsWritten({ block }: { block: string }) {
+// The share link page keeps it closed until asked for (`collapsed`), so the page starts with its text.
+export function PropertiesAsWritten({ block, collapsed = false }: { block: string; collapsed?: boolean }) {
   const text = block.replace(/\r\n/g, "\n").replace(/\n+$/, "");
   if (!text) return null;
+  const written = (
+    <pre>
+      <code>{text}</code>
+    </pre>
+  );
   return (
-    <section className="markdown" aria-label="Properties">
-      <p className="section-label">Properties</p>
-      <pre>
-        <code>{text}</code>
-      </pre>
+    <section className="markdown properties" aria-label="Properties">
+      {collapsed
+        ? <details><summary>Properties</summary>{written}</details>
+        : <><p className="section-label">Properties</p>{written}</>}
     </section>
   );
 }

@@ -227,6 +227,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "agent_run_records",
     "run_message_links",
     "chat_dispatch_pause",
+    "chat_stage_receipts",
     // R12 search tables. The two FTS5 virtual tables show up in sqlite_schema
     // with type='table', so the same presence probe applies. Their internal
     // FTS5 shadow tables are not listed.
@@ -768,7 +769,6 @@ mod tests {
         }
     }
 
-    use super::REQUIRED_TABLES;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -851,60 +851,10 @@ mod tests {
     }
 
     #[test]
-    fn current_schema_rejects_each_missing_live_application_table() {
-        for table in [
-            "markdown_write_obligations",
-            "markdown_write_obligation_notice_dismissals",
-            "live_audit_held_records",
-            "live_audit_held_blobs",
-            "live_audit_held_exports",
-            "live_audit_base_publications",
-            "live_audit_bases",
-            "live_audit_base_conflicts",
-            "live_accepted_updates",
-            "live_accepted_checkpoints",
-            "live_accepted_reader_history",
-            "live_restore_fences",
-            "live_restore_cancellations",
-            "live_owner_adoptions",
-            "live_owner_activations",
-            "live_owner_retirements",
-            "released_tail_generations",
-            "released_hold_revisions",
-            "live_device_bootstraps",
-            "live_device_application_bindings",
-            "live_device_update_applications",
-            "live_device_application_first_seen",
-            "live_device_settlements",
-        ] {
-            assert!(REQUIRED_TABLES.contains(&table));
-            let directory =
-                dohc_test_scratch::ScratchDir::new_named("live-application-schema").unwrap();
-            let path = directory.path().join("store.sqlite");
-            drop(crate::EngineStore::open(&path, 0).unwrap());
-            let connection = rusqlite::Connection::open(&path).unwrap();
-            connection
-                .execute_batch(&format!("DROP TABLE {table}"))
-                .unwrap();
-            drop(connection);
-            assert!(
-                matches!(
-                    crate::EngineStore::open(&path, 0),
-                    Err(crate::StorageError::StateCorrupt { .. })
-                ),
-                "missing {table}"
-            );
-        }
-    }
-
-    #[test]
     fn current_schema_rejects_each_missing_added_column() {
+        let image = closed_schema_image();
         for (table, column) in super::REQUIRED_COLUMNS {
-            let directory =
-                dohc_test_scratch::ScratchDir::new_named("added-column-schema").unwrap();
-            let path = directory.path().join("store.sqlite");
-            drop(crate::EngineStore::open(&path, 0).unwrap());
-            let connection = rusqlite::Connection::open(&path).unwrap();
+            let (_directory, path, connection) = copied_schema_connection(&image);
             connection
                 .execute_batch(&format!("ALTER TABLE {table} DROP COLUMN {column}"))
                 .unwrap();
@@ -920,63 +870,10 @@ mod tests {
     }
 
     #[test]
-    fn current_schema_rejects_missing_owner_outbox_tables() {
-        for table in [
-            "owner_ydoc_outboxes",
-            "owner_ydoc_outbox_entries",
-            "owner_ydoc_outbox_refusals",
-            "ydoc_owner_base_sources",
-            "ydoc_owner_activation_sources",
-        ] {
-            let directory =
-                dohc_test_scratch::ScratchDir::new_named("owner-outbox-schema").unwrap();
-            let path = directory.path().join("store.sqlite");
-            drop(crate::EngineStore::open(&path, 0).unwrap());
-            let connection = rusqlite::Connection::open(&path).unwrap();
-            connection
-                .execute_batch(&format!("DROP TABLE {table}"))
-                .unwrap();
-            drop(connection);
-            assert!(
-                matches!(
-                    crate::EngineStore::open(&path, 0),
-                    Err(crate::StorageError::StateCorrupt { .. })
-                ),
-                "open must reject a store missing {table}"
-            );
-        }
-    }
-
-    #[test]
-    fn current_schema_rejects_missing_work_reference_tables() {
-        for table in ["work_references", "work_reference_outbox"] {
-            let directory =
-                dohc_test_scratch::ScratchDir::new_named("work-reference-schema").unwrap();
-            let path = directory.path().join("store.sqlite");
-            drop(crate::EngineStore::open(&path, 0).unwrap());
-            let connection = rusqlite::Connection::open(&path).unwrap();
-            connection
-                .execute_batch(&format!("DROP TABLE {table}"))
-                .unwrap();
-            drop(connection);
-            assert!(
-                matches!(
-                    crate::EngineStore::open(&path, 0),
-                    Err(crate::StorageError::StateCorrupt { .. })
-                ),
-                "open must reject a store missing {table}"
-            );
-        }
-    }
-
-    #[test]
     fn current_schema_rejects_each_missing_released_tail_trigger() {
+        let image = closed_schema_image();
         for trigger in super::RELEASED_TAIL_TRIGGERS {
-            let directory =
-                dohc_test_scratch::ScratchDir::new_named("released-tail-schema").unwrap();
-            let path = directory.path().join("store.sqlite");
-            drop(crate::EngineStore::open(&path, 0).unwrap());
-            let connection = rusqlite::Connection::open(&path).unwrap();
+            let (_directory, path, connection) = copied_schema_connection(&image);
             connection
                 .execute_batch(&format!("DROP TRIGGER {trigger}"))
                 .unwrap();
@@ -987,37 +884,6 @@ mod tests {
                     Err(crate::StorageError::StateCorrupt { .. })
                 ),
                 "open must reject a store missing {trigger}"
-            );
-        }
-    }
-
-    #[test]
-    fn current_schema_requires_pending_conflict_bundle_tables() {
-        for table in [
-            "replication_pending_conflict_bundles",
-            "replication_pending_conflict_ops",
-            "replication_pending_conflict_moments",
-            "replication_pending_conflict_text_blobs",
-            "replication_pending_conflict_binary_blobs",
-        ] {
-            assert!(
-                REQUIRED_TABLES.contains(&table),
-                "open must reject a store missing {table}"
-            );
-        }
-    }
-
-    #[test]
-    fn current_schema_requires_ydoc_arbitration_tables() {
-        for table in [
-            "ydoc_base_relay_candidates",
-            "ydoc_recovery_decisions",
-            "ydoc_drain_reports",
-            "released_hold_copy_decisions",
-        ] {
-            assert!(
-                REQUIRED_TABLES.contains(&table),
-                "open must reject a store missing {table}"
             );
         }
     }
@@ -1049,7 +915,53 @@ mod tests {
     #[test]
     fn v2_validation_rejects_each_missing_required_table() {
         let image = closed_schema_image();
-        for table in REQUIRED_TABLES {
+        // Keep these persistence boundaries independent of the validator's list.
+        let tables: std::collections::BTreeSet<_> = super::REQUIRED_TABLES
+            .iter()
+            .copied()
+            .chain([
+                "markdown_write_obligations",
+                "markdown_write_obligation_notice_dismissals",
+                "live_audit_held_records",
+                "live_audit_held_blobs",
+                "live_audit_held_exports",
+                "live_audit_base_publications",
+                "live_audit_bases",
+                "live_audit_base_conflicts",
+                "live_accepted_updates",
+                "live_accepted_checkpoints",
+                "live_accepted_reader_history",
+                "live_restore_fences",
+                "live_restore_cancellations",
+                "live_owner_adoptions",
+                "live_owner_activations",
+                "live_owner_retirements",
+                "released_tail_generations",
+                "released_hold_revisions",
+                "live_device_bootstraps",
+                "live_device_application_bindings",
+                "live_device_update_applications",
+                "live_device_application_first_seen",
+                "live_device_settlements",
+                "owner_ydoc_outboxes",
+                "owner_ydoc_outbox_entries",
+                "owner_ydoc_outbox_refusals",
+                "ydoc_owner_base_sources",
+                "ydoc_owner_activation_sources",
+                "work_references",
+                "work_reference_outbox",
+                "replication_pending_conflict_bundles",
+                "replication_pending_conflict_ops",
+                "replication_pending_conflict_moments",
+                "replication_pending_conflict_text_blobs",
+                "replication_pending_conflict_binary_blobs",
+                "ydoc_base_relay_candidates",
+                "ydoc_recovery_decisions",
+                "ydoc_drain_reports",
+                "released_hold_copy_decisions",
+            ])
+            .collect();
+        for table in tables {
             let (_directory, _path, conn) = copied_schema_connection(&image);
             super::validate_v2(&conn).unwrap();
             conn.execute_batch(&format!("DROP TABLE \"{table}\""))

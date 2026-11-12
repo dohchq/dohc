@@ -20,7 +20,7 @@ function fixture(kind: "bootstrap" | "owner") {
   const storage = {createLiveCommittedDeliveryStore: vi.fn(() => store)};
   const connection = {client: {}, workspace: "native-workspace", deadlineMs: 1_000, nextRequestId: () => 1,
     host: {mode: "device" as const, hostId: "host", hostEpoch: 1, instanceId: "instance", connectionId: "connection"},
-    restore: {confirm, prepare}, bounds: {maxBytes: 10_000, maxEvents: 100}, ownerAdmission: {shares: new Map()}};
+    restore: {confirm, prepare}, bounds: {maxBytes: 10_000, maxEvents: 100}, ownerAdmission: {workspaceIds: new Set()}};
   const consumer = kind === "bootstrap"
     ? new LiveCommittedDelivery(storage as unknown as ConstructorParameters<typeof LiveCommittedDelivery>[0],
       {} as ConstructorParameters<typeof LiveCommittedDelivery>[1],

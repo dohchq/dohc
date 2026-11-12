@@ -42,7 +42,7 @@ import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { arch, platform, release } from "node:os";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { verifyNativeTarget } from "./native-target.mjs";
 import {
   acquireBuildSlot,
@@ -58,11 +58,14 @@ import {
 import { SCRATCH_SENTINEL, inspectScratchRun, testScratchParent } from "./scratch-leak-report.mjs";
 import { clippy, fmtCheck, nextest } from "./gate-commands.mjs";
 import { readGit } from "./git-read.mjs";
-import { readerTestNode } from "./reader-test-node.mjs";
+import { readerTestNode, stagesReaderNode } from "./reader-test-node.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "../..");
 const preparedRuntime = process.argv.includes("--prepared-runtime");
+const policyOnly = process.argv.includes("--policy-only");
+const resultIndex = process.argv.indexOf("--result");
+const resultPath = resultIndex < 0 ? null : resolve(process.argv[resultIndex + 1]);
 
 // The machine's build budget. On the shared dev box the gate refuses to
 // start under the free-space floor, takes one of the four build slots before
@@ -137,11 +140,11 @@ process.env.DOHC_TEST_SCRATCH_ROOT = scratchRunRoot;
 // row never reached the tree the tests used, whatever the entry count says.
 mkdirSync(scratchRunRoot, { recursive: true });
 writeFileSync(join(scratchRunRoot, SCRATCH_SENTINEL), scratchRunId);
+const storeImage = join(scratchRunRoot, "empty.db");
+if (!policyOnly) process.env.DOHC_TEST_EMPTY_STORE_IMAGE = storeImage;
 // The Markdown reader refuses a Node under a linked or shared-writable
-// directory, such as Homebrew's Cellar. On macOS the test step first stages the
-// app compiler's pinned Node, and the reader's tests run it.
-const stagesReaderNode = platform() === "darwin";
-if (stagesReaderNode) process.env.DOHC_READER_TEST_NODE = readerTestNode();
+// directory. Desktop-pinned POSIX targets use a private copy of the compiler's Node.
+if (stagesReaderNode()) process.env.DOHC_READER_TEST_NODE = readerTestNode();
 
 function run(cmd) {
   // shell:true so `cargo`/`cargo.exe` resolve identically under PowerShell,
@@ -184,13 +187,17 @@ const required = [
   // lock rewrites the file and the tree-provenance row fails — correctly, but
   // the reader gets a provenance refusal where a lockfile error was the fact.
   { name: "clippy -D warnings", cmd: `cargo ${clippy.join(" ")}` },
+  {
+    name: "test fixtures",
+    cmd: 'cargo nextest run --locked --workspace --run-ignored only --no-tests=fail -E "binary_id(=dohc-engine-testkit::empty_store_image) & test(=prepare_empty_store_image)"',
+  },
   // nextest schedules the workspace's ~73 test binaries in parallel where
   // `cargo test` runs them one at a time — measured, that was ~90% of the
   // gate's wall clock. It runs no doctests by design; the `doctests` row
   // below keeps them.
   {
     name: "test --workspace",
-    cmd: `${stagesReaderNode ? "node tools/rust-engine-program/reader-test-node.mjs && " : ""}cargo ${nextest.join(" ")} --no-fail-fast`,
+    cmd: `${stagesReaderNode() ? "node tools/rust-engine-program/reader-test-node.mjs && " : ""}cargo ${nextest.join(" ")} --no-fail-fast`,
   },
   // The reader regressions are ignored above because they need a real
   // reader. This builds one and runs exactly them, over the same build.
@@ -276,7 +283,8 @@ readTreeAfter("native target");
 
 // An unverified host makes every later result unattributable, so nothing else
 // runs — and the expensive steps are the ones worth skipping.
-for (const step of native.ok ? required : []) {
+const archivedSteps = new Set(["test fixtures", "test --workspace", "reader tests"]);
+for (const step of native.ok ? required.filter(step => !policyOnly || !archivedSteps.has(step.name)) : []) {
   console.log(`\n--- ${step.name} ---`);
   const r = run(step.cmd);
   // Read as soon as the command returns, before anything else can touch the
@@ -329,6 +337,7 @@ for (const step of native.ok ? optional : []) {
 }
 
 console.log(`\n--- scratch leak ---`);
+rmSync(storeImage, { force: true });
 try {
   const scratch = await inspectScratchRun(scratchRunRoot);
   if (scratch.status === "FAIL") failed = true;
@@ -395,9 +404,14 @@ for (const r of results) {
 }
 
 const verdict = failed ? "FAIL" : "PASS";
+if (resultPath) {
+  mkdirSync(dirname(resultPath), { recursive: true });
+  writeFileSync(resultPath, JSON.stringify({ version: 1, scope: "rust", part: policyOnly ? "policy" : "gate",
+    commit: readings[0].state.head, verdict, steps: results, provenance }, null, 2) + "\n");
+}
 console.log(`\nEVIDENCE (paste into the pull request):`);
 console.log(
-  `- ${stamp} | run-rust-checks | ${platform()}/${arch()} (rust cfg ${native.ok ? native.cfg : "UNVERIFIED"}, ${capsField}, head ${treeStamp}) | ${verdict} | ${summary}`,
+  `- ${stamp} | ${policyOnly ? "run-rust-checks/policy" : "run-rust-checks"} | ${platform()}/${arch()} (rust cfg ${native.ok ? native.cfg : "UNVERIFIED"}, ${capsField}, head ${treeStamp}) | ${verdict} | ${summary}`,
 );
 
 process.exit(failed ? 1 : 0);

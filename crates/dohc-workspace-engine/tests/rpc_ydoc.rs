@@ -1,7 +1,7 @@
 //! RPC-C acceptance: daemon-owned Y.Doc sessions over the in-process
 //! transport, with real domain writes, materialization, capture, and leases.
 
-mod common;
+use crate::common;
 
 use base64::Engine as _;
 use common::*;
@@ -6170,9 +6170,26 @@ async fn close_preserves_divergent_deferred_lineages_for_review_before_returning
     assert_close_drains_deferred_winning_lineage("winner from A", true).await;
 }
 
-async fn assert_close_drains_deferred_winning_lineage(winner_seed: &str, expect_conflict: bool) {
-    const WORKSPACE_ID: &str = "ws-rpc-ydoc-close-winner";
-    const PATH: &str = "notes/shared.md";
+const CLOSE_WINNER_WORKSPACE_ID: &str = "ws-rpc-ydoc-close-winner";
+const CLOSE_WINNER_PATH: &str = "notes/shared.md";
+
+/// A settled note whose lineage another device replaced while its session
+/// was open: that device's base and an edit on it wait behind the session.
+struct QueuedWinner {
+    scratch: ScratchDir,
+    transport: InProcessTransport<EngineService>,
+    handle: WorkspaceHandle,
+    connection: rusqlite::Connection,
+    db_path: std::path::PathBuf,
+    session_id: String,
+    key: DocKey,
+    winner: Ydoc,
+    winner_claim: String,
+}
+
+async fn queue_winning_lineage_behind_session(winner_seed: &str) -> QueuedWinner {
+    const WORKSPACE_ID: &str = CLOSE_WINNER_WORKSPACE_ID;
+    const PATH: &str = CLOSE_WINNER_PATH;
 
     let scratch = ScratchDir::new().expect("scratch");
     let service = Arc::new(EngineService::new());
@@ -6316,7 +6333,33 @@ async fn assert_close_drains_deferred_winning_lineage(winner_seed: &str, expect_
         } if result.deferred && refusals.is_empty() && sharing_declined.is_empty()
     ));
     drop(store);
+    QueuedWinner {
+        scratch,
+        transport,
+        handle,
+        connection,
+        db_path,
+        session_id: session_id.to_owned(),
+        key,
+        winner,
+        winner_claim,
+    }
+}
 
+async fn assert_close_drains_deferred_winning_lineage(winner_seed: &str, expect_conflict: bool) {
+    const WORKSPACE_ID: &str = CLOSE_WINNER_WORKSPACE_ID;
+    const PATH: &str = CLOSE_WINNER_PATH;
+    let QueuedWinner {
+        scratch,
+        transport,
+        handle,
+        connection,
+        db_path,
+        session_id,
+        key,
+        winner,
+        winner_claim,
+    } = queue_winning_lineage_behind_session(winner_seed).await;
     call(
         &transport,
         &handle,
@@ -6382,6 +6425,192 @@ async fn assert_close_drains_deferred_winning_lineage(winner_seed: &str, expect_
         );
     }
     call(&transport, &handle, 7, "workspace.close", json!({})).await;
+}
+
+/// #2813. A close commits, then the write its drain owes the file conflicts
+/// with an edit made outside dohc. The close reports it, and so does the
+/// first retry, so the report reaches whoever is closing; it must not read
+/// as a clean close. That write never lands, so the next retry answers
+/// closed rather than trap the note. A session id the workspace never had
+/// still answers as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_close_that_conflicts_with_an_outside_edit_reports_it_then_closes() {
+    let QueuedWinner {
+        scratch,
+        transport,
+        handle,
+        connection,
+        session_id,
+        ..
+    } = queue_winning_lineage_behind_session("loser from B").await;
+    let file = scratch.path().join(CLOSE_WINNER_PATH);
+    std::fs::write(&file, "changed outside dohc").expect("outside edit");
+
+    let close = json!({ "sessionId": session_id, "settle": false });
+    let first = call_error(&transport, &handle, 5, "ydoc.close", close.clone()).await;
+    assert_eq!(
+        first.message, "file-write-incomplete",
+        "the close names an unwritten file, not a fault"
+    );
+    let retried = call_error(&transport, &handle, 6, "ydoc.close", close.clone()).await;
+    assert_eq!(
+        (retried.code, retried.message),
+        (first.code, first.message),
+        "the retry reports the same failure"
+    );
+    let closed = call(&transport, &handle, 7, "ydoc.close", close.clone()).await;
+    assert_eq!(closed, json!({ "closed": true }), "a later retry closes");
+    let gone = call_error(&transport, &handle, 8, "ydoc.close", close).await;
+    assert_eq!(
+        gone.message, "ydoc-session-not-found",
+        "the record is dropped"
+    );
+    let unknown = call_error(
+        &transport,
+        &handle,
+        9,
+        "ydoc.close",
+        json!({ "sessionId": "no-such-session", "settle": false }),
+    )
+    .await;
+    assert_eq!(unknown.code, ErrorCode::InvalidParams);
+    assert_eq!(unknown.message, "ydoc-session-not-found");
+
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("file"),
+        "changed outside dohc",
+        "the outside edit stays"
+    );
+    let conflicted: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM materialization_jobs WHERE status='conflict'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("conflicted writes");
+    assert!(conflicted > 0, "the note's write is kept as a conflict");
+    let notes = scratch
+        .path()
+        .join(CLOSE_WINNER_PATH)
+        .parent()
+        .unwrap()
+        .to_owned();
+    let copies: Vec<String> = std::fs::read_dir(&notes)
+        .expect("notes dir")
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .filter(|name| name.ends_with(".conflict"))
+        .collect();
+    assert_eq!(
+        copies.len(),
+        1,
+        "the note's text is kept beside the file: {copies:?}"
+    );
+    call(&transport, &handle, 10, "workspace.close", json!({})).await;
+}
+
+/// Retrying a close that couldn't write the note's file must not drain what
+/// waits behind a session that has since reopened the note: that queue is the
+/// new session's to drain.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_retried_close_leaves_a_reopened_notes_queue_to_its_session() {
+    let QueuedWinner {
+        scratch,
+        transport,
+        handle,
+        connection,
+        db_path,
+        session_id,
+        key,
+        winner,
+        winner_claim,
+    } = queue_winning_lineage_behind_session("loser from B").await;
+    std::fs::write(
+        scratch.path().join(CLOSE_WINNER_PATH),
+        "changed outside dohc",
+    )
+    .expect("outside edit");
+    let close = json!({ "sessionId": session_id, "settle": false });
+    call_error(&transport, &handle, 5, "ydoc.close", close.clone()).await;
+
+    let reopened = call(
+        &transport,
+        &handle,
+        6,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": CLOSE_WINNER_PATH, "contentKind": "plaintext" }),
+    )
+    .await;
+    let mut store = EngineStore::open(&db_path, 2).expect("open fixture store");
+    let delta = winner.plaintext_insert(
+        winner.plaintext_string().len() as u32,
+        " behind the reopened session",
+    );
+    let delta_sha = store.put_binary_blob(&delta).expect("delta blob");
+    let update = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
+        workspace_id: CLOSE_WINNER_WORKSPACE_ID.to_owned(),
+        origin_id: "winner-origin".to_owned(),
+        origin_seq: 2,
+        relay_seq: Some(12),
+        op_kind: "ydoc.update".to_owned(),
+        payload: json!({
+            "versionId": "main",
+            "objectId": key.object_id,
+            "path": CLOSE_WINNER_PATH,
+            "contentKind": "plaintext",
+            "updateBlobSha256": delta_sha,
+            "lineageClaimId": winner_claim,
+            "isBaseState": false,
+        }),
+        recorded_at_ms: 40,
+    };
+    let applied = apply_ydoc_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &update,
+        &NoFaults,
+        &AlwaysLive,
+    )
+    .expect("queue behind the reopened session");
+    assert!(matches!(
+        applied,
+        dohc_engine_sync::ApplyOutcome {
+            primary: dohc_engine_sync::ApplyDisposition::Applied(result),
+            ..
+        } if result.deferred
+    ));
+    drop(store);
+    let queued = || -> i64 {
+        connection
+            .query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |row| {
+                row.get(0)
+            })
+            .expect("deferred row count")
+    };
+    assert_eq!(queued(), 1);
+
+    call_error(&transport, &handle, 7, "ydoc.close", close).await;
+    assert_eq!(
+        queued(),
+        1,
+        "the retry leaves the reopened session's queue to that session"
+    );
+    call(
+        &transport,
+        &handle,
+        8,
+        "ydoc.evict",
+        json!({ "sessionId": reopened["sessionId"] }),
+    )
+    .await;
+    call(&transport, &handle, 9, "workspace.close", json!({})).await;
 }
 
 fn richdoc_update(doc: &Ydoc, paragraph: &str) -> String {

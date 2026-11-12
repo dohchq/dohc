@@ -14,6 +14,7 @@ import { PersistentRuntimeError } from "@dohc/app-backend-runtime/persistent";
 import { DatasetReopenWaitError } from "@dohc/app-backend-runtime/supervisor";
 import { DatasetHostError, resolveCompatibleDatasetRevision } from "@dohc/app-backend-runtime/dataset-host";
 import { DaemonRefusalError, type DaemonErrorCode } from "@dohc/workspace-engine-client";
+import { EngineWorkspaceFolderTimeoutError } from "@dohc/workspace-engine-client/daemon";
 import { VersionedTextStoreError } from "@dohc/workspace-contracts/engine";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
@@ -335,6 +336,12 @@ describe("error words", () => {
     expect(PRIVACY_DENIED_WORDS).toBe(
       "macOS blocked dohc from this folder. Allow dohc in System Settings › Privacy & Security › Files & Folders.",
     );
+  });
+
+  it("says a workspace's folder did not answer, after the caller's sentence, without the folder's path", () => {
+    const stuck = acrossIpc(new EngineWorkspaceFolderTimeoutError("workspace-1", 2_000));
+    expect(withErrorWords("dohc could not open this workspace.", stuck))
+      .toBe("dohc could not open this workspace. dohc could not reach this workspace's folder.");
   });
 
   it("says why dohc can't keep a file private on a volume that shares new files, after the caller's sentence", () => {

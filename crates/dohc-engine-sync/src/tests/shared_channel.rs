@@ -1021,7 +1021,7 @@ fn a_shared_link_thread_and_post_apply_only_from_the_link_origin() {
 }
 
 #[test]
-fn shared_channel_mappings_admit_only_messages_in_the_receiving_channel() {
+fn shared_channel_mappings_admit_only_chat_in_the_receiving_channel() {
     use dohc_engine_domain::work_references::{WorkReferenceResolution, resolve_work_reference};
     let (_scratch, path, mut engine) = open_store();
     let response = |wire: &str, channel: &str, thread: &str, message: &str, mappings| {
@@ -1064,6 +1064,25 @@ fn shared_channel_mappings_admit_only_messages_in_the_receiving_channel() {
         .unwrap();
     let mappings = [("A","m-allowed","t-allowed"),("B","m-other","t-other")].map(|(r,m,t)|
         serde_json::from_value(json!({"reference":r.repeat(43),"createdAtMs":1,"target":{"kind":"message","messageId":m,"threadId":t,"channelId":"owner-coordinate"}})).unwrap()).to_vec();
+    // The shared chat itself, and a thread inside and outside it.
+    let mappings = [
+        mappings,
+        [
+            json!({"kind":"chat","channelId":"owner-coordinate"}),
+            json!({"kind":"thread","threadId":"t-allowed","channelId":"owner-coordinate"}),
+            json!({"kind":"thread","threadId":"t-other","channelId":"owner-coordinate"}),
+        ]
+        .into_iter()
+        .zip(["C", "D", "E"])
+        .map(|(target, r)| {
+            serde_json::from_value(
+                json!({"reference":r.repeat(43),"createdAtMs":1,"target":target}),
+            )
+            .unwrap()
+        })
+        .collect(),
+    ]
+    .concat();
     let mut first_page = response(
         "wire-allowed",
         "c-allowed",
@@ -1135,6 +1154,23 @@ fn shared_channel_mappings_admit_only_messages_in_the_receiving_channel() {
                 serde_json::from_str::<serde_json::Value>(&target).unwrap()["channelId"],
                 "c-allowed"
             );
+            for reference in ["C", "D"] {
+                let target: String = conn.query_row(
+                    "SELECT target_json FROM learned_work_references WHERE reference=?1",
+                    [reference.repeat(43)],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&target).unwrap()["channelId"],
+                    "c-allowed"
+                );
+            }
+            let refused: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM learned_work_references WHERE reference=?1)",
+                ["E".repeat(43)],
+                |row| row.get(0),
+            )?;
+            assert!(!refused);
             Ok::<_, rusqlite::Error>(())
         })
         .unwrap();

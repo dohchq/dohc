@@ -4,7 +4,7 @@ use super::journal::{
     journal_secret_moment_outbound_in_tx, journal_secret_put_outbound_in_tx,
 };
 use crate::error::RuntimeError;
-use dohc_engine_crypto::SecretDataKey;
+use dohc_engine_crypto::{SecretDataKey, SecretPlaintext};
 use dohc_engine_domain::{
     InbandSecret, SecretComparePage, SecretDelete, SecretFileStat, SecretFileStore,
     SecretMomentPage, SecretMomentRecord, SecretRestoreResult, SecretWrite, SecretWriteResult,
@@ -51,6 +51,22 @@ impl ActorHandle {
         self.run(move |store, _| {
             SecretFileStore::new(store, &key)
                 .materialize_secret_file_inband(&workspace_id, &version_id, &path, cap)
+                .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
+    /// Whether protected History for `path`, in any version, holds `text`.
+    pub async fn secret_text_recorded(
+        &self,
+        workspace_id: String,
+        path: String,
+        text: SecretPlaintext,
+        key: SecretDataKey,
+    ) -> Result<bool, RuntimeError> {
+        self.run(move |store, _| {
+            SecretFileStore::new(store, &key)
+                .secret_text_recorded(&workspace_id, &path, text.as_bytes())
                 .map_err(RuntimeError::from)
         })
         .await

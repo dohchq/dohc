@@ -370,7 +370,7 @@ function renderLinkAgents(page: CliResultByVerb["shareAgents"]): string {
 const LIVE_REASON_WORDS = {
   "document-unavailable": "file moved or removed", "workspace-changed": "workspace changed", "session-host-refused": "stopped by the server",
   "session-host-diverged": "server copy doesn't match", "live-document-without-lineage": "not started",
-  "live-edit-unadmitted": "server copy is missing an edit", "conflict-parent-withheld": "can't resume",
+  "live-edit-unadmitted": "server copy is missing an edit", "conflict-parent-withheld": "can't resume", "live-history-over-budget": "history too long",
 } as const;
 const LIVE_STATUS_WORDS = { ready: "live", preparing: "preparing", paused: "paused", unavailable: "unavailable", retired: "stopped" } as const;
 
@@ -474,12 +474,26 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       return `Trying again for ${lineSafe((result as Extract<CliResultByVerb["retryKeptEdits"], { ok: true }>).path)}`;
     case "liveDocuments":
       return renderLiveDocuments(result as Extract<CliResultByVerb["liveDocuments"], { ok: true }>);
+    case "liveResume": {
+      const resumed = result as Extract<CliResultByVerb["liveResume"], { ok: true }>;
+      return resumed.already ? `${lineSafe(resumed.path)} was already live.` : `Resuming live editing for ${lineSafe(resumed.path)}`;
+    }
+    case "liveStop": {
+      const stopped = result as Extract<CliResultByVerb["liveStop"], { ok: true }>;
+      const path = lineSafe(stopped.path);
+      if (stopped.already) return `Live editing for ${path} was already stopped.${stopped.keptEdits === "kept" ? " dohc still keeps edits the server refused. Run kept-edits to check them." : ""}`;
+      return stopped.keptEdits === "recovered" ? `Stopped live editing for ${path}. dohc wrote your kept edits into the file.`
+        : stopped.keptEdits === "kept" ? `Stopped live editing for ${path}. dohc still keeps edits the server refused. Run kept-edits to check them.`
+        : `Stopped live editing for ${path}`;
+    }
     case "stopAgain": {
       const stopped = result as Extract<CliResultByVerb["stopAgain"], { ok: true }>;
       return stopped.keptEdits === "recovered" ? `Stopped live editing for ${lineSafe(stopped.path)}. dohc wrote your kept edits into the file.`
         : stopped.keptEdits === "kept" ? `dohc still keeps the edits for ${lineSafe(stopped.path)}. Run kept-edits to check them.`
         : `Stopped live editing for ${lineSafe(stopped.path)}`;
     }
+    case "link":
+      return (result as CliResultByVerb["link"]).link;
     case "groups":
       return renderGroups(result as CliResultByVerb["groups"]);
     case "groupCreate":

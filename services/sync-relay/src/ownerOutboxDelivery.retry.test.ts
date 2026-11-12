@@ -93,7 +93,7 @@ function fixture(edit: (doc: Y.Doc) => void = doc => doc.getMap("frontmatter").s
   const crash = () => {refusals = new OwnerKnownRefusals();};
   // Each drain builds its delivery objects and engine connection afresh, as a new relay pass does.
   const run = (admit = validate) => drainOwnerOutbox({storage: live.storage,client: engine() as unknown as EngineClient,
-    admission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([[document.workspaceId,"share"]]),maxEntriesPerDrain: 1,maxBytesPerDrain: 10_000,refusals,validate: admit},
+    admission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), workspaceIds: new Set([document.workspaceId]),maxEntriesPerDrain: 1,maxBytesPerDrain: 10_000,refusals,validate: admit},
     workspace: "handle",host,registrationId: 1,binding,adoption: {adoptionId: "adoption",sequence: 1,applied() {}},nextRequestId: () => ++requestId,deadlineMs: 1_000,
     assertCurrent() {},applyThrough});
   const restart = () => {
@@ -175,7 +175,7 @@ it("retries without acknowledging when SQLite is busy before the first journal w
 it("refuses an owner outbox entry validated before the document's last Edit share was deleted", async () => {
   const f = fixture(), entered = deferred(), release = deferred();
   f.relay.storage.claimWorkspaceIdentity({workspaceId: f.document.workspaceId, replicationEpoch: "epoch", streamIdentity: "stream"});
-  f.relay.storage.enrollServiceHostDocument({workspaceId: f.document.workspaceId, ownerUserId: "owner", shareId: "share",
+  f.relay.storage.ensureOwnedLiveDocument({intent: "share", workspaceId: f.document.workspaceId, ownerUserId: "owner", shareId: "share",
     path: f.binding.currentPath, nowMs: 10, guard() {}});
   f.validate.mockImplementationOnce(async input => {entered.resolve(); await release.promise; return validateJournal(input);});
   const first = f.run(), firstOutcome = Promise.allSettled([first]);

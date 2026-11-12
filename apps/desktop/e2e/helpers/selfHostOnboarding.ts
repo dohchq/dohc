@@ -18,11 +18,11 @@ import {
 } from "../../../../services/workspace-api/e2e/harness";
 import { mailLinks } from "../../../../services/workspace-api/e2e/smtpCapture";
 import { mintLocalhostCa, type LocalhostCa } from "../../../../services/share-web/src/testing/localhostCa";
-import { parseStoredShareSelectorJson } from "../../../../services/sync-relay/src/shareFilter";
 import { resolveEngineBinary } from "../../src/testing/engineBinary";
 import { realDaemonReaderConfig } from "../../src/testing/realDaemonWorkspaceSessions";
 import type { LaunchedDesktopApp } from "./desktopApp";
-import { readLiveAuditRecord, type LiveAuditRecord } from "./engineDb";
+import { momentTextsForPath, readLiveAuditRecord, type LiveAuditRecord } from "./engineDb";
+import { reserveRelayPort, type SyncRelayLinkBoundary } from "./syncRelay";
 
 const relayRoot = fileURLToPath(new URL("../../../../services/sync-relay/", import.meta.url));
 const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
@@ -32,10 +32,12 @@ const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof
  * live service with the native engine. `trustEnv` is the environment a desktop
  * needs to trust that CA: Node reads it, and the debug engine accepts it only
  * for an HTTPS loopback relay. `refuse` answers matching requests with 503
- * before they reach a service.
+ * before they reach a service. `linkBoundary` points the live stack's share
+ * links at a test share-web, which reaches the relay at `relayInnerUrl` as the
+ * self-host share-web does.
  */
 export async function startSelfHostOnboardingStack(directory: string, options: {
-  live?: boolean; signal: AbortSignal; refuse?: (method: string, path: string) => boolean;
+  live?: boolean; signal: AbortSignal; refuse?: (method: string, path: string) => boolean; linkBoundary?: SyncRelayLinkBoundary;
 }) {
   assert.ok(process.env.POSTGRES_URL, "Supply a disposable POSTGRES_URL.");
   assert.equal(process.env.DOHC_REQUIRE_POSTGRES, "1", "Require the real Postgres dependency.");
@@ -54,13 +56,16 @@ export async function startSelfHostOnboardingStack(directory: string, options: {
     // The account server applies the migrations whose tables the relay reads as it starts.
     account = await startAccountServer({ publicOrigin: proxy.origin, signal: options.signal });
     proxy.routeAuthTo(account.listenOrigin);
-    relay = await startAuthenticatedRelay(directory, proxy.origin, ca ? { ...trustEnv, ...selfHostLiveEnv(directory, proxy.origin) } : {});
+    const port = ca && options.linkBoundary ? await reserveRelayPort() : 0;
+    const link = ca && options.linkBoundary ? { ...options.linkBoundary, innerHost: `127.0.0.1:${port}` } : undefined;
+    relay = await startAuthenticatedRelay(directory, proxy.origin, ca ? { ...trustEnv, ...selfHostLiveEnv(directory, proxy.origin, link) } : {}, port);
     proxy.routeRelayTo(relay.url);
     return {
       account,
       ca,
       trustEnv,
       relayUrl: proxy.origin,
+      relayInnerUrl: relay.url,
       pause: () => proxy.pause(),
       resume: () => proxy.resume(),
       outageState: () => proxy.outageState(),
@@ -80,6 +85,9 @@ export async function startSelfHostOnboardingStack(directory: string, options: {
       hostedAgentEvidence: (workspaceId: string, path: string, agentId: string) =>
         hostedAgentEvidence(directory, workspaceId, path, agentId),
       ownerLiveBinding: (workspaceId: string, path: string) => ownerLiveBinding(directory, workspaceId, path),
+      // The texts the service host settled for one path, in every store it keeps.
+      liveHostTexts: (path: string) => liveHostTexts(directory, path),
+      liveHosting: (workspaceId: string, path: string) => liveHosting(directory, workspaceId, path),
       async close() {
         const results = await Promise.allSettled([proxy.close(), relay!.close(), account!.close()]);
         const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
@@ -416,16 +424,19 @@ function acceptedCursorBefore(directory: string, workspaceId: string, path: stri
   } finally { db.close(); }
 }
 
-/** The current binding of the fixture's retained owner enrollment, read in one relay snapshot. */
+/**
+ * The current binding of the fixture's retained owner enrollment, read in one relay snapshot:
+ * its activation's recorded binding at the live document's restore generation, as the relay
+ * gives it to the owner (`recordedLiveBinding`).
+ */
 function ownerLiveBinding(directory: string, workspaceId: string, path: string) {
   const db = new DatabaseSync(join(directory, "relay-data", "relay.sqlite"), { readOnly: true });
   try {
     const rows = db.prepare(
       `SELECT d.workspace_id, d.main_version_id, d.object_id, d.lineage_claim_id,
-         d.current_path, d.restore_fence_generation, s.selector_json, a.relay_database_namespace
+         d.current_path, d.restore_fence_generation, a.binding_json, a.relay_database_namespace
        FROM sync_relay_service_host_enrollments e
        JOIN sync_relay_workspaces w ON w.workspace_id=e.workspace_id
-       JOIN sync_relay_shares s ON s.share_id=e.share_id
        JOIN sync_relay_live_documents d
          ON d.workspace_id=e.workspace_id AND d.main_version_id='main'
          AND d.object_id=e.object_id AND d.current_path=e.path
@@ -435,9 +446,8 @@ function ownerLiveBinding(directory: string, workspaceId: string, path: string) 
        WHERE e.workspace_id=? AND e.path=? AND e.enabled=1 AND e.retired=0
          AND e.owner_user_id=w.owner_user_id
          AND e.replication_epoch=w.replication_epoch AND e.stream_identity=w.stream_identity
-         AND s.workspace_id=e.workspace_id AND s.granter_user_id=e.owner_user_id
-         AND a.owner_user_id=e.owner_user_id AND a.share_id=e.share_id
-         AND a.completion_json IS NOT NULL
+         AND a.owner_user_id=e.owner_user_id
+         AND a.retired_at_ms IS NULL AND a.completion_json IS NOT NULL
          AND d.lineage_state='current' AND d.admission_state='open'
          AND EXISTS (
            SELECT 1 FROM sync_relay_object_moments m
@@ -452,15 +462,14 @@ function ownerLiveBinding(directory: string, workspaceId: string, path: string) 
     assert.ok(rows.length <= 1, "The fixture has more than one current owner enrollment for its document.");
     const row = rows[0];
     if (!row) return null;
-    assert.equal(typeof row.selector_json, "string", "The owner share selector must be JSON text.");
-    const selector = parseStoredShareSelectorJson(row.selector_json as string);
-    assert.deepEqual(selector, { paths: [path], versionId: null }, "The fixture owner share selects only this main file.");
-    const binding = parseLiveObjectBinding({
-      workspaceId: row.workspace_id, mainVersionId: row.main_version_id,
-      objectId: row.object_id, lineageClaimId: row.lineage_claim_id,
-      currentPath: row.current_path, selectorPaths: selector!.paths,
-      restoreFenceGeneration: row.restore_fence_generation,
-    });
+    assert.equal(typeof row.binding_json, "string", "The owner activation's binding must be JSON text.");
+    const recorded = parseLiveObjectBinding(JSON.parse(row.binding_json as string));
+    assert.deepEqual(
+      [recorded.workspaceId, recorded.mainVersionId, recorded.objectId, recorded.lineageClaimId, recorded.currentPath],
+      [row.workspace_id, row.main_version_id, row.object_id, row.lineage_claim_id, row.current_path],
+      "The owner activation's binding names the live document.",
+    );
+    const binding = parseLiveObjectBinding({ ...recorded, restoreFenceGeneration: row.restore_fence_generation });
     const relayDatabaseNamespace = parseLiveUpdateIdentifier(row.relay_database_namespace, "relayDatabaseNamespace");
     return { binding, relayDatabaseNamespace };
   } finally { db.close(); }
@@ -559,6 +568,35 @@ function settlementEvidence(directory: string) {
   };
 }
 
+function liveHostTexts(directory: string, path: string): string[] {
+  const hostRoot = join(directory, "relay-deployment", "live-host");
+  return readdirSync(hostRoot, { withFileTypes: true }).filter((entry) => entry.isDirectory() && entry.name !== "automations")
+    .flatMap((entry) => momentTextsForPath(join(hostRoot, entry.name), path));
+}
+
+// The relay's enrollment of one path, and every activation of its document.
+// Flags and IDs only.
+function liveHosting(directory: string, workspaceId: string, path: string) {
+  const db = new DatabaseSync(join(directory, "relay-data", "relay.sqlite"), { readOnly: true });
+  try {
+    const enrollment = db.prepare(
+      "SELECT object_id, retired, host_drained_at_ms, owner_stop FROM sync_relay_service_host_enrollments WHERE workspace_id=? AND path=?",
+    ).get(workspaceId, path);
+    if (!enrollment) return null;
+    const activations = db.prepare(
+      `SELECT activation_id, predecessor_activation_id, retired_at_ms FROM sync_relay_service_activations
+       WHERE workspace_id=? AND main_version_id='main' AND object_id=? LIMIT 16`,
+    ).all(workspaceId, enrollment.object_id);
+    return {
+      retired: Number(enrollment.retired) === 1, drained: enrollment.host_drained_at_ms !== null,
+      ownerStop: enrollment.owner_stop === null ? null : String(enrollment.owner_stop),
+      activations: activations.map((row) => ({ activationId: String(row.activation_id),
+        predecessorActivationId: row.predecessor_activation_id === null ? null : String(row.predecessor_activation_id),
+        retired: row.retired_at_ms !== null })),
+    };
+  } finally { db.close(); }
+}
+
 // How far the server's live work on one document has gone: the relay's
 // accepted head, the last cursor the service host settled, the host's
 // operations not yet pushed, and each host origin's last operation in the
@@ -588,7 +626,7 @@ function livePublication(directory: string, workspaceId: string, path: string) {
 
 // The supported self-host profile: an initialized deployment whose service
 // host runs the native engine and replicates through the public HTTPS origin.
-function selfHostLiveEnv(directory: string, origin: string): NodeJS.ProcessEnv {
+function selfHostLiveEnv(directory: string, origin: string, link?: SyncRelayLinkBoundary & { innerHost: string }): NodeJS.ProcessEnv {
   const deployment = join(directory, "relay-deployment");
   execFileSync(process.execPath, ["--import", "tsx/esm", "src/relayDeploymentCommand.ts", "initialize",
     "--config", join(deployment, "deployment.json"), "--database", join(directory, "relay-data", "relay.sqlite"), "--continuity-directory", join(deployment, "continuity")],
@@ -606,15 +644,16 @@ function selfHostLiveEnv(directory: string, origin: string): NodeJS.ProcessEnv {
     DOHC_ENGINE_READER_CONFIG: realDaemonReaderConfig(),
     DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION: "1",
     DOHC_RELAY_PUBLIC_ORIGIN: origin,
-    DOHC_RELAY_SHARE_WEB_ORIGIN: origin,
-    DOHC_RELAY_SHARE_WEB_URL: origin,
-    DOHC_RELAY_NAMED_LIVE_HOSTS: new URL(origin).host,
-    DOHC_RELAY_LINK_KEY: randomBytes(32).toString("hex"),
-    DOHC_RELAY_EXCHANGE_KEY: randomBytes(32).toString("hex"),
+    DOHC_RELAY_SHARE_WEB_ORIGIN: link?.publicViewerOrigin ?? origin,
+    DOHC_RELAY_SHARE_WEB_URL: link?.publicViewerOrigin ?? origin,
+    // Like the self-host compose file, the relay's inner host serves share-web's live routes.
+    DOHC_RELAY_NAMED_LIVE_HOSTS: [new URL(origin).host, ...(link ? [link.innerHost] : [])].join(","),
+    DOHC_RELAY_LINK_KEY: link?.linkKey ?? randomBytes(32).toString("hex"),
+    DOHC_RELAY_EXCHANGE_KEY: link?.relayExchangeKey ?? randomBytes(32).toString("hex"),
   };
 }
 
-async function startAuthenticatedRelay(directory: string, authUrl: string, liveEnv: NodeJS.ProcessEnv) {
+async function startAuthenticatedRelay(directory: string, authUrl: string, liveEnv: NodeJS.ProcessEnv, port = 0) {
   const env = {
     ...process.env,
     NODE_ENV: "test",
@@ -630,7 +669,7 @@ async function startAuthenticatedRelay(directory: string, authUrl: string, liveE
     DOHC_PUBLIC_EDIT_RELEASE: undefined,
     DOHC_RELAY_APP_PUBLICATIONS: undefined,
     DOHC_RELAY_APP_COLLECTION_MAX_CREATES_PER_GRANT: undefined,
-    SYNC_RELAY_PORT: "0",
+    SYNC_RELAY_PORT: String(port),
     SYNC_RELAY_BIND: "127.0.0.1",
     SYNC_RELAY_DB_PATH: join(directory, "onboarding-relay.sqlite"),
     SYNC_RELAY_AUTH_BASE_URL: authUrl,

@@ -1,7 +1,7 @@
 //! `capture.hold` lets a caller change the disk and record the change under
 //! its own author before capture sees it, so History keeps one row per change.
 
-mod common;
+use crate::common;
 
 use common::*;
 use dohc_engine_protocol::{

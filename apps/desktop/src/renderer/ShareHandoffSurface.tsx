@@ -9,7 +9,9 @@ import { CloudLogin } from "./CloudLogin";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { OpenSharedView, opensForLiveEditing } from "./OpenSharedView";
 import type { ConnectionNoticeHost } from "./shell/connectionNotices";
+import { CopyButton } from "./ui/CopyButton";
 import { IconButton, PrimaryButton, SecondaryButton } from "./ui/controls";
+import { inputCount } from "./ui/inputCount";
 
 const REFUSED_COPY =
   "dohc could not open this share link. It may have expired or already been used. Go back to the share page in your browser and choose Open in dohc again.";
@@ -22,13 +24,27 @@ const MISSING_COPY =
 // A Group invitation or message request waits in Chats.
 const CHATS_COPY = "Find it in Chats, in a workspace of your own.";
 const NO_OWN_WORKSPACE_COPY = `${CHATS_COPY} Create one from Manage workspaces first.`;
+// Why Chats has not shown the invitation. With chats off there is nothing to
+// read again, so `copy` stands alone, without Try again.
+export type HandoffChatsOutcome =
+  | { shareId: string; outcome: "absent" | "failed" | "late" }
+  | { shareId: string; outcome: "off"; copy: string };
+// What Chats found when it could not show the invitation. `late`: Chats did
+// not answer in time.
+const CHATS_OUTCOME_COPY = {
+  absent: "This invitation isn't in this account's list in Chats. The person who shared it may have ended it.",
+  failed: "dohc could not read Chats to find this invitation. Check your connection.",
+  late: "dohc could not open this invitation in Chats yet.",
+} as const;
 
 type ReceivedShareState =
   | { kind: "idle" }
   | { kind: "loading"; shareId: string }
   | { kind: "missing"; shareId: string }
   | { kind: "failed"; shareId: string }
-  | { kind: "chats"; shareId: string }
+  // `inputs` counts input before the lookup, so a click elsewhere during it
+  // keeps Join from taking focus.
+  | { kind: "chats"; shareId: string; inputs: number }
   | { kind: "ready"; shareId: string; shareCode: string; liveEditing: boolean; share: RelayShareReceivedRow };
 
 function HandoffCard(props: {
@@ -62,6 +78,12 @@ export function ShareHandoffSurface(props: {
   onOpened: () => void;
   // Whether the person has a workspace of their own, not only shared views.
   ownWorkspace?: boolean;
+  // Shows Chats at a Group invitation or message request, where it waits
+  // with Join or Accept. Without it, the card says where to find it.
+  openInChats?: (invitation: { shareId: string; inputs: number }) => void;
+  // Why Chats has not shown it yet, and Try again, which reads Chats again.
+  chatsOutcome?: HandoffChatsOutcome;
+  onRetryChats?: () => void;
   mountInto?: {
     workspaceId: string;
     onMounted: (label: string, access: ShareAccess | null) => void;
@@ -88,6 +110,7 @@ export function ShareHandoffSurface(props: {
       };
     }
 
+    const inputs = inputCount();
     setReceivedShare({ kind: "loading", shareId });
     void bridge()
       .getRelayReceivedShare({ shareId })
@@ -97,7 +120,7 @@ export function ShareHandoffSurface(props: {
           !result.found
             ? { kind: "missing", shareId }
             : "chats" in result
-              ? { kind: "chats", shareId }
+              ? { kind: "chats", shareId, inputs }
               : { kind: "ready", shareId, shareCode: result.share.shareCode, share: result.share, liveEditing: opensForLiveEditing(result.share) },
         );
       })
@@ -110,6 +133,15 @@ export function ShareHandoffSurface(props: {
       lookupRequest.next();
     };
   }, [lookupAttempt, shareId]);
+
+  const chatsInvitation = receivedShare.kind === "chats" && receivedShare.shareId === shareId && props.openInChats !== undefined
+    ? receivedShare : null;
+  const opensInChats = chatsInvitation !== null;
+  const openInChats = useRef(props.openInChats);
+  openInChats.current = props.openInChats;
+  useEffect(() => {
+    if (chatsInvitation) openInChats.current?.({ shareId: chatsInvitation.shareId, inputs: chatsInvitation.inputs });
+  }, [chatsInvitation]);
 
   if (props.status.status === "idle") return null;
 
@@ -248,13 +280,34 @@ export function ShareHandoffSurface(props: {
 
   if (
     receivedShare.kind === "chats" &&
-    receivedShare.shareId === shareId
+    receivedShare.shareId === shareId &&
+    !opensInChats
   ) {
     return (
       <HandoffCard title="Open a share" onBack={props.onBack}>
         <p role="status" data-testid="handoff-opens-in-chats" className="m-0 text-xs leading-relaxed text-muted">
           {props.ownWorkspace ? CHATS_COPY : NO_OWN_WORKSPACE_COPY}
         </p>
+      </HandoffCard>
+    );
+  }
+
+  const chatsOutcome = opensInChats && props.chatsOutcome?.shareId === shareId ? props.chatsOutcome : null;
+  if (chatsOutcome !== null) {
+    const copy = chatsOutcome.outcome === "off" ? chatsOutcome.copy : CHATS_OUTCOME_COPY[chatsOutcome.outcome];
+    return (
+      <HandoffCard title="Open a share" onBack={props.onBack}>
+        <div className="flex items-start gap-2">
+          <p role="alert" data-testid={`handoff-chats-${chatsOutcome.outcome}`} className="m-0 min-w-0 flex-1 text-xs leading-relaxed text-danger">
+            {copy}
+          </p>
+          <CopyButton label="Copy" pinName iconOnly getText={() => copy} />
+        </div>
+        {chatsOutcome.outcome === "off" ? null : (
+          <SecondaryButton type="button" onClick={props.onRetryChats}>
+            Try again
+          </SecondaryButton>
+        )}
       </HandoffCard>
     );
   }

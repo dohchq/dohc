@@ -8,7 +8,7 @@ import { liveJournalHistoryNamespace, requireLiveJournalHistory } from "./liveJo
 import { liveJournalCheckpointDue } from "./liveJournalCheckpoint";
 import { allowsServiceActivationCandidate, type ServiceActivationAccess } from "./serviceActivationAccess";
 import {canonicalVersionedAcceptedMetadata as canonicalAcceptedMetadata, initialAcceptedHistoryDigest, nextVersionedAcceptedHistoryDigest as nextAcceptedHistoryDigest} from "../liveAcceptedHistory";
-import { claimsPersonalAgent, deriveLiveAuthorSnapshot } from "./liveAuthorSnapshot";
+import { admitsWorkspaceLiveAuthorship, claimsPersonalAgent, deriveLiveAuthorSnapshot, personalLiveAuthorSnapshot } from "./liveAuthorSnapshot";
 import { assessLiveAuthorWindow, liveAuthorCoverageCheckpointDue, limitLiveDeclaredAgents } from "./liveAuthorWindow";
 import { LIVE_AUTHOR_CLIENTS } from "./liveAuthorshipSchema";
 import { captureSqliteReadRevisionMatches } from "./readRevision";
@@ -961,8 +961,12 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
         if (!isDeepStrictEqual(subtractJournalRanges(allFirstSeen, coverage), allFirstSeen)) {
           return refused({kind:"refused",reason:"provenance-refused"});
         }
-        if (!trustedAutomation && claimsPersonalAgent(metadata.authorContext)) return refused({kind: "refused", reason: "provenance-refused"});
-        let authorSnapshot: LiveAuthorSnapshot = trustedAutomation ? [{kind: "automation", ...trustedAutomation}] : deriveLiveAuthorSnapshot(storage, current.authority, metadata.authorContext, trustedAccount);
+        // A personal agent's snapshot comes from its authority, so its update's context is ignored.
+        const personal = current.authority.principalKind === "personal" ? current.authority : undefined;
+        if (!trustedAutomation && !personal && claimsPersonalAgent(metadata.authorContext)) return refused({kind: "refused", reason: "provenance-refused"});
+        let authorSnapshot: LiveAuthorSnapshot = trustedAutomation ? [{kind: "automation", ...trustedAutomation}]
+          : personal ? personalLiveAuthorSnapshot(storage, personal)
+          : deriveLiveAuthorSnapshot(storage, current.authority, metadata.authorContext, trustedAccount);
         journalIntegrity(isDeepStrictEqual(seedSource,liveJournalSeedSource(storage,document)));
         const seedFirstSeen = allFirstSeen.filter(range => range.clientId === seedId);
         const firstSeen = allFirstSeen.filter(range => range.clientId !== seedId);
@@ -989,6 +993,7 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
           }
         }
         authorSnapshot = limitLiveDeclaredAgents(read.cut.suffix.map(row => row.metadata), current.authority, authorSnapshot);
+        if (!admitsWorkspaceLiveAuthorship(storage, document.workspaceId, current.authority, authorSnapshot)) return refused({kind:"refused",reason:"provenance-refused"});
         const window = assessLiveAuthorWindow(read.cut.suffix.map(row => row.metadata), {authorSnapshot,firstSeen,firstSeenDeletes});
         if (window.refused) return refused({kind:"refused",reason:"capacity-refused"});
         const due = anticipatedCheckpoint || window.checkpointDue;

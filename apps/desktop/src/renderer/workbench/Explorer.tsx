@@ -12,16 +12,19 @@ import { FileGlyph, KindGlyph, listedFileKind, ObjectGlyph, type ObjectKind } fr
 import { MiddleCutName } from "../ui/MiddleCutName";
 import { SAVE_STATE } from "../ui/StateMark";
 import { usePendingShareMark } from "./pendingShareMarks";
+import { NOT_VERSIONED, NOT_VERSIONED_TITLE, NotVersionedMarks, notVersionedConfirmText, useNotVersionedMark } from "./notVersionedMarks";
 import { basenameOf, dirnameOf } from "../path";
 import {
   ChevronsUp,
   ChevronRight,
   FilePlus2,
   Folder,
+  FolderInput,
   FolderPlus,
   FolderOpen,
   Laptop,
   ListX,
+  PenLine,
   RefreshCw,
   Trash2,
   TriangleAlert,
@@ -30,6 +33,7 @@ import {
 import {
   memo,
   useCallback,
+  useContext,
   useEffect,
   useId,
   useLayoutEffect,
@@ -82,7 +86,7 @@ import { EXPLORER_PANEL_ID } from "./ExplorerModeSwitch";
 import { useCommitOnRelease } from "./useCommitOnRelease";
 import { ipcErrorMessage } from "../ipcError";
 import { fileManagerName } from "../../workspaces/explorerMenu";
-import { isLiveEditingRefusal, isLiveFolderRefusal, isLivePageOwnedRefusal, KEEPABLE_COLLECTIONS_REFUSALS, livePageTitle, namedList, readError, USE_THIS_COMPUTER, withErrorWords, type CollectionsElsewhere, type CollectionsRefusalRead } from "../../ipc/errorWords";
+import { isLiveEditingRefusal, isLiveFolderRefusal, isLivePageOwnedRefusal, KEEPABLE_COLLECTIONS_REFUSALS, livePageTitle, namedList, notVersionedPaths, readError, USE_THIS_COMPUTER, withErrorWords, type CollectionsElsewhere, type CollectionsRefusalRead } from "../../ipc/errorWords";
 import { workspaceDestinationError } from "@dohc/workspace-contracts/workspace-paths";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 
@@ -163,6 +167,9 @@ export interface ExplorerProps {
   // Folders main recognizes as apps. Their rows draw the app glyph; a row
   // still opens and expands as any folder's does.
   appFolders?: ReadonlySet<string>;
+  // Folders whose dataset.json names no Collection on this computer, as a
+  // deleted one leaves. Home shows their files.
+  unclaimedDatasetFolders?: ReadonlySet<string>;
   onOpenCollection: (path: string) => void;
   // The workspace's apps, for Home's Apps section. Without it Home has no
   // Apps section.
@@ -389,6 +396,18 @@ function rangeAroundIndex(index: number, itemCount: number): VirtualRange {
   return { start, end: Math.min(itemCount, start + TREE_INITIAL_WINDOW_SIZE) };
 }
 
+// A rename, move or delete, in a version, that reaches files the version does
+// not track: what it would change, and the change to run once the person agrees.
+type AskNotVersioned = {
+  workspaceId: string;
+  action: "delete" | "rename" | "move";
+  sources: string[];
+  paths: string[];
+  go: () => void;
+};
+
+const NOT_VERSIONED_ICON = { delete: Trash2, rename: PenLine, move: FolderInput } as const;
+
 // Memoized row: primitives + stable callbacks only, so a selection change
 // re-renders the rows whose state changed, not the whole tree. Exported for
 // the states page, which shows it in each of its states.
@@ -425,6 +444,9 @@ export const TreeRow = memo(function TreeRow(props: {
   // A closed shared note whose edits wait for the server: the pending-share
   // mark, and its words in the row's name and tooltip.
   const pendingShare = usePendingShareMark(row.fullPath, !row.isFolder);
+  // In a version, a file it does not track. Main and every version share its
+  // one copy, so the row is dimmed and says so.
+  const notVersioned = useNotVersionedMark(row.fullPath, !row.isFolder);
   const blocked = props.dropPreview?.kind === "blocked";
   const target = props.dropPreview?.role === "target";
   // A drop preview colors the whole row, glyph included. An allowed target's
@@ -459,9 +481,16 @@ export const TreeRow = memo(function TreeRow(props: {
         aria-selected={props.selected}
         // The whole name, read once, though MiddleCutName draws it in two
         // parts. The tooltip shows what a cut row hides.
-        aria-label={pendingShare ? `${name}, ${SAVE_STATE["pending-share"].label}` : name}
-        title={pendingShare ? `${name}\n${SAVE_STATE["pending-share"].label}. ${SAVE_STATE["pending-share"].title}` : name}
+        aria-label={pendingShare ? `${name}, ${SAVE_STATE["pending-share"].label}` : notVersioned ? `${name}, ${NOT_VERSIONED}` : name}
+        title={
+          pendingShare
+            ? `${name}\n${SAVE_STATE["pending-share"].label}. ${SAVE_STATE["pending-share"].title}`
+            : notVersioned
+              ? `${name}\n${NOT_VERSIONED}. ${NOT_VERSIONED_TITLE}`
+              : name
+        }
         data-state={pendingShare ? "pending-share" : undefined}
+        data-not-versioned={notVersioned ? "true" : undefined}
         {...(row.isFolder ? { "aria-expanded": row.isExpanded } : {})}
         tabIndex={props.tabbable ? 0 : -1}
         ref={(el) => props.registerRef(row.fullPath, el)}
@@ -491,7 +520,9 @@ export const TreeRow = memo(function TreeRow(props: {
               ? `bg-(--dohc-selection) text-ink${props.active ? " font-medium" : ""}`
               : props.active
                 ? "bg-selected font-medium text-ink"
-                : "text-muted hover:bg-hover hover:text-ink"
+                : notVersioned
+                  ? "text-subtle hover:bg-hover hover:text-muted"
+                  : "text-muted hover:bg-hover hover:text-ink"
         }`}
       >
         {blocked && target ? (
@@ -536,11 +567,16 @@ export const TreeRow = memo(function TreeRow(props: {
               kind={listedFileKind(row.fullPath, row.kind)}
               icon={row.icon}
               size={GLYPH_SIZE}
-              className={glyphClass}
+              className={notVersioned && !props.dropPreview ? `${glyphClass} opacity-60` : glyphClass}
             />
           </>
         )}
         <MiddleCutName name={name} />
+        {notVersioned && !pendingShare ? (
+          <span aria-hidden data-testid="tree-row-not-versioned" className="shrink-0 text-[11px] text-subtle">
+            {NOT_VERSIONED}
+          </span>
+        ) : null}
         {pendingShare ? (
           <span aria-hidden data-testid="tree-row-pending-share" className="ml-auto size-2 shrink-0 rounded-full border-[1.5px] border-current text-subtle" />
         ) : null}
@@ -698,6 +734,18 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   collectionFoldersRef.current = props.collectionFolders;
   const [dropPreview, setDropPreview] = useState<DropPreview | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string[] | null>(null);
+  const notVersionedMarks = useContext(NotVersionedMarks);
+  // One question at a time. A change refused while another waits queues
+  // behind it, so neither is lost; the same change asked again does not.
+  const [notVersionedAsks, setNotVersionedAsks] = useState<AskNotVersioned[]>([]);
+  // As with the menu, a question asked in one workspace never shows in the next.
+  if (notVersionedAsks.some((ask) => ask.workspaceId !== workspaceId)) {
+    setNotVersionedAsks((asks) => asks.filter((ask) => ask.workspaceId === workspaceId));
+  }
+  const askNotVersioned = notVersionedAsks[0] ?? null;
+  const queueNotVersioned = useCallback((ask: AskNotVersioned) => setNotVersionedAsks((asks) =>
+    asks.some((queued) => queued.action === ask.action && queued.sources.join("\n") === ask.sources.join("\n")) ? asks : [...asks, ask]), []);
+  const answerNotVersioned = useCallback(() => setNotVersionedAsks((asks) => asks.slice(1)), []);
   const [menu, setMenu] = useState<OpenMenu | null>(null);
   // The newest menu request is the only one that may open; closing the menu
   // or leaving the workspace retires it.
@@ -1078,8 +1126,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   const runChanges = useCallback(
     async function runChangesOnce<Result>(
       changes: PendingTreeChange[],
-      run: (change: PendingTreeChange) => Promise<Result>,
+      run: (change: PendingTreeChange, confirmed: boolean) => Promise<Result>,
       options: {
+        // The person agreed to change files the active version does not track.
+        confirmed?: boolean;
         afterBegin?: () => void;
         failed?: (change: PendingTreeChange, cause: unknown) => void;
         mayHaveRun?: (cause: unknown) => boolean;
@@ -1111,14 +1161,22 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         setPending((current) => [...current, ...changes.filter((change) => !afterRun(change))]);
         // The rest still go when some fail, and the failures report once.
         const failed: Array<{ change: PendingTreeChange; cause: unknown; livePage?: LivePageRefused; again?: () => void }> = [];
+        // Changes main refused because they reach files the version does not
+        // track. They ask once, together, and run again if the person agrees.
+        const unversioned: Array<{ change: PendingTreeChange; paths: string[] }> = [];
         let mayHaveRun = false;
         for (const change of changes) {
           try {
-            const result = await run(change);
+            const result = await run(change, options.confirmed === true);
             if (afterRun(change)) setPending((current) => [...current, change]);
             succeeded.push({ change, result });
           } catch (cause) {
             setPending((current) => current.filter((entry) => entry.id !== change.id));
+            const notVersioned = options.confirmed ? null : notVersionedPaths(cause);
+            if (notVersioned?.length) {
+              unversioned.push({ change, paths: notVersioned });
+              continue;
+            }
             if (options.mayHaveRun?.(cause)) mayHaveRun = true;
             if (options.failed) {
               options.failed(change, cause);
@@ -1136,10 +1194,20 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             const refused = isLiveEditingRefusal(cause);
             const isMove = change.kind === "file" || change.kind === "folder";
             const rerun = () =>
-              void runChangesOnce([{ ...change, id: nextChangeId() }], run, { answered: options.answered, action });
+              void runChangesOnce([{ ...change, id: nextChangeId() }], run, { answered: options.answered, action, confirmed: options.confirmed });
             const again = isLiveFolderRefusal(cause) || livePage ? rerun : !refused && isMove ? rerun : undefined;
             failed.push({ change, cause, ...(livePage ? { livePage } : {}), ...(again ? { again } : {}) });
           }
+        }
+        if (unversioned.length > 0) {
+          const asked = unversioned.map(({ change }) => change);
+          queueNotVersioned({
+            workspaceId,
+            action: asked.every(({ kind }) => kind === "delete-file" || kind === "delete-folder") ? "delete" : action,
+            sources: asked.map(sourcePath),
+            paths: [...new Set(unversioned.flatMap(({ paths }) => paths))],
+            go: () => void runChangesOnce(asked.map((change) => ({ ...change, id: nextChangeId() })), run, { ...options, confirmed: true }),
+          });
         }
         // Pages live editing refused report together, with the way to Live
         // documents. Each folder it refused reports alone, so its notice keeps
@@ -1167,7 +1235,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           onError(
             [`dohc could not ${verb} ${namedList(names)}.`, reason].filter(Boolean).join(" "),
             first.cause,
-            retried.length > 0 ? () => void runChangesOnce(retried, run, { answered: options.answered, action }) : undefined,
+            retried.length > 0 ? () => void runChangesOnce(retried, run, { answered: options.answered, action, confirmed: options.confirmed }) : undefined,
             group.map(({ change }) => change),
             group === live ? { paths: names, action: verb } : undefined,
           );
@@ -1196,7 +1264,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       options.answered?.(succeeded);
       return succeeded;
     },
-    [onBeginChanges, onError, onPathsChanged, onRefresh],
+    [onBeginChanges, onError, onPathsChanged, onRefresh, queueNotVersioned, workspaceId],
   );
 
   // Undo runs as a tree change of its own: drafts settle first, the row
@@ -1279,8 +1347,21 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     [onNotice, undoChanges],
   );
 
+  // In a version, a change that reaches files it does not track asks first,
+  // since those files have one copy and the change happens in Main too.
+  const askedNotVersioned = useCallback(
+    (action: AskNotVersioned["action"], sources: string[], confirmed: boolean, go: () => void): boolean => {
+      if (confirmed) return false;
+      const paths = notVersionedMarks.under(sources);
+      if (paths.length === 0) return false;
+      queueNotVersioned({ workspaceId, action, sources, paths, go });
+      return true;
+    },
+    [notVersionedMarks, queueNotVersioned, workspaceId],
+  );
+
   const performMoves = useCallback(
-    (sources: DragSource[], targetDir: string) => {
+    function performMovesAs(sources: DragSource[], targetDir: string, confirmed = false) {
       const changes: PendingTreeChange[] = [];
       for (const source of sources) {
         const action = planDrop(source, { parentDir: targetDir });
@@ -1292,28 +1373,34 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           toPath: action.toPath,
         });
       }
+      if (askedNotVersioned("move", changes.map(sourcePath), confirmed, () => performMovesAs(sources, targetDir, true))) return;
       if (changes.length > 0) setSelection(new Set());
-      void runChanges(changes, (change) =>
+      void runChanges(changes, (change, confirmedRun) =>
         change.kind === "file" || change.kind === "folder"
           ? bridge().moveWorkspacePath({
               workspaceId,
               fromPath: change.fromPath,
               toPath: change.toPath,
+              ...(confirmedRun ? { confirmNotVersioned: true as const } : {}),
             })
           : Promise.resolve(undefined),
-        { answered: announce },
+        { answered: announce, confirmed },
       );
     },
-    [announce, runChanges, workspaceId],
+    [announce, askedNotVersioned, runChanges, workspaceId],
   );
 
   const commitRename = useCallback(
-    (edit: Extract<EditingState, { mode: "rename" }>, value: string) => {
+    function commitRenameAs(edit: Extract<EditingState, { mode: "rename" }>, value: string, confirmed = false) {
       const { path, isFolder } = edit;
       const typed = resolveTypedPath(value, dirnameOf(path));
       const toPath = typed && !isFolder ? withRenameDefault(path, typed) : typed;
       if (!toPath || toPath === path) {
         setEditing(null);
+        return;
+      }
+      if (askedNotVersioned("rename", [path], confirmed, () => commitRenameAs(edit, value, true))) {
+        setEditing((current) => (current === edit ? null : current));
         return;
       }
       void runChanges(
@@ -1325,9 +1412,14 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             toPath,
           },
         ],
-        async () => {
+        async (_change, confirmedRun) => {
           try {
-            return await bridge().moveWorkspacePath({ workspaceId, fromPath: path, toPath });
+            return await bridge().moveWorkspacePath({
+              workspaceId,
+              fromPath: path,
+              toPath,
+              ...(confirmedRun ? { confirmNotVersioned: true as const } : {}),
+            });
           } catch (cause) {
             if (document.activeElement === rowFor(toPath)) {
               renameFocus.current = { from: toPath, to: path };
@@ -1336,10 +1428,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           }
         },
         // Remove this input in the same commit that stages the renamed row.
-        { afterBegin: () => setEditing(current => current === edit ? null : current), answered: announce, action: "rename" },
+        { afterBegin: () => setEditing(current => current === edit ? null : current), answered: announce, action: "rename", confirmed },
       );
     },
-    [announce, rowFor, runChanges, workspaceId],
+    [announce, askedNotVersioned, rowFor, runChanges, workspaceId],
   );
 
   const commitCreateFolder = useCallback(
@@ -1358,21 +1450,26 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   );
 
   const performDeletes = useCallback(
-    (paths: string[]) => {
+    function performDeletesAs(paths: string[], confirmed = false) {
+      if (askedNotVersioned("delete", paths, confirmed, () => performDeletesAs(paths, true))) return;
       const changes: PendingTreeChange[] = paths.map((path) => ({
         id: nextChangeId(),
         kind: isFolderPath(path) ? "delete-folder" : "delete-file",
         path,
       }));
       setSelection(new Set());
-      void runChanges(changes, (change) =>
+      void runChanges(changes, (change, confirmedRun) =>
         "path" in change
-          ? bridge().deleteWorkspacePath({ workspaceId, relativePath: change.path })
+          ? bridge().deleteWorkspacePath({
+              workspaceId,
+              relativePath: change.path,
+              ...(confirmedRun ? { confirmNotVersioned: true as const } : {}),
+            })
           : Promise.resolve(undefined),
-        { answered: announce },
+        { answered: announce, confirmed },
       );
     },
-    [announce, runChanges, workspaceId, isFolderPath],
+    [announce, askedNotVersioned, runChanges, workspaceId, isFolderPath],
   );
 
   // A delete goes to the trash with a recovery record, so it runs at once
@@ -2600,9 +2697,51 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           }}
         />
       ) : null}
+
+      {askNotVersioned ? (
+        <NotVersionedConfirm
+          ask={askNotVersioned}
+          onCancel={answerNotVersioned}
+          onConfirm={() => {
+            answerNotVersioned();
+            askNotVersioned.go();
+          }}
+        />
+      ) : null}
     </>
   );
 });
+
+function NotVersionedConfirm({ ask, onCancel, onConfirm }: { ask: AskNotVersioned; onCancel: () => void; onConfirm: () => void }) {
+  const { title, body, confirmLabel } = notVersionedConfirmText(ask.action, ask.sources, ask.paths);
+  const listed = !(ask.paths.length === 1 && ask.sources.length === 1 && ask.paths[0] === ask.sources[0]);
+  return (
+    <ConfirmDialog
+      title={title}
+      icon={NOT_VERSIONED_ICON[ask.action]}
+      intent="danger"
+      confirmLabel={confirmLabel}
+      testId="not-versioned-confirm"
+      cancelTestId="cancel-not-versioned"
+      confirmTestId="confirm-not-versioned"
+      onCancel={onCancel}
+      onConfirm={onConfirm}
+      details={listed ? (
+        // Seven rows show; the rest scroll.
+        <ul className="m-0 max-h-[204px] list-none overflow-auto rounded-lg border border-line bg-bg p-1">
+          {ask.paths.map((path) => (
+            <li key={path} title={path} className="flex h-7 items-center gap-2 rounded-md px-2">
+              <span className="min-w-0 flex-1 truncate text-[13px] text-ink">{basenameOf(path)}</span>
+              <span className="max-w-[45%] shrink-0 truncate text-[12px] text-subtle">{dirnameOf(path)}</span>
+            </li>
+          ))}
+        </ul>
+      ) : undefined}
+    >
+      {body}
+    </ConfirmDialog>
+  );
+}
 
 // A Collections row's mark and words. Given a `detail`, the words take focus
 // and show it as a tooltip on hover or keyboard focus. The row that holds

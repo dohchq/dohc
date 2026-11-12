@@ -24,6 +24,10 @@ export function initializeWorkReferenceSchema(db: SqliteDb): void {
     ON sync_relay_work_reference_scopes(workspace_id,version_id,object_id);
   CREATE INDEX IF NOT EXISTS idx_sync_relay_work_reference_messages
     ON sync_relay_log(workspace_id,json_extract(payload_json,'$.messageId')) WHERE op_kind='chat.message.append';
+  CREATE INDEX IF NOT EXISTS idx_sync_relay_work_reference_chats
+    ON sync_relay_log(workspace_id,json_extract(payload_json,'$.channelId')) WHERE op_kind='chat.channel.create';
+  CREATE INDEX IF NOT EXISTS idx_sync_relay_work_reference_chat_wires
+    ON sync_relay_log(workspace_id,json_extract(payload_json,'$.wireId')) WHERE op_kind='chat.channel.create';
   CREATE INDEX IF NOT EXISTS idx_sync_relay_work_reference_moment_sequence
     ON sync_relay_object_moments(workspace_id,version_id,relay_seq);
   CREATE TABLE IF NOT EXISTS sync_relay_work_reference_record_objects (

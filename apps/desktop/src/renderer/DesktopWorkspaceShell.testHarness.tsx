@@ -427,6 +427,9 @@ function makeBaseBridge(
     retryHistoryCapture: vi.fn(
       async (_payload: { workspaceId: string }): Promise<void> => undefined,
     ),
+    retrySecretKey: vi.fn(
+      async (_payload: { workspaceId: string }): Promise<void> => undefined,
+    ),
     retryCloudSync: vi.fn(
       async (_payload: { workspaceId: string; reason: "person" | "reconnect" }): Promise<SyncStatusResult> => SYNC_STATUS,
     ),
@@ -756,6 +759,8 @@ function makeBaseBridge(
     goToWorkspaceWindow: vi.fn(async (): Promise<void> => undefined),
     listKeptCopies: vi.fn(async (): Promise<ListKeptCopiesResult> => ({ keptCopies: [], more: false })),
     saveKeptCopy: vi.fn(async () => ({ status: "gone" as const })),
+    restoreProtectedCopy: vi.fn(async (_payload: { workspaceId: string; id: string }) => ({ path: ".env", status: "restored" as const })),
+    discardProtectedCopy: vi.fn(async (_payload: { workspaceId: string; id: string }) => ({ path: ".env", status: "discarded" as const })),
     // Typed to the contract: the capture recovery tests swap the answer.
     getCaptureRecoveryStatus: vi.fn(
       async (_payload: { workspaceId: string }): Promise<CaptureRecoveryStatusResult> => ({ captureRecoveries: [] }),
@@ -877,7 +882,7 @@ export function makeBridge(
     // swap in real rows.
     listCollections: vi.fn(
       async (_payload: ListCollectionsPayload): Promise<ListCollectionsResult> => ({
-        collections: [],
+        collections: [], unclaimedDatasetFolders: [],
       }),
     ),
     dataset: vi.fn(async (request: DatasetRequest): Promise<DatasetResult> => {
@@ -936,6 +941,8 @@ export function makeBridge(
         changedFileCount: 0,
       }),
     ),
+    // On Main nothing is marked.
+    listNotVersionedFiles: vi.fn(async (): Promise<{ paths: string[] | null }> => ({ paths: null })),
     // Typed to the contract as well: a workspace with only Main is this
     // default, not the shape every test is allowed to report.
     listWorkspaceVersions: vi.fn(
@@ -963,6 +970,7 @@ export function makeBridge(
         fileThreads: FileChatThreadRecord[];
       }> => ({ channels: [], fileThreads: [] }),
     ),
+    listChatUnread: vi.fn(async (): Promise<{ chats: Array<{ channelId: string; unreadCount: number }> }> => ({ chats: [] })),
     listChannelThreads: vi.fn(async () => ({ threads: [] })),
     listPersonalChatFeed: vi.fn(async () => ({ items: [], nextCursor: null })),
     listChatChannelShares: vi.fn(async () => {

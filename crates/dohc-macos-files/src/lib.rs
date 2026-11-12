@@ -802,23 +802,44 @@ fn type_name(kind: &[c_char]) -> Vec<u8> {
 }
 
 /// Read a value whose size `query` reports, unless it is larger than
-/// [`MAX_XATTR_BYTES`] or grows between the two calls.
+/// [`MAX_XATTR_BYTES`] or grows between the query and the read.
 fn read_bounded(
-    query: impl Fn() -> rustix::io::Result<usize>,
-    read: impl Fn(&mut [u8]) -> rustix::io::Result<usize>,
+    query: impl FnOnce() -> rustix::io::Result<usize>,
+    read: impl FnOnce(&mut [u8]) -> rustix::io::Result<usize>,
 ) -> Option<Vec<u8>> {
     let len = query().ok()?;
     if len > MAX_XATTR_BYTES {
         return None;
     }
-    let mut value = vec![0; len];
+    let mut value = vec![0; len.max(1)];
     let read_len = read(&mut value).ok()?;
+    if read_len > len {
+        return None;
+    }
     value.truncate(read_len);
     Some(value)
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_empty_attribute_that_grows_before_its_read_is_skipped() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("xattr-growth").unwrap();
+        let file = std::fs::File::create(scratch.path().join("note.md")).unwrap();
+        let name = c"user.dohc-growth";
+        for grown in [b"x".as_slice(), b"grown".as_slice()] {
+            rustix::fs::fsetxattr(&file, name, b"", rustix::fs::XattrFlags::empty()).unwrap();
+            let copied = super::read_bounded(
+                || rustix::fs::fgetxattr_query(&file, name),
+                |value| {
+                    rustix::fs::fsetxattr(&file, name, grown, rustix::fs::XattrFlags::empty())?;
+                    rustix::fs::fgetxattr(&file, name, value)
+                },
+            );
+            assert_eq!(copied, None, "an attribute grew to {} bytes", grown.len());
+        }
+    }
+
     #[test]
     fn a_barrier_flush_succeeds_on_a_file_and_its_folder() {
         let scratch = dohc_test_scratch::ScratchDir::new_named("barrier-fsync").unwrap();

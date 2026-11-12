@@ -245,7 +245,7 @@ it("resumes a real configured service activation after a lost native adoption re
     const identity = storage.getWorkspaceBootstrap("workspace").identity, serviceConfig = join(root, "service.json");
     if (!identity) throw new Error("Ordinary source owner did not establish a relay identity.");
     // Enrollment puts the document in the service host's scope and gives the host its credential.
-    const enrolled = storage.enrollServiceHostDocument({workspaceId: "workspace", path: "docs/a.md", shareId: "share", ownerUserId: ownerUser.id,
+    const enrolled = storage.ensureOwnedLiveDocument({intent: "share", workspaceId: "workspace", path: "docs/a.md", shareId: "share", ownerUserId: ownerUser.id,
       nowMs: Date.now(), guard: storage.captureStanding()});
     writeFileSync(serviceConfig, JSON.stringify({version: 1, engineExecutable: executable, hostId: "service", instanceId: "instance",
       workspaces: [{root: workspace, workspaceId: "workspace", maxRegistrations: 2, hostedReplication: {relay: {baseUrl: "https://service-activation-relay.example.test",
@@ -253,7 +253,7 @@ it("resumes a real configured service activation after a lost native adoption re
         identity: {replicationEpoch: identity.replicationEpoch, streamIdentity: identity.streamIdentity}, maxPagesPerPull: 8}}],
       settlement: {maxApplicationsPerSettlement: 8}, adoption: {maxBytes: 1_000_000, maxEvents: 100, ownerOutbox: {maxPendingBytes: 1_000_000, maxPendingAgeMs: 600000}},
       sync: {policy: {maxClientVectorBytes: 100000, maxHostVectorBytes: 100000, maxOutputBytes: 1_000_000, maxReadBytes: 4_000_000}, workingReserveBytes: 4_000_000},
-      activation: {targets: [{workspaceId: "workspace", path: "docs/a.md", shareId: "share"}], validation: validationPolicy, maxCaptureBytes: 1_000_000, maxEntriesPerDrain: 8,
+      activation: {targets: [{workspaceId: "workspace", path: "docs/a.md"}], validation: validationPolicy, maxCaptureBytes: 1_000_000, maxEntriesPerDrain: 8,
         maxBytesPerDrain: 1_000_000, maxDocumentsPerPass: 1, pollIntervalMs: 100, passDeadlineMs: 30000, idleUnloadMs: 600000, idleRetryMs: 30000},
       ingress: {aggregateBytes: 512 * 1024 * 1024, applicationWorkingReserveBytes: 8 * 1024 * 1024, maxUploads: 4, uploadDeadlineMs: 30000},
       client: {aggregateBytes: 200_000_000, maxUploads: 4, connectTimeoutMs: 30000, requestDeadlineMs: 30000}}));
@@ -313,7 +313,7 @@ it("resumes a real configured service activation after a lost native adoption re
     expect(provider.edit(() => provider.doc.getMap("frontmatter").set("named", "after-service-resume"))).toBe(true);
     const ack = (await stateWhen(provider, state => (state.lastApplied?.journalCursor ?? 0) > beforeNamedCursor && state.pendingUpdates === 0)).lastApplied!;
     results.namedAck = ack;
-    const binding = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: ownerUser.id, shareId: "share"}});
+    const binding = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: ownerUser.id}});
     if (binding.kind !== "current") throw new Error("Activated binding is unavailable.");
     const capture = await active.captureNative(binding.binding);
     expect(await capture.client.readLiveApplicationAck({id: capture.nextRequestId(), workspace: capture.workspace, registrationId: capture.registrationId, deadlineMs: capture.deadlineMs},

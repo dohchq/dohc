@@ -37,7 +37,7 @@ type Step = Omit<LoadedPublicTransitions["cases"]["view"]["updates"][number], "b
 
 export async function assertPublicApplication(h: PublicTransitionHarness, fixture: PublicTransitionFixture, step: Step) {
   const current = h.storage.resolveCurrentLiveDocumentBinding({document: fixture.document,
-    actor: {kind: "owner", userId: h.ownerUserId, shareId: fixture.link.shareId}});
+    actor: {kind: "owner", userId: h.ownerUserId}});
   if (current.kind !== "current") throw new Error("Transition native binding missing.");
   const native = await h.host().captureNative(current.binding);
   const ack = await native.client.readLiveApplicationAck({id: native.nextRequestId(), workspace: native.workspace,
@@ -58,7 +58,7 @@ export async function runPublicTransitions(h: PublicTransitionHarness, workload:
     const extraContexts: BrowserContext[] = [];
     let restoredViewer: Page | undefined;
     let continuationEvidence: Record<string, unknown> | undefined;
-    await writer.page.getByRole("button", {name: "Back to shared files", exact: true}).click();
+    await writer.page.getByRole("button", {name: "Done", exact: true}).click();
     await browserExpect.poll(h.listeners, {timeout: h.timeoutMs}).toBe(h.concurrency - 1);
     let socket = await h.wire.connect(writer.context, await h.wire.ticket(writer.context, writer.discriminator, fixture.document.objectId), `transition-${name}`);
     await socket.sync();
@@ -141,7 +141,7 @@ export async function runPublicTransitions(h: PublicTransitionHarness, workload:
           for (let index = 0; index < h.concurrency - 1; index++) peers.push(await h.openLink(fresh.url, index));
           const identity = await h.openLink(fresh.url, h.concurrency - 1);
           extraContexts.push(identity.context);
-          await identity.page.getByRole("button", {name: "Back to shared files", exact: true}).click();
+          await identity.page.getByRole("button", {name: "Done", exact: true}).click();
           restoredViewer = identity.page;
           socket = await h.wire.connect(identity.context, await h.wire.ticket(identity.context, identity.discriminator, fixture.document.objectId), `resumed-${name}`);
         } else {
@@ -177,7 +177,7 @@ export async function runPublicTransitions(h: PublicTransitionHarness, workload:
             bounds: h.interruptedBounds, validate: h.validate});
           expect(admission.projectedMarkdownSha256).toBe(hash(continuation.expected.markdown));
           const binding = h.storage.resolveCurrentLiveDocumentBinding({document: fixture.document,
-            actor: {kind: "owner", userId: h.ownerUserId, shareId: fixture.link.shareId}});
+            actor: {kind: "owner", userId: h.ownerUserId}});
           if (binding.kind !== "current") throw new Error("Restored continuation binding missing.");
           const admissionReceipt = save("admission.json", Buffer.from(JSON.stringify({admission, binding: binding.binding,
             bounds: h.interruptedBounds, checkpointSha256: hash(actual.cut.checkpoint.bytes),

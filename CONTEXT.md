@@ -111,6 +111,10 @@ A relay-derived file identity within the same recipient namespace. It survives s
 A web link to one message, `<server origin>/l/<reference>`, on the server the workspace syncs with. It carries no credential and grants nothing. dohc opens it in the workspace on this computer that holds the message. In a browser, the server's page shows only an Open in dohc button. Messages are the only work that has one so far.
 _Avoid_: share link (that is the URL grant), message URL
 
+**Work reference**:
+A lasting id for one chat, thread, message, file, app, Collection, or record. It survives renames and moves. In a chat message, `@[work:<reference>]` shows as a chip that opens what it names; `dohc chat link` and `dohc_link` make one. It grants nothing: someone who cannot see the work sees the chip as unavailable.
+_Avoid_: chat link (`dohc chat links` lists the files a chat mentions)
+
 ### Chat
 
 **ActorKey**:

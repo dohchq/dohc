@@ -1,7 +1,7 @@
 //! A paired workspace and relay backup retains public creates and retry identity.
 //! Relay rollback is refused using continuity stored outside its database volume.
 
-mod common;
+use crate::common;
 
 use base64::Engine as _;
 use common::*;

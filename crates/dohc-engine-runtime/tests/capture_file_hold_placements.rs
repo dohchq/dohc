@@ -1,5 +1,5 @@
 //! Durable holds park actual relay and rollback placements, including replay.
-mod support;
+use crate::support;
 use dohc_engine_collab::{
     ContentKind, DocKey, LeaseRegistry, LocalAppend, MarkerCreation, Regime, WriterDocCache, Ydoc,
 };

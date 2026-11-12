@@ -12,6 +12,8 @@ import type { SentNoticeTarget } from "../notices/noticeTarget";
 import { atomicReplaceFileSync } from "../atomicReplaceFile";
 import { cliUsageInvocation, type CliUsageInvocation } from "../usage/cliUsage";
 import { nameSlug } from "@dohc/workspace-contracts/names";
+import { formatChatWorkReferenceToken } from "@dohc/workspace-contracts/chat-mentions";
+import type { WorkTargetInput } from "@dohc/workspace-engine-client/daemon";
 import { SHARED_AUTOMATION_HISTORY_REASON } from "@dohc/workspace-contracts/automation-controls";
 import type { WorkspacePolicyPath } from "@dohc/security-contract/effective-policy";
 import {
@@ -52,12 +54,14 @@ import {
   cliTransportResponseSchema,
   parseCliResult,
   type CliActor,
+  type CliLinkTarget,
   type CliNoticeOpens,
   type CliCollectionQueryCursor,
   type CliGrepContextMessage,
   type CliGrepMatch,
   type CliReportedAgent,
   type CliRequest,
+  type CliVerb,
   type CliResultByVerb,
   type VersionResolution,
 } from "@dohc/cli/protocol";
@@ -113,7 +117,7 @@ import {
   type RetainedCopiesListResult,
 } from "@dohc/workspace-engine-client";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
-import type { ChatDispatchService } from "../agents/chatDispatchService";
+import type { ChatDispatchService, QuietRunRefusal } from "../agents/chatDispatchService";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type Server, type Socket } from "node:net";
 import {
@@ -300,8 +304,12 @@ export interface CliVersionsPort {
 // them meanwhile, and the step that moves one to a visible copy beside its
 // file. The desktop's Notices row offers the same step.
 export interface CliKeptCopiesPort {
-  list(): Promise<{ keptCopies: Array<{ id: number; path: string; keptAtMs: number }>; more: boolean; outsideWriteCopies?: [string, string, string][] }>;
+  list(): Promise<{ keptCopies: Array<{ id: number; path: string; keptAtMs: number }>; more: boolean; outsideWriteCopies?: [string, string, string][]; protectedCopies?: [string, string, number][] }>;
   save(id: number): Promise<KeptCopySaveResult>;
+  // A protected file's change a sync replaced, kept on this computer. The
+  // same capture operations as the Notices row's Restore and Discard.
+  restoreProtected(id: string, restoredBy: "you" | "agent"): Promise<{ path: string; status: "restored" }>;
+  discardProtected(id: string): Promise<{ path: string; status: "discarded" }>;
 }
 
 // Live documents whose edits the server refused, which dohc keeps on this
@@ -318,9 +326,14 @@ export interface CliKeptEditsPort {
   stopAgain(path: string, incident: string): Promise<Pick<Extract<CliResultByVerb["stopAgain"], { ok: true }>, "keptEdits">>;
 }
 
-// The owner's Live documents list, read as the dialog reads it. Paths are
-// workspace-relative; the cursor is the list's own nextCursor.
-export type CliLiveDocumentsPort = (cursor?: string) => Promise<Omit<Extract<CliResultByVerb["liveDocuments"], { ok: true }>, "ok">>;
+// The owner's Live documents list, and its Stop and Resume for one document,
+// through the same desktop actions as the dialog. Paths are workspace-relative;
+// the cursor is the list's own nextCursor. A Stop or Resume names its author.
+export interface CliLiveDocumentsPort {
+  list(cursor?: string): Promise<Omit<Extract<CliResultByVerb["liveDocuments"], { ok: true }>, "ok">>;
+  stop(path: string, author: import("@dohc/workspace-contracts/change-author").ChangeAuthor, objectId?: string): Promise<Pick<Extract<CliResultByVerb["liveStop"], { ok: true }>, "keptEdits" | "already">>;
+  resume(path: string, author: import("@dohc/workspace-contracts/change-author").ChangeAuthor): Promise<Pick<Extract<CliResultByVerb["liveResume"], { ok: true }>, "already">>;
+}
 
 // Old file copies kept on a drive that cannot tell dohc whether a program
 // still has one open, and the step that deletes listed ones. The desktop's
@@ -411,6 +424,8 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   store: LinkedChatStore;
   dispatchStore: AwaitableAgentDispatchStore;
   readOnly: boolean;
+  // Makes, or finds, the work reference that names `target` in this workspace.
+  makeWorkReference?(target: WorkTargetInput): Promise<string>;
   // The shared files this shared view holds back, or null outside a shared view.
   sharedFilesHeld?(): Promise<{ count: number; files: HeldSharePath[] } | null>;
   // Why the last sync pass failed, until a pass succeeds.
@@ -444,8 +459,8 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   historyOperation?(input: { operationId: string; cursor?: string }): Promise<CliResultByVerb["historyOperation"]>;
   historyUndo?(input: { operationId: string }, origin: LiveDocumentEditOrigin): Promise<CliResultByVerb["historyUndo"]>;
   duplicateFile?(path: string, origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileDuplicate"]>;
-  movePath?(input: { fromPath: string; toPath: string; overwrite?: boolean }, origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileMove"]>;
-  deletePath?(path: string, origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileDelete"]>;
+  movePath?(input: { fromPath: string; toPath: string; overwrite?: boolean; confirmNotVersioned?: boolean }, origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileMove"]>;
+  deletePath?(path: string, origin: LiveDocumentEditOrigin, requestId: string, confirmNotVersioned?: boolean): Promise<CliResultByVerb["fileDelete"]>;
   // Absent in a shared view, which keeps no copies or versions of its own.
   versions?: CliVersionsPort;
   keptCopies?: CliKeptCopiesPort;
@@ -484,7 +499,7 @@ export interface CliServerOptions {
   // chat uses, so a CLI or MCP write gets the same checks and effects.
   chatWrites: ChatWrites;
   // Try again for a conversation's stopped agent request, as the chat runs it.
-  chatRuns?: Pick<ChatDispatchService, "dispatchStateForThread" | "retryStoppedRun">;
+  chatRuns?: Pick<ChatDispatchService, "dispatchStateForThread" | "retryStoppedRun" | "endRunQuietly">;
   localUserDisplayName(): string;
   // The person this computer's agents work for: the account, or this
   // installation's id when signed out.
@@ -565,6 +580,7 @@ export async function resolveCliWorkspace(
   cwd: string,
   workspaces: readonly CliRegistryWorkspace[],
 ): Promise<CliRegistryWorkspace | null> {
+  // Needs the native realpath: the folder's real name, as the system reports it.
   const absoluteCwd = await realpath(resolve(cwd)).catch(() => null);
   if (absoluteCwd === null) return null;
   const roots = (
@@ -845,8 +861,15 @@ function retainedCopiesUnavailable() {
   };
 }
 
+// Who stopped or resumed live editing through this socket. Every call here
+// is an agent's, whatever it claims: the window is the person's door. The
+// agent is the one History records for this socket's edits.
+function liveChangeAuthor(context: CliWorkspaceContext, options: CliServerOptions): import("@dohc/workspace-contracts/change-author").ChangeAuthor {
+  return { kind: "agent", agentId: editingAgentId(context), onBehalfOf: options.localPersonId(), depth: options.agentRunDepth(context.workspaceId) };
+}
+
 function liveDocumentsUnavailable() {
-  return { ok: false as const, reason: "Live documents are listed only in the original workspace. Open it to continue." };
+  return { ok: false as const, reason: "Live documents can be listed, stopped, and resumed only in the original workspace. Open it to continue." };
 }
 
 function keptEditsUnavailable() {
@@ -936,6 +959,12 @@ function automationPressResult(pressed: { result: NamedPressResult; waiting: Pre
     waiting: waiting === null ? null : PRESS_WAITING[waiting],
   };
 }
+
+const QUIET_RUN_REFUSALS: Record<QuietRunRefusal, string> = {
+  "not-running": "Only a running agent run that an automation started can end with nothing to report.",
+  "other-thread": "Send nothingToReport in the thread this run was started for.",
+  person: "A person asked for this run. Reply to them.",
+};
 
 async function readReplyThread(
   context: CliWorkspaceContext,
@@ -2018,7 +2047,6 @@ async function callerPaths(context: CliWorkspaceContext, cwd: string) {
       ? validateUserMaterializePath(path, { platform: process.platform })
       : validateUserReadPath(path, { platform: process.platform });
   return {
-    shared: isSharedWithMePath(relative(root, folder).split(sep).join("/")),
     rebase(path: string, mode: CliPathMode): string {
       const supplied = validate(path, mode);
       if (!supplied.ok) throw new CliCommandError(cliPathRejected(supplied.reason, path).reason);
@@ -2082,6 +2110,72 @@ async function callerPaths(context: CliWorkspaceContext, cwd: string) {
   };
 }
 
+// A received share's folder sits under shared-with-me in your own workspace.
+// Commands for your workspace as its owner, and chat, run from your own
+// folder instead.
+const OWNER_COMMAND_IN_RECEIVED_SHARE = "This command isn't available in a folder others share with you. Run it from your own workspace's folder.";
+const CHAT_IN_RECEIVED_SHARE = "Chat isn't available from the command line in a folder others share with you. Run this command from your own workspace's folder.";
+
+// What each command does when run from a received share's folder: it runs
+// ("anywhere"), is refused with one of the sentences above, or gives its own
+// refusal as its answer.
+type ReceivedShareRule = "anywhere" | "owner" | "chat" | { answer: unknown };
+const keptEditsInOwner = { answer: keptEditsUnavailable() };
+const liveDocumentsInOwner = { answer: liveDocumentsUnavailable() };
+const versionsInOwner = { answer: { ok: false as const, reason: "Versions belong to the owning workspace. Open it to continue." } };
+const syncStatusInOwner = { answer: { ok: false as const, reason: "Sync status is kept only in the original workspace. Open it to continue." } };
+const HISTORY_IN_OWNER = "History operations require the owning workspace. Open it to continue.";
+// A Collection request with one of these names the Collection by its path.
+const DATASET_PATH_FIELDS = ["datasetPath", "descriptorPath", "definition"] as const;
+const RECEIVED_SHARE_RULES: { [Verb in CliVerb]: ReceivedShareRule | ((request: Extract<CliRequest, { verb: Verb }>) => ReceivedShareRule) } = {
+  // Reads. Account deletion is the account's, not a workspace's.
+  chatLinks: "anywhere", chatFileMentions: "anywhere", linksEdges: "anywhere", linksIn: "anywhere", linksResolve: "anywhere",
+  accountDeletePreview: "anywhere", accountDelete: "anywhere", accessRefresh: "anywhere", accessObject: "anywhere", accessSharing: "anywhere",
+  groups: "anywhere", threads: "anywhere", inbox: "anywhere", notices: "anywhere", grep: "anywhere", moments: "anywhere", moment: "anywhere",
+  fileChats: "anywhere", chat: "anywhere", groupsFull: "anywhere", collectionQuery: "anywhere", collectionRecord: "anywhere",
+  documentRead: "anywhere", collectionsWaiting: "anywhere", sharedFilesHeld: "anywhere", automationList: "anywhere",
+  // These act on the paths they name, which the path rules check.
+  collectionSetFields: "anywhere", collectionCreateRecord: "anywhere", fileWrite: "anywhere", fileDuplicate: "anywhere", fileMove: "anywhere",
+  fileDelete: "anywhere", documentEdit: "anywhere", documentCreate: "anywhere", heldNoteChange: "anywhere",
+  automationSwitch: "anywhere", automationRuns: "anywhere", automationRun: "anywhere", automationRetry: "anywhere", automationPress: "anywhere",
+  automationButtons: "anywhere",
+  dataset: request => DATASET_PATH_FIELDS.some(field => field in request.args.request) ? "anywhere" : "owner",
+  appPublication: request => "appRoot" in request.args.request ? "anywhere" : "owner",
+  stopSync: "owner", shareCopy: "owner", shareAgents: "owner", shareDisconnect: "owner", keptCopies: "owner", saveKeptCopy: "owner",
+  retainedCopies: "owner", deleteRetainedCopies: "owner", ownerAppResponses: "owner",
+  groupCreate: "chat", post: "chat", reply: "chat", nothingToReport: "chat", react: "chat", chatRetry: "chat", fileChatStart: "chat", export: "chat", watch: "chat",
+  link: "chat",
+  show: request => request.args.peek ? "anywhere" : "chat",
+  liveKeptEdits: keptEditsInOwner, saveRecoveryCopy: keptEditsInOwner, retryKeptEdits: keptEditsInOwner, stopAgain: keptEditsInOwner,
+  // Protected copies stay on the computer of the workspace that kept them.
+  restoreProtectedCopy: { answer: keptCopiesUnavailable() }, discardProtectedCopy: { answer: keptCopiesUnavailable() },
+  liveDocuments: liveDocumentsInOwner, liveStop: liveDocumentsInOwner, liveResume: liveDocumentsInOwner,
+  documentHeld: { answer: heldChangesUnavailable() },
+  syncFailure: syncStatusInOwner,
+  historyOperation: { answer: { ok: false as const, reason: HISTORY_IN_OWNER } },
+  // Every refused Undo carries a refusal.
+  historyUndo: { answer: { ok: false as const, reason: HISTORY_IN_OWNER, refusal: { code: "unexplained" as const } } },
+  versionList: versionsInOwner, versionCompare: versionsInOwner, versionConflicts: versionsInOwner, versionCreate: versionsInOwner,
+  versionSwitch: versionsInOwner, versionMerge: versionsInOwner, versionResolve: versionsInOwner,
+};
+
+// The answer a command gives instead of running from a received share's
+// folder, or undefined when it runs.
+async function receivedShareRefusal(request: CliRequest, options: CliServerOptions): Promise<{ answer: unknown } | undefined> {
+  const rule = RECEIVED_SHARE_RULES[request.verb];
+  const resolved = typeof rule === "function" ? (rule as (request: CliRequest) => ReceivedShareRule)(request) : rule;
+  if (resolved === "anywhere") return undefined;
+  const workspace = await resolveCliWorkspace(request.args.cwd, options.listWorkspaces());
+  if (!workspace) return undefined;
+  // Needs the native realpath: the folder's real name, as the system reports it.
+  const root = await realpath(workspace.rootPath);
+  const folder = await pathUnderRoot(root, await realpath(request.args.cwd));
+  if (folder === null || !isSharedWithMePath(relative(root, folder).split(sep).join("/"))) return undefined;
+  if (resolved === "owner") throw new CliCommandError(OWNER_COMMAND_IN_RECEIVED_SHARE);
+  if (resolved === "chat") throw new CliCommandError(CHAT_IN_RECEIVED_SHARE);
+  return resolved;
+}
+
 async function dispatch(
   request: CliRequest,
   context: CliWorkspaceContext,
@@ -2095,7 +2189,7 @@ async function dispatch(
     const rebased = { ...request, args: { ...request.args, ref: { ...ref, path: paths.rebase(ref.path, "read") } } };
     return dispatchWorkspace(rebased, context, options, completion);
   }
-  const pathVerbs = new Set(["heldNoteChange", "moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentHeld", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "liveDocuments", "fileWrite", "fileMove", "fileDelete", "fileDuplicate", "appPublication"]);
+  const pathVerbs = new Set(["link", "heldNoteChange", "moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentHeld", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "restoreProtectedCopy", "discardProtectedCopy", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "liveDocuments", "liveStop", "liveResume", "fileWrite", "fileMove", "fileDelete", "fileDuplicate", "appPublication"]);
   if (!pathVerbs.has(request.verb)) {
     validateRequestPathSpellings(request);
     return dispatchWorkspace(request, context, options, completion);
@@ -2107,10 +2201,6 @@ async function dispatch(
     }
     throw error;
   }
-  // A received share's folder resolves to its owner's workspace; the owner's kept edits stay the owner's.
-  if (paths.shared && (request.verb === "liveKeptEdits" || request.verb === "saveRecoveryCopy" || request.verb === "retryKeptEdits" || request.verb === "stopAgain")) return keptEditsUnavailable();
-  if (paths.shared && request.verb === "liveDocuments") return liveDocumentsUnavailable();
-  if (paths.shared && request.verb === "documentHeld") return heldChangesUnavailable();
   let rebased: CliRequest;
   try {
     validateRequestPathSpellings(request);
@@ -2141,6 +2231,11 @@ async function dispatch(
       case "fileChats":
         rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "read") } };
         break;
+      case "link": {
+        const target = request.args.target;
+        rebased = target.kind === "path" ? { ...request, args: { ...request.args, target: { ...target, path: paths.rebase(target.path, "read") } } } : request;
+        break;
+      }
       case "fileChatStart":
         rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "read") } };
         break;
@@ -2159,6 +2254,12 @@ async function dispatch(
         break;
       case "retryKeptEdits":
       case "stopAgain":
+        rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "write") } };
+        break;
+      case "liveStop":
+        rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "write") } };
+        break;
+      case "liveResume":
         rebased = { ...request, args: { ...request.args, path: paths.rebase(request.args.path, "write") } };
         break;
       case "documentCreate":
@@ -2213,7 +2314,7 @@ async function dispatch(
     }
   } catch (error) {
     const reason = error instanceof Error ? error.message : "path rejected";
-    if (request.verb === "moments" || request.verb === "appPublication") throw new CliCommandError(reason);
+    if (request.verb === "moments" || request.verb === "appPublication" || request.verb === "link") throw new CliCommandError(reason);
     if (request.verb === "fileWrite") return { ok: false, written: [], reason };
     return request.verb === "dataset" ? { kind: "refused", code: "path_rejected", message: reason } : { ok: false, reason };
   }
@@ -2229,6 +2330,48 @@ async function dispatch(
   }
 }
 
+// A work link for a chat message. A path names a Collection by its folder,
+// or else a file. A read-only workspace makes none: its references would not
+// reach the owner's server.
+async function makeLink(target: CliLinkTarget, context: CliWorkspaceContext, chats: ChatsHost): Promise<CliResultByVerb["link"]> {
+  if (context.readOnly || !context.makeWorkReference) throw new CliCommandError("This workspace is read-only. Make links in the owning workspace.");
+  const make = context.makeWorkReference;
+  const made = async (kind: CliResultByVerb["link"]["kind"], input: WorkTargetInput) => {
+    const reference = await make(input);
+    return { reference, link: formatChatWorkReferenceToken(reference), kind };
+  };
+  switch (target.kind) {
+    case "group": {
+      const channel = resolveChannel(target.group, await loadChannels(chats));
+      return made("chat", { kind: "chat", channelId: channel.engine.id });
+    }
+    case "thread": {
+      const thread = resolveThread(target.thread, await loadThreads(chats, await loadChannels(chats)));
+      return made("thread", { kind: "thread", threadId: thread.thread.id });
+    }
+    case "message": {
+      const threads = await loadThreads(chats, await loadChannels(chats));
+      const found = resolveThreadOrMessage(target.message, threads, await loadMessagesByThread(chats, threads));
+      if (!found.rootMessage) throw new CliCommandError(`no such message: ${target.message}`);
+      return made("message", { kind: "message", messageId: found.rootMessage.id });
+    }
+    case "path":
+      try {
+        return await made("collection", { kind: "documentCollection", path: target.path });
+      } catch {
+        // Not a Collection: try the path as a file. Only a file the engine
+        // cannot find is missing; another failure, such as a cancelled
+        // workspace, says what it is.
+        try {
+          return await made("file", { kind: "file", path: target.path });
+        } catch (error) {
+          if (!(error instanceof Error && error.message === "work-target-not-found")) throw error;
+          throw new CliCommandError(`dohc could not find ${target.path}. Link a tracked file, or a Collection by its folder.`);
+        }
+      }
+  }
+}
+
 async function dispatchWorkspace(
   request: CliRequest,
   context: CliWorkspaceContext,
@@ -2240,6 +2383,8 @@ async function dispatchWorkspace(
   }
   const chats = chatsHost(context, options);
   switch (request.verb) {
+    case "link":
+      return await makeLink(request.args.target, context, chats);
     case "notices": {
       if (!options.notices) throw new CliCommandError("Notices are unavailable.");
       // Only where a row opens is a path. Its title and text stay as sent.
@@ -2655,8 +2800,6 @@ async function dispatchWorkspace(
       const refused = ({ reason }: { reason: string }) =>
         ({ ok: false as const, reason, ...(request.verb === "historyUndo" ? { refusal: { code: "unexplained" as const } } : {}) });
       if (request.verb === "historyUndo" && request.args.actor !== "agent") return refused({ reason: `An Undo through the CLI socket is recorded as an agent's; send actor "agent".` });
-      const paths = await callerPaths(context, request.args.cwd);
-      if (paths.shared) return refused({ reason: "History operations require the owning workspace. Open it to continue." });
       if (!context.historyOperation || !context.historyUndo) return refused({ reason: "The workspace engine is not running." });
       try {
         if (request.verb === "historyOperation") return await context.historyOperation(request.args);
@@ -2686,11 +2829,12 @@ async function dispatchWorkspace(
         const origin = documentEditOrigin(context, options, request.args.agent);
         if (request.verb === "fileMove") {
           const result = await context.movePath({ fromPath: request.args.fromPath, toPath: request.args.toPath,
-            ...(request.args.overwrite !== undefined ? { overwrite: request.args.overwrite } : {}) }, origin, request.args.requestId);
+            ...(request.args.overwrite !== undefined ? { overwrite: request.args.overwrite } : {}),
+            ...(request.args.confirmNotVersioned ? { confirmNotVersioned: true } : {}) }, origin, request.args.requestId);
           if (result.ok || result.deleted?.length || result.withoutHistory?.length) await notifyWrite(options, context);
           return result;
         }
-        const result = await context.deletePath(request.args.path, origin, request.args.requestId);
+        const result = await context.deletePath(request.args.path, origin, request.args.requestId, request.args.confirmNotVersioned);
         if (result.ok || result.deleted?.length || result.withoutHistory?.length) await notifyWrite(options, context);
         return result;
       } catch (error) {
@@ -2760,9 +2904,7 @@ async function dispatchWorkspace(
     case "versionMerge":
     case "versionResolve": {
       const versions = context.versions;
-      if (!versions || (await callerPaths(context, request.args.cwd)).shared) {
-        return { ok: false as const, reason: "Versions belong to the owning workspace. Open it to continue." };
-      }
+      if (!versions) return versionsInOwner.answer;
       // A version as version list names it: by its name, then by its ID.
       const named = async (name: string) => {
         const { versions: all, activeVersionId } = await versions.list();
@@ -2868,11 +3010,8 @@ async function dispatchWorkspace(
 
     case "syncFailure": {
       // A sync failure can name any path in the workspace. Only the original
-      // workspace reads it, as with kept edits and History: not a shared view,
-      // and not a received share's folder, which resolves to its owner's.
-      const syncStatusUnavailable = { ok: false as const, reason: "Sync status is kept only in the original workspace. Open it to continue." };
-      if (!context.syncFailure || context.readOnly) return syncStatusUnavailable;
-      if ((await callerPaths(context, request.args.cwd)).shared) return syncStatusUnavailable;
+      // workspace reads it, as with kept edits and History: not a shared view.
+      if (!context.syncFailure || context.readOnly) return syncStatusInOwner.answer;
       try {
         const failure = context.syncFailure();
         return { ok: true as const, syncFailure: failure && { ...syncFailureWords(failure), detail: failure.detail } };
@@ -2897,6 +3036,30 @@ async function dispatchWorkspace(
         return { ok: true as const, ...saved };
       } catch (error) {
         return mcpFailure(error, `failed to save kept copy ${request.args.id}`);
+      }
+    }
+
+    case "restoreProtectedCopy": {
+      const keptCopies = context.keptCopies;
+      if (!keptCopies) return keptCopiesUnavailable();
+      try {
+        // Protected History names no author, so the summary says an agent
+        // restored it; every socket edit is an agent's.
+        const restored = await keptCopies.restoreProtected(request.args.id, "agent");
+        await notifyWrite(options, context);
+        return { ok: true as const, ...restored };
+      } catch (error) {
+        return pathFreeFailure(error, "dohc could not restore the kept change.");
+      }
+    }
+
+    case "discardProtectedCopy": {
+      const keptCopies = context.keptCopies;
+      if (!keptCopies) return keptCopiesUnavailable();
+      try {
+        return { ok: true as const, ...(await keptCopies.discardProtected(request.args.id)) };
+      } catch (error) {
+        return pathFreeFailure(error, "dohc could not discard the kept change.");
       }
     }
 
@@ -2988,9 +3151,33 @@ async function dispatchWorkspace(
       const live = context.liveDocuments;
       if (!live || context.readOnly) return liveDocumentsUnavailable();
       try {
-        return { ok: true as const, ...await live(request.args.cursor) };
+        return { ok: true as const, ...await live.list(request.args.cursor) };
       } catch (error) {
         return mcpFailure(error, "failed to list live documents");
+      }
+    }
+
+    case "liveStop": {
+      const live = context.liveDocuments;
+      if (!live || context.readOnly) return liveDocumentsUnavailable();
+      try {
+        const stopped = await live.stop(request.args.path, liveChangeAuthor(context, options), request.args.objectId);
+        await notifyWrite(options, context);
+        return { ok: true as const, path: request.args.path, keptEdits: stopped.keptEdits, ...(stopped.already ? { already: true as const } : {}) };
+      } catch (error) {
+        return mcpFailure(error, `failed to stop live editing for ${request.args.path}`);
+      }
+    }
+
+    case "liveResume": {
+      const live = context.liveDocuments;
+      if (!live || context.readOnly) return liveDocumentsUnavailable();
+      try {
+        const resumed = await live.resume(request.args.path, liveChangeAuthor(context, options));
+        await notifyWrite(options, context);
+        return { ok: true as const, path: request.args.path, ...(resumed.already ? { already: true as const } : {}) };
+      } catch (error) {
+        return mcpFailure(error, `failed to resume live editing for ${request.args.path}`);
       }
     }
 
@@ -3310,6 +3497,16 @@ async function dispatchWorkspace(
         title: started.thread.title,
         ...(linkWarning ? { warning: linkWarning } : {}),
       };
+    }
+
+    case "nothingToReport": {
+      const { threadId } = await readReplyThread(context, chats, request.args.thread);
+      // Only a run dohc started, proven by its secret, says this of itself.
+      const runId = context.connected ? null : request.args.runId ?? context.run?.runId ?? null;
+      if (!options.chatRuns || runId === null) throw new CliCommandError(QUIET_RUN_REFUSALS["not-running"]);
+      const refusal = options.chatRuns.endRunQuietly(context.workspaceId, runId, threadId);
+      if (refusal) throw new CliCommandError(QUIET_RUN_REFUSALS[refusal]);
+      return { threadId: cliThreadId(threadId), nothingToReport: true as const };
     }
 
     case "reply": {
@@ -3646,9 +3843,11 @@ async function workspaceContextForRequest(
     request.verb === "groupCreate" ||
     request.verb === "post" ||
     request.verb === "reply" ||
+    request.verb === "nothingToReport" ||
     request.verb === "chatRetry" ||
     request.verb === "react" ||
     request.verb === "export" ||
+    request.verb === "watch" ||
     (request.verb === "show" && !request.args.peek);
   if (workspace.readOnly && writeRequest) {
     throw new CliCommandError(
@@ -3897,7 +4096,9 @@ export async function handleCliRequestLine(
     // run secret only proves the request is a run's; no verb receives it.
     const { door: _door, runSecret, ...request } = parsed.data;
     const completion = { replayed: false };
-    const unvalidated = request.verb === "watch"
+    const refusal = await receivedShareRefusal(request, options);
+    const unvalidated = refusal ? refusal.answer
+      : request.verb === "watch"
       ? await watchMessages(request, options, runSecret, signal)
       : request.verb === "accountDeletePreview" || request.verb === "accountDelete"
       ? await dispatchAccount(request, options)

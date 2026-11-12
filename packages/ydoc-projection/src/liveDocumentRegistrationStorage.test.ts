@@ -271,12 +271,12 @@ it('resolves current owner and exact named authority after real registration', (
       principal_email, access, generation, status, created_at_ms, revoked_at_ms, parent_grant_id)
       VALUES ('grant', 'share', 'user', 'reader', NULL, 'edit', 4, 'active', 0, NULL, NULL)`).run()
     const owner = f.storage.resolveCurrentLiveDocumentBinding({ document: input.evidence.document,
-      actor: { kind: 'owner', userId: 'owner', shareId: 'share' } })
+      actor: { kind: 'owner', userId: 'owner' } })
     const named = f.storage.resolveCurrentLiveDocumentBinding({ document: input.evidence.document,
       actor: { kind: 'named', userId: 'reader', grantId: 'grant' } })
-    expect(owner).toMatchObject({ kind: 'current', host, binding: { currentPath: 'docs/a.md', restoreFenceGeneration: 1 },
+    expect(owner).toMatchObject({ kind: 'current', host, binding: { currentPath: 'docs/a.md', selectorPaths: ['docs/a.md'], restoreFenceGeneration: 1 },
       authority: { principalKind: 'owner', principalId: 'owner', grantId: null, grantGeneration: null } })
-    expect(named).toMatchObject({ kind: 'current', host, binding: { currentPath: 'docs/a.md', restoreFenceGeneration: 1 },
+    expect(named).toMatchObject({ kind: 'current', host, binding: { currentPath: 'docs/a.md', selectorPaths: ['docs/a.md'], restoreFenceGeneration: 1 },
       authority: { principalKind: 'named', principalId: 'reader', grantId: 'grant', grantGeneration: 4 } })
     f.raw.exec("UPDATE sync_relay_share_grants SET access = 'view' WHERE grant_id = 'grant'")
     expect(f.storage.resolveCurrentLiveDocumentBinding({ document: input.evidence.document,
@@ -390,7 +390,7 @@ it.each([false, true])('refuses pre-reset registration and binding after a real 
     f.moment(input)
     f.raw.prepare(`INSERT INTO sync_relay_shares (share_id, workspace_id, granter_user_id, selector_json, created_at_ms)
       VALUES ('share', 'workspace', 'owner', ?, 0)`).run(JSON.stringify({ paths: ['docs'], versionId: null }))
-    const binding = { document: input.evidence.document, actor: { kind: 'owner', userId: 'owner', shareId: 'share' } } as const
+    const binding = { document: input.evidence.document, actor: { kind: 'owner', userId: 'owner' } } as const
     if (registered) {
       expect(f.storage.registerLiveDocumentBaseline(input).kind).toBe('registered')
       expect(f.storage.resolveCurrentLiveDocumentBinding(binding).kind).toBe('current')
@@ -430,7 +430,7 @@ it.each(['owner', 'named'] as const)('does not revive pre-reset %s authority aft
     f.raw.exec(`INSERT INTO sync_relay_share_grants (grant_id, share_id, principal_kind, principal_user_id,
       principal_email, access, generation, status, created_at_ms, revoked_at_ms, parent_grant_id)
       VALUES ('grant', 'share', 'user', 'reader', NULL, 'edit', 4, 'active', 0, NULL, NULL)`)
-    const actor = kind === 'owner' ? { kind, userId: 'owner', shareId: 'share' } as const
+    const actor = kind === 'owner' ? { kind, userId: 'owner' } as const
       : { kind, userId: 'reader', grantId: 'grant' } as const
     const request = { document: input.evidence.document, actor }
     expect(f.storage.registerLiveDocumentBaseline(input).kind).toBe('registered')

@@ -18,7 +18,9 @@ describe("live membership", () => {
   it("joins different grants to the same document without exposing credentials or identities", () => {
     const registry = createLiveMembershipRegistry(policy, read => read()), first = join(registry, "private-ticket-one");
     const linkTicket = ticket("private-ticket-two", "grant-b");
-    const second = registry.join({ ticket: { ...linkTicket, authority: { ...linkTicket.authority, principalKind: "link" } },
+    const second = registry.join({ ticket: { ...linkTicket, authority: {
+      principalKind: "link", principalId: "private-account-id", grantId: "grant-b", grantGeneration: 1,
+    } },
       invalidated: new AbortController().signal, assertCurrent() {} });
     const other = join(registry, "private-ticket-three", "grant-c", "object-b");
     const snapshot = first.snapshot(586), encoded = encodeLiveFrame(snapshot, 586);

@@ -743,6 +743,13 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       const archived = lifecycle(key).archived;
       return { ...describePermission(permitted), archived, ...(archived ? { operations: [] } : {}) };
     },
+    /** Every Collection the store keeps in the workspace, archived and still importing included. */
+    keptDatasetIds(context: Context, raw: { workspaceId: string }): string[] {
+      const workspaceId = text(raw.workspaceId);
+      owner(context, { workspaceId });
+      return db.prepare("SELECT dataset_id FROM dohc_dataset_catalog WHERE workspace_id=? UNION SELECT dataset_id FROM dohc_dataset_imports WHERE workspace_id=?")
+        .all(workspaceId, workspaceId).map(row => String(row.dataset_id));
+    },
     list(context: Context, raw: { workspaceId: string; after?: string; limit?: number; includeArchived?: boolean }): { datasets: Array<DatasetDescription & { archived: boolean }>; nextCursor: string | null } {
       const workspaceId = text(raw.workspaceId), after = raw.after === undefined ? "" : text(raw.after), limit = raw.limit ?? 50;
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("Choose a page size from 1 to 100.");

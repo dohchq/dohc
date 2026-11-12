@@ -491,15 +491,17 @@ Both paths append to the same 100,000-moment fixture. Compare their baseline and
 
 Prepare separate base and candidate checkouts before the admitted measurement window.
 Copy `crates/dohc-workspace-engine/tests/history_page_benchmark.rs` from the candidate into the base checkout.
+If the base uses a separate benchmark target, replace `use crate::common;` with `mod common;` in that copy.
 The harness chooses the old page cursor when `HISTORY_BENCH_MODE=baseline`.
 Keep both checkouts and build outputs within their registered task worktrees.
 
 Read the repository's `rust-gate` skill and build each executable through its build budget with these arguments:
 
 ```text
-cargo test --locked --release -p dohc-workspace-engine --test history_page_benchmark --no-run -j 8
+cargo test --locked --release -p dohc-workspace-engine --test integration --no-run -j 8
 ```
 
+For a base with a separate benchmark target, use `--test history_page_benchmark` instead of `--test integration`.
 Use the test executable path printed by Cargo. It is platform-specific and includes a content hash.
 Record its SHA256, checkout commit, profile, fixture size, and concurrent host context.
 Both arms must use the release profile and the same fixture.

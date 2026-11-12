@@ -172,7 +172,7 @@ it.skipIf(engine.missing)(
       "",
     ].join("\n"), async ({ settled, withEngine, personSets, automationId }) => {
       await personSets({ Status: "Done" });
-      await expect(settled()).resolves.toMatchObject({ state: "done" });
+      expect(await settled()).toEqual({ claimId: expect.any(String), state: "done" });
       const stamp = await automationId("stamp");
 
       const record = await withEngine(async (adapter) => {
@@ -214,7 +214,7 @@ it.skipIf(engine.missing)(
       // exists by then.
       const followUpClaims = () => withEngine((adapter) => adapter.listAutomationClaims({ automationId: followUp }));
       for (;;) {
-        await expect(settled()).resolves.toMatchObject({ state: "done" });
+        expect(await settled()).toEqual({ claimId: expect.any(String), state: "done" });
         if ((await followUpClaims()).claims.some((claim) => claim.state === "done")) break;
       }
       const { records } = await withEngine((adapter) => adapter.queryCollectionRecords({ collectionPath: "Tasks" }));
@@ -245,7 +245,7 @@ it.skipIf(engine.missing)(
       "",
     ].join("\n"), async ({ settled, withEngine, personSets }) => {
       await personSets({ Status: "Done" });
-      await expect(settled()).resolves.toMatchObject({ state: "done" });
+      expect(await settled()).toEqual({ claimId: expect.any(String), state: "done" });
       const { records } = await withEngine((adapter) => adapter.queryCollectionRecords({ collectionPath: "Tasks" }));
       const fields = records.map((record) => Object.fromEntries(record.values.map(({ field, value }) => [field, value])));
       expect(fields).toEqual(expect.arrayContaining([

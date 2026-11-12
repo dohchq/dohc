@@ -6,6 +6,7 @@ import {
   YdocOwnerDraftPendingError,
   type ArtifactAssetDescriptor,
 } from "@dohc/workspace-engine-client";
+import { EngineWorkspaceFolderTimeoutError } from "@dohc/workspace-engine-client/daemon";
 import * as Y from "yjs";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -141,6 +142,7 @@ interface TestHarnessOptions {
   sharedCaptureFor?: Parameters<typeof createEngineYDocSessionIpc>[0]["sharedCaptureFor"];
   ownerDraftState?: Parameters<typeof createEngineYDocSessionIpc>[0]["ownerDraftState"];
   onPendingShareMayChange?: (workspaceId: string) => void;
+  onOwnerOpened?: (workspaceId: string, path: string) => void;
 }
 
 function rendererSession(
@@ -203,6 +205,7 @@ function harness(
     sharedCaptureFor: options.sharedCaptureFor,
     ownerDraftState: options.ownerDraftState,
     onPendingShareMayChange: options.onPendingShareMayChange,
+    onOwnerOpened: options.onOwnerOpened,
     resolveDocumentPath,
     onError,
   });
@@ -272,6 +275,21 @@ describe("engine Y.Doc IPC adapter", () => {
       expect(onPendingShareMayChange).toHaveBeenCalledTimes(2);
     } finally {
       await h.ipc.shutdown();
+    }
+  });
+
+  // Proves: an owner's open reaches owner delivery only for a note the engine
+  // holds an owner binding for, so a note never shared asks the server nothing.
+  it("reports an owner's open only for a note the engine holds an owner binding for", async () => {
+    for (const ownerBound of [false, true]) {
+      const onOwnerOpened = vi.fn();
+      const h = harness(providerSession({ ownerBound }), { onOwnerOpened });
+      try {
+        await expect(h.ipc.open(new FakeSender(7), openPayload)).resolves.toMatchObject({ available: true });
+        expect(onOwnerOpened.mock.calls).toEqual(ownerBound ? [[DOCUMENT.workspaceId, DOCUMENT.path]] : []);
+      } finally {
+        await h.ipc.shutdown();
+      }
     }
   });
 
@@ -735,7 +753,7 @@ describe("engine Y.Doc IPC adapter", () => {
     await h.ipc.open(sender, openPayload);
     const change = vi.fn(async () => "stopped");
     await expect(h.ipc.withLiveEditingChange(AUTHORITY_ID, "notes/a.md", change))
-      .rejects.toThrow("notes/a.md is open in an editor. Close it in dohc, then try again.");
+      .rejects.toThrow("notes/a.md is open in an editor in dohc, where someone may be typing. dohc won't change its live editing while it's open. Ask the person using dohc to close it, then try again.");
     expect(change).not.toHaveBeenCalled();
     await h.ipc.close(sender, { sessionId: openPayload.sessionId });
     await expect(h.ipc.withLiveEditingChange(AUTHORITY_ID, "notes/a.md", change)).resolves.toBe("stopped");
@@ -1915,6 +1933,12 @@ describe("engine Y.Doc IPC adapter", () => {
       ],
       [
         new YDocSessionUnreleasedError("notes/a.md", new Error("held")),
+        { available: false, engineMayHoldDocument: true },
+      ],
+      // The workspace folder stopped answering before the engine opened the
+      // workspace. The writable plain editor would write to that same folder.
+      [
+        new EngineWorkspaceFolderTimeoutError("workspace-1", 2_000),
         { available: false, engineMayHoldDocument: true },
       ],
       [

@@ -1543,6 +1543,12 @@ describe("notice center", () => {
       title: "Live editing stopped",
       body: "The server hasn't applied an edit to a document in this workspace. You can keep editing it in dohc. People you shared it with can't edit it live. Open Live documents to resume live editing.",
     },
+    // Resume fails the same way because ordinary edits never give the document a new base.
+    {
+      reason: "live-history-over-budget" as const,
+      title: "Live editing can't start",
+      body: "A document in this workspace has too much edit history for the server to check, so live editing can't start for it. Your edits are saved and keep syncing. Open Live documents to see which document.",
+    },
     {
       reason: "conflict-parent-withheld" as const,
       title: "Live editing can't resume",
@@ -2041,7 +2047,8 @@ describe("skipped-run notices", () => {
     const onRunSentNoticeNow = vi.fn((_notice: NoticeRow) => answer.promise);
     renderNotices({ sentNotices: [skipped(), sentRow("a")], onOpenSentNotice: vi.fn(async () => null), onRunSentNoticeNow });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
-    expect(screen.getByTestId("sent-notice-s-open").textContent).toBe("Open automation");
+    expect(screen.queryByTestId("sent-notice-s-open"), "the row is its own Open").toBeNull();
+    expect(screen.getByTestId("sent-notice-s-open-row")).toBeTruthy();
     expect(screen.queryByTestId("sent-notice-a-run-now"), "only a skipped schedule runs now").toBeNull();
 
     await userEvent.click(screen.getByTestId("sent-notice-s-run-now"));
@@ -2081,7 +2088,8 @@ describe("failed run notices", () => {
     });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     expect(screen.getByTestId("sent-notice-f").textContent).toContain("It ran on Ice's laptop.");
-    expect(screen.getByTestId("sent-notice-f-open").textContent).toBe("Open automation");
+    expect(screen.queryByTestId("sent-notice-f-open"), "the row is its own Open").toBeNull();
+    expect(screen.getByTestId("sent-notice-f-open-row")).toBeTruthy();
     expect(screen.queryByTestId("sent-notice-c-retry"), "a chain stop cannot run again").toBeNull();
     expect(screen.queryByTestId("sent-notice-o-retry"), "another computer holds the run").toBeNull();
     expect(screen.getByTestId("sent-notice-o").textContent).toContain("It ran on Ice's laptop.");
@@ -2118,7 +2126,8 @@ describe("failed run notices", () => {
       onOpenSentNotice: vi.fn(async () => null),
     });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
-    expect(screen.getByTestId("sent-notice-o-open").textContent).toBe("Open automation");
+    expect(screen.queryByTestId("sent-notice-o-open"), "the row is its own Open").toBeNull();
+    expect(screen.getByTestId("sent-notice-o-open-row")).toBeTruthy();
     expect(screen.queryByTestId("sent-notice-o-retry")).toBeNull();
   });
 });
@@ -2153,7 +2162,8 @@ describe("a held change from another workspace", () => {
     expect(row.querySelector(".text-warning")).toBeTruthy();
     expect(row.querySelector("[data-sender-shape]")).toBeNull();
     expect(within(row).getByRole("button", { name: "Details" })).toBeTruthy();
-    expect(screen.getByTestId("sent-notice-h-open").textContent).toBe("Open note");
+    expect(screen.queryByTestId("sent-notice-h-open"), "the row is its own Open").toBeNull();
+    expect(screen.getByTestId("sent-notice-h-open-row")).toBeTruthy();
   });
 });
 
@@ -2287,12 +2297,12 @@ describe("notices sent to you", () => {
 
     it("reads a row the moment keyboard focus reaches it", () => {
       const onReadSentNotice = vi.fn();
-      renderNotices({ sentNotices: [sentRow("a"), sentRow("b")], onReadSentNotice, onOpenSentNotice: vi.fn() });
+      renderNotices({ sentNotices: [sentRow("a"), sentRow("b")], onReadSentNotice, onOpenSentNotice: vi.fn(), onDismissSentNotice: vi.fn() });
       fireEvent.click(screen.getByTestId("notice-center-toggle"));
       act(() => screen.getByTestId("sent-notice-a-open-row").focus());
       expect(onReadSentNotice).toHaveBeenCalledExactlyOnceWith(sentRow("a").notice);
       // Moving within the row reads nothing more.
-      act(() => within(screen.getByTestId("sent-notice-a")).getByRole("button", { name: "Open" }).focus());
+      act(() => screen.getByTestId("sent-notice-a-dismiss").focus());
       expect(onReadSentNotice).toHaveBeenCalledOnce();
     });
 
@@ -2526,7 +2536,7 @@ describe("notices sent to you", () => {
     const onOpenSentNotice = vi.fn(async () => null);
     renderNotices({ sentNotices: [sentRow("a")], onOpenSentNotice });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
-    await userEvent.click(within(screen.getByTestId("sent-notice-a")).getByRole("button", { name: "Open" }));
+    await userEvent.click(screen.getByTestId("sent-notice-a-open-row"));
     expect(onOpenSentNotice).toHaveBeenCalledWith(sentRow("a").notice, expect.any(AbortSignal));
     await waitFor(() => expect(screen.queryByTestId("notice-center")).toBeNull());
     expect(document.activeElement).toBe(screen.getByTestId("notice-center-toggle"));
@@ -2537,7 +2547,7 @@ describe("notices sent to you", () => {
     const onOpenSentNotice = vi.fn(async () => note);
     renderNotices({ sentNotices: [sentRow("ended", { target: null })], onOpenSentNotice });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
-    await userEvent.click(within(screen.getByTestId("sent-notice-ended")).getByRole("button", { name: "Open" }));
+    await userEvent.click(screen.getByTestId("sent-notice-ended-open-row"));
     expect(await within(screen.getByTestId("sent-notice-ended")).findByRole("status")).toHaveProperty("textContent", note);
     expect(screen.getByTestId("notice-center")).toBeTruthy();
   });
@@ -2644,16 +2654,20 @@ describe("notices sent to you", () => {
 
     it("says it is opening and ignores a second click", async () => {
       const { answers, onOpenSentNotice } = waitingOpen();
-      renderNotices({ sentNotices: [sentRow("a")], onOpenSentNotice });
+      renderNotices({ sentNotices: [sentRow("a")], onOpenSentNotice, onDismissSentNotice: vi.fn() });
       await userEvent.click(screen.getByTestId("notice-center-toggle"));
-      await userEvent.click(screen.getByTestId("sent-notice-a-open"));
-      const open = screen.getByTestId("sent-notice-a-open");
-      expect(open.textContent).toBe("Opening…");
+      await userEvent.click(screen.getByTestId("sent-notice-a-open-row"));
+      const open = screen.getByTestId("sent-notice-a-open-row");
+      // Focus stays on the row, so the word must not hide for its ×.
+      expect(screen.getByTestId("sent-notice-a-opening").textContent).toBe("Opening…");
+      expect(screen.getByTestId("sent-notice-a-opening").className).not.toContain("invisible");
       expect(open.getAttribute("aria-busy")).toBe("true");
       await userEvent.click(open);
       expect(onOpenSentNotice).toHaveBeenCalledOnce();
 
       await act(async () => answers[0]?.resolve("dohc could not open this share."));
+      // The row no longer opens, so its Open shows, to try again.
+      expect(screen.queryByTestId("sent-notice-a-opening")).toBeNull();
       expect(screen.getByTestId("sent-notice-a-open").textContent).toBe("Open");
       expect(within(screen.getByTestId("sent-notice-a")).getByRole("status").textContent)
         .toBe("dohc could not open this share.");
@@ -2664,7 +2678,7 @@ describe("notices sent to you", () => {
       const { answers, signals, onOpenSentNotice } = waitingOpen();
       renderNotices({ sentNotices: [sentRow("a")], onOpenSentNotice });
       await userEvent.click(screen.getByTestId("notice-center-toggle"));
-      await userEvent.click(screen.getByTestId("sent-notice-a-open"));
+      await userEvent.click(screen.getByTestId("sent-notice-a-open-row"));
       await userEvent.keyboard("{Escape}");
       expect(signals[0]?.aborted).toBe(true);
 
@@ -2676,14 +2690,14 @@ describe("notices sent to you", () => {
       const { answers, signals, onOpenSentNotice } = waitingOpen();
       const { rerender } = renderNotices({ sentNotices: [sentRow("a")], onOpenSentNotice, sentNoticesAccount: "ana" });
       await userEvent.click(screen.getByTestId("notice-center-toggle"));
-      await userEvent.click(screen.getByTestId("sent-notice-a-open"));
-      expect(screen.getByTestId("sent-notice-a-open").textContent).toBe("Opening…");
+      await userEvent.click(screen.getByTestId("sent-notice-a-open-row"));
+      expect(screen.getByTestId("sent-notice-a-opening").textContent).toBe("Opening…");
 
       // Ben's list has a notice with the same id.
       rerender(noticeElement({ sentNotices: [sentRow("a", { title: "Ben's notice" })], onOpenSentNotice, sentNoticesAccount: "ben" }));
       expect(signals[0]?.aborted).toBe(true);
-      expect(screen.getByTestId("sent-notice-a-open").textContent).toBe("Open");
-      await userEvent.click(screen.getByTestId("sent-notice-a-open"));
+      expect(screen.queryByTestId("sent-notice-a-opening")).toBeNull();
+      await userEvent.click(screen.getByTestId("sent-notice-a-open-row"));
       expect(onOpenSentNotice).toHaveBeenCalledTimes(2);
       expect(signals[1]?.aborted).toBe(false);
 
@@ -2696,10 +2710,10 @@ describe("notices sent to you", () => {
       const { signals, onOpenSentNotice } = waitingOpen();
       renderNotices({ sentNotices: [sentRow("a"), sentRow("b")], onOpenSentNotice, onDismissSentNotice: vi.fn() });
       await userEvent.click(screen.getByTestId("notice-center-toggle"));
-      await userEvent.click(screen.getByTestId("sent-notice-a-open"));
-      await userEvent.click(screen.getByTestId("sent-notice-b-open"));
+      await userEvent.click(screen.getByTestId("sent-notice-a-open-row"));
+      await userEvent.click(screen.getByTestId("sent-notice-b-open-row"));
       expect(signals.map((signal) => signal.aborted)).toEqual([true, false]);
-      expect(screen.getByTestId("sent-notice-a-open").textContent).toBe("Open");
+      expect(screen.queryByTestId("sent-notice-a-opening")).toBeNull();
 
       await userEvent.click(screen.getByTestId("sent-notice-b-dismiss"));
       expect(signals[1]?.aborted).toBe(true);

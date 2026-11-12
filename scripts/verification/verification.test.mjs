@@ -40,9 +40,9 @@ test("desktop proof gets an isolated display only on headless Linux", () => {
   assert.deepEqual(desktopProofCommand(args, {platform: "linux", env: {WAYLAND_DISPLAY: "wayland-0"}}), direct);
 });
 
-test("desktop proofs require each restart proof, smoke, onboarding and the agent sign-in everywhere and the pixel baseline on Windows", () => {
+test("desktop proofs require each restart proof, smoke, onboarding, the agent sign-in, the owner open and the New page Edit link everywhere and the pixel baseline on Windows", () => {
   const restart = ["@restart-durability-idle-external", "@restart-durability-overlapping-typing", "@restart-durability-capture-before-reopen", "@restart-durability-person-agent"];
-  const everywhere = ["@verification-smoke", ...restart, "@self-host-onboarding", "@share-link-agent-sign-in"];
+  const everywhere = ["@verification-smoke", ...restart, "@self-host-onboarding", "@share-link-agent-sign-in", "@live-owner-open", "@new-page-edit-link"];
   assert.deepEqual(desktopProofTags({platform: "win32"}), {
     selected: [...everywhere, "@states-page"],
     required: [...everywhere, "@states-baselines"],
@@ -323,23 +323,24 @@ test("standalone preparation installs frozen dependencies before building, seali
     assert.match(first.stdout, /"desktopPrepared":true/);
     assert.equal(readFileSync(join(root, "apps/desktop/dist/built.txt"), "utf8"), "new-lock");
     const calls = () => readFileSync(join(root, ".dohc-dev/calls.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
-    assert.deepEqual(calls().map(({ command, args }) => [command, args[0]]), [["pnpm", "install"], ["cargo", "build"], ["pnpm", "--filter"], ["pnpm", "--filter"]]);
+    assert.deepEqual(calls()[0], { command: "pnpm", args: ["install", "--frozen-lockfile", "--config.confirm-modules-purge=false"] });
+    const initialCalls = calls().length;
     writeFileSync(join(root, "node_modules/installed.txt"), "stale-again");
     const reused = invoke();
     assert.equal(reused.status, 0, reused.stderr);
     assert.match(reused.stdout, /reuse desktop/);
     assert.equal(readFileSync(join(root, "node_modules/installed.txt"), "utf8"), "new-lock");
-    assert.equal(calls().length, 5);
+    assert.equal(calls().length, initialCalls + 1);
     assert.deepEqual(calls().at(-1), { command: "pnpm", args: ["install", "--frozen-lockfile", "--config.confirm-modules-purge=false"] });
     const installed = invoke({ install: false });
     assert.equal(installed.status, 0, installed.stderr);
     assert.match(installed.stdout, /reuse desktop/);
-    assert.equal(calls().length, 5, "the canonical verifier can reuse its completed frozen install");
+    assert.equal(calls().length, initialCalls + 1, "the canonical verifier can reuse its completed frozen install");
     rmSync(join(root, ".dohc-dev/verification/build.json"));
     const failed = invoke({ failInstall: true });
     assert.notEqual(failed.status, 0);
     assert.match(failed.stderr, /frozen install rejected/);
-    assert.equal(calls().length, 6);
+    assert.equal(calls().length, initialCalls + 2);
     assert.equal(existsSync(join(root, ".dohc-dev/verification/build.json")), false);
     assert.equal(existsSync(join(root, ".dohc-dev/verification/build.json.lock")), false);
   } finally { rmSync(root, { recursive: true, force: true }); }
@@ -477,10 +478,8 @@ test("preparation reuses artifacts across proof edits and rebuilds for productio
           assert.notEqual(after,before,path+' '+operation+' changes native proof provenance');
           before=after;
           assert.equal(preparedStatus('engine'),true,path+' '+operation+' keeps the daemon');
+          await expectBuilds(path+' '+operation,path==='services/sync-relay/relay-error-codes.json'?['desktop']:[]);
         }
-        // No build consumes a native test fixture; this fixture declares no
-        // package that would make one a desktop dependency.
-        await expectBuilds('native test fixture '+operation,[]);
       }
 
       for(const [name,change,rebuilt] of [

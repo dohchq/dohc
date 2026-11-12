@@ -229,6 +229,7 @@ export async function runRelayCase(options) {
           credential: {
             credentialId: 'link-credential',
             grantId: 'link-grant',
+            secretSealed: null,
             secretHash: linkSecurity.hashLinkBearer('benchmark-link-secret', 'document-size-key-32-characters-long'),
             generation: 1,
             mintedAtMs: now,
@@ -251,7 +252,7 @@ export async function runRelayCase(options) {
         true,
       );
       const actors = [
-        { kind: 'owner', userId: 'owner', shareId: 'share' },
+        { kind: 'owner', userId: 'owner' },
         { kind: 'named', grantId: 'grant', userId: 'reader' },
         {
           kind: 'link',

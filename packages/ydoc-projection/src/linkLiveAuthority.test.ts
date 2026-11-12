@@ -75,7 +75,7 @@ const mutations: Array<[string, (f: State) => void]> = [
   ["changed profile", f => f.raw.exec("UPDATE sync_relay_link_principals SET profile_token_hash='different'")],
   ["blocked principal", f => f.raw.exec("UPDATE sync_relay_link_principals SET blocked_at_ms=1000")],
   ["paused writes", f => f.raw.exec("UPDATE sync_relay_shares SET link_writes_paused_at_ms=1000")],
-  ["changed selector", f => f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({ paths: ["elsewhere"], versionId: null }))],
+  ["selector losing the file", f => f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({ paths: ["elsewhere"], versionId: null }))],
   ["advanced restore fence", f => f.raw.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=restore_fence_generation+1")],
   ["advanced host epoch", f => f.raw.exec("UPDATE sync_relay_session_host_control SET host_epoch=host_epoch+1")],
   ["closed lineage", f => f.raw.exec("UPDATE sync_relay_live_documents SET admission_state='closed'")],
@@ -92,6 +92,18 @@ it.each(mutations)("rechecks %s after validation without a journal write or rece
   expect(result.result.kind).toBe(_name === "changed host" ? "retry" : "refused");
   expect(result.admitted).toBeNull();
   expect(f.journalRows()).toEqual(before);
+});
+
+it("accepts a link edit on the lineage's binding after its share changes and still covers the file", async () => {
+  const f = setup(), minted = await f.mint();
+  expect(await f.tickets.redeem(minted!.token, f.scope)).not.toBeNull();
+  const input = f.capture(f.update(), "covered-link-edit", f.actor);
+  // The share selects the folder; the accepted binding is the lineage's own.
+  expect(input.metadata.binding.selectorPaths).toEqual(["docs/a.md"]);
+  f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({ paths: ["docs/a.md"], versionId: null }));
+  const result = f.storage.commitLiveUpdateJournal(input);
+  expect(result.result.kind).toBe("accepted");
+  expect(result.admitted?.metadata.accepted.binding).toEqual(input.metadata.binding);
 });
 
 it.each(mutations)("rechecks %s after the redemption host report without consuming the ticket", async (_name, mutate) => {

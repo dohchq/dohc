@@ -394,15 +394,18 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   get unavailable(): AbortSignal { return this.owner.unavailable; }
   captureStanding(): () => void { return this.owner.captureStanding(); }
 
-  enrollServiceHostDocument(input: serviceHostEnrollmentStorage.EnrollServiceHostDocumentInput) {
-    const result = serviceHostEnrollmentStorage.enrollServiceHostDocument(this, input);
+  ensureOwnedLiveDocument(input: serviceHostEnrollmentStorage.EnsureOwnedLiveDocumentInput) {
+    const result = serviceHostEnrollmentStorage.ensureOwnedLiveDocument(this, input);
     notifyDesktopReadiness(this, {workspaceId: result.workspaceId, path: result.path});
     return result;
   }
-  enrollServiceHostDocuments(inputs: readonly serviceHostEnrollmentStorage.EnrollServiceHostDocumentInput[]) {
-    const result = serviceHostEnrollmentStorage.enrollServiceHostDocuments(this, inputs);
+  ensureOwnedLiveDocuments(inputs: readonly serviceHostEnrollmentStorage.EnsureOwnedLiveDocumentInput[]) {
+    const result = serviceHostEnrollmentStorage.ensureOwnedLiveDocuments(this, inputs);
     for (const enrollment of result) notifyDesktopReadiness(this, {workspaceId: enrollment.workspaceId, path: enrollment.path});
     return result;
+  }
+  renewPersonalSessionDemand(input: {workspaceId: string; objectId: string; nowMs: number}) {
+    return serviceHostEnrollmentStorage.renewPersonalSessionDemand(this, input);
   }
   listServiceHostEnrollments(workspaceId?: string) {
     return serviceHostEnrollmentStorage.listServiceHostEnrollments(this, workspaceId);
@@ -434,6 +437,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
   latestServiceHostDocumentUpdate(input: Parameters<typeof serviceHostFeedStorage.latestServiceHostDocumentUpdate>[1]) {
     return serviceHostFeedStorage.latestServiceHostDocumentUpdate(this, input);
+  }
+  serviceHostDocumentBaseAfter(input: Parameters<typeof serviceHostFeedStorage.serviceHostDocumentBaseAfter>[1]) {
+    return serviceHostFeedStorage.serviceHostDocumentBaseAfter(this, input);
   }
   hasServiceHostConflictEffect(input: Parameters<typeof serviceHostFeedStorage.hasServiceHostConflictEffect>[1]) {
     return serviceHostFeedStorage.hasServiceHostConflictEffect(this, input);
@@ -506,11 +512,14 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   serviceHostEnrollmentCovered(enrollment: Pick<serviceHostEnrollmentStorage.ServiceHostEnrollment, "workspaceId" | "objectId" | "ownerUserId" | "shareId" | "path">) {
     return serviceHostEnrollmentStorage.serviceHostEnrollmentCovered(this, enrollment);
   }
-  serviceHostDocumentEnabled(document: {workspaceId: string; objectId: string}, owner?: {userId: string; shareId: string}, restoring?: boolean) {
+  serviceHostDocumentEnabled(document: {workspaceId: string; objectId: string}, owner?: {userId: string}, restoring?: boolean) {
     return serviceHostEnrollmentStorage.serviceHostDocumentEnabled(this, document, owner, restoring);
   }
   serviceActivationRetirement(document: {workspaceId: string; objectId: string}) {
     return serviceActivationRetirementStorage.readServiceActivationRetirement(this, document);
+  }
+  serviceActivationRetirements(workspaceId: string) {
+    return serviceActivationRetirementStorage.listServiceActivationRetirements(this, workspaceId);
   }
   serviceRestoreInProgress(document: {workspaceId: string; objectId: string}) {
     return serviceHostEnrollmentStorage.restoreInProgress(this, document.workspaceId, document.objectId);
@@ -560,6 +569,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   resolveCurrentLiveDocumentBinding(input: CurrentLiveBindingRequest, activation?: ServiceActivationAccess): CurrentLiveBindingResult {
     return liveDocumentAuthorityStorage.resolveCurrentLiveDocumentBinding(this, input, activation);
+  }
+
+  resolveCurrentLiveDocumentBindingFromMetadata(input: CurrentLiveBindingRequest): CurrentLiveBindingResult {
+    return liveDocumentAuthorityStorage.resolveCurrentLiveDocumentBindingFromMetadata(this, input);
   }
 
   automationRecordWriteAllowed(input: Parameters<SyncRelayStorage["automationRecordWriteAllowed"]>[0]): boolean {
@@ -717,6 +730,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   workspaceIsOwnedBy(workspaceId: string, ownerUserId: string): boolean {
     return !accountIsFenced(this, ownerUserId) && workspacesStorage.workspaceIsOwnedBy(this, workspaceId, ownerUserId);
+  }
+  workspaceOwner(workspaceId: string): string | null {
+    return workspacesStorage.workspaceOwner(this, workspaceId);
   }
 
   discardReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.discardReplicaCurrentView>[1]) { return replicaCurrentViews.discardReplicaCurrentView(this,lease); }

@@ -4,7 +4,7 @@ import {deferred} from "../testing/deferred";
 
 const binding = {workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
   currentPath: "docs/a.md", selectorPaths: ["docs"], restoreFenceGeneration: 1};
-const document = {binding, relayDatabaseNamespace: "namespace", shareId: "share"};
+const document = {binding, relayDatabaseNamespace: "namespace"};
 const ready = {path: "docs/a.md", status: "ready", document};
 afterEach(() => vi.useRealTimers());
 

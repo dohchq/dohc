@@ -111,6 +111,7 @@ impl EngineService {
                 | "sync.applyPull"
                 | "sync.refusalNotices"
                 | "sync.dismissRefusal"
+                | "sync.ordinary.publicationState"
                 | "liveApplication.captureOwnerActivation"
                 | "liveApplication.releaseOwnerActivation"
                 | "liveApplication.ownerState"
@@ -501,6 +502,10 @@ impl EngineService {
                 self.sync_refusal_notices(&ctx, request.workspace, request.params)
                     .await?
             }
+            "sync.ordinary.publicationState" => {
+                self.sync_ordinary_publication_state(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "sync.claim" => {
                 Box::pin(self.sync_claim(&ctx, request.workspace, request.params)).await?
             }
@@ -836,6 +841,10 @@ impl EngineService {
             }
             "secrets.materialize" => {
                 self.secrets_materialize(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "secrets.recorded" => {
+                self.secrets_recorded(&ctx, request.workspace, request.params)
                     .await?
             }
             "chats.channels.create" => {
@@ -1463,6 +1472,7 @@ mod tests {
             "sync.applyPull",
             "sync.materializePendingCursor",
             "sync.commitCursor",
+            "sync.ordinary.publicationState",
             "sync.push",
             "sync.createHostedReplica",
             "sync.pullHosted",
@@ -1592,6 +1602,7 @@ mod tests {
             "secrets.apply",
             "secrets.restore",
             "secrets.materialize",
+            "secrets.recorded",
         ] {
             assert!(method_requires_initial_capture_ready(method), "{method}");
         }
@@ -1776,6 +1787,7 @@ mod tests {
             "secrets.materialize",
             "secrets.moments.get",
             "secrets.moments.list",
+            "secrets.recorded",
             "secrets.restore",
             "secrets.stateExists",
             "secrets.write",
@@ -1794,6 +1806,7 @@ mod tests {
             "sync.resetClaimRefusal",
             "sync.materializePendingCursor",
             "sync.commitCursor",
+            "sync.ordinary.publicationState",
             "sync.createHostedReplica",
             "sync.heldDocument",
             "sync.heldDocuments",

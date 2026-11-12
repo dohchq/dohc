@@ -1,5 +1,6 @@
 import type { HeldNoteChangeInput, HeldNoteChangeResult } from "@dohc/workspace-engine-client";
 import { duplicateWithRecovery } from "./workspaceDuplicateOutcome";
+import { resolveEngineFileTargets } from "./resolveEngineFiles";
 import { SyncedDeletionRevivalError } from "./syncedDeletionRefusal";
 import { MAX_FILE_RESOLVE_BYTES, MAX_FILE_RESOLVE_TARGETS } from "@dohc/workspace-engine-client/daemon";
 import type { HistoryCursor, WatcherStatusResult } from "@dohc/workspace-engine-client";
@@ -104,6 +105,7 @@ import { folderEntriesOrNone } from "./folderEntries";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { isInside } from "../security/pathContainment";
 import { outsideWriteCopies, OutsideWriteCopyError } from "./outsideWriteCopies";
+import { MAX_PROTECTED_HISTORY_BYTES, PROTECTED_COPIES_PATH, ProtectedCopyFinalError, protectedWriteCopies, type ProtectedCopyRow } from "./protectedWriteCopies";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import { createFile } from "./workspaceFiles";
 import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "./workspaceTextLimits";
@@ -739,8 +741,13 @@ export interface WorkspaceEngineCapture {
   // Files dohc moved aside while saving because another program changed them
   // meanwhile. Each waits at a hidden name until saveKeptCopy moves it to a
   // visible copy beside its file.
-  listKeptCopies(): Promise<{ keptCopies: KeptCopy[]; more: boolean; outsideWriteCopies?: [string, string, string][] }>;
+  listKeptCopies(): Promise<{ keptCopies: KeptCopy[]; more: boolean; outsideWriteCopies?: [string, string, string][]; protectedCopies?: ProtectedCopyRow[] }>;
   saveKeptCopy(id: number): Promise<KeptCopySaveResult>;
+  // Protected text a sync replaced, kept on this computer until one of these
+  // runs. Restore writes it back as a new change in protected History, so
+  // History's restore reverses it; Discard removes it for good.
+  restoreProtectedCopy(id: string, restoredBy?: "you" | "agent"): Promise<{ path: string; status: "restored" }>;
+  discardProtectedCopy(id: string): Promise<{ path: string; status: "discarded" }>;
   // Old versions of files kept on a drive that cannot tell dohc whether a
   // program still has one open. dohc never deletes them itself; these list
   // and delete them for a person or agent who accepted that risk.
@@ -799,6 +806,11 @@ export interface WorkspaceEngineCapture {
   // Stable-identity seam for the linked-chat rail: the active version's
   // engine object id for a path, or null when the engine does not own it.
   fileObjectIdForPath(path: string): Promise<string | null>;
+  // The files on disk, of those `files` lists, that the active version does
+  // not track, such as files over History's size limit or ones its rules
+  // leave out. They have one copy for every version, so a change to one
+  // changes it in Main too. null on Main, which never lists the files.
+  notVersioned(files: () => Promise<readonly string[]>): Promise<string[] | null>;
   resolveFileForPath(path: string): Promise<{ objectId: string; path: string } | null>;
   // Reverse lookup for projections that must name a linked object's current
   // active-version path after renames.
@@ -942,7 +954,12 @@ export interface WorkspaceEngineCaptureOptions {
   // moment. Sticky: the drive does not change while the workspace is open.
   onAtomicPlacementUnavailable?: () => void;
   onRecoveryUnavailable?: (unavailable: boolean) => void;
+  // Why protected files such as `.env` wait on the workspace secret key, such
+  // as `key-missing`, or null while the key works.
+  onSecretKeyUnavailable?: (reason: string | null) => void;
   onOutsideWriteCopies?: (paths: readonly (readonly [string, string, string])[] | null, readError: string | null) => void;
+  // Protected text a sync replaced, kept on this computer: [path, id, keptAtMs].
+  onProtectedCopies?: (copies: readonly (readonly [string, string, number])[] | null, readError: string | null) => void;
   onKeptFiles?: (paths: readonly (readonly [string, string])[]) => void;
   onRetainedCopies?: (summary: RetainedCopiesSummary) => void;
   onHeldFiles?: (files: import("../ipc/bridgeContract").CaptureFileHold[]) => void;
@@ -1697,12 +1714,21 @@ async function diskContentOf(path: string, size: number, read: () => Promise<Buf
   return { kind: "text", text, sha256: sha256Utf8(text) };
 }
 
+// readDiskSecretState for text dohc keeps or restores. The leaf check alone
+// would read through a folder that links outside the workspace. It reads the
+// path the check resolved, so a folder swapped for a link after the check
+// can't redirect the read.
+async function readContainedSecretState(rootPath: string, path: string): ReturnType<typeof readDiskSecretState> {
+  const { resolvedAbsolute } = await assertResolvedWorkspacePath({ rootPath, absolutePath: join(rootPath, path), spelled: path, label: "Protected file path", access: "entry" });
+  return await readDiskSecretState(dirname(resolvedAbsolute), basename(resolvedAbsolute));
+}
+
 // Like readDiskTextState but for secret-classified paths: `.env` has no text
 // media type, so the media-type heuristic is skipped — any regular file whose
 // bytes round-trip through UTF-8 within the size cap is capturable secret
 // text. Everything else mirrors the text rules (symlink refusal, size cap,
 // confirmed-absent vs transiently-unreadable).
-async function readDiskSecretState(rootPath: string, path: string): Promise<DiskTextState> {
+async function readDiskSecretState(rootPath: string, path: string): Promise<Exclude<DiskTextState, { kind: "binary" }>> {
   const absolute = join(rootPath, path);
   try {
     const info = await lstat(absolute);
@@ -2051,6 +2077,27 @@ export function createWorkspaceEngineCapture(
       } catch (error) { onError("outside copy notices", error); }
     }
     return lastOutsideCopies;
+  };
+  const protectedCopies = protectedWriteCopies({ workspaceId, rootPath, attachmentId });
+  let lastProtectedCopies: ProtectedCopyRow[] | null = null;
+  let reportedProtectedCopies: string | null = null;
+  // Rows carry path, id and time only. Every failure the copies can raise
+  // names a path: parse errors become fixed text in protectedWriteCopies.
+  const reportProtectedCopies = async () => {
+    let readError: string | null = null;
+    const failed = (error: unknown) => {
+      readError ??= `${join(rootPath, PROTECTED_COPIES_PATH)}\n${errorMessage(error)}`;
+    };
+    try { lastProtectedCopies = await protectedCopies.list(failed); }
+    catch (error) { failed(error); }
+    const serialized = JSON.stringify([lastProtectedCopies, readError]);
+    if (serialized !== reportedProtectedCopies) {
+      try {
+        options.onProtectedCopies?.(lastProtectedCopies, readError);
+        reportedProtectedCopies = serialized;
+      } catch (error) { onError("protected copy notices", error); }
+    }
+    return lastProtectedCopies;
   };
 
   let liveStores: ReturnType<typeof createCaptureLiveStores> | null = null;
@@ -3764,6 +3811,7 @@ export function createWorkspaceEngineCapture(
         return current?.lineageClaimId ?? canonicalLineageClaimId;
       },
       get headSha256() { return current?.headSha256; },
+      get ownerBound() { return current?.ownerBound; },
       contentKind,
       get artifactAssets() {
         return current?.artifactAssets ?? [];
@@ -4338,6 +4386,31 @@ export function createWorkspaceEngineCapture(
       } while (beforeMomentOrder !== undefined);
       return false;
     }
+    // Before a protected file is replaced, keep its text on this computer
+    // when protected History lacks it. True when this call kept a copy;
+    // "skip" leaves content the store cannot hold as it is, as a version
+    // switch does.
+    async function keepProtectedChange(
+      operation: Extract<MaterializeOperation, { kind: "write" | "delete" }>,
+    ): Promise<boolean | "skip"> {
+      const { path } = operation;
+      const disk = await readContainedSecretState(rootPath, path);
+      if (disk.kind === "absent") return false;
+      if (disk.kind === "unreadable") {
+        throw await OutsideWriteCopyError.from(path, new Error(`Could not read ${path}`), rootPath, PROTECTED_COPIES_PATH);
+      }
+      if (disk.kind === "untracked-content") return disk.reason === "non-file" ? false : "skip";
+      if (operation.kind === "write" && disk.text === operation.text) return false;
+      // History holds nothing larger, so Restore could not bring it back.
+      if (Buffer.byteLength(disk.text) > MAX_PROTECTED_HISTORY_BYTES) return "skip";
+      if (await secretStoreFor().secretTextRecorded({ workspaceId, path, text: disk.text })) return false;
+      const { versionId } = await lookupContext();
+      return await protectedCopies.keep(path, disk.text, versionId).catch(async (error: unknown) => {
+        // Every failure here names paths only; this guards the notice anyway.
+        const named = error instanceof Error && disk.text !== "" && !error.message.includes(disk.text);
+        throw await OutsideWriteCopyError.from(path, named ? error : new Error("Could not write the kept copy."), rootPath, PROTECTED_COPIES_PATH);
+      });
+    }
     for (const operation of operations) {
       assertEngineWritablePath(operation.path, policy, {
         ...(operation.kind !== "write-binary" && operation.protected ? { protected: true } : {}),
@@ -4348,13 +4421,20 @@ export function createWorkspaceEngineCapture(
           ? registerExpectedEngineEvents([{ path: operation.path }])
           : () => undefined;
       let copied = false;
+      let keptProtected = false;
       try {
-        // Protected materialization has its own secret policy and recovery.
         if (operation.kind === "write-binary" || !operation.protected) {
           copied = await outsideCopies.beforeWrite(operation.path,
             operation.kind === "delete" ? null : operation.kind === "write" ? Buffer.from(operation.text) : operation.bytes,
             path => assertEngineWritablePath(path, policy),
             (path, sha256) => isRecorded(operation, path, sha256));
+        } else {
+          const kept = await keepProtectedChange(operation);
+          if (kept === "skip") {
+            cancel();
+            continue;
+          }
+          keptProtected = kept;
         }
         if (operation.kind === "write") {
           await diskWriter.writeTextFile(absolute, operation.text);
@@ -4372,6 +4452,7 @@ export function createWorkspaceEngineCapture(
         );
       } finally {
         if (copied) await reportOutsideWriteCopies();
+        if (keptProtected) await reportProtectedCopies();
       }
     }
   }
@@ -4650,8 +4731,11 @@ export function createWorkspaceEngineCapture(
         if (status) {
           options.onKeptFiles?.(status.keptFiles);
           await reportOutsideWriteCopies();
+          // Also after a restart, when dohc stopped before its notice.
+          await reportProtectedCopies();
           options.onRetainedCopies?.(status.retainedCopies);
           options.onRecoveryUnavailable?.(status.recoveryUnavailable);
+          options.onSecretKeyUnavailable?.(status.secretKeyUnavailable ?? null);
           options.onHeldFiles?.(status.heldFiles);
           for (const path of status.deferredWrites) liveYDocSessions.get(path)?.changedOutside();
         }
@@ -6233,6 +6317,7 @@ export function createWorkspaceEngineCapture(
           },
           path: session.path,
           get headSha256() { return session.headSha256; },
+          get ownerBound() { return session.ownerBound; },
           async readArtifactAsset(descriptor) {
             const bytes = await engine.readBinaryBlob({
               workspaceId,
@@ -6279,7 +6364,10 @@ export function createWorkspaceEngineCapture(
             ...applyOptions, idempotencyKey: applyOptions.idempotencyKey ?? createId(),
           }),
           settleNow: opts => publicSession.settleNow(opts),
-          close: opts => publicSession.close(opts),
+          // A later record open must follow this writer's lease release.
+          close: opts => stopped
+            ? publicSession.close(opts)
+            : enqueueResult("close record session", () => publicSession.close(opts)),
         } satisfies RecordEditSession;
         return publicSession;
       }
@@ -7239,11 +7327,78 @@ export function createWorkspaceEngineCapture(
     async listKeptCopies() {
       const native = await (await engineStore()).listKeptCopies();
       const outsideWriteCopies = await reportOutsideWriteCopies();
-      return { ...native, ...(outsideWriteCopies === null ? {} : { outsideWriteCopies }) };
+      const protectedRows = await reportProtectedCopies();
+      return {
+        ...native,
+        ...(outsideWriteCopies === null ? {} : { outsideWriteCopies }),
+        ...(protectedRows === null ? {} : { protectedCopies: protectedRows }),
+      };
     },
 
     async saveKeptCopy(id) {
       return await (await engineStore()).saveKeptCopy(id);
+    },
+
+    restoreProtectedCopy(id, restoredBy = "you") {
+      return enqueueResult("restore protected copy", async () => {
+        const copy = await protectedCopies.read(id);
+        if (copy === null) throw new ProtectedCopyFinalError("This kept change is no longer available.");
+        const { path } = copy;
+        const policy = await readPolicyForTask();
+        assertEngineWritablePath(path, policy, { protected: true });
+        const engine = await engineStore();
+        const activeVersionId = await activeVersionIdOf(engine);
+        if (copy.versionId !== activeVersionId) {
+          throw new Error("Your change was kept in a different version. Switch to that version to restore it.");
+        }
+        if (Buffer.byteLength(copy.text) > MAX_PROTECTED_HISTORY_BYTES) {
+          throw new ProtectedCopyFinalError("Your change is over the 1 MB limit for protected files.");
+        }
+        await engine.flushCapture?.();
+        const secrets = secretStoreFor();
+        const correlationId = `restore-${createId()}`;
+        // Save what is on disk first, so Restore never loses an edit
+        // capture has not saved yet, and History can bring it back.
+        const disk = await readContainedSecretState(rootPath, path);
+        if (disk.kind === "unreadable") throw new Error(`dohc could not read ${path} on disk.`);
+        if (disk.kind === "untracked-content") {
+          throw new Error(`dohc saves what is at ${path} first, and it cannot save that item. Move the item to another folder, then try again.`);
+        }
+        const saved = { origin: "local-file" as const, summary: "Saved latest edits", correlationId };
+        if (disk.kind === "text") {
+          await secrets.writeSecretFile({ workspaceId, versionId: activeVersionId, path, text: disk.text, metadata: saved });
+        } else {
+          await secrets.deleteSecretFile({ workspaceId, versionId: activeVersionId, path, metadata: saved });
+        }
+        const name = pathBasename(path);
+        await secrets.writeSecretFile({
+          workspaceId,
+          versionId: activeVersionId,
+          path,
+          text: copy.text,
+          metadata: {
+            origin: "restore",
+            // Protected History names no author, so the summary says who.
+            summary: restoredBy === "agent" ? `An agent restored your change to ${name}` : `Restored your change to ${name}`,
+            correlationId,
+          },
+        });
+        if (disk.kind !== "text" || disk.text !== copy.text) {
+          await materialize([{ kind: "write", path, text: copy.text, protected: true }], policy);
+        }
+        await protectedCopies.remove(id);
+        await reportProtectedCopies();
+        return { path, status: "restored" as const };
+      });
+    },
+
+    discardProtectedCopy(id) {
+      return enqueueResult("discard protected copy", async () => {
+        const row = (await protectedCopies.list()).find(([, copyId]) => copyId === id);
+        if (!(await protectedCopies.remove(id))) throw new ProtectedCopyFinalError("This kept change is no longer available.");
+        await reportProtectedCopies();
+        return { path: row?.[0] ?? `${PROTECTED_COPIES_PATH}/${id}.json`, status: "discarded" as const };
+      });
     },
 
     async heldNoteChange(input) {
@@ -7284,15 +7439,18 @@ export function createWorkspaceEngineCapture(
         // Only materialize a choice that changes the active version's content.
         const activeVersionId = await activeVersionIdOf(engine);
         if (result.conflict.targetVersionId === activeVersionId) {
+          const materializeResolution = async (writes: Parameters<typeof materialize>[0]) => {
+            await materialize(writes, policy);
+            // Establish the restored baseline before the next external edit.
+            await engine.reconcileCapture?.();
+          };
           if (result.write && resolution.kind !== "keep-current") {
-            await materialize(
+            await materializeResolution(
               [await materializeWriteForSnapshot(engine, result.write.snapshot)],
-              policy,
             );
           } else if (result.delete) {
-            await materialize(
+            await materializeResolution(
               [{ kind: "delete", path: result.delete.before.path }],
-              policy,
             );
           } else if (
             result.conflict.chosenFrom === "incoming" &&
@@ -7320,9 +7478,8 @@ export function createWorkspaceEngineCapture(
                 },
               );
             }
-            await materialize(
+            await materializeResolution(
               [await materializeWriteForSnapshot(engine, head)],
-              policy,
             );
           }
         }
@@ -7579,8 +7736,28 @@ export function createWorkspaceEngineCapture(
             }
             const head = await engine.listMoments({workspaceId, versionId: activeVersionId, objectId: moment.objectId, limit: 1});
             if (head.moments[0]?.id !== restoreOptions.expectedHeadMomentId) throw new RestoreHeadChangedError(path);
-            expectedAbsent = expected.operation === "delete";
-            if (!expectedAbsent) expectedSha256 = expected.payload.after.sha256 ?? createHash("sha256").update(expected.payload.after.text).digest("hex");
+            // A record-only settlement changes no file and can arrive after later
+            // edits, so the file holds the newest moment that changed it. Only
+            // moments from the restored one on were checked by the caller.
+            let changed = expected;
+            search: for (let beforeMomentOrder: number | null | undefined; expected.syncRecordOnly && beforeMomentOrder !== null;) {
+              const page = await engine.listMoments({workspaceId, versionId: activeVersionId, objectId: moment.objectId, limit: 100,
+                ...(beforeMomentOrder !== undefined ? {beforeMomentOrder} : {})});
+              for (const row of page.moments) {
+                const changes = !row.syncRecordOnly && !isCaptureRecoveryOrigin(row.metadata.origin);
+                if (row.id === moment.id) {
+                  if (changes) changed = moment;
+                  break search;
+                }
+                if (changes) {
+                  changed = await engine.getMoment({ workspaceId, momentId: row.id }) ?? expected;
+                  break search;
+                }
+              }
+              beforeMomentOrder = page.nextBeforeMomentOrder;
+            }
+            expectedAbsent = changed.operation === "delete";
+            if (!expectedAbsent) expectedSha256 = changed.payload.after.sha256 ?? createHash("sha256").update(changed.payload.after.text).digest("hex");
             const live = liveYDocSessions.get(path);
             if (live) {
               // Keep the canonical session and its queued edits intact. Closing it
@@ -7814,6 +7991,35 @@ export function createWorkspaceEngineCapture(
     },
 
     resolveFileForPath,
+
+    async notVersioned(listFiles) {
+      // A version switch queued ahead decides where the change lands. The
+      // change itself queues behind it, so the wait costs nothing on Main.
+      await chain;
+      const engine = await engineStore();
+      const versionId = await activeVersionIdOf(engine);
+      // Main tracks every file it can, so there the disk is never read.
+      if (versionId === ENGINE_MAIN_VERSION_ID) return null;
+      // A file saved a moment ago then reads as tracked.
+      await engine.flushCapture?.();
+      const files = await listFiles();
+      if (files.length === 0) return [];
+      // A few files resolve by path. Past that, one listing of the version
+      // takes fewer engine calls than resolving each file.
+      let untracked: string[];
+      if (files.length > MAX_FILE_RESOLVE_TARGETS * 4) {
+        const tracked = new Set((await listTextFileMetadata(engine, versionId)).map(file => file.path));
+        untracked = files.filter(file => !tracked.has(file));
+      } else {
+        const results = await resolveEngineFileTargets(engine, workspaceId, files.map(path => ({ path })), undefined, versionId);
+        untracked = files.filter((_, index) => results[index]?.status !== "found");
+      }
+      // Protected files, such as .env, follow each version in the secret store.
+      // A store that can't answer leaves them to be asked about.
+      if (!untracked.some(isSecretPath)) return untracked;
+      const secrets = new Set((await secretStoreFor().listSecretFiles({ workspaceId, versionId }).catch(() => [])).map(stat => stat.path));
+      return untracked.filter(file => !secrets.has(file));
+    },
 
     async fileObjectIdForPath(path) {
       return (await resolveFileForPath(path))?.objectId ?? null;

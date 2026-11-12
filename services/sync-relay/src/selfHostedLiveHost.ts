@@ -50,19 +50,60 @@ function canonicalPath(value: string, directory: boolean): string {
   return actual;
 }
 
+/** The service host id the self-hosted live host provisions for the relay's history. */
+export const selfHostedLiveHostId = (namespace: string) => `self-host-${namespace}`;
+const movedKey = (row: ServiceHostEnrollment) => JSON.stringify([row.workspaceId, row.objectId, row.path, row.replicationEpoch, row.streamIdentity]);
+const atPath = (storage: SyncRelayStorage, row: ServiceHostEnrollment) =>
+  storage.objectIdAtPathInVersion({workspaceId: row.workspaceId, versionId: "main", path: row.path}) === row.objectId;
+
+/**
+ * A host reconciliation's selection from one page of enrollments: the
+ * documents it hosts, those that departed but may remain in their workspace's
+ * hosted replica, and departed ones under an obsolete identity, whose old
+ * store is fenced, so they have none to leave. A document is hosted while an
+ * active Edit grant covers it at its enrolled path, or an open or Resume asked
+ * for it, and its owner has not paused or stopped it. `moved` holds moved
+ * documents whose replica let them go.
+ */
+export function selectHostedDocuments(storage: SyncRelayStorage, cursor: ServiceHostEnrollmentCursor | undefined, moved: Set<string>) {
+  // Whether the enrollment names its workspace's current owner and identity.
+  const matching = (row: ServiceHostEnrollment) => storage.workspaceIsOwnedBy(row.workspaceId, row.ownerUserId) && storage.verifyWorkspaceIdentity(row) === "matched";
+  // A release applies to the document: it was stopped, paused, or no Edit grant, recorded demand or owner's restore that kept it live covers it.
+  // A Resume before its activation retires leaves it departing until a successor can follow.
+  const departs = (row: ServiceHostEnrollment, covered: boolean) => row.retired || !covered || row.ownerStop !== null ||
+    storage.serviceActivationRetirement(row) !== null;
+  const page = storage.listUndrainedServiceHostEnrollments(cursor);
+  const targets: ServiceHostEnrollment[] = [], departing: ServiceHostEnrollment[] = [], obsolete: ServiceHostEnrollment[] = [], away: ServiceHostEnrollment[] = [];
+  for (const row of page.documents) {
+    const holds = storage.serviceHostEnrollmentCovered(row);
+    // A live session the owner's restore kept has no retirement once that no longer holds. Its retirement
+    // opens here, before any update lets the document go, so the host retires its activation.
+    if (!holds) storage.endLapsedServiceHostRun(row, Date.now());
+    if (departs(row, holds)) (matching(row) ? departing : obsolete).push(row);
+    else if (matching(row)) (atPath(storage, row) ? targets : away).push(row);
+  }
+  // A document moved from its enrolled path leaves its replica as a departed one does, until the replica confirms it gone.
+  const still = new Set(away.map(movedKey));
+  for (const key of moved) if (!still.has(key)) moved.delete(key);
+  departing.push(...away.filter(row => !moved.has(movedKey(row)) || storage.serviceRestoreInProgress(row)));
+  return {targets, departing, obsolete, nextCursor: page.nextCursor};
+}
+
 /** Owns the sole service daemon; account requests can select documents, never native paths or credentials. */
 export async function startSelfHostedLiveHost(options: {
   trustedAccount: OwnerOutboxAdmission["trustedAccount"];
   storage: SyncRelayStorage; history: LiveJournalHistoryAuthority; root: string; engineExecutable: string;
   relayOrigin: string; key: Uint8Array; frameChanges: LiveHostChanges;
   startHost?: typeof startServiceLiveHost;
+  /** How long reconciliation waits between periodic runs, unless a test holds them. Relay writes and host progress also run one. */
+  reconcileIntervalMs?: number;
   onError?(error: unknown): void;
 }) {
   const {storage, history} = options, profile = selfHostLiveProfile();
   const root = canonicalPath(options.root, true), engineExecutable = canonicalPath(options.engineExecutable, false);
   const relay = new URL(options.relayOrigin);
   if (relay.protocol !== "https:" || relay.origin !== options.relayOrigin || options.key.byteLength < 32) throw new Error("Self-host live editing requires its public HTTPS origin and a private key.");
-  const hostId = `self-host-${history.namespace}`, instanceId = "self-host-service";
+  const hostId = selfHostedLiveHostId(history.namespace), instanceId = "self-host-service";
   const provision = storage.provisionLiveHostControl({mode: "service", hostId, updatedAtMs: Date.now(), guard: storage.captureStanding()});
   if (!provision.ok || provision.snapshot.transition) throw new Error("Self-host live editing requires its provisioned service host. Existing device hosts must use the host transition procedure.");
   let current: Host | undefined;
@@ -75,43 +116,16 @@ export async function startSelfHostedLiveHost(options: {
   const eventHandlers = new Set<(event: Event) => void>();
   const signal = AbortSignal.any([lifetime.signal, storage.unavailable]);
   const changes = Effect.runSync(Queue.sliding<void>(1));
-  // Whether the enrollment names its workspace's current owner and identity.
-  const matching = (row: ServiceHostEnrollment) => storage.workspaceIsOwnedBy(row.workspaceId, row.ownerUserId) && storage.verifyWorkspaceIdentity(row) === "matched";
-  // A release applies to the document: it was stopped, paused, or neither an Edit grant nor its owner's restore that kept it live covers it.
-  // A Resume before its activation retires leaves it departing until a successor can follow.
-  const departs = (row: ServiceHostEnrollment, covered: boolean) => row.retired || !covered || row.ownerStop !== null ||
-    storage.serviceActivationRetirement(row) !== null;
   const covered = (row: ServiceHostEnrollment) => storage.serviceHostEnrollmentCovered(row);
-  const atPath = (row: ServiceHostEnrollment) => storage.objectIdAtPathInVersion({workspaceId: row.workspaceId, versionId: "main", path: row.path}) === row.objectId;
   const documentKey = (row: Pick<ServiceHostEnrollment, "workspaceId" | "objectId">) => JSON.stringify([row.workspaceId, row.objectId]);
-  const movedKey = (row: ServiceHostEnrollment) => JSON.stringify([row.workspaceId, row.objectId, row.path, row.replicationEpoch, row.streamIdentity]);
   // Moved documents whose replica let them go. Nothing releases one: its
   // enrollment stays, so it is hosted again once it returns to its path.
   const moved = new Set<string>();
   // Where the page of retired enrollments starts. Each page gives way to the next once all of it had its chance.
   let retiredCursor: ServiceHostEnrollmentCursor | undefined;
-  // Hosted documents, and those that departed but may remain in their workspace's hosted replica.
-  // A document is hosted while an active Edit grant covers it at its enrolled path and its owner has
-  // not paused or stopped it. A departed document under an obsolete identity has none to leave: its old store is fenced.
-  const select = () => {
-    const page = storage.listUndrainedServiceHostEnrollments(retiredCursor);
-    const targets: ServiceHostEnrollment[] = [], departing: ServiceHostEnrollment[] = [], obsolete: ServiceHostEnrollment[] = [], away: ServiceHostEnrollment[] = [];
-    for (const row of page.documents) {
-      const holds = covered(row);
-      // A live session the owner's restore kept has no retirement once that no longer holds. Its retirement
-      // opens here, before any update lets the document go, so the host retires its activation.
-      if (!holds) storage.endLapsedServiceHostRun(row, Date.now());
-      if (departs(row, holds)) (matching(row) ? departing : obsolete).push(row);
-      else if (matching(row)) (atPath(row) ? targets : away).push(row);
-    }
-    // A document moved from its enrolled path leaves its replica as a departed one does, until the replica confirms it gone.
-    const still = new Set(away.map(movedKey));
-    for (const key of moved) if (!still.has(key)) moved.delete(key);
-    departing.push(...away.filter(row => !moved.has(movedKey(row)) || storage.serviceRestoreInProgress(row)));
-    return {targets, departing, obsolete, nextCursor: page.nextCursor};
-  };
+  const select = () => selectHostedDocuments(storage, retiredCursor, moved);
   const selectionSignature = ({targets, departing}: ReturnType<typeof select>) => JSON.stringify([targets, departing].map(rows =>
-    rows.map(({workspaceId, objectId, path, shareId, ownerUserId, replicationEpoch, streamIdentity}) => ({workspaceId, objectId, path, shareId, ownerUserId, replicationEpoch, streamIdentity}))));
+    rows.map(({workspaceId, objectId, path, ownerUserId, replicationEpoch, streamIdentity}) => ({workspaceId, objectId, path, ownerUserId, replicationEpoch, streamIdentity}))));
   // A store keeps its parked documents' activations, so only account deletion removes one.
   const storeName = (row: WorkspaceIdentity) => hostedStoreName(history.namespace, row);
   // The stores, by name, whose hosted replica diverged from the relay. Each
@@ -127,7 +141,7 @@ export async function startSelfHostedLiveHost(options: {
       if (storeDiverged(row)) return {code: "host-diverged", sessionHost: "running without this document (server copy diverged)"};
       if (row.ownerStop === "pause") return {code: "host-paused", sessionHost: "running without this document (paused)"};
       if (!covered(row)) return {code: "host-no-edit-grant", sessionHost: "running without this document (no Edit grant)"};
-      if (!atPath(row)) return {code: "host-moved", sessionHost: `running without this document (moved from ${row.path})`, path: row.path};
+      if (!atPath(storage, row)) return {code: "host-moved", sessionHost: `running without this document (moved from ${row.path})`, path: row.path};
     }
     // Another failure, such as in discovery, leaves the daemon waiting for the next pass to start it.
     if (!current) return startFailed
@@ -177,7 +191,7 @@ export async function startSelfHostedLiveHost(options: {
         hostedReplication: {relay: {baseUrl: relay.origin, bearerToken: deriveServiceHostBearer(row, {key: options.key, namespace: history.namespace})},
           identity: {replicationEpoch: row.replicationEpoch, streamIdentity: row.streamIdentity}, maxPagesPerPull: 8}});
     }
-    const document = ({workspaceId, objectId, path, shareId}: ServiceHostEnrollment) => ({workspaceId, objectId, path, shareId});
+    const document = ({workspaceId, objectId, path}: ServiceHostEnrollment) => ({workspaceId, objectId, path});
     return {workspaces, documents: targets.map(document), departing: departing.map(document)};
   }
   async function start(): Promise<Host> {
@@ -193,6 +207,9 @@ export async function startSelfHostedLiveHost(options: {
       signal.throwIfAborted();
       const host = await (options.startHost ?? startServiceLiveHost)({trustedAccount: options.trustedAccount,configPath, storage, history, frameChanges: options.frameChanges, signal});
       host.onEvent((event) => { for (const handler of eventHandlers) handler(event); });
+      // Subscribed before the first update, so a workspace that drains, or a departure that ends, schedules the
+      // reconciliation that releases it.
+      host.onProgress(schedule);
       host.invalidated.addEventListener("abort", schedule, {once: true});
       return host;
     } finally {await rm(temporary, {recursive: true, force: true});}
@@ -259,7 +276,9 @@ export async function startSelfHostedLiveHost(options: {
           ? `Live editing of ${row.path} in workspace ${row.workspaceId} cannot start: the document has no live-editing history. It starts once its owner opens it in dohc on a desktop. ${store}`
           : block === "live-edit-unadmitted"
             ? `Live editing of ${row.path} in workspace ${row.workspaceId} is held: the session host hasn't applied an edit to the document. Its owner can resume live editing in dohc to try again. ${store}`
-            : `Live editing of ${row.path} in workspace ${row.workspaceId} stopped until its owner tries again. ${store}`));
+            : block === "history-over-budget"
+              ? `Live editing of ${row.path} in workspace ${row.workspaceId} cannot start: its edit history is past what this server reads or checks. It tries again once the document has a new base. ${store}`
+              : `Live editing of ${row.path} in workspace ${row.workspaceId} stopped until its owner tries again. ${store}`));
       }
       // A workspace with no documents detaches once its replica drained, then
       // releases its enrollments. Its store stays, so a document shared again
@@ -313,7 +332,7 @@ export async function startSelfHostedLiveHost(options: {
         yield* Effect.promise(() => exclusive(stopCurrent));
       }),
     );
-    yield* Effect.forkScoped(Effect.forever(pause(2_000).pipe(Effect.andThen(Effect.sync(schedule)))));
+    yield* Effect.forkScoped(Effect.forever(pause(options.reconcileIntervalMs ?? 2_000).pipe(Effect.andThen(Effect.sync(schedule)))));
     schedule();
     while (true) {
       yield* Queue.take(changes);

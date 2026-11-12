@@ -195,17 +195,19 @@ it("keeps three readers alive when a relay write wakes them during a native uplo
     remove(); removeAuthority();
   }
 });
-it("keeps two named selectors distinct while borrowing one native registration", async () => {
+it("shows each named recipient its own share's selector on one binding and one native registration", async () => {
   const f = await setup();
   const secondScope = { ...scope, shareId: "share-2", grantId: "edit-2", userId: "reader-2" };
-  const secondBinding = { ...binding, selectorPaths: [binding.currentPath] };
   f.raw.prepare("INSERT INTO sync_relay_shares (share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES (?,?,'owner-1',?,0)")
-    .run(secondScope.shareId, scope.workspaceId, JSON.stringify({ paths: secondBinding.selectorPaths, versionId: null }));
+    .run(secondScope.shareId, scope.workspaceId, JSON.stringify({ paths: ["docs/a.md"], versionId: null }));
   f.raw.prepare(`INSERT INTO sync_relay_share_grants (grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
     VALUES (?,?,'user',?,NULL,'edit',4,'active',0,NULL,NULL)`).run(secondScope.grantId, secondScope.shareId, secondScope.userId);
-  const tickets = createLiveTickets({ storage: f.storage, audience, key, hostReports: { currentBinding: async () => ({ connection: host, binding: secondBinding }) } });
+  const tickets = createLiveTickets({ storage: f.storage, audience, key, hostReports: { currentBinding: async () => report } });
   const minted = await tickets.mint({ objectId: binding.objectId }, secondScope);
   const ticket = (await tickets.redeem(minted!.token, secondScope))!;
+  // Both recipients' accepted events carry the lineage's one recorded binding.
+  expect(ticket.binding).toEqual(f.capture.ticket.binding);
+  expect(ticket.binding).toEqual(binding);
   const second = captureNamedLiveFrameHost({ ticket, actor: liveBrowserActor(secondScope), storage: f.storage, native: f.native, bounds: f.bounds, validate: f.validate });
   cleanup.push(async () => { second.close(); });
   const signal = new AbortController().signal;
@@ -268,15 +270,35 @@ it("freezes the captured ticket and its binding before exposing them", async () 
   expect(Object.isFrozen(f.capture.ticket)).toBe(true);
   f.capture.assertCurrent();
 });
-it.each(["grant", "selector", "restore", "host"])("invalidates the capture when %s standing changes", async mode => {
+it.each(["grant", "coverage", "restore", "host"])("invalidates the capture when %s standing changes", async mode => {
   const f = await setup();
   if (mode === "grant") f.raw.prepare("UPDATE sync_relay_share_grants SET generation=generation+1 WHERE grant_id=?").run(scope.grantId);
-  if (mode === "selector") f.raw.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id=?").run(JSON.stringify({ paths: ["other"], versionId: null }), scope.shareId);
+  if (mode === "coverage") f.raw.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id=?").run(JSON.stringify({ paths: ["other"], versionId: null }), scope.shareId);
   if (mode === "restore") f.raw.prepare("UPDATE sync_relay_live_documents SET restore_fence_generation=restore_fence_generation+1").run();
   if (mode === "host") f.invalidated.abort(); else f.changes.notify();
   await Promise.resolve();
   expect(f.capture.invalidated.aborted).toBe(true);
   expect(f.peer.closed).toBe(false); expect(f.changes.listenerCount()).toBe(0);
+});
+
+// A share edit that still covers the document changes what the recipient is
+// shown, so its session ends. A ticket minted before the edit still redeems,
+// and reopening with it shows the share as it is now.
+it.each([["narrowed", ["docs/a.md"]], ["widened", ["docs", "notes"]]])("ends a named recipient's session when its share is %s, and reopening shows the new view", async (_case, paths) => {
+  const f = await setup();
+  const tickets = createLiveTickets({ storage: f.storage, audience, key, hostReports: { currentBinding: async () => report } });
+  const minted = await tickets.mint({ objectId: binding.objectId }, scope);
+  f.raw.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id=?").run(JSON.stringify({ paths, versionId: null }), scope.shareId);
+  f.changes.notify(); await Promise.resolve();
+  expect(f.capture.invalidated.aborted).toBe(true);
+  expect(() => f.capture.assertCurrent()).toThrow();
+  const ticket = (await tickets.redeem(minted!.token, scope))!;
+  expect(ticket.binding).toEqual(binding);
+  const reconnected = captureNamedLiveFrameHost({ ticket, actor: liveBrowserActor(scope), storage: f.storage, native: f.native, bounds: f.bounds, validate: f.validate });
+  cleanup.push(async () => { reconnected.close(); });
+  const sync = await reconnected.openSync(Uint8Array.of(0), new AbortController().signal);
+  expect(sync.binding).toEqual({ ...binding, workspaceId: `named:${scope.grantId}`, selectorPaths: paths });
+  sync.close(); reconnected.assertCurrent();
 });
 
 // Only the relay attributes work to a personal agent. The host refuses before it reads who records.
@@ -308,7 +330,7 @@ function journal(f: Awaited<ReturnType<typeof setup>>) {
 }
 
 function ownerCapture(f: Awaited<ReturnType<typeof setup>>, authenticatedUserId = "owner-1") {
-  const capture = captureOwnerLiveFrameHost({authenticatedUserId, shareId: scope.shareId,
+  const capture = captureOwnerLiveFrameHost({authenticatedUserId,
     storage: f.storage, native: f.native, bounds: f.bounds, validate: f.validate});
   cleanup.push(async () => {capture.close();});
   return capture;
@@ -322,7 +344,7 @@ it("opens the owner on the same native feed without a recipient ticket or grant"
   expect(capture.hostEpoch).toBe(host.hostEpoch);
   expect(capture).not.toHaveProperty("ticket");
   const sync = await capture.openSync(Uint8Array.of(0), new AbortController().signal);
-  expect(sync.binding).toEqual(binding);
+  expect(sync.binding).toEqual({...binding, selectorPaths: [binding.currentPath]});
   expect([...sync.missingStateUpdate]).toEqual([0, 0]);
   expect(f.raw.prepare("SELECT count(*) AS count FROM sync_relay_live_session_tickets").get()).toEqual({count: 0});
   sync.close(); capture.close();
@@ -342,9 +364,10 @@ it.each(["applied", "missing", "ambiguous"])("requires exact native evidence for
   expect(await capture.submit({deliveryId: ack.deliveryId, updateDigest: hash(bytes), updateBytes: bytes}, new AbortController().signal))
     .toEqual(mode === "missing" ? {result: "retry", reason: "application-pending"} : {result: "success", ack});
   expect(commit).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
-    actor: {kind: "owner", userId: "owner-1", shareId: scope.shareId},
+    actor: {kind: "owner", userId: "owner-1"},
     expectedAuthority: {principalKind: "owner", principalId: "owner-1", grantId: null, grantGeneration: null},
-    metadata: {deliveryId: ack.deliveryId, updateDigest: hash(bytes), binding}, updateBytes: bytes,
+    // The owner holds the document without a share, at the baseline's own path.
+    metadata: {deliveryId: ack.deliveryId, updateDigest: hash(bytes), binding: {...binding, selectorPaths: [binding.currentPath]}}, updateBytes: bytes,
   }));
 });
 
@@ -363,11 +386,16 @@ it("passes only an internal owner automation's durable press binding into journa
   expect(commit).not.toHaveBeenCalled();
 });
 
-it.each(["owner", "selector", "restore"])("invalidates owner capture when %s changes", async kind => {
+it("keeps an owner capture when a share's selector changes", async () => {
+  const f = await setup(), capture = ownerCapture(f);
+  f.raw.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id=?").run(JSON.stringify({paths: ["other"], versionId: null}), scope.shareId);
+  f.changes.notify(); await Promise.resolve();
+  expect(capture.invalidated.aborted).toBe(false);
+});
+
+it.each(["owner", "restore"])("invalidates owner capture when %s changes", async kind => {
   const f = await setup(), capture = ownerCapture(f);
   if (kind === "owner") f.raw.prepare("UPDATE sync_relay_workspaces SET owner_user_id='different-owner'").run();
-  if (kind === "selector") f.raw.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id=?")
-    .run(JSON.stringify({paths: ["other"], versionId: null}), scope.shareId);
   if (kind === "restore") f.raw.prepare("UPDATE sync_relay_live_documents SET restore_fence_generation=restore_fence_generation+1").run();
   f.changes.notify(); await Promise.resolve();
   expect(capture.invalidated.aborted).toBe(true);
@@ -546,7 +574,7 @@ it("admits an edit to a 2 MiB checkpoint and retries a concurrent validation fro
         localYDocSequence: 1, applicationReplayed: false};
     })}};
   const capture = () => {
-    const session = captureOwnerLiveFrameHost({authenticatedUserId: "owner", shareId: "share", storage: f.storage, native,
+    const session = captureOwnerLiveFrameHost({authenticatedUserId: "owner", storage: f.storage, native,
       bounds: {...peer.bounds, maxAdmissionBytes: 20 * MiB}, validate,
       reserveBytes: size => buffers.reserve(size, [[key, 12 * MiB]]),
       validationBudget: {reserve: () => admission.reserve([[JSON.stringify(["validation", key]), 1]]), maxBytes: 128 * MiB, reserveBytes: buffers.reserve}});

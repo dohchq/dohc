@@ -12,7 +12,6 @@ import {ownerDeliveryWait} from "./ownerDeliveryWait";
 export interface DesktopOwnerDeliveryDocument {
   binding: LiveObjectBinding;
   relayDatabaseNamespace: string;
-  shareId: string;
 }
 export interface DesktopOwnerDeliveryConfig {
   nativeConfigPath: string;
@@ -46,10 +45,10 @@ export function parseDesktopOwnerDeliveryConfig(value: unknown): DesktopOwnerDel
   if (!Number.isSafeInteger(nativeClient.aggregateBytes) || nativeClient.aggregateBytes < 1 ||
     !Number.isSafeInteger(nativeClient.maxUploads) || nativeClient.maxUploads < 1) throw new TypeError("Invalid native owner client budget.");
   const documents = value.documents.map(raw => {
-    fields(raw, ["binding", "relayDatabaseNamespace", "shareId"]);
+    fields(raw, ["binding", "relayDatabaseNamespace"]);
     const binding = parseLiveObjectBinding(raw.binding);
     if (binding.mainVersionId !== "main") throw new TypeError("Owner delivery requires main.");
-    return {binding, relayDatabaseNamespace: parseLiveUpdateIdentifier(raw.relayDatabaseNamespace), shareId: parseLiveUpdateIdentifier(raw.shareId)};
+    return {binding, relayDatabaseNamespace: parseLiveUpdateIdentifier(raw.relayDatabaseNamespace)};
   });
   const ids = documents.map(document => JSON.stringify([document.binding.workspaceId, document.binding.mainVersionId, document.binding.objectId]));
   if (new Set(ids).size !== ids.length) throw new TypeError("Duplicate owner delivery target.");

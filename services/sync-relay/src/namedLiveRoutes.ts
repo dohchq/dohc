@@ -177,7 +177,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
   async function handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer) {
     let headers: Headers;
     let discriminator = "", token = "";
-    let ownerTarget: {document: LiveDocumentKey; shareId: string} | undefined;
+    let ownerTarget: LiveDocumentKey | undefined;
     try {
       headers = new Headers();
       const selected = new Set(["host", "origin", "cookie", "authorization", "x-dohc-link-profile-secret", "x-dohc-agent-resource", "sec-websocket-protocol", "x-dohc-relay-exchange-key"]);
@@ -194,11 +194,10 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
             (headers.has("origin") && headers.get("origin") !== origin) ||
             !/^Bearer [^\s]+$/.test(headers.get("authorization") ?? "") ||
             headers.get("sec-websocket-protocol") !== "dohc-live-v1" ||
-            [...url.searchParams.keys()].sort().join() !== "lineageClaimId,objectId,shareId") throw new Error();
-        ownerTarget = {document: {workspaceId: parseLiveUpdateIdentifier(decodeURIComponent(path[1]!)), mainVersionId: "main",
+            [...url.searchParams.keys()].sort().join() !== "lineageClaimId,objectId") throw new Error();
+        ownerTarget = {workspaceId: parseLiveUpdateIdentifier(decodeURIComponent(path[1]!)), mainVersionId: "main",
           objectId: parseLiveUpdateIdentifier(url.searchParams.get("objectId")),
-          lineageClaimId: parseLiveUpdateDigest(url.searchParams.get("lineageClaimId"))},
-          shareId: parseLiveUpdateIdentifier(url.searchParams.get("shareId"))};
+          lineageClaimId: parseLiveUpdateDigest(url.searchParams.get("lineageClaimId"))};
       } else {
         const path = new RegExp(`^/sync/live/${routeKind}\\?session=([A-Za-z0-9_-]{12})$`).exec(request.url ?? "");
         const protocols = headers.get("sec-websocket-protocol")?.split(",").map(value => value.trim());
@@ -284,25 +283,24 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
           maxBytes: limits.maxBufferedBytes, reserveBytes: validationBuffers.reserve};
       }
       if (options.kind === "owner") {
-        const {document, shareId} = ownerTarget!;
+        const document = ownerTarget!;
         const actor = await options.resolveActor(authenticated, document.workspaceId); signal.throwIfAborted(); check();
         connectionScopes.set(stop, {userId: actor.userId, workspaceId: document.workspaceId});
         if (actor.workspaceId !== document.workspaceId || !storage.workspaceIsOwnedBy(document.workspaceId, actor.userId)) throw new Error();
-        const current = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: actor.userId, shareId}});
+        const current = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: actor.userId}});
         if (current.kind !== "current") throw new Error();
         reserve([
           [JSON.stringify(["owner-document", actor.userId, document.workspaceId, document.objectId]), limits.maxConnectionsPerSession, "live_session_limit"],
           [JSON.stringify(["principal", "named", actor.userId]), limits.maxConnectionsPerPrincipal, "live_person_limit"],
-          [JSON.stringify(["owner-share", document.workspaceId, shareId]), limits.maxConnectionsPerGrant, "live_grant_limit"],
         ], JSON.stringify(["principal", "named", actor.userId]), document.workspaceId);
         // Counted before capture, so the host cannot unload the document while this connection opens.
         releaseEditor = editors.acquire(document);
         const native = await captureNative(current.binding, signal); signal.throwIfAborted(); check();
         if (!isDeepStrictEqual({...native.binding, selectorPaths: current.binding.selectorPaths}, current.binding)) throw new Error("Native owner target changed.");
-        const refreshed = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: actor.userId, shareId}});
+        const refreshed = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: actor.userId}});
         if (!isDeepStrictEqual(refreshed, current)) throw new Error("Owner binding changed during capture.");
         const trustedAccount = await accountSnapshot(actor.userId); signal.throwIfAborted(); check();
-        host = captureOwnerLiveFrameHost({authenticatedUserId: actor.userId, trustedAccount, shareId, storage, native, bounds, validate, reserveBytes, validationBudget});
+        host = captureOwnerLiveFrameHost({authenticatedUserId: actor.userId, trustedAccount, storage, native, bounds, validate, reserveBytes, validationBudget});
       } else {
         const context = await options.sessions.resolve(authenticated, discriminator); signal.throwIfAborted(); check();
         if (!context || context.kind !== kind) { stop(); return; }

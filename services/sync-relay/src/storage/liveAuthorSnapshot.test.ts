@@ -6,7 +6,9 @@ import type { LiveAuthorContext } from "@dohc/live-session-contract";
 import type { ServerDerivedLiveUpdateAuthority } from "@dohc/live-session-contract/live-update-admission";
 import { openSyncRelayStorage } from "../storage";
 import type { StorageContext } from "./context";
-import { claimsPersonalAgent, deriveLiveAuthorSnapshot, ensureLiveLinkPublicPrincipal } from "./liveAuthorSnapshot";
+import {
+  admitsWorkspaceLiveAuthorship, claimsPersonalAgent, deriveLiveAuthorSnapshot, ensureLiveLinkPublicPrincipal, personalLiveAuthorSnapshot,
+} from "./liveAuthorSnapshot";
 import { workspaceUsageBytes } from "./workspaces";
 
 const cleanups: (() => void)[] = [];
@@ -104,6 +106,45 @@ it.each<[string, ServerDerivedLiveUpdateAuthority, (publicId: string) => LiveAut
   const own = { ...context(publicId), agent } as LiveAuthorContext;
   expect(claimsPersonalAgent(own)).toBe(false);
   expect(storage.tx(() => deriveLiveAuthorSnapshot(storage, authority, own, account))).toContainEqual(expect.objectContaining({ kind: "agent", agentId: "writer" }));
+});
+
+it.each<LiveAuthorContext | undefined>([undefined, { kind: "account", accountId: personal.agentId, agent: personal }])
+  ("derives no snapshot under a personal agent's authority: %j", context => {
+    const authority: ServerDerivedLiveUpdateAuthority = { principalKind: "personal", principalId: personal.agentId, grantId: null, grantGeneration: null };
+    expect(() => deriveLiveAuthorSnapshot(fixture(), authority, context, account)).toThrow(/comes from its authority/);
+  });
+
+const helper: Extract<ServerDerivedLiveUpdateAuthority, { principalKind: "personal" }> = {
+  principalKind: "personal", principalId: `p-${"b".repeat(26)}`, grantId: null, grantGeneration: null,
+};
+function withHelper(ownerUserId = "owner") {
+  const storage = fixture();
+  storage.db.prepare(`INSERT INTO sync_relay_personal_agents(agent_id,owner_user_id,name,hue,status,epoch,created_at_ms)
+    VALUES (?,?,'Helper','blue','active',1,1)`).run(helper.principalId, ownerUserId);
+  return storage;
+}
+
+it("builds a personal agent's snapshot from its record, on behalf of its owner", () => {
+  const storage = withHelper();
+  const built = { kind: "agent" as const, agentId: helper.principalId, agentName: "Helper", onBehalfOf: "owner", depth: 0 };
+  expect(personalLiveAuthorSnapshot(storage, helper)).toEqual([built]);
+  storage.db.prepare("UPDATE sync_relay_personal_agents SET name='Renamed' WHERE agent_id=?").run(helper.principalId);
+  expect(personalLiveAuthorSnapshot(storage, helper)).toEqual([{ ...built, agentName: "Renamed" }]);
+  expect(personalLiveAuthorSnapshot(storage, { ...helper, principalId: personal.agentId })).toEqual([]);
+});
+
+it("admits a personal agent's update only on behalf of the workspace's owner", () => {
+  const storage = withHelper();
+  const built = { kind: "agent" as const, agentId: helper.principalId, agentName: "Helper", onBehalfOf: "owner", depth: 0 };
+  expect(admitsWorkspaceLiveAuthorship(storage, "workspace", helper, personalLiveAuthorSnapshot(storage, helper))).toBe(true);
+  expect(admitsWorkspaceLiveAuthorship(storage, "workspace", helper, [{ ...built, onBehalfOf: "reader" }])).toBe(false);
+  expect(admitsWorkspaceLiveAuthorship(storage, "missing-workspace", helper, [built])).toBe(false);
+  // Another account's agent acts on behalf of that account, so it can't edit here.
+  const other = withHelper("other-owner");
+  expect(admitsWorkspaceLiveAuthorship(other, "workspace", helper, personalLiveAuthorSnapshot(other, helper))).toBe(false);
+  // Other authorities keep the contract's rule.
+  expect(admitsWorkspaceLiveAuthorship(storage, "workspace", owner, [{ kind: "agent", ...agent }])).toBe(true);
+  expect(admitsWorkspaceLiveAuthorship(storage, "workspace", owner, [{ kind: "agent", ...personal }])).toBe(false);
 });
 
 it("reuses a durable public mapping and publishes only its ID and stored label", () => {

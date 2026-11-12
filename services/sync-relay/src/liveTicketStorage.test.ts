@@ -2,7 +2,11 @@ import { expect, it, vi } from "vitest";
 import { audience, binding, fixture, host, key, marker, report, scope, table, DatabaseSync } from "./liveTickets.test-helper.js";
 import { hashLiveTicketToken } from "./liveTicketSecurity.js";
 import { openSyncRelayStorage } from "./storage.js";
+import type { StorageContext } from "./storage/context.js";
+import { consumeLiveTicketInTransaction, storeLiveTicketInTransaction } from "./storage/liveDocumentAuthority.js";
+import { LIVE_TICKET_COLUMNS } from "./storage/schema.js";
 import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
+import { parseLiveTicketClaims } from "@dohc/live-session-contract/live-ticket";
 
 function reopenForSchemaCheck(path: string): void {
   let reopened: ReturnType<typeof openSyncRelayStorage> | undefined;
@@ -17,7 +21,7 @@ it("creates and validates the complete private named-ticket schema", async () =>
   const state = await fixture();
   try {
     expect(state.raw.prepare("SELECT migration_id FROM sync_relay_migrations WHERE migration_id=?").get(marker)).toEqual({ migration_id: marker });
-    expect(state.raw.prepare(`PRAGMA table_info(${table})`).all()).toHaveLength(20);
+    expect(state.raw.prepare(`PRAGMA table_info(${table})`).all()).toHaveLength(21);
   } finally { await state.close(); }
 });
 it("replaces a v1 ticket table, whose tickets expire within 30 seconds, instead of copying it", async () => {
@@ -29,7 +33,7 @@ it("replaces a v1 ticket table, whose tickets expire within 30 seconds, instead 
     reopenForSchemaCheck(state.path);
     expect(state.raw.prepare("SELECT migration_id FROM sync_relay_migrations WHERE migration_id LIKE 'live-session-tickets-%'").all())
       .toEqual([{ migration_id: marker }]);
-    expect(state.raw.prepare(`PRAGMA table_info(${table})`).all()).toHaveLength(20);
+    expect(state.raw.prepare(`PRAGMA table_info(${table})`).all()).toHaveLength(21);
     expect(rows(state)).toEqual([]);
     expect(state.storage.mintLiveTicket(mint)).toEqual({ expiresAtMs: 31000 });
   } finally { await state.close(); }
@@ -179,7 +183,7 @@ it("rolls bounded expiry cleanup back when retained capacity refuses", async () 
     const stale = another(9);
     state.raw.prepare(`INSERT INTO ${table} SELECT ?, ?, audience, workspace_id, main_version_id, object_id, lineage_claim_id,
       current_path, selector_paths_json, restore_fence_generation, principal_kind, principal_id, grant_id, grant_generation,
-      host_epoch, 0, 30000, NULL, link_session_id, agent_connection_id FROM ${table} LIMIT 1`).run(stale.ticketId, stale.tokenHash);
+      host_epoch, 0, 30000, NULL, link_session_id, agent_connection_id, personal_connection_id FROM ${table} LIMIT 1`).run(stale.ticketId, stale.tokenHash);
     state.setTime(31000);
     const before = rows(state);
     expect(state.storage.mintLiveTicket(another(3))).toBeNull();
@@ -227,8 +231,7 @@ it.each([
   ["grant access", "UPDATE sync_relay_share_grants SET access='view'"],
   ["named principal", "UPDATE sync_relay_share_grants SET principal_user_id='other'"],
   ["workspace owner", "UPDATE sync_relay_workspaces SET owner_user_id='other'"],
-  ["selector narrowing", `UPDATE sync_relay_shares SET selector_json='{"paths":["docs/b.md"],"versionId":null}'`],
-  ["selector widening", `UPDATE sync_relay_shares SET selector_json='{"paths":["docs","more"],"versionId":null}'`],
+  ["selector losing the document", `UPDATE sync_relay_shares SET selector_json='{"paths":["docs/b.md"],"versionId":null}'`],
   ["pinned version", `UPDATE sync_relay_shares SET selector_json='{"paths":["docs"],"versionId":"v1"}'`],
   ["fence generation", "UPDATE sync_relay_live_documents SET restore_fence_generation=8"],
   ["zero fence", "UPDATE sync_relay_live_documents SET restore_fence_generation=0"],
@@ -302,6 +305,21 @@ it.each(["mode", "hostId", "hostEpoch", "instanceId", "connectionId"] as const)(
     state.storage.mintLiveTicket(mint);
     expect(state.storage.redeemLiveTicket({ ...redeem, report: changed })).toBeNull();
     expect(state.storage.redeemLiveTicket(redeem)).not.toBeNull();
+  } finally { await state.close(); }
+});
+
+// A recipient's ticket carries the lineage's recorded binding, so a share edit
+// that still covers the document changes nothing it was minted against.
+it.each([
+  ["narrowed", `UPDATE sync_relay_shares SET selector_json='{"paths":["docs/a.md"],"versionId":null}'`],
+  ["widened", `UPDATE sync_relay_shares SET selector_json='{"paths":["docs","more"],"versionId":null}'`],
+])("redeems a ticket whose share was %s and still covers the document", async (_name, sql) => {
+  const state = await fixture();
+  try {
+    state.storage.mintLiveTicket(mint);
+    state.raw.exec(sql);
+    expect(state.storage.redeemLiveTicket(redeem)).toMatchObject({ binding });
+    expect(rows(state)).toEqual([{ ticket_id: "ticket-1", redeemed_at_ms: 1000 }]);
   } finally { await state.close(); }
 });
 
@@ -475,7 +493,7 @@ it("shares retained capacity across objects", async () => {
       INSERT INTO sync_relay_live_documents SELECT workspace_id, main_version_id, 'object-2', lineage_claim_id, replaces_lineage_claim_id,
       'docs/b.md', baseline_moment_relay_seq, baseline_projected_sha256, baseline_projected_byte_length, baseline_digest, baseline_bytes,
       lineage_state, admission_state, restore_fence_generation, registered_at_ms, retired_at_ms FROM sync_relay_live_documents`);
-    const otherBinding = { ...binding, objectId: "object-2", currentPath: "docs/b.md" };
+    const otherBinding = { ...binding, objectId: "object-2", currentPath: "docs/b.md", selectorPaths: ["docs/b.md"] };
     expect(state.storage.mintLiveTicket({ ...another(3), objectId: "object-2", report: { ...report, binding: otherBinding } })).toBeNull();
   } finally { await state.close(); }
 });
@@ -518,5 +536,116 @@ it("refuses same-name trigger collisions even when the reserved index exists", a
   try {
     state.raw.exec("CREATE TRIGGER idx_sync_relay_live_session_tickets_hash AFTER INSERT ON sync_relay_workspaces BEGIN SELECT 1; END");
     expect(() => reopenForSchemaCheck(state.path)).toThrow("live-ticket schema is missing or damaged");
+  } finally { await state.close(); }
+});
+
+// Nothing issues a personal agent's ticket yet, so these store and consume one directly.
+const personalAgent = "p-agent-1";
+const personalHash = (id: number) => hashLiveTicketToken(id.toString(16).padStart(64, "f"), key);
+const personalClaims = (ticketId: string, mintedAtMs: number) => parseLiveTicketClaims({ ticketId, audience,
+  authority: { principalKind: "personal", principalId: personalAgent, grantId: null, grantGeneration: null },
+  binding, hostEpoch: host.hostEpoch, mintedAtMs, expiresAtMs: mintedAtMs + 30000 });
+type State = Awaited<ReturnType<typeof fixture>>;
+const storePersonal = (state: State, ticketId: string, hash: string, personalConnectionId: string | null) => {
+  const storage = state.storage as StorageContext;
+  return storage.ticketTransaction((now, policy) => {
+    storeLiveTicketInTransaction(storage, { claims: personalClaims(ticketId, now), tokenHash: hash,
+      linkSessionId: null, agentConnectionId: null, personalConnectionId }, now, policy);
+    return true;
+  });
+};
+const consumePersonal = (state: State, ticketId: string, hash: string, personalConnectionId: string | null) => {
+  const storage = state.storage as StorageContext;
+  return storage.ticketTransaction(now =>
+    consumeLiveTicketInTransaction(storage, { ticketId, tokenHash: hash, personalConnectionId }, now));
+};
+
+it("stores a personal agent's ticket only with no grant and the connection that may redeem it", async () => {
+  const state = await fixture();
+  try {
+    expect(() => storePersonal(state, "ticket-p", personalHash(1), null)).toThrow(/CHECK/);
+    expect(rows(state)).toEqual([]);
+    expect(storePersonal(state, "ticket-p", personalHash(1), "personal-connection-1")).toBe(true);
+    expect(state.raw.prepare(`SELECT principal_kind, principal_id, grant_id, grant_generation, link_session_id, agent_connection_id,
+      personal_connection_id FROM ${table}`).get()).toEqual({ principal_kind: "personal", principal_id: personalAgent, grant_id: null,
+      grant_generation: null, link_session_id: null, agent_connection_id: null, personal_connection_id: "personal-connection-1" });
+    expect(() => state.raw.exec(`UPDATE ${table} SET grant_id='edit-1', grant_generation=4`)).toThrow(/CHECK/);
+    expect(() => state.raw.exec(`UPDATE ${table} SET principal_id='agent-1'`)).toThrow(/CHECK/);
+    expect(() => state.raw.exec(`UPDATE ${table} SET agent_connection_id='connection-1'`)).toThrow(/CHECK/);
+    state.storage.mintLiveTicket(mint);
+    expect(() => state.raw.exec(`UPDATE ${table} SET personal_connection_id='personal-connection-1' WHERE principal_kind='named'`)).toThrow(/CHECK/);
+  } finally { await state.close(); }
+});
+
+it("retains a personal agent's tickets per agent, which holds no grant", async () => {
+  const state = await fixture();
+  try {
+    expect(storePersonal(state, "ticket-p1", personalHash(1), "personal-connection-1")).toBe(true);
+    expect(storePersonal(state, "ticket-p2", personalHash(2), "personal-connection-2")).toBe(true);
+    expect(storePersonal(state, "ticket-p3", personalHash(3), "personal-connection-1")).toBeNull();
+    expect(state.storage.mintLiveTicket(mint)).toEqual({ expiresAtMs: 31000 });
+    expect(rows(state).map(row => row.ticket_id)).toEqual(["ticket-1", "ticket-p1", "ticket-p2"]);
+  } finally { await state.close(); }
+});
+
+it("redeems a personal agent's ticket only from the connection it names", async () => {
+  const state = await fixture();
+  try {
+    storePersonal(state, "ticket-p", personalHash(1), "personal-connection-1");
+    expect(consumePersonal(state, "ticket-p", personalHash(1), "personal-connection-2")).toBeNull();
+    expect(consumePersonal(state, "ticket-p", personalHash(1), null)).toBeNull();
+    expect(state.storage.readLiveTicketTarget({ tokenHash: personalHash(1), scope, audience })).toBeNull();
+    expect(state.storage.redeemLiveTicket({ ...redeem, tokenHash: personalHash(1) })).toBeNull();
+    expect(rows(state)).toEqual([{ ticket_id: "ticket-p", redeemed_at_ms: null }]);
+    expect(consumePersonal(state, "ticket-p", personalHash(1), "personal-connection-1")).toMatchObject({ ticketId: "ticket-p", redeemedAtMs: 1000 });
+    expect(consumePersonal(state, "ticket-p", personalHash(1), "personal-connection-1")).toBeNull();
+  } finally { await state.close(); }
+});
+
+// The v2 table, before personal agents.
+const V2_TICKET_TABLE = `CREATE TABLE ${table} (
+  ticket_id TEXT NOT NULL CHECK (length(CAST(ticket_id AS BLOB)) BETWEEN 1 AND 512),
+  token_hash TEXT NOT NULL CHECK (length(token_hash) = 43 AND length(CAST(token_hash AS BLOB)) = 43 AND token_hash NOT GLOB '*[^A-Za-z0-9_-]*'),
+  audience TEXT NOT NULL CHECK (length(CAST(audience AS BLOB)) BETWEEN 1 AND 2048),
+  workspace_id TEXT NOT NULL CHECK (length(CAST(workspace_id AS BLOB)) BETWEEN 1 AND 512),
+  main_version_id TEXT NOT NULL CHECK (main_version_id = 'main'),
+  object_id TEXT NOT NULL CHECK (length(CAST(object_id AS BLOB)) BETWEEN 1 AND 512),
+  lineage_claim_id TEXT NOT NULL CHECK (length(lineage_claim_id) = 64 AND length(CAST(lineage_claim_id AS BLOB)) = 64 AND lineage_claim_id NOT GLOB '*[^0-9a-f]*'),
+  current_path TEXT NOT NULL CHECK (length(CAST(current_path AS BLOB)) BETWEEN 1 AND 1024),
+  selector_paths_json TEXT NOT NULL CHECK (length(CAST(selector_paths_json AS BLOB)) BETWEEN 2 AND (100 * (6 * 1024 + 3) + 1)),
+  restore_fence_generation INTEGER NOT NULL CHECK (restore_fence_generation BETWEEN 1 AND 9007199254740991),
+  principal_kind TEXT NOT NULL CHECK (principal_kind IN ('named', 'link')),
+  principal_id TEXT NOT NULL CHECK (length(CAST(principal_id AS BLOB)) BETWEEN 1 AND 512),
+  grant_id TEXT NOT NULL CHECK (length(CAST(grant_id AS BLOB)) BETWEEN 1 AND 512),
+  grant_generation INTEGER NOT NULL CHECK (grant_generation BETWEEN 1 AND 9007199254740991),
+  host_epoch INTEGER NOT NULL CHECK (host_epoch BETWEEN 1 AND 9007199254740991),
+  minted_at_ms INTEGER NOT NULL CHECK (minted_at_ms BETWEEN 0 AND 9007199254710991),
+  expires_at_ms INTEGER NOT NULL CHECK (expires_at_ms BETWEEN 0 AND 9007199254740991 AND expires_at_ms = minted_at_ms + 30000),
+  redeemed_at_ms INTEGER CHECK (redeemed_at_ms IS NULL OR (redeemed_at_ms BETWEEN 0 AND 9007199254740991
+    AND minted_at_ms <= redeemed_at_ms AND redeemed_at_ms < expires_at_ms)),
+  link_session_id TEXT CHECK (link_session_id IS NULL OR length(CAST(link_session_id AS BLOB)) BETWEEN 1 AND 512),
+  agent_connection_id TEXT CHECK (agent_connection_id IS NULL OR length(CAST(agent_connection_id AS BLOB)) BETWEEN 1 AND 512),
+  CHECK ((principal_kind = 'named' AND link_session_id IS NULL AND agent_connection_id IS NULL) OR
+    (principal_kind = 'link' AND (link_session_id IS NULL) <> (agent_connection_id IS NULL))),
+  PRIMARY KEY (ticket_id),
+  FOREIGN KEY (workspace_id) REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE
+) STRICT`;
+
+it("keeps v2 tickets, which name no personal connection, when it rebuilds the table", async () => {
+  const state = await fixture();
+  try {
+    state.storage.mintLiveTicket(mint);
+    const indexes = () => state.raw.prepare("SELECT name, sql FROM sqlite_schema WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL ORDER BY name").all(table);
+    const before = { rows: state.raw.prepare(`SELECT * FROM ${table}`).all(), indexes: indexes() };
+    const v2Columns = LIVE_TICKET_COLUMNS.filter(column => column !== "personal_connection_id").join(", ");
+    state.raw.exec(`CREATE TEMP TABLE kept AS SELECT ${v2Columns} FROM ${table}; DROP TABLE ${table}; ${V2_TICKET_TABLE};
+      INSERT INTO ${table} SELECT * FROM temp.kept; DROP TABLE temp.kept`);
+    for (const { sql } of before.indexes) state.raw.exec(String(sql));
+    state.raw.prepare("UPDATE sync_relay_migrations SET migration_id='live-session-tickets-v2' WHERE migration_id=?").run(marker);
+    reopenForSchemaCheck(state.path);
+    expect(state.raw.prepare("SELECT migration_id FROM sync_relay_migrations WHERE migration_id LIKE 'live-session-tickets-%'").all())
+      .toEqual([{ migration_id: marker }]);
+    expect({ rows: state.raw.prepare(`SELECT * FROM ${table}`).all(), indexes: indexes() }).toEqual(before);
+    expect(state.storage.redeemLiveTicket(redeem)).toMatchObject({ ticketId: mint.ticketId, redeemedAtMs: 1000 });
   } finally { await state.close(); }
 });

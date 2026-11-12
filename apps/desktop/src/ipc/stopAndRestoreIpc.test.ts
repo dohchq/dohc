@@ -1,8 +1,10 @@
+import { createHash } from "node:crypto";
 import { SyncedDeletionRevivalError } from "../workspaces/syncedDeletionRefusal";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { VERSIONED_METHOD } from "@dohc/workspace-engine-client";
 import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { mockDaemonSessions } from "../testing/liveEngineSessions";
 import { createTestScratch } from "../workspaces/testTemp";
@@ -242,10 +244,11 @@ function fixture(options: {
     reopen: (store: ReturnType<typeof createAutomationRunStore>) => {const old = automations; automations = automationsFor(store); return old;} };
 }
 
-async function capturedFiles(paths: string[]) {
+async function capturedFiles(paths: string[], edits = ["shared edit"]) {
   const rootPath = await createTestScratch("dohc-stop-restore-policy-");
   const attachmentId = Symbol("stop-restore-policy");
-  const sessions = mockDaemonSessions({ rootPath, workspaceId: WORKSPACE_ID, loopback: new VersionedLoopbackEngine() });
+  const loopback = new VersionedLoopbackEngine();
+  const sessions = mockDaemonSessions({ rootPath, workspaceId: WORKSPACE_ID, loopback });
   const store = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath, attachmentId }, sessions).store;
   await store.ensureMainVersion({ workspaceId: WORKSPACE_ID });
   const files = [];
@@ -254,8 +257,10 @@ async function capturedFiles(paths: string[]) {
     await writeFile(join(rootPath, path), "owner original");
     const target = { workspaceId: WORKSPACE_ID, versionId: "main", path, metadata: { origin: "sync" as const } };
     await store.writeTextFile({ ...target, text: "owner original" });
-    const changed = await store.writeTextFile({ ...target, text: "shared edit", publish: true });
-    files.push({ path, objectId: changed.moment.objectId, momentId: changed.moment.id, created: false });
+    for (const text of edits) {
+      const changed = await store.writeTextFile({ ...target, text, publish: true });
+      files.push({ path, objectId: changed.moment.objectId, momentId: changed.moment.id, created: false });
+    }
   }
   const engineCapture = createWorkspaceEngineCapture({ workspaceId: WORKSPACE_ID, rootPath, attachmentId, rustEngineSessions: sessions, store });
   const f = fixture({ engineCapture, rootPath, ledger: {
@@ -265,7 +270,7 @@ async function capturedFiles(paths: string[]) {
     await mkdir(join(rootPath, ".dohc"), { recursive: true });
     await writeFile(join(rootPath, ".dohc/files.toml"), policy);
   };
-  return { ...f, rootPath, store, engineCapture, writePolicy, files };
+  return { ...f, rootPath, store, engineCapture, writePolicy, files, loopback };
 }
 
 describe("stop and restore in main", () => {
@@ -1364,6 +1369,77 @@ ${SHARED_LIVE_RESTORE_BODY}`}], errorMessage: null,
       restored: [],
       review: [{ path: SCHEMA, reason: "changed-since" }],
     });
+  });
+
+  // The server's settlement of `copied` reaches History last: a record-only row
+  // with that moment's time and text, newest by order. `between` makes a row
+  // History lists just before it, from the copied one.
+  type WireMoment = Record<string, unknown>;
+  const lateSettlement = (f: Awaited<ReturnType<typeof capturedFiles>>, copied: string, settlement: string,
+    between?: (copiedRow: WireMoment) => WireMoment) => {
+    const objectId = f.files[0]!.objectId;
+    const send = f.loopback.sendRequest.bind(f.loopback);
+    vi.spyOn(f.loopback, "sendRequest").mockImplementation(async request => {
+      const params = request.params as Record<string, unknown> | undefined;
+      if (request.method === VERSIONED_METHOD.momentsGet && params?.momentId === settlement) {
+        const response = await send({ ...request, params: { ...params, momentId: copied } });
+        const moment = response.result as Record<string, unknown>;
+        return { ...response, result: { ...moment, momentId: settlement, momentOrder: 1_000, syncRecordOnly: true } } as typeof response;
+      }
+      if (request.method === VERSIONED_METHOD.momentsGet && between && params?.momentId === "between") {
+        const response = await send({ ...request, params: { ...params, momentId: copied } });
+        return { ...response, result: between(response.result as WireMoment) } as typeof response;
+      }
+      const response = await send(request);
+      if (request.method !== VERSIONED_METHOD.momentsList || params?.objectId !== objectId || params?.beforeMomentOrder !== undefined) return response;
+      type Page = { moments: Array<Record<string, unknown>> };
+      const page = response.result as Page;
+      const all = (await send({ ...request, params: { ...params, limit: 100 } })).result as Page;
+      const row = all.moments.find(moment => moment.momentId === copied)!;
+      const moments = [{ ...row, momentId: settlement, momentOrder: 1_000, syncRecordOnly: true }, ...(between ? [between(row)] : []), ...page.moments];
+      return { ...response, result: { ...page, moments: moments.slice(0, page.moments.length) } } as typeof response;
+    });
+  };
+
+  it("restores a note whose server settlement of their earlier edit arrived after their later one", async () => {
+    const f = await capturedFiles(["notes/a.md"], ["shared edit", "shared edit 2"]);
+    lateSettlement(f, f.files[0]!.momentId, "late-settlement");
+    try {
+      await expect(f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } })).resolves.toMatchObject({
+        status: "restored", restored: [{ path: "notes/a.md" }], review: [], unfinished: null,
+      });
+      expect(await readFile(join(f.rootPath, "notes/a.md"), "utf8")).toBe("owner original");
+    } finally { await f.engineCapture.stop(); }
+  });
+
+  it("restores a note when dohc's recovery record of it sits between their later edit and the server's late settlement", async () => {
+    const f = await capturedFiles(["notes/a.md"], ["shared edit", "shared edit 2"]);
+    const empty = createHash("sha256").update("").digest("hex");
+    // Recovery records keep no file content, and change no file.
+    lateSettlement(f, f.files[0]!.momentId, "late-settlement", row => ({ ...row, momentId: "between", momentOrder: 999,
+      metadataOrigin: "capture-recovery", authors: null, syncRecordOnly: false, afterText: "", afterByteLength: 0, afterBlobSha256: empty,
+      beforeText: "", beforeByteLength: 0, beforeBlobSha256: empty }));
+    try {
+      await expect(f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } })).resolves.toMatchObject({
+        status: "restored", restored: [{ path: "notes/a.md" }], review: [], unfinished: null,
+      });
+      expect(await readFile(join(f.rootPath, "notes/a.md"), "utf8")).toBe("owner original");
+    } finally { await f.engineCapture.stop(); }
+  });
+
+  it("keeps a note for review when someone else changed it before the server's late record of their edit", async () => {
+    const f = await capturedFiles(["notes/a.md"]);
+    const edit = f.files[0]!;
+    await f.store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "notes/a.md", metadata: { origin: "sync" }, text: "someone else", publish: true });
+    // The ledger names the server's moment, which History records after the other change.
+    lateSettlement(f, edit.momentId, "late-settlement");
+    edit.momentId = "late-settlement";
+    try {
+      await expect(f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } })).resolves.toMatchObject({
+        status: "restored", restored: [], review: [{ path: "notes/a.md", reason: "restore-refused" }], unfinished: null,
+      });
+      expect(await readFile(join(f.rootPath, "notes/a.md"), "utf8")).toBe("someone else");
+    } finally { await f.engineCapture.stop(); }
   });
 
   it("keeps local content and unsettled drafts for review with the engine's reason", async () => {

@@ -11,11 +11,13 @@ import {expect,it,vi} from 'vitest'
 import * as Y from 'yjs'
 import {parseHostEpoch} from '@dohc/live-session-contract/host-control'
 import type {NativeOwnerActivation} from '../../workspace-engine-client/src/daemon/nativeOwnerActivation.js'
+import {EngineRequestError} from '../../workspace-engine-client/src/daemon/engineClient.js'
 import {markdownToYDoc} from './import-export.js'
 import {createLiveMarkdownRegistrationValidator,createLiveMarkdownJournalValidator,createLiveMarkdownHistoryValidator} from './liveDocumentValidation.js'
 import {openSyncRelayStorage} from '../../../services/sync-relay/src/storage.js'
+import {openEmptyRelayTestStorage} from '../../../services/sync-relay/src/testing/emptyRelayStorage.js'
 import {createLiveJournalHistoryAuthority} from '../../../services/sync-relay/src/storage/liveJournalHistory.js'
-import {ServiceActivationStaleCut,ServiceActivationTooLarge} from '../../../services/sync-relay/src/storage/serviceActivation.js'
+import {ServiceActivationHistoryOverBudget,ServiceActivationStaleCut,ServiceActivationStore,ServiceActivationTooLarge} from '../../../services/sync-relay/src/storage/serviceActivation.js'
 import {SyncRelayQuotaExceededError} from '../../../services/sync-relay/src/storage/errors.js'
 import {readOrdinaryActivationHistory,verifyOrdinaryActivationCut} from '../../../services/sync-relay/src/storage/ordinaryActivationSource.js'
 import {validateOrdinaryActivation,type OrdinaryActivationValidator} from '../../../services/sync-relay/src/storage/ordinaryActivationValidation.js'
@@ -38,6 +40,8 @@ import type {SqliteDb} from '../../../services/sync-relay/src/storage/types.js'
 import type {OwnerRestoreHost} from '../../../services/sync-relay/src/ownerRestoreRoutes.js'
 import {testHandler} from '../../../services/sync-relay/src/testing/index.js'
 import {preparedStop} from '../../../services/sync-relay/src/liveTickets.test-helper.js'
+import {registered,cleanupLiveDeliveryFixtures} from './liveCommittedDeliveryTestSupport.js'
+import {liveDeliveryBookkeepingBytes} from './liveDeliveryQuotaTestSupport.js'
 import nativeAuthoredSettlement from '../../../services/sync-relay/src/testing/fixtures/nativeAuthoredSettlement.json'
 
 const {DatabaseSync}=createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite')
@@ -48,13 +52,13 @@ const validateBaseline=createLiveMarkdownRegistrationValidator(policy),validateJ
 // The pool's check, run in this process.
 const validateActivation:OrdinaryActivationValidator=async work=>validateOrdinaryActivation(work,policy)
 const host={mode:'service' as const,hostId:'service',hostEpoch:parseHostEpoch(1),instanceId:'instance',connectionId:'connection'}
-const actor={kind:'owner' as const,userId:'owner',shareId:'share'}
+const actor={kind:'owner' as const,userId:'owner'}
 const bounds={maxCaptureBytes:1_000_000,maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000}
 const stop={operationId:'restore',workspaceId:'workspace',ownerUserId:'owner'}
 // A `large` note is not validated here; its projections are placeholders that only a finished validation would refuse.
 function fixture(note='Original',large=false,clientID?:number){
   const root=mkdtempSync(join(tmpdir(),'dohc-service-activation-')),path=join(root,'relay.sqlite')
-  const storage=openSyncRelayStorage(path),raw=new DatabaseSync(path)
+  const storage=openEmptyRelayTestStorage(path),raw=new DatabaseSync(path)
   const history=createLiveJournalHistoryAuthority({namespace:'history',reconciled:true}),store=storage.createServiceActivationStore(history)
   const doc=markdownToYDoc(note,{clientID}),baselineBytes=Buffer.from(Y.encodeStateAsUpdate(doc))
   doc.getMap('frontmatter').set('title','Edited')
@@ -89,7 +93,7 @@ function fixture(note='Original',large=false,clientID?:number){
   raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES ('share','workspace','owner',?,0)").run(JSON.stringify({paths:['docs'],versionId:null}))
   raw.exec('COMMIT')
   storage.provisionLiveHostControl({...host,updatedAtMs:1,guard(){}})
-  const prepare=(readBounds=bounds,validate=validateActivation)=>store.prepare({capture,host,shareId:'share',registeredAtMs:3,guard(){},validate,bounds:readBounds})
+  const prepare=(readBounds=bounds,validate=validateActivation)=>store.prepare({capture,host,registeredAtMs:3,guard(){},validate,bounds:readBounds})
   return {storage,raw,store,history,capture,document,prepare,path,close(){raw.close();storage.close();rmSync(root,{recursive:true,force:true})}}
 }
 it('retains the original lineage and edited ordinary cut, closing ordinary authority until activation completes',async()=>{
@@ -113,7 +117,7 @@ it('retires a captured activation the host never adopted when its owner pauses',
   const f=fixture();try{
     f.raw.exec("INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id) VALUES ('grant','share','user','reader',NULL,'edit',1,'active',0,NULL,NULL)")
     const enrollment={workspaceId:'workspace',path:'docs/a.md',shareId:'share',ownerUserId:'owner',nowMs:10,guard(){}}
-    f.storage.enrollServiceHostDocument(enrollment)
+    f.storage.ensureOwnedLiveDocument({intent:'share',...enrollment})
     expect(await f.prepare()).toEqual({document:f.document,replayed:false,completed:false})
     const access=f.store.pending(f.document,host),refused={kind:'refused',reason:'host-unavailable'}
     expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor},access).kind).toBe('current')
@@ -121,7 +125,7 @@ it('retires a captured activation the host never adopted when its owner pauses',
     expect(readServiceActivationRetirement(f.storage as StorageContext,f.document)).toEqual({relayDatabaseNamespace:'history',
       activationId:f.capture.activationId,...f.document,path:'docs/a.md',restoreFenceGeneration:1,acceptedThrough:0,requestedAtMs:20})
     expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor},access)).toEqual(refused)
-    f.storage.setServiceHostEnrollmentEnabled({...enrollment,enabled:true,nowMs:30})
+    f.storage.ensureOwnedLiveDocument({intent:'owner-resume',...enrollment,nowMs:30})
     expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor},access)).toEqual(refused)
   }finally{f.close()}
 })
@@ -341,6 +345,9 @@ it('checks configured history entry and byte budgets before loading relay blobs'
   const f=fixture();try{
     const read=vi.spyOn(f.storage,'getBlob')
     await expect(f.prepare({...bounds,maxEntriesPerDrain:1})).rejects.toThrow('entry budget')
+    expect(read).not.toHaveBeenCalled()
+    // A baseline past the byte budget is refused before the history read, as the same over-budget history.
+    await expect(f.prepare({...bounds,maxBytesPerDrain:f.capture.baselineBytes.length-1})).rejects.toBeInstanceOf(ServiceActivationHistoryOverBudget)
     expect(read).not.toHaveBeenCalled()
     await expect(f.prepare({...bounds,maxBytesPerDrain:f.capture.baselineBytes.length})).rejects.toThrow('metadata')
     expect(read).not.toHaveBeenCalled()
@@ -641,7 +648,8 @@ async function ownerCapture(f:ReturnType<typeof fixture>){
     localYDocSequence:f.capture.source.nativeHeadSequence,terminalCursor:0,adoptionReplayed:false})
   return {capture,delivery,acknowledge}
 }
-it.each(['selector','host'] as const)('revalidates a private pending activation binding after its %s changes',async change=>{
+// The owner's binding takes no share's selector; a restore generation is what moves it.
+it.each(['generation','host'] as const)('revalidates a private pending activation binding after its %s changes',async change=>{
   const f=fixture();try{
     await f.prepare()
     const access=f.store.pending(f.document,host),delivery=f.storage.createLiveCommittedDeliveryStore(f.history,access)
@@ -650,10 +658,37 @@ it.each(['selector','host'] as const)('revalidates a private pending activation 
     expect(captured.assertCurrent).not.toThrow()
     const wrong=f.storage.createLiveCommittedDeliveryStore(f.history,{activationId:'wrong-activation'})
     expect(()=>wrong.captureOwnerBinding({host,document:f.document,actor})).toThrow()
-    if(change==='selector')f.raw.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id='share'")
-      .run(JSON.stringify({paths:['other'],versionId:null}))
+    if(change==='generation')f.raw.exec('UPDATE sync_relay_live_documents SET restore_fence_generation=2')
     else f.raw.exec("UPDATE sync_relay_session_host_control SET registered_connection_id='different-connection'")
     expect(captured.assertCurrent).toThrow()
+  }finally{f.close()}
+})
+// Proves: a lineage activated while owners still took a share's selector
+// recorded it, up to 100 selectors of the maximum length. Its owner adopts
+// under that recorded binding, and the adoption's origin is charged from its
+// reservation, so usage doesn't move. A later restore generation changes the
+// binding, and the capture no longer holds.
+it('transfers owner metadata quota for a recorded binding of 100 maximum-length selectors and detects a changed binding',async()=>{
+  const f=fixture();try{
+    await f.prepare()
+    // In a binding's canonical order, by UTF-8 bytes, which its pending activation compares exactly.
+    const selectors=['docs',...Array.from({length:99},(_,index)=>`${index}`.padEnd(1024,'x'))]
+      .sort((left,right)=>Buffer.compare(Buffer.from(left),Buffer.from(right)))
+    const recorded=JSON.parse(String(f.raw.prepare('SELECT binding_json FROM sync_relay_service_activations').get()!.binding_json))
+    f.raw.prepare('UPDATE sync_relay_service_activations SET binding_json=?').run(JSON.stringify({...recorded,selectorPaths:selectors}))
+    const delivery=f.storage.createLiveCommittedDeliveryStore(f.history,f.store.pending(f.document,host))
+    const capture=delivery.captureOwnerCut({host,document:f.document,actor,adoptionId:f.capture.activationId,
+      expectedLocalSequence:f.capture.source.nativeHeadSequence,maxBytes:1_000_000,maxEvents:100,throughCursor:0})
+    expect(capture.binding.selectorPaths).toEqual(selectors)
+    const usage=()=>Number(f.raw.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='workspace'").get()!.usage_bytes)-liveDeliveryBookkeepingBytes(f.raw)
+    const before=usage()
+    delivery.acknowledgeOwnerAdoption(capture,{adoptionId:f.capture.activationId,localYDocSequence:f.capture.source.nativeHeadSequence,terminalCursor:0,adoptionReplayed:false})
+    expect(usage()).toBe(before)
+    const origin=String(f.raw.prepare('SELECT origin_json FROM sync_relay_live_delivery_owners').get()!.origin_json)
+    expect(JSON.parse(origin).originalBinding).toEqual(capture.binding)
+    expect(Buffer.byteLength(origin)).toBeLessThan(Buffer.byteLength(JSON.stringify(capture.binding))+4096)
+    f.raw.exec('UPDATE sync_relay_live_documents SET restore_fence_generation=2')
+    expect(()=>capture.assertCurrent()).toThrow()
   }finally{f.close()}
 })
 it('revalidates the frozen activation source before acknowledging a captured owner cut',async()=>{
@@ -795,16 +830,16 @@ it('rolls back the full activation when its retained-state quota charge fails',a
 type RunDocument=ConstructorParameters<typeof ServiceActivationDriver>[0]['runDocument']
 function activationDriver(f:ReturnType<typeof fixture>,captureOwnerActivation:ReturnType<typeof vi.fn>,sendRequest:ReturnType<typeof vi.fn>=vi.fn(async()=>({result:{released:true}})),
   runDocument:RunDocument=(_document,_signal,operation)=>operation(),native:object={},config:Partial<ServiceActivationConfig>={}){
-  const pull=vi.fn(async()=>({hasMore:false})),target={workspaceId:'workspace',path:'docs/a.md',shareId:'share'}
+  const pull=vi.fn(async()=>({hasMore:false})),wake=vi.fn(),target={workspaceId:'workspace',path:'docs/a.md'}
   const driver=new ServiceActivationDriver({trustedAccount:accountId=>({accountId,name:'Owner'}),storage:f.storage,history:f.history,host,
     client:{...native,captureOwnerActivation,sendRequest} as never,
     workspace:id=>id==='workspace'?{handle:'native-workspace',replica:{pull,publish:vi.fn()},identity:{replicationEpoch:'epoch',streamIdentity:'stream'}}:undefined,
     config:{targets:[target],validateActivation,validateAdmission:validateJournal,maxCaptureBytes:1_000_000,maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000,
       maxDocumentsPerPass:1,pollIntervalMs:1000,passDeadlineMs:10_000,idleUnloadMs:600_000,idleRetryMs:30_000,...config},
     adoption:{maxBytes:1_000_000,maxEvents:10},nextRequestId:()=>1,deadlineMs:1000,assertCurrent(){},registered(){},
-    runDocument,
+    runDocument,lifetime:new AbortController().signal,wake,
   })
-  return {driver,target,pull}
+  return {driver,target,pull,wake}
 }
 
 // A completed service activation: adopted, seed accepted and applied natively.
@@ -1158,6 +1193,372 @@ it('refuses a capture whose validation runs out of heap, blocks it for its owner
     expect(await f.prepare(bounds,validate)).toEqual({document:f.document,replayed:false,completed:false})
   }finally{await pool.close();large.close();f.close()}
 },60_000)
+// A history past what the relay reads refuses the same way on every capture, so the document waits for a new
+// start rather than being captured on every pass. One within the same budget still goes live.
+it('captures a document whose history is past the self-host read budget once, then waits for a new base or its owner',async()=>{
+  const {maxEntriesPerDrain}=selfHostLiveProfile().service.activation,f=fixture(),within=fixture()
+  try{
+    const config={maxEntriesPerDrain},signal=()=>new AbortController().signal,drained={kind:'pending' as const,reason:'transport interrupted',continueDrain:false}
+    vi.spyOn(OwnerCommittedDelivery.prototype,'drain').mockResolvedValue(drained)
+    const live=activationDriver(within,vi.fn(async()=>within.capture),undefined,undefined,undefined,config)
+    expect(await live.driver.activate(live.target,signal())).toMatchObject({kind:'pending',reason:'transport interrupted'})
+    expect(live.driver.blocked(live.target)).toBeUndefined()
+    expect(within.raw.prepare('SELECT count(*) AS n FROM sync_relay_service_activations').get()!.n).toBe(1)
+    const edit=(seq:number)=>append(f,'origin',seq,'ydoc.update',ydocUpdate({isBaseState:false,lineageClaimId:f.document.lineageClaimId,updateBlobSha256:hash(Buffer.from(`edit-${seq}`))}))
+    for(let seq=3;seq<=maxEntriesPerDrain+1;seq++)edit(seq)
+    const capture=vi.fn(async()=>f.capture),send=vi.fn(async()=>({result:{released:true}}))
+    const d=activationDriver(f,capture,send,undefined,undefined,config)
+    expect(await d.driver.activate(d.target,signal())).toEqual({kind:'pending',reason:'Ordinary activation history exceeds its configured entry budget.'})
+    expect(d.driver.blocked(d.target)).toBe('history-over-budget')
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({method:'liveApplication.releaseOwnerActivation',
+      params:{activationId:f.capture.activationId,sessionId:'real-session'}}),expect.any(AbortSignal))
+    expect(f.raw.prepare('SELECT * FROM sync_relay_service_activations').all()).toEqual([])
+    const blocked={kind:'pending',reason:'Hosted document is blocked until the owner tries again.'}
+    expect(await d.driver.activate(d.target,signal())).toEqual(blocked)
+    // Another edit only lengthens the history.
+    edit(maxEntriesPerDrain+2)
+    expect(await d.driver.activate(d.target,signal())).toEqual(blocked)
+    expect(capture).toHaveBeenCalledTimes(1)
+    // A new base gives the history a new start, so the next pass captures once more.
+    append(f,'rebased',1,'ydoc.update',ydocUpdate({isBaseState:true,lineageClaimId:hash(Buffer.from('rebased')),updateBlobSha256:hash(Buffer.from('rebased'))}))
+    // A pass that ends before its capture finds the same base on the next one.
+    d.pull.mockResolvedValueOnce({hasMore:true})
+    expect(await d.driver.activate(d.target,signal())).toEqual({kind:'pending',reason:'Hosted replication has more pages.'})
+    expect(capture).toHaveBeenCalledTimes(1)
+    expect(await d.driver.activate(d.target,signal())).toEqual({kind:'pending',reason:'Ordinary activation history exceeds its configured entry budget.'})
+    expect(capture).toHaveBeenCalledTimes(2)
+    expect(await d.driver.activate(d.target,signal())).toEqual(blocked)
+    // The owner's Resume allows one more capture.
+    expect(d.driver.unblock(d.target)).toBe(true)
+    await d.driver.activate(d.target,signal())
+    expect(capture).toHaveBeenCalledTimes(3)
+    expect(d.driver.blocked(d.target)).toBe('history-over-budget')
+  }finally{vi.restoreAllMocks();f.close();within.close()}
+})
+it('blocks a capture whose history check runs out of its work budget, as one past the read budget',async()=>{
+  const f=fixture();try{
+    const message='Ordinary activation history exceeds its configured validation budget.',capture=vi.fn(async()=>f.capture)
+    const d=activationDriver(f,capture,undefined,undefined,undefined,{validateActivation:async()=>({kind:'over-budget',message})})
+    expect(await d.driver.activate(d.target,new AbortController().signal)).toEqual({kind:'pending',reason:message})
+    expect(d.driver.blocked(d.target)).toBe('history-over-budget')
+    await d.driver.activate(d.target,new AbortController().signal)
+    expect(capture).toHaveBeenCalledTimes(1)
+    await expect(f.prepare(bounds,async()=>({kind:'over-budget',message}))).rejects.toBeInstanceOf(ServiceActivationHistoryOverBudget)
+  }finally{f.close()}
+})
+it('answers over-budget when a history check runs past its byte budget',async()=>{
+  const f=fixture();try{
+    const input={source:f.capture.source,document:f.document,baselineBytes:f.capture.baselineBytes,fullState:f.capture.fullState,bounds}
+    const history=readOrdinaryActivationHistory(f.storage as StorageContext,input)
+    const work={document:f.document,currentPath:'docs/a.md',baselineBytes:f.capture.baselineBytes,
+      cut:{source:f.capture.source,fullState:f.capture.fullState,history,maxBytesPerDrain:bounds.maxBytesPerDrain}}
+    expect(validateOrdinaryActivation(work,policy).kind).toBe('accepted')
+    expect(validateOrdinaryActivation({...work,cut:{...work.cut,maxBytesPerDrain:f.capture.fullState.length}},policy))
+      .toEqual({kind:'over-budget',message:'Ordinary activation history exceeds its configured byte budget.'})
+  }finally{f.close()}
+})
+// A document whose activation keeps failing for a reason nothing classifies waits longer before each try, so it isn't captured on every pass.
+it('waits longer before each retry of an activation that keeps failing, and tries at once after its owner resumes',async()=>{
+  const f=fixture();vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(0)
+  try{
+    const capture=vi.fn(async():Promise<NativeOwnerActivation>=>{throw new Error('Engine is unavailable.')}),signal=()=>new AbortController().signal
+    const d=activationDriver(f,capture),waiting={kind:'pending',reason:'Hosted document waits before it tries again.'}
+    // A pass that ended says nothing about the document, so it counts nothing.
+    for(let i=0;i<3;i++)await expect(d.driver.activate(d.target,AbortSignal.abort(new Error('Pass ended.')))).rejects.toThrow('Pass ended.')
+    await expect(d.driver.activate(d.target,signal())).rejects.toThrow('Engine is unavailable.')
+    await expect(d.driver.activate(d.target,signal())).rejects.toThrow('Engine is unavailable.')
+    expect(await d.driver.activate(d.target,signal())).toEqual(waiting)
+    vi.setSystemTime(1000)
+    await expect(d.driver.activate(d.target,signal())).rejects.toThrow('Engine is unavailable.')
+    vi.setSystemTime(2999)
+    expect(await d.driver.activate(d.target,signal())).toEqual(waiting)
+    vi.setSystemTime(3000)
+    await expect(d.driver.activate(d.target,signal())).rejects.toThrow('Engine is unavailable.')
+    expect(capture).toHaveBeenCalledTimes(4)
+    // The wait grows to five minutes and no further.
+    for(let i=0;i<10;i++){vi.setSystemTime(Date.now()+300_000);await expect(d.driver.activate(d.target,signal())).rejects.toThrow('Engine is unavailable.')}
+    vi.setSystemTime(Date.now()+299_999)
+    expect(await d.driver.activate(d.target,signal())).toEqual(waiting)
+    d.driver.unblock(d.target)
+    capture.mockImplementation(async()=>f.capture)
+    vi.spyOn(OwnerCommittedDelivery.prototype,'drain').mockResolvedValue({kind:'pending',reason:'transport interrupted',continueDrain:false})
+    expect(await d.driver.activate(d.target,signal())).toMatchObject({kind:'pending',reason:'transport interrupted'})
+    expect(capture).toHaveBeenCalledTimes(15)
+  }finally{vi.restoreAllMocks();vi.useRealTimers();f.close()}
+})
+// The pass deadline arrives as an aborted signal. A document that keeps running past it backs off like any other failure.
+it('counts a pass that runs out of its deadline during capture as a failure',async()=>{
+  const f=fixture();vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(0)
+  try{
+    let pass=new AbortController()
+    const timeout=()=>new DOMException('The pass ran out of time.','TimeoutError')
+    const capture=vi.fn(async():Promise<NativeOwnerActivation>=>{pass.abort(timeout());throw pass.signal.reason})
+    const d=activationDriver(f,capture)
+    // A pass that had already ended before it reached the document counts nothing.
+    for(let i=0;i<3;i++)await expect(d.driver.activate(d.target,AbortSignal.abort(timeout()))).rejects.toThrow()
+    expect(capture).not.toHaveBeenCalled()
+    for(let i=0;i<2;i++){pass=new AbortController();await expect(d.driver.activate(d.target,pass.signal)).rejects.toThrow('The pass ran out of time.')}
+    expect(await d.driver.activate(d.target,new AbortController().signal)).toEqual({kind:'pending',reason:'Hosted document waits before it tries again.'})
+    expect(capture).toHaveBeenCalledTimes(2)
+  }finally{vi.useRealTimers();f.close()}
+})
+// A cut that keeps going stale would repeat the capture on every pass. It waits as a failure does, and a pass that only waits doesn't end the count.
+it('waits longer before capturing again after a stale cut',async()=>{
+  const f=fixture();vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(0)
+  try{
+    vi.spyOn(ServiceActivationStore.prototype,'prepare').mockRejectedValue(new ServiceActivationStaleCut())
+    const capture=vi.fn(async()=>f.capture),signal=()=>new AbortController().signal
+    const d=activationDriver(f,capture),waiting={kind:'pending',reason:'Hosted document waits before it tries again.'}
+    const stale={kind:'pending',reason:'Hosted replication advanced before activation.'}
+    expect(await d.driver.activate(d.target,signal())).toEqual(stale)
+    expect(await d.driver.activate(d.target,signal())).toEqual(stale)
+    expect(await d.driver.activate(d.target,signal())).toEqual(waiting)
+    vi.setSystemTime(1000)
+    expect(await d.driver.activate(d.target,signal())).toEqual(stale)
+    vi.setSystemTime(2999)
+    expect(await d.driver.activate(d.target,signal())).toEqual(waiting)
+    expect(capture).toHaveBeenCalledTimes(3)
+  }finally{vi.restoreAllMocks();vi.useRealTimers();f.close()}
+})
+// A stale cut whose lease release then fails counts once, not once for the cut and again for the release.
+it('counts a stale cut once when releasing its lease fails',async()=>{
+  const f=fixture();vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(0)
+  try{
+    vi.spyOn(ServiceActivationStore.prototype,'prepare').mockRejectedValue(new ServiceActivationStaleCut())
+    const send=vi.fn(async()=>({result:{released:true}}))
+    send.mockImplementationOnce(async()=>{throw new Error('release lost')})
+    const d=activationDriver(f,vi.fn(async()=>f.capture),send)
+    await expect(d.driver.activate(d.target,new AbortController().signal)).rejects.toThrow('release lost')
+    expect(await d.driver.activate(d.target,new AbortController().signal)).toEqual({kind:'pending',reason:'Hosted replication advanced before activation.'})
+  }finally{vi.restoreAllMocks();vi.useRealTimers();f.close()}
+})
+// While every validation slot is taken, a pass captures nothing, and the document doesn't wait longer once a slot frees.
+it('captures nothing while validation is busy, and captures as soon as a slot is free',async()=>{
+  const f=fixture();vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(0)
+  try{
+    let free=false,answer:'retry'|'crash'='retry'
+    const validateActivation=Object.assign(async()=>{if(answer==='crash')throw new Error('Validator crashed.');return {kind:'retry' as const,reason:'admission-unavailable' as const}},{hasCapacity:()=>free})
+    const capture=vi.fn(async()=>f.capture),signal=()=>new AbortController().signal
+    const d=activationDriver(f,capture,undefined,undefined,undefined,{validateActivation}),busy={kind:'pending',reason:'Live validation is busy.'}
+    for(let i=0;i<5;i++)expect(await d.driver.activate(d.target,signal())).toEqual(busy)
+    expect(capture).not.toHaveBeenCalled()
+    // A slot taken between the check and validation counts nothing either.
+    free=true
+    for(let i=0;i<3;i++)expect(await d.driver.activate(d.target,signal())).toEqual(busy)
+    expect(capture).toHaveBeenCalledTimes(3)
+    // A real failure still counts from its first.
+    answer='crash'
+    await expect(d.driver.activate(d.target,signal())).rejects.toThrow('Validator crashed.')
+    await expect(d.driver.activate(d.target,signal())).rejects.toThrow('Validator crashed.')
+    expect(await d.driver.activate(d.target,signal())).toEqual({kind:'pending',reason:'Hosted document waits before it tries again.'})
+  }finally{vi.useRealTimers();f.close()}
+})
+// The slot check follows the catch-up pull, so a slot taken while the pull runs leaves nothing captured.
+it('checks for a free validation slot after the catch-up pull, just before it captures',async()=>{
+  const f=fixture()
+  try{
+    let free=true
+    const validateActivation=Object.assign(async()=>({kind:'retry' as const,reason:'admission-unavailable' as const}),{hasCapacity:()=>free})
+    const capture=vi.fn(async()=>f.capture),d=activationDriver(f,capture,undefined,undefined,undefined,{validateActivation})
+    d.pull.mockImplementation(async()=>{free=false;return {hasMore:false}})
+    expect(await d.driver.activate(d.target,new AbortController().signal)).toEqual({kind:'pending',reason:'Live validation is busy.'})
+    expect(d.pull).toHaveBeenCalledTimes(1)
+    expect(capture).not.toHaveBeenCalled()
+  }finally{f.close()}
+})
+// Issue #1967: a capture that found validation busy was tried again only by the next periodic pass.
+// Proves: the driver waits once for the slot, however many passes find it busy, and wakes one pass once it may
+// be free. A slot taken between the check and validation waits the same way after its capture.
+it('wakes one pass once the validation slot a capture found busy may be free',async()=>{
+  const f=fixture()
+  try{
+    const waits:(AbortSignal|undefined)[]=[]
+    let free=false,release=()=>{}
+    const waitForCapacity=(signal?:AbortSignal)=>{waits.push(signal);return new Promise<void>(resolve=>{release=resolve})}
+    const validateActivation=Object.assign(async()=>({kind:'retry' as const,reason:'admission-unavailable' as const}),{hasCapacity:()=>free,waitForCapacity})
+    const capture=vi.fn(async()=>f.capture),d=activationDriver(f,capture,undefined,undefined,undefined,{validateActivation})
+    const busy={kind:'pending',reason:'Live validation is busy.'}
+    for(let pass=0;pass<3;pass++)expect(await d.driver.activate(d.target,new AbortController().signal)).toEqual(busy)
+    expect(capture).not.toHaveBeenCalled()
+    expect(waits.map(signal=>signal?.aborted)).toEqual([false])
+    expect(d.wake).not.toHaveBeenCalled()
+    release()
+    await vi.waitFor(()=>expect(d.wake).toHaveBeenCalledTimes(1))
+    free=true
+    expect(await d.driver.activate(d.target,new AbortController().signal)).toEqual(busy)
+    expect(capture).toHaveBeenCalledTimes(1)
+    expect(waits).toHaveLength(2)
+    expect(d.wake).toHaveBeenCalledTimes(1)
+    release()
+    await vi.waitFor(()=>expect(d.wake).toHaveBeenCalledTimes(2))
+  }finally{f.close()}
+})
+// Going live ends the wait, so a later failure is again the first, retried on the next pass.
+it('starts the wait from the first failure again once the document has gone live',async()=>{
+  const f=fixture();vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(0)
+  try{
+    await completeActivation(f)
+    vi.spyOn(OwnerCommittedDelivery.prototype,'drain').mockResolvedValue({kind:'done'} as never)
+    const capture=vi.fn(async():Promise<NativeOwnerActivation>=>{throw new Error('Engine is unavailable.')}),signal=()=>new AbortController().signal
+    const d=activationDriver(f,capture),waiting={kind:'pending',reason:'Hosted document waits before it tries again.'}
+    for(let i=0;i<2;i++)await expect(d.driver.activate(d.target,signal())).rejects.toThrow('Engine is unavailable.')
+    expect(await d.driver.activate(d.target,signal())).toEqual(waiting)
+    vi.setSystemTime(1000)
+    capture.mockImplementation(async()=>f.capture)
+    expect(await d.driver.activate(d.target,signal())).toMatchObject({kind:'done'})
+    // A pull that no longer speaks for the document drops its owner, so a later pass captures it again.
+    expect(d.driver.hold('workspace',[],{after:'object',through:null},{listed:[],complete:false})).toBe(1)
+    capture.mockImplementation(async()=>{throw new Error('Engine is unavailable.')})
+    for(let i=0;i<2;i++)await expect(d.driver.activate(d.target,signal())).rejects.toThrow('Engine is unavailable.')
+    expect(await d.driver.activate(d.target,signal())).toEqual(waiting)
+    expect(capture).toHaveBeenCalledTimes(5)
+  }finally{vi.restoreAllMocks();vi.useRealTimers();f.close()}
+})
+// Stop forgets the document, and a restart starts with nothing in memory, so either clears a block and the wait.
+it.each(['Stop','a restart'] as const)('captures a blocked or waiting document again after %s',async when=>{
+  const f=fixture();vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(0)
+  try{
+    const message='Ordinary activation history exceeds its configured validation budget.'
+    let answer:'over-budget'|'crash'='over-budget'
+    const validateActivation:OrdinaryActivationValidator=async()=>{if(answer==='crash')throw new Error('Validator crashed.');return {kind:'over-budget',message}}
+    const capture=vi.fn(async()=>f.capture),signal=()=>new AbortController().signal,waiting={kind:'pending',reason:'Hosted document waits before it tries again.'}
+    const start=()=>activationDriver(f,capture,undefined,undefined,undefined,{validateActivation})
+    let d=start()
+    const again=()=>{if(when==='Stop'){d.driver.removeTarget(d.target);d.driver.addTarget(d.target,'object')}else d=start()}
+    expect(await d.driver.activate(d.target,signal())).toEqual({kind:'pending',reason:message})
+    expect(d.driver.blocked(d.target)).toBe('history-over-budget')
+    again()
+    expect(d.driver.blocked(d.target)).toBeUndefined()
+    expect(await d.driver.activate(d.target,signal())).toEqual({kind:'pending',reason:message})
+    expect(capture).toHaveBeenCalledTimes(2)
+    answer='crash'
+    again()
+    for(let i=0;i<2;i++)await expect(d.driver.activate(d.target,signal())).rejects.toThrow('Validator crashed.')
+    expect(await d.driver.activate(d.target,signal())).toEqual(waiting)
+    again()
+    for(let i=0;i<2;i++)await expect(d.driver.activate(d.target,signal())).rejects.toThrow('Validator crashed.')
+    expect(await d.driver.activate(d.target,signal())).toEqual(waiting)
+    expect(capture).toHaveBeenCalledTimes(6)
+  }finally{vi.useRealTimers();f.close()}
+})
+// A history past its budget is blocked, not counted: once a new base clears the block, the next failure is the first.
+it('adds nothing to the wait for a history past its budget',async()=>{
+  const {maxEntriesPerDrain}=selfHostLiveProfile().service.activation,f=fixture();vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(0)
+  try{
+    const signal=()=>new AbortController().signal,waiting={kind:'pending',reason:'Hosted document waits before it tries again.'}
+    const overBudget={kind:'pending',reason:'Ordinary activation history exceeds its configured entry budget.'}
+    f.raw.exec('BEGIN')
+    for(let seq=3;seq<=maxEntriesPerDrain+1;seq++)append(f,'origin',seq,'ydoc.update',ydocUpdate({isBaseState:false,lineageClaimId:f.document.lineageClaimId,updateBlobSha256:hash(Buffer.from(`edit-${seq}`))}))
+    f.raw.exec('COMMIT')
+    const rebase=(seq:number)=>append(f,'rebased',seq,'ydoc.update',ydocUpdate({isBaseState:true,lineageClaimId:hash(Buffer.from(`rebased-${seq}`)),updateBlobSha256:hash(Buffer.from(`rebased-${seq}`))}))
+    const capture=vi.fn(async()=>f.capture),d=activationDriver(f,capture,undefined,undefined,undefined,{maxEntriesPerDrain})
+    expect(await d.driver.activate(d.target,signal())).toEqual(overBudget)
+    rebase(1)
+    // `append` moves the capture's cut to the new base, as a capture after a complete pull would be.
+    const based=f.capture.source.committedCursor
+    expect(await d.driver.activate(d.target,signal())).toEqual(overBudget)
+    expect(d.driver.blocked(d.target)).toBe('history-over-budget')
+    expect(f.capture.source.committedCursor).toBe(based)
+    // Blocked again past that base, so the next pass captures nothing.
+    expect(await d.driver.activate(d.target,signal())).toEqual({kind:'pending',reason:'Hosted document is blocked until the owner tries again.'})
+    expect(capture).toHaveBeenCalledTimes(2)
+    rebase(2)
+    capture.mockImplementation(async()=>{throw new Error('Engine is unavailable.')})
+    for(let i=0;i<2;i++)await expect(d.driver.activate(d.target,signal())).rejects.toThrow('Engine is unavailable.')
+    expect(await d.driver.activate(d.target,signal())).toEqual(waiting)
+    expect(capture).toHaveBeenCalledTimes(4)
+  }finally{vi.useRealTimers();f.close()}
+})
+// A document the engine has not readied is retried on every pass, and that adds nothing to a later wait.
+it('adds nothing to the wait while the engine has not readied the document',async()=>{
+  const f=fixture();vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(0)
+  try{
+    const unready=()=>new EngineRequestError(1,{code:'CONFLICT',message:'hosted-document-unready',retry:'no'} as never)
+    const capture=vi.fn(async():Promise<NativeOwnerActivation>=>{throw unready()}),signal=()=>new AbortController().signal
+    const d=activationDriver(f,capture),waiting={kind:'pending',reason:'Hosted document waits before it tries again.'}
+    for(let i=0;i<3;i++)await expect(d.driver.activate(d.target,signal())).rejects.toThrow('hosted-document-unready')
+    capture.mockImplementation(async()=>{throw new Error('Engine is unavailable.')})
+    for(let i=0;i<2;i++)await expect(d.driver.activate(d.target,signal())).rejects.toThrow('Engine is unavailable.')
+    expect(await d.driver.activate(d.target,signal())).toEqual(waiting)
+    expect(capture).toHaveBeenCalledTimes(5)
+  }finally{vi.useRealTimers();f.close()}
+})
+// Stop or a closing host aborts the pass. That says nothing about the document, even when it arrives during the capture.
+it('adds nothing to the wait for a pass stopped during capture',async()=>{
+  const f=fixture();vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(0)
+  try{
+    let pass=new AbortController()
+    const capture=vi.fn(async():Promise<NativeOwnerActivation>=>{pass.abort();throw pass.signal.reason}),signal=()=>new AbortController().signal
+    const d=activationDriver(f,capture),waiting={kind:'pending',reason:'Hosted document waits before it tries again.'}
+    for(let i=0;i<3;i++){pass=new AbortController();await expect(d.driver.activate(d.target,pass.signal)).rejects.toMatchObject({name:'AbortError'})}
+    capture.mockImplementation(async()=>{throw new Error('Engine is unavailable.')})
+    for(let i=0;i<2;i++)await expect(d.driver.activate(d.target,signal())).rejects.toThrow('Engine is unavailable.')
+    expect(await d.driver.activate(d.target,signal())).toEqual(waiting)
+    expect(capture).toHaveBeenCalledTimes(5)
+  }finally{vi.useRealTimers();f.close()}
+})
+// Waiting between tries applies to capturing. A live document whose drain fails keeps draining on every pass.
+it('keeps draining a live document on every pass after its drain fails',async()=>{
+  const f=fixture();vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(0)
+  try{
+    const drained={kind:'pending' as const,reason:'transport interrupted',continueDrain:false},signal=()=>new AbortController().signal
+    const drain=vi.spyOn(OwnerCommittedDelivery.prototype,'drain').mockResolvedValue(drained)
+    const capture=vi.fn(async()=>f.capture),d=activationDriver(f,capture)
+    expect(await d.driver.activate(d.target,signal())).toMatchObject({kind:'pending',reason:'transport interrupted'})
+    drain.mockRejectedValueOnce(new Error('Drain failed.')).mockRejectedValueOnce(new Error('Drain failed.'))
+    await expect(d.driver.activate(d.target,signal())).rejects.toThrow('Drain failed.')
+    await expect(d.driver.activate(d.target,signal())).rejects.toThrow('Drain failed.')
+    expect(await d.driver.activate(d.target,signal())).toMatchObject({kind:'pending',reason:'transport interrupted'})
+    expect(capture).toHaveBeenCalledTimes(1)
+  }finally{vi.restoreAllMocks();vi.useRealTimers();f.close()}
+})
+// An engine refusal while settling a document already live counts as a failure, but waiting applies to capturing,
+// so the document keeps settling on every pass. Only a capture after its owner is dropped waits, as long as the count says.
+it('counts a settle refusal after registration without delaying a pass, and waits before capturing again',async()=>{
+  const f=fixture();vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(0)
+  try{
+    await completeActivation(f)
+    vi.spyOn(OwnerCommittedDelivery.prototype,'drain').mockResolvedValue({kind:'done'} as never)
+    const settle=vi.fn(async():Promise<void>=>{throw new Error('Settle refused.')}),signal=()=>new AbortController().signal
+    const capture=vi.fn(async()=>f.capture),d=activationDriver(f,capture),waiting={kind:'pending',reason:'Hosted document waits before it tries again.'}
+    const drop=()=>expect(d.driver.hold('workspace',[],{after:'object',through:null},{listed:[],complete:false})).toBe(1)
+    for(let i=0;i<3;i++)await expect(d.driver.activate(d.target,signal(),settle)).rejects.toThrow('Settle refused.')
+    expect(settle).toHaveBeenCalledTimes(3)
+    expect(capture).toHaveBeenCalledTimes(1)
+    // Three failures: the next capture waits 2 s from the last one, and not a moment less.
+    drop()
+    expect(await d.driver.activate(d.target,signal(),settle)).toEqual(waiting)
+    vi.setSystemTime(1999)
+    expect(await d.driver.activate(d.target,signal(),settle)).toEqual(waiting)
+    expect(capture).toHaveBeenCalledTimes(1)
+    vi.setSystemTime(2000)
+    settle.mockResolvedValueOnce(undefined)
+    expect(await d.driver.activate(d.target,signal(),settle)).toMatchObject({kind:'done'})
+    expect(capture).toHaveBeenCalledTimes(2)
+    // Going live cleared the count, so one more refusal and a drop leave the next capture free to run at once.
+    drop()
+    await expect(d.driver.activate(d.target,signal(),settle)).rejects.toThrow('Settle refused.')
+    drop()
+    await expect(d.driver.activate(d.target,signal(),settle)).rejects.toThrow('Settle refused.')
+    expect(capture).toHaveBeenCalledTimes(4)
+  }finally{vi.restoreAllMocks();vi.useRealTimers();f.close()}
+})
+// A pull page that can't speak for a document drops its owner, and an owner dropped on every pass recaptures on
+// every pass unless its failures count. Counted, the captures spread out by the wait.
+it('spreads out the captures of a document whose owner each pull drops while its drain keeps failing',async()=>{
+  const f=fixture();vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(0)
+  try{
+    await completeActivation(f)
+    vi.spyOn(OwnerCommittedDelivery.prototype,'drain').mockRejectedValue(new Error('Drain failed.'))
+    const captured:number[]=[],capture=vi.fn(async()=>{captured.push(Date.now());return f.capture}),d=activationDriver(f,capture)
+    for(let now=0;now<=7000;now+=250){
+      vi.setSystemTime(now)
+      d.driver.hold('workspace',[],{after:'object',through:null},{listed:[],complete:false})
+      await d.driver.activate(d.target,new AbortController().signal).catch((error:unknown)=>expect(error).toMatchObject({message:'Drain failed.'}))
+    }
+    expect(captured).toEqual([0,250,1250,3250])
+  }finally{vi.restoreAllMocks();vi.useRealTimers();f.close()}
+})
 it('releases a capture and tries again on a later pass while live validation is busy',async()=>{
   const f=fixture();try{
     const send=vi.fn(async()=>({result:{released:true}}))
@@ -1312,11 +1713,11 @@ const enrollment={workspaceId:'workspace',path:'docs/a.md',shareId:'share',owner
 function enroll(f:ReturnType<typeof fixture>){
   f.raw.exec(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
     VALUES ('grant','share','user','reader',NULL,'edit',1,'active',0,NULL,NULL)`)
-  return f.storage.enrollServiceHostDocument({...enrollment,nowMs:1})
+  return f.storage.ensureOwnedLiveDocument({intent:'share',...enrollment,nowMs:1})
 }
 // Stops as a running service host does, with its preparation of the activation its engine blocked.
 const stopDocument=(f:ReturnType<typeof fixture>,nowMs:number)=>preparedStop(f.storage,{...enrollment,enabled:false,retire:true,nowMs})
-const resumeDocument=(f:ReturnType<typeof fixture>,nowMs:number)=>f.storage.setServiceHostEnrollmentEnabled({...enrollment,enabled:true,nowMs})
+const resumeDocument=(f:ReturnType<typeof fixture>,nowMs:number)=>f.storage.ensureOwnedLiveDocument({intent:'owner-resume',...enrollment,nowMs})
 const retirement=(storage:unknown)=>readServiceActivationRetirement(storage as StorageContext,{workspaceId:'workspace',objectId:'object'})
 const generation=(f:ReturnType<typeof fixture>)=>Number(f.raw.prepare('SELECT restore_fence_generation AS fence FROM sync_relay_live_documents').get()!.fence)
 const refused={kind:'refused',reason:'host-unavailable'}
@@ -1349,7 +1750,7 @@ it('records the exact activation and F in Stop, and keeps that fence through a d
     expect(retirement(reopened)).toEqual(recorded)
     // Resume enables the enrollment but never reopens the retiring activation.
     expect(resumeDocument(f,40)).toMatchObject({enabled:true,retired:false})
-    expect(f.storage.enrollServiceHostDocument({...enrollment,nowMs:50})).toMatchObject({enabled:true})
+    expect(f.storage.ensureOwnedLiveDocument({intent:'share',...enrollment,nowMs:50})).toMatchObject({enabled:true})
     expect(retirement(f.storage)).toEqual(recorded)
     expect(f.storage.serviceHostDocumentEnabled(f.document)).toBe(false)
     expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor})).toEqual(refused)
@@ -1374,7 +1775,7 @@ it("records the held activation's obligation inside its Resume's enrollment tran
   const f=fixture();try{
     enroll(f);await completeActivation(f);const edit=commitEdit(f)
     const held=(changes={})=>({activationId:f.capture.activationId,replicationEpoch:'epoch',streamIdentity:'stream',assertHeld(){},...changes})
-    const resume=(snapshot:ReturnType<typeof held>,nowMs=10)=>f.storage.enrollServiceHostDocument({...enrollment,nowMs,held:snapshot})
+    const resume=(snapshot:ReturnType<typeof held>,nowMs=10)=>f.storage.ensureOwnedLiveDocument({intent:'owner-resume',...enrollment,nowMs,held:snapshot})
     expect(()=>resume(held({activationId:'other-activation'}))).toThrow('changed while live editing was resuming')
     expect(()=>resume(held({streamIdentity:'other-stream'}))).toThrow('changed while live editing was resuming')
     expect(()=>resume(held({assertHeld(){throw new Error('hold ended')}}))).toThrow('hold ended')
@@ -1555,7 +1956,7 @@ async function retirePredecessor(f:ReturnType<typeof fixture>){
 const successor=(f:ReturnType<typeof fixture>,source={})=>
   ({...f.capture,activationId:SUCCESSOR,source:{...f.capture.source,predecessorActivationId:f.capture.activationId,...source}})
 const prepareSuccessor=(f:ReturnType<typeof fixture>,capture:NativeOwnerActivation=successor(f))=>
-  f.store.prepare({capture,host,shareId:'share',registeredAtMs:21,guard(){},validate:validateActivation,bounds})
+  f.store.prepare({capture,host,registeredAtMs:21,guard(){},validate:validateActivation,bounds})
 const activations=(f:ReturnType<typeof fixture>)=>f.raw.prepare('SELECT activation_id,predecessor_activation_id FROM sync_relay_service_activations ORDER BY rowid').all()
 
 it("prepares a successor of the lineage's retired tail, closed to ordinary admission and reserved for its own owner row",async()=>{
@@ -1588,10 +1989,10 @@ it('refuses a successor beside a current activation or a sibling successor',asyn
   const f=fixture();try{
     await retirePredecessor(f)
     const columns=`relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,predecessor_activation_id,source_json,binding_json,
-      state_digest,state_bytes,owner_user_id,share_id,completion_json,accounted_bytes,retire_requested_at_ms,retire_restore_generation,retire_accepted_cursor,retired_at_ms,retired_boundary_json`
+      state_digest,state_bytes,owner_user_id,completion_json,accounted_bytes,retire_requested_at_ms,retire_restore_generation,retire_accepted_cursor,retired_at_ms,retired_boundary_json`
     // A successor that already followed the tail, and retired before it, is the tail now.
     f.raw.exec(`INSERT INTO sync_relay_service_activations(${columns}) SELECT relay_database_namespace,'ordinary-activation-${'c'.repeat(64)}',workspace_id,main_version_id,
-      object_id,lineage_claim_id,activation_id,source_json,binding_json,state_digest,NULL,owner_user_id,share_id,completion_json,accounted_bytes,10,retire_restore_generation,
+      object_id,lineage_claim_id,activation_id,source_json,binding_json,state_digest,NULL,owner_user_id,completion_json,accounted_bytes,10,retire_restore_generation,
       retire_accepted_cursor,10,retired_boundary_json FROM sync_relay_service_activations`)
     await expect(prepareSuccessor(f)).rejects.toThrow('names another predecessor')
     f.raw.exec(`DELETE FROM sync_relay_service_activations WHERE activation_id='ordinary-activation-${'c'.repeat(64)}'`)
@@ -1602,7 +2003,7 @@ it('refuses a successor beside a current activation or a sibling successor',asyn
       SELECT workspace_id,main_version_id,object_id,'${other}',NULL,current_path,baseline_moment_relay_seq,baseline_projected_sha256,
         baseline_projected_byte_length,'${other}',baseline_bytes,'retired','closed',restore_fence_generation,1,1 FROM sync_relay_live_documents;
       INSERT INTO sync_relay_service_activations(${columns}) SELECT relay_database_namespace,'ordinary-activation-${other}',workspace_id,main_version_id,object_id,'${other}',
-        NULL,source_json,binding_json,state_digest,x'0000',owner_user_id,share_id,NULL,accounted_bytes,NULL,NULL,NULL,NULL,NULL FROM sync_relay_service_activations`)
+        NULL,source_json,binding_json,state_digest,x'0000',owner_user_id,NULL,accounted_bytes,NULL,NULL,NULL,NULL,NULL FROM sync_relay_service_activations`)
     await expect(prepareSuccessor(f)).rejects.toThrow('already has a current activation')
     f.raw.exec(`DELETE FROM sync_relay_service_activations WHERE activation_id='ordinary-activation-${other}';
       DELETE FROM sync_relay_live_documents WHERE lineage_claim_id='${other}'`)
@@ -1704,7 +2105,7 @@ it("records a held Resume's obligation for a pending successor",async()=>{
   const f=fixture();try{
     const {edit,boundary}=await retirePredecessor(f)
     await adoptSuccessor(f,boundary)
-    expect(f.storage.enrollServiceHostDocument({...enrollment,nowMs:30,
+    expect(f.storage.ensureOwnedLiveDocument({intent:'owner-resume',...enrollment,nowMs:30,
       held:{activationId:SUCCESSOR,replicationEpoch:'epoch',streamIdentity:'stream',assertHeld(){}}})).toMatchObject({enabled:true})
     expect(retirement(f.storage)).toMatchObject({activationId:SUCCESSOR,acceptedThrough:edit.journalCursor,requestedAtMs:30})
   }finally{f.close()}
@@ -1812,7 +2213,7 @@ it("adopts a successor on another host than its predecessor's, funded only there
     const ledger=unaccounted(f)
     const device=transitionHost(f,host,'device','device'),other=transitionHost(f,device,'service','other') as typeof host
     expect(unaccounted(f)).toBe(ledger)
-    await f.store.prepare({capture:successor(f),host:other,shareId:'share',registeredAtMs:50,guard(){},validate:validateActivation,bounds})
+    await f.store.prepare({capture:successor(f),host:other,registeredAtMs:50,guard(){},validate:validateActivation,bounds})
     expect(adoptionReservations(f)).toEqual([{host_id:'other'}])
     const {access,delivery}=adoptSuccessorOn(f,other,boundary)
     const terminal=boundary.terminalReceipt.journalCursor,cursors=journalCursors(f)
@@ -1856,7 +2257,7 @@ it("funds a lineage only on the host its successor uses, and again on a known ho
     // Room for the successor's activation and its adoption on B alone.
     await retirePredecessor(sized);const free=usageOf(sized);await prepareSuccessor(sized)
     optionsOf(f).workspaceQuotaBytes=usageOf(f)+usageOf(sized)-free
-    await f.store.prepare({capture:successor(f),host:b,shareId:'share',registeredAtMs:50,guard(){},validate:validateActivation,bounds})
+    await f.store.prepare({capture:successor(f),host:b,registeredAtMs:50,guard(){},validate:validateActivation,bounds})
     expect(adoptionReservations(f)).toEqual([{host_id:'other-b'}])
     expect(usageOf(f)).toBe(optionsOf(f).workspaceQuotaBytes)
     expect(unaccounted(f)).toBe(ledger)
@@ -1895,7 +2296,7 @@ it("resumes and registers a successor prepared on a host a transition funded aft
     const {edit,boundary}=await retirePredecessor(f)
     const ledger=unaccounted(f),terminal=boundary.terminalReceipt.journalCursor,suffix=journalCursors(f).filter(cursor=>cursor>terminal)
     const b=transitionHost(f,host,'device','other-b')
-    await f.store.prepare({capture:successor(f),host:b,shareId:'share',registeredAtMs:50,guard(){},validate:validateActivation,bounds})
+    await f.store.prepare({capture:successor(f),host:b,registeredAtMs:50,guard(){},validate:validateActivation,bounds})
     expect(reservedOn(f,'other-b')).toEqual([0,...suffix])
     expect(f.store.resume({document:f.document,activationId:SUCCESSOR,host:b,registeredAtMs:51,guard(){}})).toMatchObject({completed:false})
     expect(f.storage.registerLiveHost({...b,updatedAtMs:52,guard(){}}).ok).toBe(true)
@@ -2235,7 +2636,7 @@ it("publishes a sibling document's write behind a retiring application once its 
       payloadAfterBlobSha256:hash(bytes),payloadAfterByteLength:bytes.length,payloadAfterContentKind:'text',recordedAtMs:1})
     f.storage.putBlob({workspaceId:'workspace',sha256:hash(created),content:created,createdAtMs:1})
     f.storage.appendLogBatch({workspaceId:'workspace',originId:'owner-device',ops:[parseLogOp({originSeq:0,opKind:'moment.append',recordedAtMs:1,payload:write('sibling-created',created)})]})
-    f.storage.enrollServiceHostDocument({...enrollment,path:'docs/b.md',nowMs:2})
+    f.storage.ensureOwnedLiveDocument({intent:'share',...enrollment,path:'docs/b.md',nowMs:2})
     for(const bytes of [r.editBytes,edited])await r.upload(bytes)
     const rows=[r.ydocRow(r.editBytes),['moment.append',write('sibling-edited',edited)] as Row]
     expect(await r.push(rows,0)).toMatchObject({status:503,body:{code:'settlement_proof_budget'}})
@@ -2486,15 +2887,17 @@ const V1_ACTIVATIONS=`CREATE TABLE sync_relay_service_activations (
   FOREIGN KEY (workspace_id,main_version_id,object_id,lineage_claim_id)
     REFERENCES sync_relay_live_documents(workspace_id,main_version_id,object_id,lineage_claim_id) ON DELETE CASCADE
 ) STRICT`
-// Rebuilds the fixture's v2 activation storage as the v1 layout, keeping its rows.
+// Rebuilds the fixture's activation storage as the v1 layout, keeping its rows. v1 named a share on each activation.
 function downgradeActivations(f:ReturnType<typeof fixture>,sql=V1_ACTIVATIONS){
-  const columns='relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,source_json,binding_json,state_digest,state_bytes,owner_user_id,share_id,completion_json,accounted_bytes'
+  const columns='relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,source_json,binding_json,state_digest,state_bytes,owner_user_id,completion_json,accounted_bytes'
   f.raw.exec(`BEGIN;DROP TABLE sync_relay_live_delivery_owner_history;
-    ALTER TABLE sync_relay_service_activations RENAME TO v2_activations;${sql};
-    INSERT INTO sync_relay_service_activations(${columns}) SELECT ${columns} FROM v2_activations;DROP TABLE v2_activations;
-    DELETE FROM sync_relay_migrations WHERE migration_id='service-activation-v2';
+    ALTER TABLE sync_relay_service_activations RENAME TO current_activations;${sql};
+    INSERT INTO sync_relay_service_activations(${columns},share_id) SELECT ${columns},'share' FROM current_activations;DROP TABLE current_activations;
+    DELETE FROM sync_relay_migrations WHERE migration_id IN ('service-activation-v2','service-activation-v3');
     INSERT OR IGNORE INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES ('service-activation-v1',0);COMMIT`)
 }
+const activationMarks=(db:{prepare(sql:string):{all():unknown[]}})=>
+  db.prepare("SELECT migration_id FROM sync_relay_migrations WHERE migration_id LIKE 'service-activation-v%' ORDER BY migration_id").all()
 it('migrates v1 activations as current ones with no obligation, and refuses damaged v1 storage',async()=>{
   const f=fixture(),damaged=fixture();let reopened:ReturnType<typeof openSyncRelayStorage>|undefined
   try{
@@ -2506,8 +2909,7 @@ it('migrates v1 activations as current ones with no obligation, and refuses dama
     const db=(reopened as StorageContext).db
     expect(db.prepare('SELECT * FROM sync_relay_service_activations').all()).toEqual(before.map(row=>({...row,predecessor_activation_id:null,
       retire_requested_at_ms:null,retire_restore_generation:null,retire_accepted_cursor:null,retired_at_ms:null,retired_boundary_json:null})))
-    expect(db.prepare("SELECT migration_id FROM sync_relay_migrations WHERE migration_id LIKE 'service-activation-v%' ORDER BY migration_id").all())
-      .toEqual([{migration_id:'service-activation-v1'},{migration_id:'service-activation-v2'}])
+    expect(activationMarks(db)).toEqual([{migration_id:'service-activation-v1'},{migration_id:'service-activation-v2'},{migration_id:'service-activation-v3'}])
     expect(db.prepare('SELECT * FROM sync_relay_workspace_usage').all()).toEqual(usage)
     expect(retirement(reopened)).toBeNull()
     expect(reopened.resolveCurrentLiveDocumentBinding({document:f.document,actor}).kind).toBe('current')
@@ -2516,4 +2918,121 @@ it('migrates v1 activations as current ones with no obligation, and refuses dama
     downgradeActivations(damaged,V1_ACTIVATIONS.replace(' STRICT',''))
     expect(()=>openSyncRelayStorage(damaged.path)).toThrow('Service activation storage is damaged.')
   }finally{reopened?.close();f.close();damaged.close()}
+})
+
+// The v2 activation layout, which named the share each owner activated through.
+const V2_ACTIVATIONS=`CREATE TABLE sync_relay_service_activations (
+  relay_database_namespace TEXT NOT NULL,
+  activation_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL,
+  main_version_id TEXT NOT NULL CHECK (main_version_id='main'),
+  object_id TEXT NOT NULL,
+  lineage_claim_id TEXT NOT NULL,
+  predecessor_activation_id TEXT,
+  source_json TEXT NOT NULL CHECK (json_valid(source_json)),
+  binding_json TEXT NOT NULL CHECK (json_valid(binding_json)),
+  state_digest TEXT NOT NULL CHECK (length(state_digest)=64 AND state_digest NOT GLOB '*[^0-9a-f]*'),
+  state_bytes BLOB CHECK (state_bytes IS NULL OR length(state_bytes) BETWEEN 2 AND 20971520),
+  owner_user_id TEXT NOT NULL,
+  share_id TEXT NOT NULL,
+  completion_json TEXT CHECK (completion_json IS NULL OR json_valid(completion_json)),
+  accounted_bytes INTEGER NOT NULL CHECK (accounted_bytes BETWEEN 1 AND 9007199254740991),
+  retire_requested_at_ms INTEGER CHECK (retire_requested_at_ms IS NULL OR retire_requested_at_ms BETWEEN 0 AND 9007199254740991),
+  retire_restore_generation INTEGER CHECK (retire_restore_generation IS NULL OR retire_restore_generation BETWEEN 0 AND 9007199254740991),
+  retire_accepted_cursor INTEGER CHECK (retire_accepted_cursor IS NULL OR retire_accepted_cursor BETWEEN 0 AND 9007199254740991),
+  retired_at_ms INTEGER CHECK (retired_at_ms IS NULL OR retired_at_ms BETWEEN 0 AND 9007199254740991),
+  retired_boundary_json TEXT CHECK (retired_boundary_json IS NULL OR json_valid(retired_boundary_json)),
+  CHECK ((retire_requested_at_ms IS NULL)=(retire_restore_generation IS NULL) AND (retire_requested_at_ms IS NULL)=(retire_accepted_cursor IS NULL)),
+  CHECK ((retired_at_ms IS NULL)=(retired_boundary_json IS NULL) AND (retired_at_ms IS NULL)=(state_bytes IS NOT NULL)),
+  CHECK (retired_at_ms IS NULL OR (retire_requested_at_ms IS NOT NULL AND retired_at_ms>=retire_requested_at_ms)),
+  CHECK (predecessor_activation_id IS NULL OR predecessor_activation_id<>activation_id),
+  PRIMARY KEY (relay_database_namespace,activation_id),
+  FOREIGN KEY (relay_database_namespace,predecessor_activation_id) REFERENCES sync_relay_service_activations(relay_database_namespace,activation_id),
+  FOREIGN KEY (workspace_id,main_version_id,object_id,lineage_claim_id)
+    REFERENCES sync_relay_live_documents(workspace_id,main_version_id,object_id,lineage_claim_id) ON DELETE CASCADE
+) STRICT`
+// Rebuilds a store's activations and archived history in the v2 layout, naming the fixture's share on every activation.
+// The v2 indexes and history table are the current ones.
+function downgradeToV2(raw:InstanceType<typeof DatabaseSync>,sql=V2_ACTIVATIONS){
+  const columns=raw.prepare("SELECT name FROM pragma_table_info('sync_relay_service_activations') ORDER BY cid").all().map(row=>String(row.name)).join(',')
+  const kept=raw.prepare(`SELECT sql FROM sqlite_schema WHERE name='sync_relay_live_delivery_owner_history'
+    OR (type='index' AND tbl_name='sync_relay_service_activations' AND sql IS NOT NULL) ORDER BY type='table'`).all().map(row=>`${String(row.sql)};`).join('')
+  raw.exec(`BEGIN;PRAGMA defer_foreign_keys=ON;
+    CREATE TEMP TABLE activations_v3 AS SELECT * FROM sync_relay_service_activations;
+    CREATE TEMP TABLE history_v3 AS SELECT * FROM sync_relay_live_delivery_owner_history;
+    DROP TABLE sync_relay_live_delivery_owner_history;DROP TABLE sync_relay_service_activations;${sql};${kept}
+    INSERT INTO sync_relay_service_activations(${columns},share_id) SELECT ${columns},'share' FROM temp.activations_v3;
+    INSERT INTO sync_relay_live_delivery_owner_history SELECT * FROM temp.history_v3;
+    DROP TABLE temp.activations_v3;DROP TABLE temp.history_v3;
+    DELETE FROM sync_relay_migrations WHERE migration_id='service-activation-v3';COMMIT`)
+}
+
+// Proves: the v3 rebuild drops the share each v2 activation named and keeps
+// the rest of the store: retired predecessors with their archived history,
+// completed activations, the pending successor, every chain link and every
+// charge. Initialization accepts the rebuilt store, again on the next open,
+// and the pending successor's access still serves the owner its lineage's
+// binding. A v2 table that is not the shipped layout is refused.
+it('migrates v2 activations and their archived history without the share each named, and refuses damaged v2 storage',async()=>{
+  const f=fixture(),damaged=fixture();let reopened:ReturnType<typeof openSyncRelayStorage>|undefined
+  try{
+    const {boundary}=await retirePredecessor(f)
+    const adopted=await adoptSuccessor(f,boundary);adopted.apply();adopted.complete()
+    stopDocument(f,20);resumeDocument(f,20)
+    expect(f.store.completeRetirement({workspaceId:'workspace',key:keyOf(retirement(f.storage)!),boundary:ownerBoundary(f),host,registeredAtMs:20,nowMs:20,guard(){}}))
+      .toEqual({status:'retired',replayed:false})
+    expect(await prepareSuccessor(f,{...f.capture,activationId:NEXT,source:{...f.capture.source,predecessorActivationId:SUCCESSOR}}))
+      .toEqual({document:f.document,replayed:false,completed:false})
+    const rows=(db:{prepare(sql:string):{all():Record<string,unknown>[]}})=>({
+      activations:db.prepare('SELECT * FROM sync_relay_service_activations ORDER BY activation_id').all(),
+      history:db.prepare('SELECT * FROM sync_relay_live_delivery_owner_history ORDER BY activation_id').all(),
+      usage:db.prepare('SELECT * FROM sync_relay_workspace_usage ORDER BY workspace_id').all()})
+    const before=rows(f.raw)
+    expect(before.activations.map(row=>[row.activation_id,row.predecessor_activation_id,row.retired_at_ms!==null,row.completion_json!==null]))
+      .toEqual([[f.capture.activationId,null,true,true],[SUCCESSOR,f.capture.activationId,true,true],[NEXT,SUCCESSOR,false,false]])
+    expect(before.history.map(row=>row.activation_id)).toEqual([f.capture.activationId,SUCCESSOR])
+    downgradeToV2(f.raw)
+    expect(f.raw.prepare('SELECT DISTINCT share_id FROM sync_relay_service_activations').all()).toEqual([{share_id:'share'}])
+    expect(activationMarks(f.raw)).toEqual([{migration_id:'service-activation-v2'}])
+    reopened=openSyncRelayStorage(f.path)
+    // The migrating connection reads its own schema; the test's raw one may still hold the old one.
+    const db=(reopened as StorageContext).db
+    expect(rows(db)).toEqual(before)
+    expect(activationMarks(db)).toEqual([{migration_id:'service-activation-v2'},{migration_id:'service-activation-v3'}])
+    const next=JSON.parse(String(before.activations[2]!.binding_json))
+    expect(reopened.resolveCurrentLiveDocumentBinding({document:f.document,actor}).kind).toBe('refused')
+    const access=reopened.createServiceActivationStore(f.history).pending(f.document,host)
+    expect(reopened.resolveCurrentLiveDocumentBinding({document:f.document,actor},access)).toMatchObject({kind:'current',binding:next})
+    reopened.close();reopened=openSyncRelayStorage(f.path)
+    expect(rows((reopened as StorageContext).db)).toEqual(before)
+    await damaged.prepare()
+    downgradeToV2(damaged.raw,V2_ACTIVATIONS.replace(' STRICT',''))
+    expect(()=>openSyncRelayStorage(damaged.path)).toThrow('Service activation storage is damaged.')
+  }finally{reopened?.close();f.close();damaged.close()}
+})
+
+// Proves: a lineage a folder share activated before the upgrade keeps that
+// share's selector as its recorded owner scope. After the upgrade no share is
+// consulted: the share it named is gone and no other covers the note, and the
+// owner is served its `["notes"]` binding and the owner's draft delivers. A
+// draft bound to the note's path alone is not that binding, and is refused.
+it('serves a folder-share lineage its recorded binding after the upgrade, consulting no share',()=>{
+  const f=registered({currentPath:'notes/a.md'});let reopened:ReturnType<typeof openSyncRelayStorage>|undefined
+  try{
+    const document=f.input.evidence.document,recorded={...document,currentPath:'notes/a.md',selectorPaths:['notes'],restoreFenceGeneration:1}
+    downgradeToV2(f.raw)
+    f.raw.prepare(`INSERT INTO sync_relay_service_activations(relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,
+        source_json,binding_json,state_digest,state_bytes,owner_user_id,share_id,completion_json,accounted_bytes) VALUES ('history',?,?,'main',?,?,'{}',?,?,x'0000','owner','notes-share','{}',1)`)
+      .run(`ordinary-activation-${'f'.repeat(64)}`,document.workspaceId,document.objectId,document.lineageClaimId,JSON.stringify(recorded),document.lineageClaimId)
+    expect(f.raw.prepare("SELECT 1 FROM sync_relay_shares WHERE share_id='notes-share'").get()).toBeUndefined()
+    reopened=openSyncRelayStorage(f.path)
+    expect((reopened as StorageContext).db.prepare('SELECT binding_json FROM sync_relay_service_activations').all()).toEqual([{binding_json:JSON.stringify(recorded)}])
+    reopened.close();reopened=undefined
+    f.storage.createLiveCommittedDeliveryStore(createLiveJournalHistoryAuthority({namespace:'history',reconciled:true}))
+    expect(f.storage.resolveCurrentLiveDocumentBinding({document,actor:f.actor})).toMatchObject({kind:'current',binding:recorded})
+    expect(f.storage.commitLiveUpdateJournal(f.capture(f.update('title','Draft'),'draft')).result.kind).toBe('accepted')
+    const narrowed=f.capture(f.update('title','Narrowed'),'narrowed')
+    expect(f.storage.commitLiveUpdateJournal({...narrowed,metadata:{...narrowed.metadata,binding:{...recorded,selectorPaths:['notes/a.md']}}}).result)
+      .toEqual({kind:'refused',reason:'stale-binding'})
+  }finally{reopened?.close();f.close();cleanupLiveDeliveryFixtures()}
 })

@@ -8,7 +8,7 @@ import { doctor } from "./doctor.mjs";
 import { git, pnpm, repoRoot, run } from "./process.mjs";
 import { cancellationScope } from "./cancellation.mjs";
 import { startTiming, timed } from "./timing.mjs";
-import { takeJsShard, testWorkspace } from "./js-tests.mjs";
+import { testWorkspace } from "./js-tests.mjs";
 import { affectedPackages, packageReferences, readWorkspacePackages, selectedGates, selectsRepositoryTests } from "./selection.mjs";
 import { classifyTreeProvenance, readTreeState } from "../../tools/rust-engine-program/tree-provenance.mjs";
 import { acquireExclusiveSlot, acquireVerificationSlot, resolveBuildBudget } from "../../tools/rust-engine-program/build-slot.mjs";
@@ -70,8 +70,8 @@ export function desktopProofTags({platform = process.platform} = {}) {
   const gallery = platform === "win32";
   const restart = ["@restart-durability-idle-external", "@restart-durability-overlapping-typing", "@restart-durability-capture-before-reopen", "@restart-durability-person-agent"];
   return {
-    selected: ["@verification-smoke", ...restart, "@self-host-onboarding", "@share-link-agent-sign-in", ...(gallery ? ["@states-page"] : [])],
-    required: ["@verification-smoke", ...restart, "@self-host-onboarding", "@share-link-agent-sign-in", ...(gallery ? ["@states-baselines"] : [])],
+    selected: ["@verification-smoke", ...restart, "@self-host-onboarding", "@share-link-agent-sign-in", "@live-owner-open", "@new-page-edit-link", ...(gallery ? ["@states-page"] : [])],
+    required: ["@verification-smoke", ...restart, "@self-host-onboarding", "@share-link-agent-sign-in", "@live-owner-open", "@new-page-edit-link", ...(gallery ? ["@states-baselines"] : [])],
   };
 }
 
@@ -83,7 +83,7 @@ function createTreeReader() {
     () => existsSync(headLogPath),
   );
 }
-function passedSpecTitles(suites = []) {
+export function passedSpecTitles(suites = []) {
   return suites.flatMap((suite) => [
     ...(suite.specs ?? []).filter((spec) => spec.ok === true && spec.tests?.some((test) => test.results?.some((result) => result.status === "passed"))).map((spec) => spec.title),
     ...passedSpecTitles(suite.suites),
@@ -107,6 +107,10 @@ export function readSelfHostNativeProof(output, executable, sha256) {
     tests.numFailedTests || tests.numPendingTests || tests.numTodoTests) {
     throw new Error("The self-host native proof did not complete its mandatory tests.");
   }
+  return { ...readSelfHostDeliveryProof(output, executable, sha256), tests: {passed: tests.numPassedTests} };
+}
+
+export function readSelfHostDeliveryProof(output, executable, sha256) {
   const directories = readdirSync(output, {withFileTypes: true}).filter(entry => entry.isDirectory() && entry.name.startsWith("self-host-live-"));
   if (directories.length !== 1) throw new Error("The self-host native proof did not produce one evidence record.");
   const path = join(output, directories[0].name, "result.json");
@@ -116,7 +120,7 @@ export function readSelfHostNativeProof(output, executable, sha256) {
     proof.results?.ownerDelivery?.idleOwnerPulledRecipientEdit !== true || proof.results?.settledAndPublished?.ordinaryOwnerReadMatched !== true) {
     throw new Error("The self-host native proof does not cover the prepared engine and complete delivery flow.");
   }
-  return {path, executable, sha256, tests: {passed: tests.numPassedTests}};
+  return {path, executable, sha256};
 }
 
 export async function postgres(output, command = run, measure = (_name, action) => action(), label = "inline") {
@@ -196,7 +200,6 @@ export async function verify(args) {
   if (ownerIndex >= 0 && (mode !== "pr" || !ownerName?.trim() || ownerName.startsWith("--"))) throw new Error("Use --owner <name> with a PR run.");
   // The queue service runs this verifier in its lane with a grant; it must not queue again.
   const { grant, output: grantOutput } = takeGrant();
-  const jsShard = takeJsShard();
   const reuseIndex = args.indexOf("--reuse-rust");
   const reuseRust = reuseIndex < 0 ? null : args[reuseIndex + 1];
   if (reuseIndex >= 0 && (mode !== "pr" || !reuseRust || reuseRust.startsWith("--") || job === "js")) {
@@ -236,7 +239,7 @@ export async function verify(args) {
   let branch = null;
   const output = grant ? grantOutput : join(repoRoot, ".agent-artifacts/verification", `${new Date().toISOString().replaceAll(":", "-")}-${randomUUID().slice(0, 8)}`);
   mkdirSync(output, { recursive: true });
-  const report = { version: 1, mode, scope: job ?? "all", ...(jsShard ? { jsShard } : {}), full, keepGoing, root: repoRoot, base, ...(grant ? { grant } : {}), ...total, steps: [], timings: [], treeReadings: [], flaky: [], failed: [], output, verdict: "RUNNING" };
+  const report = { version: 1, mode, scope: job ?? "all", full, keepGoing, root: repoRoot, base, ...(grant ? { grant } : {}), ...total, steps: [], timings: [], treeReadings: [], flaky: [], failed: [], output, verdict: "RUNNING" };
   // Tests that passed only on retry: { step, test }, with passedAlone when they failed both tries and passed only alone.
   const flaky = report.flaky;
   // Tests that failed on their last try, named as in `flaky`.
@@ -523,14 +526,15 @@ export async function verify(args) {
       if (mode === "pr" && gates.js) {
         database = await measure("postgres-start", () => postgres(output, run, measure, grant?.request ?? "inline"));
         report.postgres = { id: database.id }; save();
-        const env = { ...process.env, POSTGRES_URL: database.url, DOHC_REQUIRE_POSTGRES: "1", DOHC_REQUIRE_ENGINE_E2E: "1", DOHC_TEST_ENGINE_BINARY: stagedEnginePath };
+        const env = { ...process.env, POSTGRES_URL: database.url, DOHC_REQUIRE_POSTGRES: "1", DOHC_REQUIRE_ENGINE_E2E: "1", DOHC_TEST_ENGINE_BINARY: stagedEnginePath,
+          DOHC_TEST_RELAY_MAIN: join(repoRoot, "services/sync-relay/dist/main.js") };
         await step("typecheck", ...typecheck(), env);
         report.jsTests = join(output, "js-tests", "result.json");
         // Keep package groups under this owner so cancellation finishes their
         // escalation before database cleanup, without a competing parent timer.
         try {
           await checkedStep({ name: "tests", runner: "testWorkspace", report: report.jsTests },
-            () => testWorkspace({ prepared: true, output: join(output, "js-tests"), env, changed: full ? null : report.files, repositoryTests, full, shard: jsShard,
+            () => testWorkspace({ prepared: true, output: join(output, "js-tests"), env, changed: full ? null : report.files, repositoryTests, full,
               beforeDesktopScripts: () => measure("packaging-wait", () => rustSettled), stop: cancellation,
               runProofs: checkpoint => integrationProofs(env, checkpoint) }));
         } finally {

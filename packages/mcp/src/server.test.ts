@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DohcCliError } from "@dohc/cli/errors";
 import { createDohcMcpServer, parseArgs } from "./server";
-import { disconnectLinkAgent, getShareCopyDetails, listLinkAgents, listLiveDocuments, type ToolContext } from "./tools";
+import { disconnectLinkAgent, getShareCopyDetails, listLinkAgents, listLiveDocuments, resumeLiveEditing, stopLiveEditing, type ToolContext } from "./tools";
 
 // The two write tiers a share level decides between. A document write
 // changes the granter's files; a chat write posts to a thread.
@@ -15,6 +15,9 @@ const DOCUMENT_WRITE_TOOLS = [
   "dohc_stop_workspace_sync",
   "dohc_dataset",
   "dohc_save_kept_copy",
+  // Protected copies stay on the computer that kept them.
+  "dohc_restore_protected_copy",
+  "dohc_discard_protected_copy",
   // Refused live edits are kept only in the original workspace.
   "dohc_save_recovery_copy",
   "dohc_retry_kept_edits",
@@ -96,6 +99,27 @@ it("returns a pending document edit as a successful tool result", async () => {
   const reply = await client.callTool({ name: "dohc_edit_document", arguments: { path: "n.md", replacement: "After." } });
   expect(reply.isError).not.toBe(true);
   expect(JSON.stringify(reply)).toContain(outcome.warning);
+});
+
+it("ends an automation's run with nothing to report through the reply tool, and posts nothing", async () => {
+  const root = await workspaceRoot();
+  const requests: Array<{ verb: string; args: unknown }> = [];
+  const { client } = await connectedToolNames({ root, home: root, request: async request => {
+    requests.push(request);
+    return { threadId: "th_1", nothingToReport: true };
+  } });
+  const quiet = await client.callTool({ name: "dohc_reply_to_chat", arguments: { threadId: "th_1", runId: "run-1", nothingToReport: true, needsDecision: false, attachments: [] } });
+  expect(quiet.isError).not.toBe(true);
+  expect(quiet.structuredContent).toEqual({ ok: true, threadId: "thread-1", nothingToReport: true });
+  expect(requests).toEqual([{ protocolVersion: expect.any(Number), door: "mcp", verb: "nothingToReport", args: { cwd: root, actor: "agent", thread: "th_1", runId: "run-1" } }]);
+
+  for (const message of [{ body: "Nothing due." }, { to: "msg_1" }, { options: ["A"] }, { needsDecision: true }, { work: { status: "done" } }]) {
+    const refused = await client.callTool({ name: "dohc_reply_to_chat", arguments: { threadId: "th_1", nothingToReport: true, ...message } });
+    expect(refused.isError, JSON.stringify(message)).toBe(true);
+  }
+  const empty = await client.callTool({ name: "dohc_reply_to_chat", arguments: { threadId: "th_1" } });
+  expect(empty.isError).toBe(true);
+  expect(requests).toHaveLength(1);
 });
 
 it("uses the owner socket operation for held Review, Drop, and Undo", async () => {
@@ -708,6 +732,17 @@ describe("live documents profile admission", () => {
     expect(names).toContain("dohc_list_live_documents");
     expect((await client.callTool({ name: "dohc_list_live_documents", arguments: { cursor: "notes/old.md" } })).structuredContent).toEqual(page);
     expect(request).toHaveBeenCalledWith(expect.objectContaining({ verb: "liveDocuments", door: "mcp", args: { cursor: "notes/old.md", cwd: "/workspace", actor: "agent" } }));
+  });
+  it.each(["view", "comment", "edit"] as const)("offers neither Stop nor Resume to a %s profile", async shareAccess => {
+    const request = vi.fn(async () => ({ ok: true, path: "plan.md" }));
+    const { names, client } = await connectedToolNames({ root: "/workspace", home: "/state", shareAccess, request });
+    for (const [name, call] of [["dohc_stop_live_editing", stopLiveEditing], ["dohc_resume_live_editing", resumeLiveEditing]] as const) {
+      expect(names).not.toContain(name);
+      expect(await client.callTool({ name, arguments: { path: "plan.md" } })).toMatchObject({ isError: true });
+      expect(await call({ root: "/workspace", home: "/state", shareAccess, request }, { path: "plan.md" }))
+        .toMatchObject({ ok: false, reason: expect.stringContaining("owning workspace") });
+    }
+    expect(request).not.toHaveBeenCalled();
   });
   it.each(["view", "comment", "edit"] as const)("does not offer the list to a %s profile", async shareAccess => {
     const request = vi.fn(async () => page);

@@ -45,6 +45,7 @@ const requests = [
   [ops.saveKeptCopy.channel, { workspaceId, id: 7 }],
   [ops.listRetainedCopies.channel, { workspaceId }],
   [ops.deleteRetainedCopies.channel, { workspaceId, copies: [{ id: 3, revision: 10 }], acceptLateWriteRisk: true }],
+  [ops.listNotVersionedFiles.channel, { workspaceId }],
 ] as const;
 function harness(onRefusalsChanged?: Dependencies["onRefusalsChanged"]) {
   const handlers = new Map<string, (event: Event, payload: unknown) => Promise<unknown>>();
@@ -64,7 +65,11 @@ function harness(onRefusalsChanged?: Dependencies["onRefusalsChanged"]) {
     saveKeptCopy: vi.fn<Operations["saveKeptCopy"]>(async () => { steps.push("save kept"); return { status: "saved", path: "notes (kept copy).md" }; }),
     listRetainedCopies: vi.fn<Operations["listRetainedCopies"]>(async () => { steps.push("retained"); return { copies: [{ id: 3, revision: 10 }], more: false, total: { count: 1, bytes: 9 } }; }),
     deleteRetainedCopies: vi.fn<Operations["deleteRetainedCopies"]>(async () => { steps.push("delete retained"); return { deleted: 1, skipped: 0, failed: 0, remaining: { count: 0, bytes: 0 } }; }),
+    restoreProtectedCopy: vi.fn<Operations["restoreProtectedCopy"]>(async () => { steps.push("restore protected"); return { path: ".env", status: "restored" }; }),
+    discardProtectedCopy: vi.fn<Operations["discardProtectedCopy"]>(async () => { steps.push("discard protected"); return { path: ".env", status: "discarded" }; }),
+    notVersioned: vi.fn<Operations["notVersioned"]>(async (listFiles) => { steps.push("not versioned"); return (await listFiles()).filter(path => path.endsWith(".mp4")); }),
   };
+  const listDiskFiles = vi.fn<Dependencies["listDiskFiles"]>(async () => ["notes.md", "clip.mp4"]);
   const requireEngineCapture = vi.fn<Dependencies["requireEngineCapture"]>(async () => {
     steps.push("capture");
     return { capture: operations };
@@ -82,7 +87,7 @@ function harness(onRefusalsChanged?: Dependencies["onRefusalsChanged"]) {
     },
     ops,
     workspaceVersionHandlers({
-      requireEngineCapture, notifyRenderer,
+      requireEngineCapture, notifyRenderer, listDiskFiles,
       localPerson: async () => ({kind: "human", humanId: "local-person"}),
       authorNames: () => ({
         person: author => author.humanId === "local-person" ? "Ice" : undefined,
@@ -100,7 +105,7 @@ function harness(onRefusalsChanged?: Dependencies["onRefusalsChanged"]) {
     if (!handler) throw new Error(`missing ${channel}`);
     return handler({ openWorkspaceId }, payload);
   };
-  return { steps, operations, requireEngineCapture, notifyRenderer, queueCloudSync, invoke };
+  return { steps, operations, requireEngineCapture, notifyRenderer, queueCloudSync, listDiskFiles, invoke };
 }
 
 describe("registered workspace version handlers", () => {
@@ -153,6 +158,14 @@ describe("registered workspace version handlers", () => {
       })),
     });
     expect(h.notifyRenderer).not.toHaveBeenCalled();
+  });
+
+  it("lists the disk's files the active version does not track, and nothing on Main", async () => {
+    const h = harness();
+    await expect(h.invoke(ops.listNotVersionedFiles.channel, { workspaceId })).resolves.toEqual({ paths: ["clip.mp4"] });
+    expect(h.listDiskFiles).toHaveBeenCalledExactlyOnceWith(workspaceId);
+    h.operations.notVersioned.mockResolvedValueOnce(null);
+    await expect(h.invoke(ops.listNotVersionedFiles.channel, { workspaceId })).resolves.toEqual({ paths: null });
   });
 
   it("counts the files a version changes from Main", async () => {

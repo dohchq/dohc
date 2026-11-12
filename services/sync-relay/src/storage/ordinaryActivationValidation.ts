@@ -7,6 +7,9 @@ import type {OrderedLiveUpdateCutPolicy} from "../../../../packages/ydoc-project
 // A live validation process loads this module, so it imports nothing that reads storage.
 const integer=(value:unknown):value is number=>typeof value==="number"&&Number.isSafeInteger(value)&&value>=0;
 function requireValue(value:unknown,message:string):asserts value{if(!value)throw new Error(message);}
+/** A capture's history is past a read or work budget. The same history refuses the same way, so activation waits for it to change. */
+export class ServiceActivationHistoryOverBudget extends Error {}
+export function requireWithinBudget(value:unknown,message:string):asserts value{if(!value)throw new ServiceActivationHistoryOverBudget(message);}
 export type Projection={projectedMarkdownSha256:string;projectedMarkdownByteLength:number};
 /** The relay history a capture must rebuild, and the source facts it must prove, as one read of its cut found them. */
 export interface OrdinaryActivationHistory {
@@ -33,8 +36,13 @@ export type OrdinaryActivationBaseline=Pick<LiveMarkdownRegistrationEvidence,"pr
 /** What validating a cut leaves for the writer transaction: the bytes it charged and the projections of the wanted prefixes. */
 export interface OrdinaryActivationProof {readonly charged:number;readonly projections:readonly (Projection&{readonly index:number})[]}
 export type OrdinaryActivationValidation={kind:"accepted";baseline:OrdinaryActivationBaseline;proof?:OrdinaryActivationProof}|{kind:"refused";message:string}|
-  {kind:"capacity-refused"}|{kind:"retry";reason:"admission-unavailable"};
-export type OrdinaryActivationValidator=(work:OrdinaryActivationWork,signal?:AbortSignal)=>Promise<OrdinaryActivationValidation>;
+  {kind:"over-budget";message:string}|{kind:"capacity-refused"}|{kind:"retry";reason:"admission-unavailable"};
+/**
+ * `hasCapacity` says whether a validation slot is free now, so a pass captures nothing while the pool is busy.
+ * `waitForCapacity` settles once one may be free, which another operation can still take first.
+ */
+export type OrdinaryActivationValidator=((work:OrdinaryActivationWork,signal?:AbortSignal)=>Promise<OrdinaryActivationValidation>)&
+  {readonly hasCapacity?:()=>boolean;readonly waitForCapacity?:(signal?:AbortSignal)=>Promise<void>};
 /**
  * Validates a capture against the history `readOrdinaryActivationHistory` read for it. Runs in a
  * validation process; it reads no storage. Each refusal message is the one activation reports.
@@ -47,13 +55,16 @@ export function validateOrdinaryActivation(work:OrdinaryActivationWork,policy:Or
     projectedMarkdownSha256:base.evidence.projectedMarkdownSha256,projectedMarkdownByteLength:base.evidence.projectedMarkdownByteLength};
   if(!work.cut)return {kind:"accepted",baseline};
   try{return {kind:"accepted",baseline,proof:checkOrdinaryActivationHistory(work,work.cut,baseline,validateRegistration,createLiveMarkdownHistoryValidator(policy))};}
-  catch(error){return {kind:"refused",message:error instanceof Error?error.message:String(error)};}
+  catch(error){
+    if(error instanceof ServiceActivationHistoryOverBudget)return {kind:"over-budget",message:error.message};
+    return {kind:"refused",message:error instanceof Error?error.message:String(error)};
+  }
 }
 function checkOrdinaryActivationHistory(work:OrdinaryActivationWork,cut:NonNullable<OrdinaryActivationWork["cut"]>,baseline:OrdinaryActivationBaseline,
   validateRegistration:ReturnType<typeof createLiveMarkdownRegistrationValidator>,validateHistory:ReturnType<typeof createLiveMarkdownHistoryValidator>):OrdinaryActivationProof{
   const {document,baselineBytes}=work,{source,fullState,history:{updates,from,wanted,settled},maxBytesPerDrain}=cut;
   let charged=cut.history.charged;
-  const charge=(bytes:number)=>{requireValue(integer(bytes)&&charged<=maxBytesPerDrain-bytes,"Ordinary activation history exceeds its configured byte budget.");charged+=bytes;};
+  const charge=(bytes:number)=>{requireWithinBudget(integer(bytes)&&charged<=maxBytesPerDrain-bytes,"Ordinary activation history exceeds its configured byte budget.");charged+=bytes;};
   const projects=(evidence:Projection)=>evidence.projectedMarkdownSha256===source.sourceDigest&&evidence.projectedMarkdownByteLength===source.sourceByteLength;
   charge(fullState.length);
   const full=validateRegistration({document,currentPath:source.currentPath,checkpoint:fullState});
@@ -75,7 +86,7 @@ function checkOrdinaryActivationHistory(work:OrdinaryActivationWork,cut:NonNulla
     projected&&=index===next++&&(index<start||projects(evidence));
     if(keep.has(index))projections.push({index,projectedMarkdownSha256:evidence.projectedMarkdownSha256,projectedMarkdownByteLength:evidence.projectedMarkdownByteLength});
   }});
-  requireValue(result.kind==="accepted"||result.reason!=="capacity-refused","Ordinary activation history exceeds its configured validation budget.");
+  requireWithinBudget(result.kind==="accepted"||result.reason!=="capacity-refused","Ordinary activation history exceeds its configured validation budget.");
   requireValue(result.kind==="accepted","Ordinary activation history is not a valid live document.");
   const captured=full.evidence,ordinary=result.evidence;
   requireValue(captured.stateUpdateSha256===ordinary.stateUpdateSha256&&captured.stateUpdateByteLength===ordinary.stateUpdateByteLength&&

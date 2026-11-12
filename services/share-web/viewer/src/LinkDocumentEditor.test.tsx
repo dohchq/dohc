@@ -42,7 +42,15 @@ it("shows the grant-scoped refusal with its next step", async () => {
   vi.mocked(openLinkDocument).mockRejectedValue(new Error(LINK_REFUSALS.link_comment_access.error));
   await render(true);
   await settle(() => container.textContent?.includes(LINK_REFUSALS.link_comment_access.error) === true);
-  expect(container.textContent).toContain("Retry");
+  expect(container.textContent).toContain("Try again");
+});
+it("asks a link holder to retry, not to ask for access, when the file could not open for another reason", async () => {
+  vi.mocked(openLinkDocument).mockRejectedValue(new TypeError("Failed to fetch"));
+  await render(true);
+  await settle(() => container.querySelector(".edit-notice p") !== null);
+  expect(container.querySelector(".edit-notice p")!.textContent)
+    .toBe("dohc could not open this file for editing. Retry in a moment. If it keeps happening, ask the owner.");
+  expect(container.textContent).toContain("Try again");
 });
 it("retains a quarantined draft after access loss, including updates rejected before they entered the queue", async () => {
   const f = fixture(), onClose = vi.fn(); vi.mocked(openLinkDocument).mockResolvedValue(f.session);
@@ -55,9 +63,9 @@ it("retains a quarantined draft after access loss, including updates rejected be
   expect(container.querySelector('[role="textbox"]')?.getAttribute("contenteditable")).toBe("false");
   expect(container.textContent).not.toContain("Open current file");
   const unload = new Event("beforeunload", {cancelable: true}); window.dispatchEvent(unload); expect(unload.defaultPrevented).toBe(true);
-  await click("Back to shared files"); expect(onClose).not.toHaveBeenCalled(); expect(container.querySelector("dialog")?.open).toBe(true);
+  await click("Done"); expect(onClose).not.toHaveBeenCalled(); expect(container.querySelector("dialog")?.open).toBe(true);
   await click("Keep reviewing"); expect(onClose).not.toHaveBeenCalled();
-  await click("Back to shared files"); await click("Discard draft and continue"); expect(onClose).toHaveBeenCalledOnce();
+  await click("Done"); await click("Discard draft and continue"); expect(onClose).toHaveBeenCalledOnce();
 });
 it("retires a late open response when access changes during authorization", async () => {
   const f = fixture(); let release!: (value: typeof f.session) => void;
@@ -75,4 +83,19 @@ it("requires explicit discard before opening a fresh session and never replays t
   await click("Discard draft and continue"); await settle(() => next.session.reconnect.mock.calls.length === 1);
   expect(first.session.close).toHaveBeenCalled(); expect(next.session.doc).not.toBe(first.session.doc);
   expect(openLinkDocument).toHaveBeenLastCalledWith("abcdefghijkl", "docs/a.md", expect.any(AbortSignal));
+});
+it("reports the file open only once its session is first live, and keeps it open after that", async () => {
+  const f = fixture(), onOpenChange = vi.fn(); f.update({status: "connecting"});
+  vi.mocked(openLinkDocument).mockResolvedValue(f.session);
+  await act(async () => root.render(<LinkDocumentEditor discriminator="abcdefghijkl" path="docs/a.md" available onClose={vi.fn()} onOpenChange={onOpenChange}/>));
+  await settle(() => container.querySelector('[role="textbox"]') !== null);
+  const body = container.querySelector<HTMLElement>(".named-body-editor")!;
+  expect(onOpenChange).not.toHaveBeenCalledWith(true); expect(body.hidden).toBe(true);
+  await act(async () => f.update({status: "disconnected", reason: "authority-unavailable"}));
+  expect(onOpenChange).not.toHaveBeenCalledWith(true); expect(body.hidden).toBe(true);
+  expect(container.textContent).toContain("dohc could not open the file for editing. Try again.");
+  await act(async () => f.update({status: "live", reason: null}));
+  expect(onOpenChange).toHaveBeenLastCalledWith(true); expect(body.hidden).toBe(false);
+  await act(async () => f.update({status: "disconnected", reason: null}));
+  expect(onOpenChange).toHaveBeenLastCalledWith(true); expect(body.hidden).toBe(false);
 });

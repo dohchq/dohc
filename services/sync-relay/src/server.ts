@@ -300,6 +300,8 @@ export function createSyncRelayHandler({
   linkAuthority: LinkAuthorityResolver;
   /** Personal agents' running work and fence, for the routes main composes. */
   personalAgents: PersonalAgents;
+  /** The personal agent tools' per-connection limiter, which the personal live open shares. */
+  personalLimiter: TokenBucketLimiter;
   /** Stops the fence listener. The Postgres pool can end once it settles. */
   dispose(): Promise<void>;
   deleteAccount(userId: string, workspaceIds: readonly string[], shareIds: readonly string[]): void;
@@ -580,6 +582,7 @@ export function createSyncRelayHandler({
     undefined,
     lookupUserEmails,
     linkKey,
+    shareWebOrigin,
   );
   const { respondToShareInventory, respondToWorkspaceLinkInventory } = shareInventoryRoutes(claimPendingShares);
   // The server reads the owner's shares without the owner there, so it
@@ -1231,6 +1234,7 @@ export function createSyncRelayHandler({
   return Object.assign(handle, {
     linkAuthority,
     personalAgents,
+    personalLimiter: linkReadRateLimiter,
     dispose() {
       replicaLinkReads?.close();
       accountFeedWaits.close();

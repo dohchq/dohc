@@ -1,4 +1,4 @@
-import { chatLinks as mcpChatLinks, createGroup as mcpCreateGroup, listGroups as mcpListGroups } from "@dohc/mcp/tools";
+import { chatLinks as mcpChatLinks, createGroup as mcpCreateGroup, listGroups as mcpListGroups, makeLink as mcpMakeLink } from "@dohc/mcp/tools";
 import { createGroup } from "../workspaces/groupCreate";
 import { accessCliQueries, createAccessAcquisition, createAccessOwner } from "../access/accessOwner";
 import { createShareRosters } from "../automations/shareRoster";
@@ -8,7 +8,9 @@ import { readWorkspaceHistoryOperation, undoWorkspaceHistoryOperation } from "..
 import { listChanges, readChange, readOperation, undoOperation } from "@dohc/mcp/tools";
 import { deleteWorkspacePathByHand } from "../workspaces/workspaceFileMoves";
 import { readWorkspaceEnginePolicy } from "../workspaces/workspaceEnginePolicyFile";
-import { mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createConnection } from "node:net";
 import { stripTypeScriptTypes } from "node:module";
 import { basename, dirname, join } from "node:path";
@@ -19,6 +21,7 @@ import {
   CLI_PROTOCOL_VERSION,
   cliTransportResponseSchema,
   parseCliResult,
+  type CliLinkTarget,
   type CliRequest,
   type CliRequestWithoutToken,
   type CliResultByVerb,
@@ -41,6 +44,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DatasetSchemaChangeError } from "../workspaces/datasetSchemaChanges";
 import { LiveDocumentEditAppliedError } from "../workspaces/engineYDocSessionIpc";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
+import type { QuietRunRefusal } from "../agents/chatDispatchService";
 import { createLiveAgentDispatchStore } from "../agents/liveAgentDispatchStore";
 import { createChatWrites } from "../workspaces/chatWrites";
 import * as chatWriteSignals from "../workspaces/chatWriteSignals";
@@ -1331,6 +1335,51 @@ describe("CLI socket server", () => {
     await expect(stat(join(workspaceRoot, "later"))).rejects.toThrow();
   });
 
+  it("links a Group, thread, message, and path through the CLI and MCP, and refuses a read-only workspace", async () => {
+    const made: unknown[] = [];
+    context.makeWorkReference = async target => {
+      if (target.kind === "documentCollection") throw new Error("not a Collection");
+      const path = target.kind === "file" && "path" in target ? target.path : undefined;
+      if (path === "missing.md") throw new Error("work-target-not-found");
+      if (path === "stopped.md") throw new Error("The workspace engine is not running.");
+      made.push(target);
+      return String(made.length).padStart(43, "R");
+    };
+    const started = await post({ actor: "agent", title: "Flights", body: "Book by Friday" });
+    const general = (await invoke("groups", { cwd: workspaceRoot, actor: "agent" })).groups.find(group => group.slug === "general")!;
+    const link = (target: CliLinkTarget) => invoke("link", { cwd: workspaceRoot, actor: "agent", target });
+    await expect(link({ kind: "group", group: "general" })).resolves.toEqual({
+      reference: "R".repeat(42) + "1", link: `@[work:${"R".repeat(42)}1]`, kind: "chat",
+    });
+    expect((await link({ kind: "thread", thread: started.threadId })).kind).toBe("thread");
+    expect((await link({ kind: "message", message: started.messageId })).kind).toBe("message");
+    await mkdir(join(workspaceRoot, "plans"), { recursive: true });
+    await writeFile(join(workspaceRoot, "plans", "trip.md"), "# Trip");
+    expect((await invoke("link", { cwd: join(workspaceRoot, "plans"), actor: "agent", target: { kind: "path", path: "trip.md" } })).kind).toBe("file");
+    // The CLI names chats by short ids; links name them by their engine ids.
+    expect(general.id).toBe("ch_1");
+    expect(made).toEqual([
+      { kind: "chat", channelId: expect.stringMatching(/^channel-/u) },
+      { kind: "thread", threadId: expect.stringMatching(/^thread-/u) },
+      { kind: "message", messageId: expect.stringMatching(/^message-/u) },
+      { kind: "file", path: "plans/trip.md" },
+    ]);
+    await expect(link({ kind: "message", message: "no-such-message" })).rejects.toThrow();
+    // Only a path the engine cannot find is missing; another failure says what it is.
+    await expect(link({ kind: "path", path: "missing.md" })).rejects.toThrow("dohc could not find missing.md");
+    await expect(link({ kind: "path", path: "stopped.md" })).rejects.toThrow("The workspace engine is not running.");
+    await expect(link({ kind: "path", path: "../outside.md" })).rejects.toThrow("path rejected (traversal)");
+
+    const ctx: ToolContext = { root: workspaceRoot, home: stateDir, request: value => invoke(value.verb, value.args) };
+    await expect(mcpMakeLink(ctx, { group: "general" })).resolves.toMatchObject({ kind: "chat", link: `@[work:${"R".repeat(42)}5]` });
+    await expect(mcpMakeLink(ctx, { group: "general", thread: started.threadId })).resolves.toEqual({
+      ok: false, reason: "Pass exactly one of group, thread, message, and path.",
+    });
+
+    context.readOnly = true; registryWorkspace.readOnly = true;
+    await expect(link({ kind: "group", group: "general" })).rejects.toThrow("This workspace is read-only. Make links in the owning workspace.");
+  });
+
   it("keeps CLI and MCP group listings available when one wire lookup rejects", async () => {
     const listed = await invoke("groups", { cwd: workspaceRoot, actor: "agent" });
     const original = store!.getChannelWireId.bind(store);
@@ -1427,7 +1476,12 @@ describe("CLI socket server", () => {
   it("counts only validated successful commands, defaults missing labels to CLI and rejects unknown labels", async () => {
     const recordSuccess = vi.fn();
     serverOptions.recordSuccess = recordSuccess;
-    context.keptCopies = { list: async () => ({ keptCopies: [], more: false }), save: vi.fn(async () => ({ status: "saved" as const, path: "kept.md" })) };
+    context.keptCopies = {
+      list: async () => ({ keptCopies: [], more: false }),
+      save: vi.fn(async () => ({ status: "saved" as const, path: "kept.md" })),
+      restoreProtected: async () => ({ path: ".env", status: "restored" as const }),
+      discardProtected: async () => ({ path: ".env", status: "discarded" as const }),
+    };
     const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "saveKeptCopy", args: { cwd: workspaceRoot, actor: "agent", id: 1 } };
     expect(await rawRequest(request)).toMatchObject({ ok: true, result: { status: "saved" } });
     expect(recordSuccess).toHaveBeenLastCalledWith({ capabilityId: "file.kept.save", door: "cli" });
@@ -1512,7 +1566,12 @@ describe("CLI socket server", () => {
       serverOptions.recordSuccess = invocation => usage.recordSuccess(invocation);
       const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "saveKeptCopy", args: { cwd: workspaceRoot, actor: "agent", id: 1 } };
       const entered = deferred(); const release = deferred();
-      context.keptCopies = { list: async () => ({ keptCopies: [], more: false }), save: async () => ({ status: "saved", path: "kept.md" }) };
+      context.keptCopies = {
+        list: async () => ({ keptCopies: [], more: false }),
+        save: async () => ({ status: "saved", path: "kept.md" }),
+        restoreProtected: async () => ({ path: ".env", status: "restored" }),
+        discardProtected: async () => ({ path: ".env", status: "discarded" }),
+      };
       await rawRequest({ ...request, door: "cli" });
       const save = context.keptCopies.save;
       context.keptCopies.save = async () => { entered.resolve(); await release.promise; return save(1); };
@@ -1914,6 +1973,311 @@ describe("CLI socket server", () => {
     context.readOnly=true;
     await expect(invoke("ownerAppResponses",{cwd:workspaceRoot,actor:"agent",request})).rejects.toThrow("owning workspace");
     expect(calls).toHaveLength(2);
+  });
+
+  // shared-with-me holds what others share with you, inside your own workspace.
+  describe("from inside a folder others share with you", () => {
+    const OWNER = "dohc: This command isn't available in a folder others share with you. Run it from your own workspace's folder.";
+    const CHAT = "dohc: Chat isn't available from the command line in a folder others share with you. Run this command from your own workspace's folder.";
+    let inShare: string;
+    const send = (verb: CliVerb, args: Record<string, unknown>) =>
+      rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb, args: { cwd: inShare, actor: "agent", ...args } });
+
+    beforeEach(async () => {
+      inShare = join(workspaceRoot, "shared-with-me", "received", "notes");
+      await mkdir(inShare, { recursive: true });
+    });
+
+    it("refuses the commands for your workspace as its owner, before opening it", async () => {
+      // Every port these commands use, so a command that got through would reach one.
+      const reached = vi.fn(async () => { throw new Error("reached"); });
+      const port = new Proxy({}, { get: () => reached });
+      Object.assign(context, { stopSync: reached, shareCopy: reached, shareLinkAgents: port, keptCopies: port, retainedCopies: port,
+        ownerAppResponses: reached, dataset: reached, appPublication: reached });
+      const ownerCommands: Array<[CliVerb, Record<string, unknown>]> = [
+        ["stopSync", { actor: "human" }],
+        ["shareCopy", { shareId: "share", grantId: "grant" }],
+        ["shareAgents", { shareId: "share", grantId: "grant" }],
+        ["shareDisconnect", { shareId: "share", grantId: "grant", connectionId: "connection" }],
+        ["keptCopies", {}],
+        ["saveKeptCopy", { id: 1 }],
+        ["retainedCopies", {}],
+        ["deleteRetainedCopies", { copies: [{ id: 3, revision: 10 }], acceptLateWriteRisk: true }],
+        ["ownerAppResponses", { request: { action: "list", workspaceId: WORKSPACE_ID, grantId: "g", limit: 100 } }],
+        ["dataset", { request: { action: "list", workspaceId: WORKSPACE_ID } }],
+        ["dataset", { request: { action: "prepareRecovery", workspaceId: WORKSPACE_ID, sourcePath: workspaceRoot } }],
+        ["dataset", { request: { action: "cancelInvoke", workspaceId: WORKSPACE_ID, invocationId: "00000000-0000-4000-8000-000000000003" } }],
+        ["appPublication", { request: { action: "cancel", workspaceId: WORKSPACE_ID, approvalId: "00000000-0000-4000-8000-000000000001" } }],
+      ];
+      for (const cwd of [inShare, join(workspaceRoot, "shared-with-me")]) {
+        for (const [verb, args] of ownerCommands) {
+          expect(await send(verb, { cwd, ...args }), verb).toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: OWNER });
+        }
+      }
+      expect(reached).not.toHaveBeenCalled();
+      expect(calls.openWorkspace).toBe(0);
+    });
+
+    it("refuses chat commands, and shows a Group with --peek", async () => {
+      const chatCommands: Array<[CliVerb, Record<string, unknown>]> = [
+        ["groupCreate", { name: "needs-ice" }],
+        ["post", { actor: "human", group: "general", attachments: [], needsDecision: false, body: "hello" }],
+        ["reply", { actor: "human", thread: "thread-1", body: "hello", attachments: [], needsDecision: false }],
+        ["nothingToReport", { thread: "thread-1" }],
+        ["react", { actor: "human", message: "message-1", emoji: "👍" }],
+        ["chatRetry", { thread: "thread-1" }],
+        ["fileChatStart", { path: "a.md", title: "About a", body: "hello" }],
+        ["show", { target: "general", peek: false }],
+        ["export", { actor: "human", scope: { kind: "all" }, outDir: "inside-export" }],
+        ["watch", { timeoutMs: 0 }],
+        ["link", { target: { kind: "group", group: "general" } }],
+        ["link", { target: { kind: "path", path: "a.md" } }],
+      ];
+      for (const cwd of [inShare, join(workspaceRoot, "shared-with-me")]) {
+        for (const [verb, args] of chatCommands) {
+          expect(await send(verb, { cwd, ...args }), verb).toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: CHAT });
+        }
+      }
+      expect(calls.openWorkspace).toBe(0);
+      expect(await send("show", { target: "general", peek: true })).toMatchObject({ ok: true });
+    });
+
+    it("keeps each command's own answer where it already sent you to the original workspace", async () => {
+      const operationId = "dohc-operation:11111111-1111-4111-8111-111111111111";
+      const keptEdits = "Kept edits are kept only in the original workspace. Open it to continue.";
+      const live = "Live documents can be listed, stopped, and resumed only in the original workspace. Open it to continue.";
+      const versions = "Versions belong to the owning workspace. Open it to continue.";
+      const history = "History operations require the owning workspace. Open it to continue.";
+      const answers: Array<[CliVerb, Record<string, unknown>, string]> = [
+        ["liveKeptEdits", {}, keptEdits],
+        ["saveRecoveryCopy", { path: "a.md" }, keptEdits],
+        ["retryKeptEdits", { path: "a.md", incident: "incident" }, keptEdits],
+        ["stopAgain", { path: "a.md", incident: "incident" }, keptEdits],
+        ["restoreProtectedCopy", { id: "00000000-0000-4000-8000-000000000001" }, "kept copies are not available in this workspace"],
+        ["discardProtectedCopy", { id: "00000000-0000-4000-8000-000000000001" }, "kept copies are not available in this workspace"],
+        ["liveDocuments", {}, live],
+        ["liveStop", { path: "a.md" }, live],
+        ["liveResume", { path: "a.md" }, live],
+        ["documentHeld", { path: "a.md" }, "Held changes are kept only in the original workspace. Open it to continue."],
+        ["syncFailure", {}, "Sync status is kept only in the original workspace. Open it to continue."],
+        ["historyOperation", { operationId }, history],
+        ["versionList", {}, versions],
+        ["versionCompare", { version: "main" }, versions],
+        ["versionConflicts", {}, versions],
+        ["versionCreate", { name: "draft" }, versions],
+        ["versionSwitch", { version: "main" }, versions],
+        ["versionMerge", { version: "main" }, versions],
+        ["versionResolve", { conflictId: "conflict", resolution: { keep: "current" } }, versions],
+      ];
+      for (const [verb, args, reason] of answers) {
+        expect(await send(verb, args), verb).toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: true, result: { ok: false, reason } });
+      }
+      // Only an Undo's refusal names its cause.
+      expect(await send("historyUndo", { operationId })).toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: true,
+        result: { ok: false, reason: history, refusal: { code: "unexplained" } } });
+      expect(calls.openWorkspace).toBe(0);
+    });
+
+    it("lets Collection and app publication commands name paths in the folder", async () => {
+      const dataset = vi.fn<NonNullable<CliWorkspaceContext["dataset"]>>(async () => { throw new Error("reached"); });
+      const appPublication = vi.fn<NonNullable<CliWorkspaceContext["appPublication"]>>(async () => { throw new Error("reached"); });
+      context.dataset = dataset;
+      context.appPublication = appPublication;
+      // The reply is the operation's own, so the request got past the rule.
+      const reached = { protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: "dohc: reached" };
+      const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+      const definition = { formatVersion: 1, datasetId: id(1), name: "Equipment", schemaPath: "equipment/schema.sql", operationsPath: "equipment/actions.ts",
+        tables: [{ tableId: id(2), name: "Equipment", sqlName: "equipment", primaryKey: "id",
+          fields: [{ fieldId: id(3), name: "ID", sqlColumn: "id", type: "text", required: true, unique: true }] }],
+        operations: [{ operationId: id(4), name: "list", label: "List equipment", tableId: id(2), kind: "read", access: "owner", readOnly: true, fieldIds: [id(3)] }] };
+      const below = join(inShare, "tasks");
+      await mkdir(below, { recursive: true });
+      for (const [cwd, prefix] of [[inShare, "shared-with-me/received/notes"], [below, "shared-with-me/received/notes/tasks"]] as const) {
+        dataset.mockClear();
+        appPublication.mockClear();
+        expect(await send("dataset", { cwd, request: { action: "describe", workspaceId: WORKSPACE_ID, datasetPath: "dataset.json" } }), cwd).toEqual(reached);
+        expect(await send("dataset", { cwd, request: { action: "prepare", workspaceId: WORKSPACE_ID, descriptorPath: "dataset.json" } }), cwd).toEqual(reached);
+        expect(await send("dataset", { cwd, request: { action: "create", workspaceId: WORKSPACE_ID, definition } }), cwd).toEqual(reached);
+        expect(await send("appPublication", { cwd, request: { action: "listLocal", workspaceId: WORKSPACE_ID, appRoot: "app" } }), cwd).toEqual(reached);
+        expect(dataset.mock.calls.map(([request]) => request), cwd).toEqual([
+          expect.objectContaining({ action: "describe", datasetPath: `${prefix}/dataset.json` }),
+          expect.objectContaining({ action: "prepare", descriptorPath: `${prefix}/dataset.json` }),
+          expect.objectContaining({ action: "create",
+            definition: expect.objectContaining({ schemaPath: `${prefix}/equipment/schema.sql`, operationsPath: `${prefix}/equipment/actions.ts` }) }),
+        ]);
+        expect(appPublication, cwd).toHaveBeenCalledWith(expect.objectContaining({ appRoot: `${prefix}/app` }), expect.anything());
+      }
+    });
+
+    it("answers reads", async () => {
+      expect(await send("groups", {})).toMatchObject({ ok: true });
+      expect(await send("threads", { group: "general" })).toMatchObject({ ok: true });
+      expect(await send("inbox", {})).toMatchObject({ ok: true });
+    });
+
+    // The rule reads the folder a link leads to, as choosing the workspace does.
+    it("refuses from a link outside shared-with-me that leads into a share's folder", async () => {
+      const reached = vi.fn(async () => { throw new Error("reached"); });
+      Object.assign(context, { stopSync: reached, dataset: reached });
+      const outside = await mkdtemp(join(tmpdir(), "dohc-link-"));
+      try {
+        // Windows makes a junction without privilege; elsewhere it is a symlink.
+        const links = [join(workspaceRoot, "into-share"), join(outside, "into-share")];
+        for (const link of links) await symlink(inShare, link, "junction");
+        const linked = join(outside, "linked-into-share");
+        try { await symlink(inShare, linked, "dir"); links.push(linked); } catch (error) {
+          // Windows makes a folder symlink only with Developer Mode or as an administrator.
+          if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error;
+        }
+        for (const cwd of links) {
+          expect(await send("stopSync", { cwd, actor: "human" }), cwd).toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: OWNER });
+          expect(await send("dataset", { cwd, request: { action: "list", workspaceId: WORKSPACE_ID } }), cwd)
+            .toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: OWNER });
+          expect(await send("post", { cwd, actor: "human", group: "general", attachments: [], needsDecision: false, body: "hello" }), cwd)
+            .toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: CHAT });
+          expect(await send("watch", { cwd, timeoutMs: 0 }), cwd).toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: CHAT });
+        }
+        expect(reached).not.toHaveBeenCalled();
+        expect(calls.openWorkspace).toBe(0);
+      } finally {
+        await rm(outside, { recursive: true, force: true });
+      }
+    });
+
+    it("runs from a link in a share's folder that leads to your own folder, as from that folder", async () => {
+      const reached = vi.fn(async () => { throw new Error("reached"); });
+      context.stopSync = reached;
+      const own = join(workspaceRoot, "own");
+      await mkdir(own, { recursive: true });
+      const link = join(inShare, "to-own");
+      await symlink(own, link, "junction");
+      expect(await send("stopSync", { cwd: link, actor: "human" })).toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: "dohc: reached" });
+      expect(reached).toHaveBeenCalledTimes(1);
+    });
+
+    // Every other name for a share's folder ends at the refusal, or names no
+    // workspace at all.
+    describe("named another way", () => {
+      const NO_WORKSPACE = "dohc: not inside a dohc workspace";
+      const reached = vi.fn(async () => { throw new Error("reached"); });
+      const answer = (response: CliTransportResponse) => (response.ok ? "ran" : response.error);
+      const answers = async (cwd: string) => [
+        answer(await send("stopSync", { cwd, actor: "human" })),
+        answer(await send("post", { cwd, actor: "human", group: "general", attachments: [], needsDecision: false, body: "hello" })),
+      ];
+      // cmd's short spelling of a path: each name that has a short alias, by that alias.
+      const windowsShortPath = (path: string) => spawnSync("cmd.exe", ["/d", "/s", "/c", `"for %I in ("${path}") do @echo %~sI"`],
+        { encoding: "utf8", windowsVerbatimArguments: true }).stdout.trim();
+
+      beforeEach(() => {
+        reached.mockClear();
+        context.stopSync = reached;
+      });
+      afterEach(() => {
+        expect(reached).not.toHaveBeenCalled();
+        expect(calls.openWorkspace).toBe(0);
+      });
+
+      it("refuses in other capitals where the disk folds them, and names no workspace where it doesn't", async () => {
+        for (const cwd of [join(workspaceRoot, "SHARED-WITH-ME", "received", "notes"), join(workspaceRoot, "Shared-With-Me")]) {
+          const folds = await stat(cwd).then(() => true, () => false);
+          expect(await answers(cwd), cwd).toEqual(folds ? [OWNER, CHAT] : [NO_WORKSPACE, NO_WORKSPACE]);
+        }
+      });
+
+      // These read the folder's real name, as Windows reports it, at both the
+      // workspace lookup and the rule.
+      it("refuses by Windows short names, for the workspace's folder and for shared-with-me", async (ctx) => {
+        if (process.platform !== "win32") ctx.skip();
+        const shortRoot = windowsShortPath(workspaceRoot);
+        const shortShared = windowsShortPath(join(workspaceRoot, "shared-with-me"));
+        // A volume that keeps no short names gives each path back unchanged.
+        if (shortRoot === workspaceRoot || shortShared === join(workspaceRoot, "shared-with-me")) ctx.skip();
+        for (const cwd of [join(shortRoot, "shared-with-me", "received", "notes"), join(workspaceRoot, basename(shortShared), "received", "notes"),
+          windowsShortPath(inShare)]) {
+          expect(await answers(cwd), cwd).toEqual([OWNER, CHAT]);
+        }
+      });
+
+      it("refuses through a folder's directory stream", async (ctx) => {
+        if (process.platform !== "win32") ctx.skip();
+        for (const cwd of [`${workspaceRoot}\\shared-with-me:$I30:$INDEX_ALLOCATION`, `${workspaceRoot}\\shared-with-me::$INDEX_ALLOCATION`,
+          `${inShare}::$INDEX_ALLOCATION`]) {
+          expect(await answers(cwd), cwd).toEqual([OWNER, CHAT]);
+        }
+      });
+
+      it("refuses by the device, volume and object names Windows resolves to the same folder", async (ctx) => {
+        if (process.platform !== "win32") ctx.skip();
+        const volume = execFileSync("mountvol", [inShare.slice(0, 2), "/L"], { encoding: "utf8" }).trim();
+        for (const cwd of [`\\\\?\\${inShare}`, `\\\\.\\${inShare}`, `${volume}${inShare.slice(3)}`, `\\\\?\\GLOBALROOT\\??\\${inShare}`]) {
+          expect(await answers(cwd), cwd).toEqual([OWNER, CHAT]);
+        }
+      });
+
+      it("names no workspace for a trailing dot or space, or a file stream, on shared-with-me", async (ctx) => {
+        if (process.platform !== "win32") ctx.skip();
+        for (const cwd of [`${workspaceRoot}\\shared-with-me.\\received`, `${workspaceRoot}\\shared-with-me \\received`,
+          `${workspaceRoot}\\shared-with-me...`, `\\\\?\\${workspaceRoot}\\shared-with-me.\\received`, `${workspaceRoot}\\shared-with-me::$DATA`]) {
+          expect(await answers(cwd), cwd).toEqual([NO_WORKSPACE, NO_WORKSPACE]);
+        }
+      });
+
+      it("names no workspace for a network path to the same disk", async (ctx) => {
+        if (process.platform !== "win32") ctx.skip();
+        const cwd = `\\\\localhost\\${inShare.slice(0, 1)}$\\${inShare.slice(3)}`;
+        // The disk's administrative share can be closed to this account.
+        if (!(await stat(cwd).then(() => true, () => false))) ctx.skip();
+        expect(await answers(cwd)).toEqual([NO_WORKSPACE, NO_WORKSPACE]);
+      });
+    });
+  });
+
+  it("refuses owner and chat commands in a received share opened as its own workspace", async () => {
+    registryWorkspace = { ...registryWorkspace, readOnly: true };
+    context.readOnly = true;
+    const reached = vi.fn(async () => { throw new Error("reached"); });
+    Object.assign(context, { stopSync: reached, shareCopy: reached, shareLinkAgents: new Proxy({}, { get: () => reached }),
+      ownerAppResponses: reached, dataset: reached, appPublication: reached });
+    const folder = join(workspaceRoot, "notes", "deeper");
+    await mkdir(folder, { recursive: true });
+    const send = (cwd: string, verb: CliVerb, args: Record<string, unknown>) =>
+      rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb, args: { cwd, actor: "agent", ...args } });
+    const ownerCommands: Array<[CliVerb, Record<string, unknown>, string]> = [
+      ["stopSync", { actor: "human" }, "Open the owning workspace to stop its sync."],
+      ["shareCopy", { shareId: "share", grantId: "grant" }, "Share copy details require the owning workspace."],
+      ["shareAgents", { shareId: "share", grantId: "grant" }, "Open the owning workspace to list a link's agents."],
+      ["shareDisconnect", { shareId: "share", grantId: "grant", connectionId: "connection" }, "Open the owning workspace to disconnect a link's agent."],
+      ["ownerAppResponses", { request: { action: "list", workspaceId: WORKSPACE_ID, grantId: "g", limit: 100 } }, "App responses require the owning workspace."],
+      ["dataset", { request: { action: "list", workspaceId: WORKSPACE_ID } }, "Collections require the owning workspace."],
+      ["dataset", { request: { action: "prepareRecovery", workspaceId: WORKSPACE_ID, sourcePath: workspaceRoot } }, "Collections require the owning workspace."],
+      ["dataset", { request: { action: "describe", workspaceId: WORKSPACE_ID, datasetPath: "tasks/dataset.json" } }, "Collections require the owning workspace."],
+      ["appPublication", { request: { action: "cancel", workspaceId: WORKSPACE_ID, approvalId: "00000000-0000-4000-8000-000000000001" } },
+        "App publication requires the owning workspace."],
+      ["appPublication", { request: { action: "createLink", workspaceId: WORKSPACE_ID, appRoot: "app", access: "view",
+        operationId: "00000000-0000-4000-8000-000000000101", agentLabel: "Builder" } }, "App publication requires the owning workspace."],
+    ];
+    const chatCommands: Array<[CliVerb, Record<string, unknown>]> = [
+      ["groupCreate", { name: "needs-ice" }],
+      ["post", { actor: "human", group: "general", attachments: [], needsDecision: false, body: "hello" }],
+      ["reply", { actor: "human", thread: "thread-1", body: "hello", attachments: [], needsDecision: false }],
+      ["react", { actor: "human", message: "message-1", emoji: "👍" }],
+      ["chatRetry", { thread: "thread-1" }],
+      ["fileChatStart", { path: "a.md", title: "About a", body: "hello" }],
+      ["show", { target: "general", peek: false }],
+      ["export", { actor: "human", scope: { kind: "all" }, outDir: "inside-export" }],
+      ["watch", { timeoutMs: 0 }],
+    ];
+    for (const cwd of [workspaceRoot, folder]) {
+      for (const [verb, args, error] of ownerCommands) {
+        expect(await send(cwd, verb, args), verb).toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: `dohc: ${error}` });
+      }
+      for (const [verb, args] of chatCommands) {
+        expect(await send(cwd, verb, args), verb)
+          .toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: "dohc: chats are not available in a read-only shared view" });
+      }
+    }
+    expect(reached).not.toHaveBeenCalled();
   });
 
   it("requires owner-local authority and refuses all automation publication actions", async () => {
@@ -2558,6 +2922,69 @@ describe("CLI socket server", () => {
     })).toHaveLength(1);
   });
 
+  // Only the run itself says it has nothing to report, and the chat's own
+  // service decides whether it may.
+  describe("nothing to report", () => {
+    async function automationThread() {
+      const general = await store!.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+      return (await store!.startChannelThread({
+        authorActorKey: null, workspaceId: WORKSPACE_ID, channelId: general.id,
+        author: { kind: "automation", displayName: "Check overdue tasks" }, authorOwnerDisplayName: "Sam",
+        automation: { automationId: "collection:Tasks#overdue", chainDepth: 1 }, body: "Tell the Group about overdue tasks.",
+      })).thread.id;
+    }
+
+    function quietRuns(refusal: QuietRunRefusal | null = null): string[] {
+      const asked: string[] = [];
+      serverOptions.chatRuns = {
+        dispatchStateForThread: async () => { throw new Error("Not read for nothing to report."); },
+        retryStoppedRun: async () => false,
+        endRunQuietly(workspaceId, runId, threadId) {
+          asked.push(`${workspaceId}/${runId}/${threadId}`);
+          return refusal;
+        },
+      };
+      return asked;
+    }
+
+    it("ends the run the request proves, and posts nothing", async () => {
+      const asked = quietRuns();
+      const threadId = await automationThread();
+      holdRun("run-quiet");
+      const before = calls.writes;
+
+      await expect(invoke("nothingToReport", { cwd: workspaceRoot, actor: "agent", thread: cliThreadId(threadId), runId: "run-quiet" }))
+        .resolves.toEqual({ threadId: cliThreadId(threadId), nothingToReport: true });
+      // Without a run id, the secret alone names the run.
+      await invoke("nothingToReport", { cwd: workspaceRoot, actor: "agent", thread: cliThreadId(threadId) });
+
+      expect(asked).toEqual([`${WORKSPACE_ID}/run-quiet/${threadId}`, `${WORKSPACE_ID}/run-quiet/${threadId}`]);
+      expect(await store!.listMessages({ workspaceId: WORKSPACE_ID, threadId })).toHaveLength(1);
+      expect(calls.writes).toBe(before);
+    });
+
+    it("refuses a caller that isn't the run, and says why the service refused", async () => {
+      const asked = quietRuns();
+      const threadId = await automationThread();
+      holdRun("run-quiet");
+      callerRunSecret = "c".repeat(64);
+      await expect(invoke("nothingToReport", { cwd: workspaceRoot, actor: "agent", thread: cliThreadId(threadId), runId: "run-quiet" }))
+        .rejects.toThrow("Only a running agent run that an automation started can end with nothing to report.");
+      callerRunSecret = undefined;
+      await expect(invoke("nothingToReport", { cwd: workspaceRoot, actor: "agent", thread: cliThreadId(threadId) }))
+        .rejects.toThrow("Only a running agent run that an automation started can end with nothing to report.");
+      expect(asked).toEqual([]);
+
+      callerRunSecret = RUN_SECRET;
+      quietRuns("person");
+      await expect(invoke("nothingToReport", { cwd: workspaceRoot, actor: "agent", thread: cliThreadId(threadId) }))
+        .rejects.toThrow("A person asked for this run. Reply to them.");
+      quietRuns("other-thread");
+      await expect(invoke("nothingToReport", { cwd: workspaceRoot, actor: "agent", thread: cliThreadId(threadId) }))
+        .rejects.toThrow("Send nothingToReport in the thread this run was started for.");
+    });
+  });
+
   // Try again from the CLI and MCP runs through the chat's own service, which
   // keeps the two-attempt limit, and only for a caller who may post here.
   describe("chat retry", () => {
@@ -2576,6 +3003,7 @@ describe("CLI socket server", () => {
           retried.push(`${workspaceId}/${threadId}/${runId}`);
           return true;
         },
+        endRunQuietly: () => "not-running",
       };
       return retried;
     }
@@ -3220,6 +3648,8 @@ describe("CLI socket server", () => {
           ? { status: "saved", path: "notes/plan (kept copy).md" }
           : { status: "gone" };
       },
+      restoreProtected: async () => ({ path: ".env", status: "restored" }),
+      discardProtected: async () => ({ path: ".env", status: "discarded" }),
     };
 
     await expect(invoke("keptCopies", { cwd: workspaceRoot, actor: "agent" })).resolves.toEqual({
@@ -3242,6 +3672,45 @@ describe("CLI socket server", () => {
       ok: false,
       reason: "kept copies are not available in this workspace",
     });
+  });
+
+  it("lists, restores and discards a protected file's kept change for an agent, the steps a person takes from Notices", async () => {
+    const id = "0b5c3f2e-8d41-4a8e-9f3c-2d7e6a1b4c90";
+    let copies: [string, string, number][] = [[".env", id, 10]];
+    const restoredBy: string[] = [];
+    const gone = () => new Error("This kept change is no longer available.");
+    context.keptCopies = {
+      list: async () => ({ keptCopies: [], more: false, protectedCopies: copies }),
+      save: async () => ({ status: "gone" }),
+      async restoreProtected(copyId, by) {
+        if (!copies.some((copy) => copy[1] === copyId)) throw gone();
+        restoredBy.push(by);
+        copies = copies.filter((copy) => copy[1] !== copyId);
+        return { path: ".env", status: "restored" };
+      },
+      async discardProtected(copyId) {
+        if (!copies.some((copy) => copy[1] === copyId)) throw gone();
+        copies = copies.filter((copy) => copy[1] !== copyId);
+        return { path: ".env", status: "discarded" };
+      },
+    };
+
+    await expect(invoke("keptCopies", { cwd: workspaceRoot, actor: "agent" }))
+      .resolves.toMatchObject({ ok: true, protectedCopies: [[".env", id, 10]] });
+    await expect(invoke("restoreProtectedCopy", { cwd: workspaceRoot, actor: "agent", id }))
+      .resolves.toEqual({ ok: true, status: "restored", path: ".env" });
+    expect(restoredBy).toEqual(["agent"]);
+    expect(calls.writes).toBe(1);
+    await expect(invoke("restoreProtectedCopy", { cwd: workspaceRoot, actor: "agent", id }))
+      .resolves.toEqual({ ok: false, reason: "This kept change is no longer available." });
+
+    copies = [[".env", id, 20]];
+    await expect(invoke("discardProtectedCopy", { cwd: workspaceRoot, actor: "agent", id }))
+      .resolves.toEqual({ ok: true, status: "discarded", path: ".env" });
+    await expect(invoke("discardProtectedCopy", { cwd: workspaceRoot, actor: "agent", id }))
+      .resolves.toEqual({ ok: false, reason: "This kept change is no longer available." });
+    expect(await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "discardProtectedCopy", args: { cwd: workspaceRoot, actor: "agent", id: "../x" } }))
+      .toMatchObject({ ok: false, error: "dohc: invalid CLI request" });
   });
 
   it("lists and deletes old file copies for an agent only with the late-write risk accepted", async () => {

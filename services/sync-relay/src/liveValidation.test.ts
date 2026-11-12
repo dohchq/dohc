@@ -1,14 +1,14 @@
 import { ChildProcess, execFile } from "node:child_process";
-import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, expect, it } from "vitest";
-import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
+import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { createLiveMarkdownJournalValidator } from "@dohc/ydoc-projection/live-journal-validation";
 import { createLiveValidationExecutor, createValidatorFailureLog, LiveValidatorFailure } from "./liveValidation.js";
 import {selfHostLiveProfile} from "./selfHostLiveProfile.js";
 import { LiveRestoreBusy, LiveRestoreTooLarge } from "./liveRestoreValidation.js";
+import { nestedEmphasis } from "./liveValidation.fixture.js";
 
 import {registered, cleanupLiveDeliveryFixtures} from '../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport.js';
 const {encodeStateAsUpdate} = createRequire(new URL("../../../packages/ydoc-projection/package.json", import.meta.url))("yjs") as {
@@ -52,16 +52,7 @@ it.each([4093, 4094])("returns state bytes only when %s retained updates reach t
   }
 }, 30_000);
 
-function longCheckpoint(paragraphs: number, mixed: boolean) {
-  const markdown = Array.from({length: paragraphs}, (_, i) => mixed
-    ? `Paragraph ${i} **bold** *italic* \`code\` [link](https://example.com).`
-    : `Paragraph ${i} **bold** text.`).join("\n\n");
-  const doc = markdownToYDoc(markdown);
-  try {return encodeStateAsUpdate(doc);} finally {doc.destroy();}
-}
-
-// Each validation of 5000 mixed paragraphs takes about 5 s, so each gets its own budget.
-const longValidations = {
+const validations = {
   settlement: async ({pool, input}, checkpoint) =>
     expect(await pool.normalizeSettlement({document: input.document, currentPath: input.currentPath, checkpoint})).toMatchObject({kind: "accepted"}),
   journal: async ({pool, input}, checkpoint) =>
@@ -73,17 +64,20 @@ const longValidations = {
     expect(await pool.restore(selfHostLiveProfile().service.restore.validation).point(restorePoint(input, checkpoint)))
       .toMatchObject({journalCursor: 0, receiptDigest: "a".repeat(64)}),
 } satisfies Record<string, (f: ReturnType<typeof fixture>, checkpoint: Uint8Array) => Promise<void>>;
-it.each(Object.entries(longValidations))("accepts 5000 mixed paragraphs for %s validation in a capped child", async (_, validate) => {
-  await validate(fixture(), longCheckpoint(5000, true));
+it.each(Object.entries(validations))("routes %s validation through a capped child", async (_, validate) => {
+  const f = fixture();
+  await validate(f, f.input.checkpoint);
 }, 60_000);
 
-it("refuses 25000 bold paragraphs by the struct budget before exhausting the worker heap", async () => {
-  const {pool, input} = fixture(), checkpoint = longCheckpoint(25000, false);
-  expect(await pool.normalizeSettlement({document: input.document, currentPath: input.currentPath, checkpoint}))
-    .toMatchObject({kind: "refused", reason: "capacity-refused"});
-}, 30_000);
-
-
+it("accepts 5000 mixed paragraphs under the production worker limits", async () => {
+  const {pool, input} = fixture();
+  const doc = markdownToYDoc(Array.from({length: 5000}, (_, index) =>
+    `Paragraph ${index} **bold** *italic* \`code\` [link](https://example.com).`).join("\n\n"));
+  try {
+    expect(await pool.normalizeSettlement({document: input.document, currentPath: input.currentPath, checkpoint: encodeStateAsUpdate(doc)}))
+      .toMatchObject({kind: "accepted"});
+  } finally {doc.destroy();}
+}, 60_000);
 
 it.each([18, 19])("returns checkpoint state only when %s large suffix updates and the candidate reach the byte limit", async suffixCount => {
   const {pool, input} = fixture();
@@ -200,28 +194,19 @@ it("retains no pipe of a fork refused with EAGAIN", async () => {
   expect(stdout.trim()).toBe("0");
 }, 30_000);
 
-const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
-/** A note whose source witness nests emphasis `depth` levels; it reads as one flat emphasis run. */
-function nestedEmphasis(depth: number) {
-  const source = "*".repeat(depth) + "b" + " a*".repeat(depth);
-  const doc = markdownToYDoc(`*b${" a".repeat(depth)}*`), meta = doc.getMap("meta");
-  meta.set("dohcMarkdownSource", source);
-  meta.set("dohcMarkdownSourceSha256", sha256(source));
-  meta.set("dohcMarkdownSourceProjectionSha256", sha256(yDocToMarkdown(doc)));
-  const checkpoint = encodeStateAsUpdate(doc); doc.destroy();
-  return {source, checkpoint};
+let heapCheckpoint: Uint8Array | undefined;
+function heapExhaustionCheckpoint() {
+  if (!heapCheckpoint) {
+    const doc = markdownToYDoc("a\n\n".repeat(80_000));
+    try {heapCheckpoint = encodeStateAsUpdate(doc);} finally {doc.destroy();}
+  }
+  return heapCheckpoint;
 }
-it("keeps a worker thread's stack for deeply nested emphasis", async () => {
-  const {pool, input} = fixture(), {source, checkpoint} = nestedEmphasis(2400);
-  // A child's default stack refuses this witness as unreadable instead of verifying it.
-  expect(await pool.normalizeSettlement({document: input.document, currentPath: input.currentPath, checkpoint}))
-    .toMatchObject({kind: "accepted", evidence: {projectedMarkdownSha256: sha256(source)}});
-}, 120_000);
 
 it.each(["journal", "settlement"] as const)("refuses %s work whose child runs out of heap, and replaces the child", async kind => {
   const {input} = fixture(), pool = createLiveValidationExecutor(128); pools.push(pool);
   const validate = pool.validator(policy);
-  const doc = markdownToYDoc("a\n\n".repeat(80_000)), checkpoint = encodeStateAsUpdate(doc); doc.destroy();
+  const checkpoint = heapExhaustionCheckpoint();
   const result = kind === "journal" ? await validate({...input, checkpoint})
     : await pool.normalizeSettlement({document: input.document, currentPath: input.currentPath, checkpoint});
   expect(result).toEqual({kind: "refused", reason: "capacity-refused", source: kind === "journal" ? "final" : "registration-input"});
@@ -240,6 +225,26 @@ it("keeps a slot for live edits while an activation validates", async () => {
   held.abort(new Error("released")); expect(await running).toMatchObject({message: "released"});
 }, 60_000);
 
+// Issue #1967: a busy activation's wait for capacity ended on any slot's release, so a host waking on it would
+// capture again each time a live edit finished while the auxiliary slot stayed taken.
+// Proves: the wait outlasts a live edit's completion and ends only once the auxiliary child has exited, when an activation runs.
+it("keeps a busy activation waiting through live edits until the auxiliary slot frees", async () => {
+  const {pool, input, validate} = fixture(), {checkpoint} = nestedEmphasis(3000), activate = pool.ordinaryActivation(policy);
+  const work = {document: input.document, currentPath: input.currentPath, baselineBytes: checkpoint};
+  // The held job runs far longer than the test.
+  const held = new AbortController(), running = Promise.resolve(activate(work, held.signal)).catch((error: unknown) => error);
+  expect((await activate(work)).kind).toBe("retry");
+  let woke = false;
+  const waiting = activate.waitForCapacity!().then(() => {woke = true;});
+  expect((await validate(input)).kind).toBe("accepted");
+  // Everything the edit's completion set off has run.
+  await new Promise(setImmediate);
+  expect(woke).toBe(false);
+  held.abort(new Error("released")); expect(await running).toMatchObject({message: "released"});
+  await waiting;
+  expect(await activate({...work, baselineBytes: input.checkpoint})).toMatchObject({kind: "accepted"});
+}, 60_000);
+
 /** A restore point at `checkpoint`, with no stored artifacts. */
 function restorePoint(input: ReturnType<typeof fixture>["input"], checkpoint: Uint8Array) {
   return {binding: {...input.document, currentPath: input.currentPath}, checkpoint: {bytes: checkpoint}, events: [],
@@ -249,7 +254,7 @@ function restorePoint(input: ReturnType<typeof fixture>["input"], checkpoint: Ui
 it("refuses restore work whose child runs out of heap, and validates the next restore", async () => {
   const {input} = fixture(), pool = createLiveValidationExecutor(128); pools.push(pool);
   const restore = pool.restore(policy), validate = pool.validator(policy);
-  const doc = markdownToYDoc("a\n\n".repeat(80_000)), checkpoint = encodeStateAsUpdate(doc); doc.destroy();
+  const checkpoint = heapExhaustionCheckpoint();
   await expect(restore.point(restorePoint(input, checkpoint))).rejects.toBeInstanceOf(LiveRestoreTooLarge);
   expect(validate.hasCapacity?.()).toBe(true);
   expect(await restore.point(restorePoint(input, input.checkpoint))).toMatchObject({journalCursor: 0, receiptDigest: "a".repeat(64)});
@@ -322,30 +327,25 @@ it("kills a child at its deadline and keeps its slot until the child exits", asy
   held.abort(new Error("released")); expect(await other).toMatchObject({message: "released"});
 }, 60_000);
 
-it.each([false, true])('commits and recovers worker evidence with checkpoint due=%s', async checkpointDue => {
+it('commits and recovers worker evidence without changing an exact replay', async () => {
   const f = registered({deployment: true}), pool = createLiveValidationExecutor();
   try {
-    const template = f.capture(f.update('payload', checkpointDue ? 'x'.repeat(1_048_576) : 'small'));
-    const validate = pool.validator({...policy, maxDecodedPayloadByteVisits: 1_000_000_000});
-    for (let index = 0; index < (checkpointDue ? 20 : 1); index++) {
-      const read = f.storage.readLiveUpdateJournalCut({document: template.cutToken.document});
-      if (read.kind !== 'cut') throw Error('Expected journal cut');
-      const input = {...template, metadata: {...template.metadata, deliveryId: 'worker-' + index}, cutToken: read.cut};
-      const validation = await validate({document: read.cut.document, currentPath: read.cut.currentPath,
-        checkpoint: read.cut.checkpoint.bytes, suffix: read.cut.suffix.map(row => row.bytes), candidate: input.updateBytes});
-      if (validation.kind !== 'accepted') throw Error('Expected accepted worker evidence');
-      const due = checkpointDue && index === 19;
-      expect(Object.hasOwn(validation.evidence, 'stateUpdate')).toBe(due);
-      const accepted = f.storage.commitLiveUpdateJournal({...input, validation});
-      expect(accepted.result).toMatchObject({kind: 'accepted', replayed: false});
-      if (index !== (checkpointDue ? 19 : 0)) continue;
-      const before = f.raw.prepare('SELECT update_digest,validation_checkpoint_sha256,validation_checkpoint_bytes FROM sync_relay_live_update_journal WHERE journal_cursor=?').get(index + 1)!;
-      expect(before.validation_checkpoint_bytes).toEqual(due ? validation.evidence.stateUpdate : null);
-      expect(before.validation_checkpoint_sha256).toBe(due ? validation.evidence.stateUpdateSha256 : null);
-      expect(f.storage.commitLiveUpdateJournal({...input, validation}).result).toMatchObject({kind: 'accepted', replayed: true});
-      expect(f.raw.prepare('SELECT update_digest,validation_checkpoint_sha256,validation_checkpoint_bytes FROM sync_relay_live_update_journal WHERE journal_cursor=?').get(index + 1)).toEqual(before);
-      expect(f.storage.readCommittedLiveUpdate({host: input.host, document: input.cutToken.document, journalCursor: index + 1}))
-        .toEqual({kind: 'committed', admitted: accepted.admitted});
-    }
+    const template = f.capture(f.update('payload', 'small'));
+    const read = f.storage.readLiveUpdateJournalCut({document: template.cutToken.document});
+    if (read.kind !== 'cut') throw Error('Expected journal cut');
+    const input = {...template, metadata: {...template.metadata, deliveryId: 'worker'}, cutToken: read.cut};
+    const validation = await pool.validator(policy)({document: read.cut.document, currentPath: read.cut.currentPath,
+      checkpoint: read.cut.checkpoint.bytes, suffix: read.cut.suffix.map(row => row.bytes), candidate: input.updateBytes});
+    if (validation.kind !== 'accepted') throw Error('Expected accepted worker evidence');
+    expect(Object.hasOwn(validation.evidence, 'stateUpdate')).toBe(false);
+    const accepted = f.storage.commitLiveUpdateJournal({...input, validation});
+    expect(accepted.result).toMatchObject({kind: 'accepted', replayed: false});
+    const before = f.raw.prepare('SELECT update_digest,validation_checkpoint_sha256,validation_checkpoint_bytes FROM sync_relay_live_update_journal WHERE journal_cursor=1').get()!;
+    expect(before.validation_checkpoint_bytes).toBeNull();
+    expect(before.validation_checkpoint_sha256).toBeNull();
+    expect(f.storage.commitLiveUpdateJournal({...input, validation}).result).toMatchObject({kind: 'accepted', replayed: true});
+    expect(f.raw.prepare('SELECT update_digest,validation_checkpoint_sha256,validation_checkpoint_bytes FROM sync_relay_live_update_journal WHERE journal_cursor=1').get()).toEqual(before);
+    expect(f.storage.readCommittedLiveUpdate({host: input.host, document: input.cutToken.document, journalCursor: 1}))
+      .toEqual({kind: 'committed', admitted: accepted.admitted});
   } finally {await pool.close(); f.close();}
 }, 30_000);

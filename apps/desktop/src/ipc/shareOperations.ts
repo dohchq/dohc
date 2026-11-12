@@ -189,8 +189,9 @@ export const relayShareOperations = {
     inactiveMessage: "Sharing stopped because this window changed workspaces.",
     payload: OwnerRestoreRequest, result: z.union([
       OwnerRestoreActionResponse.options, OwnerRestoreActionResponse.plan,
-      OwnerRestoreActionResponse.begin, OwnerRestoreActionResponse.prepare,
-      OwnerRestoreActionResponse.review, OwnerRestoreActionResponse.confirm,
+      // A pending review fits prepare's shape too, so review goes first to keep its owner.
+      OwnerRestoreActionResponse.begin, OwnerRestoreActionResponse.review,
+      OwnerRestoreActionResponse.prepare, OwnerRestoreActionResponse.confirm,
       OwnerRestoreActionResponse.decline, OwnerRestoreActionResponse.unfinished,
     ]),
   },

@@ -7,7 +7,7 @@ import { ChatLane } from "./ChatLane";
 import { ipcErrorMessage } from "../ipcError";
 import { ReactionStoreProvider } from "./reactionStore";
 import type { ChatDispatchFailedRun, SendChatMessagePayload, WorkspaceActivityEvent } from "../../ipc/bridgeContract";
-import { extractChatFileReferenceTokens, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
+import { scanChatLinks, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { configureDemoDesktopBridge } from "../../../../site/src/demoDesktopBridge";
 import { COLLECTION_CHANGE_FILE } from "../collections/collectionChangeFlow";
 import { ask, asked, id, proposalPath, world } from "../collections/collectionChangeFlow.testHarness";
@@ -59,9 +59,9 @@ describe("ChatLane", () => {
   it("does not render message bodies while typing a draft", async () => {
     render(lane());
     await screen.findByText("Old message");
-    const scans = vi.mocked(extractChatFileReferenceTokens).mock.calls.length;
+    const scans = vi.mocked(scanChatLinks).mock.calls.length;
     fireEvent.change(screen.getByTestId("chats-lane-composer"), { target: { value: "A draft" } });
-    expect(vi.mocked(extractChatFileReferenceTokens).mock.calls.length).toBe(scans);
+    expect(vi.mocked(scanChatLinks).mock.calls.length).toBe(scans);
   });
 
   it("does not load conversation content or mark it read on an unchanged revision", async () => {
@@ -443,6 +443,44 @@ describe("ChatLane", () => {
     list.scrollTop = 1500;
     fireEvent.scroll(list);
     expect(screen.queryByTestId("chats-lane-new-messages")).toBeNull();
+  });
+
+  it("stops counting arrivals when the pane grows until every message fits", async () => {
+    // Each observer and what it watches, so a resize reaches only the list's.
+    const observers: Array<{ targets: Set<Element>; fire: () => void }> = [];
+    vi.stubGlobal("ResizeObserver", class {
+      private readonly entry: { targets: Set<Element>; fire: () => void };
+      constructor(callback: (entries: Array<{ contentRect: { width: number } }>) => void) {
+        this.entry = { targets: new Set(), fire: () => callback([{ contentRect: { width: 1200 } }]) };
+        observers.push(this.entry);
+      }
+      observe(target: Element) { this.entry.targets.add(target); }
+      unobserve(target: Element) { this.entry.targets.delete(target); }
+      disconnect() { this.entry.targets.clear(); }
+    });
+    try {
+      render(lane());
+      await screen.findByText("Old message");
+      const list = screen.getByRole("list");
+      Object.defineProperty(list, "scrollHeight", { configurable: true, value: 2000 });
+      Object.defineProperty(list, "clientHeight", { configurable: true, value: 500 });
+      list.scrollTop = 200;
+      fireEvent.scroll(list);
+      bridgeMock.getChatThreadRevision.mockResolvedValue({ revision: 1 });
+      bridgeMock.listChatMessages.mockResolvedValue({ messages: [
+        message({ body: "Old message" }), message({ id: "m2", body: "Arrived" }),
+      ] });
+      await act(async () => activity({ workspaceId: "workspace-a" }));
+      await screen.findByText("Arrived");
+      expect(screen.getByTestId("chats-lane-new-messages")).toBeTruthy();
+      // The window grows: the list holds everything, and nothing scrolls.
+      Object.defineProperty(list, "clientHeight", { configurable: true, value: 2000 });
+      list.scrollTop = 0;
+      act(() => { for (const observer of observers) if (observer.targets.has(list)) observer.fire(); });
+      expect(screen.queryByTestId("chats-lane-new-messages")).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("uses the oldest chat thread, breaking timestamp ties by id", async () => {

@@ -91,6 +91,7 @@ fn stopped_remote_update_retains_bytes_and_advances_with_classified_refusal() {
             coordinate.clone(),
             200,
             &NoFaults,
+            |_, _| Ok(()),
         )
         .unwrap();
     let peer = Ydoc::wire();
@@ -172,7 +173,8 @@ fn stopped_remote_update_retains_bytes_and_advances_with_classified_refusal() {
                     operation.clone(),
                     coordinate.clone(),
                     201,
-                    &NoFaults
+                    &NoFaults,
+                    |_, _| Ok(()),
                 )
                 .unwrap(),
             receipt

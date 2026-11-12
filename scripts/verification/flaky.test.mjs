@@ -1,12 +1,46 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative, resolve } from "node:path";
+import { runVitestGroup } from "./vitest-group.mjs";
 import TestRecordReporter from "./test-record-reporter.mjs";
-import { nextestFailures, nextestFlaky, nextestTimes, nodeTestFailures, nodeTestPassed, nodeTestTimes, playwrightFailures, playwrightFlaky, playwrightTimes, readTestRecord, recordedRun, rerunCommand, slowest, vitestFailures } from "./flaky.mjs";
+import { nextestFailures, nextestFlaky, nextestTimes, nodeTestFailures, nodeTestPassed, nodeTestTimes, playwrightFailures, playwrightFlaky, playwrightTimes, readTestRecord, recordedRun, reportFlaky, rerunCommand, slowest, vitestFailures } from "./flaky.mjs";
 import { flakyFixtureFiles } from "./flaky-fixture.mjs";
 import { readerTests } from "../../tools/rust-engine-program/reader-tests.mjs";
+
+test("retry reports name tasks and tests; only final reporting writes summaries and escaped annotations", t => {
+  const root = mkdtempSync(join(tmpdir(), "flaky-output-")), summary = join(root, "summary.md");
+  const previousSummary = process.env.GITHUB_STEP_SUMMARY;
+  process.env.GITHUB_STEP_SUMMARY = summary;
+  t.after(() => {
+    if (previousSummary === undefined) delete process.env.GITHUB_STEP_SUMMARY;
+    else process.env.GITHUB_STEP_SUMMARY = previousSummary;
+    rmSync(root, { recursive: true, force: true });
+  });
+  const rows = [
+    { id: "vitest:fixture.test.ts", test: "recovered case" },
+    { id: "desktop:@proof", test: "proof.spec.ts › @proof recovered" },
+    { id: "node:once.mjs", test: "once.mjs › recovers" },
+    { id: "task%\r\n", test: "case%\r\n" },
+  ];
+  const lines = rows.map(row => "Passed on retry: " + row.id + " › " + row.test);
+  const log = t.mock.method(console, "log", () => {});
+  reportFlaky(rows);
+  assert.deepEqual(log.mock.calls.map(call => call.arguments[0]), lines);
+  assert.equal(existsSync(summary), false);
+  log.mock.resetCalls();
+  reportFlaky(rows, { summary, annotate: true });
+  const warnings = [
+    "::warning title=Passed on retry::vitest:fixture.test.ts › recovered case",
+    "::warning title=Passed on retry::desktop:@proof › proof.spec.ts › @proof recovered",
+    "::warning title=Passed on retry::node:once.mjs › once.mjs › recovers",
+    "::warning title=Passed on retry::task%25%0D%0A › case%25%0D%0A",
+  ];
+  assert.deepEqual(log.mock.calls.map(call => call.arguments[0]), lines.flatMap((line, index) => [line, warnings[index]]));
+  assert.equal(readFileSync(summary, "utf8"), lines.join("\n") + "\n");
+  assert.ok(warnings.every(line => !/[\r\n]/u.test(line)));
+});
 
 test("flaky fixtures include every relative module imported at load time", () => {
   const copied = new Set(flakyFixtureFiles.map(file => new URL(`../../${file}`, import.meta.url).href));
@@ -239,4 +273,34 @@ test("each runner's report gives its test times, and the slowest are kept longes
   ] }]), [{ test: "a.spec.ts › restarts", seconds: 66 }], "the attempt that passed, and no time for a test that never passed");
   assert.deepEqual(slowest([{ test: "a", seconds: 1.04 }, { test: "b", seconds: 40.26 }, { test: "c", seconds: 3 }], 2),
     [{ test: "b", seconds: 40.3 }, { test: "c", seconds: 3 }]);
+});
+
+test("cloud Vitest retries once, completes a recovered file, and retains both kinds of errors", async t => {
+  const parent = resolve(".agent-artifacts/verification/retry-tests");
+  mkdirSync(parent, { recursive: true });
+  const root = mkdtempSync(join(parent, "vitest-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeFileSync(join(root, "package.json"), JSON.stringify({ type: "module" }));
+  writeFileSync(join(root, "vitest.config.mjs"), "export default {test:{include:['*.test.mjs'],fileParallelism:false}};");
+  const tasks = ["once", "twice"].map((name, index) => {
+    const file = join(root, name + ".test.mjs");
+    writeFileSync(file, "import {it,expect} from 'vitest'; let attempts=0; it('" + name + "',()=>{ expect(++attempts, 'first failure " + name + "').toBeGreaterThan(" + (index + 1) + "); });");
+    return { id: "vitest:retry::" + relative(process.cwd(), file).replaceAll("\\", "/"), package: "retry", cwd: root, script: "vitest run" };
+  });
+  const record = { tests: [], completed: [] }, exitCode = process.exitCode;
+  try { await assert.rejects(runVitestGroup(tasks, record, () => {})); }
+  finally { process.exitCode = exitCode; }
+  assert.deepEqual(record.completed, [tasks[0].id]);
+  const recovered = record.tests.find(row => row.id === tasks[0].id);
+  assert.equal(recovered.passed, 1);
+  assert.deepEqual(recovered.failedTests, []);
+  assert.equal(recovered.flakyTests.length, 1);
+  assert.equal(recovered.flakyTests[0].name, "once");
+  assert.equal(recovered.flakyTests[0].retries, 1);
+  assert.match(recovered.flakyTests[0].errors[0], /first failure once/u);
+  const failed = record.tests.find(row => row.id === tasks[1].id);
+  assert.equal(failed.failed, 1);
+  assert.deepEqual(failed.flakyTests, []);
+  assert.equal(failed.failedTests[0].retries, 1);
+  assert.match(failed.failedTests[0].errors.join("\n"), /first failure twice/u);
 });

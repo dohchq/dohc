@@ -963,7 +963,7 @@ describe("outbound backpressure", () => {
       let refusal: unknown;
       overflow = transport.sendRequest({ id: 70, method: "overflow", params: { payload } }).catch(error => { refusal = error; });
       await nextImmediate();
-      expect(refusal).toMatchObject({ wireError: { code: "OVERLOADED" } });
+      expect(refusal).toMatchObject({ method: "overflow", wireError: { code: "OVERLOADED" } });
       for (const controller of controllers) controller.abort();
       await Promise.all(queued);
       const after = transport.sendRequest({ id: 71, method: "after", params: { payload } }).catch(error => error);
@@ -1701,7 +1701,7 @@ describe("request progress", () => {
     const cancelled = transport.sendRequest(request(3, "cancelled"), undefined, cancelledProgress, cancel.signal).catch(error => error);
     try {
       cancel.abort();
-      expect(await cancelled).toMatchObject({ wireError: { code: "CANCELLED" } });
+      expect(await cancelled).toMatchObject({ method: "cancelled", wireError: { code: "CANCELLED" } });
       clock.mockReturnValue(400);
       peer.drain();
       await nextImmediate();
@@ -2690,6 +2690,7 @@ describe("EngineClient", () => {
     await expect(operation).rejects.toBeInstanceOf(EngineRequestError);
     await expect(operation).rejects.toMatchObject({
       requestId: 55,
+      method: "missing.method",
       wireError: { code: "METHOD_NOT_FOUND" },
     });
     transport.close();

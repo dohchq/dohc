@@ -12,6 +12,8 @@ const binding = {...documentKey, currentPath: "notes.md", selectorPaths: ["notes
 const digest = "a".repeat(64), proposalDigest = "b".repeat(64);
 const owner = {principalKind: "owner" as const, principalId: "owner", grantId: null, grantGeneration: null};
 const reader = {principalKind: "named" as const, principalId: "reader", grantId: "grant", grantGeneration: 1};
+// The account the desktop asked as, which the relay checked owns the workspace.
+const viewer = {userId: "owner", email: "owner@example.test"};
 const receipt = (cursor: number) => ({deliveryId: `event-${cursor}`, updateDigest: digest, journalCursor: cursor, acceptingHostEpoch: parseHostEpoch(1)});
 function reviewFixture() {
   return OwnerRestoreReview.parse({operationId: "restore", workspaceId: "workspace", binding, proposalDigest, candidateDigest: digest,
@@ -45,7 +47,7 @@ function fixture(pointCursor = 0) {
       status = {...status, phase: "native-fenced"};
       return {status, result: {kind: "prepared", proposalDigest, candidateDigest: digest, recordedAtMs: 9, replayed: false}};
     }
-    if (input.action === "review") return {status, result: reviewFixture()};
+    if (input.action === "review") return {status, result: reviewFixture(), owner: viewer};
     status = {...status, phase: "resumed", proposalDigest};
     return {status, result: {kind: "resumed", proposalDigest, receipt: {}, moved: false}};
   });
@@ -348,7 +350,7 @@ it("marks a connected agent's change with the plug, and a guest's agent as the g
     const change = changes[index];
     return change ? {...event, metadata: {...event.metadata, accepted: {...event.metadata.accepted, authority: change.authority}, authorSnapshot: [change.agent]}} : event;
   })};
-  f.call.mockImplementation(input => input.action === "review" ? Promise.resolve({status: f.status(), result: review}) : original(input));
+  f.call.mockImplementation(input => input.action === "review" ? Promise.resolve({status: f.status(), result: review, owner: viewer}) : original(input));
   render(<OwnerRestoreDialog {...f.props} />); await openStop();
   fireEvent.click(screen.getByRole("button", {name: "Stop access"})); await screen.findByRole("button", {name: "Restore file"});
   const badges = screen.getAllByTestId("owner-restore-change-agent-badge");
@@ -371,6 +373,28 @@ it("marks a connected agent's change with the plug, and a guest's agent as the g
   // Neither the card nor the row shows the id.
   expect(run.closest("li")!.textContent!.split("Change details")[0]).not.toContain("trip");
   expect(run.parentElement!.nextElementSibling!.textContent).toBe("Agent");
+});
+it("names a personal agent's change by the agent's name, owned by the account it acts for", async () => {
+  const f = fixture(), original = f.call.getMockImplementation()!, base = reviewFixture(), agentId = `p-${"a".repeat(26)}`;
+  // The second agent acts for an account the dialog has no email for.
+  const agents = [{agentId, agentName: "Scout", onBehalfOf: "owner"}, {agentId: `p-${"c".repeat(26)}`, agentName: "Lookout", onBehalfOf: "another-account"}];
+  const review = {...base, acceptedEvents: base.acceptedEvents.map((event, index) => {
+    const agent = agents[index];
+    return agent ? {...event, metadata: {...event.metadata, accepted: {...event.metadata.accepted,
+      authority: {principalKind: "personal" as const, principalId: agent.agentId, grantId: null, grantGeneration: null}},
+    authorSnapshot: [{kind: "agent" as const, ...agent, depth: 0}]}} : event;
+  })};
+  f.call.mockImplementation(input => input.action === "review" ? Promise.resolve({status: f.status(), result: review, owner: viewer}) : original(input));
+  render(<OwnerRestoreDialog {...f.props} />); await openStop();
+  fireEvent.click(screen.getByRole("button", {name: "Stop access"})); await screen.findByRole("button", {name: "Restore file"});
+  const badges = screen.getAllByTestId("owner-restore-change-agent-badge");
+  const named = (name: string) => badges.find(entry => entry.parentElement!.nextElementSibling!.textContent === name)!;
+  expect(named("Scout").closest("li")!.textContent!.split("Change details")[0]).not.toContain(agentId);
+  fireEvent.focus(named("Scout"));
+  expect(screen.getByRole("tooltip", { hidden: true }).textContent).toBe("ScoutOwned by owner@example.test");
+  fireEvent.blur(named("Scout"));
+  fireEvent.focus(named("Lookout"));
+  expect(screen.getByRole("tooltip", { hidden: true }).textContent).toBe("LookoutOwner name unavailable");
 });
 
 it("allows declining content replacement after access stops", async () => {
@@ -522,7 +546,7 @@ it("identifies the accepted restore point in the review", async () => {
     if (input.action !== "review") return original(input);
     const review = reviewFixture();
     return {status: f.status(), result: OwnerRestoreReview.parse({...review, point: {...review.point, journalCursor: 7},
-      selectedPointReceivedAtMs: 1788922800000, selectedPointAuthority: owner})};
+      selectedPointReceivedAtMs: 1788922800000, selectedPointAuthority: owner}), owner: viewer};
   });
   render(<OwnerRestoreDialog {...f.props} />); await openStop("7");
   fireEvent.click(screen.getByRole("button", {name: "Stop access"})); await screen.findByRole("button", {name: "Restore file"});
@@ -545,7 +569,7 @@ it("names the accepted restore point's author when a stopped restore reopens", a
     if (input.action !== "review") return original(input);
     const review = reviewFixture();
     return {status: f.status(), result: OwnerRestoreReview.parse({...review, point: {...review.point, journalCursor: 7},
-      selectedPointReceivedAtMs: at, selectedPointAuthority: reader})};
+      selectedPointReceivedAtMs: at, selectedPointAuthority: reader}), owner: viewer};
   });
   render(<OwnerRestoreDialog {...f.props} />);
   await screen.findByText("Access stopped for this restore. Review the restore, or decline it to keep the file unchanged.");
@@ -603,7 +627,7 @@ it("names people by the email the relay resolved, in the choices and in the revi
     if (input.action !== "review") return options(input);
     const review = reviewFixture();
     for (const event of review.acceptedEvents.slice(0, 2)) Object.assign(event.metadata.accepted, {authority: reader});
-    return {status: f.status(), result: review};
+    return {status: f.status(), result: review, owner: viewer};
   });
   fireEvent.change(points, {target: {value: "1"}});
   fireEvent.change(access, {target: {value: "grant"}});

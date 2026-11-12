@@ -4,6 +4,7 @@ import { MAX_PREFERRED_NAME_LENGTH, preferredNameFromInput } from "@dohc/workspa
 import type { AgentHue } from "@dohc/workspace-contracts/agent-hues";
 import { AGENT_TOOLS, type AgentLaunch } from "../../agents/agentToolCatalog";
 import { agentHandle, agentNameTaken, newAgentName, type DesktopUserSettings } from "../../settings/userSettings";
+import { AgentLinkAppMenu } from "../agentLinkApps";
 import { Overlay } from "../Overlay";
 import { CopyButton } from "../ui/CopyButton";
 import { PrimaryButton, SecondaryButton } from "../ui/controls";
@@ -232,6 +233,7 @@ export function AddAgentSheet(props: {
               : <CloudOff size={14} aria-hidden className="shrink-0 text-muted" />}
             <span className="min-w-0 truncate text-[13px] text-ink">{link.workspaceName}</span>
             <span className="ml-auto min-w-0 truncate text-[12px] text-muted">{link.link !== null ? link.host : "Not synced"}</span>
+            <AgentLinkAppMenu link={link.link} server="dohc-personal" testId="agent-add-link-apps" />
           </div>
           {/* Why the link can't be copied takes the place of what copying it does. */}
           <p data-testid="agent-add-link-note" className="m-0 -mt-2 text-[12px] text-muted">

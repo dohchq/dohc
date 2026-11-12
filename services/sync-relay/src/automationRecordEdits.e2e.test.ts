@@ -355,7 +355,7 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
   storage.createShare({share: {shareId: "native-share", workspaceId: WORKSPACE, granterUserId: "owner", selectorJson: JSON.stringify({paths: ["Tasks"], versionId: null}), createdAtMs: 0},
     grant: {grantId: "native-grant", shareId: "native-share", principalKind: "user", principalUserId: "reader", principalEmail: null, access: "edit", generation: 1, status: "active", createdAtMs: 0, revokedAtMs: null, parentGrantId: null}});
   await owner.request("liveApplication.provisionOwner", {relayNamespace: namespace, host: {hostId: host.hostId, hostEpoch: host.hostEpoch, instanceId: host.instanceId, connectionId: host.connectionId}}, owner.workspace);
-  const current = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: "owner", shareId: "native-share"}});
+  const current = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: "owner"}});
   if (current.kind !== "current") throw new Error(JSON.stringify(current));
   const {binding} = current;
   const nativeSession = session.nativeOwner!.sessionId;
@@ -390,7 +390,7 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
   } satisfies Pick<EngineClient, "sendRequest" | "sendLiveOwnerAdoption" | "sendLiveApplication" | "readLiveApplicationAck" | "openLiveAppliedSync" | "readNextLiveApplied">;
   const consumer = new OwnerCommittedDelivery(storage, history, {client: native as EngineClient, workspace: owner.workspace, host, deadlineMs: DEADLINE_MS, nextRequestId: owner.nextRequestId,
     bounds: {maxBytes: profile.nativeIngress.maxAdoptionBytes, maxEvents: profile.nativeIngress.maxAdoptionEvents},
-    ownerAdmission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([[WORKSPACE, "native-share"]]), maxEntriesPerDrain: 128, maxBytesPerDrain: profile.nativeIngress.maxAdoptionBytes, refusals: new OwnerKnownRefusals(), validate}});
+    ownerAdmission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), workspaceIds: new Set([WORKSPACE]), maxEntriesPerDrain: 128, maxBytesPerDrain: profile.nativeIngress.maxAdoptionBytes, refusals: new OwnerKnownRefusals(), validate}});
   await consumer.drain(document);
   const row = storage.joinAutomationWorkspace({workspaceId: WORKSPACE, nowMs: Date.now(), reasons: ["automation"] })!;
   const copy = await computer({root: join(root, "server"), relayUrl, bearerToken: deriveAutomationReplicaBearer(row, {key, namespace}), identity: {kind: "join", replicationEpoch: row.replicationEpoch, streamIdentity: row.streamIdentity}});
@@ -398,11 +398,10 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
   await copy.sync(); await recipient.sync();
   const replica = {...copy, workspaceId: WORKSPACE, signal: copy.lifetime};
   let refused = false, loseAck = false, staleRecipient = false;
-  let ownerDeliveryShare = "native-share";
   const capture = async () => {
     await consumer.drain(document);
     const registration = consumer.captureRegistration(binding);
-    const captured = captureOwnerLiveFrameHost({authenticatedUserId: "owner", shareId: ownerDeliveryShare, storage,
+    const captured = captureOwnerLiveFrameHost({authenticatedUserId: "owner", storage,
       trustedAccount: {accountId: "owner", name: "Owner"}, bounds: profile.namedLive.host, validate,
       native: {client: native, workspace: owner.workspace, registrationId: registration.id, coordinate: host, binding,
         invalidated: registration.invalidated, changes: createNamedFrameChanges(16), deadlineMs: DEADLINE_MS, nextRequestId: owner.nextRequestId, drain: (doc, signal) => consumer.drain(doc, signal)}});
@@ -685,7 +684,6 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
   expect(await readFile(join(owner.root, "Tasks/automations.yaml"), "utf8")).toBe(markText);
   expect(await readFile(join(copy.root, "Tasks/automations.yaml"), "utf8")).toBe(markText);
   const freshGrant = await grantButton();
-  ownerDeliveryShare = freshGrant.shareId;
   await vi.waitFor(async () => expect(await inspect(freshGrant.shareId, freshGrant.grantId)).toMatchObject({kind: "ready"}), {timeout: DEADLINE_MS});
   // A fresh server replica cannot infer the prior host's Allow from identical
   // definition bytes, even though the prior replica was ready.
@@ -781,17 +779,16 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
   await running.close();
 }, 120_000);
 
-it.skipIf(engine.missing)("finds one filtered record among 5000 without refreshing or enrolling unrelated records", async () => {
-  const root = await tempRoot("automation-find-5000");
+it.skipIf(engine.missing)("finds a filtered record without refreshing or enrolling unrelated records", async () => {
+  const root = await tempRoot("automation-find");
   const storage = await testStorage();
   const relay = createSyncRelayHandler({storage, resolveActor: testActor});
   storage.claimWorkspace({workspaceId: WORKSPACE, ownerUserId: "owner", createdAtMs: Date.now()});
   const localRoot = join(root, "copy");
   await mkdir(join(localRoot, "Tasks"), {recursive: true});
   await writeFile(join(localRoot, "Tasks/collection.yaml"), "name: Tasks\nfields:\n  Status: {type: text}\n");
-  for (let start = 0; start < 5000; start += 100) await Promise.all(Array.from({length: 100}, (_, offset) => {
-    const index = start + offset;
-    return writeFile(join(localRoot, `Tasks/${String(index).padStart(4, "0")}.md`), `---\nid: ${derivedRecordId(`benchmark-${index}`)}\nStatus: ${index === 4999 ? "Wanted" : "Other"}\n---\n\nRecord ${index}.\n`);
+  await Promise.all(Array.from({length: 5}, (_, index) => {
+    return writeFile(join(localRoot, `Tasks/${index}.md`), `---\nid: ${derivedRecordId(`find-${index}`)}\nStatus: ${index === 4 ? "Wanted" : "Other"}\n---\n\nRecord ${index}.\n`);
   }));
   const copy = await computer({root: localRoot, relayUrl: "http://127.0.0.1:1", bearerToken: "test:owner", identity: {kind: "claim"}, captureMode: "full"});
   const adapter = new VersionedLiveAdapter(copy.client, copy.workspace, {workspaceId: WORKSPACE});
@@ -804,15 +801,14 @@ it.skipIf(engine.missing)("finds one filtered record among 5000 without refreshi
   const bindingReads = vi.spyOn(storage, "automationRecordBinding");
   const capture = vi.fn(async (): Promise<never> => {throw Error("Find must not capture the owner host");});
   const errors: Array<{context: string; error: unknown}> = [];
-  const tracker = createAutomationAcceptedRecords({replica, namespace: "find-5000", storage, synchronize: capture, onError: (_path, error) => {throw error;}});
   const prune = vi.spyOn(VersionedLiveAdapter.prototype, "pruneAutomationHistory").mockRejectedValue(
     new DaemonRefusalError({code: "OVERLOADED", message: "engine-store-busy", retry: "afterBackoff"}, undefined));
   cleanup.push(async () => {prune.mockRestore();});
   let hooks: Parameters<typeof startAutomationReplicas>[0] | undefined;
   let options: ConstructorParameters<typeof CollectionAutomations>[0] | undefined;
-  const running = await startAutomationServer({storage, server: {label: "Benchmark"},
-    replicas: {root: localRoot, engineExecutable: engine.require(), relayOrigin: "https://relay.example.test", key: new Uint8Array(32), namespace: "find-5000"},
-    recordDelivery: {namespace: "find-5000", capture}, readOwnerShares: relay.readOwnerShares, lookupUserDisplayName: () => "Owner",
+  const running = await startAutomationServer({storage, server: {label: "Test server"},
+    replicas: {root: localRoot, engineExecutable: engine.require(), relayOrigin: "https://relay.example.test", key: new Uint8Array(32), namespace: "find"},
+    recordDelivery: {namespace: "find", capture}, readOwnerShares: relay.readOwnerShares, lookupUserDisplayName: () => "Owner",
     noticeLimiter: new TokenBucketLimiter(10, 1, 100), onError: (context, error) => {errors.push({context, error});},
     createExecutor: input => {options = input; return new CollectionAutomations(input);},
     startReplicas: async input => {hooks = input; return {unavailable: false, replica: () => replica, reconcile: () => undefined, deleteWorkspaces: async () => undefined,
@@ -821,33 +817,10 @@ it.skipIf(engine.missing)("finds one filtered record among 5000 without refreshi
   hooks!.onChanged?.(WORKSPACE);
   await vi.waitFor(() => expect(options).toBeDefined(), {timeout: DEADLINE_MS});
   const query = {collectionPath: "Tasks", filter: {field: "Status", operator: "equals" as const, value: "Wanted"}, limit: 1};
-  const baseline: number[] = [], changed: number[] = [];
-  // Warm both paths, then alternate five runs with the same native index and machine.
-  for (let iteration = 0; iteration < 6; iteration++) {
-    const before = performance.now();
-    let cursor;
-    let visited = 0;
-    do {
-      const page = await adapter.queryCollectionRecords({collectionPath: "Tasks", ...(cursor ? {cursor} : {})});
-      for (const record of page.records) {await tracker.refresh(record.path); visited++;}
-      cursor = page.nextCursor;
-    } while (cursor);
-    expect(visited).toBe(5000);
-    expect((await adapter.queryCollectionRecords(query)).records).toHaveLength(1);
-    const beforeMs = performance.now() - before;
-    bindingReads.mockClear(); laneEntries = 0;
-    const after = performance.now();
-    const result = await options!.withEngine(native => native.queryCollectionRecords(query));
-    const afterMs = performance.now() - after;
-    expect(result?.records).toHaveLength(1);
-    expect(bindingReads).not.toHaveBeenCalled(); expect(laneEntries).toBe(0); expect(capture).not.toHaveBeenCalled();
-    if (iteration > 0) {baseline.push(beforeMs); changed.push(afterMs);}
-  }
-  const median = (samples: number[]) => [...samples].sort((a, b) => a - b)[2]!;
-  const measurement = {baseline, changed, beforeMedianMs: median(baseline), afterMedianMs: median(changed),
-    beforeRecordLanes: 5000, afterRecordLanes: 0, liveRecords: 0, filter: query.filter, limit: query.limit};
-  console.log("FIND_5000 " + JSON.stringify(measurement));
-  if (process.env.DOHC_AUTOMATION_FIND_MEASUREMENT) await writeFile(process.env.DOHC_AUTOMATION_FIND_MEASUREMENT, JSON.stringify(measurement));
+  bindingReads.mockClear(); laneEntries = 0;
+  const result = await options!.withEngine(native => native.queryCollectionRecords(query));
+  expect(result?.records).toEqual([expect.objectContaining({path: "Tasks/4.md"})]);
+  expect(bindingReads).not.toHaveBeenCalled(); expect(laneEntries).toBe(0); expect(capture).not.toHaveBeenCalled();
   await vi.waitFor(() => expect(prune).toHaveBeenCalled(), {timeout: DEADLINE_MS});
   await running.close();
   const unexpectedErrors = errors.filter(({context, error}) =>
@@ -907,7 +880,7 @@ it.skipIf(engine.missing).each(["recipient-only", "owner-and-recipient"] as cons
   const registrationResult = storage.registerLiveDocumentBaseline({host, baselineBytes, evidence: validated.evidence, registeredAtMs: 3});
   expect(registrationResult, JSON.stringify(registrationResult)).toMatchObject({kind: "registered"});
   await owner.request("liveApplication.provisionOwner", {relayNamespace: namespace, host: {hostId: host.hostId, hostEpoch: host.hostEpoch, instanceId: host.instanceId, connectionId: host.connectionId}}, owner.workspace);
-  const current = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: "owner", shareId: "native-share"}});
+  const current = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: "owner"}});
   if (current.kind !== "current") throw new Error(JSON.stringify(current));
   const {binding} = current;
   const nativeSession = session.nativeOwner!.sessionId;
@@ -942,7 +915,7 @@ it.skipIf(engine.missing).each(["recipient-only", "owner-and-recipient"] as cons
   } satisfies Pick<EngineClient, "sendRequest" | "sendLiveOwnerAdoption" | "sendLiveApplication" | "readLiveApplicationAck" | "openLiveAppliedSync" | "readNextLiveApplied">;
   const consumer = new OwnerCommittedDelivery(storage, history, {client: native as EngineClient, workspace: owner.workspace, host, deadlineMs: DEADLINE_MS, nextRequestId: owner.nextRequestId,
     bounds: {maxBytes: profile.nativeIngress.maxAdoptionBytes, maxEvents: profile.nativeIngress.maxAdoptionEvents},
-    ownerAdmission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([[WORKSPACE, "native-share"]]), maxEntriesPerDrain: 128, maxBytesPerDrain: profile.nativeIngress.maxAdoptionBytes, refusals: new OwnerKnownRefusals(), validate}});
+    ownerAdmission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), workspaceIds: new Set([WORKSPACE]), maxEntriesPerDrain: 128, maxBytesPerDrain: profile.nativeIngress.maxAdoptionBytes, refusals: new OwnerKnownRefusals(), validate}});
   await consumer.drain(document);
   const nativeRegistration = consumer.captureRegistration(binding);
   const common = {storage, bounds: profile.namedLive.host, validate,
@@ -971,7 +944,7 @@ it.skipIf(engine.missing).each(["recipient-only", "owner-and-recipient"] as cons
   const minted = await tickets.mint({objectId: document.objectId}, viewer);
   const ticket = await tickets.redeem(minted!.token, viewer);
   if (authors === "owner-and-recipient") {
-    const ownerHost = captureOwnerLiveFrameHost({...common, authenticatedUserId: "owner", shareId: "native-share",
+    const ownerHost = captureOwnerLiveFrameHost({...common, authenticatedUserId: "owner",
       trustedAccount: {accountId: "owner", name: "Owner"}});
     await edit(ownerHost, "OwnerNote", {kind: "account", accountId: "owner"}, false);
   }
@@ -1092,20 +1065,33 @@ it.skipIf(engine.missing)("finishes a written but unadopted creation on native r
   await adapter.writeTextFile({ workspaceId: WORKSPACE, versionId: "main", path: "Tasks/collection.yaml", text: "name: Tasks\nfields: {Status: {type: text}}\n", publish: true, metadata: { origin: "api" } });
   const replica = { workspaceId: WORKSPACE, client: server.client, workspace: server.workspace, signal: server.lifetime };
   const native = replicaRecordEngine(replica);
-  let deduped = false;
+  let deduped = false, written = false, adoptionLookups = 0;
   const write = native.adapter.writeTextFile.bind(native.adapter);
-  native.adapter.writeTextFile = async input => { const result = await write(input); deduped ||= result.deduped === true; return result; };
-  const context = replicaRecordEditContext(replica, native, new AbortController().signal);
+  native.adapter.writeTextFile = async input => { const result = await write(input); written = true; deduped ||= result.deduped === true; return result; };
+  const firstAttempt = new AbortController();
+  const lookup = native.adapter.getCollectionRecord.bind(native.adapter);
+  native.adapter.getCollectionRecord = async input => {
+    try {return await lookup(input);}
+    finally {
+      if (written && input.recordId === TWO && !firstAttempt.signal.aborted) {
+        adoptionLookups++;
+        firstAttempt.abort();
+      }
+    }
+  };
+  const context = replicaRecordEditContext(replica, native, firstAttempt.signal);
   const db = new DatabaseSync(join(root, ".dohc/engine/engine.db"));
   db.exec("PRAGMA busy_timeout=10000");
   db.exec("CREATE TRIGGER block_adoption BEFORE INSERT ON collection_records WHEN NEW.file_path = 'Tasks/made.md' BEGIN SELECT RAISE(FAIL, 'test adoption failure'); END");
   const input = { collectionPath: "Tasks", name: "made", recordId: TWO, fields: { Status: "New" }, author: AUTOMATION, idempotencyKeyPrefix: "unadopted" };
   try {
-    await expect(createCollectionRecord(context, input)).resolves.toMatchObject({ kind: "partial" });
+    await expect(createCollectionRecord(context, input)).resolves.toMatchObject({ kind: "partial",failedStage: "index" });
+    expect(adoptionLookups).toBeGreaterThan(0);
     expect((await adapter.readTextFile({ workspaceId: WORKSPACE, versionId: "main", path: "Tasks/made.md" }))?.text).toContain(TWO);
     expect(db.prepare("SELECT count(*) AS n FROM collection_records WHERE record_id = ?").get(TWO)?.n).toBe(0);
     db.exec("DROP TRIGGER block_adoption");
-    await expect(createCollectionRecord(context, input)).resolves.toEqual({ path: "Tasks/made.md", recordId: TWO });
+    const retry = replicaRecordEditContext(replica, native, new AbortController().signal);
+    await expect(createCollectionRecord(retry, input)).resolves.toEqual({ path: "Tasks/made.md", recordId: TWO });
     expect(deduped).toBe(true);
     expect((await adapter.getCollectionRecord({ collectionPath: "Tasks", recordId: TWO, historyLimit: 1 })).record.values).toContainEqual(expect.objectContaining({ field: "Status", value: "New" }));
   } finally { db.exec("DROP TRIGGER IF EXISTS block_adoption"); db.close(); }

@@ -40,6 +40,7 @@ import {
 import {
   copyIntoWorkspace,
   importDroppedPaths,
+  screenPickedPaths,
   MAX_ZIP_ENTRIES,
   MAX_ZIP_TOTAL_BYTES,
   ZIP_TOO_LARGE_REFUSAL,
@@ -437,18 +438,21 @@ export function createWorkspaceFilesIpc<
                 storedShareMounts(currentWorkspace),
                 shareMountRegistryIsPresent(currentWorkspace),
               );
-              return screenAgainstRoots === null
-                ? copyIntoWorkspace(
-                    workspace.rootPath,
-                    absolutePaths,
-                    input.targetDir,
-                  )
-                : importDroppedPaths(
-                    workspace.rootPath,
-                    absolutePaths,
-                    screenAgainstRoots,
-                    input.targetDir,
-                  );
+              if (screenAgainstRoots === null) {
+                const picked = await screenPickedPaths(absolutePaths);
+                return copyIntoWorkspace(
+                  workspace.rootPath,
+                  picked.usable,
+                  input.targetDir,
+                  picked.skips,
+                );
+              }
+              return importDroppedPaths(
+                workspace.rootPath,
+                absolutePaths,
+                screenAgainstRoots,
+                input.targetDir,
+              );
             }
             return shareViewImportResult(
               workspace.workspaceId,

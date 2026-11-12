@@ -200,7 +200,7 @@ function seedDiscussionLink(
     access,
     createdAtMs,
     credentialId: `credential-${suffix}-sentinel`,
-    secretHash: hashLinkBearer(linkSecret, LINK_KEY),
+    secretSealed: null, secretHash: hashLinkBearer(linkSecret, LINK_KEY),
   });
   seedLinkSession(storage, {
     grantId,
@@ -528,7 +528,7 @@ function seedCrossShareHandles(storage: SyncRelayStorage): {
     access: "comment",
     createdAtMs: 2_001,
     credentialId: "cross-share-credential-sentinel",
-    secretHash: "cross-share-secret-hash",
+    secretSealed: null, secretHash: "cross-share-secret-hash",
   });
   seedLinkSession(storage, {
     grantId,
@@ -3353,7 +3353,7 @@ describe("share discussion HTTP boundary", () => {
         credential: {
           credentialId: "version-comment-credential-sentinel",
           grantId: link.grantId,
-          secretHash: hashLinkBearer(link.secret, LINK_KEY),
+          secretSealed: null, secretHash: hashLinkBearer(link.secret, LINK_KEY),
           generation: 1,
           mintedAtMs: 2_005,
           retiredAtMs: null,

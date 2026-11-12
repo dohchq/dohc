@@ -612,11 +612,14 @@ export class EngineClientError extends Error {
 
 export class EngineRequestError extends EngineClientError {
   readonly requestId: number;
+  /** The method of the request the engine refused, as the client sent it. */
+  readonly method: string | undefined;
 
-  constructor(requestId: number, wireError: WireError) {
+  constructor(requestId: number, wireError: WireError, method?: string) {
     super("wire-error", wireError.message, { wireError });
     this.name = "EngineRequestError";
     this.requestId = requestId;
+    this.method = method;
   }
 }
 
@@ -1303,7 +1306,7 @@ export class EngineClient implements EngineTransport {
     const retainedBytes = encodedRequest + FRAME_HEADER_BYTES;
     if (ordinary) {
       if (this.ordinaryRequests >= MAX_ORDINARY_REQUESTS || retainedBytes > MAX_ORDINARY_REQUEST_BYTES - this.ordinaryRequestBytes) {
-        throw new EngineRequestError(request.id, { code: "OVERLOADED", message: "The engine request queue is full.", retry: "afterBackoff" });
+        throw new EngineRequestError(request.id, { code: "OVERLOADED", message: "The engine request queue is full.", retry: "afterBackoff" }, request.method);
       }
       this.ordinaryRequests++;
       this.ordinaryRequestBytes += retainedBytes;
@@ -1363,7 +1366,7 @@ export class EngineClient implements EngineTransport {
         ...(deadlineTimer ? { deadlineTimer } : {}),
         ...(unsent ? { cancelUnsent: () => {
           if (transmitted) return false;
-          abandon(new EngineRequestError(request.id, { code: "CANCELLED", message: "Request cancelled before transmission.", retry: "no" }), false);
+          abandon(new EngineRequestError(request.id, { code: "CANCELLED", message: "Request cancelled before transmission.", retry: "no" }, request.method), false);
           return true;
         } } : {}),
         ...(progress ? { onProgress } : {}),
@@ -2398,7 +2401,7 @@ export class EngineClient implements EngineTransport {
       if (stream.start.requestId !== id) continue;
       this.releaseBlobStream(streamId, stream);
     }
-    pending.reject(new EngineRequestError(pending.callerId, wireError));
+    pending.reject(new EngineRequestError(pending.callerId, wireError, pending.request.method));
   }
 
   /** Whether `id` was abandoned. Its answer ends it, and its streams with it. */

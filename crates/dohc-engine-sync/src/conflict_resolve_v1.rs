@@ -2237,16 +2237,6 @@ fn preflight_imported_lineage(
             reason: "ydoc-lineage-predecessor-mismatch",
         });
     }
-    let deferred: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
-        params![key.workspace_id, key.version_id, key.object_id],
-        |row| row.get(0),
-    ).map_err(SyncError::corrupt)?;
-    if deferred {
-        return Err(SyncError::RetryableState {
-            reason: "ydoc-deferred-updates-pending",
-        });
-    }
     let doc = dohc_engine_collab::load_doc_in(tx, key).map_err(map_local_collab_error)?;
     if doc.has_pending_dependencies() {
         return Err(SyncError::RetryableState {
@@ -2267,7 +2257,20 @@ fn preflight_imported_lineage(
             reason: "ydoc-lineage-delete-set-changed",
         });
     }
-    Ok(())
+    // Replacing or archiving the lineage needs the note's queue empty, so
+    // the owner decides what it holds for its service host, last: an import
+    // that diverges decides nothing, and the binding it keeps still holds.
+    let deferred: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND deferred_while_bound=0)",
+        params![key.workspace_id, key.version_id, key.object_id],
+        |row| row.get(0),
+    ).map_err(SyncError::corrupt)?;
+    if deferred {
+        return Err(SyncError::RetryableState {
+            reason: "ydoc-deferred-updates-pending",
+        });
+    }
+    crate::ydoc_apply::decide_owner_holds_in_tx(tx, key)
 }
 
 /// The other machine kept its copy over this machine's deletion, which
@@ -2708,8 +2711,15 @@ fn commit_imported_lineage(
         .map(|successor| successor.lineage_claim_id.as_str());
     let marker = dohc_engine_collab::read_marker_in(tx, key).map_err(map_local_collab_error)?;
     if marker.is_some_and(|marker| marker.lineage_claim_id.as_deref() != successor_claim) {
-        dohc_engine_collab::owner_outbox::retirement::close_retired_in_tx(tx, key, now_ms)
-            .map_err(crate::ydoc_apply::map_owner_retirement_error)?;
+        crate::ydoc_apply::unbind_owner_in_tx(
+            tx,
+            key,
+            |error| error,
+            |tx| {
+                dohc_engine_collab::owner_outbox::retirement::close_retired_in_tx(tx, key, now_ms)
+                    .map_err(crate::ydoc_apply::map_owner_retirement_error)
+            },
+        )?;
     }
     if let Some(successor) = transition.successor.as_ref() {
         let successor_base = imported_successor(tx, transition, successor)?;
@@ -10294,5 +10304,199 @@ mod tests {
         assert_ne!(successor.lineage_claim_id, predecessor);
         assert_eq!(successor.path.as_deref(), Some("moved.md"));
         assert_owner_closed(&store, &outbox);
+    }
+
+    /// The service host's update of `object-a`, which ordinary sync delivered
+    /// before the owner's feed: the owner holds it. Returns its digest and
+    /// bytes.
+    fn hold_host_update(store: &mut EngineStore, key: &DocKey) -> (String, Vec<u8>) {
+        let lineage = dohc_engine_collab::read_marker(store, key)
+            .unwrap()
+            .unwrap()
+            .lineage_claim_id
+            .unwrap();
+        let edit = host_edit(store, key, "the host's held update");
+        let digest = store.put_binary_blob(&edit).unwrap();
+        let update = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
+            workspace_id: "ws".into(),
+            origin_id: "service-host:host".into(),
+            origin_seq: 0,
+            op_kind: "ydoc.update".into(),
+            payload: crate::ydoc_update_payload(
+                key,
+                "doc.md",
+                dohc_engine_collab::ContentKind::Richdoc,
+                &digest,
+                &lineage,
+                None,
+                None,
+                false,
+            ),
+            recorded_at_ms: 5,
+            relay_seq: Some(100),
+        };
+        let outcome = crate::apply_ydoc_envelope(
+            store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &update,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .unwrap();
+        assert!(
+            matches!(&outcome.primary, crate::ApplyDisposition::Applied(result) if result.deferred),
+            "{outcome:?}"
+        );
+        (digest, edit)
+    }
+
+    /// A host edit appending `paragraph` to `key`'s note as it stands.
+    fn host_edit(store: &EngineStore, key: &DocKey, paragraph: &str) -> Vec<u8> {
+        let host = dohc_engine_collab::Ydoc::wire();
+        host.apply(
+            &store
+                .read_with(|conn| dohc_engine_collab::load_doc_in(conn, key))
+                .unwrap()
+                .encode_full_state(),
+        )
+        .unwrap();
+        host.richdoc_append_paragraph(paragraph)
+    }
+
+    /// The owner's feed accepts `update` as its next event.
+    fn deliver_to_owner(store: &mut EngineStore, key: &DocKey, update: Vec<u8>) {
+        use dohc_engine_collab::owner_outbox::accepted::{
+            OwnerAcceptedFrameInput, apply_frame_in_tx,
+        };
+        let (binding_json, revision, cursor, head): (String, i64, i64, i64) = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT binding_json,binding_revision,accepted_cursor,native_head_sequence \
+                     FROM ydoc_owner_bindings WHERE object_id=?1",
+                    [&key.object_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+            })
+            .unwrap();
+        let binding = serde_json::from_str(&binding_json).unwrap();
+        let outcome = store
+            .write_with(&NoFaults, |tx| {
+                apply_frame_in_tx(
+                    tx,
+                    "ws",
+                    &OwnerAcceptedFrameInput {
+                        binding,
+                        relay_database_namespace: "relay".into(),
+                        expected_revision: revision,
+                        expected_native_head_sequence: head,
+                        previous_accepted_cursor: cursor,
+                        journal_cursor: cursor + 1,
+                        update_bytes: update,
+                    },
+                    30,
+                )
+            })
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            dohc_engine_storage::TxnOutcome::Committed(_)
+        ));
+    }
+
+    /// The host's queued rows, its refusals and the bytes kept for them.
+    fn host_holds(store: &EngineStore) -> (i64, Vec<(i64, String)>, Vec<String>) {
+        store
+            .read_with(|conn| {
+                let queued = conn.query_row(
+                    "SELECT COUNT(*) FROM ydoc_deferred_updates WHERE origin_id='service-host:host'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let refused = conn
+                    .prepare(
+                        "SELECT origin_seq,reason_message FROM replication_pending_refusals \
+                         WHERE origin_id='service-host:host' ORDER BY origin_seq",
+                    )?
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                let kept = conn
+                    .prepare(
+                        "SELECT update_sha256 FROM replication_refused_ydoc_blobs \
+                         WHERE origin_id='service-host:host' ORDER BY origin_seq",
+                    )?
+                    .query_map([], |row| row.get(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok::<_, rusqlite::Error>((queued, refused, kept))
+            })
+            .unwrap()
+    }
+
+    /// An imported archive or replacement of an owned note proceeds while the
+    /// owner holds the service host's update and its feed may never catch up:
+    /// the preflight decides the hold once its other checks pass. One the
+    /// feed never reached is refused as on arrival and its bytes are kept.
+    /// If the note moved on since the resolution, because the feed accepted
+    /// another event, or another update waits in the note's queue, the import
+    /// diverges as on main and decides nothing: the update stays held under
+    /// the binding it keeps.
+    #[test]
+    fn an_imported_archive_or_replacement_decides_what_the_owner_holds() {
+        for replace in [false, true] {
+            for (moved_on, queued_other) in [(false, false), (true, false), (false, true)] {
+                let fixture = receiver_fixture_of(false, ContentKind::Richdoc);
+                let (_scratch, mut store, key, built) = if replace {
+                    path_changed(fixture)
+                } else {
+                    absent_result(fixture)
+                };
+                let outbox = bind_owner(&mut store, &key);
+                let (digest, _) = hold_host_update(&mut store, &key);
+                assert_eq!(host_holds(&store).0, 1);
+                if moved_on {
+                    let other = host_edit(&store, &key, "another accepted event");
+                    deliver_to_owner(&mut store, &key, other);
+                }
+                if queued_other {
+                    // An update the owner does not hold, queued for the note.
+                    store
+                        .write_with(&NoFaults, |tx| {
+                            tx.execute(
+                                "INSERT INTO ydoc_deferred_updates(workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms) \
+                                 SELECT workspace_id,version_id,object_id,'peer',0,recorded_at_ms \
+                                 FROM ydoc_deferred_updates WHERE origin_id='service-host:host'",
+                                [],
+                            )
+                            .map_err(SyncError::persist)?;
+                            Ok::<_, SyncError>(())
+                        })
+                        .unwrap();
+                }
+                import_resolution(&mut store, &built);
+                let (queued, refused, kept) = host_holds(&store);
+                if moved_on || queued_other {
+                    assert_eq!(
+                        store.table_row_count("ydoc_owner_bindings").unwrap(),
+                        1,
+                        "replace {replace}"
+                    );
+                    assert_eq!(
+                        queued, 1,
+                        "replace {replace}: a diverged import decides nothing"
+                    );
+                    assert!(refused.is_empty() && kept.is_empty(), "replace {replace}");
+                } else {
+                    assert_owner_closed(&store, &outbox);
+                    assert_eq!(queued, 0, "replace {replace}");
+                    assert_eq!(
+                        refused,
+                        [(0, crate::ydoc_apply::LIVE_UNADMITTED_UPDATE.to_owned())],
+                        "replace {replace}"
+                    );
+                    assert_eq!(kept, [digest]);
+                }
+            }
+        }
     }
 }

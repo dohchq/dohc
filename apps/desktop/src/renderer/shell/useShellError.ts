@@ -4,7 +4,7 @@ import type { ShareUnconfirmedChanges } from "../../workspaces/shareViewInfo";
 import { CreationPartialError, creationPartialNotice } from "@dohc/cli/creation";
 import { cutText } from "@dohc/workspace-contracts/names";
 import type { ReportKinds } from "../../ipc/bridgeContract";
-import { isLiveEditingRefusal, isPrivacyDenied, isStoppedWorkspaceCall, isStoppedWorkspaceRead, KEEPABLE_COLLECTIONS_REFUSALS, readCollectionsRefusal, readError, refusalCode, UNKNOWN_ERROR_WORDS, USE_THIS_COMPUTER, waitedForCollectionMove, withErrorWords } from "../../ipc/errorWords";
+import { isLiveEditingRefusal, isPrivacyDenied, isStoppedWorkspaceCall, isStoppedWorkspaceRead, KEEPABLE_COLLECTIONS_REFUSALS, readCollectionsRefusal, readError, refusalCode, UNKNOWN_ERROR_WORDS, USE_THIS_COMPUTER, waitedForCollectionMove, VOLUME_SHARES_NEW_FILES_WORDS, withErrorWords } from "../../ipc/errorWords";
 import type { NoticeTarget } from "../../notices/noticeTarget";
 import { bridge } from "../bridge";
 import { SETTLEMENT_ATTRIBUTION_REFUSED, SETTLEMENT_BINDING_CHANGED } from "../../notices/settlementRefusal";
@@ -42,6 +42,7 @@ export type ShellErrorKind =
   | "capture-recovery"
   | "capture-held"
   | "outside-copy-read"
+  | "protected-copy-read"
   | "live-edit-refused"
   | "chat-no-runner"
   | "chat-budget-paused"
@@ -62,6 +63,7 @@ export type ShellErrorKind =
   | "drive-no-atomic-placement"
   | "network-share"
   | "file-recovery-unavailable"
+  | "secret-key-unavailable"
   | "kept-files"
   | "retained-copies"
   | "saved-tabs"
@@ -150,6 +152,22 @@ export type ReportShellFailure = (failure: {
 export const ShellErrorReporter = createContext<ReportShellFailure | null>(null);
 // Takes back the row of one identity, once what it named has worked.
 export const ShellNoticeClear = createContext<((identity: string) => void) | null>(null);
+
+const SECRET_KEY_FILE = ".dohc/engine/secret.key";
+
+// Words for the engine's codes for an unavailable workspace secret key.
+function secretKeyWords(reason: string): string {
+  switch (reason) {
+    case "volume-shares-new-files":
+      return VOLUME_SHARES_NEW_FILES_WORDS;
+    case "key-missing":
+      return `The workspace secret key file is missing. Restore ${SECRET_KEY_FILE} from a backup, then choose Try again.`;
+    case "key-corrupt":
+      return `The workspace secret key file is damaged. Restore ${SECRET_KEY_FILE} from a backup, then choose Try again.`;
+    default:
+      return "dohc could not read the workspace secret key file.";
+  }
+}
 
 export function useShellError(workspaceId: string, retrySharedView?: () => void) {
   const currentWorkspace = useRef(workspaceId);
@@ -613,6 +631,25 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     },
     [clearKind, push],
   );
+  // Protected files such as `.env` wait on the workspace secret key. `reason`
+  // is the engine's code for why; null clears the row once the key works.
+  const reportSecretKeyUnavailable = useCallback(
+    (reason: string | null, retry: () => void) => {
+      if (reason === null) {
+        clearKind("secret-key-unavailable");
+        return;
+      }
+      push({
+        title: "History could not save protected files",
+        message: secretKeyWords(reason),
+        details: [["File", SECRET_KEY_FILE], ["Reason", reason]],
+        retry,
+        noDismiss: true,
+        kind: "secret-key-unavailable",
+      }, "repeat");
+    },
+    [clearKind, push],
+  );
   // History stopped recording for this workspace. Its identity names the
   // workspace, so a later report replaces the row and a healthy status
   // clears it; null clears it. `reasons` are extra Copy details lines,
@@ -1052,7 +1089,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     // retried goes, so a failure the retry has already reported again stays.
     // A share's collision-record row stays until a refresh completes.
     setShellErrors(current => target?.kind === "sync-refusal" || target?.kind === "capture-held" || target?.kind === "outside-copy-read" ||
-      target?.kind === "share-collision-record"
+      target?.kind === "protected-copy-read" || target?.kind === "share-collision-record"
       ? current
       : current.filter(error => error !== target));
   }, []);
@@ -1081,6 +1118,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     showRetainedCopies,
     showSavedTabsNotice,
     reportRecoveryUnavailable,
+    reportSecretKeyUnavailable,
     showHistoryPaused,
     showTabLimitError,
     clearTabLimitError,

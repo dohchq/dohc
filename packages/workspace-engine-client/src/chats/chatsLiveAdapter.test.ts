@@ -1339,6 +1339,55 @@ describe("ChatsLiveAdapter", () => {
     ).resolves.toMatchObject([{ state: "added" }]);
   });
 
+  it("sends a caller's idempotency key for a resolve and a reaction, and the default without one", async () => {
+    const requests: Request[] = [];
+    const adapter = new ChatsLiveAdapter(captureClient(requests), WORKSPACE, { workspaceId: "workspace" });
+    const resolve = { workspaceId: "workspace", threadId: "thread", messageId: "question", resolvedByMessageId: "answer" };
+    const reaction = {
+      workspaceId: "workspace", threadId: "thread", messageId: "message", emoji: "👍",
+      author: { authorId: "ice", kind: "human" as const, displayName: "Sam" }, state: "added" as const,
+    };
+
+    await expect(adapter.resolveChatDecision({ ...resolve, idempotencyKey: "stage-decision", stageReceipt: true }))
+      .rejects.toBe(SENTINEL);
+    await expect(adapter.resolveChatDecision(resolve)).rejects.toBe(SENTINEL);
+    await expect(adapter.setReaction({ ...reaction, idempotencyKey: "stage-reaction", stageReceipt: true }))
+      .rejects.toBe(SENTINEL);
+    await expect(adapter.setReaction({ ...reaction, idempotencyKey: "stage-reaction", stageReceipt: false }))
+      .rejects.toBe(SENTINEL);
+    await expect(adapter.setReaction(reaction)).rejects.toBe(SENTINEL);
+
+    expect(requests.map(request => request.idempotencyKey)).toEqual([
+      "stage-decision", "question:answer", "stage-reaction", "stage-reaction", expect.stringMatching(/^reaction-/),
+    ]);
+    expect(requests.map(request => Object.hasOwn(request.params as object, "stageReceipt"))).toEqual([
+      true, false, true, false, false,
+    ]);
+  });
+
+  it("asks for a stage receipt on a start or send only when the caller does", async () => {
+    const requests: Request[] = [];
+    const adapter = new ChatsLiveAdapter(captureClient(requests), WORKSPACE, { workspaceId: "workspace" });
+    const author = { kind: "human" as const, displayName: "Ada" };
+    const start = { workspaceId: "workspace", channelId: "channel", threadId: "thread", messageId: "opening",
+      author, authorActorKey: null, body: "Hi" };
+    const send = { workspaceId: "workspace", threadId: "thread", messageId: "reply", author, authorActorKey: null, body: "Hi" };
+
+    await expect(adapter.startChannelThread({ ...start, idempotencyKey: "stage-post", stageReceipt: true }))
+      .rejects.toBe(SENTINEL);
+    await expect(adapter.startChannelThread(start)).rejects.toBe(SENTINEL);
+    await expect(adapter.sendMessage({ ...send, idempotencyKey: "stage-reply", stageReceipt: true }))
+      .rejects.toBe(SENTINEL);
+    await expect(adapter.sendMessage(send)).rejects.toBe(SENTINEL);
+
+    expect(requests.map(request => (request.params as { stageReceipt?: unknown }).stageReceipt)).toEqual([
+      true, undefined, true, undefined,
+    ]);
+    expect(requests.map(request => request.idempotencyKey)).toEqual([
+      "stage-post", "thread:opening", "stage-reply", "reply",
+    ]);
+  });
+
   it("marks only the personal-feed head that the caller actually displayed", async () => {
     const { adapter, loopback } = loopbackAdapter();
     loopback.seedChannel({

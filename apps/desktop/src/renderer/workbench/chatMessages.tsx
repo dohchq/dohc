@@ -7,6 +7,7 @@ import { AgentName, ChatAvatar, isAgentAuthor, LinkHolderMark } from "./ChatAvat
 import { AgentColorAvatar, AgentColorName, AgentColorScope } from "./AgentColorPicker";
 import { ComposerSendButton } from "./ComposerSendButton";
 import { Ref } from "../ui/Ref";
+import { WorkRef } from "./workReferences";
 import { ChatMarkdown } from "./ChatMarkdown";
 import { retainChatParser } from "./chatMarkdownWorker";
 import { SkeletonRows } from "../ui/SkeletonRows";
@@ -34,7 +35,7 @@ import type {
   ChatMessageRecord,
   ChatReactionRecord,
 } from "../../ipc/bridgeContract";
-import { chatMentions, extractChatFileReferenceTokens, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
+import { chatMentions, scanChatLinks, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { fileReferenceKey, resolveFileMentionNavigationTargets } from "./chatFileMentions";
 import { isPersonalAgentId, personalAgentName, personalAgentsVersion, subscribeChosenColors } from "./chosenColors";
 
@@ -67,6 +68,13 @@ export function usePersonalAgentNames(): number {
 // known candidate gets a calm inline chip; everything else is plain text, so
 // the message reads exactly as written. Whitespace/newlines are preserved by
 // the parent's `whitespace-pre-wrap`.
+// Whether a body holds a file or work link: a chip a reader can open, so the
+// row around it is not itself a button.
+export function hasChatLinks(body: string): boolean {
+  const { files, works } = scanChatLinks(body);
+  return files.length > 0 || works.length > 0;
+}
+
 export function MentionText(props: {
   body: string;
   candidates: readonly MentionCandidate[];
@@ -78,7 +86,7 @@ export function MentionText(props: {
   // the rendered output into pieces, but must not reset Markdown fence state
   // and accidentally turn a handle inside an unmatched/multiline fence into a
   // mention.
-  const fileTokens = extractChatFileReferenceTokens(props.body);
+  const { files: fileTokens, works } = scanChatLinks(props.body);
   const fileTargets = resolveFileMentionNavigationTargets(
     fileTokens,
     props.attachments ?? [],
@@ -88,9 +96,20 @@ export function MentionText(props: {
   let cursor = 0;
   let mentionIndex = 0;
   let fileIndex = 0;
-  while (mentionIndex < mentions.length || fileIndex < fileTokens.length) {
+  let workIndex = 0;
+  while (mentionIndex < mentions.length || fileIndex < fileTokens.length || workIndex < works.length) {
     const mention = mentions[mentionIndex];
     const fileToken = fileTokens[fileIndex];
+    const work = works[workIndex];
+    if (work && (!mention || work.start < mention.start) && (!fileToken || work.start < fileToken.start)) {
+      if (work.start > cursor) content.push(props.body.slice(cursor, work.start));
+      content.push(
+        <WorkRef key={`work:${work.start}`} reference={work.reference} interactive={props.onOpenPath !== undefined} testId={props.testId} />,
+      );
+      cursor = work.end;
+      workIndex += 1;
+      continue;
+    }
     if (fileToken && (!mention || fileToken.start < mention.start)) {
       if (fileToken.start > cursor) content.push(props.body.slice(cursor, fileToken.start));
       const navigationTarget = fileTargets.get(fileReferenceKey(fileToken)) ?? fileToken;
@@ -492,18 +511,25 @@ const DAY_DIVIDER_TOP = 10;
 // edge, so the copy steps aside while the next day's divider passes under it.
 const DAY_DIVIDER_MARK = "pointer-events-none absolute inset-x-0 top-[calc(-100%_-_6px)] h-0";
 
+// A conversation keeps one column in the middle of a wide pane: the text's
+// 720px, its face and the insets. Rows, day lines, the working row and the
+// composer share it, so a row's actions and the composer stay beside the words.
+export const STREAM_COLUMN = "mx-auto w-full max-w-[808px]";
+
 // A row is a face column and the text, at the spacing each place gives it.
 // The stream stops text at 720px; a thread's panel is narrower than that.
 // A narrow row has no room beside its name, so its hover bar rises above it.
+// A row's fill hangs outside its text: the margin and padding add up to the
+// divider's inset, so faces and day lines keep one left edge.
 export const DENSITY = {
   stream: {
-    row: "grid-cols-[36px_minmax(0,1fr)] gap-x-3 px-5", divider: "mx-5", avatar: "post", name: "text-[14px]", text: "max-w-[720px]", toolbar: "-top-3.5 right-5",
+    row: "grid-cols-[36px_minmax(0,1fr)] gap-x-3 mx-2 px-3", divider: "mx-5", avatar: "post", name: "text-[14px]", text: "max-w-[720px]", toolbar: "-top-3.5 right-3",
   },
   thread: {
-    row: "grid-cols-[36px_minmax(0,1fr)] gap-x-3 px-4", divider: "mx-4", avatar: "post", name: "text-[14px]", text: "", toolbar: "-top-3.5 right-4",
+    row: "grid-cols-[36px_minmax(0,1fr)] gap-x-3 mx-1 px-3", divider: "mx-4", avatar: "post", name: "text-[14px]", text: "", toolbar: "-top-3.5 right-3",
   },
   narrow: {
-    row: "grid-cols-[28px_minmax(0,1fr)] gap-x-2.5 px-3", divider: "mx-3", avatar: "comment", name: "text-[13.5px]", text: "", toolbar: "-top-[30px] right-3",
+    row: "grid-cols-[28px_minmax(0,1fr)] gap-x-2.5 mx-1 px-2", divider: "mx-3", avatar: "comment", name: "text-[13.5px]", text: "", toolbar: "-top-[30px] right-2",
   },
 } as const;
 
@@ -587,6 +613,9 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
   density?: ChatDensity;
   // The pane's background, which the pinned day covers messages with.
   surface?: "bg" | "panel";
+  // Keeps the rows in the middle column of a wide pane. The host puts its
+  // composer in the same column.
+  column?: boolean;
 }) {
   const density = props.density ?? "stream";
   const anchor = props.anchor ?? "end";
@@ -754,10 +783,13 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
   }, [indexes, props.messages, messageKey]);
   const hasReactionButtons = Boolean(props.reactionControls && !props.reactionControls.readOnly);
   const canOpenPath = props.onOpenPath !== undefined;
+  // A work link opens without a file opener, so its row is actionable either way.
   const actionableIndexes = useMemo(() => {
-    if (hasReactionButtons || !canOpenPath) return [];
-    return props.messages.flatMap((message, index) =>
-      extractChatFileReferenceTokens(message.body).length > 0 ? [index] : []);
+    if (hasReactionButtons) return [];
+    return props.messages.flatMap((message, index) => {
+      const { files, works } = scanChatLinks(message.body);
+      return works.length > 0 || (canOpenPath && files.length > 0) ? [index] : [];
+    });
   }, [props.messages, hasReactionButtons, canOpenPath]);
   const pinned = useMemo(() => {
     const focusedIndex = focusedMessage ? indexes.get(focusedMessage) : undefined;
@@ -805,7 +837,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
         data-message-id={message.id}
         data-continues={continues ? "true" : "false"}
         data-open={open ? "true" : undefined}
-        className={`relative flex flex-col ${
+        className={`relative flex flex-col ${props.column ? STREAM_COLUMN : ""} ${
           props.flashMessageId === message.id ? "dohc-target-flash" : ""
         }`}
       >
@@ -838,7 +870,8 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
         ) : null}
         <AgentColorScope name={chatAuthorLabel(message)} kind={message.authorKind} presentation={message.presentation}>
         <div
-          className={`group relative grid ${sizes.row} ${continues ? "pt-px" : "pt-1.5"} pb-1 ${
+          // A new author's row stands 4px off the run before it, outside its fill.
+          className={`group relative grid rounded-md ${sizes.row} ${continues ? "py-0.5" : "mt-1 py-1"} ${
             open ? "bg-hue-blue/10 shadow-[inset_2px_0_0_var(--dohc-hue-blue)]" : "hover:bg-hover keyboard:focus-within:bg-hover"
           }`}
         >
@@ -933,17 +966,20 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
   // The list draws a row again only when this changes, so a rename shows on rows already drawn.
   const listExtraData = useMemo(() => ({ props, personalNames }), [props, personalNames]);
   if (!props.loading && props.messages.length === 0 && props.emptyPicture) {
-    return <div className="flex min-h-0 flex-1 flex-col overflow-y-auto py-2">
+    return <div className={`flex min-h-0 flex-1 flex-col overflow-y-auto py-2 ${props.column ? "[scrollbar-gutter:stable]" : ""}`}>
       <EmptyState picture={props.emptyPicture} title={props.emptyLabel} />
     </div>;
   }
   if (props.loading || props.messages.length === 0) {
-    return <div className={`flex min-h-0 flex-1 flex-col overflow-y-auto px-5 py-2 ${anchor === "end" ? "justify-end" : ""}`}>
-      {props.loading ? (
-        <SkeletonRows label="Loading..." className="pt-1" />
-      ) : (
-        <p className="m-0 py-4 text-[13px] text-muted">{props.emptyLabel}</p>
-      )}
+    // Loading rows and the empty line start where the messages will.
+    return <div className={`flex min-h-0 flex-1 flex-col overflow-y-auto py-2 ${props.column ? "[scrollbar-gutter:stable]" : ""} ${anchor === "end" ? "justify-end" : ""}`}>
+      <div className={`px-5 ${props.column ? STREAM_COLUMN : ""}`}>
+        {props.loading ? (
+          <SkeletonRows label="Loading..." className="pt-1" />
+        ) : (
+          <p className="m-0 py-4 text-[13px] text-muted">{props.emptyLabel}</p>
+        )}
+      </div>
     </div>;
   }
   return <div className="relative flex min-h-0 flex-1 flex-col">
@@ -954,7 +990,9 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
         className={`pointer-events-none absolute left-0 top-0 z-10 ${props.surface === "panel" ? "bg-panel" : "bg-bg"}`}
         style={{ right: scrollbarWidth }}
       >
-        <span className={`${DENSITY[density].divider} ${DAY_DIVIDER}`}>{topDay}</span>
+        <div className={props.column ? STREAM_COLUMN : undefined}>
+          <span className={`${DENSITY[density].divider} ${DAY_DIVIDER}`}>{topDay}</span>
+        </div>
       </div>
     ) : null}
     <LegendList
@@ -975,7 +1013,8 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
     onLayout={event => setViewportHeight(event.nativeEvent.layout.height)}
     recycleItems={false}
     alwaysRender={pinned}
-    className="min-h-0 flex-1 overflow-y-auto"
+    // The column keeps its place when a scrollbar appears.
+    className={`min-h-0 flex-1 overflow-y-auto ${props.column ? "[scrollbar-gutter:stable]" : ""}`}
     // A narrow row's hover bar rises above it, so the first row needs the room.
     style={{ paddingTop: density === "narrow" ? 30 : 8, paddingBottom: 8 }}
     role="list"

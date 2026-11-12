@@ -20,6 +20,7 @@
 
 pub mod capture;
 pub mod db_scan;
+mod empty_store;
 pub mod faults;
 pub mod fixtures;
 pub mod harness;
@@ -27,6 +28,7 @@ pub mod scratch;
 pub mod version_comparison;
 
 pub use db_scan::{EngineDbScan, bytes_contain};
+pub use empty_store::{EMPTY_STORE_IMAGE_ENV, open_empty_store, write_empty_store_image};
 pub use faults::{GateFaults, PanicFaults, ScriptedFaults};
 pub use fixtures::{decode_hex, flip_byte, open_store};
 pub use scratch::{

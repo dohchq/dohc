@@ -39,14 +39,16 @@ const DECLINING_MESSAGE = "Declining has not finished. Live editing of this file
 /** A Decline the relay refused to end. Asking again gets the same refusal. */
 export const DECLINE_REFUSED_MESSAGE = "Declining did not finish, and trying again will not finish it. Live editing of this file stays stopped.";
 type Authority = OwnerRestoreReview["acceptedEvents"][number]["metadata"]["accepted"]["authority"];
-// Account emails the relay resolved for this file's grants and authors, by account ID.
+// Account emails by account ID: those the relay resolved for this file's grants
+// and authors, and the owner's own.
 type Emails = ReadonlyMap<string, string>;
 const recipient = (row: {principalKind: string; email: string | null; userId: string | null}, emails: Emails) =>
   row.principalKind === "link" ? "Anyone using this link"
     : row.email ?? (row.userId === null ? undefined : emails.get(row.userId)) ?? `Account ${row.userId}`;
 // Who the relay accepted a change from. An account the relay could not name keeps its ID.
 const author = (authority: Authority, emails: Emails) => authority.principalKind === "owner" ? "Owner"
-  : authority.principalKind === "link" ? "Link participant" : emails.get(authority.principalId) ?? `Account ${authority.principalId}`;
+  : authority.principalKind === "link" ? "Link participant" : authority.principalKind === "personal" ? "Personal agent"
+  : emails.get(authority.principalId) ?? `Account ${authority.principalId}`;
 const time = (ms: number) => new Date(ms).toLocaleString();
 // One line per restore point: when, and who made the change. Points that read
 // the same gain their order, oldest first, so no two choices look alike.
@@ -69,16 +71,19 @@ function ChangeList({label, events, emails}: {label: string; events: OwnerRestor
       {events.slice(start, start + 50).map(({metadata}) => {
         const {authority, receipt, receivedAtMs} = metadata.accepted;
         const agent = metadata.authorSnapshot?.find(entry => entry.kind === "agent");
+        // A personal agent made the change itself, so it shows alone, owned by the account it acts for.
+        const personal = authority.principalKind === "personal" && agent !== undefined;
         // A guest gives both the name and the id, so either shows only when nothing in it hides or reorders text.
-        // A connected agent's id is dohc's, not a name it gave.
-        const given = shownAgentName(agent?.agentName) ?? (isConnectedAgentId(agent?.agentId) ? undefined : shownAgentName(agent?.agentId));
+        // A connected or personal agent's id is dohc's, not a name it gave.
+        const given = shownAgentName(agent?.agentName) ?? (personal || isConnectedAgentId(agent?.agentId) ? undefined : shownAgentName(agent?.agentId));
         const agentName = given ?? "Agent";
         return <li key={receipt.deliveryId}>
-          {author(authority, emails)}
-          {agent ? <span className="inline-flex max-w-full items-center gap-1"> · <AgentBadge testIdPrefix="owner-restore-change"
+          {personal ? null : author(authority, emails)}
+          {agent ? <span className="inline-flex max-w-full items-center gap-1">{personal ? null : " · "}<AgentBadge testIdPrefix="owner-restore-change"
             presentation={isConnectedAgentId(agent.agentId) ? {...neutralPresentation, connected: true} : undefined}
             named={given !== undefined}
-            author={{authorDisplayName: agentName, authorOwnerDisplayName: author(authority, emails)}} />
+            author={{authorDisplayName: agentName, authorOwnerDisplayName: personal
+              ? agent.onBehalfOf === undefined ? undefined : emails.get(agent.onBehalfOf) : author(authority, emails)}} />
             <span className="min-w-0 break-all text-agent">{agentName}</span></span> : null}
           <span> · {time(receivedAtMs)}</span>
           <details><summary className="cursor-pointer">Change details</summary><pre className="overflow-auto whitespace-pre-wrap break-all font-mono text-[11px]">{escapeHiddenText(JSON.stringify(metadata, null, 2))}</pre></details>
@@ -219,6 +224,8 @@ export function OwnerRestoreDialog({workspaceId, path, operationId, onClose, onB
     const checked = await bridge().ownerRestore({workspaceId, action: "review", operationId: saved.operationId});
     if (!current(token)) return;
     operation.current = checked.status;
+    // A personal agent's change names the owner it acts for by this email.
+    setEmails(known => new Map([...known, [checked.owner.userId, checked.owner.email] as const]));
     if (!checked.result || "kind" in checked.result) {setState({kind: "pending", message: "dohc could not prepare the full change review. Retry to review it again."}); return;}
     if (checked.result.operationId !== saved.operationId || checked.result.proposalDigest !== proposalDigest) throw Error("The restore review changed. Retry to review it again.");
     setState({kind: "review", review: checked.result});

@@ -39,7 +39,9 @@ describe("read-only reason on the text and CSV chips", () => {
     vi.unstubAllGlobals();
   });
 
+  // Other files keep the chip's title, which names any file; a page says its own.
   const SHARE = "This document is shared with you to read.";
+  const PAGE_SHARE = "This page is shared with you to read.";
   const TOO_LARGE = "This file is too large to edit in dohc.";
 
   it.each([false, true])("describes why the Markdown toggle is disabled, truncated: %s", async (truncated) => {
@@ -48,8 +50,8 @@ describe("read-only reason on the text and CSV chips", () => {
       : { text: "# Plan\n", truncated: false, contentHash: TEST_CONTENT_HASH });
     const user = userEvent.setup();
     render(<FileInspector workspaceId="ws-1" path="plan.md" readOnly={!truncated} />);
-    const toggle = await screen.findByRole("button", { name: "Edit", description: truncated ? TOO_LARGE : SHARE });
-    expect(toggle.getAttribute("title")).toBe(truncated ? TOO_LARGE : SHARE);
+    const toggle = await screen.findByRole("button", { name: "Edit", description: truncated ? TOO_LARGE : PAGE_SHARE });
+    expect(toggle.getAttribute("title")).toBe(truncated ? TOO_LARGE : PAGE_SHARE);
     toggle.focus();
     await user.keyboard("{Enter} ");
     await user.click(toggle);

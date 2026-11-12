@@ -7,7 +7,14 @@ Track the remaining public-contributor setup in [issue #1193](https://github.com
 ## Keep Blacksmith off
 
 The repository variable `BLACKSMITH_ENABLED` chooses the runners in `PR checks`.
-An absent variable or `false` runs PR checks and manual dispatch on GitHub-hosted `ubuntu-24.04` runners.
+With both runner variables unset, PR checks and default manual dispatch use GitHub-hosted `ubuntu-24.04` runners.
+A manual dispatch with `runner_provider=blacksmith` opts that run into Blacksmith while the switch stays off.
+Confinement always uses GitHub's `ubuntu-24.04` image.
+
+Set `BLACKSMITH_BUILD_VCPUS` to `4` or `8` to move only the shared JavaScript build (`shared preparation`) to Blacksmith.
+An absent, empty, or other value leaves that job on GitHub. Manual `runner_provider=blacksmith-builds` selects only that job using `runner_size`.
+The Rust archive stays on the same runner type as its test jobs because tests read build-time paths.
+The full-gate switch and manual `blacksmith` selection keep their existing runner sizes; manual build-only selection overrides the build variable's size.
 
 Inspect the switch:
 
@@ -59,13 +66,27 @@ There are no automatic main-branch, nightly, Windows, macOS, or release builds i
 Run a manual benchmark from the Actions page, or use:
 
 ```sh
-gh workflow run pr-checks.yml --repo dohchq/dohc --ref main -f gate=all -f runner_size=4
+gh workflow run pr-checks.yml --repo dohchq/dohc --ref main -f gate=all -f runner_provider=blacksmith -f runner_size=4
 ```
 
 The `gate` input accepts `all`, `js`, or `rust`.
-The `runner_size` input accepts `4` or `8` vCPUs and affects manual Blacksmith runs only.
+The `runner_provider` input accepts `github` (default), `blacksmith`, or `blacksmith-builds` for a manual opt-in.
+The default does not override `BLACKSMITH_ENABLED=true`.
+The `runner_size` input accepts `4` or `8` vCPUs and affects both manual Blacksmith modes.
 Manual runs execute the requested gates. Automatic PR runs execute the gates that the changed files select.
-The JavaScript job has a 60-minute timeout, and the engine gate has 90 minutes.
+Cloud timing targets are 300 s for JavaScript and 600 s for Rust, including preparation and reporting.
+Uncontended runs above target warn and pass through ceilings of 400 s and 700 s, respectively; runs above those ceilings fail.
+Gate timing records each gate's wall span, including both confinement jobs, without estimating workload from runner waits.
+A run above target with a counted runner wait above 30 s warns that timing is unmeasured and does not fail for time.
+A receipt transfer above 30 s excuses only its own seconds; the run still fails if it is above the ceiling without the transfer.
+Final verification alone emits timing warning annotations and step summary lines.
+A confinement job's runner wait counts only if it started after shared preparation finished.
+Individual jobs have separate termination limits. See [verification timing](verify-agent-work.md#verify-a-pull-request).
+
+The workflow runs 20 JavaScript workers and 20 Rust test partitions. Combined runs permit at most 25 concurrent jobs.
+The initial peak includes preparation, Rust build, Rust policy, and both confinement jobs.
+Rust test partitions wait for the JavaScript worker matrix; the JavaScript aggregate can report alongside them.
+The Rust phase also permits at most 25 jobs: its partitions, JavaScript reporting, preparation, Rust policy, and both confinement jobs.
 
 Compare cold and warm runs before choosing larger runners or shorter timeouts.
 Record elapsed time, billed cost, peak memory, and disk use for each gate.
@@ -93,7 +114,7 @@ If projected spending exceeds the budget, reduce unnecessary reruns or follow th
 PR checks continue on GitHub-hosted runners after Blacksmith is off.
 
 At $0.008 per minute, 950 PRs averaging ten combined 4-vCPU runner-minutes each cost $76 before credits and overhead.
-Count both test jobs across every run on each PR, including cancelled runs.
+Count all gate jobs across every run on each PR, including cancelled runs.
 The 2-vCPU selection and verdict jobs add cost beyond those test-job minutes.
 Use ten minutes per PR as a planning target, not a measured runtime or permission to remove required tests.
 The free allowance is shared across the organization; check its remaining balance before including it in the budget.
@@ -102,13 +123,19 @@ An 8-vCPU runner costs twice as much per minute. Choose it only after comparing 
 ## Sandbox suites run on GitHub's image
 
 Blacksmith's kernel has no Landlock, which the app compiler and the relay's replicas apply.
-The `confinement` job runs those suites on GitHub's `ubuntu-24.04` image whenever either gate runs.
-It runs the relay's replica suites in a container under Docker's default seccomp profile and the self-host compose's security options, as production runs the relay.
-It fails if an app compiler or replica test skips.
+The `compiler confinement` and `relay confinement` jobs always use GitHub's `ubuntu-24.04` image with Landlock whenever either gate runs.
+Their engine and compiler test binaries come from shared preparation's selected pool, including Blacksmith when enabled.
+Both download and check the prepared artifacts. Both install Rust because the engine fingerprint reads the compiler version.
+They run compiler and replica proofs on separate runners; only the compiler job needs nextest.
+Both confinement jobs overlap setup with preparation, then wait for their published artifacts under a 15-minute cap.
+Workers do not wait for confinement. Aggregates and final verification require both jobs and include their finishes in both gates' wall spans.
+If confinement fails, select **Re-run all jobs**. **Re-run failed jobs** does not create preparation artifacts for the new attempt.
+The relay job runs the replica suites in a container under Docker's default seccomp profile and the self-host compose's security options, as production runs the relay.
+Both jobs fail if any required test skips.
 The other jobs leave these suites out with `DOHC_CONFINEMENT_SUITES=exclude` and the `without-confinement` nextest profile.
-The local gate runs no Linux JavaScript, so the replica suites run only in this job.
+The local gate runs no Linux JavaScript, so the replica suites run only in the relay confinement job.
 
-Blacksmith's image sets `HOME` to the runner's home in every login shell, through `/etc/profile.d/blacksmith.sh`. The JavaScript job moves that file aside, so the login shell tests read the profile in their own `HOME`.
+The Bash profile fixtures use `--noprofile` and explicitly load their temporary profile. This isolates their assertions from the runner's system profile. They do not test automatic login-profile loading.
 
 ## Read the result
 
@@ -138,4 +165,5 @@ Record the run URL and verification scope in the PR before artifacts expire.
 Set `BLACKSMITH_ENABLED` to `false` with the command above.
 Cancel any queued or running Blacksmith workflows in GitHub Actions.
 Changing the variable alone does not cancel runners already allocated.
-New PR checks and manual dispatch use GitHub-hosted `ubuntu-24.04` runners.
+New PR checks and default manual dispatch use GitHub-hosted `ubuntu-24.04` runners.
+An explicit `runner_provider=blacksmith` manual dispatch still opts into Blacksmith, so leave that input at `github`.

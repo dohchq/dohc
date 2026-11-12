@@ -4,7 +4,7 @@
 //! driving a dirty-generation reconcile; a deadline that trips cleanly; and
 //! deterministic close/Drop tearing down the hash pool.
 
-mod common;
+use crate::common;
 
 use common::Scratch;
 use dohc_engine_files::{

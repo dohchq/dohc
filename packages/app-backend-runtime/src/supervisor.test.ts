@@ -24,6 +24,7 @@ const hash = (value: string) => createHash("sha256").update(value).digest("hex")
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 const schemaSql = "CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL);";
+let emptyCheckpoint: Buffer | undefined;
 const source = `globalThis.operations = { run(ctx,input) {
   if(input.refuse) ctx.refuse('full','No spaces remain.');
   if(input.id) ctx.db.execute('INSERT INTO items VALUES(?,?)',[input.id,input.value]);
@@ -34,8 +35,14 @@ const source = `globalThis.operations = { run(ctx,input) {
 async function fixture(options: { transform?: (journal: DatasetJournal) => DatasetJournal; launch?: AppRuntimeLauncher; maxWorkers?: number; schemaSql?:string; source?:string; tables?:string[];maintenanceStorage?:DatasetSupervisorOptions["maintenanceStorage"];nowMs?:()=>number; materializationEvents?:number; idleMs?:number; queueMs?:number; onMaintenanceError?:DatasetSupervisorOptions["onMaintenanceError"]; workerRoot?:string } = {}) {
   const approvedSchema=options.schemaSql ?? schemaSql, approvedSource=options.source ?? source;
   const directory = await mkdtemp(join(tmpdir(), "dohc-supervisor-"));
-  const seed = new DatabaseSync(join(directory, "seed.sqlite")); seed.exec(approvedSchema); seed.close();
-  const checkpoint = await readFile(join(directory, "seed.sqlite"));
+  let seedCheckpoint = approvedSchema === schemaSql ? emptyCheckpoint : undefined;
+  if (!seedCheckpoint) {
+    const seed = new DatabaseSync(join(directory, "seed.sqlite"));
+    try { seed.exec(approvedSchema); } finally { seed.close(); }
+    seedCheckpoint = await readFile(join(directory, "seed.sqlite"));
+    if (approvedSchema === schemaSql) emptyCheckpoint = seedCheckpoint;
+  }
+  const checkpoint = seedCheckpoint;
   const db = new DatabaseSync(join(directory, "authority.sqlite"));
   db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; BEGIN IMMEDIATE; CREATE TABLE grants(allowed INTEGER); INSERT INTO grants VALUES(1); CREATE TABLE files(attached INTEGER); INSERT INTO files VALUES(0); COMMIT;");
   function transaction<T>(work: () => T): T {
@@ -366,6 +373,21 @@ it("recovers committed data after the worker dies before finalization", async ()
   await expect(f.invoke({ id: "once", value: "saved" })).rejects.toThrow("stopped");
   expect(await f.invoke({ id: "once", value: "saved" })).toMatchObject({ replayed: true, revision: 1 });
   expect((await f.invoke({}, { readOnly: true })).result).toEqual([{ id: "once", value: "saved" }]);
+});
+
+it("keeps a committed action when cancellation arrives before finalization and replays its retry once", async () => {
+  const controller = new AbortController();
+  let cancelled = false;
+  const f = await fixture({ launch: launcher((command, controls) => {
+    if (command.command.kind === "finalize" && !cancelled) { cancelled = true; controller.abort(new Error("dohc could not confirm whether this action finished. Try again with the same idempotencyKey.")); }
+    else controls.deliver();
+  }) });
+  const input = { id: "once", value: "saved" };
+  await expect(f.invoke(input, { signal: controller.signal })).rejects.toThrow("dohc could not confirm whether this action finished. Try again with the same idempotencyKey.");
+  expect(f.journal.head(f.scope, f.authorize).cursor.revision).toBe(1);
+  expect(await f.invoke(input)).toMatchObject({ replayed: true, revision: 1, result: [input] });
+  expect((await f.invoke({}, { readOnly: true })).result).toEqual([input]);
+  expect(f.journal.head(f.scope, f.authorize).cursor.revision).toBe(1);
 });
 
 it("does not commit a prepared write after revocation", async () => {

@@ -26,6 +26,9 @@ const tests = desktopTestFiles(dirname(fileURLToPath(import.meta.url)), {
     // The report bound lasts as long as the window, and the module holds the
     // count. An earlier file in a shared worker would spend part of it.
     "src/renderer/rendererErrorReport.bound.test.ts",
+    // Update failures stay quiet across workspace remounts for this window.
+    // These tests spend that module state with their own failure IDs.
+    "src/renderer/UpdateButton.test.tsx",
   ],
 });
 // A full verification run, the nightly included, sets this and gives every

@@ -1,6 +1,7 @@
 import {fetchShareWeb} from "./apiVersion";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { OpenSharedApp } from "./OpenSharedApp";
+import { Icon } from "./icons";
 import {LINK_REFUSALS, parseLinkRefusal} from "@dohc/security-contract/link-refusal";
 
 interface Publication {publicationId: string; name: string}
@@ -15,8 +16,12 @@ function parsePage(value: unknown): {publications: Publication[]; nextCursor: st
   return page as unknown as {publications: Publication[]; nextCursor: string | null};
 }
 
-export function PublishedApps({session}: {session: string}) {return <PublicationList key={session} session={session}/>;}
-function PublicationList({session}: {session: string}) {
+/** Whether a link has apps to show. A list that could not load, or has more to load, counts as some, so its Retry and Load more stay reachable. */
+export type AppsState = "loading" | "none" | "some";
+export function PublishedApps({session, onState}: {session: string; onState?: (state: AppsState) => void}) {
+  return <PublicationList key={session} session={session} onState={onState}/>;
+}
+function PublicationList({session, onState}: {session: string; onState?: (state: AppsState) => void}) {
   const [publications, setPublications] = useState<Publication[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [status, setStatus] = useState<"loading" | "ready" | "failed">("loading");
@@ -43,10 +48,13 @@ function PublicationList({session}: {session: string}) {
     } catch {if (!controller.signal.aborted && active.current === controller) {setError("Could not load apps.");setStatus("failed");}}
   }
   useEffect(() => {void load(null);return () => active.current?.abort();}, []);
+  const state: AppsState = publications.length > 0 || status === "failed" || cursor !== null ? "some" : status === "loading" ? "loading" : "none";
+  // Before paint, so a link that holds only apps never shows its empty page first.
+  useLayoutEffect(() => {onState?.(state);}, [onState, state]);
   return <section aria-label="Shared apps">
     <h2>Apps</h2>
     {publications.length > 0 && <p>Apps can use external services. Their authors decide where they send data.</p>}
-    <ul>{publications.map(item => <li key={item.publicationId}><h3>{item.name}</h3><OpenSharedApp session={session} publicationId={item.publicationId} showNotice={false}/></li>)}</ul>
+    <ul>{publications.map(item => <li key={item.publicationId}><span className="tile"><Icon name="grid"/></span><h3>{item.name}</h3><OpenSharedApp session={session} publicationId={item.publicationId} showNotice={false}/></li>)}</ul>
     {status === "loading" && <p role="status">Loading apps</p>}
     {status === "failed" && <><p role="status">{error}</p><button className="handoff-button" onClick={() => void load(cursor)}>Retry</button></>}
     {status === "ready" && publications.length === 0 && cursor === null && <p>No apps are available on this link. Ask the owner to publish one.</p>}

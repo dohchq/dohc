@@ -1,5 +1,7 @@
 import {fetchShareWeb} from "./apiVersion";
 import {useEffect, useRef, useState} from "react";
+import {createPortal} from "react-dom";
+import {Icon} from "./icons";
 import {collectionWriteBody, COLLECTION_WRITES_PATH, parseCollectionWriteOutcome, type CollectionWriteOutcome} from "../../src/collectionWrites";
 import {DiscardDraft} from "./DiscardDraft";
 
@@ -27,8 +29,10 @@ async function sha256(text: string): Promise<string> {
  * owner's workspace history at once and reaches the owner's computer when it
  * next syncs, so the editor says only what the relay has taken.
  */
-export function CollectionFileEditor({session, path, blobSha256, available, onClose}: {
+export function CollectionFileEditor({session, path, blobSha256, available, onClose, barSlot}: {
   session: string; path: string; blobSha256: string; available: boolean; onClose(): void;
+  /** The page's bar, where Done and Save go. */
+  barSlot?: HTMLElement | null;
 }) {
   const [status, setStatus] = useState<Status>({kind: "loading"});
   // The content the draft replaces, and the text it replaced, so a save
@@ -96,25 +100,26 @@ export function CollectionFileEditor({session, path, blobSha256, available, onCl
   const leave = (action: () => void) => {if (unsaved) setLeaving(() => action); else action();};
   const saving = status.kind === "saving";
 
-  return <div className="viewer">
-    <header><div><p className="eyebrow">Shared by a dohc user</p><h1>{path}</h1></div>
-      <div className="header-actions">
-        <button className="handoff-button secondary" onClick={() => leave(onClose)}>Back to shared files</button>
-        {available && status.kind !== "loading" && status.kind !== "load-failed" &&
-          <button className="handoff-button primary" disabled={saving || !unsaved} onClick={save}>{saving ? "Saving…" : "Save"}</button>}
-      </div></header>
-    <main className="content collection-file-editor">
-      {!available && <p role="alert">Editing is no longer available. Copy your text before closing this file.</p>}
-      {status.kind === "loading" && <p role="status" className="muted">Opening the file…</p>}
-      {status.kind === "load-failed" && <div className="download-card"><p>dohc could not open this file for editing. Retry or ask the owner for access.</p>
-        {available && <button className="handoff-button secondary" onClick={() => load(base.blobSha256)}>Retry</button>}</div>}
+  const bar = <>
+    {status.kind === "loading" && <p role="status" className="named-document-status">Opening the file…</p>}
+    <button className="handoff-button secondary" onClick={() => leave(onClose)}>Done</button>
+    {available && status.kind !== "loading" && status.kind !== "load-failed" &&
+      <button className="handoff-button primary" disabled={saving || !unsaved} onClick={save}>{saving ? "Saving…" : "Save"}</button>}
+  </>;
+  return <>
+    {barSlot ? createPortal(bar, barSlot) : <div className="header-actions">{bar}</div>}
+    <div className="collection-file-editor">
+      {!available && <p className="edit-alert" role="alert">Editing is no longer available. Copy your text before closing this file.</p>}
+      {status.kind === "load-failed" && <div className="edit-notice" role="alert"><span className="tile bad"><Icon name="alert"/></span><div>
+        <p className="edit-notice-title">dohc could not open this file for editing. Retry in a moment. If it keeps happening, ask the owner.</p>
+        {available && <div className="edit-notice-actions"><button className="handoff-button secondary" onClick={() => load(base.blobSha256)}>Try again</button></div>}</div></div>}
       <StatusLine status={status} onReload={hash => leave(() => load(hash))}/>
       {status.kind !== "loading" && status.kind !== "load-failed" &&
         <textarea aria-label={path} spellCheck={false} value={draft} readOnly={!available || saving}
           onChange={event => {setDraft(event.target.value); if (!saving) setStatus({kind: "editing"});}}/>}
-    </main>
+    </div>
     {leaving && <DiscardDraft cancel={() => setLeaving(null)} confirm={() => {const action = leaving; setLeaving(null); action();}}/>}
-  </div>;
+  </>;
 }
 
 function StatusLine({status, onReload}: {status: Status; onReload(blobSha256: string): void}) {

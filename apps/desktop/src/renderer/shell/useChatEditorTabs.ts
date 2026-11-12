@@ -31,6 +31,8 @@ export function useChatEditorTabs(input: {
   enabled: boolean;
   // The agents in Settings, whose names agent chat tabs take.
   agents: readonly SettingsAgent[];
+  // Moves when an open conversation marks messages read.
+  readRevision: number;
 }) {
   const callbacks = useRef(input);
   callbacks.current = input;
@@ -159,6 +161,60 @@ export function useChatEditorTabs(input: {
       }).catch(() => undefined);
     }
   }, [get, input.enabled, pathsKey, input.workspaceId, sessionRevision]);
+  // A hidden conversation's tab counts its unread messages, as Chats does.
+  // One local read per workspace change, and none without a hidden one.
+  const [unreadRead, setUnread] = useState({ workspaceId: input.workspaceId, counts: NO_UNREAD });
+  // One read in flight across tab switches too; the latest tabs take the next.
+  const unreadReads = useRef({ reading: false, again: false, read: null as (() => Promise<void>) | null });
+  useEffect(() => {
+    const byChannel = new Map<string, string>();
+    for (const path of JSON.parse(pathsKey) as string[]) {
+      const tab = parseTab(path);
+      if (tab.kind === "chat" && (tab.target.kind === "channel" || tab.target.kind === "dm")) {
+        byChannel.set(tab.target.id, path);
+      }
+    }
+    if (!input.enabled || byChannel.size === 0) {
+      setUnread((current) => current.counts === NO_UNREAD ? current : { workspaceId: input.workspaceId, counts: NO_UNREAD });
+      return;
+    }
+    const workspaceId = input.workspaceId;
+    const reads = unreadReads.current;
+    const read = async () => {
+      const result = await bridge().listChatUnread({ workspaceId }).catch(() => null);
+      if (reads.read !== read || !result) return;
+      const counts = new Map(result.chats.flatMap(({ channelId, unreadCount }) => {
+        const path = byChannel.get(channelId);
+        return path && unreadCount > 0 ? [[path, unreadCount] as const] : [];
+      }));
+      // Most workspace changes are not messages: keep the shell's render.
+      setUnread((current) => current.workspaceId === workspaceId && sameCounts(current.counts, counts)
+        ? current
+        : { workspaceId, counts: counts.size === 0 ? NO_UNREAD : counts });
+    };
+    const request = async () => {
+      if (reads.reading) { reads.again = true; return; }
+      reads.reading = true;
+      try {
+        do {
+          reads.again = false;
+          await reads.read?.();
+        } while (reads.again);
+      } finally {
+        reads.reading = false;
+      }
+    };
+    reads.read = read;
+    void request();
+    const unsubscribe = bridge().onWorkspaceActivity((event) => {
+      if (event.workspaceId === workspaceId) void request();
+    });
+    return () => {
+      if (reads.read === read) reads.read = null;
+      unsubscribe();
+    };
+  }, [input.enabled, input.workspaceId, input.readRevision, pathsKey]);
+  const unread = unreadRead.workspaceId === input.workspaceId ? unreadRead.counts : NO_UNREAD;
   const titles = useMemo(() => new Map(
     [...store.current.entries].filter(([, entry]) => entry.nav).map(([path, entry]) =>
       [path, chatEditorTitle(entry.nav!, input.agents)] as const),
@@ -167,5 +223,11 @@ export function useChatEditorTabs(input: {
   const glyphs = useMemo(() => new Map(
     [...store.current.entries].filter(([, entry]) => isAgentNav(entry.nav)).map(([path]) => [path, "agent" as const]),
   ), [revision, input.workspaceId]);
-  return { get, open, titles, glyphs };
+  return { get, open, titles, glyphs, unread };
+}
+
+const NO_UNREAD: ReadonlyMap<string, number> = new Map();
+
+function sameCounts(a: ReadonlyMap<string, number>, b: ReadonlyMap<string, number>): boolean {
+  return a.size === b.size && [...a].every(([path, count]) => b.get(path) === count);
 }

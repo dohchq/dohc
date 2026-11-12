@@ -70,11 +70,12 @@ export function liveAuthorCheckpointAnticipated(suffix: readonly AdmittedLiveUpd
 
 /** Each account or link grant may introduce 16 declared-agent identities per window, with 32 across the document.
  * Further declarations keep the principal's credit but omit agent identity; content is still admitted.
+ * A personal agent declares nothing: the relay authenticated it, and it is its update's only author.
  */
 export function limitLiveDeclaredAgents(suffix: readonly AdmittedLiveUpdateMetadata[],
   authority: ServerDerivedLiveUpdateAuthority, snapshot: LiveAuthorSnapshot): LiveAuthorSnapshot {
   const agent = snapshot.find(author => author.kind === "agent");
-  if (!agent) return snapshot;
+  if (!agent || authority.principalKind === "personal") return snapshot;
   const identities = new Set<string>();
   for (const metadata of suffix) {
     if (metadata.firstSeen.length === 0 && (metadata.firstSeenDeletes?.length ?? 0) === 0) continue;

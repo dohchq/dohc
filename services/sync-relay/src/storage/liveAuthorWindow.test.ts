@@ -207,6 +207,19 @@ it("caps new declared agents at 32 across the document and ignores rows with no 
   expect(limitLiveDeclaredAgents([], authority, snapshot)).toEqual(snapshot);
 });
 
+it("keeps a personal agent as its update's only author after 32 agents were declared in the document", () => {
+  const owner = {principalKind: "owner" as const, principalId: "owner", grantId: null, grantGeneration: null};
+  const personal = {principalKind: "personal" as const, principalId: `p-${"a".repeat(26)}`, grantId: null, grantGeneration: null};
+  const declared: LiveAuthorEntry = {kind: "agent", agentId: "writer", onBehalfOf: "owner"};
+  // Other accounts declared them, so the owner stays under its own 16 and meets only the document's 32.
+  const suffix = Array.from({length: 32}, (_, index) => ({...admitted([human(`account-${index}`),
+    {...declared, agentId: `writer-${index}`, onBehalfOf: `account-${index}`}], [range(index)]),
+    accepted: {...admitted([]).accepted, authority: {...owner, principalId: `account-${index}`}}}));
+  const helper: LiveAuthorSnapshot = [{kind: "agent", agentId: personal.principalId, agentName: "Helper", onBehalfOf: "owner", depth: 0}];
+  expect(limitLiveDeclaredAgents(suffix, personal, helper)).toEqual(helper);
+  expect(limitLiveDeclaredAgents(suffix, owner, [human("owner"), declared])).toEqual([human("owner")]);
+});
+
 it("derives a stored coverage checkpoint trigger with the agent growth reserve", () => {
   const agent: LiveAuthorEntry = {kind: "agent", agentId: "worker", depth: 1};
   const {suffix, author} = byteBoundaryWindow(96 * 1024, agent);

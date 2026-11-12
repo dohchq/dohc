@@ -99,49 +99,8 @@ export function EmailShareForm(props: {
     <>
       {created === null ? (
         <>
-          <div className="flex flex-col gap-1">
-            <span className="text-[11px] font-medium text-subtle">Access</span>
-            <div className="flex gap-1.5" role="radiogroup" aria-label="Access">
-              {ACCESS_OPTIONS.map((option) => (
-                <button
-                  key={option.value}
-                  type="button"
-                  role="radio"
-                  aria-checked={access === option.value}
-                  data-testid={`share-access-${option.value}`}
-                  disabled={phase === "creating"}
-                  onClick={() => edit(() => setAccess(option.value))}
-                  className={`flex-1 rounded-md border px-2.5 py-1.5 text-left text-xs transition-colors disabled:opacity-50 ${
-                    access === option.value
-                      ? "border-ink bg-panel-2 text-ink"
-                      : "border-line bg-panel text-muted hover:text-ink"
-                  }`}
-                >
-                  {option.label}
-                </button>
-              ))}
-            </div>
-            <p
-              data-testid="share-access-helper"
-              className="m-0 text-[11px] leading-relaxed text-subtle"
-            >
-              {ACCESS_OPTIONS.find((option) => option.value === access)?.helper}
-            </p>
-            {access === "edit" && (
-              <p className="m-0 text-[11px] leading-relaxed text-subtle">
-                People who can edit can see the full History.
-              </p>
-            )}
-          </div>
-
-          {access === "edit" && props.target.kind === "paths" && (
-            <p className="m-0 text-xs leading-relaxed text-muted">
-              Browser editing lets them change shared Markdown files live when available. Other files use changes you accept.
-            </p>
-          )}
-
-          <label className="block text-[11px] font-medium text-subtle">
-            Share with (email)
+          <label className="block text-[12px] font-medium text-muted">
+            Email
             <input
               data-testid="share-email"
               type="email"
@@ -156,12 +115,54 @@ export function EmailShareForm(props: {
               }}
               placeholder="name@example.com"
               spellCheck={false}
-              className="mt-1 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink"
+              className="mt-1 h-8 w-full rounded-lg border border-line bg-bg px-3 text-[13px] text-ink placeholder:text-subtle focus:border-ink"
             />
           </label>
+          <div className="flex flex-col gap-1">
+            <span className="text-[12px] font-medium text-muted">Access</span>
+            <div className="flex gap-1.5" role="radiogroup" aria-label="Access">
+              {ACCESS_OPTIONS.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  role="radio"
+                  aria-checked={access === option.value}
+                  data-testid={`share-access-${option.value}`}
+                  disabled={phase === "creating"}
+                  onClick={() => edit(() => setAccess(option.value))}
+                  className={`h-8 flex-1 rounded-lg border px-3 text-left text-[13px] transition-colors disabled:opacity-50 ${
+                    access === option.value
+                      ? "border-ink bg-panel-2 text-ink"
+                      : "border-line bg-panel text-muted hover:text-ink"
+                  }`}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+            <p
+              data-testid="share-access-helper"
+              className="m-0 text-[12px] leading-relaxed text-subtle"
+            >
+              {ACCESS_OPTIONS.find((option) => option.value === access)?.helper}
+            </p>
+            {access === "edit" && (
+              <p className="m-0 text-[12px] leading-relaxed text-subtle">
+                People who can edit can see the full History.
+              </p>
+            )}
+          </div>
+
+          {access === "edit" && props.target.kind === "paths" && (
+            <p className="m-0 text-[12px] leading-relaxed text-muted">
+              Browser editing lets them change shared Markdown files live when available. Other files use changes you accept.
+            </p>
+          )}
+
           {note?.warning ? <AutomationShareNote note={note} /> : null}
           <PrimaryButton
             type="button"
+            className="self-end"
             data-testid="share-create"
             disabled={!canSubmit}
             onClick={() => void createShare()}
@@ -207,6 +208,7 @@ export function EmailShareForm(props: {
           </p>
           <SecondaryButton
             type="button"
+            className="self-end"
             data-testid="share-done"
             onClick={props.onDone}
           >

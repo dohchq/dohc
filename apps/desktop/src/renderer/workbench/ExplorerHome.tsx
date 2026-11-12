@@ -35,6 +35,7 @@ import {
   type HomeSectionId,
 } from "./explorerHomeModel";
 import { navigateTree, type FlatRow } from "./file-tree-nav";
+import { NOT_VERSIONED, NOT_VERSIONED_TITLE, useNotVersionedMark } from "./notVersionedMarks";
 import { TabGlyph } from "./tabGlyph";
 import { parseTab, siteTabPath } from "./workbenchState";
 
@@ -155,8 +156,8 @@ export function ExplorerHome(props: ExplorerHomeProps) {
 
   const noFolders = useMemo(() => new Set<string>(), []);
   const kinds = useMemo(
-    () => classifyFiles(files, explorer.collectionFolders, explorer.appFolders ?? noFolders),
-    [files, explorer.collectionFolders, explorer.appFolders, noFolders],
+    () => classifyFiles(files, explorer.collectionFolders, explorer.appFolders ?? noFolders, explorer.unclaimedDatasetFolders ?? noFolders),
+    [files, explorer.collectionFolders, explorer.appFolders, explorer.unclaimedDatasetFolders, noFolders],
   );
   const tree = useMemo(() => pageTree(kinds.pages), [kinds.pages]);
   const pages = useMemo(() => pageRows(tree, expanded), [tree, expanded]);
@@ -817,6 +818,8 @@ const HomeRow = memo(function HomeRow(props: {
   const onSetPinned = app ? props.onSetPinned : undefined;
   const pinned = props.pinned ?? false;
   const pinLabel = pinned ? "Unpin" : "Pin to sidebar";
+  // As in Files, a file the active version does not track is dimmed and says so.
+  const notVersioned = useNotVersionedMark(path ?? "", row.menu?.kind === "file");
   const fill = props.dropKind
     ? props.dropKind === "blocked"
       ? "bg-danger/10 text-danger"
@@ -827,7 +830,9 @@ const HomeRow = memo(function HomeRow(props: {
       ? `bg-(--dohc-selection) text-ink${active ? " font-medium" : ""}`
       : active
         ? "bg-selected font-medium text-ink"
-        : "text-muted hover:bg-hover hover:text-ink";
+        : notVersioned
+          ? "text-subtle hover:bg-hover hover:text-muted"
+          : "text-muted hover:bg-hover hover:text-ink";
   // An allowed drop target's glyph takes the success color.
   const glyphTone =
     props.dropKind && props.dropKind !== "blocked" && props.dropRole === "target"
@@ -877,7 +882,8 @@ const HomeRow = memo(function HomeRow(props: {
           aria-current={active ? "page" : undefined}
           aria-describedby={picked ? props.selectedNoteId : undefined}
           {...(row.folder ? { "aria-expanded": row.expanded } : {})}
-          title={row.unavailable ?? (app ? app.root : path)}
+          title={row.unavailable ?? (app ? app.root : notVersioned ? `${path}\n${NOT_VERSIONED}. ${NOT_VERSIONED_TITLE}` : path)}
+          data-not-versioned={notVersioned ? "true" : undefined}
           aria-disabled={row.unavailable && !row.fix ? true : undefined}
           tabIndex={props.tabbable ? 0 : -1}
           draggable={dragPath !== null ? true : undefined}
@@ -920,12 +926,15 @@ const HomeRow = memo(function HomeRow(props: {
               <span aria-hidden className="w-3 shrink-0" />
             )
           ) : null}
-          <HomeGlyph row={row} tone={glyphTone} />
+          <HomeGlyph row={row} tone={notVersioned && !props.dropKind ? `${glyphTone} opacity-60` : glyphTone} />
           {/* The folder hint gives way before the name; the title holds the whole path.
               A row with a cause keeps its sentence as the row's title, so its name has its own. */}
           <span title={cause ? row.label : undefined} className="min-w-0 flex-auto truncate">{row.label}</span>
           {row.detail ? (
             <span className={`min-w-0 truncate text-[12px] ${cause ? "col-[-2/-1] row-start-2 -mt-1 leading-4 text-warning" : "shrink-[999] text-subtle"}`}>{row.detail}</span>
+          ) : null}
+          {notVersioned && !cause ? (
+            <span data-testid="home-row-not-versioned" className="shrink-0 text-[11px] text-subtle">{NOT_VERSIONED}</span>
           ) : null}
           {app ? <AppMarks app={app} /> : null}
         </button>

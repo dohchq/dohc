@@ -30,7 +30,7 @@
 //! one content hash flips the plan from empty to `changed`, proving the golden
 //! is sensitive to exactly the hash bit.
 
-mod common;
+use crate::common;
 
 use common::Scratch;
 use dohc_engine_files::{

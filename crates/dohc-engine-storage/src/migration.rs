@@ -3682,6 +3682,34 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("live_document_changes.sql"),
         sets_user_version: None,
     },
+    // A live update applies under a personal agent's own authority.
+    Migration {
+        ordinal: 95,
+        id: "v2-live-personal-authority",
+        sql: include_str!("live_personal_authority.sql"),
+        sets_user_version: None,
+    },
+    // A work reference can name a chat or a thread.
+    Migration {
+        ordinal: 96,
+        id: "v2-work-reference-chats",
+        sql: include_str!("work_reference_chats.sql"),
+        sets_user_version: None,
+    },
+    // What each keyed chat write stage committed, for publication state.
+    Migration {
+        ordinal: 97,
+        id: "v2-chat-stage-receipts",
+        sql: include_str!("chat_stage_receipts.sql"),
+        sets_user_version: None,
+    },
+    // An owner marks a service host's update it queued while bound.
+    Migration {
+        ordinal: 98,
+        id: "v2-ydoc-deferred-while-bound",
+        sql: include_str!("ydoc_deferred_while_bound.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -5714,6 +5742,22 @@ mod tests {
                 "v2-live-document-changes",
                 "a2b983ef5ce31429bcf7e2ea3ac488deec15f3ba3afe07022e464003025e84dd",
             ),
+            (
+                "v2-live-personal-authority",
+                "00536edaa3f05c210affce630f2332e76630dc67ac94fbb4f0d5ebd01bf6b1ff",
+            ),
+            (
+                "v2-work-reference-chats",
+                "6c97a01bc90c9bc22b1b4f65b1625283973da1ea08002af1e31d673d4484886c",
+            ),
+            (
+                "v2-chat-stage-receipts",
+                "19ac78d41361ece77935fc56ee6d3d8d07170e8c3edbd4bc8967319387d08582",
+            ),
+            (
+                "v2-ydoc-deferred-while-bound",
+                "30bd92335f7e5afbb08144a5340745fc0dd4d90ba891062a79f236a7f1869323",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -6157,6 +6201,135 @@ mod tests {
         assert_eq!(messages(&conn), old_messages);
     }
 
+    /// The rebuild that admits `personal` authority keeps every application,
+    /// the restore fence and first-seen range that reference one, the column
+    /// order, both indexes and the released-tail triggers. The copy back
+    /// advances no released tail, and deferral ends with the migration.
+    #[test]
+    fn live_personal_authority_rebuild_keeps_applications_and_dependents() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("enable foreign keys");
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-live-personal-authority");
+        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 94);
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 95);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        let digest = crate::blob::put_binary_blob(&conn, &[0, 0]).unwrap();
+        let application = |delivery: &str, cursor: i64, authority: &str| {
+            format!(
+                "INSERT INTO live_device_update_applications (relay_database_namespace,workspace_id,\
+                 delivery_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,\
+                 restore_fence_generation,update_digest,update_byte_length,journal_cursor,\
+                 accepting_host_epoch,principal_kind,principal_id,grant_id,grant_generation,\
+                 received_at_ms,first_seen_count,local_ydoc_sequence,applied_host_id,applied_host_epoch,\
+                 applied_instance_id,applied_connection_id,admitted_metadata_json) VALUES ('relay','ws',\
+                 '{delivery}','main','doc','lineage','a.md','[\"a.md\"]',0,'{digest}',2,{cursor},1,\
+                 {authority},10,0,{cursor},'host',1,'instance','connection','{{}}')"
+            )
+        };
+        conn.execute_batch(&format!(
+            "INSERT INTO versioned_workspaces (workspace_id, main_version_id) VALUES ('ws', 'main');
+             INSERT INTO released_tail_generations VALUES ('ws', 'main', 'doc', 1);
+             {owner}; {named}; {link};
+             INSERT INTO live_device_application_first_seen VALUES ('relay','ws','restored',0,1,0,1);
+             INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,
+                 relay_database_namespace,operation_id,input_json,receipt_json,proposal_json,
+                 proposal_candidate_sha256,proposal_frozen_sha256,proposal_point_sha256,
+                 application_json,application_delivery_id)
+               VALUES ('ws','main','doc','relay','restore',
+                 '{{\"oldBinding\":{{\"lineageClaimId\":\"lineage\"}},\"newFence\":1}}','{{}}','{{}}',
+                 '{digest}','{digest}','{digest}','{{}}','restored');",
+            owner = application("restored", 1, "'owner','owner',NULL,NULL"),
+            named = application("named", 2, "'named','guest','grant-named',1"),
+            link = application("link", 3, "'link','holder','grant-link',2"),
+        ))
+        .unwrap();
+        let personal = application("personal", 4, "'personal','p-agent',NULL,NULL");
+        // Before the rebuild, no application can name a personal agent.
+        assert_eq!(
+            conn.execute_batch(&personal)
+                .unwrap_err()
+                .sqlite_error_code(),
+            Some(rusqlite::ErrorCode::ConstraintViolation)
+        );
+        let rows = |conn: &Connection, sql: &str| -> Vec<String> {
+            conn.prepare(sql)
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let evidence = |conn: &Connection| {
+            [
+                "SELECT json_array(relay_database_namespace,workspace_id,delivery_id,main_version_id,\
+                 object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,\
+                 update_digest,update_byte_length,journal_cursor,accepting_host_epoch,principal_kind,\
+                 principal_id,grant_id,grant_generation,received_at_ms,first_seen_count,\
+                 local_ydoc_sequence,applied_host_id,applied_host_epoch,applied_instance_id,\
+                 applied_connection_id,admitted_metadata_json) \
+                 FROM live_device_update_applications ORDER BY journal_cursor",
+                "SELECT name FROM pragma_table_info('live_device_update_applications') ORDER BY cid",
+                "SELECT json_array(type,name,sql) FROM sqlite_schema \
+                 WHERE tbl_name='live_device_update_applications' AND sql IS NOT NULL \
+                 AND type IN ('index','trigger') ORDER BY name",
+                "SELECT json_array(relay_database_namespace,workspace_id,delivery_id,ordinal,client_id,\
+                 start_clock,end_clock) FROM live_device_application_first_seen",
+                "SELECT json_array(operation_id,application_delivery_id) FROM live_restore_fences",
+                "SELECT json_array(object_id,generation) FROM released_tail_generations",
+            ]
+            .map(|sql| rows(conn, sql))
+        };
+        let old = evidence(&conn);
+        assert_eq!(old[0].len(), 3);
+        assert_eq!(old[2].len(), 5, "two indexes and three triggers");
+        assert_eq!(old[5], vec![r#"["doc",4]"#]);
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        assert_eq!(evidence(&conn), old);
+        assert_eq!(
+            conn.query_row("PRAGMA defer_foreign_keys", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            0
+        );
+
+        // A personal agent holds no grant and names itself.
+        for refused in [
+            application("personal", 4, "'personal','p-agent','grant',1"),
+            application("personal", 4, "'personal','p-agent','grant',NULL"),
+            application("personal", 4, "'personal','agent',NULL,NULL"),
+        ] {
+            assert_eq!(
+                conn.execute_batch(&refused)
+                    .unwrap_err()
+                    .sqlite_error_code(),
+                Some(rusqlite::ErrorCode::ConstraintViolation)
+            );
+        }
+        conn.execute_batch(&personal).unwrap();
+        conn.execute_batch(&application("owner", 5, "'owner','owner',NULL,NULL"))
+            .unwrap();
+        // The returned insert trigger advances the released tail once per row.
+        assert_eq!(
+            rows(
+                &conn,
+                "SELECT json_array(object_id,generation) FROM released_tail_generations"
+            ),
+            vec![r#"["doc",6]"#]
+        );
+    }
+
     /// The upgrade keeps the author of each unsettled update, and counts each
     /// identity those updates name once, with the bytes admission counts for
     /// its entry. A settled, unattributed or seed update adds none.
@@ -6232,6 +6405,102 @@ mod tests {
             )
             .unwrap();
         assert_eq!(totals, (2, 32 + 84));
+    }
+
+    /// Chats and threads become reference targets with every reference and
+    /// outbox row kept, and the rebuilt table still refuses a row that does
+    /// not fit its kind, a second reference to one target, and any change.
+    #[test]
+    fn work_reference_chats_keep_references_and_outbox() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-work-reference-chats");
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 96);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        let (a, b) = ("A".repeat(43), "B".repeat(43));
+        conn.execute_batch(&format!(
+            "INSERT INTO work_references(reference, workspace_id, target_kind, target_id, version_id, created_at_ms)              VALUES ('{a}', 'ws', 'file', 'object', 'main', 1);              INSERT INTO work_references(reference, workspace_id, target_kind, target_id, thread_id, channel_id, created_at_ms)              VALUES ('{b}', 'ws', 'message', 'message', 'thread', 'channel', 2);              INSERT INTO work_reference_outbox(reference, enqueued_at_ms) VALUES ('{b}', 7);"
+        ))
+        .unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        let rows: Vec<(String, String)> = conn
+            .prepare("SELECT reference, target_kind FROM work_references ORDER BY reference")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            [
+                (a.clone(), "file".to_owned()),
+                (b.clone(), "message".to_owned())
+            ]
+        );
+        let outbox: Vec<(String, i64)> = conn
+            .prepare("SELECT reference, enqueued_at_ms FROM work_reference_outbox")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(outbox, [(b.clone(), 7)]);
+        let insert = |reference: &str,
+                      kind: &str,
+                      target: &str,
+                      thread: Option<&str>,
+                      channel: Option<&str>| {
+            conn.execute(
+                "INSERT INTO work_references(reference, workspace_id, target_kind, target_id,                  thread_id, channel_id, created_at_ms) VALUES (?1, 'ws', ?2, ?3, ?4, ?5, 1)",
+                rusqlite::params![reference, kind, target, thread, channel],
+            )
+        };
+        assert!(insert(&"C".repeat(43), "chat", "target", None, None).is_ok());
+        assert!(insert(&"D".repeat(43), "thread", "target", None, Some("channel")).is_ok());
+        assert!(
+            insert(&"E".repeat(43), "thread", "target", None, None).is_err(),
+            "a second reference to one thread"
+        );
+        // Each bad shape names another target, so only its shape can refuse it.
+        for (kind, thread, channel) in [
+            ("chat", None, Some("channel")),
+            ("chat", Some("thread"), None),
+            ("thread", Some("thread"), None),
+            ("folder", None, None),
+        ] {
+            assert!(
+                insert(&"F".repeat(43), kind, "other", thread, channel).is_err(),
+                "{kind} {thread:?} {channel:?}"
+            );
+        }
+        assert!(
+            conn.execute(
+                "UPDATE work_references SET target_id = 'other' WHERE reference = ?1",
+                [&a]
+            )
+            .is_err()
+        );
+        assert!(
+            conn.execute(
+                "INSERT INTO work_reference_outbox(reference, enqueued_at_ms) VALUES (?1, 1)",
+                ["G".repeat(43)],
+            )
+            .is_err(),
+            "the outbox still names work_references"
+        );
+        conn.execute("DELETE FROM work_references WHERE reference = ?1", [&b])
+            .unwrap();
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM work_reference_outbox", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(left, 0, "deleting a reference still clears its outbox row");
     }
 
     /// The work reference tables arrive empty on an existing store, and refuse
@@ -7537,6 +7806,96 @@ mod tests {
             r#"[["hosted","legacy-unknown",null],["ordinary","local",null]]"#
         );
         released_hold_and_deferred_feed_constraints_hold(&conn);
+    }
+
+    /// The upgrade marks no queued row. An older build queued none of an
+    /// owner's updates while its note was bound, so a service host's row on
+    /// a lineage bound now was queued under no binding, before this binding
+    /// or between an earlier one and it, and one under a Stop that released
+    /// its note was too. Each stays unmarked and is decided as before: by the
+    /// echo check while the binding stands, or applied once it is gone. A
+    /// peer's row, another lineage's, an unbound note's and one with an
+    /// unknown feed stay unmarked too. The column takes only 0 and 1, and new
+    /// rows start at 0.
+    #[test]
+    fn deferred_while_bound_upgrade_marks_no_queued_row() {
+        let ctx = MigrationContext::current(1);
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let before = migration_index("v2-ydoc-deferred-while-bound");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch(
+            "INSERT INTO versioned_workspaces VALUES ('ws','main'); \
+             INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) \
+               VALUES ('ws','main','main','main',0); \
+             INSERT INTO file_objects (workspace_id,object_id,created_at_ms) \
+               VALUES ('ws','bound',0),('ws','unbound',0),('ws','released',0); \
+             INSERT INTO binary_blobs (sha256,byte_length,bytes) \
+               VALUES (printf('%064d',1),1,x'01'),(printf('%064d',9),1,x'09'); \
+             INSERT INTO ydoc_docs(workspace_id,version_id,object_id,updated_at_ms) \
+               VALUES ('ws','main','released',0); \
+             INSERT INTO ydoc_owner_bindings VALUES ('ws','main','bound',printf('%064d',1),'{}', \
+               'relay',1,0,0,printf('%064d',9),1,1); \
+             INSERT INTO ydoc_owner_bindings VALUES ('ws','main','released',printf('%064d',1),'{}', \
+               'relay',1,0,0,printf('%064d',9),1,1); \
+             INSERT INTO owner_live_stops VALUES ('ws','main','released','relay','released','{}',1,1); \
+             INSERT INTO ydoc_deferred_updates (workspace_id,version_id,object_id,origin_id, \
+               origin_seq,recorded_at_ms,lineage_claim_id,relay_seq,ingress_kind) VALUES \
+               ('ws','main','bound','service-host:a',1,5,printf('%064d',1),NULL,'local'), \
+               ('ws','main','bound','peer',1,5,printf('%064d',1),NULL,'local'), \
+               ('ws','main','bound','service-host:a',2,5,printf('%064d',2),NULL,'local'), \
+               ('ws','main','bound','service-host:a',3,5,printf('%064d',1),3,'legacy-unknown'), \
+               ('ws','main','unbound','service-host:a',4,5,printf('%064d',1),NULL,'local'), \
+               ('ws','main','released','service-host:a',6,5,printf('%064d',1),NULL,'local');",
+        )
+        .unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        let marks: String = conn
+            .query_row(
+                "SELECT json_group_array(json_array(object_id,origin_id,origin_seq,deferred_while_bound)) \
+                 FROM (SELECT * FROM ydoc_deferred_updates ORDER BY origin_id,origin_seq)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            marks,
+            r#"[["bound","peer",1,0],["bound","service-host:a",1,0],["bound","service-host:a",2,0],["bound","service-host:a",3,0],["unbound","service-host:a",4,0],["released","service-host:a",6,0]]"#
+        );
+        let index: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type='index' \
+                 AND name='ydoc_deferred_updates_while_bound'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(index, 1);
+        assert!(
+            conn.execute(
+                "UPDATE ydoc_deferred_updates SET deferred_while_bound=2",
+                []
+            )
+            .is_err()
+        );
+        conn.execute(
+            "INSERT INTO ydoc_deferred_updates (workspace_id,version_id,object_id,origin_id, \
+               origin_seq,recorded_at_ms,lineage_claim_id,relay_seq,ingress_kind) \
+             VALUES ('ws','main','bound','service-host:a',5,5,printf('%064d',1),NULL,'local')",
+            [],
+        )
+        .unwrap();
+        let fresh: i64 = conn
+            .query_row(
+                "SELECT deferred_while_bound FROM ydoc_deferred_updates WHERE origin_seq=5",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fresh, 0, "only the defer insert marks a row");
     }
 
     #[test]

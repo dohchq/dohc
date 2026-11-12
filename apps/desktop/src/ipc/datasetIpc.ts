@@ -82,6 +82,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
   collectionRulesChanged?(workspaceId: string, datasetId: string): void;
 }) {
   const migrations = new Map<string, { caller: Caller; workspaceId: string; signal: AbortSignal; scope?: string; credentialGeneration?: number; review: LocalDatasetMigrationPreparation; clear(): void }>();
+  const invocations = new Map<string, { caller: Caller; workspaceId: string; controller: AbortController }>();
   let preparingMigrations = 0;
   /**
    * `agent` is set only by the owner CLI, from the actor main derived for the
@@ -90,6 +91,21 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
    */
   return async (caller: Caller, raw: unknown, agent: LocalDatasetAgent | null = null) => {
     const request = DatasetRequest.parse(raw);
+    if (request.action === "cancelInvoke") {
+      // A dialog can unmount after its window switches workspaces. Only signal a request this sender registered.
+      const running = invocations.get(request.invocationId);
+      if (running && running.caller === caller && running.workspaceId === request.workspaceId) {
+        running.controller.abort(new Error("dohc could not confirm whether this action finished. Try again with the same idempotencyKey."));
+      }
+      return { kind: "invoke-cancel-requested" as const, outcome: "unknown" as const };
+    }
+    const invocationId = request.action === "invoke" ? request.invocationId : undefined;
+    const invocation = invocationId ? { caller, workspaceId: request.workspaceId, controller: new AbortController() } : undefined;
+    if (invocationId && invocation) {
+      if (invocations.has(invocationId)) throw new Error("This Collection request is already running.");
+      if (invocations.size >= 256) throw new Error("Too many Collection requests are running. Wait for one to finish.");
+      invocations.set(invocationId, invocation);
+    }
     let formFailure: ((error: unknown) => CreationPartial) | undefined;
     let formPartial: CreationPartial | undefined;
     // Preparing a change reads the files as they are now, so it settles disk edits first.
@@ -101,6 +117,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         catch (error) { throw new DatasetScopeError(error); }
       };
       current();
+      const invokeSignal = invocation ? AbortSignal.any([operation.signal, invocation.controller.signal]) : operation.signal;
       let sourceCapture: SourceCaptureStatus = { heldFiles: [], deferredWrites: [] };
       const flushSourceCapture = async () => {
         sourceCapture = await dependencies.flushSourceCapture(operation.workspace, operation.signal);
@@ -167,7 +184,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         if (input.action === "upload") { const result = await data.upload(input); current(); return { kind: "uploaded" as const, ...result }; }
         if (input.action === "file") { const result = await data.file(input); current(); return { kind: "file" as const, ...result }; }
         if (input.action === "invoke") {
-          try { const result = await data.invoke({ ...input, signal: operation.signal }); current(); return { kind: "invoked" as const, ...DatasetInvocationResult.parse(result) }; }
+          try { invokeSignal.throwIfAborted(); const result = await data.invoke({ ...input, signal: invokeSignal }); current(); return { kind: "invoked" as const, ...DatasetInvocationResult.parse(result) }; }
           catch (error) { current(); if (isAppBackendRuntimeError(error)) return { kind: "refused" as const, ...error.refusal }; throw error; }
         }
         throw new Error("This Collection action is unavailable.");
@@ -495,7 +512,8 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
       }
       if (input.action === "invoke") {
         try {
-          const result = await data.invoke({ ...input, signal: operation.signal, ...(agent === null ? {} : { agent }) });
+          invokeSignal.throwIfAborted();
+          const result = await data.invoke({ ...input, signal: invokeSignal, ...(agent === null ? {} : { agent }) });
           current();
           return { kind: "invoked" as const, ...DatasetInvocationResult.parse(result) };
         } catch (error) {
@@ -540,6 +558,6 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
       if (formPartial) return formPartial;
       if (formFailure) return formFailure(new DatasetScopeError(error));
       throw error;
-    }
+    } finally { if (invocationId) invocations.delete(invocationId); }
   };
 }

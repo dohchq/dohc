@@ -217,6 +217,7 @@ export function createShareSummaries(
       grantId: grant.grantId,
       recipientUserId: grant.principalUserId,
       recipientEmail,
+      access: grant.access,
     };
   };
 

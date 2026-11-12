@@ -293,7 +293,7 @@ describe("capability identities and exposure", () => {
     expect(row.payload).toBe(DatasetRequest);
     expect(row.result).toBe(DatasetResult);
     expect(Object.keys(row.capabilityIdsByAction!).sort()).toEqual(DatasetRequest.options.map(option => option.shape.action.value).sort());
-    expect(Object.values(row.capabilityIdsByAction!)).toHaveLength(35);
+    expect(Object.values(row.capabilityIdsByAction!)).toHaveLength(36);
     assertAdmission(row);
   });
 

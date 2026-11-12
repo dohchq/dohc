@@ -187,6 +187,7 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
   EngineWorkspaceRetryDeadlineError: { "*": "dohc could not reach this workspace in time. Try again." },
   EngineWorkspaceRebuildingError: { "*": "dohc is rebuilding this workspace's data store. Try again in a moment." },
   EngineWorkspaceShuttingDownError: { "*": "dohc is quitting." },
+  EngineWorkspaceFolderTimeoutError: { "*": "dohc could not reach this workspace's folder." },
   EngineWorkspaceRebindError: { "*": null },
   EngineWorkspaceSessionsClosedError: { "*": null },
   EngineRequestError: { "*": null },
@@ -392,6 +393,9 @@ export function readError(error: unknown): ReadError {
     const [title = "", ...body] = message.split("\n");
     return { title, words: body.join("\n"), mapped: false, cause: null };
   }
+  // The Explorer asks before changing these files. Anywhere else the
+  // sentence says what happened; the file names follow it.
+  if (name === "NotVersionedError") return { words: message.split("\n")[0] ?? message, mapped: false, cause: null };
   if (name === "ReservedWorkspaceIdError") {
     return { title: RESERVED_WORKSPACE_ID_TITLE, words: message, mapped: false, cause: text, ...NOT_A_WORKSPACE };
   }
@@ -453,6 +457,14 @@ export const AGENT_ID_TAKEN_ERROR = "AgentIdTakenError";
 /** Whether a settings save was refused because an agent it adds is in the file by then. */
 export function isAgentIdTaken(error: unknown): boolean {
   return parse(error).name === AGENT_ID_TAKEN_ERROR;
+}
+
+/** The class of a protected copy's Restore or Discard that fails the same way every time. */
+export const PROTECTED_COPY_FINAL_ERROR = "ProtectedCopyFinalError";
+
+/** Whether Try again would give a protected copy's Restore or Discard the same answer. */
+export function isProtectedCopyFinal(error: unknown): boolean {
+  return parse(error).name === PROTECTED_COPY_FINAL_ERROR;
 }
 
 export const GROUP_NAME_TAKEN_ERROR = "GroupNameTakenError";
@@ -683,6 +695,15 @@ export function isShareReadOnlyRefusal(error: unknown): boolean {
 /** History's current rules refused a restore. Its words say why and what to do next. */
 export function isRestorePolicyRefusal(error: unknown): boolean {
   return parse(error).name === "RestorePolicyRefusalError";
+}
+
+/**
+ * The files a rename, move or delete in a version would change in Main too,
+ * because the version does not track them, or null for any other error.
+ */
+export function notVersionedPaths(error: unknown): string[] | null {
+  const { name, message } = parse(error);
+  return name === "NotVersionedError" ? message.split("\n").slice(1).filter(Boolean) : null;
 }
 
 /** A folder move or delete refused while a page in it has live editing on. Try again reruns it. */

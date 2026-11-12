@@ -1012,6 +1012,7 @@ fn fence_and_cancel(
             coordinate.clone(),
             200,
             &NoFaults,
+            |_, _| Ok(()),
         )
         .unwrap();
     let input = RestoreFenceCancellation {
@@ -1044,6 +1045,209 @@ fn fence_and_cancel(
         )
         .unwrap();
     *cancelled
+}
+
+/// A service host's update is held for a bootstrapped live note, and the
+/// owner's feed never reaches it. A restore fence decides it in its
+/// own transaction: the update is refused as on arrival, its bytes are kept,
+/// and the fence commits. A fence refused for another reason first decides
+/// nothing. With nothing deciding there, the same fence commits and leaves
+/// the update held.
+#[test]
+fn a_restore_fence_decides_what_the_owner_holds() {
+    use dohc_engine_collab::live_update_application::{
+        ApplicationHostCoordinate, NativeRestoreFence, NativeRestoreSelection,
+        RestoreDeliveryOrigin,
+    };
+    use dohc_engine_collab::owner_outbox::{
+        OwnerOutboxLimits,
+        draft::{ObservedOwnerBinding, install_observed_binding_in_tx},
+    };
+    /// The restore's fence, with the owner's decision in its transaction
+    /// only if `decides`.
+    fn fence_deciding(
+        f: &mut Fixture,
+        fence: NativeRestoreFence,
+        decides: bool,
+    ) -> Result<(), ApplicationError> {
+        f._owner
+            .fence_restore(
+                &mut f.store,
+                None,
+                fence,
+                ApplicationHostCoordinate {
+                    host_id: "host".into(),
+                    host_epoch: 1,
+                    instance_id: "instance".into(),
+                    connection_id: "connection".into(),
+                },
+                200,
+                &NoFaults,
+                |tx, key| {
+                    if !decides {
+                        return Ok(());
+                    }
+                    crate::decide_owner_holds_in_tx(tx, key).map_err(|error| match error {
+                        SyncError::Storage(storage) => ApplicationError::Storage(storage),
+                        _ => ApplicationError::Corrupt,
+                    })
+                },
+            )
+            .map(|_| ())
+    }
+    for decides in [false, true] {
+        let mut f = fixture(true);
+        bootstrap(&mut f, false).unwrap();
+        let pushed = operations(&f.store).last().unwrap().origin_seq;
+        crate::cursor::write_pushed_seq(
+            &mut f.store,
+            "ws",
+            "owner-origin",
+            pushed,
+            &NoFaults,
+            &NoLiveLeases,
+            300,
+        )
+        .unwrap();
+        let key = DocKey::new("ws", "main", "object").unwrap();
+        let marker = dohc_engine_collab::read_marker(&f.store, &key)
+            .unwrap()
+            .unwrap();
+        let checkpoint = f
+            .store
+            .read_with(|conn| dohc_engine_collab::load_doc_in(conn, &key))
+            .unwrap()
+            .encode_full_state();
+        let observed = ObservedOwnerBinding {
+            binding: f.binding.clone(),
+            relay_database_namespace: "relay".into(),
+            revision: 1,
+            accepted_cursor: 0,
+            native_head_sequence: marker.head_update_seq,
+            checkpoint_digest: hex_sha256(&checkpoint),
+            limits: OwnerOutboxLimits {
+                max_pending_bytes: 1_000_000,
+                max_pending_age_ms: 60_000,
+            },
+        };
+        f.store
+            .write_with(&NoFaults, |tx| {
+                install_observed_binding_in_tx(tx, "ws", &observed, &checkpoint)
+            })
+            .unwrap();
+        let host = dohc_engine_collab::Ydoc::wire();
+        host.apply(&checkpoint).unwrap();
+        let edit = host.richdoc_append_paragraph("the host's held update");
+        let digest = f.store.put_binary_blob(&edit).unwrap();
+        let update = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
+            workspace_id: "ws".into(),
+            origin_id: "service-host:host".into(),
+            origin_seq: 0,
+            op_kind: "ydoc.update".into(),
+            payload: crate::ydoc_update_payload(
+                &key,
+                "note.md",
+                ContentKind::Richdoc,
+                &digest,
+                &f.binding.lineage_claim_id,
+                None,
+                None,
+                false,
+            ),
+            recorded_at_ms: 5,
+            relay_seq: Some(1_000),
+        };
+        // This device is the note's own live host, so it marks nothing for
+        // the note's lineage, and the row is seeded held. The fence decides a
+        // row held under any lineage of the note.
+        let lineage = f.binding.lineage_claim_id.clone();
+        crate::apply_envelope_with(&mut f.store, &update, &NoFaults, |tx, op| {
+            crate::ydoc_apply::defer_ydoc_update_in_tx(tx, &key, op, &lineage, 1_000, None)?;
+            tx.execute(
+                "UPDATE ydoc_deferred_updates SET deferred_while_bound=1",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok(())
+        })
+        .unwrap();
+        let holds = |store: &EngineStore| {
+            store
+                .read_with(|conn| {
+                    let queued: i64 = conn.query_row(
+                        "SELECT COUNT(*) FROM ydoc_deferred_updates \
+                         WHERE origin_id='service-host:host' AND deferred_while_bound=1",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    let refused = conn
+                        .prepare(
+                            "SELECT origin_seq,reason_message FROM replication_pending_refusals \
+                             WHERE origin_id='service-host:host' ORDER BY origin_seq",
+                        )?
+                        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                        .collect::<Result<Vec<(i64, String)>, _>>()?;
+                    let kept = conn
+                        .prepare(
+                            "SELECT update_sha256 FROM replication_refused_ydoc_blobs \
+                             WHERE origin_id='service-host:host' ORDER BY origin_seq",
+                        )?
+                        .query_map([], |row| row.get(0))?
+                        .collect::<Result<Vec<String>, _>>()?;
+                    Ok::<_, rusqlite::Error>((queued, refused, kept))
+                })
+                .unwrap()
+        };
+        assert_eq!(holds(&f.store), (1, vec![], vec![]));
+        let applied_sequence: i64 = f
+            .store
+            .read_with(|c| c.query_row("SELECT head_update_seq FROM ydoc_docs", [], |r| r.get(0)))
+            .unwrap();
+        let next = f.binding.restore_fence_generation + 1;
+        let fence = NativeRestoreFence {
+            point: NativeRestoreSelection {
+                journal_cursor: 0,
+                receipt_digest: f.binding.lineage_claim_id.clone(),
+            },
+            operation_id: format!("restore-{next}"),
+            relay_database_namespace: "relay".into(),
+            old_binding: f.binding.clone(),
+            host_id: "host".into(),
+            new_fence: next,
+            origin: RestoreDeliveryOrigin::Bootstrap {
+                id: "bootstrap".into(),
+            },
+            terminal: None,
+            applied_sequence,
+        };
+        // Refused for another reason, here a stale applied sequence, the
+        // fence decides nothing: the update stays held.
+        let mut stale = fence.clone();
+        stale.applied_sequence += 1;
+        assert!(fence_deciding(&mut f, stale, decides).is_err());
+        assert_eq!(count(&f.store, "live_restore_fences"), 0);
+        assert_eq!(holds(&f.store), (1, vec![], vec![]));
+        fence_deciding(&mut f, fence, decides).unwrap();
+        assert_eq!(
+            count(&f.store, "live_restore_fences"),
+            1,
+            "decides {decides}"
+        );
+        if decides {
+            assert_eq!(
+                holds(&f.store),
+                (
+                    0,
+                    vec![(0, crate::ydoc_apply::LIVE_UNADMITTED_UPDATE.to_owned())],
+                    vec![digest]
+                )
+            );
+        } else {
+            assert_eq!(holds(&f.store), (1, vec![], vec![]));
+        }
+    }
 }
 
 /// Repeat the latest cancellation `count` times in one transaction, each row
@@ -1440,6 +1644,7 @@ fn a_successors_cancelled_restore_exports_and_imports_with_its_origin() {
                 coordinate.clone(),
                 300 + round,
                 &NoFaults,
+                |_, _| Ok(()),
             )
             .unwrap();
         let cancelled = cancel_restore_fence(
@@ -1829,6 +2034,7 @@ fn an_audited_sources_adopted_owner_exports_and_imports_its_cancelled_restore() 
             coordinate.clone(),
             301,
             &NoFaults,
+            |_, _| Ok(()),
         )
         .unwrap();
     let cancelled = cancel_restore_fence(
@@ -1962,6 +2168,7 @@ fn a_note_keeps_saving_after_a_cancelled_restore() {
             coordinate.clone(),
             301,
             &NoFaults,
+            |_, _| Ok(()),
         )
         .unwrap();
     let cancelled = cancel_restore_fence(

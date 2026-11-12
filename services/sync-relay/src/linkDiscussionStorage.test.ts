@@ -121,7 +121,7 @@ function seedShare(
     access: input.access ?? "comment",
     createdAtMs: createdAtMs + 1,
     credentialId: `credential-${suffix}`,
-    secretHash: `secret-hash-${suffix}`,
+    secretSealed: null, secretHash: `secret-hash-${suffix}`,
   });
   const hash = capabilityHash(`capability-${suffix}`);
   seedLinkSession(storage, {
@@ -1003,7 +1003,7 @@ describe("durable link discussion storage", () => {
             guard: () => {},
             mintCredential: () => ({
               credentialId: "rotated-replay-credential",
-              secretHash: "rotated-replay-secret-hash",
+              secretSealed: null, secretHash: "rotated-replay-secret-hash",
             }),
           }),
         ).toMatchObject({ ok: true });
@@ -1050,7 +1050,7 @@ describe("durable link discussion storage", () => {
         guard: () => {},
         mintCredential: () => ({
           credentialId: "retuned-credential",
-          secretHash: "retuned-secret-hash",
+          secretSealed: null, secretHash: "retuned-secret-hash",
         }),
       }),
     ).toMatchObject({ ok: true, grant: { generation: 2, access: "comment" } });
@@ -1081,7 +1081,7 @@ describe("durable link discussion storage", () => {
         guard: () => {},
         mintCredential: () => ({
           credentialId: "rotated-credential",
-          secretHash: "rotated-secret-hash",
+          secretSealed: null, secretHash: "rotated-secret-hash",
         }),
       }),
     ).toMatchObject({ ok: true, grant: { generation: 3 } });
@@ -1569,7 +1569,7 @@ describe("durable link discussion storage", () => {
         guard: () => {},
         mintCredential: () => ({
           credentialId: "population-generation-two",
-          secretHash: "population-generation-two-secret",
+          secretSealed: null, secretHash: "population-generation-two-secret",
         }),
       }),
     ).toMatchObject({ ok: true, grant: { generation: 2 } });
@@ -1629,7 +1629,7 @@ describe("durable link discussion storage", () => {
         guard: () => {},
         mintCredential: () => ({
           credentialId: "debt-generation-two",
-          secretHash: "debt-generation-two-secret",
+          secretSealed: null, secretHash: "debt-generation-two-secret",
         }),
       }),
     ).toMatchObject({ ok: true, grant: { generation: 2 } });

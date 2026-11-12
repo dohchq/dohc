@@ -496,8 +496,10 @@ export type SaveOwnerLiveRecoveryCopyResult = z.infer<typeof SaveOwnerLiveRecove
 export const OwnerLiveDocument = z.object({
   path: SAFE_RELATIVE_PATH,
   status: z.enum(["ready", "preparing", "paused", "unavailable", "retired"]),
-  reason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "conflict-parent-withheld"]).optional(),
+  reason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "conflict-parent-withheld", "live-history-over-budget"]).optional(),
   canResume: z.boolean(),
+  // A retired row's: its owner's Pause or Stop retired it. One the server released without either goes live again when its owner opens it.
+  stopped: z.boolean().optional(),
   deferredStop: z.object({unsentEdits: z.number().int().nonnegative().safe(), editable: z.boolean()}).strict().optional(),
   // The server refused this document's edits for good, and dohc keeps them where `storedOn` says.
   quarantine: OwnerLiveQuarantine.shape.recovery.optional(),
@@ -521,11 +523,16 @@ export function saveOnlyLiveDocuments(quarantines: readonly OwnerLiveQuarantine[
     ...(row.reason === "retired" ? {sessionEnded: true} : {})}));
 }
 // What a Stop did with edits the server refused: wrote them into the file,
-// or kept them on this computer because it could not.
+// or kept them on this computer because it could not. `already` when the
+// server says live editing was already stopped, so this Stop changed nothing.
 export const StopOwnerLiveDocumentResult = z.object({
   keptEdits: z.enum(["none", "recovered", "kept"]),
+  already: z.literal(true).optional(),
 }).strict();
 export type StopOwnerLiveDocumentResult = z.infer<typeof StopOwnerLiveDocumentResult>;
+// `already` when the server says the document was already live, so this Resume changed nothing.
+export const ResumeOwnerLiveDocumentResult = z.object({already: z.literal(true).optional()}).strict();
+export type ResumeOwnerLiveDocumentResult = z.infer<typeof ResumeOwnerLiveDocumentResult>;
 export const ListOwnerLiveDocumentsPayload = WorkspaceIdPayload.extend({
   retiredAfter: SAFE_RELATIVE_PATH.optional(),
 }).strict();
@@ -791,9 +798,10 @@ const CollectionQueryFilterSchema: z.ZodType<CollectionQueryFilter> = z.object({
 export const ListCollectionsPayload = WorkspaceIdPayload;
 export type ListCollectionsPayload = z.infer<typeof ListCollectionsPayload>;
 
-export const ListCollectionsResult: z.ZodType<CollectionListResultContract> =
-  z.object({ collections: z.array(CollectionSummarySchema).max(10_000) });
-export type ListCollectionsResult = CollectionListResultContract;
+// `unclaimedDatasetFolders`: folders whose dataset.json names no Collection on this computer, as a deleted one leaves.
+export type ListCollectionsResult = CollectionListResultContract & { unclaimedDatasetFolders: string[] };
+export const ListCollectionsResult: z.ZodType<ListCollectionsResult> =
+  z.object({ collections: z.array(CollectionSummarySchema).max(10_000), unclaimedDatasetFolders: z.array(z.string().max(4096)).max(10_000) });
 
 export const GetCollectionPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -923,10 +931,13 @@ export type CreateWorkspaceFolderPayload = z.infer<
 export const DuplicateWorkspaceFilePayload = z.object({workspaceId: WORKSPACE_ID, relativePath: PATH_STRING}).strict();
 export const DuplicateWorkspaceFileResult = CreateWorkspaceFileResult.extend({...OperationRecovery.shape, materialized: z.boolean()});
 
+// confirmNotVersioned: the person agreed to change, in a version, files that
+// version does not track, so the change happens in Main too.
 export const MoveWorkspacePathPayload = z.object({
   workspaceId: WORKSPACE_ID,
   fromPath: PATH_STRING,
   toPath: PATH_STRING,
+  confirmNotVersioned: z.literal(true).optional(),
 });
 export type MoveWorkspacePathPayload = z.infer<typeof MoveWorkspacePathPayload>;
 
@@ -934,6 +945,7 @@ export const DeleteWorkspacePathPayload = z.object({
   workspaceId: WORKSPACE_ID,
   relativePath: PATH_STRING,
   emptyFolderOnly: z.boolean().optional(),
+  confirmNotVersioned: z.literal(true).optional(),
 });
 export type DeleteWorkspacePathPayload = z.infer<
   typeof DeleteWorkspacePathPayload
@@ -1465,8 +1477,15 @@ const SYNC_STATUS_BASE_FIELDS = {
   // decides who can read its History (#2379). Omitted otherwise.
   onNetworkShare: z.boolean().optional(),
   recoveryUnavailable: z.boolean().optional(),
+  // Why protected files such as `.env` wait on the workspace secret key, as
+  // the engine's code, such as `key-missing`. Omitted while the key works.
+  secretKeyUnavailable: z.string().min(1).optional(),
   outsideWriteCopies: z.array(z.tuple([z.string(), z.string(), z.string()])).optional(),
   outsideWriteCopyReadError: z.string().nullable().optional(),
+  // A protected file's change a sync replaced, kept on this computer, as
+  // [path, id, keptAtMs]. Paths and ids only, never the kept text.
+  protectedCopies: z.array(z.tuple([z.string(), z.string(), z.number().int()])).optional(),
+  protectedCopyReadError: z.string().nullable().optional(),
   keptFiles: z.array(z.tuple([z.string(), z.string()])).optional(),
   // Old versions of files the engine keeps on a drive that cannot tell it
   // whether a program still has one open, so it never deletes them: how
@@ -1496,7 +1515,7 @@ const SYNC_STATUS_BASE_FIELDS = {
     .optional(),
   // Active describes owner live delivery, not a fully synchronized workspace.
   ownerLiveDelivery: z.enum(["preparing", "active", "retrying"]).optional(),
-  ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "conflict-parent-withheld", "restart-required", "unsent-edits-limit"]).optional(),
+  ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed", "session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "conflict-parent-withheld", "live-history-over-budget", "restart-required", "unsent-edits-limit"]).optional(),
   // Files that take no edits until the ones waiting for the server reach it.
   ownerLivePausedPaths: z.array(SAFE_RELATIVE_PATH).optional(),
   ownerLiveStopFailures: z.array(z.object({objectId:z.string().min(1),path:SAFE_RELATIVE_PATH,detail:z.string()})).optional(),
@@ -1628,6 +1647,16 @@ export const captureRecoveryOperations = {
     guard: "trusted-sender",
     scope: "workspace",
     handlerCheck: { check: "withRendererWorkspaceOperation + assertWritableWorkspace", reason: "The restart starts only in the sending window's active, writable workspace, and is awaited outside its workspace operation." },
+  },
+  // Rescans, so a protected file waiting on the secret key is captured again.
+  // Rejects while the key is still unavailable.
+  retrySecretKey: {
+    capabilityId: "capture.secret.retry",
+    channel: "desktop:retry-secret-key",
+    payload: WorkspaceIdPayload,
+    guard: "trusted-sender",
+    scope: "workspace",
+    handlerCheck: { check: "withRendererWorkspaceOperation + assertWritableWorkspace", reason: "The rescan runs only in the sending window's active, writable workspace." },
   },
 } satisfies OperationTable;
 
@@ -2568,6 +2597,21 @@ export const ListChatChannelsResult = z.object({
 });
 export type ListChatChannelsResult = z.infer<typeof ListChatChannelsResult>;
 
+// Each chat's unread count, read from this computer alone: no relay pass, so
+// a tab strip can ask after every workspace change.
+export const ListChatUnreadPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+});
+export type ListChatUnreadPayload = z.infer<typeof ListChatUnreadPayload>;
+
+export const ListChatUnreadResult = z.object({
+  chats: z.array(z.object({
+    channelId: z.string().min(1),
+    unreadCount: z.number().int().min(0),
+  })),
+});
+export type ListChatUnreadResult = z.infer<typeof ListChatUnreadResult>;
+
 const CHAT_FOLLOW_TARGET_KIND = z.enum(["person", "agent", "channel", "thread"]);
 const CHAT_FOLLOW_STATE = z.enum(["following", "unfollowed"]);
 
@@ -3304,6 +3348,16 @@ export const SaveKeptCopyResult = z.discriminatedUnion("status", [
 ]);
 export type SaveKeptCopyResult = z.infer<typeof SaveKeptCopyResult>;
 
+// A protected file's change a sync replaced, kept on this computer under a
+// UUID until Restore writes it back or Discard removes it for good. Answers
+// name the path only; the text never crosses IPC.
+export const ProtectedCopyPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  id: z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/),
+});
+export const RestoreProtectedCopyResult = z.object({ status: z.literal("restored"), path: z.string().min(1) });
+export const DiscardProtectedCopyResult = z.object({ status: z.literal("discarded"), path: z.string().min(1) });
+
 // Old versions of files the engine keeps on a drive that cannot tell it
 // whether a program still has one open. dohc never deletes them itself. A
 // list names those a delete may remove now, each with the revision the
@@ -3364,6 +3418,13 @@ export const HeldNoteChangeResult = z.object({
 }).strict();
 export type HeldNoteChangeResult = z.infer<typeof HeldNoteChangeResult>;
 
+// The workspace's files the active version does not track, which have one
+// copy for every version. null on Main.
+export const ListNotVersionedFilesResult = z.object({
+  paths: z.array(PATH_STRING).nullable(),
+}).strict();
+export type ListNotVersionedFilesResult = z.infer<typeof ListNotVersionedFilesResult>;
+
 export const workspaceVersionOperations = {
   heldNoteChange: {
     capabilityId: "document.held.change", channel: "desktop:held-note-change",
@@ -3373,6 +3434,11 @@ export const workspaceVersionOperations = {
     capabilityId: "version.list",
     channel: "desktop:list-workspace-versions",
     payload: WorkspaceIdPayload, result: ListWorkspaceVersionsResult, ...versionGuard,
+  },
+  listNotVersionedFiles: {
+    capabilityId: "version.unversioned.list",
+    channel: "desktop:list-not-versioned-files",
+    payload: WorkspaceIdPayload, result: ListNotVersionedFilesResult, ...versionGuard,
   },
   createWorkspaceVersion: {
     capabilityId: "version.create",
@@ -3423,6 +3489,16 @@ export const workspaceVersionOperations = {
     capabilityId: "file.kept.save",
     channel: "desktop:save-kept-copy",
     payload: SaveKeptCopyPayload, result: SaveKeptCopyResult, ...versionGuard,
+  },
+  restoreProtectedCopy: {
+    capabilityId: "file.protected.restore",
+    channel: "desktop:restore-protected-copy",
+    payload: ProtectedCopyPayload, result: RestoreProtectedCopyResult, ...versionGuard,
+  },
+  discardProtectedCopy: {
+    capabilityId: "file.protected.discard",
+    channel: "desktop:discard-protected-copy",
+    payload: ProtectedCopyPayload, result: DiscardProtectedCopyResult, ...versionGuard,
   },
   listRetainedCopies: {
     capabilityId: "file.retained.list",
@@ -4284,6 +4360,7 @@ export type RelayShareLinkDependent = z.infer<
 >;
 
 const RelayShareLinkRowBase = z.object({
+  url: z.string().url().max(4096).nullable(),
   shareId: OPAQUE_ID,
   grantId: OPAQUE_ID,
   generation: z.number().int().min(1),
@@ -4316,6 +4393,7 @@ export const RelayShareLinkIndependentGrant = z
     grantId: OPAQUE_ID,
     recipientUserId: z.string().min(1).max(256).nullable(),
     recipientEmail: EMAIL_STRING.nullable(),
+    access: SHARE_ACCESS,
   })
   .strict();
 export type RelayShareLinkIndependentGrant = z.infer<
@@ -6873,6 +6951,32 @@ export type ResolveWorkLinkPayload = z.infer<typeof ResolveWorkLinkPayload>;
 // workspace on this computer that syncs with the link's server holds it.
 export const WorkLinkPlace = WorkspaceActivatedMessage.extend({ workspaceId: WORKSPACE_ID }).strict();
 export type WorkLinkPlace = z.infer<typeof WorkLinkPlace>;
+// The work references in chat messages' `@[work:REF]` links, which this
+// workspace's engine resolves.
+export const WORK_REFERENCE_PATTERN = /^[A-Za-z0-9_-]{43}$/u;
+export const DescribeWorkReferencesPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  references: z.array(z.string().regex(WORK_REFERENCE_PATTERN)).min(1).max(64),
+}).strict();
+export type DescribeWorkReferencesPayload = z.infer<typeof DescribeWorkReferencesPayload>;
+// What a work link shows and where it opens. `kind` is null when this
+// workspace holds no such work, or holds it no longer. `label` is a chat's
+// name, a thread's title, or the path of a file, app, record, or Collection.
+// `open` is null when nothing here opens it.
+export const WorkReferenceOpen = z.discriminatedUnion("to", [
+  z.object({ to: z.literal("file"), path: z.string().min(1) }).strict(),
+  z.object({ to: z.literal("collection"), path: z.string().min(1) }).strict(),
+  z.object({ to: z.literal("chat-channel"), channel: OPAQUE_ID }).strict(),
+  z.object({ to: z.literal("chat"), thread: OPAQUE_ID, channel: OPAQUE_ID.optional(), message: OPAQUE_ID.optional() }).strict(),
+]);
+export type WorkReferenceOpen = z.infer<typeof WorkReferenceOpen>;
+export const WorkReferenceView = z.object({
+  reference: z.string().regex(WORK_REFERENCE_PATTERN),
+  kind: z.enum(["chat", "thread", "message", "file", "app", "collection", "record", "data"]).nullable(),
+  label: z.string().max(4_096),
+  open: WorkReferenceOpen.nullable(),
+}).strict();
+export type WorkReferenceView = z.infer<typeof WorkReferenceView>;
 export const workLinkOperations = {
   makeMessageLink: {
     capabilityId: "chat.message.link",
@@ -6886,6 +6990,13 @@ export const workLinkOperations = {
     scope: "workspace",
     channel: "desktop:resolve-work-link",
     payload: ResolveWorkLinkPayload, result: WorkLinkPlace.nullable(),
+    guard: "active-workspace", inactiveMessage: "This window changed workspaces.",
+  },
+  describeWorkReferences: {
+    capabilityId: "work.reference.describe",
+    scope: "workspace",
+    channel: "desktop:describe-work-references",
+    payload: DescribeWorkReferencesPayload, result: z.array(WorkReferenceView),
     guard: "active-workspace", inactiveMessage: "This window changed workspaces.",
   },
 } as const satisfies OperationTable;

@@ -404,7 +404,7 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
     expect(response.status).toBe(200); return await response.json() as { token: string; expiresAtMs: number; publicPrincipalId?: string };
   }
   function connect(token: string, cookie = defaultCookie, extra: Record<string, string> = {}, ownerQuery = "", session = discriminator) {
-    const target = owner ? `/sync/workspaces/${binding.workspaceId}/live/owner?shareId=${scope.shareId}&objectId=${binding.objectId}&lineageClaimId=${binding.lineageClaimId}${ownerQuery}` : `/sync/live/${routeKind}?session=${session}`;
+    const target = owner ? `/sync/workspaces/${binding.workspaceId}/live/owner?objectId=${binding.objectId}&lineageClaimId=${binding.lineageClaimId}${ownerQuery}` : `/sync/live/${routeKind}?session=${session}`;
     const ws = new WebSocket(`ws://127.0.0.1:${port}${target}`, owner ? ["dohc-live-v1"] : ["dohc-live-v1", `dohc-live-ticket.${token}`], {
       headers: desktop ? {host: relayHost, authorization: "Bearer reader-token", ...extra} : owner ? {host: relayHost, authorization: "Bearer owner-token", ...extra} : { host: relayHost, origin: audience, "x-dohc-relay-exchange-key": exchangeKey, ...(cookie ? {cookie} : {}), ...linkHeaders, ...extra }, perMessageDeflate: false });
     sockets.push(ws); ws.on("error", () => undefined);
@@ -442,7 +442,7 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
         const context = currentScope.kind === "link" ? {...currentScope, sessionId: "link-session-" + person,
           capabilityHash: hashLinkBearer(bearer, key), profileTokenHash: hashLinkProfileSecret(profile, key)} : {...scope, grantId, userId: "reader-" + person};
         expect(state.storage.resolveLiveObjectHostBinding(context, "object-" + document)).toMatchObject({kind: "current",
-          binding: {...binding, objectId: "object-" + document, currentPath: `docs/${document}.md`}});
+          binding: {...binding, objectId: "object-" + document, currentPath: `docs/${document}.md`, selectorPaths: [`docs/${document}.md`]}});
         const response = await post(`/sync/live/${routeKind}-tickets`, {discriminator: session, objectId: "object-" + document}, cookie, headers);
         expect(response.status).toBe(200);
         return await response.json() as {token: string};
@@ -691,7 +691,7 @@ const agentEnds: Array<[string, (f: LinkFixture, agent: SeededAgent) => void, bo
   }, true],
   ["the owner resets the link", (f, agent) => {
     expect(f.storage.rotateLinkGrant({shareId: agent.shareId, grantId: agent.grantId, rotatedAtMs: 1001, expectedDependentGrantIds: [], guard: () => {},
-      mintCredential: () => ({credentialId: "raced-credential", secretHash: "raced-secret-hash"})}).ok).toBe(true);
+      mintCredential: () => ({credentialId: "raced-credential", secretSealed: null, secretHash: "raced-secret-hash"})}).ok).toBe(true);
   }, false],
   ["the owner ends the link", (f, agent) => {
     expect(f.storage.revokeShareGrant({shareId: agent.shareId, grantId: agent.grantId, revokedAtMs: 1001}).ok).toBe(true);
@@ -958,15 +958,23 @@ it("refuses additional identity and duplicate selector fields on owner upgrades"
   expect(f.actor).not.toHaveBeenCalled();
 });
 
-it.each(["owner", "fence", "selector"])("rechecks owner %s standing after native capture awaits", async changed => {
+it.each(["owner", "fence"])("rechecks owner %s standing after native capture awaits", async changed => {
   const f = await fixture(limits, false, undefined, true);
   f.captureNative.mockImplementationOnce(async () => {
-    f.raw.exec(changed === "owner" ? "UPDATE sync_relay_workspaces SET owner_user_id='other'" : changed === "selector" ?
-      `UPDATE sync_relay_shares SET selector_json='{"paths":["elsewhere"],"versionId":null}'` :
+    f.raw.exec(changed === "owner" ? "UPDATE sync_relay_workspaces SET owner_user_id='other'" :
       "UPDATE sync_relay_live_documents SET restore_fence_generation=restore_fence_generation+1");
     return f.native;
   });
   expect(await f.connect("").status).toBe(404);
+});
+
+it("opens the owner route while a share's selector changes during native capture", async () => {
+  const f = await fixture(limits, false, undefined, true);
+  f.captureNative.mockImplementationOnce(async () => {
+    f.raw.exec(`UPDATE sync_relay_shares SET selector_json='{"paths":["elsewhere"],"versionId":null}'`);
+    return f.native;
+  });
+  expect(await f.connect("").status).toBe(101);
 });
 
 it("applies owner connection limits and closes captured owners on host invalidation", async () => {
@@ -1018,18 +1026,45 @@ it("refuses a native capture for a different owner document", async () => {
   expect(f.native.client.openLiveAppliedSync).not.toHaveBeenCalled();
 });
 
-it("projects file-only link sync metadata before it reaches the browser provider", async () => {
+// The link's own share decides what it sees, not the lineage's recorded binding.
+it.each([
+  ["file-only", [binding.currentPath], "a.md", ["a.md"]],
+  ["folder", ["docs"], "docs/a.md", ["docs"]],
+] as const)("projects %s link sync metadata from the link's share before it reaches the browser provider", async (kind, paths, currentPath, selectorPaths) => {
   const f = await fixture(limits, true);
-  f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({paths: [binding.currentPath], versionId: null}));
+  f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({paths, versionId: null}));
   const minted = await f.tickets.mint({objectId: binding.objectId}, f.currentScope);
   expect(minted).not.toBeNull();
   const browser = f.connect(minted!.token); expect(await browser.status).toBe(101);
   const {provider, until} = await startProvider(browser);
   await until(() => provider.state().status === "live");
-  expect(provider.state().binding).toMatchObject({workspaceId: `link:${scope.grantId}`, currentPath: "a.md", selectorPaths: ["a.md"], objectId: binding.objectId});
+  expect(provider.state().binding).toMatchObject({workspaceId: `link:${scope.grantId}`, currentPath, selectorPaths, objectId: binding.objectId});
   expect(JSON.stringify(provider.state().binding)).not.toContain(scope.workspaceId);
-  expect(JSON.stringify(provider.state().binding)).not.toContain("docs/");
+  if (kind === "file-only") expect(JSON.stringify(provider.state().binding)).not.toContain("docs/");
   expect(f.native.client.openLiveAppliedSync).toHaveBeenCalled();
+});
+
+// A share narrowed from a folder to the file still covers it, but changes what
+// the recipient is shown. The open connection closes. Reopening, with a new
+// provider, shows the share as it is now.
+it.each([
+  ["named", false, "docs/a.md", ["docs/a.md"]],
+  ["link", true, "a.md", ["a.md"]],
+] as const)("closes a %s connection when its folder share narrows to the file, and reopening shows the new view", async (_kind, link, currentPath, selectorPaths) => {
+  const f = await fixture(limits, link);
+  f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({paths: ["docs"], versionId: null}));
+  const first = f.connect((await f.mint()).token); expect(await first.status).toBe(101);
+  const opened = await startProvider(first);
+  await opened.until(() => opened.provider.state().status === "live");
+  expect(opened.provider.state().binding).toMatchObject({currentPath: "docs/a.md", selectorPaths: ["docs"]});
+  const closed = once(first.ws, "close");
+  f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({paths: [binding.currentPath], versionId: null}));
+  f.changes.notify(); await closed;
+  expect(f.native.invalidated.aborted).toBe(false);
+  const second = f.connect((await f.mint()).token); expect(await second.status).toBe(101);
+  const reopened = await startProvider(second);
+  await reopened.until(() => reopened.provider.state().status === "live");
+  expect(reopened.provider.state().binding).toMatchObject({currentPath, selectorPaths, objectId: binding.objectId});
 });
 
 it.each(["named", "link", "owner", "desktop"])("deletion closes a running %s live connection", async kind => {
@@ -1436,7 +1471,7 @@ it("opens an owner 4 MiB sync while the non-owner workspace byte portion is full
   const syncBinding = {...owner.binding, selectorPaths: [owner.binding.currentPath]}, hostVector = Buffer.from([0]);
   const current = owner.storage.resolveCurrentLiveDocumentBinding({document: {workspaceId: owner.binding.workspaceId,
     mainVersionId: owner.binding.mainVersionId, objectId: owner.binding.objectId, lineageClaimId: owner.binding.lineageClaimId},
-    actor: {kind: "owner", userId: "owner-1", shareId: scope.shareId}});
+    actor: {kind: "owner", userId: "owner-1"}});
   if (current.kind !== "current") throw new Error("Expected current owner binding");
   const overhead = encodeLiveFrameSync({binding: current.binding, hostVector, missingStateUpdate: Uint8Array.of(0)}, owner.frames.receive).length - 1;
   const missingStateUpdate = Buffer.alloc(4 * MiB - overhead);
@@ -1488,7 +1523,8 @@ it.each((["direct", "claimed-email", "link-dependent"] as const).flatMap(kind =>
     expect(await socket.status).toBe(101);
     const {provider, until} = await startProvider(socket);
     await until(() => provider.state().status === "live");
-    expect(provider.state().binding).toMatchObject({...binding, workspaceId: `named:${scope.grantId}`});
+    // A named recipient sees its own share's selector, not the lineage's recorded binding.
+    expect(provider.state().binding).toMatchObject({...binding, workspaceId: `named:${scope.grantId}`, selectorPaths: ["docs"]});
     expect(JSON.stringify(provider.state().binding)).not.toContain(scope.workspaceId);
     expect(f.native.binding.workspaceId).toBe(scope.workspaceId);
 });

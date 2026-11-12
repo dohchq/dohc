@@ -162,6 +162,11 @@ function buildCliRequest(
     case "liveDocuments":
       return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor,
         ...(command.cursor === undefined ? {} : { cursor: command.cursor }) } };
+    case "liveStop":
+      return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, path: command.path,
+        ...(command.objectId === undefined ? {} : { objectId: command.objectId }) } };
+    case "liveResume":
+      return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, path: command.path } };
     case "documentEdit":
     case "documentCreate": {
       const args = {
@@ -207,6 +212,12 @@ function buildCliRequest(
         verb: command.verb,
         protocolVersion: common.protocolVersion,
         args: { cwd: common.cwd, actor: common.actor },
+      };
+    case "link":
+      return {
+        verb: command.verb,
+        protocolVersion: common.protocolVersion,
+        args: { cwd: common.cwd, actor: common.actor, target: command.target },
       };
     case "threads":
       return {
@@ -414,7 +425,7 @@ function refusal(result: CliResultByVerb[keyof CliResultByVerb]): string | null 
     : result.reason;
 }
 
-const REFUSING_VERBS = new Set(["heldNoteChange", "dataset", "fileDuplicate","historyOperation", "historyUndo", "versionList", "versionCompare", "versionConflicts", "versionCreate", "versionSwitch", "versionMerge", "versionResolve", "accountDelete", "moments", "moment", "documentRead", "documentHeld", "documentEdit", "documentCreate", "collectionSetFields", "fileChats", "fileChatStart", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "liveDocuments", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "chatRetry"]);
+const REFUSING_VERBS = new Set(["heldNoteChange", "dataset", "fileDuplicate","historyOperation", "historyUndo", "versionList", "versionCompare", "versionConflicts", "versionCreate", "versionSwitch", "versionMerge", "versionResolve", "accountDelete", "moments", "moment", "documentRead", "documentHeld", "documentEdit", "documentCreate", "collectionSetFields", "fileChats", "fileChatStart", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "liveDocuments", "liveStop", "liveResume", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "chatRetry"]);
 
 function jsonOutput(result: CliResultByVerb[keyof CliResultByVerb]): string {
   return JSON.stringify({ schemaVersion: CLI_JSON_SCHEMA_VERSION, ...result }, null, 2);

@@ -286,11 +286,11 @@ Returns `{ notices: { kind, id, title, body, sender, createdAtMs, read, opens, n
 
 List retained copies with a known workspace path, including copies adopted from staging during startup. Each entry names the file (`path`) that has a second copy, hidden until dohc_save_kept_copy moves it beside the file. `more` is true when the workspace kept more than this list holds.
 
-Known copies deleted during replacement do not appear. Adopted staging files without an original path remain in `.dohc/engine/displaced`. Notices offers a recovery-folder action for these files; `watcher.status.keptFiles` also lists them. Copies kept from outside writes are ordinary workspace files listed separately in `outsideWriteCopies` in this tool's response as [original path, copy path, copy id] entries. Open the copy by its workspace path.
+Known copies deleted during replacement do not appear. Adopted staging files without an original path remain in `.dohc/engine/displaced`. Notices offers a recovery-folder action for these files; `watcher.status.keptFiles` also lists them. Copies kept from outside writes are ordinary workspace files listed separately in `outsideWriteCopies` in this tool's response as [original path, copy path, copy id] entries. Open the copy by its workspace path. Changes to protected files such as `.env` that a sync replaced or deleted are listed in `protectedCopies` as [path, id, keptAtMs] entries, kept on this computer only; use dohc_restore_protected_copy or dohc_discard_protected_copy.
 
 No arguments.
 
-Returns `{ ok: true, outsideWriteCopies?, keptCopies: { id, path, keptAtMs }[], more } | { ok: false, reason }`.
+Returns `{ ok: true, outsideWriteCopies?, protectedCopies?, keptCopies: { id, path, keptAtMs }[], more } | { ok: false, reason }`.
 
 ### `dohc_save_kept_copy`
 
@@ -301,6 +301,26 @@ Changes the workspace, so a shared view does not offer it.
 - `id`: `integer`. Required.
 
 Returns `{ ok: true, status: "saved", path } | { ok: true, status: "gone" } | { ok: true, status: "no-valid-name" } | { ok: false, reason }`.
+
+### `dohc_restore_protected_copy`
+
+Write one entry from `protectedCopies` in dohc_list_kept_copies back to its protected file. Each entry is [path, id, keptAtMs]: a change to a protected file such as `.env` that a sync replaced or deleted, kept on this computer only. The synced text stays in the file's History, so the restore can be reversed there. `status` is `restored` with the file's `path`.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `id`: `string`. Required.
+
+Returns `{ ok: true, status: "restored", path } | { ok: false, reason }`.
+
+### `dohc_discard_protected_copy`
+
+Remove one entry from `protectedCopies` in dohc_list_kept_copies for good. The kept change was never in History, so it cannot be brought back. The protected file does not change. `status` is `discarded` with the file's `path`.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `id`: `string`. Required.
+
+Returns `{ ok: true, status: "discarded", path } | { ok: false, reason }`.
 
 ### `dohc_save_recovery_copy`
 
@@ -337,13 +357,34 @@ Returns `{ ok: true, path, keptEdits } | { ok: false, reason }`.
 
 ### `dohc_list_live_documents`
 
-List this workspace's live documents, as Live documents shows them in dohc. Each row has `path`, `objectId`, `status` (`ready`, `preparing`, `paused`, `unavailable`, or `retired` once live editing stopped), `reason` when it is not live, and `canResume`, true when Resume in Live documents can start it again. `document-unavailable`: The file moved or was removed on this computer. Review it in Live documents. `workspace-changed`: The workspace changed while live editing ran. Review it in Live documents. `session-host-refused`: The server stopped live editing. The file and its history are unchanged. Resume tries again. `session-host-diverged`: The server's copy no longer matches the synced one. Resume and Stop can't help. Contact the server's operator. `live-document-without-lineage`: Live editing can't start until the document is opened once in dohc. Open it, then Resume. `live-edit-unadmitted`: The server hasn't applied an edit. Resume tries again. `conflict-parent-withheld`: A conflict in the file was resolved, so live editing can't resume. Edits made in dohc may not reach people with the link. `deferredStop` `{ unsentEdits, editable }` is a Stop that waits for unsent edits. `quarantine` is the `recovery` of edits the server refused, with `storedOn` and `incident` as in `keptEdits`; `stopping` means a Stop waits for the server. Pass `nextCursor` as `cursor` until it is null. Owner workspace only.
+List this workspace's live documents, as Live documents shows them in dohc. Each row has `path`, `objectId`, `status` (`ready`, `preparing`, `paused`, `unavailable`, or `retired` once live editing stopped), `reason` when it is not live, and `canResume`, true when dohc_resume_live_editing can start it again. `document-unavailable`: The file moved or was removed on this computer. Review it in Live documents. `workspace-changed`: The workspace changed while live editing ran. Review it in Live documents. `session-host-refused`: The server stopped live editing. The file and its history are unchanged. Resume tries again. `session-host-diverged`: The server's copy no longer matches the synced one. Resume and Stop can't help. Contact the server's operator. `live-document-without-lineage`: Live editing can't start until the document is opened once in dohc. Open it, then Resume. `live-edit-unadmitted`: The server hasn't applied an edit. Resume tries again. `conflict-parent-withheld`: A conflict in the file was resolved, so live editing can't resume. Edits made in dohc may not reach people with the link. `live-history-over-budget`: The document's edit history is too long for the server to check, so live editing can't start. Edits still sync, but people it is shared with can't edit it live. Resume can't help. `deferredStop` `{ unsentEdits, editable }` is a Stop that waits for unsent edits. `quarantine` is the `recovery` of edits the server refused, with `storedOn` and `incident` as in `keptEdits`; `stopping` means a Stop waits for the server. Pass `nextCursor` as `cursor` until it is null. Owner workspace only.
 
 Live editing belongs to the owner's sharing. Shared profiles do not offer this read.
 
 - `cursor`: `string`
 
 Returns `{ ok: true, documents: { path, objectId, status, reason?, canResume, deferredStop?, quarantine?, earlier?: true, saveOnly?: true, sessionEnded?: true, storedOn?, incident? }[], nextCursor } | { ok: false, reason }`.
+
+### `dohc_stop_live_editing`
+
+Stop live editing for a document, as Stop does in Live documents. dohc_resume_live_editing starts it again. dohc records the Stop as this agent's when the server says this request stopped it; `already: true` means live editing was already stopped, and dohc records no one. Pass the row's `objectId` from dohc_list_live_documents to stop the server's document when its file moved or is gone; dohc then stops that document, whatever path it has now. `keptEdits` is `recovered` when dohc wrote edits the server refused into the file, `kept` while dohc still keeps them (see `keptEdits` in dohc_workspace_status), and `none` when there were none. Unlike Stop in Live documents, dohc refuses while the document is open in an editor, where someone may be typing; ask the person using dohc to close it. Owner workspace only.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `path`: `string`. Required.
+- `objectId`: `string`
+
+Returns `{ ok: true, path, keptEdits, already?: true } | { ok: false, reason }`.
+
+### `dohc_resume_live_editing`
+
+Resume live editing for a document, as Resume does in Live documents. Accepts a row whose `canResume` is true in dohc_list_live_documents. dohc sends this computer's unsent changes first, and records the Resume as this agent's when the server says this request resumed it; `already: true` means it was already live, and dohc records no one. Then read dohc_list_live_documents: `preparing` until the server starts the document, then `ready`. Owner workspace only.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `path`: `string`. Required.
+
+Returns `{ ok: true, path, already?: true } | { ok: false, reason }`.
 
 ### `dohc_list_retained_copies`
 
@@ -490,24 +531,26 @@ Returns `{ ok: true, path }`, or `{ ok: true, path, unchanged: true }` when the 
 
 ### `dohc_move_path`
 
-Move or rename a visible workspace file or folder. Returns operationId and undo availability. Use dohc_undo_operation when available. Overwrites, moves that change only letter case, and files without History rows update no links. A folder move updates no links. Other file moves update [[links]] after the result returns. dohc_read_operation lists the documents it could not update. Requires dohc open. History records the move under your agent name. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. Files over 5 MiB binary or 10 MiB text move without a History row. Text with invalid UTF-8 also moves without a row when History cannot keep it as binary. `withoutHistory` lists their destination paths. With overwrite, `replaced` separately reports the old destination's trash location and files without History copies. A failed move puts everything back it can. `deleted` lists files History records as deleted after rollback. They stay in the workspace's .dohc/local/trash, and Restore in History brings them back.
+Move or rename a visible workspace file or folder. Returns operationId and undo availability. Use dohc_undo_operation when available. Overwrites, moves that change only letter case, and files without History rows update no links. A folder move updates no links. Other file moves update [[links]] after the result returns. dohc_read_operation lists the documents it could not update. Requires dohc open. History records the move under your agent name. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. Files over 5 MiB binary or 10 MiB text move without a History row. Text with invalid UTF-8 also moves without a row when History cannot keep it as binary. `withoutHistory` lists their destination paths. With overwrite, `replaced` separately reports the old destination's trash location and files without History copies. A failed move puts everything back it can. `deleted` lists files History records as deleted after rollback. They stay in the workspace's .dohc/local/trash, and Restore in History brings them back. In a version other than Main, refuses to change files the version does not track, such as files over those sizes, because they have one copy for every version and the change also happens in Main. Set confirmNotVersioned to true to change them anyway.
 
 Changes the workspace, so a shared view does not offer it.
 
 - `fromPath`: `string`. Required.
 - `toPath`: `string`. Required.
 - `overwrite`: `boolean`
+- `confirmNotVersioned`: `boolean`
 - `summary`: `string`
 
 Returns `{ ok: true, operationId, fromPath, toPath, withoutHistory?, replaced? }`. Uses the desktop `fileMove` verb. `withoutHistory` lists moved files with no History row: oversized files or non-UTF-8 text that History cannot keep as binary. `replaced` describes the old destination separately: `{ path, trashed, trashPath?, withoutHistory }`. `trashed` is true when the system trash took it; otherwise `trashPath` names its workspace trash entry. `replaced.withoutHistory` lists replaced files without History copies; other replaced files can be restored in History. On failure: `{ ok: false, reason, path?, deleted?, withoutHistory?, replaced? }`. The reason reports rollback's outcome. `withoutHistory` names moved files without History rows after rollback. `replaced` reports any old destination files retained in the workspace trash. `deleted` lists files History records as deleted after the failed move. They stay in the workspace's .dohc/local/trash.
 
 ### `dohc_delete_path`
 
-Delete a visible workspace file or folder. Returns operationId and undo availability. Use dohc_undo_operation when available. Requires dohc open. History records the delete under your agent name, and Restore there brings the file back. Files over 5 MiB binary or 10 MiB text delete without a History row. Text with invalid UTF-8 also deletes without a row when History cannot keep it as binary. `withoutHistory` lists their paths. Restore these files from the trash. The file or folder goes through the workspace's .dohc/local/trash to the system trash, or stays in .dohc/local/trash when the system refuses; `trashed` says which. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. If History refuses a file in a folder, `deleted` lists the files already deleted, and the rest go back to their place.
+Delete a visible workspace file or folder. Returns operationId and undo availability. Use dohc_undo_operation when available. Requires dohc open. History records the delete under your agent name, and Restore there brings the file back. Files over 5 MiB binary or 10 MiB text delete without a History row. Text with invalid UTF-8 also deletes without a row when History cannot keep it as binary. `withoutHistory` lists their paths. Restore these files from the trash. The file or folder goes through the workspace's .dohc/local/trash to the system trash, or stays in .dohc/local/trash when the system refuses; `trashed` says which. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. If History refuses a file in a folder, `deleted` lists the files already deleted, and the rest go back to their place. In a version other than Main, refuses to change files the version does not track, such as files over those sizes, because they have one copy for every version and the change also happens in Main. Set confirmNotVersioned to true to change them anyway.
 
 Changes the workspace, so a shared view does not offer it.
 
 - `path`: `string`. Required.
+- `confirmNotVersioned`: `boolean`
 - `summary`: `string`
 
 Returns `{ ok: true, operationId, undo, path, trashed, trashPath?, withoutHistory? }`. Uses the desktop `fileDelete` verb. `trashed` is true when the system trash took the entry; otherwise `trashPath` names its workspace trash entry. `withoutHistory` lists files deleted without History rows: oversized files or non-UTF-8 text that History cannot keep as binary. On failure: `{ ok: false, reason, deleted?, path?, withoutHistory? }`. `deleted` lists files History recorded as deleted before it refused `path`. `withoutHistory` names files already removed without History rows. The reason names their workspace trash location.
@@ -583,6 +626,19 @@ The agent inbox belongs to the owning workspace. Shared profiles do not offer th
 
 Returns `{ messages: { threadId, messageId, group, author, createdAtMs, text }[], cursor }`.
 
+### `dohc_link`
+
+Make a link to a chat, thread, message, file, or Collection. Pass exactly one of `group` (a Group, DM, or agent chat, by name, #slug, or id), `thread`, `message` (ids), or `path` (a file, or a Collection by its folder). Put the returned `link` text, `@[work:...]`, in a chat message: it shows as a chip that opens what it names, and keeps working after a rename or move.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `group`: `string`
+- `thread`: `string`
+- `message`: `string`
+- `path`: `string`
+
+Returns `{ kind, reference, link }`.
+
 ### `dohc_read_chat`
 
 Read one dohc Chat thread, or one group's stream. With `threadId`: its messages (with author kind, display name, and the product, version, and model an agent reported, in `authorReported`), whether agent replies are paused and the latest run outcome, and a read-only text projection. With `group` (a name, #slug, or id): its posts and conversation messages in one order, oldest first, a page at a time from the newest end. Each post says how many replies it has, who replied, and the latest agent reply. A message an agent reported work with has `work`, and a post whose thread has such a report has its Work card in `post.work`. Pass `nextBefore` back as `before` for the older page; `limit` is 50 by default, at most 100. Messages name the agents still asked to answer them in `agentRequests`.
@@ -649,7 +705,7 @@ Returns `{ ok: true, path, threadId, messageId, warning? } | { ok: false, reason
 
 ### `dohc_reply_to_chat`
 
-Reply in a dohc Chat thread as the agent. `to` replies under one message; `resolve` closes that open decision with this reply and `choose` names the option picked. Message ids come from dohc_read_chat. `attachments`, `needsDecision`, `options`, `runId`, `model`, and `work` behave as in dohc_start_group_chat.
+Reply in a dohc Chat thread as the agent. `to` replies under one message; `resolve` closes that open decision with this reply and `choose` names the option picked. Message ids come from dohc_read_chat. `attachments`, `needsDecision`, `options`, `runId`, `model`, and `work` behave as in dohc_start_group_chat. A run an automation started that has nothing to report sends `nothingToReport: true` with only `threadId` and `runId`, and no `body`: it posts nothing, and the run ends without a failure.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -657,15 +713,16 @@ Changes the workspace, so a shared view does not offer it.
 - `to`: `string`
 - `resolve`: `string`
 - `choose`: `string`
-- `body`: `string`. Required.
+- `body`: `string`
 - `attachments`: `string[]`
 - `needsDecision`: `boolean`
 - `options`: `string[]`
 - `runId`: `string`
 - `model`: `string`
 - `work`: `{ status: "working" | "waiting" | "done" | "failed" | "stopped", url?: string }`
+- `nothingToReport`: `true`
 
-Returns `{ ok: true, threadId, messageId, parentMessageId?, resolvedMessageId?, warning? }`.
+Returns `{ ok: true, threadId, messageId, parentMessageId?, resolvedMessageId?, warning? }`, or `{ ok: true, threadId, nothingToReport: true }`.
 
 ### `dohc_retry_chat_run`
 
@@ -994,7 +1051,7 @@ With `--json`, prints `{ schemaVersion, connectionId }`.
 
 ### `dohc document`
 
-Read, edit, and create live Markdown documents. List and start chats on tracked files. List live documents, and recover edits the server refused.
+Read, edit, and create live Markdown documents. List and start chats on tracked files. List, stop, and resume live documents, and recover edits the server refused.
 
 Paths resolve from your current folder. Changes are recorded as an agent's, as with MCP. A refusal exits with status 1 and prints its reason to stderr, including with --json.
 
@@ -1170,11 +1227,37 @@ dohc document live [options]
 
 List this workspace's live documents, with each one's state and why.
 
-status is ready, preparing, paused, unavailable, or retired once live editing stopped. reason says why a document is not live. canResume is true when Resume in Live documents can start it again. document-unavailable: The file moved or was removed on this computer. Review it in Live documents. workspace-changed: The workspace changed while live editing ran. Review it in Live documents. session-host-refused: The server stopped live editing. The file and its history are unchanged. Resume tries again. session-host-diverged: The server's copy no longer matches the synced one. Resume and Stop can't help. Contact the server's operator. live-document-without-lineage: Live editing can't start until the document is opened once in dohc. Open it, then Resume. live-edit-unadmitted: The server hasn't applied an edit. Resume tries again. conflict-parent-withheld: A conflict in the file was resolved, so live editing can't resume. Edits made in dohc may not reach people with the link. deferredStop is a Stop that waits for unsentEdits to reach the server. editable says whether the document still takes edits. quarantine is the recovery of edits the server refused, as kept-edits lists them. stopping means a Stop waits for the server. Pass nextCursor as --cursor until it is null.
+status is ready, preparing, paused, unavailable, or retired once live editing stopped. reason says why a document is not live. canResume is true when resume can start it again. document-unavailable: The file moved or was removed on this computer. Review it in Live documents. workspace-changed: The workspace changed while live editing ran. Review it in Live documents. session-host-refused: The server stopped live editing. The file and its history are unchanged. Resume tries again. session-host-diverged: The server's copy no longer matches the synced one. Resume and Stop can't help. Contact the server's operator. live-document-without-lineage: Live editing can't start until the document is opened once in dohc. Open it, then Resume. live-edit-unadmitted: The server hasn't applied an edit. Resume tries again. conflict-parent-withheld: A conflict in the file was resolved, so live editing can't resume. Edits made in dohc may not reach people with the link. live-history-over-budget: The document's edit history is too long for the server to check, so live editing can't start. Edits still sync, but people it is shared with can't edit it live. Resume can't help. deferredStop is a Stop that waits for unsentEdits to reach the server. editable says whether the document still takes edits. quarantine is the recovery of edits the server refused, as kept-edits lists them. stopping means a Stop waits for the server. Pass nextCursor as --cursor until it is null.
 
 - `--cursor <cursor>`: Continue the previous page.
 
 With `--json`, prints `{ schemaVersion, ok: true, documents: { path, objectId, status, reason?, canResume, deferredStop?, quarantine?, earlier?: true, saveOnly?: true, sessionEnded?: true, storedOn?, incident? }[], nextCursor }`.
+
+#### `dohc document stop`
+
+```sh
+dohc document stop <path> [options]
+```
+
+Stop live editing for a document, as Stop does in Live documents.
+
+Run resume to start live editing again. dohc records the Stop as this agent's when the server says this request stopped it. already is true when live editing was already stopped. Then dohc records no one. Pass --object-id from live to stop the server's document when its file moved or is gone. dohc then stops that document, whatever path it has now. keptEdits is recovered when dohc wrote edits the server refused into the file, kept while dohc still keeps them, and none when there were none. For kept, run kept-edits, then save-recovery-copy or stop-again. Unlike Stop in Live documents, dohc refuses while the document is open in an editor, where someone may be typing. Ask the person using dohc to close it.
+
+- `--object-id <id>`: Stop the server's document with this objectId from live.
+
+With `--json`, prints `{ schemaVersion, ok: true, path, keptEdits, already?: true }`.
+
+#### `dohc document resume`
+
+```sh
+dohc document resume <path> [options]
+```
+
+Resume live editing for a document, as Resume does in Live documents.
+
+Accepts a document whose canResume is true in live. dohc sends this computer's unsent changes first, and records the Resume as this agent's when the server says this request resumed it. already is true when the document was already live. Then dohc records no one. Run live again to follow it: preparing until the server starts the document, then ready.
+
+With `--json`, prints `{ schemaVersion, ok: true, path, already?: true }`.
 
 ### `dohc chat`
 
@@ -1191,6 +1274,23 @@ dohc chat groups [options]
 List the Groups in this workspace.
 
 With `--json`, prints `{ schemaVersion, groups: { kind, id, name, slug, purpose?, channelWireId? }[] }`.
+
+#### `dohc chat link`
+
+```sh
+dohc chat link [options]
+```
+
+Make a link to put in a chat message.
+
+Give exactly one flag. Put the printed @[work:...] text in a message: it shows as a chip that opens what it names. The link keeps working after a rename or a move. Someone who cannot see what it names sees it as unavailable.
+
+- `--group <group>`: Link a Group, DM, or agent chat, by name, #slug, or id.
+- `--thread <id>`: Link a thread.
+- `--message <id>`: Link a message.
+- `--path <path>`: Link a file, or a Collection by its folder.
+
+With `--json`, prints `{ schemaVersion, kind, reference, link }`.
 
 #### `dohc chat create-group`
 
@@ -1603,6 +1703,17 @@ Set `reference` to `entries[].reference` from `pendingAttempts`. Set acknowledge
 
 Returns `{ kind: "attempt-cancelled", cancelled: true }`.
 
+#### `dohc dataset cancelInvoke`
+
+Request cancellation of a running Collection action.
+
+Use the invocationId sent with invoke. The action may already have changed records. Check records or History. Retry with the same input and idempotencyKey.
+
+- `workspaceId`: `string`. Required.
+- `invocationId`: `UUID`. Required.
+
+Returns `{ kind: "invoke-cancel-requested", outcome: "unknown" }`.
+
 #### `dohc dataset export`
 
 Save a private recovery archive of a Collection.
@@ -1842,7 +1953,7 @@ Returns `{ kind: "migration-discarded" }`.
 
 Run an approved operation.
 
-Use describe to find approved operation IDs. Retry an uncertain write with the same input and idempotencyKey.
+Use describe to find approved operation IDs. Retry an uncertain write with the same input and idempotencyKey. Send a fresh invocationId to allow cancelInvoke to stop this running request. Cancellation cannot undo committed changes.
 
 - `workspaceId`: `string`. Required.
 - `datasetPath`: `string`. Required.
@@ -1852,6 +1963,7 @@ Use describe to find approved operation IDs. Retry an uncertain write with the s
 - `revisionSha256`: `SHA-256 hex`. Required.
 - `input`: `any JSON`. Required.
 - `idempotencyKey`: `string`. Required.
+- `invocationId`: `UUID`
 
 Returns `{ kind: "invoked", result, revision, replayed, copy?: { offline, savedAtMs, coverage?: "saved-pages", host? } }` or `{ kind: "refused", code, message }`.
 

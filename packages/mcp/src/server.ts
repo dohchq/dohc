@@ -28,7 +28,7 @@ import {
 import {
   MCP_TOOL_CAPABILITIES,
   heldNoteChange,
-  chatLinks, chatFileMentions, linksEdges, linksIn, linksResolve, readOperation, undoOperation, listVersions, compareVersion, listVersionConflicts, createVersion, switchVersion, mergeVersion, resolveVersionConflict,
+  chatLinks, chatFileMentions, makeLink, linksEdges, linksIn, linksResolve, readOperation, undoOperation, listVersions, compareVersion, listVersionConflicts, createVersion, switchVersion, mergeVersion, resolveVersionConflict,
   getShareCopyDetails,
   listLinkAgents,
   disconnectLinkAgent,
@@ -52,6 +52,7 @@ import {
   listFileChats,
   readChat,
   replyToChat,
+  reportNothing,
   startGroupChat,
   startFileChat,
   reportedAgent,
@@ -73,10 +74,14 @@ import {
   readHeldChange,
   readWorkspaceFile,
   saveKeptCopy,
+  restoreProtectedCopy,
+  discardProtectedCopy,
   saveRecoveryCopy,
   retryKeptEdits,
   stopAgain,
   listLiveDocuments,
+  stopLiveEditing,
+  resumeLiveEditing,
   listRetainedCopies,
   deleteRetainedCopies,
   searchWorkspaceFiles,
@@ -312,7 +317,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_list_kept_copies",
     {
       description:
-        "List retained copies with a known workspace path, including copies adopted from staging during startup. Each entry names the file (`path`) that has a second copy, hidden until dohc_save_kept_copy moves it beside the file. `more` is true when the workspace kept more than this list holds.\n\nKnown copies deleted during replacement do not appear. Adopted staging files without an original path remain in `.dohc/engine/displaced`. Notices offers a recovery-folder action for these files; `watcher.status.keptFiles` also lists them. Copies kept from outside writes are ordinary workspace files listed separately in `outsideWriteCopies` in this tool's response as [original path, copy path, copy id] entries. Open the copy by its workspace path.",
+        "List retained copies with a known workspace path, including copies adopted from staging during startup. Each entry names the file (`path`) that has a second copy, hidden until dohc_save_kept_copy moves it beside the file. `more` is true when the workspace kept more than this list holds.\n\nKnown copies deleted during replacement do not appear. Adopted staging files without an original path remain in `.dohc/engine/displaced`. Notices offers a recovery-folder action for these files; `watcher.status.keptFiles` also lists them. Copies kept from outside writes are ordinary workspace files listed separately in `outsideWriteCopies` in this tool's response as [original path, copy path, copy id] entries. Open the copy by its workspace path. Changes to protected files such as `.env` that a sync replaced or deleted are listed in `protectedCopies` as [path, id, keptAtMs] entries, kept on this computer only; use dohc_restore_protected_copy or dohc_discard_protected_copy.",
       inputSchema: {},
     },
     async () => text(await listKeptCopies(ctx)),
@@ -326,6 +331,26 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       inputSchema: { id: z.number().int() },
     },
     async (args) => text(await saveKeptCopy(ctx, args)),
+  );
+
+  register(
+    "dohc_restore_protected_copy",
+    {
+      description:
+        "Write one entry from `protectedCopies` in dohc_list_kept_copies back to its protected file. Each entry is [path, id, keptAtMs]: a change to a protected file such as `.env` that a sync replaced or deleted, kept on this computer only. The synced text stays in the file's History, so the restore can be reversed there. `status` is `restored` with the file's `path`.",
+      inputSchema: { id: z.string() },
+    },
+    async (args) => text(await restoreProtectedCopy(ctx, args)),
+  );
+
+  register(
+    "dohc_discard_protected_copy",
+    {
+      description:
+        "Remove one entry from `protectedCopies` in dohc_list_kept_copies for good. The kept change was never in History, so it cannot be brought back. The protected file does not change. `status` is `discarded` with the file's `path`.",
+      inputSchema: { id: z.string() },
+    },
+    async (args) => text(await discardProtectedCopy(ctx, args)),
   );
 
   register(
@@ -362,12 +387,32 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_list_live_documents",
     {
       description:
-        "List this workspace's live documents, as Live documents shows them in dohc. Each row has `path`, `objectId`, `status` (`ready`, `preparing`, `paused`, `unavailable`, or `retired` once live editing stopped), `reason` when it is not live, and `canResume`, true when Resume in Live documents can start it again. " +
+        "List this workspace's live documents, as Live documents shows them in dohc. Each row has `path`, `objectId`, `status` (`ready`, `preparing`, `paused`, `unavailable`, or `retired` once live editing stopped), `reason` when it is not live, and `canResume`, true when dohc_resume_live_editing can start it again. " +
         Object.entries(LIVE_DOCUMENT_REASON_STEPS).map(([reason, step]) => `\`${reason}\`: ${step}`).join(" ") +
         " `deferredStop` `{ unsentEdits, editable }` is a Stop that waits for unsent edits. `quarantine` is the `recovery` of edits the server refused, with `storedOn` and `incident` as in `keptEdits`; `stopping` means a Stop waits for the server. Pass `nextCursor` as `cursor` until it is null. Owner workspace only.",
       inputSchema: { cursor: z.string().min(1).max(4096).optional() },
     },
     async (args) => text(await listLiveDocuments(ctx, args)),
+  );
+
+  register(
+    "dohc_stop_live_editing",
+    {
+      description:
+        "Stop live editing for a document, as Stop does in Live documents. dohc_resume_live_editing starts it again. dohc records the Stop as this agent's when the server says this request stopped it; `already: true` means live editing was already stopped, and dohc records no one. Pass the row's `objectId` from dohc_list_live_documents to stop the server's document when its file moved or is gone; dohc then stops that document, whatever path it has now. `keptEdits` is `recovered` when dohc wrote edits the server refused into the file, `kept` while dohc still keeps them (see `keptEdits` in dohc_workspace_status), and `none` when there were none. Unlike Stop in Live documents, dohc refuses while the document is open in an editor, where someone may be typing; ask the person using dohc to close it. Owner workspace only.",
+      inputSchema: { path: z.string().min(1).max(4096), objectId: z.string().min(1).max(512).optional() },
+    },
+    async (args) => text(await stopLiveEditing(ctx, args)),
+  );
+
+  register(
+    "dohc_resume_live_editing",
+    {
+      description:
+        "Resume live editing for a document, as Resume does in Live documents. Accepts a row whose `canResume` is true in dohc_list_live_documents. dohc sends this computer's unsent changes first, and records the Resume as this agent's when the server says this request resumed it; `already: true` means it was already live, and dohc records no one. Then read dohc_list_live_documents: `preparing` until the server starts the document, then `ready`. Owner workspace only.",
+      inputSchema: { path: z.string().min(1).max(4096) },
+    },
+    async (args) => text(await resumeLiveEditing(ctx, args)),
   );
 
   register(
@@ -553,11 +598,12 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_move_path",
     {
       description:
-        "Move or rename a visible workspace file or folder. Returns operationId and undo availability. Use dohc_undo_operation when available. Overwrites, moves that change only letter case, and files without History rows update no links. A folder move updates no links. Other file moves update [[links]] after the result returns. dohc_read_operation lists the documents it could not update. Requires dohc open. History records the move under your agent name. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. Files over 5 MiB binary or 10 MiB text move without a History row. Text with invalid UTF-8 also moves without a row when History cannot keep it as binary. `withoutHistory` lists their destination paths. With overwrite, `replaced` separately reports the old destination's trash location and files without History copies. A failed move puts everything back it can. `deleted` lists files History records as deleted after rollback. They stay in the workspace's .dohc/local/trash, and Restore in History brings them back.",
+        "Move or rename a visible workspace file or folder. Returns operationId and undo availability. Use dohc_undo_operation when available. Overwrites, moves that change only letter case, and files without History rows update no links. A folder move updates no links. Other file moves update [[links]] after the result returns. dohc_read_operation lists the documents it could not update. Requires dohc open. History records the move under your agent name. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. Files over 5 MiB binary or 10 MiB text move without a History row. Text with invalid UTF-8 also moves without a row when History cannot keep it as binary. `withoutHistory` lists their destination paths. With overwrite, `replaced` separately reports the old destination's trash location and files without History copies. A failed move puts everything back it can. `deleted` lists files History records as deleted after rollback. They stay in the workspace's .dohc/local/trash, and Restore in History brings them back. In a version other than Main, refuses to change files the version does not track, such as files over those sizes, because they have one copy for every version and the change also happens in Main. Set confirmNotVersioned to true to change them anyway.",
       inputSchema: {
         fromPath: z.string().min(1).max(4096),
         toPath: z.string().min(1).max(4096),
         overwrite: z.boolean().optional(),
+        confirmNotVersioned: z.boolean().optional(),
         summary: z.string().max(500).optional(),
       },
     },
@@ -568,9 +614,10 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_delete_path",
     {
       description:
-        "Delete a visible workspace file or folder. Returns operationId and undo availability. Use dohc_undo_operation when available. Requires dohc open. History records the delete under your agent name, and Restore there brings the file back. Files over 5 MiB binary or 10 MiB text delete without a History row. Text with invalid UTF-8 also deletes without a row when History cannot keep it as binary. `withoutHistory` lists their paths. Restore these files from the trash. The file or folder goes through the workspace's .dohc/local/trash to the system trash, or stays in .dohc/local/trash when the system refuses; `trashed` says which. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. If History refuses a file in a folder, `deleted` lists the files already deleted, and the rest go back to their place.",
+        "Delete a visible workspace file or folder. Returns operationId and undo availability. Use dohc_undo_operation when available. Requires dohc open. History records the delete under your agent name, and Restore there brings the file back. Files over 5 MiB binary or 10 MiB text delete without a History row. Text with invalid UTF-8 also deletes without a row when History cannot keep it as binary. `withoutHistory` lists their paths. Restore these files from the trash. The file or folder goes through the workspace's .dohc/local/trash to the system trash, or stays in .dohc/local/trash when the system refuses; `trashed` says which. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. If History refuses a file in a folder, `deleted` lists the files already deleted, and the rest go back to their place. In a version other than Main, refuses to change files the version does not track, such as files over those sizes, because they have one copy for every version and the change also happens in Main. Set confirmNotVersioned to true to change them anyway.",
       inputSchema: {
         path: z.string().min(1).max(4096),
+        confirmNotVersioned: z.boolean().optional(),
         summary: z.string().max(500).optional(),
       },
     },
@@ -664,6 +711,21 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   });
 
   register(
+    "dohc_link",
+    {
+      description:
+        "Make a link to a chat, thread, message, file, or Collection. Pass exactly one of `group` (a Group, DM, or agent chat, by name, #slug, or id), `thread`, `message` (ids), or `path` (a file, or a Collection by its folder). Put the returned `link` text, `@[work:...]`, in a chat message: it shows as a chip that opens what it names, and keeps working after a rename or move.",
+      inputSchema: {
+        group: z.string().min(1).max(500).optional(),
+        thread: z.string().min(1).max(200).optional(),
+        message: z.string().min(1).max(200).optional(),
+        path: z.string().min(1).max(4096).optional(),
+      },
+    },
+    async (args) => text(await makeLink(ctx, args)),
+  );
+
+  register(
     "dohc_read_chat",
     {
       description:
@@ -752,16 +814,30 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_reply_to_chat",
     {
       description:
-        "Reply in a dohc Chat thread as the agent. `to` replies under one message; `resolve` closes that open decision with this reply and `choose` names the option picked. Message ids come from dohc_read_chat. `attachments`, `needsDecision`, `options`, `runId`, `model`, and `work` behave as in dohc_start_group_chat.",
+        "Reply in a dohc Chat thread as the agent. `to` replies under one message; `resolve` closes that open decision with this reply and `choose` names the option picked. Message ids come from dohc_read_chat. `attachments`, `needsDecision`, `options`, `runId`, `model`, and `work` behave as in dohc_start_group_chat. A run an automation started that has nothing to report sends `nothingToReport: true` with only `threadId` and `runId`, and no `body`: it posts nothing, and the run ends without a failure.",
       inputSchema: {
         threadId: z.string().min(1).max(200),
         to: z.string().min(1).max(200).optional(),
         resolve: z.string().min(1).max(200).optional(),
         choose: z.string().min(1).max(200).optional(),
         ...chatWriteInput,
+        body: chatWriteInput.body.optional(),
+        nothingToReport: z.literal(true).optional(),
       },
     },
-    async ({ model, ...args }) => text(await replyToChat(ctx, args, agentName(), reported(model))),
+    async ({ model, body, nothingToReport, ...args }) => {
+      if (nothingToReport) {
+        // An empty list or a false flag sends nothing.
+        const { threadId, runId, ...message } = args;
+        const sent = Object.values(message).some((value) =>
+          value !== undefined && value !== false && !(Array.isArray(value) && value.length === 0));
+        return text(body !== undefined || sent
+          ? { ok: false as const, reason: "nothingToReport posts no message. Send it with only threadId and runId." }
+          : await reportNothing(ctx, { threadId, ...(runId !== undefined ? { runId } : {}) }));
+      }
+      if (body === undefined) return text({ ok: false as const, reason: "Send a body, or nothingToReport to end an automation's run with no message." });
+      return text(await replyToChat(ctx, { ...args, body }, agentName(), reported(model)));
+    },
   );
 
   register(

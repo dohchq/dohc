@@ -1,4 +1,5 @@
 [package]
+autotests = false
 license.workspace = true
 name = "dohc-engine-files"
 version.workspace = true
@@ -97,3 +98,7 @@ dohc-engine-storage = { path = "../dohc-engine-storage", features = ["test-suppo
 
 [lints]
 workspace = true
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"

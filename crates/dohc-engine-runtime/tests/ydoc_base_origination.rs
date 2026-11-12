@@ -14,18 +14,18 @@
 
 use dohc_engine_collab::{ContentKind, DocKey, LeaseRegistry, Regime, Ydoc};
 use dohc_engine_domain::{
-    CreateNamedVersion, DeleteTextFile, MergeTextFileFromVersion, MergeTextFileResult,
-    RenameTextFile, RollbackTextFileMutation, VersionedTextStore, WriteText, get_collection_record,
-    reconcile_collections_in_tx,
+    ChangeActorKind, ChangeAttribution, CreateNamedVersion, DeleteTextFile,
+    MergeTextFileFromVersion, MergeTextFileResult, RenameTextFile, RollbackTextFileMutation,
+    VersionedTextStore, WriteText, get_collection_record, reconcile_collections_in_tx,
 };
 use dohc_engine_runtime::{
     CancellationToken, CaptureIngest, CaptureRetire, NoFaults, RuntimeError, WorkspaceSupervisor,
 };
-use dohc_engine_storage::{EngineStore, StorageError};
+use dohc_engine_storage::{EngineStore, StorageError, TxnOutcome};
 use dohc_engine_sync::{
-    AlwaysLive, NoLiveLeases, RelayCursor, ReplicationEnvelope, SyncError,
+    AlwaysLive, BaseOrigination, NoLiveLeases, RelayCursor, ReplicationEnvelope, SyncError,
     apply_replication_envelope, apply_ydoc_envelope, commit_relay_cursor,
-    drain_deferred_ydoc_for_key,
+    drain_deferred_ydoc_for_key, originate_ydoc_base_in_tx,
 };
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use std::path::Path;
@@ -4375,4 +4375,594 @@ impl dohc_engine_sync::RelayTransport for AcceptPushTransport {
     ) -> Result<dohc_engine_sync::ShareCollectionWriteResponse, dohc_engine_sync::RelayError> {
         Err(dohc_engine_sync::RelayError::InvalidResponse)
     }
+}
+
+/// The rich-document schema version a stored Y.Doc update names, if any.
+fn schema_version(update: &[u8]) -> Option<Any> {
+    use yrs::Map;
+    use yrs::updates::decoder::Decode;
+    let doc = Doc::new();
+    let meta = doc.get_or_insert_map(dohc_engine_collab::ROOT_META);
+    doc.transact_mut()
+        .apply_update(yrs::Update::decode_v1(update).expect("decode update"))
+        .expect("apply update");
+    match meta.get(&doc.transact(), "schemaVersion") {
+        None => None,
+        Some(yrs::Out::Any(value)) => Some(value),
+        Some(other) => panic!("schemaVersion holds a shared type: {other:?}"),
+    }
+}
+
+/// Open `path` as New page does: the editor opens before the engine has
+/// captured a file, so there is no head and no seed.
+async fn open_new_page(
+    handle: &dohc_engine_runtime::ActorHandle,
+    workspace_id: &str,
+    path: &str,
+) -> dohc_engine_runtime::YdocOpenState {
+    let state = handle
+        .ydoc_open_state(
+            workspace_id.to_owned(),
+            150,
+            true,
+            None,
+            "main".to_owned(),
+            path.to_owned(),
+            Some(ContentKind::Richdoc),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("open a new page");
+    assert!(
+        state.head_blob_sha256.is_none(),
+        "New page opens with no head"
+    );
+    assert!(state.seed_content.is_none(), "and with nothing to seed");
+    state
+}
+
+/// The editor's first update to a lineage-absent session, as `ydoc.recordUpdate`
+/// sends it: it requires an empty lineage and names no seed source.
+async fn record_first_new_page_update(
+    handle: &dohc_engine_runtime::ActorHandle,
+    key: &DocKey,
+    path: &str,
+    update: Vec<u8>,
+) -> Option<String> {
+    handle
+        .ydoc_record_update(
+            key.clone(),
+            path.to_owned(),
+            ContentKind::Richdoc,
+            Regime::LocalOnly,
+            update,
+            None,
+            None,
+            None,
+            true,
+            None,
+            None,
+            200,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .expect("record the first update")
+        .lineage_claim_id
+}
+
+async fn settle_note(
+    handle: &dohc_engine_runtime::ActorHandle,
+    root: &Path,
+    key: &DocKey,
+    path: &str,
+    claim: Option<String>,
+    session: &str,
+    now_ms: i64,
+) {
+    handle
+        .ydoc_settle(
+            root.to_path_buf(),
+            key.clone(),
+            path.to_owned(),
+            ContentKind::Richdoc,
+            claim,
+            None,
+            session.to_owned(),
+            Arc::new(()),
+            now_ms,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            None,
+            None,
+        )
+        .await
+        .expect("settle the note");
+}
+
+async fn settle_and_close_new_page(
+    handle: &dohc_engine_runtime::ActorHandle,
+    root: &Path,
+    state: &dohc_engine_runtime::YdocOpenState,
+    path: &str,
+    claim: Option<String>,
+) {
+    settle_note(
+        handle,
+        root,
+        &state.key,
+        path,
+        claim,
+        "new-page-session",
+        400,
+    )
+    .await;
+    handle
+        .ydoc_close_session(
+            state.key.clone(),
+            500,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("close the new page's tab");
+}
+
+/// The first version a New page note claims must name its schema version
+/// (#3790). Nothing seeds such a note, so its editor's update holds only the
+/// typed body, and the live host refuses a first version without the version.
+fn assert_first_version_names_its_schema_version(store: &EngineStore, case: &str) {
+    let ops = read_local_ydoc_ops(store);
+    assert_eq!(read_base_ops_in_log(store), 1, "{case}: one first version");
+    let base = ops.iter().find(|op| op.is_base()).expect("the base op");
+    assert_eq!(
+        schema_version(&read_blob_bytes(store, &base.blob_sha())),
+        Some(Any::Number(1.0)),
+        "{case}: the first version a New page note claims names schemaVersion 1"
+    );
+}
+
+/// New page in a synced workspace: the first record claims the note's first
+/// version while its tab is open.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_page_note_claimed_at_its_first_record_names_its_schema_version() {
+    const WS: &str = "ws-new-page-first-record";
+    const PATH: &str = "notes/typed-page.md";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    enable_sync(&db, WS);
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    let state = open_new_page(&handle, WS, PATH).await;
+    let typed = Ydoc::wire().richdoc_append_paragraph("Typed into a new page.");
+    let claim = record_first_new_page_update(&handle, &state.key, PATH, typed).await;
+    assert!(claim.is_some(), "the first record claims the first version");
+    supervisor.close(&db).expect("close actor");
+    let store = EngineStore::open(&db, 9_107).expect("reopen for assertions");
+
+    assert_first_version_names_its_schema_version(&store, "first record");
+    let ops = read_local_ydoc_ops(&store);
+    assert_eq!(ops.len(), 1, "the base already carries the typed text");
+    assert!(
+        replay_into_clean_peer(&store, &ops, WS, PATH).contains("Typed into a new page."),
+        "a clean peer rebuilds the typed note from the base alone"
+    );
+}
+
+/// New page in a synced workspace, typed and closed before anyone shares it.
+/// The close keeps the first version the first record claimed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_page_note_closed_before_any_share_keeps_a_first_version_with_its_schema_version() {
+    const WS: &str = "ws-new-page-closed";
+    const PATH: &str = "notes/closed-page.md";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    // New page leaves an empty file before the engine captures it.
+    std::fs::create_dir_all(scratch.path().join("notes")).expect("notes dir");
+    std::fs::write(scratch.path().join(PATH), "").expect("New page's empty file");
+    enable_sync(&db, WS);
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    let state = open_new_page(&handle, WS, PATH).await;
+    let typed = Ydoc::wire().richdoc_append_paragraph("Typed, then closed.");
+    let claim = record_first_new_page_update(&handle, &state.key, PATH, typed).await;
+    settle_and_close_new_page(&handle, scratch.path(), &state, PATH, claim).await;
+    supervisor.close(&db).expect("close actor");
+    let store = EngineStore::open(&db, 9_107).expect("reopen for assertions");
+
+    assert_first_version_names_its_schema_version(&store, "closed before any share");
+    assert_eq!(
+        read_marker_state(&store, &state.key),
+        (Regime::Replicated, true)
+    );
+    assert!(
+        std::fs::read_to_string(scratch.path().join(PATH))
+            .expect("the settled file")
+            .contains("Typed, then closed."),
+        "the settle wrote the typed text to the file"
+    );
+}
+
+/// Sync turns on while a New page note's tab is open, so its first version is
+/// claimed when the tab closes (`originate_closing_ydoc_base_in_tx`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_page_note_claimed_at_its_close_names_its_schema_version() {
+    const WS: &str = "ws-new-page-close-claim";
+    const PATH: &str = "notes/close-claim.md";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    std::fs::create_dir_all(scratch.path().join("notes")).expect("notes dir");
+    std::fs::write(scratch.path().join(PATH), "").expect("New page's empty file");
+    seed_identity(&db, WS);
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    let state = open_new_page(&handle, WS, PATH).await;
+    let typed = Ydoc::wire().richdoc_append_paragraph("Typed before sync.");
+    let claim = record_first_new_page_update(&handle, &state.key, PATH, typed).await;
+    assert!(
+        claim.is_none(),
+        "a workspace that does not sync claims nothing"
+    );
+    enable_sync(&db, WS);
+    settle_and_close_new_page(&handle, scratch.path(), &state, PATH, claim).await;
+    supervisor.close(&db).expect("close actor");
+    let store = EngineStore::open(&db, 9_107).expect("reopen for assertions");
+
+    assert_first_version_names_its_schema_version(&store, "claimed at close");
+    assert_eq!(
+        read_marker_state(&store, &state.key),
+        (Regime::Replicated, true)
+    );
+}
+
+/// A rich first version that already names its schema version, and a
+/// plain-text one, are claimed exactly as before the origination write: one
+/// update row, and a base that is that row's full state, byte for byte.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_first_version_that_needs_no_schema_version_write_originates_byte_identical() {
+    for kind in [ContentKind::Richdoc, ContentKind::Plaintext] {
+        const WS: &str = "ws-first-version-unchanged";
+        const PATH: &str = "notes/unchanged.md";
+        let scratch = ScratchDir::new().expect("scratch");
+        let db = engine_db_path(&scratch).expect("db");
+        enable_sync(&db, WS);
+
+        let supervisor = WorkspaceSupervisor::new();
+        let handle = supervisor.open(&db, 1).expect("open actor").actor;
+        let state = handle
+            .ydoc_open_state(
+                WS.to_owned(),
+                150,
+                true,
+                None,
+                "main".to_owned(),
+                PATH.to_owned(),
+                Some(kind),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("open");
+        let editor = Ydoc::wire();
+        let first = if kind == ContentKind::Richdoc {
+            let update = editor
+                .rewrite_content_to_markdown(ContentKind::Richdoc, "# Kept\n\nAs it was.\n")
+                .expect("rich first version");
+            assert_eq!(
+                schema_version(&update),
+                Some(Any::Number(1.0)),
+                "the rich first version already names its schema version"
+            );
+            update
+        } else {
+            editor.plaintext_insert(0, "As it was.")
+        };
+        handle
+            .ydoc_record_update(
+                state.key.clone(),
+                PATH.to_owned(),
+                kind,
+                Regime::LocalOnly,
+                first.clone(),
+                None,
+                None,
+                None,
+                true,
+                None,
+                None,
+                200,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+                None,
+            )
+            .await
+            .expect("first update");
+        supervisor.close(&db).expect("close actor");
+        let store = EngineStore::open(&db, 9_107).expect("reopen for assertions");
+
+        let ops = read_local_ydoc_ops(&store);
+        assert_eq!(ops.len(), 1, "{kind:?}: one base");
+        let expected = Ydoc::wire();
+        expected.apply(&first).expect("apply the first version");
+        assert_eq!(
+            read_blob_bytes(&store, &ops[0].blob_sha()),
+            expected.encode_full_state(),
+            "{kind:?}: the base is the first version's full state, byte for byte"
+        );
+        assert_eq!(
+            read_lineage_rows(&store, &state.key).0,
+            1,
+            "{kind:?}: the origination adds no update row"
+        );
+    }
+}
+
+/// The rich-document schema version the stored lineage names, if any.
+fn stored_schema_version(store: &EngineStore, key: &DocKey) -> Option<Any> {
+    let doc = store
+        .read_with(|conn| dohc_engine_collab::load_doc_in(conn, key))
+        .expect("load the stored lineage");
+    schema_version(&doc.encode_full_state())
+}
+
+/// `(settled_update_seq, head_update_seq)` for one lineage.
+fn settled_and_head(store: &EngineStore, key: &DocKey) -> (Option<i64>, i64) {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT settled_update_seq, head_update_seq FROM ydoc_docs \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .expect("read the lineage's positions")
+}
+
+fn moment_count(store: &EngineStore, key: &DocKey) -> i64 {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM moments \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                |row| row.get(0),
+            )
+        })
+        .expect("count moments")
+}
+
+/// A New page note typed and saved before its workspace synced, so nothing
+/// claimed it: its one update has no schema version, and its head is settled.
+async fn saved_unclaimed_new_page(db: &Path, root: &Path, ws: &str, path: &str) -> DocKey {
+    std::fs::create_dir_all(root.join("notes")).expect("notes dir");
+    std::fs::write(root.join(path), "").expect("New page's empty file");
+    seed_identity(db, ws);
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(db, 1).expect("open actor").actor;
+    let state = open_new_page(&handle, ws, path).await;
+    let typed = Ydoc::wire().richdoc_append_paragraph("Typed before sync.");
+    let claim = record_first_new_page_update(&handle, &state.key, path, typed).await;
+    assert!(
+        claim.is_none(),
+        "a workspace that does not sync claims nothing"
+    );
+    settle_note(
+        &handle,
+        root,
+        &state.key,
+        path,
+        None,
+        "new-page-session",
+        400,
+    )
+    .await;
+    supervisor.close(db).expect("close actor");
+    state.key
+}
+
+/// The schema version is written in the claim's own transaction. A claim that
+/// rolls back leaves no version, no claim and no row behind, and its retry
+/// proposes the same first version.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rolled_back_claim_leaves_no_schema_version_and_its_retry_proposes_the_same_base() {
+    const WS: &str = "ws-new-page-rollback";
+    const PATH: &str = "notes/rolled-back.md";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let key = saved_unclaimed_new_page(&db, scratch.path(), WS, PATH).await;
+    enable_sync(&db, WS);
+    let mut store = EngineStore::open(&db, 9_107).expect("open store");
+    let rows = read_lineage_rows(&store, &key);
+    let positions = settled_and_head(&store, &key);
+    assert_eq!(stored_schema_version(&store, &key), None);
+
+    let mut proposed = None;
+    let rolled_back = store.write_with(&NoFaults, |tx| {
+        let BaseOrigination::Originated { base_snapshot_sha } =
+            originate_ydoc_base_in_tx(tx, &key, PATH, None, None, 600)?
+        else {
+            panic!("the saved note originates");
+        };
+        proposed = Some(base_snapshot_sha);
+        Err::<(), _>(SyncError::RetryableState {
+            reason: "roll the claim back",
+        })
+    });
+    assert!(matches!(rolled_back, Err(SyncError::RetryableState { .. })));
+    assert_eq!(read_lineage_rows(&store, &key), rows, "no row stays behind");
+    assert_eq!(
+        settled_and_head(&store, &key),
+        positions,
+        "the head stays where it was"
+    );
+    assert!(!read_marker_state(&store, &key).1, "no claim stays behind");
+    assert_eq!(
+        stored_schema_version(&store, &key),
+        None,
+        "no schema version stays behind"
+    );
+    assert!(
+        read_local_ydoc_ops(&store).is_empty(),
+        "nothing is journaled"
+    );
+
+    let TxnOutcome::Committed(retried) = store
+        .write_with(&NoFaults, |tx| {
+            originate_ydoc_base_in_tx(tx, &key, PATH, None, None, 700)
+        })
+        .expect("retry the claim")
+    else {
+        panic!("the retried claim commits");
+    };
+    assert_eq!(
+        retried,
+        BaseOrigination::Originated {
+            base_snapshot_sha: proposed.expect("the rolled-back claim proposed a base"),
+        },
+        "the retry proposes the same first version"
+    );
+    assert_eq!(
+        read_lineage_rows(&store, &key).0,
+        rows.0 + 1,
+        "the claim adds the schema version's one row"
+    );
+    assert_first_version_names_its_schema_version(&store, "retried claim");
+}
+
+/// The schema version adds no text, so the first save after a claim wrote it
+/// adds no History entry and leaves the file as it was. The save settles the
+/// version's row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_first_save_after_the_schema_version_write_adds_no_history_entry() {
+    const WS: &str = "ws-new-page-no-stray-moment";
+    const PATH: &str = "notes/no-stray.md";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let key = saved_unclaimed_new_page(&db, scratch.path(), WS, PATH).await;
+    enable_sync(&db, WS);
+    let (moments, claim) = {
+        let mut store = EngineStore::open(&db, 9_107).expect("open store");
+        let TxnOutcome::Committed(BaseOrigination::Originated { .. }) = store
+            .write_with(&NoFaults, |tx| {
+                originate_ydoc_base_in_tx(tx, &key, PATH, None, None, 600)
+            })
+            .expect("claim the saved note")
+        else {
+            panic!("the saved note originates");
+        };
+        let (settled, head) = settled_and_head(&store, &key);
+        assert_eq!(
+            settled,
+            Some(head - 1),
+            "the schema version's row is the one unsettled row"
+        );
+        let claim = dohc_engine_collab::read_marker(&store, &key)
+            .expect("read marker")
+            .expect("marker exists")
+            .lineage_claim_id;
+        (moment_count(&store, &key), claim)
+    };
+    let file = std::fs::read_to_string(scratch.path().join(PATH)).expect("the saved file");
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 2).expect("reopen actor").actor;
+    handle
+        .ydoc_open_state(
+            WS.to_owned(),
+            800,
+            true,
+            None,
+            "main".to_owned(),
+            PATH.to_owned(),
+            Some(ContentKind::Richdoc),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("reopen the note");
+    settle_note(
+        &handle,
+        scratch.path(),
+        &key,
+        PATH,
+        claim,
+        "reopened-session",
+        900,
+    )
+    .await;
+    supervisor.close(&db).expect("close actor");
+    let store = EngineStore::open(&db, 9_108).expect("reopen for assertions");
+
+    assert_eq!(moment_count(&store, &key), moments, "no new History entry");
+    let (settled, head) = settled_and_head(&store, &key);
+    assert_eq!(
+        settled,
+        Some(head),
+        "the save settles the schema version's row"
+    );
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(PATH)).expect("the file"),
+        file,
+        "the file is unchanged"
+    );
+}
+
+/// Nobody wrote the schema version, so a note a person typed keeps that
+/// person as its only author: the next settlement adds no unrecorded author.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_schema_version_adds_no_unrecorded_author() {
+    const WS: &str = "ws-new-page-named-author";
+    const PATH: &str = "notes/named-author.md";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    enable_sync(&db, WS);
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    let state = open_new_page(&handle, WS, PATH).await;
+    let claim = handle
+        .ydoc_record_update(
+            state.key.clone(),
+            PATH.to_owned(),
+            ContentKind::Richdoc,
+            Regime::LocalOnly,
+            Ydoc::wire().richdoc_append_paragraph("Typed by a person."),
+            Some("local-person".to_owned()),
+            Some(ChangeAttribution {
+                actor_kind: ChangeActorKind::Human,
+                on_behalf_of: None,
+                depth: 0,
+                run: None,
+                agent_run_id: None,
+            }),
+            None,
+            true,
+            None,
+            None,
+            200,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .expect("record the person's first update")
+        .lineage_claim_id;
+    assert!(claim.is_some(), "the first record claims the first version");
+    supervisor.close(&db).expect("close actor");
+    let store = EngineStore::open(&db, 9_107).expect("reopen for assertions");
+
+    assert_first_version_names_its_schema_version(&store, "named author");
+    let authors = store
+        .read_with(|conn| {
+            dohc_engine_collab::author_coverage::interval_in(conn, &state.key, i64::MAX)
+        })
+        .expect("read the next settlement's authors");
+    assert!(
+        !authors.has_unattributed(),
+        "the schema version adds no unrecorded author"
+    );
+    assert_eq!(authors.len(), 1, "only the person who typed");
 }

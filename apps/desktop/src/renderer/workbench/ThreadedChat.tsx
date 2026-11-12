@@ -5,7 +5,7 @@ import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { CopyButton } from "../ui/CopyButton";
 import { Menu } from "../ui/Menu";
 import { CopyMessageLink } from "./messageLinks";
-import { ChatMessageList, TOOLBAR_BUTTON, type ChatMessageListHandle, type ChatReactionControls } from "./chatMessages";
+import { ChatMessageList, STREAM_COLUMN, TOOLBAR_BUTTON, type ChatMessageListHandle, type ChatReactionControls } from "./chatMessages";
 import { EMPTY_ART } from "./EmptyArt";
 import { ChatThreadPanel, splitThreads, ThreadSummary, WorkingLine, WorkingRow, type ChatWorking } from "./ChatThreadPanel";
 import { MentionComposer, type FileMentionCandidate } from "./MentionComposer";
@@ -76,6 +76,20 @@ export function ThreadedChat(props: {
   const [detailsId, setDetailsId] = useState<string | null>(null);
   const [narrow, setNarrow] = useState(false);
   const [atEnd, setAtEnd] = useState(true);
+  // The width this platform's scrollbar takes, which is none where scrollbars
+  // float over the content. The list keeps that room while its column is on,
+  // and the composer keeps the same, so the two stay level. An empty box that
+  // always scrolls gives the width before the first paint, list or no list.
+  const [gutter, setGutter] = useState(0);
+  const watchGutter = useCallback((probe: HTMLDivElement | null) => {
+    if (!probe) return;
+    const measure = () => setGutter(probe.offsetWidth - probe.clientWidth);
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(probe);
+    return () => observer.disconnect();
+  }, []);
   // Messages the reader had seen when last at the end.
   const seenCount = useRef(0);
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -113,12 +127,24 @@ export function ThreadedChat(props: {
   useEffect(() => {
     const node = hasList && streamShown ? streamListRef.current?.getScrollableNode() : null;
     if (!node) return;
-    const onScroll = () => {
-      setAtEnd(node.scrollHeight - node.scrollTop - node.clientHeight <= FOLLOW_THRESHOLD_PX);
+    const reachesEnd = () => node.scrollHeight - node.scrollTop - node.clientHeight <= FOLLOW_THRESHOLD_PX;
+    const onScroll = () => setAtEnd(reachesEnd());
+    // A pane or its messages can change size with no scroll, such as a window
+    // that grows until every message fits. A resize can bring the reader to
+    // the end. Only a scroll takes them from it, so a message that arrives
+    // at the end is never counted while the list catches up.
+    const onResize = () => {
+      if (reachesEnd()) setAtEnd(true);
     };
     onScroll();
     node.addEventListener("scroll", onScroll, { passive: true });
-    return () => node.removeEventListener("scroll", onScroll);
+    const resized = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(onResize);
+    resized?.observe(node);
+    if (node.firstElementChild) resized?.observe(node.firstElementChild);
+    return () => {
+      node.removeEventListener("scroll", onScroll);
+      resized?.disconnect();
+    };
   }, [hasList, streamShown]);
   useEffect(() => {
     if (atEnd) seenCount.current = stream.length;
@@ -302,8 +328,13 @@ export function ThreadedChat(props: {
             rowActions={streamActions}
             openMessageId={openRootId}
             firstUnreadMessageId={props.firstUnreadMessageId}
-            footer={working && workingRootId === null ? <WorkingRow testIdPrefix={prefix} working={working} density={narrow ? "narrow" : "stream"} /> : null}
+            footer={working && workingRootId === null ? (
+              <div className={narrow ? undefined : STREAM_COLUMN}>
+                <WorkingRow testIdPrefix={prefix} working={working} density={narrow ? "narrow" : "stream"} />
+              </div>
+            ) : null}
             density={narrow ? "narrow" : "stream"}
+            column={!narrow}
           />
           <span role="status" aria-live="polite" className="sr-only">
             {newCount > 0 ? `${newCount} ${newCount === 1 ? "new message" : "new messages"}` : ""}
@@ -322,9 +353,14 @@ export function ThreadedChat(props: {
               </button>
             </div>
           ) : null}
-          {props.belowList}
-          {props.notice}
-          {props.composer(narrow ? "narrow" : "stream")}
+          <div ref={watchGutter} aria-hidden className="h-0 shrink-0 overflow-y-scroll [scrollbar-gutter:stable]" />
+          <div className="flex shrink-0 flex-col" style={narrow ? undefined : { paddingRight: gutter }}>
+            <div className={`flex flex-col ${narrow ? "" : STREAM_COLUMN}`}>
+              {props.belowList}
+              {props.notice}
+              {props.composer(narrow ? "narrow" : "stream")}
+            </div>
+          </div>
         </div>
       ) : null}
       {openRootId ? (

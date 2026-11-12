@@ -59,6 +59,7 @@ export const DATASET_RESULTS: Record<DatasetAction, DatasetKind[]> = {
   pendingAttempts: ["pending-attempts"],
   reconcileAttempt: ["attempt-reconciled"],
   cancelAttempt: ["attempt-cancelled"],
+  cancelInvoke: ["invoke-cancel-requested"],
   export: ["exported"],
   prepareRecovery: ["recovery-prepared"],
   claimRecovery: ["recovery-claimed"],
@@ -143,7 +144,7 @@ export const ACCOUNT_RESULTS: Record<string, CliSocketVerb> = {
 const DOCUMENT_RESULTS: Record<string, CliSocketVerb> = {
   read: "documentRead", held: "documentHeld", "held-change": "heldNoteChange", edit: "documentEdit", create: "documentCreate", "set-fields": "collectionSetFields", chats: "fileChats", comment: "fileChatStart",
   "kept-edits": "liveKeptEdits", "save-recovery-copy": "saveRecoveryCopy", "retry-kept-edits": "retryKeptEdits", "stop-again": "stopAgain",
-  live: "liveDocuments",
+  live: "liveDocuments", stop: "liveStop", resume: "liveResume",
 };
 
 // The socket verb whose result each `dohc automation` verb prints.
@@ -163,6 +164,12 @@ export const CHAT_EXAMPLES: Record<string, string[][]> = {
   links: [["chat","links","general","--cursor","sealed"]],
   "file-mentions": [["chat", "file-mentions", "--subject", '{"path":"notes/plan.md"}', "--cursor", "sealed"]],
   groups: [["chat", "groups"]],
+  link: [
+    ["chat", "link", "--group", "#trip"],
+    ["chat", "link", "--thread", "th_1"],
+    ["chat", "link", "--message", "msg_1"],
+    ["chat", "link", "--path", "plans/trip.md"],
+  ],
   "create-group": [["chat", "create-group", "needs-ice", "--purpose", "Questions for Ice", "--type", "posts"]],
   threads: [["chat", "threads", "general"]],
   watch: [["chat", "watch", "--once", "--cursor", "cursor", "--group", "general", "--thread", "th_1", "--timeout", "25"]],
@@ -191,6 +198,7 @@ export const CHAT_EXAMPLES: Record<string, string[][]> = {
 // verb's result schema; a string is written from the tool in tools.ts.
 export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_chat_links:{cli:"chatLinks"},
+  dohc_link:{cli:"link"},
   dohc_chat_file_mentions: { cli: "chatFileMentions" },
   dohc_links_edges: { cli: "linksEdges" },
   dohc_links_in: { cli: "linksIn" },
@@ -219,10 +227,14 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_list_kept_copies: { cli: "keptCopies" },
   dohc_list_notices: { cli: "notices" },
   dohc_save_kept_copy: { cli: "saveKeptCopy" },
+  dohc_restore_protected_copy: { cli: "restoreProtectedCopy" },
+  dohc_discard_protected_copy: { cli: "discardProtectedCopy" },
   dohc_save_recovery_copy: { cli: "saveRecoveryCopy" },
   dohc_retry_kept_edits: { cli: "retryKeptEdits" },
   dohc_stop_again: { cli: "stopAgain" },
   dohc_list_live_documents: { cli: "liveDocuments" },
+  dohc_stop_live_editing: { cli: "liveStop" },
+  dohc_resume_live_editing: { cli: "liveResume" },
   dohc_list_retained_copies: { cli: "retainedCopies" },
   dohc_delete_retained_copies: { cli: "deleteRetainedCopies" },
   dohc_read_document: { cli: "documentRead" },
@@ -248,7 +260,7 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_create_group: "`{ ok: true, group: { id, name, slug, kind, purpose? } }`",
   dohc_start_group_chat: "`{ ok: true, group: { id, slug, kind }, threadId, messageId, title, warning? }`",
   dohc_start_file_chat: { cli: "fileChatStart" },
-  dohc_reply_to_chat: "`{ ok: true, threadId, messageId, parentMessageId?, resolvedMessageId?, warning? }`",
+  dohc_reply_to_chat: "`{ ok: true, threadId, messageId, parentMessageId?, resolvedMessageId?, warning? }`, or `{ ok: true, threadId, nothingToReport: true }`",
   dohc_query_collection: { cli: "collectionQuery" },
   dohc_read_record: { cli: "collectionRecord" },
   dohc_set_record_fields: { cli: "collectionSetFields" },

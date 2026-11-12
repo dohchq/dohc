@@ -77,6 +77,8 @@ export function createWorkspaceEngineIpc<
   readWorkspaceEnginePolicy: typeof readWorkspaceEnginePolicy;
   readSyncHistory: typeof readSyncHistory;
   historyCollections(operation: Operation): Promise<Pick<TimelineReads, "local" | "remote" | "scope">>;
+  /** Folders whose dataset.json names no Collection this computer keeps. None on a computer that doesn't keep them. */
+  unclaimedDatasetFolders(operation: Operation): Promise<string[]>;
   /** The name Settings gives one of this computer's agents, while Settings lists it. */
   agentName(agentId: string): string | undefined;
   localPersonId(): string;
@@ -171,7 +173,9 @@ export function createWorkspaceEngineIpc<
           for (const result of mounted) {
             if (result.status === "fulfilled") collections.push(...result.value);
           }
-          return ListCollectionsResult.parse({ collections });
+          // Only for the workspace's own folders. Without an answer, Home keeps hiding every Collection's folder.
+          const unclaimedDatasetFolders = operation.workspace.shareView ? [] : await dependencies.unclaimedDatasetFolders(operation).catch(() => []);
+          return ListCollectionsResult.parse({ collections, unclaimedDatasetFolders });
         },
       );
     });
@@ -588,6 +592,24 @@ export function createWorkspaceEngineIpc<
         } finally {
           notifyRenderer({ workspaceId: started.workspaceId });
         }
+      },
+      retrySecretKey: async (input, { event }) => {
+        return withRendererWorkspaceOperation(event.sender, input.workspaceId, "This workspace is no longer active.", async operation => {
+          assertWritableWorkspace(operation.workspace);
+          const result = await withEngineAdapter(operation.workspace, async adapter => {
+            const capture = await adapter.reconcileCapture();
+            return { capture, status: await adapter.watcherStatus() };
+          });
+          if (!result?.status) throw new Error("The workspace engine is not running.");
+          const { capture, status } = result;
+          notifyRenderer({ workspaceId: operation.workspace.workspaceId });
+          // Until a pass settles, a restarted engine has not tried the key, so
+          // a missing reason does not mean it works.
+          if (!capture.settled || !capture.running || capture.degraded) {
+            throw new Error("dohc is still checking this workspace's files.");
+          }
+          if (status.secretKeyUnavailable) throw new Error("dohc still cannot use the workspace secret key.");
+        });
       },
     });
     registerOperations<typeof fileObservationOperations, Event, Operation>({

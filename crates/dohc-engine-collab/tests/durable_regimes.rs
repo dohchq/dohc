@@ -3,7 +3,7 @@
 //! and the yjs-non-atomic boundary (never journal invalid bytes). Crash-recovery
 //! / exactly-once tests use the storage fault seam enabled by testkit.
 
-mod common;
+use crate::common;
 
 use std::collections::{BTreeMap, BTreeSet};
 

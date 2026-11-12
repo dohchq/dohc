@@ -82,14 +82,19 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_list_kept_copies: ["file.kept.list"],
   dohc_list_notices: ["notice.list"],
   dohc_save_kept_copy: ["file.kept.save"],
+  dohc_restore_protected_copy: ["file.protected.restore"],
+  dohc_discard_protected_copy: ["file.protected.discard"],
   dohc_save_recovery_copy: ["share.live.document.recovery.save"],
   dohc_retry_kept_edits: ["share.live.document.retry"],
   dohc_stop_again: ["share.live.document.stop"],
   dohc_list_live_documents: ["share.live.documents.list"],
+  dohc_stop_live_editing: ["share.live.document.stop"],
+  dohc_resume_live_editing: ["share.live.document.resume"],
   dohc_list_retained_copies: ["file.retained.list"],
   dohc_delete_retained_copies: ["file.retained.delete"],
   dohc_chat_file_mentions: ["chat.read"],
   dohc_chat_links: ["chat.read"],
+  dohc_link: ["work.reference.make"],
   dohc_links_edges: ["links.edges"],
   dohc_links_in: ["links.in"],
   dohc_links_resolve: ["links.resolve"],
@@ -893,7 +898,7 @@ export async function createWorkspaceDirectory(
 // only word an early refusal; the desktop decides.
 export async function moveWorkspacePath(
   ctx: ToolContext,
-  args: { fromPath: string; toPath: string; overwrite?: boolean; summary?: string },
+  args: { fromPath: string; toPath: string; overwrite?: boolean; confirmNotVersioned?: boolean; summary?: string },
   agent?: string,
 ) {
   const from = await safeResolve(ctx, args.fromPath, "entry");
@@ -906,6 +911,7 @@ export async function moveWorkspacePath(
   return requestCli(ctx, "fileMove", {
     fromPath: from.normalized, toPath: to.normalized,
     ...(args.overwrite !== undefined ? { overwrite: args.overwrite } : {}),
+    ...(args.confirmNotVersioned ? { confirmNotVersioned: true } : {}),
     agent, requestId: randomUUID(),
   });
 }
@@ -919,13 +925,14 @@ export async function duplicateWorkspaceFile(ctx: ToolContext, args: {path: stri
 
 export async function deleteWorkspacePath(
   ctx: ToolContext,
-  args: { path: string; summary?: string },
+  args: { path: string; confirmNotVersioned?: boolean; summary?: string },
   agent?: string,
 ) {
   // A link is deleted as a link, not followed.
   const resolved = await safeResolve(ctx, args.path, "entry");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
-  return requestCli(ctx, "fileDelete", { path: resolved.normalized, agent, requestId: randomUUID() });
+  return requestCli(ctx, "fileDelete", { path: resolved.normalized,
+    ...(args.confirmNotVersioned ? { confirmNotVersioned: true } : {}), agent, requestId: randomUUID() });
 }
 
 // --- dohc_list_workspaces / cloud binding helpers ---------------------------
@@ -2090,6 +2097,19 @@ export async function readChat(ctx: ToolContext, args: {
   return { ok: false as const, reason: "Pass a threadId to read a thread, or a group to read its stream." };
 }
 
+// A link to put in a chat message, for exactly one of a chat, thread, message, or path.
+export async function makeLink(ctx: ToolContext, args: { group?: string; thread?: string; message?: string; path?: string }) {
+  const given = (["group", "thread", "message", "path"] as const).filter(kind => args[kind] !== undefined);
+  if (given.length !== 1) return { ok: false as const, reason: "Pass exactly one of group, thread, message, and path." };
+  const kind = given[0]!;
+  const value = args[kind]!;
+  const target = kind === "group" ? { kind, group: value }
+    : kind === "thread" ? { kind, thread: value }
+    : kind === "message" ? { kind, message: value }
+    : { kind, path: value };
+  return requestCli(ctx, "link", { target });
+}
+
 // --- groups (PR 12/15 slice, WS-E) ----------------------------------------
 
 // Group discovery for agents: names, slugs, kinds, and each group's
@@ -2247,6 +2267,19 @@ export async function replyToChat(
   };
 }
 
+// End an automation's run with nothing to report. It posts no message, and
+// the run ends without a failure.
+export async function reportNothing(ctx: ToolContext, args: { threadId: string; runId?: string }) {
+  // The run this server works for wins over a run the caller names.
+  const runId = ctx.runId ?? args.runId;
+  const result = await requestCli(ctx, "nothingToReport", {
+    thread: args.threadId,
+    ...(runId !== undefined ? { runId } : {}),
+  });
+  if ("ok" in result) return result;
+  return { ok: true as const, threadId: engineThreadId(result.threadId), nothingToReport: true as const };
+}
+
 // --- collections ------------------------------------------------------------
 //
 // Collection reads and writes cross the same desktop CLI hop as chats: the
@@ -2398,6 +2431,15 @@ export async function saveKeptCopy(ctx: ToolContext, args: { id: number }) {
   return requestCli(ctx, "saveKeptCopy", { id: args.id });
 }
 
+// A protected file's change a sync replaced, kept on this computer only.
+export async function restoreProtectedCopy(ctx: ToolContext, args: { id: string }) {
+  return requestCli(ctx, "restoreProtectedCopy", { id: args.id });
+}
+
+export async function discardProtectedCopy(ctx: ToolContext, args: { id: string }) {
+  return requestCli(ctx, "discardProtectedCopy", { id: args.id });
+}
+
 // A live document's edits the server refused, which dohc keeps on this
 // computer. The desktop's Notices row offers these same steps, and
 // dohc_workspace_status lists the documents as keptEdits.
@@ -2424,6 +2466,20 @@ export async function stopAgain(ctx: ToolContext, args: { path: string; incident
 export async function listLiveDocuments(ctx: ToolContext, args: { cursor?: string }) {
   if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "Open the owning workspace to list its live documents." };
   return requestCli(ctx, "liveDocuments", args.cursor === undefined ? {} : { cursor: args.cursor });
+}
+
+export async function stopLiveEditing(ctx: ToolContext, args: { path: string; objectId?: string }) {
+  if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "Open the owning workspace to stop live editing." };
+  const resolved = await safeResolve(ctx, args.path, "write");
+  if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  return requestCli(ctx, "liveStop", { path: resolved.normalized, ...(args.objectId === undefined ? {} : { objectId: args.objectId }) });
+}
+
+export async function resumeLiveEditing(ctx: ToolContext, args: { path: string }) {
+  if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "Open the owning workspace to resume live editing." };
+  const resolved = await safeResolve(ctx, args.path, "write");
+  if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  return requestCli(ctx, "liveResume", { path: resolved.normalized });
 }
 
 // Old file copies kept on a drive that cannot tell dohc whether a program

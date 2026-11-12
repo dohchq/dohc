@@ -1,6 +1,7 @@
 import {shareSenderLabel, shareAccessLabel} from "@dohc/security-contract/share-labels";
 import {ShareSender} from "../ShareSender";
 import { MessageReactions } from "./chatMessages";
+import { WorkLinkText } from "./workReferences";
 import { chatEditorPath, chatEditorTitle } from "../shell/chatsNav";
 import { parseTab } from "./workbenchState";
 import { PostFeedList } from "./PostFeedList";
@@ -119,6 +120,7 @@ import { bridge } from "../bridge";
 import {
   type ChatMessageListHandle,
   MentionText,
+  hasChatLinks,
   chatAuthorLabel,
   usePersonalAgentNames,
   type ChatReactionControls,
@@ -143,6 +145,8 @@ import { usePresence } from "../collab/usePresence";
 import { useChatDispatchPaused } from "../useChatDispatchPaused";
 import { isLivePageOwnedRefusal, withErrorWords } from "../../ipc/errorWords";
 import { publishAboutConversation, type AboutConversationEntry } from "./aboutConversation";
+import { ShareRowMark } from "./shareRowMark";
+import { nextInvitationList, type InvitationLists } from "./invitationOutcome";
 import type {
   PresenceTransport,
 } from "../collab/presenceChannel";
@@ -361,6 +365,14 @@ type DmSyncCause = keyof typeof DM_SYNC_CAUSES;
 interface DmSyncRequest {
   pull: boolean;
   asked: boolean;
+}
+
+// The sync that holds the slot: the pass queued behind it, and the calls
+// waiting for that pass.
+interface DmSyncDrain {
+  token: number;
+  queued: DmSyncRequest | null;
+  waiting: (() => void)[];
 }
 
 interface OpenDmSyncRequest extends DmSyncRequest {
@@ -662,6 +674,13 @@ export function ChatsView(props: {
   // onInvitationRevealed then reports it handled.
   revealInvitation?: ChatsInvitation;
   onInvitationRevealed?: () => void;
+  // What each list's reads since the newest reveal said, sent again whenever
+  // that changes. Withdrawn (null) once this Chats stops keeping it current:
+  // before each change, and when Chats unmounts.
+  onInvitationProgress?: (shareId: string, lists: InvitationLists | null) => void;
+  // While a reveal is owed, each row that stands for a share reports its share
+  // id when it mounts, and again for each newer reveal.
+  onShareRowMounted?: (shareId: string) => void;
 }) {
   const { workspaceId, onNavChange, onDraftsChange, onThreadRead, onDmRead } =
     props;
@@ -934,6 +953,23 @@ export function ChatsView(props: {
     relayReach: 0,
   });
   const takeCommitTicket = useCallback(() => ++commitTicket.current, []);
+  // The newest reveal (a notice's Open), and what Chats has seen of its
+  // invitation since. Every share listing and message sync that started after
+  // the reveal records whether it answered; nothing waits on a particular
+  // read. `owedFrom` holds the share ticket and message pass the reveal began
+  // at, so a read already running before it counts for nothing.
+  const [owed, setOwed] = useState<({ reveal: ChatsInvitation } & InvitationLists) | null>(null);
+  const owedFrom = useRef<{ shareTicket: number; dmPass: number } | null>(null);
+  const dmPassClock = useRef(0);
+  const noteListing = useCallback((list: "shares" | "dms", startedAt: number, listed: boolean) => {
+    const from = owedFrom.current;
+    if (from === null || startedAt <= (list === "shares" ? from.shareTicket : from.dmPass)) return;
+    setOwed((current) => {
+      if (current === null) return current;
+      const next = nextInvitationList(current[list], listed);
+      return next === current[list] ? current : { ...current, [list]: next };
+    });
+  }, []);
   // Claim every lane in `lanes`, or none of them. A response writes exactly
   // what it claims, so a reader that can only speak for part of what it is
   // about to write must not claim the rest and then write it anyway.
@@ -1001,6 +1037,7 @@ export function ChatsView(props: {
       // A response issued under an older cloud session commits nothing: its
       // rows belong to an account the user has left.
       if (session !== sessionGeneration.current) return;
+      noteListing("shares", ticket, value?.relay.state === "answered");
       // A failed lookup for a refresh nobody asked for is not an answer. It
       // fills in only where nothing has answered yet — so the surface resolves
       // instead of waiting on a request that may never return — and it takes
@@ -1140,7 +1177,7 @@ export function ChatsView(props: {
       });
       setSharesWorkspaceId(workspaceId);
     },
-    [claimLanes, planJoinedWrite, workspaceId],
+    [claimLanes, noteListing, planJoinedWrite, workspaceId],
   );
   const refreshOverview = useCallback(
     async (options?: { background?: boolean }): Promise<void> => {
@@ -1197,6 +1234,8 @@ export function ChatsView(props: {
         }
       } catch (error) {
         if (token !== liveToken.current) return;
+        // The channel list did not answer, so neither did its share listing.
+        if (session === sessionGeneration.current) noteListing("shares", ticket, false);
         // A refresh nobody asked for never reports a failure. There is nothing
         // to tell a user who asked for nothing, and a failure holds no answer
         // for the lane — so claiming it would only discard the answer of
@@ -1211,7 +1250,7 @@ export function ChatsView(props: {
         });
       }
     },
-    [claimLanes, commitShareListing, takeCommitTicket, workspaceId],
+    [claimLanes, commitShareListing, noteListing, takeCommitTicket, workspaceId],
   );
 
   // The sidebar shows each agent's chat, which dohc makes for each agent it can start.
@@ -1305,6 +1344,9 @@ export function ChatsView(props: {
               .catch(() => null);
             if (seed !== null && isCurrent()) {
               commitShareListing(seedTicket, session, seed, { background: true });
+            } else if (isCurrent() && session === sessionGeneration.current) {
+              // Not committed, but a reveal still learns the read failed.
+              noteListing("shares", seedTicket, false);
             }
           } else {
             const sharesTicket = takeCommitTicket();
@@ -1408,29 +1450,33 @@ export function ChatsView(props: {
   // the pass (DM_SYNC_CAUSES). The queued pass checks the hold again, so a
   // sync that queued behind a slow failure waits it out unless a person
   // asked for it.
-  const dmSync = useRef<{ token: number; queued: DmSyncRequest | null } | null>(null);
+  //
+  // Each call resolves once the pass that covers it ends, the call that
+  // starts the drain included: polls can keep queueing passes behind a slow
+  // sync, so the drain itself may not end for a long time.
+  const dmSync = useRef<DmSyncDrain | null>(null);
   const dmSyncHold = useRef<DmSyncHold>({ issued: 0, settled: 0, until: 0 });
   const keepAcceptedNoticeRef = useRef(false);
-  const refreshDms = useCallback(async (cause: DmSyncCause) => {
-    const active = dmSync.current;
-    if (active !== null && active.token === liveToken.current) {
-      active.queued = queueDmSync(active.queued, cause);
-      return;
-    }
-    const mine: { token: number; queued: DmSyncRequest | null } = {
-      token: liveToken.current,
-      queued: queueDmSync(null, cause),
+  const drainDms = useCallback(async (mine: DmSyncDrain) => {
+    // The calls the running pass covers.
+    let covering: (() => void)[] = [];
+    const settle = () => {
+      for (const waiter of covering) waiter();
+      covering = [];
     };
-    dmSync.current = mine;
     try {
       while (
         mine.queued !== null &&
         mine.token === liveToken.current &&
         dmSync.current === mine
       ) {
+        settle();
         const request = mine.queued;
         mine.queued = null;
-        if (dmSyncHeld(dmSyncHold.current, request)) return;
+        covering = mine.waiting;
+        mine.waiting = [];
+        if (dmSyncHeld(dmSyncHold.current, request)) break;
+        const pass = ++dmPassClock.current;
         const token = mine.token;
         const session = sessionGeneration.current;
         const sync = ++dmSyncHold.current.issued;
@@ -1440,8 +1486,9 @@ export function ChatsView(props: {
             ...(request.pull ? { poll: true } : {}),
           });
           settleDmSync(dmSyncHold.current, sync, result.failed);
-          if (token !== liveToken.current) return;
+          if (token !== liveToken.current) break;
           if (session !== sessionGeneration.current) continue;
+          noteListing("dms", pass, result.available && !result.failed);
           setDmAvailable(result.available);
           setDms(keepIfUnchanged(result.dms));
           setPendingDmRequests(keepIfUnchanged(result.pending));
@@ -1454,12 +1501,27 @@ export function ChatsView(props: {
           }
         } catch {
           // DMs are optional: Chats stays fully usable without them.
+          if (session === sessionGeneration.current) noteListing("dms", pass, false);
         }
       }
     } finally {
       if (dmSync.current === mine) dmSync.current = null;
+      settle();
+      for (const waiter of mine.waiting) waiter();
+      mine.waiting = [];
     }
-  }, [workspaceId]);
+  }, [noteListing, workspaceId]);
+  const refreshDms = useCallback((cause: DmSyncCause) => new Promise<void>((resolve) => {
+    const active = dmSync.current;
+    if (active !== null && active.token === liveToken.current) {
+      active.queued = queueDmSync(active.queued, cause);
+      active.waiting.push(resolve);
+      return;
+    }
+    const mine: DmSyncDrain = { token: liveToken.current, queued: queueDmSync(null, cause), waiting: [resolve] };
+    dmSync.current = mine;
+    void drainDms(mine);
+  }), [drainDms]);
 
   // Workspace switch: drop everything stale and reload from the top.
   useEffect(() => {
@@ -3065,6 +3127,11 @@ export function ChatsView(props: {
       channel.wireId ? joinedByWire.get(channel.wireId) ?? null : null,
     [joinedByWire],
   );
+  // The share a Group row stands for, while that share lasts.
+  const groupShareId = useCallback((channel: ChatChannelRecord) => {
+    const joined = joinedFor(channel);
+    return joined && joined.ended !== true ? joined.shareId : null;
+  }, [joinedFor]);
   const agentChats = useMemo(
     () => overview.status === "ready" ? orderAgentChats(overview.channels, settingsAgents) : [],
     [overview, settingsAgents],
@@ -3352,7 +3419,7 @@ export function ChatsView(props: {
     return publishAboutConversation(workspaceId, props.editorTabPath, aboutConversation);
   }, [aboutConversation, props.editorTabPath, workspaceId]);
 
-  const refreshShares = useCallback(async () => {
+  const refreshShares = useCallback(async (): Promise<void> => {
     // This reader has no channel list of its own, and the joined lane answers
     // what a caller NAMES. While the overview is unresolved there is nothing
     // to name, and asking anyway would claim the lane with an answer covering
@@ -3364,10 +3431,7 @@ export function ChatsView(props: {
     // nobody asked for this refresh and it must not bump liveToken under an
     // in-flight navigation.
     const shown = latestShownWireIds.current;
-    if (shown === null) {
-      await refreshOverview({ background: true });
-      return;
-    }
+    if (shown === null) return refreshOverview({ background: true });
     const ticket = takeCommitTicket();
     const session = sessionGeneration.current;
     const shares = await bridge()
@@ -3380,15 +3444,6 @@ export function ChatsView(props: {
     // stale response there.
     commitShareListing(ticket, session, shares);
   }, [commitShareListing, refreshOverview, takeCommitTicket, workspaceId]);
-  // A notice's Open can name an invitation that arrived after Chats last
-  // listed it. Each reveal reads the shares again and pulls message requests,
-  // whose poll stops while a conversation tab is open.
-  useEffect(() => {
-    if (revealInvitation === undefined) return;
-    void refreshShares();
-    void refreshDms("open");
-  }, [refreshDms, refreshShares, revealInvitation]);
-
   // A cloud session transition re-scopes the relay-backed share rows: the
   // granted/received lanes belong to the signed-in account. The generic
   // activity ping only reaches the badge path, which deliberately never asks
@@ -3425,6 +3480,8 @@ export function ChatsView(props: {
         // new account for as long as its own listing takes to arrive — or for
         // good, if that listing stalls. It goes with the rows it explains.
         setShareReadFailure(null);
+        // What the reveal's lists said was about the previous account.
+        setOwed((current) => current === null ? current : { ...current, shares: "waiting", dms: "waiting" });
         // The members dialog holds the previous account's picks and contacts.
         setSharePanelOpen(false);
         setDms([]);
@@ -3632,6 +3689,53 @@ export function ChatsView(props: {
     [props.userSettings, settingsAgents, personalNames],
   );
   const [archiveOpen, setArchiveOpen] = useState(false);
+
+  // A notice's Open can name an invitation that arrived after Chats last
+  // listed it. Each reveal reads the shares again and pulls message requests,
+  // whose poll stops while a conversation tab is open. Those reads, and any
+  // poll or activity pass after them, record into `owed`.
+  useEffect(() => {
+    if (revealInvitation === undefined) return;
+    owedFrom.current = { shareTicket: commitTicket.current, dmPass: dmPassClock.current };
+    setOwed({ reveal: revealInvitation, shares: "waiting", dms: "waiting" });
+    void refreshShares();
+    void refreshDms("open");
+  }, [refreshDms, refreshShares, revealInvitation]);
+  const { onInvitationProgress, onShareRowMounted } = props;
+  const owedReveal = owed?.reveal ?? null;
+  // A row reports itself (ShareRowMark), so a report means the row is in the
+  // mounted list. The newest reveal's row is scrolled into view.
+  const reportRow = useMemo(() => {
+    if (owedReveal === null || onShareRowMounted === undefined) return null;
+    let scrolled = false;
+    return (shareId: string, row: HTMLElement) => {
+      onShareRowMounted(shareId);
+      if (shareId !== owedReveal.shareId || scrolled) return;
+      scrolled = true;
+      row.scrollIntoView({ block: "nearest" });
+    };
+  }, [owedReveal, onShareRowMounted]);
+  useEffect(() => {
+    if (owed === null || onInvitationProgress === undefined) return;
+    const { shareId } = owed.reveal;
+    onInvitationProgress(shareId, { shares: owed.shares, dms: owed.dms });
+    return () => onInvitationProgress(shareId, null);
+  }, [onInvitationProgress, owed]);
+  // An archived Group or conversation mounts its row only while Archived is
+  // open, so a reveal of one opens Archived, in this render so the row mounts
+  // in the same commit.
+  const revealArchived = useMemo(() => {
+    if (owedReveal === null) return false;
+    const { shareId } = owedReveal;
+    if (dms.some((dm) => dm.shareId === shareId && archivedIds.has(dm.channelId))) return true;
+    return overview.status === "ready" &&
+      overview.channels.some((channel) => archivedIds.has(channel.id) && groupShareId(channel) === shareId);
+  }, [archivedIds, dms, groupShareId, overview, owedReveal]);
+  const [archiveOpenedFor, setArchiveOpenedFor] = useState<ChatsInvitation | null>(null);
+  if (revealArchived && archiveOpenedFor !== owedReveal) {
+    setArchiveOpenedFor(owedReveal);
+    setArchiveOpen(true);
+  }
   const setChatArchived = useCallback(
     async (channelId: string, label: string, archived: boolean): Promise<void> => {
       try {
@@ -4299,7 +4403,7 @@ export function ChatsView(props: {
                       unreadCount: 0,
                     })
                   : false;
-                const hasFileMentions = extractChatFileReferences(item.message.body).length > 0;
+                const hasFileMentions = hasChatLinks(item.message.body);
                 const time = formatChatTime(item.message.createdAtMs);
                 const itemView = reactions.view(item.thread.id, item.message.id);
                 const itemReactions = itemView.reactions.filter(
@@ -4406,7 +4510,7 @@ export function ChatsView(props: {
                         {isComment ? (
                           <span className="mt-0.5 flex items-center gap-1.5 text-[12px] text-muted">
                             <MessageSquare size={12} aria-hidden className="shrink-0" />
-                            <span className="truncate">{item.thread.title}</span>
+                            <span className="truncate"><WorkLinkText text={item.thread.title} interactive={false} /></span>
                           </span>
                         ) : null}
                         {hasFileMentions ? null : body}
@@ -5323,6 +5427,7 @@ export function ChatsView(props: {
     const unread = channel.unreadCount > 0;
     return (
       <li key={channel.id}>
+        <ShareRowMark shareId={groupShareId(channel)} report={reportRow} />
         <NavRow
           testId="chats-channel"
           data={{
@@ -5381,6 +5486,7 @@ export function ChatsView(props: {
   function dmRow(dm: DmRecord, archived: boolean) {
     return (
       <li key={dm.channelId}>
+        <ShareRowMark shareId={dm.shareId} report={reportRow} />
         <NavRow
           testId="chats-dm-item"
           data={{ "data-channel-id": dm.channelId, ...(archived ? { "data-archived": "true" } : {}) }}
@@ -5530,6 +5636,7 @@ export function ChatsView(props: {
                     aria-current={markedInvitation?.shareId === row.shareId ? "true" : undefined}
                     className={`mx-1 flex min-h-8 items-center gap-2 rounded-md px-2 py-1${markedInvitation?.shareId === row.shareId ? " bg-selected" : ""}`}
                   >
+                    <ShareRowMark shareId={row.shareId} report={reportRow} />
                     <Users size={15} strokeWidth={1.9} aria-hidden className="shrink-0 text-muted" />
                     <div className="min-w-0 flex-1" title={`${row.subjectName ?? "a Group"} · ${shareSenderLabel(row.sharerName, row.granterEmail)}`}>
                       <div className="truncate text-[13px] text-ink">{row.subjectName ?? "a Group"}<span className="sr-only"> · </span></div>
@@ -5610,6 +5717,7 @@ export function ChatsView(props: {
                     request={request}
                     state="pending"
                     marked={markedInvitation?.shareId === request.shareId}
+                    report={reportRow}
                     busy={dmRequestBusy !== null}
                     onAccept={() => setAcceptingDmRequest(request)}
                     onDecline={() => void setDmRequestDeclined(request, true)}
@@ -5627,6 +5735,7 @@ export function ChatsView(props: {
                         key={request.shareId}
                         request={request}
                         state="declined"
+                        report={reportRow}
                         busy={dmRequestBusy !== null}
                         onRequestAgain={() =>
                           void setDmRequestDeclined(request, false)

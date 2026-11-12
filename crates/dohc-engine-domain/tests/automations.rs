@@ -38,7 +38,7 @@ const ADDED_AND_CHANGED: &[AutomationChangeKind] =
 
 fn open_store(scratch: &ScratchDir) -> EngineStore {
     let db = engine_db_path(scratch).expect("engine db path");
-    EngineStore::open(&db, 1).expect("open store")
+    dohc_engine_testkit::open_empty_store(&db, 1)
 }
 
 fn subscription(
@@ -3086,7 +3086,8 @@ fn a_record_change_claim_keeps_its_parent_after_reopening() {
     assert_eq!(inserted[0].parent_claim_id.as_deref(), Some("button-claim"));
     let claim_id = inserted[0].claim_id.clone();
     drop(store);
-    let store = open_store(&scratch);
+    let store = EngineStore::open(&engine_db_path(&scratch).expect("database path"), 1)
+        .expect("reopen store");
     let claim = get_automation_claim(&store, WS, &AutomationClaimLookup::Id(claim_id))
         .expect("read claim")
         .expect("claim");

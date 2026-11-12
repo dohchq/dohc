@@ -20,7 +20,7 @@ export function actualAppLaunchFixture(script:Uint8Array, options:{appHosting?:b
   for(const [grantId,link] of [['g',secret],['wrong',wrongSecret]])storage.createFileLinkShare({
     share:{shareId:grantId!,workspaceId:'w',granterUserId:'owner',selectorJson:JSON.stringify({paths:collection?['app','responses']:['app'],versionId:null}),createdAtMs:1},
     grant:{grantId:grantId!,shareId:grantId!,principalKind:'link',principalUserId:null,principalEmail:null,access:'view',generation:1,status:'active',createdAtMs:1,revokedAtMs:null,parentGrantId:null},
-    credential:{credentialId:grantId!,grantId:grantId!,secretHash:hashLinkBearer(link!,key),generation:1,mintedAtMs:1,retiredAtMs:null},guard:()=>{}});
+    credential:{credentialId:grantId!,grantId:grantId!,secretSealed:null,secretHash:hashLinkBearer(link!,key),generation:1,mintedAtMs:1,retiredAtMs:null},guard:()=>{}});
   const candidate=parseAppPublicationCandidate({versionId:'main',appRoot:'app',entryPath:'app/index.js',packageMap:{},sourceRevision:'1'.repeat(64),sourceDigest:'2'.repeat(64),dependencyLockDigest:'3'.repeat(64),bundleDigest:'4'.repeat(64),buildDigest:'5'.repeat(64),compilerIdentity:{recipe:'closed-esbuild',version:'0.28.1',binarySha256:'6'.repeat(64)},inputs:[{path:'app/index.js',sha256:digest(script),byteLength:script.byteLength}],dependencies:['app/index.js'],files:[{path:'bundle.js',sha256:digest(script),byteLength:script.byteLength,contentType:'text/javascript; charset=utf-8'}],capabilities:[]},limits);
   const record=(domain:string,value:unknown)=>digest(JSON.stringify([domain,value]));
   const schema='fields:\n  destination:\n    type: select\n    options: [Tokyo, Manila]\n';

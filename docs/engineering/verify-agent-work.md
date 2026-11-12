@@ -103,7 +103,77 @@ The person deletes the delivery folder when they finish. That removes only its c
 One verification owner records passing evidence for every selected gate in the PR.
 PR checks run the selected gates on GitHub-hosted `ubuntu-24.04` runners for ready same-repository PRs.
 When their passing evidence covers the head, it replaces running the gates locally. Drafts and forks start no automatic checks.
-PR checks split the JavaScript gate into three jobs, `desktop`, `packages`, and `proofs`, and `PR verification` passes only when all three pass. A local `pnpm verify:pr` still runs the whole gate.
+PR checks distribute the complete selected JavaScript inventory across 20 workers.
+Worker 0 runs inside the JavaScript aggregate; workers 1–19 run as matrix jobs.
+Cloud workers retry failing Vitest group cases, desktop and account browser proofs, and node:test files once; other commands do not retry.
+Tests that pass on retry remain in worker, aggregate, and completed receipts under `flaky`, and appear with task and test names in job logs.
+Only final verification writes their step summary lines and warning annotations.
+Shared preparation uses the same runner pool as the JavaScript workers. It builds and publishes desktop artifacts and a nextest archive for the compiler proofs.
+Compiler and relay confinement run in separate jobs on GitHub's `ubuntu-24.04` image, using binaries from that preparation pool.
+Both install Rust to check the prepared engine fingerprint. Relay checks only that engine and builds its runtime bundles.
+Compiler also checks the prepared desktop artifacts and installs nextest for its test archive.
+Both jobs start setup after selection, then wait for preparation's published artifacts.
+Compiler waits for both the prepared engine and compiler test archive under one 15-minute cap; relay waits only for the prepared engine.
+Workers do not wait for confinement. Aggregates and final verification require both confinement jobs.
+If confinement fails, select **Re-run all jobs**. Artifacts belong to a run attempt; **Re-run failed jobs** cannot recreate preparation artifacts for the new attempt.
+Workers run pure tests during preparation. Native tests start after the prepared artifacts pass validation.
+Workers have two execution slots during preparation and three afterward. Desktop and accounts browser proofs reserve two slots; other groups reserve one.
+The Rust gate builds one test archive, runs its complete inventory across 20 shards, and checks policy separately.
+Ordinary Rust tests use nextest's `hash:N/20` partitions. Shard 1 also runs the reader proofs, with nextest partition `hash:2/20`.
+Shard 1 had the least ordinary test time in the first 20-partition run.
+The completed verdict requires those proofs exactly once on that shard.
+Rust test jobs wait for their archive and the JavaScript worker matrix to limit concurrent jobs. JavaScript reporting runs alongside them.
+The graph permits at most 25 concurrent jobs: 20 JavaScript workers, preparation, Rust build, Rust policy, and both confinement jobs.
+The Rust phase also permits 25: 20 partitions, JavaScript reporting, preparation, Rust policy, and both confinement jobs.
+The organisation's Team plan permits 60 concurrent standard-runner jobs. Two combined runs fit; three can queue.
+A failed JavaScript worker does not suppress Rust's verdict. Each gate still requires shared preparation and confinement to pass.
+Each aggregate requires passing receipts for every assigned task. `PR verification` also checks completed job times and head commits.
+A local `pnpm verify:pr` still runs the whole selected gate.
+
+Cloud timing targets are 300 s for JavaScript and 600 s for Rust; the failure ceilings are 400 s and 700 s.
+Receipts record these as `targetSeconds` and `budgetSeconds`, respectively.
+Each gate includes selection, shared preparation, both confinement jobs, and its own workers, build, policy, and reporting jobs.
+Rust's job list excludes JavaScript jobs.
+`spanSeconds` runs from the start of `what changed` through the last gate job's finish.
+`seconds` equals `spanSeconds`. No runner-wait discount estimates the workload.
+Each job records `runnerWaitSeconds = max(0, started_at - created_at)`.
+A gate is `contended` when a job inside its span waited more than 30 s for a runner.
+Receipt transfers above 30 s also count as contention: aggregates measure from the saved group-wait finish to verification start, while completed checks use the download step duration; unavailable timing is `transferSeconds: null` and does not count.
+A confinement job's runner wait counts only if it started after shared preparation finished.
+Selection's pre-span wait does not count.
+Rust also counts waits of non-skipped JavaScript worker matrix jobs because its tests need that matrix. JavaScript conclusions do not affect Rust's verdict.
+At or below the target, timing is `"within budget"`.
+Above the target, an uncontended run reports `"over target"` and passes with a warning through the ceiling, inclusive.
+Above the ceiling, an uncontended run reports `"over budget"` and fails.
+A run above the target with a runner wait above 30 s reports `"unmeasured"`, warns with the wait, and does not fail for time, even above the ceiling.
+A receipt transfer above 30 s excuses only its own seconds: the run reports `"unmeasured"` if it is at or under the ceiling without the transfer, and fails otherwise.
+Only final verification emits timing warning annotations and writes their step summary lines; aggregates retain warnings in their receipts.
+Failed tests, incomplete inventory or coverage, wrong commits, and missing, duplicated, cancelled, or failed jobs still fail.
+Aggregate receipts include confinement and remain `complete: false` until final verification checks the reporting jobs' completed times.
+Final receipts have `complete: true` and require successful confinement at the head commit.
+
+Preparation waits stop after 15 minutes from the wait's start. Group waits stop after 20 minutes.
+A timeout names whether an awaited job is queued or running. Native artifact transfer has a 60 s timeout.
+Preparation checks build state every 60 s and once at the cap. It polls artifacts every 2.5 s once the build is running or complete.
+Artifact polls send the last ETag in `If-None-Match` when available.
+If a 200 response repeats the previous artifact list, that wait polls every 10 s for its remaining duration.
+After listing an artifact, worker and confinement waits check that its archive is downloadable.
+Only HTTP 404 retries, every 2 s for up to 30 s. Other download failures stop immediately.
+JavaScript workers consume the successful response. Other consumers close it before their download action transfers the archive.
+[Authenticated 304 responses do not consume GitHub's primary rate limit](https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api#use-conditional-requests).
+JavaScript group polls run every 3 s; Rust group polls run every 10 s. These add at most 3 s and 10 s of detection latency.
+Job-list responses change with step status, so every group poll is budgeted as a counted request.
+Each wait logs its last rate-limit headers, non-304 request count, and 304 count, including on failure.
+Use the wait counters to measure custom REST requests, including archive readiness checks and native downloads.
+Standard action upload, download, and cache requests are additional.
+Job timeouts are 10 minutes for selection and final verification, 20 for preparation and confinement,
+25 for Rust archive and policy jobs and ordinary workers, and 40 for aggregate jobs.
+Workers have 10 minutes beyond their preparation wait cap. Aggregates have 5 minutes beyond both sequential wait caps for setup and execution.
+The nextest install, compiler test archive, and its upload follow prepared-artifact publication.
+Workers can start native work while preparation finishes the compiler archive.
+Confinement runs those test binaries without compilation or retries. Its Node staging tests still build the release compiler owner.
+For a full measurement, dispatch `PR checks` with `gate=all` and `cache=cold`, then repeat with `cache=warm` on the same commit.
+Read the cache logs before describing a hit or miss. A requested cache condition alone does not establish one.
 Use the [Blacksmith setup procedure](enable-blacksmith.md) to inspect or change the optional Blacksmith runners.
 Run focused checks locally. Use the [review policy](../../AGENTS.md#select-reviewers) to select independent reviewers and handle later fixes.
 Before merging, confirm passing evidence covers the PR's changes under the [evidence reuse rules](../../AGENTS.md#verify-the-change).
@@ -118,7 +188,7 @@ The JavaScript gate runs the [affected packages'](#affected-packages) tests, the
 Commit the changes. Run `pnpm verify:pr --base <target-ref>` against that clean commit.
 The runner rejects changes to the source or commit during verification.
 The JavaScript gate prepares the engine and desktop, typechecks the whole workspace, then runs repository checks alongside package tests.
-A Rust-only run skips Electron, desktop preparation, Postgres, and the browser proofs.
+A local Rust-only run skips Electron, desktop preparation, Postgres, and the browser proofs.
 On headless Linux hosts, only the desktop proof runs under Xvfb.
 The runner starts a dedicated Postgres container for the database tests and proofs.
 Integration suites must run; unavailable prerequisites cause failure rather than a silent skip.

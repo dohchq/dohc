@@ -6,12 +6,13 @@ use dohc_engine_storage::EngineStore;
 
 use crate::scratch::{ScratchDir, engine_db_path};
 
-/// A fresh engine store under a scratch workspace, opened at `now_ms = 1_000`.
+/// An empty engine store under a scratch workspace, opened at `now_ms = 1_000`.
 /// The path is returned so a test can reopen the same database.
+/// The runner's closed schema image is used when configured; see [`crate::open_empty_store`].
 pub fn open_store() -> (ScratchDir, PathBuf, EngineStore) {
     let scratch = ScratchDir::new().expect("scratch");
     let path = engine_db_path(&scratch).expect("db path");
-    let store = EngineStore::open(&path, 1_000).expect("open");
+    let store = crate::open_empty_store(&path, 1_000);
     (scratch, path, store)
 }
 

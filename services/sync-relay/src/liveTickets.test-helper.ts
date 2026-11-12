@@ -4,7 +4,8 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
-import { openSyncRelayStorage, type OpenSyncRelayStorageOptions, type SyncRelayStorage } from "./storage.js";
+import type { OpenSyncRelayStorageOptions, SyncRelayStorage } from "./storage.js";
+import { openEmptyRelayTestStorage } from "./testing/emptyRelayStorage";
 import type { SetServiceHostEnrollmentEnabledInput } from "./storage/serviceHostEnrollment.js";
 import type { StorageContext } from "./storage/context.js";
 import { prepareLiveDeliveryWorkspace, registerLiveDeliveryBaseline } from "./storage/liveDeliveryReservations.js";
@@ -16,7 +17,7 @@ export const scope = { kind: "named" as const, workspaceId: "workspace-1", share
 export const host = { mode: "device", hostId: "host-1", hostEpoch: parseHostEpoch(1), instanceId: "instance-1", connectionId: "connection-1" } as const;
 const bytes = new Uint8Array([0, 0]);
 export const binding = { workspaceId: scope.workspaceId, mainVersionId: "main", objectId: "object-1",
-  lineageClaimId: createHash("sha256").update(bytes).digest("hex"), currentPath: "docs/a.md", selectorPaths: ["docs"], restoreFenceGeneration: 7 };
+  lineageClaimId: createHash("sha256").update(bytes).digest("hex"), currentPath: "docs/a.md", selectorPaths: ["docs/a.md"], restoreFenceGeneration: 7 };
 export const report = { connection: host, binding };
 /** Stored metadata of a retained service activation of `binding`. Native activation is covered by the engine integration suite. */
 export function retainServiceActivation(raw: InstanceType<typeof DatabaseSync>, namespace: string, completed = false): string {
@@ -26,9 +27,9 @@ export function retainServiceActivation(raw: InstanceType<typeof DatabaseSync>, 
     baseOriginId: "origin", baseOriginSeq: 0, baseRelaySeq: 1, sourceMomentId: "moment-1", sourceDigest: "b".repeat(64), sourceByteLength: 1,
     nativeHeadSequence: 0, fullStateDigest: binding.lineageClaimId, fullStateByteLength: 2};
   raw.prepare(`INSERT INTO sync_relay_service_activations(relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,
-      source_json,binding_json,state_digest,state_bytes,owner_user_id,share_id,completion_json,accounted_bytes) VALUES (?,?,?,?,?,?,?,?,?,x'0000','owner-1',?,?,1)`)
+      source_json,binding_json,state_digest,state_bytes,owner_user_id,completion_json,accounted_bytes) VALUES (?,?,?,?,?,?,?,?,?,x'0000','owner-1',?,1)`)
     .run(namespace, activationId, scope.workspaceId, "main", binding.objectId, binding.lineageClaimId,
-      JSON.stringify(source), JSON.stringify(binding), binding.lineageClaimId, scope.shareId, completed ? "{}" : null);
+      JSON.stringify(source), JSON.stringify(binding), binding.lineageClaimId, completed ? "{}" : null);
   return activationId;
 }
 /**
@@ -47,7 +48,7 @@ export function keptByOwnerRestore(raw: InstanceType<typeof DatabaseSync>, names
   const document = {workspaceId: binding.workspaceId, mainVersionId: "main", objectId: binding.objectId, lineageClaimId: binding.lineageClaimId};
   const intent = {deliveryKind: "owner", operationId: "restore", ownerUserId: "owner-1", document, shareId: scope.shareId, grantId: scope.grantId,
     expectedGrantGeneration: 4, expectedDependentGrantIds: [], expectedFence: 7, restorePointCursor: 0, restorePointReceiptDigest: binding.lineageClaimId,
-    keptRun: {runToken: Number(run.created_at_ms), ownerUserId: "owner-1", shareId: scope.shareId, activationId}};
+    keptRun: {runToken: Number(run.created_at_ms), ownerUserId: "owner-1", activationId}};
   const basis = {binding, ownerBinding: binding, baselineSequence: 1, namespace, ownerOrigin: JSON.stringify({adoptionId: activationId})};
   raw.prepare(`INSERT INTO sync_relay_live_restore_operations(operation_id,relay_database_namespace,previous_operation_id,workspace_id,main_version_id,object_id,
       lineage_claim_id,intent_json,basis_json,terminal_json,applied_json,native_receipt_json,phase,old_fence,new_fence,cutover_cursor,revoked_generation,
@@ -110,7 +111,7 @@ export function holderLinkAuthority(storage: Parameters<typeof createLinkAuthori
     requireLinkCapability: holderOnly, requireFreshLinkRead: holderOnly});
 }
 export const table = "sync_relay_live_session_tickets";
-export const marker = "live-session-tickets-v2";
+export const marker = "live-session-tickets-v3";
 const defaultScope = scope, defaultBinding = binding;
 export async function fixture(options?: OpenSyncRelayStorageOptions, identity?: {userId: string; grantId: string; objectId: string; workspaceId?: string; shareId?: string}, population?: {people: number; documents: number}) {
   const scope = {...defaultScope, ...(identity ? {shareId: identity.shareId ?? defaultScope.shareId, userId: identity.userId, grantId: identity.grantId, workspaceId: identity.workspaceId ?? defaultScope.workspaceId} : {})};
@@ -119,7 +120,7 @@ export async function fixture(options?: OpenSyncRelayStorageOptions, identity?: 
   const path = join(root, "relay.sqlite");
   let time = 1000;
   const config = options ?? { liveTickets: { retainedTicketsPerPrincipalGrant: 2, expiredTicketCleanupBatchSize: 1, now: () => time } };
-  const storage = openSyncRelayStorage(path, config);
+  const storage = openEmptyRelayTestStorage(path, config);
   const raw = new DatabaseSync(path);
   try {
   raw.exec("PRAGMA foreign_keys=ON");

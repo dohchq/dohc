@@ -596,7 +596,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     const captured = head(input);
     if (!captured.active) throw new Error("This host stopped accepting changes to this Collection. Its owner can publish its app again to finish moving it, or finish restoring it from its recovery file.");
     let worker: Worker | undefined;
-    const abort = () => { void worker?.runtime.abort("The Collection action stopped before it finished.").catch(() => {}); };
+    const abort = () => { void worker?.runtime.abort("dohc could not confirm whether this action finished. Try again with the same idempotencyKey.").catch(() => {}); };
     const currentAuthority = () => {
       const current = head(input);
       if (!current.active || !sameAuthority(captured.cursor, current.cursor)) throw new Error("The Collection's rules changed. Reload the Collection. Then try again.");

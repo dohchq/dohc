@@ -1378,6 +1378,7 @@ fn native_tail_input_at(
             coordinate,
             40,
             &NoFaults,
+            |_, _| Ok(()),
         )
         .unwrap();
     let point = Ydoc::wire();
@@ -2843,6 +2844,26 @@ fn a_recovery_copy_of_a_refused_seed_holds_every_accepted_edit_after_it() {
     ));
     assert!(matches!(prepare(&mut f), Err(owner_outbox::OwnerOutboxError::AcceptedStateIncomplete)));
     assert_eq!(recorded(&f), second);
+    // An update the owner holds for its service host is never applied, so the
+    // copy proceeds past it and the row stays held for the binding's end.
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE ydoc_deferred_updates SET origin_id='service-host:host',deferred_while_bound=1",
+                [],
+            )
+            .map_err(write_sql)
+        })
+        .unwrap();
+    prepare(&mut f).unwrap();
+    let (header, checkpoint) = read_recovery_checkpoint(&f, &outbox, 4096).unwrap();
+    assert_eq!(second.0.as_deref(), header["checkpointDigest"].as_str());
+    assert!(checkpoint_text(&checkpoint).contains("Second recipient text"));
+    let held: i64 = f
+        .store
+        .read_with(|conn| conn.query_row("SELECT count(*) FROM ydoc_deferred_updates WHERE deferred_while_bound=1", [], |r| r.get(0)))
+        .unwrap();
+    assert_eq!(held, 1);
 }
 
 /// A recovery checkpoint waits only for a dependency still missing. A lasting
@@ -3077,7 +3098,7 @@ fn try_fence_next_generation(f: &mut Fixture, operation: &str) -> Result<(), App
     let coordinate = held.coordinate.clone();
     drop(held);
     f._owner
-        .fence_restore(&mut f.store, None, input, coordinate, 20, &NoFaults)
+        .fence_restore(&mut f.store, None, input, coordinate, 20, &NoFaults, |_, _| Ok(()))
         .map(|_| ())
 }
 
@@ -3237,6 +3258,57 @@ fn a_lineage_change_without_a_fence_keeps_the_earlier_seeds_final_accepted_state
     assert_ne!(header["recoveryCheckpointDigest"], copied["recoveryCheckpointDigest"]);
     let text = checkpoint_text(&checkpoint);
     assert!(text.contains("Recipient text") && text.contains("Second recipient text"), "{text}");
+}
+
+/// An update the owner holds for its service host is never applied, so a
+/// registration that moves the binding still keeps a readable copy past it,
+/// and the row stays held.
+#[test]
+fn a_lineage_change_over_a_held_update_keeps_a_readable_copy() {
+    let mut f = Fixture::new();
+    f.local_edit_before_adoption();
+    f.adopt().unwrap();
+    let outbox = seed_outbox(&f);
+    let other = Ydoc::wire();
+    other.apply(&f.cut.baseline_bytes).unwrap();
+    assert!(matches!(
+        apply_recipient_edit(&mut f, &other, 1, "Recipient text"),
+        ApplicationResult::Applied(..)
+    ));
+    refuse_seed(&mut f, &outbox);
+    assert!(matches!(
+        apply_recipient_edit(&mut f, &other, 2, "Second recipient text"),
+        ApplicationResult::Applied(..)
+    ));
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO ydoc_deferred_updates(workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms,deferred_while_bound) \
+                 VALUES('workspace','main','object','service-host:host',1,30,1)",
+                [],
+            )
+            .map_err(write_sql)
+        })
+        .unwrap();
+    let (namespace, coordinate) = {
+        let held = f.handle.registration.lock().unwrap();
+        (held.namespace.clone(), held.coordinate.clone())
+    };
+    let mut moved = f.binding.clone();
+    moved.lineage_claim_id = "c".repeat(64);
+    f._owner
+        .register(&mut f.store, namespace, coordinate, moved)
+        .unwrap();
+    let (header, checkpoint) = read_recovery_checkpoint(&f, &outbox, 4096).unwrap();
+    assert_eq!(header["frozenAtRefusedSeed"], serde_json::json!(false));
+    assert_eq!(header["recoveryCheckpointDigest"], header["checkpointDigest"]);
+    let text = checkpoint_text(&checkpoint);
+    assert!(text.contains("Recipient text") && text.contains("Second recipient text"), "{text}");
+    let held: i64 = f
+        .store
+        .read_with(|conn| conn.query_row("SELECT count(*) FROM ydoc_deferred_updates WHERE deferred_while_bound=1", [], |r| r.get(0)))
+        .unwrap();
+    assert_eq!(held, 1);
 }
 
 #[test]
@@ -3513,7 +3585,8 @@ fn native_restore_apply_preserves_quarantined_tail_and_survives_compaction_and_b
                 prep.fence.operation.clone(),
                 coordinate.clone(),
                 110,
-                &NoFaults
+                &NoFaults,
+                |_, _| Ok(()),
             )
             .unwrap(),
         prep.fence

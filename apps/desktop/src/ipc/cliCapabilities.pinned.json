@@ -33,6 +33,9 @@
     "reply": [
       "chat.reply"
     ],
+    "nothingToReport": [
+      "chat.reply"
+    ],
     "chatRetry": [
       "agent.run.retry"
     ],
@@ -102,6 +105,12 @@
     "saveKeptCopy": [
       "file.kept.save"
     ],
+    "restoreProtectedCopy": [
+      "file.protected.restore"
+    ],
+    "discardProtectedCopy": [
+      "file.protected.discard"
+    ],
     "retainedCopies": [
       "file.retained.list"
     ],
@@ -122,6 +131,12 @@
     ],
     "liveDocuments": [
       "share.live.documents.list"
+    ],
+    "liveStop": [
+      "share.live.document.stop"
+    ],
+    "liveResume": [
+      "share.live.document.resume"
     ],
     "documentEdit": [
       "document.edit"
@@ -188,7 +203,8 @@
       "dataset.schema.change.prepare",
       "dataset.migration.approve",
       "dataset.migration.discard",
-      "dataset.operation.invoke"
+      "dataset.operation.invoke",
+      "dataset.operation.cancel"
     ],
     "appPublication": [
       "app.link.create",
@@ -250,6 +266,9 @@
     "chatLinks": [
       "chat.read"
     ],
+    "link": [
+      "work.reference.make"
+    ],
     "versionList": [
       "version.list"
     ],
@@ -294,7 +313,10 @@
     "document retry-kept-edits": "share.live.document.retry",
     "document stop-again": "share.live.document.stop",
     "document live": "share.live.documents.list",
+    "document stop": "share.live.document.stop",
+    "document resume": "share.live.document.resume",
     "chat groups": "group.list",
+    "chat link": "work.reference.make",
     "chat create-group": "group.create",
     "chat threads": "chat.threads.list",
     "chat watch": "chat.inbox.read",
@@ -386,6 +408,7 @@
     "file duplicate": "file.duplicate",
     "chat links": "chat.read",
     "notices list": "notice.list",
-    "document held-change": "document.held.change"
+    "document held-change": "document.held.change",
+    "dataset cancelInvoke": "dataset.operation.cancel"
   }
 }

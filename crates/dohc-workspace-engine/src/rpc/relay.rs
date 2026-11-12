@@ -135,6 +135,12 @@ struct RelayWorkspaceParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PublicationStateParams {
+    stage_keys: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PullHostedParams {
     workspace_id: String,
     /// The answer lists the documents the pass holds after this object ID;
@@ -1832,6 +1838,65 @@ impl EngineService {
         )
         .await?;
         Ok(json!({"notices": notices}))
+    }
+
+    /// `sync.ordinary.publicationState`: each stage key's receipt in the open
+    /// workspace and how far each journal row it lists has been pushed.
+    pub(super) async fn sync_ordinary_publication_state(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: PublicationStateParams = parse(params)?;
+        if params.stage_keys.len() > dohc_engine_domain::MAX_PUBLICATION_STAGE_KEYS
+            || params
+                .stage_keys
+                .iter()
+                .any(|key| key.is_empty() || key.chars().any(char::is_control))
+        {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "invalid-stage-keys",
+            ));
+        }
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let stages = Self::read_under_ctx(
+            &cancellation,
+            "sync.ordinary.publicationState",
+            open.actor
+                .chat_publication_state(open.workspace_id.clone(), params.stage_keys),
+        )
+        .await?;
+        let stages: Vec<Value> = stages
+            .into_iter()
+            .map(|stage| match stage.receipt {
+                None => json!({ "stageKey": stage.stage_key, "state": "absent" }),
+                Some(receipt) => {
+                    let mut answer = json!({
+                        "stageKey": stage.stage_key,
+                        "state": "present",
+                        "outcome": receipt.outcome.as_str(),
+                        "threadId": receipt.thread_id,
+                        "coordinates": receipt
+                            .coordinates
+                            .iter()
+                            .map(|coordinate| json!({
+                                "originId": coordinate.origin_id,
+                                "originSeq": coordinate.origin_seq,
+                                "state": coordinate.state.as_str(),
+                            }))
+                            .collect::<Vec<_>>(),
+                    });
+                    if let Some(winner) = receipt.winner_message_id {
+                        answer["winnerMessageId"] = json!(winner);
+                    }
+                    answer
+                }
+            })
+            .collect();
+        Ok(json!({ "stages": stages }))
     }
 
     pub(super) async fn sync_dismiss_refusal(

@@ -236,7 +236,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
   const historyCollections = vi.fn<() => Promise<Pick<TimelineReads, "scope" | "local" | "remote">>>(async () => ({ scope: "test", local: () => ({ pages: [], transferred: [], sourceIds: [], sourceCount: 0 }), remote: async () => { throw new Error("unexpected remote history"); } }));
   const stateDirectory = await createTestScratch("engine-ipc-settings-");
   const registrations = createWorkspaceEngineIpc({
-    historyCollections,
+    historyCollections, unclaimedDatasetFolders: async () => ["old"],
     readWorkspaceEnginePolicy: readPolicy, readSyncHistory,
     localPersonId: () => "person-local",
     localPersonName: () => "Ice",
@@ -302,7 +302,7 @@ const channels = [
   CHANNELS.listCollections, CHANNELS.getCollection, CHANNELS.queryCollectionRecords, CHANNELS.getCollectionRecordHistory,
   CHANNELS.locateRecordHistoryRun, historyOperations.listHistory.channel, historyOperations.listVersionLastChanges.channel, CHANNELS.listEngineMoments, CHANNELS.readEngineMoment, CHANNELS.restoreEngineMomentFile,
   CHANNELS.getSyncStatus, captureRecoveryOperations.retryHeldCapture.channel, captureRecoveryOperations.getCaptureRecoveryStatus.channel, captureRecoveryOperations.clearCaptureRecovery.channel,
-  captureRecoveryOperations.retryHistoryCapture.channel, fileObservationOperations.retryFileObservation.channel, CHANNELS.retryFileRecovery, CHANNELS.retryOwnerLiveDelivery, CHANNELS.retryCloudSync,
+  captureRecoveryOperations.retryHistoryCapture.channel, captureRecoveryOperations.retrySecretKey.channel, fileObservationOperations.retryFileObservation.channel, CHANNELS.retryFileRecovery, CHANNELS.retryOwnerLiveDelivery, CHANNELS.retryCloudSync,
   CHANNELS.rebuildEngineStore,
   engineYDocAdmissionOperations.waitForEngineYDocAdmission.channel, engineYDocSaveOperations.retryEngineYDocSave.channel, CHANNELS.engineYDocOpen, CHANNELS.engineYDocReadArtifactAsset, CHANNELS.engineYDocApplyUpdate,
   CHANNELS.engineYDocAcknowledgeLineageReplacement, CHANNELS.engineYDocClose,
@@ -463,6 +463,28 @@ describe("workspace engine IPC registrations", () => {
     h.adapter.reconcileCapture.mockRejectedValue(new Error("denied"));
     await expect(h.invoke(CHANNELS.retryFileRecovery)).rejects.toThrow("denied");
   });
+  it("retries the secret key only for the writable workspace this renderer shows, and fails while the key is still unavailable", async () => {
+    const h = await harness();
+    await h.invoke(captureRecoveryOperations.retrySecretKey.channel);
+    expect(h.adapter.reconcileCapture).toHaveBeenCalledOnce();
+    expect(h.notify).toHaveBeenCalledWith({ workspaceId: "workspace" });
+    await expect(h.invoke(captureRecoveryOperations.retrySecretKey.channel, { workspaceId: "other" })).rejects.toThrow();
+    h.adapter.watcherStatus.mockResolvedValue({ running: true, degraded: false, terminal: false, phase: "ready", noAtomicPlacement: false, recoveryUnavailable: false, secretKeyUnavailable: "key-missing", deferredWrites: [], keptFiles: [], captureRecoveries: [], heldFiles: [], retainedCopies: { count: 0, bytes: 0 } });
+    await expect(h.invoke(captureRecoveryOperations.retrySecretKey.channel)).rejects.toThrow("still cannot use the workspace secret key");
+    h.writable.mockImplementation(() => { throw new Error("readonly"); });
+    await expect(h.invoke(captureRecoveryOperations.retrySecretKey.channel)).rejects.toThrow("readonly");
+    expect(h.adapter.reconcileCapture).toHaveBeenCalledTimes(2);
+  });
+  it("keeps the secret key notice when Try again runs before dohc has finished checking the workspace", async () => {
+    const h = await harness();
+    // A restarted engine has no reason yet: the status alone reads as healthy.
+    h.adapter.reconcileCapture.mockResolvedValue({ deferredWrites: [], settled: false, running: true, degraded: false, heldFiles: [] });
+    await expect(h.invoke(captureRecoveryOperations.retrySecretKey.channel)).rejects.toThrow("still checking this workspace");
+    h.adapter.reconcileCapture.mockResolvedValue({ deferredWrites: [], settled: true, running: false, degraded: false, heldFiles: [] });
+    await expect(h.invoke(captureRecoveryOperations.retrySecretKey.channel)).rejects.toThrow("still checking this workspace");
+    h.adapter.reconcileCapture.mockResolvedValue({ deferredWrites: [], settled: true, running: true, degraded: true, heldFiles: [] });
+    await expect(h.invoke(captureRecoveryOperations.retrySecretKey.channel)).rejects.toThrow("still checking this workspace");
+  });
   it("admits live delivery retries only through the current writable renderer workspace", async () => {
     const h = await harness();
     await h.invoke(CHANNELS.retryOwnerLiveDelivery);
@@ -521,7 +543,7 @@ describe("workspace engine IPC registrations", () => {
   it("returns an empty list without an adapter but rejects get and query", async () => {
     const h = await harness();
     h.setMissingAdapter();
-    await expect(h.invoke(CHANNELS.listCollections)).resolves.toEqual({ collections: [] });
+    await expect(h.invoke(CHANNELS.listCollections)).resolves.toEqual({ collections: [], unclaimedDatasetFolders: ["old"] });
     for (const channel of [CHANNELS.getCollection, CHANNELS.queryCollectionRecords, CHANNELS.getCollectionRecordHistory]) {
       await expect(h.invoke(channel, { workspaceId: "workspace", collectionPath: "data", recordId: "rec_a" })).rejects.toThrow("engine is not running");
     }
@@ -550,7 +572,7 @@ describe("workspace engine IPC registrations", () => {
       { path: "tasks", objectId: "schema", status: "valid", reasons: [] },
       { path: "shared-with-me/healthy/tasks", objectId: "schema", status: "valid", reasons: [] },
       { path: "shared-with-me/other/tasks", objectId: "schema", status: "valid", reasons: [] },
-    ] });
+    ], unclaimedDatasetFolders: ["old"] });
     h.adapter.listCollections.mockRejectedValue(new Error("host store refused"));
     await expect(h.invoke(CHANNELS.listCollections)).rejects.toThrow("host store refused");
   });
@@ -587,7 +609,7 @@ describe("workspace engine IPC registrations", () => {
     const record = { id: "retained", path: "data/a.md", conflicted: false, values: [] };
     h.adapter.queryCollectionRecords.mockResolvedValue({ collection,
       records: [record, { ...record, id: "outside", path: "private/a.md" }], groups: null, nextCursor: null });
-    await expect(h.invoke(CHANNELS.listCollections)).resolves.toEqual({ collections: [collection] });
+    await expect(h.invoke(CHANNELS.listCollections)).resolves.toEqual({ collections: [collection], unclaimedDatasetFolders: [] });
     await expect(h.invoke(CHANNELS.getCollection, { workspaceId: "workspace", collectionPath: "data" }))
       .resolves.toMatchObject({ schema: { name: "Retained" }, recordCount: 1 });
     await expect(h.invoke(CHANNELS.queryCollectionRecords, { workspaceId: "workspace", collectionPath: "data" }))

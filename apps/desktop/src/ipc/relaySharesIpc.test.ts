@@ -6,7 +6,7 @@ import { stripTypeScriptTypes } from "node:module";
 import { relayShareOperations } from "./shareOperations";
 import {heldDocumentFixture} from "../../../../services/sync-relay/src/heldDocument.test-helper";
 import {closeTestStorages, interceptStorage, request as relayRequest, testHandler, testStorage} from "../../../../services/sync-relay/src/testing";
-import { OwnerRestoreActionResponse } from "./ownerRestoreContract";
+import { OwnerRestoreActionResponse, OwnerRestoreRelayReview } from "./ownerRestoreContract";
 import { registerOperations } from "./operationTable";
 import { describe, expect, it, vi } from "vitest";
 import { createOwnerLiveDocumentActions, createRelaySharesIpcHandlers } from "./relaySharesIpc";
@@ -200,6 +200,19 @@ describe("named browser invitations", () => {
   });
 });
 
+it.each(["https://share.example.test/s/#owner-secret", null])("passes the owner inventory URL through IPC: %s", async url => {
+  const h = harness();
+  const row = {
+    shareId: "share", grantId: "grant", selector: { paths: ["docs"], versionId: null },
+    access: "view", generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null,
+    lastUsedAtMs: null, urlIssuedAtMs: 1, url, dependents: [],
+  };
+  h.request.mockResolvedValue({ ok: true, links: [row], independentGrants: [], supportedLinkAccess: ["view", "comment"] });
+  expect(await h.invoke(relayShareOperations.listRelayShareLinks.channel, { workspaceId })).toEqual({
+    links: [row], independentGrants: [], supportedLinkAccess: ["view", "comment"],
+  });
+});
+
 describe("sync before live hosting", () => {
   const editShare = {workspaceId, paths: ["docs"], recipientEmail: "friend@dohc.test", access: "edit"};
   const shareSent = (h: ReturnType<typeof harness>) => h.request.mock.calls.some(([, path, init]) => path === "/sync/workspace/shares" && init?.method === "POST");
@@ -389,7 +402,7 @@ describe("owner live document enrollment", () => {
         return response.json();
       });
       await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId})).resolves.toEqual({documents: [{
-        path: f.binding.currentPath, objectId: f.binding.objectId, status: "retired", reason: "conflict-parent-withheld", canResume: false,
+        path: f.binding.currentPath, objectId: f.binding.objectId, status: "retired", reason: "conflict-parent-withheld", stopped: true, canResume: false,
       }], nextCursor: null});
     } finally {await f.close();}
   });
@@ -474,6 +487,7 @@ describe("owner live document enrollment", () => {
         {path: "unopened.md", objectId: "unopened", status: "unavailable", reason: "live-document-without-lineage"},
         {path: "diverged.md", objectId: "diverged", status: "unavailable", reason: "session-host-diverged"},
         {path: "edited.md", objectId: "edited", status: "unavailable", reason: "live-edit-unadmitted"},
+        {path: "long.md", objectId: "long", status: "unavailable", reason: "live-history-over-budget"},
       ]});
     await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId, retiredAfter: "older.md"})).resolves.toEqual({
       documents: [
@@ -488,6 +502,8 @@ describe("owner live document enrollment", () => {
         {path: "diverged.md", objectId: "diverged", status: "unavailable", reason: "session-host-diverged", canResume: false},
         // A Resume adds an edit made while live editing was off to the server's copy.
         {path: "edited.md", objectId: "edited", status: "unavailable", reason: "live-edit-unadmitted", canResume: true},
+        // A Resume fails the same way because ordinary edits never give the document a new base.
+        {path: "long.md", objectId: "long", status: "unavailable", reason: "live-history-over-budget", canResume: false},
       ], nextCursor: "old.md",
     });
     expect(h.request.mock.calls.map((call) => call[1])).toEqual([
@@ -969,8 +985,10 @@ describe("registered owner restore handler", () => {
             : [false, true].map(moved => ({status, result: {kind: "resumed", proposalDigest: "b".repeat(64), receipt: {accepted: true}, moved}})))];
       for (const response of responses) {
         const h = harness();
-        h.request.mockResolvedValue({...response, ignored: "stripped"});
-        const parsed = OwnerRestoreActionResponse[action].parse(response);
+        h.request.mockResolvedValue({...response, ignored: "stripped", owner: {userId: "forged", email: "forged@example.com"}});
+        // A review also names the account the desktop asked as, which the relay never sends.
+        const parsed = action === "review" ? {...OwnerRestoreRelayReview.parse(response), owner: {userId: "owner", email: "owner@example.com"}}
+          : OwnerRestoreActionResponse[action].parse(response);
         expect(relayShareOperations.ownerRestore.result.parse(parsed)).toEqual(parsed);
         await expect(h.invoke(relayShareOperations.ownerRestore.channel, inputs[action])).resolves.toEqual(parsed);
       }

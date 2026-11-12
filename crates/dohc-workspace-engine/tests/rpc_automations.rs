@@ -5,7 +5,7 @@
 //! transitions, all observed through the real in-process daemon request
 //! path over durable claims seeded in engine.db.
 
-mod common;
+use crate::common;
 
 use common::*;
 use dohc_engine_domain::{

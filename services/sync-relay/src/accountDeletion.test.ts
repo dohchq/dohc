@@ -112,7 +112,7 @@ function seedJournal(storage:StorageContext,shareId:string) {
     const registered=createLiveMarkdownRegistrationValidator(policy)({document,currentPath:"docs/file.md",checkpoint:baseline});
     if(registered.kind!=="accepted")throw Error("registration refused");
     expect(storage.registerLiveDocumentBaseline({host,evidence:registered.evidence,baselineBytes:baseline,registeredAtMs:10}).kind).toBe("registered");
-    const actor={kind:"owner" as const,userId:deleted,shareId};
+    const actor={kind:"owner" as const,userId:deleted};
     const current=storage.resolveCurrentLiveDocumentBinding({document,actor});if(current.kind!=="current")throw Error(JSON.stringify(current));
     const cut=storage.readLiveUpdateJournalCut({document});if(cut.kind!=="cut")throw Error("missing cut");
     const before=Y.encodeStateVector(doc);doc.getMap("frontmatter").set("title",email);const bytes=Y.encodeStateAsUpdate(doc,before);
@@ -151,7 +151,7 @@ async function fixture() {
   expect((await h(request("other","/sync/shares/"+ownedShare+"/blobs/"+proposedHash,{method:"PUT",body:proposedBytes}))).status).toBe(200);
   const proposed=await h(request("other","/sync/shares/"+ownedShare+"/proposals",jsonBody({submitId:"owned-proposal",ops:[{basedOnPath:"docs/file.md",basedOnBlobSha256:createHash("sha256").update("original\n").digest("hex"),operation:"write",afterPath:"docs/file.md",afterBlobSha256:proposedHash,afterContentKind:"text",afterByteLength:proposedBytes.byteLength,recordedAtMs:2000}]})));
   expect(proposed.status,await proposed.clone().text()).toBe(200);
-  storage.enrollServiceHostDocument({workspaceId:workspace,ownerUserId:deleted,shareId:ownedShare,path:"docs/file.md",nowMs:2000,guard:storage.captureStanding()});
+  storage.ensureOwnedLiveDocument({intent:"share",workspaceId:workspace,ownerUserId:deleted,shareId:ownedShare,path:"docs/file.md",nowMs:2000,guard:storage.captureStanding()});
   const serviceKey={key:Buffer.alloc(32,1),namespace:deployment.history.namespace};
   const serviceBearer=deriveServiceHostBearer(storage.currentServiceHostWorkspace(workspace)!,serviceKey);
   const serviceAccess=()=>authorizeServiceHostReplication(storage,{...serviceKey,workspaceId:workspace,bearer:serviceBearer,method:"GET",pathname:"/sync/"+workspace+"/hosted/log"});

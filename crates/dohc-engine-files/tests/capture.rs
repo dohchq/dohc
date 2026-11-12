@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 
 use common::Scratch;
 use dohc_engine_files::{

@@ -2,7 +2,7 @@ import { ChatFileMentionsInput } from "@dohc/workspace-contracts/chat-file-menti
 import { LinksEdgesInput, type LinksEdgesInput as EdgesInput, LinksInInput, LinksResolveInput, type LinksInInput as InInput, type LinksResolveInput as ResolveInput } from "@dohc/workspace-contracts/links";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import type { z } from "zod";
-import { CHAT_WATCH_TIMEOUT_MS, CHAT_WATCH_MAX_TIMEOUT_MS, cliAgentIdSchema, APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, chatLinksGroupInputSchema, chatWorkReportSchema, LIVE_DOCUMENT_REASON_STEPS, type CliActor, type CliStreamPosition, type CliWorkReport } from "./protocol";
+import { CHAT_WATCH_TIMEOUT_MS, CHAT_WATCH_MAX_TIMEOUT_MS, cliAgentIdSchema, APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, chatLinksGroupInputSchema, type CliLinkTarget, chatWorkReportSchema, LIVE_DOCUMENT_REASON_STEPS, type CliActor, type CliStreamPosition, type CliWorkReport } from "./protocol";
 import { CHAT_WORK_STATUSES, isChatWorkStatus } from "@dohc/workspace-contracts/chat-work";
 import { DohcCliError } from "./errors";
 import { OwnerAppPublicationRequest } from "./appPublication";
@@ -23,6 +23,7 @@ type ExportScope =
   | { kind: "thread"; thread: string };
 
 type CliCommandBody =
+  | { verb: "link"; target: CliLinkTarget }
   | ({ verb: "chatLinks" } & z.infer<typeof chatLinksGroupInputSchema>)
   | ({ verb: "chatFileMentions" } & ChatFileMentionsInput)
   | ({ verb: "linksEdges" } & EdgesInput)
@@ -43,6 +44,8 @@ type CliCommandBody =
   | { verb: "liveKeptEdits" }
   | { verb: "retryKeptEdits" | "stopAgain"; path: string; incident: string }
   | { verb: "liveDocuments"; cursor?: string }
+  | { verb: "liveStop"; path: string; objectId?: string }
+  | { verb: "liveResume"; path: string }
   | { verb: "fileChatStart"; path: string; title: string; body: string; stdin: boolean; agent?: string; requestId?: string; runId?: string }
   | {verb: "heldNoteChange"; path: string; action: "review" | "drop" | "undo"; token?: string}
   | { verb: "documentEdit" | "documentCreate"; path: string; text: string; stdin: boolean; find?: string; agent?: string; requestId?: string }
@@ -526,7 +529,7 @@ const DOCUMENT_VERBS = {
     summary: "List this workspace's live documents, with each one's state and why.",
     operands: "",
     notes: ["status is ready, preparing, paused, unavailable, or retired once live editing stopped.",
-      "reason says why a document is not live. canResume is true when Resume in Live documents can start it again.",
+      "reason says why a document is not live. canResume is true when resume can start it again.",
       ...Object.entries(LIVE_DOCUMENT_REASON_STEPS).map(([reason, step]) => `${reason}: ${step}`),
       "deferredStop is a Stop that waits for unsentEdits to reach the server. editable says whether the document still takes edits.",
       "quarantine is the recovery of edits the server refused, as kept-edits lists them. stopping means a Stop waits for the server.",
@@ -536,6 +539,39 @@ const DOCUMENT_VERBS = {
       noExtraArgs(input.operands, "document live");
       const cursor = lastValue(input, "--cursor");
       return { verb: "liveDocuments", ...(cursor ? { cursor } : {}) };
+    },
+  },
+  stop: {
+    capabilityId: "share.live.document.stop",
+    summary: "Stop live editing for a document, as Stop does in Live documents.",
+    operands: "<path>",
+    notes: ["Run resume to start live editing again. dohc records the Stop as this agent's when the server says this request stopped it.",
+      "already is true when live editing was already stopped. Then dohc records no one.",
+      "Pass --object-id from live to stop the server's document when its file moved or is gone. dohc then stops that document, whatever path it has now.",
+      "keptEdits is recovered when dohc wrote edits the server refused into the file, kept while dohc still keeps them, and none when there were none.",
+      "For kept, run kept-edits, then save-recovery-copy or stop-again.",
+      "Unlike Stop in Live documents, dohc refuses while the document is open in an editor, where someone may be typing. Ask the person using dohc to close it."],
+    flags: [{ name: "--object-id", value: "id", text: "Stop the server's document with this objectId from live." }],
+    parse: input => {
+      const [path, ...extra] = input.operands;
+      if (!path) fail("document stop requires a path");
+      noExtraArgs(extra, "document stop");
+      const objectId = lastValue(input, "--object-id");
+      return { verb: "liveStop", path, ...(objectId ? { objectId } : {}) };
+    },
+  },
+  resume: {
+    capabilityId: "share.live.document.resume",
+    summary: "Resume live editing for a document, as Resume does in Live documents.",
+    operands: "<path>",
+    notes: ["Accepts a document whose canResume is true in live. dohc sends this computer's unsent changes first, and records the Resume as this agent's when the server says this request resumed it.",
+      "already is true when the document was already live. Then dohc records no one.",
+      "Run live again to follow it: preparing until the server starts the document, then ready."],
+    parse: input => {
+      const [path, ...extra] = input.operands;
+      if (!path) fail("document resume requires a path");
+      noExtraArgs(extra, "document resume");
+      return { verb: "liveResume", path };
     },
   },
 } satisfies Record<string, CliVerbSpec>;
@@ -578,6 +614,36 @@ const CHAT_VERBS = {
     parse: ({ operands }) => {
       noExtraArgs(operands, "groups");
       return { verb: "groups" };
+    },
+  },
+  link: {
+    capabilityId: "work.reference.make",
+    summary: "Make a link to put in a chat message.",
+    operands: "",
+    flags: [
+      { name: "--group", value: "group", text: "Link a Group, DM, or agent chat, by name, #slug, or id." },
+      { name: "--thread", value: "id", text: "Link a thread." },
+      { name: "--message", value: "id", text: "Link a message." },
+      { name: "--path", value: "path", text: "Link a file, or a Collection by its folder." },
+    ],
+    notes: [
+      "Give exactly one flag. Put the printed @[work:...] text in a message: it shows as a chip that opens what it names.",
+      "The link keeps working after a rename or a move. Someone who cannot see what it names sees it as unavailable.",
+    ],
+    parse: input => {
+      noExtraArgs(input.operands, "link");
+      const given = ([["group", "--group"], ["thread", "--thread"], ["message", "--message"], ["path", "--path"]] as const)
+        .flatMap(([kind, flag]) => {
+          const value = lastValue(input, flag);
+          return value === undefined ? [] : [{ kind, value }];
+        });
+      if (given.length !== 1) fail("link needs exactly one of --group, --thread, --message, and --path");
+      const { kind, value } = given[0]!;
+      const target: CliLinkTarget = kind === "group" ? { kind, group: value }
+        : kind === "thread" ? { kind, thread: value }
+        : kind === "message" ? { kind, message: value }
+        : { kind, path: value };
+      return { verb: "link", target };
     },
   },
   "create-group": {
@@ -1161,6 +1227,10 @@ const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
     take: [{ field: "reference", from: "pendingAttempts", path: "entries[].reference" }],
     notes: ["Set acknowledge to true."],
   },
+  cancelInvoke: {
+    summary: "Request cancellation of a running Collection action.",
+    notes: ["Use the invocationId sent with invoke. The action may already have changed records. Check records or History. Retry with the same input and idempotencyKey."],
+  },
   export: {
     summary: "Save a private recovery archive of a Collection.",
     required: ["savePath"],
@@ -1235,6 +1305,7 @@ const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
     notes: [
       "Use describe to find approved operation IDs.",
       "Retry an uncertain write with the same input and idempotencyKey.",
+      "Send a fresh invocationId to allow cancelInvoke to stop this running request. Cancellation cannot undo committed changes.",
     ],
   },
 };
@@ -1482,7 +1553,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
     },
   },
   document: {
-    summary: "Read, edit, and create live Markdown documents. List and start chats on tracked files. List live documents, and recover edits the server refused.",
+    summary: "Read, edit, and create live Markdown documents. List and start chats on tracked files. List, stop, and resume live documents, and recover edits the server refused.",
     notes: ["Paths resolve from your current folder. Changes are recorded as an agent's, as with MCP.",
       "A refusal exits with status 1 and prints its reason to stderr, including with --json."],
     verbs: DOCUMENT_VERBS,

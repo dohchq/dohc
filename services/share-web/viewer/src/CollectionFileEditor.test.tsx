@@ -56,6 +56,15 @@ it("offers only a Collection's schema and automations files", () => {
   expect(isCollectionOwnFile("trip/packing/notes.yaml")).toBe(false);
 });
 
+it("asks a link holder to retry, not to ask for access, when the file could not be read", async () => {
+  vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () => {throw new TypeError("Failed to fetch");}));
+  await act(async () => root.render(<CollectionFileEditor session="abcdefghijkl" path={PATH} blobSha256={BASE} available onClose={vi.fn()}/>));
+  await settle(() => container.querySelector(".edit-notice p") !== null);
+  expect(container.querySelector(".edit-notice p")!.textContent)
+    .toBe("dohc could not open this file for editing. Retry in a moment. If it keeps happening, ask the owner.");
+  expect(button("Try again")).toBeDefined();
+});
+
 it("saves the file on the content it opened, and says the relay has it before the owner's computer does", async () => {
   const sent = relay([() => jsonResponse({ok: true, outcome: "accepted", submitId: "x"})]);
   const text = await render();
@@ -131,7 +140,7 @@ it("says why a write was refused, and stops editing when the link can no longer 
   expect(container.querySelector("textarea")!.readOnly).toBe(true);
   expect(button("Save")).toBeUndefined();
   expect(container.textContent).toContain("Editing is no longer available.");
-  await click("Back to shared files");
+  await click("Done");
   expect(onClose).not.toHaveBeenCalled();
   await click("Discard draft and continue");
   expect(onClose).toHaveBeenCalledOnce();

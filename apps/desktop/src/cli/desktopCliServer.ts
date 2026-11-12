@@ -40,7 +40,7 @@ import type { WorkspaceAuthorityOperation } from "../workspaces/workspaceAuthori
 import type { LocalPersonAuthor } from "../workspaces/desktopRecordEdits";
 import { captureRefusal } from "../workspaces/engineCaptureGate";
 import { assertOriginalWorkspace } from "../ipc/ownerRelayShareHandler";
-import type { OwnerLiveDocumentsResult, OwnerLiveQuarantine, SaveOwnerLiveRecoveryCopyResult, StopOwnerLiveDocumentResult, SyncStatusResult } from "../ipc/bridgeContract";
+import type { OwnerLiveDocumentsResult, OwnerLiveQuarantine, ResumeOwnerLiveDocumentResult, SaveOwnerLiveRecoveryCopyResult, StopOwnerLiveDocumentResult, SyncStatusResult } from "../ipc/bridgeContract";
 import type { OwnerLiveStopAgain } from "../ipc/relaySharesIpc";
 import type {
   DisconnectRelayShareLinkAgentResult, ListRelayShareLinkAgentsResult,
@@ -128,8 +128,15 @@ interface DesktopCliServerDependencies<State> {
     /** The window's Stop of that row's document only, run while no editor holds the document where it is now. */
     stopAgain(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, kept: { path: string } & OwnerLiveStopAgain): Promise<StopOwnerLiveDocumentResult>;
   };
-  /** The Live documents dialog's list (createOwnerLiveDocumentActions), read under the window's admission. */
-  ownerLiveDocuments?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: { retiredAfter?: string }): Promise<OwnerLiveDocumentsResult>;
+  /**
+   * The Live documents dialog's list, Stop and Resume (createOwnerLiveDocumentActions), under the window's admission.
+   * A Stop or Resume names its author, whom the CLI server knows: never the caller's claim.
+   */
+  ownerLiveDocuments?: {
+    list(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: { retiredAfter?: string }): Promise<OwnerLiveDocumentsResult>;
+    stop(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: { path: string; objectId?: string; author: import("@dohc/workspace-contracts/change-author").ChangeAuthor }): Promise<StopOwnerLiveDocumentResult>;
+    resume(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: { path: string; author: import("@dohc/workspace-contracts/change-author").ChangeAuthor }): Promise<ResumeOwnerLiveDocumentResult>;
+  };
   access?(workspaceId: string): NonNullable<CliWorkspaceContext["access"]>;
   recordSuccess?: CliServerOptions["recordSuccess"];
   serverAccount?: CliServerOptions["serverAccount"];
@@ -150,7 +157,8 @@ interface DesktopCliServerDependencies<State> {
     engineCaptureFor(workspaceId: string): Pick<
       WorkspaceEngineCapture,
       | "fileObjectIdForPath" | "filePathForObjectId" | "listMoments" | "readMoment"
-      | "heldNoteChange" | "listKeptCopies" | "saveKeptCopy" | "listRetainedCopies" | "deleteRetainedCopies"
+      | "heldNoteChange" | "listKeptCopies" | "saveKeptCopy" | "restoreProtectedCopy" | "discardProtectedCopy"
+      | "listRetainedCopies" | "deleteRetainedCopies"
       | "listVersions" | "compareVersions" | "listOpenConflictsPage" | "writeAuthoredFile"
       | "createVersion" | "switchVersion" | "mergeVersionIntoMain" | "resolveConflict"
       | "changePathsAs"
@@ -323,10 +331,10 @@ export function createDesktopCliServer<State>(
       });
       return finish();
     };
-    // Save recovery copy, Try again and Stop again, and the Live documents
-    // list, under the admission the window's IPC uses: this attachment and
-    // the original workspace. Kept edits come from main's own record, found
-    // by path. The caller names nothing else.
+    // Save recovery copy, Try again and Stop again, and Live documents' list,
+    // Stop and Resume, under the admission the window's IPC uses: this
+    // attachment and the original workspace. Kept edits come from main's own
+    // record, found by path. The caller names nothing else.
     const ownerLiveRecovery = dependencies.ownerLiveRecovery;
     const ownerLiveDocuments = dependencies.ownerLiveDocuments;
     const withOwnerLiveRecovery = <Result>(work: (operation: WorkspaceAuthorityOperation<RegistryEntry, State>) => Promise<Result>) =>
@@ -398,6 +406,12 @@ export function createDesktopCliServer<State>(
       store,
       dispatchStore: agentDispatchStoreHandleFor(workspace).store,
       readOnly: Boolean(sharedViewOf(workspace.workspaceId)),
+      makeWorkReference: async (target) => {
+        const made = await withEngineAdapter(workspace, adapter =>
+          adapter.makeWorkReference({ workspaceId: workspace.workspaceId, target, signal: publicationAttachment }));
+        if (made === null) throw new Error("The workspace engine is not running.");
+        return made.reference;
+      },
       createGroup: (input) => withPhysicalWorkspaceOperation(workspace.workspaceId, async (operation) => {
         operation.assertCurrent();
         if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("This workspace changed while this ran. Try again.");
@@ -503,9 +517,9 @@ export function createDesktopCliServer<State>(
       }),
       movePath: (input, origin, requestId) => withPathChange(requestId, (operation, options) =>
         prepareMoveWorkspacePathAs(operation, input, agentWriteAuthor(origin), options)),
-      deletePath: async (path, origin, requestId) => {
+      deletePath: async (path, origin, requestId, confirmNotVersioned) => {
         const result = await withPathChange(requestId, (operation, options) =>
-          prepareDeleteWorkspacePathAs(operation, path, agentWriteAuthor(origin), options));
+          prepareDeleteWorkspacePathAs(operation, path, agentWriteAuthor(origin), options, confirmNotVersioned));
         return result;
       },
       // Document reads and edits go through the desktop's live document
@@ -669,6 +683,14 @@ export function createDesktopCliServer<State>(
             keptCopies: {
               list: () => capture.listKeptCopies(),
               save: (id: number) => capture.saveKeptCopy(id),
+              restoreProtected: async (id, restoredBy) => {
+                const restored = await capture.restoreProtectedCopy(id, restoredBy);
+                // As the window's Restore does: the other computer hears of it promptly.
+                activity.queueCloudSync(workspace.workspaceId);
+                notifyRenderer({ workspaceId: workspace.workspaceId });
+                return restored;
+              },
+              discardProtected: (id) => capture.discardProtectedCopy(id),
             },
             heldNoteChange: input => capture.heldNoteChange(input),
             retainedCopies: {
@@ -698,8 +720,12 @@ export function createDesktopCliServer<State>(
               },
             } : {}),
             ...(ownerLiveDocuments ? {
-              liveDocuments: (cursor?: string) => withOwnerLiveRecovery(operation =>
-                ownerLiveDocuments(operation, cursor === undefined ? {} : { retiredAfter: cursor })),
+              liveDocuments: {
+                list: (cursor?: string) => withOwnerLiveRecovery(operation => ownerLiveDocuments.list(operation, cursor === undefined ? {} : { retiredAfter: cursor })),
+                stop: (path: string, author: import("@dohc/workspace-contracts/change-author").ChangeAuthor, objectId?: string) => withOwnerLiveRecovery(operation =>
+                  ownerLiveDocuments.stop(operation, { path, author, ...(objectId === undefined ? {} : { objectId }) })),
+                resume: (path: string, author: import("@dohc/workspace-contracts/change-author").ChangeAuthor) => withOwnerLiveRecovery(operation => ownerLiveDocuments.resume(operation, { path, author })),
+              },
             } : {}),
           }),
       filePathForObjectId: (objectId) => capture.filePathForObjectId(objectId),

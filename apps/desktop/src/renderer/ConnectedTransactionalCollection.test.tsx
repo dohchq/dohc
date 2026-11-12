@@ -10,6 +10,12 @@ import { resetAutomationButtonsForTests } from "./collections/useAutomationButto
 import { resetKeptAutomationDraftsForTests } from "./collections/AutomationsPanel";
 import type { TransactionalButtons, TransactionalViewControls } from "./TransactionalCollectionPage";
 import type { CollectionTableView } from "./collectionTableViews";
+import type { TransactionalCollectionPageProps } from "./TransactionalCollectionPage";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { openPersistentAppBackend } from "../../../../packages/app-backend-runtime/src/persistent";
 
 const backend = vi.hoisted(() => ({ dataset: vi.fn(), createWorkspaceFile: vi.fn(), listCollections: vi.fn(),
   // The owner's page reads the table's saved views. Unless a test saves some, the workspace has no views file.
@@ -30,6 +36,7 @@ const backend = vi.hoisted(() => ({ dataset: vi.fn(), createWorkspaceFile: vi.fn
   onCloudSessionChanged: vi.fn(() => () => undefined),
   writeCollectionAutomations: vi.fn(), listRelayShares: vi.fn() }));
 vi.mock("./bridge", () => ({ bridge: () => backend }));
+const pageInvoke = vi.hoisted(() => ({ current: null as TransactionalCollectionPageProps["invoke"] | null }));
 // The form dialog only approves public choices here, and records how that ended.
 const formDialog = vi.hoisted(() => ({ outcomes: [] as string[] }));
 // What the stand-in page did once the ⚡ panel closed at its asking, as the page opens a record.
@@ -37,7 +44,9 @@ const handoff = vi.hoisted(() => ({ opened: 0 }));
 vi.mock("./CreateDatasetFormDialog", () => ({ CreateDatasetFormDialog: (props: { onApproveChoices?(input: { workspaceId: string; preparationId: string; revisionSha256: string; approvalDigest: string }, signal: AbortSignal): Promise<void> }) =>
   <button onClick={() => void props.onApproveChoices!({ workspaceId: "workspace-a", preparationId: "choices", revisionSha256: "a".repeat(64), approvalDigest: "d".repeat(64) }, new AbortController().signal)
     .then(() => formDialog.outcomes.push("approved"), (error: Error) => formDialog.outcomes.push(error.message))}>Approve public choices</button> }));
-vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (props: { automations?: { open: boolean; count: number; onToggle(): void; close(then: () => void): void }; panel?: ReactNode; views?: TransactionalViewControls; activeView?: CollectionTableView | null; onOpenSource?(): void; dataset?: { tables: Array<{ fields: Array<{ name: string }> }> }; recordsVersion?: number; recordsChanged?: number; buttons?: TransactionalButtons; onRefresh?(): void; onCreateForm?(): void; onHistory?(): void; onReviewSchema?(): void; onTransferCsv?(): void; onPendingResponses?(): void; onExportRecovery?(): void; onCustomize?(): void; onManageAccess?(): void }) => <>
+vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (props: { invoke: TransactionalCollectionPageProps["invoke"]; automations?: { open: boolean; count: number; onToggle(): void; close(then: () => void): void }; panel?: ReactNode; views?: TransactionalViewControls; activeView?: CollectionTableView | null; onOpenSource?(): void; dataset?: DatasetDescription; recordsVersion?: number; recordsChanged?: number; buttons?: TransactionalButtons; onRefresh?(): void; onCreateForm?(): void; onHistory?(): void; onReviewSchema?(): void; onTransferCsv?(): void; onPendingResponses?(): void; onExportRecovery?(): void; onCustomize?(): void; onManageAccess?(): void; onCustomAction?(operationId: string): void }) => {
+  pageInvoke.current = props.invoke;
+  return <>
   {props.automations && <button data-testid="collection-automations-button" aria-pressed={props.automations.open} onClick={props.automations.onToggle}>Automations{props.automations.count > 0 ? props.automations.count : null}</button>}
   {props.automations && <button onClick={() => props.automations!.close(() => { handoff.opened += 1; })}>Open a record</button>}
   {props.panel}
@@ -57,7 +66,8 @@ vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (
   {props.onExportRecovery && <button onClick={props.onExportRecovery}>Export recovery</button>}
   {props.onCustomize && <button onClick={props.onCustomize}>Customize…</button>}
   {props.onManageAccess && <button onClick={props.onManageAccess}>Manage access</button>}
-</> }));
+  {props.dataset?.operations.filter(operation => operation.kind === "action").map(operation => <button key={operation.operationId} onClick={() => props.onCustomAction?.(operation.operationId)}>{operation.label}</button>)}
+</>; } }));
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const dataset: DatasetDescription = { datasetId: id(1), name: "Fundraiser", revision: 1, revisionSha256: "a".repeat(64), tables: [{ tableId: id(2), name: "Registrations", fields: [{ fieldId: id(3), name: "Name", type: "text", required: true, unique: false }] }], operations: [{ operationId: id(4), tableId: id(2), name: "create", label: "Create", kind: "create", access: "owner", readOnly: false, fieldIds: [id(3)] }] };
 // A builder left with changes keeps its draft for the next panel, so each test starts with none.
@@ -125,6 +135,78 @@ describe("a dataset table's saved views", () => {
     expect(screen.queryByRole("region", { name: "View tabs" })).toBeNull();
     expect(backend.readWorkspaceText).not.toHaveBeenCalled();
   });
+});
+
+it("keeps the worker usable after a read is aborted", async () => {
+  const root = await mkdtemp(join(tmpdir(), "dohc-read-abort-"));
+  // Child IPC supplies Node typed arrays, including its prepared changeset.
+  vi.stubGlobal("Uint8Array", Object.getPrototypeOf(Buffer.prototype).constructor);
+  const cursor = { revision: 0, digest: createHash("sha256").update("initial").digest("hex") };
+  const worker = await openPersistentAppBackend({ directory: root, schemaSql: "CREATE TABLE items(id TEXT NOT NULL PRIMARY KEY, value INTEGER NOT NULL);", tables: ["items"],
+    scope: { workspaceId: "workspace-a", datasetId: id(1), hostEpoch: "host", approvedRevisionHash: dataset.revisionSha256 }, cursor });
+  const prepared = deferred<void>(), release = deferred<void>();
+  let first = true;
+  backend.dataset.mockImplementation(async request => {
+    if (request.action === "describe") return { kind: "description", dataset };
+    if (request.action === "cancelInvoke") { await worker.abort(); return { kind: "invoke-cancel-requested", outcome: "unknown" }; }
+    const response = await worker.prepare({ expected: cursor, source: "globalThis.operations={read(){return [{value:42}]}}", operation: "read", input: {}, caller: { kind: "owner" }, nowMs: 0, requestId: crypto.randomUUID(), readOnly: true });
+    if (first) { first = false; prepared.resolve(); await release.promise; }
+    return { kind: "invoked", result: response.result, revision: 0, replayed: false };
+  });
+  try {
+    render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetPath="data/dataset.json" tableId={id(2)} onError={vi.fn()} onFormCreated={vi.fn()} onOpenFile={vi.fn()} onOpenScheduleSettings={vi.fn()} />);
+    await screen.findByLabelText("Collection view state");
+    const request = { workspaceId: "workspace-a", datasetId: id(1), revision: 1, revisionSha256: dataset.revisionSha256, operationId: id(4), input: {}, idempotencyKey: "read" };
+    const controller = new AbortController();
+    const reading = pageInvoke.current!(request, controller.signal).catch(error => error);
+    await prepared.promise;
+    controller.abort(); release.resolve();
+    expect(await reading).toBe(controller.signal.reason);
+    // A second real query must reuse the surviving worker, not need a cold start.
+    expect((await pageInvoke.current!({ ...request, idempotencyKey: "next-read" }, new AbortController().signal)).result).toEqual([{ value: 42 }]);
+    expect(backend.dataset.mock.calls.filter(([request]) => request.action === "invoke").every(([request]) => request.invocationId === undefined)).toBe(true);
+  } finally { cleanup(); await worker.close(); vi.unstubAllGlobals(); await rm(root, { recursive: true, force: true, maxRetries: 8 }); }
+});
+
+it("reports an unknown action result in the open dialog without a toast or Notice", async () => {
+  const action = { ...dataset.operations[0]!, operationId: id(7), name: "draw", label: "Draw winner", kind: "action" as const };
+  backend.dataset.mockImplementation(async request => {
+    if (request.action === "invoke") throw new Error("Connection closed.");
+    return { kind: "description", dataset: { ...dataset, operations: [...dataset.operations, action] } };
+  });
+  const onError = vi.fn();
+  render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetPath="data/dataset.json" tableId={id(2)} onError={onError} onFormCreated={vi.fn()} onOpenFile={vi.fn()} onOpenScheduleSettings={vi.fn()} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Draw winner" }));
+  fireEvent.click(screen.getByRole("button", { name: "Run action" }));
+  await screen.findByText("Action not confirmed");
+  expect(screen.getByText(/may have changed records/)).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
+  expect(onError).not.toHaveBeenCalled();
+});
+
+it("forwards Cancel over IPC with the running invocation id and retains the retry key", async () => {
+  const action = { ...dataset.operations[0]!, operationId: id(7), name: "draw", label: "Draw winner", kind: "action" as const };
+  const running = deferred<unknown>();
+  backend.dataset.mockImplementation(async request => {
+    if (request.action === "invoke") return running.promise;
+    if (request.action === "cancelInvoke") { running.reject(new Error("cancelled")); return { kind: "invoke-cancel-requested", outcome: "unknown" }; }
+    return { kind: "description", dataset: { ...dataset, operations: [...dataset.operations, action] } };
+  });
+  render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetPath="data/dataset.json" tableId={id(2)} onError={vi.fn()} onFormCreated={vi.fn()} onOpenFile={vi.fn()} onOpenScheduleSettings={vi.fn()} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Draw winner" }));
+  const recordsVersion = Number(screen.getByLabelText("Collection view state").getAttribute("data-records-version"));
+  fireEvent.click(screen.getByRole("button", { name: "Run action" }));
+  const first = backend.dataset.mock.calls.find(([request]) => request.action === "invoke")![0];
+  fireEvent.keyDown(document, { key: "Escape" });
+  await screen.findByText("Action cancelled");
+  expect(Number(screen.getByLabelText("Collection view state").getAttribute("data-records-version"))).toBe(recordsVersion + 1);
+  expect(backend.dataset).toHaveBeenCalledWith({ action: "cancelInvoke", workspaceId: "workspace-a", invocationId: first.invocationId });
+  backend.dataset.mockResolvedValue({ kind: "invoked", result: null, revision: 1, replayed: true });
+  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+  await screen.findByText("Action completed");
+  const second = backend.dataset.mock.calls.filter(([request]) => request.action === "invoke")[1]![0];
+  expect(second.idempotencyKey).toBe(first.idempotencyKey);
+  expect(second.invocationId).not.toBe(first.invocationId);
 });
 
 describe("a dataset table's buttons", () => {

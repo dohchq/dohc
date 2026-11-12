@@ -40,6 +40,7 @@
 mod dispatch;
 mod pending_replay;
 mod reactions;
+mod receipts;
 mod stream;
 mod thread_projection;
 
@@ -47,6 +48,10 @@ pub use pending_replay::{
     replay_pending_chat_coordinates_for_change, replay_ready_pending_chat_coordinates,
 };
 pub use reactions::{is_reaction_emoji_verbatim, normalize_reaction_author_id, reaction_id_for};
+pub use receipts::{
+    ChatCoordinatePublication, ChatCoordinateState, ChatStageOutcome, ChatStagePublication,
+    ChatStageReceipt, MAX_PUBLICATION_STAGE_KEYS,
+};
 pub use stream::{
     AGENT_REPLY_EXCERPT_CHARS, STREAM_LIMIT_DEFAULT, StreamAgentReply, StreamAgentRequest,
     StreamAgentRequestState, StreamItem, StreamPage, StreamPosition, StreamPost, StreamReplier,
@@ -1728,11 +1733,27 @@ pub fn chat_thread_display_title(stored_title: &str, first_body: Option<&str>) -
     if first_line.chars().count() <= THREAD_SNIPPET_TITLE_MAX_CHARS {
         return first_line.to_owned();
     }
-    let kept: String = first_line
-        .chars()
-        .take(THREAD_SNIPPET_TITLE_MAX_CHARS.saturating_sub(1))
-        .collect();
-    format!("{}\u{2026}", kept.trim_end())
+    let mut cut = first_line
+        .char_indices()
+        .nth(THREAD_SNIPPET_TITLE_MAX_CHARS.saturating_sub(1))
+        .map_or(first_line.len(), |(at, _)| at);
+    // A work link, `@[work:` + 43 base64url characters + `]`, is kept whole or
+    // dropped, so a title never shows half of one.
+    let bytes = first_line.as_bytes();
+    for (start, _) in first_line.match_indices("@[work:") {
+        if start >= cut {
+            break;
+        }
+        let is_link = bytes.get(start + 50) == Some(&b']')
+            && bytes[start + 7..start + 50]
+                .iter()
+                .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-' || *byte == b'_');
+        if is_link && cut < start + 51 {
+            cut = start;
+            break;
+        }
+    }
+    format!("{}\u{2026}", first_line[..cut].trim_end())
 }
 
 fn opening_message_body_snippet(body: &str) -> String {
@@ -2806,6 +2827,9 @@ pub struct LinkedChatStore<'a> {
     /// Group automation claims this handle's committed writes took, for the
     /// caller to announce after commit.
     automation_claims: Vec<crate::AutomationClaim>,
+    /// Whether keyed writes record a stage receipt. Only callers that read
+    /// publication state ask for one.
+    stage_receipts: bool,
 }
 
 impl<'a> LinkedChatStore<'a> {
@@ -2814,7 +2838,15 @@ impl<'a> LinkedChatStore<'a> {
         LinkedChatStore {
             store,
             automation_claims: Vec::new(),
+            stage_receipts: false,
         }
+    }
+
+    /// Record a stage receipt for each keyed thread start, send, resolve, and
+    /// reaction set this handle writes.
+    pub fn record_stage_receipts(&mut self, record: bool) -> &mut Self {
+        self.stage_receipts = record;
+        self
     }
 
     /// The Group automation claims committed writes took since the last call.
@@ -3471,11 +3503,20 @@ impl<'a> LinkedChatStore<'a> {
             if recorded != payload_hash {
                 return Err(DomainError::IdempotencyKeyReuseMismatch);
             }
+            let kept = self.store.read_with(|conn| {
+                receipts::replayed_thread(conn, &input.workspace_id, request_id)
+            })?;
+            if let Some(thread) = kept {
+                let message = self.reconstruct_message(&input.workspace_id, &input.message_id)?;
+                return Ok((thread, message));
+            }
+            self.require_stage_receipt(&input.workspace_id, request_id)?;
             return self.reconstruct_thread_message(&input.workspace_id, &input.message_id);
         }
 
         let mut input = input.clone();
         input.thread_id = thread_id;
+        let stage_receipt = self.stage_receipts;
         let title_c = title.clone();
         let body_c = body.clone();
         let display_c = display_name.clone();
@@ -3483,6 +3524,9 @@ impl<'a> LinkedChatStore<'a> {
         let origin_c = origin.clone();
         let attachments_c = attachments.clone();
         let outcome = self.write_chat_with_claims(&input.workspace_id, faults, |tx, claims| {
+            let mark = (stage_receipt && input.request_id.is_some())
+                .then(|| receipts::journal_mark(tx, &input.workspace_id))
+                .transpose()?;
             let channel = require_channel(tx, &input.workspace_id, &input.channel_id)?;
             let channel_wire_id =
                 wire_id_for_channel_id(tx, &input.workspace_id, &channel.channel_id)?;
@@ -3709,6 +3753,18 @@ impl<'a> LinkedChatStore<'a> {
                 claims,
             )?;
             record_request(tx, input.request_id.as_deref(), &payload_hash, now)?;
+            if let (Some(stage_key), Some(mark)) = (input.request_id.as_deref(), &mark) {
+                receipts::record_receipt(
+                    tx,
+                    &input.workspace_id,
+                    stage_key,
+                    receipts::ChatStageOutcome::Written,
+                    thread_id,
+                    None,
+                    mark,
+                    receipts::StageResult::Thread(&thread),
+                )?;
+            }
             bump_chat_conversation_revision(tx, &input.workspace_id, thread_id)?;
             let message = ChatMessage {
                 author_actor_key: author_actor_key.map(str::to_owned),
@@ -3863,10 +3919,12 @@ impl<'a> LinkedChatStore<'a> {
             if recorded != payload_hash {
                 return Err(DomainError::IdempotencyKeyReuseMismatch);
             }
+            self.require_stage_receipt(&input.workspace_id, request_id)?;
             return self.reconstruct_message(&input.workspace_id, &input.message_id);
         }
 
         let input = input.clone();
+        let stage_receipt = self.stage_receipts;
         let display_c = display_name.clone();
         let author_user_c = author_user_id.clone();
         let origin_c = origin.clone();
@@ -3874,6 +3932,9 @@ impl<'a> LinkedChatStore<'a> {
         let parent_c = parent.clone();
         let attachments_c = attachments.clone();
         let outcome = self.write_chat_with_claims(&input.workspace_id, faults, |tx, claims| {
+            let mark = (stage_receipt && input.request_id.is_some())
+                .then(|| receipts::journal_mark(tx, &input.workspace_id))
+                .transpose()?;
             require_thread(tx, &input.workspace_id, &input.thread_id)?;
             if let Some(parent_id) = &parent_c
                 && !thread_has_message(tx, &input.workspace_id, &input.thread_id, parent_id)?
@@ -4072,6 +4133,18 @@ impl<'a> LinkedChatStore<'a> {
                 claims,
             )?;
             record_request(tx, input.request_id.as_deref(), &payload_hash, now)?;
+            if let (Some(stage_key), Some(mark)) = (input.request_id.as_deref(), &mark) {
+                receipts::record_receipt(
+                    tx,
+                    &input.workspace_id,
+                    stage_key,
+                    receipts::ChatStageOutcome::Written,
+                    &input.thread_id,
+                    None,
+                    mark,
+                    receipts::StageResult::Message,
+                )?;
+            }
             bump_chat_conversation_revision(tx, &input.workspace_id, &input.thread_id)?;
             let message = ChatMessage {
                 author_actor_key: author_actor_key.map(str::to_owned),
@@ -4146,17 +4219,46 @@ impl<'a> LinkedChatStore<'a> {
             if recorded != payload_hash {
                 return Err(DomainError::IdempotencyKeyReuseMismatch);
             }
+            let kept = self.store.read_with(|conn| {
+                receipts::replayed_decision(conn, &input.workspace_id, &input.request_id)
+            })?;
+            if let Some(decision) = kept {
+                return Ok(decision);
+            }
+            self.require_stage_receipt(&input.workspace_id, &input.request_id)?;
             return self.store.read_with(|conn| {
                 require_decision(conn, &input.workspace_id, &thread_id, &input.message_id)
             });
         }
 
         let input = input.clone();
+        let stage_receipt = self.stage_receipts;
         let outcome = self.write_with_pending_chat_replay(&input.workspace_id, faults, |tx| {
+            let mark = stage_receipt
+                .then(|| receipts::journal_mark(tx, &input.workspace_id))
+                .transpose()?;
             require_thread(tx, &input.workspace_id, &thread_id)?;
             let current = require_decision(tx, &input.workspace_id, &thread_id, &input.message_id)?;
             if current.state == ChatDecisionState::Resolved {
                 record_request(tx, Some(&input.request_id), &payload_hash, current.at_ms)?;
+                if let Some(mark) = &mark {
+                    let (outcome, winner) = match current.resolved_by_message_id.as_deref() {
+                        Some(winner) if winner == input.resolved_by_message_id => {
+                            (receipts::ChatStageOutcome::NoOp, None)
+                        }
+                        winner => (receipts::ChatStageOutcome::Lost, winner),
+                    };
+                    receipts::record_receipt(
+                        tx,
+                        &input.workspace_id,
+                        &input.request_id,
+                        outcome,
+                        &thread_id,
+                        winner,
+                        mark,
+                        receipts::StageResult::Decision(&current),
+                    )?;
+                }
                 return Ok(current);
             }
             let chosen = validate_chosen_option(&current.options, input.chosen_option.as_deref())?;
@@ -4184,7 +4286,21 @@ impl<'a> LinkedChatStore<'a> {
                 at_ms,
             )?;
             record_request(tx, Some(&input.request_id), &payload_hash, at_ms)?;
-            require_decision(tx, &input.workspace_id, &thread_id, &input.message_id)
+            let decision =
+                require_decision(tx, &input.workspace_id, &thread_id, &input.message_id)?;
+            if let Some(mark) = &mark {
+                receipts::record_receipt(
+                    tx,
+                    &input.workspace_id,
+                    &input.request_id,
+                    receipts::ChatStageOutcome::Written,
+                    &thread_id,
+                    None,
+                    mark,
+                    receipts::StageResult::Decision(&decision),
+                )?;
+            }
+            Ok(decision)
         })?;
         committed(outcome)
     }
@@ -8980,5 +9096,23 @@ mod replicated_origin_tests {
             .expect("an agent you run"),
             ReplicatedMessageAuthor::Device
         );
+    }
+}
+
+#[cfg(test)]
+mod display_title_tests {
+    use super::chat_thread_display_title;
+
+    #[test]
+    fn an_untitled_thread_title_drops_a_work_link_it_would_cut() {
+        let first = format!("@[work:{}]", "A".repeat(43));
+        let second = format!("@[work:{}]", "B".repeat(43));
+        let title = chat_thread_display_title(
+            "",
+            Some(&format!("Plans live in {first}. See {second} and more.")),
+        );
+        assert_eq!(title, format!("Plans live in {first}. See\u{2026}"));
+        let plain = chat_thread_display_title("", Some(&"x".repeat(100)));
+        assert_eq!(plain, format!("{}\u{2026}", "x".repeat(79)));
     }
 }

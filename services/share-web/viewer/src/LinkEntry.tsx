@@ -1,49 +1,86 @@
-import { useEffect, useRef, useState } from "react";
-import { shareLinkSummary } from "../../src/shareSummary";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { Icon } from "./icons";
 import type { ViewMeta } from "./model";
 import "./LinkEntry.css";
 
-export function LinkEntry({ meta, secret, hasFiles, canEditFile }: {
+function accessDetail(meta: ViewMeta): string {
+  if (meta.access === "view") return "You can read the files and the comments.";
+  if (meta.access === "comment") return "You can read the files, and read and post comments.";
+  return meta.effectiveSelector.versionId !== null
+    ? "A saved version can't be edited."
+    : "You can edit pages here. Editing pauses while the owner's workspace is offline.";
+}
+
+/** What this link reaches, in three facts: who can do what, what it includes, and how current it is. */
+export function LinkAbout({ meta, fileCount, updated, children }: {
   meta: ViewMeta;
-  secret?: string | null;
-  hasFiles: boolean;
-  canEditFile: boolean;
+  fileCount: number;
+  updated: string;
+  children?: ReactNode;
 }) {
-  const summary = shareLinkSummary(meta);
+  const { paths, versionId } = meta.effectiveSelector;
+  const files = fileCount === 0 ? "No files yet" : fileCount === 1 ? "1 file" : `${fileCount} files`;
+  // The paths say where the files sit, unless the link is named for its one path.
+  const where = paths.length === 0 || (paths.length === 1 && paths[0] === meta.subjectName) ? "" : ` in ${paths.join(", ")}`;
+  return (
+    <section className="link-about" aria-labelledby="link-entry-title">
+      <h2 id="link-entry-title">About this link</h2>
+      <ul className="link-facts">
+        <li>
+          <Icon name="link" />
+          <div>
+            <p>Anyone with this link can {meta.access}</p>
+            <p className="link-fact-detail">{accessDetail(meta)}</p>
+          </div>
+        </li>
+        <li>
+          <Icon name={fileCount === 1 ? "file-text" : "folder"} />
+          <div>
+            <p>{meta.subjectName ?? "Shared files"}</p>
+            <p className="link-fact-detail">{files}{where}</p>
+          </div>
+        </li>
+        <li>
+          <Icon name="clock" />
+          <div>
+            <p>{versionId === null ? "Follows the current version" : "Shows a saved version"}</p>
+            {updated && <p className="link-fact-detail">{updated}</p>}
+          </div>
+        </li>
+      </ul>
+      {children}
+    </section>
+  );
+}
+
+/** The link's MCP address, and the two steps that connect an agent with it. */
+export function LinkAgent({ secret }: { secret?: string | null }) {
   const mcpAddress = `${location.origin}/mcp/s/${secret ?? "<secret>"}`;
   return (
-    <section className="link-entry" aria-labelledby="link-entry-title">
-      <h2 className="section-label" id="link-entry-title">About this link</h2>
-      {meta.subjectName && <p>{summary.subject}</p>}
-      <p>{summary.permissions}</p>
-      <p>
-        {hasFiles && "Choose a file in Files to read it. "}
-        {meta.access === "view" ? "Read the discussion in Comments. " : "Use Comments to read or post comments. "}
-        {canEditFile && "Choose Edit file to edit this file. "}
-        Choose Open in dohc to continue in the desktop app.
+    <section className="link-agent" aria-labelledby="link-agent-title">
+      <h2 id="link-agent-title">Use with an agent</h2>
+      <div className="link-agent-address">
+        <code>{mcpAddress}</code>
+        <CopyAddress key={mcpAddress} text={mcpAddress} />
+      </div>
+      {!secret && (
+        <p className="link-agent-missing"><Icon name="alert" size={14} /><span>Replace &lt;secret&gt; with the text after # in the original share link.</span></p>
+      )}
+      <ol>
+        <li>Add this address to your agent's MCP client.</li>
+        <li>Allow the agent when its client opens the sign-in page.</li>
+      </ol>
+      <p className="link-fact-detail">
+        The agent uses this link's access. It cannot access work outside this link or change its permissions.{" "}
+        Anyone with the full address gets this link's access, so share it only as you share the link.
       </p>
-      <section className="link-agent" aria-labelledby="link-agent-title">
-        <h3 id="link-agent-title">Use with an agent</h3>
-        <p>Connect your agent's MCP client to this address.</p>
-        <div className="link-agent-address">
-          <code>{mcpAddress}</code>
-          <CopyAddress key={mcpAddress} text={mcpAddress} />
-        </div>
-        <p>{!secret && <>Replace &lt;secret&gt; with the text after # in the original share link. </>}Anyone with the full address gets this link's access, so share it only as you share the link.</p>
-        <p>Allow the agent when its client opens the sign-in page. The agent uses this link's access.</p>
-        <p>It cannot access work outside this link or change its permissions.</p>
-      </section>
-      <details>
-        <summary>Included files and history</summary>
-        <p>{summary.included}</p>
-        <p>{summary.history}</p>
-      </details>
     </section>
   );
 }
 
 type CopyState = "idle" | "copied" | "failed";
 const COPY_LABEL: Record<CopyState, string> = {idle: "Copy MCP address", copied: "Copied", failed: "Could not copy"};
+const COPY_WORD: Record<CopyState, string> = {idle: "Copy", copied: "Copied", failed: "Could not copy"};
 
 // The viewer's own copy control: write the text, then show the result for 2 s.
 function CopyAddress({ text }: { text: string }) {
@@ -60,13 +97,10 @@ function CopyAddress({ text }: { text: string }) {
   const label = COPY_LABEL[state];
   return (
     <>
-      <button type="button" className="link-agent-copy" data-copy-feedback={state === "idle" ? undefined : state}
+      <button type="button" className="handoff-button primary link-agent-copy" data-copy-feedback={state === "idle" ? undefined : state}
         aria-label={label} title={label} onClick={() => void copy()}>
-        <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-          {state === "copied" ? <path d="M20 6 9 17l-5-5"/> :
-            state === "failed" ? <><path d="M18 6 6 18"/><path d="m6 6 12 12"/></> :
-            <><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></>}
-        </svg>
+        <Icon name={state === "copied" ? "check" : state === "failed" ? "x" : "copy"} size={14} />
+        {COPY_WORD[state]}
       </button>
       <span className="sr-only" aria-live="polite">{state === "idle" ? "" : label}</span>
     </>

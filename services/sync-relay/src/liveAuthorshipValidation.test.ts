@@ -263,7 +263,7 @@ it('cuts a complete checkpoint when the owner outbox introduces the 960th identi
         bytesBase64: bytes.toString('base64'), nextCursor}}
     }}
     const retained: Array<boolean | undefined> = [], validations: LiveJournalValidation[] = []
-    const admission: OwnerOutboxAdmission = {shares: new Map([[document.workspaceId, 'share']]), maxEntriesPerDrain: 1,
+    const admission: OwnerOutboxAdmission = {workspaceIds: new Set([document.workspaceId]), maxEntriesPerDrain: 1,
       maxBytesPerDrain: 10_000, refusals: new OwnerKnownRefusals(), trustedAccount: accountId => ({accountId, name: 'Alice'}),
       validate: async (input, signal) => {
         retained.push(input.retainStateUpdate)

@@ -49,6 +49,7 @@ import {
   RUNNER_OUTLIVED_STOP,
   SELF_TEST_RESTRICTED_DETAIL,
   createChatDispatchService,
+  replyExcerpt,
   type ChatDispatchPresenceInput,
   type ChatDispatchService,
   type ChatDispatchWorkspace,
@@ -153,6 +154,8 @@ interface FixtureOptions {
   hasPendingRunMessageLink?: (workspaceId: string, runId: string) => boolean;
   // Each post of a run notice takes the next error, if any, and fails.
   noticeFailures?: Error[];
+  // The workspace's sync is paused.
+  syncPaused?: boolean;
   // Each record of an owed notice takes the next error, if any, and fails.
   owedAddFailures?: Error[];
   // The workspace starts in Restricted Mode.
@@ -693,6 +696,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
         if (failure) throw failure;
         if (!notices.some((notice) => notice.noticeId === input.noticeId)) notices.push(input);
       },
+      syncing: () => options.syncPaused !== true,
       owed: {
         ...owedRunNotices,
         add: async (workspaceId, runId) => {
@@ -928,7 +932,7 @@ describe("chatDispatchService", () => {
       ? "Agent replies need Node.js. Install Node.js, restart dohc, then try again."
       : exitCode !== 0
         ? `Its run ended with an error.${replied ? " Mention @Nova to ask again." : ""}`
-        : replied ? "" : "Its run ended without a reply.");
+        : replied ? "Finished the work." : "Its run ended without a reply.");
   });
 
   it.each([0, 7])("recovers the saved Node.js notice after restart, exit %s", async (exitCode) => {
@@ -949,6 +953,7 @@ describe("chatDispatchService", () => {
       runNotices: {
         post: async (notice) => { fixture.notices.push(notice); },
         owed: createOwedRunNotices(() => fixture.owedRunNoticesPath),
+        syncing: () => true,
       },
     });
     vi.unstubAllEnvs();
@@ -2584,18 +2589,70 @@ describe("chatDispatchService", () => {
       noticeId: `agent-run:${WORKSPACE_ID}:${claim.run.runId}`,
       kind: "agent-run",
       title: "Nova replied in \"Plan day 2\"",
-      body: "",
+      body: "Finished the work.",
       target: { thread: trigger.threadId, run: claim.run.runId, message: reply },
     }]);
   });
 
-  it("reads the thread's title from its own channel, and names no thread when that read fails", async () => {
+  it("names a group's conversation by its group and the agent's own chat by nothing, with the reply's opening words", async () => {
+    const fixture = await createFixture();
+    const group = await fixture.chat.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const own = await fixture.chat.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "default", name: "Nova" });
+    const threads: string[] = [];
+    for (const channelId of [group.id, own.id]) {
+      const { thread } = await fixture.chat.startChannelThread({
+        authorActorKey: null, workspaceId: WORKSPACE_ID, channelId, lane: "chat", wakeAgentIds: ["default"],
+        author: { kind: "human", displayName: "Sam" }, authorUserId: "user_local", body: "@Nova Book the train.",
+      });
+      threads.push(thread.id);
+    }
+    await activate(fixture);
+    for (const [index, threadId] of threads.entries()) {
+      const claim = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0];
+      if (!claim) throw new Error("Expected a live run.");
+      await linkAgentReply(fixture, threadId, claim.run.runId, "## Booked\n\nThe **9:40** train, in [itinerary.md](trip/itinerary.md).");
+      fixture.spawnCalls[index]!.process.emitExit(0);
+      await fixture.service.scanWorkspace(WORKSPACE_ID);
+    }
+
+    expect(fixture.notices.map(({ title, body }) => ({ title, body }))).toEqual([
+      { title: "Nova replied in #general", body: "Booked: The 9:40 train, in itinerary.md." },
+      { title: "Nova replied", body: "Booked: The 9:40 train, in itinerary.md." },
+    ]);
+  });
+
+  it.each([
+    ["- [x] Moved `trip_plan.md`\n- Added ~~two~~ __three__ stops", "Moved trip_plan.md Added two three stops"],
+    ["> Quoted\n1. First\n2) Second", "Quoted First Second"],
+    ["Run this:\n```sh\npnpm build\n```\nThen ![chart](a.png) shows it.", "Run this: Then chart shows it."],
+    ["```\nonly code\n```", ""],
+    ["Updated `__init__.py` and ``a`b``.", "Updated __init__.py and a`b."],
+    [`# Done ${" #".repeat(20000)}x`, "Done:"],
+    [`Long ${"word ".repeat(60)}`, `Long ${"word ".repeat(30)}word…`],
+  ])("keeps a reply's words as one plain line: %j", (markdown, excerpt) => {
+    expect(replyExcerpt(markdown)).toBe(excerpt);
+  });
+
+  it("keeps a reply's notice on this computer while the workspace's sync is paused", async () => {
+    const fixture = await createFixture({ syncPaused: true });
+    await createAgentThread(fixture, { title: "Plan day 2", body: "Plan it.", authorUserId: "user_local" });
+    await activate(fixture);
+    const claim = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0];
+    if (!claim) throw new Error("Expected a live run.");
+    await linkAgentReply(fixture, claim.run.threadId, claim.run.runId, "Booked.");
+    fixture.spawnCalls[0]!.process.emitExit(0);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+    expect(fixture.notices).toEqual([expect.objectContaining({ body: "Booked.", onlyHere: true })]);
+  });
+
+  it("reads where a run answered from its thread, and names no place when that read fails", async () => {
     const fixture = await createFixture();
     await createAgentThread(fixture, { title: "Plan day 2", body: "Plan it.", authorUserId: "user_local" });
     await createAgentThread(fixture, { title: "Plan day 3", body: "Plan it.", authorUserId: "user_local" });
     await activate(fixture);
     const listThreads = vi.spyOn(fixture.chat, "listThreads");
-    vi.spyOn(fixture.chat, "listChannelThreads").mockRejectedValueOnce(new Error("engine busy"));
+    vi.spyOn(fixture.chat, "getThread").mockRejectedValueOnce(new Error("engine busy"));
 
     fixture.spawnCalls[0]!.process.emitExit(0);
     await fixture.service.scanWorkspace(WORKSPACE_ID);
@@ -3651,7 +3708,7 @@ describe("chatDispatchService", () => {
       const posted: typeof fixture.notices = [];
       fixture.service = createChatDispatchService({
         ...fixture.serviceOptions,
-        runNotices: { post: async (notice) => { posted.push(notice); }, owed: fixture.owedRunNotices },
+        runNotices: { post: async (notice) => { posted.push(notice); }, owed: fixture.owedRunNotices, syncing: () => true },
       });
 
       await activate(fixture);
@@ -4460,6 +4517,7 @@ describe("chatDispatchService", () => {
   const WORKSPACE_TOOLS = "To make and change things in this workspace, such as files, documents, Collections and their records, and chats, use the tools of the `dohc` MCP server.";
   const APPROVALS = "Nobody can approve actions during this run, so anything that needs approval is refused. Do what you can without it.";
   const REPORT = "When you finish, reply in two to four sentences. Say what you made or changed, by name, and write each file as `@[path]`, with its path from the workspace root, so a person can open it. Don't explain how you did it. For each thing you couldn't do, write one line: what you couldn't do, then dohc's reason. Don't ask the person to approve anything, change a setting, or share their screen.";
+  const LINKS = "To link a chat, thread, message, or Collection, call `dohc_link` and write the `link` it returns.";
 
   it.each([
     [undefined, "argument"],
@@ -4482,7 +4540,7 @@ describe("chatDispatchService", () => {
     if (tool) expect(prompt).toContain(instructionsFile[tool]);
     else expect(prompt).not.toContain("AGENTS");
     if (tool !== "claude") expect(prompt).not.toContain("CLAUDE.md");
-    if (tool) expect(prompt).toContain(`thread. ${WORKSPACE_TOOLS} ${APPROVALS} ${REPORT} Reply in-thread`);
+    if (tool) expect(prompt).toContain(`thread. ${WORKSPACE_TOOLS} ${APPROVALS} ${REPORT} ${LINKS} Reply in-thread`);
     else expect(prompt).toContain("thread. Report outcomes, not tool logs. Reply in-thread");
     if (!tool) expect(prompt).not.toContain("approve");
   });
@@ -4542,6 +4600,166 @@ describe("chatDispatchService", () => {
     expect(prompt).toContain(`thread. ${APPROVALS} ${REPORT} Reply in-thread`);
     expect(prompt).not.toContain("tools of the `dohc` MCP server");
     expect(prompt).not.toContain("dohc_read_chat");
+  });
+
+  // An automation wakes the agent, and the run holds its slot until it exits.
+  async function startAutomationRun(fixture: Fixture) {
+    const channel = await fixture.chat.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "default", name: "Nova" });
+    const wake = await fixture.chat.startChannelThread({
+      authorActorKey: null,
+      workspaceId: WORKSPACE_ID,
+      channelId: channel.id,
+      author: { kind: "automation", displayName: "Check overdue tasks" },
+      authorOwnerDisplayName: "Sam",
+      automation: { automationId: "collection:Tasks#overdue", chainDepth: 1 },
+      body: "Tell the Group about overdue tasks.",
+    });
+    await fixture.dispatch.recordTrigger({ workspaceId: WORKSPACE_ID, triggerMessageId: wake.message.id, threadId: wake.thread.id, agentId: "default" });
+    await activate(fixture);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    await vi.waitFor(() => expect(fixture.spawnCalls).toHaveLength(1));
+    const claim = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0]!;
+    return { threadId: wake.thread.id, runId: claim.run.runId, process: fixture.spawnCalls[0]!.process };
+  }
+
+  const quietProfile = { tool: "claude" as const, executable: resolve("test-claude.exe") };
+
+  it("tells an automation's run, and only that run, how to end with nothing to report", async () => {
+    const fixture = await createFixture({ runner: { command: "", profile: quietProfile } });
+    const { process } = await startAutomationRun(fixture);
+    expect(process.stdinText).toContain("call the same tool with `nothingToReport: true` and no `body` instead of replying");
+
+    const person = await createFixture({ runner: { command: "", profile: quietProfile } });
+    await createAgentThread(person, { body: "Plan the trip.", authorUserId: "user_local" });
+    await activate(person);
+    await person.service.scanWorkspace(WORKSPACE_ID);
+    await vi.waitFor(() => expect(person.spawnCalls).toHaveLength(1));
+    expect(person.spawnCalls[0]!.process.stdinText).not.toContain("nothingToReport");
+  });
+
+  it.each([false, true])("ends an automation's run with nothing to report as finished, after a restart too, when the reply read fails: %s", async (readFails) => {
+    const fixture = await createFixture({ runner: { command: "", profile: quietProfile } });
+    const { threadId, runId, process } = await startAutomationRun(fixture);
+
+    expect(fixture.service.endRunQuietly(WORKSPACE_ID, runId, threadId)).toBeNull();
+    if (readFails) {
+      // A failed read holds the run's end, unsaved, until a recovery scan
+      // reads again.
+      vi.useFakeTimers();
+      const lookupError = new Error("daemon restarted during listRunMessages");
+      fixture.rejectNextRunMessageLookup!(lookupError);
+      process.emitExit(0);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fixture.errors).toContain(lookupError);
+      expect(fixture.service.hasLiveRun(WORKSPACE_ID)).toBe(true);
+      expect((await fixture.dispatch.getRunRecord(runId))?.endedAtMs).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_RECOVERY_BACKOFF_MS);
+      vi.useRealTimers();
+    } else {
+      process.emitExit(0);
+      await fixture.service.scanWorkspace(WORKSPACE_ID);
+    }
+    await vi.waitFor(() => expect(fixture.service.hasLiveRun(WORKSPACE_ID)).toBe(false));
+
+    expect(await fixture.dispatch.getRunRecord(runId)).toMatchObject({ exitCode: 0, failureHandled: false });
+    expect(fixture.notices).toEqual([]);
+    expect(await fixture.owedRunNotices.list(WORKSPACE_ID)).toEqual([]);
+    expect((await fixture.service.dispatchStateForThread(WORKSPACE_ID, threadId)).failedRun).toBeUndefined();
+
+    // Nothing is left for recovery to mark failed.
+    await fixture.service.stop();
+    fixture.service = createChatDispatchService(fixture.serviceOptions);
+    await activate(fixture);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    expect(await fixture.dispatch.getRunRecord(runId)).toMatchObject({ failureHandled: false });
+    expect(fixture.notices).toEqual([]);
+  });
+
+  it.each(["none", "linked", "link pending"] as const)("saves a quiet run's end when dohc quits before it reads again, reply: %s", async (posted) => {
+    let linkPending = posted === "link pending";
+    const fixture = await createFixture({ runner: { command: "", profile: quietProfile }, hasPendingRunMessageLink: () => linkPending });
+    const { threadId, runId, process } = await startAutomationRun(fixture);
+    expect(fixture.service.endRunQuietly(WORKSPACE_ID, runId, threadId)).toBeNull();
+    let reply = posted === "linked" ? await linkAgentReply(fixture, threadId, runId) : undefined;
+    vi.useFakeTimers();
+    const lookupError = new Error("daemon restarted during listRunMessages");
+    fixture.rejectNextRunMessageLookup!(lookupError);
+    process.emitExit(0);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fixture.errors).toContain(lookupError);
+    vi.useRealTimers();
+
+    await fixture.service.stop();
+    expect(await fixture.dispatch.getRunRecord(runId)).toMatchObject({ exitCode: 0, failureHandled: false, endedAtMs: expect.any(Number) });
+    // A reply whose link was still being written lands after the restart.
+    if (linkPending) {
+      reply = await linkAgentReply(fixture, threadId, runId);
+      linkPending = false;
+    }
+
+    // After the restart, only a run that posted gets its notice, and none is marked failed.
+    fixture.service = createChatDispatchService(fixture.serviceOptions);
+    await activate(fixture);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    expect(await fixture.dispatch.getRunRecord(runId)).toMatchObject({ exitCode: 0, failureHandled: false });
+    expect(fixture.notices).toEqual(posted !== "none"
+      ? [expect.objectContaining({ body: "Finished the work.", target: expect.objectContaining({ message: reply }) })]
+      : []);
+  });
+
+  it("still fails an automation's run that ends without a reply and without saying it had nothing", async () => {
+    const fixture = await createFixture({ runner: { command: "", profile: quietProfile } });
+    const { runId, process } = await startAutomationRun(fixture);
+
+    process.emitExit(0);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+
+    expect(await fixture.dispatch.getRunRecord(runId)).toMatchObject({ failureHandled: true });
+    expect(fixture.notices).toEqual([expect.objectContaining({ title: "Nova didn't reply" })]);
+  });
+
+  it("still fails a quiet run that exits with an error, and tells of a quiet run's reply as usual", async () => {
+    const failing = await createFixture({ runner: { command: "", profile: quietProfile } });
+    const failed = await startAutomationRun(failing);
+    expect(failing.service.endRunQuietly(WORKSPACE_ID, failed.runId, failed.threadId)).toBeNull();
+    failed.process.emitExit(7);
+    await failing.service.scanWorkspace(WORKSPACE_ID);
+    expect(await failing.dispatch.getRunRecord(failed.runId)).toMatchObject({ exitCode: 7, failureHandled: true });
+    expect(failing.notices).toEqual([expect.objectContaining({ title: "Nova didn't reply" })]);
+
+    const replying = await createFixture({ runner: { command: "", profile: quietProfile } });
+    const replied = await startAutomationRun(replying);
+    expect(replying.service.endRunQuietly(WORKSPACE_ID, replied.runId, replied.threadId)).toBeNull();
+    const reply = await linkAgentReply(replying, replied.threadId, replied.runId);
+    // The first read after it ends fails; the next one finds the reply.
+    const lookupError = new Error("daemon restarted during listRunMessages");
+    replying.rejectNextRunMessageLookup!(lookupError);
+    replied.process.emitExit(0);
+    await replying.service.scanWorkspace(WORKSPACE_ID);
+    await vi.waitFor(() => expect(replying.service.hasLiveRun(WORKSPACE_ID)).toBe(false));
+    expect(replying.errors).toContain(lookupError);
+    expect(replying.notices).toEqual([expect.objectContaining({ body: "Finished the work.", target: expect.objectContaining({ message: reply }) })]);
+    expect(await replying.dispatch.getRunRecord(replied.runId)).toMatchObject({ exitCode: 0, failureHandled: false });
+  });
+
+  it("refuses to end quietly a person's run, another thread's, or one that isn't running", async () => {
+    const person = await createFixture({ runner: { command: "", profile: quietProfile } });
+    const asked = await createAgentThread(person, { body: "Plan the trip.", authorUserId: "user_local" });
+    await activate(person);
+    await person.service.scanWorkspace(WORKSPACE_ID);
+    await vi.waitFor(() => expect(person.spawnCalls).toHaveLength(1));
+    const personRun = (await person.dispatch.openRuns(WORKSPACE_ID))[0]!.run.runId;
+    expect(person.service.endRunQuietly(WORKSPACE_ID, personRun, asked.threadId)).toBe("person");
+
+    const fixture = await createFixture({ runner: { command: "", profile: quietProfile } });
+    const { threadId, runId, process } = await startAutomationRun(fixture);
+    expect(fixture.service.endRunQuietly(WORKSPACE_ID, runId, "another-thread")).toBe("other-thread");
+    expect(fixture.service.endRunQuietly(WORKSPACE_ID, "another-run", threadId)).toBe("not-running");
+    process.emitExit(0);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    expect(fixture.service.endRunQuietly(WORKSPACE_ID, runId, threadId)).toBe("not-running");
+    // Refused, so the run still ended without its reply.
+    expect(await fixture.dispatch.getRunRecord(runId)).toMatchObject({ failureHandled: true });
   });
 
   it.each(["shutdown", "occupied"])("does not start a self-test after %s during its thread write", async (reason) => {

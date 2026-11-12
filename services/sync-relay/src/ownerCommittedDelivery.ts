@@ -4,7 +4,7 @@ import type { LiveHostConnectionCoordinate, SyncRelayStorage } from "./storage.j
 import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory.js";
 import { configRecord } from "./deviceLiveHostConfig.js";
 import { authorityInteger } from "./storage/liveDocumentAuthority.js";
-import {drainOwnerOutbox,ownerOutboxHeadIsSeed,type OwnerOutboxAdmission} from "./ownerOutboxDelivery.js";
+import {admittedOwner,drainOwnerOutbox,ownerOutboxHeadIsSeed,type OwnerOutboxAdmission} from "./ownerOutboxDelivery.js";
 import type {CommittedDeliveryOutcome} from "./liveCommittedDelivery.js";
 import {settlementResponse,settlementPending,type CommittedSettlement,type SettlementOutcome} from "./liveSettlement.js";
 import {isDeepStrictEqual} from "node:util";
@@ -69,9 +69,7 @@ export class OwnerCommittedDelivery {
     const request = () => ({ id: c.nextRequestId(),workspace: c.workspace,deadlineMs: c.deadlineMs });
     try {
       check();
-      const shareId = c.ownerAdmission.shares.get(document.workspaceId), share = shareId ? this.storage.getShare(shareId) : null;
-      if (!share || share.workspaceId !== document.workspaceId) throw new Error("Owner share is unavailable.");
-      const actor = {kind: "owner" as const,userId: share.granterUserId,shareId: share.shareId};
+      const actor = admittedOwner(this.storage, c.ownerAdmission, document.workspaceId);
       let saved = this.#adopted.get(key);
       const existing = this.#store.existingOwnerDelivery({host: c.host, document, actor});
       if (existing && (!saved || !isDeepStrictEqual(saved.binding, existing.binding))) {

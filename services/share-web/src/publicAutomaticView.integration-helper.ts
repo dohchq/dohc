@@ -99,16 +99,16 @@ export async function runPublicAutomaticView(options: Options) {
     transport.relayUrl = options.relayUrl;
     const {hostId, instanceId} = h.host().coordinate;
     // Enrollment puts the document in the service host's scope and gives the host its credential.
-    const enrolled = h.storage.enrollServiceHostDocument({workspaceId, path, shareId: link.shareId, ownerUserId: h.ownerUserId,
+    const enrolled = h.storage.ensureOwnedLiveDocument({intent: "share", workspaceId, path, shareId: link.shareId, ownerUserId: h.ownerUserId,
       nowMs: Date.now(), guard: h.storage.captureStanding()});
     await options.replaceHost({version: 1, ...options.native, engineExecutable: options.executable, hostId, instanceId,
       workspaces: [{root: serviceRoot, workspaceId, maxRegistrations: options.maxRegistrations, hostedReplication: {
         relay: {baseUrl: "https://public-proof-relay.example.test", bearerToken: options.serviceBearer(enrolled)},
         identity: {replicationEpoch: identity.replicationEpoch, streamIdentity: identity.streamIdentity}, maxPagesPerPull: admission.maxPagesPerPull}}],
-      adoption: admission.adoption, activation: {...admission.activation, validation: options.validation, targets: [{workspaceId, path, shareId: link.shareId}]}});
+      adoption: admission.adoption, activation: {...admission.activation, validation: options.validation, targets: [{workspaceId, path}]}});
     const fixture: PublicTransitionFixture = {document: {workspaceId, mainVersionId, objectId, lineageClaimId: hash(selected.baseline.checkpoint)}, path, link};
     await browserExpect.poll(() => h.storage.resolveCurrentLiveDocumentBinding({document: fixture.document,
-      actor: {kind: "owner", userId: h.ownerUserId, shareId: link.shareId}}).kind, {timeout: h.timeoutMs}).toBe("current");
+      actor: {kind: "owner", userId: h.ownerUserId}}).kind, {timeout: h.timeoutMs}).toBe("current");
     for (let index = 0; index < admission.readContexts; index++) {
       const view = await options.newView(viewLink.url); views.push(view);
       await browserExpect.poll(async () => hash(Buffer.from(await view.page.locator("article.markdown").textContent() ?? "")), {timeout: h.timeoutMs}).toBe(hash(selected.baseline.viewText));
@@ -116,7 +116,7 @@ export async function runPublicAutomaticView(options: Options) {
     }
     for (let index = 0; index < h.concurrency; index++) peers.push(await h.openLink(link.url, index));
     const writer = peers.at(-1)!;
-    await writer.page.getByRole("button", {name: "Back to shared files", exact: true}).click();
+    await writer.page.getByRole("button", {name: "Done", exact: true}).click();
     await browserExpect.poll(h.listeners, {timeout: h.timeoutMs}).toBe(h.concurrency - 1);
     socket = await h.wire.connect(writer.context, await h.wire.ticket(writer.context, writer.discriminator, objectId), "automatic-view-writer"); await socket.sync();
     await browserExpect.poll(h.listeners, {timeout: h.timeoutMs}).toBe(h.concurrency);

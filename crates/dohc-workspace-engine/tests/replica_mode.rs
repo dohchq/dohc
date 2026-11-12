@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 
 use common::service_call_with_busy_retry;
 use dohc_engine_protocol::{

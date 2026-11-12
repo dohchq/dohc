@@ -34,8 +34,6 @@ async function assertOwnerWritable(base) {
   }
 }
 
-// Each case copies the packaged layout with its two Node binaries. On a slow
-// disk the cases take about 180 s in all, where a normal one takes 80 s.
 test("packaged macOS runtime signing", { timeout: 600000 }, async t => {
   const root = await mkdtemp(join(tmpdir(), "dohc-reader-signing-")), source = join(root, "source");
   t.after(async () => { await removeLayout(source); await rm(root, { recursive: true, force: true }); });
@@ -74,16 +72,12 @@ test("packaged macOS runtime signing", { timeout: 600000 }, async t => {
     }
     return { app, resources, original, modes, setMode, prepare };
   }
-  await t.test("removes unselected generations only from the app copy", async sub => {
+  await t.test("prunes only the app copy and leaves its unsigned layout writable and removable", async sub => {
     const f = await fixture(sub);
     await f.prepare();
     assert.deepEqual((await readdir(join(f.resources, "engine-reader"))).sort(), [staged.generation, "selection.json", "node-LICENSE.txt"].sort());
     assert.deepEqual((await readdir(sourceBase)).sort(), sourceEntries);
     for (const name of stale.slice(0, 2)) assert.equal(await readFile(join(sourceBase, name, "node"), "utf8"), "unselected executable");
-  });
-  await t.test("keeps packaged folders and files owner-writable", async sub => {
-    const f = await fixture(sub);
-    await f.prepare();
     const base = join(f.resources, "engine-reader");
     for (const [path, mode] of [[base, 0o755], [dirname(f.original.node), 0o755], [join(base, "selection.json"), 0o644], [f.original.manifest, 0o644], [f.original.bundle, 0o644], [f.original.node, 0o755]]) {
       assert.equal(f.modes.get(path), mode, `requested POSIX mode for ${path}`);
@@ -92,22 +86,16 @@ test("packaged macOS runtime signing", { timeout: 600000 }, async t => {
     await assertOwnerWritable(base);
     await rm(f.app, { recursive: true, force: true });
   });
-  await t.test("plain rm deletes an unsigned packaged layout without mode repair", async sub => {
-    const f = await fixture(sub);
-    await f.prepare();
-    await rm(f.app, { recursive: true, force: true });
-  });
   await t.test("afterPack refuses an unsupported packaging architecture", async sub => {
     const f = await fixture(sub);
     for (const arch of [1, 0]) await assert.rejects(f.prepare(arch), /architecture/);
   });
+  const sourceManifest = await readFile(staged.manifest), sourceSelection = await readFile(join(sourceBase, "selection.json"));
+  const sourceCompilerManifest = await readFile(join(sourceCompiler, "manifest.json"));
+  const sourceNodeHash = PINNED_NODE["darwin-arm64"].sha256;
   for (const scenario of ["compiler signing", "transient timestamp failures", "permanent signing failure", "verification failure", "ad hoc signing", "hard-linked source", "compiler signing failure", "compiler verification failure", "outer reader mutation", "outer compiler mutation"]) {
     await t.test(`handles ${scenario}`, async sub => {
       const f = await fixture(sub);
-      const sourceManifest = await readFile(staged.manifest), sourceSelection = await readFile(join(sourceBase, "selection.json"));
-      const sourceNodeHash = createHash("sha256").update(await readFile(staged.node)).digest("hex");
-      const sourceCompilerManifest = await readFile(join(sourceCompiler, "manifest.json"));
-      const sourceCompilerNodeHash = createHash("sha256").update(await readFile(join(sourceCompiler, "node"))).digest("hex");
       const compilerNode = join(f.resources, "app-compiler/node");
       if (scenario === "hard-linked source") {
         for (const [sourcePath, target] of [[staged.node, f.original.node], [staged.manifest, f.original.manifest], [join(sourceBase, "selection.json"), join(f.resources, "engine-reader/selection.json")], [join(sourceCompiler, "node"), compilerNode], [join(sourceCompiler, "manifest.json"), join(f.resources, "app-compiler/manifest.json")]]) {
@@ -207,12 +195,18 @@ test("packaged macOS runtime signing", { timeout: 600000 }, async t => {
         assert.deepEqual(waits, scenario === "transient timestamp failures" ? [5000, 10000, 5000, 10000] : []);
       }
       assert.equal(outerCalls, sealed ? 1 : 0);
-      assert.deepEqual(await readFile(join(sourceCompiler, "manifest.json")), sourceCompilerManifest);
-      assert.equal(createHash("sha256").update(await readFile(join(sourceCompiler, "node"))).digest("hex"), sourceCompilerNodeHash);
-      await requireEngineReader(source, "darwin", "arm64");
+      if (scenario === "hard-linked source") {
+        assert.deepEqual(await readFile(join(sourceCompiler, "manifest.json")), sourceCompilerManifest);
+        assert.equal(createHash("sha256").update(await readFile(join(sourceCompiler, "node"))).digest("hex"), sourceNodeHash);
+      }
       if (sealed) await rm(f.app, { recursive: true, force: true });
     });
   }
+  assert.deepEqual(await readFile(join(sourceCompiler, "manifest.json")), sourceCompilerManifest);
+  assert.equal(createHash("sha256").update(await readFile(join(sourceCompiler, "node"))).digest("hex"), sourceNodeHash);
+  assert.deepEqual(await readFile(staged.manifest), sourceManifest);
+  assert.deepEqual(await readFile(join(sourceBase, "selection.json")), sourceSelection);
+  await requireEngineReader(source, "darwin", "arm64");
 });
 
 const developerIDRequirement = "anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists";
