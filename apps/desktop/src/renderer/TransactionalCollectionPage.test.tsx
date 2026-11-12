@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppBackendJson } from "@dohc/security-contract/app-backend";
 import { deferred } from "../testing/deferred";
@@ -110,6 +111,12 @@ function typeInPanel(field: string, value: string): void {
 }
 /** The control that opens the record's name for typing. */
 const nameButton = () => within(within(panel()).getByRole("heading")).getByRole("button");
+/** Opens the record's name in the panel's heading and types into it, without saving. */
+function typeName(text: string): void {
+  fireEvent.click(nameButton());
+  fireEvent.change(within(panel()).getByRole("textbox", { name: "Name" }), { target: { value: text } });
+}
+const LEFT_OPEN = "This edit was still open, so dohc did not save it.";
 /** A command in the panel's menu, which this opens. */
 function recordCommand(name: string): HTMLElement {
   fireEvent.click(within(panel()).getByRole("button", { name: "Record actions" }));
@@ -1064,6 +1071,105 @@ describe("a Data Collection's record panel and forms", () => {
     expect(sent(invoke, edit)).toHaveLength(0);
   });
 
+  it("closes an open table editor on the first Escape and the record on the second, and returns focus to what opened the record", async () => {
+    const { invoke } = setup(); await screen.findByText("Alice");
+    const open = screen.getByRole("button", { name: "Open Alice" });
+    open.focus(); fireEvent.click(open);
+    const record = panel();
+    fireEvent.click(cell("Amount"));
+    fireEvent.change(editorInput(), { target: { value: "9" } });
+    fireEvent.keyDown(editorInput(), { key: "Escape" });
+    expect(editor()).toBeNull();
+    expect(panel()).toBe(record);
+    expect(document.activeElement).toBe(grid());
+    // An input method's Escape belongs to its composition.
+    fireEvent.keyDown(grid(), { key: "Escape", keyCode: 229 });
+    expect(panel()).toBe(record);
+    press("Escape");
+    expect(screen.queryByRole("complementary")).toBeNull();
+    expect(document.activeElement).toBe(open);
+    expect(sent(invoke, edit)).toHaveLength(0);
+  });
+
+  it("closes the open record before the table clears its selection: one Escape on the table closes the record, and the next clears the selected cell", async () => {
+    setup(); await screen.findByText("Alice");
+    fireEvent.click(cell("Status"));
+    fireEvent.keyDown(grid(), { key: "Enter", ctrlKey: true });
+    expect(document.activeElement).toBe(panel());
+    grid().focus();
+    press("Escape");
+    expect(screen.queryByRole("complementary")).toBeNull();
+    expect(cell("Status").getAttribute("aria-selected")).toBe("true");
+    expect(document.activeElement).toBe(grid());
+    press("Escape");
+    expect(cell("Status").getAttribute("aria-selected")).toBeNull();
+  });
+
+  it("closes the record on Escape from any control of its page, after an open menu has taken its own", async () => {
+    setup(); await screen.findByText("Alice");
+    const open = screen.getByRole("button", { name: "Open Alice" });
+    open.focus(); fireEvent.click(open);
+    const record = panel();
+    // The page's menu closes on its own Escape, and the record stays.
+    fireEvent.keyDown(command("Refresh"), { key: "Escape" });
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(panel()).toBe(record);
+    const search = screen.getByRole("searchbox");
+    search.focus();
+    fireEvent.keyDown(search, { key: "Escape" });
+    expect(screen.queryByRole("complementary")).toBeNull();
+    expect(document.activeElement).toBe(open);
+  });
+
+  it("keeps a name being typed on its own record when another record takes the panel, and when the panel closes, and sends neither", async () => {
+    const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => ({ result: request.operationId === read ? twoRecords() : receipt() }));
+    const { props, rerender } = setup({ invoke }); await screen.findByText("Alice");
+    openPanel();
+    typeName("Alicia");
+    fireEvent.click(screen.getByRole("button", { name: "Open Bea" }));
+    expect(within(panel()).getByRole("heading").textContent).toBe("Bea");
+    expect([mark("Name", 0), why("Name", 0), mark("Name", 1)]).toEqual(["refused", LEFT_OPEN, null]);
+    expect(cell("Name", 0).textContent).toContain("Alicia");
+    typeName("Beatrice");
+    // The ⚡ panel takes the record's place. No press landed away from the name, so nothing saved it.
+    rerender(<TransactionalCollectionPage {...props} automations={{ open: true, count: 1, onToggle: vi.fn(), close: vi.fn() }} panel={<aside aria-label="Automations" />} />);
+    expect(screen.getAllByRole("complementary").map(side => side.getAttribute("aria-label"))).toEqual(["Automations"]);
+    expect([mark("Name", 1), why("Name", 1)]).toEqual(["refused", LEFT_OPEN]);
+    expect(cell("Name", 1).textContent).toContain("Beatrice");
+    expect(sent(invoke, edit)).toHaveLength(0);
+  });
+
+  it("keeps the record one copy of a tab still shows in the tab's saved entry when another copy closes its own, and never makes one copy follow the other", async () => {
+    const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => ({ result: request.operationId === read ? twoRecords() : receipt() }));
+    const { props } = setup({ invoke }); cleanup();
+    // Two editor groups show the Collection's tab. The tab has one saved entry, which both copies read and write.
+    function TwoCopies() {
+      const [kept, setKept] = useState<string | null>(null);
+      return <>
+        {["Left", "Right"].map(group => <div key={group} data-testid={group}><TransactionalCollectionPage {...props} initialOpenRecord={kept} onOpenRecordChange={setKept} /></div>)}
+        <output aria-label="Kept record">{kept ?? "none"}</output>
+      </>;
+    }
+    render(<TwoCopies />);
+    const copy = (group: string) => within(screen.getByTestId(group));
+    const kept = () => screen.getByRole("status", { name: "Kept record" }).textContent;
+    await waitFor(() => expect(screen.getAllByText("Alice")).toHaveLength(2));
+    fireEvent.click(copy("Left").getByRole("button", { name: "Open Alice" }));
+    expect(kept()).toBe("1");
+    expect(copy("Right").queryByRole("complementary")).toBeNull();
+    // The entry holds the record a person opened last, in either copy.
+    fireEvent.click(copy("Right").getByRole("button", { name: "Open Bea" }));
+    expect(kept()).toBe("2");
+    expect(copy("Left").getByRole("complementary", { name: "Alice" })).toBeTruthy();
+    // The right copy closes its record. The left one still shows a record, so the entry holds that one.
+    fireEvent.click(within(copy("Right").getByRole("complementary")).getByRole("button", { name: "Close record" }));
+    expect(kept()).toBe("1");
+    expect(copy("Right").queryByRole("complementary")).toBeNull();
+    expect(copy("Left").getByRole("complementary", { name: "Alice" })).toBeTruthy();
+    fireEvent.click(within(copy("Left").getByRole("complementary")).getByRole("button", { name: "Close record" }));
+    expect(kept()).toBe("none");
+  });
+
   it("opens the selected cell's record on Ctrl+Enter, and replaces the panel's record when another opens", async () => {
     const invoke = vi.fn(async (): Promise<{ result: AppBackendJson }> => ({ result: twoRecords() }));
     setup({ invoke }); await screen.findByText("Alice");
@@ -1131,11 +1237,39 @@ describe("a Data Collection's record panel and forms", () => {
       await waitFor(() => expect(sent(invoke, edit)[0]?.input).toEqual({ id: 2, expectedVersion: 4, values: { [amount]: 8 } }));
     });
 
+    it("keeps a confirmed value on its field until a read of that record shows it: after the table's read leaves the record out, and after the read of the record fails", async () => {
+      const lookups: Array<ReturnType<typeof deferred<{ result: AppBackendJson }>>> = [];
+      const invoke = vi.fn((request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+        if (!byKey(request)) return Promise.resolve({ result: request.operationId === read ? page() : { id: 2, version: 5, priorValues: { [amount]: 7 } } });
+        lookups.push(deferred<{ result: AppBackendJson }>());
+        return lookups.at(-1)!.promise;
+      });
+      const { props, rerender } = setup({ dataset: keyed(), invoke, initialOpenRecord: "2" });
+      await screen.findByText("Alice");
+      await waitFor(() => expect(lookups).toHaveLength(1));
+      await act(async () => lookups[0]!.resolve({ result: bea }));
+      typeInPanel("Amount", "8");
+      // The change is confirmed, the table's records are read again without the record, and the read of the record has not answered.
+      await waitFor(() => expect(lookups).toHaveLength(2));
+      expect(property("Amount").textContent).toContain("8");
+      // That read fails. The field still shows what the Collection confirmed.
+      await act(async () => lookups[1]!.reject(new Error("Lost reply")));
+      expect(property("Amount").textContent).toContain("8");
+      expect(screen.getByRole("complementary", { name: "Bea" })).toBeTruthy();
+      // The next read of the record shows the value, and the field says nothing more of the change.
+      rerender(<TransactionalCollectionPage {...props} recordsChanged={1} />);
+      await waitFor(() => expect(lookups).toHaveLength(3));
+      expect(propertyMark("Amount")).toBe("pending");
+      await act(async () => lookups[2]!.resolve({ result: { rows: [{ id: 2, version: 5, values: { [name]: "Bea", [amount]: 8, [status]: "New" } }], nextCursor: null } }));
+      expect(propertyMark("Amount")).toBeNull();
+      expect(property("Amount").textContent).toContain("8");
+    });
+
     it("says in one line that a record is gone, could not be read, or was never one, and offers Close", async () => {
       const onOpenRecordChange = vi.fn();
       const gone = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => ({ result: byKey(request) ? { rows: [], nextCursor: null } : page() }));
       setup({ dataset: keyed(), invoke: gone, initialOpenRecord: "2", onOpenRecordChange });
-      expect((await within(await screen.findByRole("complementary")).findByRole("status")).textContent).toBe("This record is no longer in this Collection.");
+      expect((await within(await screen.findByRole("complementary")).findByText("This record is no longer in this Collection.")).getAttribute("role")).toBe("status");
       fireEvent.click(within(panel()).getByRole("button", { name: "Close" }));
       expect(screen.queryByRole("complementary")).toBeNull();
       expect(onOpenRecordChange).toHaveBeenLastCalledWith(null);
@@ -1143,13 +1277,13 @@ describe("a Data Collection's record panel and forms", () => {
 
       const failing = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => { if (byKey(request)) throw new Error("Lost reply"); return { result: page() }; });
       setup({ dataset: keyed(), invoke: failing, initialOpenRecord: "2" });
-      expect((await within(await screen.findByRole("complementary")).findByRole("status")).textContent).toBe("dohc could not read this record. Close it, then open it again.");
+      expect((await within(await screen.findByRole("complementary")).findByText("dohc could not read this record. Close it, then open it again.")).getAttribute("role")).toBe("status");
       cleanup(); resetKeptCollectionEditsForTests();
 
       // A kept key that names no record is never sent to the Collection.
       const foreign = vi.fn(async (_request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => ({ result: page() }));
       setup({ dataset: keyed(), invoke: foreign, initialOpenRecord: "{not a key" });
-      expect((await within(await screen.findByRole("complementary")).findByRole("status")).textContent).toBe("This record is no longer in this Collection.");
+      expect((await within(await screen.findByRole("complementary")).findByText("This record is no longer in this Collection.")).getAttribute("role")).toBe("status");
       expect(foreign.mock.calls.some(([request]) => byKey(request))).toBe(false);
     });
 
@@ -1327,18 +1461,50 @@ describe("a Data Collection's record panel and forms", () => {
     expect(view.onError).not.toHaveBeenCalled();
   });
 
-  it("opens a custom action from the panel only for the record's own table, and keeps the panel open", async () => {
+  it("opens a custom action from the panel only for the record's own table, keeps the panel open, and lists no action in an offline copy", async () => {
     const description = dataset();
     description.operations.push(
       { operationId: id(20), name: "approve", label: "Approve", kind: "action", access: "owner", readOnly: false, tableId: id(2), fieldIds: [] },
-      { operationId: id(21), name: "other", label: "Other table action", kind: "action", access: "owner", readOnly: false, tableId: id(9), fieldIds: [] });
+      { operationId: id(21), name: "other", label: "Other table action", kind: "action", access: "owner", readOnly: false, tableId: id(9), fieldIds: [] },
+      // An action that changes nothing is still among an offline copy's operations.
+      { operationId: id(22), name: "summarize", label: "Summarize", kind: "action", access: "owner", readOnly: true, tableId: id(2), fieldIds: [] });
     const onCustomAction = vi.fn();
-    setup({ dataset: description, onCustomAction }); await screen.findByText("Alice");
+    const view = setup({ dataset: description, onCustomAction }); await screen.findByText("Alice");
     const record = openPanel();
     expect(within(record).queryByRole("button", { name: "Open Other table action" })).toBeNull();
+    expect(within(record).getByRole("button", { name: "Open Summarize" })).toBeTruthy();
     fireEvent.click(within(record).getByRole("button", { name: "Open Approve" }));
     expect(onCustomAction).toHaveBeenCalledExactlyOnceWith(id(20));
     expect(panel()).toBe(record);
+    view.rerender(<TransactionalCollectionPage {...view.props} copy={{ offline: true, savedAtMs: 1 }} />);
+    expect(panel()).toBe(record);
+    expect(within(record).queryByRole("button", { name: /^Open / })).toBeNull();
+    expect(within(record).queryByText("Open an action to review its inputs before running it.")).toBeNull();
+  });
+
+  it("says why Delete record waits: for the records while they load, and for the file while one uploads", async () => {
+    const description = dataset(); description.tables[0]!.fields.find(field => field.fieldId === amount)!.type = "attachment";
+    const reload = deferred<{ result: AppBackendJson }>(), pendingUpload = deferred<import("@dohc/security-contract/app-backend").AppBackendFile>();
+    let reads = 0;
+    const invoke = vi.fn((request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => request.operationId === read && ++reads === 2 ? reload.promise : Promise.resolve({ result: page() }));
+    const uploadFile = vi.fn<NonNullable<React.ComponentProps<typeof TransactionalCollectionPage>["uploadFile"]>>(() => pendingUpload.promise);
+    const view = setup({ dataset: description, invoke, uploadFile, confirmDelete: vi.fn(async () => false) }); await screen.findByText("Alice");
+    openPanel();
+    view.rerender(<TransactionalCollectionPage {...view.props} recordsVersion={1} />);
+    await waitFor(() => expect(reads).toBe(2));
+    let remove = recordCommand("Delete record…");
+    expect(remove.getAttribute("aria-disabled")).toBe("true");
+    expect(remove.textContent).toContain("Wait for the records to load.");
+    fireEvent.keyDown(remove, { key: "Escape" });
+    await act(async () => reload.resolve({ result: page() }));
+    await loaded();
+    // A file for a new record is still uploading.
+    fireEvent.click(screen.getAllByRole("button", { name: "New record" })[0]!);
+    fireEvent.change(within(screen.getByRole("form", { name: "New record" })).getByLabelText("Amount"), { target: { files: [new File(["abc"], "receipt.txt", { type: "text/plain" })] } });
+    remove = recordCommand("Delete record…");
+    expect(remove.getAttribute("aria-disabled")).toBe("true");
+    expect(remove.textContent).toContain("Wait for the file to upload.");
+    expect(remove.textContent).not.toContain("Wait for the records to load.");
   });
 
   it("closes the panel on Escape and returns keyboard focus to the row", async () => {
@@ -2105,6 +2271,37 @@ describe("when the Collection's fields change", () => {
     fireEvent.keyDown(input, { key: "Enter" });
     expect(within(property("Amount")).getByRole("note").textContent).toContain("The Collection's rules no longer allow this change, so dohc did not save it.");
     expect(property("Amount").textContent).toContain("9");
+    expect(sent(result.invoke, edit)).toHaveLength(0);
+  });
+
+  it.each([
+    ["the Collection goes offline", (): Partial<React.ComponentProps<typeof TransactionalCollectionPage>> => ({ copy: { offline: true, savedAtMs: 1 } })],
+    ["its edit is gone", (): Partial<React.ComponentProps<typeof TransactionalCollectionPage>> => ({ dataset: revised(2, next => { next.operations = next.operations.filter(entry => entry.operationId !== edit); }) })],
+  ])("keeps a name being typed in the panel's heading on its field, and sends none of it, when %s", async (_when, change) => {
+    const result = setup(); await screen.findByText("Alice");
+    openPanel();
+    typeName("Alicia");
+    result.rerender(<TransactionalCollectionPage {...result.props} {...change()} />);
+    expect(within(panel()).queryByRole("textbox")).toBeNull();
+    expect(within(panel()).getByRole("heading").textContent).toBe("Alicia");
+    expect(within(panel()).getByRole("note").textContent).toContain(LEFT_OPEN);
+    expect([mark("Name"), why("Name")]).toEqual(["refused", LEFT_OPEN]);
+    expect(sent(result.invoke, edit)).toHaveLength(0);
+  });
+
+  it("keeps a name being typed with the field it was typed for when another field becomes the record's name, and sends it to neither field", async () => {
+    const result = setup(); await screen.findByText("Alice");
+    openPanel();
+    typeName("Alicia");
+    // The rules stop showing Name, so Private note, the next text field, heads the record.
+    result.rerender(<TransactionalCollectionPage {...result.props} dataset={revised(2, next => {
+      operation(next, read).fieldIds = [amount, status, secret];
+      operation(next, edit).fieldIds = [amount, secret];
+    })} />);
+    expect(within(panel()).queryByRole("textbox")).toBeNull();
+    expect(within(strip()!).getByText("Name of record 1")).toBeTruthy();
+    expect(within(strip()!).getByLabelText<HTMLInputElement>("Name").value).toBe("Alicia");
+    expect(within(strip()!).getByRole("alert").textContent).toBe(LEFT_OPEN);
     expect(sent(result.invoke, edit)).toHaveLength(0);
   });
 

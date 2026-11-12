@@ -95,7 +95,7 @@ export interface WriteQueuePage {
   open(): () => void;
   /** Call when a read of records starts, and pass what it returns to `readShown`. A saved offline page shows no change. */
   readStarted(): number;
-  /** The page shows the records a read returned. */
+  /** The page shows the records a read returned. A confirmed value of a record the read left out stays on its cell. */
   readShown(token: number, rows: readonly TransactionalRow[]): void;
 }
 
@@ -295,7 +295,11 @@ export class WriteQueue {
       readShown: (token, rows) => {
         page.readAsked = false;
         page.seen = Math.max(page.seen, token);
-        for (const [recordKey, fields] of page.settled) {
+        // A read shows a confirmed value only on a record it returns. A record it leaves out, as one open from
+        // another page of records, keeps the value until a read returns that record.
+        for (const row of rows) {
+          const recordKey = JSON.stringify(row.id), fields = page.settled.get(recordKey);
+          if (!fields) continue;
           for (const [fieldId, settled] of fields) if (settled.seq <= token) fields.delete(fieldId);
           if (fields.size === 0) page.settled.delete(recordKey);
         }

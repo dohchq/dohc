@@ -54,7 +54,10 @@ export interface TransactionalCollectionPageProps extends CollectionResources {
   automations?: { open: boolean; count: number; onToggle(): void; close(then: () => void): void };
   /** The ⚡ panel, docked at the right of the view. An open record takes its place: one side panel shows at a time. */
   panel?: ReactNode;
-  /** The record the page shows open when it starts, by its key, as its host kept it with the page's tab. */
+  /**
+   * The record its host keeps with the page's tab, by its key. The page shows it open when it starts. After
+   * that the page only learns from it that another copy of the tab emptied it.
+   */
   initialOpenRecord?: string | null;
   /** The page opened a record in its panel, by the record's key, or closed the panel, for null. */
   onOpenRecordChange?(record: string | null): void;
@@ -120,6 +123,7 @@ const ALL_RECORDS = "all-records";
 const LAYOUT_TABS: readonly CollectionFrameTab[] = [{ id: "table", name: "Table", kind: "table" }, { id: "board", name: "Board", kind: "board" }, { id: "calendar", name: "Calendar", kind: "calendar" }];
 const FORM_OPEN = "Save or cancel the open form first.";
 const RECORDS_LOADING = "Wait for the records to load.";
+const FILE_UPLOADING = "Wait for the file to upload.";
 const RECORDS_FAILED = "dohc could not load the records. Refresh first.";
 type Query = { after: TransactionalCursor | null; search: string; filters?: CollectionTableView["filters"]; sort?: { fieldId: string; direction: "asc" | "desc" } };
 /** The open form of a new record. A record's fields change in its cells and in its panel. */
@@ -421,7 +425,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     }
     // The open record stays open on another page of records, a search or a sort. The read no longer holds
     // the page, so a record it left out is read by its key.
-    if (shown) showOpenRecord(shown);
+    if (shown) showOpenRecord(shown, shows);
   }
   // The words state the wait when it began, so once it ends the page says so.
   useEffect(() => {
@@ -555,7 +559,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       const loaded = parsePage(response.result, read.fieldIds);
       setPage(loaded);
       settle();
-      showOpenRecord(loaded.rows);
+      showOpenRecord(loaded.rows, shows);
       view.readShown(shows, loaded.rows);
     } catch (cause) {
       // Otherwise nothing to say: the change happened elsewhere, and the page still shows its last read.
@@ -568,18 +572,18 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
    * The open record shows what a read found of it. One the read left out, as
    * a Calendar record moved to another month or a record on another page, is
    * read by its key, and one that is gone says so instead of showing its old
-   * values.
+   * values. `shows`: what the queue gave when the read started.
    */
-  function showOpenRecord(rows: readonly TransactionalRow[]): void {
+  function showOpenRecord(rows: readonly TransactionalRow[], shows: number): void {
     const key = openKeyRef.current;
     if (key === null) return;
     // This read is newer than a by-key read still in flight, which then changes nothing.
     openRecordRead.current?.abort();
     const found = rows.find(row => JSON.stringify(row.id) === key);
-    if (!found) { void readOpenRecord(key); return; }
+    if (!found) { void readOpenRecord(key, shows); return; }
     setDetails(found); setDetailsUnavailable(null);
   }
-  async function readOpenRecord(key: string): Promise<void> {
+  async function readOpenRecord(key: string, shows: number): Promise<void> {
     if (!read || !alive.current || locked.current) return;
     const fieldId = table?.primaryKeyFieldId;
     // A key the host kept is foreign text until it reads as a record's id.
@@ -601,9 +605,12 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       const found = parsePage(response.result, read.fieldIds).rows.find(row => JSON.stringify(row.id) === key);
       if (!found) { setDetailsUnavailable({ id: key, text: "This record is no longer in this Collection." }); return; }
       setDetails(found); setDetailsUnavailable(null);
+      // The read that left the record out kept its confirmed values on its fields. This read shows them,
+      // as of that read's start, which is no later than this one's.
+      view.readShown(shows, [found]);
     } catch {
-      // A record the panel already shows keeps its last values: the next change or Refresh reads again.
-      // One it has nothing to show of says so.
+      // A record the panel already shows keeps its last values, and those the Collection confirmed since:
+      // the next change or Refresh reads again. One it has nothing to show of says so.
       if (current() && detailsRef.current === null) setDetailsUnavailable({ id: key, text: "dohc could not read this record. Close it, then open it again." });
     }
   }
@@ -629,14 +636,18 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     if (props.automations?.open) props.automations.close(show);
     else show();
   }
-  /** Closes the panel. Focus the panel held goes back to what opened it, or to the table. */
-  function closePanel(focus: "opener" | "table" | "none"): void {
+  /**
+   * Closes the panel. Focus the panel held goes back to what opened it, or
+   * to the table. `fromPage`: Escape on the page closed it, so focus goes
+   * back from wherever on the page it is.
+   */
+  function closePanel(focus: "opener" | "table" | "none", fromPage = false): void {
     if (openKeyRef.current === null) return;
     openRecordRead.current?.abort();
     const active = document.activeElement, opener = panelOpener.current;
     panelOpener.current = null;
-    // Focus the person has moved to the page stays where they put it.
-    if (focus !== "none" && (active === null || active === document.body || panelElement.current?.contains(active))) {
+    // Otherwise, focus the person has moved to the page stays where they put it.
+    if (focus !== "none" && (fromPage || active === null || active === document.body || panelElement.current?.contains(active))) {
       const target = focus === "opener" && opener?.isConnected ? opener : panelElement.current?.parentElement?.querySelector<HTMLElement>('[role="grid"]');
       target?.focus({ preventScroll: true });
     }
@@ -648,6 +659,13 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     focusPanel.current = false;
     panelElement.current?.focus({ preventScroll: true });
   }, [openKey]);
+  // Two editor groups can show this tab, and its one saved entry holds the record a person last opened or closed
+  // in either. When a close in the other copy empties the entry while this copy still shows a record, this copy
+  // saves its record again, so the entry is never empty beside a panel that shows one. Neither copy follows the other's record.
+  const keptRecord = props.initialOpenRecord ?? null;
+  useEffect(() => {
+    if (keptRecord === null && openKeyRef.current !== null) props.onOpenRecordChange?.(openKeyRef.current);
+  }, [keptRecord]);
   // The ⚡ panel takes the side panel's place when it opens.
   const automationsOpen = props.automations?.open ?? false;
   useLayoutEffect(() => { if (automationsOpen) closePanel("none"); }, [automationsOpen]);
@@ -978,14 +996,17 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     // The name as its cell shows it: what the person gave, until the host confirms it. A record with no name
     // says so in its heading. Only the panel's accessible name falls back to what the table's Open control calls it.
     const nameText = !details ? undefined : nameField ? display(nameStatus ? nameStatus.value as AppBackendJson : details.values[nameField.fieldId]) : "";
-    const renames = nameField !== undefined && !offline && editableIds.includes(nameField.fieldId) ? nameField : undefined;
-    const recordActions = onCustomAction ? operations.filter(operation => operation.kind === "action") : [];
+    // An offline copy lists no action, as it takes no change.
+    const recordActions = onCustomAction && !offline ? operations.filter(operation => operation.kind === "action") : [];
     const commands: RecordPanelCommand[] = details && remove && confirmDelete
-      ? [{ id: "delete", label: "Delete record…", icon: icon(Trash2), danger: true, disabled, reason: RECORDS_LOADING, onSelect: () => { void deleteRecord(details); } }] : [];
+      ? [{ id: "delete", label: "Delete record…", icon: icon(Trash2), danger: true, disabled, reason: busy || visualBusy ? RECORDS_LOADING : FILE_UPLOADING, onSelect: () => { void deleteRecord(details); } }] : [];
+    // The name opens only where a cell of its field would. An open name stays with its record and its field,
+    // and saves as a cell does: the page asks the rules again, and keeps what they refuse.
     return <RecordPanel key={openKey} panelRef={panelElement} collectionName={table.name}
       name={nameText || (details ? recordName(details, fields) : "")} nameText={nameText} nameLabel={nameField?.name}
-      onNameChange={renames && (value => { commitCell(openKey, renames.fieldId, value === "" ? null : value); })}
-      onNameAbandoned={renames && (text => keepDraft({ recordId: openKey, field: renames.fieldId, text }))}
+      nameField={nameField?.fieldId} canRename={nameField !== undefined && !offline && editableIds.includes(nameField.fieldId)}
+      onNameChange={nameField && (value => { commitCell(openKey, nameField.fieldId, value === "" ? null : value); })}
+      onNameAbandoned={nameField && (text => keepDraft({ recordId: openKey, field: nameField.fieldId, text }))}
       nameNote={nameField ? <CellStatusNote statuses={view.statuses} recordId={openKey} field={nameField.fieldId} /> : undefined}
       loading={details === null && unavailable === undefined} unavailable={unavailable} commands={commands}
       width={panelWidth} onWidthChange={width => { setPanelWidth(width); props.onRecordPanelWidthChange?.(width); }} onClose={() => closePanel("opener")}
@@ -1003,6 +1024,15 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     const fieldId = event.target.closest<HTMLElement>("[data-field]")?.dataset.field;
     lastFocus.current = fieldId === undefined ? null : { element: event.target, fieldId };
   }}
+    // An editor, a picker, a menu and a popover each take their own Escape, which never reaches here. The next
+    // one closes the open record from anywhere on the page, before the table clears its selection.
+    onKeyDown={event => {
+      if (event.key !== "Escape" || event.defaultPrevented || isComposingKey(event) || panelElement.current === null) return;
+      // A dialog a control of the page opens is the page's child in React, not on the page.
+      if (!event.currentTarget.contains(event.target as Node)) return;
+      event.preventDefault();
+      closePanel("opener", true);
+    }}
     // A count of this page's records. It says so when the Collection holds more pages.
     count={shownRecords === null ? undefined : `${shownRecords} ${shownRecords === 1 ? "record" : "records"}${previous.length > 0 || (page?.nextCursor ?? null) !== null ? " on this page" : ""}`}
     status={props.copy ? <span role="status" className="truncate text-[12px] text-muted">{savedPages ? "Offline · Saved pages only" : props.copy.offline ? `Offline copy · Read-only${props.copy.host ? ` until ${props.copy.host} is reachable` : ""}`
@@ -1045,7 +1075,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     {busy ? page ? <p role="status" className="m-0 px-5 text-[12px] text-muted first:pt-3">Loading records…</p> : <SkeletonRows label="Loading records…" className="first:mt-3" /> : null}
     {visual && shownView?.kind === "calendar" && !shownView.dateField ? <CalendarNeedsDateField disabled={writeDisabled || editor !== null} onAddDateField={props.onAddDateField} />
     : visual && shownView ? <div className="flex min-h-0 flex-1 flex-col px-5 pb-3 first:pt-3"><Suspense fallback={<SkeletonRows label="Opening view…" />}><TransactionalCollectionViews key={JSON.stringify([activeViewKey,query.search,visualEpoch])} view={shownView} fields={fields} search={query.search} refresh={visualRefresh} changed={visualChanged} rules={contractKey}
-      onReadInPlace={rows => { showOpenRecord(rows); const shows = visualRead.current; visualRead.current = Number.POSITIVE_INFINITY; view.readShown(Number.isFinite(shows) ? shows : -1, rows); }}
+      onReadInPlace={rows => { const shows = Number.isFinite(visualRead.current) ? visualRead.current : -1; visualRead.current = Number.POSITIVE_INFINITY; showOpenRecord(rows, shows); view.readShown(shows, rows); }}
       disabled={busy || resourceBusy || editor !== null} onBusy={setVisualBusy} onError={failLoad} onLoaded={settle}
       read={(input,signal)=>{ visualRead.current = Math.min(visualRead.current, view.readStarted()); return invoke(request(read,input,crypto.randomUUID()),signal); }}
       openRecord={openKey} onOpen={openPanel}

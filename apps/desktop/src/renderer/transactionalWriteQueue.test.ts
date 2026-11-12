@@ -163,6 +163,38 @@ describe("the version a record's next change goes with", () => {
   });
 });
 
+describe("a confirmed value a page's records do not show yet", () => {
+  it("stays on the cell of a record a read leaves out, and goes once a read returns that record", async () => {
+    const rules = host(), { queue, page } = open(rules);
+    queue.enqueue(edit(row(1, 2), name, "Alicia"));
+    queue.enqueue(edit(row(2, 4), name, "Beatrice"));
+    rules.calls[0]!.answer.resolve({ result: { id: 1, version: 3 } });
+    await vi.waitFor(() => expect(rules.calls).toHaveLength(2));
+    rules.calls[1]!.answer.resolve({ result: { id: 2, version: 5 } });
+    await vi.waitFor(() => expect(rules.read).toHaveBeenCalled());
+    // The read returns record 1 only, as when record 2 is on another page of records.
+    const started = page.readStarted();
+    page.readShown(started, [row(1, 3)]);
+    expect(state(page, 1, name)).toBeUndefined();
+    expect(page.statuses.get("2", "name")).toMatchObject({ state: "pending", value: "Beatrice" });
+    // A read of record 2 alone shows it.
+    page.readShown(started, [row(2, 5)]);
+    expect(state(page, 2, name)).toBeUndefined();
+  });
+
+  it("stays through a read of its record that started before the change was confirmed", async () => {
+    const rules = host(), { queue, page } = open(rules);
+    const before = page.readStarted();
+    queue.enqueue(edit(row(2, 4), name, "Beatrice"));
+    rules.calls[0]!.answer.resolve({ result: { id: 2, version: 5 } });
+    await vi.waitFor(() => expect(rules.read).toHaveBeenCalled());
+    page.readShown(before, [row(2, 4)]);
+    expect(state(page, 2, name)).toBe("pending");
+    page.readShown(page.readStarted(), [row(2, 5)]);
+    expect(state(page, 2, name)).toBeUndefined();
+  });
+});
+
 describe("a value dohc did not save", () => {
   it("is not kept once a later change to its cell is queued, so the cell ends on the later value", async () => {
     const rules = host(), { queue, page } = open(rules);

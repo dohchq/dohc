@@ -42,13 +42,29 @@ export interface RecordPanelProps {
   /** The Collection's name, beside the top bar's controls. */
   collectionName: string;
   /**
+   * The field the name is a value of, as the host knows it. An open input
+   * belongs to the field it opened on: when another field becomes the name,
+   * the input goes, and what was typed goes to `onNameAbandoned`.
+   */
+  nameField?: string;
+  /**
+   * Whether the name opens for typing. Only opening depends on it. An input
+   * already open when it ends goes, and what was typed goes to
+   * `onNameAbandoned`.
+   */
+  canRename?: boolean;
+  /**
    * Saves a new name, by a cell's rules: Enter or a press away saves, and
-   * Escape cancels. Absent, the name cannot change here.
+   * Escape cancels. The host decides what a save does, as for a cell.
    */
   onNameChange?: (name: string) => void;
   /** The name field's own name, which the open input takes. */
   nameLabel?: string;
-  /** Receives a name still being typed when the panel goes, neither saved nor cancelled. */
+  /**
+   * Receives a name still being typed when its input goes, neither saved
+   * nor cancelled: with the panel, with the right to rename, or because
+   * another field became the name. The host keeps it and sends nothing.
+   */
   onNameAbandoned?: (text: string) => void;
   /** What shows under the name, such as a change to it the host has not confirmed. */
   nameNote?: ReactNode;
@@ -75,8 +91,8 @@ export interface RecordPanelProps {
 }
 
 /** The record's name: a heading, and where the host lets it change, the control that opens it for typing. */
-function PanelName(props: Pick<RecordPanelProps, "name" | "nameText" | "onNameChange" | "nameLabel" | "onNameAbandoned">) {
-  const { onNameChange } = props;
+function PanelName(props: Pick<RecordPanelProps, "name" | "nameText" | "canRename" | "onNameChange" | "nameLabel" | "onNameAbandoned">) {
+  const { canRename = false, onNameChange } = props;
   const name = props.nameText ?? props.name;
   const [editing, setEditing] = useState(false);
   const input = useRef<HTMLInputElement>(null);
@@ -96,23 +112,30 @@ function PanelName(props: Pick<RecordPanelProps, "name" | "nameText" | "onNameCh
   useEffect(() => {
     if (!editing) return;
     const node = input.current;
-    // The input is off the page with text in it only when the panel went first.
+    // The input is off the page with text in it only when the panel, or the name's field, went first.
     return () => {
       if (node && !node.isConnected && typed.current && !done.current) abandoned.current?.(node.value);
     };
   }, [editing]);
-  const heading = "m-0 min-w-0 text-base font-semibold text-ink";
-  const shown = name === "" ? <span className="text-subtle">Untitled</span> : name;
-  if (!onNameChange) return <h2 className={`${heading} whitespace-pre-wrap break-words`}>{shown}</h2>;
   const close = (focused: boolean) => {
     done.current = true;
     refocus.current = focused;
     setEditing(false);
   };
+  // The right to rename ended under an open input. The host gets what was typed, and nothing saves it.
+  useLayoutEffect(() => {
+    if (!editing || canRename) return;
+    if (input.current && typed.current && !done.current) abandoned.current?.(input.current.value);
+    close(false);
+  }, [editing, canRename]);
+  // The record's title, not a panel title, so the type scale's panel title recipe does not apply: 20px, to stand out from the Collection's name above it.
+  const heading = "m-0 min-w-0 text-xl font-semibold leading-tight tracking-tight text-ink";
+  const shown = name === "" ? <span className="text-subtle">Untitled</span> : name;
+  if (!editing && !canRename) return <h2 className={`${heading} whitespace-pre-wrap break-words`}>{shown}</h2>;
   const save = (value: string, focused: boolean) => {
     if (done.current) return;
     close(focused);
-    if (value !== name) onNameChange(value);
+    if (value !== name) onNameChange?.(value);
   };
   return (
     <h2 className={heading}>
@@ -136,7 +159,7 @@ function PanelName(props: Pick<RecordPanelProps, "name" | "nameText" | "onNameCh
             }
           }}
           onBlur={(event) => save(event.currentTarget.value, false)}
-          className="-mx-1 w-[calc(100%+0.5rem)] rounded border border-line bg-bg px-1 text-base font-semibold text-ink focus:border-ink"
+          className="-mx-1 w-[calc(100%+0.5rem)] rounded border border-line bg-bg px-1 text-xl font-semibold leading-tight tracking-tight text-ink focus:border-ink"
         />
       ) : (
         <button
@@ -276,7 +299,8 @@ export function RecordPanel(props: RecordPanelProps) {
         <>
           <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-3 pb-4">
             <div className="flex flex-col gap-1 pb-3 pt-1">
-              <PanelName name={name} nameText={props.nameText} onNameChange={props.onNameChange} nameLabel={props.nameLabel} onNameAbandoned={props.onNameAbandoned} />
+              {/* Another field as the name is another name: an input open on the first goes with it. */}
+              <PanelName key={props.nameField ?? ""} name={name} nameText={props.nameText} canRename={props.canRename} onNameChange={props.onNameChange} nameLabel={props.nameLabel} onNameAbandoned={props.onNameAbandoned} />
               {props.nameNote}
             </div>
             {props.properties}

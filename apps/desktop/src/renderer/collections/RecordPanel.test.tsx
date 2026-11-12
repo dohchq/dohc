@@ -74,14 +74,14 @@ describe("the record panel", () => {
     expect(view.onClose).not.toHaveBeenCalled();
   });
 
-  it("shows a name the host cannot change as a plain heading", () => {
-    const view = setup();
+  it("shows a name the host does not let open as a plain heading", () => {
+    const view = setup({ onNameChange: vi.fn() });
     expect(within(view.in.getByRole("heading", { name: "Alice" })).queryByRole("button")).toBeNull();
   });
 
   it("changes the name in place by a cell's rules: Enter or a press away saves, Escape cancels, and the panel stays", () => {
     const onNameChange = vi.fn();
-    const view = setup({ onNameChange, nameLabel: "Full name" });
+    const view = setup({ onNameChange, canRename: true, nameLabel: "Full name" });
     const open = () => {
       fireEvent.click(within(view.in.getByRole("heading")).getByRole("button", { name: "Alice" }));
       return view.in.getByRole<HTMLInputElement>("textbox", { name: "Full name" });
@@ -113,7 +113,7 @@ describe("the record panel", () => {
   });
 
   it("starts the name's input from the field's own text, and says when a record has none", () => {
-    const view = setup({ name: "record 7", nameText: "", onNameChange: vi.fn() });
+    const view = setup({ name: "record 7", nameText: "", onNameChange: vi.fn(), canRename: true });
     expect(view.panel.getAttribute("aria-label")).toBe("record 7");
     fireEvent.click(within(view.in.getByRole("heading", { name: "Untitled" })).getByRole("button"));
     expect(view.in.getByRole<HTMLInputElement>("textbox", { name: "Name" }).value).toBe("");
@@ -127,7 +127,7 @@ describe("the record panel", () => {
       return <>
         <button type="button" onClick={() => setName("Changed elsewhere")}>Read again</button>
         <button type="button" onClick={() => setOpen(false)}>Leave</button>
-        {open ? <RecordPanel name={name} collectionName="People" width={380} onWidthChange={vi.fn()} onClose={vi.fn()} onNameChange={onNameChange} onNameAbandoned={onNameAbandoned} /> : null}
+        {open ? <RecordPanel name={name} collectionName="People" width={380} onWidthChange={vi.fn()} onClose={vi.fn()} canRename onNameChange={onNameChange} onNameAbandoned={onNameAbandoned} /> : null}
       </>;
     }
     render(<Host />);
@@ -139,6 +139,36 @@ describe("the record panel", () => {
     fireEvent.click(screen.getByRole("button", { name: "Leave" }));
     expect(onNameAbandoned).toHaveBeenCalledExactlyOnceWith("Half typed");
     expect(onNameChange).not.toHaveBeenCalled();
+  });
+
+  it("closes a name being typed when the host stops letting the name open, hands the host the text, and saves none of it", () => {
+    const onNameChange = vi.fn(), onNameAbandoned = vi.fn();
+    const view = setup({ onNameChange, onNameAbandoned, canRename: true });
+    fireEvent.click(within(view.in.getByRole("heading")).getByRole("button"));
+    fireEvent.change(view.in.getByRole("textbox", { name: "Name" }), { target: { value: "Half typed" } });
+    view.rerender({ onNameChange, onNameAbandoned, canRename: false });
+    expect(view.in.queryByRole("textbox")).toBeNull();
+    expect(within(view.in.getByRole("heading", { name: "Alice" })).queryByRole("button")).toBeNull();
+    expect(onNameAbandoned).toHaveBeenCalledExactlyOnceWith("Half typed");
+    expect(onNameChange).not.toHaveBeenCalled();
+    // An input in which nothing was typed leaves nothing to keep.
+    view.rerender({ onNameChange, onNameAbandoned, canRename: true });
+    fireEvent.click(within(view.in.getByRole("heading")).getByRole("button"));
+    view.rerender({ onNameChange, onNameAbandoned, canRename: false });
+    expect(view.in.queryByRole("textbox")).toBeNull();
+    expect(onNameAbandoned).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps an open name with the field it opened on: when another field becomes the name, the first field's host gets the text and the new field gets nothing", () => {
+    const first = { onNameChange: vi.fn(), onNameAbandoned: vi.fn() }, second = { onNameChange: vi.fn(), onNameAbandoned: vi.fn() };
+    const view = setup({ ...first, nameField: "name", canRename: true });
+    fireEvent.click(within(view.in.getByRole("heading")).getByRole("button"));
+    fireEvent.change(view.in.getByRole("textbox", { name: "Name" }), { target: { value: "Half typed" } });
+    view.rerender({ ...second, nameField: "notes", nameLabel: "Notes", name: "Call back", canRename: true });
+    expect(view.in.queryByRole("textbox")).toBeNull();
+    expect(view.in.getByRole("heading", { name: "Call back" })).toBeTruthy();
+    expect(first.onNameAbandoned).toHaveBeenCalledExactlyOnceWith("Half typed");
+    expect([first.onNameChange, second.onNameChange, second.onNameAbandoned].map((spy) => spy.mock.calls.length)).toEqual([0, 0, 0]);
   });
 
   it("says in one line why it cannot show a record, and offers Close", () => {
