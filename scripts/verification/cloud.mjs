@@ -13,6 +13,7 @@ import { git, pnpm, readJson, repoRoot, run } from "./process.mjs";
 import { nodeTestFailures, playwrightFailures, playwrightFlaky, readLog, reportFlaky } from "./flaky.mjs";
 import { startTiming, timed } from "./timing.mjs";
 import { readGit } from "../../tools/rust-engine-program/git-read.mjs";
+import { CLOUD_SHAPES, cloudShape } from "./cloud-shape.mjs";
 
 export { JS_SHARDS };
 const output = resolve(repoRoot, ".agent-artifacts/verification/cloud", process.argv[2] ?? "unknown", process.argv[3] ?? "0");
@@ -169,9 +170,11 @@ export async function cloudJavascript(part, index = 0) {
       record.assigned = shard.flatMap(group => group.tasks.map(task => task.id));
       save();
       process.env.DOHC_QA_OUTPUT = output;
-      let nativeReady = !shard.some(group => group.native);
+      const localBuild = cloudShape() === CLOUD_SHAPES.boat;
+      let nativeReady = !localBuild && !shard.some(group => group.native);
       const preparation = nativeReady ? Promise.resolve() : step("native preparation", async () => {
-        const actions = [restoreNativePreparation().then(build => { record.build = build; })];
+        const build = localBuild ? prepare({ install: false, output }).then(() => assertPrepared()) : restoreNativePreparation();
+        const actions = [build.then(build => { record.build = build; })];
         if (shard.some(group => ["desktop", "accounts"].includes(group.kind))) actions.push(step("browser installation", () =>
           run(...pnpm(["exec", "playwright", "install", "chromium"]), { log: join(output, "browser-install.log") })));
         const results = await Promise.allSettled(actions);

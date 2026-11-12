@@ -5,7 +5,9 @@ import { cloudApi, GATE_POLL_MS, QUEUED_STATUSES } from "./cloud-api.mjs";
 import { reportFlaky } from "./flaky.mjs";
 import { assertTaskCoverage } from "./shards.mjs";
 import { RUST_ARCHIVE_PROOFS, RUST_POLICY_STEPS, RUST_TEST_PROOFS } from "./cloud-rust.mjs";
-import { cloudShape, rustReaderShard } from "./cloud-shape.mjs";
+import { CLOUD_SHAPES, cloudShape, rustReaderShard } from "./cloud-shape.mjs";
+
+const REQUIRE_IDENTICAL_BUILDS = false;
 
 export function aggregateJavascript(records, shape = cloudShape()) {
   const preparation = records.filter(record => record.part === "prepare-0");
@@ -23,7 +25,19 @@ export function aggregateJavascript(records, shape = cloudShape()) {
   const expected = inventory.map(id => ({ id }));
   assertTaskCoverage(expected, shards);
   if (records.filter(record => record.selfHostNative).length !== 1) throw new Error("The native delivery and restart proof did not produce its evidence.");
-  return { tasks: expected.length, flaky: shards.flatMap(record => record.flaky ?? []), tests: shards.flatMap(record => record.tests), parts: records.map(({ part, seconds }) => ({ part, seconds })) };
+  let buildIdentity;
+  if (shape === CLOUD_SHAPES.boat) {
+    const outputs = Object.fromEntries(["engine", "desktop"].map(kind => [kind, records.map(record => {
+      const sha256 = record.build?.[kind]?.artifact;
+      if (!/^[a-f0-9]{64}$/u.test(sha256 ?? "")) throw new Error(`JavaScript ${record.part} has no valid ${kind} build identity.`);
+      return { part: record.part, sha256 };
+    })]));
+    const differingOutputs = Object.keys(outputs).filter(kind => new Set(outputs[kind].map(row => row.sha256)).size !== 1);
+    buildIdentity = { matched: !differingOutputs.length, differingOutputs, outputs };
+    if (REQUIRE_IDENTICAL_BUILDS && !buildIdentity.matched) throw new Error(`JavaScript build outputs differ: ${differingOutputs.join(", ")}.`);
+  }
+  return { tasks: expected.length, flaky: shards.flatMap(record => record.flaky ?? []), tests: shards.flatMap(record => record.tests), parts: records.map(({ part, seconds }) => ({ part, seconds })),
+    ...(buildIdentity ? { buildIdentity } : {}) };
 }
 
 export function aggregateRust(records, shape = cloudShape()) {
@@ -50,18 +64,23 @@ export function aggregateRust(records, shape = cloudShape()) {
 }
 
 // These are workflow `needs` edges. The workflow tests compare every edge and name.
-export function cloudJobGraph(shape = cloudShape()) { return {
-  changes: { names: ["what changed"], needs: [] },
-  "javascript-prepare": { names: ["shared preparation"], needs: ["changes"] },
-  "confinement-compiler": { names: ["compiler confinement"], needs: ["changes"] },
-  "confinement-relay": { names: ["relay confinement"], needs: ["changes"] },
-  "javascript-workers": { names: Array.from({ length: shape.js - 1 }, (_, index) => `JS worker ${index + 1}`), needs: ["changes"] },
-  javascript: { names: ["typecheck + tests"], needs: ["changes"] },
-  "rust-archive": { names: ["Rust build once"], needs: ["changes"] },
-  "rust-policy": { names: ["Rust policy checks"], needs: ["changes"] },
-  "rust-tests": { names: Array.from({ length: shape.rust - 1 }, (_, index) => `Rust tests ${index + 1}`), needs: ["changes", "rust-archive", "javascript-workers"] },
-  rust: { names: ["engine gate"], needs: ["changes", "rust-archive", "javascript-workers"] },
-}; }
+export function cloudJobGraph(shape = cloudShape()) {
+  const boat = shape === CLOUD_SHAPES.boat;
+  const workers = Array.from({ length: shape.js - 1 }, (_, index) => `JS worker ${index + 1}`);
+  return {
+    changes: { names: ["what changed"], needs: [] },
+    "javascript-prepare": { names: ["shared preparation"], needs: ["changes"] },
+    "confinement-compiler": { names: ["compiler confinement"], needs: ["changes"] },
+    "confinement-relay": { names: ["relay confinement"], needs: ["changes"] },
+    "javascript-workers": { names: boat ? [] : workers, needs: ["changes"], skippedName: "JS worker ${{ matrix.shard }}" },
+    "javascript-boat-workers": { names: boat ? workers : [], needs: ["changes"], skippedName: "JS worker ${{ matrix.shard }}" },
+    javascript: { names: ["typecheck + tests"], needs: ["changes"] },
+    "rust-archive": { names: boat ? [] : ["Rust build once"], needs: ["changes"], skippedName: "Rust build once" },
+    "rust-policy": { names: ["Rust policy checks"], needs: ["changes"] },
+    "rust-tests": { names: Array.from({ length: shape.rust - 1 }, (_, index) => `Rust tests ${index + 1}`), needs: ["changes", "rust-archive", "javascript-workers"], skippedName: "Rust tests ${{ matrix.shard }}" },
+    rust: { names: ["engine gate"], needs: ["changes", "rust-archive", "javascript-workers"] },
+  };
+}
 export const CLOUD_JOB_GRAPH = cloudJobGraph();
 
 function gateJobNames(scope, shape) {
@@ -74,17 +93,9 @@ function jobReadyAt(job, metadata, graph) {
   const node = Object.values(graph).find(node => node.names.includes(job.name));
   const sameHead = metadata.filter(dependency => dependency.head_sha === job.head_sha);
   const dependencies = (node?.needs ?? []).flatMap(id => {
-    const { names } = graph[id], present = sameHead.filter(dependency => names.includes(dependency.name));
-    if (!present.length && names.length > 1) {
-      const prefix = names.reduce((prefix, name) => {
-        while (!name.startsWith(prefix)) prefix = prefix.slice(0, -1);
-        return prefix;
-      });
-      if (sameHead.some(dependency => {
-        const expression = dependency.name.indexOf("${{");
-        return dependency.conclusion === "skipped" && expression > 0 && prefix.startsWith(dependency.name.slice(0, expression));
-      })) return [];
-    }
+    const { names, skippedName } = graph[id], present = sameHead.filter(dependency => names.includes(dependency.name));
+    if (!present.length && sameHead.some(dependency => dependency.conclusion === "skipped" && dependency.name === skippedName)) return [];
+    if (!names.length) return [null];
     return names.flatMap(name => {
       const matches = present.filter(dependency => dependency.name === name);
       return matches.length !== 1 ? [null] : matches[0].conclusion === "skipped" ? [] : matches;
@@ -107,7 +118,7 @@ function gateTiming(scope, required, metadata = required, transferSeconds = null
   const wait = job => Math.max(0, (Date.parse(job.started_at) - jobReadyAt(job, metadata, graph)) / 1000) || 0;
   const jobs = required.map(job => ({ name: job.name, createdAt: job.created_at,
     startedAt: job.started_at, finishedAt: job.completed_at, conclusion: job.conclusion, runnerWaitSeconds: wait(job) }));
-  // Rust waits for the JS worker matrix; their conclusions do not affect its verdict.
+  // Standard Rust waits for the JS worker matrix; its conclusions do not affect Rust.
   const javascriptNames = graph["javascript-workers"].names;
   const javascriptWaits = scope === "rust" ? metadata.filter(job => javascriptNames.includes(job.name) && job.conclusion !== "skipped"
     && job.head_sha === required.find(job => job.name === "what changed").head_sha).map(job => ({ name: job.name,
@@ -158,7 +169,11 @@ function pendingTransferSeconds(scope, outputDirectory, startedAt, verificationS
 }
 
 function gateJobs(scope, jobs, expected) {
-  return jobs.filter(job => expected.includes(job.name) || (scope === "js" ? /^JS worker /u : /^Rust tests /u).test(job.name));
+  const placeholders = ["JS worker ${{ matrix.shard }}", "Rust tests ${{ matrix.shard }}"];
+  return jobs.filter(job => !(job.conclusion === "skipped" && (placeholders.includes(job.name)
+    || job.name === "Rust build once" && !expected.includes(job.name)))
+    && (expected.includes(job.name) || (scope === "js" ? /^JS worker /u : /^Rust tests /u).test(job.name)
+      || scope === "rust" && job.name === "Rust build once"));
 }
 
 export function completedGateTiming(scope, jobs, commit, shape = cloudShape()) {
@@ -178,6 +193,10 @@ export async function verifyCompletedCloud(scope, { env = process.env, readJobs 
       const aggregate = JSON.parse(readFileSync(`${outputDirectory}/js-result.json`, "utf8"));
       if (aggregate.verdict !== "PASS" || !env.GITHUB_SHA || aggregate.commit !== env.GITHUB_SHA) throw new Error("The JavaScript aggregate does not cover the checked-out commit.");
       report.flaky = aggregate.flaky ?? [];
+      if (cloudShape(env) === CLOUD_SHAPES.boat) {
+        if (!aggregate.buildIdentity) throw new Error("The JavaScript aggregate has no build identity comparison.");
+        report.buildIdentity = aggregate.buildIdentity;
+      }
     }
     Object.assign(report, completedGateTiming(scope, await readJobs(), report.commit, cloudShape(env)));
     report.verdict = "PASS";
@@ -192,6 +211,11 @@ export async function verifyCompletedCloud(scope, { env = process.env, readJobs 
       if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, report.warning + "\n");
     }
     if (scope === "js") reportFlaky(report.flaky, { summary: env.GITHUB_STEP_SUMMARY, annotate: true });
+    if (report.buildIdentity && !report.buildIdentity.matched) {
+      const warning = `JavaScript build outputs differ across shared preparation and workers: ${report.buildIdentity.differingOutputs.join(", ")}.`;
+      console.warn("::warning::" + warning);
+      if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, warning + "\n");
+    }
     console.log(`[verification] ${report.verdict} (${scope} completed group): ${JSON.stringify(report)}`);
   }
 }

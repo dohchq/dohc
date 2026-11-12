@@ -439,7 +439,7 @@ jobs:
   javascript-workers:
     name: JS worker ${{ matrix.shard }}
     needs: changes
-    if: (github.event_name == 'workflow_dispatch' && inputs.gate != 'rust') || needs.changes.outputs.js == 'true'
+    if: "!(github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'boat') && ((github.event_name == 'workflow_dispatch' && inputs.gate != 'rust') || needs.changes.outputs.js == 'true')"
     runs-on: &compute-runner ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'boat') && '["boat-xlarge"]' || (vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
     timeout-minutes: 25
     defaults: *compute-defaults
@@ -447,11 +447,11 @@ jobs:
       fail-fast: false
       matrix:
         shard: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'boat' && '[1,2,3]' || '[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]') }}
-    env:
+    env: &javascript-worker-env
       DOHC_CONFINEMENT_SUITES: exclude
       CARGO_INCREMENTAL: '0'
       GITHUB_TOKEN: ${{ github.token }}
-    steps:
+    steps: &javascript-worker-steps
       - *boat-capability-check
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -481,6 +481,19 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
+  javascript-boat-workers:
+    name: JS worker ${{ matrix.shard }}
+    needs: changes
+    if: github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'boat' && inputs.gate != 'rust'
+    runs-on: *compute-runner
+    timeout-minutes: 25
+    defaults: *compute-defaults
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON('[1,2,3]') }}
+    env: *javascript-worker-env
+    steps: *javascript-worker-steps
   javascript:
     name: typecheck + tests
     needs: changes
@@ -552,7 +565,7 @@ jobs:
   rust-archive:
     name: Rust build once
     needs: changes
-    if: (github.event_name == 'workflow_dispatch' && inputs.gate != 'js') || needs.changes.outputs.rust == 'true'
+    if: "!(github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'boat') && ((github.event_name == 'workflow_dispatch' && inputs.gate != 'js') || needs.changes.outputs.rust == 'true')"
     runs-on: *compute-runner
     timeout-minutes: 25
     defaults: *compute-defaults
@@ -611,6 +624,7 @@ jobs:
     needs: [changes, rust-archive, javascript-workers]
     if: >-
       always() && !cancelled() && needs.changes.result == 'success' &&
+      !(github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'boat') &&
       ((github.event_name == 'workflow_dispatch' && inputs.gate != 'js') || needs.changes.outputs.rust == 'true')
     runs-on: *compute-runner
     timeout-minutes: 25
@@ -618,7 +632,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'boat' && '[1]' || '[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]') }}
+        shard: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'boat' && '[]' || '[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]') }}
     env:
       NEXTEST_PROFILE: without-confinement
       CARGO_INCREMENTAL: '0'
@@ -746,12 +760,24 @@ jobs:
           key: node-cache-${{ runner.os }}-x64-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
       - name: Install dependencies
         run: pnpm install --frozen-lockfile && pnpm --filter @dohc/app-backend-runtime build
+      - name: Rust toolchain
+        if: github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'boat'
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+        if: github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'boat' && inputs.cache != 'cold'
+        with:
+          shared-key: engine-archive
       - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf
         with:
           tool: cargo-nextest@0.9.143
+      - name: Compile and inventory every workspace test
+        if: github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'boat'
+        run: node scripts/verification/cloud-rust.mjs archive
       - name: Wait for the shared Rust archive
+        if: "!(github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'boat')"
         run: node scripts/verification/wait-preparation.mjs rust
       - id: rust-archive-download
+        if: "!(github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'boat')"
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         timeout-minutes: 2
         continue-on-error: true
@@ -759,7 +785,7 @@ jobs:
           name: rust-tests-${{ github.run_attempt }}
           path: .agent-artifacts/verification
       - name: Download the shared Rust archive again after a stalled transfer
-        if: steps.rust-archive-download.outcome == 'failure'
+        if: "!(github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'boat') && steps.rust-archive-download.outcome == 'failure'"
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         timeout-minutes: 3
         with:

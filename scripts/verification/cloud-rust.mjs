@@ -7,7 +7,7 @@ import { startTiming, timed } from "./timing.mjs";
 import { readTreeState, classifyTreeProvenance } from "../../tools/rust-engine-program/tree-provenance.mjs";
 import { SCRATCH_SENTINEL, inspectScratchRun, testScratchParent } from "../../tools/rust-engine-program/scratch-leak-report.mjs";
 import { stageReaderTestNode } from "../../tools/rust-engine-program/reader-test-node.mjs";
-import { cloudShape, rustReaderShard } from "./cloud-shape.mjs";
+import { CLOUD_SHAPES, cloudShape, rustReaderShard } from "./cloud-shape.mjs";
 
 export const RUST_SHARDS = cloudShape().rust;
 export const RUST_READER_SHARD = rustReaderShard(cloudShape());
@@ -68,8 +68,10 @@ export async function cloudRust(part, index = 0) {
       report.assigned = [];
       // CARGO_BIN_EXE in the integration binary retains the build's target path.
       // Extract once into this checkout, then reuse its metadata for execution.
+      // Boat built this archive here, so its target directory already exists.
       const listed = await step("inventory", "cargo", ["nextest", "list", "--archive-file", archive,
-        "--workspace-remap", repoRoot, "--extract-to", repoRoot, "--message-format=json"]);
+        "--workspace-remap", repoRoot, "--extract-to", repoRoot,
+        ...(cloudShape() === CLOUD_SHAPES.boat ? ["--extract-overwrite"] : []), "--message-format=json"]);
       const extracted = rustTestInventory(JSON.parse(listed.stdout)).map(task => task.id);
       if (JSON.stringify(extracted.sort()) !== JSON.stringify([...all].sort())) throw new Error("The extracted Rust archive inventory differs from its build.");
       const reused = ["--cargo-metadata", join(repoRoot, "target/nextest/cargo-metadata.json"),

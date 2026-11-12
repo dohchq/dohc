@@ -170,10 +170,10 @@ test("package scheduling bounds concurrency and serializes shared database consu
   assert.equal(active.size, 0);
 });
 
-test("pure work fills both lanes before native preparation and admits native work when ready", async () => {
-  const preparation = deferred(), release = deferred(), second = deferred(), native = deferred(), started = [];
+test("pure work overlaps preparation and native work waits for build validation", async () => {
+  const build = deferred(), preparation = deferred(), release = deferred(), second = deferred(), native = deferred(), started = [];
   let ready = false;
-  const changed = preparation.promise.then(() => { ready = true; });
+  const changed = build.promise.then(() => preparation.promise).then(() => { ready = true; });
   const tasks = [{ name: "native", native: true }, { name: "pure-one" }, { name: "pure-two" }];
   const run = runBounded(tasks, async task => {
     started.push(task.name);
@@ -184,6 +184,9 @@ test("pure work fills both lanes before native preparation and admits native wor
   }, 2, undefined, { changed, canRun: task => !task.native || ready });
   await second.promise;
   assert.deepEqual(started, ["pure-one", "pure-two"]);
+  build.resolve();
+  await new Promise(setImmediate);
+  assert.deepEqual(started, ["pure-one", "pure-two"], "a build must pass validation before native tests start");
   preparation.resolve();
   await native.promise;
   assert.deepEqual(started, ["pure-one", "pure-two", "native"]);
