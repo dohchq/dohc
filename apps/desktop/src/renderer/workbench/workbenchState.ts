@@ -799,7 +799,7 @@ export function replaceTab(
       activeTab: group.activeTab === from ? to : group.activeTab,
     };
   });
-  return changed ? { ...state, editorGroups } : state;
+  return changed ? dropClosedTabRecords({ ...state, editorGroups }) : state;
 }
 
 export function activateTab(
@@ -1230,12 +1230,14 @@ export function setCollectionActiveView(
 
 // Remembers the record a Collection tab shows open in its panel. null closes
 // the panel. At the bound the oldest entry gives way, as for collectionViews.
+// A record whose key is longer than a saved layout takes is not remembered,
+// so its tab opens with no panel: one such key must never fail the layout's save.
 export function setCollectionOpenRecord(
   state: WorkbenchState,
   tabPath: string,
   record: string | null,
 ): WorkbenchState {
-  if (record === null) {
+  if (record === null || record.length === 0 || record.length > MAX_OPEN_RECORD_CHARS) {
     if (!Object.hasOwn(state.openRecords, tabPath)) return state;
     const openRecords = { ...state.openRecords };
     delete openRecords[tabPath];

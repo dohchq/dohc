@@ -50,6 +50,7 @@ import {
   toggleAbout,
   toggleSidebar,
   MAX_EDITOR_GROUPS,
+  MAX_OPEN_RECORD_CHARS,
   MAX_OPEN_TABS,
   MAX_COLLECTION_VIEWS,
   MAX_EXPANDED_FOLDERS,
@@ -1725,6 +1726,30 @@ describe("the record a Collection tab shows open, and the record panel's width",
     let grouped = setCollectionOpenRecord(withTabs("a.md", data), data, "7");
     grouped = moveTabToNewGroup(grouped, DEFAULT_EDITOR_GROUP_ID, data, "right");
     expect(closeEditorGroup(grouped, "right").openRecords).toEqual({});
+  });
+
+  it("drops the open record of a tab another tab replaces", () => {
+    let state = setCollectionOpenRecord(withTabs(data, "a.md"), data, "7");
+    state = replaceTab(state, data, "b.md");
+    expect(state.editorGroups[0]!.tabs.map((tab) => tab.path)).toEqual(["b.md", "a.md"]);
+    expect(state.openRecords).toEqual({});
+  });
+
+  it("stores no record whose key is longer than a saved layout takes, so the layout still saves", () => {
+    // A Data record's key is its id as JSON. An id of 1024 control characters is 6146 characters there.
+    const long = JSON.stringify("\u0001".repeat(1024));
+    expect(long.length).toBeGreaterThan(MAX_OPEN_RECORD_CHARS);
+    let state = setCollectionOpenRecord(withTabs(data, "a.md"), data, "7");
+    // The tab shows that record now, so the one saved before it does not come back in its place.
+    state = setCollectionOpenRecord(state, data, long);
+    expect(state.openRecords).toEqual({});
+    expect(setCollectionOpenRecord(state, data, long)).toBe(state);
+    expect(SetWorkspaceUiStatePayload.safeParse({ workspaceId: "workspace-a", state: serializeUiState(state) }).success).toBe(true);
+    // A key as long as the bound is stored.
+    const longest = "x".repeat(MAX_OPEN_RECORD_CHARS);
+    state = setCollectionOpenRecord(state, data, longest);
+    expect(state.openRecords).toEqual({ [data]: longest });
+    expect(SetWorkspaceUiStatePayload.safeParse({ workspaceId: "workspace-a", state: serializeUiState(state) }).success).toBe(true);
   });
 
   it("follows a Collection's tab through a rename and goes with a deleted one", () => {
