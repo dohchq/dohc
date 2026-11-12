@@ -28,6 +28,8 @@ export {
   type TableCellStatuses,
   type TableFieldMark,
   type TableHostCell,
+  type TableNewRecord,
+  type TableNewRecordStatus,
   type TableViewProps,
 } from "./table/TableView";
 export { BoardView, type BoardViewProps } from "./board/BoardView";
