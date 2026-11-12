@@ -6275,6 +6275,46 @@ it("frees an ended hold while another document keeps its workspace from being re
   expect(pushes()).toBe(pushed);
 });
 
+// A workspace pushed only once every document it hosts had gone live, so a
+// live document's settled edits reached nobody while another document kept
+// failing to go live, until that one went live or the live one unloaded idle.
+// Proves: a live document's edit, settled on the host, is pushed on the next
+// pass while another document in its workspace waits out a backoff after
+// failed activations. That document has not gone live or left, and the live
+// one has not unloaded.
+it("pushes a live document's settled edit on the next pass while another document in its workspace backs off", async () => {
+  const o = await emptyServiceHost({maxDocumentsPerPass: 2}), workspaces = [o.workspace];
+  // Both documents activate for real here, the other at a path the relay names it at.
+  vi.mocked(ServiceActivationDriver.prototype.activate).mockRestore();
+  vi.mocked(ServiceActivationDriver.prototype.loaded).mockRestore();
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await o.pushed.promise;
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  o.raw.prepare(`INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,
+    content_kind,byte_length,recorded_at_ms) SELECT 'workspace',?,MAX(relay_seq),'other-moment','main',?,?,'text',0,0
+    FROM sync_relay_log WHERE workspace_id='workspace'`).run(o.other.objectId, o.other.path, "e".repeat(64));
+  const captures = () => o.client().captureOwnerActivation.mock.calls.filter(call => call[1] === o.other.path).length;
+  const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+  o.refuseCaptureAt(o.other.path, new Error("Capture failed."));
+  await o.host.update({workspaces, documents: [o.sibling, o.other], ...stay});
+  // The first failure retries on the next pass; the second starts a wait before the next try.
+  await vi.waitFor(() => expect(captures()).toBeGreaterThanOrEqual(2));
+  expect(errors).toHaveBeenCalledWith("Service activation pass failed.", expect.stringContaining("Capture failed."));
+  const edit = o.acceptEdit("while-another-backs-off");
+  await vi.waitFor(() => expect(o.applied.has(edit.deliveryId)).toBe(true));
+  await o.host.settle(o.document);
+  const requests = () => o.client().sendRequest.mock.calls.map(call => (call as unknown[])[0] as
+    {method: string; params: {terminalReceipt?: {deliveryId?: string} | null}});
+  const settledAt = requests().findIndex(request => request.method === "liveApplication.settle" && request.params.terminalReceipt?.deliveryId === edit.deliveryId);
+  expect(settledAt).toBeGreaterThan(-1);
+  await o.nextPass();
+  const after = requests().slice(settledAt + 1).map(request => request.method);
+  expect(after, "The settled edit must be pushed on the next pass.").toContain("sync.push");
+  expect(after).not.toContain("liveApplication.unloadDocument");
+  expect(o.host.retains(o.other)).toBe(true);
+  expect(o.host.settled(o.other)).toBe(false);
+});
+
 // Sol's review: departed documents the engine cannot park, more than an
 // answer fits, filled every departed list from the first, so a document
 // after them was never named once the engine parked it, and the host kept
