@@ -398,6 +398,8 @@ describe("Members page", () => {
     renderMembers();
     await screen.findByTestId("settings-members-alone");
     expect(screen.queryByTestId("settings-members-end")).toBeNull();
+    // With nothing to end or leave, no empty section is left behind.
+    expect([...screen.getByTestId("settings-members-page").querySelectorAll("section")].filter((section) => !section.textContent?.trim())).toEqual([]);
     cleanup();
     for (const people of [[owner, cy], [owner, dee]]) {
       bridge.workspaceMembers.mockImplementation(async () => ({ status: "ready", view: ownerView({ people }) }));
@@ -439,18 +441,20 @@ describe("Members page", () => {
     expect(screen.queryByTestId("settings-members-limit")).toBeNull();
   });
 
-  it("keeps the level control in place while a change runs", async () => {
+  it("shows the level spinner without taking room from the control", async () => {
     renderMembers();
     await screen.findByTestId("settings-members-page");
     const control = screen.getByTestId("settings-members-level-control");
-    const before = control.previousElementSibling;
-    expect(before?.getAttribute("aria-hidden")).toBe("true");
+    // Nothing sits before the control while idle, so it lines up with the words when it wraps.
+    expect(control.previousElementSibling).toBeNull();
+    const holder = control.parentElement;
     const answer = deferred<MembersResult>();
     bridge.workspaceMembers.mockReturnValueOnce(answer.promise);
     await userEvent.click(screen.getByRole("radio", { name: "Edit" }));
-    expect(screen.getByTestId("settings-members-level-busy")).toBeTruthy();
-    // The spinner fills the place kept for it, so nothing before the control is added.
-    expect(screen.getByTestId("settings-members-level-control").previousElementSibling).toBe(before);
+    const spinner = screen.getByTestId("settings-members-level-busy");
+    expect(spinner.getAttribute("class")).toContain("absolute");
+    expect(spinner.parentElement).toBe(holder);
+    expect(screen.getByTestId("settings-members-level-control").parentElement).toBe(holder);
     await act(async () => answer.resolve({ status: "ready", view: ownerView({ memberLevel: "edit" }) }));
   });
 
