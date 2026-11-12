@@ -2341,11 +2341,7 @@ pub fn record_update_in_tx(
     attribution: Option<&ChangeAttribution>,
     now_ms: i64,
 ) -> Result<AppendOutcome, CollabError> {
-    crate::owner_outbox::draft::require_ordinary_write(tx, key)?;
-    crate::live_update_application::require_restore_open(tx, key)?;
-    if crate::owner_outbox::has_adopted_owner_in(tx, key)? {
-        return Err(CollabError::OwnerOutboxFrozen);
-    }
+    require_ordinary_local_write(tx, key)?;
     record_authorized_update_in_tx(
         tx,
         key,
@@ -2356,6 +2352,16 @@ pub fn record_update_in_tx(
         false,
         now_ms,
     )
+}
+
+/// The checks every ordinary local write passes before it appends.
+fn require_ordinary_local_write(tx: &Transaction<'_>, key: &DocKey) -> Result<(), CollabError> {
+    crate::owner_outbox::draft::require_ordinary_write(tx, key)?;
+    crate::live_update_application::require_restore_open(tx, key)?;
+    if crate::owner_outbox::has_adopted_owner_in(tx, key)? {
+        return Err(CollabError::OwnerOutboxFrozen);
+    }
+    Ok(())
 }
 
 pub(crate) type CreditedUpdate = ((Option<String>, Option<ChangeAttribution>), Vec<u8>);
@@ -2639,11 +2645,15 @@ pub fn add_missing_schema_version_in_tx(
     let Some(update) = doc.missing_schema_version_update(key)? else {
         return Ok(true);
     };
-    match record_update_in_tx(tx, key, &update, None, None, now_ms) {
-        Ok(_) => Ok(true),
-        Err(CollabError::OwnerOutboxFrozen | CollabError::RestoreFenced) => Ok(false),
-        Err(error) => Err(error),
+    match require_ordinary_local_write(tx, key) {
+        Ok(()) => {}
+        Err(CollabError::OwnerOutboxFrozen | CollabError::RestoreFenced) => return Ok(false),
+        Err(error) => return Err(error),
     }
+    // Nobody wrote the version, so it adds no author coverage: the next
+    // settlement names only the people who typed.
+    record_authorized_update_in_tx(tx, key, &update, true, None, None, true, now_ms)?;
+    Ok(true)
 }
 
 /// Encode the base bytes (and their state vector) that originate `key`'s

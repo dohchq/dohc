@@ -14,9 +14,9 @@
 
 use dohc_engine_collab::{ContentKind, DocKey, LeaseRegistry, Regime, Ydoc};
 use dohc_engine_domain::{
-    CreateNamedVersion, DeleteTextFile, MergeTextFileFromVersion, MergeTextFileResult,
-    RenameTextFile, RollbackTextFileMutation, VersionedTextStore, WriteText, get_collection_record,
-    reconcile_collections_in_tx,
+    ChangeActorKind, ChangeAttribution, CreateNamedVersion, DeleteTextFile,
+    MergeTextFileFromVersion, MergeTextFileResult, RenameTextFile, RollbackTextFileMutation,
+    VersionedTextStore, WriteText, get_collection_record, reconcile_collections_in_tx,
 };
 use dohc_engine_runtime::{
     CancellationToken, CaptureIngest, CaptureRetire, NoFaults, RuntimeError, WorkspaceSupervisor,
@@ -4908,4 +4908,61 @@ async fn the_first_save_after_the_schema_version_write_adds_no_history_entry() {
         file,
         "the file is unchanged"
     );
+}
+
+/// Nobody wrote the schema version, so a note a person typed keeps that
+/// person as its only author: the next settlement adds no unrecorded author.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_schema_version_adds_no_unrecorded_author() {
+    const WS: &str = "ws-new-page-named-author";
+    const PATH: &str = "notes/named-author.md";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    enable_sync(&db, WS);
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    let state = open_new_page(&handle, WS, PATH).await;
+    let claim = handle
+        .ydoc_record_update(
+            state.key.clone(),
+            PATH.to_owned(),
+            ContentKind::Richdoc,
+            Regime::LocalOnly,
+            Ydoc::wire().richdoc_append_paragraph("Typed by a person."),
+            Some("local-person".to_owned()),
+            Some(ChangeAttribution {
+                actor_kind: ChangeActorKind::Human,
+                on_behalf_of: None,
+                depth: 0,
+                run: None,
+                agent_run_id: None,
+            }),
+            None,
+            true,
+            None,
+            None,
+            200,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .expect("record the person's first update")
+        .lineage_claim_id;
+    assert!(claim.is_some(), "the first record claims the first version");
+    supervisor.close(&db).expect("close actor");
+    let store = EngineStore::open(&db, 9_107).expect("reopen for assertions");
+
+    assert_first_version_names_its_schema_version(&store, "named author");
+    let authors = store
+        .read_with(|conn| {
+            dohc_engine_collab::author_coverage::interval_in(conn, &state.key, i64::MAX)
+        })
+        .expect("read the next settlement's authors");
+    assert!(
+        !authors.has_unattributed(),
+        "the schema version adds no unrecorded author"
+    );
+    assert_eq!(authors.len(), 1, "only the person who typed");
 }

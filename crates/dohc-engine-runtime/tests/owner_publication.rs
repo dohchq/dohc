@@ -1646,7 +1646,8 @@ async fn first_audited_settlement_publishes_its_own_moment_over_an_imported_prel
 /// A New page note typed before #3790's fix had its first version claimed
 /// without a schema version. The fix writes the version only before a claim,
 /// so it does not repair such a note: sharing it after the fix is still
-/// refused. This pins that limit; the workaround is to make the note again.
+/// refused. This pins that limit. The workaround: make the note as a file
+/// outside dohc, open it once in dohc, then share it.
 #[tokio::test]
 async fn a_new_page_note_claimed_without_its_schema_version_before_the_fix_stays_refused() {
     use dohc_engine_storage::StorageError;
