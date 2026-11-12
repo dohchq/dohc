@@ -1618,8 +1618,8 @@ export function App() {
                   title="Apps"
                   aria-expanded={surface === "apps" || appsLead}
                   aria-controls="link-apps"
-                  // Leading apps are already open, so the button takes the reader to them.
-                  onClick={appsLead ? () => document.getElementById(SURFACE_ID.apps)?.focus() : toggle("apps")}
+                  // Leading apps are already open, so the button closes anything over them and takes the reader there.
+                  onClick={appsLead ? () => { setSurface(null); document.getElementById(SURFACE_ID.apps)?.focus(); } : toggle("apps")}
                 >
                   <Icon name="grid" />
                 </button>
