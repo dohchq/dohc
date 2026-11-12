@@ -1487,6 +1487,62 @@ it("reclaims a document only its owner's open keeps once idle past retention, an
   return {attemptsBeforeOpen: before, reports: proof.reports};
 }), 120000);
 
+// Reclaim, with the owner's open arriving while the document departs. Each
+// request to release its activation fails before it reaches the engine, so
+// its retirement stays open and the host cannot drain it. The replica still
+// parks it, and the host confirms it left before it asks for any release. The
+// owner's open enrolls it again before the drain, and it stays departing. Once
+// a release reaches the engine the activation retires, and a successor holds
+// the edit the owner made after the reclaim.
+it("keeps a reclaimed document departing when its owner's open enrolls it again before the host drains it, then starts a successor holding the edit made meanwhile", () => withSelfHostProof("self-host-reclaim-reopen", async proof => {
+  const saved = proof.activation()!;
+  expect(await proof.route("POST", {path: "docs/a.md", open: true}))
+    .toMatchObject({status: 200, body: {ok: true, path: "docs/a.md", objectId: proof.objectId, status: "ready", changed: false}});
+  expect(proof.storage.revokeShare("share", Date.now())).toBe(true);
+  harness.unreachable.add("liveApplication.releaseActivation");
+  const releases = () => proof.started("liveApplication.releaseActivation"), replies = harness.releases.length;
+  expect(proof.storage.reclaimIdleLiveDocuments(Date.now() + RECLAIM_RETENTION_MS + 1).map(row => row.path)).toEqual(["docs/a.md"]);
+  // The host asks to release the activation only once its replica confirmed the document left.
+  await vi.waitFor(() => {
+    expect(proof.hosted()?.state).toBe("parked");
+    expect(releases()).toBeGreaterThan(0);
+  }, {timeout: 30000});
+  // No release reached the engine, so the retirement is open and the host has not drained the document.
+  expect(harness.releases.length).toBe(replies);
+  const retiring = expect.objectContaining({activation_id: saved.activationId, retire_accepted_cursor: expect.any(Number), retired: 0});
+  expect(proof.activations()).toEqual([retiring]);
+  expect(proof.storage.readServiceHostEnrollment("workspace", "docs/a.md"))
+    .toMatchObject({enabled: false, retired: true, ownerStop: null, ownerDemand: false, demandAtMs: null, hostDrainedAtMs: null});
+  // The owner keeps editing on their device, where no session host admits the edit.
+  await proof.ownerEdit(doc => doc.getMap("frontmatter").set("whileReclaimed", "ordinary-owner"));
+  const attempts = () => proof.started("captureOwnerActivation"), before = attempts(), held = releases();
+  // The desktop's owner open enrolls it again before the drain, as the owner's demand. Its retirement stays open.
+  expect(await proof.route("POST", {path: "docs/a.md", open: true}))
+    .toMatchObject({status: 202, body: {ok: true, path: "docs/a.md", objectId: proof.objectId, status: "preparing", changed: true}});
+  expect(proof.storage.readServiceHostEnrollment("workspace", "docs/a.md"))
+    .toMatchObject({enabled: true, retired: false, ownerStop: null, ownerDemand: true, hostDrainedAtMs: null});
+  expect(proof.activations()).toEqual([retiring]);
+  expect(proof.hosted()?.state).toBe("parked");
+  // Releases reach the engine again. The activation retires, and the successor follows it.
+  harness.unreachable.delete("liveApplication.releaseActivation");
+  await vi.waitFor(async () => expect(await proof.documents()).toEqual([proof.ready("docs/a.md")]), {timeout: 30000});
+  expect(harness.releases.at(-1)).toMatchObject({status: "released"});
+  // One capture, in the store it parked in, starts a successor holding the edit.
+  expect(attempts()).toBe(before + 1);
+  expect(proof.activation()!.source.predecessorActivationId).toBe(saved.activationId);
+  expect(proof.activations()).toEqual([expect.objectContaining({activation_id: saved.activationId, retired: 1}),
+    expect.objectContaining({predecessor_activation_id: saved.activationId, completed: 1, retired: 0})]);
+  // The host never drained the document.
+  expect(proof.storage.readServiceHostEnrollment("workspace", "docs/a.md"))
+    .toMatchObject({enabled: true, retired: false, ownerStop: null, ownerDemand: true, hostDrainedAtMs: null});
+  const markdown = "---\nbeforeActivation: ordinary-owner\nwhileReclaimed: ordinary-owner\n---\n\nHello\n";
+  expect((await proof.hostState()).markdown).toBe(markdown);
+  // The settlement commits before the engine writes the file.
+  await vi.waitFor(() => expect(readFileSync(join(proof.store, "docs/a.md"), "utf8")).toBe(markdown), {timeout: 10000});
+  expect(proof.hosted()).toEqual({state: "ready", reason: null});
+  return {attemptsBeforeOpen: before, releasesHeld: held, releases: harness.releases, reports: proof.reports};
+}), 120000);
+
 // Pause fences live admission and retires the document's activation at once,
 // at its seed, before the document parks. Its owner's ordinary edit made while
 // paused then waits for no activation to admit it. Resume through the
