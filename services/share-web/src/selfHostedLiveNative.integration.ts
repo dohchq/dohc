@@ -26,7 +26,9 @@ import {selfHostLiveProfile} from "../../sync-relay/src/selfHostLiveProfile.js";
 import { createSyncRelayHandler } from "../../sync-relay/src/server.js";
 import { createNamedLiveRoutes, createOwnerLiveRoutes } from "../../sync-relay/src/namedLiveRoutes.js";
 import { captureNamedLiveFrameHost, captureOwnerLiveFrameHost } from "../../sync-relay/src/namedLiveFrameHost.js";
-import { liveBrowserActor } from "../../sync-relay/src/liveBrowserContext.js";
+import { liveBrowserActor, type PersonalLiveContext } from "../../sync-relay/src/liveBrowserContext.js";
+import { agentAccessCheck } from "../../sync-relay/src/linkAuthority.js";
+import type { StorageContext } from "../../sync-relay/src/storage/context.js";
 import type { LiveAuthorContext } from "@dohc/live-session-contract/live-authorship";
 import {OwnerKnownRefusals, runNativeOwnerDeliveryPass} from "../../../apps/desktop/src/workspaces/nativeOwnerDelivery.js";
 import {readyOwnerDeliveryDocuments} from "../../../apps/desktop/src/workspaces/serverOwnerDelivery.js";
@@ -554,15 +556,61 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     const automationSettlement = await settlementOf(automationAck, agentAck.journalCursor, automationMarkdown);
     await publication(automationSettlement, [automationAdmitted]);
 
+    // The owner's personal agent, signed in and reaching the workspace at
+    // Edit, through the capture its live route makes. Its update declares
+    // another agent, and the relay credits it to the agent on behalf of its owner.
+    const personal = {kind: "agent", agentId: `p-${"proofpersonalagent".padEnd(26, "a")}`, agentName: "Proof personal agent", onBehalfOf: ownerUser.id, depth: 0};
+    const personalCheck = agentAccessCheck(createHash("sha256").update("proof-personal-token").digest("base64url"), `${audience}/mcp/agent/w/workspace`, ticketKey)!;
+    const relayWrite = storage as StorageContext;
+    relayWrite.tx(() => {
+      relayWrite.db.prepare("INSERT INTO sync_relay_personal_agents(agent_id,owner_user_id,name,hue,status,epoch,created_at_ms) VALUES (?,?,?,'olive','active',1,0)")
+        .run(personal.agentId, ownerUser.id, personal.agentName);
+      relayWrite.db.prepare("INSERT INTO sync_relay_personal_agent_reach(agent_id,workspace_id,level,start_seq) VALUES (?,'workspace','edit',0)").run(personal.agentId);
+      relayWrite.db.prepare(`INSERT INTO sync_relay_personal_agent_connections(connection_id,agent_id,owner_user_id,client_id,resource_hash,agent_epoch,
+        fence_epoch,connected_at_ms) VALUES ('proof-personal-connection',?,?,'client',?,1,0,0)`).run(personal.agentId, ownerUser.id, personalCheck.resourceHash);
+      relayWrite.db.prepare("INSERT INTO sync_relay_personal_agent_tokens(token_hash,connection_id,kind,issued_at_ms,expires_at_ms) VALUES (?,'proof-personal-connection','access',0,?)")
+        .run(personalCheck.accessTokenHash, 4_000_000_000_000);
+    });
+    const personalContext: PersonalLiveContext = {kind: "personal", workspaceId: "workspace", agentId: personal.agentId, connectionId: "proof-personal-connection",
+      accessTokenHash: personalCheck.accessTokenHash, resourceHash: personalCheck.resourceHash, fenceEpoch: 0};
+    const personalMinted = await tickets.mint({objectId}, personalContext);
+    const personalTicket = personalMinted && await tickets.redeem(personalMinted.token, personalContext);
+    if (!personalTicket) throw new Error("The personal agent's live ticket was refused.");
+    // The account's fence doesn't move here; the relay's tests cover the reads.
+    const personalHost = captureNamedLiveFrameHost({ticket: personalTicket, actor: liveBrowserActor(personalContext), storage,
+      native: await active!.captureNative(personalTicket.binding), bounds: profile.namedLive.host, validate, fresh: async () => undefined});
+    const {personalAck, personalMarkdown} = await (async () => {
+      const personalDoc = new Y.Doc();
+      try {
+        const sync = await personalHost.openSync(Y.encodeStateVector(personalDoc), AbortSignal.timeout(30_000));
+        try {Y.applyUpdate(personalDoc, sync.missingStateUpdate);} finally {sync.close();}
+        const beforePersonal = Y.encodeStateVector(personalDoc);
+        personalDoc.getMap("frontmatter").set("personalProof", "admitted");
+        const updateBytes = Y.encodeStateAsUpdate(personalDoc, beforePersonal);
+        const submitted = await personalHost.submit({deliveryId: "self-host-proof-personal", updateDigest: hash(updateBytes), updateBytes,
+          authorContext: {kind: "account", accountId: namedUser.id, agent: {agentId: agent.agentId, agentName: agent.agentName, onBehalfOf: agent.onBehalfOf, depth: agent.depth}}},
+          AbortSignal.timeout(30_000));
+        if (submitted.result !== "success") throw new Error(`Personal agent edit was not admitted: ${JSON.stringify(submitted)}`);
+        return {personalAck: submitted.ack, personalMarkdown: yDocToMarkdown(personalDoc)};
+      } finally {personalHost.close(); personalDoc.destroy();}
+    })();
+    expect(admittedSnapshot(personalAck.deliveryId)).toEqual([personal]);
+    expect(personalAck.journalCursor).toBeGreaterThan(automationAck.journalCursor);
+    await active!.settle(document);
+    expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe(personalMarkdown);
+    const personalSettlement = await settlementOf(personalAck, automationAck.journalCursor, personalMarkdown);
+    await publication(personalSettlement, [personal]);
+
     // Publication credits each interval with the relay-admitted authors in
     // History's flat form: the snapshot person and the declared agent, never
-    // the grant authority. The service keeps the same credit that owner
-    // devices import.
+    // the grant authority, and the personal agent on behalf of its owner. The
+    // service keeps the same credit that owner devices import.
     // Import marks the relay-admitted person confirmed; the admitted snapshot carries no marker.
     const importedHuman = {...human, relayConfirmed: true};
     const declaredCredit = [
       {momentId: agentSettlement.record.momentId, imported: [agent, importedHuman]},
       {momentId: automationSettlement.record.momentId, imported: [automation]},
+      {momentId: personalSettlement.record.momentId, imported: [personal]},
     ] as const;
     const expectAuthors = (actual: unknown, expected: readonly unknown[]) => {
       expect(actual).toHaveLength(expected.length);
@@ -586,13 +634,13 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
       }
       throw new Error("Pull exceeded its eight-page bound.");
     };
-    // The enrolled owner first receives both admitted intervals through its
+    // The enrolled owner first receives the admitted intervals through its
     // authenticated native delivery, as after the baseline's idle edit.
     expect(await runOwnerPass()).toBe("empty");
-    expect((await owner!.ownerYDocReadState(nativeRequest(), target)).acceptedCursor).toBeGreaterThanOrEqual(automationAck.journalCursor);
+    expect((await owner!.ownerYDocReadState(nativeRequest(), target)).acceptedCursor).toBeGreaterThanOrEqual(personalAck.journalCursor);
     // Imported audit evidence adds no credit to the published moments.
     await pullAll(rpc);
-    expect((await rpc("versionedText.read", {versionId: mainVersionId, path: "docs/a.md"})).text).toBe(automationMarkdown);
+    expect((await rpc("versionedText.read", {versionId: mainVersionId, path: "docs/a.md"})).text).toBe(personalMarkdown);
     for (const {momentId, imported} of declaredCredit) expectAuthors(await momentAuthors(rpc, momentId), imported);
 
     // A fresh ordinary peer imports the same credit without any live feed.
@@ -611,14 +659,15 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     expect((await peerRpc("sync.adoptJoinIdentity", {workspaceId: "workspace", replicationEpoch: identity.replicationEpoch,
       streamIdentity: identity.streamIdentity})).adopted).toBe(true);
     await pullAll(peerRpc);
-    expect((await peerRpc("versionedText.read", {versionId: mainVersionId, path: "docs/a.md"})).text).toBe(automationMarkdown);
-    expect(readFileSync(join(peerRoot, "docs/a.md"), "utf8")).toBe(automationMarkdown);
+    expect((await peerRpc("versionedText.read", {versionId: mainVersionId, path: "docs/a.md"})).text).toBe(personalMarkdown);
+    expect(readFileSync(join(peerRoot, "docs/a.md"), "utf8")).toBe(personalMarkdown);
     for (const {momentId, imported} of declaredCredit) expectAuthors(await momentAuthors(peerRpc, momentId), imported);
     expect(await momentAuthors(peerRpc, settledMomentId)).toEqual(unattributed);
     peer.close(); await peer.waitForExit(); peer = undefined;
     results.declaredAuthors = {
       agent: {receipt: agentAck, settlement: agentSettlement, admitted: [human, agent], imported: [agent, importedHuman]},
       automation: {receipt: automationAck, settlement: automationSettlement, admitted: [automationAdmitted], imported: [automation]},
+      personal: {receipt: personalAck, settlement: personalSettlement, admitted: [personal], imported: [personal]},
     };
     // The service imports the admitted credit through its own background pull.
     // Poll its store until that credit lands. A missing row reads as undefined, not null.
@@ -651,7 +700,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     } finally {engine.close();}
     expect(hash(readFileSync(executable))).toBe(expectedHash);
     writeFileSync(join(root, "result.json"), JSON.stringify({verdict: "PASS", executable, sha256: expectedHash,
-      scope: "Default self-host profile, scoped replication credentials, automatic discovery, native cold import and adoption-reply-loss recovery, service restart, owner draft restart, concurrent named and owner edits, idle owner receive, native acknowledgements, settlement and ordinary publication, declared agent and trusted automation credit through service publication, owner and fresh peer import.",
+      scope: "Default self-host profile, scoped replication credentials, automatic discovery, native cold import and adoption-reply-loss recovery, service restart, owner draft restart, concurrent named and owner edits, idle owner receive, native acknowledgements, settlement and ordinary publication, declared agent, trusted automation and personal agent credit through service publication, owner and fresh peer import.",
       omitted: ["TLS transport", "browser UI", "restore cutover"], harness: {transforms: harness.transforms, captures: harness.captures}, results}, null, 2));
   } finally {
     for (const provider of providers) {provider.close(); provider.doc.destroy();}
