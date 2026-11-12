@@ -3,6 +3,7 @@ import { createActorIssuer, deriveMomentActor, parseActorKey } from "@dohc/works
 import { isConnectedAgentId } from "@dohc/workspace-contracts/actor-presentation";
 import type { ChatMessage, ChatReaction } from "@dohc/workspace-contracts/engine";
 import { createChatWrites, type ChatWriter, type PersonWriter, type ChatWriteStore } from "./chatWrites";
+import { answerDecision, answerWithReply, reactToMessage, replyInThread } from "@dohc/workspace-operations/chat-writes";
 import { AutomationChatSessionWait } from "@dohc/automation-executor/automation-chat";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import type { JoinedSharedChannel, RegistryEntry } from "./registryStore";
@@ -79,6 +80,9 @@ function fixture() {
       events.push("resolve");
       return { ...input, state: "resolved", atMs: 3 };
     }),
+    listThreadDecisions: vi.fn<ChatWriteStore["listThreadDecisions"]>(async (workspaceId, threadId) => [{
+      workspaceId, threadId, messageId: "question", state: "open", atMs: 1, options: ["Monday", "Tuesday"],
+    }]),
     listReactions: vi.fn<ChatWriteStore["listReactions"]>(async () => {
       await reach("reactions");
       return [...reactions];
@@ -156,12 +160,11 @@ function fixture() {
       start: () => writes.startThread(place, { writer: AGENT, channelId: "channel", body: "Hi", resolveAttachments: attachments }),
       react: () => writes.setReaction(place, { writer: PERSON, threadId: "thread", messageId: "message", emoji: "👍", state: "added" }),
       toggle: () => writes.setReaction(place, { writer: PERSON, threadId: "thread", messageId: "message", emoji: "👍", state: "toggle" }),
-      answer: () => writes.answer(place, {
-        writer: PERSON, threadId: "thread", body: "Monday", resolveAttachments: attachments,
-        resolves: { messageId: "question", chosenOption: "Monday" },
+      answer: () => answerDecision(writes.host(place, { writer: PERSON, resolveAttachments: attachments }), {
+        threadId: "thread", body: "Monday", resolves: { messageId: "question", chosenOption: "Monday" },
       }),
-      answerWith: () => writes.answerWith(place, {
-        writer: PERSON, threadId: "thread", messageId: "question", resolvedByMessageId: "message", chosenOption: "Monday",
+      answerWith: () => answerWithReply(writes.host(place, { writer: PERSON }), {
+        threadId: "thread", messageId: "question", replyId: "message", chosenOption: "Monday",
       }),
     },
   };
@@ -682,7 +685,7 @@ describe("chat writes", () => {
     const input = { writer: PERSON, body: "Hi", resolveAttachments: test.attachments, onSaved };
     const write = kind === "send" ? test.writes.sendMessage(test.place, { ...input, threadId: "thread" })
       : kind === "start" ? test.writes.startThread(test.place, { ...input, channelId: "channel" })
-      : test.writes.answer(test.place, { ...input, threadId: "thread", resolves: { messageId: "question", chosenOption: "Monday" } });
+      : answerDecision(test.writes.host(test.place, input), { threadId: "thread", body: "Hi", resolves: { messageId: "question", chosenOption: "Monday" } });
     await expect(write).rejects.toThrow("The bookmark projection stopped.");
     expect(onSaved).toHaveBeenCalledOnce();
     expect(onSaved.mock.calls[0]?.[0]).not.toHaveProperty("failure");
@@ -695,12 +698,49 @@ describe("chat writes", () => {
     const refusal = new Error("Pick one of the poll's choices.");
     test.store.resolveChatDecision.mockRejectedValueOnce(refusal);
     const onSaved = vi.fn();
-    const answered = await test.writes.answer(test.place, {
-      writer: PERSON, threadId: "thread", body: "Monday", resolveAttachments: test.attachments, onSaved,
-      resolves: { messageId: "question", chosenOption: "Monday" },
+    const answered = await answerDecision(test.writes.host(test.place, { writer: PERSON, resolveAttachments: test.attachments, onSaved }), {
+      threadId: "thread", body: "Monday", resolves: { messageId: "question", chosenOption: "Monday" },
     });
-    expect(answered).toEqual({ message: expect.objectContaining({ id: "message" }), failure: refusal });
-    expect(onSaved).toHaveBeenCalledExactlyOnceWith(answered);
+    expect(answered).toEqual({ state: "failed", message: expect.objectContaining({ id: "message" }), failure: refusal });
+    expect(onSaved).toHaveBeenCalledExactlyOnceWith({ message: answered.message, failure: refusal });
+  });
+
+  // The engine answers an answered question as it stands, so only the
+  // decision says another reply won. The reply stays, with its effects.
+  it("keeps the reply and names the winner when another reply answered first", async () => {
+    const test = fixture();
+    test.store.resolveChatDecision.mockResolvedValueOnce({
+      workspaceId: "workspace", threadId: "thread", messageId: "question",
+      state: "resolved", resolvedByMessageId: "earlier", chosenOption: "Tuesday", atMs: 1,
+    });
+    const onSaved = vi.fn();
+    const answered = await answerDecision(test.writes.host(test.place, { writer: PERSON, resolveAttachments: test.attachments, onSaved }), {
+      threadId: "thread", body: "Monday", resolves: { messageId: "question", chosenOption: "Monday" },
+    });
+    expect(answered).toMatchObject({ state: "lost", winnerMessageId: "earlier", message: { id: "message" }, decision: { chosenOption: "Tuesday" } });
+    expect(test.store.sendMessage).toHaveBeenCalledOnce();
+    expect(onSaved).toHaveBeenCalledExactlyOnceWith({ message: answered.message });
+    expect(test.effects.scanChatDispatch).toHaveBeenCalledWith("workspace");
+  });
+
+  it("refuses an answer's invalid choice after admission and before the reply or its attachments", async () => {
+    const test = fixture();
+    await expect(answerDecision(test.writes.host(test.place, { writer: PERSON, resolveAttachments: test.attachments }), {
+      threadId: "thread", body: "Friday", resolves: { messageId: "question", chosenOption: "Friday" },
+    })).rejects.toThrow("Pick one of the poll's choices.");
+    expect(test.warmCredentials).toHaveBeenCalled();
+    expect(test.attachments).not.toHaveBeenCalled();
+    expectNothingWritten(test);
+  });
+
+  // The engine refuses a missing parent, so the desktop reads none first.
+  it("hands a reply's parent to the store without reading it", async () => {
+    const test = fixture();
+    await replyInThread(test.writes.host(test.place, { writer: AGENT, resolveAttachments: test.attachments }), {
+      threadId: "thread", parentMessageId: "parent", body: "Hi",
+    });
+    expect(test.store.getMessage).not.toHaveBeenCalled();
+    expect(test.store.sendMessage).toHaveBeenCalledWith(expect.objectContaining({ threadId: "thread", parentMessageId: "parent" }));
   });
 
   // Try again after an answer whose reply saved while its question stayed open.
@@ -718,13 +758,15 @@ describe("chat writes", () => {
       const test = fixture();
       const reply = await savedReply(test);
       test.store.getMessage.mockResolvedValue(reply);
-      const decision = await test.writeEach.answerWith();
+      const answered = await test.writeEach.answerWith();
       expect(test.store.getMessage).toHaveBeenCalledWith({ workspaceId: "workspace", messageId: "message" });
       expect(test.store.resolveChatDecision).toHaveBeenCalledExactlyOnceWith({
         workspaceId: "workspace", threadId: "thread", messageId: "question",
         resolvedByMessageId: "message", chosenOption: "Monday",
       });
-      expect(decision).toMatchObject({ messageId: "question", state: "resolved", resolvedByMessageId: "message" });
+      expect(answered).toMatchObject({
+        state: "resolved", decision: { messageId: "question", state: "resolved", resolvedByMessageId: "message" },
+      });
       expect(test.store.sendMessage).not.toHaveBeenCalled();
       expect(test.store.startChannelThread).not.toHaveBeenCalled();
       // The answer syncs. No new message means nothing to dispatch.
@@ -753,8 +795,8 @@ describe("chat writes", () => {
       const test = fixture();
       const reply = change(await savedReply(test));
       test.store.getMessage.mockResolvedValue(reply);
-      await expect(test.writes.answerWith(test.place, {
-        writer: PERSON, threadId: "thread", messageId: "question", resolvedByMessageId: reply.id,
+      await expect(answerWithReply(test.writes.host(test.place, { writer: PERSON }), {
+        threadId: "thread", messageId: "question", replyId: reply.id,
       })).rejects.toThrow("Only your own reply in this thread can answer its question.");
       expectNothingWritten(test);
     });
@@ -793,7 +835,7 @@ describe("chat writes", () => {
       expectNothingWritten(test);
     });
 
-    it("refuses a question another reply already answered, which keeps that answer", async () => {
+    it("names the reply that already answered the question, which keeps that answer", async () => {
       const test = fixture();
       const reply = await savedReply(test);
       test.store.getMessage.mockResolvedValue(reply);
@@ -801,9 +843,10 @@ describe("chat writes", () => {
         workspaceId: "workspace", threadId: "thread", messageId: "question",
         state: "resolved", resolvedByMessageId: "earlier", atMs: 1,
       });
-      await expect(test.writeEach.answerWith()).rejects.toThrow("Another reply already answered this question.");
+      await expect(test.writeEach.answerWith()).resolves.toMatchObject({ state: "lost", winnerMessageId: "earlier", message: { id: "message" } });
       expect(test.store.sendMessage).not.toHaveBeenCalled();
       expect(test.effects.queueCloudSync).not.toHaveBeenCalled();
+      expect(test.effects.notifyRenderer).not.toHaveBeenCalled();
     });
   });
 
@@ -870,6 +913,23 @@ describe("chat writes", () => {
       workspaceId: "workspace", threadId: "thread", messageId: "message", emoji: "👍", state: "added",
       author: { authorId: "user-1", kind: "agent", displayName: "Agent" }, replicationAuthorId: "user-1",
     });
+  });
+
+  it("passes a shared reaction's key to its row, and a key of its own to the alias row", async () => {
+    const test = fixture();
+    const host = test.writes.host(test.place, { writer: PERSON });
+    await reactToMessage(host, { threadId: "thread", messageId: "message", emoji: "👍", state: "added", idempotencyKey: "react-1" });
+    expect(test.store.setReaction).toHaveBeenLastCalledWith(expect.objectContaining({ state: "added", idempotencyKey: "react-1" }));
+    test.setCredentials(null);
+    await test.writeEach.react();
+    test.setCredentials(signedIn("user-1"));
+    test.store.setReaction.mockClear();
+    await reactToMessage(host, { threadId: "thread", messageId: "message", emoji: "👍", state: "removed", idempotencyKey: "react-2" });
+    expect(test.store.setReaction.mock.calls.map(([input]) => [input.author.authorId, input.idempotencyKey])).toEqual([
+      ["local-id", "react-2:local"], ["user-1", "react-2"],
+    ]);
+    // The engine refuses a missing message, so the desktop reads none first.
+    expect(test.store.getMessage).not.toHaveBeenCalled();
   });
 
   it("syncs a reaction without projecting bookmarks or scanning dispatch", async () => {
