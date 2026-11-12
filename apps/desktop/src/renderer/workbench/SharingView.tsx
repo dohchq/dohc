@@ -16,6 +16,7 @@ import { MoreMenu, type MoreMenuItem } from "../ui/MoreMenu";
 import { NameLine } from "../ui/NameLine";
 import { SkeletonLines } from "../ui/SkeletonRows";
 import { useRequestSequence } from "../useRequestSequence";
+import { JOINED_WORKSPACE_LIMIT } from "../joinedWorkspaceLimit";
 import {
   ABOUT_ROW,
   AccessChecked,
@@ -519,7 +520,7 @@ function ReceivedRow(props: {
     : files && active
       ? [{ label: "Add to workspace", onSelect: () => actions.mount(shareId), disabled: props.busy }]
       : membership && active
-        ? [{ label: "Open", onSelect: () => undefined, disabled: true, description: "This version of dohc cannot open a workspace you joined." }]
+        ? [{ label: "Open", onSelect: () => undefined, disabled: true, description: JOINED_WORKSPACE_LIMIT.open }]
         : [];
   const word: Word | null = damaged ? "damaged" : removed ? "removed" : active || !row ? null : "ended";
   // The level only while the share is live and dohc knows it; else the sender alone.

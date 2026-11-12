@@ -8,6 +8,7 @@ import type { ShareCopyResult } from "@dohc/workspace-contracts/share-copy";
 import type { ShareProposalRow } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
 import { ShellErrorReporter } from "../shell/useShellError";
+import { JOINED_WORKSPACE_LIMIT } from "../joinedWorkspaceLimit";
 import type { AccessFacts } from "./accessReason";
 import { groupShares, SharingView, waitingByShare, type ShareMount, type SharingFocus } from "./SharingView";
 
@@ -640,7 +641,7 @@ describe("the actions Settings offers on a share", () => {
     expect(within(admin!).getByTestId("sharing-row-who").textContent).toBe("Admin · Sam owns this workspace");
     const open = within(await openMenu(member!)).getByRole("menuitem", { name: /Open/ });
     expect(open.getAttribute("aria-disabled")).toBe("true");
-    expect(open.textContent).toContain("This version of dohc cannot open a workspace you joined.");
+    expect(open.textContent).toContain(JOINED_WORKSPACE_LIMIT.open);
     await userEvent.click(open);
     expect(bridgeMock.getRelayReceivedShare).not.toHaveBeenCalled();
     expect(bridgeMock.mountShare).not.toHaveBeenCalled();
