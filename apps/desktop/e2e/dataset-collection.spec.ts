@@ -122,11 +122,14 @@ test("@dataset-collection owner changes fields, archives, restores, and exports 
     await collection.getByRole("button", { name: "Create record", exact: true }).click();
     await expect(await fieldCells(collection, "Name")).toHaveText("Camera");
     await collection.getByRole("button", { name: "Open Camera", exact: true }).click();
-    const details = page.getByRole("dialog", { name: "Record details" });
-    await expect(details).toContainText("Camera");
-    await page.screenshot({ path: test.info().outputPath("record-details-light.png") });
+    // The record opens in a panel beside the table, which stays where it was.
+    const record = collection.getByRole("complementary", { name: "Camera", exact: true });
+    await expect(record.getByRole("heading", { name: "Camera", exact: true })).toBeVisible();
+    await expect(await fieldCells(collection, "Name")).toHaveText("Camera");
+    await page.screenshot({ path: test.info().outputPath("record-panel-light.png") });
+    // The panel took focus when it opened, so Escape closes it.
     await page.keyboard.press("Escape");
-    await expect(details).toBeHidden();
+    await expect(record).toBeHidden();
     await (await collectionCommand(collection, "Views")).click();
     const views = page.getByRole("region", { name: "Collection views" });
     await views.getByRole("button", { name: "Create view", exact: true }).click();
