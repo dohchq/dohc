@@ -719,8 +719,10 @@ export type PersonalAgentChangeResult =
     ok: true;
     agent: PersonalAgentRow;
     revision: number;
-    /** Running work here ends: the agent's credentials ended, or the workspace left its reach or dropped a level. */
+    /** Running work here ends: the agent's credentials ended, or the workspace left its reach. */
     endedWorkspaceIds: string[];
+    /** Running work here that needs Edit ends: the workspace stayed in reach at a lower level. */
+    loweredWorkspaceIds: string[];
     /** Parked waits here re-check, and pick up a workspace new to reach. */
     wakeWorkspaceIds: string[];
   }
@@ -746,6 +748,7 @@ export function changePersonalAgent(storage: StorageContext, input: {
     }
     const before = agent.reach.map(entry => entry.workspaceId);
     let ended: string[] = [];
+    let lowered: string[] = [];
     let added: string[] = [];
     switch (input.change.kind) {
       case "name": {
@@ -760,8 +763,9 @@ export function changePersonalAgent(storage: StorageContext, input: {
         break;
       case "reach": {
         if (!reachIsOwned(storage, input.ownerUserId, input.change.reach)) return { ok: false, reason: "invalid" };
-        const rank = new Map(input.change.reach.map(entry => [entry.workspaceId, PERSONAL_REACH_LEVELS.indexOf(entry.level)]));
-        ended = agent.reach.filter(entry => (rank.get(entry.workspaceId) ?? -1) < PERSONAL_REACH_LEVELS.indexOf(entry.level))
+        const kept = new Map(input.change.reach.map(entry => [entry.workspaceId, PERSONAL_REACH_LEVELS.indexOf(entry.level)]));
+        ended = before.filter(workspaceId => !kept.has(workspaceId));
+        lowered = agent.reach.filter(entry => kept.has(entry.workspaceId) && kept.get(entry.workspaceId)! < PERSONAL_REACH_LEVELS.indexOf(entry.level))
           .map(entry => entry.workspaceId);
         added = writeReach(storage, agent.agentId, input.change.reach);
         appendPersonalDms(storage, agent.agentId, added, Math.trunc(input.nowMs));
@@ -783,7 +787,8 @@ export function changePersonalAgent(storage: StorageContext, input: {
     }
     const revision = bumpRoster(storage, input.ownerUserId);
     return {
-      ok: true, agent: agentById(storage, agent.agentId)!, revision, endedWorkspaceIds: ended, wakeWorkspaceIds: [...before, ...added],
+      ok: true, agent: agentById(storage, agent.agentId)!, revision, endedWorkspaceIds: ended, loweredWorkspaceIds: lowered,
+      wakeWorkspaceIds: [...before, ...added],
     };
   });
 }

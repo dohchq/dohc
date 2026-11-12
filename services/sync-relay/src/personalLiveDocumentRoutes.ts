@@ -199,7 +199,7 @@ export function createPersonalLiveDocumentRoute(input: {
     try {
       unregister = input.personalAgents.register({
         agentId, ownerUserId: current.ownerUserId, connectionId: current.connectionId, fenceEpoch: current.fenceEpoch,
-        workspaceIds: [workspaceId], kind: "wait", terminate: () => ended.abort(),
+        workspaceIds: [workspaceId], kind: "wait", needs: "edit", terminate: () => ended.abort(),
       });
     } catch {
       return answerResponse({ status: "preparing" });
