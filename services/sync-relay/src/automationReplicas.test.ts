@@ -274,6 +274,8 @@ describe("the automation replicas", () => {
     // Pull pages the relay holds for the copy beyond the one every pull answers, and the cursor each page moves to.
     let pullPages = 0;
     let pullCursor = 0;
+    // Pulls wait here, once one started, until the test releases them.
+    let pullGate: { reached(): void; open: Promise<void> } | null = null;
     const engines: Array<{ exit(): void; close: ReturnType<typeof vi.fn>; waitForExit: ReturnType<typeof vi.fn> }> = [];
     spawn.mockImplementation(async (spawned: { env?: Record<string, string>; onExit?: () => void; authToken?: string }) => {
       expect(spawned.env?.DOHC_ENGINE_LIVE_HOST_CONFIG, "a plain engine, not the live host's").toBeUndefined();
@@ -309,7 +311,12 @@ describe("the automation replicas", () => {
             case "sync.push": return { result: { status: "complete", pushed: 0, hasMore: false, sharingDeclined: [], ownerAdmissionPending: [] } };
             case "sync.materializePendingCursor": return { result: { materialized: true } };
             case "sync.commitCursor": return { result: { committed: true, sharingDeclined: [] } };
-            case "sync.fetchPull": return { result: { pageToken: "fetched" } };
+            case "sync.fetchPull":
+              if (pullGate !== null) {
+                pullGate.reached();
+                await pullGate.open;
+              }
+              return { result: { pageToken: "fetched" } };
             case "files.resolve": return { result: { versionId: "main",
               results: (request.params.targets as Array<{ objectId?: string }>).map((target) => {
                 const path = target.objectId === undefined ? undefined : filePaths.get(target.objectId);
@@ -341,6 +348,13 @@ describe("the automation replicas", () => {
       movedOnRelay: (paths: Map<string, string>) => { pulledPaths = paths; },
       /** The relay holds this many more pull pages for the copy than one pull answers. */
       backlog: (pages: number) => { pullPages = pages; },
+      /** Holds the next pulls. `reached` resolves once one is waiting. */
+      holdPulls: () => {
+        let reached!: () => void, release!: () => void;
+        const waiting = new Promise<void>((resolve) => { reached = resolve; });
+        pullGate = { reached, open: new Promise<void>((resolve) => { release = resolve; }) };
+        return { reached: waiting, release: () => { pullGate = null; release(); } };
+      },
       methods: () => sent.map((request) => request.method) };
   }
 
@@ -2869,6 +2883,45 @@ describe("the automation replicas", () => {
       // A full sync catches it up again and asks for the pass that replays, into a thread still visible.
       engine.failPush(false);
       await replica.sync();
+      await restarted.pass();
+      expect(sends(), `moved: ${moved}`).toBe(moved ? 0 : 1);
+    }
+  });
+
+  it("replays an owed write only after a sync finished pulling, not while a later sync hasn't pulled yet", async () => {
+    for (const moved of [true, false]) {
+      const { storage } = await relay();
+      const engine = fakeEngine();
+      const wanted = () => new Map<string, readonly CopyReason[]>([[WORKSPACE, ["account"]]]);
+      const first = await stepped(storage, wanted);
+      const opened = first.running.replica(WORKSPACE)!;
+      const chats = new ChatsLiveAdapter(engine.chats, opened.workspace, { workspaceId: WORKSPACE });
+      engine.filePaths.set("object-plan", "docs/plan.md");
+      const onPage = await chats.createThread({ workspaceId: WORKSPACE, title: "Plan", linkedFile: { objectId: "object-plan", pathHint: "docs/plan.md" } });
+      const ids = phoneWriteIds("owner", WORKSPACE, "unsent");
+      const author = { accountId: "owner", displayName: "Owner", actorKey: null };
+      const write: WriteCommand = { kind: "reply", threadId: onPage.id, messageId: ids.messageId("reply"), body: "Ship it" };
+      storage.recordAccountOperation({ accountId: "owner", operationId: "unsent",
+        binding: { workspaceId: WORKSPACE, operation: "reply", args: { operationId: "unsent" } }, incarnation: opened.incarnation,
+        replicationEpoch: "epoch-1", streamIdentity: "stream-1", writesMessage: true, nowMs: 0,
+        command: JSON.parse(JSON.stringify({ stages: publicationStages(write, author, ids.key), write, author })) as JsonValue });
+      await first.running.close();
+      // The restarted copy catches up, but its receipts can't be read, so the replay stays owed.
+      engine.receipts(new Error("the engine is busy"));
+      const restarted = await stepped(storage, wanted, { root: first.root, onError: () => undefined });
+      const sends = () => engine.sent.filter((request) => request.method === "chats.messages.send").length;
+      engine.receipts(new Map());
+
+      // A visit's sync starts, and waits before it pulls what the relay holds now.
+      if (moved) engine.movedOnRelay(new Map([["object-plan", ".env"]]));
+      const gate = engine.holdPulls();
+      const syncing = restarted.running.replica(WORKSPACE)!.sync();
+      await gate.reached;
+      await restarted.pass();
+      expect(sends(), `moved: ${moved}; nothing replays before the sync pulls`).toBe(0);
+
+      gate.release();
+      await syncing;
       await restarted.pass();
       expect(sends(), `moved: ${moved}`).toBe(moved ? 0 : 1);
     }

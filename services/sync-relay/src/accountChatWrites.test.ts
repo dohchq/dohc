@@ -160,12 +160,18 @@ async function fixture() {
   };
   let requestId = 0;
   let syncError: Error | null = null;
+  // A sync that waits, once it started, until the test releases it.
+  let heldSync: { reached(): void; open: Promise<void> } | null = null;
   const lifetime = new AbortController();
   const copy: AutomationReplica = {
     workspaceId: WORKSPACE, ownerUserId: OWNER, incarnation: 1, reasons: ["account"], startedAtMs: 1, pulledHead: 0,
     root: "unused", metadataDir: "unused", client: engine as unknown as EngineClient, workspace: WORKSPACE, signal: lifetime.signal,
     nextRequestId: () => ++requestId, withRecordWork: (work) => work(),
     sync: async () => {
+      if (heldSync !== null) {
+        heldSync.reached();
+        await heldSync.open;
+      }
       if (syncError !== null) throw syncError;
     },
     step: async () => {
@@ -188,6 +194,13 @@ async function fixture() {
     storage, raw, engine, copy, chats, run, rows, operation, authorize,
     relay: (mode: typeof relay) => { relay = mode; },
     failSync: (error: Error | null) => { syncError = error; },
+    /** Holds the next syncs. `reached` resolves once one is waiting. */
+    holdSync: () => {
+      let reached!: () => void, release!: () => void;
+      const waiting = new Promise<void>((resolve) => { reached = resolve; });
+      heldSync = { reached, open: new Promise<void>((resolve) => { release = resolve; }) };
+      return { reached: waiting, release: () => { heldSync = null; release(); } };
+    },
   };
 }
 
@@ -460,6 +473,33 @@ describe("a phone's chat write through the server's copy", () => {
     expect(JSON.stringify(unsynced)).not.toContain("relay.internal");
     expect(f.engine.writes).toHaveLength(1);
     expect(f.operation("op-new")).toBeUndefined();
+  });
+
+  it("keeps a write's replay owed while a request holds it, and replays it once the request's own stage failed", async () => {
+    const f = await fixture();
+    await seed(f.chats);
+    const write = reply("op-locked", "thread-stay");
+    const ids = phoneWriteIds(OWNER, WORKSPACE, "op-locked");
+    // The first attempt's send is lost.
+    f.engine.failing.set(CHATS_METHOD.messageSend, new Error("the engine went away"));
+    expect(await f.run(write)).toMatchObject({ ok: true, state: "pending" });
+    const errors: unknown[] = [];
+    const replay = async () => await replayUnfinishedWrites({ storage: f.storage, copy: f.copy, nowMs: () => 0, onError: (error) => errors.push(error),
+      records: f.storage.listUnfinishedAccountOperations({ workspaceId: WORKSPACE, incarnation: 1 }) });
+
+    // The phone retries while the engine still fails, and the retry holds the write while its copy syncs.
+    const held = f.holdSync();
+    const retry = f.run(write);
+    await held.reached;
+    expect(await replay(), "a request holds it, so the replay stays owed").toBe(false);
+    expect(f.engine.writes).toEqual([]);
+    held.release();
+    expect(await retry, "the retry's own stage failed").toMatchObject({ ok: true, state: "pending" });
+
+    f.engine.failing.clear();
+    expect(await replay(), "a later pass replays it").toBe(true);
+    expect(f.engine.writes).toMatchObject([{ method: CHATS_METHOD.messageSend, idempotencyKey: ids.key("reply") }]);
+    expect(errors).toEqual([]);
   });
 
   it("refuses a message the shared rules refuse, and an operation ID outside its bounds, as bad requests, writing nothing", async () => {

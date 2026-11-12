@@ -822,7 +822,7 @@ export function mayPublish(storage: SyncRelayStorage, record: OperationRecord): 
  * never committed, from its stored command, while its account may still
  * publish it. Answers whether every write is done with: replayed, skipped
  * because its account lost access or its thread is hidden, already
- * committed by its receipts, refused, or left to a request working on it.
+ * committed by its receipts, or refused. One a request is working on isn't.
  * A failure that may pass, such as an unreadable receipt, is reported and
  * leaves the replay owed.
  */
@@ -838,9 +838,13 @@ export async function replayUnfinishedWrites(input: {
     .find((each) => each.accountId === record.accountId && each.operationId === record.operationId);
   let done = true;
   for (const listed of input.records) {
-    // A request working on the write now finishes it itself; the copy doesn't wait for it.
-    if (listed.incarnation !== copy.incarnation || storedWrite(listed.command) === null ||
-      operationLocks.has(lockKey(listed.accountId, listed.operationId))) continue;
+    if (listed.incarnation !== copy.incarnation || storedWrite(listed.command) === null) continue;
+    // A request is working on the write. The copy doesn't wait for it, but the request's stages can fail and leave
+    // it to publication, so the replay stays owed and a later pass looks again.
+    if (operationLocks.has(lockKey(listed.accountId, listed.operationId))) {
+      done = false;
+      continue;
+    }
     try {
       await withOperationLock(listed.accountId, listed.operationId, async () => {
         // A request may have finished it while this waited.

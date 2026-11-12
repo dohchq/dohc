@@ -402,9 +402,16 @@ export async function startAutomationReplicas(options: {
     // or a request's. Open replays at once; otherwise the next pass does, outside the sync lane, which a request
     // holding a write's lock may be waiting on, and before that pass's publication pushes.
     let pulledCurrent = false;
+    let replayAsked = false;
     let replayed = false;
     const caughtUp = async (): Promise<"idle" | "replayed" | "owed"> => {
-      if (replayed || !pulledCurrent) return "idle";
+      if (replayed) return "idle";
+      // A copy behind the relay, syncing now and maybe not pulled yet, or with relay rows past what it pulled, waits:
+      // the next sync that catches it up asks for the pass that replays.
+      if (!pulledCurrent || running > 0 || logHead(row.workspaceId) > replica.pulledHead) {
+        replayAsked = false;
+        return "idle";
+      }
       // Only a replay that finished is done; one that failed stays owed for a later pass.
       replayed = await replayUnfinishedWrites({storage, copy: replica, nowMs,
         records: storage.listUnfinishedAccountOperations({workspaceId: row.workspaceId, incarnation: row.incarnation}),
@@ -416,6 +423,8 @@ export async function startAutomationReplicas(options: {
     let running = 0;
     const syncRounds = (rounds: number, callerSignal?: AbortSignal): Promise<boolean> => {
       running += 1;
+      // Until this sync finishes caught up, the copy may be behind what the relay holds now.
+      pulledCurrent = false;
       const run = syncChain.then(async () => {
         replicaSignal.throwIfAborted(); callerSignal?.throwIfAborted(); current();
         // Live record refresh has its own retry lane; failure never skips sync.
@@ -432,15 +441,18 @@ export async function startAutomationReplicas(options: {
         syncRetries.delete(row.workspaceId);
         failedSyncs.delete(row.workspaceId);
         busyRefusals.delete(row.workspaceId);
-        // A copy left with more to pull is behind the relay again, so it replays nothing until a sync catches it up.
+        // A copy left with more to pull is behind the relay, so it replays nothing until a sync catches it up.
         if (pushMore || pullMore) {
-          pulledCurrent = false;
+          replayAsked = false;
           return false;
         }
         replica.pulledHead = Math.max(replica.pulledHead, head);
-        // The first sync that catches a registered copy up, such as a request's, asks for the pass that replays its
-        // writes. A replay that fails after that waits for the pass's own retry.
-        if (!pulledCurrent && !replayed && replicas.get(row.workspaceId) === replica) schedule();
+        // The first sync that catches a registered copy up since it fell behind, such as a request's, asks for the pass
+        // that replays its writes. A replay that fails after that waits for the pass's own retry.
+        if (!replayed && !replayAsked && replicas.get(row.workspaceId) === replica) {
+          replayAsked = true;
+          schedule();
+        }
         pulledCurrent = true;
         return true;
       });
@@ -452,7 +464,7 @@ export async function startAutomationReplicas(options: {
       }, () => { running -= 1; });
       syncChain = run.catch((error: unknown) => {
         // So is one whose sync failed or was given up partway.
-        pulledCurrent = false;
+        replayAsked = false;
         // A caller that gave up, as at a request's deadline, leaves the copy's sync as it was.
         if (!replicaSignal.aborted && !callerSignal?.aborted) {
           failedSyncs.set(row.workspaceId, error);
