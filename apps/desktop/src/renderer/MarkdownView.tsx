@@ -289,6 +289,8 @@ export function MarkdownView(props: {
   // sends its queue or a Stop releases the note. The session stays bound, so
   // remote edits still show.
   liveEditingPaused?: "refused" | "full";
+  // Opens Live documents at this note's row, the way out of a refused pause.
+  onOpenLiveDocuments?: (path: string) => void;
   // G2-C-3 version-switch re-bind token (the shell's versionEpoch), forwarded
   // to useEngineDoc so switching the active version reopens the engine session
   // against the new version's lineage.
@@ -2234,7 +2236,12 @@ export function MarkdownView(props: {
                     ? CHANGED_OUTSIDE_NOTICE
                     : undefined
               }
-              onRetry={engine.retryReplacement ?? undefined}
+              action={engine.retryReplacement
+                ? { label: "Try again", run: engine.retryReplacement }
+                // Waiting edits end by themselves; a refused pause ends in Live documents.
+                : props.liveEditingPaused === "refused" && props.onOpenLiveDocuments
+                  ? { label: "Open Live documents", run: () => props.onOpenLiveDocuments?.(props.path) }
+                  : undefined}
             />
           }
           actions={

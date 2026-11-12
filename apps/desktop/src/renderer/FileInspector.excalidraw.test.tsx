@@ -1073,7 +1073,7 @@ describe("FileInspector Excalidraw view", () => {
     const winner = new Y.Doc();
     declareSceneRoots(winner);
     act(() => bridge.emitLineageReplacement(Y.encodeStateAsUpdate(winner)));
-    const retry = await screen.findByTestId("drawing-save-state-retry");
+    const retry = await screen.findByTestId("drawing-save-state-action");
     expect(bridge.acknowledgeEngineYDocLineageReplacement).not.toHaveBeenCalled();
     // The same words as the Markdown chip (FileInspector.lineageRetry.test.tsx):
     // storage refused the edits, so nothing is set aside yet.
@@ -1084,7 +1084,7 @@ describe("FileInspector Excalidraw view", () => {
     setItem.mockRestore();
     fireEvent.click(retry);
     await waitFor(() => expect(bridge.acknowledgeEngineYDocLineageReplacement).toHaveBeenCalledOnce());
-    await waitFor(() => expect(screen.queryByTestId("drawing-save-state-retry")).toBeNull());
+    await waitFor(() => expect(screen.queryByTestId("drawing-save-state-action")).toBeNull());
     expect(screen.getByTestId("orphaned-draft-notice").textContent).toContain(REPLACED_HISTORY_DRAFT_NOTICE);
   });
 

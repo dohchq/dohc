@@ -2243,6 +2243,8 @@ export function DesktopWorkspaceShell(props: {
     ...(livePausedPaths ?? []).map((path) => [path, "full"] as const),
     ...(liveQuarantines ?? []).filter(queueHoldsNote).map((row) => [row.path, "refused"] as const),
   ]), [livePausedPaths, liveQuarantines]);
+  // A refused note's chip opens Live documents at its row.
+  const openLiveDocumentsAt = useCallback((path: string) => openLiveDocuments(workspaceId, path), [workspaceId, openLiveDocuments]);
   // Sign in again, from Notices or Settings: the Cloud dialog starts the same
   // sign-in as Connect server at the session's server, with no Disconnect.
   // The new session rebuilds the engine, so sync resumes with nothing else
@@ -7379,6 +7381,7 @@ export function DesktopWorkspaceShell(props: {
                 }
                 // The lists name this workspace's own notes, never a received share's.
                 liveEditingPaused={shareView || isMountedSharePath(tabPath) ? undefined : liveEditingPaused.get(tabPath)}
+                onOpenLiveDocuments={openLiveDocumentsAt}
                 receivedShare={!!shareView || isMountedSharePath(tabPath)}
                 {...(shareView || isMountedSharePath(tabPath)
                   ? {}
