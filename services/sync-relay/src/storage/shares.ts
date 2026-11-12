@@ -166,7 +166,7 @@ export function getShareGrant(storage: StorageContext, grantId: string): SyncRel
 export function getCurrentLinkCredential(storage: StorageContext, grantId: string): SyncRelayLinkCredentialRow | null {
     const row = storage.db
       .prepare(
-        `SELECT credential_id, grant_id, secret_hash, generation, minted_at_ms, retired_at_ms
+        `SELECT credential_id, grant_id, secret_hash, secret_sealed, generation, minted_at_ms, retired_at_ms
          FROM sync_relay_link_credentials
          WHERE grant_id = ? AND retired_at_ms IS NULL
          LIMIT 1`,
@@ -181,7 +181,7 @@ export function findLinkGrantByCredentialHash(
   ): SyncRelayLinkCredentialGrantRow | null {
     const row = storage.db
       .prepare(
-        `SELECT c.credential_id, c.grant_id AS credential_grant_id, c.secret_hash,
+        `SELECT c.credential_id, c.grant_id AS credential_grant_id, c.secret_hash, c.secret_sealed,
                 c.generation AS credential_generation, c.minted_at_ms, c.retired_at_ms,
                 g.grant_id, g.share_id, g.principal_kind, g.principal_user_id,
                 g.principal_email, g.access, g.generation, g.status, g.created_at_ms,
@@ -243,6 +243,7 @@ export function rotateLinkGrant(storage: StorageContext, input: {
         credentialId: credential.credentialId,
         grantId: grant.grantId,
         secretHash: credential.secretHash,
+        secretSealed: credential.secretSealed,
         generation,
         mintedAtMs: input.rotatedAtMs,
         retiredAtMs: null,
@@ -325,6 +326,7 @@ export function retuneShareGrant(storage: StorageContext, input: {
           credentialId: wideningCredential.credentialId,
           grantId: grant.grantId,
           secretHash: wideningCredential.secretHash,
+          secretSealed: wideningCredential.secretSealed,
           generation,
           mintedAtMs: input.changedAtMs,
           retiredAtMs: null,
@@ -619,13 +621,14 @@ export function insertLinkCredential(storage: StorageContext, credential: SyncRe
     storage.db
       .prepare(
         `INSERT INTO sync_relay_link_credentials (
-           credential_id, grant_id, secret_hash, generation, minted_at_ms, retired_at_ms
-         ) VALUES (?, ?, ?, ?, ?, ?)`,
+           credential_id, grant_id, secret_hash, secret_sealed, generation, minted_at_ms, retired_at_ms
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         credential.credentialId,
         credential.grantId,
         credential.secretHash,
+        credential.secretSealed,
         credential.generation,
         Math.trunc(credential.mintedAtMs),
         credential.retiredAtMs,

@@ -691,7 +691,7 @@ const agentEnds: Array<[string, (f: LinkFixture, agent: SeededAgent) => void, bo
   }, true],
   ["the owner resets the link", (f, agent) => {
     expect(f.storage.rotateLinkGrant({shareId: agent.shareId, grantId: agent.grantId, rotatedAtMs: 1001, expectedDependentGrantIds: [], guard: () => {},
-      mintCredential: () => ({credentialId: "raced-credential", secretHash: "raced-secret-hash"})}).ok).toBe(true);
+      mintCredential: () => ({credentialId: "raced-credential", secretSealed: null, secretHash: "raced-secret-hash"})}).ok).toBe(true);
   }, false],
   ["the owner ends the link", (f, agent) => {
     expect(f.storage.revokeShareGrant({shareId: agent.shareId, grantId: agent.grantId, revokedAtMs: 1001}).ok).toBe(true);

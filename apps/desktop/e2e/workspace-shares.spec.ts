@@ -409,7 +409,7 @@ confidentialTest.describe("View link lifecycle", () => {
         "The sync relay serves the link, so it can read this content.",
       );
       await expect(dialog).toContainText(
-        "Ending it stops future access, but can't take back copies people already made.",
+        "Anyone with the link can open it without an account.",
       );
 
       await dialog.getByRole("button", { name: "Create link", exact: true }).click();
@@ -419,7 +419,7 @@ confidentialTest.describe("View link lifecycle", () => {
       expect(oldUrl.origin === publicViewerOrigin).toBe(true);
       const oldSecret = oldUrl.hash.slice(1);
       expect(/^[A-Za-z0-9_-]{43}$/u.test(oldSecret)).toBe(true);
-      const copyButton = dialog.getByRole("button", { name: "Copy", exact: true });
+      const copyButton = dialog.getByRole("button", { name: "Copy link", exact: true });
       await holdSystemClipboard(test.info(), async (remainingMs) => {
         await copyButton.click({ timeout: remainingMs() });
         await expect(dialog.getByRole("button", { name: "Copied", exact: true })).toBeVisible({ timeout: remainingMs() });
@@ -543,19 +543,18 @@ confidentialTest.describe("View link lifecycle", () => {
       const linkRow = linkRows.first();
       const linkRowTestId = await linkRow.getAttribute("data-testid");
       expect(linkRowTestId === `share-link-row-${linkGrantId}`).toBe(true);
-      await expect(linkRow).toContainText("Used as recently as");
-      await expect(
-        linkAccess.getByRole("radio", { name: "Comment", exact: true }),
-      ).toBeVisible();
-      await expect(
-        linkAccess.getByRole("radio", { name: "View", exact: true }),
-      ).toBeVisible();
+      await expect(linkRow).toContainText(/Used .+ · Created /u);
+      await expect(linkRow.getByTestId(`share-link-access-${linkGrantId}`)).toHaveText("Can view");
+      // A separate share is one step away while this one has a link.
+      await expect(dialog.getByRole("button", { name: "Create separate link" })).toBeVisible();
+      await expect(linkAccess).toHaveCount(0);
       const reachableRetuneTargets = await dialog
         .getByRole("button", { name: /^(?:View|Comment|Edit)$/u })
         .allTextContents();
       expect(reachableRetuneTargets).toEqual([]);
 
-      await linkRow.getByRole("button", { name: "Reset link" }).click();
+      await linkRow.getByRole("button", { name: "Link options" }).click();
+      await dialog.getByRole("menuitem", { name: "Reset link" }).click();
       let confirmation = dialog.getByTestId("share-link-confirmation");
       await expect(confirmation).toContainText(RECIPIENT_EMAIL);
       await expect(confirmation).toContainText("keep access");
@@ -583,9 +582,12 @@ confidentialTest.describe("View link lifecycle", () => {
         ).status,
       ).toBe(200);
 
-      await linkRow.getByRole("button", { name: "Reset link" }).click();
+      await linkRow.getByRole("button", { name: "Link options" }).click();
+      await dialog.getByRole("menuitem", { name: "Reset link" }).click();
       confirmation = dialog.getByTestId("share-link-confirmation");
       await confirmation.getByRole("button", { name: "Reset link" }).click();
+      // The kept URL shows until the reset answers with its replacement.
+      await expect(dialog.getByTestId("share-link-url")).not.toContainText(oldSecret);
       const resetUrlText = await dialog.getByTestId("share-link-url").textContent();
       if (resetUrlText === null) throw new Error("Reset did not expose the replacement link.");
       const resetUrl = new URL(resetUrlText);
@@ -644,7 +646,8 @@ confidentialTest.describe("View link lifecycle", () => {
       );
       expect(namedAfterReset.status).toBe(200);
 
-      await linkRow.getByRole("button", { name: "End link" }).click();
+      await linkRow.getByRole("button", { name: "Link options" }).click();
+      await dialog.getByRole("menuitem", { name: "End link" }).click();
       confirmation = dialog.getByTestId("share-link-confirmation");
       await expect(confirmation).toContainText(RECIPIENT_EMAIL);
       await expect(confirmation).toContainText("lose access");
@@ -665,7 +668,8 @@ confidentialTest.describe("View link lifecycle", () => {
         ).status,
       ).toBe(200);
 
-      await linkRow.getByRole("button", { name: "End link" }).click();
+      await linkRow.getByRole("button", { name: "Link options" }).click();
+      await dialog.getByRole("menuitem", { name: "End link" }).click();
       confirmation = dialog.getByTestId("share-link-confirmation");
       await confirmation.getByRole("button", { name: "End link" }).click();
       await expect(confirmation).not.toBeVisible();

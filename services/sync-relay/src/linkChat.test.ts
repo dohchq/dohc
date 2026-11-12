@@ -317,7 +317,7 @@ describe("link chat on a Group share", () => {
       expect((await retune(f, fileLink.grantId, access, fileLink.shareId)).status, access).toBe(400);
     }
 
-    const mintCredential = vi.fn(() => ({ credentialId: "mixed-replacement", secretHash: "h".repeat(64) }));
+    const mintCredential = vi.fn(() => ({ credentialId: "mixed-replacement", secretSealed: null, secretHash: "h".repeat(64) }));
     const input = { changedAtMs: 3000, expectedDependentGrantIds: [], guard: () => undefined };
     expect(f.storage.retuneShareGrant({ ...input, shareId: f.shareId, grantId: link.grantId, access: "view" })).toEqual({ ok: false });
     expect(f.storage.retuneShareGrant({ ...input, shareId: f.shareId, grantId: link.grantId, access: "edit", mintCredential })).toEqual({ ok: false });
@@ -333,7 +333,7 @@ describe("link chat on a Group share", () => {
     expect(f.storage.createLinkGrant({
       grant: { grantId, shareId: f.shareId, principalKind: "link", principalUserId: null, principalEmail: null,
         access: "view", generation: 1, status: "active", createdAtMs: 2, revokedAtMs: null, parentGrantId: null },
-      credential: { credentialId: "group-link-file-level-credential", grantId, secretHash: "s".repeat(64),
+      credential: { credentialId: "group-link-file-level-credential", grantId, secretSealed: null, secretHash: "s".repeat(64),
         generation: 1, mintedAtMs: 2, retiredAtMs: null },
     })).toBe(true);
     const retuneShareGrant = vi.spyOn(f.storage, "retuneShareGrant");

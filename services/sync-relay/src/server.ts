@@ -582,6 +582,7 @@ export function createSyncRelayHandler({
     undefined,
     lookupUserEmails,
     linkKey,
+    shareWebOrigin,
   );
   const { respondToShareInventory, respondToWorkspaceLinkInventory } = shareInventoryRoutes(claimPendingShares);
   // The server reads the owner's shares without the owner there, so it

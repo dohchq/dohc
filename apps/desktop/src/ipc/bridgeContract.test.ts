@@ -271,6 +271,7 @@ describe("owner relay share link IPC contract", () => {
     createdAtMs: 10,
     revokedAtMs: null,
     lastUsedAtMs: 20,
+    url: "https://share.example.test/s/#owner-secret",
     urlIssuedAtMs: 15,
     dependents: [
       {
@@ -293,11 +294,12 @@ describe("owner relay share link IPC contract", () => {
     status: "revoked" as const,
     revokedAtMs: 30,
     lastUsedAtMs: null,
+    url: null,
     urlIssuedAtMs: null,
     dependents: [],
   };
 
-  it("parses readable and damaged inventory rows while stripping bearer fields", () => {
+  it("preserves owner URLs while stripping credential fields", () => {
     const parsed = ListRelayShareLinksResult.parse({
       ok: true,
       nextCursor: "next-page",
@@ -305,14 +307,14 @@ describe("owner relay share link IPC contract", () => {
       links: [
         {
           ...readable,
-          url: "https://share.example.test/s/#must-not-cross",
+          url: readable.url,
           secret: "must-not-cross",
           credential: { token: "must-not-cross" },
         },
         {
           ...damaged,
           selectorKind: "chat",
-          url: "https://share.example.test/s/#must-not-cross",
+          url: damaged.url,
           secret: "must-not-cross",
           credentialId: "must-not-cross",
         },
@@ -324,6 +326,7 @@ describe("owner relay share link IPC contract", () => {
           grantId: "independent-1",
           recipientUserId: "user-1",
           recipientEmail: "reader@example.test",
+          access: "comment",
         },
       ],
     });
@@ -337,13 +340,14 @@ describe("owner relay share link IPC contract", () => {
           grantId: "independent-1",
           recipientUserId: "user-1",
           recipientEmail: "reader@example.test",
+          access: "comment",
         },
       ],
       nextCursor: "next-page",
       nextIndependentGrantCursor: "next-grant-page",
     });
     for (const row of parsed.links) {
-      expect(row).not.toHaveProperty("url");
+      expect(row).toHaveProperty("url");
       expect(row).not.toHaveProperty("secret");
       expect(row).not.toHaveProperty("credential");
       expect(row).not.toHaveProperty("credentialId");

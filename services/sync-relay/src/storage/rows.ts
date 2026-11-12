@@ -111,6 +111,7 @@ export function rowToLinkCredentialRow(
     credentialId: String(row.credential_id),
     grantId: String(row.grant_id),
     secretHash: String(row.secret_hash),
+    secretSealed: row.secret_sealed == null ? null : String(row.secret_sealed),
     generation: Number(row.generation),
     mintedAtMs: Number(row.minted_at_ms),
     retiredAtMs: nullableInt(row.retired_at_ms),

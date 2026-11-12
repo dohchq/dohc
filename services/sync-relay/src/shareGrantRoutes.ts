@@ -6,13 +6,16 @@ import type {PublicEditRelease} from "@dohc/security-contract";
 import type { DiscussionActivityHub } from "./discussionActivity";
 import { badRequest, notFound, RELAY_ERRORS, relayError } from "./errors";
 import type { createLinkResponseStreams } from "./linkResponseStreams";
-import { hashLinkBearer, isPublicLinkAccess } from "./linkSecurity";
+import { composePublicLinkUrl, hashLinkBearer, isPublicLinkAccess, recoverPublicLinkUrl, sealLinkBearer } from "./linkSecurity";
 import { parseShareId, parseString, parseWorkspaceId, readJsonObject } from "./requestInputs";
 import { selectorTargetsBlockedChannel } from "./shareAuthorization";
 import { fileHalfOfGroup, linkAccessLevels, parseStoredAnyShareSelectorJson, validateChatChannelShareSelector, validateChatShareAccess, validateFileShareAccess, validateGroupShareSelector, validateShareSelector } from "./shareFilter";
 import type { createShareSummaries } from "./shareSummaries";
 import type { SyncRelayShareGrantRow, SyncRelayShareWithGrantRow, SyncRelayStorage } from "./storage";
 import { MAX_ORIGIN_ID_CHARS, MAX_SHARE_ID_CHARS } from "./wireLimits";
+
+// A response that carries a link URL is a bearer secret: never cached.
+const NO_STORE = { "cache-control": "private, no-store" };
 
 export type ShareGrantTransitionRoute =
   | { route: "share-link-rotate"; shareId: string; grantId: string }
@@ -26,10 +29,6 @@ export type WorkspaceShareCreationRoute =
   | { route: "shares-create"; workspaceId: string }
   | { route: "share-link-create-atomic"; workspaceId: string }
   | { route: "share-link-create"; workspaceId: string; shareId: string };
-
-function composePublicLinkUrl(shareWebOrigin: string, secret: string): string {
-  return `${shareWebOrigin}/s/#${secret}`;
-}
 
 function validatePublicLinkAccess(value: unknown, release?: PublicEditRelease): "view" | "comment" | "edit" {
   const validation = validateFileShareAccess(value);
@@ -77,6 +76,7 @@ export function createShareGrantRoutes(
   storage: Pick<SyncRelayStorage,
     | "getShare"
     | "getShareGrant"
+    | "getCurrentLinkCredential"
     | "workspaceIsOwnedBy"
     | "rotateLinkGrant"
     | "retuneShareGrant"
@@ -208,8 +208,10 @@ export function createShareGrantRoutes(
         },
         mintCredential: () => {
           secret = newLinkBearer();
+          const credentialId = newId();
           return {
-            credentialId: newId(),
+            credentialId,
+            secretSealed: sealLinkBearer(secret, linkKey!, credentialId, grant.grantId),
             secretHash: hashLinkBearer(secret, linkKey!),
           };
         },
@@ -228,7 +230,7 @@ export function createShareGrantRoutes(
         ok: true,
         ...linkGrantBody(result.grant),
         url: composePublicLinkUrl(shareWebOrigin!, secret),
-      });
+      }, 200, NO_STORE);
     }
     if (route.route === "share-link-rotate") throw relayError("method_not_allowed");
 
@@ -272,8 +274,10 @@ export function createShareGrantRoutes(
           ? {
               mintCredential: () => {
                 secret = newLinkBearer();
+                const credentialId = newId();
                 return {
-                  credentialId: newId(),
+                  credentialId,
+                  secretSealed: sealLinkBearer(secret, linkKey!, credentialId, grant.grantId),
                   secretHash: hashLinkBearer(secret, linkKey!),
                 };
               },
@@ -295,7 +299,7 @@ export function createShareGrantRoutes(
         ...(secret === null
           ? {}
           : { url: composePublicLinkUrl(shareWebOrigin!, secret) }),
-      });
+      }, 200, NO_STORE);
     }
     if (route.route === "share-link-retune") throw relayError("method_not_allowed");
 
@@ -456,7 +460,10 @@ export function createShareGrantRoutes(
       const receipt = operationId && storage.readLinkCreation(route.workspaceId,operationId,actor.userId);
       if (receipt) {
         if (receipt.requestJson !== requestJson) throw relayError("conflict", "Link operation changed.");
-        return jsonResponse({ok:true,workspaceId:route.workspaceId,selector,access,shareId:receipt.shareId,grantId:receipt.grantId,urlUnavailable:true});
+        // A link whose access changed since is not the link this request made.
+        const grant = storage.getShareGrant(receipt.grantId);
+        const url = grant?.access === access ? recoverPublicLinkUrl(grant, storage.getCurrentLinkCredential(receipt.grantId), linkKey, shareWebOrigin) : null;
+        return jsonResponse({ok:true,workspaceId:route.workspaceId,selector,access,shareId:receipt.shareId,grantId:receipt.grantId,...(url === null ? {urlUnavailable:true} : {url})}, 200, NO_STORE);
       }
       requireEditableSelector(access, JSON.stringify(selector));
       const shareId = newShareId();
@@ -484,12 +491,14 @@ export function createShareGrantRoutes(
         revokedAtMs: null,
         parentGrantId: null,
       };
+      const credentialId = newId();
       const created = storage.createFileLinkShare({
         ...(operationId ? {operation: {operationId, requestJson}} : {}),
         share,
         grant,
         credential: {
-          credentialId: newId(),
+          credentialId,
+          secretSealed: sealLinkBearer(secret, linkKey!, credentialId, grantId),
           grantId,
           secretHash: hashLinkBearer(secret, linkKey!),
           generation: 1,
@@ -507,7 +516,7 @@ export function createShareGrantRoutes(
         selector,
         ...linkGrantBody(grant),
         url: composePublicLinkUrl(shareWebOrigin!, secret),
-      });
+      }, 200, NO_STORE);
     }
     if (route.route === "share-link-create-atomic") throw relayError("method_not_allowed");
 
@@ -552,10 +561,12 @@ export function createShareGrantRoutes(
         revokedAtMs: null,
         parentGrantId: null,
       };
+      const credentialId = newId();
       const created = storage.createLinkGrant({
         grant,
         credential: {
-          credentialId: newId(),
+          credentialId,
+          secretSealed: sealLinkBearer(secret, linkKey!, credentialId, grantId),
           grantId,
           secretHash: hashLinkBearer(secret, linkKey!),
           generation: 1,
@@ -568,7 +579,7 @@ export function createShareGrantRoutes(
         ok: true,
         ...linkGrantBody(grant),
         url: composePublicLinkUrl(shareWebOrigin!, secret),
-      });
+      }, 200, NO_STORE);
     }
     if (route.route === "share-link-create") throw relayError("method_not_allowed");
 

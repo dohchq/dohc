@@ -729,7 +729,7 @@ it("retires the activation only when the last Edit grant covering the document e
   f.share("overlap", "overlap-view", "view");
   expect(f.storage.createLinkGrant({grant: {grantId: "overlap-link", shareId: "overlap", principalKind: "link", principalUserId: null, principalEmail: null,
     access: "edit", generation: 1, status: "active", createdAtMs: 0, revokedAtMs: null, parentGrantId: null},
-    credential: {credentialId: "overlap-credential", grantId: "overlap-link", secretHash: "d".repeat(64), generation: 1, mintedAtMs: 0, retiredAtMs: null}})).toBe(true);
+    credential: {credentialId: "overlap-credential", grantId: "overlap-link", secretSealed: null, secretHash: "d".repeat(64), generation: 1, mintedAtMs: 0, retiredAtMs: null}})).toBe(true);
   expect(f.storage.revokeShare(scope.shareId, 30)).toBe(true);
   expect(f.retirement()).toBeNull();
   expect(f.owner()).toBe("current");
@@ -1035,7 +1035,7 @@ it.each([
     f.share("again", "again-view", "view");
     expect(f.storage.createLinkGrant({grant: {grantId: "again-link", shareId: "again", principalKind: "link", principalUserId: null, principalEmail: null,
       access: "edit", generation: 1, status: "active", createdAtMs: 0, revokedAtMs: null, parentGrantId: null},
-      credential: {credentialId: "again-credential", grantId: "again-link", secretHash: "d".repeat(64), generation: 1, mintedAtMs: 0, retiredAtMs: null}})).toBe(true);
+      credential: {credentialId: "again-credential", grantId: "again-link", secretSealed: null, secretHash: "d".repeat(64), generation: 1, mintedAtMs: 0, retiredAtMs: null}})).toBe(true);
     expect(f.covered()).toBe(true);
     expect(f.storage.retuneShareGrant({shareId: "again", grantId: "again-link", access: "view", changedAtMs: 50, expectedDependentGrantIds: [], guard() {}}).ok).toBe(true);
   }],

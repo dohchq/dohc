@@ -4357,6 +4357,7 @@ export type RelayShareLinkDependent = z.infer<
 >;
 
 const RelayShareLinkRowBase = z.object({
+  url: z.string().url().max(4096).nullable(),
   shareId: OPAQUE_ID,
   grantId: OPAQUE_ID,
   generation: z.number().int().min(1),
@@ -4389,6 +4390,7 @@ export const RelayShareLinkIndependentGrant = z
     grantId: OPAQUE_ID,
     recipientUserId: z.string().min(1).max(256).nullable(),
     recipientEmail: EMAIL_STRING.nullable(),
+    access: SHARE_ACCESS,
   })
   .strict();
 export type RelayShareLinkIndependentGrant = z.infer<

@@ -1304,6 +1304,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
         completed_at_ms INTEGER NOT NULL
       ) STRICT;
     `);
+    initializeLinkCredentialSealSchema(db);
     initializeSessionHostControlSchema(db);
     initializeDeviceHostCredentialSchema(db);
     initializeLiveDocumentAuthoritySchema(db);
@@ -1728,4 +1729,13 @@ function initializeLiveTicketSchema(db: SqliteDb): void {
   }
   assertLiveTicketSchema(db);
   db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(LIVE_TICKET_MIGRATION, Date.now());
+}
+
+const LINK_CREDENTIAL_SEAL_MIGRATION = "link-credential-seal-v1";
+
+function initializeLinkCredentialSealSchema(db: SqliteDb): void {
+  if (db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(LINK_CREDENTIAL_SEAL_MIGRATION)) return;
+  db.exec("ALTER TABLE sync_relay_link_credentials ADD COLUMN secret_sealed TEXT");
+  db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)")
+    .run(LINK_CREDENTIAL_SEAL_MIGRATION, Date.now());
 }

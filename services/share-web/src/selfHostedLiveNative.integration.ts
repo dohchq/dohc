@@ -1571,7 +1571,7 @@ it("detaches a store restored from an older copy before anyone edits it", () => 
   const linkKey = Buffer.alloc(32, 7), bearer = Buffer.alloc(32, 1).toString("base64url"), now = Date.now();
   expect(proof.storage.createLinkGrant({grant: {grantId: "link-grant", shareId: "share", principalKind: "link", principalUserId: null, principalEmail: null,
     access: "edit", generation: 1, status: "active", createdAtMs: now, revokedAtMs: null, parentGrantId: null},
-  credential: {credentialId: "link-credential", grantId: "link-grant", secretHash: "s".repeat(64), generation: 1, mintedAtMs: now, retiredAtMs: null}})).toBe(true);
+  credential: {credentialId: "link-credential", grantId: "link-grant", secretSealed: null, secretHash: "s".repeat(64), generation: 1, mintedAtMs: now, retiredAtMs: null}})).toBe(true);
   expect(proof.storage.mintLinkSession({session: {sessionId: "link-session", capabilityHash: hashLinkBearer(bearer, linkKey), grantId: "link-grant",
     generation: 1, mintedAtMs: now, expiresAtMs: now + 600_000}})).toBe(true);
   const linkHttp = createLinkLiveHttp({publicEditRelease:{version:1},storage: proof.storage, linkKey, hosts: new Set(["relay.test"]), publicOrigin: audience, exchangeKey,

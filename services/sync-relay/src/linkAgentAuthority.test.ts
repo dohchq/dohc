@@ -201,7 +201,7 @@ const racedEnds: Array<[string, (f: Fixture, storage: SyncRelayStorage, agent: A
   ["the owner resets the link", (f, storage, agent) => {
     expect(storage.rotateLinkGrant({
       shareId: agent.shareId, grantId: agent.grantId, rotatedAtMs: f.now.value, expectedDependentGrantIds: [], guard: () => {},
-      mintCredential: () => ({ credentialId: "raced-credential", secretHash: "raced-secret-hash" }),
+      mintCredential: () => ({ credentialId: "raced-credential", secretSealed: null, secretHash: "raced-secret-hash" }),
     }).ok).toBe(true);
   }],
   ["the owner ends the link", (f, storage, agent) => {
