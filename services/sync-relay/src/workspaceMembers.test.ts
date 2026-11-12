@@ -472,6 +472,18 @@ describe("ending access", () => {
     expect((await join(h, "cara", token!)).status).toBe(404);
     expect((await membersView(h, OWNER)).people).toHaveLength(1);
   });
+
+  it("shows the owner alone after ending membership, and sets the level again from there", async () => {
+    const { h } = await seed();
+    await invited(h, "ana");
+    expect((await post(h, OWNER, `/sync/${WORKSPACE}/members/end`)).status).toBe(200);
+    const after = await membersView(h, OWNER);
+    expect(after).toMatchObject({ workspaceName: "", memberLevel: "comment", inviteLink: { enabled: false, url: null } });
+    expect(after.people.map((person) => person.memberId)).toEqual(["owner"]);
+    const level = await post(h, OWNER, `/sync/${WORKSPACE}/members/level`, { level: "edit", workspaceName: "Community" });
+    expect(level.status).toBe(200);
+    expect(await json(level)).toMatchObject({ workspaceName: "Community", memberLevel: "edit" });
+  });
 });
 
 describe("account deletion", () => {

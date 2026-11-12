@@ -467,15 +467,17 @@ function retuneGrants(storage: StorageContext, membership: WorkspaceMembershipRo
   forgetReplicaCurrentViewCaches(storage, membership.workspaceId);
 }
 
+/** Sets what members can do. With no membership yet, as before the first invite or after one ended, the name starts one. */
 export function setWorkspaceMemberLevel(storage: StorageContext, input: {
   workspaceId: string; actorUserId: string; level: MemberLevel;
+  workspaceName: string | undefined; newShareId: () => string; nowMs: number;
 }): MemberChangeResult {
   return storage.tx(() => {
     const actor = workspaceRoleOf(storage, input.workspaceId, input.actorUserId);
     if (!actor) return refuse("not-found");
     if (!manages(actor.role)) return refuse("forbidden");
-    const before = getWorkspaceMembership(storage, input.workspaceId);
-    if (!before) return refuse("not-found");
+    const before = ensureMembership(storage, { ...input, ownerUserId: ownerOf(storage, input.workspaceId)!, nowMs: Math.trunc(input.nowMs) });
+    if (!before) return refuse("name-required");
     if (before.memberLevel === input.level) return { ok: true };
     storage.db.prepare(`UPDATE ${MEMBERSHIPS} SET member_level = ? WHERE workspace_id = ?`).run(input.level, input.workspaceId);
     const membership = getWorkspaceMembership(storage, input.workspaceId)!;

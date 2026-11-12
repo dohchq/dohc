@@ -133,7 +133,7 @@ describe("workspace members actions", () => {
     ] as const;
     for (const request of requests) await h.bridge.workspaceMembers({ workspaceId: "ws-1", request });
     expect(calls(h.relay)).toEqual([
-      'POST /sync/ws-1/members/level {"level":"view"}',
+      'POST /sync/ws-1/members/level {"level":"view","workspaceName":"Community"}',
       'POST /sync/ws-1/members/m-ana/role {"role":"admin"}',
       "POST /sync/ws-1/members/m-ana/remove {}",
       "POST /sync/ws-1/members/m-ana/let-back-in {}",
@@ -148,6 +148,13 @@ describe("workspace members actions", () => {
     expect(calls(h.relay)).toEqual(["GET /sync/ws-1/members", "POST /sync/ws-1/members/m-ana/remove {}"]);
     await expect(h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "remove", person: "cy@test" } }))
       .rejects.toThrow("No one in this workspace has the email cy@test.");
+  });
+
+  it("names the workspace by its folder when the relay has no membership to name it", async () => {
+    const h = harness();
+    h.relay.mockResolvedValueOnce(json(view({ workspaceName: "", inviteLink: { enabled: false, url: null } })));
+    await expect(h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "list" } }))
+      .resolves.toMatchObject({ status: "ready", view: { workspaceName: "Community" } });
   });
 
   it("answers done after leaving or ending membership", async () => {

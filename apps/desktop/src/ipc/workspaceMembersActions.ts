@@ -99,7 +99,9 @@ export function createWorkspaceMembersActions<Workspace extends MembersWorkspace
         if (!view || view.workspaceId !== workspaceId) {
           throw new Error(`dohc could not read Members from your server. Try again.`);
         }
-        return view;
+        // With no membership, as before the first invite or after End
+        // membership, the relay has no name for the workspace.
+        return view.workspaceName ? view : { ...view, workspaceName };
       };
 
       const list = async (): Promise<MembersResult> => {
@@ -148,7 +150,8 @@ export function createWorkspaceMembersActions<Workspace extends MembersWorkspace
           return list();
         }
         case "level":
-          return change(route(WORKSPACE_MEMBER_ROUTES.level, workspaceId), { level: request.level });
+          // The name lets the relay start the membership when there is none.
+          return change(route(WORKSPACE_MEMBER_ROUTES.level, workspaceId), { level: request.level, workspaceName });
         case "role":
           return change(route(WORKSPACE_MEMBER_ROUTES.role, workspaceId, await memberId(request.person)), { role: request.role });
         case "remove":
