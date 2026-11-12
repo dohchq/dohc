@@ -37,3 +37,11 @@ it.each([".env", "Trip/.env", "Trip/.env.local", "Trip/config.env", "Trip/.dohc/
 it("returns the normalized spelling that the relay previously served", () => {
   expect(visibleSharePath({ paths: ["Trip"], versionId: null }, "Trip\\a.md")).toBe("Trip/a.md");
 });
+
+it("selects every tracked path on main for a whole-workspace scope, and nothing for a malformed one", () => {
+  const whole = { paths: [], versionId: null, wholeWorkspace: true };
+  expect(visibleSharePath(whole, "Notes/new.md")).toBe("Notes/new.md");
+  for (const path of [".env", "Trip/.dohc/token", "../a.md"]) expect(visibleSharePath(whole, path)).toBeNull();
+  expect(visibleSharePath({ ...whole, versionId: "version" }, "Notes/a.md")).toBeNull();
+  expect(visibleSharePath({ ...whole, paths: ["Trip"] }, "Trip/a.md")).toBeNull();
+});
