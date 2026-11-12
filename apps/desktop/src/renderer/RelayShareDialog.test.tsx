@@ -2591,7 +2591,7 @@ codex mcp login dohc-share`);
     const create = screen.getByRole("button", { name: "Create link" });
     expect(create.textContent).toBe("Create separate link");
     expect(
-      screen.getByText("A separate link starts a new share of this selection, with its own comments."),
+      screen.getByText("Starts a new share with its own comments."),
     ).toBeTruthy();
     expect(screen.queryByText(PATHS_WARNING)).toBeNull();
     const createAccess = screen.getByRole("radiogroup", { name: "Link access" });
@@ -2624,7 +2624,7 @@ codex mcp login dohc-share`);
     const create = screen.getByRole("button", { name: "Create link" });
     expect(create.textContent).toBe("Create link");
     expect(
-      screen.queryByText("A separate link starts a new share of this selection, with its own comments."),
+      screen.queryByText("Starts a new share with its own comments."),
     ).toBeNull();
     expect(screen.getByText(VERSION_WARNING)).toBeTruthy();
     const createAccess = screen.getByRole("radiogroup", { name: "Link access" });

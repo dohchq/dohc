@@ -23,7 +23,7 @@ import { AutomationShareNote, useAutomationShareCheck, type AutomationShare } fr
 import { DangerButton, GhostButton, PrimaryButton, SecondaryButton, SectionLabel } from "./ui/controls";
 import { Menu } from "./ui/Menu";
 import { MoreMenu } from "./ui/MoreMenu";
-import { CopyButton, CopyField, type CopySecret } from "./ui/CopyButton";
+import { CopyButton, type CopySecret } from "./ui/CopyButton";
 import { AgentLinkAppMenu } from "./agentLinkApps";
 import { AGENT_ADDRESS_SECRET, LinkAgentsList, agentAddressFor, useLinkAgentDisconnects } from "./shareLinkAgents";
 
@@ -1873,32 +1873,42 @@ export function useRelayShareLinkPane(props: {
   function renderLinkUrl(url: string) {
     const agentAddress = agentAddressFor(url);
     return (
-      <div className="flex items-center gap-2">
-        <div className="min-w-0 flex-1">
-          <CopyField getText={() => url} label="Copy link" sensitive={SHARE_LINK_SECRET} copyTestId="share-link-copy">
-            <code data-testid="share-link-url" title={url}>{url}</code>
-          </CopyField>
-        </div>
-        {/* The same link, at the address an agent signs in with. Keyed
-            by the link, so a reset link is a new control. */}
-        {agentAddress !== null ? <>
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center gap-2">
+          <div className="flex h-8 min-w-0 flex-1 items-center rounded-lg border border-line bg-bg px-3 font-mono text-[12px] text-muted">
+            <code data-testid="share-link-url" title={url} className="min-w-0 select-text truncate">{url}</code>
+          </div>
+          {/* Keyed by the link, so a reset link is a new control. */}
           <CopyButton
             key={url}
-            size="header"
-            icon={Sparkles}
-            label="Copy for an agent"
-            getText={() => agentAddressFor(url)}
-            sensitive={AGENT_ADDRESS_SECRET}
-            testId="share-link-agent-copy"
+            size="button"
+            label="Copy link"
+            getText={() => url}
+            sensitive={SHARE_LINK_SECRET}
+            testId="share-link-copy"
           />
-          <AgentLinkAppMenu
-            key={`apps:${url}`}
-            link={agentAddress}
-            server="dohc-share"
-            sensitive={AGENT_ADDRESS_SECRET}
-            testId="share-link-agent-apps"
-          />
-        </> : null}
+        </div>
+        {/* The same link, at the address an agent signs in with. */}
+        {agentAddress !== null ? (
+          <div className="flex items-center gap-1">
+            <CopyButton
+              key={`agent:${url}`}
+              size="header"
+              icon={Sparkles}
+              label="Copy for an agent"
+              getText={() => agentAddressFor(url)}
+              sensitive={AGENT_ADDRESS_SECRET}
+              testId="share-link-agent-copy"
+            />
+            <AgentLinkAppMenu
+              key={`apps:${url}`}
+              link={agentAddress}
+              server="dohc-share"
+              sensitive={AGENT_ADDRESS_SECRET}
+              testId="share-link-agent-apps"
+            />
+          </div>
+        ) : null}
       </div>
     );
   }
@@ -2477,9 +2487,12 @@ export function useRelayShareLinkPane(props: {
   const createSection = (
     <section aria-label="New link" className="flex flex-col gap-2">
       {hasMatchingShare ? (
-        <p className="m-0 text-[12px] leading-relaxed text-muted">
-          A separate link starts a new share of this selection, with its own comments.
-        </p>
+        <div className="flex flex-col gap-1 pt-2">
+          <SectionLabel as="h3" className="m-0">Separate link</SectionLabel>
+          <p className="m-0 text-[12px] leading-relaxed text-muted">
+            Starts a new share with its own comments.
+          </p>
+        </div>
       ) : null}
       <div className="flex items-center gap-2">
         <div className="min-w-0 flex-1">
