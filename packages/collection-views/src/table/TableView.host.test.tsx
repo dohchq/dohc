@@ -252,6 +252,29 @@ describe("what the host allows and has not confirmed", () => {
     expect(onCellChange).toHaveBeenCalledOnce();
   });
 
+  it("saves nothing when the table closes under a focused editor, where the browser blurs an input as it removes it, and tells its host the text", () => {
+    const onDraftAbandoned = vi.fn();
+    const { view, cell, editor, onCellChange } = setup({ onDraftAbandoned });
+    fireEvent.click(cell(0, 0));
+    const input = editor()!.querySelector("input")!;
+    fireEvent.change(input, { target: { value: "Typed" } });
+    expect(document.activeElement).toBe(input);
+    // Chromium has blurred a focused element as it left the page. jsdom does not, so the test does it for jsdom.
+    const blurred = vi.fn();
+    input.addEventListener("focusout", blurred);
+    const removeChild = Node.prototype.removeChild;
+    const removal = vi.spyOn(Node.prototype, "removeChild").mockImplementation(function (this: Node, child: Node) {
+      if (input.isConnected && child.contains(input)) fireEvent.blur(input);
+      return removeChild.call(this, child);
+    } as typeof Node.prototype.removeChild);
+    view.unmount();
+    removal.mockRestore();
+    // React hears no event while it changes the page, so that blur saves nothing. A blur while the table is open saves (cells.test.tsx).
+    expect(blurred).toHaveBeenCalled();
+    expect(onCellChange).not.toHaveBeenCalled();
+    expect(onDraftAbandoned).toHaveBeenCalledExactlyOnceWith({ recordId: "rec-a", field: "title", text: "Typed" });
+  });
+
   it("keeps its layers in a stacking context of its own, so its sticky header never covers its host's menus", () => {
     const { grid } = setup();
     expect(grid.classList.contains("isolate")).toBe(true);
