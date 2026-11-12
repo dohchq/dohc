@@ -389,7 +389,7 @@ describe("owner live document enrollment", () => {
         return response.json();
       });
       await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId})).resolves.toEqual({documents: [{
-        path: f.binding.currentPath, objectId: f.binding.objectId, status: "retired", reason: "conflict-parent-withheld", canResume: false,
+        path: f.binding.currentPath, objectId: f.binding.objectId, status: "retired", reason: "conflict-parent-withheld", stopped: true, canResume: false,
       }], nextCursor: null});
     } finally {await f.close();}
   });

@@ -430,7 +430,8 @@ it("keeps a retiring document out of hosted reads and writes while its sibling s
   const activationId = retainServiceActivation(f.raw, namespace, true);
   const stop = preparedStop(f.storage, {workspaceId: ws, path: "docs/a.md", ownerUserId: "owner-1", enabled: false, retire: true, nowMs: 20, guard() {}});
   expect(stop?.acceptedCursor).toBe(0);
-  f.enroll("docs/a.md");
+  // Only the owner's Resume clears a Stop.
+  f.storage.ensureOwnedLiveDocument({intent: "owner-resume", workspaceId: ws, path: "docs/a.md", ownerUserId: "owner-1", nowMs: 20, guard() {}});
   expect(f.storage.readServiceHostEnrollment(ws, "docs/a.md")).toMatchObject({enabled: true, retired: false});
   const current = f.storage.readServiceHostFeedScope(ws)!;
   expect([[...current.hosted.keys()], [...current.shared.keys()]]).toEqual([["object-b"], ["object-b"]]);
@@ -923,8 +924,12 @@ it("cuts a paused document's reads at once and keeps its writes until the sessio
   expect(release(binding.objectId)).toBeNull();
   expect(await documents()).toEqual([binding.objectId]);
   expect(await f.blobStatus(B.sha256)).toBe(404);
-  // Revocation cuts reads at once; writes stay open until the release retires the document.
+  // The Resume's demand keeps the document readable past revocation, and its release keeps it.
   f.setGrant(scope.shareId, "status='revoked',revoked_at_ms=40");
+  expect(await documents()).toEqual([binding.objectId]);
+  expect(release(binding.objectId)).toBeNull();
+  // Without that demand, revocation cuts reads at once; writes stay open until the release retires the document.
+  f.raw.prepare("UPDATE sync_relay_service_host_enrollments SET owner_demand=0,demand_at_ms=NULL WHERE workspace_id=? AND object_id=?").run(ws, binding.objectId);
   expect(await documents()).toEqual([]);
   expect([...f.storage.readServiceHostFeedScope(ws)!.hosted.keys()]).toEqual([binding.objectId]);
   expect(release(binding.objectId)).toMatchObject({enabled: false, retired: true});

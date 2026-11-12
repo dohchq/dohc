@@ -544,7 +544,9 @@ it("retiring the last enrollment in a workspace frees its workspace slot", async
   f.stop();
   f.enroll({workspaceId: "workspace-17", shareId: "share-17"});
   expect(f.storage.listServiceHostEnrollments()).toHaveLength(16);
-  expect(() => f.enroll()).toThrow("capacity");
+  // A share leaves the Stop, and Resume needs a free workspace slot.
+  expect(f.enroll()).toMatchObject({retired: true, ownerStop: "retire"});
+  expect(() => f.resume()).toThrow("capacity");
   expect(f.raw.prepare(`SELECT count(*) AS count FROM ${SERVICE_HOST_ENROLLMENTS}`).get()!.count).toBe(17);
 });
 
@@ -1000,9 +1002,10 @@ it("brings live editing back when the owner resumes a paused restored note", asy
   expect(f.afterRestart()).toEqual({covered: true, owner: true});
 });
 
-// Proves: Stop ends the live session the restore kept, for good. A share
-// doesn't bring it back; the owner's Resume hosts the note again in a new run,
-// kept by the owner's demand, not by the restore.
+// Proves: Stop ends the live session the restore kept, for good. The share
+// whose last Edit grant the restore revoked can't enroll it, so nothing
+// changes; the owner's Resume hosts the note again in a new run, kept by the
+// owner's demand, not by the restore.
 it.each([10, 5] as const)("ends the kept session when the owner stops a restored note, until the owner resumes it (%s)",
   async nowMs => {
     const f = await kept();
@@ -1012,7 +1015,8 @@ it.each([10, 5] as const)("ends the kept session when the owner stops a restored
     expect(f.covered()).toBe(false);
     expect(f.release()).toMatchObject({retired: true});
     f.retireKept();
-    expect(f.enroll({nowMs})).toMatchObject({enabled: false, retired: true, ownerStop: "retire", runToken: 11});
+    expect(() => f.enroll({nowMs})).toThrow("owner edit share");
+    expect(f.enrolled()).toMatchObject({enabled: false, retired: true, ownerStop: "retire", runToken: 11});
     expect(f.covered()).toBe(false);
     expect(f.resume({nowMs})).toMatchObject({enabled: true, retired: false, ownerStop: null, runToken: 11, ownerDemand: true});
     expect(f.covered()).toBe(true);
