@@ -119,6 +119,7 @@ test("@two-client an owner invites, opens the link, and sets roles; members see 
     const kai = rows.filter({ hasText: JOINER.email });
     await kai.getByTestId("settings-members-row-menu").click();
     await page.getByRole("menuitem", { name: "Make admin" }).click();
+    await page.getByTestId("settings-members-confirm").click();
     await expect(kai.getByTestId("settings-members-role")).toHaveText("Admin");
 
     for (const theme of ["Light", "Dark"] as const) {
@@ -156,9 +157,22 @@ test("@two-client an owner invites, opens the link, and sets roles; members see 
     await expect(received.getByTestId("sharing-row-who")).toContainText("Member ·");
     await expect(received.getByTestId("sharing-row-who")).toContainText("lets members edit");
     await member.page.getByTestId("sharing-view").screenshot({ path: shot("members-received") });
+    expect(member.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
+
+    // --- The owner ends membership, then starts again ---------------------
+    await member.close();
+    member = null;
+    members = await openMembers(page);
+    await members.getByTestId("settings-members-end-open").click();
+    await page.getByTestId("settings-members-confirm").click();
+    await expect(page.getByTestId("settings-members-ended")).toBeVisible();
+    expect((await relayJson(relay.baseUrl, MEMBER.token, `/sync/${workspaceId}/members`)).status).not.toBe(200);
+    await expect(members.getByTestId("settings-members-end-open")).toHaveCount(0);
+    await members.getByTestId("settings-members-level-control").getByRole("radio", { name: "View" }).click();
+    await expect.poll(async () => (await membersView(relay!, OWNER.token, workspaceId)).memberLevel).toBe("view");
+    await page.getByTestId("settings-members").screenshot({ path: shot("members-ended") });
 
     expect(owner.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
-    expect(member.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
   } finally {
     await cleanupDesktopWorkspace(member, memberTemp);
     await cleanupDesktopWorkspace(owner, ownerTemp);
