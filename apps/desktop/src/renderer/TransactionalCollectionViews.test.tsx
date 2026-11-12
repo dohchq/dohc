@@ -9,7 +9,7 @@ import { resetKeptCollectionEditsForTests, TransactionalCollectionPage, type Tra
 import type { CollectionTableView } from "./collectionTableViews";
 import { admitCollectionChanges, openCollectionChangeShell } from "./collectionChangeShells";
 vi.mock("@dohc/collection-views",()=>({
-  BoardView: (props:BoardViewProps)=><div data-testid="board" data-open-record={props.openRecordId??""} data-field-names={props.schema.fields.map(field=>props.fieldLabel?.(field.name)??field.name).join("|")}>{props.groups.map((group,index)=><section key={index} aria-label={String(group.value)}>{group.records.map(record=><div key={record.id}>{record.values.find(value=>value.field==="name")?.value as string}<button disabled={!props.onCellChange} onClick={()=>props.onCellChange?.({recordId:record.id,recordPath:"",field:props.groupBy,value:"Done"})}>Move {record.id}</button><button onClick={()=>props.onOpenRecord?.(record)}>Show {record.id}</button></div>)}{props.groupFooter?.(group,index)}</section>)}{props.onNewRecord?<button onClick={()=>props.onNewRecord?.("Done")}>New in Done</button>:null}</div>,
+  BoardView: (props:BoardViewProps)=><div data-testid="board" data-open-record={props.openRecordId??""} data-field-names={props.schema.fields.map(field=>props.fieldLabel?.(field.name)??field.name).join("|")}>{props.groups.map((group,index)=><section key={index} aria-label={String(group.value)}>{group.records.map(record=><div key={record.id}>{record.values.find(value=>value.field==="name")?.value as string}<button disabled={!props.onCellChange} onClick={()=>props.onCellChange?.({recordId:record.id,recordPath:"",field:props.groupBy,value:"Done"})}>Move {record.id}</button><button onClick={()=>props.onOpenRecord?.(record)}>Show {record.id}</button></div>)}{props.groupFooter?.(group,index)}</section>)}{props.onNewRecord?<><button onClick={()=>props.onNewRecord?.("Done")}>New in Done</button><button onClick={()=>props.onNewRecord?.(null)}>New with no value</button></>:null}</div>,
   CalendarView: (props:CalendarViewProps)=><div data-testid="calendar" data-open-record={props.openRecordId??""}><button onClick={()=>props.onNavigate?.(new Date(2027,0,1))}>January</button>{props.nearbyDates?.length ? <span>Nearby {props.nearbyDates.join(" ")}</span> : null}{props.records.map(record=><span key={record.id}>{record.id}<button onClick={()=>props.onOpenRecord?.(record)}>Show {record.id}</button></span>)}{props.onNewRecord?<button onClick={()=>props.onNewRecord?.("2026-11-20")}>New on November 20</button>:null}</div>,
 }));
 const dataset:TransactionalDatasetDescription={datasetId:"dataset",name:"Work",revision:1,revisionSha256:"a".repeat(64),tables:[{tableId:"table",name:"Tasks",fields:[
@@ -210,6 +210,23 @@ it("opens a board column's new record in the panel with the column's value fille
   fireEvent.click(screen.getByRole("button",{name:"Create record"}));
   await waitFor(()=>expect(invoke.mock.calls.filter(([request])=>request.operationId==="create").map(([request])=>request.input)).toEqual([{values:{name:"Ship it",status:"Done",date:null}}]));
   await waitFor(()=>expect(screen.queryByRole("complementary",{name:"New record"})).toBeNull());
+});
+it("opens the no value column's new record with the group field empty, over the field's default",async()=>{
+  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>({result:{...empty,group:(request.input as Record<string,AppBackendJson>).group!}}));
+  const view=setup(invoke);
+  const base=creating();
+  // Status starts as Todo in a new record, unless the column says it has no value.
+  const defaulted={...base,tables:[{...base.tables[0]!,fields:base.tables[0]!.fields.map(field=>field.fieldId==="status"?{...field,default:"Todo"}:field)}]};
+  view.rerender(<TransactionalCollectionPage {...view.props} dataset={defaulted}/>);
+  fireEvent.click(await screen.findByRole("button",{name:"New in Done"}));
+  expect(draftValue("Status")).toBe("Done");
+  fireEvent.click(within(draftPanel()).getByRole("button",{name:"Cancel"}));
+  fireEvent.click(screen.getByRole("button",{name:"New with no value"}));
+  expect(draftValue("Status")).toBe("Empty");
+  fireEvent.click(within(draftPanel()).getByRole("button",{name:"Cancel"}));
+  // New record beside the board fills nothing in, so the default shows.
+  fireEvent.click(screen.getByTestId("collection-new-record"));
+  expect(draftValue("Status")).toBe("Todo");
 });
 it("opens New record beside a board in the panel with no value filled in, and offers a column no New where the create does not take its field",async()=>{
   const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>({result:{...empty,group:(request.input as Record<string,AppBackendJson>).group!}}));

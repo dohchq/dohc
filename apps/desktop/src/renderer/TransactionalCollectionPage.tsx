@@ -114,6 +114,7 @@ const ALL_RECORDS = "all-records";
 const LAYOUT_TABS: readonly CollectionFrameTab[] = [{ id: "table", name: "Table", kind: "table" }, { id: "board", name: "Board", kind: "board" }, { id: "calendar", name: "Calendar", kind: "calendar" }];
 const NEW_RECORD_OPEN = "Create or cancel the new record first.";
 const RECORDS_LOADING = "Wait for the records to load.";
+const FILE_UPLOADING = "Wait for the file to upload.";
 const RECORDS_FAILED = "dohc could not load the records. Refresh first.";
 type Query = { after: TransactionalCursor | null; search: string; filters?: CollectionTableView["filters"]; sort?: { fieldId: string; direction: "asc" | "desc" } };
 /** A new record open in the panel, before it exists. A record's fields change in its cells and in its panel. */
@@ -263,6 +264,10 @@ interface Live {
   changeDraft(fieldId: string, value: AppBackendJson): void;
   /** What people call the table. */
   tableName: string;
+  /** A file of the new record in the panel started or stopped uploading. */
+  uploading(fieldId: string, busy: boolean): void;
+  /** Says a record the table's new row made has no row on screen. */
+  outOfView(): void;
   scope: CollectionResourceScope;
   offline: boolean;
   read: DatasetOperation;
@@ -316,6 +321,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   // What the person gave the new record in the panel, by field id. A field they have not touched shows a new
   // record's default, under the field's definition now.
   const [draft, setDraft] = useState<Record<string, Typed>>({});
+  const draftNow = useRef(draft); draftNow.current = draft;
   // What is wrong with each field the person tried to save, by field id.
   const [invalid, setInvalid] = useState<Readonly<Record<string, string>>>({});
   const errorIds = useId(), focusInvalid = useRef(false);
@@ -331,9 +337,17 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   const [formRefusal, setFormRefusal] = useState<string | null>(null);
   // The table's new row, while its save is with the queue: the change, and what tells the row how it ended.
   const rowSave = useRef<{ id: number; report(status: TableNewRecordStatus): boolean } | null>(null);
-  // The record a new row made, by its key, until a read shows whether this page of records holds it.
-  const createdKey = useRef<string | null>(null);
   const [undo, setUndo] = useState<Undo | null>(null);
+  // A file of the new record in the panel is uploading, by field. Until it ends, a create would go without the
+  // file, so the page's controls and the panel's buttons wait, and reads that would redraw the page are put off.
+  const [resourceBusy, setResourceBusy] = useState(false);
+  const pendingResources = useRef(new Set<string>());
+  function uploading(fieldId: string, busy: boolean): void {
+    if (busy) pendingResources.current.add(fieldId); else pendingResources.current.delete(fieldId);
+    if (alive.current) setResourceBusy(pendingResources.current.size > 0);
+  }
+  // Text an editor of the new record held when it went with the page, by field, which the kept record takes.
+  const leftInEditors = useRef<Record<string, Typed>>({});
   const alive = useRef(true), sequence = useRef(0), readActive = useRef<AbortController | null>(null);
   // A full read of records holds the page's own controls. A change never does.
   const locked = useRef(false);
@@ -395,7 +409,6 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       setPage(loaded); setQuery(next); setPrevious(history);
       settle();
       showRead(shows, loaded.rows);
-      noteCreated(loaded.rows);
       shown = loaded.rows;
     } catch (cause) {
       if (alive.current && sequence.current === mine && !abort.signal.aborted) {
@@ -496,7 +509,11 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     keptEdits.delete(keptKey);
     // A new record whose change is with the queue is not kept: the queue has the change, and reports how it ended.
     // One not opened again yet, because the page closed before its records showed, stays kept.
-    return () => { const kept = keeping.current ?? restoring.current; if (kept && awaitingRef.current === null) keptEdits.set(keptKey, kept); };
+    return () => {
+      const kept = keeping.current ?? restoring.current;
+      // Text an editor gave up before this ran is part of what is kept. Text given up after it is added to what was kept, below.
+      if (kept && awaitingRef.current === null) keptEdits.set(keptKey, { editor: kept.editor, draft: { ...kept.draft, ...leftInEditors.current } });
+    };
   }, [keptKey]);
   useLayoutEffect(() => {
     const kept = restoring.current;
@@ -512,10 +529,10 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     void load({ after: null, search: view?.search ?? "", filters: view?.filters, sort: view?.sort ?? undefined }, []);
   }, [activeViewKey]);
   useEffect(() => {
-    if (loadedVersion.current === props.recordsVersion || busy || editor) return;
+    if (loadedVersion.current === props.recordsVersion || busy || editor || resourceBusy) return;
     loadedVersion.current = props.recordsVersion;
     void load(currentQuery.current);
-  }, [props.recordsVersion, editor, busy]);
+  }, [props.recordsVersion, editor, resourceBusy, busy]);
   /**
    * Reads the shown page again in place: no loading line, nothing disabled,
    * and an open record stays open, with its new values. A later read
@@ -540,19 +557,12 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       settle();
       showOpenRecord(loaded.rows);
       showRead(shows, loaded.rows);
-      noteCreated(loaded.rows);
     } catch (cause) {
       // Otherwise nothing to say: the change happened elsewhere, and the page still shows its last read.
       if (failure === undefined || !alive.current || sequence.current !== mine || abort.signal.aborted) return;
       setPage(null); setDetails(null);
       failLoad(failure, cause, () => { if (alive.current) void load(next, []); });
     }
-  }
-  /** A record the table's new row made is not among the records a read shows, as on another page of them or outside a search, so a notice says it was made. */
-  function noteCreated(rows: readonly TransactionalRow[]): void {
-    const key = createdKey.current;
-    createdKey.current = null;
-    if (key !== null && !rows.some(row => JSON.stringify(row.id) === key)) props.onNotice?.("Created a record. It is not on this page of records.");
   }
   /**
    * The open record shows what a read found of it. One the read left out, as
@@ -630,11 +640,11 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   // What changed elsewhere waits for a full read in flight to end, then shows in place. The lock is
   // read now, not from this render, since a read the effect above started in this same commit has taken it.
   useEffect(() => {
-    if (changedVersion.current === props.recordsChanged || busy || visualBusy || locked.current) return;
+    if (changedVersion.current === props.recordsChanged || busy || visualBusy || resourceBusy || locked.current) return;
     changedVersion.current = props.recordsChanged;
     if (visual) setVisualChanged(value => value + 1);
     else void reread();
-  }, [props.recordsChanged, busy, visualBusy]);
+  }, [props.recordsChanged, busy, visualBusy, resourceBusy]);
   // A read the queue asked for while another read held the page, which runs once that one ends.
   const readWanted = useRef(false);
   /** The queue's changes are confirmed or refused, so the page reads its records again in place, with nothing disabled. */
@@ -649,7 +659,31 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   // The reads a board or calendar made since it last showed records. The earliest tells the queue which changes they show.
   const visualRead = useRef(Number.POSITIVE_INFINITY);
 
-  function closeEditor(): void { setEditor(null); setInvalid({}); setFormRefusal(null); awaitingRef.current = null; setAwaiting(null); }
+  function closeEditor(): void {
+    setEditor(null); setInvalid({}); setFormRefusal(null); awaitingRef.current = null; setAwaiting(null);
+    // An upload of the record that is gone holds nothing more.
+    pendingResources.current.clear(); setResourceBusy(false);
+  }
+  // The record in the panel, as the page last had it, for text an editor gives up once the page has closed.
+  const openDraft = useRef<Editor | null>(null);
+  openDraft.current = editor;
+  /**
+   * Text still in an editor of the new record when the editor went, neither saved nor cancelled. While the page
+   * is open it goes into the record as a value. Once the page has closed, as with its tab or its workspace, it
+   * goes into the record the page keeps. Text its field cannot take is kept as the text, with its field, which
+   * Create record then points at.
+   */
+  function keepDraftText(left: TableAbandonedDraft): void {
+    const field = table?.fields.find(entry => entry.fieldId === left.field);
+    if (!field) return;
+    const value = left.value === undefined ? left.text : jsonValue(left.value) ?? left.text;
+    if (alive.current) { changeDraft(field.fieldId, value); return; }
+    const record = openDraft.current;
+    if (!record || awaitingRef.current !== null) return;
+    leftInEditors.current = { ...leftInEditors.current, [field.fieldId]: { value, under: field } };
+    const kept = keptEdits.get(keptKey) ?? { editor: record, draft: draftNow.current };
+    keptEdits.set(keptKey, { editor: kept.editor, draft: { ...kept.draft, ...leftInEditors.current } });
+  }
   /** Gives a field of the panel's new record a value, which takes back what was wrong with the one before. */
   function changeDraft(fieldId: string, value: AppBackendJson): void {
     const field = table?.fields.find(entry => entry.fieldId === fieldId);
@@ -672,16 +706,24 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     const row = rowSave.current;
     if (row?.id !== write.id) return;
     rowSave.current = null;
-    // The record exists, so the row goes. The next read says whether this page of records holds the record.
-    if (row.report({ state: "saved" })) createdKey.current = receiptKey(receipt);
+    // The record exists and nothing of it is left to do, so the row goes. The page reads its records next, and
+    // the table then says whether a row on screen shows the record.
+    const key = receiptKey(receipt);
+    row.report({ state: "saved", ...(key === null ? {} : { recordId: key }) });
   }
   /** A change went unsaved. The row or the panel that sent it stays, with what was typed, and says why. */
   function dropped(write: QueuedWrite, reason: string, refused: boolean): boolean {
     const row = rowSave.current;
     if (row?.id === write.id) {
       rowSave.current = null;
-      // A row that went with its table leaves the new record to the page's list.
-      return row.report({ state: "refused", reason });
+      // Only a create the Collection did not run comes back to the row for typing: one it refused, or one never
+      // sent. Its request was out, whoever asked for the try, and it did not run. A row that went with its
+      // table leaves the new record to the page's list.
+      if (refused || !write.request) { row.report({ state: "pending" }); return row.report({ state: "refused", reason }); }
+      // A create that was sent and not refused may have run, so the row never takes typing or sends again. It
+      // goes, and the queue keeps what it held in the page's list, as for any change that may have run.
+      row.report({ state: "dropped" });
+      return false;
     }
     if (awaitingRef.current !== write.id) {
       // A new record the Collection refused, with no row or panel left to show it, opens in the panel with what was typed and why, while the panel holds no other.
@@ -701,12 +743,14 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     if (awaitingRef.current === write.id) closeEditor();
     const row = rowSave.current;
     if (row?.id !== write.id) return;
-    const shown = row.report({ state: "unconfirmed", reason: unconfirmedWords(write),
-      // Try again sends the same request. An offline copy sends nothing, so the row keeps its Try again.
-      retry: () => { queue.retry(write.id); if (queue.find(write.id)?.state !== "unconfirmed") row.report({ state: "pending" }); },
+    const doubt: TableNewRecordStatus = { state: "unconfirmed", reason: unconfirmedWords(write),
+      // Try again sends the same request, with the same key. An offline copy sends nothing, so the row is in doubt still.
+      retry: () => { queue.retry(write.id); if (queue.find(write.id)?.state === "unconfirmed") row.report(doubt); },
       // The change may have saved, so the queue keeps what it held, and the page lists it.
-      discard: () => { rowSave.current = null; queue.discard(write.id); } });
-    if (!shown) rowSave.current = null;
+      discard: () => { rowSave.current = null; queue.discard(write.id); },
+      // The row went with its table. The queue still has the change, and the page's list shows it.
+      released: () => { if (rowSave.current?.id === write.id) rowSave.current = null; } };
+    if (!row.report(doubt)) rowSave.current = null;
   }
   /**
    * Saves the table's new row: one create with every value typed in it, and
@@ -723,8 +767,17 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       onError(message, new TextNotSavedError(message, typed), null);
     };
     if (!create || !table) return refuse(RULES_DISALLOW);
+    // A value in a field the create does not take is never sent. It goes to a notice, so it is not dropped in silence.
+    const stray = Object.entries(values).filter(([fieldId, value]) => !create.fieldIds.includes(fieldId) && !isEmptyValue(jsonValue(value) ?? null));
+    if (stray.length > 0) {
+      const kept = stray.map(([fieldId, value]) => `${knownFields.current.get(fieldId)?.name ?? fieldId}: ${display(jsonValue(value))}`).join(", ");
+      const message = `dohc did not save part of the new record, because a new record in ${table.name} no longer takes it. You typed: ${kept}`;
+      onError(message, new TextNotSavedError(message, kept), null);
+    }
     const typed: Record<string, Typed> = {};
     for (const field of createFields) {
+      // The row's cells show each field's default, so what they hold is what is sent: a default left alone, and an
+      // explicit empty value where the person cleared one. A field the row does not show takes its default.
       const given = Object.hasOwn(values, field.fieldId) ? jsonValue(values[field.fieldId] ?? null) : initialValue(field);
       const problem = given === undefined ? `Enter a value ${field.name} can take.` : inputProblem(field, given);
       if (given === undefined || problem !== null) {
@@ -777,10 +830,13 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   }
   // The panel's new record's change, while its host has not answered.
   const sent = awaiting === null ? undefined : queue.find(awaiting);
-  // A full read or a view opening holds the page's own controls. A change waiting to be confirmed never does.
-  const disabled = busy || visualBusy;
-  // The new record's fields and buttons wait while its change is with the host.
-  const formDisabled = disabled || sent !== undefined;
+  // A full read, a view opening, or an upload holds the page's own controls. A change waiting to be confirmed never does.
+  const disabled = busy || visualBusy || resourceBusy;
+  // The new record's fields wait for a read, and while its change is with the host. An upload does not hold them,
+  // so the file's own editor can still stop it.
+  const draftLocked = busy || visualBusy || sent !== undefined;
+  // Its buttons wait for an upload too: Create record would go without the file, and Cancel would drop it.
+  const formDisabled = draftLocked || resourceBusy;
   // Records that could not load take no changes until a read shows them; Search and Refresh still read again.
   const writeDisabled = disabled || failure !== null;
   // A new record that leaves the panel returns focus to its opener once that is enabled again, unless the person has moved on.
@@ -882,7 +938,9 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   const rowTakes = (field: TransactionalField) => shownIds.has(field.fieldId) && supportsInput(field);
   const needsPanel = createFields.some(field => field.required && isEmptyValue(initialValue(field)) && !rowTakes(field));
   const creatableIds = createFields.filter(rowTakes).map(field => field.fieldId);
-  const creatableKey = JSON.stringify(creatableIds);
+  // What a new record starts with in the fields the row shows, which the row's cells show too.
+  const rowDefaults = Object.fromEntries(createFields.filter(field => rowTakes(field) && field.default !== undefined && field.default !== null).map(field => [field.fieldId, field.default as CollectionValue]));
+  const creatableKey = JSON.stringify([creatableIds, rowDefaults]);
   // What starts the table's new row, while a table shows.
   const startRow = useRef<(() => void) | null>(null);
   // Built again only when the fields a new record takes change, so a queued change builds nothing in the table.
@@ -890,6 +948,8 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     const takes = new Set(creatableIds);
     return {
       canEdit: field => takes.has(field.name),
+      defaults: rowDefaults,
+      onOutOfView: () => live.current?.outOfView(),
       bind: start => { startRow.current = start; return () => { if (startRow.current === start) startRow.current = null; }; },
       save: (values, report) => saveRow.current(values, report),
       // What the row held and did not save is kept in a notice, with all of it in its details. Nothing is created.
@@ -936,6 +996,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       const initial = status ? status.value as AppBackendJson : now.rows.get(record.id)?.values[field.fieldId] ?? emptyValue(field);
       // A new definition, such as another related table, gets a new editor with nothing it found under the old one.
       return <ResourceCellEditor key={fieldShape(field)} scope={now.scope} field={field} initial={initial} upload={now.resources.uploadFile} resolve={now.resources.resolveRelation} onError={now.onError}
+        onBusy={record.id === NEW_RECORD ? busy => live.current?.uploading(field.fieldId, busy) : undefined}
         onSave={value => { commitCell(record.id, field.fieldId, value); }} onClose={close} />;
     } : undefined,
   }]));
@@ -950,10 +1011,12 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   const nameOmitted = useMemo(() => nameFieldId === undefined ? [] : [nameFieldId], [nameFieldId]);
 
   if (!table || !read) return <section aria-label="Collection" className="p-4 text-sm text-muted">This collection is unavailable. Ask its owner for access.</section>;
-  // Why the panel's new record can't be made, over its buttons.
+  // Why the panel's new record can't be made, or why its buttons wait, over them.
   const formBlocked = editor && !formOperation ? offline ? SAVE_OFFLINE : CHANGE_GONE : null;
   const formProblem = formBlocked === SAVE_OFFLINE ? null : formBlocked ?? formRefusal;
-  const formNote = formProblem !== null ? <FieldError id={`${errorIds}-form`}>{formProblem}</FieldError> : formBlocked !== null ? <p className="m-0 text-[12px] text-muted">{formBlocked}</p> : null;
+  const formNote = formProblem !== null ? <FieldError id={`${errorIds}-form`}>{formProblem}</FieldError>
+    : formBlocked !== null ? <p className="m-0 text-[12px] text-muted">{formBlocked}</p>
+    : resourceBusy ? <p role="status" className="m-0 text-[12px] text-muted">{FILE_UPLOADING}</p> : null;
   /** Opens a new record in the panel, in place of the record or the automations it shows. `filled`: values it starts with, as a board column's. */
   const openCreate = (opener: HTMLElement | null, filled: Record<string, Typed> = {}) => {
     if (!create) return;
@@ -968,7 +1031,8 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   if (openKey !== null && details !== null && !rows.has(openKey)) liveRows.set(openKey, details);
   if (editor) liveRows.set(NEW_RECORD, { id: NEW_RECORD, version: 0, values: Object.fromEntries(form.map(entry => [entry.field.fieldId, entry.value])) });
   live.current = { rows: liveRows, openRecord: openPanel, fields, editable: new Set(editableIds), editOperation, held: disabled || editor !== null, query, load, openCreate, scope, offline, read,
-    creatable: new Set(creatableIds), changeDraft, tableName: table.name, resources: { uploadFile: props.uploadFile, readFile: props.readFile, resolveRelation: props.resolveRelation }, onError };
+    creatable: new Set(creatableIds), changeDraft, tableName: table.name, uploading,
+    outOfView: () => props.onNotice?.("Created a record. It is not among the records on screen."), resources: { uploadFile: props.uploadFile, readFile: props.readFile, resolveRelation: props.resolveRelation }, onError };
   // The table's new row shows its own change while a table shows that takes one. Without it, the page's list does.
   const rowHosted = !visual && page !== null && canCreate === true && !needsPanel;
   if (!rowHosted) rowSave.current = null;
@@ -1073,8 +1137,8 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     width={recordPanel.width} onWidthChange={recordPanel.setWidth} onClose={cancelDraft}
     properties={<>
       <RecordProperties schema={visualSchema(draftShown.map(entry => entry.field))} record={draftRecord} fieldLabel={fieldId => knownFields.current.get(fieldId)?.name ?? fieldId}
-        onCellChange={change => { changeDraft(change.field, jsonValue(change.value) ?? null); return queue.skip(); }} editingDisabled={formDisabled || !formOperation}
-        acknowledgedWriteId={view.acknowledged} hostCells={draftHostCells} problems={new Map(Object.entries(invalid))} />
+        onCellChange={change => { changeDraft(change.field, jsonValue(change.value) ?? null); return queue.skip(); }} onDraftAbandoned={keepDraftText}
+        editingDisabled={draftLocked || !formOperation} acknowledgedWriteId={view.acknowledged} hostCells={draftHostCells} problems={new Map(Object.entries(invalid))} />
       {form.filter(entry => entry.changed).map(changedValue)}
     </>}
     actions={<>
@@ -1127,13 +1191,13 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     {visual && shownView?.kind === "calendar" && !shownView.dateField ? <CalendarNeedsDateField disabled={writeDisabled || editor !== null} onAddDateField={props.onAddDateField} />
     : visual && shownView ? <div className="flex min-h-0 flex-1 flex-col px-5 pb-3 first:pt-3"><Suspense fallback={<SkeletonRows label="Opening view…" />}><TransactionalCollectionViews key={JSON.stringify([activeViewKey,query.search,visualEpoch])} view={shownView} fields={fields} search={query.search} refresh={visualRefresh} changed={visualChanged} rules={contractKey}
       onReadInPlace={rows => { const shows = Number.isFinite(visualRead.current) ? visualRead.current : -1; visualRead.current = Number.POSITIVE_INFINITY; showOpenRecord(rows); showRead(shows, rows); }}
-      disabled={busy || editor !== null} onBusy={setVisualBusy} onError={failLoad} onLoaded={settle}
+      disabled={busy || resourceBusy || editor !== null} onBusy={setVisualBusy} onError={failLoad} onLoaded={settle}
       read={(input,signal)=>{ visualRead.current = Math.min(visualRead.current, view.readStarted()); return invoke(request(read,input,crypto.randomUUID()),signal); }}
       openRecord={openKey} onOpen={openPanel}
       // A column's New and a day's New record open the new record in the panel, with the column's value or the day filled in.
       canNew={fieldId=>canCreate===true&&create.fieldIds.includes(fieldId)}
       onNew={(fieldId,value)=>{const field=table.fields.find(entry=>entry.fieldId===fieldId);
-        openCreate(document.activeElement instanceof HTMLElement?document.activeElement:null,field&&!isEmptyValue(value)?{[fieldId]:{value,under:field}}:{});}}
+        openCreate(document.activeElement instanceof HTMLElement?document.activeElement:null,field?{[fieldId]:{value,under:field}}:{});}}
       canMove={fieldId=>editOperation(fieldId)!==undefined}
       onMove={(row,fieldId,value)=>{const operation=editOperation(fieldId),field=fields.find(field=>field.fieldId===fieldId);if(!operation||!field||disabled)return;
         queue.enqueue({kind:"edit",record:row,operationId:operation.operationId,values:{[fieldId]:{value,under:field}},label:"Moved the record"},view);}} /></Suspense></div> : null}

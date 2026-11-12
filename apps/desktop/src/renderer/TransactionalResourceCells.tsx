@@ -59,6 +59,8 @@ export function ResourceCellEditor(props: {
   onError: CollectionResourceError;
   onSave(value: AppBackendJson): void;
   onClose(): void;
+  /** A file started or stopped uploading, for a host that holds what would go without it. */
+  onBusy?(busy: boolean): void;
 }) {
   const { field } = props;
   const [value, setValue] = useState(props.initial);
@@ -71,7 +73,7 @@ export function ResourceCellEditor(props: {
     if (event.defaultPrevented || isComposingKey(event) || event.key !== "Escape") return;
     event.preventDefault(); event.stopPropagation(); props.onClose();
   }}>
-    {field.type === "attachment" && props.upload ? <CollectionAttachmentInput {...input} upload={props.upload} onBusy={setUploading} />
+    {field.type === "attachment" && props.upload ? <CollectionAttachmentInput {...input} upload={props.upload} onBusy={busy => { setUploading(busy); props.onBusy?.(busy); }} />
       : props.resolve ? <CollectionRelationInput {...input} resolve={props.resolve} /> : null}
     <div className="flex justify-end gap-2">
       <SecondaryButton size="compact" onClick={props.onClose}>Cancel</SecondaryButton>
