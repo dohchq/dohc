@@ -8,6 +8,7 @@ import {
   publishOperation,
   settleOperations,
   tombstoneSettledOperations,
+  type PublicationAnswer,
   type PublicationCommand,
   type PublicationCopy,
   type PublicationStage,
@@ -18,6 +19,7 @@ import { OPERATION_ACTIVE_MS, OPERATION_TOMBSTONE_BATCH, type OperationRecord, t
 import { closeTestStorages, inspectDatabase, storagePath, testStorage } from "./testing";
 
 afterEach(async () => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   await closeTestStorages();
 });
@@ -137,6 +139,14 @@ function copy(receipts: Map<string, unknown>) {
 /** Reads receipts as the engine would answer them, decoded as the wrapper decodes them. */
 const reader = (receipts: Map<string, unknown>): ReceiptReader => async (stageKeys) =>
   decodeOrdinaryPublicationState({ stages: stageKeys.map((stageKey) => receipts.get(stageKey) ?? { stageKey, state: "absent" }) }, stageKeys);
+
+// Starts a write's publication on fake timers, and tells whether it has answered yet.
+function answering(start: () => Promise<PublicationAnswer>) {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  let answered = false;
+  const answer = start().finally(() => { answered = true; });
+  return { answer, answered: () => answered };
+}
 
 // A clock that moves only when the driver waits.
 function clock() {
@@ -290,7 +300,13 @@ describe("a phone write's publication", () => {
     engine.hold("step");
     const authorize = vi.fn(async () => undefined);
     const caller = new AbortController();
-    const answered = await publishOperation({ storage, copy: engine.replica, record: write, authorize, signal: caller.signal, deadlineMs: 50, nowMs: () => 1 });
+    const publishing = answering(() =>
+      publishOperation({ storage, copy: engine.replica, record: write, authorize, signal: caller.signal, deadlineMs: 50, nowMs: () => 1 }));
+    await vi.advanceTimersByTimeAsync(49);
+    expect(publishing.answered(), "it waits until its deadline").toBe(false);
+    expect(authorize).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    const answered = await publishing.answer;
     expect(answered).toMatchObject({ state: "pending", record: { stage: "publishing" } });
     expect(authorize).toHaveBeenCalledOnce();
     expect(engine.signals[0]?.aborted, "the step heard the deadline").toBe(true);
@@ -302,7 +318,12 @@ describe("a phone write's publication", () => {
     const write = record(storage, { stages: [replyStage()] });
     const engine = copy(new Map());
     engine.hold("receipts");
-    const answered = await publishOperation({ storage, copy: engine.replica, record: write, deadlineMs: 50, nowMs: () => 1 });
+    const publishing = answering(() => publishOperation({ storage, copy: engine.replica, record: write, deadlineMs: 50, nowMs: () => 1 }));
+    await vi.advanceTimersByTimeAsync(49);
+    expect(publishing.answered(), "it waits until its deadline").toBe(false);
+    expect(engine.signals[0]?.aborted, "the read is still waiting").toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const answered = await publishing.answer;
     expect(answered).toMatchObject({ state: "pending", record: { stage: "publishing" } });
     expect(engine.signals[0]?.aborted).toBe(true);
   });
