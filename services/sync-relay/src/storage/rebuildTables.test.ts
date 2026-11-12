@@ -20,7 +20,7 @@ const withoutShare = "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT NOT 
 
 it("drops a column only when the caller names it, and keeps every other column's rows", () => {
   withTable(db => {
-    expect(() => rebuildTables(db, ["notes"], () => withoutShare)).toThrow(/would lose a column/);
+    expect(() => rebuildTables(db, ["notes"], () => withoutShare)).toThrow("rebuilding notes would lose share_id");
   });
   withTable(db => {
     rebuildTables(db, ["notes"], () => withoutShare, ["share_id"]);
