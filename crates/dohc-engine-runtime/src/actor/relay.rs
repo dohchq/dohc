@@ -3586,17 +3586,14 @@ fn park_departed_hosted(
 
 /// End the file writes still pending at each of `document`'s paths in
 /// `active`, the version the root holds, where the file already holds its
-/// head. A pull's projection of a Y.Doc update queues its own write of the
-/// file, and the pull's page then writes the file itself. Only a session's
-/// settlement or a restart replayed the queued writes, so a document no
-/// session opened waited at the unload check for the next restart (#3793).
+/// head. A document that left the scope with writes queued, and that no
+/// session settles, would otherwise wait at the unload check for the next
+/// restart (#3793).
 ///
-/// A queued write of an earlier state is cancelled: the head replaced it,
-/// and a replay would find the file changed and keep that state beside it
-/// as a conflict file. The write of the head itself is replayed, which only
-/// records that the file holds it. The store keeps every state as a moment,
-/// so nothing is lost. A file that holds anything else keeps its writes
-/// pending, and the unload check holds the document as before.
+/// `end_superseded_writes` cancels each queued write of an earlier state.
+/// The write of the head itself is replayed, which only records that the
+/// file holds it. A file that holds anything else keeps its writes pending,
+/// and the unload check holds the document as before.
 fn end_departed_writes(
     store: &mut EngineStore,
     workspace_id: &str,
@@ -3605,52 +3602,23 @@ fn end_departed_writes(
     active: &str,
     now_ms: i64,
 ) -> Result<(), RuntimeError> {
-    use dohc_engine_files::ProjectionTargetState as File;
-    use dohc_engine_storage::StorageError;
+    use super::materialization::{SupersededWrites, end_superseded_writes};
     let mut head_writes = std::collections::HashSet::new();
     for head in document
         .heads
         .iter()
         .filter(|head| head.version_id == active)
     {
-        if !matches!(
-            dohc_engine_files::probe_projection_target(
-                root,
-                &head.path,
-                dohc_engine_files::ProjectionTargetKind::Plaintext,
-            ),
-            File::Text { sha256 } | File::Binary { sha256 } if sha256 == head.sha256
-        ) {
-            continue;
-        }
-        let outcome = store.write_with(&NoFaults, |tx| {
-            tx.execute(
-                "UPDATE materialization_jobs SET status='cancelled',completed_at_ms=?4 \
-                 WHERE status='pending' AND operation='write' AND target_path=?2 \
-                   AND (workspace_id=?1 OR workspace_id='') AND content_sha256<>?3",
-                rusqlite::params![workspace_id, head.path, head.sha256, now_ms],
-            )
-            .map_err(StorageError::persist_public)?;
-            let mut statement = tx
-                .prepare(
-                    "SELECT job_id FROM materialization_jobs \
-                     WHERE status='pending' AND operation='write' AND target_path=?2 \
-                       AND (workspace_id=?1 OR workspace_id='') AND content_sha256=?3",
-                )
-                .map_err(StorageError::corrupt_public)?;
-            let jobs = statement
-                .query_map(
-                    rusqlite::params![workspace_id, head.path, head.sha256],
-                    |row| row.get::<_, String>(0),
-                )
-                .map_err(StorageError::corrupt_public)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(StorageError::corrupt_public)?;
-            Ok::<_, StorageError>(jobs)
-        })?;
-        match outcome {
-            TxnOutcome::Committed(jobs) => head_writes.extend(jobs),
-            TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
+        if let Some(ended) = end_superseded_writes(
+            store,
+            root,
+            workspace_id,
+            &head.path,
+            &head.sha256,
+            SupersededWrites::All,
+            now_ms,
+        )? {
+            head_writes.extend(ended.head_writes);
         }
     }
     if head_writes.is_empty() {

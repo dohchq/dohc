@@ -939,6 +939,11 @@ fn replay_materializations(
             hard_errors: Vec::new(),
         };
         let mut secret_key: Option<SecretDataKey> = None;
+        // Writes this replay cancelled as superseded, before it reached them.
+        let mut superseded: HashSet<String> = HashSet::new();
+        // Whether the workspace is a hosted replica, read at the first
+        // projection write.
+        let mut is_hosted: Option<bool> = None;
         // Replay changes disk and the job ledger, never active tips.
         let mut active_paths: std::collections::HashMap<String, Vec<String>> = Default::default();
         let mut paths_loaded = false;
@@ -1258,6 +1263,40 @@ fn replay_materializations(
                 summary.completed += 1;
                 continue;
             }
+            // On a hosted replica, a projection's write of a state the path's
+            // head replaced never runs once the file holds that head: it
+            // could only conflict (#3804). Any other store replays it as
+            // before.
+            let projection_write = job.operation == MaterializationOperation::Write
+                && job.job_id.starts_with("ydoc-mat_");
+            if projection_write && is_hosted.is_none() {
+                is_hosted = Some(dohc_engine_sync::is_hosted_replica(
+                    store,
+                    scope.workspace_id,
+                )?);
+            }
+            if projection_write && is_hosted == Some(true) {
+                if !superseded.contains(&job.job_id)
+                    && let Some(head) =
+                        active_head_sha(store, scope.workspace_id, &job.target_path)?
+                    && head != job.content_sha256
+                    && let Some(ended) = end_superseded_writes(
+                        store,
+                        root_dir,
+                        scope.workspace_id,
+                        &job.target_path,
+                        &head,
+                        SupersededWrites::Projections,
+                        now_ms,
+                    )?
+                {
+                    superseded.extend(ended.cancelled);
+                }
+                if superseded.remove(&job.job_id) {
+                    summary.completed += 1;
+                    continue;
+                }
+            }
             if let Some(recorder) = scope.self_writes {
                 recorder.record(scope.workspace_id, &job.target_path, &job.content_sha256);
             }
@@ -1420,6 +1459,131 @@ fn replay_materializations(
         }
     }
     Ok(summary)
+}
+
+/// Which queued writes at a path its head supersedes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SupersededWrites {
+    /// The writes Y.Doc projections queued, `ydoc-mat_…`.
+    Projections,
+    /// Every queued write, for a document that left a hosted scope: its file
+    /// goes next.
+    All,
+}
+
+/// What [`end_superseded_writes`] found at a path whose file holds its head.
+#[derive(Debug, Default)]
+pub(super) struct EndedWrites {
+    /// The queued writes of earlier states, now cancelled.
+    pub(super) cancelled: Vec<String>,
+    /// The queued writes of the head itself. Replaying one finds the file
+    /// equal to its content and marks it complete without writing.
+    pub(super) head_writes: Vec<String>,
+}
+
+/// End the queued writes that the head at `path` replaced, once the file
+/// holds that head.
+///
+/// A Y.Doc projection queues a write of the file that expects the file to
+/// hold the head before it. When something else brings the file to a later
+/// head, as a pull's page does (#3804), that write can no longer land: a
+/// replay finds the file changed and keeps the write's content beside it as
+/// a conflict file. The content is an earlier state the store still holds as
+/// a moment, and the head replaced it, so the write is cancelled instead.
+///
+/// `None`, changing nothing, unless the file holds exactly `head_sha256`. An
+/// absent file, or one holding anything else, keeps its writes for the
+/// ordinary replay, which lands them in order or reports the conflict.
+pub(super) fn end_superseded_writes(
+    store: &mut EngineStore,
+    root_dir: &std::path::Path,
+    workspace_id: &str,
+    path: &str,
+    head_sha256: &str,
+    writes: SupersededWrites,
+    now_ms: i64,
+) -> Result<Option<EndedWrites>, RuntimeError> {
+    use dohc_engine_files::ProjectionTargetState as File;
+    if !matches!(
+        dohc_engine_files::probe_projection_target(
+            root_dir,
+            path,
+            dohc_engine_files::ProjectionTargetKind::Plaintext,
+        ),
+        File::Text { sha256 } | File::Binary { sha256 } if sha256 == head_sha256
+    ) {
+        return Ok(None);
+    }
+    let projections = writes == SupersededWrites::Projections;
+    let pending = store.read_with(|conn| {
+        let mut statement = conn
+            .prepare_cached(
+                "SELECT job_id, content_sha256=?3 FROM materialization_jobs \
+                 WHERE status='pending' AND operation='write' AND target_path=?2 \
+                   AND (workspace_id=?1 OR workspace_id='') \
+                   AND (?4=0 OR job_id GLOB 'ydoc-mat_*')",
+            )
+            .map_err(StorageError::corrupt_public)?;
+        let pending = statement
+            .query_map(
+                params![workspace_id, path, head_sha256, projections],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
+            )
+            .map_err(StorageError::corrupt_public)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::corrupt_public)?;
+        Ok::<_, StorageError>(pending)
+    })?;
+    let mut ended = EndedWrites::default();
+    for (job_id, writes_head) in pending {
+        if writes_head {
+            ended.head_writes.push(job_id);
+        } else {
+            ended.cancelled.push(job_id);
+        }
+    }
+    if ended.cancelled.is_empty() {
+        return Ok(Some(ended));
+    }
+    let outcome = store.write_with(&NoFaults, |tx| {
+        tx.execute(
+            "UPDATE materialization_jobs SET status='cancelled',completed_at_ms=?5 \
+             WHERE status='pending' AND operation='write' AND target_path=?2 \
+               AND (workspace_id=?1 OR workspace_id='') \
+               AND (?4=0 OR job_id GLOB 'ydoc-mat_*') AND content_sha256<>?3",
+            params![workspace_id, path, head_sha256, projections, now_ms],
+        )
+        .map_err(StorageError::persist_public)
+    })?;
+    match outcome {
+        dohc_engine_storage::TxnOutcome::Committed(_) => Ok(Some(ended)),
+        dohc_engine_storage::TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
+}
+
+/// The digest of the head at `path` in the version the root holds, if the
+/// path has one.
+pub(super) fn active_head_sha(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    path: &str,
+) -> Result<Option<String>, RuntimeError> {
+    let version = match VersionedTextStore::new(store).get_active_version(workspace_id) {
+        Ok(version) => version,
+        Err(DomainError::WorkspaceNotFound) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    Ok(store.read_with(|conn| {
+        conn.query_row(
+            "SELECT COALESCE(blob_sha256,binary_sha256) FROM snapshots \
+             WHERE workspace_id=?1 AND version_id=?2 AND path=?3",
+            params![workspace_id, version.version_id, path],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map(Option::flatten)
+        .map_err(StorageError::corrupt_public)
+    })?)
 }
 
 // ASCII collision keys lowercase each segment and strip trailing dots/spaces.
