@@ -46,6 +46,13 @@ import {
 } from "@dohc/workspace-operations/chats";
 import { documentsUnavailable, readDocument, type DocumentsHost } from "@dohc/workspace-operations/documents";
 import {
+  answerDecision,
+  postToGroup,
+  replyInThread,
+  sendToStream,
+  type ChatDecision,
+} from "@dohc/workspace-operations/chat-writes";
+import {
   CLI_PROTOCOL_VERSION,
   CHAT_WATCH_TIMEOUT_MS,
   MAX_CLI_REQUEST_BYTES,
@@ -3471,19 +3478,21 @@ async function dispatchWorkspace(
       }
       const actor = writeActor(request.args.actor, context, options);
       refusePersonWork(actor, request.args.work);
-      const started = await options.chatWrites.startThread(context, {
+      const host = options.chatWrites.host(context, {
         writer: cliChatWriter(actor, context, request.args.agent, request.args.reported),
-        channelId: channel.engine.id,
-        // A chat-only group shows only its chat lane.
-        ...(channel.engine.type === "chat" ? { lane: "chat" as const } : {}),
-        ...(request.args.title ? { title: request.args.title } : {}),
-        body: request.args.body,
-        needsDecision: request.args.needsDecision,
-        ...(request.args.options ? { options: request.args.options } : {}),
         ...(request.args.work ? { work: request.args.work } : {}),
         resolveAttachments: () =>
           resolveAttachments(context, request.args.cwd, request.args.attachments),
       });
+      const message = {
+        channelId: channel.engine.id,
+        ...(request.args.title ? { title: request.args.title } : {}),
+        body: request.args.body,
+        needsDecision: request.args.needsDecision,
+        ...(request.args.options ? { options: request.args.options } : {}),
+      };
+      // A chat-only group shows only its chat lane, so a post there joins it.
+      const started = channel.engine.type === "chat" ? await sendToStream(host, message) : await postToGroup(host, message);
       const linkWarning = await linkRunMessage(context, {
         actor,
         ...(request.args.runId ? { runId: request.args.runId } : {}),
@@ -3492,7 +3501,7 @@ async function dispatchWorkspace(
       await notifyWrite(options, context);
       return {
         group: channel.cli,
-        threadId: cliThreadId(started.thread.id),
+        threadId: cliThreadId(started.threadId),
         messageId: cliMessageId(started.message.id),
         title: started.thread.title,
         ...(linkWarning ? { warning: linkWarning } : {}),
@@ -3519,6 +3528,7 @@ async function dispatchWorkspace(
           ? await askingThreadParent(context, threadId, messages, context.connected ? null : request.args.runId ?? context.run?.runId ?? null, options.onError)
           : undefined;
       let decisionMessage: ChatMessage | undefined;
+      let question: ChatDecision | undefined;
       if (request.args.resolve) {
         decisionMessage = resolveMessageInThread(request.args.resolve, messages);
         const decisions = await context.store.listThreadDecisions(
@@ -3533,49 +3543,46 @@ async function dispatchWorkspace(
             `message is not an open decision: ${cliMessageId(decisionMessage.id)}`,
           );
         }
-        const choices = decision.options ?? [];
-        const chosen = request.args.choose?.trim();
-        if (choices.length > 0 && (!chosen || !choices.includes(chosen))) {
-          throw new CliCommandError("Pick one of the poll's choices.");
-        }
-        if (choices.length === 0 && chosen) {
-          throw new CliCommandError("This question has no choices to pick from.");
-        }
+        question = decision;
       }
       refusePersonWork(actor, request.args.work);
-      const reply = {
+      const host = options.chatWrites.host(context, {
         writer: cliChatWriter(actor, context, request.args.agent, request.args.reported),
+        ...(request.args.work ? { work: request.args.work } : {}),
+        resolveAttachments: () =>
+          resolveAttachments(context, request.args.cwd, request.args.attachments),
+      });
+      const reply = {
         threadId,
         ...(parent ? { parentMessageId: parent.id } : {}),
         body: request.args.body,
         needsDecision: request.args.needsDecision,
         ...(request.args.options ? { options: request.args.options } : {}),
-        ...(request.args.work ? { work: request.args.work } : {}),
-        resolveAttachments: () =>
-          resolveAttachments(context, request.args.cwd, request.args.attachments),
       };
-      const sent = decisionMessage
-        ? await options.chatWrites.answer(context, {
+      // The poll's choice is checked before the reply, so a wrong one posts nothing.
+      const answered = decisionMessage
+        ? await answerDecision(host, {
             ...reply,
+            question,
             resolves: {
               messageId: decisionMessage.id,
               ...(request.args.choose ? { chosenOption: request.args.choose } : {}),
             },
           })
-        : { message: await options.chatWrites.sendMessage(context, reply) };
-      const { message } = sent;
+        : undefined;
+      const message = answered ? answered.message : await replyInThread(host, reply);
       const linkWarning = await linkRunMessage(context, {
         actor,
         ...(request.args.runId ? { runId: request.args.runId } : {}),
         messageId: message.id,
       }, options);
-      const resolvedByReply = "decision" in sent && sent.decision.resolvedByMessageId === message.id;
+      const resolvedByReply = answered?.state === "resolved";
       let resolutionFailure: string | null = null;
-      if ("failure" in sent) {
+      if (answered?.state === "failed") {
         resolutionFailure = oneLine(
-          sent.failure instanceof Error ? sent.failure.message : "decision update failed",
+          answered.failure instanceof Error ? answered.failure.message : "decision update failed",
         );
-        options.onError?.(sent.failure);
+        options.onError?.(answered.failure);
       }
       if (actor === "agent") {
         try {
@@ -3619,6 +3626,8 @@ async function dispatchWorkspace(
       if (!target.rootMessage) {
         throw new CliCommandError(`no such message: ${request.args.message}`);
       }
+      // Each invocation toggles, resolved to added or removed within its
+      // one admitted write.
       const reaction = await options.chatWrites.setReaction(context, {
         writer: cliChatWriter(writeActor(request.args.actor, context, options), context),
         threadId: target.thread.thread.id,

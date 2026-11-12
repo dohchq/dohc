@@ -5521,7 +5521,10 @@ describe("CLI socket server", () => {
   it("posts into a chat-only group's chat lane, and lists both lanes of every group", async () => {
     if (!store) throw new Error("Store is not available");
     const chat = await store.createChannel({ workspaceId: WORKSPACE_ID, name: "Chat group", kind: "channel", type: "chat", purpose: "Plan the launch" });
-    await post({ actor: "human", group: chat.slug, title: "Hello", body: "In chat" });
+    const first = await post({ actor: "human", group: chat.slug, title: "Hello", body: "In chat" });
+    // The conversation is running, so the next post joins it and names its thread.
+    const second = await post({ actor: "human", group: chat.slug, body: "Still in chat" });
+    expect(second.threadId).toBe(first.threadId);
     expect(await store.listChannelThreads({ workspaceId: WORKSPACE_ID, channelId: chat.id, lane: "chat" })).toHaveLength(1);
     expect(await store.listChannelThreads({ workspaceId: WORKSPACE_ID, channelId: chat.id, lane: "posts" })).toHaveLength(0);
     const listed = await invoke("threads", { cwd: workspaceRoot, actor: "human", group: chat.slug });
@@ -5555,6 +5558,9 @@ describe("CLI socket server", () => {
     expect(started.group.kind).toBe("agent");
     const threads = await store.listChannelThreads({ workspaceId: WORKSPACE_ID, channelId: agent.id, lane: "chat" });
     expect(threads.map(({ thread }) => cliThreadId(thread.id))).toContain(started.threadId);
+    // The DM's conversation is running, so the next message joins it.
+    const again = await post({ actor: "agent", group: discovered!.name, body: "And this one." });
+    expect(again.threadId).toBe(started.threadId);
   });
 
   // Provisioning General writes outside chatWrites, so only onWrite tells
