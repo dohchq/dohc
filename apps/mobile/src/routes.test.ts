@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { describe, expect, it } from "vitest";
 
 // A link can open any route directly, so each route says which builds it serves (src/sampleOnly.tsx). The tabs, a chat
@@ -18,13 +18,16 @@ const BOTH_BUILDS: Readonly<Record<string, string>> = {
   "(tabs)/search/index.tsx": "<NotYet",
 };
 
+// The rules below name paths with "/". This turns Windows' "\" into "/", and changes nothing where "/" is the separator.
+const slashed = (path: string) => path.split(sep).join("/");
+
 function files(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap(entry => entry.isDirectory()
     ? files(join(directory, entry.name))
     : /\.tsx?$/.test(entry.name) ? [join(directory, entry.name)] : []);
 }
 
-const routes = () => files(APP).filter(path => !path.endsWith("_layout.tsx")).map(path => relative(APP, path));
+const routes = () => files(APP).filter(path => !path.endsWith("_layout.tsx")).map(path => slashed(relative(APP, path)));
 
 describe("routes opened from a link", () => {
   it("each serve only the builds they're for", () => {
@@ -51,7 +54,7 @@ describe("routes opened from a link", () => {
 // Round 72 found the sample's data in the bundle of a build without it. Metro bundles every module a file imports, so
 // only a require behind a test that folds to false keeps one out.
 describe("sample modules", () => {
-  const isSample = (path: string) => /(^|\/)sample\.ts$|(^|\/)Sample[A-Z]\w*\.tsx$/.test(path);
+  const isSample = (path: string) => /(^|\/)sample\.ts$|(^|\/)Sample[A-Z]\w*\.tsx$/.test(slashed(path));
   const sources = [...files(APP), ...files(join(ROOT, "src"))].filter(path => !/\.test\.tsx?$/.test(path) && !path.endsWith("testServer.ts"));
   const target = (from: string, specifier: string) => {
     const base = resolve(dirname(from), specifier);
@@ -59,7 +62,7 @@ describe("sample modules", () => {
   };
 
   it("exist where the rule names them", () => {
-    expect(sources.filter(isSample).map(path => relative(ROOT, path)).sort()).toEqual([
+    expect(sources.filter(isSample).map(path => slashed(relative(ROOT, path))).sort()).toEqual([
       "src/chats/SampleAgentCard.tsx", "src/chats/SampleChats.tsx", "src/chats/sample.ts", "src/conversation/SampleConversation.tsx", "src/conversation/sample.ts",
       "src/notices/SampleNotices.tsx", "src/notices/sample.ts", "src/pages/SamplePage.tsx", "src/pages/sample.ts", "src/sharing/SampleSharing.tsx", "src/sharing/sample.ts",
       "src/testRoute/sample.ts",
