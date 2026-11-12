@@ -20,7 +20,7 @@ import { asRecord } from "@dohc/workspace-core";
 import { SHA256_HEX_PATTERN } from "@dohc/security-contract/wire-patterns";
 import { RELAY_ERRORS } from "./errors";
 import { pathCollisionKey } from "./pathCollisionKey";
-import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
+import { GENERAL_CHANNEL_WIRE_ID, agentIdForChannelWireId } from "@dohc/security-contract/chat-wire-ids";
 import { PERSONAL_AGENT_ID_PREFIX } from "./relayLogInputs";
 import {
   workspaceFileReach,
@@ -700,9 +700,10 @@ export function presenceTopicAllowedForShare(
       const path = resolvedThreadPath(chat, chat.threadFileBinding(threadId));
       return path !== null && pathVisibleThroughShare(files, path);
     }
-    // A topic naming General or any created channel answers only through its
-    // Group, never through a file of the same name.
-    if (topic === GENERAL_CHANNEL_WIRE_ID || chat.channelKind(topic) !== undefined) {
+    // A topic naming General, an agent's chat, or any created channel answers
+    // only through its Group, never through a file of the same name. Agent
+    // chat ids are known before their chat reaches the relay.
+    if (topic === GENERAL_CHANNEL_WIRE_ID || agentIdForChannelWireId(topic) !== null || chat.channelKind(topic) !== undefined) {
       return workspaceGroupReachable(topic, chat);
     }
     return pathVisibleThroughShare(files, topic);

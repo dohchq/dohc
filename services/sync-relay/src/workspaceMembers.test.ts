@@ -244,7 +244,8 @@ describe("what a member reaches", () => {
     for (const topic of [GROUP, "chat:thread:t-team", "docs/plan.md"]) {
       expect((await presence(topic)).status, topic).toBe(200);
     }
-    for (const topic of [GENERAL_CHANNEL_WIRE_ID, DM, AGENT, "chat:thread:t-general", "chat:thread:t-dm"]) {
+    // Agent chats the relay has not seen yet are refused too: their ids are known in advance.
+    for (const topic of [GENERAL_CHANNEL_WIRE_ID, DM, AGENT, "channel_wire_agent_v1", "channel_wire_agent_v1_helper", "chat:thread:t-general", "chat:thread:t-dm"]) {
       expect((await presence(topic)).status, topic).toBe(404);
     }
   });
