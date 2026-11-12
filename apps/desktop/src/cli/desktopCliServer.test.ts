@@ -181,6 +181,7 @@ function fixture(rootPath = resolve("cli-workspace"), canonicalizeRoot: (root: s
       scanWorkspace: vi.fn(async () => undefined),
       dispatchStateForThread: vi.fn(async () => ({ liveRunId: null, liveTriggerMessageId: null, pendingCount: 0, paused: false })),
       retryStoppedRun: vi.fn(async () => false),
+      endRunQuietly: vi.fn(() => "not-running" as const),
     },
     rememberPendingCliRunMessageLink: vi.fn(),
   };

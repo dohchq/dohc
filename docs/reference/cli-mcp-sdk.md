@@ -705,7 +705,7 @@ Returns `{ ok: true, path, threadId, messageId, warning? } | { ok: false, reason
 
 ### `dohc_reply_to_chat`
 
-Reply in a dohc Chat thread as the agent. `to` replies under one message; `resolve` closes that open decision with this reply and `choose` names the option picked. Message ids come from dohc_read_chat. `attachments`, `needsDecision`, `options`, `runId`, `model`, and `work` behave as in dohc_start_group_chat.
+Reply in a dohc Chat thread as the agent. `to` replies under one message; `resolve` closes that open decision with this reply and `choose` names the option picked. Message ids come from dohc_read_chat. `attachments`, `needsDecision`, `options`, `runId`, `model`, and `work` behave as in dohc_start_group_chat. A run an automation started that has nothing to report sends `nothingToReport: true` with only `threadId` and `runId`, and no `body`: it posts nothing, and the run ends without a failure.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -713,15 +713,16 @@ Changes the workspace, so a shared view does not offer it.
 - `to`: `string`
 - `resolve`: `string`
 - `choose`: `string`
-- `body`: `string`. Required.
+- `body`: `string`
 - `attachments`: `string[]`
 - `needsDecision`: `boolean`
 - `options`: `string[]`
 - `runId`: `string`
 - `model`: `string`
 - `work`: `{ status: "working" | "waiting" | "done" | "failed" | "stopped", url?: string }`
+- `nothingToReport`: `true`
 
-Returns `{ ok: true, threadId, messageId, parentMessageId?, resolvedMessageId?, warning? }`.
+Returns `{ ok: true, threadId, messageId, parentMessageId?, resolvedMessageId?, warning? }`, or `{ ok: true, threadId, nothingToReport: true }`.
 
 ### `dohc_retry_chat_run`
 

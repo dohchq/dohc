@@ -67,6 +67,8 @@ describe("CLI, MCP, and app channel reference", () => {
       "sharedFilesHeld",
       // dohc_workspace_status reports it as its `syncFailure` field.
       "syncFailure",
+      // dohc_reply_to_chat sends it for `nothingToReport`.
+      "nothingToReport",
       ...Object.values(MCP_RETURNS).flatMap((returns) => typeof returns === "string" ? [] : [returns.cli]),
     ]);
     expect(Object.keys(cliResultSchemas).filter((verb) => !documented.has(verb))).toEqual([]);

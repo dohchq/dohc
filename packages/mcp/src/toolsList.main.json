@@ -3806,7 +3806,7 @@
     },
     {
       "name": "dohc_reply_to_chat",
-      "description": "Reply in a dohc Chat thread as the agent. `to` replies under one message; `resolve` closes that open decision with this reply and `choose` names the option picked. Message ids come from dohc_read_chat. `attachments`, `needsDecision`, `options`, `runId`, `model`, and `work` behave as in dohc_start_group_chat.",
+      "description": "Reply in a dohc Chat thread as the agent. `to` replies under one message; `resolve` closes that open decision with this reply and `choose` names the option picked. Message ids come from dohc_read_chat. `attachments`, `needsDecision`, `options`, `runId`, `model`, and `work` behave as in dohc_start_group_chat. A run an automation started that has nothing to report sends `nothingToReport: true` with only `threadId` and `runId`, and no `body`: it posts nothing, and the run ends without a failure.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -3886,11 +3886,14 @@
               "status"
             ],
             "additionalProperties": false
+          },
+          "nothingToReport": {
+            "type": "boolean",
+            "const": true
           }
         },
         "required": [
-          "threadId",
-          "body"
+          "threadId"
         ],
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"

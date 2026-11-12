@@ -117,7 +117,7 @@ import {
   type RetainedCopiesListResult,
 } from "@dohc/workspace-engine-client";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
-import type { ChatDispatchService } from "../agents/chatDispatchService";
+import type { ChatDispatchService, QuietRunRefusal } from "../agents/chatDispatchService";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type Server, type Socket } from "node:net";
 import {
@@ -499,7 +499,7 @@ export interface CliServerOptions {
   // chat uses, so a CLI or MCP write gets the same checks and effects.
   chatWrites: ChatWrites;
   // Try again for a conversation's stopped agent request, as the chat runs it.
-  chatRuns?: Pick<ChatDispatchService, "dispatchStateForThread" | "retryStoppedRun">;
+  chatRuns?: Pick<ChatDispatchService, "dispatchStateForThread" | "retryStoppedRun" | "endRunQuietly">;
   localUserDisplayName(): string;
   // The person this computer's agents work for: the account, or this
   // installation's id when signed out.
@@ -959,6 +959,12 @@ function automationPressResult(pressed: { result: NamedPressResult; waiting: Pre
     waiting: waiting === null ? null : PRESS_WAITING[waiting],
   };
 }
+
+const QUIET_RUN_REFUSALS: Record<QuietRunRefusal, string> = {
+  "not-running": "Only a running agent run that an automation started can end with nothing to report.",
+  "other-thread": "Send nothingToReport in the thread this run was started for.",
+  person: "A person asked for this run. Reply to them.",
+};
 
 async function readReplyThread(
   context: CliWorkspaceContext,
@@ -2137,7 +2143,7 @@ const RECEIVED_SHARE_RULES: { [Verb in CliVerb]: ReceivedShareRule | ((request: 
   appPublication: request => "appRoot" in request.args.request ? "anywhere" : "owner",
   stopSync: "owner", shareCopy: "owner", shareAgents: "owner", shareDisconnect: "owner", keptCopies: "owner", saveKeptCopy: "owner",
   retainedCopies: "owner", deleteRetainedCopies: "owner", ownerAppResponses: "owner",
-  groupCreate: "chat", post: "chat", reply: "chat", react: "chat", chatRetry: "chat", fileChatStart: "chat", export: "chat", watch: "chat",
+  groupCreate: "chat", post: "chat", reply: "chat", nothingToReport: "chat", react: "chat", chatRetry: "chat", fileChatStart: "chat", export: "chat", watch: "chat",
   link: "chat",
   show: request => request.args.peek ? "anywhere" : "chat",
   liveKeptEdits: keptEditsInOwner, saveRecoveryCopy: keptEditsInOwner, retryKeptEdits: keptEditsInOwner, stopAgain: keptEditsInOwner,
@@ -3493,6 +3499,16 @@ async function dispatchWorkspace(
       };
     }
 
+    case "nothingToReport": {
+      const { threadId } = await readReplyThread(context, chats, request.args.thread);
+      // Only a run dohc started, proven by its secret, says this of itself.
+      const runId = context.connected ? null : request.args.runId ?? context.run?.runId ?? null;
+      if (!options.chatRuns || runId === null) throw new CliCommandError(QUIET_RUN_REFUSALS["not-running"]);
+      const refusal = options.chatRuns.endRunQuietly(context.workspaceId, runId, threadId);
+      if (refusal) throw new CliCommandError(QUIET_RUN_REFUSALS[refusal]);
+      return { threadId: cliThreadId(threadId), nothingToReport: true as const };
+    }
+
     case "reply": {
       const { threadId, messages } = await readReplyThread(context, chats, request.args.thread);
       const actor = writeActor(request.args.actor, context, options);
@@ -3827,6 +3843,7 @@ async function workspaceContextForRequest(
     request.verb === "groupCreate" ||
     request.verb === "post" ||
     request.verb === "reply" ||
+    request.verb === "nothingToReport" ||
     request.verb === "chatRetry" ||
     request.verb === "react" ||
     request.verb === "export" ||
