@@ -80,7 +80,10 @@ function gateTiming(scope, required, metadata = required) {
   const javascriptWaits = scope === "rust" ? metadata.filter(job => javascriptNames.includes(job.name) && job.conclusion !== "skipped"
     && job.head_sha === required.find(job => job.name === "what changed").head_sha).map(job => ({ name: job.name,
     runnerWaitSeconds: Math.max(0, (Date.parse(job.started_at) - Date.parse(job.created_at)) / 1000) || 0 })) : [];
-  const longest = [...jobs.filter(job => job.name !== "what changed"), ...javascriptWaits]
+  const preparedAt = Date.parse(required.find(job => job.name === "shared preparation").completed_at);
+  const confinementNames = [...CLOUD_JOB_GRAPH["confinement-compiler"].names, ...CLOUD_JOB_GRAPH["confinement-relay"].names];
+  const longest = [...jobs.filter(job => job.name !== "what changed"
+    && (!confinementNames.includes(job.name) || Date.parse(job.startedAt) > preparedAt)), ...javascriptWaits]
     .reduce((a, b) => a.runnerWaitSeconds > b.runnerWaitSeconds ? a : b);
   const contended = longest.runnerWaitSeconds > 30, seconds = spanSeconds;
   const budgetSeconds = scope === "js" ? 300 : 600;

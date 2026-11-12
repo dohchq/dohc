@@ -134,7 +134,8 @@ Rust's job list excludes JavaScript jobs.
 `spanSeconds` runs from the start of `what changed` through the last gate job's finish.
 `seconds` equals `spanSeconds`. No runner-wait discount estimates the workload.
 Each job records `runnerWaitSeconds = max(0, started_at - created_at)`.
-A gate is `contended` when a job inside its span waited more than 30 s for a runner, including either confinement job.
+A gate is `contended` when a job inside its span waited more than 30 s for a runner.
+A confinement job's runner wait counts only if it started after shared preparation finished.
 Selection's pre-span wait does not count.
 Rust also counts waits of non-skipped JavaScript worker matrix jobs because its tests need that matrix. JavaScript conclusions do not affect Rust's verdict.
 Within budget, timing is `"within budget"`. An uncontended overrun fails.

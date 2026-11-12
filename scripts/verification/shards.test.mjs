@@ -277,6 +277,38 @@ test("confinement execution uses the wall span and its runner wait counts as con
   }
 });
 
+test("confinement runner waits count only after preparation has finished", t => {
+  t.mock.method(console, "warn", () => {});
+  for (const scope of ["js", "rust"]) for (const name of ["compiler confinement", "relay confinement"]) {
+    for (const offset of [-1000, 0, 1000]) {
+      const jobs = withoutWaits(), proof = jobs.find(job => job.name === name);
+      const preparedAt = Date.parse(jobs.find(job => job.name === "shared preparation").completed_at);
+      proof.started_at = new Date(preparedAt + offset).toISOString();
+      proof.created_at = new Date(preparedAt + offset - 35_000).toISOString();
+      proof.completed_at = new Date(Date.parse(jobs[0].started_at) + 650_000).toISOString();
+      if (offset <= 0) {
+        assert.throws(() => completedGateTiming(scope, jobs, jobs[0].head_sha), error => {
+          assert.equal(error.timing.contended, false);
+          assert.equal(error.timing.timing, "over budget");
+          assert.equal(error.timing.jobs.find(job => job.name === name).runnerWaitSeconds, 35);
+          return /exceeding/u.test(error.message);
+        });
+        const otherName = scope === "js" ? "JS worker 1" : "Rust tests 1";
+        const other = jobs.find(job => job.name === otherName);
+        other.created_at = new Date(Date.parse(other.started_at) - 31_000).toISOString();
+        const result = completedGateTiming(scope, jobs, jobs[0].head_sha);
+        assert.equal(result.timing, "unmeasured");
+        assert.match(result.warning, new RegExp(`longest runner wait ${otherName}: 31s`, "u"));
+      } else {
+        const result = completedGateTiming(scope, jobs, jobs[0].head_sha);
+        assert.equal(result.contended, true);
+        assert.equal(result.timing, "unmeasured");
+        assert.match(result.warning, new RegExp(`longest runner wait ${name}: 35s`, "u"));
+      }
+    }
+  }
+});
+
 test("a failed JavaScript worker leaves Rust's independent verdict visible", () => {
   const jobs = passingCloudJobs();
   jobs.find(job => job.name === "JS worker 1").conclusion = "failure";
@@ -604,8 +636,11 @@ test("aggregate receipts use the same timing rule and remain incomplete", async 
   const proofWait = structuredClone(jobs);
   const proof = proofWait.find(job => job.name === "compiler confinement");
   proof.created_at = new Date(Date.parse(proof.started_at) - 31_000).toISOString();
+  await assert.rejects(run(proofWait, Date.parse(jobs[0].started_at) + 301_000), /exceeding.*budget/u);
+  proof.started_at = new Date(Date.parse(proof.started_at) + 1000).toISOString();
+  proof.created_at = new Date(Date.parse(proof.started_at) - 31_000).toISOString();
   const unmeasured = await run(proofWait, Date.parse(jobs[0].started_at) + 301_000);
-  assert.equal(unmeasured.timing, "unmeasured", "a confinement wait also governs aggregate timing");
+  assert.equal(unmeasured.timing, "unmeasured", "a confinement wait after preparation also governs aggregate timing");
   const zeroWait = structuredClone(jobs);
   zeroWait.forEach(job => { job.created_at = job.started_at; });
   await assert.rejects(run(zeroWait, Date.parse(jobs[0].started_at) + 301_000), /exceeding.*budget/u);

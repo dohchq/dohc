@@ -72,6 +72,7 @@ Manual runs execute the requested gates. Automatic PR runs execute the gates tha
 Cloud workload budgets are 300 s for JavaScript and 600 s for Rust, including preparation and reporting.
 Gate timing records each gate's wall span, including both confinement jobs, without estimating workload from runner waits.
 An over-budget run with more than 30 s of gate-job runner wait warns that timing is unmeasured; uncontended overruns fail.
+A confinement job's runner wait counts only if it started after shared preparation finished.
 Individual jobs have separate termination limits. See [verification timing](verify-agent-work.md#verify-a-pull-request).
 
 The workflow runs 20 JavaScript workers and 16 Rust test partitions. Combined runs permit at most 25 concurrent jobs.
