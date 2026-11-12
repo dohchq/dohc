@@ -497,6 +497,20 @@ describe("CollectionPage", () => {
     expect(bridge.listAutomationButtons).not.toHaveBeenCalled();
     expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
   });
+  it("shows an ended share's saved views as tabs that switch, with no + and no tab menu", async () => {
+    const onActiveViewChange = vi.fn();
+    renderPage(makeBridge([record("rec-1", "Shared task")], TWO_VIEW_SCHEMA), undefined, undefined, { readOnly: true, accessEnded: true, activeViewName: "Sorted", onActiveViewChange });
+    await screen.findByText("Shared task");
+    expect(viewTab("Sorted").getAttribute("aria-pressed")).toBe("true");
+    expect(screen.queryByRole("button", { name: "Add a view" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "View actions" })).toBeNull();
+    fireEvent.contextMenu(viewTab("Sorted"));
+    fireEvent.keyDown(viewTab("All"), { key: "ContextMenu" });
+    expect(screen.queryByRole("menu")).toBeNull();
+    fireEvent.click(viewTab("All"));
+    expect(onActiveViewChange).toHaveBeenCalledExactlyOnceWith("All");
+  });
+
   it("reloads initially empty Buttons when the automation index changes in this workspace", async () => {
     const bridge = makeBridge([record("rec-1", "Plan")], {
       ...SCHEMA, fields: [...SCHEMA.fields, { name: "Finish", type: "button" }],
@@ -1570,6 +1584,43 @@ describe("collection authoring", () => {
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2));
     expect(lastWrittenSchema(bridge).schema.views.map((view) => view.name)).toEqual(["All"]);
     await waitFor(() => expect(onActiveViewChange).toHaveBeenLastCalledWith(null));
+  });
+
+  // The shell keeps which view is open after the page has closed, so a write that ends then must not change it.
+  it.each([
+    { change: "a new view", result: { status: "conflict" as const } },
+    { change: "a new view", result: { status: "written" as const, contentHash: hashFor(1) } },
+    { change: "a rename", result: { status: "conflict" as const } },
+    { change: "a rename", result: { status: "written" as const, contentHash: hashFor(1) } },
+    { change: "a deletion", result: { status: "conflict" as const } },
+    { change: "a deletion", result: { status: "written" as const, contentHash: hashFor(1) } },
+  ])("changes nothing in the shell when the write of $change ends after the page closed ($result.status)", async ({ change, result }) => {
+    const bridge = makeBridge([record("rec-1", "Plan")], TWO_VIEW_SCHEMA);
+    const onActiveViewChange = vi.fn(), onError = vi.fn();
+    const page = renderPage(bridge, undefined, undefined, { activeViewName: "Sorted", onActiveViewChange, onError });
+    await screen.findByText("Plan");
+    const write = deferred<typeof result>();
+    bridge.writeWorkspaceText.mockReturnValue(write.promise as never);
+    if (change === "a new view") {
+      fireEvent.click(screen.getByRole("button", { name: "Add a view" }));
+      fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Late view" } });
+      fireEvent.click(screen.getByRole("button", { name: "Create view" }));
+    } else {
+      fireEvent.click(screen.getByRole("button", { name: "View actions" }));
+      if (change === "a rename") {
+        fireEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
+        fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Late view" } });
+        fireEvent.click(screen.getByRole("button", { name: "Rename" }));
+      } else {
+        fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+        fireEvent.click(screen.getByRole("menuitem", { name: "Confirm delete" }));
+      }
+    }
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce());
+    page.unmount();
+    await act(async () => write.resolve(result));
+    expect(onActiveViewChange).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
   });
 
   it("says in the popover why a view could not be added, and reports a delete that failed", async () => {

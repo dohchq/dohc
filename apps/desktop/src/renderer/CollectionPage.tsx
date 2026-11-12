@@ -554,11 +554,13 @@ export function CollectionPage({
 
   // The tab strip's view changes: each is one schema rewrite, as the Views
   // dialog's are. Which view is open stays the shell's state, so the page
-  // follows a new, renamed or deleted view there.
+  // follows a new, renamed or deleted view there. A write that ends after
+  // the page closed changes nothing: applySchemaChange answers null for it too.
   const openViewName = useRef(activeViewName);
   openViewName.current = activeViewName;
   const createView = useCallback(
     async (view: NewCollectionView): Promise<string | null> => {
+      const request = schemaWrites.current();
       const failure = await applySchemaChange((current) =>
         addView(current, {
           name: view.name,
@@ -569,23 +571,26 @@ export function CollectionPage({
           dateField: view.kind === "calendar" ? view.dateField ?? null : null,
         }),
       );
-      if (failure === null) onActiveViewChange(view.name);
+      if (failure === null && schemaWrites.isCurrent(request)) onActiveViewChange(view.name);
       return failure;
     },
-    [applySchemaChange, onActiveViewChange],
+    [applySchemaChange, onActiveViewChange, schemaWrites],
   );
   const renameOpenView = useCallback(
     async (from: string, to: string): Promise<string | null> => {
+      const request = schemaWrites.current();
       const failure = await applySchemaChange((current) => renameView(current, from, to));
-      if (failure === null && openViewName.current === from) onActiveViewChange(to);
+      if (failure === null && schemaWrites.isCurrent(request) && openViewName.current === from) onActiveViewChange(to);
       return failure;
     },
-    [applySchemaChange, onActiveViewChange],
+    [applySchemaChange, onActiveViewChange, schemaWrites],
   );
   const removeView = useCallback(
     function remove(name: string) {
       const dialog = currentSchemaDialog.current;
+      const request = schemaWrites.current();
       void applySchemaChange((current) => deleteView(current, name)).then((failure) => {
+        if (!schemaWrites.isCurrent(request)) return;
         if (failure === null) {
           if (openViewName.current === name) onActiveViewChange(null);
           // applySchemaChange reports a failure itself only when a dialog changed.
@@ -594,7 +599,7 @@ export function CollectionPage({
         }
       });
     },
-    [applySchemaChange, onActiveViewChange, onError],
+    [applySchemaChange, onActiveViewChange, onError, schemaWrites],
   );
 
   // A typed select value not in the options yet: the whole edit enters the
