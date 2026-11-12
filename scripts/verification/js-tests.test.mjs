@@ -1110,7 +1110,8 @@ test("cloud node:test files rerun once after a test failure; other commands do n
     const record = { steps: [], tests: [], completed: [], flaky: [] };
     const action = () => runJavascript([{ ...task, tasks: [task], weight: 1 }], record, () => {}, undefined, { directory: root, executeCommand: (command, args, options) => {
       const { NODE_TEST_CONTEXT: _context, ...env } = process.env;
-      return run(command, args, { ...options, env });
+      // The fixtures fail on purpose. Their reports stay out of this step's log, where the runner would read them as failures.
+      return run(command, args, { ...options, env, quietStdout: true });
     } });
     if (name === "once") {
       await action();
