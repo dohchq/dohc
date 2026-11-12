@@ -211,7 +211,7 @@ export function createServiceHostEnrollmentRoutes(options: {
     // host copy is missing an owner edit retires its held activation.
     const block = host.blocked(row);
     if (block) return {...base, status: "unavailable", reason: block === "without-lineage" ? "live-document-without-lineage" :
-      block === "live-edit-unadmitted" ? "live-edit-unadmitted" : "session-host-refused"};
+      block === "live-edit-unadmitted" ? "live-edit-unadmitted" : block === "history-over-budget" ? "live-history-over-budget" : "session-host-refused"};
     if (host.holdReason(row) === "hosted-conflict-parent-withheld") return {...base, status: "unavailable", reason: "conflict-parent-withheld"};
     // A damaged activation record stops its own document, not the list. Only the operator can repair it.
     let saved: ReturnType<typeof activation.read>;

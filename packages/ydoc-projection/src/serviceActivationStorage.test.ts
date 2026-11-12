@@ -11,11 +11,12 @@ import {expect,it,vi} from 'vitest'
 import * as Y from 'yjs'
 import {parseHostEpoch} from '@dohc/live-session-contract/host-control'
 import type {NativeOwnerActivation} from '../../workspace-engine-client/src/daemon/nativeOwnerActivation.js'
+import {EngineRequestError} from '../../workspace-engine-client/src/daemon/engineClient.js'
 import {markdownToYDoc} from './import-export.js'
 import {createLiveMarkdownRegistrationValidator,createLiveMarkdownJournalValidator,createLiveMarkdownHistoryValidator} from './liveDocumentValidation.js'
 import {openSyncRelayStorage} from '../../../services/sync-relay/src/storage.js'
 import {createLiveJournalHistoryAuthority} from '../../../services/sync-relay/src/storage/liveJournalHistory.js'
-import {ServiceActivationStaleCut,ServiceActivationTooLarge} from '../../../services/sync-relay/src/storage/serviceActivation.js'
+import {ServiceActivationHistoryOverBudget,ServiceActivationStaleCut,ServiceActivationStore,ServiceActivationTooLarge} from '../../../services/sync-relay/src/storage/serviceActivation.js'
 import {SyncRelayQuotaExceededError} from '../../../services/sync-relay/src/storage/errors.js'
 import {readOrdinaryActivationHistory,verifyOrdinaryActivationCut} from '../../../services/sync-relay/src/storage/ordinaryActivationSource.js'
 import {validateOrdinaryActivation,type OrdinaryActivationValidator} from '../../../services/sync-relay/src/storage/ordinaryActivationValidation.js'
@@ -343,6 +344,9 @@ it('checks configured history entry and byte budgets before loading relay blobs'
   const f=fixture();try{
     const read=vi.spyOn(f.storage,'getBlob')
     await expect(f.prepare({...bounds,maxEntriesPerDrain:1})).rejects.toThrow('entry budget')
+    expect(read).not.toHaveBeenCalled()
+    // A baseline past the byte budget is refused before the history read, as the same over-budget history.
+    await expect(f.prepare({...bounds,maxBytesPerDrain:f.capture.baselineBytes.length-1})).rejects.toBeInstanceOf(ServiceActivationHistoryOverBudget)
     expect(read).not.toHaveBeenCalled()
     await expect(f.prepare({...bounds,maxBytesPerDrain:f.capture.baselineBytes.length})).rejects.toThrow('metadata')
     expect(read).not.toHaveBeenCalled()
@@ -1188,6 +1192,345 @@ it('refuses a capture whose validation runs out of heap, blocks it for its owner
     expect(await f.prepare(bounds,validate)).toEqual({document:f.document,replayed:false,completed:false})
   }finally{await pool.close();large.close();f.close()}
 },60_000)
+// A history past what the relay reads refuses the same way on every capture, so the document waits for a new
+// start rather than being captured on every pass. One within the same budget still goes live.
+it('captures a document whose history is past the self-host read budget once, then waits for a new base or its owner',async()=>{
+  const {maxEntriesPerDrain}=selfHostLiveProfile().service.activation,f=fixture(),within=fixture()
+  try{
+    const config={maxEntriesPerDrain},signal=()=>new AbortController().signal,drained={kind:'pending' as const,reason:'transport interrupted',continueDrain:false}
+    vi.spyOn(OwnerCommittedDelivery.prototype,'drain').mockResolvedValue(drained)
+    const live=activationDriver(within,vi.fn(async()=>within.capture),undefined,undefined,undefined,config)
+    expect(await live.driver.activate(live.target,signal())).toMatchObject({kind:'pending',reason:'transport interrupted'})
+    expect(live.driver.blocked(live.target)).toBeUndefined()
+    expect(within.raw.prepare('SELECT count(*) AS n FROM sync_relay_service_activations').get()!.n).toBe(1)
+    const edit=(seq:number)=>append(f,'origin',seq,'ydoc.update',ydocUpdate({isBaseState:false,lineageClaimId:f.document.lineageClaimId,updateBlobSha256:hash(Buffer.from(`edit-${seq}`))}))
+    for(let seq=3;seq<=maxEntriesPerDrain+1;seq++)edit(seq)
+    const capture=vi.fn(async()=>f.capture),send=vi.fn(async()=>({result:{released:true}}))
+    const d=activationDriver(f,capture,send,undefined,undefined,config)
+    expect(await d.driver.activate(d.target,signal())).toEqual({kind:'pending',reason:'Ordinary activation history exceeds its configured entry budget.'})
+    expect(d.driver.blocked(d.target)).toBe('history-over-budget')
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({method:'liveApplication.releaseOwnerActivation',
+      params:{activationId:f.capture.activationId,sessionId:'real-session'}}),expect.any(AbortSignal))
+    expect(f.raw.prepare('SELECT * FROM sync_relay_service_activations').all()).toEqual([])
+    const blocked={kind:'pending',reason:'Hosted document is blocked until the owner tries again.'}
+    expect(await d.driver.activate(d.target,signal())).toEqual(blocked)
+    // Another edit only lengthens the history.
+    edit(maxEntriesPerDrain+2)
+    expect(await d.driver.activate(d.target,signal())).toEqual(blocked)
+    expect(capture).toHaveBeenCalledTimes(1)
+    // A new base gives the history a new start, so the next pass captures once more.
+    append(f,'rebased',1,'ydoc.update',ydocUpdate({isBaseState:true,lineageClaimId:hash(Buffer.from('rebased')),updateBlobSha256:hash(Buffer.from('rebased'))}))
+    // A pass that ends before its capture finds the same base on the next one.
+    d.pull.mockResolvedValueOnce({hasMore:true})
+    expect(await d.driver.activate(d.target,signal())).toEqual({kind:'pending',reason:'Hosted replication has more pages.'})
+    expect(capture).toHaveBeenCalledTimes(1)
+    expect(await d.driver.activate(d.target,signal())).toEqual({kind:'pending',reason:'Ordinary activation history exceeds its configured entry budget.'})
+    expect(capture).toHaveBeenCalledTimes(2)
+    expect(await d.driver.activate(d.target,signal())).toEqual(blocked)
+    // The owner's Resume allows one more capture.
+    expect(d.driver.unblock(d.target)).toBe(true)
+    await d.driver.activate(d.target,signal())
+    expect(capture).toHaveBeenCalledTimes(3)
+    expect(d.driver.blocked(d.target)).toBe('history-over-budget')
+  }finally{vi.restoreAllMocks();f.close();within.close()}
+})
+it('blocks a capture whose history check runs out of its work budget, as one past the read budget',async()=>{
+  const f=fixture();try{
+    const message='Ordinary activation history exceeds its configured validation budget.',capture=vi.fn(async()=>f.capture)
+    const d=activationDriver(f,capture,undefined,undefined,undefined,{validateActivation:async()=>({kind:'over-budget',message})})
+    expect(await d.driver.activate(d.target,new AbortController().signal)).toEqual({kind:'pending',reason:message})
+    expect(d.driver.blocked(d.target)).toBe('history-over-budget')
+    await d.driver.activate(d.target,new AbortController().signal)
+    expect(capture).toHaveBeenCalledTimes(1)
+    await expect(f.prepare(bounds,async()=>({kind:'over-budget',message}))).rejects.toBeInstanceOf(ServiceActivationHistoryOverBudget)
+  }finally{f.close()}
+})
+it('answers over-budget when a history check runs past its byte budget',async()=>{
+  const f=fixture();try{
+    const input={source:f.capture.source,document:f.document,baselineBytes:f.capture.baselineBytes,fullState:f.capture.fullState,bounds}
+    const history=readOrdinaryActivationHistory(f.storage as StorageContext,input)
+    const work={document:f.document,currentPath:'docs/a.md',baselineBytes:f.capture.baselineBytes,
+      cut:{source:f.capture.source,fullState:f.capture.fullState,history,maxBytesPerDrain:bounds.maxBytesPerDrain}}
+    expect(validateOrdinaryActivation(work,policy).kind).toBe('accepted')
+    expect(validateOrdinaryActivation({...work,cut:{...work.cut,maxBytesPerDrain:f.capture.fullState.length}},policy))
+      .toEqual({kind:'over-budget',message:'Ordinary activation history exceeds its configured byte budget.'})
+  }finally{f.close()}
+})
+// A document whose activation keeps failing for a reason nothing classifies waits longer before each try, so it isn't captured on every pass.
+it('waits longer before each retry of an activation that keeps failing, and tries at once after its owner resumes',async()=>{
+  const f=fixture();vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(0)
+  try{
+    const capture=vi.fn(async():Promise<NativeOwnerActivation>=>{throw new Error('Engine is unavailable.')}),signal=()=>new AbortController().signal
+    const d=activationDriver(f,capture),waiting={kind:'pending',reason:'Hosted document waits before it tries again.'}
+    // A pass that ended says nothing about the document, so it counts nothing.
+    for(let i=0;i<3;i++)await expect(d.driver.activate(d.target,AbortSignal.abort(new Error('Pass ended.')))).rejects.toThrow('Pass ended.')
+    await expect(d.driver.activate(d.target,signal())).rejects.toThrow('Engine is unavailable.')
+    await expect(d.driver.activate(d.target,signal())).rejects.toThrow('Engine is unavailable.')
+    expect(await d.driver.activate(d.target,signal())).toEqual(waiting)
+    vi.setSystemTime(1000)
+    await expect(d.driver.activate(d.target,signal())).rejects.toThrow('Engine is unavailable.')
+    vi.setSystemTime(2999)
+    expect(await d.driver.activate(d.target,signal())).toEqual(waiting)
+    vi.setSystemTime(3000)
+    await expect(d.driver.activate(d.target,signal())).rejects.toThrow('Engine is unavailable.')
+    expect(capture).toHaveBeenCalledTimes(4)
+    // The wait grows to five minutes and no further.
+    for(let i=0;i<10;i++){vi.setSystemTime(Date.now()+300_000);await expect(d.driver.activate(d.target,signal())).rejects.toThrow('Engine is unavailable.')}
+    vi.setSystemTime(Date.now()+299_999)
+    expect(await d.driver.activate(d.target,signal())).toEqual(waiting)
+    d.driver.unblock(d.target)
+    capture.mockImplementation(async()=>f.capture)
+    vi.spyOn(OwnerCommittedDelivery.prototype,'drain').mockResolvedValue({kind:'pending',reason:'transport interrupted',continueDrain:false})
+    expect(await d.driver.activate(d.target,signal())).toMatchObject({kind:'pending',reason:'transport interrupted'})
+    expect(capture).toHaveBeenCalledTimes(15)
+  }finally{vi.restoreAllMocks();vi.useRealTimers();f.close()}
+})
+// The pass deadline arrives as an aborted signal. A document that keeps running past it backs off like any other failure.
+it('counts a pass that runs out of its deadline during capture as a failure',async()=>{
+  const f=fixture();vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(0)
+  try{
+    let pass=new AbortController()
+    const timeout=()=>new DOMException('The pass ran out of time.','TimeoutError')
+    const capture=vi.fn(async():Promise<NativeOwnerActivation>=>{pass.abort(timeout());throw pass.signal.reason})
+    const d=activationDriver(f,capture)
+    // A pass that had already ended before it reached the document counts nothing.
+    for(let i=0;i<3;i++)await expect(d.driver.activate(d.target,AbortSignal.abort(timeout()))).rejects.toThrow()
+    expect(capture).not.toHaveBeenCalled()
+    for(let i=0;i<2;i++){pass=new AbortController();await expect(d.driver.activate(d.target,pass.signal)).rejects.toThrow('The pass ran out of time.')}
+    expect(await d.driver.activate(d.target,new AbortController().signal)).toEqual({kind:'pending',reason:'Hosted document waits before it tries again.'})
+    expect(capture).toHaveBeenCalledTimes(2)
+  }finally{vi.useRealTimers();f.close()}
+})
+// A cut that keeps going stale would repeat the capture on every pass. It waits as a failure does, and a pass that only waits doesn't end the count.
+it('waits longer before capturing again after a stale cut',async()=>{
+  const f=fixture();vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(0)
+  try{
+    vi.spyOn(ServiceActivationStore.prototype,'prepare').mockRejectedValue(new ServiceActivationStaleCut())
+    const capture=vi.fn(async()=>f.capture),signal=()=>new AbortController().signal
+    const d=activationDriver(f,capture),waiting={kind:'pending',reason:'Hosted document waits before it tries again.'}
+    const stale={kind:'pending',reason:'Hosted replication advanced before activation.'}
+    expect(await d.driver.activate(d.target,signal())).toEqual(stale)
+    expect(await d.driver.activate(d.target,signal())).toEqual(stale)
+    expect(await d.driver.activate(d.target,signal())).toEqual(waiting)
+    vi.setSystemTime(1000)
+    expect(await d.driver.activate(d.target,signal())).toEqual(stale)
+    vi.setSystemTime(2999)
+    expect(await d.driver.activate(d.target,signal())).toEqual(waiting)
+    expect(capture).toHaveBeenCalledTimes(3)
+  }finally{vi.restoreAllMocks();vi.useRealTimers();f.close()}
+})
+// A stale cut whose lease release then fails counts once, not once for the cut and again for the release.
+it('counts a stale cut once when releasing its lease fails',async()=>{
+  const f=fixture();vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(0)
+  try{
+    vi.spyOn(ServiceActivationStore.prototype,'prepare').mockRejectedValue(new ServiceActivationStaleCut())
+    const send=vi.fn(async()=>({result:{released:true}}))
+    send.mockImplementationOnce(async()=>{throw new Error('release lost')})
+    const d=activationDriver(f,vi.fn(async()=>f.capture),send)
+    await expect(d.driver.activate(d.target,new AbortController().signal)).rejects.toThrow('release lost')
+    expect(await d.driver.activate(d.target,new AbortController().signal)).toEqual({kind:'pending',reason:'Hosted replication advanced before activation.'})
+  }finally{vi.restoreAllMocks();vi.useRealTimers();f.close()}
+})
+// While every validation slot is taken, a pass captures nothing, and the document doesn't wait longer once a slot frees.
+it('captures nothing while validation is busy, and captures as soon as a slot is free',async()=>{
+  const f=fixture();vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(0)
+  try{
+    let free=false,answer:'retry'|'crash'='retry'
+    const validateActivation=Object.assign(async()=>{if(answer==='crash')throw new Error('Validator crashed.');return {kind:'retry' as const,reason:'admission-unavailable' as const}},{hasCapacity:()=>free})
+    const capture=vi.fn(async()=>f.capture),signal=()=>new AbortController().signal
+    const d=activationDriver(f,capture,undefined,undefined,undefined,{validateActivation}),busy={kind:'pending',reason:'Live validation is busy.'}
+    for(let i=0;i<5;i++)expect(await d.driver.activate(d.target,signal())).toEqual(busy)
+    expect(capture).not.toHaveBeenCalled()
+    // A slot taken between the check and validation counts nothing either.
+    free=true
+    for(let i=0;i<3;i++)expect(await d.driver.activate(d.target,signal())).toEqual(busy)
+    expect(capture).toHaveBeenCalledTimes(3)
+    // A real failure still counts from its first.
+    answer='crash'
+    await expect(d.driver.activate(d.target,signal())).rejects.toThrow('Validator crashed.')
+    await expect(d.driver.activate(d.target,signal())).rejects.toThrow('Validator crashed.')
+    expect(await d.driver.activate(d.target,signal())).toEqual({kind:'pending',reason:'Hosted document waits before it tries again.'})
+  }finally{vi.useRealTimers();f.close()}
+})
+// The slot check follows the catch-up pull, so a slot taken while the pull runs leaves nothing captured.
+it('checks for a free validation slot after the catch-up pull, just before it captures',async()=>{
+  const f=fixture()
+  try{
+    let free=true
+    const validateActivation=Object.assign(async()=>({kind:'retry' as const,reason:'admission-unavailable' as const}),{hasCapacity:()=>free})
+    const capture=vi.fn(async()=>f.capture),d=activationDriver(f,capture,undefined,undefined,undefined,{validateActivation})
+    d.pull.mockImplementation(async()=>{free=false;return {hasMore:false}})
+    expect(await d.driver.activate(d.target,new AbortController().signal)).toEqual({kind:'pending',reason:'Live validation is busy.'})
+    expect(d.pull).toHaveBeenCalledTimes(1)
+    expect(capture).not.toHaveBeenCalled()
+  }finally{f.close()}
+})
+// Going live ends the wait, so a later failure is again the first, retried on the next pass.
+it('starts the wait from the first failure again once the document has gone live',async()=>{
+  const f=fixture();vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(0)
+  try{
+    await completeActivation(f)
+    vi.spyOn(OwnerCommittedDelivery.prototype,'drain').mockResolvedValue({kind:'done'} as never)
+    const capture=vi.fn(async():Promise<NativeOwnerActivation>=>{throw new Error('Engine is unavailable.')}),signal=()=>new AbortController().signal
+    const d=activationDriver(f,capture),waiting={kind:'pending',reason:'Hosted document waits before it tries again.'}
+    for(let i=0;i<2;i++)await expect(d.driver.activate(d.target,signal())).rejects.toThrow('Engine is unavailable.')
+    expect(await d.driver.activate(d.target,signal())).toEqual(waiting)
+    vi.setSystemTime(1000)
+    capture.mockImplementation(async()=>f.capture)
+    expect(await d.driver.activate(d.target,signal())).toMatchObject({kind:'done'})
+    // A pull that no longer speaks for the document drops its owner, so a later pass captures it again.
+    expect(d.driver.hold('workspace',[],{after:'object',through:null},{listed:[],complete:false})).toBe(1)
+    capture.mockImplementation(async()=>{throw new Error('Engine is unavailable.')})
+    for(let i=0;i<2;i++)await expect(d.driver.activate(d.target,signal())).rejects.toThrow('Engine is unavailable.')
+    expect(await d.driver.activate(d.target,signal())).toEqual(waiting)
+    expect(capture).toHaveBeenCalledTimes(5)
+  }finally{vi.restoreAllMocks();vi.useRealTimers();f.close()}
+})
+// Stop forgets the document, and a restart starts with nothing in memory, so either clears a block and the wait.
+it.each(['Stop','a restart'] as const)('captures a blocked or waiting document again after %s',async when=>{
+  const f=fixture();vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(0)
+  try{
+    const message='Ordinary activation history exceeds its configured validation budget.'
+    let answer:'over-budget'|'crash'='over-budget'
+    const validateActivation:OrdinaryActivationValidator=async()=>{if(answer==='crash')throw new Error('Validator crashed.');return {kind:'over-budget',message}}
+    const capture=vi.fn(async()=>f.capture),signal=()=>new AbortController().signal,waiting={kind:'pending',reason:'Hosted document waits before it tries again.'}
+    const start=()=>activationDriver(f,capture,undefined,undefined,undefined,{validateActivation})
+    let d=start()
+    const again=()=>{if(when==='Stop'){d.driver.removeTarget(d.target);d.driver.addTarget(d.target,'object')}else d=start()}
+    expect(await d.driver.activate(d.target,signal())).toEqual({kind:'pending',reason:message})
+    expect(d.driver.blocked(d.target)).toBe('history-over-budget')
+    again()
+    expect(d.driver.blocked(d.target)).toBeUndefined()
+    expect(await d.driver.activate(d.target,signal())).toEqual({kind:'pending',reason:message})
+    expect(capture).toHaveBeenCalledTimes(2)
+    answer='crash'
+    again()
+    for(let i=0;i<2;i++)await expect(d.driver.activate(d.target,signal())).rejects.toThrow('Validator crashed.')
+    expect(await d.driver.activate(d.target,signal())).toEqual(waiting)
+    again()
+    for(let i=0;i<2;i++)await expect(d.driver.activate(d.target,signal())).rejects.toThrow('Validator crashed.')
+    expect(await d.driver.activate(d.target,signal())).toEqual(waiting)
+    expect(capture).toHaveBeenCalledTimes(6)
+  }finally{vi.useRealTimers();f.close()}
+})
+// A history past its budget is blocked, not counted: once a new base clears the block, the next failure is the first.
+it('adds nothing to the wait for a history past its budget',async()=>{
+  const {maxEntriesPerDrain}=selfHostLiveProfile().service.activation,f=fixture();vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(0)
+  try{
+    const signal=()=>new AbortController().signal,waiting={kind:'pending',reason:'Hosted document waits before it tries again.'}
+    const overBudget={kind:'pending',reason:'Ordinary activation history exceeds its configured entry budget.'}
+    f.raw.exec('BEGIN')
+    for(let seq=3;seq<=maxEntriesPerDrain+1;seq++)append(f,'origin',seq,'ydoc.update',ydocUpdate({isBaseState:false,lineageClaimId:f.document.lineageClaimId,updateBlobSha256:hash(Buffer.from(`edit-${seq}`))}))
+    f.raw.exec('COMMIT')
+    const rebase=(seq:number)=>append(f,'rebased',seq,'ydoc.update',ydocUpdate({isBaseState:true,lineageClaimId:hash(Buffer.from(`rebased-${seq}`)),updateBlobSha256:hash(Buffer.from(`rebased-${seq}`))}))
+    const capture=vi.fn(async()=>f.capture),d=activationDriver(f,capture,undefined,undefined,undefined,{maxEntriesPerDrain})
+    expect(await d.driver.activate(d.target,signal())).toEqual(overBudget)
+    rebase(1)
+    // `append` moves the capture's cut to the new base, as a capture after a complete pull would be.
+    const based=f.capture.source.committedCursor
+    expect(await d.driver.activate(d.target,signal())).toEqual(overBudget)
+    expect(d.driver.blocked(d.target)).toBe('history-over-budget')
+    expect(f.capture.source.committedCursor).toBe(based)
+    // Blocked again past that base, so the next pass captures nothing.
+    expect(await d.driver.activate(d.target,signal())).toEqual({kind:'pending',reason:'Hosted document is blocked until the owner tries again.'})
+    expect(capture).toHaveBeenCalledTimes(2)
+    rebase(2)
+    capture.mockImplementation(async()=>{throw new Error('Engine is unavailable.')})
+    for(let i=0;i<2;i++)await expect(d.driver.activate(d.target,signal())).rejects.toThrow('Engine is unavailable.')
+    expect(await d.driver.activate(d.target,signal())).toEqual(waiting)
+    expect(capture).toHaveBeenCalledTimes(4)
+  }finally{vi.useRealTimers();f.close()}
+})
+// A document the engine has not readied is retried on every pass, and that adds nothing to a later wait.
+it('adds nothing to the wait while the engine has not readied the document',async()=>{
+  const f=fixture();vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(0)
+  try{
+    const unready=()=>new EngineRequestError(1,{code:'CONFLICT',message:'hosted-document-unready',retry:'no'} as never)
+    const capture=vi.fn(async():Promise<NativeOwnerActivation>=>{throw unready()}),signal=()=>new AbortController().signal
+    const d=activationDriver(f,capture),waiting={kind:'pending',reason:'Hosted document waits before it tries again.'}
+    for(let i=0;i<3;i++)await expect(d.driver.activate(d.target,signal())).rejects.toThrow('hosted-document-unready')
+    capture.mockImplementation(async()=>{throw new Error('Engine is unavailable.')})
+    for(let i=0;i<2;i++)await expect(d.driver.activate(d.target,signal())).rejects.toThrow('Engine is unavailable.')
+    expect(await d.driver.activate(d.target,signal())).toEqual(waiting)
+    expect(capture).toHaveBeenCalledTimes(5)
+  }finally{vi.useRealTimers();f.close()}
+})
+// Stop or a closing host aborts the pass. That says nothing about the document, even when it arrives during the capture.
+it('adds nothing to the wait for a pass stopped during capture',async()=>{
+  const f=fixture();vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(0)
+  try{
+    let pass=new AbortController()
+    const capture=vi.fn(async():Promise<NativeOwnerActivation>=>{pass.abort();throw pass.signal.reason}),signal=()=>new AbortController().signal
+    const d=activationDriver(f,capture),waiting={kind:'pending',reason:'Hosted document waits before it tries again.'}
+    for(let i=0;i<3;i++){pass=new AbortController();await expect(d.driver.activate(d.target,pass.signal)).rejects.toMatchObject({name:'AbortError'})}
+    capture.mockImplementation(async()=>{throw new Error('Engine is unavailable.')})
+    for(let i=0;i<2;i++)await expect(d.driver.activate(d.target,signal())).rejects.toThrow('Engine is unavailable.')
+    expect(await d.driver.activate(d.target,signal())).toEqual(waiting)
+    expect(capture).toHaveBeenCalledTimes(5)
+  }finally{vi.useRealTimers();f.close()}
+})
+// Waiting between tries applies to capturing. A live document whose drain fails keeps draining on every pass.
+it('keeps draining a live document on every pass after its drain fails',async()=>{
+  const f=fixture();vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(0)
+  try{
+    const drained={kind:'pending' as const,reason:'transport interrupted',continueDrain:false},signal=()=>new AbortController().signal
+    const drain=vi.spyOn(OwnerCommittedDelivery.prototype,'drain').mockResolvedValue(drained)
+    const capture=vi.fn(async()=>f.capture),d=activationDriver(f,capture)
+    expect(await d.driver.activate(d.target,signal())).toMatchObject({kind:'pending',reason:'transport interrupted'})
+    drain.mockRejectedValueOnce(new Error('Drain failed.')).mockRejectedValueOnce(new Error('Drain failed.'))
+    await expect(d.driver.activate(d.target,signal())).rejects.toThrow('Drain failed.')
+    await expect(d.driver.activate(d.target,signal())).rejects.toThrow('Drain failed.')
+    expect(await d.driver.activate(d.target,signal())).toMatchObject({kind:'pending',reason:'transport interrupted'})
+    expect(capture).toHaveBeenCalledTimes(1)
+  }finally{vi.restoreAllMocks();vi.useRealTimers();f.close()}
+})
+// An engine refusal while settling a document already live counts as a failure, but waiting applies to capturing,
+// so the document keeps settling on every pass. Only a capture after its owner is dropped waits, as long as the count says.
+it('counts a settle refusal after registration without delaying a pass, and waits before capturing again',async()=>{
+  const f=fixture();vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(0)
+  try{
+    await completeActivation(f)
+    vi.spyOn(OwnerCommittedDelivery.prototype,'drain').mockResolvedValue({kind:'done'} as never)
+    const settle=vi.fn(async():Promise<void>=>{throw new Error('Settle refused.')}),signal=()=>new AbortController().signal
+    const capture=vi.fn(async()=>f.capture),d=activationDriver(f,capture),waiting={kind:'pending',reason:'Hosted document waits before it tries again.'}
+    const drop=()=>expect(d.driver.hold('workspace',[],{after:'object',through:null},{listed:[],complete:false})).toBe(1)
+    for(let i=0;i<3;i++)await expect(d.driver.activate(d.target,signal(),settle)).rejects.toThrow('Settle refused.')
+    expect(settle).toHaveBeenCalledTimes(3)
+    expect(capture).toHaveBeenCalledTimes(1)
+    // Three failures: the next capture waits 2 s from the last one, and not a moment less.
+    drop()
+    expect(await d.driver.activate(d.target,signal(),settle)).toEqual(waiting)
+    vi.setSystemTime(1999)
+    expect(await d.driver.activate(d.target,signal(),settle)).toEqual(waiting)
+    expect(capture).toHaveBeenCalledTimes(1)
+    vi.setSystemTime(2000)
+    settle.mockResolvedValueOnce(undefined)
+    expect(await d.driver.activate(d.target,signal(),settle)).toMatchObject({kind:'done'})
+    expect(capture).toHaveBeenCalledTimes(2)
+    // Going live cleared the count, so one more refusal and a drop leave the next capture free to run at once.
+    drop()
+    await expect(d.driver.activate(d.target,signal(),settle)).rejects.toThrow('Settle refused.')
+    drop()
+    await expect(d.driver.activate(d.target,signal(),settle)).rejects.toThrow('Settle refused.')
+    expect(capture).toHaveBeenCalledTimes(4)
+  }finally{vi.restoreAllMocks();vi.useRealTimers();f.close()}
+})
+// A pull page that can't speak for a document drops its owner, and an owner dropped on every pass recaptures on
+// every pass unless its failures count. Counted, the captures spread out by the wait.
+it('spreads out the captures of a document whose owner each pull drops while its drain keeps failing',async()=>{
+  const f=fixture();vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(0)
+  try{
+    await completeActivation(f)
+    vi.spyOn(OwnerCommittedDelivery.prototype,'drain').mockRejectedValue(new Error('Drain failed.'))
+    const captured:number[]=[],capture=vi.fn(async()=>{captured.push(Date.now());return f.capture}),d=activationDriver(f,capture)
+    for(let now=0;now<=7000;now+=250){
+      vi.setSystemTime(now)
+      d.driver.hold('workspace',[],{after:'object',through:null},{listed:[],complete:false})
+      await d.driver.activate(d.target,new AbortController().signal).catch((error:unknown)=>expect(error).toMatchObject({message:'Drain failed.'}))
+    }
+    expect(captured).toEqual([0,250,1250,3250])
+  }finally{vi.restoreAllMocks();vi.useRealTimers();f.close()}
+})
 it('releases a capture and tries again on a later pass while live validation is busy',async()=>{
   const f=fixture();try{
     const send=vi.fn(async()=>({result:{released:true}}))

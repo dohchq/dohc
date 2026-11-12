@@ -649,6 +649,8 @@ export interface SyncRelayStorage {
   listServiceHostDocumentRows(input: {workspaceId: string; objectId: string; afterRelaySeq: number; limit: number}): SyncRelayLogRow[];
   /** The relay sequence of the document's latest Y.Doc update, or 0 while it has none. */
   latestServiceHostDocumentUpdate(input: {workspaceId: string; objectId: string}): number;
+  /** Whether the document has a base Y.Doc row after `afterRelaySeq`. */
+  serviceHostDocumentBaseAfter(input: {workspaceId: string; objectId: string; afterRelaySeq: number}): boolean;
   hasServiceHostConflictEffect(input: {workspaceId: string; objectId: string}): boolean;
   /** Stores blob bytes the service host uploaded, with its proof of holding them. */
   putServiceHostBlob(input: {workspaceId: string; sha256: string; content: Uint8Array; createdAtMs: number}): PutBlobResult;

@@ -518,7 +518,7 @@ it("reports only a conflict-parent hold, after document state and existing block
   f.host.holdReason.mockReturnValue("hosted-conflict-parent-withheld");
   expect(await state()).toEqual({...base, status: "unavailable", reason: "conflict-parent-withheld"});
   for (const [block, reason] of [["without-lineage", "live-document-without-lineage"],
-    ["refused", "session-host-refused"], ["live-edit-unadmitted", "live-edit-unadmitted"]] as const) {
+    ["refused", "session-host-refused"], ["live-edit-unadmitted", "live-edit-unadmitted"], ["history-over-budget", "live-history-over-budget"]] as const) {
     f.host.block(enrolled.objectId, block);
     expect(await state()).toEqual({...base, status: "unavailable", reason});
   }

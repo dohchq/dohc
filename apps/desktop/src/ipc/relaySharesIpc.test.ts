@@ -474,6 +474,7 @@ describe("owner live document enrollment", () => {
         {path: "unopened.md", objectId: "unopened", status: "unavailable", reason: "live-document-without-lineage"},
         {path: "diverged.md", objectId: "diverged", status: "unavailable", reason: "session-host-diverged"},
         {path: "edited.md", objectId: "edited", status: "unavailable", reason: "live-edit-unadmitted"},
+        {path: "long.md", objectId: "long", status: "unavailable", reason: "live-history-over-budget"},
       ]});
     await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId, retiredAfter: "older.md"})).resolves.toEqual({
       documents: [
@@ -488,6 +489,8 @@ describe("owner live document enrollment", () => {
         {path: "diverged.md", objectId: "diverged", status: "unavailable", reason: "session-host-diverged", canResume: false},
         // A Resume adds an edit made while live editing was off to the server's copy.
         {path: "edited.md", objectId: "edited", status: "unavailable", reason: "live-edit-unadmitted", canResume: true},
+        // A Resume fails the same way because ordinary edits never give the document a new base.
+        {path: "long.md", objectId: "long", status: "unavailable", reason: "live-history-over-budget", canResume: false},
       ], nextCursor: "old.md",
     });
     expect(h.request.mock.calls.map((call) => call[1])).toEqual([

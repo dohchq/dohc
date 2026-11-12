@@ -2216,6 +2216,7 @@ describe("server owner peer lifecycle", () => {
     const divergedRow = {path: "diverged.md", status: "unavailable", reason: "session-host-diverged"};
     const edited = {path: "edited.md", status: "unavailable", reason: "live-edit-unadmitted"};
     const held = {path: "held.md", status: "unavailable", reason: "conflict-parent-withheld"};
+    const long = {path: "long.md", status: "unavailable", reason: "live-history-over-budget"};
     const others = [{path: "changed.md", status: "unavailable", reason: "workspace-changed"}, {path: "moved.md", status: "unavailable", reason: "document-unavailable"}];
     const ready = {path: "a.md", status: "ready", document};
     // The server says the workspace diverged whenever any of its rows does, and after its owner stopped every one.
@@ -2231,6 +2232,9 @@ describe("server owner peer lifecycle", () => {
     try {
       expect(await f.engine.start()).toBe(true);
       await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("workspace-changed"));
+      // A document whose history the server can't check outranks the reasons an owner can't act on either way.
+      rows = [...others, long]; f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("live-history-over-budget"));
       // With no document to deliver.
       rows = [...others, refused]; f.engine.retryOwnerDelivery("owner");
       await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("session-host-refused"));
