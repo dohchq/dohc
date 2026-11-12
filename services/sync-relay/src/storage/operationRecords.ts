@@ -8,6 +8,9 @@ import type { SqliteDb, SyncRelayLogRow } from "./types";
 export const ACCOUNT_OPERATIONS = "sync_relay_account_operations";
 const WORKSPACE_DELETED = "sync_relay_account_operations_workspace_deleted";
 const IDENTITY_ENDED = "sync_relay_account_operations_identity_ended";
+export const UNFINISHED_INDEX = "idx_sync_relay_account_operations_unfinished";
+// A row still to finish. Queries for such rows repeat these terms exactly, so SQLite uses the partial index.
+const UNFINISHED = "stage NOT IN ('saved', 'refused') AND command_json IS NOT NULL";
 const MARKER = "account-operations-v1";
 
 // One row per phone write, keyed by the account and the phone's operation ID,
@@ -56,6 +59,9 @@ const SCHEMA = {
   ON sync_relay_account_operations(workspace_id, incarnation)`,
   idx_sync_relay_account_operations_settled: `CREATE INDEX idx_sync_relay_account_operations_settled
   ON sync_relay_account_operations(settled_at_ms) WHERE settled_at_ms IS NOT NULL`,
+  // Each pass asks for the unfinished writes; this keeps settled rows and tombstones out of that read.
+  [UNFINISHED_INDEX]: `CREATE INDEX idx_sync_relay_account_operations_unfinished
+  ON sync_relay_account_operations(workspace_id, incarnation) WHERE ${UNFINISHED}`,
   // A deleted workspace can never publish, so its unfinished rows end refused.
   [WORKSPACE_DELETED]: `CREATE TRIGGER sync_relay_account_operations_workspace_deleted
   AFTER DELETE ON sync_relay_workspaces BEGIN
@@ -304,24 +310,26 @@ export function advanceOperation(
   });
 }
 
+/** The read of a copy's unfinished writes, as `listUnfinishedOperations` runs it. */
+export const UNFINISHED_OPERATIONS_SQL = `SELECT * FROM sync_relay_account_operations
+     WHERE workspace_id = ? AND (? IS NULL OR incarnation = ?) AND ${UNFINISHED}
+     ORDER BY created_at_ms, account_id, operation_id`;
+
 /** The writes still to finish on one copy, or on every copy of the workspace, oldest first, including stalled ones. */
 export function listUnfinishedOperations(
   storage: StorageContext,
   input: { workspaceId: string; incarnation?: number },
 ): OperationRecord[] {
   const incarnation = input.incarnation ?? null;
-  return storage.readTx(() => storage.db.prepare(
-    `SELECT * FROM sync_relay_account_operations
-     WHERE workspace_id = ? AND (? IS NULL OR incarnation = ?) AND stage NOT IN ('saved', 'refused')
-     ORDER BY created_at_ms, account_id, operation_id`,
-  ).all(input.workspaceId, incarnation, incarnation).map(recordOf));
+  return storage.readTx(() => storage.db.prepare(UNFINISHED_OPERATIONS_SQL)
+    .all(input.workspaceId, incarnation, incarnation).map(recordOf));
 }
 
 /** Each copy, by workspace and incarnation, that holds writes still to finish. */
 export function listUnfinishedOperationCopies(storage: StorageContext): Array<{ workspaceId: string; incarnation: number }> {
   return storage.readTx(() => storage.db.prepare(
     `SELECT DISTINCT workspace_id, incarnation FROM sync_relay_account_operations
-     WHERE stage NOT IN ('saved', 'refused') AND command_json IS NOT NULL ORDER BY workspace_id, incarnation`,
+     WHERE ${UNFINISHED} ORDER BY workspace_id, incarnation`,
   ).all().map(row => ({ workspaceId: String(row.workspace_id), incarnation: Number(row.incarnation) })));
 }
 

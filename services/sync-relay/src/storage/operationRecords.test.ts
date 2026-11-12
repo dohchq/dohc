@@ -7,6 +7,8 @@ import type { StorageContext } from "./context";
 import {
   OPERATION_ACTIVE_MS,
   OPERATION_KEEP_SETTLED_MS,
+  UNFINISHED_INDEX,
+  UNFINISHED_OPERATIONS_SQL,
   type AdvanceOperationInput,
   type OperationBinding,
   type OperationClaim,
@@ -85,6 +87,10 @@ it("creates the operation table on an older relay once, and refuses an unmarked 
 
   const upgraded = reopenTestStorage(path);
   expect(recorded(upgraded.recordAccountOperation(input())).stage).toBe("recorded");
+  const indexed = inspectDatabase(path);
+  expect(indexed.prepare("SELECT 1 AS made FROM sqlite_schema WHERE type = 'index' AND name = ?").get(UNFINISHED_INDEX), "the partial index")
+    .toEqual({ made: 1 });
+  indexed.close();
   closeTestStorage(upgraded);
   const first = marker();
   expect(first).toEqual({ migration_id: MARKER, completed_at_ms: expect.any(Number) });
@@ -281,4 +287,22 @@ it("records a new write only for the workspace's owner, and answers a retry from
   expect(storage.recordAccountOperation(input({ binding: binding({ ...ARGS, body: "Other" }) }))).toEqual({ kind: "mismatch" });
   expect(storage.recordAccountOperation(input({ operationId: "operation-2" }))).toEqual({ kind: "not-owner" });
   expect(rowCount(storage)).toEqual({ n: 1 });
+});
+
+it("reads a copy's unfinished writes through the partial index, past settled rows and tombstones", async () => {
+  const storage = await testStorage();
+  await own(storage, ACCOUNT, "workspace");
+  for (const operationId of ["unfinished", "stalled", "saved", "forgotten"]) recorded(storage.recordAccountOperation(input({ operationId })));
+  advance(storage, "stalled", "stalled");
+  advance(storage, "saved", "saved");
+  advance(storage, "forgotten", "refused", { nowMs: NOW });
+  expect(storage.tombstoneSettledAccountOperations(NOW + OPERATION_KEEP_SETTLED_MS + 1)).toBe(1);
+  expect(tombstones(storage).map(row => row.operationId)).toEqual(["forgotten"]);
+
+  const db = inspectDatabase(storagePath(storage));
+  const plan = db.prepare(`EXPLAIN QUERY PLAN ${UNFINISHED_OPERATIONS_SQL}`).all("workspace", 1, 1).map(row => String(row.detail));
+  db.close();
+  expect(plan.join("\n")).toContain(`USING INDEX ${UNFINISHED_INDEX}`);
+  expect(storage.listUnfinishedAccountOperations({ workspaceId: "workspace", incarnation: 1 }).map(row => row.operationId))
+    .toEqual(["stalled", "unfinished"]);
 });
