@@ -6526,6 +6526,15 @@ it("records an idle unload whose reply arrives after the sweep deadline and relo
   await expect(o.host.drain(o.document)).resolves.toMatchObject({kind: "done"});
 });
 
+it("logs only an engine refusal's code word when an idle unload waits on it", async () => {
+  const o = await idleHost(), log = vi.spyOn(console, "error").mockImplementation(() => {});
+  const refusal = () => new EngineRequestError(1, {code: "INTERNAL", message: "hosted-file-unexpected: notes/secret plan.md holds bytes other than its document's head", retry: "no"} as never, "live.unload");
+  o.unloads.push(refusal(), refusal());
+  o.advance(600_000);
+  await vi.waitFor(() => expect(log).toHaveBeenCalledWith("Idle live document unload is waiting.", "hosted-file-unexpected (code INTERNAL, method live.unload)"));
+  expect(JSON.stringify(log.mock.calls)).not.toContain("secret");
+});
+
 it("sends an unanswered idle unload again before settling it or reloading it on reconnect", async () => {
   const o = await idleHost(), log = vi.spyOn(console, "error").mockImplementation(() => {});
   o.unloads.push(new Error("Engine connection reset."), new Error("Engine connection reset."));
@@ -6572,7 +6581,7 @@ it("keeps an idle unload the engine stopped waiting for unanswered and sends it 
   // The engine's spawned unload runs on after its request deadline.
   o.unloads.push(new EngineRequestError(1, {code: "DEADLINE_EXCEEDED", message: "unload-deadline", retry: "afterBackoff"} as never));
   o.advance(600_000);
-  await vi.waitFor(() => expect(log).toHaveBeenCalledWith("Idle live document unload is waiting.", "unload-deadline"));
+  await vi.waitFor(() => expect(log).toHaveBeenCalledWith("Idle live document unload is waiting.", "unload-deadline (code DEADLINE_EXCEEDED)"));
   // Passes leave it alone: the engine may have ended its registration.
   const visits = o.visits(o.sibling.path);
   await o.passes();

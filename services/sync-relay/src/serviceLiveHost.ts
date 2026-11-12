@@ -1611,7 +1611,7 @@ export async function startServiceLiveHost(options: {
           visited++;
           let waiting:string|undefined;
           try{waiting=await withDeadline(signal,bounds.passDeadlineMs,deadline=>sleep(key,row,state.generation,deadline));}
-          catch(error){waiting=error instanceof Error?error.message:String(error);}
+          catch(error){waiting=activationFailureLine(error);}
           if(waiting===undefined || idle.get(key)?.generation!==state.generation)continue;
           idle.set(key,{due:idleClock.nowMs()+bounds.idleRetryMs,generation:state.generation});
           if(!signal.aborted && waiting!==lastIdleError){
