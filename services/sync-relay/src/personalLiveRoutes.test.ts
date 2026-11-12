@@ -56,8 +56,11 @@ afterEach(async () => {
 class Fence implements CredentialFence {
   epoch = 0;
   down = false;
+  /** While set, a read waits for it, as a read Postgres hasn't answered. */
+  held: Promise<void> | undefined;
   listener: CredentialFenceListener | undefined;
   async readEpoch(): Promise<number> {
+    await this.held;
     if (this.down) throw new Error("The database is unreachable.");
     return this.epoch;
   }
@@ -126,8 +129,13 @@ async function fixture() {
   }
   await up();
 
-  const validate: CapacityLiveAdmissionValidator = ({ retainStateUpdate: _retainStateUpdate, ...input }) =>
-    createLiveMarkdownJournalValidator(policy)(input);
+  // A test can hold validation to change the agent's access while it runs.
+  let validations = 0, validating: Promise<void> | undefined;
+  const validate: CapacityLiveAdmissionValidator = async ({ retainStateUpdate: _retainStateUpdate, ...input }) => {
+    validations++;
+    await validating;
+    return createLiveMarkdownJournalValidator(policy)(input);
+  };
   const routes = createPersonalLiveRoutes({ storage, hosts: new Set([relayHost]), publicOrigin: audience, exchangeKey: RELAY_EXCHANGE_KEY,
     frames, bounds, limits, validate, captureNative, tickets, linkAuthority: h.linkAuthority, personalAgents: h.personalAgents,
     limiter: h.personalLimiter, supported: () => supported });
@@ -196,12 +204,15 @@ async function fixture() {
     const closed = new Promise<[number, string]>(resolve => ws.once("close", (code, reason) => resolve([code, reason.toString()])));
     return { ws, status, received, closed };
   }
-  /** An owner's edit the host applied, read by the next pull. */
-  function applied(updateBytes = Buffer.from([1, 2, 3])) {
-    vi.mocked(native.client.readNextLiveApplied).mockImplementation(async (_request, after) => after.eventCount ? null : {
-      position: { eventCount: 1, journalCursor: 1, evidenceDigest: "cd".repeat(32) }, updateBytes,
-      ack: { deliveryId: "owner-edit", updateDigest: sha(updateBytes), journalCursor: 1, acceptingHostEpoch: service.hostEpoch,
-        localYDocSequence: 1, applicationReplayed: false } });
+  /** An owner's edit the host applied, read by the next pull, which waits for `held` before it answers. */
+  function applied(updateBytes = Buffer.from([1, 2, 3]), held?: Promise<void>) {
+    vi.mocked(native.client.readNextLiveApplied).mockImplementation(async (_request, after) => {
+      if (after.eventCount) return null;
+      await held;
+      return { position: { eventCount: 1, journalCursor: 1, evidenceDigest: "cd".repeat(32) }, updateBytes,
+        ack: { deliveryId: "owner-edit", updateDigest: sha(updateBytes), journalCursor: 1, acceptingHostEpoch: service.hostEpoch,
+          localYDocSequence: 1, applicationReplayed: false } };
+    });
     changes.notify(binding);
     return updateBytes;
   }
@@ -220,7 +231,8 @@ async function fixture() {
   const unredeemed = () => Number(state.raw.prepare("SELECT count(*) AS count FROM sync_relay_live_session_tickets WHERE redeemed_at_ms IS NULL").get()!.count);
   const demandAtMs = () => Number(state.raw.prepare(`SELECT demand_at_ms FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=? AND object_id=?`)
     .get(scope.workspaceId, binding.objectId)!.demand_at_ms);
-  return { ...state, h, fence, native, tickets, validate, up, agent, ticketRequest, mint, connect, applied, admitting, reach, unredeemed, demandAtMs,
+  return { ...state, h, fence, native, tickets, validate, up, validations: () => validations,
+    holdValidation: (held: Promise<void> | undefined) => { validating = held; }, agent, ticketRequest, mint, connect, applied, admitting, reach, unredeemed, demandAtMs,
     setClock: (value: number) => { clock = value; }, setSupported: (value: boolean) => { supported = value; } };
 }
 type Fixture = Awaited<ReturnType<typeof fixture>>;
@@ -295,7 +307,7 @@ it("opens a ticket only for the connection it was minted for", async () => {
 });
 
 // Each fresh read begins after the engine read the update or the route
-// validated the edit, so a change Postgres committed before then is seen.
+// validated the edit, so a change Postgres committed while either ran is seen.
 const accessChanges: [string, (f: Fixture) => void, boolean][] = [
   ["nothing changed", () => undefined, true],
   ["the fence moved on without its notification", f => { f.fence.epoch = 1; }, false],
@@ -305,8 +317,12 @@ const accessChanges: [string, (f: Fixture) => void, boolean][] = [
 it.each(accessChanges)("reads the agent's access again before sending it the next update: %s", async (_change, change, continues) => {
   const f = await fixture(), helper = f.agent("helper");
   const socket = await editing(f, helper);
+  const reads = vi.mocked(f.native.client.readNextLiveApplied).mock.calls.length;
+  let answer!: () => void;
+  const update = f.applied(undefined, new Promise<void>(resolve => { answer = resolve; }));
+  await vi.waitFor(() => expect(f.native.client.readNextLiveApplied).toHaveBeenCalledTimes(reads + 1));
   change(f);
-  const update = f.applied();
+  answer();
   if (continues) {
     await vi.waitFor(() => expect(delivered(socket)).toEqual(update));
     expect(socket.ws.readyState).toBe(WebSocket.OPEN);
@@ -320,8 +336,12 @@ it.each(accessChanges)("reads the agent's access again before admitting its next
   const f = await fixture(), helper = f.agent("helper");
   const socket = await editing(f, helper);
   const commit = f.admitting();
-  change(f);
+  let answer!: () => void;
+  f.holdValidation(new Promise<void>(resolve => { answer = resolve; }));
   submit(socket, "edit", 2);
+  await vi.waitFor(() => expect(f.validations()).toBe(1));
+  change(f);
+  answer();
   if (continues) {
     await vi.waitFor(() => expect(resultFor(socket, "edit")).toBeDefined());
     expect(commit).toHaveBeenCalledOnce();
@@ -372,6 +392,23 @@ it("refuses a mint, an open, an initial sync and an admission while Postgres can
   submit(socket, "once-up", 3);
   await vi.waitFor(() => expect(resultFor(socket, "once-up")).toBeDefined());
   expect(commit).toHaveBeenCalledOnce();
+});
+
+it.each(["sending it an update", "admitting its edit"])("lets go of a closed session while a fresh read before %s is still waiting", async step => {
+  const f = await fixture(), helper = f.agent("helper");
+  const socket = await editing(f, helper);
+  const renew = vi.spyOn(f.storage, "renewPersonalSessionDemand");
+  const reads = vi.spyOn(f.fence, "readEpoch");
+  let answer!: () => void;
+  f.fence.held = new Promise<void>(resolve => { answer = resolve; });
+  const commit = step === "admitting its edit" ? f.admitting() : undefined;
+  if (commit) submit(socket, "held", 2); else f.applied();
+  await vi.waitFor(() => expect(reads).toHaveBeenCalled());
+  socket.ws.close();
+  // The session's connection and editor count are released while Postgres still hasn't answered.
+  await vi.waitFor(() => expect(renew).toHaveBeenCalledOnce());
+  if (commit) expect(commit).not.toHaveBeenCalled();
+  answer();
 });
 
 it("ends every personal session when the fence listener goes down, and opens a session once it has caught up", async () => {

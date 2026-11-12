@@ -17,7 +17,7 @@ import type { PersonalAgents } from "./personalAgents.js";
 import { errorResponse, relayError, RelayError } from "./errors.js";
 import type { CapacityLiveAdmissionValidator } from "./ownerOutboxDelivery.js";
 import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity.js";
-import { captureNamedLiveFrameHost, captureOwnerLiveFrameHost, type NamedFrameValidationBudget, type NamedFrameHostBounds, type NamedFrameNativeHost } from "./namedLiveFrameHost.js";
+import { captureNamedLiveFrameHost, captureOwnerLiveFrameHost, untilAborted, type NamedFrameValidationBudget, type NamedFrameHostBounds, type NamedFrameNativeHost } from "./namedLiveFrameHost.js";
 import { createNamedLiveFrameSession, type NamedFrameHostSession } from "./namedLiveFrameSession.js";
 import type { createLiveMembershipRegistry, LiveMembershipSession } from "./liveMembership.js";
 import {createLiveConnectionAdmission} from "./liveConnectionAdmission";
@@ -370,7 +370,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
       } else if (options.kind === "personal") {
         // The account's fence, read from Postgres for this open.
         const linkAuthority = options.linkAuthority;
-        const authority = await linkAuthority.personal(authenticated); signal.throwIfAborted(); check();
+        const authority = await untilAborted(linkAuthority.personal(authenticated), signal); signal.throwIfAborted(); check();
         const context = personalLiveContext(authority, personalWorkspaceId);
         connectionScopes.set(stop, {userId: authority.ownerUserId, workspaceId: context.workspaceId});
         if (!options.supported()) { stop(); return; }

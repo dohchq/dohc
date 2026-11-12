@@ -56,6 +56,19 @@ class ValidationExceedsBudget extends Error {}
 export type PersonalFreshRead = () => Promise<unknown>;
 
 /**
+ * Waits for a read until `signal` aborts. Other callers may share the read,
+ * so a closing session stops waiting for it rather than cancelling it.
+ */
+export function untilAborted<T>(read: Promise<T>, signal: AbortSignal): Promise<T> {
+  signal.throwIfAborted();
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+    void read.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+  });
+}
+
+/**
  * Wraps an established authenticated native registration. It never owns host
  * retirement. A personal agent's capture reads its access again before its
  * initial sync, each update it is sent, and each update admitted.
@@ -177,7 +190,7 @@ function captureLiveFrameHost(options: {
   // A personal agent's access, read again from Postgres before anything is sent.
   async function fresh(signal: AbortSignal) {
     if (!freshRead) return;
-    await freshRead();
+    await untilAborted(freshRead(), signal);
     check(signal);
   }
   const request = () => ({ id: native.nextRequestId(), workspace: native.workspace, registrationId: native.registrationId, deadlineMs: native.deadlineMs });
@@ -319,8 +332,9 @@ function captureLiveFrameHost(options: {
             // Read again from Postgres just before the journal transaction. While
             // it can't answer, nothing is admitted and the agent may try again.
             if (freshRead) {
-              try { await freshRead(); }
+              try { await untilAborted(freshRead(), admissionSignal); }
               catch (error) {
+                admissionSignal.throwIfAborted();
                 if (error instanceof RelayError && error.code === "personal_agent_unavailable") {
                   check(admissionSignal);
                   return { result: "retry", reason: "admission-unavailable" };
