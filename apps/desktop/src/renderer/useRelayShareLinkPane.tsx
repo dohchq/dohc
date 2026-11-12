@@ -26,12 +26,12 @@ import { MoreMenu } from "./ui/MoreMenu";
 import { CopyButton, type CopySecret } from "./ui/CopyButton";
 import { AgentLinkAppMenu } from "./agentLinkApps";
 import { AGENT_ADDRESS_SECRET, LinkAgentsList, agentAddressFor, useLinkAgentDisconnects } from "./shareLinkAgents";
+import { SegmentedControl } from "./ui/SegmentedControl";
+import { SkeletonRows } from "./ui/SkeletonRows";
 
 // The relay keeps a sealed copy of each link for its owner, so Share can
 // copy the same link again.
 const SHARE_LINK_SECRET: CopySecret = { what: "the share link", again: "Open Share to copy it again." };
-import { SegmentedControl } from "./ui/SegmentedControl";
-import { SkeletonRows } from "./ui/SkeletonRows";
 
 type LinkAccess = "view" | "comment" | "edit";
 
@@ -523,6 +523,25 @@ export function useRelayShareLinkPane(props: {
   >({});
   const [linkError, setLinkError] = useState<string | null>(null);
   const [separateOpen, setSeparateOpen] = useState(false);
+  // Links whose last change may have landed without its answer: no URL
+  // shows for them until the list reads again.
+  const [unsureUrls, setUnsureUrls] = useState<ReadonlySet<string>>(() => new Set());
+  // Where focus goes once the next render has it: a new link's Copy link,
+  // or the access choice of the separate link just opened.
+  const focusAfterRender = useRef<{ kind: "copy"; grantId: string } | { kind: "separate" } | null>(null);
+  useLayoutEffect(() => {
+    const target = focusAfterRender.current;
+    if (target === null) return;
+    const element = target.kind === "separate"
+      ? document.querySelector<HTMLElement>('[data-testid="share-link-create-section"] [role="radio"][aria-checked="true"]')
+      : [...document.querySelectorAll<HTMLElement>("[data-link-url-for]")]
+          .find((box) => box.dataset.linkUrlFor === target.grantId)
+          ?.querySelector<HTMLElement>('[data-testid="share-link-copy"]');
+    if (element) {
+      focusAfterRender.current = null;
+      element.focus();
+    }
+  });
   const [minted, setMinted] = useState<{ grantId: string; url: string } | null>(null);
   const [links, setLinks] = useState<RelayShareLinkRow[]>([]);
   // A read of the links that changes them reads each link's agents again. A
@@ -670,6 +689,7 @@ export function useRelayShareLinkPane(props: {
     setAddAccessByShareId({});
     setLinkError(null);
     setMinted(null);
+    setUnsureUrls(new Set());
     setLinks([]);
     linksKey.current = null;
     setLinksLoading(false);
@@ -1489,6 +1509,13 @@ export function useRelayShareLinkPane(props: {
       setLinkAccess(current => advertisedAccess!.includes(current) ? current : "view");
       setAddAccessByShareId(current => Object.fromEntries(Object.entries(current).map(([id, access]) => [id, advertisedAccess!.includes(access) ? access : "view"])));
       setLinks(inventory);
+      setUnsureUrls(new Set());
+      // Once the list holds a link's URL, that copy is the current one.
+      setMinted((current) =>
+        current !== null && inventory.some((row) => row.grantId === current.grantId && row.url !== null)
+          ? null
+          : current,
+      );
       const key = JSON.stringify(inventory);
       if (linksKey.current !== key) {
         linksKey.current = key;
@@ -1557,6 +1584,8 @@ export function useRelayShareLinkPane(props: {
         return;
       }
       setMinted({ grantId: result.grantId, url: result.url });
+      focusAfterRender.current = { kind: "copy", grantId: result.grantId };
+      if (action.kind === "create") setSeparateOpen(false);
       void refreshLinks(scopeGeneration);
     } catch (cause) {
       if (
@@ -1744,13 +1773,7 @@ export function useRelayShareLinkPane(props: {
       // work until the list reads again.
       if (retiresDisplayedCredential) {
         setMinted((current) => (current?.grantId === row.grantId ? null : current));
-        setLinks((current) =>
-          current.map((currentRow) =>
-            currentRow.shareId === row.shareId && currentRow.grantId === row.grantId
-              ? { ...currentRow, url: null }
-              : currentRow,
-          ),
-        );
+        setUnsureUrls((current) => new Set(current).add(row.grantId));
       }
       if (action.kind !== "end" || !props.shareRemovals) setLifecycleError(ipcErrorMessage(cause));
       setConfirmation(null);
@@ -1874,10 +1897,10 @@ export function useRelayShareLinkPane(props: {
     );
   }
 
-  function renderLinkUrl(url: string) {
+  function renderLinkUrl(url: string, grantId: string) {
     const agentAddress = agentAddressFor(url);
     return (
-      <div className="flex flex-col gap-2">
+      <div data-link-url-for={grantId} className="flex flex-col gap-2">
         <div className="flex items-center gap-2">
           <div className="flex h-8 min-w-0 flex-1 items-center rounded-lg border border-line bg-bg px-3 font-mono text-[12px] text-muted">
             <code data-testid="share-link-url" title={url} className="min-w-0 select-text truncate">{url}</code>
@@ -1927,7 +1950,8 @@ export function useRelayShareLinkPane(props: {
     const canReset = !damaged && (row.access !== "edit" || (availableLinkAccess.includes("edit") && row.selector?.versionId === null));
     // A link made or reset in this dialog is the one to send now; every
     // other active link shows the copy the relay keeps for its owner.
-    const url = !active || damaged ? null : minted?.grantId === row.grantId ? minted.url : row.url;
+    const unsure = unsureUrls.has(row.grantId);
+    const url = !active || damaged || unsure ? null : minted?.grantId === row.grantId ? minted.url : row.url;
     const used = row.lastUsedAtMs === null ? "Not used yet" : `Used ${shortTimestamp.format(row.lastUsedAtMs)}`;
     const issued = row.urlIssuedAtMs !== null && row.urlIssuedAtMs > row.createdAtMs
       ? ` · Link reset ${shortDate.format(row.urlIssuedAtMs)}`
@@ -1989,10 +2013,21 @@ export function useRelayShareLinkPane(props: {
         )}
 
         {url !== null ? (
-          renderLinkUrl(url)
+          renderLinkUrl(url, row.grantId)
+        ) : active && !damaged && unsure ? (
+          <div className="flex items-center gap-2">
+            <p data-testid="share-link-unsure" className="m-0 min-w-0 flex-1 text-[12px] leading-relaxed text-muted">
+              dohc could not load the current link.
+            </p>
+            <SecondaryButton size="compact" disabled={linksLoading} onClick={() => void refreshLinks()}>
+              Try again
+            </SecondaryButton>
+          </div>
         ) : active && !damaged ? (
           <p data-testid="share-link-no-copy" className="m-0 text-[12px] leading-relaxed text-muted">
-            dohc has no copy of this link. Reset it to get a link you can copy.
+            {canReset
+              ? "dohc has no copy of this link. Reset it to get a link you can copy."
+              : "dohc has no copy of this link."}
           </p>
         ) : null}
 
@@ -2515,16 +2550,18 @@ export function useRelayShareLinkPane(props: {
 
   const createSection = separateHidden ? (
     <GhostButton
-      aria-expanded={false}
       className="self-start"
       disabled={linkControlsBusy}
-      onClick={() => setSeparateOpen(true)}
+      onClick={() => {
+        focusAfterRender.current = { kind: "separate" };
+        setSeparateOpen(true);
+      }}
     >
       <Plus size={13} aria-hidden />
       Create separate link
     </GhostButton>
   ) : (
-    <section aria-label="New link" className="flex flex-col gap-2">
+    <section aria-label="New link" data-testid="share-link-create-section" className="flex flex-col gap-2">
       {hasMatchingShare ? (
         <div className="flex flex-col gap-1">
           <SectionLabel as="h3" className="m-0">Separate link</SectionLabel>
@@ -2585,7 +2622,7 @@ export function useRelayShareLinkPane(props: {
       <>
         {mintedElsewhere ? (
           <div data-testid="share-link-new" className="flex flex-col gap-2 rounded-lg border border-line bg-panel p-3">
-            {renderLinkUrl(minted.url)}
+            {renderLinkUrl(minted.url, minted.grantId)}
           </div>
         ) : null}
         {visibleLinkGroups.length || linksLoading || linksError || lifecycleError ? (

@@ -2369,8 +2369,7 @@ codex mcp login dohc-share`);
       expect(within(group).getByRole("button", { name: "Comments" })).toBeTruthy();
     }
 
-    const separate = screen.getByRole("button", { name: "Create separate link" });
-    expect(separate.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.getByRole("button", { name: "Create separate link" })).toBeTruthy();
     expect(screen.queryByTestId("share-link-create")).toBeNull();
 
     await user.click(within(named).getByRole("button", { name: "Comments" }));
@@ -2598,6 +2597,9 @@ codex mcp login dohc-share`);
     expect(await screen.findByTestId("share-link-group-share-first")).toBeTruthy();
     expect(screen.getByTestId("share-link-group-share-second")).toBeTruthy();
     await openSeparateLink(user);
+    // Focus moves into what the button opened.
+    expect(document.activeElement?.getAttribute("role")).toBe("radio");
+    expect(document.activeElement?.getAttribute("aria-checked")).toBe("true");
     const create = screen.getByTestId("share-link-create");
     expect(create.textContent).toBe("Create separate link");
     expect(
@@ -2614,6 +2616,11 @@ codex mcp login dohc-share`);
       paths: ["docs/plan.md"],
       access: "comment",
     });
+    // The new link takes focus at its Copy link, and the separate link folds away.
+    await vi.waitFor(() => {
+      expect(document.activeElement?.getAttribute("data-testid")).toBe("share-link-copy");
+    });
+    expect(screen.queryByTestId("share-link-create")).toBeNull();
   });
 
   it("keeps Create link when no share matches and honors a changed access choice", async () => {
@@ -2847,7 +2854,8 @@ codex mcp login dohc-share`);
     const kept = readableLink("kept-reset", { shareId: "share-kept-reset", access: "view", url: LINK_URL_A });
     bridgeMock.listRelayShareLinks
       .mockResolvedValueOnce({ links: [kept] })
-      .mockRejectedValueOnce(new Error("The relay did not answer."));
+      .mockRejectedValueOnce(new Error("The relay did not answer."))
+      .mockResolvedValueOnce({ links: [{ ...kept, url: LINK_URL_B }] });
     bridgeMock.rotateRelayShareLink.mockRejectedValueOnce(new Error("The relay did not answer."));
     const user = userEvent.setup();
     render(
@@ -2870,7 +2878,12 @@ codex mcp login dohc-share`);
     });
     expect(screen.queryByTestId("share-link-url")).toBeNull();
     expect(screen.queryByRole("button", { name: "Copy link" })).toBeNull();
-    expect(within(screen.getByTestId("share-link-row-kept-reset")).getByTestId("share-link-no-copy")).toBeTruthy();
+    // The reset may have landed, so the row neither copies nor offers another reset.
+    const unsureRow = screen.getByTestId("share-link-row-kept-reset");
+    expect(within(unsureRow).queryByTestId("share-link-no-copy")).toBeNull();
+    expect(within(unsureRow).getByTestId("share-link-unsure").textContent).toBe("dohc could not load the current link.");
+    await user.click(within(unsureRow).getByRole("button", { name: "Try again" }));
+    expect((await screen.findByTestId("share-link-url")).textContent).toBe(LINK_URL_B);
   });
 
   it("retires the displayed URL before refreshing after a lost widening response", async () => {

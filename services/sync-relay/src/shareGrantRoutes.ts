@@ -14,6 +14,9 @@ import type { createShareSummaries } from "./shareSummaries";
 import type { SyncRelayShareGrantRow, SyncRelayShareWithGrantRow, SyncRelayStorage } from "./storage";
 import { MAX_ORIGIN_ID_CHARS, MAX_SHARE_ID_CHARS } from "./wireLimits";
 
+// A response that carries a link URL is a bearer secret: never cached.
+const NO_STORE = { "cache-control": "private, no-store" };
+
 export type ShareGrantTransitionRoute =
   | { route: "share-link-rotate"; shareId: string; grantId: string }
   | { route: "share-link-retune"; shareId: string; grantId: string }
@@ -227,7 +230,7 @@ export function createShareGrantRoutes(
         ok: true,
         ...linkGrantBody(result.grant),
         url: composePublicLinkUrl(shareWebOrigin!, secret),
-      });
+      }, 200, NO_STORE);
     }
     if (route.route === "share-link-rotate") throw relayError("method_not_allowed");
 
@@ -296,7 +299,7 @@ export function createShareGrantRoutes(
         ...(secret === null
           ? {}
           : { url: composePublicLinkUrl(shareWebOrigin!, secret) }),
-      });
+      }, 200, NO_STORE);
     }
     if (route.route === "share-link-retune") throw relayError("method_not_allowed");
 
@@ -460,7 +463,7 @@ export function createShareGrantRoutes(
         // A link whose access changed since is not the link this request made.
         const grant = storage.getShareGrant(receipt.grantId);
         const url = grant?.access === access ? recoverPublicLinkUrl(grant, storage.getCurrentLinkCredential(receipt.grantId), linkKey, shareWebOrigin) : null;
-        return jsonResponse({ok:true,workspaceId:route.workspaceId,selector,access,shareId:receipt.shareId,grantId:receipt.grantId,...(url === null ? {urlUnavailable:true} : {url})}, 200, { "cache-control": "private, no-store" });
+        return jsonResponse({ok:true,workspaceId:route.workspaceId,selector,access,shareId:receipt.shareId,grantId:receipt.grantId,...(url === null ? {urlUnavailable:true} : {url})}, 200, NO_STORE);
       }
       requireEditableSelector(access, JSON.stringify(selector));
       const shareId = newShareId();
@@ -513,7 +516,7 @@ export function createShareGrantRoutes(
         selector,
         ...linkGrantBody(grant),
         url: composePublicLinkUrl(shareWebOrigin!, secret),
-      });
+      }, 200, NO_STORE);
     }
     if (route.route === "share-link-create-atomic") throw relayError("method_not_allowed");
 
@@ -576,7 +579,7 @@ export function createShareGrantRoutes(
         ok: true,
         ...linkGrantBody(grant),
         url: composePublicLinkUrl(shareWebOrigin!, secret),
-      });
+      }, 200, NO_STORE);
     }
     if (route.route === "share-link-create") throw relayError("method_not_allowed");
 
