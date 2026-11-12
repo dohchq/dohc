@@ -145,11 +145,10 @@ export function MembersSettings(props: {
   // arrives late cannot undo a newer change.
   const issued = useRef(0);
   const applied = useRef(0);
-  // Changes still running, and whether two ran at once. The server may run
-  // overlapping changes in either order, so the page reads itself again once
-  // they all answer.
-  const running = useRef(0);
-  const overlapped = useRef(false);
+  // Changes still running for this workspace and account, and whether two ran
+  // at once. The server may run overlapping changes in either order, so the
+  // page reads itself again once they all answer.
+  const changes = useRef<{ key: string | null; running: number; overlapped: boolean }>({ key: null, running: 0, overlapped: false });
   const listIdentity = `settings-members:${workspaceId}`;
 
   const showView = (key: string, order: number, view: WorkspaceMembersView) => {
@@ -162,7 +161,8 @@ export function MembersSettings(props: {
     if (scopeKey === null) return;
     const token = scope.current();
     const order = ++issued.current;
-    setLoad((current) => (current?.key === scopeKey && current.load.status === "ready" ? current : { key: scopeKey, load: { status: "loading" } }));
+    // A page that lists people, or says this account left, keeps showing it while it reads again.
+    setLoad((current) => (current?.key === scopeKey && (current.load.status === "ready" || current.load.status === "left") ? current : { key: scopeKey, load: { status: "loading" } }));
     bridge().workspaceMembers({ workspaceId, request: { action: "list" } }).then(
       (result) => {
         if (!scope.isCurrent(token)) return;
@@ -189,17 +189,19 @@ export function MembersSettings(props: {
     const order = ++issued.current;
     const key = keyOf(request);
     const identity = `settings-members:${workspaceId}:${key}`;
-    if (running.current > 0) overlapped.current = true;
-    running.current += 1;
+    if (changes.current.key !== scopeKey) changes.current = { key: scopeKey, running: 0, overlapped: false };
+    const counter = changes.current;
+    if (counter.running > 0) counter.overlapped = true;
+    counter.running += 1;
     setPending((current) => {
       const items = new Map(current?.key === scopeKey ? current.items : []);
       items.set(key, request);
       return { key: scopeKey, items };
     });
     const settle = () => {
-      running.current -= 1;
-      if (running.current === 0 && overlapped.current) {
-        overlapped.current = false;
+      counter.running -= 1;
+      if (counter.running === 0 && counter.overlapped) {
+        counter.overlapped = false;
         if (scope.isCurrent(token)) setAttempt((count) => count + 1);
       }
       if (!scope.isCurrent(token)) return;
