@@ -86,8 +86,41 @@ function needingPanel(description: TransactionalDatasetDescription): Transaction
 const newRow = () => document.querySelector<HTMLElement>("[data-new-record]");
 /** The new row's field cells, after the cell that holds Discard. */
 const newRowCells = () => within(newRow()!).getAllByRole("gridcell").slice(1);
-/** What the new row says of a save that did not happen. */
-const newRowNote = () => document.querySelector<HTMLElement>("[data-new-record-status]:not([data-new-record-status='pending'])");
+/** What the new row says under it, as of a value it gave back. */
+const newRowNote = () => document.querySelector<HTMLElement>("[data-new-record-status]");
+/** Types records into the table's new row one after another, each saved with Enter, with no wait between them. */
+function typeRows(names: readonly string[]): void {
+  fireEvent.click(within(grid()).getByRole("button", { name: "New record" }));
+  for (const text of names) {
+    fireEvent.change(cellEditor(), { target: { value: text } });
+    fireEvent.keyDown(cellEditor(), { key: "Enter" });
+  }
+}
+/** A Collection that holds each create's answer until the test gives it, in `answers`. Its reads return Alice at once. */
+function heldCreates() {
+  const answers: Array<ReturnType<typeof deferred<{ result: AppBackendJson }>>> = [];
+  const invoke = vi.fn((request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+    if (request.operationId === read) return Promise.resolve({ result: page() });
+    const answer = deferred<{ result: AppBackendJson }>();
+    answers.push(answer);
+    return answer.promise;
+  });
+  /** Waits for the create the queue sends next, which is the one numbered here, and answers it. */
+  const answer = async (index: number, settle: (answer: (typeof answers)[number]) => void) => {
+    await waitFor(() => expect(answers).toHaveLength(index + 1));
+    await act(async () => settle(answers[index]!));
+  };
+  return { invoke, answers, answer };
+}
+/** The Name each create was sent with, in the order sent. */
+const createdNames = (invoke: Invoke) => sent(invoke, create).map(request => (request.input as { values: Record<string, AppBackendJson> }).values[name]);
+/** The new row on screen holds nothing typed, and has the cursor in its first field. */
+function expectFreshRow(): void {
+  expect(document.querySelectorAll("[data-new-record]")).toHaveLength(1);
+  expect(newRowCells().map(cell => cell.textContent)).toEqual(["", "", "New"]);
+  expect(document.activeElement).toBe(cellEditor());
+  expect(document.querySelector("[data-new-record-status]")).toBeNull();
+}
 const cellEditor = (root: ParentNode = document) => root.querySelector<HTMLInputElement>("[data-cell-editor] input")!;
 /** Starts the table's new row, types in its first field, and leaves that field with a key. */
 function typeNewRow(text: string, leave: "Enter" | "Tab" = "Enter", root: HTMLElement = document.body): void {
@@ -1765,25 +1798,88 @@ describe("a Data Collection's record panel and forms", () => {
     expect(within(draftField("Status")).getByRole("alert").textContent).toBe("Enter Status.");
   });
 
-  it("shows a new row that waits for the Collection with what was typed, takes no typing until it answers, and says when no row on screen shows the record", async () => {
+  it("hands a new row to the Collection as it is saved: no row shows the save, leaving sends nothing more, and one notice says when no row on screen shows the record", async () => {
     const answer = deferred<{ result: AppBackendJson }>();
     const invoke = vi.fn((request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => request.operationId === read ? Promise.resolve({ result: page() }) : answer.promise);
     const { onNotice } = setup({ invoke }); await screen.findByText("Alice");
     typeNewRow("Bob");
+    // The row left the table with its save. The row on screen is the next one.
+    expectFreshRow();
     await waitFor(() => expect(sent(invoke, create)).toHaveLength(1));
-    expect(newRow()!.querySelector("[data-new-record-status='pending']")).not.toBeNull();
-    expect(newRowCells()[0]!.textContent).toBe("Bob");
-    fireEvent.click(newRowCells()[0]!);
-    expect(document.querySelector("[data-cell-editor]")).toBeNull();
-    // Leaving the row sends nothing more.
-    fireEvent.pointerDown(document.body);
+    // Leaving the next row, which holds nothing typed, sends nothing more.
+    fireEvent.keyDown(cellEditor(), { key: "Escape" });
+    fireEvent.keyDown(grid(), { key: "Escape" });
+    expect(newRow()).toBeNull();
     expect(sent(invoke, create)).toHaveLength(1);
     // The Collection made the record, and this page of records does not hold it.
     await act(async () => answer.resolve({ result: { id: 7, version: 1 } }));
     await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Created a record. It is not among the records on screen."));
+    expect(onNotice).toHaveBeenCalledTimes(1);
+    expect(sent(invoke, create)).toHaveLength(1);
   });
 
-  it("says on the new row that dohc could not confirm it, with Try again and Discard, and sends the exact request again", async () => {
+  it("takes three records typed in the new row with no pause: three creates in the order typed, each with its own values, and one notice for them", async () => {
+    const { invoke, answer } = heldCreates();
+    const { onNotice } = setup({ invoke }); await screen.findByText("Alice");
+    typeRows(["Bob", "Cy", "Di"]);
+    // Each row left the table as it was saved, and the next key was typed in the row after it.
+    expectFreshRow();
+    // The queue sends one change at a time, in the order made.
+    await waitFor(() => expect(sent(invoke, create)).toHaveLength(1));
+    for (const [index, record] of [7, 8, 9].entries()) await answer(index, held => held.resolve({ result: { id: record, version: 1 } }));
+    await waitFor(() => expect(sent(invoke, read)).toHaveLength(2));
+    expect(createdNames(invoke)).toEqual(["Bob", "Cy", "Di"]);
+    expect(new Set(sent(invoke, create).map(request => request.idempotencyKey)).size).toBe(3);
+    // None of the three is among this page's records. The burst gets one notice, after the read that follows it.
+    await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Created 3 records. They are not among the records on screen."));
+    expect(onNotice).toHaveBeenCalledTimes(1);
+    expect(strip()).toBeNull();
+    expectFreshRow();
+    expect(sent(invoke, create)).toHaveLength(3);
+  });
+
+  it("makes the other two when the Collection refuses one of three new rows, and lists the refused one with why and what was typed", async () => {
+    const { invoke, answer } = heldCreates();
+    setup({ invoke }); await screen.findByText("Alice");
+    typeRows(["Bob", "Cy", "Di"]);
+    await answer(0, held => held.resolve({ result: { id: 7, version: 1 } }));
+    await answer(1, held => held.reject(refusal("Name is taken.")));
+    await answer(2, held => held.resolve({ result: { id: 9, version: 1 } }));
+    const list = within(await screen.findByRole("group", { name: "Changes dohc did not confirm" }));
+    expect(list.getByLabelText<HTMLInputElement>("New record").value).toBe("Name: Cy, Status: New");
+    expect(list.getByRole("alert").textContent).toBe("The Collection refused this change. Name is taken.");
+    expect(list.getByRole("button", { name: "Copy value" })).toBeTruthy();
+    expect(list.queryByRole("button", { name: "Try again" })).toBeNull();
+    // The refused record opens nowhere for typing: no panel opened, and the row on screen is still the empty one.
+    expect(noDraftPanel()).toBe(true);
+    expectFreshRow();
+    // Nothing was lost and nothing was sent twice.
+    expect(createdNames(invoke)).toEqual(["Bob", "Cy", "Di"]);
+  });
+
+  it("makes the other two when the first of three new rows loses its answer, and Try again in the list sends that row's exact request", async () => {
+    const { invoke, answer } = heldCreates();
+    setup({ invoke }); await screen.findByText("Alice");
+    typeRows(["Bob", "Cy", "Di"]);
+    await answer(0, held => held.reject(new Error("Lost reply")));
+    // The first is in doubt. The others go on, and are made before it.
+    await answer(1, held => held.resolve({ result: { id: 8, version: 1 } }));
+    await answer(2, held => held.resolve({ result: { id: 9, version: 1 } }));
+    const list = within(await screen.findByRole("group", { name: "Changes dohc did not confirm" }));
+    expect(list.getByText("dohc could not confirm the new record.")).toBeTruthy();
+    // A create that may have run is offered for typing nowhere: no panel opened, and the row on screen is the empty one.
+    expect(noDraftPanel()).toBe(true);
+    expectFreshRow();
+    fireEvent.click(list.getByRole("button", { name: "Try again" }));
+    await answer(3, held => held.resolve({ result: { id: 7, version: 1 } }));
+    await waitFor(() => expect(strip()).toBeNull());
+    const creates = sent(invoke, create);
+    expect(creates).toHaveLength(4);
+    expect(creates[3]).toEqual(creates[0]);
+    expect(createdNames(invoke).slice(0, 3)).toEqual(["Bob", "Cy", "Di"]);
+  });
+
+  it("lists a new row's create that dohc could not confirm, with Try again and Discard, and sends the exact request again", async () => {
     let writes = 0;
     const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
       if (request.operationId === read) return { result: page() };
@@ -1793,21 +1889,18 @@ describe("a Data Collection's record panel and forms", () => {
     const result = setup({ invoke });
     await screen.findByText("Alice");
     typeNewRow("Bob");
-    await waitFor(() => expect(newRowNote()?.getAttribute("data-new-record-status")).toBe("unconfirmed"));
-    expect(newRowNote()!.textContent).toContain("dohc could not confirm the new record.");
-    expect(within(newRowNote()!).getByRole("button", { name: "Discard" })).toBeTruthy();
-    expect(newRowCells()[0]!.textContent).toBe("Bob");
-    // The row shows the change, so the page's list does not.
-    expect(strip()).toBeNull();
-    // The row takes no typing while its save may have happened.
-    fireEvent.click(newRowCells()[0]!);
-    expect(document.querySelector("[data-cell-editor]")).toBeNull();
-    fireEvent.click(within(newRowNote()!).getByRole("button", { name: "Try again" }));
+    const list = within(await screen.findByRole("group", { name: "Changes dohc did not confirm" }));
+    expect(list.getByText("dohc could not confirm the new record.")).toBeTruthy();
+    expect(list.getByRole("button", { name: "Discard" })).toBeTruthy();
+    // No row holds the record: the row on screen is the next one, and takes typing.
+    expectFreshRow();
+    fireEvent.click(list.getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(sent(invoke, create)).toHaveLength(2));
     const changes = sent(invoke, create);
     expect(changes[1]).toEqual(changes[0]);
-    await waitFor(() => expect(newRowNote()).toBeNull());
+    await waitFor(() => expect(strip()).toBeNull());
     // The record is on this page of records, so no notice says it was made.
+    await waitFor(() => expect(sent(invoke, read)).toHaveLength(2));
     expect(result.onNotice).not.toHaveBeenCalled();
   });
 
@@ -2472,24 +2565,24 @@ describe("when the Collection's fields change", () => {
     expect(result.onError).toHaveBeenCalledWith(words, expect.any(TextNotSavedError), null);
   });
 
-  it("sends no second create for a new row dohc could not confirm once the rules change: not on Enter, Try again, or close", async () => {
+  it("sends no second create for a new row dohc could not confirm once the rules change: not on Enter, and not on close", async () => {
     const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
       if (request.operationId === read) return { result: page() };
       throw new Error("Lost reply");
     });
     const result = setup({ invoke }); await screen.findByText("Alice");
     typeNewRow("Bob");
-    await waitFor(() => expect(newRowNote()?.getAttribute("data-new-record-status")).toBe("unconfirmed"));
+    expect(within(await screen.findByRole("group", { name: "Changes dohc did not confirm" })).getByRole("button", { name: "Try again" })).toBeTruthy();
     // The first try may have run. The rules change, so its request can never be confirmed, and the queue lets it go.
     result.rerender(<TransactionalCollectionPage {...result.props} dataset={revised(2)} />);
-    // The row goes: nothing is left on it to type in, to save with Enter, or to try again.
-    await waitFor(() => expect(newRow()).toBeNull());
-    fireEvent.keyDown(grid(), { key: "Enter" });
-    // The page's list keeps what the row held, as for any change that may have run.
-    const list = within(await screen.findByRole("group", { name: "Changes dohc did not confirm" }));
+    // The page's list keeps what the row held, as for any change that may have run, and offers no Try again.
+    await waitFor(() => expect(within(strip()!).queryByRole("button", { name: "Try again" })).toBeNull());
+    const list = within(strip()!);
     expect(list.getByLabelText<HTMLInputElement>("New record").value).toBe("Name: Bob, Status: New");
     expect(list.getByRole("alert").textContent).toBe("The Collection's rules changed before dohc confirmed this change. Check the record, then make the change again.");
-    expect(list.queryByRole("button", { name: "Try again" })).toBeNull();
+    // No row holds the record to save it again: the row on screen is the next one, with nothing typed in it.
+    expect(newRowCells()[0]!.textContent).toBe("");
+    fireEvent.keyDown(grid(), { key: "Enter" });
     result.unmount();
     await Promise.resolve();
     expect(sent(invoke, create)).toHaveLength(1);
@@ -2523,14 +2616,15 @@ describe("when the Collection's fields change", () => {
     });
     const result = setup({ invoke }); await screen.findByText("Alice");
     typeNewRow("Bob");
-    await waitFor(() => expect(newRowNote()?.getAttribute("data-new-record-status")).toBe("unconfirmed"));
-    fireEvent.click(within(newRowNote()!).getByRole("button", { name: "Try again" }));
+    fireEvent.click(within(await screen.findByRole("group", { name: "Changes dohc did not confirm" })).getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(sent(invoke, create)).toHaveLength(2));
-    // The same request went twice, and the first may have run: the row does not come back for typing.
-    await waitFor(() => expect(newRow()).toBeNull());
+    // The same request went twice, and the first may have run: the record is offered for typing nowhere.
+    await waitFor(() => expect(within(strip()!).queryByRole("button", { name: "Try again" })).toBeNull());
     expect(sent(invoke, create)[1]).toEqual(sent(invoke, create)[0]);
-    const list = within(await screen.findByRole("group", { name: "Changes dohc did not confirm" }));
+    const list = within(strip()!);
     expect(list.getByLabelText<HTMLInputElement>("New record").value).toBe("Name: Bob, Status: New");
+    expect(noDraftPanel()).toBe(true);
+    expect(newRowCells()[0]!.textContent).toBe("");
     result.unmount();
     await Promise.resolve();
     expect(sent(invoke, create)).toHaveLength(2);
@@ -2892,7 +2986,7 @@ describe("one queue for a table's changes", () => {
     expect(newer.container.querySelector('[data-cell-status="refused"]')).toBeNull();
   });
 
-  it.each([["first", 0], ["second", 1]] as const)("shows a new record the Collection refuses on the new row of the %s of two pages, which sent it, and nothing in the other", async (_which, maker) => {
+  it.each([["first", 0], ["second", 1]] as const)("lists a new record the Collection refuses from the new row of the %s of two pages, with why and what was typed, and opens it for typing in neither", async (_which, maker) => {
     const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
       if (request.operationId === read) return { result: page() };
       throw refusal("Name is taken.");
@@ -2904,19 +2998,16 @@ describe("one queue for a table's changes", () => {
     const pages = [first.container, second.container];
     const sender = pages[maker]!, other = pages[1 - maker]!;
     typeNewRow("Bob", "Enter", sender);
-    const note = () => sender.querySelector<HTMLElement>("[data-new-record-status]:not([data-new-record-status='pending'])");
-    await waitFor(() => expect(note()?.textContent).toContain("The Collection refused this change. Name is taken."));
-    // The row keeps what was typed, with Try again and Discard, and nothing shows it as saved.
-    expect(sender.querySelector("[data-new-record]")!.textContent).toContain("Bob");
-    expect(within(note()!).getByRole("button", { name: "Try again" })).toBeTruthy();
-    expect(within(note()!).getByRole("button", { name: "Discard" })).toBeTruthy();
+    const list = within(await within(sender).findByRole("group", { name: "Changes dohc did not confirm" }));
+    expect(list.getByLabelText<HTMLInputElement>("New record").value).toBe("Name: Bob, Status: New");
+    expect(list.getByRole("alert").textContent).toBe("The Collection refused this change. Name is taken.");
+    expect(list.queryByRole("button", { name: "Try again" })).toBeNull();
+    // Neither page takes the record back for typing: no panel opens, and no row holds it.
+    expect(within(sender).queryByRole("complementary")).toBeNull();
+    expect(sender.querySelector("[data-new-record]")!.textContent).toBe("New");
     expect(other.querySelector("[data-new-record]")).toBeNull();
     expect(within(other).queryByRole("complementary")).toBeNull();
-    expect(strip()).toBeNull();
     expect(sent(invoke, create)).toHaveLength(1);
-    // Try again makes the record again, as one more create.
-    fireEvent.click(within(note()!).getByRole("button", { name: "Try again" }));
-    await waitFor(() => expect(sent(invoke, create)).toHaveLength(2));
   });
 
   it("drops a request sent under the old rules when its page opens again under new ones, and keeps what was typed", async () => {
@@ -3325,7 +3416,7 @@ describe("what a change that did not save leaves for the person", () => {
     expect(sent(invoke, edit)[2]!.idempotencyKey).not.toBe(sent(invoke, edit)[0]!.idempotencyKey);
   });
 
-  it("offers Discard on a new row dohc could not confirm, and keeps its values above the table once it is discarded", async () => {
+  it("offers Discard in the list for a new row dohc could not confirm, and keeps its values there once it is discarded", async () => {
     const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
       if (request.operationId === read) return { result: page() };
       throw new Error("Lost reply");
@@ -3333,11 +3424,8 @@ describe("what a change that did not save leaves for the person", () => {
     setup({ invoke });
     await screen.findByText("Alice");
     typeNewRow("Bob");
-    await waitFor(() => expect(newRowNote()?.getAttribute("data-new-record-status")).toBe("unconfirmed"));
-    expect(strip()).toBeNull();
-    fireEvent.click(within(newRowNote()!).getByRole("button", { name: "Discard" }));
-    // The row goes. The record may have saved, so what it held stays for the person to check.
-    expect(newRow()).toBeNull();
+    fireEvent.click(within(await screen.findByRole("group", { name: "Changes dohc did not confirm" })).getByRole("button", { name: "Discard" }));
+    // The record may have saved, so what its row held stays for the person to check.
     const list = within(await screen.findByRole("group", { name: "Changes dohc did not confirm" }));
     expect(list.queryByRole("button", { name: "Try again" })).toBeNull();
     expect(list.getByLabelText<HTMLInputElement>("New record").value).toBe("Name: Bob, Status: New");
@@ -3356,10 +3444,12 @@ describe("what a change that did not save leaves for the person", () => {
       throw refusal("Name is taken.");
     });
   }
-  /** Saves a new row named Bob, and waits for the row to say dohc could not confirm it. */
+  /** Saves a new row named Bob, and waits for the page's list to say dohc could not confirm it. Leaves no row open. */
   async function createBob(): Promise<void> {
     typeNewRow("Bob");
-    await waitFor(() => expect(newRowNote()?.getAttribute("data-new-record-status")).toBe("unconfirmed"));
+    await screen.findByRole("group", { name: "Changes dohc did not confirm" });
+    fireEvent.keyDown(cellEditor(), { key: "Escape" });
+    fireEvent.keyDown(grid(), { key: "Escape" });
   }
 
   const REFUSED_TAKEN = "The Collection refused this change. Name is taken.";
@@ -3373,15 +3463,15 @@ describe("what a change that did not save leaves for the person", () => {
     expect(noDraftPanel()).toBe(true);
   }
 
-  it("never brings a new row back for typing once its answer was missing, even when the Collection then refuses the retry", async () => {
+  it("never offers a new row's record for typing once its answer was missing, even when the Collection then refuses the retry", async () => {
     const invoke = refusedCreate();
     const view = setup({ invoke });
     await screen.findByText("Alice");
     await createBob();
-    fireEvent.click(within(newRowNote()!).getByRole("button", { name: "Try again" }));
+    fireEvent.click(within(strip()!).getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(sent(invoke, create)).toHaveLength(2));
-    // The first try may have run, whatever the retry answers. The row goes, and the page's list keeps what it held.
-    await waitFor(() => expect(newRow()).toBeNull());
+    // The first try may have run, whatever the retry answers. The page's list keeps what the row held, and no row or panel takes it.
+    await waitFor(() => expect(within(strip()!).queryByRole("button", { name: "Try again" })).toBeNull());
     await expectListedOnly("Name: Bob, Status: New");
     // Nothing sends a third create: not Enter, and not closing the page.
     fireEvent.keyDown(grid(), { key: "Enter" });
