@@ -164,6 +164,24 @@ it("does not treat a descriptor's ID as a grant", async () => {
   expect(f.host.invoke).not.toHaveBeenCalled();
 });
 
+it("refuses a Collection named by a path under shared-with-me, even when that path has an address", async () => {
+  const shared = "shared-with-me/ana/data/dataset.json";
+  const exportHost = vi.fn(async () => { throw Error("export opened the host"); });
+  for (const f of [fixture(), fixture(undefined, undefined, undefined, exportHost)]) {
+    f.sources.set(shared, f.sources.get("data/dataset.json")!);
+    f.sources.delete("data/dataset.json");
+    invalidateDatasetAddresses({ workspaceId: "workspace" });
+    // A Collection's address follows the write floor, which reserves shared-with-me.
+    const refusal = "Use the caller-relative dataset.json path.";
+    await expect(f.handler("agent", { action: "invoke", workspaceId: "workspace", datasetPath: shared, operationId: datasetId,
+      revision: 1, revisionSha256: "a".repeat(64), input: {}, idempotencyKey: "shared" })).rejects.toThrow(refusal);
+    await expect(f.handler("agent", { action: "export", workspaceId: "workspace", datasetPath: shared,
+      savePath: join(process.cwd(), "shared-export.dohc") })).rejects.toThrow(refusal);
+    expect(f.host.invoke).not.toHaveBeenCalled();
+  }
+  expect(exportHost).not.toHaveBeenCalled();
+});
+
 it("restores absent source files after recovery so the recovered dataset has an address", async () => {
   const f = fixture();
   f.sources.clear();

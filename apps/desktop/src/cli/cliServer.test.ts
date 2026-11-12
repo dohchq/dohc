@@ -8,7 +8,9 @@ import { readWorkspaceHistoryOperation, undoWorkspaceHistoryOperation } from "..
 import { listChanges, readChange, readOperation, undoOperation } from "@dohc/mcp/tools";
 import { deleteWorkspacePathByHand } from "../workspaces/workspaceFileMoves";
 import { readWorkspaceEnginePolicy } from "../workspaces/workspaceEnginePolicyFile";
-import { mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createConnection } from "node:net";
 import { stripTypeScriptTypes } from "node:module";
 import { basename, dirname, join } from "node:path";
@@ -1970,6 +1972,310 @@ describe("CLI socket server", () => {
     context.readOnly=true;
     await expect(invoke("ownerAppResponses",{cwd:workspaceRoot,actor:"agent",request})).rejects.toThrow("owning workspace");
     expect(calls).toHaveLength(2);
+  });
+
+  // shared-with-me holds what others share with you, inside your own workspace.
+  describe("from inside a folder others share with you", () => {
+    const OWNER = "dohc: This command isn't available in a folder others share with you. Run it from your own workspace's folder.";
+    const CHAT = "dohc: Chat isn't available from the command line in a folder others share with you. Run this command from your own workspace's folder.";
+    let inShare: string;
+    const send = (verb: CliVerb, args: Record<string, unknown>) =>
+      rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb, args: { cwd: inShare, actor: "agent", ...args } });
+
+    beforeEach(async () => {
+      inShare = join(workspaceRoot, "shared-with-me", "received", "notes");
+      await mkdir(inShare, { recursive: true });
+    });
+
+    it("refuses the commands for your workspace as its owner, before opening it", async () => {
+      // Every port these commands use, so a command that got through would reach one.
+      const reached = vi.fn(async () => { throw new Error("reached"); });
+      const port = new Proxy({}, { get: () => reached });
+      Object.assign(context, { stopSync: reached, shareCopy: reached, shareLinkAgents: port, keptCopies: port, retainedCopies: port,
+        ownerAppResponses: reached, dataset: reached, appPublication: reached });
+      const ownerCommands: Array<[CliVerb, Record<string, unknown>]> = [
+        ["stopSync", { actor: "human" }],
+        ["shareCopy", { shareId: "share", grantId: "grant" }],
+        ["shareAgents", { shareId: "share", grantId: "grant" }],
+        ["shareDisconnect", { shareId: "share", grantId: "grant", connectionId: "connection" }],
+        ["keptCopies", {}],
+        ["saveKeptCopy", { id: 1 }],
+        ["retainedCopies", {}],
+        ["deleteRetainedCopies", { copies: [{ id: 3, revision: 10 }], acceptLateWriteRisk: true }],
+        ["ownerAppResponses", { request: { action: "list", workspaceId: WORKSPACE_ID, grantId: "g", limit: 100 } }],
+        ["dataset", { request: { action: "list", workspaceId: WORKSPACE_ID } }],
+        ["dataset", { request: { action: "prepareRecovery", workspaceId: WORKSPACE_ID, sourcePath: workspaceRoot } }],
+        ["dataset", { request: { action: "cancelInvoke", workspaceId: WORKSPACE_ID, invocationId: "00000000-0000-4000-8000-000000000003" } }],
+        ["appPublication", { request: { action: "cancel", workspaceId: WORKSPACE_ID, approvalId: "00000000-0000-4000-8000-000000000001" } }],
+      ];
+      for (const cwd of [inShare, join(workspaceRoot, "shared-with-me")]) {
+        for (const [verb, args] of ownerCommands) {
+          expect(await send(verb, { cwd, ...args }), verb).toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: OWNER });
+        }
+      }
+      expect(reached).not.toHaveBeenCalled();
+      expect(calls.openWorkspace).toBe(0);
+    });
+
+    it("refuses chat commands, and shows a Group with --peek", async () => {
+      const chatCommands: Array<[CliVerb, Record<string, unknown>]> = [
+        ["groupCreate", { name: "needs-ice" }],
+        ["post", { actor: "human", group: "general", attachments: [], needsDecision: false, body: "hello" }],
+        ["reply", { actor: "human", thread: "thread-1", body: "hello", attachments: [], needsDecision: false }],
+        ["react", { actor: "human", message: "message-1", emoji: "👍" }],
+        ["chatRetry", { thread: "thread-1" }],
+        ["fileChatStart", { path: "a.md", title: "About a", body: "hello" }],
+        ["show", { target: "general", peek: false }],
+        ["export", { actor: "human", scope: { kind: "all" }, outDir: "inside-export" }],
+        ["watch", { timeoutMs: 0 }],
+        ["link", { target: { kind: "group", group: "general" } }],
+        ["link", { target: { kind: "path", path: "a.md" } }],
+      ];
+      for (const cwd of [inShare, join(workspaceRoot, "shared-with-me")]) {
+        for (const [verb, args] of chatCommands) {
+          expect(await send(verb, { cwd, ...args }), verb).toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: CHAT });
+        }
+      }
+      expect(calls.openWorkspace).toBe(0);
+      expect(await send("show", { target: "general", peek: true })).toMatchObject({ ok: true });
+    });
+
+    it("keeps each command's own answer where it already sent you to the original workspace", async () => {
+      const operationId = "dohc-operation:11111111-1111-4111-8111-111111111111";
+      const keptEdits = "Kept edits are kept only in the original workspace. Open it to continue.";
+      const live = "Live documents can be listed, stopped, and resumed only in the original workspace. Open it to continue.";
+      const versions = "Versions belong to the owning workspace. Open it to continue.";
+      const history = "History operations require the owning workspace. Open it to continue.";
+      const answers: Array<[CliVerb, Record<string, unknown>, string]> = [
+        ["liveKeptEdits", {}, keptEdits],
+        ["saveRecoveryCopy", { path: "a.md" }, keptEdits],
+        ["retryKeptEdits", { path: "a.md", incident: "incident" }, keptEdits],
+        ["stopAgain", { path: "a.md", incident: "incident" }, keptEdits],
+        ["restoreProtectedCopy", { id: "00000000-0000-4000-8000-000000000001" }, "kept copies are not available in this workspace"],
+        ["discardProtectedCopy", { id: "00000000-0000-4000-8000-000000000001" }, "kept copies are not available in this workspace"],
+        ["liveDocuments", {}, live],
+        ["liveStop", { path: "a.md" }, live],
+        ["liveResume", { path: "a.md" }, live],
+        ["documentHeld", { path: "a.md" }, "Held changes are kept only in the original workspace. Open it to continue."],
+        ["syncFailure", {}, "Sync status is kept only in the original workspace. Open it to continue."],
+        ["historyOperation", { operationId }, history],
+        ["versionList", {}, versions],
+        ["versionCompare", { version: "main" }, versions],
+        ["versionConflicts", {}, versions],
+        ["versionCreate", { name: "draft" }, versions],
+        ["versionSwitch", { version: "main" }, versions],
+        ["versionMerge", { version: "main" }, versions],
+        ["versionResolve", { conflictId: "conflict", resolution: { keep: "current" } }, versions],
+      ];
+      for (const [verb, args, reason] of answers) {
+        expect(await send(verb, args), verb).toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: true, result: { ok: false, reason } });
+      }
+      // Only an Undo's refusal names its cause.
+      expect(await send("historyUndo", { operationId })).toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: true,
+        result: { ok: false, reason: history, refusal: { code: "unexplained" } } });
+      expect(calls.openWorkspace).toBe(0);
+    });
+
+    it("lets Collection and app publication commands name paths in the folder", async () => {
+      const dataset = vi.fn<NonNullable<CliWorkspaceContext["dataset"]>>(async () => { throw new Error("reached"); });
+      const appPublication = vi.fn<NonNullable<CliWorkspaceContext["appPublication"]>>(async () => { throw new Error("reached"); });
+      context.dataset = dataset;
+      context.appPublication = appPublication;
+      // The reply is the operation's own, so the request got past the rule.
+      const reached = { protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: "dohc: reached" };
+      const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+      const definition = { formatVersion: 1, datasetId: id(1), name: "Equipment", schemaPath: "equipment/schema.sql", operationsPath: "equipment/actions.ts",
+        tables: [{ tableId: id(2), name: "Equipment", sqlName: "equipment", primaryKey: "id",
+          fields: [{ fieldId: id(3), name: "ID", sqlColumn: "id", type: "text", required: true, unique: true }] }],
+        operations: [{ operationId: id(4), name: "list", label: "List equipment", tableId: id(2), kind: "read", access: "owner", readOnly: true, fieldIds: [id(3)] }] };
+      const below = join(inShare, "tasks");
+      await mkdir(below, { recursive: true });
+      for (const [cwd, prefix] of [[inShare, "shared-with-me/received/notes"], [below, "shared-with-me/received/notes/tasks"]] as const) {
+        dataset.mockClear();
+        appPublication.mockClear();
+        expect(await send("dataset", { cwd, request: { action: "describe", workspaceId: WORKSPACE_ID, datasetPath: "dataset.json" } }), cwd).toEqual(reached);
+        expect(await send("dataset", { cwd, request: { action: "prepare", workspaceId: WORKSPACE_ID, descriptorPath: "dataset.json" } }), cwd).toEqual(reached);
+        expect(await send("dataset", { cwd, request: { action: "create", workspaceId: WORKSPACE_ID, definition } }), cwd).toEqual(reached);
+        expect(await send("appPublication", { cwd, request: { action: "listLocal", workspaceId: WORKSPACE_ID, appRoot: "app" } }), cwd).toEqual(reached);
+        expect(dataset.mock.calls.map(([request]) => request), cwd).toEqual([
+          expect.objectContaining({ action: "describe", datasetPath: `${prefix}/dataset.json` }),
+          expect.objectContaining({ action: "prepare", descriptorPath: `${prefix}/dataset.json` }),
+          expect.objectContaining({ action: "create",
+            definition: expect.objectContaining({ schemaPath: `${prefix}/equipment/schema.sql`, operationsPath: `${prefix}/equipment/actions.ts` }) }),
+        ]);
+        expect(appPublication, cwd).toHaveBeenCalledWith(expect.objectContaining({ appRoot: `${prefix}/app` }), expect.anything());
+      }
+    });
+
+    it("answers reads", async () => {
+      expect(await send("groups", {})).toMatchObject({ ok: true });
+      expect(await send("threads", { group: "general" })).toMatchObject({ ok: true });
+      expect(await send("inbox", {})).toMatchObject({ ok: true });
+    });
+
+    // The rule reads the folder a link leads to, as choosing the workspace does.
+    it("refuses from a link outside shared-with-me that leads into a share's folder", async () => {
+      const reached = vi.fn(async () => { throw new Error("reached"); });
+      Object.assign(context, { stopSync: reached, dataset: reached });
+      const outside = await mkdtemp(join(tmpdir(), "dohc-link-"));
+      try {
+        // Windows makes a junction without privilege; elsewhere it is a symlink.
+        const links = [join(workspaceRoot, "into-share"), join(outside, "into-share")];
+        for (const link of links) await symlink(inShare, link, "junction");
+        const linked = join(outside, "linked-into-share");
+        try { await symlink(inShare, linked, "dir"); links.push(linked); } catch (error) {
+          // Windows makes a folder symlink only with Developer Mode or as an administrator.
+          if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error;
+        }
+        for (const cwd of links) {
+          expect(await send("stopSync", { cwd, actor: "human" }), cwd).toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: OWNER });
+          expect(await send("dataset", { cwd, request: { action: "list", workspaceId: WORKSPACE_ID } }), cwd)
+            .toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: OWNER });
+          expect(await send("post", { cwd, actor: "human", group: "general", attachments: [], needsDecision: false, body: "hello" }), cwd)
+            .toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: CHAT });
+          expect(await send("watch", { cwd, timeoutMs: 0 }), cwd).toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: CHAT });
+        }
+        expect(reached).not.toHaveBeenCalled();
+        expect(calls.openWorkspace).toBe(0);
+      } finally {
+        await rm(outside, { recursive: true, force: true });
+      }
+    });
+
+    it("runs from a link in a share's folder that leads to your own folder, as from that folder", async () => {
+      const reached = vi.fn(async () => { throw new Error("reached"); });
+      context.stopSync = reached;
+      const own = join(workspaceRoot, "own");
+      await mkdir(own, { recursive: true });
+      const link = join(inShare, "to-own");
+      await symlink(own, link, "junction");
+      expect(await send("stopSync", { cwd: link, actor: "human" })).toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: "dohc: reached" });
+      expect(reached).toHaveBeenCalledTimes(1);
+    });
+
+    // Every other name for a share's folder ends at the refusal, or names no
+    // workspace at all.
+    describe("named another way", () => {
+      const NO_WORKSPACE = "dohc: not inside a dohc workspace";
+      const reached = vi.fn(async () => { throw new Error("reached"); });
+      const answer = (response: CliTransportResponse) => (response.ok ? "ran" : response.error);
+      const answers = async (cwd: string) => [
+        answer(await send("stopSync", { cwd, actor: "human" })),
+        answer(await send("post", { cwd, actor: "human", group: "general", attachments: [], needsDecision: false, body: "hello" })),
+      ];
+      // cmd's short spelling of a path: each name that has a short alias, by that alias.
+      const windowsShortPath = (path: string) => spawnSync("cmd.exe", ["/d", "/s", "/c", `"for %I in ("${path}") do @echo %~sI"`],
+        { encoding: "utf8", windowsVerbatimArguments: true }).stdout.trim();
+
+      beforeEach(() => {
+        reached.mockClear();
+        context.stopSync = reached;
+      });
+      afterEach(() => {
+        expect(reached).not.toHaveBeenCalled();
+        expect(calls.openWorkspace).toBe(0);
+      });
+
+      it("refuses in other capitals where the disk folds them, and names no workspace where it doesn't", async () => {
+        for (const cwd of [join(workspaceRoot, "SHARED-WITH-ME", "received", "notes"), join(workspaceRoot, "Shared-With-Me")]) {
+          const folds = await stat(cwd).then(() => true, () => false);
+          expect(await answers(cwd), cwd).toEqual(folds ? [OWNER, CHAT] : [NO_WORKSPACE, NO_WORKSPACE]);
+        }
+      });
+
+      // These read the folder's real name, as Windows reports it, at both the
+      // workspace lookup and the rule.
+      it("refuses by Windows short names, for the workspace's folder and for shared-with-me", async (ctx) => {
+        if (process.platform !== "win32") ctx.skip();
+        const shortRoot = windowsShortPath(workspaceRoot);
+        const shortShared = windowsShortPath(join(workspaceRoot, "shared-with-me"));
+        // A volume that keeps no short names gives each path back unchanged.
+        if (shortRoot === workspaceRoot || shortShared === join(workspaceRoot, "shared-with-me")) ctx.skip();
+        for (const cwd of [join(shortRoot, "shared-with-me", "received", "notes"), join(workspaceRoot, basename(shortShared), "received", "notes"),
+          windowsShortPath(inShare)]) {
+          expect(await answers(cwd), cwd).toEqual([OWNER, CHAT]);
+        }
+      });
+
+      it("refuses through a folder's directory stream", async (ctx) => {
+        if (process.platform !== "win32") ctx.skip();
+        for (const cwd of [`${workspaceRoot}\\shared-with-me:$I30:$INDEX_ALLOCATION`, `${workspaceRoot}\\shared-with-me::$INDEX_ALLOCATION`,
+          `${inShare}::$INDEX_ALLOCATION`]) {
+          expect(await answers(cwd), cwd).toEqual([OWNER, CHAT]);
+        }
+      });
+
+      it("refuses by the device, volume and object names Windows resolves to the same folder", async (ctx) => {
+        if (process.platform !== "win32") ctx.skip();
+        const volume = execFileSync("mountvol", [inShare.slice(0, 2), "/L"], { encoding: "utf8" }).trim();
+        for (const cwd of [`\\\\?\\${inShare}`, `\\\\.\\${inShare}`, `${volume}${inShare.slice(3)}`, `\\\\?\\GLOBALROOT\\??\\${inShare}`]) {
+          expect(await answers(cwd), cwd).toEqual([OWNER, CHAT]);
+        }
+      });
+
+      it("names no workspace for a trailing dot or space, or a file stream, on shared-with-me", async (ctx) => {
+        if (process.platform !== "win32") ctx.skip();
+        for (const cwd of [`${workspaceRoot}\\shared-with-me.\\received`, `${workspaceRoot}\\shared-with-me \\received`,
+          `${workspaceRoot}\\shared-with-me...`, `\\\\?\\${workspaceRoot}\\shared-with-me.\\received`, `${workspaceRoot}\\shared-with-me::$DATA`]) {
+          expect(await answers(cwd), cwd).toEqual([NO_WORKSPACE, NO_WORKSPACE]);
+        }
+      });
+
+      it("names no workspace for a network path to the same disk", async (ctx) => {
+        if (process.platform !== "win32") ctx.skip();
+        const cwd = `\\\\localhost\\${inShare.slice(0, 1)}$\\${inShare.slice(3)}`;
+        // The disk's administrative share can be closed to this account.
+        if (!(await stat(cwd).then(() => true, () => false))) ctx.skip();
+        expect(await answers(cwd)).toEqual([NO_WORKSPACE, NO_WORKSPACE]);
+      });
+    });
+  });
+
+  it("refuses owner and chat commands in a received share opened as its own workspace", async () => {
+    registryWorkspace = { ...registryWorkspace, readOnly: true };
+    context.readOnly = true;
+    const reached = vi.fn(async () => { throw new Error("reached"); });
+    Object.assign(context, { stopSync: reached, shareCopy: reached, shareLinkAgents: new Proxy({}, { get: () => reached }),
+      ownerAppResponses: reached, dataset: reached, appPublication: reached });
+    const folder = join(workspaceRoot, "notes", "deeper");
+    await mkdir(folder, { recursive: true });
+    const send = (cwd: string, verb: CliVerb, args: Record<string, unknown>) =>
+      rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb, args: { cwd, actor: "agent", ...args } });
+    const ownerCommands: Array<[CliVerb, Record<string, unknown>, string]> = [
+      ["stopSync", { actor: "human" }, "Open the owning workspace to stop its sync."],
+      ["shareCopy", { shareId: "share", grantId: "grant" }, "Share copy details require the owning workspace."],
+      ["shareAgents", { shareId: "share", grantId: "grant" }, "Open the owning workspace to list a link's agents."],
+      ["shareDisconnect", { shareId: "share", grantId: "grant", connectionId: "connection" }, "Open the owning workspace to disconnect a link's agent."],
+      ["ownerAppResponses", { request: { action: "list", workspaceId: WORKSPACE_ID, grantId: "g", limit: 100 } }, "App responses require the owning workspace."],
+      ["dataset", { request: { action: "list", workspaceId: WORKSPACE_ID } }, "Collections require the owning workspace."],
+      ["dataset", { request: { action: "prepareRecovery", workspaceId: WORKSPACE_ID, sourcePath: workspaceRoot } }, "Collections require the owning workspace."],
+      ["dataset", { request: { action: "describe", workspaceId: WORKSPACE_ID, datasetPath: "tasks/dataset.json" } }, "Collections require the owning workspace."],
+      ["appPublication", { request: { action: "cancel", workspaceId: WORKSPACE_ID, approvalId: "00000000-0000-4000-8000-000000000001" } },
+        "App publication requires the owning workspace."],
+      ["appPublication", { request: { action: "createLink", workspaceId: WORKSPACE_ID, appRoot: "app", access: "view",
+        operationId: "00000000-0000-4000-8000-000000000101", agentLabel: "Builder" } }, "App publication requires the owning workspace."],
+    ];
+    const chatCommands: Array<[CliVerb, Record<string, unknown>]> = [
+      ["groupCreate", { name: "needs-ice" }],
+      ["post", { actor: "human", group: "general", attachments: [], needsDecision: false, body: "hello" }],
+      ["reply", { actor: "human", thread: "thread-1", body: "hello", attachments: [], needsDecision: false }],
+      ["react", { actor: "human", message: "message-1", emoji: "👍" }],
+      ["chatRetry", { thread: "thread-1" }],
+      ["fileChatStart", { path: "a.md", title: "About a", body: "hello" }],
+      ["show", { target: "general", peek: false }],
+      ["export", { actor: "human", scope: { kind: "all" }, outDir: "inside-export" }],
+      ["watch", { timeoutMs: 0 }],
+    ];
+    for (const cwd of [workspaceRoot, folder]) {
+      for (const [verb, args, error] of ownerCommands) {
+        expect(await send(cwd, verb, args), verb).toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: `dohc: ${error}` });
+      }
+      for (const [verb, args] of chatCommands) {
+        expect(await send(cwd, verb, args), verb)
+          .toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: "dohc: chats are not available in a read-only shared view" });
+      }
+    }
+    expect(reached).not.toHaveBeenCalled();
   });
 
   it("requires owner-local authority and refuses all automation publication actions", async () => {
