@@ -791,8 +791,11 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       keepUnsaved(collectionChangeShell(workspaceId) ? `dohc did not create a record in ${table?.name ?? "this Collection"}. ${reason}` : `dohc did not create this record. ${reason}`, values);
     };
     if (!create || !table) return refuse(RULES_DISALLOW);
-    // The row holds no value the create does not take: the table gives such a value back as soon as the row
-    // takes typing, before any save of it.
+    // The table gives a value back as soon as the create stops taking its field and the row takes typing. One can
+    // still reach a save, as from an editor that was open over the row when the rules changed. It is never sent
+    // and never dropped in silence: it is kept where the person can copy it, and the rest is saved.
+    const stray = Object.fromEntries(Object.entries(values).filter(([fieldId, value]) => !create.fieldIds.includes(fieldId) && !isEmptyValue(jsonValue(value) ?? null)));
+    if (Object.keys(stray).length > 0) keepUnsaved(`dohc did not save part of the new record, because a new record in ${table.name} no longer takes it.`, stray);
     const typed: Record<string, Typed> = {};
     for (const field of createFields) {
       // The row's cells show each field's default, so what they hold is what is sent: a default left alone, and an

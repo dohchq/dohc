@@ -2458,6 +2458,20 @@ describe("when the Collection's fields change", () => {
     expect(Object.keys((sent(result.invoke, create)[0]!.input as { values: object }).values)).toEqual([name, status]);
   });
 
+  it("keeps a value an open editor saves into the row after the create stopped taking its field, and sends the rest", async () => {
+    const result = setup(); await screen.findByText("Alice");
+    typeNewRow("Bob", "Tab");
+    fireEvent.keyDown(grid(), { key: "5" });
+    fireEvent.change(cellEditor(), { target: { value: "58" } });
+    // The create stops taking Amount while its editor is still open over the row.
+    result.rerender(<TransactionalCollectionPage {...result.props} dataset={revised(2, next => { operation(next, create).fieldIds = [name, status]; })} />);
+    fireEvent.keyDown(cellEditor(), { key: "Enter" });
+    await waitFor(() => expect(sent(result.invoke, create)).toHaveLength(1));
+    expect(Object.keys((sent(result.invoke, create)[0]!.input as { values: object }).values)).toEqual([name, status]);
+    const words = "dohc did not save part of the new record, because a new record in People no longer takes it. You typed: Amount: 58";
+    expect(result.onError).toHaveBeenCalledWith(words, expect.any(TextNotSavedError), null);
+  });
+
   it("sends no second create for a new row dohc could not confirm once the rules change: not on Enter, Try again, or close", async () => {
     const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
       if (request.operationId === read) return { result: page() };

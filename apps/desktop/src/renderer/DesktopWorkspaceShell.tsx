@@ -4437,8 +4437,11 @@ export function DesktopWorkspaceShell(props: {
         // shell the window no longer shows can run no retry.
         const shownInPage = (reason: string, retry: (() => void) | null = resume, partial = recordId !== undefined) =>
           options.onFailure?.({ reason, retry: moved() ? null : retry, partial, ...(recordId === undefined ? {} : { recordId }) }) ?? false;
+        // A record that exists in part is said to exist in every failure of its resume, so nobody takes it for one
+        // that was never made and makes it again beside its file.
+        const could = recordId === undefined ? "dohc could not create this record." : "dohc created the record file but could not finish the record.";
         // Main takes no creation for a workspace the window no longer shows. The page keeps what was typed.
-        if (moved()) { shownInPage("This window changed workspaces before dohc created the record."); return; }
+        if (moved()) { shownInPage(recordId === undefined ? "This window changed workspaces before dohc created the record." : `${could} This window changed workspaces first.`); return; }
         if (shareView && !shareViewWritableRef.current) {
           const message = shareWriteRefusalRef.current;
           if (!shownInPage(message)) reportShellError(message, new Error(message), resume);
@@ -4449,7 +4452,7 @@ export function DesktopWorkspaceShell(props: {
           result = await bridge().createCollectionRecord({ workspaceId, collectionPath, name, recordId });
         } catch (error) {
           // Only an error from the creation itself is a creation that failed.
-          const words = withErrorWords("dohc could not create this record.", error);
+          const words = withErrorWords(could, error);
           // A check of the share's access that fails leaves the creation's own error to say why.
           try { if (!moved() && shareView && shouldRecheckShareAccess(error)) await checkShareAccess(); } catch { /* Reported below. */ }
           if (moved()) { shownInPage(words); return; }

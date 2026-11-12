@@ -493,6 +493,9 @@ describe("collection folders", () => {
     fireEvent.click(within(note()!).getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(note()?.textContent).toContain("already exists"));
+    // The words still say the record's file exists, so nobody takes the record for one that was never made.
+    expect(note()!.textContent).toContain("dohc created the record file but could not finish the record.");
+    expect(note()!.textContent).not.toContain("could not create this record");
     expect(note()!.getAttribute("data-new-record-status")).toBe("unconfirmed");
     expect(within(note()!).getByRole("button", { name: "Discard" })).toBeTruthy();
     // It takes no typing, and Enter starts no creation beside the unfinished one.
