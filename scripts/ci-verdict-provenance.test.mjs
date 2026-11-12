@@ -830,9 +830,11 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
   const source = job.steps[verdictIndex].run.match(/<<'NODE'\n([\s\S]*)\nNODE\s*$/)?.[1];
   assert.ok(source, "the final check must execute its verdict");
   const started = Date.parse("2026-11-09T00:00:00Z");
+  // The spawned check inherits this process's environment, so it expects the same shape.
+  const shape = cloudShape();
   const jobNames = ["what changed", "shared preparation", "compiler confinement", "relay confinement", "typecheck + tests", "engine gate", "Rust build once", "Rust policy checks",
-    ...Array.from({length: JS_SHARDS - 1}, (_, index) => `JS worker ${index + 1}`),
-    ...Array.from({length: RUST_SHARDS - 1}, (_, index) => `Rust tests ${index + 1}`)];
+    ...Array.from({length: shape.js - 1}, (_, index) => `JS worker ${index + 1}`),
+    ...Array.from({length: shape.rust - 1}, (_, index) => `Rust tests ${index + 1}`)];
   const completed = jobNames.map(name => ({name, status: "completed", conclusion: "success", head_sha: "head",
     created_at: new Date(started).toISOString(), started_at: new Date(started).toISOString(), completed_at: new Date(started + 100_000).toISOString()}));
   const run = (jobs, event = "pull_request", gate = "all", rows = completed, checkout = "head") => {
