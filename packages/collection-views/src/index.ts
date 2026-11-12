@@ -29,7 +29,7 @@ export {
   type TableFieldMark,
   type TableHostCell,
   type TableNewRecord,
-  type TableNewRecordStatus,
+  type TableNewRecordStop,
   type TableUnsavedRow,
   type TableViewProps,
 } from "./table/TableView";

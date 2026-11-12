@@ -119,36 +119,11 @@ export interface TableAbandonedDraft {
   value?: CollectionValue;
 }
 
-/**
- * What the host says of a new row's save. Each answer puts the row in one
- * state: `pending` is sending, `made` is made, `unconfirmed` is in doubt,
- * `refused` is refused, and `invalid` is typing again. The host gives the
- * words: the table cannot know why a record was not made.
- */
-export type TableNewRecordStatus =
-  /** One request is out. The row takes no typing, and offers nothing that starts another. */
-  | { state: "pending" }
-  /** The record exists, and the host still has work on it, as its field writes. The row never creates again. */
-  | { state: "made" }
-  /**
-   * The record exists and nothing of it is left to do, so the row goes.
-   * `recordId`: its id among the records the host gives the table next. The
-   * table then calls `onOutOfView` when no row on screen shows it.
-   */
-  | { state: "saved"; recordId?: string }
-  /** The host keeps what the row held somewhere else, so the row goes, and no record is claimed. */
-  | { state: "dropped" }
-  /** A field's value stops the save, and the host sent nothing. The cursor goes to that cell, which says why. */
-  | { state: "invalid"; field: string; reason: string }
-  /**
-   * The host cannot say whether its request ran. The row never takes typing
-   * again. `retry` sends the SAME request again, and absent, the row offers
-   * Discard only. `discard` gives the request up for good. `released`: the
-   * row went with its table, so the host keeps what it must elsewhere.
-   */
-  | { state: "unconfirmed"; reason: string; retry?(): void; discard(): void; released?(): void }
-  /** The host says its request did not run, and why. The row takes typing again, and a later save is a new request. */
-  | { state: "refused"; reason: string };
+/** A value that stops a new row's save: its field, and why, in the host's words. */
+export interface TableNewRecordStop {
+  field: string;
+  reason: string;
+}
 
 /** What a new row held that the table did not save. */
 export interface TableUnsavedRow {
@@ -156,10 +131,12 @@ export interface TableUnsavedRow {
   values: Readonly<Record<string, CollectionValue>>;
   /** Text an open editor held that its field cannot take, as a word in a number field. */
   text?: { field: string; text: string };
+  /** What stopped the save of a row its table closed over. */
+  stopped?: TableNewRecordStop;
   /**
    * `field`: the value's field left the table, changed its kind, or takes no
-   * value in a new record now. `closed`: the table closed over text its
-   * field cannot take, so the row was not saved as if it were complete.
+   * value in a new record now. `closed`: the table closed over a row it
+   * could not save, as one with text its field cannot take.
    */
   why: "field" | "closed";
 }
@@ -180,26 +157,25 @@ export interface TableNewRecord {
   defaults?: Readonly<Record<string, CollectionValue>>;
   /**
    * Saves a new record with what the row's cells show, by field key. A cell
-   * with no value and no default has no key. `report` tells the row what
-   * became of the save, as often as that changes. It answers false once the
-   * row is gone, as with its table. The host then reports the outcome its
-   * own way.
+   * with no value and no default has no key. The host answers a value that
+   * stops the save, having sent nothing: the row stays, with the cursor on
+   * that field. With no answer the save is the host's. The row leaves the
+   * table at once, and the host shows what becomes of the save.
    */
-  save(values: Readonly<Record<string, CollectionValue>>, report: (status: TableNewRecordStatus) => boolean): void;
+  save(values: Readonly<Record<string, CollectionValue>>): TableNewRecordStop | void;
   /**
-   * Takes what starts the new row, for the host's own New record control,
-   * and returns what gives it back. A press on a control marked
-   * `data-starts-new-record` does not leave an open row.
+   * Takes the table's side, and returns what gives it back. `start` starts
+   * the new row, for the host's own New record control. A press on a control
+   * marked `data-starts-new-record` does not leave an open row. `shows`
+   * answers whether a record's row is among the rows on screen.
    */
-  bind?(start: () => void): () => void;
+  bind?(table: { start(): void; shows(recordId: string): boolean }): () => void;
   /**
    * Receives what the row held and did not save, for the host to keep where
    * the person can copy it. Nothing is created. The words it returns for a
    * value whose field went show on the row.
    */
   onUnsaved(row: TableUnsavedRow): string | void;
-  /** The record a row saved has no row on screen: it is past the rows in view, or not among the host's records. */
-  onOutOfView?(): void;
 }
 
 export interface TableViewProps {
@@ -403,47 +379,19 @@ interface NewRowCell {
   touched: boolean;
 }
 
-/**
- * The states of a new row. `typing`: never sent. `sending`: one request is
- * out. `made`: the host says the record exists. `doubt`: the host cannot say
- * whether its request ran. `refused`: the host says it did not run.
- */
-type NewRowPhase = "typing" | "sending" | "made" | "doubt" | "refused";
+/** What the row says: on a cell, the value that stops its save, and under it, the host's words for a value it gave back. */
+type NewRowNote = ({ state: "invalid" } & TableNewRecordStop) | { state: "said"; reason: string };
 
-/**
- * What each state lets a trigger do. Every trigger of the row asks here, and
- * only the host's answers move the row between states, in `answer` below.
- * `type`: a cell takes a value. `save`: Enter, leaving the row, Try again
- * and the table closing start a request. `retry`: the host's own retry of
- * the same request runs. `discard`: Discard removes the row.
- */
-const NEW_ROW: Readonly<Record<NewRowPhase, { type: boolean; save: boolean; retry: boolean; discard: boolean }>> = {
-  typing: { type: true, save: true, retry: false, discard: true },
-  sending: { type: false, save: false, retry: false, discard: false },
-  made: { type: false, save: false, retry: false, discard: false },
-  doubt: { type: false, save: false, retry: true, discard: true },
-  refused: { type: true, save: true, retry: false, discard: true },
-};
-
-/** What the row says under it or on a cell: the host's words, or the words the host gave for a value the row gave back. */
-type NewRowNote = Extract<TableNewRecordStatus, { state: "invalid" | "refused" | "unconfirmed" }> | { state: "said"; reason: string };
-
-/**
- * The one new row. `id` rises with each row, and `attempt` with each fresh
- * save of it, so an answer for an earlier row, or for an earlier save of
- * this one, changes nothing. The host's retry of a request is the same
- * attempt.
- */
+/** The one new row. `id` rises with each row, so an editor of one row is never the next row's. */
 interface NewRowState {
   id: number;
-  attempt: number;
-  phase: NewRowPhase;
   note: NewRowNote | null;
 }
 
 /**
- * The new row's values, its state, and what it says. Each cell reads its own
- * value, so a value typed in the row draws that cell and no other row.
+ * The new row's values and what it says. The row is only ever typed in: a
+ * save the host takes removes it. Each cell reads its own value, so a value
+ * typed in the row draws that cell and no other row.
  */
 function createNewRow() {
   let row: NewRowState | null = null;
@@ -454,7 +402,6 @@ function createNewRow() {
   const tell = () => {
     for (const listener of [...listeners]) listener();
   };
-  const may = (trigger: keyof (typeof NEW_ROW)["typing"]) => row !== null && NEW_ROW[row.phase][trigger];
   const typedIn = (name: string) => cells.get(name)?.touched === true;
   /** The cells that hold no typing start from the defaults, in the fields that still take one. */
   const start = (next: Readonly<Record<string, CollectionValue>>, fields: readonly FieldDefinition[]) => {
@@ -466,10 +413,6 @@ function createNewRow() {
     }
   };
   return {
-    /** Enter sent the row, so the next row starts once it is saved. */
-    enter: false,
-    /** A value changed since the host last answered. */
-    changed: false,
     /** Text an open editor held when it went with its table, which its field cannot take. */
     unparsed: null as { field: string; text: string } | null,
     cells: cells as ReadonlyMap<string, NewRowCell>,
@@ -480,7 +423,6 @@ function createNewRow() {
       };
     },
     row: () => row,
-    may,
     value: (field: string) => cells.get(field)?.value,
     /** Whether the person typed in this field or set it, whatever value it holds. */
     typedIn,
@@ -490,9 +432,7 @@ function createNewRow() {
     values: (): Record<string, CollectionValue> => Object.fromEntries([...cells].map(([field, cell]) => [field, cell.value])),
     open(next: Readonly<Record<string, CollectionValue>>, fields: readonly FieldDefinition[]) {
       cells.clear();
-      row = { id: ++made, attempt: 0, phase: "typing", note: null };
-      this.enter = false;
-      this.changed = false;
+      row = { id: ++made, note: null };
       this.unparsed = null;
       start(next, fields);
       tell();
@@ -503,9 +443,9 @@ function createNewRow() {
       this.unparsed = null;
       tell();
     },
-    /** The defaults changed with what a new record takes. A row the person may still type in follows them where it holds no typing. */
+    /** The defaults changed with what a new record takes. The row follows them where it holds no typing. */
     rebase(next: Readonly<Record<string, CollectionValue>>, fields: readonly FieldDefinition[]) {
-      if (!may("type")) return;
+      if (!row) return;
       start(next, fields);
       tell();
     },
@@ -515,7 +455,7 @@ function createNewRow() {
      * opens on, passes false, and its value is taken only where it differs.
      */
     set(field: FieldDefinition, value: CollectionValue, typed = true) {
-      if (!row || !may("type")) return;
+      if (!row) return;
       const cell = cells.get(field.name);
       const next = blank(value) ? null : value;
       const same = JSON.stringify(cell?.value ?? null) === JSON.stringify(next);
@@ -524,7 +464,6 @@ function createNewRow() {
       // again, as an emptied cell or an unticked box, is a field left alone.
       if ((next === null || next === false) && defaults[field.name] === undefined) cells.delete(field.name);
       else cells.set(field.name, { value: next, type: field.type, touched: true });
-      if (!same) this.changed = true;
       // The cell no longer holds what stopped the save, and the row has said what it had to.
       if ((row.note?.state === "invalid" && row.note.field === field.name) || row.note?.state === "said") row = { ...row, note: null };
       tell();
@@ -534,47 +473,20 @@ function createNewRow() {
     },
     /** Says the host's words for a value the row gave back, until the next value is typed or the row is saved. */
     say(reason: string) {
-      if (!row || !may("type")) return;
+      if (!row) return;
       row = { ...row, note: { state: "said", reason } };
       tell();
     },
-    /** A save starts: one request goes out. False where the row's state lets none start. */
-    begin(): boolean {
-      if (!row || !may("save")) return false;
-      row = { ...row, attempt: row.attempt + 1, phase: "sending", note: null };
-      this.changed = false;
-      tell();
-      return true;
-    },
-    /** The host's own retry of a request in doubt starts: the same request is out again. Null where there is none to run. */
-    retry(): (() => void) | null {
-      const retry = row?.note?.state === "unconfirmed" ? row.note.retry : undefined;
-      if (!row || !may("retry") || !retry) return null;
-      row = { ...row, phase: "sending", note: null };
-      tell();
-      return retry;
-    },
-    /**
-     * The host's answer moves the row to its next state. A record that is
-     * made stays made. A request that did not run can only be one that was
-     * out, so a row in doubt never goes back to typing.
-     */
-    answer(status: Exclude<TableNewRecordStatus, { state: "saved" | "dropped" }>) {
+    /** A value stops the save: the row says so on its cell until that cell holds another value. */
+    stop(stopped: TableNewRecordStop) {
       if (!row) return;
-      const out = row.phase === "sending";
-      if (status.state === "made") row = { ...row, phase: "made", note: null };
-      else if (row.phase === "made") return;
-      else if (status.state === "pending") row = { ...row, phase: "sending", note: null };
-      else if (status.state === "unconfirmed") row = { ...row, phase: "doubt", note: status };
-      else if (!out) return;
-      else row = { ...row, phase: status.state === "refused" ? "refused" : "typing", note: status };
-      this.changed = false;
+      row = { ...row, note: { state: "invalid", ...stopped } };
       tell();
     },
-    /** The row goes with nothing left to show it. Answers what it held, and its state. */
+    /** The row goes with nothing left to show it. Answers what it held. */
     release() {
       if (!row) return null;
-      const held = { phase: row.phase, note: row.note, values: this.values(), typed: this.typed(), unparsed: this.unparsed };
+      const held = { values: this.values(), typed: this.typed(), unparsed: this.unparsed };
       this.close();
       return held;
     },
@@ -607,29 +519,17 @@ function NewRowValue(props: {
   );
 }
 
-/**
- * What stands at the new row's start, where a saved row has Open: a dot
- * while the host has the row, and Discard where the row's state offers it.
- */
+/** What stands at the new row's start, where a saved row has Open: Discard, once the row holds something typed. */
 function NewRowLead(props: {
   row: NewRow;
-  phase: NewRowPhase;
   discardRef: { current: HTMLButtonElement | null };
   onDiscard: () => void;
   onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => void;
 }) {
-  const { row, phase } = props;
+  const { row } = props;
   const typed = useSyncExternalStore(row.subscribe, row.typed);
-  if (phase === "sending" || phase === "made") {
-    return (
-      <span data-new-record-status="pending" className="inline-flex shrink-0 items-center">
-        <span aria-hidden className="size-1.5 rounded-full bg-subtle" />
-        <span className="sr-only">Saving</span>
-      </span>
-    );
-  }
-  // A row that holds nothing typed has nothing to discard, unless a request of it may have run.
-  if (!NEW_ROW[phase].discard || (!typed && phase !== "doubt")) return null;
+  // A row that holds nothing typed has nothing to discard.
+  if (!typed) return null;
   return (
     <button
       ref={props.discardRef}
@@ -637,7 +537,7 @@ function NewRowLead(props: {
       // Shift+Tab and the left arrow on the row's first cell reach it.
       tabIndex={-1}
       aria-label="Discard new record"
-      title={phase === "doubt" ? DISCARD_HINT : "Discard"}
+      title="Discard"
       className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors duration-75 hover:bg-hover hover:text-ink"
       onClick={(event) => {
         // The press acts on the row. It neither selects nor edits a cell.
@@ -903,7 +803,7 @@ export function TableView({
   const hasDraft = draft !== null && newRecord !== undefined;
   const draftNote = hasDraft ? draft.note : null;
   /** The new row takes typing now. */
-  const draftOpen = hasDraft && !editingDisabled && NEW_ROW[draft.phase].type;
+  const draftOpen = hasDraft && !editingDisabled;
 
   // Selection stays out of the columns: a click or an arrow key must not
   // rebuild them.
@@ -1035,16 +935,12 @@ export function TableView({
   const press = useRef<"starts" | "row" | null>(null);
   // The press that left the new row found a value that stops its save, so its click selects nothing.
   const pressHeld = useRef(false);
-  const selectedNow = useRef(selected);
-  selectedNow.current = selected;
   const fieldsNow = useRef(fields);
   fieldsNow.current = fields;
   const contract = useRef(newRecord);
   if (newRecord) contract.current = newRecord;
-  const mounted = useRef(true);
-  const recordsNow = useRef(records);
-  recordsNow.current = records;
-  const landed = useRef<{ id: string; records: CollectionRecord[] } | null>(null);
+  // Whether a record's row is among the rows on screen, as the table is now.
+  const shows = useRef<(recordId: string) => boolean>(() => false);
 
   // A key that moves the selection or closes the editor sets this, always
   // with a state change. After that render the grid takes focus and scrolls
@@ -1099,91 +995,55 @@ export function TableView({
     const typable = fieldsNow.current.filter(typesNew);
     const field = typable[0];
     // A table with no field to type in has no row to offer, so the host makes the record as it is.
-    if (!field) return contract.current.save({}, () => false);
+    if (!field) return void contract.current.save({});
     if (!newRow.row()) newRow.open(contract.current.defaults ?? {}, typable);
     setSelected({ recordId: NEW_RECORD_ROW, field: field.name });
     reveal.current = true;
-    if (field.type !== "checkbox" && newRow.may("type")) startEdit(NEW_RECORD_ROW, fieldsNow.current.indexOf(field));
+    if (field.type !== "checkbox") startEdit(NEW_RECORD_ROW, fieldsNow.current.indexOf(field));
     else setEditing(null);
   };
-  // The host's own control, and a save that answers later, start the row as the table is then.
+  // The host's own control starts the row as the table is then.
   const startNow = useRef(startNewRow);
   startNow.current = startNewRow;
-  useEffect(() => newRecord?.bind?.(() => startNow.current()), [newRecord]);
-
-  /** Sends the new row to the host. Answers whether a value stopped the save, so the row keeps the cursor. */
-  const sendNewRow = (enter: boolean): "kept" | "sent" | "invalid" => {
-    const host = contract.current;
-    if (!host || !newRow.begin()) return "kept";
-    const sent = newRow.row()!;
-    let outcome: "sent" | "invalid" = "sent";
-    newRow.enter = enter;
-    // The answer is for this save of this row. A row that went, with its table or by Discard, takes none, and
-    // neither does a row that has started another save: its earlier request is no longer the one that is out.
-    host.save(newRow.values(), (status) => {
-      const now = newRow.row();
-      if (!mounted.current || now?.id !== sent.id || now.attempt !== sent.attempt) return false;
-      if (status.state === "saved" || status.state === "dropped") {
-        // Enter starts the next row while the cursor is still on this one.
-        const next = status.state === "saved" && newRow.enter && selectedNow.current?.recordId === NEW_RECORD_ROW && scrollRef.current?.contains(document.activeElement) === true;
-        // The records the host gives next say whether a row on screen shows the record.
-        if (status.state === "saved" && status.recordId !== undefined) landed.current = { id: status.recordId, records: recordsNow.current };
-        newRow.close();
-        if (next) startNow.current();
-        else setSelected((current) => (current?.recordId === NEW_RECORD_ROW ? null : current));
-        return true;
-      }
-      newRow.answer(status);
-      if (status.state !== "invalid" || newRow.row()?.note !== status) return true;
-      outcome = "invalid";
-      const field = fieldsNow.current.find((entry) => entry.name === status.field);
-      if (field) {
-        setEditing(null);
-        setSelected({ recordId: NEW_RECORD_ROW, field: field.name });
-        reveal.current = true;
-      }
-      return true;
-    });
-    return outcome;
-  };
+  useEffect(() => newRecord?.bind?.({ start: () => startNow.current(), shows: (recordId) => shows.current(recordId) }), [newRecord]);
 
   /**
    * Saves the new row: with Enter, or because the cursor left it. A row with
-   * nothing typed in it goes and makes no record. A row whose state lets no
-   * request start, or one the host refused that has not changed since, stays
-   * as it is.
+   * nothing typed in it goes and makes no record. A value that stops the
+   * save keeps the row, with the cursor on its cell. Otherwise the save is
+   * the host's and the row is gone, and Enter starts the next row at once,
+   * so the next key is typed in it.
    */
-  const commitNewRow = (how: "enter" | "away" | "again"): "none" | "removed" | "kept" | "sent" | "invalid" => {
-    const row = newRow.row();
-    if (!row || !newRecord) return "none";
-    if (editingDisabled || !newRow.may("save")) return "kept";
-    if (!newRow.typed()) {
-      newRow.close();
-      setSelected((current) => (current?.recordId === NEW_RECORD_ROW ? null : current));
-      return "removed";
+  const commitNewRow = (enter: boolean): "none" | "removed" | "kept" | "sent" | "invalid" => {
+    const host = contract.current;
+    if (!newRow.row() || !newRecord || !host) return "none";
+    if (editingDisabled) return "kept";
+    const typed = newRow.typed();
+    const stopped = typed ? host.save(newRow.values()) : undefined;
+    if (stopped) {
+      newRow.stop(stopped);
+      const field = fieldsNow.current.find((entry) => entry.name === stopped.field);
+      if (!field) return "invalid";
+      setEditing(null);
+      setSelected({ recordId: NEW_RECORD_ROW, field: field.name });
+      reveal.current = true;
+      return "invalid";
     }
-    if (how === "away" && row.phase === "refused" && !newRow.changed) return "kept";
-    return sendNewRow(how === "enter");
+    newRow.close();
+    if (typed && enter) startNewRow();
+    else setSelected((current) => (current?.recordId === NEW_RECORD_ROW ? null : current));
+    return typed ? "sent" : "removed";
   };
   /** The cursor leaves the new row. False when a value that stops the save keeps it there. */
-  const leaveNewRow = () => commitNewRow("away") !== "invalid";
+  const leaveNewRow = () => commitNewRow(false) !== "invalid";
 
   const discardNewRow = () => {
-    const row = newRow.row();
-    if (!row || !newRow.may("discard")) return;
-    if (row.note?.state === "unconfirmed") row.note.discard();
+    if (!newRow.row()) return;
     newRow.close();
     setEditing(null);
     setSelected((current) => (current?.recordId === NEW_RECORD_ROW ? null : current));
     // The control that had focus went with the row.
     reveal.current = true;
-  };
-  /** Try again: the host's own retry of a request in doubt, or a new save of a row the host refused. */
-  const retryNewRow = () => {
-    scrollRef.current?.focus({ preventScroll: true });
-    const retry = newRow.retry();
-    if (retry) retry();
-    else commitNewRow("again");
   };
   const onDiscardKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
     const { key } = event;
@@ -1213,11 +1073,11 @@ export function TableView({
       }
       reveal.current = true;
       // Enter saves the record.
-      if (to === "down") return void commitNewRow("enter");
+      if (to === "down") return void commitNewRow(true);
       if (!to || !editingField) return;
       const next = fields.indexOf(editingField) + (to === "previous" ? -1 : 1);
       // Tab past the row's last cell leaves it.
-      if (next >= fields.length) return void commitNewRow("away");
+      if (next >= fields.length) return void leaveNewRow();
       if (next >= 0) select(newRowIndex, next);
       return;
     }
@@ -1283,13 +1143,10 @@ export function TableView({
     };
   }, [hasDraft]);
 
-  // A row the person may still type in follows what a new record takes. Its defaults follow the host's. A typed
-  // value whose field left the table, became another kind of field, or takes no value now goes back to the host
-  // to keep, and the row says so. A row the host has holds what was sent, and gives such a value back when it
-  // takes typing again.
-  const draftPhase = hasDraft ? draft.phase : null;
+  // The row follows what a new record takes. Its defaults follow the host's. A typed value whose field left the
+  // table, became another kind of field, or takes no value now goes back to the host to keep, and the row says so.
   useEffect(() => {
-    if (!newRecord || !newRow.may("type")) return;
+    if (!newRecord || !newRow.row()) return;
     newRow.rebase(newRecord.defaults ?? {}, fields.filter(typesNew));
     for (const [name, cell] of [...newRow.cells]) {
       const field = fields.find((entry) => entry.name === name);
@@ -1302,40 +1159,23 @@ export function TableView({
       const said = newRecord.onUnsaved({ values: { [name]: cell.value }, why: "field" });
       if (typeof said === "string") newRow.say(said);
     }
-  }, [fields, newRecord, newRow, draftPhase]);
-  // The row goes with nothing left to show it. What its state lets happen is decided where every trigger's is:
-  // a row never sent is saved, or where an editor held text its field cannot take, handed whole to the host and
-  // not created. A row the host has, or one in doubt, starts no request.
+  }, [fields, newRecord, newRow]);
+  // The row goes with nothing left to show it, so it is saved as it is. Where no row is left to say why it was
+  // not, as for text its field cannot take or a value that stops the save, the host gets it whole to keep.
   const release = useRef(() => {
     const held = newRow.release();
     const host = contract.current;
     if (!held || !host) return;
-    if (held.phase === "doubt") return void (held.note?.state === "unconfirmed" ? held.note.released?.() : undefined);
-    if (!NEW_ROW[held.phase].save) return;
-    if (held.unparsed) host.onUnsaved({ values: held.values, text: held.unparsed, why: "closed" });
-    else if (held.typed) host.save(held.values, () => false);
+    if (held.unparsed) return void host.onUnsaved({ values: held.values, text: held.unparsed, why: "closed" });
+    const stopped = held.typed ? host.save(held.values) : undefined;
+    if (stopped) host.onUnsaved({ values: held.values, stopped, why: "closed" });
   }).current;
   // A host that stops taking new records, as when a share's access ends, has no row.
   useEffect(() => {
     if (!newRecord) release();
   }, [newRecord, release]);
   // The table closes, as with its view or its tab, which leaves the row. An open editor gives the row its text first.
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-      queueMicrotask(release);
-    };
-  }, [release]);
-  // The record a row saved, until the host's next records say whether a row on screen shows it.
-  useEffect(() => {
-    const wait = landed.current;
-    if (!wait || wait.records === records) return;
-    landed.current = null;
-    const index = rows.findIndex((row) => row.id === wait.id);
-    const range = virtualizer.range;
-    if (index < 0 || !range || index < range.startIndex || index > range.endIndex) contract.current?.onOutOfView?.();
-  }, [records]);
+  useEffect(() => () => queueMicrotask(release), [release]);
 
   const clickCell = (row: number, column: number) => {
     // The press that brought this click left the new row, and a value there stops its save.
@@ -1381,11 +1221,10 @@ export function TableView({
         event.preventDefault();
         return select(newRowIndex, next);
       }
-      // Discard stands before the row's first cell, and what the row says of its save after its last.
-      const control = event.shiftKey ? discardControl.current : newRowNote.current?.querySelector<HTMLElement>("button");
-      if (control) {
+      // Discard stands before the row's first cell.
+      if (event.shiftKey && discardControl.current) {
         event.preventDefault();
-        return control.focus();
+        return discardControl.current.focus();
       }
       if (!leaveNewRow()) return event.preventDefault();
       // Back from the first cell is the row above. On from the last, Tab leaves the grid.
@@ -1416,7 +1255,7 @@ export function TableView({
     // With no editor open, Enter saves the row, whatever cell it is on.
     if (key === "Enter") {
       event.preventDefault();
-      return void commitNewRow("enter");
+      return void commitNewRow(true);
     }
     if (!draftOpen || !typesNew(field)) return;
     if (field.type === "checkbox") {
@@ -1555,6 +1394,11 @@ export function TableView({
     rangeExtractor,
   });
   const virtualItems = virtualizer.getVirtualItems();
+  shows.current = (recordId) => {
+    const index = rows.findIndex((row) => row.id === recordId);
+    const range = virtualizer.range;
+    return index >= 0 && range !== null && index >= range.startIndex && index <= range.endIndex;
+  };
 
   // Paging: nearing the end of the loaded rows asks the host for the next
   // page. Driven by the last rendered index, so it also fires when a short
@@ -1585,7 +1429,7 @@ export function TableView({
     draftNote?.state === "invalid" && at?.row === newRowIndex && editing === null && fields[at.column]?.name === draftNote.field
       ? draftNote
       : null;
-  // What the new row says under it: a save in doubt or refused, a value the row gave back, and a value that stops the save in a field the table does not show.
+  // What the new row says under it: a value the row gave back, and a value that stops the save in a field the table does not show.
   const rowNote =
     draftNote !== null && (draftNote.state !== "invalid" || !fields.some((field) => field.name === draftNote.field))
       ? draftNote
@@ -1595,7 +1439,7 @@ export function TableView({
 
   const openColumn = Boolean(onOpenRecord);
   const newRowLead = hasDraft ? (
-    <NewRowLead row={newRow} phase={draft.phase} discardRef={discardControl} onDiscard={discardNewRow} onKeyDown={onDiscardKeyDown} />
+    <NewRowLead row={newRow} discardRef={discardControl} onDiscard={discardNewRow} onKeyDown={onDiscardKeyDown} />
   ) : null;
   return (
     <div
@@ -1765,57 +1609,13 @@ export function TableView({
                 id={newRowNoteId}
                 role="note"
                 data-new-record-status={rowNote.state}
-                className="flex flex-wrap items-center gap-2 border-b border-line py-1 pr-2 text-[12px] font-normal"
+                className="flex flex-wrap items-center gap-2 border-b border-line py-1 pr-2 text-[12px] font-normal text-danger"
                 style={{ paddingLeft: gutter + 8 }}
-                onKeyDown={(event) => {
-                  if (event.key === "Escape") {
-                    // The row's words take this Escape, and the cursor goes back to the row.
-                    event.preventDefault();
-                    event.stopPropagation();
-                    return leaveNote();
-                  }
-                  if (event.key !== "Tab") return;
-                  const actions = [...event.currentTarget.querySelectorAll<HTMLElement>("button")];
-                  const action = actions[actions.indexOf(event.target as HTMLElement) + (event.shiftKey ? -1 : 1)];
-                  if (action) {
-                    event.preventDefault();
-                    return action.focus();
-                  }
-                  // Back from the first action is the row's last cell. On from the last, Tab leaves the grid, and the row with it.
-                  if (!event.shiftKey) return void leaveNewRow();
-                  event.preventDefault();
-                  select(newRowIndex, fields.length - 1);
-                }}
               >
-                <span aria-hidden className={`flex shrink-0 items-center ${rowNote.state === "unconfirmed" ? "text-warning" : "text-danger"}`}>
-                  {rowNote.state === "unconfirmed" ? <TriangleAlert {...MARK_ICON} /> : <CircleAlert {...MARK_ICON} />}
+                <span aria-hidden className="flex shrink-0 items-center">
+                  <CircleAlert {...MARK_ICON} />
                 </span>
-                <p className={`m-0 ${rowNote.state === "unconfirmed" ? "text-warning" : "text-danger"}`}>{rowNote.reason}</p>
-                {rowNote.state === "invalid" || rowNote.state === "said" ? null : (
-                  <>
-                    {/* A save in doubt is tried again only by the host's own retry of the same request. Without one, Discard is all there is. */}
-                    {rowNote.state === "unconfirmed" && !rowNote.retry ? null : (
-                      <button
-                        type="button"
-                        // Tab on the row's last cell reaches it.
-                        tabIndex={-1}
-                        className="h-6 rounded-md border border-line px-2 text-[12px] text-ink transition-colors duration-75 hover:bg-hover"
-                        onClick={retryNewRow}
-                      >
-                        Try again
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      tabIndex={-1}
-                      title={rowNote.state === "unconfirmed" ? DISCARD_HINT : undefined}
-                      className="h-6 rounded-md border border-line px-2 text-[12px] text-ink transition-colors duration-75 hover:bg-hover"
-                      onClick={discardNewRow}
-                    >
-                      Discard
-                    </button>
-                  </>
-                )}
+                <p className="m-0">{rowNote.reason}</p>
               </div>
             ) : null}
             {editing && editingNew && editingField && draft ? (
