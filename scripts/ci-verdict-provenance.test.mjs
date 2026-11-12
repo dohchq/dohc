@@ -682,6 +682,24 @@ test("cloud selection uses the tested Git checkout and evidence has bounded rete
   }
 });
 
+test("aggregate dependency caches restore the setup-node key without saving", () => {
+  const {jobs} = load(workflow);
+  for (const name of ["javascript", "rust"]) {
+    const {steps} = jobs[name];
+    assert.equal(steps.find(step => step.uses?.startsWith("actions/setup-node@")).with.cache, undefined);
+    const store = steps.find(step => step.id === "pnpm-store");
+    const restore = steps.find(step => step.uses?.startsWith("actions/cache/restore@"));
+    assert.equal(store.if, "inputs.cache != 'cold'");
+    assert.equal(store.run, 'echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"');
+    assert.equal(restore.if, store.if);
+    assert.equal(restore.with.path, "${{ steps.pnpm-store.outputs.path }}");
+    assert.equal(restore.with.key, "node-cache-${{ runner.os }}-x64-pnpm-${{ hashFiles('pnpm-lock.yaml') }}");
+    assert.ok(steps.indexOf(store) < steps.indexOf(restore));
+    assert.ok(steps.indexOf(restore) < steps.findIndex(step => step.name === "Install dependencies"));
+    assert.ok(!steps.some(step => /^actions\/cache(?:@|\/save@)/u.test(step.uses ?? "")));
+  }
+});
+
 test("cloud JavaScript jobs do not inherit the event's base SHA", () => {
   const {jobs, env} = load(workflow);
   assert.equal(env.PR_BASE_SHA, undefined);
