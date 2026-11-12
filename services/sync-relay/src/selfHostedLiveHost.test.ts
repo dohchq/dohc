@@ -17,6 +17,7 @@ import {attachLiveJournalHistory, createLiveJournalHistoryAuthority} from "./sto
 import {createNamedFrameChanges} from "./liveHostChanges";
 import {hasRelayWriteObservers, notifyRelayWrite} from "./relayWriteChanges";
 import {serviceHostDocumentEnabled, SERVICE_HOST_MAX_WORKSPACES} from "./storage/serviceHostEnrollment";
+import {RECLAIM_RETENTION_MS, RECLAIM_SWEEP_MS} from "./liveHostingLimits";
 import type {StorageContext} from "./storage/context";
 
 // While `error` is set, opening a divergence marker fails, as on a full disk.
@@ -39,18 +40,18 @@ vi.mock("node:fs/promises", async importOriginal => {
     return Object.assign(handle, {sync: async () => {await sync(); markerFailure.synced++;}});
   }};
 });
-// The reclaim sweep's minute-long waits, in order. Each lasts until a test passes it or its signal aborts. Every other wait keeps the real clock.
-const sweepWaits = vi.hoisted(() => [] as Array<{signal: AbortSignal | undefined; pass(): void}>);
+// The reclaim sweep's waits, in order. Each lasts until a test passes it or its signal aborts. Every other wait keeps the real clock.
+const sweepWaits = vi.hoisted(() => [] as Array<{ms: number; signal: AbortSignal | undefined; pass(): void}>);
 vi.mock("node:timers/promises", async importOriginal => {
   const actual = await importOriginal<typeof import("node:timers/promises")>();
-  const {RECLAIM_SWEEP_MS} = await import("./liveHostingLimits");
-  return {...actual, setTimeout: <T>(ms?: number, value?: T, options?: {signal?: AbortSignal; ref?: boolean}) => ms !== RECLAIM_SWEEP_MS
+  const {RECLAIM_RETENTION_MS, RECLAIM_SWEEP_MS} = await import("./liveHostingLimits");
+  return {...actual, setTimeout: <T>(ms?: number, value?: T, options?: {signal?: AbortSignal; ref?: boolean}) => ms !== RECLAIM_SWEEP_MS && ms !== RECLAIM_RETENTION_MS
     ? actual.setTimeout(ms, value, options)
     : new Promise<T>((resolve, reject) => {
       const signal = options?.signal;
       if (signal?.aborted) {reject(signal.reason); return;}
       signal?.addEventListener("abort", () => reject(signal.reason), {once: true});
-      sweepWaits.push({signal, pass: () => resolve(value as T)});
+      sweepWaits.push({ms: ms!, signal, pass: () => resolve(value as T)});
     })};
 });
 
@@ -1173,20 +1174,22 @@ it("closes the daemon and observer when storage becomes unavailable", async () =
   expect(f.onError).not.toHaveBeenCalled();
 });
 
-// Proves: the host sweeps first when its first minute passes, not at start,
-// so clients a restart dropped can reconnect first, and again each minute.
+// Proves: the host sweeps first once a retention period has passed, not at
+// start, so clients a restart dropped can reconnect first, and then each minute.
 // A failed sweep goes to onError, and the next one tries again and reclaims
 // the note only its owner's long-past open keeps, which the host then
 // drains. Closing the host aborts the pending wait, and no sweep follows.
-it("sweeps idle documents each minute from the first minute, tries again after a failure, and stops when closed", async () => {
+it("sweeps idle documents each minute from one retention period after start, tries again after a failure, and stops when closed", async () => {
   const f = await fixture({seed: async (_data, relay) => {vi.spyOn(relay.storage, "reclaimIdleLiveDocuments");}});
   const sweeps = vi.mocked(f.storage.reclaimIdleLiveDocuments);
   await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
   await vi.waitFor(() => expect(sweepWaits).toHaveLength(1));
+  expect(sweepWaits[0]!.ms).toBe(RECLAIM_RETENTION_MS);
   expect(sweeps).not.toHaveBeenCalled();
   sweepWaits[0]!.pass();
   // The first sweep found the shared note covered, so it wrote nothing.
   await vi.waitFor(() => {expect(sweeps).toHaveBeenCalledTimes(1); expect(sweepWaits).toHaveLength(2);});
+  expect(sweepWaits[1]!.ms).toBe(RECLAIM_SWEEP_MS);
   expect(sweeps.mock.results[0]).toEqual({type: "return", value: []});
   f.storage.ensureOwnedLiveDocument({intent: "owner-open", ...f.input, nowMs: 20});
   expect(f.storage.revokeShareGrant({shareId: scope.shareId, grantId: scope.grantId, revokedAtMs: 20}).ok).toBe(true);

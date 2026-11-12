@@ -21,7 +21,7 @@ import {observeRelayWrites, type LiveHostChanges} from "./relayWriteChanges";
 import {startServiceLiveHost, type ServiceHostedSet} from "./serviceLiveHost";
 import {selfHostLiveProfile} from "./selfHostLiveProfile";
 import {discoverServiceHostDocuments} from "./serviceHostEnrollmentRoutes";
-import {RECLAIM_SWEEP_MS} from "./liveHostingLimits";
+import {RECLAIM_RETENTION_MS, RECLAIM_SWEEP_MS} from "./liveHostingLimits";
 
 type WorkspaceIdentity = {workspaceId: string; replicationEpoch: string | null; streamIdentity: string | null};
 // A workspace identity's hosted replica. The label keeps a store of any other kind from opening as one.
@@ -340,8 +340,8 @@ export async function startSelfHostedLiveHost(options: {
       }),
     );
     yield* Effect.forkScoped(Effect.forever(pause(options.reconcileIntervalMs ?? 2_000).pipe(Effect.andThen(Effect.sync(schedule)))));
-    // Once a minute, starting a minute in: after a restart, clients reconnect before any document counts as unconnected.
-    yield* Effect.forkScoped(Effect.forever(pause(RECLAIM_SWEEP_MS).pipe(Effect.andThen(Effect.sync(sweep)))));
+    // Once a minute, starting a retention period in: after a restart, clients reconnect before any document counts as unconnected.
+    yield* Effect.forkScoped(pause(RECLAIM_RETENTION_MS).pipe(Effect.andThen(Effect.forever(Effect.sync(sweep).pipe(Effect.andThen(pause(RECLAIM_SWEEP_MS)))))));
     schedule();
     while (true) {
       yield* Queue.take(changes);

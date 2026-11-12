@@ -4,7 +4,7 @@ import {fixture as ticketFixture, binding, keptByOwnerRestore, retainServiceActi
 import {openSyncRelayStorage, type SyncRelayStorage} from "../storage";
 import {authorizeServiceHostReplication, deriveServiceHostBearer, serviceHostReplicationRoute} from "../serviceHostCredential";
 import {liveEditors} from "../liveEditors";
-import {RECLAIM_MIN_HOLD_MS, RECLAIM_RETENTION_MS} from "../liveHostingLimits";
+import {RECLAIM_MAX_DEPARTING, RECLAIM_MIN_HOLD_MS, RECLAIM_RETENTION_MS} from "../liveHostingLimits";
 import {LATEST_RESTORE, LiveHostingRefusal, serviceHostDocumentEnabled, SERVICE_HOST_ENROLLMENTS, SERVICE_HOST_MAX_DOCUMENTS, SERVICE_HOST_MAX_WORKSPACES,
   ServiceHostRetirementConflict, serviceHostOwnerRetains, type ServiceHostRetirementPreparation} from "./serviceHostEnrollment";
 import {readServiceActivationRetirement} from "./serviceActivationRetirement";
@@ -1355,6 +1355,50 @@ it("reclaims an idle agent-only document first, then the least recently used, fo
   // With no agent-only document left, the least recently used goes, though its owner opened it.
   expect(share("new-b", at)).toMatchObject({enabled: true, retired: false});
   expect(retiredObjects(f)).toEqual(["agent-a", "agent-b", "owner-a"]);
+});
+
+/** `count` retired documents at notes/departing-<n>.md that the host has not let go of yet. */
+function departing(f: Fixture, count: number) {
+  for (let n = 0; n < count; n++) {
+    demandOnly(f, `departing-${n}`, 1);
+    f.raw.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET enabled=0,retired=1,demand_at_ms=NULL WHERE workspace_id=? AND object_id=?`)
+      .run(scope.workspaceId, `departing-${n}`);
+  }
+}
+/** The host has let go of the document. */
+const drained = (f: Fixture, objectId: string) =>
+  f.raw.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET host_drained_at_ms=1 WHERE workspace_id=? AND object_id=?`).run(scope.workspaceId, objectId);
+
+// Proves: while the host is still letting go of RECLAIM_MAX_DEPARTING retired
+// documents, the sweep reclaims nothing and writes nothing, though a note is
+// idle past retention. Once one of them drains, the same sweep reclaims it.
+it("sweeps nothing while the host is letting go of as many retired documents as reclaim allows, and reclaims once one drains", async () => {
+  const f = await demandedOnly(), past = 10 + RECLAIM_RETENTION_MS + 1;
+  departing(f, RECLAIM_MAX_DEPARTING);
+  const before = stored(f);
+  expect(f.sweep(past)).toEqual([]);
+  expect(stored(f)).toEqual(before);
+  drained(f, "departing-0");
+  expect(f.sweep(past)).toMatchObject([{objectId: binding.objectId, ...reclaimed}]);
+});
+
+// Proves: at capacity, while the host is still letting go of
+// RECLAIM_MAX_DEPARTING retired documents, a share that only a reclaim would
+// fit is refused and writes nothing. Once one of them drains, the same share
+// reclaims the idle note and fits.
+it("refuses a share at capacity without a reclaim while the host is letting go of as many retired documents as reclaim allows", async () => {
+  const f = await fixture(); f.enroll();
+  demandOnly(f, "agent-a", 1);
+  fill(f);
+  departing(f, RECLAIM_MAX_DEPARTING);
+  f.seed("workspace-2", "new-a", "docs/new-a.md", "new-a");
+  const share = () => f.enroll({workspaceId: "workspace-2", path: "docs/new-a.md", shareId: "new-a", nowMs: 2 + RECLAIM_MIN_HOLD_MS});
+  const before = stored(f);
+  expect(share).toThrow("capacity");
+  expect(stored(f)).toEqual(before);
+  drained(f, "departing-0");
+  expect(share()).toMatchObject({enabled: true, retired: false});
+  expect(retiredObjects(f)).toContain("agent-a");
 });
 
 // Proves: the owner's next open of a reclaimed note enrolls it again, not

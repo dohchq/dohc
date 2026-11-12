@@ -17,7 +17,7 @@ import {SERVICE_ACTIVATIONS} from "./serviceActivationSchema";
 import {LIVE_JOURNAL_TABLE} from "./schema";
 import {badRequest, notFound, relayError} from "../errors";
 import {liveEditors} from "../liveEditors";
-import {AGENT_ONLY_MAX_DOCUMENTS, AGENT_ONLY_MAX_WORKSPACES, RECLAIM_MIN_HOLD_MS, RECLAIM_RETENTION_MS, SERVICE_HOST_MAX_DOCUMENTS,
+import {AGENT_ONLY_MAX_DOCUMENTS, AGENT_ONLY_MAX_WORKSPACES, RECLAIM_MAX_DEPARTING, RECLAIM_MIN_HOLD_MS, RECLAIM_RETENTION_MS, SERVICE_HOST_MAX_DOCUMENTS,
   SERVICE_HOST_MAX_WORKSPACES} from "../liveHostingLimits";
 import type {PersonalCredential} from "./personalAgentChat";
 import {personalReachIn, readPersonalAuthority} from "./personalAgents";
@@ -367,7 +367,9 @@ function agentOnly(storage: StorageContext, enrollment: Pick<ServiceHostEnrollme
  * agent-only caps. Without room, the open reclaims, in its own transaction,
  * the least recently used document idle past the minimum hold that makes
  * room: a personal open only an agent-only one, any other intent an
- * agent-only one first. `full` is the intent's answer when none does.
+ * agent-only one first. It reclaims none while the host is still letting go
+ * of `RECLAIM_MAX_DEPARTING` retired documents. `full` is the intent's
+ * answer when none does.
  */
 function assertCapacity(storage: StorageContext, workspaceId: string, full: () => Error, nowMs: number, personal?: Parameters<typeof agentOnly>[1]): void {
   const all = storage.db.prepare(`SELECT * FROM ${SERVICE_HOST_ENROLLMENTS} WHERE retired=0 LIMIT ?`).all(SERVICE_HOST_MAX_DOCUMENTS + 1);
@@ -395,6 +397,7 @@ function assertCapacity(storage: StorageContext, workspaceId: string, full: () =
     return documents < AGENT_ONLY_MAX_DOCUMENTS && (byWorkspace.has(workspaceId) || [...byWorkspace.values()].filter(Boolean).length < AGENT_ONLY_MAX_WORKSPACES);
   };
   if (fits(rows)) return;
+  if (departingAtLimit(storage)) throw full();
   const idleBefore = nowMs - RECLAIM_MIN_HOLD_MS;
   const candidates = rows.flatMap(enrollment => {
     if (personal !== undefined && !only(enrollment)) return [];
@@ -405,6 +408,10 @@ function assertCapacity(storage: StorageContext, workspaceId: string, full: () =
   if (!freeing) throw full();
   reclaim(storage, freeing.enrollment, nowMs);
 }
+/** Whether the host is still letting go of as many retired documents as reclaim may add to. */
+const departingAtLimit = (storage: StorageContext) =>
+  Number(storage.db.prepare(`SELECT count(*) AS count FROM (SELECT 1 FROM ${SERVICE_HOST_ENROLLMENTS} WHERE retired=1 AND host_drained_at_ms IS NULL LIMIT ?)`)
+    .get(RECLAIM_MAX_DEPARTING)!.count) >= RECLAIM_MAX_DEPARTING;
 /** When the document's last admitted update in its current lineage arrived, read through the document index, or 0 with none. */
 function lastAdmittedAtMs(storage: StorageContext, document: {workspaceId: string; objectId: string}): number {
   const value = storage.db.prepare(`SELECT received_at_ms FROM ${LIVE_JOURNAL_TABLE} WHERE workspace_id=? AND main_version_id='main' AND object_id=?
@@ -454,8 +461,9 @@ function reclaim(storage: StorageContext, enrollment: ServiceHostEnrollment, now
  * Reclaims every document that only recorded demand keeps and that went
  * unused for the retention period. Reads at most the host's capacity of
  * rows, and writes nothing when none is idle. Each reclaim reads its row
- * again in its own transaction, so an open that commits first keeps it.
- * Returns the documents it reclaimed.
+ * again in its own transaction, so an open that commits first keeps it, and
+ * stops once the host is letting go of `RECLAIM_MAX_DEPARTING` retired
+ * documents. Returns the documents it reclaimed.
  */
 export function reclaimIdleLiveDocuments(storage: StorageContext, nowMs: number): readonly ServiceHostEnrollment[] {
   const now = timestamp(nowMs), idleBefore = now - RECLAIM_RETENTION_MS, standing = storage.captureStanding();
@@ -465,7 +473,7 @@ export function reclaimIdleLiveDocuments(storage: StorageContext, nowMs: number)
     standing();
     const value = storage.db.prepare(`SELECT * FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=? AND object_id=?`).get(enrollment.workspaceId, enrollment.objectId);
     const current = value ? row(value) : null;
-    if (!current || idleSince(storage, current, idleBefore) === null) return [];
+    if (!current || idleSince(storage, current, idleBefore) === null || departingAtLimit(storage)) return [];
     reclaim(storage, current, now);
     return [read(storage, current.workspaceId, current.path)!];
   }));
