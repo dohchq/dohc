@@ -22,6 +22,7 @@ import type { ShareRemovalNotices } from "./shell/useShareRemovalNotices";
 import { AutomationShareNote, useAutomationShareCheck, type AutomationShare } from "./automationShareCheck";
 import { DangerButton, PrimaryButton, SecondaryButton, SectionLabel } from "./ui/controls";
 import { CopyButton, CopyField, type CopySecret } from "./ui/CopyButton";
+import { AgentLinkAppMenu } from "./agentLinkApps";
 import { AGENT_ADDRESS_SECRET, LinkAgentsList, agentAddressFor, useLinkAgentDisconnects } from "./shareLinkAgents";
 
 // Share links are shown once, so a link whose copy is gone is reset, not
@@ -1705,7 +1706,7 @@ export function useRelayShareLinkPane(props: {
               </div>
               {/* The same link, at the address an agent signs in with. Keyed
                   by the link, so a reset link is a new control. */}
-              {agentAddressFor(minted.url) !== null ? (
+              {agentAddressFor(minted.url) !== null ? <>
                 <CopyButton
                   key={minted.url}
                   size="header"
@@ -1715,7 +1716,14 @@ export function useRelayShareLinkPane(props: {
                   sensitive={AGENT_ADDRESS_SECRET}
                   testId="share-link-agent-copy"
                 />
-              ) : null}
+                <AgentLinkAppMenu
+                  key={`apps:${minted.url}`}
+                  link={agentAddressFor(minted.url)}
+                  server="dohc-share"
+                  sensitive={AGENT_ADDRESS_SECRET}
+                  testId="share-link-agent-apps"
+                />
+              </> : null}
             </div>
             <p className="m-0 text-[11px] leading-relaxed text-subtle">
               If you lose the link, reset it to get a new one.

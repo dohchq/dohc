@@ -11,6 +11,7 @@ import {
   type PersonalAgentsAccount,
 } from "../../ipc/bridgeContract";
 import { agentHandle } from "../../settings/userSettings";
+import { AgentLinkAppMenu } from "../agentLinkApps";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 import { Overlay } from "../Overlay";
@@ -348,6 +349,12 @@ export function PersonalAgentPage(props: {
                 testId="personal-agent-link-copy"
                 disabled={!synced}
                 getText={() => (synced ? agentLink(account, props.workspaceId) : null)}
+              />
+              <AgentLinkAppMenu
+                key={props.workspaceId}
+                link={synced ? agentLink(account, props.workspaceId) : null}
+                server="dohc-personal"
+                testId="personal-agent-link-apps"
               />
             </span>
           </PageRow>

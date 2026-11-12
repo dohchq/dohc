@@ -1343,6 +1343,10 @@ it("copies this workspace's agent link from Add agent, where the agent gets no n
   expect(copy.textContent).toBe("Copy agent link");
   await user.click(copy);
   expect(writeText).toHaveBeenCalledWith("https://relay.test/mcp/agent/w/ws-1");
+  // The same link as the message one named agent takes.
+  await user.click(sheet().getByRole("button", { name: "Copy setup for an agent" }));
+  await user.click(sheet().getByTestId("agent-add-link-apps-grok-bot"));
+  expect(writeText).toHaveBeenLastCalledWith("Add the MCP server https://relay.test/mcp/agent/w/ws-1 and connect it.");
   expect(onSave).not.toHaveBeenCalled();
   writeText.mockRestore();
 });
@@ -1352,6 +1356,7 @@ it("can't copy an agent link for a workspace that doesn't sync to the server, an
   await openAdd();
   await userEvent.click(runsWith("link"));
   expect(sheet().getByTestId<HTMLButtonElement>("agent-add-link-copy").disabled).toBe(true);
+  expect(sheet().getByTestId<HTMLButtonElement>("agent-add-link-apps").disabled).toBe(true);
   expect(sheet().getByTestId("agent-add-link").textContent).toBe("TripNot synced");
   expect(sheet().getByTestId("agent-add-link-note").textContent).toBe("Sync this workspace to relay.test to give an agent a link.");
 });
