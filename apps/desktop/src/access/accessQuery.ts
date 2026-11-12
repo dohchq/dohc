@@ -93,8 +93,10 @@ function grantedRows(listing: RosterListing): AccessShareRow[] {
   if (listing.grants === null) return [];
   const linkShares = new Set(listing.links.map(link => link.grant.shareId));
   const rows = new Map<string, AccessShareRow>();
-  const add = (grant: unknown, via: AccessShareRow["via"]) => {
-    const row = AccessShareRow.parse({ ...(grant as object), kind: "share", via });
+  const add = (grant: object, via: AccessShareRow["via"]) => {
+    // A workspace membership is listed on the Members page, not as a share.
+    if ("selector" in grant && (grant.selector as { kind?: unknown } | null)?.kind === "workspace") return;
+    const row = AccessShareRow.parse({ ...grant, kind: "share", via });
     if (!rows.has(key(row))) rows.set(key(row), row);
   };
   for (const grant of listing.grants) add(grant, linkShares.has(grant.shareId) ? "dependent" : "named");

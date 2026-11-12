@@ -81,7 +81,14 @@ const FileGrant = z.object({
     .refine((selector) => selector.paths.length > 0 || selector.versionId !== null),
   access: z.enum(SHARE_ACCESS_VALUES),
 });
-const GrantSchema = z.union([GroupGrant, ChatGrant, FileGrant]);
+// A workspace membership: every tracked file on main, at the member's level.
+// An admin's grant is Edit.
+const WorkspaceGrant = z.object({
+  ...BASE,
+  selector: z.object({ kind: z.literal("workspace") }),
+  access: z.enum(SHARE_ACCESS_VALUES),
+});
+const GrantSchema = z.union([GroupGrant, ChatGrant, FileGrant, WorkspaceGrant]);
 const ListedGrantSchema = GrantSchema.refine((grant) => grant.recipientUserId !== null || grant.recipientEmail !== null);
 export type ListedGrant = z.infer<typeof ListedGrantSchema>;
 
@@ -96,9 +103,11 @@ const ListedLinkSchema = z.object({
   automationsGeneration: GENERATION.nullable(),
 }).refine((link) => link.automationsGeneration === null || declaresFilePaths(link.grant));
 
-// A recorded automation write requires stored file paths. Group paths
-// remain historical scope when its channel no longer serves files.
+// A recorded automation write requires a file scope: stored file paths, or
+// a membership's whole workspace. Group paths remain historical scope when
+// its channel no longer serves files.
 function declaresFilePaths(grant: z.infer<typeof GrantSchema>): boolean {
+  if (grant.selector.kind === "workspace") return true;
   return grant.selector.kind !== "chat" && grant.selector.paths.length > 0;
 }
 export type ListedLink = z.infer<typeof ListedLinkSchema>;
@@ -167,11 +176,20 @@ function isGroupGrant(grant: ListedGrant): grant is z.infer<typeof GroupGrant> {
   return grant.selector.kind === "group";
 }
 
+function isWorkspaceGrant(grant: ListedGrant): grant is z.infer<typeof WorkspaceGrant> {
+  return grant.selector.kind === "workspace";
+}
+
+const WHOLE_WORKSPACE = { paths: [], versionId: null, wholeWorkspace: true } as const;
+
 function rosterGrantOf(grant: ListedGrant): RosterGrant {
   const recipient = { grantId: grant.grantId, recipientUserId: grant.recipientUserId, recipientEmail: grant.recipientEmail };
   if (isFileGrant(grant)) {
     const { paths, versionId } = grant.selector;
     return { ...recipient, files: { paths, versionId, access: grant.access }, channel: null };
+  }
+  if (isWorkspaceGrant(grant)) {
+    return { ...recipient, files: { ...WHOLE_WORKSPACE, access: grant.access }, channel: null };
   }
   // A Group's read-write edits its folder and posts in its chat. Read-only
   // views both.
@@ -406,10 +424,12 @@ function formerEditorOf(
   holder: FormerEditor["holder"],
 ): FormerEditor[] {
   if (grant.selector.kind === "chat") return [];
-  const {paths, versionId} = grant.selector;
+  const files = grant.selector.kind === "workspace"
+    ? WHOLE_WORKSPACE
+    : {paths: grant.selector.paths, versionId: grant.selector.versionId};
   return [{
     grantId: grant.grantId, generation, holder, recipientEmail: grant.recipientEmail,
-    files: {paths, versionId},
+    files,
   }];
 }
 

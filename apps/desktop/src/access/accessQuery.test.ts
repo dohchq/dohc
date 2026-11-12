@@ -125,6 +125,15 @@ it("excludes revoked named grants, former automation writers and ended links fro
   expect(index.forChat("channel").map(row => row.shareId)).toEqual(["active"]);
 });
 
+it("leaves the owner's workspace memberships to the Members page", () => {
+  const member = grant("member", { selector: { kind: "workspace" }, access: "edit" });
+  const source = readStoredRoster({ grants: [grant("active"), member], formerGrants: [{ grant: { ...member, grantId: "former", access: "view" }, automationsGeneration: 1 }],
+    endedGrants: [], links: [] })!;
+  const query = createAccessQuery();
+  expect(query.answer(input(source)).rows).toMatchObject([{ shareId: "active" }]);
+  expect(query.answer({ ...input(source), ref: null }).rows.map(row => row.kind === "share" ? row.shareId : null)).toEqual(["active"]);
+});
+
 it("reports unreadable when a stored roster cannot establish grants", () => {
   const source = { ...listing(), grants: null, problem: { kind: "unusable-listing" as const } };
   expect(createAccessQuery().answer(input(source))).toMatchObject({ unknownReason: "unreadable", rows: [] });
