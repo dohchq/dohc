@@ -4,14 +4,17 @@ import type { ResolveActor } from "@dohc/workspace-auth/session";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer } from "ws";
-import { readBoundedJson, refuseDeviceControl } from "@dohc/service-http";
+import { readBoundedJson, refuseDeviceControl, type TokenBucketLimiter } from "@dohc/service-http";
 import { parseLiveTicketAudience, parseLiveTicketToken } from "@dohc/live-session-contract/live-ticket";
 import { createLiveFrameSession, LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, type LiveFrameSessionPolicy } from "@dohc/live-session-contract/live-frame";
 import { parseLiveUpdateIdentifier, parseLiveUpdateDigest, type LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import type { SyncRelayStorage } from "./storage.js";
 import type { createLiveTickets } from "./liveTickets.js";
-import { liveBrowserActor, type LiveBrowserContext } from "./liveBrowserContext.js";
+import { liveBrowserActor, type LiveBrowserContext, type PersonalLiveContext } from "./liveBrowserContext.js";
+import type { LinkAuthorityResolver, PersonalAuthority } from "./linkAuthority.js";
+import type { PersonalAgents } from "./personalAgents.js";
+import { errorResponse, relayError, RelayError } from "./errors.js";
 import type { CapacityLiveAdmissionValidator } from "./ownerOutboxDelivery.js";
 import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity.js";
 import { captureNamedLiveFrameHost, captureOwnerLiveFrameHost, type NamedFrameValidationBudget, type NamedFrameHostBounds, type NamedFrameNativeHost } from "./namedLiveFrameHost.js";
@@ -78,18 +81,44 @@ type BrowserRouteOptions = LiveRouteOptions & {
   sessionHostBlocked?: (document: {workspaceId: string; objectId: string}) => boolean;
 };
 type OwnerRouteOptions = LiveRouteOptions & { kind: "owner"; resolveActor: ResolveActor };
+/**
+ * A personal agent's routes, which share-web calls over the relay exchange
+ * key with the agent's bearer: `POST /sync/live/personal-tickets` and the
+ * `/sync/live/personal?workspaceId=` socket.
+ */
+type PersonalRouteOptions = LiveRouteOptions & {
+  kind: "personal";
+  tickets: ReturnType<typeof createLiveTickets>;
+  linkAuthority: Pick<LinkAuthorityResolver, "personal" | "freshPersonal">;
+  personalAgents: Pick<PersonalAgents, "register">;
+  /** Admits requests per connection, with the personal agent tools. */
+  limiter: TokenBucketLimiter;
+  /** Whether the self-hosted live host is the configured host, the only one that hosts documents for agents. */
+  supported(): boolean;
+  sessionHostBlocked?: (document: {workspaceId: string; objectId: string}) => boolean;
+};
 export function createNamedLiveRoutes(options: BrowserRouteOptions) { return createLiveRoutes(options); }
 export function createOwnerLiveRoutes(options: Omit<OwnerRouteOptions, "kind">) {
   return createLiveRoutes({ ...options, kind: "owner" });
 }
-function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
+export function createPersonalLiveRoutes(options: Omit<PersonalRouteOptions, "kind">) {
+  return createLiveRoutes({ ...options, kind: "personal" });
+}
+// The standard close for a server that can't answer now: a personal agent's account can't be read.
+const TRY_AGAIN_LATER_CLOSE_CODE = 1013;
+const personalUnavailable = (error: unknown) => error instanceof RelayError && error.code === "personal_agent_unavailable";
+const personalLiveContext = (authority: PersonalAuthority, workspaceId: string): PersonalLiveContext => ({ kind: "personal", workspaceId,
+  agentId: authority.agentId, connectionId: authority.connectionId, accessTokenHash: authority.check.accessTokenHash,
+  resourceHash: authority.check.resourceHash, fenceEpoch: authority.fenceEpoch });
+function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | PersonalRouteOptions) {
   const options = input.kind === "owner" ? {...input, resolveActor: input.resolveActor.bind(input)} :
+    input.kind === "personal" ? {...input} :
     {...input, sessions: {resolve: input.sessions.resolve.bind(input.sessions)}};
   const limits = parseNamedLiveRouteLimits(options.limits), hosts = new Set(options.hosts);
   const kind = options.kind;
   const desktop = options.kind === "named" && options.desktopBearer === true;
   const routeKind = desktop ? "desktop" : kind;
-  if (kind !== "named" && kind !== "link" && kind !== "owner") throw new TypeError("Explicit live route kind required.");
+  if (kind !== "named" && kind !== "link" && kind !== "owner" && kind !== "personal") throw new TypeError("Explicit live route kind required.");
   const origin = parseLiveTicketAudience(options.publicOrigin), keyHash = hashRelayExchangeKey(options.exchangeKey);
   if (!origin.startsWith("https:") || options.exchangeKey.length < 32 || hosts.size === 0 || [...hosts].some(host => !host || new URL(`http://${host}`).host !== host)) {
     throw new TypeError("Named routes require explicit relay hosts, HTTPS audience, and exchange key.");
@@ -126,6 +155,11 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
     Object.fromEntries(["authorization", "cookie", "x-dohc-link-profile-secret", "x-dohc-agent-resource", "x-dohc-relay-exchange-key"]
       .flatMap((name): [string, string][] => { const value = headers.get(name); return value === null ? [] : [[name, value]]; }));
   const sessionId = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9_-]{12}$/.test(value);
+  const answer = (minted: object) => {
+    const body = JSON.stringify(minted);
+    if (Buffer.byteLength(body) > limits.maxResponseBytes) return refusal();
+    return new Response(body, { headers: { "content-type": "application/json", "cache-control": "private, no-store" } });
+  };
   server.on("wsClientError", (_error, socket) => refuseDeviceControl(socket, limits.drainTimeoutMs));
 
   async function handle(request: Request): Promise<Response> {
@@ -141,7 +175,20 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
       try {
         const check = storage.captureStanding();
         const input = await readBoundedJson(request, limits.maxRequestBytes, signal);
-        if (!input || typeof input !== "object" || Array.isArray(input) || Object.keys(input).sort().join() !== "discriminator,objectId") return refusal();
+        if (!input || typeof input !== "object" || Array.isArray(input)) return refusal();
+        if (options.kind === "personal") {
+          if (Object.keys(input).sort().join() !== "objectId,workspaceId") return refusal();
+          const { objectId, workspaceId } = input as Record<string, unknown>;
+          parseLiveUpdateIdentifier(objectId); parseLiveUpdateIdentifier(workspaceId);
+          // The account's fence, read from Postgres once the body is in. The mint's transaction authorizes at it.
+          const authority = await options.linkAuthority.personal(new Request(request.url, { headers: credentials(request.headers), signal }));
+          signal.throwIfAborted(); check();
+          if (!options.limiter.allow(authority.callerKey, Date.now())) throw relayError("link_read_rate_limited");
+          if (!options.supported() || sessionHostBlocked?.({workspaceId: workspaceId as string, objectId: objectId as string})) return refusal();
+          const minted = await options.tickets.mint({ objectId }, personalLiveContext(authority, workspaceId as string), signal); signal.throwIfAborted(); check();
+          return minted ? answer({ expiresAtMs: minted.expiresAtMs, token: minted.token }) : refusal();
+        }
+        if (Object.keys(input).sort().join() !== "discriminator,objectId") return refusal();
         const { discriminator, objectId } = input as Record<string, unknown>;
         if (!sessionId(discriminator)) return refusal();
         parseLiveUpdateIdentifier(objectId);
@@ -164,11 +211,12 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
         if (sessionHostBlocked?.({workspaceId: context.workspaceId, objectId: objectId as string}))
           return context.kind === "link" ? linkRefusal("link_live_unavailable") : refusal();
         const minted = await options.tickets.mint({ objectId }, context, signal); signal.throwIfAborted(); check();
-        if (!minted) return refusal();
-        const body = JSON.stringify(minted);
-        if (Buffer.byteLength(body) > limits.maxResponseBytes) return refusal();
-        return new Response(body, { headers: { "content-type": "application/json", "cache-control": "private, no-store" } });
-      } catch { return refusal(); }
+        return minted ? answer(minted) : refusal();
+      } catch (error) {
+        // A personal agent learns when to try again: its account can't be read now, or it asked too often.
+        return kind === "personal" && !signal.aborted && error instanceof RelayError && (error.statusCode === 503 || error.statusCode === 429)
+          ? errorResponse(error) : refusal();
+      }
       finally { pendingRequests--; clearTimeout(timer); signal.removeEventListener("abort", cancel); }
     })();
     return Promise.race([work, cancelled]);
@@ -176,7 +224,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
 
   async function handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer) {
     let headers: Headers;
-    let discriminator = "", token = "";
+    let discriminator = "", token = "", personalWorkspaceId = "";
     let ownerTarget: LiveDocumentKey | undefined;
     try {
       headers = new Headers();
@@ -199,10 +247,17 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
           objectId: parseLiveUpdateIdentifier(url.searchParams.get("objectId")),
           lineageClaimId: parseLiveUpdateDigest(url.searchParams.get("lineageClaimId"))};
       } else {
-        const path = new RegExp(`^/sync/live/${routeKind}\\?session=([A-Za-z0-9_-]{12})$`).exec(request.url ?? "");
+        if (kind === "personal") {
+          const url = new URL(request.url ?? "", "https://personal.invalid");
+          if (url.pathname !== "/sync/live/personal" || [...url.searchParams.keys()].join() !== "workspaceId") throw new Error();
+          personalWorkspaceId = parseLiveUpdateIdentifier(url.searchParams.get("workspaceId"));
+        } else {
+          const path = new RegExp(`^/sync/live/${routeKind}\\?session=([A-Za-z0-9_-]{12})$`).exec(request.url ?? "");
+          if (!path) throw new Error();
+          discriminator = path[1]!;
+        }
         const protocols = headers.get("sec-websocket-protocol")?.split(",").map(value => value.trim());
-        if (!path || request.method !== "GET" || !trusted(headers) || protocols?.length !== 2 || protocols.filter(value => value === "dohc-live-v1").length !== 1) throw new Error();
-        discriminator = path[1]!;
+        if (request.method !== "GET" || !trusted(headers) || protocols?.length !== 2 || protocols.filter(value => value === "dohc-live-v1").length !== 1) throw new Error();
         const credential = protocols.find(value => value.startsWith("dohc-live-ticket."));
         token = credential?.slice("dohc-live-ticket.".length) ?? "";
         parseLiveTicketToken(token);
@@ -222,6 +277,8 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
     let validationBudget: NamedFrameValidationBudget | undefined;
     let closingForLimit = false;
     let done = false, opening = true, releaseAuthority: (() => void) | undefined, releaseEditor: (() => void) | undefined;
+    // A personal session's running-work registration, and the document whose demand its close renews.
+    let unregister: (() => void) | undefined, personalDocument: {workspaceId: string; objectId: string} | undefined;
     let timer = setTimeout(stop, limits.upgradeTimeoutMs);
     async function release() {
       if (opening || !done) return;
@@ -230,13 +287,22 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
       connectionScopes.delete(stop);
       if (!connections.delete(stop)) return;
       releaseEditor?.(); releaseAuthority?.(); releaseConnection?.(); releaseRefusal?.();
+      // The host keeps an agent's document while it is in use, so a close counts as use. An owner's Stop still holds.
+      if (personalDocument) try { storage.renewPersonalSessionDemand({...personalDocument, nowMs: Date.now()}); } catch { /* Storage is closing. */ }
     }
-    function refuseLimit(code: LiveConnectionLimitCode) {
+    const refuseLimit = (code: LiveConnectionLimitCode) => refuseOpen(LIVE_CONNECTION_LIMIT_CLOSE_CODE, code);
+    const refuseRetryable = (error: unknown) => {
+      if (error instanceof LiveConnectionLimitError) { refuseLimit(error.code); return true; }
+      // A WebSocket has no status, so a personal agent's 503 is the close that says to try again later.
+      if (personalUnavailable(error)) { refuseOpen(TRY_AGAIN_LATER_CLOSE_CODE, "personal_agent_unavailable"); return true; }
+      return false;
+    };
+    function refuseOpen(closeCode: number, reason: string) {
       if (done || socket.destroyed) return;
       if (!ws) server.handleUpgrade(request, socket, Buffer.alloc(0), accepted => { ws = accepted; accepted.on("error", stop); });
       if (ws) {
         closingForLimit = true;
-        ws.close(LIVE_CONNECTION_LIMIT_CLOSE_CODE, code);
+        ws.close(closeCode, reason);
         socket.resume();
         const deadline = setTimeout(() => ws?.terminate(), limits.drainTimeoutMs); deadline.unref();
         ws.once("close", () => clearTimeout(deadline));
@@ -249,7 +315,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
       signal.removeEventListener("abort", stop);
       host?.invalidated.removeEventListener("abort", stop);
       membership?.invalidated.removeEventListener("abort", stop);
-      membership?.close();
+      membership?.close(); unregister?.();
       session?.close(); host?.close();
       if (ws) { if (!closingForLimit) ws.terminate(); } else refuseDeviceControl(socket, limits.drainTimeoutMs);
       void release();
@@ -301,6 +367,31 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
         if (!isDeepStrictEqual(refreshed, current)) throw new Error("Owner binding changed during capture.");
         const trustedAccount = await accountSnapshot(actor.userId); signal.throwIfAborted(); check();
         host = captureOwnerLiveFrameHost({authenticatedUserId: actor.userId, trustedAccount, storage, native, bounds, validate, reserveBytes, validationBudget});
+      } else if (options.kind === "personal") {
+        // The account's fence, read from Postgres for this open.
+        const linkAuthority = options.linkAuthority;
+        const authority = await linkAuthority.personal(authenticated); signal.throwIfAborted(); check();
+        const context = personalLiveContext(authority, personalWorkspaceId);
+        connectionScopes.set(stop, {userId: authority.ownerUserId, workspaceId: context.workspaceId});
+        if (!options.supported()) { stop(); return; }
+        // Registered before the ticket is spent, so a registry that isn't caught up refuses without spending it. Sign-out,
+        // removal, a narrowed reach, a lowered level, a newer fence, or the listener going down end the session from here.
+        unregister = options.personalAgents.register({agentId: context.agentId, ownerUserId: authority.ownerUserId,
+          connectionId: context.connectionId, fenceEpoch: context.fenceEpoch, workspaceIds: [context.workspaceId],
+          kind: "live", needs: "edit", terminate: stop});
+        const ticket = await options.tickets.redeem(token, context, signal); signal.throwIfAborted(); check();
+        if (!ticket || ticket.audience !== origin || ticket.authority.principalKind !== "personal" || ticket.authority.principalId !== context.agentId ||
+          ticket.authority.grantId !== null || ticket.binding.workspaceId !== context.workspaceId) { stop(); return; }
+        personalDocument = {workspaceId: ticket.binding.workspaceId, objectId: ticket.binding.objectId};
+        const principal = JSON.stringify(["principal", "personal", context.agentId]);
+        reserve([
+          [JSON.stringify(["session", "personal", context.connectionId, context.workspaceId]), limits.maxConnectionsPerSession, "live_session_limit"],
+          [principal, limits.maxConnectionsPerPrincipal, "live_person_limit"],
+        ], principal, context.workspaceId);
+        releaseEditor = editors.acquire(ticket.binding);
+        const native = await captureNative(ticket.binding, signal); signal.throwIfAborted(); check();
+        host = captureNamedLiveFrameHost({ ticket, actor: liveBrowserActor(context), storage, native, bounds, validate, reserveBytes, validationBudget,
+          fresh: () => linkAuthority.freshPersonal(authority) });
       } else {
         const context = await options.sessions.resolve(authenticated, discriminator); signal.throwIfAborted(); check();
         if (!context || context.kind !== kind) { stop(); return; }
@@ -345,7 +436,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
           catch { releaseBytes(); stop(); }
         });
         session = createNamedLiveFrameSession({ host: host!, frames, membership, reserveBytes,
-          failed(error) { if (error instanceof LiveConnectionLimitError) refuseLimit(error.code); }, transport: {
+          failed(error) { refuseRetryable(error); }, transport: {
           send(bytes) {
             if (done || accepted.readyState !== WebSocket.OPEN || accepted.bufferedAmount > limits.maxPendingBytes - bytes.length) return Promise.reject(new Error("Named transport unavailable."));
             host!.assertCurrent();
@@ -365,7 +456,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
         touch(); socket.resume();
       });
       if (!ws) stop();
-    } catch (error) { if (error instanceof LiveConnectionLimitError) refuseLimit(error.code); else stop(); }
+    } catch (error) { if (!refuseRetryable(error)) stop(); }
     finally { opening = false; void release(); }
   }
   return { handle, handleUpgrade,

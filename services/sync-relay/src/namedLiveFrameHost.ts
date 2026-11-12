@@ -15,7 +15,8 @@ import { snapshotCurrentBindingRequest } from "./storage/liveDocumentAuthority.j
 import type { CapacityLiveAdmissionValidator } from "./ownerOutboxDelivery.js";
 import type { NamedFrameAppliedUpdate, NamedFrameHostSession, NamedFrameSync } from "./namedLiveFrameSession.js";
 import type { NamedFrameChanges } from "./liveHostChanges.js";
-import { claimsPersonalAgent, deriveLiveAuthorSnapshot, type TrustedLiveAccount } from "./storage/liveAuthorSnapshot.js";
+import { claimsPersonalAgent, deriveLiveAuthorSnapshot, personalLiveAuthorSnapshot, type TrustedLiveAccount } from "./storage/liveAuthorSnapshot.js";
+import { RelayError } from "./errors.js";
 export { createNamedFrameChanges, type NamedFrameChanges } from "./liveHostChanges.js";
 
 export interface NamedFrameNativeHost {
@@ -47,7 +48,18 @@ export interface NamedFrameValidationBudget {
 }
 class ValidationExceedsBudget extends Error {}
 
-/** Wraps an established authenticated native registration. It never owns host retirement. */
+/**
+ * A personal agent's access read again from Postgres. It rejects with
+ * `personal_agent_unavailable` while Postgres can't answer, and otherwise
+ * once that access has ended.
+ */
+export type PersonalFreshRead = () => Promise<unknown>;
+
+/**
+ * Wraps an established authenticated native registration. It never owns host
+ * retirement. A personal agent's capture reads its access again before its
+ * initial sync, each update it is sent, and each update admitted.
+ */
 export function captureNamedLiveFrameHost(options: {
   ticket: RedeemedLiveTicket;
   actor: CurrentLiveBindingRequest["actor"];
@@ -58,13 +70,15 @@ export function captureNamedLiveFrameHost(options: {
   validate: CapacityLiveAdmissionValidator;
   reserveBytes?: (size: number) => () => void;
   validationBudget?: NamedFrameValidationBudget;
+  fresh?: PersonalFreshRead;
 }): NamedFrameHostSession & {readonly ticket: RedeemedLiveTicket} {
   const ticket = parseRedeemedLiveTicket(options.ticket);
   Object.freeze(ticket.binding.selectorPaths);
   Object.freeze(ticket.binding);
   Object.freeze(ticket.authority);
   Object.freeze(ticket);
-  if (ticket.authority.principalKind !== "named" && ticket.authority.principalKind !== "link") throw new TypeError("Invalid live host capture.");
+  const kind = ticket.authority.principalKind;
+  if (kind === "personal" ? !options.fresh : (kind !== "named" && kind !== "link") || options.fresh) throw new TypeError("Invalid live host capture.");
   return { ...captureLiveFrameHost({...options, binding: ticket.binding, authority: ticket.authority, hostEpoch: ticket.hostEpoch}), ticket };
 }
 
@@ -102,10 +116,12 @@ function captureLiveFrameHost(options: {
   validate: CapacityLiveAdmissionValidator;
   reserveBytes?: (size: number) => () => void;
   validationBudget?: NamedFrameValidationBudget;
+  fresh?: PersonalFreshRead;
 }): NamedFrameHostSession {
   const binding = parseLiveObjectBinding(options.binding);
   Object.freeze(binding.selectorPaths); Object.freeze(binding);
   const authority = Object.freeze(parseServerDerivedLiveUpdateAuthority(options.authority));
+  const freshRead = options.fresh;
   const hostEpoch = options.hostEpoch;
   const { storage } = options;
   const trustedAccount = options.trustedAccount ? Object.freeze({...options.trustedAccount}) : undefined;
@@ -127,6 +143,7 @@ function captureLiveFrameHost(options: {
     objectId: binding.objectId, lineageClaimId: binding.lineageClaimId };
   const actor = Object.freeze(snapshotCurrentBindingRequest({ document, actor: options.actor }).actor);
   if (actor.kind !== authority.principalKind) throw new TypeError("Live host actor kind changed.");
+  if ((authority.principalKind === "personal") !== (freshRead !== undefined)) throw new TypeError("Invalid live host capture.");
   // What this editor is shown, which the opening check reads from its current
   // binding: an owner sees binding, a recipient its own share's view. Accepted
   // events carry binding, the lineage's one recorded binding, for every editor.
@@ -157,6 +174,12 @@ function captureLiveFrameHost(options: {
       }
     } catch (error) { close(); throw error; }
   }
+  // A personal agent's access, read again from Postgres before anything is sent.
+  async function fresh(signal: AbortSignal) {
+    if (!freshRead) return;
+    await freshRead();
+    check(signal);
+  }
   const request = () => ({ id: native.nextRequestId(), workspace: native.workspace, registrationId: native.registrationId, deadlineMs: native.deadlineMs });
   const signalFor = (caller: AbortSignal) => AbortSignal.any([caller, lifetime.signal]);
   native.invalidated.addEventListener("abort", close, { once: true });
@@ -186,6 +209,7 @@ function captureLiveFrameHost(options: {
         { maxInputBytes: bounds.maxClientVectorBytes, maxOutputBytes: bounds.maxSyncOutputBytes }, signal);
       check(signal);
       if (!isDeepStrictEqual(initial.binding, native.binding)) { close(); throw new Error("Native sync binding changed."); }
+      await fresh(signal);
       let position: NativeAppliedPosition = { ...initial.position };
       let held = false, pulling = false;
       const feed = new AbortController();
@@ -207,6 +231,8 @@ function captureLiveFrameHost(options: {
                 const next = await native.client.readNextLiveApplied(request(), position, bounds.maxAppliedUpdateBytes, signal);
                 check(signal);
                 if (next) {
+                  // Asked after the engine read, so even a shared read began after it.
+                  await fresh(signal);
                   let releaseBytes = options.reserveBytes?.(next.updateBytes.byteLength);
                   try {
                     if (next.position.eventCount !== position.eventCount + 1 || next.position.journalCursor <= position.journalCursor ||
@@ -245,7 +271,8 @@ function captureLiveFrameHost(options: {
         if (trustedAutomationPress && (!trustedAutomation || actor.kind !== "owner")) return {result: "refused", reason: "authority-refused"};
         const trustedAutomationGrant = input.trustedAutomationGrant;
         if (trustedAutomationGrant && (!trustedAutomation || actor.kind !== "owner" || trustedAutomationPress)) return {result: "refused", reason: "authority-refused"};
-        const authorContext = input.authorContext === undefined ? undefined : parseLiveAuthorContext(input.authorContext);
+        // A personal agent's authorship comes from its authority, so any context it sends is ignored.
+        const authorContext = input.authorContext === undefined || freshRead ? undefined : parseLiveAuthorContext(input.authorContext);
         // Only the relay attributes work to a personal agent.
         if (!trustedAutomation && claimsPersonalAgent(authorContext)) return { result: "refused", reason: "provenance-refused" };
         if (updateBytes.length < 1) return { result: "refused", reason: "invalid-update" };
@@ -281,11 +308,27 @@ function captureLiveFrameHost(options: {
               suffix: cut.suffix.map(row => row.bytes), candidate: updateBytes,
               retainStateUpdate: (actor.kind === "owner" && liveAuthorCheckpointAnticipated(cut.suffix.map(row => row.metadata), [])) || liveAuthorCheckpointAnticipated(cut.suffix.map(row => row.metadata),
                 limitLiveDeclaredAgents(cut.suffix.map(row => row.metadata), authority,
-                  trustedAutomation ? [{kind: "automation", ...trustedAutomation}] : deriveLiveAuthorSnapshot(storage as StorageContext, authority, authorContext, trustedAccount))) }, admissionSignal);
+                  trustedAutomation ? [{kind: "automation", ...trustedAutomation}]
+                    : authority.principalKind === "personal" ? personalLiveAuthorSnapshot(storage as StorageContext, authority)
+                    : deriveLiveAuthorSnapshot(storage as StorageContext, authority, authorContext, trustedAccount))) }, admissionSignal);
             check(admissionSignal);
             if (validation.kind === "retry") {
               waitForCapacity = validation.waitForCapacity.bind(validation);
               continue;
+            }
+            // Read again from Postgres just before the journal transaction. While
+            // it can't answer, nothing is admitted and the agent may try again.
+            if (freshRead) {
+              try { await freshRead(); }
+              catch (error) {
+                if (error instanceof RelayError && error.code === "personal_agent_unavailable") {
+                  check(admissionSignal);
+                  return { result: "retry", reason: "admission-unavailable" };
+                }
+                close();
+                return { result: "refused", reason: "authority-refused" };
+              }
+              check(admissionSignal);
             }
             const committed = storage.commitLiveUpdateJournal({ host: native.coordinate, actor, expectedAuthority: authority,
               ...(trustedAccount ? {trustedAccount} : {}),

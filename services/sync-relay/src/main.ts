@@ -54,7 +54,7 @@ import { startEngineProjection } from "./engineProjection";
 import { parseNamedLiveConfig } from "./namedLiveConfig";
 import { readAppBackendParticipantLimit, readAppCollectionPolicy, readAppPublicationConfig } from "./appPublicationConfig";
 import { createNamedFrameChanges } from "./liveHostChanges";
-import { createOwnerLiveRoutes, createNamedLiveRoutes } from "./namedLiveRoutes";
+import { createOwnerLiveRoutes, createNamedLiveRoutes, createPersonalLiveRoutes } from "./namedLiveRoutes";
 import { createLiveTickets } from "./liveTickets";
 import { createLiveHostReports } from "./namedLiveHostReports";
 import {createLinkLiveResolver} from "./linkLiveBrowserAuth";
@@ -456,12 +456,14 @@ let desktopLive: ReturnType<typeof createNamedLiveRoutes> | undefined;
 let desktopAdmission: ReturnType<typeof createNamedDesktopLive> | undefined;
 let serviceEnrollment: ReturnType<typeof createServiceHostEnrollmentRoutes> | undefined;
 let personalLiveDocument: ReturnType<typeof createPersonalLiveDocumentRoute> | undefined;
+let personalLive: ReturnType<typeof createPersonalLiveRoutes> | undefined;
 const relayHandler = guardRelayResponses(storage, request => {
   const path = new URL(request.url).pathname;
   if (request.headers.get("authorization")?.startsWith("Bearer dohc-service-v1.")) return serviceReplication?.(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   if (request.headers.get("authorization")?.startsWith(`Bearer ${AUTOMATION_REPLICA_BEARER_PREFIX}`)) return automationReplication?.(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   if (isServiceHostEnrollmentPath(path)) return serviceEnrollment?.(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   if (path === PERSONAL_LIVE_DOCUMENT_PATH) return personalLiveDocument?.(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
+  if (path === "/sync/live/personal-tickets") return personalLive?.handle(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   if (path === "/sync/live/named-tickets") return namedLive?.handle(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   if ((path === "/sync/live/desktop-open" || path === "/sync/live/desktop-ready")) return desktopAdmission?.handle(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   if (isLinkLivePath(path)) return (path === "/sync/live/link-tickets" ? linkLive?.handle(request) : linkLiveHttp?.(request)) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
@@ -471,7 +473,7 @@ const deletions = createAccountDeletionRoute({storage: storage as StorageContext
   invalidate(userId, manifest) {
     const ids = manifest.workspaces.map(row => row.workspaceId);
     relayApplication.deleteAccount(userId,ids,manifest.shareIds);
-    namedLive?.deleteAccount(userId,ids); linkLive?.deleteAccount(userId,ids); desktopLive?.deleteAccount(userId,ids); ownerLive?.deleteAccount(userId,ids);
+    namedLive?.deleteAccount(userId,ids); linkLive?.deleteAccount(userId,ids); personalLive?.deleteAccount(userId,ids); desktopLive?.deleteAccount(userId,ids); ownerLive?.deleteAccount(userId,ids);
     automations?.deleteAccount(userId);
   },
   async deleteRuntime(userId, manifest) {
@@ -595,14 +597,14 @@ const server = serveFetchHandler({
     isAutomationServerPath(url.pathname) ? AUTOMATION_SERVER_MAX_BODY_BYTES :
     isAccountWorkspacePath(url.pathname) ? ACCOUNT_WORKSPACE_MAX_BODY_BYTES :
     (url.pathname === "/sync/live/desktop-open" || url.pathname === "/sync/live/desktop-ready") && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
-    (url.pathname === "/sync/live/named-tickets" || isLinkLivePath(url.pathname)) && namedLiveConfig ? namedLiveConfig.transport.maxRequestBytes :
+    (url.pathname === "/sync/live/named-tickets" || url.pathname === "/sync/live/personal-tickets" || isLinkLivePath(url.pathname)) && namedLiveConfig ? namedLiveConfig.transport.maxRequestBytes :
     (isNamedBrowserSessionPath(url.pathname) || url.pathname === "/sync/named-chat/messages") && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
     isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
       ? MAX_LINK_EXCHANGE_BODY_BYTES
       : MAX_BODY_BYTES),
   oversized: (url) =>
     isLinkEndpointPath(url.pathname) ? opaqueLinkRefusal() :
-    (url.pathname === "/sync/live/desktop-open" || url.pathname === "/sync/live/desktop-ready") || url.pathname === "/sync/live/named-tickets" || isLinkLivePath(url.pathname) || isNamedBrowserSessionPath(url.pathname) || isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
+    (url.pathname === "/sync/live/desktop-open" || url.pathname === "/sync/live/desktop-ready") || url.pathname === "/sync/live/named-tickets" || url.pathname === "/sync/live/personal-tickets" || isLinkLivePath(url.pathname) || isNamedBrowserSessionPath(url.pathname) || isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
       ? errorBody("not_found")
       : errorBody("payload_too_large"),
   // Never echo internal error details (or anything derived from the request)
@@ -647,7 +649,7 @@ if (process.env.DOHC_DEVICE_CONTROL_LIMITS !== undefined) {
 }
 if (deviceControl) {
   server.on("upgrade", (request, socket, head) => {
-    if (namedLiveConfig && (request.url?.startsWith("/sync/live/named?") || request.url?.startsWith("/sync/live/link?") || request.url?.startsWith("/sync/live/desktop?") || /^\/sync\/workspaces\/[^/]+\/live\/owner(?:\?|$)/.test(request.url ?? ""))) return;
+    if (namedLiveConfig && (request.url?.startsWith("/sync/live/named?") || request.url?.startsWith("/sync/live/link?") || request.url?.startsWith("/sync/live/personal?") || request.url?.startsWith("/sync/live/desktop?") || /^\/sync\/workspaces\/[^/]+\/live\/owner(?:\?|$)/.test(request.url ?? ""))) return;
     deviceControl!.handleUpgrade(request, socket, head);
   });
   process.once("SIGINT", deviceControl.close);
@@ -719,6 +721,16 @@ if (namedLiveConfig) {
       linkAuthority: relayApplication.linkAuthority});
     server.once("close", linkLive.close); process.once("SIGINT", linkLive.close); process.once("SIGTERM", linkLive.close);
   }
+  // A personal agent edits only through the self-hosted live host, and only while it is the configured host.
+  if (selfHost && deployment) {
+    const hostId = selfHostedLiveHostId(deployment.history.namespace);
+    personalLive = createPersonalLiveRoutes({storage, hosts: new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(",")), publicOrigin: shareWebOrigin!,
+      exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport, frames: namedLiveConfig.frames, bounds: namedLiveConfig.host,
+      validate: namedLiveConfig.validate, tickets, captureNative, admission, sessionHostBlocked, linkAuthority: relayApplication.linkAuthority,
+      personalAgents: relayApplication.personalAgents, limiter: relayApplication.personalLimiter,
+      supported: () => { const control = storage.getLiveHostControl(); return control?.configuredMode === "service" && control.configuredHostId === hostId; }});
+    server.once("close", personalLive.close); process.once("SIGINT", personalLive.close); process.once("SIGTERM", personalLive.close);
+  }
   if (desktopEditorLimits) {
     const hosts = new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(","));
     desktopAdmission = createNamedDesktopLive({storage, resolveActor, publicOrigin: shareWebOrigin!, hosts,
@@ -739,6 +751,7 @@ if (namedLiveConfig) {
     if (/^\/sync\/workspaces\/[^/]+\/live\/owner(?:\?|$)/.test(request.url ?? "")) void ownerLive!.handleUpgrade(request, socket, head).catch(() => socket.destroy());
     else if (request.url?.startsWith("/sync/live/named?")) void namedLive!.handleUpgrade(request, socket, head).catch(() => socket.destroy());
     else if (request.url?.startsWith("/sync/live/link?")) {if (linkLive) void linkLive!.handleUpgrade(request, socket, head).catch(() => socket.destroy()); else socket.destroy();}
+    else if (request.url?.startsWith("/sync/live/personal?")) {if (personalLive) void personalLive.handleUpgrade(request, socket, head).catch(() => socket.destroy()); else socket.destroy();}
     else if (request.url?.startsWith("/sync/live/desktop?")) {if (desktopLive) void desktopLive!.handleUpgrade(request, socket, head).catch(() => socket.destroy()); else socket.destroy();}
     else if (!deviceControl) socket.destroy();
   });
