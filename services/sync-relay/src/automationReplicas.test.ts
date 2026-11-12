@@ -15,6 +15,8 @@ import { createServiceHostReplication } from "./serviceHostReplication";
 import { deriveServiceHostBearer } from "./serviceHostCredential";
 import type { SyncRelayStorage } from "./storage";
 import { AUTOMATION_WORKSPACE_KEEP_AFTER_LEAVING_MS, AUTOMATION_WORKSPACE_LEAVE_AFTER_MS, type CopyReason } from "./storage/automationWorkspaces";
+import { OPERATION_ACTIVE_MS } from "./storage/operationRecords";
+import type { PublicationCommand } from "./operationPublication";
 import { closeTestStorages, inspectDatabase, storagePath, testStorage, closeTestStorage, reopenTestStorage } from "./testing";
 import { notifyRelayWrite } from "./relayWriteChanges";
 
@@ -127,6 +129,30 @@ describe("the workspaces this server keeps a replica of", () => {
       .toMatchObject({ incarnation: 2, reasons: ["account"] });
   });
 
+  it("widens a relay's copy reasons once for the phone's writes, keeping every reason it had", async () => {
+    const { storage } = await relay();
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0, reasons: ["automation", "account"] });
+    const path = storagePath(storage);
+    closeTestStorage(storage);
+    const older = inspectDatabase(path);
+    older.exec(`DROP TABLE sync_relay_automation_workspace_reasons;
+      CREATE TABLE sync_relay_automation_workspace_reasons (
+        workspace_id TEXT NOT NULL REFERENCES sync_relay_automation_workspaces(workspace_id) ON DELETE CASCADE,
+        reason TEXT NOT NULL CHECK (reason IN ('automation', 'account')),
+        PRIMARY KEY (workspace_id, reason)
+      ) STRICT;
+      INSERT INTO sync_relay_automation_workspace_reasons VALUES ('${WORKSPACE}', 'automation'), ('${WORKSPACE}', 'account');
+      DELETE FROM sync_relay_migrations WHERE migration_id = 'copy-publication-reason-v1';`);
+    older.close();
+    const upgraded = reopenTestStorage(path);
+    expect(upgraded.listAutomationWorkspaces()[0]?.reasons).toEqual(["account", "automation"]);
+    expect(upgraded.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 1, reasons: ["publication"] })?.reasons)
+      .toEqual(["account", "automation", "publication"]);
+    closeTestStorage(upgraded);
+    expect(reopenTestStorage(path).listAutomationWorkspaces()[0]?.reasons, "a second open changes nothing")
+      .toEqual(["account", "automation", "publication"]);
+  });
+
   it("lists the workspaces whose automation host is the server, running or handing over", async () => {
     const { storage, raw } = await relay();
     storage.claimWorkspace({ workspaceId: "other", ownerUserId: "owner", createdAtMs: 1 });
@@ -215,6 +241,8 @@ describe("the automation replicas", () => {
     const sent: Sent[] = [];
     let failPush: boolean | Error = false;
     let failingWorkspace: string | undefined;
+    // What the engine answers for the phone's writes' receipts, by stage key. A key it doesn't hold is absent.
+    let receipts: Map<string, unknown> | Error = new Map();
     const engines: Array<{ exit(): void; close: ReturnType<typeof vi.fn>; waitForExit: ReturnType<typeof vi.fn> }> = [];
     spawn.mockImplementation(async (spawned: { env?: Record<string, string>; onExit?: () => void }) => {
       expect(spawned.env?.DOHC_ENGINE_LIVE_HOST_CONFIG, "a plain engine, not the live host's").toBeUndefined();
@@ -233,6 +261,11 @@ describe("the automation replicas", () => {
             case "workspace.close": return { result: {} };
             case "sync.adoptJoinIdentity": return { result: { adopted: true } };
             case "versions.ensureMain": return { result: { id: "main" } };
+            case "sync.ordinary.publicationState": {
+              if (receipts instanceof Error) throw receipts;
+              const held = receipts;
+              return { result: { stages: (request.params.stageKeys as string[]).map((stageKey) => held.get(stageKey) ?? { stageKey, state: "absent" }) } };
+            }
             case "sync.push": return { result: { status: "complete", pushed: 0, hasMore: false, sharingDeclined: [], ownerAdmissionPending: [] } };
             case "sync.materializePendingCursor": return { result: { materialized: true } };
             case "sync.commitCursor": return { result: { committed: true, sharingDeclined: [] } };
@@ -248,7 +281,8 @@ describe("the automation replicas", () => {
       engines.push({ exit: () => spawned.onExit?.(), close: engine.close, waitForExit: engine.waitForExit });
       return engine;
     });
-    return { sent, engines, failPush: (value: boolean | Error, workspace?: string) => { failPush = value; failingWorkspace = workspace; }, methods: () => sent.map((request) => request.method) };
+    return { sent, engines, failPush: (value: boolean | Error, workspace?: string) => { failPush = value; failingWorkspace = workspace; },
+      receipts: (value: Map<string, unknown> | Error) => { receipts = value; }, methods: () => sent.map((request) => request.method) };
   }
 
   // The engine refuses to open the workspaces `refused` names.
@@ -2011,5 +2045,226 @@ describe("the automation replicas", () => {
     await next;
     expect(running.unavailable).toBe(false);
     expect(vi.getTimerCount(), "the deadline the pass read").toBe(1);
+  });
+
+  // A phone write the owner's account recorded on the copy, sending one message.
+  function phoneWrite(storage: SyncRelayStorage, id: string) {
+    const command: PublicationCommand = {
+      stages: [{ key: `${id}:send`, role: "post", records: [{ kind: "chat.message.append", fields: { messageId: id } }] }],
+    };
+    const claim = storage.recordAccountOperation({ accountId: "owner", operationId: id, binding: { workspaceId: WORKSPACE, operation: "send", args: { id } },
+      incarnation: 1, replicationEpoch: "epoch-1", streamIdentity: "stream-1", command, writesMessage: true, nowMs: 0 });
+    if (claim.kind !== "recorded") throw new Error(`expected a new record, got ${claim.kind}`);
+  }
+  // The receipt of a write's one stage, whose message the copy journaled at `originSeq`.
+  const receipt = (id: string, originSeq: number, state: "pushed" | "pending" = "pushed"): [string, unknown] => [`${id}:send`, {
+    stageKey: `${id}:send`, state: "present", outcome: "written", threadId: "thread", coordinates: [{ originId: "copy", originSeq, state }],
+  }];
+  // The relay accepted the message at the copy's coordinate.
+  const accept = (raw: ReturnType<typeof inspectDatabase>, id: string, originSeq: number) => raw.prepare(
+    "INSERT INTO sync_relay_log (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms) VALUES (?, 'copy', ?, 'chat.message.append', ?, 1)",
+  ).run(WORKSPACE, originSeq, JSON.stringify({ messageId: id, threadId: "thread" }));
+  const outcome = (raw: ReturnType<typeof inspectDatabase>, id: string) => {
+    const row = raw.prepare("SELECT stage, message_state, result_json FROM sync_relay_account_operations WHERE operation_id = ?").get(id);
+    return [row?.stage, row?.message_state, row?.result_json == null ? null : JSON.parse(String(row?.result_json))];
+  };
+  // What the server's copies want: each copy whose phone writes may still publish, as serverCopies gives them a place.
+  const publishing = (storage: SyncRelayStorage) => () =>
+    new Map(storage.publishingCopies().map((copy): [string, readonly CopyReason[]] => [copy.workspaceId, ["publication"]]));
+  const count = (engine: ReturnType<typeof fakeEngine>, method: string) => engine.methods().filter((sent) => sent === method).length;
+
+  it("settles a retiring copy's phone writes before its folder goes, and keeps the folder while their receipts can't be read", async () => {
+    const { storage, raw } = await relay();
+    const engine = fakeEngine();
+    const errors: unknown[] = [];
+    let wanted = new Map<string, readonly CopyReason[]>([[WORKSPACE, ["account"]]]);
+    const root = await mkdtemp(join(tmpdir(), "automation-replicas-"));
+    const running = await startAutomationReplicas({ storage, root, engineExecutable: process.execPath, relayOrigin: "https://relay.example",
+      key, namespace, wanted: () => wanted, nowMs: () => 0, onError: (error) => errors.push(error) });
+    cleanup.push(async () => { await running.close(); await rm(root, { recursive: true, force: true }); });
+    await running.settled();
+    phoneWrite(storage, "sent");
+    phoneWrite(storage, "unwritten");
+    accept(raw, "sent", 1);
+    // "Show on phone" goes off, so the writes no longer keep the copy, and it retires.
+    storage.setShowOnPhone({ ownerUserId: "owner", workspaceId: WORKSPACE, showOnPhone: false });
+    wanted = new Map();
+    engine.receipts(new Error("the engine is busy"));
+    running.reconcile(); await running.settled();
+    expect(errors).toEqual([new Error("the engine is busy")]);
+    expect(folders(root), "the folder stays until its writes settle").toHaveLength(1);
+    expect(storage.listAutomationWorkspaces(), "and so does its row").toHaveLength(1);
+    expect([outcome(raw, "sent")[0], outcome(raw, "unwritten")[0]]).toEqual(["recorded", "recorded"]);
+
+    engine.receipts(new Map([receipt("sent", 1)]));
+    running.reconcile(); await running.settled();
+    expect([outcome(raw, "sent"), outcome(raw, "unwritten")]).toEqual([
+      ["saved", "published", { threadId: "thread" }],
+      // Its stage never committed, so it never published.
+      ["refused", "pending", { threadId: null, reason: "Couldn't send" }],
+    ]);
+    expect(folders(root)).toEqual([]);
+    expect(storage.listAutomationWorkspaces()).toEqual([]);
+
+    // Showing the workspace again makes a new copy, which replays nothing.
+    storage.setShowOnPhone({ ownerUserId: "owner", workspaceId: WORKSPACE, showOnPhone: true });
+    const reads = count(engine, "sync.ordinary.publicationState");
+    wanted = new Map([[WORKSPACE, ["account"]]]);
+    running.reconcile(); await running.settled();
+    expect(running.replica(WORKSPACE)).toMatchObject({ incarnation: 1 });
+    expect(count(engine, "sync.ordinary.publicationState")).toBe(reads);
+    expect(errors).toHaveLength(1);
+  });
+
+  it("settles a deleted workspace's phone writes before its folder goes, and leaves a folder whose receipts can't be read", async () => {
+    const { storage, raw } = await relay();
+    const engine = fakeEngine();
+    const errors: unknown[] = [];
+    let wanted = [WORKSPACE];
+    const root = await mkdtemp(join(tmpdir(), "automation-replicas-"));
+    const running = await startReplicas({ storage, root, engineExecutable: process.execPath, relayOrigin: "https://relay.example",
+      key, namespace, wanted: () => wanted, nowMs: () => 0, onError: (error) => errors.push(error) });
+    cleanup.push(async () => { await running.close(); await rm(root, { recursive: true, force: true }); });
+    await running.settled();
+    engine.receipts(new Error("the engine is busy"));
+    phoneWrite(storage, "sent");
+    accept(raw, "sent", 1);
+    wanted = [];
+    running.reconcile(); await running.settled();
+    await running.deleteWorkspaces([WORKSPACE]);
+    expect(running.replica(WORKSPACE)).toBeUndefined();
+    expect(folders(root), "kept for a later settlement").toHaveLength(1);
+    expect(outcome(raw, "sent")[0]).toBe("recorded");
+    expect(errors.at(-1)).toEqual(new Error("the engine is busy"));
+
+    engine.receipts(new Map([receipt("sent", 1)]));
+    await running.deleteWorkspaces([WORKSPACE]);
+    expect(outcome(raw, "sent")).toEqual(["saved", "published", { threadId: "thread" }]);
+    expect(folders(root)).toEqual([]);
+  });
+
+  it("refuses an earlier incarnation's unpublished phone writes before the new incarnation pushes anything", async () => {
+    const { storage, raw } = await relay();
+    const engine = fakeEngine();
+    engine.receipts(new Map([receipt("unsent", 1, "pending")]));
+    const { replicas: running } = await replicas(storage, () => [WORKSPACE], { ms: 1 });
+    const first = running.replica(WORKSPACE)!;
+    phoneWrite(storage, "unsent");
+    await running.settled();
+    const before = engine.sent.length;
+    storage.rotateWorkspaceIdentity({ workspaceId: WORKSPACE, ownerUserId: "owner", replicationEpoch: "epoch-2", streamIdentity: "stream-2", rotatedAtMs: 2 });
+    running.reconcile(); await running.settled();
+    expect(running.replica(WORKSPACE)).toMatchObject({ incarnation: 2 });
+    expect(outcome(raw, "unsent")).toEqual(["refused", "pending", { threadId: "thread", reason: "This workspace changed on your server" }]);
+    const after = engine.sent.slice(before).map((request) => request.method);
+    expect(after.indexOf("sync.ordinary.publicationState")).toBeGreaterThanOrEqual(0);
+    expect(after.indexOf("sync.ordinary.publicationState"), "settled before the new incarnation pushes").toBeLessThan(after.indexOf("sync.push"));
+    expect(existsSync(first.root)).toBe(false);
+  });
+
+  it("refuses the phone's writes in a copy whose folder was lost, and replays none of them in its new folder", async () => {
+    const { storage, raw } = await relay();
+    const engine = fakeEngine();
+    const { replicas: first, root } = await replicas(storage, () => [WORKSPACE], { ms: 1 });
+    phoneWrite(storage, "lost");
+    await first.settled();
+    await first.close();
+    await rm(join(root, folders(root)[0]!), { recursive: true, force: true });
+    const reads = count(engine, "sync.ordinary.publicationState");
+    const restarted = await start(storage, { root, wanted: () => [WORKSPACE], nowMs: () => 2 });
+    await restarted.settled();
+    expect(outcome(raw, "lost")).toEqual(["refused", "pending", { threadId: null, reason: "Couldn't send" }]);
+    expect(count(engine, "sync.ordinary.publicationState"), "no folder, so no receipt to read").toBe(reads);
+    expect(restarted.replica(WORKSPACE)).toMatchObject({ incarnation: 1 });
+  });
+
+  it("settles the phone's writes in a folder no row names before the sweep removes it", async () => {
+    const { storage, raw } = await relay();
+    const engine = fakeEngine();
+    const { replicas: first, root } = await replicas(storage, () => [WORKSPACE], { ms: 0 });
+    // Hidden from the phone, the writes no longer keep the copy.
+    storage.setShowOnPhone({ ownerUserId: "owner", workspaceId: WORKSPACE, showOnPhone: false });
+    phoneWrite(storage, "sent");
+    accept(raw, "sent", 1);
+    await first.settled();
+    await first.close();
+    inspectDatabase(storagePath(storage), { foreignKeys: true }).prepare("DELETE FROM sync_relay_automation_workspaces WHERE workspace_id = ?").run(WORKSPACE);
+    engine.receipts(new Map([receipt("sent", 1)]));
+    const later = await start(storage, { root, wanted: () => [], nowMs: () => 0 });
+    await later.settled();
+    expect(outcome(raw, "sent")).toEqual(["saved", "published", { threadId: "thread" }]);
+    expect(folders(root)).toEqual([]);
+  });
+
+  it("settles the phone's writes before removing every copy when copies are off, and keeps one whose receipts can't be read", async () => {
+    const { storage, raw } = await relay();
+    storage.claimWorkspace({ workspaceId: "ledger", ownerUserId: "owner", createdAtMs: 1 });
+    storage.claimWorkspaceIdentity({ workspaceId: "ledger", replicationEpoch: "epoch", streamIdentity: "stream" });
+    const engine = fakeEngine();
+    const { replicas: running, root } = await replicas(storage, () => [WORKSPACE, "ledger"], { ms: 0 });
+    storage.setShowOnPhone({ ownerUserId: "owner", workspaceId: WORKSPACE, showOnPhone: false });
+    phoneWrite(storage, "sent");
+    accept(raw, "sent", 1);
+    await running.settled();
+    await running.close();
+    const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    cleanup.push(async () => { logged.mockRestore(); });
+    const settle = { namespace, engineExecutable: process.execPath };
+    engine.receipts(new Error("the engine is busy"));
+    await removeAutomationReplicas(storage, root, settle);
+    expect(storage.listAutomationWorkspaces().map((row) => row.workspaceId)).toEqual([WORKSPACE]);
+    expect(folders(root)).toHaveLength(1);
+    expect(outcome(raw, "sent")[0]).toBe("recorded");
+    expect(logged).toHaveBeenCalled();
+
+    engine.receipts(new Map([receipt("sent", 1)]));
+    await removeAutomationReplicas(storage, root, settle);
+    expect(outcome(raw, "sent")).toEqual(["saved", "published", { threadId: "thread" }]);
+    expect(existsSync(root)).toBe(false);
+    expect(storage.listAutomationWorkspaces()).toEqual([]);
+  });
+
+  it("keeps publishing a copy's phone writes when nothing new reaches the relay, stalls them past their active time, and saves them later", async () => {
+    const { storage, raw } = await relay();
+    const engine = fakeEngine();
+    const clock = { ms: 0 };
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0, reasons: ["account"] });
+    phoneWrite(storage, "sent");
+    engine.receipts(new Map([receipt("sent", 1, "pending")]));
+    const { replicas: running } = await copies(storage, publishing(storage), clock);
+    expect(running.replica(WORKSPACE)?.reasons).toEqual(["account", "publication"]);
+    const reads = count(engine, "sync.ordinary.publicationState"), pushes = count(engine, "sync.push");
+    expect(reads).toBeGreaterThan(0);
+    // The relay's head doesn't move, and the copy still pushes and looks again.
+    running.reconcile(WORKSPACE); await running.settled();
+    expect(count(engine, "sync.ordinary.publicationState")).toBeGreaterThan(reads);
+    expect(count(engine, "sync.push")).toBeGreaterThan(pushes);
+    expect(outcome(raw, "sent")[0]).toBe("recorded");
+
+    clock.ms = OPERATION_ACTIVE_MS;
+    running.reconcile(WORKSPACE); await running.settled();
+    expect(outcome(raw, "sent")[0]).toBe("stalled");
+    expect(running.replica(WORKSPACE), "a stalled write still keeps its copy").toBeDefined();
+
+    engine.receipts(new Map([receipt("sent", 1)]));
+    accept(raw, "sent", 1);
+    running.reconcile(WORKSPACE); await running.settled();
+    expect(outcome(raw, "sent")).toEqual(["saved", "published", { threadId: "thread" }]);
+    expect(storage.listAutomationWorkspaces()[0]?.reasons, "saved, it keeps the copy no more").toEqual(["account"]);
+  });
+
+  it("stalls a copy's phone writes once their receipts keep failing to read, and keeps the copy", async () => {
+    const { storage, raw } = await relay();
+    const engine = fakeEngine();
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0, reasons: ["account"] });
+    phoneWrite(storage, "sent");
+    engine.receipts(new Error("the engine is busy"));
+    const { replicas: running } = await copies(storage, publishing(storage), { ms: 0 });
+    for (let attempt = 0; attempt < 10 && outcome(raw, "sent")[0] !== "stalled"; attempt++) {
+      running.reconcile(WORKSPACE); await running.settled();
+    }
+    expect(outcome(raw, "sent")[0]).toBe("stalled");
+    expect(running.replica(WORKSPACE)).toBeDefined();
+    expect(storage.listAutomationWorkspaces()[0]?.reasons).toEqual(["account", "publication"]);
   });
 });

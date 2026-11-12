@@ -192,7 +192,7 @@ async function server(storage: SyncRelayStorage, h: Pick<ReturnType<typeof testH
   const replicaOf = (): AutomationReplica => ({
     workspaceId: WORKSPACE, ownerUserId: OWNER, incarnation: input.incarnation ?? 1, reasons: ["automation"], startedAtMs: input.startedAtMs ?? at(7),
     root: "unused", metadataDir: "unused", client: input.client ?? {} as unknown as EngineClient, workspace: "handle", signal: new AbortController().signal,
-    nextRequestId: () => 1, sync, withRecordWork: work => work(), get pulledHead() { return pulledHead; },
+    nextRequestId: () => 1, sync, step: async () => true, withRecordWork: work => work(), get pulledHead() { return pulledHead; },
   });
   const run = await startAutomationServer({
     storage, datasetHost: input.datasetHost,

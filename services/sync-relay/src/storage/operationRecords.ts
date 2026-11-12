@@ -163,7 +163,8 @@ export interface RecordOperationInput {
 export interface AdvanceOperationInput {
   accountId: string;
   operationId: string;
-  stage: OperationStage;
+  /** Omitted, the stage stays as it is. */
+  stage?: OperationStage;
   message?: "published";
   result?: JsonValue;
   nowMs: number;
@@ -246,10 +247,10 @@ export function recordOperation(storage: StorageContext, input: RecordOperationI
 
 /**
  * Moves a write's stage forward, marks its message published, or stores its
- * result. A stage never moves back and a final stage never changes, so a late
- * or repeated call leaves the row as it is and writes nothing. Returns the row
- * after the call and whether it changed, or null when only a tombstone or
- * nothing is left.
+ * result, with or without a new stage. A stage never moves back and a final
+ * stage never changes, so a late or repeated call leaves the row as it is
+ * and writes nothing. Returns the row after the call and whether it
+ * changed, or null when only a tombstone or nothing is left.
  */
 export function advanceOperation(
   storage: StorageContext,
@@ -262,33 +263,84 @@ export function advanceOperation(
     if (input.message !== undefined && record.messageState === null) {
       throw new Error("This operation writes no message.");
     }
-    if (isFinal(record.stage) || STAGE_ORDER[input.stage] < STAGE_ORDER[record.stage]) return { moved: false, record };
+    const stage = input.stage ?? record.stage;
+    if (isFinal(record.stage) || STAGE_ORDER[stage] < STAGE_ORDER[record.stage]) return { moved: false, record };
     const messageState = input.message ?? record.messageState;
     const resultJson = input.result === undefined ? row.result_json : JSON.stringify(input.result);
-    if (input.stage === record.stage && messageState === record.messageState && resultJson === row.result_json) {
+    if (stage === record.stage && messageState === record.messageState && resultJson === row.result_json) {
       return { moved: false, record };
     }
     storage.db.prepare(
       `UPDATE sync_relay_account_operations SET stage = ?, message_state = ?, result_json = ?, updated_at_ms = ?, settled_at_ms = ?
        WHERE account_id = ? AND operation_id = ?`,
     ).run(
-      input.stage, messageState, resultJson, Math.max(input.nowMs, record.createdAtMs),
-      isFinal(input.stage) ? Math.max(input.nowMs, record.createdAtMs) : null, input.accountId, input.operationId,
+      stage, messageState, resultJson, Math.max(input.nowMs, record.createdAtMs),
+      isFinal(stage) ? Math.max(input.nowMs, record.createdAtMs) : null, input.accountId, input.operationId,
     );
     return { moved: true, record: recordOf(readRow(storage, input.accountId, input.operationId)!) };
   });
 }
 
-/** The writes still to finish on one copy, oldest first, including stalled ones. */
+/** The writes still to finish on one copy, or on every copy of the workspace, oldest first, including stalled ones. */
 export function listUnfinishedOperations(
   storage: StorageContext,
-  input: { workspaceId: string; incarnation: number },
+  input: { workspaceId: string; incarnation?: number },
 ): OperationRecord[] {
+  const incarnation = input.incarnation ?? null;
   return storage.readTx(() => storage.db.prepare(
     `SELECT * FROM sync_relay_account_operations
-     WHERE workspace_id = ? AND incarnation = ? AND stage NOT IN ('saved', 'refused')
+     WHERE workspace_id = ? AND (? IS NULL OR incarnation = ?) AND stage NOT IN ('saved', 'refused')
      ORDER BY created_at_ms, account_id, operation_id`,
-  ).all(input.workspaceId, input.incarnation).map(recordOf));
+  ).all(input.workspaceId, incarnation, incarnation).map(recordOf));
+}
+
+/** Each copy, by workspace and incarnation, that holds writes still to finish. */
+export function listUnfinishedOperationCopies(storage: StorageContext): Array<{ workspaceId: string; incarnation: number }> {
+  return storage.readTx(() => storage.db.prepare(
+    `SELECT DISTINCT workspace_id, incarnation FROM sync_relay_account_operations
+     WHERE stage NOT IN ('saved', 'refused') AND command_json IS NOT NULL ORDER BY workspace_id, incarnation`,
+  ).all().map(row => ({ workspaceId: String(row.workspace_id), incarnation: Number(row.incarnation) })));
+}
+
+/**
+ * The copies whose unfinished writes may still publish, oldest write first:
+ * the workspace's owner, epoch, and stream, and the copy's owner, epoch,
+ * stream, and incarnation, are still those each write was recorded under,
+ * and the workspace shows on that owner's phone. Runs inside the caller's
+ * transaction. The caller also leaves out fenced accounts and deleted
+ * workspaces, which SQL can't name.
+ */
+export function publishingCopiesInTransaction(storage: StorageContext): Array<{ workspaceId: string; ownerUserId: string }> {
+  return storage.db.prepare(
+    `SELECT o.workspace_id, o.account_id, MIN(o.created_at_ms) AS since FROM sync_relay_account_operations o
+     JOIN sync_relay_automation_workspaces a ON a.workspace_id = o.workspace_id AND a.incarnation = o.incarnation
+       AND a.owner_user_id = o.account_id AND a.replication_epoch = o.replication_epoch AND a.stream_identity = o.stream_identity
+     JOIN sync_relay_workspaces w ON w.workspace_id = o.workspace_id AND w.owner_user_id = o.account_id
+       AND w.replication_epoch = o.replication_epoch AND w.stream_identity = o.stream_identity
+     WHERE o.stage NOT IN ('saved', 'refused') AND o.command_json IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM sync_relay_phone_hidden_workspaces h
+         WHERE h.workspace_id = o.workspace_id AND h.owner_user_id = o.account_id)
+     GROUP BY o.workspace_id, o.account_id ORDER BY since, o.workspace_id`,
+  ).all().map(row => ({ workspaceId: String(row.workspace_id), ownerUserId: String(row.account_id) }));
+}
+
+/** The copies that keep the `publication` reason now. Runs inside the caller's transaction. */
+export function publicationReasonCopiesInTransaction(storage: StorageContext): string[] {
+  return storage.db.prepare("SELECT workspace_id FROM sync_relay_automation_workspace_reasons WHERE reason = 'publication'")
+    .all().map(row => String(row.workspace_id));
+}
+
+/** Exactly these copies keep the `publication` reason. Runs inside the caller's write transaction. */
+export function setPublicationReasonsInTransaction(storage: StorageContext, workspaceIds: readonly string[]): void {
+  const ids = JSON.stringify(workspaceIds);
+  storage.db.prepare(
+    `DELETE FROM sync_relay_automation_workspace_reasons
+     WHERE reason = 'publication' AND workspace_id NOT IN (SELECT value FROM json_each(?))`,
+  ).run(ids);
+  storage.db.prepare(
+    `INSERT OR IGNORE INTO sync_relay_automation_workspace_reasons (workspace_id, reason)
+     SELECT value, 'publication' FROM json_each(?)`,
+  ).run(ids);
 }
 
 /** Turns rows settled more than OPERATION_KEEP_SETTLED_MS ago into tombstones. Returns how many. */

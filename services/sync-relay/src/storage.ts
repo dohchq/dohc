@@ -1,4 +1,4 @@
-import {accountIsFenced} from "./storage/accountDeletion";
+import {accountIsFenced, workspaceIsDeleted} from "./storage/accountDeletion";
 import * as workReferenceStorage from "./storage/workReferences";
 import * as replicaCurrentViews from "./storage/replicaCurrentViews";
 import * as replicaCurrentViewReads from "./replicaCurrentViewReads";
@@ -897,8 +897,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     automationWorkspaceStorage.forgetAutomationWorkspace(this, input);
   }
 
-  forgetAutomationWorkspaces() {
-    automationWorkspaceStorage.forgetAutomationWorkspaces(this);
+  forgetAutomationWorkspaces(kept?: readonly string[]) {
+    automationWorkspaceStorage.forgetAutomationWorkspaces(this, kept);
   }
 
   endCopyReasonEverywhere(reason: automationWorkspaceStorage.CopyReason) {
@@ -937,8 +937,33 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return operationRecordStorage.advanceOperation(this, input);
   }
 
-  listUnfinishedAccountOperations(input: { workspaceId: string; incarnation: number }) {
+  listUnfinishedAccountOperations(input: { workspaceId: string; incarnation?: number }) {
     return operationRecordStorage.listUnfinishedOperations(this, input);
+  }
+
+  listUnfinishedOperationCopies() {
+    return operationRecordStorage.listUnfinishedOperationCopies(this);
+  }
+
+  publishingCopies() {
+    return this.readTx(() => this.publishingCopiesInTransaction());
+  }
+
+  // Each pass asks, so it writes only when the reasons changed.
+  restorePublicationReasons() {
+    const changed = () => JSON.stringify(this.publishingWorkspaceIds()) !==
+      JSON.stringify(operationRecordStorage.publicationReasonCopiesInTransaction(this).sort());
+    if (!this.readTx(changed)) return;
+    this.tx(() => operationRecordStorage.setPublicationReasonsInTransaction(this, this.publishingWorkspaceIds()));
+  }
+
+  private publishingCopiesInTransaction() {
+    return operationRecordStorage.publishingCopiesInTransaction(this)
+      .filter((copy) => !accountIsFenced(this, copy.ownerUserId) && !workspaceIsDeleted(this, copy.workspaceId));
+  }
+
+  private publishingWorkspaceIds() {
+    return [...new Set(this.publishingCopiesInTransaction().map((copy) => copy.workspaceId))].sort();
   }
 
   tombstoneSettledAccountOperations(nowMs: number) {

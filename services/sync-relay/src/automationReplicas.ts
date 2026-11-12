@@ -19,6 +19,16 @@ import {
   type CopyReason,
 } from "./storage/automationWorkspaces";
 import {deriveAutomationReplicaBearer} from "./automationReplicaCredential";
+import {
+  COULD_NOT_SEND,
+  WORKSPACE_CHANGED,
+  publishOnce,
+  receiptReader,
+  settleOperations,
+  stallOperations,
+  type ReceiptReader,
+  type RefusalReason,
+} from "./operationPublication";
 import {observeRelayWrites} from "./relayWriteChanges";
 import {ServiceOrdinaryReplication} from "./serviceOrdinaryReplication";
 import {selfHostedLiveProfile} from "./selfHostLiveProfile";
@@ -46,6 +56,12 @@ export interface AutomationReplica {
   nextRequestId(): number;
   /** Pushes the replica's own writes to the relay, then pulls what the relay has. */
   sync(signal?: AbortSignal): Promise<void>;
+  /**
+   * One bounded sync, queued behind the one running: pushes, then pulls, a
+   * pass's rounds at most. Answers whether it caught up. Never call it from
+   * inside a sync callback, which holds the lane it waits for.
+   */
+  step(signal?: AbortSignal): Promise<boolean>;
   /** Serializes record draft preparation and delivery without delaying ordinary sync. */
   withRecordWork<T>(work: () => Promise<T>): Promise<T>;
 }
@@ -62,6 +78,14 @@ const RETRY_MAX_MS = 60_000;
 const BUSY_REFUSALS_REPORTED = 3;
 // The longest a deadline timer waits before it looks again.
 const DEADLINE_MAX_WAIT_MS = 24 * 60 * 60 * 1000;
+// A copy with unsent phone writes tries to publish them this soon, then less
+// often up to the most, even when nothing new reached the relay.
+const PUBLICATION_RETRY_FIRST_MS = 2_000;
+const PUBLICATION_RETRY_MAX_MS = 5 * 60_000;
+// A stalled write may still publish, so its copy keeps trying, more slowly.
+const PUBLICATION_STALLED_RETRY_MS = 30 * 60_000;
+// A copy whose receipts can't be read this many times in a row stalls its writes.
+const PUBLICATION_QUERY_FAILURES = 5;
 
 /**
  * Keeps one engine replica per workspace whose automations this server runs
@@ -110,8 +134,6 @@ export async function startAutomationReplicas(options: {
   const signal = AbortSignal.any([lifetime.signal, storage.unavailable]);
   const replicas = new Map<string, AutomationReplica & {
     close(): Promise<void>; pulledHead: number; reasons: readonly CopyReason[];
-    /** A bounded sync for a pass: answers whether it caught up. */
-    step(): Promise<boolean>;
     busy(): boolean;
   }>();
   // Replicas an engine exit is closing, until their close settles. One that
@@ -134,6 +156,9 @@ export async function startAutomationReplicas(options: {
   // Sync failures wait on elapsed time, independently of retention's nowMs clock.
   const syncRetries = new Map<string, { at: number; delay: number; incarnation: number }>();
   const canSync = (workspaceId: string) => (syncRetries.get(workspaceId)?.at ?? 0) <= performance.now();
+  // When each copy with unsent phone writes tries next, on the same clock,
+  // the wait before it, and how many reads of its receipts failed in a row.
+  const publicationRetries = new Map<string, { at: number; delay: number; failures: number }>();
 
   const folderOf = (workspaceId: string) => replicaFolder(options.root, options.namespace, workspaceId);
   // The workspace ids whose folders the last sweep kept.
@@ -143,23 +168,16 @@ export async function startAutomationReplicas(options: {
     if (client && !client.exited.signal.aborted) return Promise.resolve(client);
     starting ??= (async () => {
       const exited = new AbortController();
-      const started = await createEngineClient({
-        command: options.engineExecutable, authToken: randomBytes(32).toString("base64url"),
-        env: {DOHC_ENGINE_OWNER_HOST_CONFIG: configPath, DOHC_ENGINE_READER_CONFIG: process.env.DOHC_ENGINE_READER_CONFIG},
-        privateLiveApplication: selfHostedLiveProfile.nativeClient,
-        protocolVersion: 2, capabilities: ["blobs"], connectTimeoutMs: REQUEST_DEADLINE_MS, signal,
-        onExit: () => {
-          exited.abort();
-          // Every replica opened in it is gone; the next pass opens them again.
-          for (const replica of [...replicas.values()]) {
-            if (replica.client !== started) continue;
-            const closing = replica.close();
-            retiring.add(closing);
-            closing.then(() => retiring.delete(closing), () => {});
-          }
-          schedule(RETRY_FIRST_MS);
-        },
-        onStderr: text => console.error("[automation-replicas]", text.trimEnd()),
+      const started = await spawnEngine(options.engineExecutable, configPath, signal, () => {
+        exited.abort();
+        // Every replica opened in it is gone; the next pass opens them again.
+        for (const replica of [...replicas.values()]) {
+          if (replica.client !== started) continue;
+          const closing = replica.close();
+          retiring.add(closing);
+          closing.then(() => retiring.delete(closing), () => {});
+        }
+        schedule(RETRY_FIRST_MS);
       });
       if (options.onEngineEvent) started.onEvent(options.onEngineEvent);
       client = {engine: started, exited};
@@ -176,6 +194,79 @@ export async function startAutomationReplicas(options: {
 
   const logHead = (workspaceId: string) => storage.automationWorkspaceLogHead(workspaceId);
 
+  const unfinishedIncarnations = (workspaceId: string) =>
+    new Set(storage.listUnfinishedAccountOperations({workspaceId}).map((record) => record.incarnation));
+
+  /**
+   * Settles the phone's unfinished writes in one incarnation's folder before
+   * the folder goes, reading their receipts from the open copy, or from the
+   * folder opened for that alone. Answers false, and reports why, when the
+   * receipts couldn't be read: the folder stays, and a later pass tries again.
+   */
+  async function settleCopy(workspaceId: string, incarnation: number, reason: RefusalReason): Promise<boolean> {
+    const records = storage.listUnfinishedAccountOperations({workspaceId, incarnation});
+    if (records.length === 0) return true;
+    const home = join(folderOf(workspaceId), String(incarnation));
+    try {
+      const open_ = replicas.get(workspaceId);
+      if (open_?.incarnation === incarnation) await settleOperations(storage, records, receiptReader(open_, open_.workspace), reason, nowMs());
+      else if (await missing(home)) await settleOperations(storage, records, null, reason, nowMs());
+      else await readFolder((await engine()).engine, nextRequestId, join(home, "workspace"), workspaceId,
+        (read) => settleOperations(storage, records, read, reason, nowMs()));
+      storage.restorePublicationReasons();
+      return true;
+    } catch (error) {
+      if (signal.aborted) throw error;
+      observe(() => options.onError?.(error, workspaceId));
+      return false;
+    }
+  }
+
+  // Every incarnation's writes. Those of an earlier incarnation, whose identity is gone, answer that the workspace changed.
+  async function settleWorkspace(workspaceId: string, reason: RefusalReason): Promise<boolean> {
+    const incarnations = unfinishedIncarnations(workspaceId);
+    if (incarnations.size === 0) return true;
+    const current = storage.listAutomationWorkspaces().find((row) => row.workspaceId === workspaceId)?.incarnation;
+    let settled = true;
+    for (const incarnation of incarnations) {
+      const answer = current === undefined || incarnation === current ? reason : WORKSPACE_CHANGED;
+      settled = await settleCopy(workspaceId, incarnation, answer) && settled;
+    }
+    return settled;
+  }
+
+  /**
+   * One attempt to publish an open copy's unsent phone writes, when it is
+   * due. The next comes sooner while they are active, and slowly once every
+   * one is stalled. Receipts that keep failing to read stall the writes.
+   */
+  async function publish(replica: AutomationReplica): Promise<void> {
+    const {workspaceId, incarnation} = replica;
+    const records = storage.listUnfinishedAccountOperations({workspaceId, incarnation});
+    const previous = publicationRetries.get(workspaceId);
+    if (records.length === 0) {
+      publicationRetries.delete(workspaceId);
+      return;
+    }
+    let read = false;
+    try {
+      read = await publishOnce(storage, replica, records, nowMs) !== null;
+    } catch (error) {
+      if (signal.aborted) throw error;
+      observe(() => options.onError?.(error, workspaceId));
+    }
+    const failures = read ? 0 : (previous?.failures ?? 0) + 1;
+    if (failures >= PUBLICATION_QUERY_FAILURES) stallOperations(storage, records, nowMs());
+    const left = storage.listUnfinishedAccountOperations({workspaceId, incarnation});
+    if (left.length === 0 || !replicas.has(workspaceId)) {
+      publicationRetries.delete(workspaceId);
+      return;
+    }
+    const delay = left.every((record) => record.stage === "stalled") ? PUBLICATION_STALLED_RETRY_MS
+      : Math.min(previous ? previous.delay * 2 : PUBLICATION_RETRY_FIRST_MS, PUBLICATION_RETRY_MAX_MS);
+    publicationRetries.set(workspaceId, {at: performance.now() + delay, delay, failures});
+  }
+
   let runningPass: Promise<boolean> | undefined;
   async function open(row: AutomationWorkspace): Promise<void> {
     if (workspaceIsDeleted(storage, row.workspaceId)) return;
@@ -185,6 +276,13 @@ export async function startAutomationReplicas(options: {
     await mkdir(root, {recursive: true, mode: 0o700});
     await mkdir(metadataDir, {recursive: true, mode: 0o700});
     // An earlier incarnation's replica belongs to an identity that is gone.
+    // The phone's writes in it settle before its folder goes, and before this
+    // one publishes anything.
+    for (const incarnation of unfinishedIncarnations(row.workspaceId)) {
+      if (incarnation !== row.incarnation && !(await settleCopy(row.workspaceId, incarnation, WORKSPACE_CHANGED))) {
+        throw new Error("This server couldn't settle the phone's writes in its earlier copy of the workspace.");
+      }
+    }
     for (const entry of await readdir(folder)) {
       if (entry !== String(row.incarnation)) await rm(join(folder, entry), {recursive: true, force: true});
     }
@@ -268,8 +366,8 @@ export async function startAutomationReplicas(options: {
       sync(callerSignal?: AbortSignal): Promise<void> {
         return syncRounds(Number.POSITIVE_INFINITY, callerSignal).then(() => undefined);
       },
-      step(): Promise<boolean> {
-        return syncRounds(ROUNDS_PER_PASS);
+      step(callerSignal?: AbortSignal): Promise<boolean> {
+        return syncRounds(ROUNDS_PER_PASS, callerSignal);
       },
       /** A sync is running or queued: it makes progress without the pass. */
       busy(): boolean {
@@ -282,6 +380,7 @@ export async function startAutomationReplicas(options: {
           failedSyncs.delete(row.workspaceId);
           busyRefusals.delete(row.workspaceId);
           syncRetries.delete(row.workspaceId);
+          publicationRetries.delete(row.workspaceId);
           closed.abort();
           await Promise.all([recordChain, syncChain]);
           await release();
@@ -350,6 +449,9 @@ export async function startAutomationReplicas(options: {
     let ok = true;
     let passFailure: unknown = null;
     await engine();
+    // A copy keeps the phone's unsent writes' reason exactly while they may still publish from it.
+    storage.restorePublicationReasons();
+    const publishing = new Set(storage.publishingCopies().map((copy) => copy.workspaceId));
     const wanted = new Map([...options.wanted()].filter(([id]) => !workspaceIsDeleted(storage, id)));
     for (const [workspaceId, reasons] of wanted) {
       ok = await each(workspaceId, async () => {
@@ -368,7 +470,9 @@ export async function startAutomationReplicas(options: {
           let opening: AutomationWorkspace | null = row;
           try {
             // The server lost this replica's folder, and its engine with it.
+            // The phone's writes in that folder can never publish, and none replays in a new one.
             if (await missing(join(folderOf(workspaceId), String(row.incarnation)))) {
+              await settleCopy(workspaceId, row.incarnation, COULD_NOT_SEND);
               opening = storage.replaceLostAutomationReplica({workspaceId, incarnation: row.incarnation, nowMs: nowMs()});
             }
             if (opening !== null) await open(opening);
@@ -399,14 +503,22 @@ export async function startAutomationReplicas(options: {
         const unwanted = () => !options.wanted().has(row.workspaceId);
         if (!unwanted()) return;
         const close = async () => { if (unwanted()) await replicas.get(row.workspaceId)?.close(); };
+        // The phone's writes in the folder settle first, while it can be read,
+        // and before the row goes, so a copy made again replays none of them.
+        // One whose receipts can't be read keeps the folder and the row.
         const retire = async () => {
+          if (!(await settleWorkspace(row.workspaceId, COULD_NOT_SEND))) return;
           await close();
           if (!unwanted()) return;
           await rm(folderOf(row.workspaceId), {recursive: true, force: true});
           storage.forgetAutomationWorkspace({workspaceId: row.workspaceId, incarnation: row.incarnation});
         };
         const kept = row.reasons.includes("automation");
-        if (row.reasons.length === 0) {
+        // Phone writes that may still publish keep the copy's folder and
+        // credential, past the places it has now, until they settle.
+        if (publishing.has(row.workspaceId)) {
+          await close();
+        } else if (row.reasons.length === 0) {
           await retire();
         } else if (row.leftAtMs === null) {
           const left = storage.unwantAutomationWorkspace({workspaceId: row.workspaceId, nowMs: nowMs()});
@@ -425,14 +537,22 @@ export async function startAutomationReplicas(options: {
     const rows = storage.listAutomationWorkspaces();
     const rowIds = new Set(rows.map((row) => row.workspaceId));
     for (const replica of [...replicas.values()]) {
-      if (!rowIds.has(replica.workspaceId)) ok = await each(replica.workspaceId, () => replica.close()) && ok;
+      if (!rowIds.has(replica.workspaceId)) {
+        ok = await each(replica.workspaceId, async () => {
+          await settleWorkspace(replica.workspaceId, COULD_NOT_SEND);
+          await replica.close();
+        }) && ok;
+      }
     }
     for (const workspaceId of [...failedSyncs.keys()]) if (!rowIds.has(workspaceId) && !wanted.has(workspaceId)) {
       failedSyncs.delete(workspaceId);
       busyRefusals.delete(workspaceId);
       syncRetries.delete(workspaceId);
     }
-    const kept = JSON.stringify(rows.map((row) => row.workspaceId));
+    // A folder no row names may still hold phone writes to settle.
+    const unsettled = new Map(storage.listUnfinishedOperationCopies().filter((copy) => !rowIds.has(copy.workspaceId))
+      .map((copy) => [folderOf(copy.workspaceId), copy.workspaceId]));
+    const kept = JSON.stringify([rows.map((row) => row.workspaceId), [...unsettled.values()]]);
     if (kept !== swept) {
       const folders = new Set(rows.map((row) => folderOf(row.workspaceId)));
       let swept_ = true;
@@ -440,6 +560,11 @@ export async function startAutomationReplicas(options: {
         const path = join(options.root, entry);
         // The daemon needs this configuration again after an engine exit.
         if (path === configPath || folders.has(path)) continue;
+        const holder = unsettled.get(path);
+        if (holder !== undefined && !(await settleWorkspace(holder, COULD_NOT_SEND))) {
+          swept_ = false;
+          continue;
+        }
         try {
           await rm(path, {recursive: true, force: true});
         } catch (error) {
@@ -462,6 +587,27 @@ export async function startAutomationReplicas(options: {
         // A copy with more to sync goes on in the next pass, after the others.
         if (!(await replica.step())) schedule();
       }) && ok;
+    }
+    // A copy with unsent phone writes pushes them and checks what the relay
+    // accepted, even when nothing new reached the relay.
+    for (const replica of [...replicas.values()]) {
+      const {workspaceId} = replica;
+      if (!publishing.has(workspaceId) || !wanted.has(workspaceId)) {
+        publicationRetries.delete(workspaceId);
+        continue;
+      }
+      const retry = publicationRetries.get(workspaceId);
+      const now = performance.now();
+      if (replica.busy() || failedSyncs.has(workspaceId)) {
+        // A copy syncing now, or waiting to retry its sync, tries after that.
+        if (!retry || retry.at <= now) {
+          publicationRetries.set(workspaceId, {at: Math.max(now + PUBLICATION_RETRY_FIRST_MS, syncRetries.get(workspaceId)?.at ?? 0),
+            delay: retry?.delay ?? PUBLICATION_RETRY_FIRST_MS, failures: retry?.failures ?? 0});
+        }
+        continue;
+      }
+      if ((retry?.at ?? 0) > now) continue;
+      await publish(replica);
     }
     if (passFailure !== null) throw passFailure;
     return ok;
@@ -495,7 +641,11 @@ export async function startAutomationReplicas(options: {
       if (row.leftAtMs !== null) next = Math.min(next, row.reasons.includes("automation") ? row.leftAtMs + AUTOMATION_WORKSPACE_KEEP_AFTER_LEAVING_MS : nowMs());
       else if (row.unwantedSinceMs !== null) next = Math.min(next, row.unwantedSinceMs + AUTOMATION_WORKSPACE_LEAVE_AFTER_MS);
     }
-    return next === Number.POSITIVE_INFINITY ? undefined : Math.min(Math.max(next - nowMs(), 0), DEADLINE_MAX_WAIT_MS);
+    let wait = next === Number.POSITIVE_INFINITY ? next : Math.max(next - nowMs(), 0);
+    // A copy's next attempt to publish the phone's writes is a deadline of its own.
+    const now = performance.now();
+    for (const retry of publicationRetries.values()) wait = Math.min(wait, Math.max(retry.at - now, 0));
+    return wait === Number.POSITIVE_INFINITY ? undefined : Math.min(wait, DEADLINE_MAX_WAIT_MS);
   }
 
   // The wait for the nearest deadline, as the last pass found it. None until a
@@ -560,8 +710,7 @@ export async function startAutomationReplicas(options: {
   });
 
   await mkdir(options.root, {recursive: true, mode: 0o700});
-  const configPath = join(options.root, `owner-ingress-${randomBytes(8).toString("hex")}.json`);
-  await writeFile(configPath, JSON.stringify(selfHostedLiveProfile.nativeIngress), {flag: "wx", mode: 0o600});
+  const configPath = await writeEngineConfig(options.root);
   const stopWatching = observeRelayWrites(storage, () => schedule());
   schedule(0);
   const worker = Effect.runFork(passes.pipe(Effect.tapCause((cause) => Effect.sync(() => {
@@ -602,9 +751,12 @@ export async function startAutomationReplicas(options: {
     async deleteWorkspaces(workspaceIds: readonly string[]) {
       await runningPass?.catch(() => undefined);
       for (const id of workspaceIds) {
+        // Nothing publishes from a deleted workspace, so its phone writes settle first. A folder whose receipts can't be
+        // read stays for the sweep to settle once its row is gone.
+        const settled = await settleWorkspace(id, COULD_NOT_SEND);
         await replicas.get(id)?.close();
-        await rm(folderOf(id), {recursive: true, force: true});
-        failedSyncs.delete(id); busyRefusals.delete(id); syncRetries.delete(id);
+        if (settled) await rm(folderOf(id), {recursive: true, force: true});
+        failedSyncs.delete(id); busyRefusals.delete(id); syncRetries.delete(id); publicationRetries.delete(id);
       }
     },
     /** The daemon is running and a pass completed, even if individual workspaces failed. */
@@ -617,6 +769,8 @@ export async function startAutomationReplicas(options: {
     reconcile(workspaceId?: string): void {
       const retry = workspaceId === undefined ? undefined : syncRetries.get(workspaceId);
       if (retry) retry.at = performance.now();
+      const publication = workspaceId === undefined ? undefined : publicationRetries.get(workspaceId);
+      if (publication) publication.at = performance.now();
       schedule();
     },
     /** The workspaces whose copy failed to open, sync, leave, or go in the last pass, with why. */
@@ -628,6 +782,25 @@ export async function startAutomationReplicas(options: {
     /** Stops the passes, then closes every replica and the engine, waiting for work that ignores the abort. */
     close,
   };
+}
+
+// The copies' engine: a plain one, never the live host's.
+async function spawnEngine(engineExecutable: string, configPath: string, signal: AbortSignal, onExit?: () => void): Promise<EngineClient> {
+  return await createEngineClient({
+    command: engineExecutable, authToken: randomBytes(32).toString("base64url"),
+    env: {DOHC_ENGINE_OWNER_HOST_CONFIG: configPath, DOHC_ENGINE_READER_CONFIG: process.env.DOHC_ENGINE_READER_CONFIG},
+    privateLiveApplication: selfHostedLiveProfile.nativeClient,
+    protocolVersion: 2, capabilities: ["blobs"], connectTimeoutMs: REQUEST_DEADLINE_MS, signal,
+    ...(onExit ? {onExit} : {}),
+    onStderr: text => console.error("[automation-replicas]", text.trimEnd()),
+  });
+}
+
+// The engine reads this configuration at start.
+async function writeEngineConfig(root: string): Promise<string> {
+  const configPath = join(root, `owner-ingress-${randomBytes(8).toString("hex")}.json`);
+  await writeFile(configPath, JSON.stringify(selfHostedLiveProfile.nativeIngress), {flag: "wx", mode: 0o600});
+  return configPath;
 }
 
 async function missing(path: string): Promise<boolean> {
@@ -645,11 +818,78 @@ function replicaFolder(root: string, namespace: string, workspaceId: string): st
 }
 
 /**
+ * Opens a copy's workspace folder that no replica holds open, with no relay,
+ * only to read the receipts of the phone's writes in it, then closes it.
+ */
+async function readFolder<T>(engineClient: EngineClient, nextRequestId: () => number, root: string, workspaceId: string,
+  read: (reader: ReceiptReader) => Promise<T>): Promise<T> {
+  const send = async (method: string, params: {[key: string]: JsonValue}, workspace?: string) =>
+    (await engineClient.sendRequest({id: nextRequestId(), method, params, ...(workspace ? {workspace} : {}), deadlineMs: REQUEST_DEADLINE_MS})).result;
+  const opened = await send("workspace.open", {rootDir: root, workspaceId, captureMode: "none", recoverRunningDispatches: false}) as {workspace?: unknown} | null;
+  if (typeof opened?.workspace !== "string" || !opened.workspace) throw new Error("The engine did not open the copy's folder.");
+  const handle = opened.workspace;
+  try {
+    return await read(receiptReader({client: engineClient, nextRequestId}, handle));
+  } finally {
+    await send("workspace.close", {}, handle).catch(() => undefined);
+  }
+}
+
+/**
  * The server keeps no copies: they go at once, with their rows, rather than
  * after the retention a host move keeps them for. Call it at start when the
- * server keeps no copies of workspaces.
+ * server keeps no copies of workspaces. The phone's unfinished writes in a
+ * copy settle first, read with `settle`'s engine, started for that alone.
+ * A copy whose writes couldn't be settled keeps its folder and its row, so a
+ * later start tries again; without `settle`, every folder stays while one
+ * holds such writes, since only the namespace tells the folders apart.
  */
-export async function removeAutomationReplicas(storage: SyncRelayStorage, root: string): Promise<void> {
-  storage.forgetAutomationWorkspaces();
-  await rm(root, {recursive: true, force: true});
+export async function removeAutomationReplicas(storage: SyncRelayStorage, root: string,
+  settle?: {namespace: string; engineExecutable: string}): Promise<void> {
+  const unsettled = storage.listUnfinishedOperationCopies();
+  if (unsettled.length > 0 && settle) await settleRemovedCopies(storage, root, settle, unsettled);
+  const kept = [...new Set(storage.listUnfinishedOperationCopies().map((copy) => copy.workspaceId))];
+  storage.forgetAutomationWorkspaces(kept);
+  if (kept.length === 0) {
+    await rm(root, {recursive: true, force: true});
+    return;
+  }
+  console.error(`[sync-relay] Kept ${kept.length} copies of workspaces whose phone writes couldn't be settled yet.`);
+  if (!settle) return;
+  const folders = new Set(kept.map((workspaceId) => replicaFolder(root, settle.namespace, workspaceId)));
+  for (const entry of await readdir(root)) {
+    if (!folders.has(join(root, entry))) await rm(join(root, entry), {recursive: true, force: true});
+  }
+}
+
+// Copies are off, so nothing will push from these folders again: each write ends saved or refused.
+async function settleRemovedCopies(storage: SyncRelayStorage, root: string, settle: {namespace: string; engineExecutable: string},
+  copies: ReadonlyArray<{workspaceId: string; incarnation: number}>): Promise<void> {
+  await mkdir(root, {recursive: true, mode: 0o700});
+  const configPath = await writeEngineConfig(root);
+  let requestId = 0;
+  const nextRequestId = () => ++requestId;
+  try {
+    const engineClient = await spawnEngine(settle.engineExecutable, configPath, storage.unavailable);
+    try {
+      for (const {workspaceId, incarnation} of copies) {
+        const records = storage.listUnfinishedAccountOperations({workspaceId, incarnation});
+        const home = join(replicaFolder(root, settle.namespace, workspaceId), String(incarnation));
+        try {
+          if (await missing(home)) await settleOperations(storage, records, null, COULD_NOT_SEND, Date.now());
+          else await readFolder(engineClient, nextRequestId, join(home, "workspace"), workspaceId,
+            (read) => settleOperations(storage, records, read, COULD_NOT_SEND, Date.now()));
+        } catch (error) {
+          console.error(`[sync-relay] The phone's writes in the copy of workspace "${workspaceId}" couldn't be settled.`, error);
+        }
+      }
+    } finally {
+      engineClient.close();
+      await engineClient.waitForExit();
+    }
+  } catch (error) {
+    console.error("[sync-relay] The engine that settles the phone's writes in removed copies didn't start.", error);
+  } finally {
+    await rm(configPath, {force: true});
+  }
 }

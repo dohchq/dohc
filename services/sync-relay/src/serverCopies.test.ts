@@ -5,6 +5,7 @@ import type { AutomationReplica, startAutomationReplicas } from "./automationRep
 import { RelayError } from "./errors";
 import { ACCOUNT_VISIT_WORKSPACES, ACCOUNT_VISITS_PER_ACCOUNT, ACCOUNT_VISITS_PER_CALLER, startServerCopies, type CopyAutomations, type CopyVisitor } from "./serverCopies";
 import type { SyncRelayStorage } from "./storage";
+import type { CopyReason } from "./storage/automationWorkspaces";
 import type { StorageContext } from "./storage/context";
 import { closeTestStorages, testStorage } from "./testing";
 
@@ -39,7 +40,7 @@ async function copies(storage: SyncRelayStorage, automations?: CopyAutomations) 
       open.set(workspaceId, {
         workspaceId, ownerUserId: row.ownerUserId, incarnation: row.incarnation, reasons: row.reasons, startedAtMs: 1, pulledHead: 0,
         root: "unused", metadataDir: "unused", client: {} as unknown as EngineClient, workspace: "handle", signal: new AbortController().signal,
-        nextRequestId: () => 1, sync: async () => undefined, withRecordWork: (work) => work(),
+        nextRequestId: () => 1, sync: async () => undefined, step: async () => true, withRecordWork: (work) => work(),
       });
       hooks!.onChanged?.(workspaceId);
     }
@@ -69,7 +70,7 @@ async function copies(storage: SyncRelayStorage, automations?: CopyAutomations) 
       open.set(workspaceId, {
         workspaceId, ownerUserId: row.ownerUserId, incarnation: row.incarnation, reasons: row.reasons, startedAtMs: 1, pulledHead: 0,
         root: "unused", metadataDir: "unused", client: {} as unknown as EngineClient, workspace: "handle", signal: new AbortController().signal,
-        nextRequestId: () => 1, sync: async () => undefined, withRecordWork: (work) => work(),
+        nextRequestId: () => 1, sync: async () => undefined, step: async () => true, withRecordWork: (work) => work(),
       });
     },
   };
@@ -270,5 +271,36 @@ describe("an automation visit beside account visits", () => {
     account.release();
     await Promise.all([automation.visit, account.visit]);
     expect(storage.listAutomationWorkspaces()).toMatchObject([{ reasons: ["account", "automation"], unwantedSinceMs: null }]);
+  });
+});
+
+describe("the copies the phone's unsent writes keep", () => {
+  it("restores their reasons before the first pass, and gives them places within the account's limit", async () => {
+    const ids = Array.from({ length: ACCOUNT_VISITS_PER_ACCOUNT + 1 }, (_, n) => `w-${n}`);
+    const storage = await relay([...ids, "hidden"]);
+    for (const [n, workspaceId] of [...ids, "hidden"].entries()) {
+      // Each copy took a write during a visit that ended before the server restarted.
+      storage.joinAutomationWorkspace({ workspaceId, nowMs: 1, reasons: ["account"] });
+      storage.endCopyReason(workspaceId, "account");
+      storage.recordAccountOperation({ accountId: OWNER, operationId: `write-${workspaceId}`, binding: { workspaceId, operation: "send", args: { n } },
+        incarnation: 1, replicationEpoch: "epoch", streamIdentity: "stream", command: { stages: [] }, writesMessage: true, nowMs: n });
+    }
+    // A workspace hidden from the phone keeps no copy for its writes.
+    storage.setShowOnPhone({ ownerUserId: OWNER, workspaceId: "hidden", showOnPhone: false });
+    let atStart: Array<[string, readonly CopyReason[]]> = [];
+    let wanted: ReadonlyMap<string, readonly CopyReason[]> = new Map();
+    const started = await startServerCopies({
+      storage, root: "unused", engineExecutable: "unused", relayOrigin: "https://relay.example.test", key: new Uint8Array(32), namespace: "test",
+      startReplicas: async (options) => {
+        atStart = storage.listAutomationWorkspaces().map((row): [string, readonly CopyReason[]] => [row.workspaceId, row.reasons]);
+        wanted = options.wanted();
+        return { unavailable: false, replica: () => undefined, reconcile: () => undefined, deleteWorkspaces: async () => undefined,
+          failedSyncs: () => new Map(), settled: async () => undefined, close: async () => undefined };
+      },
+    });
+    cleanup.push(() => started.close());
+    expect(atStart).toEqual([["hidden", []], ...ids.map((id): [string, CopyReason[]] => [id, ["publication"]])]);
+    // The oldest writes first, and no more than the account may hold.
+    expect(wanted).toEqual(new Map(ids.slice(0, ACCOUNT_VISITS_PER_ACCOUNT).map((id): [string, CopyReason[]] => [id, ["publication"]])));
   });
 });
