@@ -61,7 +61,7 @@ const application = createShareWebApplication({
 const server = serveFetchHandler({
   handler: application.handle,
   requestLog: SHARE_WEB_REQUEST_LOG,
-  maxBodyBytes: url => signInBodyLimit(url.pathname) ?? (["/api/live/link-document", "/api/live/link-ticket"].includes(url.pathname) && config.linkLive ? config.linkLive.requests.maxRequestBytes : ["/api/live/named-session", "/api/live/named-ticket", "/api/live/named-documents", "/api/named-chat/messages"].includes(url.pathname) && config.namedBrowserSessionLimits
+  maxBodyBytes: url => signInBodyLimit(url.pathname) ?? (["/api/live/link-document", "/api/live/link-ticket"].includes(url.pathname) && config.linkLive ? config.linkLive.requests.maxRequestBytes : ["/api/live/named-session", "/api/live/named-ticket", "/api/live/named-documents", "/api/named-chat/messages", "/api/members/join-preview", "/api/members/join"].includes(url.pathname) && config.namedBrowserSessionLimits
     ? config.namedBrowserSessionLimits.maxRequestBytes : MAX_REQUEST_BODY_BYTES),
   streamBody: streamsRequestBody,
   oversized: url => url.pathname === "/api/named-chat/messages"
