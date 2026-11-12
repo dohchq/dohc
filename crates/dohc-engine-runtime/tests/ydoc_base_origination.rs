@@ -21,11 +21,11 @@ use dohc_engine_domain::{
 use dohc_engine_runtime::{
     CancellationToken, CaptureIngest, CaptureRetire, NoFaults, RuntimeError, WorkspaceSupervisor,
 };
-use dohc_engine_storage::{EngineStore, StorageError};
+use dohc_engine_storage::{EngineStore, StorageError, TxnOutcome};
 use dohc_engine_sync::{
-    AlwaysLive, NoLiveLeases, RelayCursor, ReplicationEnvelope, SyncError,
+    AlwaysLive, BaseOrigination, NoLiveLeases, RelayCursor, ReplicationEnvelope, SyncError,
     apply_replication_envelope, apply_ydoc_envelope, commit_relay_cursor,
-    drain_deferred_ydoc_for_key,
+    drain_deferred_ydoc_for_key, originate_ydoc_base_in_tx,
 };
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use std::path::Path;
@@ -4452,6 +4452,35 @@ async fn record_first_new_page_update(
         .lineage_claim_id
 }
 
+async fn settle_note(
+    handle: &dohc_engine_runtime::ActorHandle,
+    root: &Path,
+    key: &DocKey,
+    path: &str,
+    claim: Option<String>,
+    session: &str,
+    now_ms: i64,
+) {
+    handle
+        .ydoc_settle(
+            root.to_path_buf(),
+            key.clone(),
+            path.to_owned(),
+            ContentKind::Richdoc,
+            claim,
+            None,
+            session.to_owned(),
+            Arc::new(()),
+            now_ms,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            None,
+            None,
+        )
+        .await
+        .expect("settle the note");
+}
+
 async fn settle_and_close_new_page(
     handle: &dohc_engine_runtime::ActorHandle,
     root: &Path,
@@ -4459,24 +4488,16 @@ async fn settle_and_close_new_page(
     path: &str,
     claim: Option<String>,
 ) {
-    handle
-        .ydoc_settle(
-            root.to_path_buf(),
-            state.key.clone(),
-            path.to_owned(),
-            ContentKind::Richdoc,
-            claim,
-            None,
-            "new-page-session".to_owned(),
-            Arc::new(()),
-            400,
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-            None,
-            None,
-        )
-        .await
-        .expect("settle the new page");
+    settle_note(
+        handle,
+        root,
+        &state.key,
+        path,
+        claim,
+        "new-page-session",
+        400,
+    )
+    .await;
     handle
         .ydoc_close_session(
             state.key.clone(),
@@ -4677,4 +4698,214 @@ async fn a_first_version_that_needs_no_schema_version_write_originates_byte_iden
             "{kind:?}: the origination adds no update row"
         );
     }
+}
+
+/// The rich-document schema version the stored lineage names, if any.
+fn stored_schema_version(store: &EngineStore, key: &DocKey) -> Option<Any> {
+    let doc = store
+        .read_with(|conn| dohc_engine_collab::load_doc_in(conn, key))
+        .expect("load the stored lineage");
+    schema_version(&doc.encode_full_state())
+}
+
+/// `(settled_update_seq, head_update_seq)` for one lineage.
+fn settled_and_head(store: &EngineStore, key: &DocKey) -> (Option<i64>, i64) {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT settled_update_seq, head_update_seq FROM ydoc_docs \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .expect("read the lineage's positions")
+}
+
+fn moment_count(store: &EngineStore, key: &DocKey) -> i64 {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM moments \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                |row| row.get(0),
+            )
+        })
+        .expect("count moments")
+}
+
+/// A New page note typed and saved before its workspace synced, so nothing
+/// claimed it: its one update has no schema version, and its head is settled.
+async fn saved_unclaimed_new_page(db: &Path, root: &Path, ws: &str, path: &str) -> DocKey {
+    std::fs::create_dir_all(root.join("notes")).expect("notes dir");
+    std::fs::write(root.join(path), "").expect("New page's empty file");
+    seed_identity(db, ws);
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(db, 1).expect("open actor").actor;
+    let state = open_new_page(&handle, ws, path).await;
+    let typed = Ydoc::wire().richdoc_append_paragraph("Typed before sync.");
+    let claim = record_first_new_page_update(&handle, &state.key, path, typed).await;
+    assert!(
+        claim.is_none(),
+        "a workspace that does not sync claims nothing"
+    );
+    settle_note(
+        &handle,
+        root,
+        &state.key,
+        path,
+        None,
+        "new-page-session",
+        400,
+    )
+    .await;
+    supervisor.close(db).expect("close actor");
+    state.key
+}
+
+/// The schema version is written in the claim's own transaction. A claim that
+/// rolls back leaves no version, no claim and no row behind, and its retry
+/// proposes the same first version.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rolled_back_claim_leaves_no_schema_version_and_its_retry_proposes_the_same_base() {
+    const WS: &str = "ws-new-page-rollback";
+    const PATH: &str = "notes/rolled-back.md";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let key = saved_unclaimed_new_page(&db, scratch.path(), WS, PATH).await;
+    enable_sync(&db, WS);
+    let mut store = EngineStore::open(&db, 9_107).expect("open store");
+    let rows = read_lineage_rows(&store, &key);
+    let positions = settled_and_head(&store, &key);
+    assert_eq!(stored_schema_version(&store, &key), None);
+
+    let mut proposed = None;
+    let rolled_back = store.write_with(&NoFaults, |tx| {
+        let BaseOrigination::Originated { base_snapshot_sha } =
+            originate_ydoc_base_in_tx(tx, &key, PATH, None, None, 600)?
+        else {
+            panic!("the saved note originates");
+        };
+        proposed = Some(base_snapshot_sha);
+        Err::<(), _>(SyncError::RetryableState {
+            reason: "roll the claim back",
+        })
+    });
+    assert!(matches!(rolled_back, Err(SyncError::RetryableState { .. })));
+    assert_eq!(read_lineage_rows(&store, &key), rows, "no row stays behind");
+    assert_eq!(
+        settled_and_head(&store, &key),
+        positions,
+        "the head stays where it was"
+    );
+    assert!(!read_marker_state(&store, &key).1, "no claim stays behind");
+    assert_eq!(
+        stored_schema_version(&store, &key),
+        None,
+        "no schema version stays behind"
+    );
+    assert!(
+        read_local_ydoc_ops(&store).is_empty(),
+        "nothing is journaled"
+    );
+
+    let TxnOutcome::Committed(retried) = store
+        .write_with(&NoFaults, |tx| {
+            originate_ydoc_base_in_tx(tx, &key, PATH, None, None, 700)
+        })
+        .expect("retry the claim")
+    else {
+        panic!("the retried claim commits");
+    };
+    assert_eq!(
+        retried,
+        BaseOrigination::Originated {
+            base_snapshot_sha: proposed.expect("the rolled-back claim proposed a base"),
+        },
+        "the retry proposes the same first version"
+    );
+    assert_eq!(
+        read_lineage_rows(&store, &key).0,
+        rows.0 + 1,
+        "the claim adds the schema version's one row"
+    );
+    assert_first_version_names_its_schema_version(&store, "retried claim");
+}
+
+/// The schema version adds no text, so the first save after a claim wrote it
+/// adds no History entry and leaves the file as it was. The save settles the
+/// version's row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_first_save_after_the_schema_version_write_adds_no_history_entry() {
+    const WS: &str = "ws-new-page-no-stray-moment";
+    const PATH: &str = "notes/no-stray.md";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let key = saved_unclaimed_new_page(&db, scratch.path(), WS, PATH).await;
+    enable_sync(&db, WS);
+    let (moments, claim) = {
+        let mut store = EngineStore::open(&db, 9_107).expect("open store");
+        let TxnOutcome::Committed(BaseOrigination::Originated { .. }) = store
+            .write_with(&NoFaults, |tx| {
+                originate_ydoc_base_in_tx(tx, &key, PATH, None, None, 600)
+            })
+            .expect("claim the saved note")
+        else {
+            panic!("the saved note originates");
+        };
+        let (settled, head) = settled_and_head(&store, &key);
+        assert_eq!(
+            settled,
+            Some(head - 1),
+            "the schema version's row is the one unsettled row"
+        );
+        let claim = dohc_engine_collab::read_marker(&store, &key)
+            .expect("read marker")
+            .expect("marker exists")
+            .lineage_claim_id;
+        (moment_count(&store, &key), claim)
+    };
+    let file = std::fs::read_to_string(scratch.path().join(PATH)).expect("the saved file");
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 2).expect("reopen actor").actor;
+    handle
+        .ydoc_open_state(
+            WS.to_owned(),
+            800,
+            true,
+            None,
+            "main".to_owned(),
+            PATH.to_owned(),
+            Some(ContentKind::Richdoc),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("reopen the note");
+    settle_note(
+        &handle,
+        scratch.path(),
+        &key,
+        PATH,
+        claim,
+        "reopened-session",
+        900,
+    )
+    .await;
+    supervisor.close(&db).expect("close actor");
+    let store = EngineStore::open(&db, 9_108).expect("reopen for assertions");
+
+    assert_eq!(moment_count(&store, &key), moments, "no new History entry");
+    let (settled, head) = settled_and_head(&store, &key);
+    assert_eq!(
+        settled,
+        Some(head),
+        "the save settles the schema version's row"
+    );
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(PATH)).expect("the file"),
+        file,
+        "the file is unchanged"
+    );
 }

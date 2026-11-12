@@ -149,6 +149,7 @@ impl ContentKind {
 const SUCCESSOR_EPOCH_DOMAIN: &[u8] = b"dohc:ydoc-successor-epoch:v1";
 const SUCCESSOR_CLIENT_DOMAIN: &[u8] = b"dohc:ydoc-successor-client:v1";
 const SEED_CLIENT_DOMAIN: &[u8] = b"dohc:ydoc-seed-client:v1";
+const SCHEMA_VERSION_CLIENT_DOMAIN: &[u8] = b"dohc:ydoc-schema-version-client:v1";
 
 /// The Yjs client an editor seeds `key`'s lineage under, from the head it
 /// seeds.
@@ -173,6 +174,25 @@ pub fn seed_client_id(
         content_kind.as_str(),
         head_moment_id,
         head_blob_sha256,
+    ] {
+        let length = u64::try_from(field.len()).unwrap_or(u64::MAX);
+        hash.update(length.to_be_bytes());
+        hash.update(field.as_bytes());
+    }
+    let digest = hash.finalize();
+    u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]).max(1)
+}
+
+/// The Yjs client the engine adds `key`'s missing schema version under. One
+/// client per document, so a retried claim proposes the same base. The value
+/// fits a Yjs client id: nonzero and at most 32 bits.
+fn schema_version_client_id(key: &crate::DocKey) -> u32 {
+    let mut hash = Sha256::new();
+    hash.update(SCHEMA_VERSION_CLIENT_DOMAIN);
+    for field in [
+        key.workspace_id.as_str(),
+        key.version_id.as_str(),
+        key.object_id.as_str(),
     ] {
         let length = u64::try_from(field.len()).unwrap_or(u64::MAX);
         hash.update(length.to_be_bytes());
@@ -1478,6 +1498,25 @@ impl Ydoc {
         public.validate_public_baseline(&public.encode_full_state())?;
         public.project(ContentKind::Richdoc)?;
         Ok(candidate)
+    }
+
+    /// The update that gives this document of `key` the rich-document schema
+    /// version, or `None` when it already names one. New page's editor writes
+    /// a note's first update without the version (#3790).
+    pub(crate) fn missing_schema_version_update(
+        &self,
+        key: &crate::DocKey,
+    ) -> Result<Option<Vec<u8>>, CollabError> {
+        let meta = self.doc.get_or_insert_map(ROOT_META);
+        if meta.contains_key(&self.doc.transact(), "schemaVersion") {
+            return Ok(None);
+        }
+        let writer = Ydoc::with_client_id(u64::from(schema_version_client_id(key)));
+        writer.apply(&self.encode_full_state())?;
+        let meta = writer.doc.get_or_insert_map(ROOT_META);
+        Ok(Some(writer.with_delta(|txn| {
+            meta.insert(txn, "schemaVersion", Any::Number(1.0));
+        })))
     }
 
     /// Replace an outside fold's frontmatter without rebuilding its body.

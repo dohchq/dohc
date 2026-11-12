@@ -2611,6 +2611,41 @@ pub(crate) fn record_authorized_update_in_tx(
     )
 }
 
+/// Give an unclaimed rich document the schema version it lacks, in the
+/// caller's claim transaction, so the first version it claims passes public
+/// validation (#3790). Nothing seeds a New page note, and its editor writes
+/// the first update without the version.
+///
+/// `false` means an owner binding or a restore holds the document, so the
+/// write would be refused: the caller does not claim it yet, and a later
+/// claim moment adds the version. A document that needs no write, or that
+/// [`encode_origination_base_in_tx`] would decline, answers `true`.
+pub fn add_missing_schema_version_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    now_ms: i64,
+) -> Result<bool, CollabError> {
+    let marker = read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
+    if marker.content_kind != ContentKind::Richdoc
+        || marker.lineage_claim_status.has_claimed_base()
+        || (marker.head_update_seq == 0 && marker.head_snapshot_seq == 0)
+    {
+        return Ok(true);
+    }
+    let doc = load_doc_in(tx, key)?;
+    if doc.has_missing_updates() {
+        return Ok(true);
+    }
+    let Some(update) = doc.missing_schema_version_update(key)? else {
+        return Ok(true);
+    };
+    match record_update_in_tx(tx, key, &update, None, None, now_ms) {
+        Ok(_) => Ok(true),
+        Err(CollabError::OwnerOutboxFrozen | CollabError::RestoreFenced) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 /// Encode the base bytes (and their state vector) that originate `key`'s
 /// replicated lineage, from the state persisted inside the caller's
 /// transaction.
