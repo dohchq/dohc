@@ -11813,6 +11813,39 @@ mod projection_tests {
         assert!(incoming.validate_public_baseline(&bytes).is_err());
     }
 
+    /// New page opens a note before its file exists, so nothing seeds it: its
+    /// Y.Doc holds only the title and the text the editor typed. Shared as
+    /// that, its base has no schema version and the capture refuses it.
+    #[test]
+    fn a_new_page_base_without_a_seed_has_no_schema_version_and_is_refused() {
+        let doc = Ydoc::wire();
+        doc.doc.get_or_insert_map(ROOT_FRONTMATTER).insert(
+            &mut doc.doc.transact_mut(),
+            "title",
+            "Case one",
+        );
+        doc.richdoc_append_paragraph("Typed into a new page.");
+        let base = doc.encode_full_state();
+        let shared = Ydoc::wire();
+        shared.apply(&base).unwrap();
+        let meta = shared.doc.get_or_insert_map(ROOT_META);
+        assert_eq!(meta.len(&shared.doc.transact()), 0);
+        let refusal = shared.validate_public_baseline(&base).unwrap_err();
+        assert!(
+            matches!(&refusal, CollabError::MalformedUpdate { reason } if reason == "invalid public baseline schema"),
+            "{refusal:?}"
+        );
+        // The same note with the version the seed would have written passes.
+        meta.insert(
+            &mut shared.doc.transact_mut(),
+            "schemaVersion",
+            Any::Number(1.0),
+        );
+        shared
+            .validate_public_baseline(&shared.encode_full_state())
+            .expect("a seeded new page passes");
+    }
+
     /// Binds `source` to the document's current projection, as a crafted
     /// update from any collaborator can.
     fn witness_source(doc: &Ydoc, source: &str) -> String {

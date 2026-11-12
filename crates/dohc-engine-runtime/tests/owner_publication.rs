@@ -1643,6 +1643,113 @@ async fn first_audited_settlement_publishes_its_own_moment_over_an_imported_prel
     supervisor.close_all().unwrap();
 }
 
+/// A New page note typed before #3790's fix had its first version claimed
+/// without a schema version. The fix writes the version only before a claim,
+/// so it does not repair such a note: sharing it after the fix is still
+/// refused. This pins that limit; the workaround is to make the note again.
+#[tokio::test]
+async fn a_new_page_note_claimed_without_its_schema_version_before_the_fix_stays_refused() {
+    use dohc_engine_storage::StorageError;
+    use dohc_engine_sync::{
+        ApplyDisposition, NoLiveLeases, ReplicationEnvelope, apply_replication_envelope,
+    };
+    let root = ScratchDir::new().unwrap();
+    let db = engine_db_path(&root).unwrap();
+    let mut store = EngineStore::open(&db, 0).unwrap();
+    let path = "notes/typed-before-the-fix.md";
+    let key = DocKey::new("workspace", "main", "object").unwrap();
+    // What New page claimed before the fix: the typed body and no version.
+    let base = Ydoc::wire().richdoc_append_paragraph("Typed before the fix.");
+    let lineage = hex_sha256(&base);
+    dohc_engine_domain::VersionedTextStore::new(&mut store)
+        .ensure_main_version("workspace", "main", 0, &NoFaults)
+        .unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            for sql in [
+                "INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) VALUES ('workspace','origin','epoch','stream',1)",
+                "INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) VALUES ('workspace','origin',0)",
+                "INSERT INTO sync_relay_cursors (workspace_id,cursor,replication_epoch,stream_identity) VALUES ('workspace','1','epoch','stream')",
+            ] {
+                tx.execute(sql, []).map_err(StorageError::persist_public)?;
+            }
+            Ok::<_, StorageError>(())
+        })
+        .unwrap();
+    // The owner's device holds that first version as the relay serves it.
+    let mut cache = dohc_engine_collab::WriterDocCache::new();
+    cache.reader_resolver = Some(Arc::new(
+        dohc_engine_collab::reader_resolver::ReaderResolver::new(Arc::new(
+            dohc_engine_reader::Reader::new(Some(support::fake_reader(&root, "witness-safe"))),
+        )),
+    ));
+    let digest = store.put_binary_blob(&base).unwrap();
+    let op = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
+        workspace_id: "workspace".into(),
+        origin_id: "owner-peer".into(),
+        origin_seq: 0,
+        relay_seq: Some(1),
+        op_kind: "ydoc.update".into(),
+        payload: serde_json::json!({
+            "versionId":"main", "objectId":"object", "path":path, "contentKind":"richdoc",
+            "updateBlobSha256":digest, "lineageClaimId":lineage, "isBaseState":true
+        }),
+        recorded_at_ms: 10,
+    };
+    let applied = loop {
+        match apply_replication_envelope(&mut store, &mut cache, &op, &NoFaults, &NoLiveLeases) {
+            Ok(applied) => break applied,
+            Err(dohc_engine_sync::SyncError::MarkdownWitnessCheckPending { pending, .. }) => {
+                pending.resolve().await;
+            }
+            Err(error) => panic!("{error:?}"),
+        }
+    };
+    assert!(
+        !matches!(applied.primary, ApplyDisposition::Refused(_)),
+        "the device holds the first version claimed before the fix"
+    );
+
+    std::fs::create_dir(root.path().join("notes")).unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 3).unwrap().actor;
+    actor
+        .materialize_replay_pending(root.path().to_owned(), "workspace".into(), 20)
+        .await
+        .unwrap();
+    // Sharing after the fix asks the device to host the note.
+    match actor
+        .capture_imported_owner_activation(
+            "relay".into(),
+            key.clone(),
+            path.into(),
+            1_000_000,
+            None,
+            CancellationToken::new(),
+            Arc::new(()),
+        )
+        .await
+    {
+        Ok(_) => panic!("a first version claimed without its schema version must stay refused"),
+        Err(error) => assert!(
+            format!("{error:?}").contains("invalid public baseline schema"),
+            "refused for the missing schema version: {error:?}"
+        ),
+    }
+    assert_eq!(
+        dohc_engine_collab::read_marker(&store, &key)
+            .unwrap()
+            .unwrap()
+            .lineage_claim_id
+            .as_deref(),
+        Some(lineage.as_str()),
+        "the note keeps the first version it was claimed with"
+    );
+    supervisor.close_all().unwrap();
+}
+
 #[tokio::test]
 async fn observed_owner_cannot_use_ordinary_runtime_settlement() {
     let mut f = Fixture::new();
