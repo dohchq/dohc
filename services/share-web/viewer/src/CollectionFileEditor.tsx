@@ -106,7 +106,7 @@ export function CollectionFileEditor({session, path, blobSha256, available, onCl
     <main className="content collection-file-editor">
       {!available && <p role="alert">Editing is no longer available. Copy your text before closing this file.</p>}
       {status.kind === "loading" && <p role="status" className="muted">Opening the file…</p>}
-      {status.kind === "load-failed" && <div className="download-card"><p>dohc could not open this file for editing. Retry or ask the owner for access.</p>
+      {status.kind === "load-failed" && <div className="download-card"><p>dohc could not open this file for editing. Retry in a moment. If it keeps happening, ask the owner.</p>
         {available && <button className="handoff-button secondary" onClick={() => load(base.blobSha256)}>Retry</button>}</div>}
       <StatusLine status={status} onReload={hash => leave(() => load(hash))}/>
       {status.kind !== "loading" && status.kind !== "load-failed" &&
