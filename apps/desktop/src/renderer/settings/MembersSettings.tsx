@@ -410,7 +410,7 @@ export function MembersPage(props: {
           <SettingRow
             title="Invite link"
             testId="settings-members-link"
-            description={linkOn ? "Anyone with the link can join as a member." : undefined}
+            description={linkOn ? "Anyone with the link can join as a member." : "Turn it on to let anyone with the link join as a member."}
             aside={view.inviteLink?.url && linkOn ? (
               <div className="max-w-md">
                 <CopyField label="Copy invite link" copiedLabel="Invite link copied" copyTestId="settings-members-link-copy"
@@ -480,7 +480,7 @@ export function MembersPage(props: {
 
       <PeopleGroup title="People" count={groups.active.length} shown={shown.active} testId="settings-members-people" first={!filtering}>
         {(person) => (
-          <PersonRow key={person.memberId} person={person} viewer={view.viewer.memberId} showEmail={manages}
+          <PersonRow key={person.memberId} person={person} viewer={view.viewer.memberId} showEmail={manages} actions={manages}
             busy={busy(`person:${person.memberId}`)} menu={rowMenu(person)} />
         )}
       </PeopleGroup>
@@ -493,13 +493,13 @@ export function MembersPage(props: {
         <>
           <PeopleGroup title="Invites" count={groups.invited.length} shown={shown.invited} testId="settings-members-invites">
             {(person) => (
-              <PersonRow key={person.memberId} person={person} viewer={view.viewer.memberId} showEmail
+              <PersonRow key={person.memberId} person={person} viewer={view.viewer.memberId} showEmail actions
                 busy={busy(`person:${person.memberId}`)} menu={rowMenu(person)} />
             )}
           </PeopleGroup>
           <PeopleGroup title="Removed" count={groups.removed.length} shown={shown.removed} testId="settings-members-removed">
             {(person) => (
-              <PersonRow key={person.memberId} person={person} viewer={view.viewer.memberId} showEmail
+              <PersonRow key={person.memberId} person={person} viewer={view.viewer.memberId} showEmail actions
                 busy={busy(`person:${person.memberId}`)} menu={[]}
                 action={
                   <SecondaryButton size="row" data-testid="settings-members-let-back-in" disabled={busy(`person:${person.memberId}`)}
@@ -673,6 +673,8 @@ function PersonRow(props: {
   showEmail: boolean;
   busy: boolean;
   menu: readonly MoreMenuItem[];
+  // Whether the list has row actions, so a row without one keeps the column.
+  actions: boolean;
   action?: ReactNode;
 }) {
   const { person } = props;
@@ -720,7 +722,7 @@ function PersonRow(props: {
         </span>
       ) : props.menu.length > 0 ? (
         <MoreMenu label={`Actions for ${title}`} items={props.menu} testId="settings-members-row-menu" width={184} topLayer />
-      ) : props.action ? null : (
+      ) : props.action || !props.actions ? null : (
         <span aria-hidden className="size-6 shrink-0" />
       )}
     </li>
