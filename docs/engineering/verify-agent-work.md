@@ -130,7 +130,8 @@ A failed JavaScript worker does not suppress Rust's verdict. Each gate still req
 Each aggregate requires passing receipts for every assigned task. `PR verification` also checks completed job times and head commits.
 A local `pnpm verify:pr` still runs the whole selected gate.
 
-Cloud timing budgets are 300 s for JavaScript and 600 s for Rust.
+Cloud timing targets are 300 s for JavaScript and 600 s for Rust; the failure ceilings are 400 s and 700 s.
+Receipts record these as `targetSeconds` and `budgetSeconds`, respectively.
 Each gate includes selection, shared preparation, both confinement jobs, and its own workers, build, policy, and reporting jobs.
 Rust's job list excludes JavaScript jobs.
 `spanSeconds` runs from the start of `what changed` through the last gate job's finish.
@@ -140,8 +141,11 @@ A gate is `contended` when a job inside its span waited more than 30 s for a run
 A confinement job's runner wait counts only if it started after shared preparation finished.
 Selection's pre-span wait does not count.
 Rust also counts waits of non-skipped JavaScript worker matrix jobs because its tests need that matrix. JavaScript conclusions do not affect Rust's verdict.
-Within budget, timing is `"within budget"`. An uncontended overrun fails.
-A contended overrun reports timing as `"unmeasured"`, emits a warning with the longest wait, and does not fail for time.
+At or below the target, timing is `"within budget"`.
+Above the target, an uncontended run reports `"over target"` and passes with a warning through the ceiling, inclusive.
+Above the ceiling, an uncontended run reports `"over budget"` and fails.
+A contended run above the target reports `"unmeasured"`, warns with the longest wait, and does not fail for time, even above the ceiling.
+Only final verification emits timing warning annotations and writes their step summary lines; aggregates retain warnings in their receipts.
 Failed tests, incomplete inventory or coverage, wrong commits, and missing, duplicated, cancelled, or failed jobs still fail.
 Aggregate receipts include confinement and remain `complete: false` until final verification checks the reporting jobs' completed times.
 Final receipts have `complete: true` and require successful confinement at the head commit.

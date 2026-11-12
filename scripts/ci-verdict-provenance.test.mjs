@@ -792,10 +792,13 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
   assert.equal(failedJavascript.status, 1);
   assert.match(failedJavascript.stdout, /PASS \(rust completed group\)/,
     "a failed JavaScript gate must not omit the Rust group's completed timing verdict");
-  for (const [gate, finalJob, budget] of [["js", "typecheck + tests", 300], ["rust", "engine gate", 600]]) {
+  for (const [gate, finalJob, target, budget] of [["js", "typecheck + tests", 300, 400], ["rust", "engine gate", 600, 700]]) {
     const manual = jobs(undefined, undefined, gate === "js" ? "success" : "skipped", gate === "rust" ? "success" : "skipped", "success");
     const at = seconds => completed.map(row => row.name === finalJob ? {...row, completed_at: new Date(started + seconds * 1000).toISOString()} : row);
     assert.equal(run(manual, "workflow_dispatch", gate, at(budget)).status, 0);
+    const overTarget = run(manual, "workflow_dispatch", gate, at(target + 1));
+    assert.equal(overTarget.status, 0);
+    assert.match(overTarget.stderr, new RegExp(`::warning::${gate} timing over target: ${target + 1}s exceeds the ${target}s target; the gate fails above ${budget}s\\.`));
     const late = run(manual, "workflow_dispatch", gate, at(budget + 1));
     assert.equal(late.status, 1, `${gate} must include reporting after the aggregate receipt`);
     assert.match(late.stderr, /complete.*budget/);

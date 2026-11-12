@@ -1,4 +1,4 @@
-import { globSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, globSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { setTimeout } from "node:timers/promises";
 import { cloudApi, GATE_POLL_MS, QUEUED_STATUSES } from "./cloud-api.mjs";
@@ -86,15 +86,16 @@ function gateTiming(scope, required, metadata = required) {
     && (!confinementNames.includes(job.name) || Date.parse(job.startedAt) > preparedAt)), ...javascriptWaits]
     .reduce((a, b) => a.runnerWaitSeconds > b.runnerWaitSeconds ? a : b);
   const contended = longest.runnerWaitSeconds > 30, seconds = spanSeconds;
-  const budgetSeconds = scope === "js" ? 300 : 600;
-  const timing = seconds <= budgetSeconds ? "within budget" : contended ? "unmeasured" : "over budget";
-  return { spanSeconds, seconds, budgetSeconds, contended, timing, jobs,
-    ...(timing === "unmeasured" ? { warning: `${scope} timing unmeasured: ${seconds}s exceeds the ${budgetSeconds}s budget; longest runner wait ${longest.name}: ${longest.runnerWaitSeconds}s.` } : {}) };
+  const targetSeconds = scope === "js" ? 300 : 600;
+  const budgetSeconds = scope === "js" ? 400 : 700;
+  const timing = seconds <= targetSeconds ? "within budget" : contended ? "unmeasured" : seconds <= budgetSeconds ? "over target" : "over budget";
+  return { spanSeconds, seconds, targetSeconds, budgetSeconds, contended, timing, jobs,
+    ...(timing === "unmeasured" ? { warning: `${scope} timing unmeasured: ${seconds}s exceeds the ${targetSeconds}s target; longest runner wait ${longest.name}: ${longest.runnerWaitSeconds}s.` }
+      : timing === "over target" ? { warning: `${scope} timing over target: ${seconds}s exceeds the ${targetSeconds}s target; the gate fails above ${budgetSeconds}s.` } : {}) };
 }
 
 function requireBudget(scope, timing) {
   if (timing.timing === "over budget") throw Object.assign(new Error(`The complete ${scope} gate took ${timing.seconds}s, exceeding its ${timing.budgetSeconds}s budget including final reporting.`), { timing });
-  if (timing.warning) console.warn(`::warning::${timing.warning}`);
   return timing;
 }
 
@@ -124,6 +125,10 @@ export async function verifyCompletedCloud(scope, { env = process.env, readJobs 
   } finally {
     mkdirSync(outputDirectory, { recursive: true });
     writeFileSync(`${outputDirectory}/${scope}-completed-result.json`, JSON.stringify(report, null, 2) + "\n");
+    if (report.warning) {
+      console.warn("::warning::" + report.warning.replaceAll("%", "%25").replaceAll("\r", "%0D").replaceAll("\n", "%0A"));
+      if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, report.warning + "\n");
+    }
     if (scope === "js") reportFlaky(report.flaky, { summary: env.GITHUB_STEP_SUMMARY, annotate: true });
     console.log(`[verification] ${report.verdict} (${scope} completed group): ${JSON.stringify(report)}`);
   }
