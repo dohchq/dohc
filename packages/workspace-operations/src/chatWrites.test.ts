@@ -234,6 +234,30 @@ describe("answer", () => {
       await expect(answerWithReply(host, { threadId: "thread-plan", messageId: "question", replyId: "mine" }))
         .resolves.toMatchObject({ state: "resolved" });
     });
+
+    it("finds the question and the reply through the host's hook before it resolves", async () => {
+      const { store, host } = trip({ findMessage: true });
+      asked(store);
+      store.addThread({ id: "thread-other", channelId: "channel-trip", lane: "posts" });
+      store.addMessage({ id: "elsewhere", threadId: "thread-other" });
+      store.addMessage({ id: "mine", threadId: "thread-plan" });
+      await expect(answerWithReply(host, { threadId: "thread-plan", messageId: "question", replyId: "elsewhere" }))
+        .rejects.toThrow("no such message in this thread: elsewhere");
+      await expect(answerWithReply(host, { threadId: "thread-plan", messageId: "elsewhere", replyId: "mine" }))
+        .rejects.toThrow("no such message in this thread: elsewhere");
+      expect(store.log).not.toContain("resolve");
+    });
+  });
+
+  it("writes no reply when its host never checked the question", async () => {
+    const { store, host } = trip();
+    asked(store, ["Monday", "Tuesday"]);
+    const answer = host.answer;
+    host.answer = (command, _checkTargets, use) => answer(command, async () => undefined, use);
+    await expect(answerDecision(host, { threadId: "thread-plan", body: "Monday", resolves: { messageId: "question", chosenOption: "Monday" } }))
+      .rejects.toThrow("The question wasn't checked before the reply.");
+    expect(store.log).not.toContain("reply");
+    expect(store.messages.get("thread-plan")).toHaveLength(1);
   });
 
   it("judges the winner by the decision alone", () => {

@@ -85,6 +85,10 @@ export interface AnswerWithStages {
   resolve(command: ResolveCommand): Promise<ChatDecision>;
 }
 
+// Each write resolves the channel or thread it names under the host's own
+// read rules. A host whose store hides channels or threads from some callers
+// must refuse a hidden one with the same not-found answer its reads give,
+// before any row: the commands check only messages, through findMessage.
 export interface ChatWriteHost {
   workspaceId: string;
   store: ChatWriteReadStore;
@@ -276,12 +280,17 @@ export async function answerDecision(host: ChatWriteHost, input: AnswerInput): P
   };
   let chosenOption = input.question ? choose(input.question) : undefined;
   await checkInThread(host, input.parentMessageId, input.threadId);
+  // The question must be checked before the reply, so a host that never
+  // ran the check can't write a reply to a question it didn't read.
+  let checked = Boolean(input.question);
   const checkTargets = async () => {
     if (input.question) return;
     chosenOption = choose((await host.store.listThreadDecisions(host.workspaceId, input.threadId))
       .find((decision) => decision.messageId === input.resolves.messageId));
+    checked = true;
   };
   return await host.answer(command, checkTargets, async ({ reply, resolve }) => {
+    if (!checked) throw new Error("The question wasn't checked before the reply.");
     const message = await reply();
     try {
       return answerOutcome(message, await resolve({
@@ -300,6 +309,8 @@ export async function answerDecision(host: ChatWriteHost, input: AnswerInput): P
 // Marks a question answered with a reply that already saved. It posts
 // nothing, and the question need not be open: the winner says who answered.
 export async function answerWithReply(host: ChatWriteHost, input: AnswerWithInput): Promise<Answered> {
+  await checkInThread(host, input.messageId, input.threadId);
+  await checkInThread(host, input.replyId, input.threadId);
   return await host.answerWith(
     { threadId: input.threadId, questionId: input.messageId, replyId: input.replyId },
     async ({ reply, resolve }) => {
