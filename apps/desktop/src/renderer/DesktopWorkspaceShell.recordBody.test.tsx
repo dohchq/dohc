@@ -132,6 +132,30 @@ it("keeps the Collection's tab open when the text typed in its record's body can
   expect(bridge.writeWorkspaceText).toHaveBeenCalledWith(expect.objectContaining({ relativePath: "a.md", text: expect.stringContaining("Draft!") }));
 });
 
+it("takes Ctrl+/ for the body's Source only while focus is in the body", async () => {
+  collectionShell();
+  await within(await screen.findByRole("complementary", { name: "Record a" })).findByTestId("view-markdown");
+  const toggle = () => within(record()).getByTestId<HTMLButtonElement>("markdown-edit-toggle");
+  // The toggle names the next surface. The body opens in its editor, so the next one is Source.
+  await waitFor(() => expect(toggle().textContent).toBe("Source"));
+  expect(toggle().disabled).toBe(false);
+  expect(record().contains(document.activeElement)).toBe(false);
+
+  // Focus is on the Collection's page, outside the record's body: the shortcut is not the body's.
+  const outside = screen.getByRole("button", { name: "Open record a" });
+  outside.focus();
+  fireEvent.keyDown(outside, { key: "/", ctrlKey: true });
+  fireEvent.keyDown(document.body, { key: "/", ctrlKey: true });
+  expect(toggle().textContent).toBe("Source");
+
+  // Focus is in the body: the shortcut shows its Source, and takes it back, as in the file's own tab.
+  toggle().focus();
+  fireEvent.keyDown(toggle(), { key: "/", ctrlKey: true });
+  await waitFor(() => expect(toggle().textContent).toBe("WYSIWYG"));
+  fireEvent.keyDown(toggle(), { key: "/", ctrlKey: true });
+  await waitFor(() => expect(toggle().textContent).toBe("Source"));
+});
+
 it("saves the text typed in a record's body before the record's file opens in another editor group", async () => {
   const { bridge } = collectionShell({
     ...STORED_STATE,

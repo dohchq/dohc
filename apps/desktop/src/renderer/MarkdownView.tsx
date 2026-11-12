@@ -1168,6 +1168,8 @@ export function MarkdownView(props: {
   // The engine branch's scroller. It holds the top-matter (title, properties)
   // above the editor, which is where a frontmatter search hit actually lives.
   const engineDocPaneRef = useRef<HTMLDivElement | null>(null);
+  // The whole view: its actions where it draws them itself, its notices and its text.
+  const viewRef = useRef<HTMLDivElement | null>(null);
   // Where the person is in the read view, as of its last scroll. The editor
   // that replaces it opens at the same place.
   const readScroll = useRef<{ key: string | undefined; top: number } | null>(null);
@@ -1955,7 +1957,9 @@ export function MarkdownView(props: {
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       if (!hasPrimaryModifier(event, window.dohcDesktop?.platform) || event.key !== "/") return;
-      if (props.autoFocus === false) return;
+      // A file's view takes the shortcut in the active editor group. A record's body never takes focus by
+      // itself, so it takes the shortcut only while focus is in it.
+      if (props.recordBody ? !(event.target instanceof Node && viewRef.current?.contains(event.target)) : props.autoFocus === false) return;
       event.preventDefault();
       // Engine mode: the same keystroke drives the source-view toggle (the
       // legacy mode cycle is meaningless there — the CRDT editor is the only
@@ -2221,7 +2225,7 @@ export function MarkdownView(props: {
   // never a second editing surface (see the showSource comment above).
   if (displayDoc) {
     return (
-      <div className="flex min-h-0 flex-1 flex-col">
+      <div ref={viewRef} className="flex min-h-0 flex-1 flex-col">
         <ViewActions
           onShare={onShareCurrentPath}
           status={
@@ -2367,7 +2371,7 @@ export function MarkdownView(props: {
   }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div ref={viewRef} className="flex min-h-0 flex-1 flex-col">
       <ViewActions
         onShare={onShareCurrentPath}
         status={
