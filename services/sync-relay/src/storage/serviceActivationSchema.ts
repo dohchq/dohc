@@ -146,7 +146,7 @@ export function initializeServiceActivationSchema(db: SqliteDb): void {
     // verify the predecessor chain and each history row's activation when it
     // commits. Every column but `share_id` returns.
     db.exec("PRAGMA defer_foreign_keys=ON");
-    rebuildTables(db, [SERVICE_ACTIVATIONS, LIVE_DELIVERY_OWNER_HISTORY], table => table === SERVICE_ACTIVATIONS ? sql : historySql);
+    rebuildTables(db, [SERVICE_ACTIVATIONS, LIVE_DELIVERY_OWNER_HISTORY], table => table === SERVICE_ACTIVATIONS ? sql : historySql, ["share_id"]);
   } else if (!current && marked(V1_MIGRATION)) {
     if (!exact(db, SERVICE_ACTIVATIONS, "table", v1Sql) || present(LIVE_DELIVERY_OWNER_HISTORY)) throw new Error("Service activation storage is damaged.");
     assertV1Constraints(db);

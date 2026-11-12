@@ -3,12 +3,14 @@ import type { SqliteDb } from "./types";
 // SQLite cannot change a CHECK or drop a constrained column in place. Each of
 // `tables`, a parent before its children, is copied aside, dropped and created
 // again under its own name from `sqlFor`, which receives its current SQL.
-// Children drop first, so no drop cascades. The rows return with the columns
-// both layouts have, and a new column takes its default. Indexes, triggers and
+// Children drop first, so no drop cascades. The rows return with every old
+// column except those named in `dropped`, and a new column takes its default.
+// A column the new layout lacks and `dropped` doesn't name refuses. Indexes, triggers and
 // AUTOINCREMENT positions return after the rows, so no trigger runs on the
 // copy. A table outside `tables` that references one of them would lose its
 // rows, so it refuses.
-export function rebuildTables(db: SqliteDb, tables: readonly string[], sqlFor: (table: string, sql: string) => string): void {
+export function rebuildTables(db: SqliteDb, tables: readonly string[], sqlFor: (table: string, sql: string) => string,
+  dropped: readonly string[] = []): void {
   const marks = tables.map(() => "?").join(",");
   const outside = db.prepare(`SELECT s.name FROM sqlite_schema s JOIN pragma_foreign_key_list(s.name) f
     WHERE s.type = 'table' AND f."table" IN (${marks}) AND s.name NOT IN (${marks})`).all(...tables, ...tables);
@@ -30,6 +32,8 @@ export function rebuildTables(db: SqliteDb, tables: readonly string[], sqlFor: (
   for (const sql of created) db.exec(sql);
   for (const [index, table] of tables.entries()) {
     const kept = new Set(columnsOf(table));
+    const lost = previous[index]!.filter(name => !kept.has(name) && !dropped.includes(name));
+    if (lost.length) throw new Error("a rebuilt table would lose a column");
     const columns = previous[index]!.filter(name => kept.has(name)).join(", ");
     db.exec(`INSERT INTO main.${table} (${columns}) SELECT ${columns} FROM temp.${table}_previous`);
   }

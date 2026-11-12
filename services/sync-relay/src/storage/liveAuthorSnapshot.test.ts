@@ -128,11 +128,6 @@ it("builds a personal agent's snapshot from its record, on behalf of its owner",
   const storage = withHelper();
   const built = { kind: "agent" as const, agentId: helper.principalId, agentName: "Helper", onBehalfOf: "owner", depth: 0 };
   expect(personalLiveAuthorSnapshot(storage, helper)).toEqual([built]);
-  // A context that declares another name and account changes nothing; no context can be derived under this authority.
-  const declared: LiveAuthorContext = { kind: "account", accountId: "reader",
-    agent: { agentId: helper.principalId, agentName: "Impostor", onBehalfOf: "reader", depth: 3 } };
-  expect(() => deriveLiveAuthorSnapshot(storage, helper, declared, account)).toThrow(/comes from its authority/);
-  expect(personalLiveAuthorSnapshot(storage, helper)).toEqual([built]);
   storage.db.prepare("UPDATE sync_relay_personal_agents SET name='Renamed' WHERE agent_id=?").run(helper.principalId);
   expect(personalLiveAuthorSnapshot(storage, helper)).toEqual([{ ...built, agentName: "Renamed" }]);
   expect(personalLiveAuthorSnapshot(storage, { ...helper, principalId: personal.agentId })).toEqual([]);

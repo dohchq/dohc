@@ -2417,6 +2417,13 @@ fn audit_record_refused(
         )
         .unwrap();
         if index == at && matches!(result.primary, ApplyDisposition::Refused(_)) {
+            assert!(
+                matches!(&result.primary, ApplyDisposition::Refused(refusal)
+                    if refusal.reason.message()
+                        == "live audit record credits a personal agent the relay did not admit"),
+                "{:?}",
+                result.primary
+            );
             refused = true;
         } else {
             assert!(
