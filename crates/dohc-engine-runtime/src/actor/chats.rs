@@ -5,11 +5,11 @@ use dohc_engine_domain::{
     ChatAgentReadState, ChatAgentRequest, ChatAgentRequestDetail, ChatAttachment, ChatBookmark,
     ChatBookmarkTransition, ChatChannel, ChatChannelKind, ChatChannelSummary, ChatDecision,
     ChatFeedPage, ChatFeedReadState, ChatFollow, ChatMention, ChatMessage, ChatMessagePage,
-    ChatProjectionFileAccess, ChatReaction, ChatThread, ChatThreadLane, ChatThreadProjection,
-    ChatThreadReadState, CreateFileThread, DispatchClaim, DispatchRecovery, FollowTargetKind,
-    LinkedChatStore, MentionCursor, PendingBookmarkRow, ResolveDecision, RunRecordLink,
-    SaveBookmark, SendMessage, SetFollow, SetReaction, StartChannelThread, StreamPage,
-    StreamPosition, ThreadDispatchPause, ThreadWithChannel, UnreadFileThread,
+    ChatProjectionFileAccess, ChatReaction, ChatStagePublication, ChatThread, ChatThreadLane,
+    ChatThreadProjection, ChatThreadReadState, CreateFileThread, DispatchClaim, DispatchRecovery,
+    FollowTargetKind, LinkedChatStore, MentionCursor, PendingBookmarkRow, ResolveDecision,
+    RunRecordLink, SaveBookmark, SendMessage, SetFollow, SetReaction, StartChannelThread,
+    StreamPage, StreamPosition, ThreadDispatchPause, ThreadWithChannel, UnreadFileThread,
 };
 use dohc_engine_storage::NoFaults;
 use tokio_util::sync::CancellationToken;
@@ -160,6 +160,7 @@ impl ActorHandle {
         &self,
         input: StartChannelThread,
         author_actor_key: Option<String>,
+        stage_receipt: bool,
         token: CancellationToken,
     ) -> Result<(ChatThread, ChatMessage), RuntimeError> {
         self.run_chats(move |chats| {
@@ -167,6 +168,7 @@ impl ActorHandle {
                 Err(RuntimeError::Cancelled)
             } else {
                 chats
+                    .record_stage_receipts(stage_receipt)
                     .start_admitted_channel_thread(&input, author_actor_key.as_deref(), &NoFaults)
                     .map_err(RuntimeError::from)
             }
@@ -342,6 +344,7 @@ impl ActorHandle {
         &self,
         input: SendMessage,
         author_actor_key: Option<String>,
+        stage_receipt: bool,
         token: CancellationToken,
     ) -> Result<ChatMessage, RuntimeError> {
         self.run_chats(move |chats| {
@@ -349,6 +352,7 @@ impl ActorHandle {
                 Err(RuntimeError::Cancelled)
             } else {
                 chats
+                    .record_stage_receipts(stage_receipt)
                     .send_admitted_message(&input, author_actor_key.as_deref(), &NoFaults)
                     .map_err(RuntimeError::from)
             }
@@ -372,6 +376,7 @@ impl ActorHandle {
     pub async fn chat_decision_resolve(
         &self,
         input: ResolveDecision,
+        stage_receipt: bool,
         token: CancellationToken,
     ) -> Result<ChatDecision, RuntimeError> {
         self.run_chats(move |chats| {
@@ -379,9 +384,25 @@ impl ActorHandle {
                 Err(RuntimeError::Cancelled)
             } else {
                 chats
+                    .record_stage_receipts(stage_receipt)
                     .resolve_decision(&input, &NoFaults)
                     .map_err(RuntimeError::from)
             }
+        })
+        .await
+    }
+
+    /// Each stage key's receipt and its journal rows' publication, read from
+    /// one snapshot.
+    pub async fn chat_publication_state(
+        &self,
+        workspace_id: String,
+        stage_keys: Vec<String>,
+    ) -> Result<Vec<ChatStagePublication>, RuntimeError> {
+        self.run_chats(move |chats| {
+            chats
+                .publication_state(&workspace_id, &stage_keys)
+                .map_err(RuntimeError::from)
         })
         .await
     }
@@ -404,6 +425,7 @@ impl ActorHandle {
     pub async fn chat_reaction_set(
         &self,
         input: SetReaction,
+        stage_receipt: bool,
         token: CancellationToken,
     ) -> Result<ChatReaction, RuntimeError> {
         self.run_chats(move |chats| {
@@ -411,6 +433,7 @@ impl ActorHandle {
                 Err(RuntimeError::Cancelled)
             } else {
                 chats
+                    .record_stage_receipts(stage_receipt)
                     .set_reaction(&input, &NoFaults)
                     .map_err(RuntimeError::from)
             }

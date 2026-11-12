@@ -111,6 +111,7 @@ impl EngineService {
                 | "sync.applyPull"
                 | "sync.refusalNotices"
                 | "sync.dismissRefusal"
+                | "sync.ordinary.publicationState"
                 | "liveApplication.captureOwnerActivation"
                 | "liveApplication.releaseOwnerActivation"
                 | "liveApplication.ownerState"
@@ -499,6 +500,10 @@ impl EngineService {
             }
             "sync.refusalNotices" => {
                 self.sync_refusal_notices(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "sync.ordinary.publicationState" => {
+                self.sync_ordinary_publication_state(&ctx, request.workspace, request.params)
                     .await?
             }
             "sync.claim" => {
@@ -1467,6 +1472,7 @@ mod tests {
             "sync.applyPull",
             "sync.materializePendingCursor",
             "sync.commitCursor",
+            "sync.ordinary.publicationState",
             "sync.push",
             "sync.createHostedReplica",
             "sync.pullHosted",
@@ -1800,6 +1806,7 @@ mod tests {
             "sync.resetClaimRefusal",
             "sync.materializePendingCursor",
             "sync.commitCursor",
+            "sync.ordinary.publicationState",
             "sync.createHostedReplica",
             "sync.heldDocument",
             "sync.heldDocuments",

@@ -14,6 +14,7 @@ use crate::rpc::request::OperationCancellation;
 use crate::rpc::request::deserialize_optional_non_null;
 use crate::rpc::request::now_ms;
 use crate::rpc::request::parse;
+use crate::rpc::request::require_stage_receipt_key;
 use crate::rpc::request::required_idempotency_key;
 use dohc_engine_domain::ChatActorKind;
 use dohc_engine_domain::ChatAttachment;
@@ -68,6 +69,8 @@ struct ChatMessageSendParams {
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     wake_agent_ids: Option<Vec<String>>,
     now_ms: Option<i64>,
+    #[serde(default)]
+    stage_receipt: bool,
 }
 
 /// The automation executor names the automation that writes a message.
@@ -95,6 +98,8 @@ struct ChatDecisionResolveParams {
     resolved_by_message_id: String,
     chosen_option: Option<String>,
     now_ms: Option<i64>,
+    #[serde(default)]
+    stage_receipt: bool,
 }
 
 #[derive(Deserialize)]
@@ -116,6 +121,8 @@ struct ChatReactionSetParams {
     replication_author_id: Option<String>,
     state: String,
     now_ms: Option<i64>,
+    #[serde(default)]
+    stage_receipt: bool,
 }
 
 #[derive(Deserialize)]
@@ -593,6 +600,7 @@ impl EngineService {
         request_id: Option<String>,
     ) -> Result<Value, WireError> {
         let params: ChatMessageSendParams = parse(params)?;
+        require_stage_receipt_key(params.stage_receipt, request_id.as_deref())?;
         validate_actor_key(params.author_actor_key.as_deref())?;
         reject_capture_origin(params.origin.as_deref())?;
         let author_kind = parse_actor_kind(&params.author_kind)?;
@@ -630,6 +638,7 @@ impl EngineService {
                     request_id,
                 },
                 params.author_actor_key,
+                params.stage_receipt,
                 cancellation.token(),
             ),
         )
@@ -682,6 +691,7 @@ impl EngineService {
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                     request_id,
                 },
+                params.stage_receipt,
                 cancellation.token(),
             ),
         )
@@ -782,6 +792,7 @@ impl EngineService {
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                     request_id,
                 },
+                params.stage_receipt,
                 cancellation.token(),
             ),
         )

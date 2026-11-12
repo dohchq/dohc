@@ -245,6 +245,7 @@ export class ChatsLiveAdapter {
     threadId?: string;
     messageId?: string;
     idempotencyKey?: string;
+    stageReceipt?: boolean;
     automation?: ChatMessageAutomationInput;
     authorAgentId?: string;
     authorReported?: ChatReportedAgent;
@@ -302,6 +303,7 @@ export class ChatsLiveAdapter {
         ...(input.wakeAgentIds !== undefined && input.wakeAgentIds.length > 0
           ? { wakeAgentIds: input.wakeAgentIds }
           : {}),
+        ...(input.stageReceipt === true ? { stageReceipt: true as const } : {}),
       },
       { idempotencyKey: input.idempotencyKey ?? `${threadId}:${messageId}` },
     );
@@ -391,6 +393,7 @@ export class ChatsLiveAdapter {
     threadId: string;
     messageId?: string;
     idempotencyKey?: string;
+    stageReceipt?: boolean;
     automation?: ChatMessageAutomationInput;
     authorAgentId?: string;
     authorReported?: ChatReportedAgent;
@@ -444,6 +447,7 @@ export class ChatsLiveAdapter {
         ...(input.wakeAgentIds !== undefined && input.wakeAgentIds.length > 0
           ? { wakeAgentIds: input.wakeAgentIds }
           : {}),
+        ...(input.stageReceipt === true ? { stageReceipt: true as const } : {}),
       },
       { idempotencyKey: input.idempotencyKey ?? messageId },
     );
@@ -495,6 +499,8 @@ export class ChatsLiveAdapter {
     messageId: string;
     resolvedByMessageId: string;
     chosenOption?: string;
+    idempotencyKey?: string;
+    stageReceipt?: boolean;
   }): Promise<ChatDecision & { workspaceId: string }> {
     this.assertWorkspace(input.workspaceId);
     const decision = await this.request(
@@ -504,9 +510,10 @@ export class ChatsLiveAdapter {
         messageId: input.messageId,
         resolvedByMessageId: input.resolvedByMessageId,
         ...(input.chosenOption !== undefined ? { chosenOption: input.chosenOption } : {}),
+        ...(input.stageReceipt === true ? { stageReceipt: true as const } : {}),
       },
       {
-        idempotencyKey: `${input.messageId}:${input.resolvedByMessageId}`,
+        idempotencyKey: input.idempotencyKey ?? `${input.messageId}:${input.resolvedByMessageId}`,
       },
     );
     return { ...decision, workspaceId: input.workspaceId };
@@ -662,6 +669,8 @@ export class ChatsLiveAdapter {
     author: ChatReactionAuthor;
     replicationAuthorId?: string;
     state: "added" | "removed";
+    idempotencyKey?: string;
+    stageReceipt?: boolean;
   }): Promise<ChatReaction> {
     this.assertWorkspace(input.workspaceId);
     return this.request(
@@ -675,9 +684,10 @@ export class ChatsLiveAdapter {
           ? { replicationAuthorId: input.replicationAuthorId }
           : {}),
         state: input.state,
+        ...(input.stageReceipt === true ? { stageReceipt: true as const } : {}),
       },
       {
-        idempotencyKey: `reaction-${randomUUID()}`,
+        idempotencyKey: input.idempotencyKey ?? `reaction-${randomUUID()}`,
       },
     );
   }

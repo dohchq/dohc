@@ -3696,6 +3696,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("work_reference_chats.sql"),
         sets_user_version: None,
     },
+    // What each keyed chat write stage committed, for publication state.
+    Migration {
+        ordinal: 97,
+        id: "v2-chat-stage-receipts",
+        sql: include_str!("chat_stage_receipts.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -5735,6 +5742,10 @@ mod tests {
             (
                 "v2-work-reference-chats",
                 "6c97a01bc90c9bc22b1b4f65b1625283973da1ea08002af1e31d673d4484886c",
+            ),
+            (
+                "v2-chat-stage-receipts",
+                "19ac78d41361ece77935fc56ee6d3d8d07170e8c3edbd4bc8967319387d08582",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

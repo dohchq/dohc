@@ -172,6 +172,8 @@ type ChatThreadStartParams = ChatsJsonObject & {
   work?: ChatWorkReport;
   wakeAgentIds?: string[];
   nowMs?: number;
+  // Record a stage receipt; needs an idempotency key.
+  stageReceipt?: true;
 };
 type ChatThreadCreateParams = ChatsJsonObject & {
   threadId: string;
@@ -224,6 +226,7 @@ type ChatMessageSendParams = ChatsJsonObject & {
   work?: ChatWorkReport;
   wakeAgentIds?: string[];
   nowMs?: number;
+  stageReceipt?: true;
 };
 type ChatMessagesListParams = ChatsJsonObject & {
   threadId: string;
@@ -246,6 +249,7 @@ type ChatDecisionResolveParams = ChatsJsonObject & {
   resolvedByMessageId: string;
   chosenOption?: string;
   nowMs?: number;
+  stageReceipt?: true;
 };
 type ChatReactionSetParams = ChatsJsonObject & {
   threadId: string;
@@ -255,6 +259,7 @@ type ChatReactionSetParams = ChatsJsonObject & {
   replicationAuthorId?: string;
   state: "added" | "removed";
   nowMs?: number;
+  stageReceipt?: true;
 };
 type ChatThreadPageParams = ChatPageParams & { threadId: string };
 type ChatFileMentionsParams = ChatsJsonObject & { subject?: { path: string } | { objectId: string }; cursor?: string; scope: string; sharedChannelRowsUncovered: number };
