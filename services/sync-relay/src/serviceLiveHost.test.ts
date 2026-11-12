@@ -6578,6 +6578,16 @@ it.each([
   expect(o.native.entries).toEqual([]);
 });
 
+// Proves: Stop for a note that never went live finishes at once on a server
+// that hasn't hosted any note since it started, so it hasn't registered as
+// the host. Stop goes straight to the step that records it, with nothing prepared.
+it("stops a note that never went live on a server that hasn't hosted a note yet", async () => {
+  const o = await emptyServiceHost();
+  const fence = vi.fn((prepared?: ServiceHostRetirementPreparation) => prepared ?? "stopped");
+  await expect(o.host.stop({workspaceId: "workspace", objectId: o.other.objectId}, fence)).resolves.toBe("stopped");
+  expect(fence).toHaveBeenCalledExactlyOnceWith();
+});
+
 // Proves: a kept row that still says retrying does not hold Stop back once
 // the engine's queue holds nothing and no Try again.
 it("stops a document whose kept row still says retrying once its native queue is empty", async () => {
