@@ -97,8 +97,9 @@ export const ORDINARY_PUBLICATION_STATE_METHOD = "sync.ordinary.publicationState
 /** The most stage keys one publication-state request may name. */
 export const MAX_PUBLICATION_STAGE_KEYS = 256;
 
-// A committed stage's receipt, or `absent` when no stage with the key
-// committed in the workspace. Each journal row the stage added is `refused`
+// A committed stage's receipt, or `absent` when the workspace has no receipt
+// for the key. A keyed write made without `stageReceipt` also reads `absent`,
+// so `absent` doesn't prove the write never committed. Each journal row the stage added is `refused`
 // when a refusal is recorded for it, `pushed` at or below its origin's push
 // cursor, and `pending` otherwise.
 const StagePublication = Schema.Union([

@@ -2726,6 +2726,48 @@ fn a_receipted_stage_that_publishes_nothing_rolls_back() {
 }
 
 #[test]
+fn a_receipted_post_that_publishes_nothing_rolls_back_its_writes() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    let mut post = keyed_post("local-post", "thread", "opening", 20);
+    post.author_user_id = None;
+    post.needs_decision = false;
+    let journal = local_journal(&store);
+
+    let failed = receipted(&mut store).start_channel_thread(&post, &NO_FAULTS);
+    assert!(
+        matches!(
+            failed,
+            Err(dohc_engine_domain::DomainError::InvalidInput {
+                reason: "stage-not-published"
+            })
+        ),
+        "a local-only post receipted as written -> the phone reports saved for a post no copy sees."
+    );
+    let (threads, messages, ledger): (i64, i64, i64) = store
+        .read_with(|conn| {
+            let count = |sql: &str| conn.query_row(sql, [WS], |row| row.get::<_, i64>(0));
+            Ok::<_, rusqlite::Error>((
+                count("SELECT COUNT(*) FROM chat_threads WHERE workspace_id = ?1")?,
+                count("SELECT COUNT(*) FROM chat_messages WHERE workspace_id = ?1")?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM engine_requests WHERE request_id = 'local-post'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("counts");
+    assert_eq!(
+        (threads, messages, ledger),
+        (0, 0, 0),
+        "a refusal after the thread and message writes -> those writes must roll back with it."
+    );
+    assert_eq!(receipt(&store, "local-post"), None);
+    assert_eq!(local_journal(&store), journal);
+}
+
+#[test]
 fn a_receipted_reaction_on_an_unexported_message_is_refused() {
     let (_scratch, mut store) = store();
     seed_channel(&mut store);
