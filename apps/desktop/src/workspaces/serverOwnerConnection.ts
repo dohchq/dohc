@@ -178,12 +178,12 @@ export function createServerOwnerConnection(options: {
           const retired=z.object({ok:z.literal(true),path:z.string().min(1),objectId:z.literal(binding.objectId),status:z.literal("retired"),acceptedCursor:z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)}).parse(value);
           discovery.delete(workspace.workspaceId);return retired.acceptedCursor;
         },
-        async documents(attempt) {
+        async documents(attempt, fresh = false) {
           assertCurrent();
           const requestSignal = AbortSignal.any([signal, attempt]);
           requestSignal.throwIfAborted();
           const cached = discovery.get(workspace.workspaceId);
-          if (cached?.credentials === session.value && cached.until > Date.now()) return cached.value;
+          if (!fresh && cached?.credentials === session.value && cached.until > Date.now()) return cached.value;
           const response = await options.fetch(`${relayUrl}/sync/${encodeURIComponent(workspace.workspaceId)}/live-host`, {
             headers: {authorization: `Bearer ${session.value.token}`}, signal: requestSignal, redirect: "error",
           });

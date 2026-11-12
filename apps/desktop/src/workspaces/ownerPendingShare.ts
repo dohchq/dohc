@@ -24,24 +24,6 @@ export async function listOwnerPendingSharePaths(client: DraftLister, workspace:
 }
 
 /**
- * Which of these paths name a document this computer holds an owner binding
- * for on main, whatever its queue holds.
- */
-export async function listOwnerBoundPaths(client: DraftLister, workspace: string, paths: ReadonlySet<string>,
-  signal?: AbortSignal): Promise<Set<string>> {
-  const bound = new Set<string>();
-  let after: Parameters<EngineClient["ownerYDocListDrafts"]>[1]["after"] = null;
-  do {
-    const page = await client.ownerYDocListDrafts({ id: 0, workspace, deadlineMs: 30_000 }, { after, limit: 64 }, signal);
-    for (const draft of page.drafts) {
-      if (draft.binding.mainVersionId === "main" && paths.has(draft.binding.currentPath)) bound.add(draft.binding.currentPath);
-    }
-    after = page.next;
-  } while (after && bound.size < paths.size);
-  return bound;
-}
-
-/**
  * Each workspace's pending-share paths, read again when owner delivery or an
  * editor's share state changes, so a lookup never asks the engine. One read
  * runs per workspace at a time; changes during it read once more after it.

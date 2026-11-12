@@ -152,7 +152,7 @@ interface EngineYDocSessionIpcOptions {
   onError: (message: string, error?: unknown) => void;
   /** dohc refused an edit to `path` because its queue for the server takes no more. */
   onLiveEditsPaused?: (workspaceId: string, path: string) => void;
-  /** The owner opened a document of their own workspace in an editor here, not a shared view's. */
+  /** The owner opened a document of their own workspace in an editor here, not a shared view's, that the engine holds an owner binding for. */
   onOwnerOpened?: (workspaceId: string, path: string) => void;
   /** The person typing on this computer: the account, or this installation's id when signed out. */
   localPersonId: () => string;
@@ -884,7 +884,8 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           ? unavailableOpen({ engineMayHoldDocument: true })
           : unavailableOpen();
       }
-      if (!shared) this.#onOwnerOpened?.(workspace.workspaceId, canonicalPath);
+      // Only a note the engine holds an owner binding for can be hosted at its owner's open.
+      if (!shared && owned.provider.ownerBound) this.#onOwnerOpened?.(workspace.workspaceId, canonicalPath);
       return OpenEngineYDocSessionResult.parse({
         available: true,
         headSha256: owned.provider.headSha256,

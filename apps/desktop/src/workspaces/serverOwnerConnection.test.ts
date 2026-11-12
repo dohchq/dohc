@@ -36,6 +36,18 @@ it("discovers only owned synced workspaces and sends credentials only to their p
   await expect(session!.documents(new AbortController().signal)).rejects.toThrow("changed");
 });
 
+// Proves: a pass holding an owner's open reads the server's list, not the
+// one cached before it, and other reads keep the cache.
+it("reads the list fresh when asked, and from its cache otherwise", async () => {
+  const f = fixture(), session = (await f.connection.connect(f.workspace, new AbortController().signal))!;
+  const signal = new AbortController().signal;
+  await session.documents(signal);
+  await session.documents(signal);
+  expect(f.fetch).toHaveBeenCalledTimes(1);
+  await session.documents(signal, true);
+  expect(f.fetch).toHaveBeenCalledTimes(2);
+});
+
 it("sends the owner's kept-edits actions to the owner route, and reads the list fresh after one changes it", async () => {
   const f = fixture(), session = (await f.connection.connect(f.workspace, new AbortController().signal))!;
   const signal = new AbortController().signal;

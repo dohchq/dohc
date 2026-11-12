@@ -3811,6 +3811,7 @@ export function createWorkspaceEngineCapture(
         return current?.lineageClaimId ?? canonicalLineageClaimId;
       },
       get headSha256() { return current?.headSha256; },
+      get ownerBound() { return current?.ownerBound; },
       contentKind,
       get artifactAssets() {
         return current?.artifactAssets ?? [];
@@ -6316,6 +6317,7 @@ export function createWorkspaceEngineCapture(
           },
           path: session.path,
           get headSha256() { return session.headSha256; },
+          get ownerBound() { return session.ownerBound; },
           async readArtifactAsset(descriptor) {
             const bytes = await engine.readBinaryBlob({
               workspaceId,

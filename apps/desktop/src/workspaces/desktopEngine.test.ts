@@ -1348,9 +1348,6 @@ describe("server owner peer lifecycle", () => {
     const open = vi.fn(async (_path: string, _signal: AbortSignal): Promise<"hosted" | "refused"> => "refused");
     const {f, credentials} = await quarantinedOwner([{path: "notes/plan.md", objectId: "object"}], {open});
     f.dependencies.ownerPendingPaths = () => ["notes/plan.md", "notes/draft.md"];
-    // The engine holds an owner binding for the opened document.
-    const drafts = vi.spyOn(EngineClient.prototype, "ownerYDocListDrafts").mockImplementation(async () =>
-      ({drafts: [{binding: {mainVersionId: "main", currentPath: "notes/draft.md"}} as never], next: null}));
     ownerDeliveryMock.pass.mockResolvedValue("empty");
     const passes = async (count: number) => {
       for (let pass = 0; pass < count; pass++) {
@@ -1370,6 +1367,36 @@ describe("server owner peer lifecycle", () => {
       await vi.waitFor(() => expect(open).toHaveBeenCalledTimes(2));
       await passes(3);
       expect(open.mock.calls.map(call => call[0])).toEqual(["notes/draft.md", "notes/draft.md"]);
+    } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset();}
+  });
+
+  // Proves: an owner's open of a note the last list named live waits for a
+  // list read after it. The next pass asks once for the note the server
+  // retired since, not for the one still live, and no pass scans the
+  // engine's owner bindings.
+  it("asks once on the next pass for an opened note the server retired since its last list, and not for one still live", async () => {
+    const listed = [{path: "notes/plan.md", objectId: "object"}, {path: "notes/other.md", objectId: "other"}];
+    const open = vi.fn(async (_path: string, _signal: AbortSignal): Promise<"hosted" | "refused"> => "hosted");
+    const {f, credentials} = await quarantinedOwner(listed, {open});
+    const drafts = vi.spyOn(EngineClient.prototype, "ownerYDocListDrafts").mockImplementation(async () => ({drafts: [], next: null}));
+    ownerDeliveryMock.pass.mockResolvedValue("empty");
+    const passes = async (count: number) => {
+      for (let pass = 0; pass < count; pass++) {
+        const before = ownerDeliveryMock.pass.mock.calls.length;
+        f.engine.retryOwnerDelivery("owner");
+        await vi.waitFor(() => expect(ownerDeliveryMock.pass.mock.calls.length).toBeGreaterThan(before));
+      }
+    };
+    try {
+      expect(await f.engine.start()).toBe(true);
+      await vi.waitFor(() => expect(ownerDeliveryMock.pass).toHaveBeenCalled());
+      // The list named both live. The server retires plan.md without a Stop, then the owner opens both.
+      listed.splice(0, 1);
+      f.engine.ownerOpenedLiveDocument("owner", "notes/plan.md");
+      f.engine.ownerOpenedLiveDocument("owner", "notes/other.md");
+      await passes(3);
+      expect(open.mock.calls.map(call => call[0])).toEqual(["notes/plan.md"]);
+      expect(drafts).not.toHaveBeenCalled();
     } finally {credentials.abort(); drafts.mockRestore(); await f.close(); ownerDeliveryMock.pass.mockReset();}
   });
 
