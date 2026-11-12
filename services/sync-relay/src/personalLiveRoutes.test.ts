@@ -496,14 +496,14 @@ it("admits the agent's edit as the agent, whoever its update declares", async ()
   }
 });
 
-it.each([false, true])("renews the document's demand when the agent's session closes, unless its owner paused it; paused=%s", async paused => {
+it.each([null, "pause", "retire"] as const)("renews the document's demand when the agent's session closes, unless its owner paused or stopped it; owner_stop=%s", async ownerStop => {
   const f = await fixture(), helper = f.agent("helper");
   const socket = await editing(f, helper);
   const renew = vi.spyOn(f.storage, "renewPersonalSessionDemand");
-  if (paused) f.raw.exec(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET owner_stop='pause'`);
+  if (ownerStop) f.raw.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET owner_stop=?`).run(ownerStop);
   socket.ws.close();
   await vi.waitFor(() => expect(renew).toHaveBeenCalledOnce());
-  expect(renew.mock.results[0]).toEqual({ type: "return", value: !paused });
-  if (paused) expect(f.demandAtMs()).toBe(1);
+  expect(renew.mock.results[0]).toEqual({ type: "return", value: ownerStop === null });
+  if (ownerStop) expect(f.demandAtMs()).toBe(1);
   else expect(f.demandAtMs()).toBeGreaterThan(1);
 });
