@@ -5,7 +5,6 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import { mintLocalhostCa } from "../../../services/share-web/src/testing/localhostCa";
 import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
-import { editorTabTestId } from "../src/testPins";
 import { resolveEngineBinary } from "../src/testing/engineBinary";
 import { assertDesktopEngineHealthy, launchDesktopApp, type LaunchedDesktopApp } from "./helpers/desktopApp";
 import { readHistoryMoments } from "./helpers/history";
@@ -49,19 +48,26 @@ async function openCollection(page: Page) {
  * is named for its record, which this Collection names by its file, so the helper waits for the new record's panel
  * before it presses Open as page. Pressed sooner, it opens the page of the record before.
  *
- * It then closes the panel, so the specs go on with the record's page alone, as they did when New record opened it.
+ * It ends with the record's page showing in its tab, which is where New record used to leave these specs. The panel
+ * is not on screen then: it belongs to the Collection's tab, and shows again when a spec goes back to the Collection.
  */
 async function newRecordPage(page: Page, file = "Untitled") {
   await page.getByTestId("collection-new-record").click();
   const panel = page.getByRole("complementary", { name: file, exact: true });
   await panel.getByRole("button", { name: "Open as page", exact: true }).click({ timeout: 30_000 });
-  const tab = page.getByTestId(`tab-${COLLECTION}/${file}.md`);
-  await expect(tab).toBeVisible({ timeout: 30_000 });
-  await page.getByTestId(editorTabTestId(`tab://collection/${COLLECTION}`)).click();
+  await expect(page.getByTestId(`tab-${COLLECTION}/${file}.md`)).toBeVisible({ timeout: 30_000 });
+}
+/**
+ * Closes the record panel where the Collection shows one. A spec that goes back to the Collection after
+ * `newRecordPage` finds the panel on the record it made. Closing it leaves the Collection as it was when New record
+ * opened a record's page in a tab, with no record open beside the board. The panel is part of the Collection's page,
+ * so once `openCollection` has seen the page's New record button, the panel is on the page or it is not open.
+ */
+async function closeRecordPanel(page: Page) {
+  const panel = page.getByTestId("collection-record-panel");
+  if (await panel.count() === 0) return;
   await panel.getByRole("button", { name: "Close record", exact: true }).click();
-  await expect(page.getByTestId("collection-record-panel")).toHaveCount(0);
-  await tab.click();
-  await expect(tab).toHaveAttribute("data-active", "true");
+  await expect(panel).toHaveCount(0);
 }
 async function records(page: Page) {
   return page.evaluate(async collectionPath => {
@@ -437,6 +443,7 @@ test("@two-client a recipient restarts after a lost creation acknowledgement and
     expect(original.request.submitId).toEqual(expect.any(String));
     await expect.poll(async () => creationOps(await log(fixture.relay)).length, { timeout: 120_000 }).toBe(1);
     await openCollection(page);
+    await closeRecordPanel(page);
     await expect(page.getByTestId("collection-record-drafts")).toContainText("Saved on this computer. Waiting to send");
     await expect(page.getByTestId("collection-record-drafts").getByRole("button", { name: "Discard draft", exact: true })).toHaveCount(0);
     let beforeRelaunch = 0;
@@ -500,6 +507,7 @@ test("@two-client a recipient's record survives a restart while the relay is unr
     const [created] = await records(page);
     expect(created).toMatchObject({ creationDelivery: "pending" });
     await openCollection(page);
+    await closeRecordPanel(page);
     await expectWaitingDraft(page);
     let refusedBeforeRelaunch = 0;
     page = (await fixture.restartRecipient(() => { refusedBeforeRelaunch = refusedWrites; })).page;
