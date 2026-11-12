@@ -235,10 +235,19 @@ jobs:
       (vars.BLACKSMITH_BUILD_VCPUS == '4' || vars.BLACKSMITH_BUILD_VCPUS == '8') &&
       format('["blacksmith-{0}vcpu-ubuntu-2404"]', vars.BLACKSMITH_BUILD_VCPUS) || '["ubuntu-24.04"]') }}
     timeout-minutes: 20
+    defaults: &compute-defaults
+      run:
+        shell: ${{ github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'boat' && 'setpriv --inh-caps=-all --ambient-caps=-all bash -e {0}' || 'bash -e {0}' }}
     env:
       DOHC_CONFINEMENT_SUITES: exclude
       CARGO_INCREMENTAL: '0'
     steps:
+      - &boat-capability-check
+        name: Require unprivileged Boat run steps
+        if: github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'boat'
+        run: |
+          awk '/^Cap(Eff|Amb):/ { if ($2 !~ /^0+$/) bad = 1; seen[$1] = 1 } END { exit (bad || !seen["CapEff:"] || !seen["CapAmb:"]) }' /proc/self/status ||
+            { echo '::error::Boat run steps must have zero effective and ambient capabilities.'; exit 1; }
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           ref: ${{ github.sha }}
@@ -248,7 +257,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version-file: .node-version
-          cache: ${{ inputs.cache != 'cold' && 'pnpm' || '' }}
+          cache: ${{ inputs.cache != 'cold' && !(github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'boat') && 'pnpm' || '' }}
       - name: Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - name: Install dependencies
@@ -433,6 +442,7 @@ jobs:
     if: (github.event_name == 'workflow_dispatch' && inputs.gate != 'rust') || needs.changes.outputs.js == 'true'
     runs-on: &compute-runner ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'boat') && '["boat-xlarge"]' || (vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
     timeout-minutes: 25
+    defaults: *compute-defaults
     strategy:
       fail-fast: false
       matrix:
@@ -442,6 +452,7 @@ jobs:
       CARGO_INCREMENTAL: '0'
       GITHUB_TOKEN: ${{ github.token }}
     steps:
+      - *boat-capability-check
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           ref: ${{ github.sha }}
@@ -451,7 +462,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version-file: .node-version
-          cache: ${{ inputs.cache != 'cold' && 'pnpm' || '' }}
+          cache: ${{ inputs.cache != 'cold' && !(github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'boat') && 'pnpm' || '' }}
       - name: Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - name: Install dependencies
@@ -476,11 +487,13 @@ jobs:
     if: always() && !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.gate != 'rust') || needs.changes.outputs.js == 'true')
     runs-on: *compute-runner
     timeout-minutes: 40
+    defaults: *compute-defaults
     env:
       DOHC_CONFINEMENT_SUITES: exclude
       CARGO_INCREMENTAL: '0'
       GITHUB_TOKEN: ${{ github.token }}
     steps:
+      - *boat-capability-check
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           ref: ${{ github.sha }}
@@ -491,10 +504,10 @@ jobs:
         with:
           node-version-file: .node-version
       - id: pnpm-store
-        if: inputs.cache != 'cold'
+        if: inputs.cache != 'cold' && !(github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'boat')
         run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
-        if: inputs.cache != 'cold'
+        if: inputs.cache != 'cold' && !(github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'boat')
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
           key: node-cache-${{ runner.os }}-x64-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
@@ -542,10 +555,12 @@ jobs:
     if: (github.event_name == 'workflow_dispatch' && inputs.gate != 'js') || needs.changes.outputs.rust == 'true'
     runs-on: *compute-runner
     timeout-minutes: 25
+    defaults: *compute-defaults
     env:
       NEXTEST_PROFILE: without-confinement
       CARGO_INCREMENTAL: '0'
     steps:
+      - *boat-capability-check
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           ref: ${{ github.sha }}
@@ -599,6 +614,7 @@ jobs:
       ((github.event_name == 'workflow_dispatch' && inputs.gate != 'js') || needs.changes.outputs.rust == 'true')
     runs-on: *compute-runner
     timeout-minutes: 25
+    defaults: *compute-defaults
     strategy:
       fail-fast: false
       matrix:
@@ -608,6 +624,7 @@ jobs:
       CARGO_INCREMENTAL: '0'
       GITHUB_TOKEN: ${{ github.token }}
     steps:
+      - *boat-capability-check
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           ref: ${{ github.sha }}
@@ -617,7 +634,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version-file: .node-version
-          cache: ${{ inputs.cache != 'cold' && 'pnpm' || '' }}
+          cache: ${{ inputs.cache != 'cold' && !(github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'boat') && 'pnpm' || '' }}
       - name: Install dependencies
         run: pnpm install --frozen-lockfile && pnpm --filter @dohc/app-backend-runtime build
       - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf
@@ -656,10 +673,12 @@ jobs:
     if: always() && !cancelled() && needs.changes.result == 'success' && ((github.event_name == 'workflow_dispatch' && inputs.gate != 'js') || needs.changes.outputs.rust == 'true')
     runs-on: *compute-runner
     timeout-minutes: 25
+    defaults: *compute-defaults
     env:
       NEXTEST_PROFILE: without-confinement
       CARGO_INCREMENTAL: '0'
     steps:
+      - *boat-capability-check
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           ref: ${{ github.sha }}
@@ -669,7 +688,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version-file: .node-version
-          cache: ${{ inputs.cache != 'cold' && 'pnpm' || '' }}
+          cache: ${{ inputs.cache != 'cold' && !(github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'boat') && 'pnpm' || '' }}
       - name: Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - name: Install dependencies
@@ -701,11 +720,13 @@ jobs:
     if: always() && !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.gate != 'js') || needs.changes.outputs.rust == 'true')
     runs-on: *compute-runner
     timeout-minutes: 40
+    defaults: *compute-defaults
     env:
       NEXTEST_PROFILE: without-confinement
       CARGO_INCREMENTAL: '0'
       GITHUB_TOKEN: ${{ github.token }}
     steps:
+      - *boat-capability-check
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           ref: ${{ github.sha }}
@@ -716,10 +737,10 @@ jobs:
         with:
           node-version-file: .node-version
       - id: pnpm-store
-        if: inputs.cache != 'cold'
+        if: inputs.cache != 'cold' && !(github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'boat')
         run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
-        if: inputs.cache != 'cold'
+        if: inputs.cache != 'cold' && !(github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'boat')
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
           key: node-cache-${{ runner.os }}-x64-pnpm-${{ hashFiles('pnpm-lock.yaml') }}

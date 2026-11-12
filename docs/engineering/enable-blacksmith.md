@@ -95,6 +95,8 @@ It runs 4 JavaScript workers and 2 Rust partitions: 9 Boat jobs and 13 jobs in t
 Selection, final verification, and both confinement jobs stay on GitHub's `ubuntu-24.04` image.
 Boat's Landlock ABI 4 lacks the ABI 5 and 6 features that compiler confinement requires.
 The Boat dispatch overrides Blacksmith runner variables for that run.
+Boat's runner user can read files regardless of their permissions, so Boat jobs drop that capability before running commands.
+Boat jobs skip the pnpm store cache.
 
 Compare cold and warm runs before choosing larger runners or shorter timeouts.
 Record elapsed time, billed cost, peak memory, and disk use for each gate.

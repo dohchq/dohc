@@ -461,13 +461,37 @@ function evaluatedJobs(context) {
 }
 
 test("Boat is dispatch-only, overrides runner variables only for that dispatch, and keeps confinement on GitHub", () => {
-  const { jobs, env } = load(workflow);
+  const { jobs, env, defaults } = load(workflow);
+  assert.equal(defaults, undefined, "no workflow default can change the other jobs' shells");
+  const computeJobs = ["javascript-prepare", "javascript-workers", "javascript", "rust-archive", "rust-tests", "rust-policy", "rust"];
+  const setupCacheJobs = ["javascript-prepare", "confinement-compiler", "confinement-relay", "javascript-workers", "rust-tests", "rust-policy"];
+  const restoreCacheJobs = ["javascript", "rust"];
+  const capabilityCheck = jobs["javascript-prepare"].steps[0];
+  assert.equal(capabilityCheck.name, "Require unprivileged Boat run steps");
+  assert.equal(capabilityCheck.run, `awk '/^Cap(Eff|Amb):/ { if ($2 !~ /^0+$/) bad = 1; seen[$1] = 1 } END { exit (bad || !seen["CapEff:"] || !seen["CapAmb:"]) }' /proc/self/status ||
+  { echo '::error::Boat run steps must have zero effective and ambient capabilities.'; exit 1; }\n`);
+  for (const [id, job] of Object.entries(jobs)) {
+    if (computeJobs.includes(id)) {
+      assert.deepEqual(job.steps[0], capabilityCheck, id);
+      assert.equal(job.steps.find(step => step.run), job.steps[0], id);
+    } else {
+      assert.equal(job.defaults, undefined, id);
+      assert.ok(!job.steps.some(step => step.name === capabilityCheck.name), id);
+    }
+    assert.equal(job.steps.filter(step => step.uses?.startsWith("actions/setup-node@") && step.with.cache !== undefined).length, setupCacheJobs.includes(id) ? 1 : 0, id);
+    assert.equal(job.steps.filter(step => step.id === "pnpm-store").length, restoreCacheJobs.includes(id) ? 1 : 0, id);
+    assert.equal(job.steps.filter(step => step.uses?.startsWith("actions/cache/restore@")).length, restoreCacheJobs.includes(id) ? 1 : 0, id);
+    for (const step of job.steps) {
+      assert.equal(step.shell, undefined, `${id}: no step bypasses the job shell`);
+      if (step.uses?.startsWith("Swatinem/rust-cache@")) assert.equal(step.if, "inputs.cache != 'cold'", id);
+    }
+  }
   assert.deepEqual(jobs.changes.steps.map(step => step.id ?? step.uses), [
     "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5", "merge-base", "filter",
   ], "selection gains no checkout or step");
-  for (const enabled of ["", "false", "true"]) for (const buildSize of ["", "4", "8", "boat"]) {
-    for (const event of ["pull_request", "workflow_dispatch"]) for (const provider of ["github", "blacksmith", "blacksmith-builds", "boat", "unknown"]) {
-      const context = workflowContext({ enabled, buildSize, event, provider });
+  for (const enabled of ["", "false", "true", "boat"]) for (const buildSize of ["", "4", "8", "boat"]) {
+    for (const event of ["pull_request", "workflow_dispatch"]) for (const provider of ["github", "blacksmith", "blacksmith-builds", "boat", "unknown"]) for (const size of ["4", "8", "32", ""]) {
+      const context = workflowContext({ enabled, buildSize, event, provider, size });
       // Even a forged input on a PR cannot opt in.
       context.inputs.runner_provider = provider;
       context.vars.BOAT_ENABLED = "true";
@@ -481,6 +505,26 @@ test("Boat is dispatch-only, overrides runner variables only for that dispatch, 
         if (boat) assert.deepEqual(labels, [id === "javascript-prepare" ? "boat-large"
           : ["changes", "verification", "confinement-compiler", "confinement-relay"].includes(id) ? "ubuntu-24.04" : "boat-xlarge"], id);
         else assert.ok(labels.every(label => !label.startsWith("boat")), id);
+        const boatRunner = labels.some(label => label.startsWith("boat-"));
+        const expectedShell = boatRunner ? "setpriv --inh-caps=-all --ambient-caps=-all bash -e {0}" : "bash -e {0}";
+        const jobShell = job.defaults?.run?.shell;
+        for (const step of job.steps.filter(step => step.run)) {
+          assert.equal(jobShell ? workflowExpression(jobShell, context) : "bash -e {0}", expectedShell, `${id}: ${step.name ?? step.id}`);
+        }
+        if (computeJobs.includes(id)) assert.equal(workflowExpression(job.steps[0].if, context), boatRunner, id);
+        for (const cache of [undefined, "", "warm", "cold", "unknown"]) {
+          const cacheContext = { ...context, inputs: { ...context.inputs, cache } };
+          const enabledCache = cache !== "cold" && !boatRunner;
+          for (const step of job.steps) {
+            if (step.uses?.startsWith("actions/setup-node@")) {
+              assert.equal(step.with.cache === undefined ? undefined : workflowExpression(step.with.cache, cacheContext),
+                setupCacheJobs.includes(id) ? enabledCache ? "pnpm" : "" : undefined, `${id}: setup-node cache (${cache})`);
+            }
+            if (step.id === "pnpm-store" || step.uses?.startsWith("actions/cache/restore@")) {
+              assert.equal(workflowExpression(step.if, cacheContext), enabledCache, `${id}: pnpm store cache (${cache})`);
+            }
+          }
+        }
         const prerequisite = job.steps.filter(step => step.name === "Install missing browser system dependencies");
         assert.equal(prerequisite.length, ["javascript-workers", "javascript"].includes(id) ? 1 : 0, id);
         if (prerequisite.length) {
@@ -788,7 +832,11 @@ test("aggregate dependency caches restore the setup-node key without saving", ()
     assert.equal(steps.find(step => step.uses?.startsWith("actions/setup-node@")).with.cache, undefined);
     const store = steps.find(step => step.id === "pnpm-store");
     const restore = steps.find(step => step.uses?.startsWith("actions/cache/restore@"));
-    assert.equal(store.if, "inputs.cache != 'cold'");
+    for (const provider of ["github", "blacksmith", "blacksmith-builds", "boat"]) for (const cache of [undefined, "cold"]) {
+      const context = workflowContext({ event: "workflow_dispatch", provider });
+      context.inputs.cache = cache;
+      assert.equal(workflowExpression(store.if, context), cache !== "cold" && provider !== "boat");
+    }
     assert.equal(store.run, 'echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"');
     assert.equal(restore.if, store.if);
     assert.equal(restore.with.path, "${{ steps.pnpm-store.outputs.path }}");
