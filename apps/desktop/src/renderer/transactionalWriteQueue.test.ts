@@ -121,6 +121,24 @@ describe("the version a record's next change goes with", () => {
     expect(rules.inputs("edit")[1]).toEqual({ id: 1, expectedVersion: 1, values: { amount: 9 } });
   });
 
+  it("gives a read's version, after a receipt with none, to the changes that waited for it and to no change made after", async () => {
+    const rules = host(), first = open(rules), second = open(host());
+    first.queue.enqueue(edit(row(1, 1), name, "Alicia"));
+    first.queue.enqueue(edit(row(1, 1), name, "Alice"));
+    // The first change saves with no version in its receipt, so the second waits for a read of the record.
+    rules.calls[0]!.answer.resolve({ result: null });
+    await vi.waitFor(() => expect(rules.read).toHaveBeenCalled());
+    // Someone else changes the record meanwhile. The first page reads it at version 3, and the waiting change goes with that.
+    first.page.readShown(first.page.readStarted(), [row(1, 3)]);
+    await vi.waitFor(() => expect(rules.inputs("edit")).toHaveLength(2));
+    expect(rules.inputs("edit")[1]).toEqual({ id: 1, expectedVersion: 3, values: { name: "Alice" } });
+    // The second page still shows version 1. Its change is made after that read, and never showed what someone else did.
+    second.queue.enqueue(edit(row(1, 1), amount, 9));
+    rules.calls[1]!.answer.resolve({ result: { id: 1, version: 4 } });
+    await vi.waitFor(() => expect(rules.inputs("edit")).toHaveLength(3));
+    expect(rules.inputs("edit")[2]).toEqual({ id: 1, expectedVersion: 1, values: { amount: 9 } });
+  });
+
   it("follows the queue's own changes to a record one after another, from the version each change's page showed", async () => {
     const rules = host(), first = open(rules), second = open(host());
     first.queue.enqueue(edit(row(1, 1), name, "Alicia"));
@@ -261,6 +279,12 @@ describe("a confirmed value a page's records do not show yet", () => {
     expect(page.confirmed(page.readStarted(), "2", 4)).toEqual({ values: { name: "Beatrice" }, version: 5 });
     // A copy of the record that showed another version did not see what the change was made over, and keeps its own.
     expect(page.confirmed(page.readStarted(), "2", 3)).toEqual({ values: { name: "Beatrice" }, version: 3 });
+    // A second change to the same field replaces its value, and the copy still moves along both changes.
+    queue.enqueue(edit(row(2, 5), name, "Bea"));
+    await vi.waitFor(() => expect(rules.calls).toHaveLength(2));
+    rules.calls[1]!.answer.resolve({ result: { id: 2, version: 6 } });
+    await vi.waitFor(() => expect(queue.size).toBe(0));
+    expect(page.confirmed(page.readStarted(), "2", 4)).toEqual({ values: { name: "Bea" }, version: 6 });
   });
 
   it("stays through a read of its record that started before the change was confirmed", async () => {
