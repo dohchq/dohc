@@ -991,6 +991,9 @@ export class ChatsLoopbackEngine implements EngineTransport {
     return () => undefined;
   }
 
+  /** Nothing to release: the engine lives in memory. An adapter needs a client it can close. */
+  close(): void {}
+
   seedChannel(input: SeedChannelInput): ChatChannel {
     const state = this.workspace(input.workspace);
     const name = normalizeNonempty(input.name, "invalid-channel-name");

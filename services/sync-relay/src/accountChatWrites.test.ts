@@ -144,6 +144,8 @@ async function fixture() {
   storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 1, reasons: ["account"] });
   const raw = inspectDatabase(storagePath(storage));
   const engine = new TestEngine();
+  // The copy has files, so its active version exists, which placing a chat's file needs.
+  engine.files.seedTextFile({ workspace: WORKSPACE, path: "README.md", text: "# Trip\n", objectId: "object-readme" });
   // What the relay does with what the copy pushes.
   let relay: "accept" | "refuse" | "hold" = "accept";
   const pushed = (row: Row) => {
