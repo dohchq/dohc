@@ -20,6 +20,7 @@ import {
   type CollectionCellChange,
   type CollectionOptionCreate,
   type TableAbandonedDraft,
+  type TableNewRecord,
 } from "@dohc/collection-views";
 import type {
   CollectionQueryCursor,
@@ -132,13 +133,26 @@ async function findRecord(
  * `title`, then its `name`, where that holds text. Null for a record named
  * by its file.
  */
-function labelField(record: CollectionRecord): string | null {
+function labelField(values: ReadonlyArray<{ field: string; value: CollectionValue }>): string | null {
   for (const preferred of ["title", "name"]) {
-    const matches = record.values.filter((entry) => entry.field.toLowerCase() === preferred);
+    const matches = values.filter((entry) => entry.field.toLowerCase() === preferred);
     const entry = matches.find((candidate) => candidate.field === preferred) ?? matches.sort((a, b) => (a.field < b.field ? -1 : 1))[0];
     if (entry && typeof entry.value === "string" && entry.value.trim().length > 0) return entry.field;
   }
   return null;
+}
+
+/** How the shell makes a record the page asks for. */
+export interface NewRecordOptions {
+  /** The record's name, which names its file as a new page's title does. Absent, the file is Untitled. */
+  title?: string;
+  /** False keeps the record's file out of a tab. */
+  open?: boolean;
+  /**
+   * Receives why the record was not made, and what finishes a creation that
+   * stopped part way. True when the page shows it, so the shell reports nothing.
+   */
+  onFailure?(failure: { reason: string; retry: (() => void) | null }): boolean;
 }
 
 export interface CollectionPageProps extends RecordPanelHost {
@@ -153,12 +167,13 @@ export interface CollectionPageProps extends RecordPanelHost {
   // the page falls back to the schema's first view.
   activeViewName: string | null;
   onActiveViewChange: (viewName: string | null) => void;
-  // The shell creates the record file (untitled naming needs the file
-  // listing, which the shell owns) and opens it; adoption mints the id.
-  // `created` runs once the record exists, before it opens.
+  // The shell creates the record file (naming it needs the file listing,
+  // which the shell owns) and opens it in a tab unless asked not to;
+  // adoption mints the id. `created` runs once the record exists, before it opens.
   onNewRecord: (
     collectionPath: string,
     created?: (record: { path: string; recordId: string }) => void,
+    options?: NewRecordOptions,
   ) => void;
   // The md file IS the record. A record opens in the panel beside its view;
   // this opens its file in a tab, as the panel's Open as page does.
@@ -523,10 +538,79 @@ export function CollectionPage({
     refreshCoalescer.schedule();
   }, [settledWrites, refreshCoalescer]);
 
+  // The page is open. A creation that answers after it closed changes nothing on screen.
+  const pageOpen = useRef(true);
+  useEffect(() => {
+    pageOpen.current = true;
+    return () => {
+      pageOpen.current = false;
+    };
+  }, []);
+  // What starts the table's new row, while a table shows.
+  const startNewRow = useRef<(() => void) | null>(null);
   const newRecord = useCallback(
-    () => onNewRecord(collectionPath),
+    () => (startNewRow.current ? startNewRow.current() : onNewRecord(collectionPath)),
     [onNewRecord, collectionPath],
   );
+  const rowHost = useRef({ onNewRecord, enqueueCellChange, onError, onNotice, collectionName: collectionPath });
+  rowHost.current = { onNewRecord, enqueueCellChange, onError, onNotice, collectionName: details?.schema.name ?? collectionPath.split("/").at(-1) ?? collectionPath };
+  /**
+   * The table's new row. Saving it creates the record's file, named from
+   * the row's title or name, then writes each typed value as an edit of a
+   * cell does. One object for the page's life, so the table builds nothing again.
+   */
+  const tableNewRecord = useMemo((): TableNewRecord => {
+    const text = (value: CollectionValue) => (Array.isArray(value) ? value.join(", ") : String(value));
+    const save: TableNewRecord["save"] = (values, report) => {
+      const now = rowHost.current;
+      const entries = Object.entries(values).map(([field, value]) => ({ field, value }));
+      const named = labelField(entries);
+      const typed = entries.map((entry) => `${entry.field}: ${text(entry.value)}`).join(", ");
+      now.onNewRecord(collectionPath, (record) => {
+        // The record exists, so what was typed is written whether or not the page is still open.
+        for (const { field, value } of entries) now.enqueueCellChange({ recordId: record.recordId, recordPath: record.path, field, value });
+        const shown = () => {
+          if (!pageOpen.current) return;
+          report({ state: "saved" });
+          // A record past the rows loaded so far has no row to show it.
+          const loaded = store.getState();
+          if (!loaded.records.some((entry) => entry.id === record.recordId) && loaded.nextCursor !== null) {
+            rowHost.current.onNotice("Created a record. It is past the records loaded here.");
+          }
+        };
+        // The record's own row is on the page before the new row goes. A page that closed reads nothing again.
+        if (pageOpen.current) void store.refresh().then(shown, shown);
+      }, {
+        ...(named === null ? {} : { title: text(values[named] ?? null) }),
+        open: false,
+        onFailure: (failure) => {
+          if (pageOpen.current && report({ state: "refused", reason: failure.reason, ...(failure.retry ? { retry: failure.retry } : {}) })) return true;
+          // A record with nothing typed in it has nothing to keep, so the shell reports it as it does any creation.
+          if (typed === "") return false;
+          // The row went with its table, so what it held goes to a notice, which can make the record again.
+          const message = `dohc did not create a record in ${rowHost.current.collectionName}. ${failure.reason} You typed: ${typed}`;
+          rowHost.current.onError(message, new TextNotSavedError(message, typed), failure.retry ?? (() => save(values, () => false)));
+          return true;
+        },
+      });
+    };
+    return {
+      bind: (start) => {
+        startNewRow.current = start;
+        return () => {
+          if (startNewRow.current === start) startNewRow.current = null;
+        };
+      },
+      save,
+      onValueDropped: (field, value) => {
+        const why = dropRefusal.current() ?? "The field changed, or this view no longer shows it.";
+        const message = `dohc did not save what you typed in the ${field} field of the new record. ${why} You typed: ${text(value)}`;
+        rowHost.current.onError(message, new TextNotSavedError(message, text(value)));
+      },
+    };
+  }, [collectionPath, store]);
+  // Why the page may not write now, read when the new row gives a value back.
+  const dropRefusal = useRef<() => string | null>(() => null);
   // A board column's New: the record starts with the column's value, written
   // through the same queue as any edit once the record exists.
   const groupBy = activeView?.kind === "board" ? activeView.groupBy : undefined;
@@ -598,6 +682,7 @@ export function CollectionPage({
   const accessRefusal = () => !draftAccess.current.readOnly && !draftAccess.current.accessEnded ? null
     : draftAccess.current.writeRefusal ?? (draftAccess.current.accessEnded ? "Your access to this share ended."
       : "Your access to this share changed. Ask for Edit access, then reopen the share.");
+  dropRefusal.current = accessRefusal;
   // Each record as the page last had it, so text left in a cell whose record a refresh took still has its record's name and file.
   const knownRecords = useRef(new Map<string, CollectionRecord>());
   useEffect(() => {
@@ -940,7 +1025,7 @@ export function CollectionPage({
     if (openRecordId === null || automationsOpen) return null;
     const record = shownRecord;
     // The name opens for typing only where it is a text field's value, which the page writes as the table's cell does.
-    const nameFieldName = record === null ? null : labelField(record);
+    const nameFieldName = record === null ? null : labelField(record.values);
     const nameField = schema.fields.find((field) => field.name === nameFieldName && field.type === "text");
     const stored = nameField && record?.values.find((entry) => entry.field === nameField.name)?.value;
     const commands: RecordPanelCommand[] = record !== null && onOpenRecordHistory
@@ -1034,7 +1119,7 @@ export function CollectionPage({
       onSelectTab={(id) => { if (id !== "") onActiveViewChange(id); }}
       views={frameViews}
       automations={{ open: automationsOpen, count: automationCount(automations.file), onToggle: toggleAutomations }}
-      newRecord={readOnly ? undefined : { onClick: newRecord }}
+      newRecord={readOnly ? undefined : { onClick: newRecord, disabled: writesPaused }}
       menuLabel="Collection actions"
       menu={[
         { label: "View", commands: [
@@ -1113,7 +1198,7 @@ export function CollectionPage({
             fieldMarks={tableFieldMarks}
             renderButton={readOnly ? undefined : renderButton}
             onNearEnd={loadNextPage}
-            onNewRecord={readOnly ? undefined : newRecord}
+            newRecord={readOnly ? undefined : tableNewRecord}
           />
         )}
       </div>

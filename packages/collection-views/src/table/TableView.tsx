@@ -941,13 +941,14 @@ export function TableView({
     // An editor holding a value it cannot save keeps its place, as for a press on a cell.
     const held = editorRef.current?.querySelector<HTMLElement>("[data-unsaved]");
     if (held) return held.focus();
-    if (!newRow.row()) newRow.open();
     const typed = fieldsNow.current.findIndex(typesNew);
-    const field = fieldsNow.current[Math.max(typed, 0)];
-    if (!field) return;
+    const field = fieldsNow.current[typed];
+    // A table with no field to type in has no row to offer, so the host makes the record as it is.
+    if (!field) return contract.current.save({}, () => false);
+    if (!newRow.row()) newRow.open();
     setSelected({ recordId: NEW_RECORD_ROW, field: field.name });
     reveal.current = true;
-    if (typed >= 0 && field.type !== "checkbox" && !heldByHost(newRow.row()?.status ?? null)) startEdit(NEW_RECORD_ROW, typed);
+    if (field.type !== "checkbox" && !heldByHost(newRow.row()?.status ?? null)) startEdit(NEW_RECORD_ROW, typed);
     else setEditing(null);
   };
   // The host's own control, and a save that answers later, start the row as the table is then.
@@ -1131,24 +1132,30 @@ export function TableView({
       contract.current?.onValueDropped?.(name, cell.value);
     }
   }, [fields, newRow]);
-  // A host that stops taking new records takes what the row held, and the row goes.
-  useEffect(() => {
-    if (newRecord || !newRow.row()) return;
-    for (const [name, cell] of [...newRow.cells]) contract.current?.onValueDropped?.(name, cell.value);
+  // The row goes with nothing left to show it. The host gets it to save, or to finish a save that stopped
+  // part way, and reports the outcome its own way. A save the host still has is the host's already.
+  const release = useRef(() => {
+    const row = newRow.row();
+    if (!row) return;
+    const { status } = row;
+    const values = newRow.typed() ? newRow.values() : null;
+    // The row goes first, so an answer that comes at once finds no row to show it.
     newRow.close();
-  }, [newRecord, newRow]);
+    if (status?.state === "refused" && status.retry) status.retry();
+    else if (!heldByHost(status) && values) contract.current?.save(values, () => false);
+  }).current;
+  // A host that stops taking new records, as when a share's access ends, has no row.
+  useEffect(() => {
+    if (!newRecord) release();
+  }, [newRecord, release]);
   // The table closes, as with its view or its tab, which leaves the row. An open editor gives the row its text first.
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
-      queueMicrotask(() => {
-        const row = newRow.row();
-        if (!row || heldByHost(row.status) || !newRow.typed()) return;
-        contract.current?.save(newRow.values(), () => false);
-      });
+      queueMicrotask(release);
     };
-  }, [newRow]);
+  }, [release]);
 
   const clickCell = (row: number, column: number) => {
     // The press that brought this click left the new row, and a value there stops its save.

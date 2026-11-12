@@ -194,6 +194,8 @@ export function CollectionFrame({
           {newRecord ? (
             <PrimaryButton
               data-testid="collection-new-record"
+              // A table with a new row open keeps the row through this press, and moves the cursor to it.
+              data-starts-new-record=""
               disabled={newRecord.disabled}
               onClick={(event) => newRecord.onClick(event.currentTarget)}
               className="ml-1 inline-flex shrink-0 items-center gap-2 pl-2"

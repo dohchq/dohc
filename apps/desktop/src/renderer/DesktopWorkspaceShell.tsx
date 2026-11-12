@@ -3,7 +3,7 @@ import { useTypingRecoveryNotices } from "./shell/useTypingRecoveryNotices";
 import { isRefusalNoticeKind } from "../notices/refusalNoticeKind";
 import { useFolderAppOffers } from "./offers/useFolderAppOffers";
 import { withClosedEngineDocSession } from "./collab/engineDocLease";
-import { CreationPartialError } from "@dohc/cli/creation";
+import { CreationPartialError, creationPartialNotice } from "@dohc/cli/creation";
 import {shareSenderLabel} from "@dohc/security-contract/share-labels";
 import { AgentSettingsProvider } from "./workbench/AgentBadge";
 import { AgentColorContext, saveAgentColor } from "./workbench/AgentColorPicker";
@@ -61,7 +61,7 @@ import {
   saveOnlyLiveDocuments,
 } from "../ipc/bridgeContract";
 import { DROP_IMPORT_LIMITS, DROP_IMPORT_REFUSALS, isEditorMenuCommand } from "../ipc/channels";
-import { isHistoryCatchingUp, isLiveEditingRefusal, isLiveFolderRefusal, isPathTaken, isPrivacyDenied, isRestorePolicyRefusal, isLivePageOwnedRefusal, isSharedLiveFileRefusal, isStoppedWorkspaceRead, liveEditingStoppedPaths, livePageBody, livePagesBody, livePagesTitle, livePageTitle, readError, SHARED_LIVE_RESTORE_BODY, sharedLiveRestoreTitle, shouldRecheckShareAccess } from "../ipc/errorWords";
+import { isHistoryCatchingUp, isLiveEditingRefusal, isLiveFolderRefusal, isPathTaken, isPrivacyDenied, isRestorePolicyRefusal, isLivePageOwnedRefusal, isSharedLiveFileRefusal, isStoppedWorkspaceRead, liveEditingStoppedPaths, livePageBody, livePagesBody, livePagesTitle, livePageTitle, readError, SHARED_LIVE_RESTORE_BODY, sharedLiveRestoreTitle, shouldRecheckShareAccess, withErrorWords } from "../ipc/errorWords";
 import { SyncedDeletionRevivalError } from "../workspaces/syncedDeletionRefusal";
 import {
   hasUnacknowledgedShareSkips,
@@ -180,6 +180,7 @@ import { NewPage, type NewPageFile } from "./NewPage";
 import { displayFrontmatterValue, parseFrontmatter } from "./markdown/frontmatter";
 import { registerPendingEditorDraft } from "./pendingEditorDrafts";
 import { nextPagePath, pageFileStem } from "./workbench/new-file-name";
+import type { NewRecordOptions } from "./CollectionPage";
 import { NewCollectionDialog } from "./collections/NewCollectionDialog";
 import { type ShareViewRefresh, useShareDirectWrites } from "./shell/useShareDirectWrites";
 import { useSharedViewAccess } from "./shell/useSharedViewAccess";
@@ -4409,32 +4410,30 @@ export function DesktopWorkspaceShell(props: {
   // Human and agent creation share the same record identity and recovery path.
   const pendingRecordPaths = useRef(new Set<string>());
   const createCollectionRecord = useCallback(
-    async (collectionPath: string, created?: (record: { path: string; recordId: string }) => void) => {
-      const prefix = `${collectionPath}/`;
-      const scopedFiles = files
-        .filter((file) => file.path.startsWith(prefix))
-        .map((file) => ({ ...file, path: file.path.slice(prefix.length) }));
-      const scopedFolders = folders
-        .filter((folder) => folder.startsWith(prefix))
-        .map((folder) => folder.slice(prefix.length));
-      scopedFolders.push(...[...pendingRecordPaths.current].filter(path => path.startsWith(prefix)).map(path => path.slice(prefix.length)));
+    async (collectionPath: string, created?: (record: { path: string; recordId: string }) => void, options: NewRecordOptions = {}) => {
       const selection = workspaceSelection.current;
-      const name = uniqueUntitledPath(scopedFiles, scopedFolders, "md").slice(0, -3);
-      const reservedPath = `${collectionPath}/${name}.md`;
+      // The file takes its name from the record's name, as a new page's does from its title. A record with none is Untitled.
+      const occupied = new Set([...files.map((file) => file.path), ...folders, ...pendingRecordPaths.current].map((path) => path.toLowerCase()));
+      const stem = options.title === undefined ? "Untitled" : pageFileStem(options.title, bridge().platform);
+      const reservedPath = nextPagePath(collectionPath, stem, occupied, bridge().platform);
+      const name = reservedPath.slice(collectionPath.length + 1, -3);
       pendingRecordPaths.current.add(reservedPath);
+      // The page that asked shows a failure in place, where it still can. Otherwise the shell reports it.
+      const shownInPage = (reason: string, retry: (() => void) | null) => options.onFailure?.({ reason, retry }) ?? false;
       const execute = async (recordId?: string): Promise<void> => {
         if (workspaceSelection.current !== selection) return;
         if (shareView && !shareViewWritableRef.current) {
           const message = shareWriteRefusalRef.current;
-          reportShellError(message, new Error(message));
+          if (!shownInPage(message, null)) reportShellError(message, new Error(message));
           return;
         }
         try {
           const result = await bridge().createCollectionRecord({ workspaceId, collectionPath, name, recordId });
           if (workspaceSelection.current !== selection) return;
           if ("kind" in result) {
-            reportShellError("dohc could not finish this record.", new CreationPartialError(result),
-              result.retry.mode === "resume" ? () => void execute(result.retry.recordId) : null);
+            const resume = result.retry.mode === "resume" ? () => void execute(result.retry.recordId) : null;
+            // Files with no way to finish them stay in the notice too, whose details name them.
+            if (!shownInPage(creationPartialNotice(result), resume) || resume === null) reportShellError("dohc could not finish this record.", new CreationPartialError(result), resume);
             return;
           }
           await refreshFiles();
@@ -4444,16 +4443,16 @@ export function DesktopWorkspaceShell(props: {
             if (workspaceSelection.current !== selection) return;
             const restricted = shareView && !shareViewWritableRef.current;
             const reason = restricted ? shareWriteRefusalRef.current : result.reason ?? "The sync relay did not accept this record.";
-            reportShellError(reason, new Error(reason), restricted ? null : () => void createCollectionRecord(collectionPath, created));
+            if (!shownInPage(reason, null)) reportShellError(reason, new Error(reason), restricted ? null : () => void createCollectionRecord(collectionPath, created, options));
           } else created?.(result);
-          openFile(result.path);
+          if (options.open !== false) openFile(result.path);
         } catch (error) {
           if (shareView && shouldRecheckShareAccess(error)) await checkShareAccess();
           if (workspaceSelection.current !== selection) return;
           if (shareView && !shareViewWritableRef.current) {
             const message = shareWriteRefusalRef.current;
-            reportShellError(message, new Error(message));
-          } else reportShellError("Could not create a record.", error);
+            if (!shownInPage(message, null)) reportShellError(message, new Error(message));
+          } else if (!shownInPage(withErrorWords("dohc could not create this record.", error), null)) reportShellError("Could not create a record.", error);
         }
       };
       try { await execute(); }

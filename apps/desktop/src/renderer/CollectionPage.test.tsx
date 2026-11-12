@@ -25,6 +25,7 @@ import type { AutomationButtonState } from "@dohc/automation-executor/automation
 import { CollectionPage, DRAIN_RECORD_LIMIT, type CollectionPageProps } from "./CollectionPage";
 import { automationButtonsFor, disposeAutomationButtons, resetAutomationButtonsForTests } from "./collections/useAutomationButtons";
 import { deferred } from "../testing/deferred";
+import { TextNotSavedError } from "./shell/copyDetails";
 import {
   beginCollectionWriteOperation,
   enqueueCollectionFieldWrite,
@@ -611,9 +612,11 @@ describe("CollectionPage", () => {
     expect(screen.queryByRole("menu")).toBeNull();
     expect(screen.getByTestId("collection-record-count").textContent).toBe("0 records");
 
+    // Both start the one new row in place. Nothing is made until the row holds something and is saved.
     fireEvent.click(within(grid).getByRole("button", { name: "New record" }));
     fireEvent.click(screen.getByTestId("collection-new-record"));
-    expect(onNewRecord.mock.calls).toEqual([["tasks"], ["tasks"]]);
+    expect(document.querySelectorAll("[data-new-record]")).toHaveLength(1);
+    expect(onNewRecord).not.toHaveBeenCalled();
   });
 
   it("names the Collection's files from Customize… and opens one in a tab", async () => {
@@ -3085,5 +3088,181 @@ describe("table pickers", () => {
     // A click beside the link text edits the url.
     fireEvent.click(within(fieldCell(2)).getByRole("button", { name: "Edit site" }));
     expect(screen.getByRole<HTMLInputElement>("textbox").value).toBe("website.example");
+  });
+});
+
+describe("a new record in the table", () => {
+  const TWO_FIELDS: CollectionSchema = {
+    ...SCHEMA,
+    fields: [{ name: "title", type: "text" }, { name: "status", type: "select", options: ["Todo", "Doing"] }],
+  };
+  const grid = () => screen.getByRole("grid");
+  const newRow = () => document.querySelector<HTMLElement>("[data-new-record]");
+  const editorInput = () => document.querySelector<HTMLInputElement>("[data-cell-editor] input")!;
+  /** Starts the row from the frame, types a title, and leaves the title with a key. */
+  async function startRow(title: string, leave: "Enter" | "Tab") {
+    await screen.findByRole("grid");
+    fireEvent.click(screen.getByTestId("collection-new-record"));
+    fireEvent.change(editorInput(), { target: { value: title } });
+    fireEvent.keyDown(editorInput(), { key: leave });
+  }
+
+  it("starts a row in place, then creates the file and writes each typed value when the row is saved", async () => {
+    const bridge = makeBridge([record("rec-1", "Plan")], TWO_FIELDS);
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-new");
+    docMock.current = engineDocState({ available: true, doc });
+    const onNewRecord = vi.fn<CollectionPageProps["onNewRecord"]>();
+    const onOpenRecord = vi.fn();
+    const page = renderPage(bridge, onNewRecord, onOpenRecord);
+    await screen.findByText("Plan");
+
+    await startRow("Milk", "Tab");
+    // Nothing is made while the row is typed in.
+    expect(onNewRecord).not.toHaveBeenCalled();
+    fireEvent.keyDown(grid(), { key: "Enter" });
+    fireEvent.click(within(document.querySelector<HTMLElement>("[data-cell-editor]")!).getByText("Doing"));
+    // Tab past the last cell leaves the row, which saves it.
+    fireEvent.keyDown(grid(), { key: "Tab" });
+
+    expect(onNewRecord).toHaveBeenCalledOnce();
+    const [path, created, options] = onNewRecord.mock.calls[0]!;
+    expect(path).toBe("tasks");
+    // The file takes the record's name, and opens in no tab.
+    expect(options).toMatchObject({ title: "Milk", open: false });
+    expect(newRow()?.querySelector("[data-new-record-status='pending']")).not.toBeNull();
+
+    act(() => created!({ path: "tasks/Milk.md", recordId: "rec-new" }));
+    await waitFor(() => expect(doc.getMap("frontmatter").get("title")).toBe("Milk"));
+    // The first write settles, and the next typed value follows it through the same queue.
+    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saving" } });
+    page.rerender(pageWithHost(onNewRecord, onOpenRecord));
+    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saved-here" } });
+    page.rerender(pageWithHost(onNewRecord, onOpenRecord));
+    await waitFor(() => expect(doc.getMap("frontmatter").get("status")).toBe("Doing"));
+    await waitFor(() => expect(newRow()).toBeNull());
+    expect(onOpenRecord).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("collection-record-panel")).toBeNull();
+  });
+
+  it("names the file Untitled when the row has no title or name", async () => {
+    const bridge = makeBridge([], TWO_FIELDS);
+    const onNewRecord = vi.fn<CollectionPageProps["onNewRecord"]>();
+    renderPage(bridge, onNewRecord);
+    await screen.findByRole("grid");
+    fireEvent.click(within(grid()).getByRole("button", { name: "New record" }));
+    fireEvent.keyDown(editorInput(), { key: "Tab" });
+    fireEvent.keyDown(grid(), { key: "Enter" });
+    fireEvent.click(within(document.querySelector<HTMLElement>("[data-cell-editor]")!).getByText("Todo"));
+    fireEvent.keyDown(grid(), { key: "Tab" });
+    expect(onNewRecord).toHaveBeenCalledOnce();
+    expect(onNewRecord.mock.calls[0]![2]).not.toHaveProperty("title");
+  });
+
+  it("keeps the row and says why when the record is not made, and makes it once on Try again", async () => {
+    const bridge = makeBridge([], TWO_FIELDS);
+    const onNewRecord = vi.fn<CollectionPageProps["onNewRecord"]>();
+    const onError = vi.fn();
+    renderPage(bridge, onNewRecord, undefined, { onError });
+    await startRow("Milk", "Enter");
+    let shown = false;
+    act(() => {
+      shown = onNewRecord.mock.calls[0]![2]!.onFailure!({ reason: "The sync relay did not accept this record.", retry: null });
+    });
+
+    // The row shows it, so the shell reports nothing.
+    expect(shown).toBe(true);
+    expect(onError).not.toHaveBeenCalled();
+    const note = within(grid()).getByRole("note");
+    expect(note.textContent).toContain("The sync relay did not accept this record.");
+    expect(newRow()?.textContent).toContain("Milk");
+    fireEvent.click(within(note).getByRole("button", { name: "Try again" }));
+    expect(onNewRecord).toHaveBeenCalledTimes(2);
+    expect(onNewRecord.mock.calls[1]![2]).toMatchObject({ title: "Milk", open: false });
+    // The second try is in flight: the row offers no Try again to send it twice.
+    expect(within(grid()).queryByRole("note")).toBeNull();
+  });
+
+  it("finishes a creation that stopped part way from the row's Try again", async () => {
+    const bridge = makeBridge([], TWO_FIELDS);
+    const onNewRecord = vi.fn<CollectionPageProps["onNewRecord"]>();
+    renderPage(bridge, onNewRecord);
+    await startRow("Milk", "Enter");
+    const resume = vi.fn();
+    act(() => void onNewRecord.mock.calls[0]![2]!.onFailure!({ reason: "dohc created the record file but could not finish the record.", retry: resume }));
+    fireEvent.click(within(within(grid()).getByRole("note")).getByRole("button", { name: "Try again" }));
+    expect(resume).toHaveBeenCalledOnce();
+    // The same creation goes on: no second file is asked for.
+    expect(onNewRecord).toHaveBeenCalledOnce();
+  });
+
+  it("reports what was typed in a notice when the page closed before the record could not be made", async () => {
+    const bridge = makeBridge([], TWO_FIELDS);
+    const onNewRecord = vi.fn<CollectionPageProps["onNewRecord"]>();
+    const onError = vi.fn();
+    const view = renderPage(bridge, onNewRecord, undefined, { onError });
+    await startRow("Milk", "Enter");
+    view.unmount();
+    expect(onNewRecord.mock.calls[0]![2]!.onFailure!({ reason: "The sync relay did not accept this record.", retry: null })).toBe(true);
+
+    expect(onError).toHaveBeenCalledOnce();
+    const [message, error, retry] = onError.mock.calls[0]!;
+    expect(message).toBe("dohc did not create a record in Tasks. The sync relay did not accept this record. You typed: title: Milk");
+    expect(error).toBeInstanceOf(TextNotSavedError);
+    expect((error as TextNotSavedError).typed).toBe("title: Milk");
+    // The notice's Try again makes the record with what was typed.
+    (retry as () => void)();
+    expect(onNewRecord).toHaveBeenCalledTimes(2);
+    expect(onNewRecord.mock.calls[1]![2]).toMatchObject({ title: "Milk", open: false });
+  });
+
+  it("saves a typed row when the table closes, and changes nothing on screen once the page has closed", async () => {
+    const bridge = makeBridge([], TWO_FIELDS);
+    const onNewRecord = vi.fn<CollectionPageProps["onNewRecord"]>();
+    const onNotice = vi.fn();
+    vi.stubGlobal("dohcDesktop", bridge);
+    const view = render(pageWithHost(onNewRecord, undefined, { onNotice }));
+    await startRow("Milk", "Tab");
+    expect(onNewRecord).not.toHaveBeenCalled();
+    view.unmount();
+    await waitFor(() => expect(onNewRecord).toHaveBeenCalledOnce());
+    const queries = bridge.queryCollectionRecords.mock.calls.length;
+    // The creation answers after the page closed: it reads nothing again and says nothing.
+    onNewRecord.mock.calls[0]![1]!({ path: "tasks/Milk.md", recordId: "rec-new" });
+    await Promise.resolve();
+    expect(bridge.queryCollectionRecords.mock.calls.length).toBe(queries);
+    expect(onNotice).not.toHaveBeenCalled();
+  });
+
+  it("says the record was created when it is past the rows loaded so far", async () => {
+    const bridge = makeBridge([record("rec-1", "Plan")], TWO_FIELDS);
+    bridge.queryCollectionRecords.mockResolvedValue({
+      collection: { path: "tasks", objectId: "object-test", status: "valid", reasons: [] },
+      records: [record("rec-1", "Plan")],
+      groups: null,
+      nextCursor: { sortValues: [], recordPath: "tasks/Plan.md", recordId: "rec-1" },
+    });
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-new");
+    docMock.current = engineDocState({ available: true, doc });
+    const onNewRecord = vi.fn<CollectionPageProps["onNewRecord"]>();
+    const onNotice = vi.fn();
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(pageWithHost(onNewRecord, undefined, { onNotice }));
+    await screen.findByText("Plan");
+    await startRow("Zebra", "Enter");
+    act(() => onNewRecord.mock.calls[0]![1]!({ path: "tasks/Zebra.md", recordId: "rec-new" }));
+    await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Created a record. It is past the records loaded here."));
+    // Enter saved the row, so the next one starts with the cursor in its first field.
+    expect(document.querySelectorAll("[data-new-record]")).toHaveLength(1);
+    expect(document.activeElement).toBe(editorInput());
+    expect(editorInput().value).toBe("");
+  });
+
+  it("offers no new row to someone who cannot change the Collection", async () => {
+    const bridge = makeBridge([record("rec-1", "Plan")], TWO_FIELDS);
+    renderPage(bridge, undefined, undefined, { readOnly: true });
+    await screen.findByText("Plan");
+    expect(screen.queryByRole("button", { name: "New record" })).toBeNull();
   });
 });

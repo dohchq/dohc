@@ -459,6 +459,15 @@ describe("a new record's row", () => {
     expect(within(newRow()).queryByRole("button", { name: "Run" })).toBeNull();
   });
 
+  it("has the host make the record at once where the table has no field to type in", () => {
+    const made = host();
+    render(<TableView schema={makeSchema([{ name: "Run", type: "button" }])} records={[]} newRecord={made.newRecord} />);
+    fireEvent.click(addRow());
+    expect(newRows()).toHaveLength(0);
+    expect(made.saves.map((save) => save.values)).toEqual([{}]);
+    expect(made.saves[0]!.report({ state: "saved" })).toBe(false);
+  });
+
   it("builds no column again and remounts no row, and typing draws no other row", () => {
     const renderButton = vi.fn(() => <button type="button">Run</button>);
     const made = host();
@@ -484,13 +493,40 @@ describe("a new record's row", () => {
     expect(renderButton.mock.calls.length).toBe(drawn);
   });
 
-  it("removes the row and gives the host its values when the host stops taking new records", () => {
-    const { again, dropped, saves } = setup();
+  it("removes the row and gives the host its values to save when the host stops taking new records", () => {
+    const { again, saves } = setup();
     press(addRow());
     type("Milk", "Tab");
     again({ newRecord: undefined, onNewRecord: undefined });
     expect(newRows()).toHaveLength(0);
-    expect(dropped.mock.calls).toEqual([["title", "Milk"]]);
-    expect(saves).toHaveLength(0);
+    expect(saves.map((save) => save.values)).toEqual([{ title: "Milk" }]);
+    // No row is left to show the outcome, so the host reports it.
+    expect(saves[0]!.report({ state: "refused", reason: "No." })).toBe(false);
+  });
+
+  it("finishes a save that stopped part way when the row goes, and sends nothing the host still has", async () => {
+    const { saves, again, unmount } = setup();
+    const retry = vi.fn();
+    press(addRow());
+    type("Milk", "Enter");
+    // The host has the row: closing the table sends it nothing more.
+    again({ newRecord: undefined, onNewRecord: undefined });
+    expect(saves).toHaveLength(1);
+    expect(saves[0]!.report({ state: "saved" })).toBe(false);
+    unmount();
+
+    const next = setup();
+    press(addRow());
+    type("Bread", "Enter");
+    // What finishes the save may answer at once. The row is gone by then, so the host reports that answer.
+    retry.mockImplementation(() => expect(next.saves[0]!.report({ state: "refused", reason: "No." })).toBe(false));
+    act(() => void next.saves[0]!.report({ state: "refused", reason: "dohc could not finish this record.", retry }));
+    // The host finishes what it started: the row takes no typing.
+    press(cells()[0]!);
+    expect(document.querySelector("[data-cell-editor]")).toBeNull();
+    next.unmount();
+    await Promise.resolve();
+    expect(retry).toHaveBeenCalledTimes(1);
+    expect(next.saves).toHaveLength(1);
   });
 });

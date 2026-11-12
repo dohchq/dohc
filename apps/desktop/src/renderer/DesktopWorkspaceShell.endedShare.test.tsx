@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Profiler, useMemo, useRef, useState } from "react";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { deferred } from "../testing/deferred";
+import { editorTabTestId } from "../testPins";
 import { sharedViewRefusalWords } from "../testing/sharedViewRefusal.fixture";
 import { createAutomationButtons } from "./collections/useAutomationButtons";
 import { collectionTabPath } from "./workbench/workbenchState";
@@ -118,6 +119,19 @@ async function runCollectionAction(testId: string) {
   fireEvent.click(screen.getByTestId(testId));
 }
 
+/** Types a name in the table's new row, and saves the row with Enter. */
+async function saveNewRow(name: string) {
+  fireEvent.click(await screen.findByTestId("collection-new-record"));
+  const input = document.querySelector<HTMLInputElement>("[data-cell-editor] input")!;
+  fireEvent.change(input, { target: { value: name } });
+  fireEvent.keyDown(input, { key: "Enter" });
+}
+/** Waits for the new row to say why it was not saved. */
+async function newRowSays(text: string) {
+  await waitFor(() => expect(document.querySelector("[data-new-record-status]")?.textContent).toContain(text));
+}
+const PART_WAY = "dohc created the record file but could not finish the record.";
+
 async function assertReadableAndReadOnly(bridge: ReturnType<typeof collectionBridge>) {
   await waitFor(() => expect(screen.getByTestId("shared-view-banner").textContent).toContain(ENDED_SENTENCE));
   expect(await screen.findByText("Retained task")).toBeTruthy();
@@ -171,16 +185,17 @@ describe("ended Edit Collection shares", () => {
     await screen.findByTestId("collection-new-record");
     const send = directWriteInput.current!.sendShareChanges;
     if (action === "record creation") {
-      fireEvent.click(screen.getByTestId("collection-new-record"));
-      await screen.findByTestId("workspace-shell-error");
+      await saveNewRow("Milk");
+      // The row says the creation stopped part way, so no notice does.
+      await newRowSays(PART_WAY);
+      expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
     }
     view.rerender(shell(bridge, { ...ENDED_SHARE, shareView: { ...ENDED_SHARE.shareView!, damaged: true } }));
-    if (action === "record creation") {
-      fireEvent.click(screen.getByTestId("notice-center-toggle"));
-      fireEvent.click(within(screen.getByTestId("notice-center")).getByRole("button", { name: "Try again" }));
-    } else await act(async () => send());
+    // The row goes with the right to add records. Finishing its creation meets the shell's refusal, in a notice with what was typed.
+    if (action !== "record creation") await act(async () => send());
     const message = "Your access to this share ended.";
-    expect(screen.getByTestId("workspace-shell-error").textContent).toContain(message);
+    await waitFor(() => expect(screen.getByTestId("workspace-shell-error").textContent).toContain(message));
+    if (action === "record creation") expect(screen.getByTestId("workspace-shell-error").textContent).toContain("You typed: Name: Milk");
     expect(shellRefusal).toHaveBeenLastCalledWith(EDIT_SHARE.workspaceId, message);
     expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(action === "record creation" ? 1 : 0);
     expect(bridge.submitShareChanges).not.toHaveBeenCalled();
@@ -645,12 +660,15 @@ describe("ended Edit Collection shares", () => {
     bridge.createCollectionRecord.mockRejectedValueOnce(new Error("tasks/Untitled.md already exists. Choose another record name."));
     vi.stubGlobal("dohcDesktop", bridge);
     render(shell(bridge, EDIT_SHARE));
-    const create = await screen.findByTestId("collection-new-record");
+    await screen.findByTestId("collection-new-record");
     await waitFor(() => expect(bridge.checkSharedViewAccess).toHaveBeenCalledOnce());
     const pending = deferred<Awaited<ReturnType<typeof bridge.checkSharedViewAccess>>>();
     bridge.checkSharedViewAccess.mockReturnValue(pending.promise);
-    fireEvent.click(create);
-    await waitFor(() => expect(screen.getByTestId("workspace-shell-error").textContent).toContain("already exists"));
+    await saveNewRow("Milk");
+    // The row keeps what was typed and says why, in place of a notice.
+    await newRowSays("already exists");
+    expect(document.querySelector("[data-new-record]")?.textContent).toContain("Milk");
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
     expect(bridge.checkSharedViewAccess).toHaveBeenCalledOnce();
   });
 
@@ -665,15 +683,39 @@ describe("ended Edit Collection shares", () => {
     bridge.createCollectionRecord.mockRejectedValueOnce(new Error(error));
     vi.stubGlobal("dohcDesktop", bridge);
     render(shell(bridge, EDIT_SHARE));
-    const create = await screen.findByTestId("collection-new-record");
+    await screen.findByTestId("collection-new-record");
     await waitFor(() => expect(bridge.checkSharedViewAccess).toHaveBeenCalledOnce());
     const pending = deferred<Awaited<ReturnType<typeof bridge.checkSharedViewAccess>>>();
     bridge.checkSharedViewAccess.mockReturnValueOnce(pending.promise);
-    fireEvent.click(create);
+    await saveNewRow("Milk");
     await waitFor(() => expect(bridge.checkSharedViewAccess).toHaveBeenCalledTimes(2));
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
     await act(async () => pending.resolve(access === "ended" ? { status: "ended" } : { status: "current", access: "view" }));
     await waitFor(() => expect(screen.getByTestId("workspace-shell-error").textContent).toContain(`Your access to this share ${access}.`));
+  });
+
+  it("keeps a recipient's new row, with why, when the relay refuses the record, and opens no file tab", async () => {
+    const bridge = collectionBridge();
+    bridge.checkSharedViewAccess.mockResolvedValue({ status: "current", access: "edit" });
+    // The record's file is kept on this computer as a draft the relay refused.
+    const refused = { path: "tasks/Milk.md", recordId: "rec_abcdefghijklmnopqrstuvwxyz", delivery: "refused" as const, reason: "The owner's server did not accept this record." };
+    bridge.createCollectionRecord.mockResolvedValueOnce(refused);
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(shell(bridge, EDIT_SHARE));
+    await saveNewRow("Milk");
+    await newRowSays("The owner's server did not accept this record.");
+
+    // The file takes the record's name. The row keeps what was typed, and nothing else reports the refusal.
+    expect(bridge.createCollectionRecord.mock.calls[0]![0]).toMatchObject({ collectionPath: "tasks", name: "Milk" });
+    expect(document.querySelector("[data-new-record]")?.textContent).toContain("Milk");
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(screen.queryByTestId(editorTabTestId("tasks/Milk.md"))).toBeNull();
+
+    // Try again makes the record once more, and still opens no tab.
+    fireEvent.click(within(document.querySelector<HTMLElement>("[data-new-record-status]")!).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(document.querySelector("[data-new-record-status='refused']")).toBeNull());
+    expect(screen.queryByTestId(editorTabTestId("tasks/Milk.md"))).toBeNull();
   });
 
   it("reports a record creation retry after the share ends", async () => {
@@ -684,11 +726,10 @@ describe("ended Edit Collection shares", () => {
     });
     vi.stubGlobal("dohcDesktop", bridge);
     const view = render(shell(bridge, EDIT_SHARE));
-    fireEvent.click(await screen.findByTestId("collection-new-record"));
-    await screen.findByTestId("workspace-shell-error");
+    await saveNewRow("Milk");
+    await newRowSays(PART_WAY);
+    // The share ends, so the row goes, and what finishes its creation is refused.
     view.rerender(shell(bridge, ENDED_SHARE));
-    fireEvent.click(screen.getByTestId("notice-center-toggle"));
-    fireEvent.click(within(screen.getByTestId("notice-center")).getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(screen.getByTestId("workspace-shell-error").textContent).toContain("Your access to this share ended."));
     expect(bridge.createCollectionRecord).toHaveBeenCalledOnce();
   });
@@ -707,8 +748,8 @@ describe("ended Edit Collection shares", () => {
     });
     vi.stubGlobal("dohcDesktop", bridge);
     render(shell(bridge, EDIT_SHARE));
-    fireEvent.click(await screen.findByTestId("collection-new-record"));
-    await screen.findByTestId("workspace-shell-error");
+    await saveNewRow("Milk");
+    await newRowSays(PART_WAY);
     bridge.checkSharedViewAccess.mockResolvedValue({ status: "current", access });
     focusAfterMinimum();
     await waitFor(() => expect(screen.queryByTestId("collection-new-record")).toBeNull());
@@ -730,8 +771,8 @@ describe("ended Edit Collection shares", () => {
     });
     vi.stubGlobal("dohcDesktop", bridge);
     render(shell(bridge, EDIT_SHARE));
-    fireEvent.click(await screen.findByTestId("collection-new-record"));
-    await screen.findByTestId("workspace-shell-error");
+    await saveNewRow("Milk");
+    await newRowSays(PART_WAY);
     bridge.checkSharedViewAccess.mockResolvedValue({ status: "needs-reopen" });
     focusAfterMinimum();
     await waitFor(() => expect(screen.queryByTestId("collection-new-record")).toBeNull());

@@ -374,6 +374,56 @@ describe("collection folders", () => {
     expect(bridge.createCollectionRecord.mock.calls[2]![0]).toMatchObject({ name: "Untitled", recordId });
   });
 
+  it("names a new record's file from its name, made safe and unique, and opens no tab for it", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const files: Array<{ path: string; kind: "file" }> = [];
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] }, files: [...files], folders: ["tasks"] }));
+    bridge.listCollections = vi.fn(async () => ({ collections: [{ path: "tasks", objectId: "object-test", status: "valid" as const, reasons: [] }] }));
+    bridge.getCollection.mockResolvedValue({
+      path: "tasks", objectId: "object-test", status: "valid", reasons: [], recordCount: 0,
+      schema: { name: "Tasks", description: null, fields: [{ name: "title", type: "text" }, { name: "notes", type: "text" }], views: [] },
+    });
+    bridge.createCollectionRecord.mockImplementation(async (payload) => {
+      files.push({ path: `${payload.collectionPath}/${payload.name}.md`, kind: "file" });
+      return { path: `${payload.collectionPath}/${payload.name}.md`, recordId: "rec_abcdefghijklmnopqrstuvwxyz" };
+    });
+    renderShell(bridge);
+    const row = await waitFor(() => {
+      const row = screen.getAllByTestId("tree-row").find(entry => entry.dataset.path === "tasks");
+      expect(row?.dataset.collection).toBe("true");
+      return row!;
+    });
+    fireEvent.click(row);
+    const editor = () => document.querySelector<HTMLInputElement>("[data-cell-editor] input");
+    /** Saves the new row with Enter, with `title` typed in its first field, or `notes` in its second. */
+    const saveRow = async (title: string | null, notes?: string) => {
+      fireEvent.click(await screen.findByTestId("collection-new-record", undefined, { timeout: 15_000 }));
+      await waitFor(() => expect(editor()).not.toBeNull());
+      if (title !== null) fireEvent.change(editor()!, { target: { value: title } });
+      if (notes === undefined) return fireEvent.keyDown(editor()!, { key: "Enter" });
+      fireEvent.keyDown(editor()!, { key: "Tab" });
+      fireEvent.keyDown(screen.getByRole("grid"), { key: "Enter" });
+      fireEvent.change(editor()!, { target: { value: notes } });
+      fireEvent.keyDown(editor()!, { key: "Enter" });
+    };
+
+    // Characters a file name cannot hold become spaces, as in a new page's name.
+    await saveRow("Plan: Q4/Launch");
+    await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(1));
+    expect(bridge.createCollectionRecord.mock.calls[0]![0]).toMatchObject({ collectionPath: "tasks", name: "Plan Q4 Launch" });
+    // The listing has the first file by now, so the same name takes the next number.
+    await waitFor(() => expect(bridge.listWorkspaceFiles.mock.results.length).toBeGreaterThan(1));
+    await waitFor(() => expect(screen.getAllByTestId("tree-row").some(entry => entry.dataset.path === "tasks/Plan Q4 Launch.md") || files.length === 1).toBe(true));
+    await saveRow("Plan: Q4/Launch");
+    await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(2));
+    expect(bridge.createCollectionRecord.mock.calls[1]![0].name).toBe("Plan Q4 Launch 2");
+    // A record with no name is Untitled.
+    await saveRow(null, "Remember the milk");
+    await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(3));
+    expect(bridge.createCollectionRecord.mock.calls[2]![0].name).toBe("Untitled");
+    for (const name of ["Plan Q4 Launch", "Plan Q4 Launch 2", "Untitled"]) expect(screen.queryByTestId(editorTabTestId(`tasks/${name}.md`))).toBeNull();
+  });
+
   it("opens a collection folder as its views tab with its columns and a New record row", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
