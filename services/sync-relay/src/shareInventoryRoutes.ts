@@ -258,7 +258,8 @@ export function createShareInventoryRoutes(
       ...(page.nextCursor
         ? { nextCursor: linkInventoryCursor.encode(page.nextCursor) }
         : {}),
-    });
+    // Each row carries its live link, so no cache keeps the page.
+    }, 200, { "cache-control": "private, no-store" });
   }
 
   return { respondToShareInventory, respondToWorkspaceLinkInventory };

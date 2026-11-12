@@ -458,7 +458,7 @@ export function createShareGrantRoutes(
       if (receipt) {
         if (receipt.requestJson !== requestJson) throw relayError("conflict", "Link operation changed.");
         const url = recoverPublicLinkUrl(storage.getShareGrant(receipt.grantId), storage.getCurrentLinkCredential(receipt.grantId), linkKey, shareWebOrigin);
-        return jsonResponse({ok:true,workspaceId:route.workspaceId,selector,access,shareId:receipt.shareId,grantId:receipt.grantId,...(url === null ? {urlUnavailable:true} : {url})});
+        return jsonResponse({ok:true,workspaceId:route.workspaceId,selector,access,shareId:receipt.shareId,grantId:receipt.grantId,...(url === null ? {urlUnavailable:true} : {url})}, 200, { "cache-control": "private, no-store" });
       }
       requireEditableSelector(access, JSON.stringify(selector));
       const shareId = newShareId();

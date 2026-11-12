@@ -384,12 +384,6 @@ const LINK_ACCESS_WORDS: Record<LinkAccess, string> = {
   edit: "Can edit",
 };
 
-const LINK_ACCESS_DETAIL: Record<LinkAccess, string> = {
-  view: "Read only",
-  comment: "Read and comment",
-  edit: "Read, comment, and change files",
-};
-
 function linkAccessOf(access: string): LinkAccess | null {
   return access === "view" || access === "comment" || access === "edit" ? access : null;
 }
@@ -433,11 +427,11 @@ function LinkAccessMenu(props: {
       open={open}
       onOpenChange={setOpen}
       width={224}
+      topLayer
       align="start"
       items={props.supported.map((access) => ({
         id: access,
         label: LINK_ACCESS_WORDS[access],
-        description: LINK_ACCESS_DETAIL[access],
         checked: access === props.access,
         onSelect: () => props.onPick(access),
       }))}
@@ -480,10 +474,10 @@ function AddLinkMenu(props: {
       open={open}
       onOpenChange={setOpen}
       width={224}
+      topLayer
       items={props.supported.map((access) => ({
         id: access,
         label: LINK_ACCESS_WORDS[access],
-        description: LINK_ACCESS_DETAIL[access],
         onSelect: () => props.onPick(access),
       }))}
       trigger={(trigger) => (
@@ -528,6 +522,7 @@ export function useRelayShareLinkPane(props: {
     Record<string, LinkAccess>
   >({});
   const [linkError, setLinkError] = useState<string | null>(null);
+  const [separateOpen, setSeparateOpen] = useState(false);
   const [minted, setMinted] = useState<{ grantId: string; url: string } | null>(null);
   const [links, setLinks] = useState<RelayShareLinkRow[]>([]);
   // A read of the links that changes them reads each link's agents again. A
@@ -1944,6 +1939,7 @@ export function useRelayShareLinkPane(props: {
             {active ? (
               <MoreMenu
                 label="Link options"
+                topLayer
                 testId={`share-link-options-${row.grantId}`}
                 items={[{ label: "End link", danger: true, disabled: linkBusy || mutationBusy !== null, onSelect: () => openConfirmation("end", row) }]}
               />
@@ -1972,6 +1968,7 @@ export function useRelayShareLinkPane(props: {
             {active ? (
               <MoreMenu
                 label="Link options"
+                topLayer
                 testId={`share-link-options-${row.grantId}`}
                 items={[
                   ...(canReset ? [{ label: "Reset link", disabled: linkBusy || mutationBusy !== null, onSelect: () => openConfirmation("reset", row) }] : []),
@@ -1986,7 +1983,7 @@ export function useRelayShareLinkPane(props: {
           renderLinkUrl(url)
         ) : active && !damaged ? (
           <p data-testid="share-link-no-copy" className="m-0 text-[12px] leading-relaxed text-muted">
-            This link was made before dohc kept a copy. Reset it to get a link you can copy.
+            dohc has no copy of this link. Reset it to get a link you can copy.
           </p>
         ) : null}
 
@@ -2006,15 +2003,49 @@ export function useRelayShareLinkPane(props: {
     );
   }
 
-  function renderOwnerDiscussion(group: LinkGroup) {
-    const ownerDiscussion =
-      ownerDiscussionByShareId[group.shareId] ?? emptyOwnerDiscussion();
-    const ownerDraftInvalid =
-      ownerDiscussion.draft.length > 0 &&
-      normalizeShareDiscussionBody(ownerDiscussion.draft) === null;
-    const showOwnerAppendRetry =
-      ownerDiscussion.appendError && !ownerDraftInvalid;
-    const ownerDraftErrorId = `share-comment-body-error-${group.shareId}`;
+  function renderOwnerConfirmation(pending: OwnerConfirmation) {
+    return (
+      <div
+            data-testid="owner-comments-confirmation"
+            className="flex flex-col gap-3 rounded-lg bg-panel-2 p-3"
+          >
+            <p className="m-0 text-[13px] leading-relaxed text-ink">
+              {pending.kind === "delete"
+                ? "Delete this comment? Its text is removed for everyone right away and can't be brought back. Readers see that a comment was deleted."
+                : pending.kind === "block"
+                  ? `Block ${pending.name}? They can't comment through this link from this browser until you unblock them. They can still comment from another browser or another link. To stop everyone with this link, reset it.`
+                  : pending.kind === "promote"
+                    ? `Make ${pending.name}'s access independent of this link? This is permanent. Resetting or ending the link no longer affects their access. You can end their access here at any time.`
+                    : `End ${pending.name}'s access? They lose access right away. Copies they already made stay with them.`}
+            </p>
+            <div className="flex justify-end gap-2">
+              <SecondaryButton
+                disabled={ownerMutationBusy !== null}
+                onClick={() => setOwnerConfirmation(null)}
+              >
+                Cancel
+              </SecondaryButton>
+              <OwnerConfirm
+                disabled={ownerMutationBusy !== null}
+                aria-busy={ownerMutationBusy !== null}
+                onClick={() =>
+                  executeOwnerConfirmation(pending)
+                }
+              >
+                {pending.kind === "delete"
+                  ? "Delete comment"
+                  : pending.kind === "block"
+                    ? "Block"
+                    : pending.kind === "promote"
+                      ? "Make independent"
+                      : "End access"}
+              </OwnerConfirm>
+            </div>
+          </div>
+    );
+  }
+
+  function renderPeople(group: LinkGroup) {
     const displayedDependentIds = new Set(
       group.rows.flatMap((row) =>
         row.status === "active"
@@ -2035,6 +2066,106 @@ export function useRelayShareLinkPane(props: {
             .map((dependent) => ({ row, dependent }))
         : [],
     );
+    if (linkedPeople.length === 0 && shareIndependentGrants.length === 0) return null;
+    return (
+      <div className="flex flex-col gap-2 border-t border-line px-3 py-3">
+          <section aria-labelledby={`share-people-heading-${group.shareId}`} className="flex flex-col gap-1">
+            <SectionLabel as="h4" id={`share-people-heading-${group.shareId}`} className="m-0">
+              People
+            </SectionLabel>
+            {linkedPeople.map(({ row, dependent }) => {
+              const actionKey = `promote:${dependent.grantId}`;
+              return (
+                <div
+                  key={`${row.grantId}:${dependent.grantId}`}
+                  data-testid={`share-dependent-${dependent.grantId}`}
+                  className="flex flex-col gap-1"
+                >
+                  <div className="flex min-h-8 items-center justify-between gap-3">
+                    <span className="flex min-w-0 flex-col">
+                      <span className="break-all text-[13px] text-ink">{dependentName(dependent)}</span>
+                      <span className="text-[12px] text-subtle">Joined through a link</span>
+                    </span>
+                    <SecondaryButton
+                      size="compact"
+                      disabled={ownerMutationBusy !== null}
+                      onClick={() => {
+                        setOwnerConfirmation({
+                          kind: "promote",
+                          shareId: group.shareId,
+                          grantId: dependent.grantId,
+                          parentGrantId: row.grantId,
+                          parentGeneration: row.generation,
+                          name: dependentName(dependent),
+                        });
+                      }}
+                    >
+                      Make independent
+                    </SecondaryButton>
+                  </div>
+                  {ownerMutationError?.shareId === group.shareId &&
+                  ownerMutationError.actionKey === actionKey ? (
+                    <p role="alert" className="m-0 text-[12px] text-danger">
+                      dohc could not complete that change.
+                    </p>
+                  ) : null}
+                </div>
+              );
+            })}
+            {shareIndependentGrants.map((grant) => {
+              const actionKey = `revoke:${grant.grantId}`;
+              return (
+                <div
+                  key={grant.grantId}
+                  data-testid={`share-independent-${grant.grantId}`}
+                  className="flex flex-col gap-1"
+                >
+                  <div className="flex min-h-8 items-center justify-between gap-3">
+                    <span className="min-w-0 break-all text-[13px] text-ink">
+                      {namedGrantName(grant)}
+                    </span>
+                    <SecondaryButton
+                      size="compact"
+                      disabled={ownerMutationBusy !== null}
+                      onClick={() => {
+                        setOwnerConfirmation({
+                          kind: "revoke",
+                          shareId: group.shareId,
+                          grantId: grant.grantId,
+                          name: namedGrantName(grant),
+                        });
+                      }}
+                    >
+                      End access
+                    </SecondaryButton>
+                  </div>
+                  {ownerMutationError?.shareId === group.shareId &&
+                  ownerMutationError.actionKey === actionKey ? (
+                    <p role="alert" className="m-0 text-[12px] text-danger">
+                      dohc could not complete that change.
+                    </p>
+                  ) : null}
+                </div>
+              );
+            })}
+          </section>
+        {ownerConfirmation?.shareId === group.shareId &&
+        (ownerConfirmation.kind === "promote" || ownerConfirmation.kind === "revoke")
+          ? renderOwnerConfirmation(ownerConfirmation)
+          : null}
+      </div>
+    );
+  }
+
+  function renderOwnerDiscussion(group: LinkGroup) {
+    const ownerDiscussion =
+      ownerDiscussionByShareId[group.shareId] ?? emptyOwnerDiscussion();
+    const ownerDraftInvalid =
+      ownerDiscussion.draft.length > 0 &&
+      normalizeShareDiscussionBody(ownerDiscussion.draft) === null;
+    const showOwnerAppendRetry =
+      ownerDiscussion.appendError && !ownerDraftInvalid;
+    const ownerDraftErrorId = `share-comment-body-error-${group.shareId}`;
     return (
       <div className="flex flex-col gap-3 border-t border-line px-3 py-3">
         <div className="flex items-center gap-2">
@@ -2288,128 +2419,10 @@ export function useRelayShareLinkPane(props: {
           </div>
         </div>
 
-        {linkedPeople.length > 0 || shareIndependentGrants.length > 0 ? (
-          <section aria-labelledby={`share-people-heading-${group.shareId}`} className="flex flex-col gap-1">
-            <SectionLabel as="h4" id={`share-people-heading-${group.shareId}`} className="m-0">
-              People
-            </SectionLabel>
-            {linkedPeople.map(({ row, dependent }) => {
-              const actionKey = `promote:${dependent.grantId}`;
-              return (
-                <div
-                  key={`${row.grantId}:${dependent.grantId}`}
-                  data-testid={`share-dependent-${dependent.grantId}`}
-                  className="flex flex-col gap-1"
-                >
-                  <div className="flex min-h-8 items-center justify-between gap-3">
-                    <span className="flex min-w-0 flex-col">
-                      <span className="break-all text-[13px] text-ink">{dependentName(dependent)}</span>
-                      <span className="text-[12px] text-subtle">Joined through a link</span>
-                    </span>
-                    <SecondaryButton
-                      size="compact"
-                      disabled={ownerMutationBusy !== null}
-                      onClick={() => {
-                        setOwnerConfirmation({
-                          kind: "promote",
-                          shareId: group.shareId,
-                          grantId: dependent.grantId,
-                          parentGrantId: row.grantId,
-                          parentGeneration: row.generation,
-                          name: dependentName(dependent),
-                        });
-                      }}
-                    >
-                      Make independent
-                    </SecondaryButton>
-                  </div>
-                  {ownerMutationError?.shareId === group.shareId &&
-                  ownerMutationError.actionKey === actionKey ? (
-                    <p role="alert" className="m-0 text-[12px] text-danger">
-                      dohc could not complete that change.
-                    </p>
-                  ) : null}
-                </div>
-              );
-            })}
-            {shareIndependentGrants.map((grant) => {
-              const actionKey = `revoke:${grant.grantId}`;
-              return (
-                <div
-                  key={grant.grantId}
-                  data-testid={`share-independent-${grant.grantId}`}
-                  className="flex flex-col gap-1"
-                >
-                  <div className="flex min-h-8 items-center justify-between gap-3">
-                    <span className="min-w-0 break-all text-[13px] text-ink">
-                      {namedGrantName(grant)}
-                    </span>
-                    <SecondaryButton
-                      size="compact"
-                      disabled={ownerMutationBusy !== null}
-                      onClick={() => {
-                        setOwnerConfirmation({
-                          kind: "revoke",
-                          shareId: group.shareId,
-                          grantId: grant.grantId,
-                          name: namedGrantName(grant),
-                        });
-                      }}
-                    >
-                      End access
-                    </SecondaryButton>
-                  </div>
-                  {ownerMutationError?.shareId === group.shareId &&
-                  ownerMutationError.actionKey === actionKey ? (
-                    <p role="alert" className="m-0 text-[12px] text-danger">
-                      dohc could not complete that change.
-                    </p>
-                  ) : null}
-                </div>
-              );
-            })}
-          </section>
-        ) : null}
-
-        {ownerConfirmation?.shareId === group.shareId ? (
-          <div
-            data-testid="owner-comments-confirmation"
-            className="flex flex-col gap-3 rounded-lg bg-panel-2 p-3"
-          >
-            <p className="m-0 text-[13px] leading-relaxed text-ink">
-              {ownerConfirmation.kind === "delete"
-                ? "Delete this comment? Its text is removed for everyone right away and can't be brought back. Readers see that a comment was deleted."
-                : ownerConfirmation.kind === "block"
-                  ? `Block ${ownerConfirmation.name}? They can't comment through this link from this browser until you unblock them. They can still comment from another browser or another link. To stop everyone with this link, reset it.`
-                  : ownerConfirmation.kind === "promote"
-                    ? `Make ${ownerConfirmation.name}'s access independent of this link? This is permanent. Resetting or ending the link no longer affects their access. You can end their access here at any time.`
-                    : `End ${ownerConfirmation.name}'s access? They lose access right away. Copies they already made stay with them.`}
-            </p>
-            <div className="flex justify-end gap-2">
-              <SecondaryButton
-                disabled={ownerMutationBusy !== null}
-                onClick={() => setOwnerConfirmation(null)}
-              >
-                Cancel
-              </SecondaryButton>
-              <OwnerConfirm
-                disabled={ownerMutationBusy !== null}
-                aria-busy={ownerMutationBusy !== null}
-                onClick={() =>
-                  executeOwnerConfirmation(ownerConfirmation)
-                }
-              >
-                {ownerConfirmation.kind === "delete"
-                  ? "Delete comment"
-                  : ownerConfirmation.kind === "block"
-                    ? "Block"
-                    : ownerConfirmation.kind === "promote"
-                      ? "Make independent"
-                      : "End access"}
-              </OwnerConfirm>
-            </div>
-          </div>
-        ) : null}
+        {ownerConfirmation?.shareId === group.shareId &&
+        (ownerConfirmation.kind === "delete" || ownerConfirmation.kind === "block")
+          ? renderOwnerConfirmation(ownerConfirmation)
+          : null}
       </div>
     );
   }
@@ -2430,6 +2443,8 @@ export function useRelayShareLinkPane(props: {
         className="flex flex-col rounded-lg border border-line bg-panel"
       >
         {group.rows.map((row) => renderLinkRow(group, row))}
+
+        {canAdd ? renderPeople(group) : null}
 
         {canAdd ? (
           <div className="flex flex-col gap-2 border-t border-line px-3 py-2">
@@ -2484,10 +2499,25 @@ export function useRelayShareLinkPane(props: {
             : "Create link";
   const CreateButton = hasMatchingShare && !newLinkNote?.warning ? SecondaryButton : PrimaryButton;
 
-  const createSection = (
+  // Once this selection has a share, another link is added to it from its
+  // card; a separate share is the rarer choice, one step further away.
+  const separateHidden =
+    hasMatchingShare && !separateOpen && !newLinkNote?.warning && linkRequestBusy?.kind !== "create" && linkError === null;
+
+  const createSection = separateHidden ? (
+    <GhostButton
+      aria-expanded={false}
+      className="self-start"
+      disabled={linkControlsBusy}
+      onClick={() => setSeparateOpen(true)}
+    >
+      <Plus size={13} aria-hidden />
+      Create separate link
+    </GhostButton>
+  ) : (
     <section aria-label="New link" className="flex flex-col gap-2">
       {hasMatchingShare ? (
-        <div className="flex flex-col gap-1 pt-2">
+        <div className="flex flex-col gap-1">
           <SectionLabel as="h3" className="m-0">Separate link</SectionLabel>
           <p className="m-0 text-[12px] leading-relaxed text-muted">
             Starts a new share with its own comments.
@@ -2506,7 +2536,7 @@ export function useRelayShareLinkPane(props: {
         </div>
         <CreateButton
           type="button"
-          aria-label="Create link"
+          data-testid="share-link-create"
           className="shrink-0"
           disabled={linkControlsBusy}
           onClick={() => void createLink()}

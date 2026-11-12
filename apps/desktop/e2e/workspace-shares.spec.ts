@@ -545,12 +545,9 @@ confidentialTest.describe("View link lifecycle", () => {
       expect(linkRowTestId === `share-link-row-${linkGrantId}`).toBe(true);
       await expect(linkRow).toContainText(/Used .+ · Created /u);
       await expect(linkRow.getByTestId(`share-link-access-${linkGrantId}`)).toHaveText("Can view");
-      await expect(
-        linkAccess.getByRole("radio", { name: "Comment", exact: true }),
-      ).toBeVisible();
-      await expect(
-        linkAccess.getByRole("radio", { name: "View", exact: true }),
-      ).toBeVisible();
+      // A separate share is one step away while this one has a link.
+      await expect(dialog.getByRole("button", { name: "Create separate link" })).toBeVisible();
+      await expect(linkAccess).toHaveCount(0);
       const reachableRetuneTargets = await dialog
         .getByRole("button", { name: /^(?:View|Comment|Edit)$/u })
         .allTextContents();
@@ -589,6 +586,8 @@ confidentialTest.describe("View link lifecycle", () => {
       await dialog.getByRole("menuitem", { name: "Reset link" }).click();
       confirmation = dialog.getByTestId("share-link-confirmation");
       await confirmation.getByRole("button", { name: "Reset link" }).click();
+      // The kept URL shows until the reset answers with its replacement.
+      await expect(dialog.getByTestId("share-link-url")).not.toContainText(oldSecret);
       const resetUrlText = await dialog.getByTestId("share-link-url").textContent();
       if (resetUrlText === null) throw new Error("Reset did not expose the replacement link.");
       const resetUrl = new URL(resetUrlText);

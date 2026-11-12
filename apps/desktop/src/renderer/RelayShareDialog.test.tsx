@@ -385,19 +385,24 @@ async function showLinkPane(user: ReturnType<typeof userEvent.setup>) {
 
 type User = ReturnType<typeof userEvent.setup>;
 
+// With a matching share on screen, a separate share is one step away.
+async function openSeparateLink(user: User) {
+  await user.click(screen.getByRole("button", { name: "Create separate link" }));
+}
+
 async function chooseLinkOption(user: User, row: HTMLElement, name: "Reset link" | "End link") {
   await user.click(within(row).getByRole("button", { name: "Link options" }));
-  await user.click(await screen.findByRole("menuitem", { name }));
+  await user.click(await screen.findByRole("menuitem", { name, hidden: true }));
 }
 
 async function chooseLinkAccess(user: User, row: HTMLElement, name: "Can view" | "Can comment" | "Can edit") {
   await user.click(within(row).getByRole("button", { name: /^Can (view|comment|edit)$/ }));
-  await user.click(await screen.findByRole("menuitemradio", { name }));
+  await user.click(await screen.findByRole("menuitemradio", { name, hidden: true }));
 }
 
 async function addLinkWith(user: User, group: HTMLElement, name: "Can view" | "Can comment" | "Can edit") {
   await user.click(within(group).getByRole("button", { name: "Add link" }));
-  await user.click(await screen.findByRole("menuitem", { name }));
+  await user.click(await screen.findByRole("menuitem", { name, hidden: true }));
 }
 
 // An active, readable link: its access opens a menu, and its ••• menu offers
@@ -406,9 +411,9 @@ async function expectActiveLinkControls(user: User, row: HTMLElement, access: "C
   expect(within(row).getByRole("button", { name: access }).getAttribute("aria-haspopup")).toBe("menu");
   const options = within(row).getByRole("button", { name: "Link options" });
   await user.click(options);
-  expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Reset link", "End link"]);
+  expect(screen.getAllByRole("menuitem", { hidden: true }).map((item) => item.textContent)).toEqual(["Reset link", "End link"]);
   await user.click(options);
-  expect(screen.queryByRole("menu")).toBeNull();
+  expect(screen.queryByRole("menu", { hidden: true })).toBeNull();
 }
 
 async function openOwnerComments(
@@ -640,10 +645,10 @@ describe("RelayShareDialog", () => {
       ),
     ).toBe("false");
     expect(screen.getByTestId("share-email")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Create link" })).toBeNull();
+    expect(screen.queryByTestId("share-link-create")).toBeNull();
     await showLinkPane(user);
     expect(screen.queryByTestId("share-email")).toBeNull();
-    expect(screen.getByRole("button", { name: "Create link" })).toBeTruthy();
+    expect(screen.getByTestId("share-link-create")).toBeTruthy();
   });
 
   it("creates a version share addressed by version id and closes on Done", async () => {
@@ -930,7 +935,7 @@ describe("RelayShareDialog", () => {
       "Link options",
     ]);
     await user.click(within(rows[3]!).getByRole("button", { name: "Link options" }));
-    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+    expect(screen.getAllByRole("menuitem", { hidden: true }).map((item) => item.textContent)).toEqual([
       "End link",
     ]);
     expect(screen.queryByTestId("share-link-row-subset")).toBeNull();
@@ -979,7 +984,7 @@ describe("RelayShareDialog", () => {
       />,
     );
     await showLinkPane(user);
-    await user.click(screen.getByRole("button", { name: "Create link" }));
+    await user.click(screen.getByTestId("share-link-create"));
 
     expect(bridgeMock.createRelayShareLink).toHaveBeenCalledWith({
       workspaceId: "physical-ws-1",
@@ -998,7 +1003,7 @@ describe("RelayShareDialog", () => {
     await showLinkPane(user);
     const access = screen.getByRole("radiogroup", { name: "Link access" });
     await user.click(await within(access).findByRole("radio", { name: "Edit" }));
-    const create = screen.getByRole("button", { name: "Create link" });
+    const create = screen.getByTestId("share-link-create");
     await user.click(create);
 
     expect(bridgeMock.automationShareImpact).toHaveBeenCalledWith({
@@ -1024,7 +1029,7 @@ describe("RelayShareDialog", () => {
       />,
     );
     await showLinkPane(user);
-    await user.click(screen.getByRole("button", { name: "Create link" }));
+    await user.click(screen.getByTestId("share-link-create"));
 
     expect(bridgeMock.createRelayShareLink).toHaveBeenCalledWith({
       workspaceId: "physical-ws-1",
@@ -1045,9 +1050,9 @@ describe("RelayShareDialog", () => {
       />,
     );
     await showLinkPane(user);
-    await user.click(screen.getByRole("button", { name: "Create link" }));
+    await user.click(screen.getByTestId("share-link-create"));
 
-    const pendingButton = screen.getByRole("button", { name: "Create link" });
+    const pendingButton = screen.getByTestId("share-link-create");
     expect(pendingButton.textContent).toBe("Creating link…");
     expect(pendingButton.hasAttribute("disabled")).toBe(true);
 
@@ -1062,7 +1067,7 @@ describe("RelayShareDialog", () => {
     expect((await screen.findByRole("alert")).textContent).toBe(
       "The sync relay refused this selection.",
     );
-    expect(screen.getByRole("button", { name: "Create link" }).hasAttribute("disabled")).toBe(
+    expect(screen.getByTestId("share-link-create").hasAttribute("disabled")).toBe(
       false,
     );
   });
@@ -1080,7 +1085,7 @@ describe("RelayShareDialog", () => {
 
     expect(screen.queryByText(LINK_URL)).toBeNull();
     expect(writeText).not.toHaveBeenCalled();
-    await user.click(screen.getByRole("button", { name: "Create link" }));
+    await user.click(screen.getByTestId("share-link-create"));
 
     const url = await screen.findByTestId("share-link-url");
     expect(url.tagName).toBe("CODE");
@@ -1146,7 +1151,7 @@ describe("RelayShareDialog", () => {
 
     const row = await screen.findByTestId("share-link-row-old-link");
     expect(within(row).getByTestId("share-link-no-copy").textContent).toBe(
-      "This link was made before dohc kept a copy. Reset it to get a link you can copy.",
+      "dohc has no copy of this link. Reset it to get a link you can copy.",
     );
     expect(screen.queryByTestId("share-link-url")).toBeNull();
     expect(screen.queryByRole("button", { name: "Copy link" })).toBeNull();
@@ -1167,7 +1172,7 @@ describe("RelayShareDialog", () => {
     );
     await showLinkPane(user);
     expect(screen.queryByTestId("share-link-agent-copy")).toBeNull();
-    await user.click(screen.getByRole("button", { name: "Create link" }));
+    await user.click(screen.getByTestId("share-link-create"));
 
     const copy = await screen.findByTestId("share-link-agent-copy");
     expect(copy.textContent).toBe("Copy for an agent");
@@ -1194,7 +1199,7 @@ codex mcp login dohc-share`);
       />,
     );
     await showLinkPane(user);
-    await user.click(screen.getByRole("button", { name: "Create link" }));
+    await user.click(screen.getByTestId("share-link-create"));
     await screen.findByTestId("share-link-url");
     expect(screen.queryByTestId("share-link-agent-copy")).toBeNull();
   });
@@ -1573,7 +1578,8 @@ codex mcp login dohc-share`);
     );
     await showLinkPane(user);
     await screen.findByTestId("share-link-row-grant-link-1");
-    await user.click(screen.getByRole("button", { name: "Create link" }));
+    await openSeparateLink(user);
+    await user.click(screen.getByTestId("share-link-create"));
     expect((await screen.findByTestId("share-link-url")).textContent).toBe(LINK_URL);
     await user.click(screen.getByRole("button", { name: "Copy link" }));
     await vi.waitFor(() =>
@@ -1621,7 +1627,8 @@ codex mcp login dohc-share`);
     );
     await showLinkPane(user);
     await screen.findByTestId("share-link-row-grant-link-1");
-    await user.click(screen.getByRole("button", { name: "Create link" }));
+    await openSeparateLink(user);
+    await user.click(screen.getByTestId("share-link-create"));
     expect((await screen.findByTestId("share-link-url")).textContent).toBe(LINK_URL);
     await vi.waitFor(() => {
       expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
@@ -1676,7 +1683,8 @@ codex mcp login dohc-share`);
     });
     await screen.findByTestId("share-link-row-grant-link-1");
 
-    await user.click(screen.getByRole("button", { name: "Create link" }));
+    await openSeparateLink(user);
+    await user.click(screen.getByTestId("share-link-create"));
     await vi.waitFor(() => {
       expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
     });
@@ -1704,7 +1712,8 @@ codex mcp login dohc-share`);
     );
     await showLinkPane(user);
     await screen.findByTestId("share-link-row-grant-link-1");
-    await user.click(screen.getByRole("button", { name: "Create link" }));
+    await openSeparateLink(user);
+    await user.click(screen.getByTestId("share-link-create"));
     expect((await screen.findByTestId("share-link-url")).textContent).toBe(LINK_URL);
     await vi.waitFor(() => {
       expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
@@ -1817,7 +1826,8 @@ codex mcp login dohc-share`);
     await showLinkPane(user);
 
     const linkRow = await screen.findByTestId("share-link-row-grant-link-1");
-    await user.click(screen.getByRole("button", { name: "Create link" }));
+    await openSeparateLink(user);
+    await user.click(screen.getByTestId("share-link-create"));
     await vi.waitFor(() => {
       expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
     });
@@ -1829,7 +1839,7 @@ codex mcp login dohc-share`);
     });
 
     expect(screen.queryByTestId("share-link-confirmation")).toBeNull();
-    expect(screen.getByRole("button", { name: "Create link" }).hasAttribute("disabled")).toBe(
+    expect(screen.getByTestId("share-link-create").hasAttribute("disabled")).toBe(
       false,
     );
   });
@@ -2041,7 +2051,7 @@ codex mcp login dohc-share`);
       />,
     );
     await showLinkPane(user);
-    await user.click(screen.getByRole("button", { name: "Create link" }));
+    await user.click(screen.getByTestId("share-link-create"));
 
     view.rerender(
       <RelayShareDialog
@@ -2050,7 +2060,7 @@ codex mcp login dohc-share`);
         onClose={() => {}}
       />,
     );
-    await user.click(screen.getByRole("button", { name: "Create link" }));
+    await user.click(screen.getByTestId("share-link-create"));
 
     await act(async () => {
       requestA.resolve(linkResult(LINK_URL_A));
@@ -2058,7 +2068,7 @@ codex mcp login dohc-share`);
 
     expect(screen.queryByText(LINK_URL_A)).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
-    const pendingCreate = screen.getByRole("button", { name: "Create link" });
+    const pendingCreate = screen.getByTestId("share-link-create");
     expect(pendingCreate.textContent).toBe("Creating link…");
     expect(pendingCreate.hasAttribute("disabled")).toBe(true);
     expect(writeText).not.toHaveBeenCalled();
@@ -2084,7 +2094,7 @@ codex mcp login dohc-share`);
       />,
     );
     await showLinkPane(user);
-    await user.click(screen.getByRole("button", { name: "Create link" }));
+    await user.click(screen.getByTestId("share-link-create"));
 
     view.rerender(
       <RelayShareDialog
@@ -2093,14 +2103,14 @@ codex mcp login dohc-share`);
         onClose={() => {}}
       />,
     );
-    await user.click(screen.getByRole("button", { name: "Create link" }));
+    await user.click(screen.getByTestId("share-link-create"));
 
     await act(async () => {
       requestA.reject(new Error("A failed after the target changed."));
     });
 
     expect(screen.queryByRole("alert")).toBeNull();
-    const pendingCreate = screen.getByRole("button", { name: "Create link" });
+    const pendingCreate = screen.getByTestId("share-link-create");
     expect(pendingCreate.textContent).toBe("Creating link…");
     expect(pendingCreate.hasAttribute("disabled")).toBe(true);
     expect(writeText).not.toHaveBeenCalled();
@@ -2127,7 +2137,7 @@ codex mcp login dohc-share`);
       />,
     );
     await showLinkPane(user);
-    await user.click(screen.getByRole("button", { name: "Create link" }));
+    await user.click(screen.getByTestId("share-link-create"));
     first.unmount();
     await act(async () => {
       success.resolve(linkResult(LINK_URL_A));
@@ -2141,7 +2151,7 @@ codex mcp login dohc-share`);
       />,
     );
     await showLinkPane(user);
-    await user.click(screen.getByRole("button", { name: "Create link" }));
+    await user.click(screen.getByTestId("share-link-create"));
     second.unmount();
     await act(async () => {
       failure.reject(new Error("A failed after unmount."));
@@ -2173,7 +2183,7 @@ codex mcp login dohc-share`);
     await showLinkPane(user);
 
     await user.click(screen.getByRole("radio", { name: "Comment" }));
-    await user.click(screen.getByRole("button", { name: "Create link" }));
+    await user.click(screen.getByTestId("share-link-create"));
     await act(async () => {
       create.reject(new Error("The Create link response was lost."));
     });
@@ -2359,8 +2369,9 @@ codex mcp login dohc-share`);
       expect(within(group).getByRole("button", { name: "Comments" })).toBeTruthy();
     }
 
-    const create = screen.getByRole("button", { name: "Create link" });
-    expect(create.textContent).toBe("Create separate link");
+    const separate = screen.getByRole("button", { name: "Create separate link" });
+    expect(separate.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByTestId("share-link-create")).toBeNull();
 
     await user.click(within(named).getByRole("button", { name: "Comments" }));
     const namedGrant = await within(named).findByTestId(
@@ -2586,7 +2597,8 @@ codex mcp login dohc-share`);
 
     expect(await screen.findByTestId("share-link-group-share-first")).toBeTruthy();
     expect(screen.getByTestId("share-link-group-share-second")).toBeTruthy();
-    const create = screen.getByRole("button", { name: "Create link" });
+    await openSeparateLink(user);
+    const create = screen.getByTestId("share-link-create");
     expect(create.textContent).toBe("Create separate link");
     expect(
       screen.getByText("Starts a new share with its own comments."),
@@ -2619,7 +2631,7 @@ codex mcp login dohc-share`);
       expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(1);
     });
 
-    const create = screen.getByRole("button", { name: "Create link" });
+    const create = screen.getByTestId("share-link-create");
     expect(create.textContent).toBe("Create link");
     expect(
       screen.queryByText("Starts a new share with its own comments."),
@@ -2728,6 +2740,7 @@ codex mcp login dohc-share`);
     const bridgeCalls = () =>
       Object.values(bridgeMock).reduce((count, mocked) => count + mocked.mock.calls.length, 0);
 
+    await openSeparateLink(user);
     const linkAccess = screen.getByRole("radiogroup", { name: "Link access" });
     const callsBefore = bridgeCalls();
     within(linkAccess).getByRole("radio", { name: "View" }).focus();
@@ -2740,15 +2753,16 @@ codex mcp login dohc-share`);
     const trigger = within(screen.getByTestId("share-link-row-view-link")).getByRole("button", { name: "Can view" });
     trigger.focus();
     await user.keyboard("{ArrowDown}");
-    const menu = screen.getByRole("menu", { name: "Access for this link" });
-    expect(within(menu).getByRole("menuitemradio", { name: "Can view" }).getAttribute("aria-checked")).toBe("true");
+    const menu = screen.getByRole("menu", { hidden: true });
+    expect(menu.getAttribute("aria-label")).toBe("Access for this link");
+    expect(within(menu).getByRole("menuitemradio", { name: "Can view", hidden: true }).getAttribute("aria-checked")).toBe("true");
     await user.keyboard("{ArrowDown}");
-    expect(document.activeElement).toBe(within(menu).getByRole("menuitemradio", { name: "Can comment" }));
+    expect(document.activeElement).toBe(within(menu).getByRole("menuitemradio", { name: "Can comment", hidden: true }));
     await user.keyboard("{ArrowDown}");
-    expect(document.activeElement).toBe(within(menu).getByRole("menuitemradio", { name: "Can edit" }));
+    expect(document.activeElement).toBe(within(menu).getByRole("menuitemradio", { name: "Can edit", hidden: true }));
     expect(bridgeCalls()).toBe(callsBefore);
     await user.keyboard("{Enter}");
-    expect(screen.queryByRole("menu")).toBeNull();
+    expect(screen.queryByRole("menu", { hidden: true })).toBeNull();
     expect(
       within(screen.getByTestId("share-link-confirmation")).getByRole("button", { name: "Turn on editing" }),
     ).toBeTruthy();
@@ -2784,7 +2798,8 @@ codex mcp login dohc-share`);
     );
     await showLinkPane(user);
     await screen.findByTestId("share-link-row-retune-link");
-    await user.click(screen.getByRole("button", { name: "Create link" }));
+    await openSeparateLink(user);
+    await user.click(screen.getByTestId("share-link-create"));
     expect((await screen.findByTestId("share-link-url")).textContent).toBe(LINK_URL_A);
     await vi.waitFor(() => {
       expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
@@ -2859,7 +2874,8 @@ codex mcp login dohc-share`);
     await showLinkPane(user);
 
     let row = await screen.findByTestId("share-link-row-stale-retune");
-    await user.click(screen.getByRole("button", { name: "Create link" }));
+    await openSeparateLink(user);
+    await user.click(screen.getByTestId("share-link-create"));
     expect((await screen.findByTestId("share-link-url")).textContent).toBe(LINK_URL_A);
     await vi.waitFor(() => {
       expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
@@ -2973,9 +2989,9 @@ codex mcp login dohc-share`);
     expect(document.activeElement).toBe(retune);
     // Enter opens the menu on the current level, an arrow moves, and Enter picks.
     await user.keyboard("{Enter}");
-    expect(screen.getByRole("menu", { name: "Access for this link" })).toBeTruthy();
+    expect(screen.getByRole("menu", { hidden: true }).getAttribute("aria-label")).toBe("Access for this link");
     await user.keyboard("{ArrowDown}");
-    expect(document.activeElement).toBe(screen.getByRole("menuitemradio", { name: "Can comment" }));
+    expect(document.activeElement).toBe(screen.getByRole("menuitemradio", { name: "Can comment", hidden: true }));
     await user.keyboard("{Enter}");
     const confirmation = screen.getByTestId("share-link-confirmation");
     expect(within(confirmation).getByRole("button", { name: "Turn on comments" })).toBeTruthy();
@@ -2989,8 +3005,9 @@ codex mcp login dohc-share`);
     addButton.focus();
     expect(document.activeElement).toBe(addButton);
     await user.keyboard("{Enter}");
-    const addMenu = screen.getByRole("menu", { name: "Access for the new link" });
-    expect(document.activeElement).toBe(within(addMenu).getByRole("menuitem", { name: "Can view" }));
+    const addMenu = screen.getByRole("menu", { hidden: true });
+    expect(addMenu.getAttribute("aria-label")).toBe("Access for the new link");
+    expect(document.activeElement).toBe(within(addMenu).getByRole("menuitem", { name: "Can view", hidden: true }));
     await user.keyboard("{Enter}");
     expect(
       within(group).getByRole("button", { name: "Adding link…" }).hasAttribute(
@@ -3000,12 +3017,12 @@ codex mcp login dohc-share`);
     expect(within(row).getByRole("button", { name: "Can view" }).hasAttribute("disabled")).toBe(true);
     await user.click(within(row).getByRole("button", { name: "Link options" }));
     for (const name of ["Reset link", "End link"]) {
-      expect(screen.getByRole("menuitem", { name }).getAttribute("aria-disabled")).toBe("true");
+      expect(screen.getByRole("menuitem", { name, hidden: true }).getAttribute("aria-disabled")).toBe("true");
     }
-    await user.click(screen.getByRole("menuitem", { name: "End link" }));
+    await user.click(screen.getByRole("menuitem", { name: "End link", hidden: true }));
     expect(screen.queryByTestId("share-link-confirmation")).toBeNull();
     expect(
-      screen.getByRole("button", { name: "Create link" }).hasAttribute("disabled"),
+      screen.getByRole("button", { name: "Create separate link" }).hasAttribute("disabled"),
     ).toBe(true);
 
     await act(async () => {
@@ -3146,7 +3163,7 @@ codex mcp login dohc-share`);
     expect((await screen.findByTestId("share-code")).textContent).toBe(SHARE_CODE);
 
     await showLinkPane(user);
-    await user.click(screen.getByRole("button", { name: "Create link" }));
+    await user.click(screen.getByTestId("share-link-create"));
     expect((await screen.findByTestId("share-link-url")).textContent).toBe(LINK_URL);
 
     await user.click(screen.getByRole("radio", { name: "Invite by email" }));
@@ -6078,13 +6095,13 @@ codex mcp login dohc-share`);
     const options = within(group).getByRole("button", { name: "Link options" });
     options.focus();
     await user.keyboard("{Enter}");
-    expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "Reset link" }));
+    expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "Reset link", hidden: true }));
     await user.keyboard("{ArrowDown}");
-    expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "End link" }));
+    expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "End link", hidden: true }));
     await user.keyboard("{Escape}");
-    expect(screen.queryByRole("menu")).toBeNull();
+    expect(screen.queryByRole("menu", { hidden: true })).toBeNull();
     expect(document.activeElement).toBe(options);
-    expect(screen.getByRole("button", { name: "Create link" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Create separate link" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Close" })).toBeTruthy();
   });
 });
@@ -6111,7 +6128,7 @@ describe("advertised public Edit release", () => {
     const choices = screen.getByRole("radiogroup", {name: "Link access"});
     await user.click(await within(choices).findByRole("radio", {name: "Edit"}));
     expect(screen.getByText("People who can edit can see the full History.")).toBeTruthy();
-    await user.click(screen.getByRole("button", {name: "Create link"}));
+    await user.click(screen.getByTestId("share-link-create"));
     expect(bridgeMock.createRelayShareLink).toHaveBeenCalledWith({workspaceId: "ws-1", paths, access: "edit"});
   });
   it("does not offer Edit for a pinned version even when advertised", async () => {

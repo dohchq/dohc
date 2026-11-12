@@ -67,8 +67,13 @@ export function hashLinkBearer(secret: string, key: BinaryLike): string {
   return createHmac("sha256", key).update(secret).digest("base64url");
 }
 
+// The relay holds one link key, so its sealing key is derived once.
+let sealingKeyFor: { key: string | Uint8Array; derived: Buffer } | null = null;
 function linkSealingKey(key: string | Uint8Array): Buffer {
-  return Buffer.from(hkdfSync("sha256", key, Buffer.alloc(0), "dohc-link-url-seal-v1", 32));
+  if (sealingKeyFor?.key !== key) {
+    sealingKeyFor = { key, derived: Buffer.from(hkdfSync("sha256", key, Buffer.alloc(0), "dohc-link-url-seal-v1", 32)) };
+  }
+  return sealingKeyFor.derived;
 }
 
 export function sealLinkBearer(secret: string, key: string | Uint8Array, credentialId: string, grantId: string): string {
