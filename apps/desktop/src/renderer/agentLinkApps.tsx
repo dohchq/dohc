@@ -53,7 +53,12 @@ export function AgentLinkAppMenu(props: {
   const report = useContext(ShellErrorReporter);
   const [open, setOpen] = useState(false);
   const [answer, setAnswer] = useState<{ id: string; feedback: CopyFeedback } | null>(null);
-  const picked = useRef<{ id: string; text: string } | null>(null);
+  const setups = props.link === null ? [] : agentLinkSetups(props.link, props.server);
+  // The row picked last. Its text is made from the link the menu has at the
+  // copy, so Try again after a failed copy never gives a link since replaced.
+  const picked = useRef<string | null>(null);
+  const current = useRef(setups);
+  current.current = setups;
   // Whether the open list is showing a row's answer.
   const answered = useRef(false);
   const reportTo = useRef(report);
@@ -63,14 +68,14 @@ export function AgentLinkAppMenu(props: {
   const action = useRef<ReturnType<typeof createCopy> | null>(null);
   useLayoutEffect(() => {
     const copy = createCopy({
-      getText: () => picked.current?.text ?? null,
+      getText: () => current.current.find((setup) => setup.id === picked.current)?.text ?? null,
       report: () => reportTo.current,
       secret: () => secret.current,
       show: (feedback) => {
-        const row = picked.current;
-        if (feedback && row) {
+        const id = picked.current;
+        if (feedback && id) {
           answered.current = true;
-          setAnswer({ id: row.id, feedback });
+          setAnswer({ id, feedback });
           return;
         }
         // The answer has shown. A list closed since has already let go of it.
@@ -87,7 +92,6 @@ export function AgentLinkAppMenu(props: {
     };
   }, []);
 
-  const setups = props.link === null ? [] : agentLinkSetups(props.link, props.server);
   return (
     <Menu
       label="Copy setup for an agent"
@@ -110,7 +114,7 @@ export function AgentLinkAppMenu(props: {
         label: answer?.id === setup.id ? COPY_WORDS[answer.feedback] : setup.label,
         testId: `${props.testId}-${setup.id}`,
         onSelect: () => {
-          picked.current = { id: setup.id, text: setup.text };
+          picked.current = setup.id;
           void action.current?.copy();
         },
       }))}

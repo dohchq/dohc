@@ -52,8 +52,10 @@ function userWith(timers: "fake" | "real") {
 // The list opens in the top layer, which jsdom does not draw, so it reads the list as hidden.
 const list = () => screen.queryByRole("menu", { hidden: true });
 
-function renderMenu(props: { link: string | null; sensitive?: boolean; report?: ReportShellFailure }) {
-  render(
+type MenuFixture = { link: string | null; sensitive?: boolean; report?: ReportShellFailure };
+
+function menu(props: MenuFixture) {
+  return (
     <ShellErrorReporter.Provider value={props.report ?? null}>
       <AgentLinkAppMenu
         link={props.link}
@@ -61,8 +63,13 @@ function renderMenu(props: { link: string | null; sensitive?: boolean; report?: 
         sensitive={props.sensitive ? { what: "the address for an agent", again: "Reset the link in Share to get a new one." } : undefined}
         testId="apps"
       />
-    </ShellErrorReporter.Provider>,
+    </ShellErrorReporter.Provider>
   );
+}
+
+function renderMenu(props: MenuFixture) {
+  const { rerender } = render(menu(props));
+  return { rerender: (next: MenuFixture) => rerender(menu(next)) };
 }
 
 it("copies the picked agent's setup, says so on its row, then closes", async () => {
@@ -126,6 +133,26 @@ it("says a refused copy on its row and reports it without keeping a secret link 
   const later = report.mock.calls[1]![0];
   expect(later.retry).toBeNull();
   expect(later.message).toContain("Reset the link in Share to get a new one.");
+});
+
+it("never copies a link its surface has replaced when Try again comes after a failed copy", async () => {
+  const user = userWith("real");
+  const writeText = vi.spyOn(navigator.clipboard, "writeText").mockRejectedValueOnce(new Error("denied")).mockResolvedValue(undefined);
+  const report = vi.fn<ReportShellFailure>();
+  const { rerender } = renderMenu({ link: SHARE, sensitive: true, report });
+  await user.click(screen.getByRole("button", { name: "Copy setup for an agent" }));
+  await user.click(screen.getByTestId("apps-codex"));
+  expect(report).toHaveBeenCalledTimes(1);
+  // The surface gets a new link while the same menu stays on screen.
+  const replaced = SHARE.replace(/6$/u, "7");
+  rerender({ link: replaced, sensitive: true, report });
+  await act(async () => report.mock.calls[0]![0].retry?.());
+  expect(writeText).toHaveBeenCalledTimes(2);
+  expect(writeText).toHaveBeenLastCalledWith(`codex mcp add dohc-share --url ${replaced}\ncodex mcp login dohc-share`);
+  // With no link left, Try again copies nothing.
+  rerender({ link: null, sensitive: true, report });
+  await act(async () => report.mock.calls[0]![0].retry?.());
+  expect(writeText).toHaveBeenCalledTimes(2);
 });
 
 it("cannot open while there is no link", async () => {
