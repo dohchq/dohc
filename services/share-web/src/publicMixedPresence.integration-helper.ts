@@ -11,7 +11,7 @@ export async function runPublicMixedPresence(h: PublicTransitionHarness, workloa
   let named = await openNamed(fixture);
   await browserExpect.poll(h.listeners, {timeout: h.timeoutMs}).toBe(h.concurrency);
   const writer = peers.pop()!;
-  await writer.page.getByRole("button", {name: "Back to shared files", exact: true}).click();
+  await writer.page.getByRole("button", {name: "Done", exact: true}).click();
   await browserExpect.poll(h.listeners, {timeout: h.timeoutMs}).toBe(h.concurrency - 1);
   const socket = await h.wire.connect(writer.context, await h.wire.ticket(writer.context, writer.discriminator, fixture.document.objectId), "anonymous-mixed-membership");
   try {

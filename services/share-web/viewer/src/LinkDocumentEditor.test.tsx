@@ -42,15 +42,15 @@ it("shows the grant-scoped refusal with its next step", async () => {
   vi.mocked(openLinkDocument).mockRejectedValue(new Error(LINK_REFUSALS.link_comment_access.error));
   await render(true);
   await settle(() => container.textContent?.includes(LINK_REFUSALS.link_comment_access.error) === true);
-  expect(container.textContent).toContain("Retry");
+  expect(container.textContent).toContain("Try again");
 });
 it("asks a link holder to retry, not to ask for access, when the file could not open for another reason", async () => {
   vi.mocked(openLinkDocument).mockRejectedValue(new TypeError("Failed to fetch"));
   await render(true);
-  await settle(() => container.querySelector(".download-card p") !== null);
-  expect(container.querySelector(".download-card p")!.textContent)
+  await settle(() => container.querySelector(".edit-notice p") !== null);
+  expect(container.querySelector(".edit-notice p")!.textContent)
     .toBe("dohc could not open this file for editing. Retry in a moment. If it keeps happening, ask the owner.");
-  expect(container.textContent).toContain("Retry");
+  expect(container.textContent).toContain("Try again");
 });
 it("retains a quarantined draft after access loss, including updates rejected before they entered the queue", async () => {
   const f = fixture(), onClose = vi.fn(); vi.mocked(openLinkDocument).mockResolvedValue(f.session);
@@ -63,9 +63,9 @@ it("retains a quarantined draft after access loss, including updates rejected be
   expect(container.querySelector('[role="textbox"]')?.getAttribute("contenteditable")).toBe("false");
   expect(container.textContent).not.toContain("Open current file");
   const unload = new Event("beforeunload", {cancelable: true}); window.dispatchEvent(unload); expect(unload.defaultPrevented).toBe(true);
-  await click("Back to shared files"); expect(onClose).not.toHaveBeenCalled(); expect(container.querySelector("dialog")?.open).toBe(true);
+  await click("Done"); expect(onClose).not.toHaveBeenCalled(); expect(container.querySelector("dialog")?.open).toBe(true);
   await click("Keep reviewing"); expect(onClose).not.toHaveBeenCalled();
-  await click("Back to shared files"); await click("Discard draft and continue"); expect(onClose).toHaveBeenCalledOnce();
+  await click("Done"); await click("Discard draft and continue"); expect(onClose).toHaveBeenCalledOnce();
 });
 it("retires a late open response when access changes during authorization", async () => {
   const f = fixture(); let release!: (value: typeof f.session) => void;

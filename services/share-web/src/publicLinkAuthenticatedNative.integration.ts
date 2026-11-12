@@ -326,7 +326,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     for (let index = 0; index < peers.length; index++) expect(settledMarkdown).toContain(`Public peer ${index}.`);
     results.tinyBrowserLifecycle = {concurrency: peers.length, settlement, settledMarkdown};
     const first = peers[0]!;
-    await first.page.getByRole("button", {name: "Back to shared files", exact: true}).click();
+    await first.page.getByRole("button", {name: "Done", exact: true}).click();
     await browserExpect.poll(() => frameChanges.captureCount()).toBe(capacity.admittedConcurrency - 1);
     const wire = createPublicLinkWireProof({audience, root, frames, timeoutMs: routeLimits.upgradeTimeoutMs}); closes.push(wire.close);
     const consumed = await wire.ticket(first.context, first.discriminator, "object");
@@ -372,7 +372,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     const freshPeers = [];
     for (let index = 0; index < capacity.admittedConcurrency; index++) freshPeers.push(await openLink(freshLink.url, peers.length + index));
     const freshFirst = freshPeers[0]!;
-    await freshFirst.page.getByRole("button", {name: "Back to shared files", exact: true}).click();
+    await freshFirst.page.getByRole("button", {name: "Done", exact: true}).click();
     await browserExpect.poll(() => frameChanges.captureCount()).toBe(capacity.admittedConcurrency - 1);
     for (const origin of [null, "https://unapproved.example.test"]) {
       const invalidOrigin = await wire.connect(freshFirst.context, await wire.ticket(freshFirst.context, freshFirst.discriminator, "object"), `origin-${origin ?? "missing"}`, origin);
@@ -381,7 +381,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     const outsideLink = await ownerRequest("/sync/workspace/shares/links", {paths: ["docs/other.md"], access: "edit"});
     const outsidePeer = await openLink(outsideLink.url, peers.length + freshPeers.length);
     await browserExpect(outsidePeer.editor).toHaveText("Hello");
-    await outsidePeer.page.getByRole("button", {name: "Back to shared files", exact: true}).click();
+    await outsidePeer.page.getByRole("button", {name: "Done", exact: true}).click();
     await browserExpect.poll(() => frameChanges.captureCount()).toBe(capacity.admittedConcurrency - 1);
     const outsideTicketCapacity = assertTicketCapacity(freshLink.grantId);
     const outsideTicket = await freshFirst.context.request.post(audience + "/api/live/link-ticket", {
@@ -436,7 +436,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
       beforeRestartEpoch, afterRestartEpoch: newEpoch.hostEpoch!, freshAck: accepted.ack};
     await newEpoch.close();
     for (const [index, peer] of freshPeers.entries()) await peer.page.screenshot({path: join(root, `public-peer-${index}.png`), fullPage: true});
-    for (const peer of freshPeers.slice(1)) await peer.page.getByRole("button", {name: "Back to shared files", exact: true}).click();
+    for (const peer of freshPeers.slice(1)) await peer.page.getByRole("button", {name: "Done", exact: true}).click();
     await browserExpect.poll(() => frameChanges.listenerCount()).toBe(0);
     const workloadDocument = {...document, objectId: "workload-object", lineageClaimId: hash(workload.checkpoint)};
     const browserWorkloadDocument = {...workloadDocument, objectId: "browser-workload-object"};
@@ -478,12 +478,12 @@ it("exercises public Edit through owner creation, exchange and native applicatio
       for (let index = 0; index < workloadBrowsers.length; index++) expect(markdown).toContain(`Workload peer ${index}.`);
       results.workloadBrowserEdits = {concurrency: workloadBrowsers.length, applications: rows, settled, markdownSha256: hash(Buffer.from(markdown))};
     } finally {browserJournal.close();}
-    for (const peer of workloadBrowsers) await peer.page.getByRole("button", {name: "Back to shared files", exact: true}).click();
+    for (const peer of workloadBrowsers) await peer.page.getByRole("button", {name: "Done", exact: true}).click();
     await browserExpect.poll(() => frameChanges.listenerCount()).toBe(0);
     const wireIdentities = [];
     for (let index = 0; index < capacity.admittedConcurrency; index++) {
       const peer = await openLink(workloadLink.url, contexts.length);
-      await peer.page.getByRole("button", {name: "Back to shared files", exact: true}).click(); wireIdentities.push(peer);
+      await peer.page.getByRole("button", {name: "Done", exact: true}).click(); wireIdentities.push(peer);
     }
     await browserExpect.poll(() => frameChanges.listenerCount()).toBe(0);
     const workloadWires: Awaited<ReturnType<typeof wire.connect>>[] = [];

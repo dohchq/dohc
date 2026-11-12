@@ -270,6 +270,8 @@ export function CommentsPanel(props: {
   access: ShareAccess;
   session: string;
   onAccessChange?: (session: string, access: ShareAccess) => void;
+  /** Hears how many comments are loaded, and whether earlier ones remain. */
+  onCount?: (count: number, more: boolean) => void;
 }) {
   const [messages, setMessages] = useState<PublicDiscussionMessage[] | null>(null);
   const [loadState, setLoadState] = useState<InitialLoadState>("loading");
@@ -709,6 +711,11 @@ export function CommentsPanel(props: {
       }
     }
   };
+
+  const { onCount } = props;
+  useEffect(() => {
+    onCount?.(messages?.length ?? 0, earlierCursor !== null);
+  }, [onCount, messages, earlierCursor]);
 
   const currentLoadState = loadStateSession === props.session ? loadState : "loading";
   const disabled = pending || composerState !== "available" || followerPhase !== "live";
