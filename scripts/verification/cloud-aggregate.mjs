@@ -8,7 +8,7 @@ import { RUST_ARCHIVE_PROOFS, RUST_POLICY_STEPS, RUST_READER_SHARD, RUST_SHARDS,
 
 export function aggregateJavascript(records) {
   const preparation = records.filter(record => record.part === "prepare-0");
-  if (preparation.length !== 1 || preparation[0].verdict !== "PASS") throw new Error("The shared JavaScript preparation did not pass.");
+  if (preparation.length !== 1 || preparation[0].verdict !== "PASS") throw new Error("The JavaScript preparation receipt is missing, duplicated, or unsuccessful; check preparation and worker jobs.");
   const shards = records.filter(record => /^worker-\d+$/u.test(record.part));
   const expectedParts = Array.from({ length: JS_SHARDS }, (_, index) => `worker-${index}`);
   if (records.length !== expectedParts.length + 1 || shards.length !== expectedParts.length
@@ -161,7 +161,7 @@ export async function verifyCompletedCloud(scope, { env = process.env, readJobs 
 
 // Partition zero publishes its own receipt before joining the other workers.
 export async function waitForGate(scope, { readJobs, pause = setTimeout, now = Date.now, outputDirectory = ".agent-artifacts/verification/aggregate", ...options } = {}) {
-  const api = cloudApi(options), deadline = now() + 20 * 60_000;
+  const deadline = now() + 20 * 60_000, api = cloudApi({ ...options, pause, now, deadline });
   const expected = gateJobNames(scope).filter(name => name !== (scope === "js" ? "typecheck + tests" : "engine gate"));
   try {
     for (;;) {
