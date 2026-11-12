@@ -406,9 +406,12 @@ export async function settleOperations(
   read: ReceiptReader | null,
   reason: RefusalReason,
   nowMs: number,
+  /** Runs once every receipt is read and before any verdict is recorded, whether or not a record needed a read. */
+  beforeRecording?: () => Promise<void>,
 ): Promise<void> {
   if (records.length === 0) return;
   const receipts = read === null ? new Map<string, StageState>() : await readStages(read, records);
+  await beforeRecording?.();
   for (const record of records) recordVerdict(storage, record, judgeOperation(storage, record, receipts, reason), nowMs);
 }
 

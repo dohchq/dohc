@@ -1,6 +1,6 @@
 import { workspaceIsDeleted } from "./storage/accountDeletion";
 import {createHash, randomBytes} from "node:crypto";
-import {mkdir, open as openFile, readdir, rm, stat, writeFile} from "node:fs/promises";
+import {mkdir, open as openFile, readdir, rename, rm, stat, writeFile} from "node:fs/promises";
 import {join} from "node:path";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
@@ -243,7 +243,7 @@ export async function startAutomationReplicas(options: {
       const reader = (await engine()).engine;
       // A handle the read left open keeps the folder until a removal path closes it.
       await readFolder(reader, nextRequestId, join(home, "workspace"), workspaceId,
-        (read) => settleOperations(storage, records, markingSettled(home, read), reason, nowMs()), (handle) => {
+        (read) => settleOperations(storage, records, read, reason, nowMs(), () => markSettled(home)), (handle) => {
           const held = heldOpen.get(folderOf(workspaceId)) ?? new Set<{engine: EngineClient; handle: string}>();
           held.add({engine: reader, handle});
           heldOpen.set(folderOf(workspaceId), held);
@@ -346,7 +346,7 @@ export async function startAutomationReplicas(options: {
     }
     await closeHeld(folder);
     for (const entry of await readdir(folder)) {
-      if (entry !== String(row.incarnation)) await rm(join(folder, entry), {recursive: true, force: true});
+      if (entry !== String(row.incarnation)) await discard(join(folder, entry));
     }
     const {engine: engineClient, exited} = await engine();
     const bearerToken = deriveAutomationReplicaBearer(row, {key: options.key, namespace: options.namespace});
@@ -546,7 +546,7 @@ export async function startAutomationReplicas(options: {
               // over as if it were lost. Writes a crash left unrecorded after the read settle first.
               await settleCopy(workspaceId, row.incarnation, COULD_NOT_SEND);
               await closeHeld(folderOf(workspaceId));
-              await rm(home, {recursive: true, force: true});
+              await discard(home);
               opening = storage.replaceLostAutomationReplica({workspaceId, incarnation: row.incarnation, nowMs: nowMs()});
             }
             if (opening !== null) await open(opening);
@@ -591,7 +591,7 @@ export async function startAutomationReplicas(options: {
           // Settlement is final: the folder's unsent writes now answer refused, so it must not
           // publish again. A visit admitted meanwhile gets a copy joined anew.
           await closeHeld(folderOf(row.workspaceId));
-          await rm(folderOf(row.workspaceId), {recursive: true, force: true});
+          await discard(folderOf(row.workspaceId));
           storage.forgetAutomationWorkspace({workspaceId: row.workspaceId, incarnation: row.incarnation});
         };
         const kept = row.reasons.includes("automation");
@@ -646,7 +646,7 @@ export async function startAutomationReplicas(options: {
           // Its phone writes settle first. A failure keeps the folder and fails the pass, which retries after its delay.
           if (holder !== undefined) await settleWorkspace(holder, COULD_NOT_SEND);
           await closeHeld(path);
-          await rm(path, {recursive: true, force: true});
+          await discard(path);
         } catch (error) {
           // A folder no row names is no one workspace's: the pass fails as a whole, after the others had their turn.
           if (signal.aborted) throw error;
@@ -926,22 +926,42 @@ const SETTLED_MARKER = "settled";
 const isSettled = async (home: string) => !(await missing(join(home, SETTLED_MARKER)));
 
 /**
- * A receipt reader that, once the receipts are read and before any verdict
- * is recorded, marks the folder settled, durably, so no later open, after a
- * restart too, reuses it for sync.
+ * Marks an incarnation's folder settled, durably, so no later open, after a
+ * restart too, reuses it for sync. Settlement calls it once the receipts are
+ * read and before any verdict is recorded. A read that fails marks nothing,
+ * so a copy whose writes nothing judged can still open and publish them.
  */
-function markingSettled(home: string, read: ReceiptReader): ReceiptReader {
-  return async (stageKeys) => {
-    const state = await read(stageKeys);
-    const marker = await openFile(join(home, SETTLED_MARKER), "w", 0o600);
-    try { await marker.sync(); } finally { await marker.close(); }
-    // Windows cannot open a folder to sync it.
-    if (process.platform !== "win32") {
-      const folder = await openFile(home, "r");
-      try { await folder.sync(); } finally { await folder.close(); }
-    }
-    return state;
-  };
+async function markSettled(home: string): Promise<void> {
+  const marker = await openFile(join(home, SETTLED_MARKER), "w", 0o600);
+  try { await marker.sync(); } finally { await marker.close(); }
+  // Windows cannot open a folder to sync it.
+  if (process.platform !== "win32") {
+    const folder = await openFile(home, "r");
+    try { await folder.sync(); } finally { await folder.close(); }
+  }
+}
+
+// A copy's folder or incarnation renamed to go: no workspace or incarnation owns a name with it.
+const DISCARDED = ".discarded-";
+
+/**
+ * Removes a copy's folder, or one incarnation's, whole or not at all: it is
+ * first renamed, in the same parent, to a name nothing owns, then removed. A
+ * removal that fails partway can't leave a settled folder without its
+ * marker where a copy would open it. The leftover goes when the parent's
+ * unowned names are next removed: open() removes every name in a copy's
+ * folder but its incarnation, and the sweep every name in the root that no
+ * copy's row names. A path already gone is nothing to do.
+ */
+async function discard(path: string): Promise<void> {
+  const discarded = `${path}${DISCARDED}${randomBytes(8).toString("hex")}`;
+  try {
+    await rename(path, discarded);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  await rm(discarded, {recursive: true, force: true});
 }
 
 async function missing(path: string): Promise<boolean> {
@@ -1020,6 +1040,8 @@ export async function removeAutomationReplicas(storage: SyncRelayStorage, root: 
   const kept = [...new Set(storage.listUnfinishedOperationCopies().map((copy) => copy.workspaceId))];
   storage.forgetAutomationWorkspaces(kept);
   if (kept.length === 0) {
+    // Each copy's folder goes whole or not at all, so a later server that keeps copies never reopens a settled one.
+    if (!(await missing(root))) for (const entry of await readdir(root)) await discard(join(root, entry));
     await rm(root, {recursive: true, force: true});
     return;
   }
@@ -1027,7 +1049,7 @@ export async function removeAutomationReplicas(storage: SyncRelayStorage, root: 
   if (!settle) return;
   const folders = new Set(kept.map((workspaceId) => replicaFolder(root, settle.namespace, workspaceId)));
   for (const entry of await readdir(root)) {
-    if (!folders.has(join(root, entry))) await rm(join(root, entry), {recursive: true, force: true});
+    if (!folders.has(join(root, entry))) await discard(join(root, entry));
   }
 }
 
@@ -1047,7 +1069,7 @@ async function settleRemovedCopies(storage: SyncRelayStorage, root: string, sett
         try {
           if (await missing(home)) await settleOperations(storage, records, null, COULD_NOT_SEND, Date.now());
           else await readFolder(engineClient, nextRequestId, join(home, "workspace"), workspaceId,
-            (read) => settleOperations(storage, records, markingSettled(home, read), COULD_NOT_SEND, Date.now()));
+            (read) => settleOperations(storage, records, read, COULD_NOT_SEND, Date.now(), () => markSettled(home)));
         } catch (error) {
           console.error(`[sync-relay] The phone's writes in the copy of workspace "${workspaceId}" couldn't be settled.`, error);
         }

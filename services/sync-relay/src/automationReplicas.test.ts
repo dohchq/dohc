@@ -26,12 +26,18 @@ const spawn = vi.hoisted(() => vi.fn());
 vi.mock("@dohc/workspace-engine-client/daemon", async (importOriginal) => ({
   ...await importOriginal<typeof import("@dohc/workspace-engine-client/daemon")>(), createEngineClient: spawn,
 }));
-// A folder a test names here can't be removed, as when the disk refuses.
-const stuck = vi.hoisted(() => ({ path: null as string | null }));
+// A folder a test names here can't be removed, as when the disk refuses. With `renamed`, so can the name
+// it is renamed to on its way out. With `partly`, the removal first deletes the folder's settled marker.
+const stuck = vi.hoisted(() => ({ path: null as string | null, renamed: false, partly: false }));
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
+  const { join: joinPath } = await import("node:path");
   return { ...actual, rm: async (...args: Parameters<typeof actual.rm>) => {
-    if (stuck.path !== null && String(args[0]) === stuck.path) throw Object.assign(new Error("the folder is busy"), { code: "EBUSY" });
+    const target = String(args[0]);
+    if (stuck.path !== null && (target === stuck.path || (stuck.renamed && target.startsWith(`${stuck.path}.discarded-`)))) {
+      if (stuck.partly) await actual.rm(joinPath(target, "settled"), { force: true });
+      throw Object.assign(new Error("the folder is busy"), { code: "EBUSY" });
+    }
     return await actual.rm(...args);
   } };
 });
@@ -2386,6 +2392,34 @@ describe("the automation replicas", () => {
     expect(closedAt, "before the copy opened for sync").toBeLessThan(openedAt);
   });
 
+  it("never reopens a settled folder whose removal failed partway, and removes what it left later", async () => {
+    const { storage, raw } = await relay();
+    const engine = fakeEngine();
+    const { running, pass, home, sentinel, wantAgain } = await refusedBehindFailedClose(storage, raw, engine);
+    const folder = join(home, "..");
+    const relayOpens = () => engine.sent.filter((request) => request.method === "workspace.open" && request.params.relay !== undefined).length;
+    const opens = relayOpens();
+    // The visit's pass removes the settled folder, and the removal deletes the marker, then fails.
+    stuck.path = home; stuck.renamed = true; stuck.partly = true;
+    cleanup.push(async () => { stuck.path = null; stuck.renamed = false; stuck.partly = false; });
+    wantAgain();
+    await pass(WORKSPACE);
+    expect(relayOpens(), "nothing opened for sync").toBe(opens);
+    expect(running.replica(WORKSPACE)).toBeUndefined();
+    expect(existsSync(home), "the settled folder is no incarnation's any more").toBe(false);
+    const [leftover] = readdirSync(folder).filter((entry) => entry.startsWith("1.discarded-"));
+    expect(leftover, "what the failed removal left").toBeDefined();
+    expect(existsSync(join(folder, leftover!, "settled")), "its marker went first").toBe(false);
+    expect(existsSync(join(folder, leftover!, "workspace", "sentinel"))).toBe(true);
+
+    // The removal works again; the retry opens a fresh copy and removes the leftover.
+    stuck.path = null;
+    await pass(WORKSPACE);
+    freshCopy(running, raw, sentinel);
+    expect(relayOpens()).toBe(opens + 1);
+    expect(readdirSync(folder), "only the fresh incarnation").toEqual(["1"]);
+  });
+
   it("never reopens a settled folder whose read didn't close after a restart", async () => {
     const { storage, raw } = await relay();
     const engine = fakeEngine();
@@ -2430,7 +2464,7 @@ describe("the automation replicas", () => {
     const errors: Array<[unknown, string | undefined]> = [];
     const { running } = await stepped(storage, () => automation([WORKSPACE]), { onError: (error, workspaceId) => errors.push([error, workspaceId]) });
     const folder = join(running.replica(WORKSPACE)!.root, "..", "..");
-    cleanup.push(async () => { stuck.path = null; });
+    cleanup.push(async () => { stuck.path = null; stuck.renamed = false; stuck.partly = false; });
     let runtimeDone = false;
     const deletion = createAccountDeletionRoute({ storage: storage as StorageContext, key: "bearer", fenceKey: "fence", invalidate() {},
       deleteRuntime: async () => running.deleteWorkspaces([WORKSPACE]),
