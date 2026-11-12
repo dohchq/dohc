@@ -16,6 +16,8 @@ import { TextNotSavedError } from "./shell/copyDetails";
 import { AutomationFieldIcon, automationFieldMarkLabel, type FieldMarks } from "./collections/collectionFieldMarks";
 import { inputClass } from "./collections/FieldForm";
 import { CalendarNeedsDateField } from "./collections/CalendarNeedsDateField";
+import { collectionChangeShell } from "./collectionChangeShells";
+import { retainUnsavedCollectionRecord } from "./collections/recordFieldWrites";
 import { CollectionFrame, type CollectionFrameTab, type CollectionFrameViewField, type CollectionFrameViews, type NewCollectionView } from "./collections/CollectionFrame";
 import { RecordPanel, type RecordPanelCommand } from "./collections/RecordPanel";
 import { useRecordPanel, type RecordPanelHost } from "./collections/useRecordPanel";
@@ -268,6 +270,8 @@ interface Live {
   uploading(fieldId: string, busy: boolean): void;
   /** Says a record the table's new row made has no row on screen. */
   outOfView(): void;
+  /** Keeps what a new row held and dohc did not save, by field id, with why. */
+  keepUnsaved(words: string, values: Readonly<Record<string, CollectionValue>>, text?: { field: string; text: string }): void;
   scope: CollectionResourceScope;
   offline: boolean;
   read: DatasetOperation;
@@ -711,26 +715,32 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     const key = receiptKey(receipt);
     row.report({ state: "saved", ...(key === null ? {} : { recordId: key }) });
   }
-  /** A change went unsaved. The row or the panel that sent it stays, with what was typed, and says why. */
+  /**
+   * A change went unsaved. A new record comes back for typing, in the row or the panel that sent it, only when
+   * the Collection did not run its create and no answer of it was ever missing: one it refused at the first
+   * try, or one never sent. A create that was sent and not refused may have run, and so may one whose answer
+   * was once missing, whatever a later try answers. Such a record is never put where it can be sent again
+   * under a new key: its row or its panel goes, and the queue keeps what it held in the page's list.
+   */
   function dropped(write: QueuedWrite, reason: string, refused: boolean): boolean {
+    const typable = (refused || !write.request) && !write.doubted;
     const row = rowSave.current;
     if (row?.id === write.id) {
       rowSave.current = null;
-      // Only a create the Collection did not run comes back to the row for typing: one it refused, or one never
-      // sent. Its request was out, whoever asked for the try, and it did not run. A row that went with its
-      // table leaves the new record to the page's list.
-      if (refused || !write.request) { row.report({ state: "pending" }); return row.report({ state: "refused", reason }); }
-      // A create that was sent and not refused may have run, so the row never takes typing or sends again. It
-      // goes, and the queue keeps what it held in the page's list, as for any change that may have run.
+      // Its request was out, whoever asked for the try, and it did not run. A row that went with its table
+      // leaves the new record to the page's list.
+      if (typable) { row.report({ state: "pending" }); return row.report({ state: "refused", reason }); }
       row.report({ state: "dropped" });
       return false;
     }
     if (awaitingRef.current !== write.id) {
       // A new record the Collection refused, with no row or panel left to show it, opens in the panel with what was typed and why, while the panel holds no other.
-      if (!refused || write.kind !== "create" || editor !== null || !create || !canCreate) return false;
+      if (!typable || !refused || write.kind !== "create" || editor !== null || !create || !canCreate) return false;
       trigger.current = null; setDraft({ ...write.values }); setInvalid({}); setFormRefusal(reason); setEditor({ operation: create });
       return true;
     }
+    // The panel's own create.
+    if (!typable) { closeEditor(); return false; }
     awaitingRef.current = null; setAwaiting(null);
     setFormRefusal(reason);
     return true;
@@ -753,6 +763,22 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     if (!row.report(doubt)) rowSave.current = null;
   }
   /**
+   * Keeps what a new row held and dohc did not save where the person can copy it: a notice of this workspace's
+   * shell while the window shows the workspace, and once it shows another, the list of unsaved Collection
+   * changes, which outlives the shell and keeps entries by workspace. `text`: what an editor held that its
+   * field cannot take, kept under its field.
+   */
+  function keepUnsaved(words: string, values: Readonly<Record<string, CollectionValue>>, text?: { field: string; text: string }): void {
+    const named = (fieldId: string) => knownFields.current.get(fieldId)?.name ?? fieldId;
+    const kept: Record<string, CollectionValue> = Object.fromEntries(Object.entries(values).map(([fieldId, value]) => [named(fieldId), value]));
+    if (text) kept[named(text.field)] = text.text;
+    if (collectionChangeShell(workspaceId)) {
+      const typed = Object.entries(kept).map(([field, value]) => `${field}: ${display(jsonValue(value))}`).join(", ");
+      const message = `${words} You typed: ${typed}`;
+      onError(message, new TextNotSavedError(message, typed), null);
+    } else retainUnsavedCollectionRecord(workspaceId, table?.name ?? dataset.name, kept, words);
+  }
+  /**
    * Saves the table's new row: one create with every value typed in it, and
    * a new record's default in each field left alone. A value that stops the
    * save goes back to its cell, and nothing is sent.
@@ -761,19 +787,12 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   saveRow.current = (values, report) => {
     const refuse = (reason: string) => {
       if (report({ state: "refused", reason })) return;
-      // The row went with its table, so a notice keeps what it held.
-      const typed = Object.entries(values).map(([fieldId, value]) => `${knownFields.current.get(fieldId)?.name ?? fieldId}: ${display(jsonValue(value))}`).join(", ");
-      const message = `dohc did not create a record in ${table?.name ?? "this Collection"}. ${reason} You typed: ${typed}`;
-      onError(message, new TextNotSavedError(message, typed), null);
+      // The row went with its table, so what it held is kept where the window can still show it.
+      keepUnsaved(collectionChangeShell(workspaceId) ? `dohc did not create a record in ${table?.name ?? "this Collection"}. ${reason}` : `dohc did not create this record. ${reason}`, values);
     };
     if (!create || !table) return refuse(RULES_DISALLOW);
-    // A value in a field the create does not take is never sent. It goes to a notice, so it is not dropped in silence.
-    const stray = Object.entries(values).filter(([fieldId, value]) => !create.fieldIds.includes(fieldId) && !isEmptyValue(jsonValue(value) ?? null));
-    if (stray.length > 0) {
-      const kept = stray.map(([fieldId, value]) => `${knownFields.current.get(fieldId)?.name ?? fieldId}: ${display(jsonValue(value))}`).join(", ");
-      const message = `dohc did not save part of the new record, because a new record in ${table.name} no longer takes it. You typed: ${kept}`;
-      onError(message, new TextNotSavedError(message, kept), null);
-    }
+    // The row holds no value the create does not take: the table gives such a value back as soon as the row
+    // takes typing, before any save of it.
     const typed: Record<string, Typed> = {};
     for (const field of createFields) {
       // The row's cells show each field's default, so what they hold is what is sent: a default left alone, and an
@@ -955,13 +974,15 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       // What the row held and did not save is kept in a notice, with all of it in its details. Nothing is created.
       onUnsaved: row => {
         const named = (fieldId: string) => knownFields.current.get(fieldId)?.name ?? "removed";
-        const typed = [...Object.entries(row.values).map(([fieldId, value]) => `${named(fieldId)}: ${display(jsonValue(value))}`), ...(row.text ? [`${named(row.text.field)}: ${row.text.text}`] : [])].join(", ");
+        const shell = collectionChangeShell(workspaceId) !== undefined;
+        if (row.why === "closed") {
+          const why = `Enter a value ${named(row.text?.field ?? "")} can take.`;
+          live.current?.keepUnsaved(shell ? `dohc did not create a record in ${live.current.tableName}. ${why}` : `dohc did not create this record. ${why}`, row.values, row.text);
+          return;
+        }
         const field = named(Object.keys(row.values)[0] ?? "");
-        const message = row.why === "field"
-          ? `dohc did not save what you typed in the ${field} field of the new record. The field changed, or a new record no longer takes it. You typed: ${typed}`
-          : `dohc did not create a record in ${live.current?.tableName ?? "this Collection"}. Enter a value ${named(row.text?.field ?? "")} can take. You typed: ${typed}`;
-        live.current?.onError(message, new TextNotSavedError(message, typed), null);
-        return row.why === "field" ? `${field} changed, or a new record no longer takes it, so its value left this row. A notice has what you typed.` : undefined;
+        live.current?.keepUnsaved(`dohc did not save what you typed in the ${field} field of the new record. The field changed, or a new record no longer takes it.`, row.values);
+        return `${field} changed, or a new record no longer takes it, so its value left this row. A notice has what you typed.`;
       },
     };
   }, [creatableKey]);
@@ -1031,7 +1052,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   if (openKey !== null && details !== null && !rows.has(openKey)) liveRows.set(openKey, details);
   if (editor) liveRows.set(NEW_RECORD, { id: NEW_RECORD, version: 0, values: Object.fromEntries(form.map(entry => [entry.field.fieldId, entry.value])) });
   live.current = { rows: liveRows, openRecord: openPanel, fields, editable: new Set(editableIds), editOperation, held: disabled || editor !== null, query, load, openCreate, scope, offline, read,
-    creatable: new Set(creatableIds), changeDraft, tableName: table.name, uploading,
+    creatable: new Set(creatableIds), changeDraft, tableName: table.name, uploading, keepUnsaved,
     outOfView: () => props.onNotice?.("Created a record. It is not among the records on screen."), resources: { uploadFile: props.uploadFile, readFile: props.readFile, resolveRelation: props.resolveRelation }, onError };
   // The table's new row shows its own change while a table shows that takes one. Without it, the page's list does.
   const rowHosted = !visual && page !== null && canCreate === true && !needsPanel;

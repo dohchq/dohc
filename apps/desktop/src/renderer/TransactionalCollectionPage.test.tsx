@@ -9,7 +9,8 @@ import { describeApprovedDataset, parseDatasetDescription } from "@dohc/security
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { datasetDefinitionFromDrafts } from "./collections/datasetDefinitionFromDrafts";
 import { transactionalDescription } from "./transactionalCollectionModel";
-import { admitCollectionChanges, openCollectionChangeShell } from "./collectionChangeShells";
+import { admitCollectionChanges, closeCollectionChangeShellsForTests, openCollectionChangeShell } from "./collectionChangeShells";
+import { collectionWriteFailures, resetCollectionFieldWritesForTests } from "./collections/recordFieldWrites";
 import { resetKeptCollectionEditsForTests, TransactionalCollectionPage, type TransactionalDatasetDescription, type TransactionalInvoke } from "./TransactionalCollectionPage";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -67,6 +68,8 @@ afterEach(async () => {
   // A table that closes hands a new row it still holds to its queue, a moment after it closes. That is taken before the queues are cleared.
   await Promise.resolve();
   resetKeptCollectionEditsForTests();
+  // The list of unsaved Collection changes outlives a page, and a test.
+  resetCollectionFieldWritesForTests();
   for (const [key, descriptor] of Object.entries(offsetDescriptors)) if (descriptor) Object.defineProperty(HTMLElement.prototype, key, descriptor);
 });
 
@@ -2478,6 +2481,25 @@ describe("when the Collection's fields change", () => {
     expect(sent(invoke, create)).toHaveLength(1);
   });
 
+  it("sends no second create from the panel once the rules change while its create is out", async () => {
+    const invoke = vi.fn((request: TransactionalInvoke): Promise<{ result: AppBackendJson }> =>
+      request.operationId === read ? Promise.resolve({ result: page() }) : new Promise<never>(() => undefined));
+    const result = setup({ invoke, dataset: needingPanel(dataset()) }); await screen.findByText("Alice");
+    newRecord();
+    typeDraft("Name", "Bob"); typeDraft("Badge", "A1");
+    fireEvent.click(screen.getByRole("button", { name: "Create record" }));
+    await waitFor(() => expect(sent(invoke, create)).toHaveLength(1));
+    // The rules change while the create is with the host. Its request can never be confirmed, and it may have run.
+    result.rerender(<TransactionalCollectionPage {...result.props} dataset={needingPanel(revised(2))} />);
+    // The panel goes: it offers no Create record that would send the record again under a new key.
+    await waitFor(() => expect(noDraftPanel()).toBe(true));
+    const list = within(await screen.findByRole("group", { name: "Changes dohc did not confirm" }));
+    expect(list.getByLabelText<HTMLInputElement>("New record").value).toBe("Name: Bob, Status: New, Badge: A1");
+    expect(list.getByRole("alert").textContent).toBe("The Collection's rules changed before dohc confirmed this change. Check the record, then make the change again.");
+    expect(list.queryByRole("button", { name: "Try again" })).toBeNull();
+    expect(sent(invoke, create)).toHaveLength(1);
+  });
+
   it("sends no second create when the host answers a retried create with changed rules", async () => {
     let writes = 0;
     const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
@@ -3326,24 +3348,35 @@ describe("what a change that did not save leaves for the person", () => {
     await waitFor(() => expect(newRowNote()?.getAttribute("data-new-record-status")).toBe("unconfirmed"));
   }
 
-  it("says on the new row that the Collection refused the record after Try again, with what was typed", async () => {
+  const REFUSED_TAKEN = "The Collection refused this change. Name is taken.";
+  /** The page's list holds the new record with why, to copy, and nothing on the page can send it again. */
+  async function expectListedOnly(values: string) {
+    const list = within(await screen.findByRole("group", { name: "Changes dohc did not confirm" }));
+    expect(list.getByLabelText<HTMLInputElement>("New record").value).toBe(values);
+    expect(list.getByRole("alert").textContent).toBe(REFUSED_TAKEN);
+    expect(list.queryByRole("button", { name: "Try again" })).toBeNull();
+    expect(newRow()).toBeNull();
+    expect(noDraftPanel()).toBe(true);
+  }
+
+  it("never brings a new row back for typing once its answer was missing, even when the Collection then refuses the retry", async () => {
     const invoke = refusedCreate();
-    setup({ invoke });
+    const view = setup({ invoke });
     await screen.findByText("Alice");
     await createBob();
     fireEvent.click(within(newRowNote()!).getByRole("button", { name: "Try again" }));
-    await waitFor(() => expect(newRowNote()?.getAttribute("data-new-record-status")).toBe("refused"));
-    expect(newRowNote()!.textContent).toContain("The Collection refused this change. Name is taken.");
-    expect(newRowCells()[0]!.textContent).toBe("Bob");
-    // The Collection ran nothing, so the row takes typing again.
-    fireEvent.click(newRowCells()[0]!);
-    expect(cellEditor().value).toBe("Bob");
-    expect(strip()).toBeNull();
-    expect(noDraftPanel()).toBe(true);
+    await waitFor(() => expect(sent(invoke, create)).toHaveLength(2));
+    // The first try may have run, whatever the retry answers. The row goes, and the page's list keeps what it held.
+    await waitFor(() => expect(newRow()).toBeNull());
+    await expectListedOnly("Name: Bob, Status: New");
+    // Nothing sends a third create: not Enter, and not closing the page.
+    fireEvent.keyDown(grid(), { key: "Enter" });
+    view.unmount();
+    await Promise.resolve();
     expect(sent(invoke, create)).toHaveLength(2);
   });
 
-  it("opens a new record in the panel, with what was typed and why, when the Collection refuses it with no row left to show it", async () => {
+  it("opens no new record for typing when the Collection refuses a create whose answer was once missing, with no row left to show it", async () => {
     const invoke = refusedCreate();
     const view = setup({ invoke });
     await screen.findByText("Alice");
@@ -3352,11 +3385,59 @@ describe("what a change that did not save leaves for the person", () => {
     view.unmount();
     render(<TransactionalCollectionPage {...view.props} />);
     fireEvent.click(within(await screen.findByRole("group", { name: "Changes dohc did not confirm" })).getByRole("button", { name: "Try again" }));
-    await screen.findByRole("complementary", { name: "New record" });
-    expect(draftValue("Name")).toBe("Bob");
-    expect(within(draftPanel()).getByRole("alert").textContent).toBe("The Collection refused this change. Name is taken.");
-    expect(strip()).toBeNull();
-    expect(sent(invoke, create)).toHaveLength(2);
+    await waitFor(() => expect(sent(invoke, create)).toHaveLength(2));
+    await expectListedOnly("Name: Bob, Status: New");
+  });
+
+  it("opens no new record for typing when the Collection refuses the retry of a panel's create whose answer was missing", async () => {
+    const invoke = refusedCreate();
+    setup({ invoke, dataset: needingPanel(dataset()) });
+    await screen.findByText("Alice");
+    fireEvent.click(within(grid()).getByRole("button", { name: "New record" }));
+    typeDraft("Name", "Bob"); typeDraft("Badge", "A1");
+    fireEvent.click(screen.getByRole("button", { name: "Create record" }));
+    // dohc could not confirm it: the panel closes, and the list has the change with its Try again.
+    fireEvent.click(within(await screen.findByRole("group", { name: "Changes dohc did not confirm" })).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(sent(invoke, create)).toHaveLength(2));
+    await expectListedOnly("Name: Bob, Status: New, Badge: A1");
+    expect(sent(invoke, create)[1]).toEqual(sent(invoke, create)[0]);
+  });
+
+  it("keeps what a new row held in the list of unsaved changes when its table closes after the window showed another workspace", async () => {
+    const view = setup();
+    await screen.findByText("Alice");
+    typeNewRow("Bob", "Tab");
+    fireEvent.keyDown(grid(), { key: "a" });
+    fireEvent.change(cellEditor(), { target: { value: "abc" } });
+    // The window switches workspaces: this workspace's shell closes, and takes no notice.
+    closeCollectionChangeShellsForTests();
+    view.unmount();
+    await Promise.resolve();
+    // A word in a number field stops the save. Everything the row held is kept, with the word under its field.
+    expect(sent(view.invoke, create)).toHaveLength(0);
+    expect(collectionWriteFailures().map(failure => [failure.workspaceId, failure.collectionPath, failure.change.field, failure.change.value, failure.message])).toEqual([
+      ["workspace-A", "People", "New record", { Name: "Bob", Status: "New", Amount: "abc" }, "dohc did not create this record. Enter a value Amount can take. Copy what you typed before discarding it."],
+    ]);
+    expect(view.onError).not.toHaveBeenCalled();
+  });
+
+  it("keeps a new row a required field stops in the list of unsaved changes when its table closes after the window showed another workspace", async () => {
+    const view = setup();
+    await screen.findByText("Alice");
+    // Name is left empty, and Amount is typed.
+    fireEvent.click(within(grid()).getByRole("button", { name: "New record" }));
+    fireEvent.keyDown(cellEditor(), { key: "Tab" });
+    fireEvent.keyDown(grid(), { key: "7" });
+    fireEvent.change(cellEditor(), { target: { value: "7" } });
+    fireEvent.keyDown(cellEditor(), { key: "Tab" });
+    closeCollectionChangeShellsForTests();
+    view.unmount();
+    await Promise.resolve();
+    expect(sent(view.invoke, create)).toHaveLength(0);
+    expect(collectionWriteFailures().map(failure => [failure.workspaceId, failure.collectionPath, failure.change.field, failure.change.value, failure.message])).toEqual([
+      ["workspace-A", "People", "New record", { Amount: 7, Status: "New" }, "dohc did not create this record. Enter Name. Copy what you typed before discarding it."],
+    ]);
+    expect(view.onError).not.toHaveBeenCalled();
   });
 
   it("keeps a new record the Collection refused after its page closed where the person can copy it", async () => {

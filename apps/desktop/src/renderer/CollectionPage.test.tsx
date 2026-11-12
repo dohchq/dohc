@@ -3459,7 +3459,7 @@ describe("a new record in the table", () => {
     expect(onError).not.toHaveBeenCalled();
     expect(collectionWriteFailures().map((failure) => ({ workspaceId: failure.workspaceId, collectionPath: failure.collectionPath, field: failure.change.field, value: failure.change.value, message: failure.message })))
       .toEqual([{ workspaceId: "ws-1", collectionPath: "tasks", field: "New record", value: { title: "Milk" },
-        message: "dohc did not create this record. This window changed workspaces before dohc created the record." }]);
+        message: "dohc did not create this record. This window changed workspaces before dohc created the record. Copy what you typed before discarding it." }]);
     // It is no field write of a record's file.
     expect(retainedCollectionFieldWritePaths("ws-1")).toEqual([]);
     render(<CollectionFieldWriteHost />);
