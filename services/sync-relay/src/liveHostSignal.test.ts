@@ -1,6 +1,11 @@
 import {getEventListeners} from "node:events";
+import {setFlagsFromString} from "node:v8";
+import {runInNewContext} from "node:vm";
 import {describe, expect, it} from "vitest";
-import {liveHostSignal, withLiveHostSignal} from "./liveHostSignal";
+import {liveHostSignal, withDeadline, withLiveHostSignal} from "./liveHostSignal";
+
+setFlagsFromString("--expose-gc");
+const gc = runInNewContext("gc") as () => void;
 
 describe("live host cancellation lifetime", () => {
   it.each([false, true])("releases every request source after completion, failure=%s", async fail => {
@@ -50,5 +55,23 @@ describe("live host cancellation lifetime", () => {
     await expect(pending).rejects.toBe("host retired");
     release();
     expect(getEventListeners(host.signal, "abort")).toHaveLength(0);
+  });
+
+  it("leaves no deadline signal behind after work that derives from it and returns early", async () => {
+    const host = new AbortController(), connection = new AbortController(), signals: WeakRef<AbortSignal>[] = [];
+    for (let i = 0; i < 100; i++) await withDeadline(host.signal, 60_000, async signal => {
+      signals.push(new WeakRef(signal));
+      // Hosted replication derives its own signal from the pass's.
+      AbortSignal.any([connection.signal, signal]);
+    });
+    await new Promise(setImmediate); gc();
+    expect(signals.filter(signal => signal.deref() !== undefined)).toHaveLength(0);
+    expect(getEventListeners(host.signal, "abort")).toHaveLength(0);
+  });
+
+  it("aborts at the deadline with a timeout reason", async () => {
+    const work = withDeadline(new AbortController().signal, 1, signal =>
+      new Promise<never>((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), {once: true})));
+    await expect(work).rejects.toMatchObject({name: "TimeoutError"});
   });
 });

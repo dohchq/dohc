@@ -2,7 +2,7 @@ import {workspaceIsDeleted} from "./storage/accountDeletion";
 import {stopWithoutSessionHost} from "./sessionHostStop";
 import {parseServiceActivationConfig,parseServiceActivationTarget,ServiceActivationDriver,type ServiceActivationBlock,type ServiceActivationConfig,type ServiceActivationTarget,type ServiceCatchUp} from "./serviceActivationDriver";
 import type {OwnerOutboxAdmission} from "./ownerOutboxDelivery";
-import {liveHostSignal, withLiveHostSignal} from "./liveHostSignal.js";
+import {liveHostSignal, withDeadline, withLiveHostSignal} from "./liveHostSignal.js";
 import {observeRelayWrites, type LiveHostChanges} from "./relayWriteChanges.js";
 import {parseNativeLiveSyncConfig} from "./liveSyncConfig.js";
 import {LiveDocumentWork} from "./liveDocumentWork.js";
@@ -1285,9 +1285,8 @@ export async function startServiceLiveHost(options: {
         registered(){registered=true;},runDocument:(document,signal,operation)=>runDocument(document,signal,operation)});
       registerRetained();
       let index=0,lastError:string|undefined,lastIdleError:string|undefined;
-      const pass=async()=>{
+      const pass=()=>withDeadline(signal,config.activation!.passDeadlineMs,async passSignal=>{
         const bounds=config.activation!;
-        const passSignal=AbortSignal.any([signal,AbortSignal.timeout(bounds.passDeadlineMs)]);
         let failed=false;
         // One failed step does not hold back the others.
         const step=async(work:()=>Promise<unknown>)=>{
@@ -1382,7 +1381,7 @@ export async function startServiceLiveHost(options: {
           });
         }
         if(!failed)lastError=undefined;
-      };
+      });
       // Unloads hosted documents with no live connection for the idle period.
       // Unfinished delivery, settlement, publication, or engine work keeps a
       // document loaded until a later sweep retries it.
@@ -1395,7 +1394,7 @@ export async function startServiceLiveHost(options: {
             editors.connected({workspaceId:row.target.workspaceId,objectId:row.objectId}))continue;
           visited++;
           let waiting:string|undefined;
-          try{waiting=await sleep(key,row,state.generation,AbortSignal.any([signal,AbortSignal.timeout(bounds.passDeadlineMs)]));}
+          try{waiting=await withDeadline(signal,bounds.passDeadlineMs,deadline=>sleep(key,row,state.generation,deadline));}
           catch(error){waiting=error instanceof Error?error.message:String(error);}
           if(waiting===undefined || idle.get(key)?.generation!==state.generation)continue;
           idle.set(key,{due:Date.now()+bounds.idleRetryMs,generation:state.generation});

@@ -23,3 +23,16 @@ export async function withLiveHostSignal<T>(host: AbortSignal, caller: AbortSign
   try {return await run(scope.signal);}
   finally {scope.dispose();}
 }
+
+/**
+ * Runs work until its source aborts or the deadline passes. Not AbortSignal.timeout: once AbortSignal.any derives
+ * from a signal that has a timeout among its sources, Node holds that signal until it aborts itself, which a
+ * finished pass never does.
+ */
+export async function withDeadline<T>(source: AbortSignal, ms: number, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(new DOMException("The operation was aborted due to timeout", "TimeoutError")), ms);
+  timer.unref();
+  try {return await withLiveHostSignal(source, deadline.signal, run);}
+  finally {clearTimeout(timer);}
+}
