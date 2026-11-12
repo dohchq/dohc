@@ -8,10 +8,12 @@ import "./namedRecipient.css";
 
 export type NamedDocumentSession = ReturnType<ReturnType<typeof createNamedLiveBrowserTransport>["select"]>;
 const OPENING = ["authorizing", "connecting", "syncing"];
-/** Editing stopped with a change the page will not send again by itself. In every other state it still sends a pending change. */
+// A disconnected page reconnects by itself and sends a pending change again, except for these reasons: it waits for the person to retry.
+const WAITS_FOR_RETRY = ["authority-unavailable", "paused"];
+/** Editing stopped with a change the page will not send again by itself. */
 export function draftNeedsReview(state: NamedLiveBrowserState): boolean {
   return state.status === "quarantined" || state.pendingUpdates > 0 &&
-    (state.status === "closed" || state.status === "disconnected" && state.reason === "authority-unavailable");
+    (state.status === "closed" || state.status === "disconnected" && state.reason !== null && WAITS_FOR_RETRY.includes(state.reason));
 }
 function statusText(state: NamedLiveBrowserState, link: boolean): string {
   if (state.status === "live") return state.pendingUpdates ? "Saving changes…" : state.lastApplied ? "Changes saved" : "Ready to edit";

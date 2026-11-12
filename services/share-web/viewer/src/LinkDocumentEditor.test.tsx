@@ -68,8 +68,9 @@ it.each(resending)("shows no draft panel while the page reconnects ($status) to 
   expect(panel()).toBeNull(); expect(unloadWarns()).toBe(true);
 });
 const stopped: Pick<NamedLiveBrowserState, "status" | "reason" | "pendingUpdates">[] = [{status: "quarantined", reason: "pending-update-limit", pendingUpdates: 0},
-  {status: "disconnected", reason: "authority-unavailable", pendingUpdates: 1}, {status: "closed", reason: null, pendingUpdates: 1}];
-it.each(stopped)("shows the draft panel when editing stopped ($status) with a change the page will not send", async state => {
+  {status: "disconnected", reason: "authority-unavailable", pendingUpdates: 1}, {status: "disconnected", reason: "paused", pendingUpdates: 1},
+  {status: "closed", reason: null, pendingUpdates: 1}];
+it.each(stopped)("shows the draft panel when editing stopped ($status, $reason) with a change the page will not send", async state => {
   const f = await opened();
   await act(async () => f.update(state));
   expect(panel()?.textContent).toContain("Review your draft"); expect(panel()?.textContent).toContain("Open current file");
