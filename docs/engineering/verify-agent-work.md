@@ -103,8 +103,8 @@ The person deletes the delivery folder when they finish. That removes only its c
 One verification owner records passing evidence for every selected gate in the PR.
 PR checks run the selected gates on GitHub-hosted `ubuntu-24.04` runners for ready same-repository PRs.
 When their passing evidence covers the head, it replaces running the gates locally. Drafts and forks start no automatic checks.
-PR checks distribute the complete selected JavaScript inventory across 16 workers.
-Worker 0 runs inside the JavaScript aggregate; workers 1–15 run as matrix jobs.
+PR checks distribute the complete selected JavaScript inventory across 20 workers.
+Worker 0 runs inside the JavaScript aggregate; workers 1–19 run as matrix jobs.
 Cloud workers retry failing Vitest group cases, desktop and account browser proofs, and node:test files once; other commands do not retry.
 Tests that pass on retry remain in worker, aggregate, and completed receipts under `flaky`, and appear with task and test names in job logs.
 Only final verification writes their step summary lines and warning annotations.
@@ -122,7 +122,8 @@ The Rust gate builds one test archive, runs its complete inventory across 16 sha
 Ordinary Rust tests use nextest's `hash:N/16` partitions. Shard 7 also runs the reader proofs, with nextest partition `hash:8/16`.
 The completed verdict requires those proofs exactly once on that shard.
 Rust test jobs wait for their archive and the JavaScript worker matrix to limit concurrent jobs. JavaScript reporting runs alongside them.
-The graph permits at most 21 concurrent jobs: 16 JavaScript workers, preparation, Rust build, Rust policy, and both confinement jobs.
+The graph permits at most 25 concurrent jobs: 20 JavaScript workers, preparation, Rust build, Rust policy, and both confinement jobs.
+The organisation's Team plan permits 60 concurrent standard-runner jobs. Two combined runs fit; three can queue.
 A failed JavaScript worker does not suppress Rust's verdict. Each gate still requires shared preparation and confinement to pass.
 Each aggregate requires passing receipts for every assigned task. `PR verification` also checks completed job times and head commits.
 A local `pnpm verify:pr` still runs the whole selected gate.

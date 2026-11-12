@@ -597,7 +597,7 @@ test("job names match the workflow graph and timeout backstops", () => {
 
 test("cloud matrices run every JavaScript and Rust shard with separate evidence", () => {
   const {jobs} = load(workflow);
-  assert.equal(JS_SHARDS, 16);
+  assert.equal(JS_SHARDS, 20);
   assert.equal(RUST_SHARDS, 16);
   for (const [name, count, finalJob, scope, command] of [
     ["javascript-workers", JS_SHARDS, "javascript", "js-worker", "node scripts/verification/cloud.mjs worker 0"],
@@ -630,7 +630,8 @@ test("the workflow graph pins its peak concurrent jobs", () => {
     if (simultaneous.some(name => simultaneous.some(other => before.get(name).has(other)))) continue;
     peak = Math.max(peak, simultaneous.reduce((n, name) => n + (jobs[name].strategy?.matrix?.shard?.length ?? 1), 0));
   }
-  assert.equal(peak, 21);
+  assert.equal(peak, JS_SHARDS + 5, "workers, preparation, Rust archive and policy, and both confinement jobs");
+  assert.equal(peak, 25);
 });
 
 test("cloud selection uses the tested Git checkout and evidence has bounded retention", () => {

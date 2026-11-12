@@ -74,7 +74,7 @@ Gate timing records each gate's wall span, including both confinement jobs, with
 An over-budget run with more than 30 s of gate-job runner wait warns that timing is unmeasured; uncontended overruns fail.
 Individual jobs have separate termination limits. See [verification timing](verify-agent-work.md#verify-a-pull-request).
 
-The workflow runs 16 JavaScript workers and 16 Rust test partitions. Combined runs permit at most 21 concurrent jobs.
+The workflow runs 20 JavaScript workers and 16 Rust test partitions. Combined runs permit at most 25 concurrent jobs.
 The initial peak includes preparation, Rust build, Rust policy, and both confinement jobs.
 Rust test partitions wait for the JavaScript worker matrix; the JavaScript aggregate can report alongside them.
 
