@@ -139,7 +139,7 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
     // Its replica had its chance to retire the document once it is attached and no longer hosts it.
     const pulledAfterDeparture = (document: Document) => attached.has(document.workspaceId) && !holds(document);
     const readKeptEditsPage = async (kept: ServiceKeptEdits, _cursor: unknown, store: string) => {keptReads.push({outboxId: kept.outboxId, store}); return {kind: "page"};};
-    return {invalidated: controller.signal, close, update, deleteWorkspaces, retains, pulledAfterDeparture, drained, detachDrained, isDocumentReady, readKeptEditsPage, onEvent: () => () => undefined,
+    return {invalidated: controller.signal, close, update, deleteWorkspaces, retains, pulledAfterDeparture, drained, detachDrained, isDocumentReady, readKeptEditsPage, onEvent: () => () => undefined, onProgress: () => () => undefined,
       stop: async <T>(document: Document, fence: () => T) => stopWithoutSessionHost(document, {code: "host-not-loaded", sessionHost: "running, document not loaded yet"}, fence),
       blocked: (document: Document) => holds(document) ? blocked.get(document.objectId) : undefined,
       holdReason: (document: Document) => holds(document) ? holdReasons.get(document.objectId) : undefined,
