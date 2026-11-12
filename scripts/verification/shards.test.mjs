@@ -6,9 +6,10 @@ import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { assertTaskCoverage, javascriptGroups, javascriptTasks, nativeTestFiles, partitionJavascript, partitionTasks, preparedArtifactPaths } from "./shards.mjs";
 import { readWorkspacePackages } from "./selection.mjs";
-import { CLOUD_JOB_GRAPH, aggregateCloud, aggregateJavascript, aggregateRust, completedGateTiming, verifyCompletedCloud, waitForGate } from "./cloud-aggregate.mjs";
+import { CLOUD_JOB_GRAPH, cloudJobGraph, aggregateCloud, aggregateJavascript, aggregateRust, completedGateTiming, verifyCompletedCloud, waitForGate } from "./cloud-aggregate.mjs";
+import { CLOUD_SHAPES, cloudShape, rustReaderShard } from "./cloud-shape.mjs";
 import { JS_SHARDS } from "./cloud.mjs";
-import { RUST_ARCHIVE_PROOFS, RUST_POLICY_STEPS, RUST_READER_SHARD, RUST_SHARDS, RUST_TEST_PROOFS, passedRustTests, rustTestInventory } from "./cloud-rust.mjs";
+import { RUST_ARCHIVE_PROOFS, RUST_POLICY_STEPS, RUST_SHARDS, RUST_TEST_PROOFS, passedRustTests, rustTestInventory } from "./cloud-rust.mjs";
 import { waitForPreparation } from "./wait-preparation.mjs";
 import { cloudApi } from "./cloud-api.mjs";
 import { runVitestGroup } from "./vitest-group.mjs";
@@ -166,58 +167,68 @@ test("only browser groups reserve two slots and double their partition cost", ()
     .map(shard => shard.reduce((n, group) => n + group.weight, 0)), [60, 60]);
 });
 
-test("JavaScript receipts reject missing, failed, duplicated, or different-head work", () => {
+for (const [shapeName, shape] of Object.entries(CLOUD_SHAPES)) {
+test(`${shapeName} JavaScript receipts reject missing, failed, duplicated, or different-head work`, () => {
+  const all = Array.from({ length: 31 }, (_, id) => `task-${id}`);
   const records = [{ part: "prepare-0", commit: "head", verdict: "PASS" }];
-  for (let index = 0; index < JS_SHARDS; index++) records.push({
-    part: `worker-${index}`, commit: "head", verdict: "PASS", planned: Array.from({ length: JS_SHARDS }, (_, id) => `task-${id}`),
-    assigned: [`task-${index}`], completed: [`task-${index}`], tests: [], ...(!index ? { selfHostNative: {} } : {}),
+  for (let index = 0; index < shape.js; index++) records.push({
+    part: `worker-${index}`, commit: "head", verdict: "PASS", planned: all,
+    assigned: all.filter((_, id) => id % shape.js === index), completed: all.filter((_, id) => id % shape.js === index), tests: [], ...(!index ? { selfHostNative: {} } : {}),
   });
-  assert.equal(aggregateJavascript(records).tasks, JS_SHARDS);
-  assert.throws(() => aggregateJavascript(records.slice(1)), {
+  assert.equal(aggregateJavascript(records, shape).tasks, 31, "inventory does not depend on the worker count");
+  assert.throws(() => aggregateJavascript(records.slice(1), shape), {
     message: "The JavaScript preparation receipt is missing, duplicated, or unsuccessful; check preparation and worker jobs.",
   });
   for (const mutate of [
     rows => rows.pop(), rows => { rows[1].completed = []; }, rows => { rows[1].verdict = "FAIL"; },
     rows => { rows[1].commit = "other"; }, rows => { rows[1].planned.push("forgotten"); }, rows => rows.push(rows[1]),
     rows => rows.push({ part: "unexpected", commit: "head", verdict: "FAIL" }),
+    rows => rows.push({ ...rows[1], part: `worker-${shape.js}` }),
+    rows => { rows[1].assigned.pop(); rows[1].completed.pop(); },
+    rows => { rows[1].assigned.push(rows[2].completed[0]); rows[1].completed.push(rows[2].completed[0]); },
   ]) {
     const broken = structuredClone(records); mutate(broken);
-    assert.throws(() => aggregateJavascript(broken));
+    assert.throws(() => aggregateJavascript(broken, shape));
   }
 });
 
-test("Rust receipts require every policy row and exactly the full passing test inventory", () => {
+test(`${shapeName} Rust receipts require every policy row and exactly the full passing test inventory`, () => {
+  const reader = rustReaderShard(shape);
   const steps = RUST_POLICY_STEPS.map(name => ({ name, status: "PASS" }));
-  const all = Array.from({ length: RUST_SHARDS }, (_, index) => `crate test${index}`);
+  const all = Array.from({ length: 31 }, (_, index) => `crate test${index}`);
   const row = (part, extra = {}) => ({ part, commit: "head", verdict: "PASS", provenance: { status: "PASS" }, ...extra });
   const archiveSteps = RUST_ARCHIVE_PROOFS.map(name => ({ name, verdict: "PASS" }));
-  const records = [row("policy", { steps }), row("archive-0", { planned: all, steps: archiveSteps, scratch: { status: "PASS" } }), ...all.map((id, index) => row(`tests-${index}`, {
-    planned: all, assigned: [id], completed: [id], scratch: { status: "PASS" }, steps: index === RUST_READER_SHARD ? RUST_TEST_PROOFS.map(name => ({ name, verdict: "PASS" })) : [],
+  const records = [row("policy", { steps }), row("archive-0", { planned: all, steps: archiveSteps, scratch: { status: "PASS" } }), ...Array.from({ length: shape.rust }, (_, index) => row(`tests-${index}`, {
+    planned: all, assigned: all.filter((_, id) => id % shape.rust === index), completed: all.filter((_, id) => id % shape.rust === index), scratch: { status: "PASS" }, steps: index === reader ? RUST_TEST_PROOFS.map(name => ({ name, verdict: "PASS" })) : [],
   }))];
-  assert.equal(aggregateRust(records).tasks, RUST_SHARDS);
+  assert.equal(aggregateRust(records, shape).tasks, 31, "inventory does not depend on the partition count");
   for (const mutate of [
     rows => { rows[0].steps.pop(); }, rows => { rows[0].steps[0].status = "SKIP"; }, rows => { rows[2].completed = []; },
     rows => { rows[2].completed.push(rows[3].completed[0]); }, rows => { rows[2].scratch.status = "FAIL"; }, rows => { rows[2].provenance.status = "FAIL"; },
     rows => { rows[1].planned.push("unrun"); }, rows => { rows[1].commit = "other"; }, rows => rows.pop(),
     rows => { rows[1].steps.pop(); }, rows => { rows[1].steps[0].verdict = "FAIL"; }, rows => { rows[1].scratch.status = "FAIL"; },
-    rows => { rows[RUST_READER_SHARD + 2].steps = []; }, rows => { rows[RUST_READER_SHARD + 2].steps[0].verdict = "FAIL"; },
-    rows => { rows[2].steps = structuredClone(rows[RUST_READER_SHARD + 2].steps); },
-    rows => { rows[1].steps.push(...structuredClone(rows[RUST_READER_SHARD + 2].steps)); },
-    rows => { rows[2].steps = rows[RUST_READER_SHARD + 2].steps; rows[RUST_READER_SHARD + 2].steps = []; },
+    rows => { rows[reader + 2].steps = []; }, rows => { rows[reader + 2].steps[0].verdict = "FAIL"; },
+    rows => { rows[2].steps = structuredClone(rows[reader + 2].steps); },
+    rows => { rows[1].steps.push(...structuredClone(rows[reader + 2].steps)); },
+    rows => { rows[2].steps = rows[reader + 2].steps; rows[reader + 2].steps = []; },
+    rows => rows.push({ ...rows[2], part: `tests-${shape.rust}` }),
   ]) {
     const broken = structuredClone(records); mutate(broken);
-    assert.throws(() => aggregateRust(broken));
+    assert.throws(() => aggregateRust(broken, shape));
   }
 });
+}
 
 test("reader proofs fit beside the lightest measured partition", () => {
   // Run 43196624375 execution times, excluding setup and transfer.
   const ordinary = [109.688, 60.09, 91.792, 78.737, 118.796, 88.909, 102.22, 105.92, 82.694, 101.816,
     94.654, 122.536, 94.212, 83.972, 76.527, 79.268, 98.246, 98.599, 103.154, 91.983];
   const reader = 53.275;
-  assert.equal(ordinary.length, RUST_SHARDS);
-  assert.equal(RUST_READER_SHARD, ordinary.indexOf(Math.min(...ordinary)));
-  assert.ok(ordinary[RUST_READER_SHARD] + reader <= Math.max(...ordinary), "reader proofs must fit within the longest ordinary partition");
+  assert.equal(ordinary.length, CLOUD_SHAPES.standard.rust);
+  const readerShard = rustReaderShard(CLOUD_SHAPES.standard);
+  assert.equal(readerShard, ordinary.indexOf(Math.min(...ordinary)));
+  assert.ok(ordinary[readerShard] + reader <= Math.max(...ordinary), "reader proofs must fit within the longest ordinary partition");
+  assert.equal(rustReaderShard({ rust: 1 }), 0);
 });
 
 test("Rust inventory retains selected ordinary tests and counts only actual passes", () => {
@@ -230,7 +241,7 @@ test("Rust inventory retains selected ordinary tests and counts only actual pass
   assert.deepEqual(passedRustTests("PASS [ 0.1s] (1/2) crate retained\nFAIL [ 0.2s] crate broken\nFLAKY 2/2 [ 0.1s] crate retry"), ["crate retained"]);
 });
 
-function passingCloudJobs() {
+function passingCloudJobs(shape = cloudShape()) {
   const { jobs } = JSON.parse(readFileSync(new URL("./fixtures/passing-cloud-jobs.json", import.meta.url), "utf8"));
   // Split the saved combined job at its artifact publication and proof start.
   const prepared = jobs.find(job => job.name === "shared preparation + confinement");
@@ -239,34 +250,37 @@ function passingCloudJobs() {
   jobs.push({ ...jobs.at(-1), name: "relay confinement", completed_at: "2026-11-11T13:07:00Z" });
   prepared.completed_at = "2026-11-11T13:06:40Z";
   // Extend the historical topology with copies of an existing worker's timing.
-  for (const [prefix, count] of [["JS worker", JS_SHARDS], ["Rust tests", RUST_SHARDS]]) {
+  for (const [prefix, count] of [["JS worker", shape.js], ["Rust tests", shape.rust]]) {
     const workers = jobs.filter(job => job.name.startsWith(`${prefix} `));
     for (let part = workers.length + 1; part < count; part++) {
       jobs.push({ ...workers[0], name: `${prefix} ${part}` });
     }
   }
-  return jobs;
+  return jobs.filter(job => !/^JS worker \d+$/u.test(job.name) || Number(job.name.split(" ").at(-1)) < shape.js)
+    .filter(job => !/^Rust tests \d+$/u.test(job.name) || Number(job.name.split(" ").at(-1)) < shape.rust);
 }
 
-const apiEnv = { GITHUB_API_URL: "https://api.example.test", GITHUB_REPOSITORY: "test/repo", GITHUB_RUN_ID: "1", GITHUB_RUN_ATTEMPT: "2", GITHUB_TOKEN: "fixture" };
+const shapeEnv = { GITHUB_EVENT_NAME: process.env.GITHUB_EVENT_NAME, DOHC_CLOUD_SHAPE: process.env.DOHC_CLOUD_SHAPE };
+const apiEnv = { ...shapeEnv, GITHUB_API_URL: "https://api.example.test", GITHUB_REPOSITORY: "test/repo", GITHUB_RUN_ID: "1", GITHUB_RUN_ATTEMPT: "2", GITHUB_TOKEN: "fixture" };
 const apiResponse = (value, status = 200, etag = '"fixture"') => new Response(status === 304 ? null : JSON.stringify(value), {
   status, headers: { etag, "x-ratelimit-limit": "1000", "x-ratelimit-remaining": "997", "x-ratelimit-used": "3" },
 });
-function dependencyFinishedAt(jobs, name) {
-  const node = Object.values(CLOUD_JOB_GRAPH).find(node => node.names.includes(name));
+function dependencyFinishedAt(jobs, name, shape = cloudShape()) {
+  const graph = cloudJobGraph(shape);
+  const node = Object.values(graph).find(node => node.names.includes(name));
   if (!node?.needs.length) return Date.parse(jobs.find(job => job.name === name).started_at);
-  return Math.max(...node.needs.flatMap(id => CLOUD_JOB_GRAPH[id].names).map(name => Date.parse(jobs.find(job => job.name === name).completed_at)));
+  return Math.max(...node.needs.flatMap(id => graph[id].names).map(name => Date.parse(jobs.find(job => job.name === name).completed_at)));
 }
-const withoutWaits = () => {
-  const jobs = passingCloudJobs();
+const withoutWaits = (shape = cloudShape()) => {
+  const jobs = passingCloudJobs(shape);
   for (const job of jobs) {
-    if (job.name !== "what changed") job.started_at = new Date(dependencyFinishedAt(jobs, job.name)).toISOString();
+    if (job.name !== "what changed") job.started_at = new Date(dependencyFinishedAt(jobs, job.name, shape)).toISOString();
     job.created_at = job.started_at;
   }
   return jobs;
 };
-function withRunnerWait(jobs, name, seconds) {
-  const job = jobs.find(job => job.name === name), ready = dependencyFinishedAt(jobs, name);
+function withRunnerWait(jobs, name, seconds, shape = cloudShape()) {
+  const job = jobs.find(job => job.name === name), ready = dependencyFinishedAt(jobs, name, shape);
   job.created_at = new Date(ready).toISOString();
   job.started_at = new Date(ready + seconds * 1000).toISOString();
 }
@@ -407,10 +421,11 @@ test("contention counts only waits that can occur inside the gate span", t => {
   }
 });
 
-test("negative waits clamp to zero and invalid or incomplete evidence always fails", () => {
-  const jobs = withoutWaits();
+for (const [shapeName, shape] of Object.entries(CLOUD_SHAPES)) {
+test(`${shapeName} negative waits clamp to zero and invalid or incomplete evidence always fails`, () => {
+  const jobs = withoutWaits(shape);
   jobs.forEach(job => { job.created_at = job.completed_at; });
-  assert.ok(completedGateTiming("js", jobs, jobs[0].head_sha).jobs.every(job => job.runnerWaitSeconds === 0));
+  assert.ok(completedGateTiming("js", jobs, jobs[0].head_sha, shape).jobs.every(job => job.runnerWaitSeconds === 0));
   for (const scope of ["js", "rust"]) for (const mutate of [
     ...["compiler confinement", "relay confinement"].flatMap(name => [
       rows => rows.splice(rows.findIndex(job => job.name === name), 1),
@@ -418,25 +433,27 @@ test("negative waits clamp to zero and invalid or incomplete evidence always fai
       ...["cancelled", "failure", "skipped"].map(conclusion => rows => { rows.find(job => job.name === name).conclusion = conclusion; }),
       rows => { rows.find(job => job.name === name).head_sha = "other"; },
     ]),
-    ...[scope === "js" ? `JS worker ${JS_SHARDS - 2}` : "Rust tests 1", scope === "js" ? `JS worker ${JS_SHARDS - 1}` : `Rust tests ${RUST_SHARDS - 1}`].flatMap(name => [
+    ...[scope === "js" ? `JS worker ${shape.js - 2}` : "Rust tests 1", scope === "js" ? `JS worker ${shape.js - 1}` : `Rust tests ${shape.rust - 1}`].flatMap(name => [
       rows => rows.splice(rows.findIndex(job => job.name === name), 1),
       rows => rows.push(rows.find(job => job.name === name)),
       rows => { rows.find(job => job.name === name).conclusion = "cancelled"; },
       rows => { rows.find(job => job.name === name).head_sha = "other"; },
     ]),
     rows => rows.push(rows.find(job => job.name === "shared preparation")),
+    rows => rows.push({ ...rows[0], name: scope === "js" ? `JS worker ${shape.js}` : `Rust tests ${shape.rust}` }),
     ...["cancelled", "failure", "skipped"].map(conclusion => rows => { rows.find(job => job.name === "compiler confinement").conclusion = conclusion; }),
     rows => { rows[0].head_sha = "other-head"; },
     rows => { rows[0].created_at = "invalid"; },
     rows => { rows[0].completed_at = rows[0].created_at; rows[0].started_at = "invalid"; },
   ]) {
-    const broken = passingCloudJobs();
+    const broken = passingCloudJobs(shape);
     const prepared = broken.find(job => job.name === "shared preparation");
     prepared.created_at = new Date(Date.parse(prepared.started_at) - 31_000).toISOString();
     mutate(broken);
-    assert.throws(() => completedGateTiming(scope, broken, jobs[0].head_sha));
+    assert.throws(() => completedGateTiming(scope, broken, jobs[0].head_sha, shape));
   }
 });
+}
 
 test("prepared artifact body aborts get one fresh transfer inside the preparation cap", async t => {
   t.mock.method(console, "log", () => {});
@@ -739,33 +756,43 @@ test("compiler preparation waits for exactly both consumed artifacts under one c
   }), new RegExp(`shared preparation ended with ${conclusion}`, "u"));
 });
 
-test("reporting joins its own successful group and caps queued or running siblings at 20 minutes", async () => {
+for (const [shapeName, shape] of Object.entries(CLOUD_SHAPES)) {
+test(`${shapeName} reporting joins its own successful group and caps queued or running siblings at 20 minutes`, async () => {
+  const env = { ...apiEnv, GITHUB_EVENT_NAME: "workflow_dispatch", DOHC_CLOUD_SHAPE: shapeName };
   for (const scope of ["js", "rust"]) {
-    const jobs = passingCloudJobs();
+    const jobs = passingCloudJobs(shape);
     const sibling = jobs.find(job => job.name === (scope === "js" ? "JS worker 1" : "Rust tests 1"));
     for (const state of ["queued", "in_progress"]) {
       let clock = 0;
       Object.assign(sibling, { status: state, conclusion: null });
-      await assert.rejects(waitForGate(scope, { readJobs: async () => jobs, now: () => clock, pause: async ms => { clock += ms; } }),
+      await assert.rejects(waitForGate(scope, { env, readJobs: async () => jobs, now: () => clock, pause: async ms => { clock += ms; } }),
         new RegExp(`20-minute wait cap.*${state === "queued" ? "queued for a runner" : "running"}`, "u"));
       assert.equal(clock, 1_200_000);
     }
     for (const conclusion of ["failure", "cancelled", "skipped"]) {
       Object.assign(sibling, { status: "completed", conclusion });
-      await assert.rejects(waitForGate(scope, { readJobs: async () => jobs }), /did not finish successfully/u);
+      await assert.rejects(waitForGate(scope, { env, readJobs: async () => jobs }), /did not finish successfully/u);
     }
     Object.assign(sibling, { conclusion: "success" });
     const proof = jobs.find(job => job.name === "compiler confinement");
     Object.assign(proof, { status: "queued", conclusion: null });
     let polls = 0;
-    await waitForGate(scope, { outputDirectory: waitOutput, readJobs: async () => {
+    await waitForGate(scope, { env, outputDirectory: waitOutput, readJobs: async () => {
       if (++polls === 2) Object.assign(proof, { status: "completed", conclusion: "success" });
       return jobs;
     }, pause: async () => {} });
     assert.equal(polls, 2, "reporting waits for confinement before deciding timing and contention");
-    await assert.rejects(waitForGate(scope, { readJobs: async () => [...jobs, sibling] }), /Duplicate/u);
+    await assert.rejects(waitForGate(scope, { env, readJobs: async () => [...jobs, sibling] }), /Duplicate/u);
+    await assert.rejects(waitForGate(scope, { env, readJobs: async () => [...jobs,
+      { ...sibling, name: scope === "js" ? `JS worker ${shape.js}` : `Rust tests ${shape.rust}` }] }), /Unexpected/u);
+    if (scope === "rust") {
+      for (const job of jobs.filter(job => /^JS worker /u.test(job.name))) job.conclusion = "failure";
+      await waitForGate(scope, { env, outputDirectory: waitOutput, readJobs: async () => jobs });
+      assert.doesNotThrow(() => completedGateTiming(scope, jobs, jobs[0].head_sha, shape), "JavaScript failure cannot fail Rust");
+    }
   }
 });
+}
 
 test("API-backed group waits retain the cap message and last observed jobs", async t => {
   t.mock.method(console, "log", () => {});
@@ -829,14 +856,16 @@ test("polling waits for initially missing jobs and rejects invalid HTTP response
     ? apiResponse({ jobs: [{ name: "shared preparation", status: "in_progress" }] }) : apiResponse(null, 304) }), /no cached data/u);
 });
 
-function writeTimingReceipts(root, scope, commit) {
-  const all = Array.from({ length: scope === "js" ? JS_SHARDS : RUST_SHARDS }, (_, i) => `task-${i}`);
+function writeTimingReceipts(root, scope, commit, shape = cloudShape()) {
+  const all = Array.from({ length: 31 }, (_, i) => `task-${i}`);
+  const parts = Array.from({ length: shape[scope] }, (_, index) => ({ planned: all,
+    assigned: all.filter((_, id) => id % shape[scope] === index), completed: all.filter((_, id) => id % shape[scope] === index) }));
   const records = scope === "js"
-    ? [{ part: "prepare-0" }, ...all.map((id, index) => ({ part: `worker-${index}`, planned: all, assigned: [id], completed: [id], tests: [], ...(!index ? { selfHostNative: {} } : {}) }))]
+    ? [{ part: "prepare-0" }, ...parts.map((part, index) => ({ ...part, part: `worker-${index}`, tests: [], ...(!index ? { selfHostNative: {} } : {}) }))]
     : [{ part: "policy", steps: RUST_POLICY_STEPS.map(name => ({ name, status: "PASS" })) },
       { part: "archive-0", planned: all, steps: RUST_ARCHIVE_PROOFS.map(name => ({ name, verdict: "PASS" })) },
-      ...all.map((id, index) => ({ part: `tests-${index}`, planned: all, assigned: [id], completed: [id],
-        steps: index === RUST_READER_SHARD ? RUST_TEST_PROOFS.map(name => ({ name, verdict: "PASS" })) : [] }))];
+      ...parts.map((part, index) => ({ ...part, part: `tests-${index}`,
+        steps: index === rustReaderShard(shape) ? RUST_TEST_PROOFS.map(name => ({ name, verdict: "PASS" })) : [] }))];
   for (const row of records) {
     const directory = join(root, row.part); mkdirSync(directory);
     writeFileSync(join(directory, "result.json"), JSON.stringify({ scope, commit, verdict: "PASS", provenance: { status: "PASS" }, scratch: { status: "PASS" }, ...row }));
@@ -844,6 +873,7 @@ function writeTimingReceipts(root, scope, commit) {
 }
 
 test("delayed job creation in run 43235841741 is unmeasured in both timing checks", async t => {
+  const shape = CLOUD_SHAPES.standard;
   const fixture = JSON.parse(readFileSync(new URL("./fixtures/delayed-job-creation.json", import.meta.url), "utf8"));
   const origin = Date.parse(fixture.origin), commit = fixture.headSha;
   // Only the two timing verdicts change; the recorded task and proof jobs passed.
@@ -861,7 +891,7 @@ test("delayed job creation in run 43235841741 is unmeasured in both timing check
   ]) await t.test(scope, async () => {
     const root = mkdtempSync(join(tmpdir(), "creation-gap-")), outputDirectory = join(root, "aggregate");
     t.after(() => rmSync(root, { recursive: true, force: true }));
-    writeTimingReceipts(root, scope, commit);
+    writeTimingReceipts(root, scope, commit, shape);
     const env = { GITHUB_SHA: commit, DOHC_WORKFLOW_HEAD_SHA: commit, GITHUB_STEP_SUMMARY: join(root, "summary.md") };
     const final = jobs.find(job => job.name === name), verify = final.steps.find(step => /^Require complete proof/u.test(step.name));
     const warningCount = warn.mock.calls.length;
@@ -883,21 +913,23 @@ test("delayed job creation in run 43235841741 is unmeasured in both timing check
   });
 });
 
-test("job creation waits use dependency completion and the last matrix member", async t => {
+for (const [shapeName, shape] of Object.entries(CLOUD_SHAPES)) {
+test(`${shapeName} job creation waits use dependency completion and the last matrix member`, async t => {
   t.mock.method(console, "log", () => {});
   t.mock.method(console, "warn", () => {});
   for (const [scope, name, ceiling] of [["js", "shared preparation", 400], ["rust", "Rust tests 1", 700]]) {
     const root = mkdtempSync(join(tmpdir(), "creation-boundary-")), outputDirectory = join(root, "aggregate");
     t.after(() => rmSync(root, { recursive: true, force: true }));
-    const commit = passingCloudJobs()[0].head_sha, env = { GITHUB_SHA: commit, DOHC_WORKFLOW_HEAD_SHA: commit };
-    writeTimingReceipts(root, scope, commit);
+    const commit = passingCloudJobs(shape)[0].head_sha;
+    const env = { GITHUB_EVENT_NAME: "workflow_dispatch", DOHC_CLOUD_SHAPE: shapeName, GITHUB_SHA: commit, DOHC_WORKFLOW_HEAD_SHA: commit };
+    writeTimingReceipts(root, scope, commit, shape);
     for (const wait of [30, 31]) {
-      const jobs = withoutWaits(), start = Date.parse(jobs[0].started_at);
+      const jobs = withoutWaits(shape), start = Date.parse(jobs[0].started_at);
       if (scope === "rust") {
         const workers = jobs.filter(job => /^JS worker /u.test(job.name));
         workers.at(-1).completed_at = new Date(Math.max(...workers.map(job => Date.parse(job.completed_at))) + 10_000).toISOString();
       }
-      const job = jobs.find(job => job.name === name), ready = dependencyFinishedAt(jobs, name);
+      const job = jobs.find(job => job.name === name), ready = dependencyFinishedAt(jobs, name, shape);
       job.started_at = new Date(ready + wait * 1000).toISOString();
       job.created_at = new Date(ready + (wait - 1) * 1000).toISOString();
       const final = jobs.find(job => job.name === (scope === "js" ? "typecheck + tests" : "engine gate"));
@@ -918,25 +950,27 @@ test("job creation waits use dependency completion and the last matrix member", 
     }
   }
 });
+}
 
 test("job readiness falls back for missing prerequisites and partial re-runs", () => {
+  const shape = CLOUD_SHAPES.standard, JS_SHARDS = shape.js;
   {
-    const jobs = withoutWaits(), job = jobs.find(job => job.name === "Rust tests 1"), start = Date.parse(jobs[0].started_at);
+    const jobs = withoutWaits(shape), job = jobs.find(job => job.name === "Rust tests 1"), start = Date.parse(jobs[0].started_at);
     job.started_at = new Date(Date.parse(job.started_at) + 200_000).toISOString();
     job.created_at = new Date(Date.parse(job.started_at) - 5000).toISOString();
     job.completed_at = new Date(Date.parse(job.started_at) + 1000).toISOString();
     const index = jobs.findIndex(job => job.name === `JS worker ${JS_SHARDS - 1}`);
     jobs.splice(index, 1);
     jobs.find(job => job.name === "engine gate").completed_at = new Date(start + 750_000).toISOString();
-    assert.throws(() => completedGateTiming("rust", jobs, jobs[0].head_sha), error => {
+    assert.throws(() => completedGateTiming("rust", jobs, jobs[0].head_sha, shape), error => {
       assert.equal(error.timing.jobs.find(row => row.name === job.name).runnerWaitSeconds, 5);
       return error.timing.timing === "over budget";
     });
     job.created_at = new Date(Date.parse(job.started_at) - 31_000).toISOString();
-    assert.match(completedGateTiming("rust", jobs, jobs[0].head_sha).warning, /longest runner wait Rust tests 1: 31s/u);
+    assert.match(completedGateTiming("rust", jobs, jobs[0].head_sha, shape).warning, /longest runner wait Rust tests 1: 31s/u);
   }
   for (const carried of [false, true]) for (const wait of [0, 31]) {
-    const jobs = withoutWaits();
+    const jobs = withoutWaits(shape);
     jobs.forEach(job => { job.run_attempt = 1; });
     const selection = jobs[0], job = jobs.find(job => job.name === "shared preparation");
     const final = jobs.find(job => job.name === "typecheck + tests");
@@ -945,7 +979,7 @@ test("job readiness falls back for missing prerequisites and partial re-runs", (
       // A previous successful job keeps its own wait when selection is re-run later.
       selection.run_attempt = 2;
       for (const field of ["created_at", "started_at", "completed_at"]) selection[field] = new Date(Date.parse(selection[field]) + 3_600_000).toISOString();
-      withRunnerWait(jobs, final.name, 0);
+      withRunnerWait(jobs, final.name, 0, shape);
       job.started_at = new Date(Date.parse(job.created_at) + wait * 1000).toISOString();
       assert.ok(Date.parse(selection.completed_at) > Date.parse(job.started_at), "the later prerequisite completion must exercise the timestamp fallback");
     } else {
@@ -956,36 +990,39 @@ test("job readiness falls back for missing prerequisites and partial re-runs", (
       job.completed_at = new Date(Date.parse(job.started_at) + 1000).toISOString();
     }
     final.completed_at = new Date(Math.max(Date.parse(selection.started_at), Date.parse(job.completed_at)) + 450_000).toISOString();
-    if (!wait) assert.throws(() => completedGateTiming("js", jobs, jobs[0].head_sha), error => error.timing.timing === "over budget");
-    else assert.match(completedGateTiming("js", jobs, jobs[0].head_sha).warning, /longest runner wait shared preparation: 31s/u);
+    if (!wait) assert.throws(() => completedGateTiming("js", jobs, jobs[0].head_sha, shape), error => error.timing.timing === "over budget");
+    else assert.match(completedGateTiming("js", jobs, jobs[0].head_sha, shape).warning, /longest runner wait shared preparation: 31s/u);
   }
 });
 
 test("timing warnings name the larger part of a job's scheduling wait", () => {
+  const shape = CLOUD_SHAPES.standard;
   for (const scope of ["js", "rust"]) for (const [creation, runner, cause] of [
     [0, 200, "runner wait"], [1, 200, "runner wait"], [105, 21, "wait for GitHub to start"], [100, 100, "runner wait"],
   ]) {
-    const jobs = withoutWaits(), worker = jobs.find(job => job.name === "JS worker 8"), ready = dependencyFinishedAt(jobs, worker.name);
+    const jobs = withoutWaits(shape), worker = jobs.find(job => job.name === "JS worker 8"), ready = dependencyFinishedAt(jobs, worker.name, shape);
     worker.created_at = new Date(ready + creation * 1000).toISOString();
     worker.started_at = new Date(ready + (creation + runner) * 1000).toISOString();
     worker.completed_at = new Date(Date.parse(worker.started_at) + 1000).toISOString();
     jobs.find(job => job.name === (scope === "js" ? "typecheck + tests" : "engine gate")).completed_at = new Date(Date.parse(jobs[0].started_at) + 750_000).toISOString();
-    const timing = completedGateTiming(scope, jobs, jobs[0].head_sha);
+    const timing = completedGateTiming(scope, jobs, jobs[0].head_sha, shape);
     assert.equal(timing.warning, `${scope} timing unmeasured: 750s exceeds the ${scope === "js" ? 300 : 600}s target; longest ${cause} JS worker 8: ${creation + runner}s.`);
   }
 });
 
-test("Rust-only scheduling ignores skipped needs but requires evidence for an absent matrix", async t => {
+for (const [shapeName, shape] of Object.entries(CLOUD_SHAPES)) {
+test(`${shapeName} Rust-only scheduling ignores skipped needs but requires evidence for an absent matrix`, async t => {
   t.mock.method(console, "log", () => {});
   t.mock.method(console, "warn", () => {});
   const root = mkdtempSync(join(tmpdir(), "skipped-needs-")), outputDirectory = join(root, "aggregate");
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const commit = passingCloudJobs()[0].head_sha, env = { GITHUB_SHA: commit, DOHC_WORKFLOW_HEAD_SHA: commit };
-  writeTimingReceipts(root, "rust", commit);
-  const names = CLOUD_JOB_GRAPH["javascript-workers"].names;
+  const commit = passingCloudJobs(shape)[0].head_sha;
+  const env = { GITHUB_EVENT_NAME: "workflow_dispatch", DOHC_CLOUD_SHAPE: shapeName, GITHUB_SHA: commit, DOHC_WORKFLOW_HEAD_SHA: commit };
+  writeTimingReceipts(root, "rust", commit, shape);
+  const names = cloudJobGraph(shape)["javascript-workers"].names;
   const placeholderName = names[0].replace(/\d+$/u, "${{ matrix.shard }}");
   for (const mode of ["placeholder", "missing", "partial", "wrong head", "wrong prefix", "named skips", "one named skip"]) {
-    const original = withoutWaits(), workers = original.filter(job => names.includes(job.name));
+    const original = withoutWaits(shape), workers = original.filter(job => names.includes(job.name));
     const jobs = original.filter(job => !names.includes(job.name)), ready = Date.parse(jobs.find(job => job.name === "Rust build once").completed_at);
     if (mode === "named skips" || mode === "one named skip") jobs.push(...workers.map((job, index) => mode === "named skips" || index === workers.length - 1
       ? { ...job, conclusion: "skipped", started_at: null, completed_at: null } : job));
@@ -1014,24 +1051,27 @@ test("Rust-only scheduling ignores skipped needs but requires evidence for an ab
   }
 });
 
+}
+
+for (const [shapeName, shape] of Object.entries(CLOUD_SHAPES)) {
 for (const [scope, finalJob, target, ceiling] of [["js", "typecheck + tests", 300, 400], ["rust", "engine gate", 600, 700]]) {
-  test(`${scope} timing boundaries agree in aggregate and completed receipts; only final verification warns`, async t => {
+  test(`${shapeName} ${scope} timing boundaries agree in aggregate and completed receipts; only final verification warns`, async t => {
     const parent = resolve(".agent-artifacts/verification");
     mkdirSync(parent, { recursive: true });
     const root = mkdtempSync(join(parent, "timing-boundaries-"));
     t.after(() => rmSync(root, { recursive: true, force: true }));
     const outputDirectory = join(root, "aggregate"), summary = join(root, "summary.md");
     const commit = passingCloudJobs()[0].head_sha;
-    const env = { GITHUB_SHA: commit, DOHC_WORKFLOW_HEAD_SHA: commit, GITHUB_STEP_SUMMARY: summary };
-    writeTimingReceipts(root, scope, commit);
+    const env = { GITHUB_EVENT_NAME: "workflow_dispatch", DOHC_CLOUD_SHAPE: shapeName, GITHUB_SHA: commit, DOHC_WORKFLOW_HEAD_SHA: commit, GITHUB_STEP_SUMMARY: summary };
+    writeTimingReceipts(root, scope, commit, shape);
     t.mock.method(console, "log", () => {});
     const warn = t.mock.method(console, "warn", () => {});
     for (const seconds of [target, target + 1, ceiling, ceiling + 1]) for (const wait of [0, 30, 31]) {
       await t.test(`${seconds}s with ${wait}s runner wait`, async () => {
-        const jobs = withoutWaits(), start = Date.parse(jobs[0].started_at);
+        const jobs = withoutWaits(shape), start = Date.parse(jobs[0].started_at);
         const final = jobs.find(job => job.name === finalJob);
         final.completed_at = new Date(start + seconds * 1000).toISOString();
-        withRunnerWait(jobs, finalJob, wait);
+        withRunnerWait(jobs, finalJob, wait, shape);
         const timing = seconds <= target ? "within budget" : wait > 30 ? "unmeasured" : seconds <= ceiling ? "over target" : "over budget";
         const fails = timing === "over budget";
         const warning = timing === "over target" ? `${scope} timing over target: ${seconds}s exceeds the ${target}s target; the gate fails above ${ceiling}s.`
@@ -1066,19 +1106,28 @@ for (const [scope, finalJob, target, ceiling] of [["js", "typecheck + tests", 30
         } else assert.equal(existsSync(summary), false);
       });
     }
+    for (const extra of [false, true]) {
+      const jobs = withoutWaits(shape), sibling = jobs.find(job => job.name === (scope === "js" ? "JS worker 1" : "Rust tests 1"));
+      if (extra) jobs.push({ ...sibling, name: scope === "js" ? `JS worker ${shape.js}` : `Rust tests ${shape.rust}` });
+      else jobs.splice(jobs.indexOf(sibling), 1);
+      const now = () => Date.parse(jobs.find(job => job.name === finalJob).completed_at);
+      await assert.rejects(aggregateCloud(scope, root.replaceAll("\\", "/"), { env, outputDirectory, now, readJobs: async () => jobs }), /missing or did not finish/u);
+      if (scope === "js") writeFileSync(join(outputDirectory, "js-result.json"), JSON.stringify({ verdict: "PASS", commit }));
+      await assert.rejects(verifyCompletedCloud(scope, { env, outputDirectory, readJobs: async () => jobs }), /missing, unsuccessful/u);
+    }
   });
 }
 
 for (const [scope, finalJob, target, ceiling] of [["js", "typecheck + tests", 300, 400], ["rust", "engine gate", 600, 700]]) {
-  test(`${scope} receipt transfer contention requires known evidence above 30 seconds`, async t => {
+  test(`${shapeName} ${scope} receipt transfer contention requires known evidence above 30 seconds`, async t => {
     const parent = resolve(".agent-artifacts/verification");
     mkdirSync(parent, { recursive: true });
     const root = mkdtempSync(join(parent, "transfer-boundaries-"));
     t.after(() => rmSync(root, { recursive: true, force: true }));
     const outputDirectory = join(root, "aggregate"); mkdirSync(outputDirectory);
-    const jobs = withoutWaits(), commit = jobs[0].head_sha, start = Date.parse(jobs[0].started_at);
-    const env = { GITHUB_SHA: commit, DOHC_WORKFLOW_HEAD_SHA: commit };
-    writeTimingReceipts(root, scope, commit);
+    const jobs = withoutWaits(shape), commit = jobs[0].head_sha, start = Date.parse(jobs[0].started_at);
+    const env = { GITHUB_EVENT_NAME: "workflow_dispatch", DOHC_CLOUD_SHAPE: shapeName, GITHUB_SHA: commit, DOHC_WORKFLOW_HEAD_SHA: commit };
+    writeTimingReceipts(root, scope, commit, shape);
     t.mock.method(console, "log", () => {});
     t.mock.method(console, "warn", () => {});
     // ceiling + 32 stays over the ceiling after a 31 s transfer is taken out.
@@ -1091,7 +1140,7 @@ for (const [scope, finalJob, target, ceiling] of [["js", "typecheck + tests", 30
           const rows = structuredClone(jobs), final = rows.find(job => job.name === finalJob);
           const end = start + seconds * 1000, waitedAt = new Date(end - transfer * 1000).toISOString();
           final.completed_at = new Date(end).toISOString();
-          withRunnerWait(rows, finalJob, runnerWait);
+          withRunnerWait(rows, finalJob, runnerWait, shape);
           final.steps = [
             { name: "Run actions/download-artifact@unrelated-archive", started_at: new Date(start).toISOString(), completed_at: new Date(start + 80_000).toISOString() },
             ...(scope === "rust" ? [{ name: "Download the shared Rust archive again after a stalled transfer",
@@ -1126,6 +1175,7 @@ for (const [scope, finalJob, target, ceiling] of [["js", "typecheck + tests", 30
       }
     }
   });
+}
 }
 
 test("a saved 181-second receipt download is unmeasured in both timing checks", async t => {
@@ -1188,7 +1238,7 @@ test("aggregate receipts use the same timing rule and remain incomplete", async 
   const final = jobs.find(job => job.name === "typecheck + tests");
   const now = Date.parse(final.completed_at);
   Object.assign(final, { status: "in_progress", conclusion: null, completed_at: null });
-  const run = (rows, finish, env = { GITHUB_SHA: commit }) => aggregateCloud("js", root.replaceAll("\\", "/"), { readJobs: async () => rows, now: () => finish, env, outputDirectory });
+  const run = (rows, finish, env = { ...shapeEnv, GITHUB_SHA: commit }) => aggregateCloud("js", root.replaceAll("\\", "/"), { readJobs: async () => rows, now: () => finish, env, outputDirectory });
   const passed = await run(jobs, now);
   assert.equal(passed.complete, false);
   assert.equal(passed.seconds, 241);
@@ -1234,7 +1284,7 @@ test("JavaScript flaky evidence survives aggregation and the completed receipt w
   const root = mkdtempSync(join(parent, "cloud-flaky-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const outputDirectory = join(root, "aggregate"), summary = join(root, "summary.md"), jobs = passingCloudJobs();
-  const commit = "checkout-merge-head", env = { GITHUB_SHA: commit, DOHC_WORKFLOW_HEAD_SHA: jobs[0].head_sha, GITHUB_STEP_SUMMARY: summary };
+  const commit = "checkout-merge-head", env = { ...shapeEnv, GITHUB_SHA: commit, DOHC_WORKFLOW_HEAD_SHA: jobs[0].head_sha, GITHUB_STEP_SUMMARY: summary };
   const flaky = [{ id: "task-1", test: "recovered test", errors: ["first try"], retries: 1 }];
   const records = [{ scope: "js", part: "prepare-0", commit, verdict: "PASS" }, ...Array.from({ length: JS_SHARDS }, (_, index) => ({
     scope: "js", part: "worker-" + index, commit, verdict: "PASS", planned: Array.from({ length: JS_SHARDS }, (_, id) => "task-" + id),

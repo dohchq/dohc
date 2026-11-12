@@ -3,10 +3,11 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { affectedPackages, packageReferences, readWorkspacePackages } from "./selection.mjs";
 import { repoRoot } from "./process.mjs";
 import { desktopProofTags } from "./verify.mjs";
+import { cloudShape } from "./cloud-shape.mjs";
 
 const slash = path => path.replaceAll("\\", "/");
 const fileId = path => slash(relative(repoRoot, path));
-export const JS_SHARDS = 20;
+export const JS_SHARDS = cloudShape().js;
 
 const databasePackages = new Set(["@dohc/workspace-postgres", "@dohc/workspace-auth", "@dohc/workspace-api", "@dohc/share-web"]);
 

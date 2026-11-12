@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { cancellationScope } from "./cancellation.mjs";
 import { run } from "./process.mjs";
-import { runJavascript } from "./cloud.mjs";
+import { javascriptConcurrency, runJavascript } from "./cloud.mjs";
 import { runBounded, testPlan, testWorkspace } from "./js-tests.mjs";
 import { affectedPackages, packageReferences } from "./selection.mjs";
 import { copyFlakyFixture } from "./flaky-fixture.mjs";
@@ -21,6 +21,58 @@ function deferred() {
   const promise = new Promise((pass, fail) => { resolve = pass; reject = fail; });
   return { promise, resolve, reject };
 }
+
+test("cloud workers scale command slots with CPUs and drain readers before replacing the runtime", async () => {
+  for (const [cpus, limit] of [[2, 2], [4, 2], [8, 4], [16, 8]]) {
+    assert.equal(javascriptConcurrency(cpus), limit);
+    const hold = deferred(), started = [];
+    let active = 0, peak = 0;
+    const tasks = Array.from({ length: 12 }, (_, index) => ({ id: `reader-${index}`, kind: "command", command: "node", args: [String(index)], cwd: "." }));
+    tasks.push({ id: "stage-app-backend-runtime.test.mjs", kind: "command", command: "node", args: ["runtime"], cwd: "." });
+    const record = { steps: [], tests: [], completed: [] };
+    const running = runJavascript(tasks.map((task, index) => ({ ...task, tasks: [task], weight: 100 - index })), record, () => {}, undefined, {
+      cpus, executeCommand: async (_command, args) => {
+        if (args[0] === "runtime") {
+          assert.equal(active, 0);
+          assert.equal(record.completed.length, 12);
+          return;
+        }
+        started.push(args[0]);
+        peak = Math.max(peak, ++active);
+        try { await hold.promise; } finally { active--; }
+      },
+    });
+    try { await new Promise(setImmediate); assert.equal(started.length, limit); }
+    finally { hold.resolve(); await running; }
+    assert.equal(peak, limit);
+    assert.equal(record.completed.length, tasks.length);
+  }
+});
+
+test("a prepared Boat image skips apt and an incomplete image installs only missing packages", { skip: process.platform !== "linux" }, t => {
+  const root = mkdtempSync(join(tmpdir(), "boat-browser-deps-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const log = join(root, "apt.log");
+  const fixture = `
+    function dpkg-query() {
+      if [[ "$DOHC_TEST_MISSING_PACKAGE" == "\${@: -1}" ]]; then return 1; fi
+      printf 'install ok installed'
+    }
+    function sudo() { printf '%s\\n' "$*" >> "$DOHC_TEST_APT_LOG"; }
+    function xvfb-run() { :; }
+    export -f dpkg-query sudo xvfb-run
+    bash "$1"
+  `;
+  for (const missing of ["", "xvfb", "libgtk-3-0t64", "libnss3"]) {
+    rmSync(log, { force: true });
+    const result = spawnSync("bash", ["-c", fixture, "fixture", "scripts/verification/boat-browser-deps.sh"], {
+      env: { ...process.env, DOHC_TEST_MISSING_PACKAGE: missing, DOHC_TEST_APT_LOG: log }, encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(existsSync(log), Boolean(missing));
+    if (missing) assert.equal(readFileSync(log, "utf8"), `-n apt-get update\n-n env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ${missing}\n`);
+  }
+});
 
 for (const [limit, slots] of [[3, 2], [2, 2], [2, 4]]) {
   test(`slot reservations at limit ${limit} keep a ${slots}-slot task within its capacity`, async () => {

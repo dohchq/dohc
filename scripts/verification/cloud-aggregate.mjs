@@ -3,14 +3,15 @@ import { resolve } from "node:path";
 import { setTimeout } from "node:timers/promises";
 import { cloudApi, GATE_POLL_MS, QUEUED_STATUSES } from "./cloud-api.mjs";
 import { reportFlaky } from "./flaky.mjs";
-import { JS_SHARDS, assertTaskCoverage } from "./shards.mjs";
-import { RUST_ARCHIVE_PROOFS, RUST_POLICY_STEPS, RUST_READER_SHARD, RUST_SHARDS, RUST_TEST_PROOFS } from "./cloud-rust.mjs";
+import { assertTaskCoverage } from "./shards.mjs";
+import { RUST_ARCHIVE_PROOFS, RUST_POLICY_STEPS, RUST_TEST_PROOFS } from "./cloud-rust.mjs";
+import { cloudShape, rustReaderShard } from "./cloud-shape.mjs";
 
-export function aggregateJavascript(records) {
+export function aggregateJavascript(records, shape = cloudShape()) {
   const preparation = records.filter(record => record.part === "prepare-0");
   if (preparation.length !== 1 || preparation[0].verdict !== "PASS") throw new Error("The JavaScript preparation receipt is missing, duplicated, or unsuccessful; check preparation and worker jobs.");
   const shards = records.filter(record => /^worker-\d+$/u.test(record.part));
-  const expectedParts = Array.from({ length: JS_SHARDS }, (_, index) => `worker-${index}`);
+  const expectedParts = Array.from({ length: shape.js }, (_, index) => `worker-${index}`);
   if (records.length !== expectedParts.length + 1 || shards.length !== expectedParts.length
     || expectedParts.some(part => shards.filter(record => record.part === part).length !== 1)) throw new Error("JavaScript shard evidence is missing, duplicated, or unexpected.");
   if (new Set(records.map(record => record.commit)).size !== 1) throw new Error("JavaScript parts examined different commits.");
@@ -25,7 +26,7 @@ export function aggregateJavascript(records) {
   return { tasks: expected.length, flaky: shards.flatMap(record => record.flaky ?? []), tests: shards.flatMap(record => record.tests), parts: records.map(({ part, seconds }) => ({ part, seconds })) };
 }
 
-export function aggregateRust(records) {
+export function aggregateRust(records, shape = cloudShape()) {
   const one = part => {
     const rows = records.filter(record => record.part === part);
     if (rows.length !== 1 || rows[0].verdict !== "PASS" || rows[0].provenance?.status !== "PASS") throw new Error(`Rust ${part} evidence did not pass.`);
@@ -35,9 +36,9 @@ export function aggregateRust(records) {
   if (policy.steps.length !== RUST_POLICY_STEPS.length || RUST_POLICY_STEPS.some(name => policy.steps.filter(step => step.name === name && step.status === "PASS").length !== 1)) throw new Error("A required Rust policy step is missing or did not pass.");
   const archive = one("archive-0");
   if (archive.scratch?.status !== "PASS" || RUST_ARCHIVE_PROOFS.some(name => archive.steps?.filter(step => step.name === name && step.verdict === "PASS").length !== 1)) throw new Error("A required Rust archive proof is missing or did not pass.");
-  const shards = Array.from({ length: RUST_SHARDS }, (_, index) => one(`tests-${index}`));
+  const shards = Array.from({ length: shape.rust }, (_, index) => one(`tests-${index}`));
   if (RUST_TEST_PROOFS.some(name => records.flatMap(record => record.steps ?? []).filter(step => step.name === name).length !== 1
-    || shards[RUST_READER_SHARD].steps?.filter(step => step.name === name && step.verdict === "PASS").length !== 1)) throw new Error("A required Rust test proof is missing, duplicated, or did not pass.");
+    || shards[rustReaderShard(shape)].steps?.filter(step => step.name === name && step.verdict === "PASS").length !== 1)) throw new Error("A required Rust test proof is missing, duplicated, or did not pass.");
   if (records.length !== shards.length + 2 || new Set(records.map(record => record.commit)).size !== 1) throw new Error("Rust parts examined different commits or unexpected evidence.");
   for (const shard of shards) {
     if (JSON.stringify([...shard.planned].sort()) !== JSON.stringify([...archive.planned].sort())) throw new Error("Rust inventories disagree.");
@@ -49,30 +50,31 @@ export function aggregateRust(records) {
 }
 
 // These are workflow `needs` edges. The workflow tests compare every edge and name.
-export const CLOUD_JOB_GRAPH = {
+export function cloudJobGraph(shape = cloudShape()) { return {
   changes: { names: ["what changed"], needs: [] },
   "javascript-prepare": { names: ["shared preparation"], needs: ["changes"] },
   "confinement-compiler": { names: ["compiler confinement"], needs: ["changes"] },
   "confinement-relay": { names: ["relay confinement"], needs: ["changes"] },
-  "javascript-workers": { names: Array.from({ length: JS_SHARDS - 1 }, (_, index) => `JS worker ${index + 1}`), needs: ["changes"] },
+  "javascript-workers": { names: Array.from({ length: shape.js - 1 }, (_, index) => `JS worker ${index + 1}`), needs: ["changes"] },
   javascript: { names: ["typecheck + tests"], needs: ["changes"] },
   "rust-archive": { names: ["Rust build once"], needs: ["changes"] },
   "rust-policy": { names: ["Rust policy checks"], needs: ["changes"] },
-  "rust-tests": { names: Array.from({ length: RUST_SHARDS - 1 }, (_, index) => `Rust tests ${index + 1}`), needs: ["changes", "rust-archive", "javascript-workers"] },
+  "rust-tests": { names: Array.from({ length: shape.rust - 1 }, (_, index) => `Rust tests ${index + 1}`), needs: ["changes", "rust-archive", "javascript-workers"] },
   rust: { names: ["engine gate"], needs: ["changes", "rust-archive", "javascript-workers"] },
-};
+}; }
+export const CLOUD_JOB_GRAPH = cloudJobGraph();
 
-function gateJobNames(scope) {
+function gateJobNames(scope, shape) {
   if (!["js", "rust"].includes(scope)) throw new Error(`Unknown distributed gate ${scope}.`);
-  return Object.entries(CLOUD_JOB_GRAPH).filter(([id]) => id === "changes" || id === "javascript-prepare" || id.startsWith("confinement-")
+  return Object.entries(cloudJobGraph(shape)).filter(([id]) => id === "changes" || id === "javascript-prepare" || id.startsWith("confinement-")
     || (scope === "rust" ? id.startsWith("rust") : id.startsWith("javascript"))).flatMap(([, node]) => node.names);
 }
 
-function jobReadyAt(job, metadata) {
-  const node = Object.values(CLOUD_JOB_GRAPH).find(node => node.names.includes(job.name));
+function jobReadyAt(job, metadata, graph) {
+  const node = Object.values(graph).find(node => node.names.includes(job.name));
   const sameHead = metadata.filter(dependency => dependency.head_sha === job.head_sha);
   const dependencies = (node?.needs ?? []).flatMap(id => {
-    const { names } = CLOUD_JOB_GRAPH[id], present = sameHead.filter(dependency => names.includes(dependency.name));
+    const { names } = graph[id], present = sameHead.filter(dependency => names.includes(dependency.name));
     if (!present.length && names.length > 1) {
       const prefix = names.reduce((prefix, name) => {
         while (!name.startsWith(prefix)) prefix = prefix.slice(0, -1);
@@ -96,21 +98,22 @@ function jobReadyAt(job, metadata) {
   return readyAt <= Date.parse(job.started_at) ? readyAt : createdAt;
 }
 
-function gateTiming(scope, required, metadata = required, transferSeconds = null) {
+function gateTiming(scope, required, metadata = required, transferSeconds = null, shape = cloudShape()) {
   if (required.some(job => ![job.created_at, job.started_at, job.completed_at].every(time => Number.isFinite(Date.parse(time)))
     || Date.parse(job.completed_at) < Date.parse(job.started_at))) throw new Error(`A completed ${scope} job has invalid times.`);
   const start = Date.parse(required.find(job => job.name === "what changed").started_at);
   const spanSeconds = (Math.max(...required.map(job => Date.parse(job.completed_at))) - start) / 1000;
-  const wait = job => Math.max(0, (Date.parse(job.started_at) - jobReadyAt(job, metadata)) / 1000) || 0;
+  const graph = cloudJobGraph(shape);
+  const wait = job => Math.max(0, (Date.parse(job.started_at) - jobReadyAt(job, metadata, graph)) / 1000) || 0;
   const jobs = required.map(job => ({ name: job.name, createdAt: job.created_at,
     startedAt: job.started_at, finishedAt: job.completed_at, conclusion: job.conclusion, runnerWaitSeconds: wait(job) }));
   // Rust waits for the JS worker matrix; their conclusions do not affect its verdict.
-  const javascriptNames = CLOUD_JOB_GRAPH["javascript-workers"].names;
+  const javascriptNames = graph["javascript-workers"].names;
   const javascriptWaits = scope === "rust" ? metadata.filter(job => javascriptNames.includes(job.name) && job.conclusion !== "skipped"
     && job.head_sha === required.find(job => job.name === "what changed").head_sha).map(job => ({ name: job.name,
     createdAt: job.created_at, startedAt: job.started_at, runnerWaitSeconds: wait(job) })) : [];
   const preparedAt = Date.parse(required.find(job => job.name === "shared preparation").completed_at);
-  const confinementNames = [...CLOUD_JOB_GRAPH["confinement-compiler"].names, ...CLOUD_JOB_GRAPH["confinement-relay"].names];
+  const confinementNames = [...graph["confinement-compiler"].names, ...graph["confinement-relay"].names];
   const longest = [...jobs.filter(job => job.name !== "what changed"
     && (!confinementNames.includes(job.name) || Date.parse(job.startedAt) > preparedAt)), ...javascriptWaits]
     .reduce((a, b) => a.runnerWaitSeconds > b.runnerWaitSeconds ? a : b);
@@ -154,14 +157,18 @@ function pendingTransferSeconds(scope, outputDirectory, startedAt, verificationS
   } catch { return null; }
 }
 
-export function completedGateTiming(scope, jobs, commit) {
-  const expected = gateJobNames(scope);
-  const required = jobs.filter(job => expected.includes(job.name));
+function gateJobs(scope, jobs, expected) {
+  return jobs.filter(job => expected.includes(job.name) || (scope === "js" ? /^JS worker /u : /^Rust tests /u).test(job.name));
+}
+
+export function completedGateTiming(scope, jobs, commit, shape = cloudShape()) {
+  const expected = gateJobNames(scope, shape);
+  const required = gateJobs(scope, jobs, expected);
   if (!commit || required.length !== expected.length || expected.some(name => required.filter(job => job.name === name).length !== 1)
     || required.some(job => job.status !== "completed" || job.conclusion !== "success" || job.head_sha !== commit)) {
     throw new Error(`A completed ${scope} job is missing, unsuccessful, or from another commit.`);
   }
-  return requireBudget(scope, gateTiming(scope, required, jobs, completedTransferSeconds(scope, jobs)));
+  return requireBudget(scope, gateTiming(scope, required, jobs, completedTransferSeconds(scope, jobs), shape));
 }
 
 export async function verifyCompletedCloud(scope, { env = process.env, readJobs = () => cloudApi({ env }).jobs(), outputDirectory = ".agent-artifacts/verification/aggregate" } = {}) {
@@ -172,7 +179,7 @@ export async function verifyCompletedCloud(scope, { env = process.env, readJobs 
       if (aggregate.verdict !== "PASS" || !env.GITHUB_SHA || aggregate.commit !== env.GITHUB_SHA) throw new Error("The JavaScript aggregate does not cover the checked-out commit.");
       report.flaky = aggregate.flaky ?? [];
     }
-    Object.assign(report, completedGateTiming(scope, await readJobs(), report.commit));
+    Object.assign(report, completedGateTiming(scope, await readJobs(), report.commit, cloudShape(env)));
     report.verdict = "PASS";
   } catch (error) {
     Object.assign(report, error.timing, { error: error.message });
@@ -192,12 +199,13 @@ export async function verifyCompletedCloud(scope, { env = process.env, readJobs 
 // Partition zero publishes its own receipt before joining the other workers.
 export async function waitForGate(scope, { readJobs, pause = setTimeout, now = Date.now, outputDirectory = ".agent-artifacts/verification/aggregate", ...options } = {}) {
   const deadline = now() + 20 * 60_000, api = cloudApi({ ...options, pause, now, deadline });
-  const expected = gateJobNames(scope).filter(name => name !== (scope === "js" ? "typecheck + tests" : "engine gate"));
+  const expected = gateJobNames(scope, cloudShape(options.env)).filter(name => name !== (scope === "js" ? "typecheck + tests" : "engine gate"));
   let required = [];
   try {
     for (;;) {
       if (now() < deadline) {
-        required = (await (readJobs ? readJobs() : api.jobs())).filter(job => expected.includes(job.name));
+        required = gateJobs(scope, await (readJobs ? readJobs() : api.jobs()), expected);
+        if (required.some(job => !expected.includes(job.name))) throw new Error(`Unexpected ${scope} jobs.`);
         if (expected.some(name => required.filter(job => job.name === name).length > 1)) throw new Error(`Duplicate ${scope} jobs.`);
         if (required.some(job => job.status === "completed" && job.conclusion !== "success")) throw new Error(`A required ${scope} job did not finish successfully.`);
       }
@@ -213,6 +221,7 @@ export async function waitForGate(scope, { readJobs, pause = setTimeout, now = D
 }
 
 export async function aggregateCloud(scope, directory = ".agent-artifacts/verification/downloaded", { readJobs = () => cloudApi().jobs(), now = Date.now, env = process.env, outputDirectory = ".agent-artifacts/verification/aggregate" } = {}) {
+  const shape = cloudShape(env);
   const verificationStartedAt = now();
   const report = { version: 1, scope, verdict: "FAIL", complete: false, steps: [] };
   try {
@@ -220,16 +229,16 @@ export async function aggregateCloud(scope, directory = ".agent-artifacts/verifi
     if (!["js", "rust"].includes(scope)) throw new Error(`Unknown distributed gate ${scope}.`);
     if (!env.GITHUB_SHA || records.some(record => record.commit !== env.GITHUB_SHA)) throw new Error("The gate evidence does not cover the requested commit.");
     report.commit = env.GITHUB_SHA;
-    Object.assign(report, scope === "js" ? aggregateJavascript(records) : aggregateRust(records));
+    Object.assign(report, scope === "js" ? aggregateJavascript(records, shape) : aggregateRust(records, shape));
     const finalJob = scope === "js" ? "typecheck + tests" : "engine gate";
     const all = await readJobs();
-    const expected = gateJobNames(scope);
-    const required = all.filter(job => expected.includes(job.name));
+    const expected = gateJobNames(scope, shape);
+    const required = gateJobs(scope, all, expected);
     if (required.length !== expected.length || expected.some(name => required.filter(job => job.name === name).length !== 1)
       || required.some(job => job.name !== finalJob && (job.status !== "completed" || job.conclusion !== "success"))) throw new Error(`A required ${scope} job is missing or did not finish successfully.`);
     const finishedAt = new Date(now()).toISOString();
     const transferSeconds = pendingTransferSeconds(scope, outputDirectory, required.find(job => job.name === finalJob).started_at, verificationStartedAt);
-    Object.assign(report, gateTiming(scope, required.map(job => job.name === finalJob ? { ...job, completed_at: finishedAt } : job), all, transferSeconds));
+    Object.assign(report, gateTiming(scope, required.map(job => job.name === finalJob ? { ...job, completed_at: finishedAt } : job), all, transferSeconds, shape));
     requireBudget(scope, report);
     report.verdict = "PASS";
     return report;

@@ -1,5 +1,5 @@
 import { createWriteStream, mkdirSync, mkdtempSync, readFileSync, rmSync, rmdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { availableParallelism, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -38,7 +38,9 @@ function passingBrowserReport(path) {
   return report;
 }
 
-export async function runJavascript(groups, record, save, availability, { executeCommand = run, directory = output } = {}) {
+export const javascriptConcurrency = (cpus = availableParallelism()) => Math.max(2, Math.floor(cpus / 2));
+
+export async function runJavascript(groups, record, save, availability, { executeCommand = run, directory = output, cpus = availableParallelism() } = {}) {
   record.flaky ??= [];
   const tasks = groups.flatMap(group => group.tasks);
   const selected = new Map(tasks.map(task => [task.id, task]));
@@ -124,7 +126,7 @@ export async function runJavascript(groups, record, save, availability, { execut
   }
   // This test replaces the packaged runtime. Its readers finish first.
   const runtime = groups.filter(group => group.tasks.some(task => task.id.includes("stage-app-backend-runtime.test.mjs")));
-  await runBounded(groups.filter(group => !runtime.includes(group)), execute, 2, availability?.changed, availability);
+  await runBounded(groups.filter(group => !runtime.includes(group)), execute, javascriptConcurrency(cpus), availability?.changed, availability);
   for (const group of runtime) await execute(group);
   assertTaskCoverage([...selected.values()], [{ ...record, verdict: "PASS" }]);
 }

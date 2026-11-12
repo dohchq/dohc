@@ -7,9 +7,10 @@ import { startTiming, timed } from "./timing.mjs";
 import { readTreeState, classifyTreeProvenance } from "../../tools/rust-engine-program/tree-provenance.mjs";
 import { SCRATCH_SENTINEL, inspectScratchRun, testScratchParent } from "../../tools/rust-engine-program/scratch-leak-report.mjs";
 import { stageReaderTestNode } from "../../tools/rust-engine-program/reader-test-node.mjs";
+import { cloudShape, rustReaderShard } from "./cloud-shape.mjs";
 
-export const RUST_SHARDS = 20;
-export const RUST_READER_SHARD = 1;
+export const RUST_SHARDS = cloudShape().rust;
+export const RUST_READER_SHARD = rustReaderShard(cloudShape());
 export const RUST_POLICY_STEPS = ["tree provenance", "native target", "fixture drift", "fmt --check", "clippy -D warnings", "doctests", "build daemon", "cargo-deny", "cargo-audit", "scratch leak"];
 export const RUST_ARCHIVE_PROOFS = ["test fixtures"];
 export const RUST_TEST_PROOFS = ["reader tests"];

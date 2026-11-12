@@ -8,9 +8,8 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import { load } from "js-yaml";
 import { requireCiPassVerdict } from "../tools/rust-engine-program/require-ci-pass-verdict.mjs";
-import { JS_SHARDS } from "./verification/shards.mjs";
-import { CLOUD_JOB_GRAPH } from "./verification/cloud-aggregate.mjs";
-import { RUST_SHARDS } from "./verification/cloud-rust.mjs";
+import { cloudJobGraph } from "./verification/cloud-aggregate.mjs";
+import { CLOUD_SHAPES, cloudShape, rustReaderShard } from "./verification/cloud-shape.mjs";
 import { environmentInputs } from "./verification/build.mjs";
 import {
   HEAD_REFLOG_RECOVERY,
@@ -453,6 +452,51 @@ function workflowContext({ enabled = "", buildSize = "", event = "pull_request",
   };
 }
 
+function evaluatedJobs(context) {
+  const { jobs } = load(workflow);
+  for (const job of Object.values(jobs)) if (job.strategy) {
+    job.strategy.matrix.shard = workflowExpression(job.strategy.matrix.shard, context);
+  }
+  return jobs;
+}
+
+test("Boat is dispatch-only, overrides runner variables only for that dispatch, and keeps confinement on GitHub", () => {
+  const { jobs, env } = load(workflow);
+  assert.deepEqual(jobs.changes.steps.map(step => step.id ?? step.uses), [
+    "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5", "merge-base", "filter",
+  ], "selection gains no checkout or step");
+  for (const enabled of ["", "false", "true"]) for (const buildSize of ["", "4", "8", "boat"]) {
+    for (const event of ["pull_request", "workflow_dispatch"]) for (const provider of ["github", "blacksmith", "blacksmith-builds", "boat", "unknown"]) {
+      const context = workflowContext({ enabled, buildSize, event, provider });
+      // Even a forged input on a PR cannot opt in.
+      context.inputs.runner_provider = provider;
+      context.vars.BOAT_ENABLED = "true";
+      const boat = event === "workflow_dispatch" && provider === "boat";
+      const selected = workflowExpression(env.DOHC_CLOUD_SHAPE, context);
+      assert.equal(selected, boat ? "boat" : "standard");
+      assert.equal(cloudShape({ GITHUB_EVENT_NAME: event, DOHC_CLOUD_SHAPE: selected }), CLOUD_SHAPES[boat ? "boat" : "standard"]);
+      assert.equal(cloudShape({ GITHUB_EVENT_NAME: "pull_request", DOHC_CLOUD_SHAPE: "boat" }), CLOUD_SHAPES.standard);
+      for (const [id, job] of Object.entries(jobs)) {
+        const labels = workflowExpression(job["runs-on"], context);
+        if (boat) assert.deepEqual(labels, [id === "javascript-prepare" ? "boat-large"
+          : ["changes", "verification", "confinement-compiler", "confinement-relay"].includes(id) ? "ubuntu-24.04" : "boat-xlarge"], id);
+        else assert.ok(labels.every(label => !label.startsWith("boat")), id);
+        const prerequisite = job.steps.filter(step => step.name === "Install missing browser system dependencies");
+        assert.equal(prerequisite.length, ["javascript-workers", "javascript"].includes(id) ? 1 : 0, id);
+        if (prerequisite.length) {
+          assert.equal(workflowExpression(prerequisite[0].if, context), boat);
+          assert.equal(prerequisite[0].run, "bash scripts/verification/boat-browser-deps.sh");
+          assert.ok(job.steps.indexOf(prerequisite[0]) < job.steps.findIndex(step => step.name === "Run the complete assigned inventory"));
+        }
+      }
+      const expanded = evaluatedJobs(context);
+      for (const [id, key] of [["javascript-workers", "js"], ["rust-tests", "rust"]]) {
+        assert.deepEqual(expanded[id].strategy.matrix.shard, Array.from({ length: CLOUD_SHAPES[boat ? "boat" : "standard"][key] - 1 }, (_, index) => index + 1));
+      }
+    }
+  }
+});
+
 test("ready same-repository PRs and manual runs use GitHub Ubuntu unless Blacksmith is on", () => {
   const document = load(workflow);
   assert.deepEqual(Object.keys(document.on).sort(), ["pull_request", "workflow_dispatch"]);
@@ -478,7 +522,7 @@ test("ready same-repository PRs and manual runs use GitHub Ubuntu unless Blacksm
 test("manual Blacksmith selection leaves automatic and default runs unchanged", () => {
   const document = load(workflow);
   assert.equal(document.on.workflow_dispatch.inputs.runner_provider.default, "github");
-  assert.deepEqual(document.on.workflow_dispatch.inputs.runner_provider.options, ["github", "blacksmith", "blacksmith-builds"]);
+  assert.deepEqual(document.on.workflow_dispatch.inputs.runner_provider.options, ["github", "blacksmith", "blacksmith-builds", "boat"]);
   for (const enabled of ["", "false"]) for (const size of ["4", "8", "32", ""]) {
     const manual = workflowContext({enabled, size, event: "workflow_dispatch", provider: "blacksmith"});
     const automatic = {...workflowContext({enabled}), inputs: {runner_provider: "blacksmith", runner_size: size}};
@@ -628,8 +672,13 @@ test("prepared artifact consumers share preparation's fingerprint environment", 
   }
 });
 
-test("job names match the workflow graph and timeout backstops", () => {
-  const {jobs} = load(workflow);
+for (const [shapeName, shape] of Object.entries(CLOUD_SHAPES)) {
+const { js: JS_SHARDS, rust: RUST_SHARDS } = shape;
+const context = workflowContext({ event: "workflow_dispatch", provider: shapeName === "boat" ? "boat" : "github" });
+const CLOUD_JOB_GRAPH = cloudJobGraph(shape);
+
+test(`${shapeName} job names match the workflow graph and timeout backstops`, () => {
+  const jobs = evaluatedJobs(context);
   assert.deepEqual(Object.keys(CLOUD_JOB_GRAPH).sort(), Object.keys(jobs).filter(name => name !== "verification").sort());
   for (const [id, node] of Object.entries(CLOUD_JOB_GRAPH)) {
     const job = jobs[id];
@@ -646,10 +695,10 @@ test("job names match the workflow graph and timeout backstops", () => {
   assert.equal(upload.with.path, ".agent-artifacts/verification/aggregate/*-completed-result.json");
 });
 
-test("cloud matrices run every JavaScript and Rust shard with separate evidence", () => {
-  const {jobs} = load(workflow);
-  assert.equal(JS_SHARDS, 20);
-  assert.equal(RUST_SHARDS, 20);
+test(`${shapeName} cloud matrices run every JavaScript and Rust shard with separate evidence`, () => {
+  const jobs = evaluatedJobs(context);
+  assert.deepEqual(shape, shapeName === "boat" ? { js: 4, rust: 2 } : { js: 20, rust: 20 });
+  assert.ok(rustReaderShard(shape) >= 0 && rustReaderShard(shape) < RUST_SHARDS);
   for (const [name, count, finalJob, scope, command] of [
     ["javascript-workers", JS_SHARDS, "javascript", "js-worker", "node scripts/verification/cloud.mjs worker 0"],
     ["rust-tests", RUST_SHARDS, "rust", "rust-tests", "node scripts/verification/cloud-rust.mjs tests 0"],
@@ -676,8 +725,13 @@ test("cloud matrices run every JavaScript and Rust shard with separate evidence"
   }
 });
 
-test("the workflow graph pins its peak concurrent jobs", () => {
-  const {jobs} = load(workflow), names = Object.keys(jobs);
+test(`${shapeName} workflow graph pins total and peak concurrent jobs`, () => {
+  const jobs = evaluatedJobs(context), names = Object.keys(jobs);
+  assert.equal(names.reduce((total, name) => total + (jobs[name].strategy?.matrix?.shard?.length ?? 1), 0), shapeName === "boat" ? 13 : 47);
+  if (shapeName === "boat") {
+    assert.equal(names.filter(name => workflowExpression(jobs[name]["runs-on"], context)[0].startsWith("boat"))
+      .reduce((total, name) => total + (jobs[name].strategy?.matrix?.shard?.length ?? 1), 0), 9);
+  }
   const ancestors = name => {
     const needs = jobs[name].needs ?? [];
     return new Set((Array.isArray(needs) ? needs : [needs]).flatMap(parent => [parent, ...ancestors(parent)]));
@@ -698,9 +752,10 @@ test("the workflow graph pins its peak concurrent jobs", () => {
   assert.equal(concurrent(initial), JS_SHARDS + 5);
   assert.equal(concurrent(rustPhase), RUST_SHARDS + 5);
   assert.equal(peak, Math.max(JS_SHARDS + 5, RUST_SHARDS + 5));
-  assert.equal(peak, 25);
+  assert.equal(peak, shapeName === "boat" ? 9 : 25);
   assert.ok(peak <= 60, "one combined gate fits the plan limit");
 });
+}
 
 test("cloud selection uses the tested Git checkout and evidence has bounded retention", () => {
   const {jobs} = load(workflow);

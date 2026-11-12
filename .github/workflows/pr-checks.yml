@@ -22,7 +22,7 @@ on:
       runner_provider:
         description: Runner provider for this manual measurement
         type: choice
-        options: [github, blacksmith, blacksmith-builds]
+        options: [github, blacksmith, blacksmith-builds, boat]
         default: github
       runner_size:
         description: Blacksmith vCPUs, ignored on GitHub's runners
@@ -39,6 +39,7 @@ permissions:
   actions: read
 
 env:
+  DOHC_CLOUD_SHAPE: ${{ github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'boat' && 'boat' || 'standard' }}
   CARGO_PROFILE_DEV_DEBUG: '0'
   CARGO_DENY_VERSION: "0.20.2"
   CARGO_AUDIT_VERSION: "0.22.2"
@@ -51,7 +52,7 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (!github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && '["blacksmith-2vcpu-ubuntu-2404"]' || '["ubuntu-24.04"]') }}
+    runs-on: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'boat') && '["ubuntu-24.04"]' || (vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && '["blacksmith-2vcpu-ubuntu-2404"]' || '["ubuntu-24.04"]') }}
     timeout-minutes: 10
     outputs:
       js: ${{ steps.filter.outputs.js }}
@@ -228,7 +229,7 @@ jobs:
     needs: changes
     if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.js == 'true' || needs.changes.outputs.rust == 'true'
     runs-on: >-
-      ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' ||
+      ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'boat') && '["boat-large"]' || (vars.BLACKSMITH_ENABLED == 'true' ||
       (github.event_name == 'workflow_dispatch' && (inputs.runner_provider == 'blacksmith' || inputs.runner_provider == 'blacksmith-builds'))) &&
       format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') ||
       (vars.BLACKSMITH_BUILD_VCPUS == '4' || vars.BLACKSMITH_BUILD_VCPUS == '8') &&
@@ -430,31 +431,12 @@ jobs:
     name: JS worker ${{ matrix.shard }}
     needs: changes
     if: (github.event_name == 'workflow_dispatch' && inputs.gate != 'rust') || needs.changes.outputs.js == 'true'
-    runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
+    runs-on: &compute-runner ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'boat') && '["boat-xlarge"]' || (vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
     timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        shard:
-          - 1
-          - 2
-          - 3
-          - 4
-          - 5
-          - 6
-          - 7
-          - 8
-          - 9
-          - 10
-          - 11
-          - 12
-          - 13
-          - 14
-          - 15
-          - 16
-          - 17
-          - 18
-          - 19
+        shard: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'boat' && '[1,2,3]' || '[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]') }}
     env:
       DOHC_CONFINEMENT_SUITES: exclude
       CARGO_INCREMENTAL: '0'
@@ -474,6 +456,9 @@ jobs:
         run: rustup show active-toolchain || rustup toolchain install
       - name: Install dependencies
         run: pnpm install --frozen-lockfile && pnpm --filter @dohc/app-backend-runtime build
+      - name: Install missing browser system dependencies
+        if: github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'boat'
+        run: bash scripts/verification/boat-browser-deps.sh
       - name: Run the complete assigned inventory
         run: node scripts/verification/cloud.mjs worker ${{ matrix.shard }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -489,7 +474,7 @@ jobs:
     name: typecheck + tests
     needs: changes
     if: always() && !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.gate != 'rust') || needs.changes.outputs.js == 'true')
-    runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
+    runs-on: *compute-runner
     timeout-minutes: 40
     env:
       DOHC_CONFINEMENT_SUITES: exclude
@@ -517,6 +502,9 @@ jobs:
         run: rustup show active-toolchain || rustup toolchain install
       - name: Install dependencies
         run: pnpm install --frozen-lockfile && pnpm --filter @dohc/app-backend-runtime build
+      - name: Install missing browser system dependencies
+        if: github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'boat'
+        run: bash scripts/verification/boat-browser-deps.sh
       - name: Run the complete assigned inventory
         run: node scripts/verification/cloud.mjs worker 0
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -552,7 +540,7 @@ jobs:
     name: Rust build once
     needs: changes
     if: (github.event_name == 'workflow_dispatch' && inputs.gate != 'js') || needs.changes.outputs.rust == 'true'
-    runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
+    runs-on: *compute-runner
     timeout-minutes: 25
     env:
       NEXTEST_PROFILE: without-confinement
@@ -609,31 +597,12 @@ jobs:
     if: >-
       always() && !cancelled() && needs.changes.result == 'success' &&
       ((github.event_name == 'workflow_dispatch' && inputs.gate != 'js') || needs.changes.outputs.rust == 'true')
-    runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
+    runs-on: *compute-runner
     timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        shard:
-          - 1
-          - 2
-          - 3
-          - 4
-          - 5
-          - 6
-          - 7
-          - 8
-          - 9
-          - 10
-          - 11
-          - 12
-          - 13
-          - 14
-          - 15
-          - 16
-          - 17
-          - 18
-          - 19
+        shard: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'boat' && '[1]' || '[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]') }}
     env:
       NEXTEST_PROFILE: without-confinement
       CARGO_INCREMENTAL: '0'
@@ -685,7 +654,7 @@ jobs:
     name: Rust policy checks
     needs: changes
     if: always() && !cancelled() && needs.changes.result == 'success' && ((github.event_name == 'workflow_dispatch' && inputs.gate != 'js') || needs.changes.outputs.rust == 'true')
-    runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
+    runs-on: *compute-runner
     timeout-minutes: 25
     env:
       NEXTEST_PROFILE: without-confinement
@@ -730,7 +699,7 @@ jobs:
     name: engine gate
     needs: [changes, rust-archive, javascript-workers]
     if: always() && !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.gate != 'js') || needs.changes.outputs.rust == 'true')
-    runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
+    runs-on: *compute-runner
     timeout-minutes: 40
     env:
       NEXTEST_PROFILE: without-confinement
@@ -810,7 +779,7 @@ jobs:
     name: ${{ github.event_name == 'pull_request' && 'PR verification' || 'Manual verification' }}
     needs: [changes, javascript, rust, javascript-prepare, confinement-compiler, confinement-relay]
     if: ${{ always() && !cancelled() && needs.changes.result != 'skipped' }}
-    runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && '["blacksmith-2vcpu-ubuntu-2404"]' || '["ubuntu-24.04"]') }}
+    runs-on: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'boat') && '["ubuntu-24.04"]' || (vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && '["blacksmith-2vcpu-ubuntu-2404"]' || '["ubuntu-24.04"]') }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5

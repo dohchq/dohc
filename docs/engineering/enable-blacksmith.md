@@ -70,7 +70,7 @@ gh workflow run pr-checks.yml --repo dohchq/dohc --ref main -f gate=all -f runne
 ```
 
 The `gate` input accepts `all`, `js`, or `rust`.
-The `runner_provider` input accepts `github` (default), `blacksmith`, or `blacksmith-builds` for a manual opt-in.
+The `runner_provider` input accepts `github` (default), `blacksmith`, `blacksmith-builds`, or `boat` for a manual opt-in.
 The default does not override `BLACKSMITH_ENABLED=true`.
 The `runner_size` input accepts `4` or `8` vCPUs and affects both manual Blacksmith modes.
 Manual runs execute the requested gates. Automatic PR runs execute the gates that the changed files select.
@@ -83,10 +83,18 @@ Final verification alone emits timing warning annotations and step summary lines
 A confinement job's runner wait counts only if it started after shared preparation finished.
 Individual jobs have separate termination limits. See [verification timing](verify-agent-work.md#verify-a-pull-request).
 
-The workflow runs 20 JavaScript workers and 20 Rust test partitions. Combined runs permit at most 25 concurrent jobs.
+The GitHub and Blacksmith shapes run 20 JavaScript workers and 20 Rust test partitions, with 47 jobs per combined run.
+Combined runs permit at most 25 concurrent jobs.
 The initial peak includes preparation, Rust build, Rust policy, and both confinement jobs.
 Rust test partitions wait for the JavaScript worker matrix; the JavaScript aggregate can report alongside them.
 The Rust phase also permits at most 25 jobs: its partitions, JavaScript reporting, preparation, Rust policy, and both confinement jobs.
+
+The experimental `boat` option runs only on explicit manual dispatches. No repository variable enables it.
+It uses `boat-large` for shared preparation and `boat-xlarge` for JavaScript workers, the Rust archive, Rust partitions, and Rust policy.
+It runs 4 JavaScript workers and 2 Rust partitions: 9 Boat jobs and 13 jobs in total, with at most 9 concurrent jobs.
+Selection, final verification, and both confinement jobs stay on GitHub's `ubuntu-24.04` image.
+Boat's Landlock ABI 4 lacks the ABI 5 and 6 features that compiler confinement requires.
+The Boat dispatch overrides Blacksmith runner variables for that run.
 
 Compare cold and warm runs before choosing larger runners or shorter timeouts.
 Record elapsed time, billed cost, peak memory, and disk use for each gate.
