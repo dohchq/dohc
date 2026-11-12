@@ -20,15 +20,18 @@ export function ResourceCell(props: {
   unconfirmed: boolean;
   editable: boolean;
   offline: boolean;
+  /** The control that edits the value is a Tab stop and its row's open target, as in a record's panel. In the table the grid is the stop. */
+  tabStop?: boolean;
   /** Reads the file's bytes through the table's read action. Absent, the file can't be downloaded here. */
   download?: NonNullable<CollectionResources["readFile"]>;
   onError: CollectionResourceError;
 }) {
   const { field, value, editable } = props;
+  const stop = props.tabStop ? undefined : -1, target = props.tabStop ? " dohc-row-open-target" : "";
   if (field.type !== "attachment") {
     const text = <span className="truncate">{display(value)}</span>;
-    // A button, so assistive technology hears that the cell opens. The grid is the Tab stop.
-    return editable ? <button type="button" tabIndex={-1} className="flex min-h-5 w-full min-w-0 items-center text-left text-[13px]">{text}</button>
+    // A button, so assistive technology hears that the cell opens. In the table the grid is the Tab stop.
+    return editable ? <button type="button" tabIndex={stop} aria-label={display(value) === "" ? `Edit ${field.name}` : undefined} className={`flex min-h-5 w-full min-w-0 items-center text-left text-[13px]${target}`}>{text}</button>
       : <span className="flex min-w-0 text-[13px]">{text}</span>;
   }
   const fileId = typeof value === "string" && value !== "" ? value : null;
@@ -38,7 +41,7 @@ export function ResourceCell(props: {
       // The press downloads the file. It neither selects nor edits the cell.
       : props.download ? <span className="flex min-w-0" onClick={event => event.stopPropagation()}><CollectionAttachmentCell key={fileId} compact scope={props.scope} fieldName={field.name} fileId={fileId} disabled={false} read={props.download} onError={props.onError} /></span>
       : <span className="truncate text-[13px]">Attached file</span>}
-    {editable ? <IconButton tabIndex={-1} className="ml-auto shrink-0" aria-label={fileId === null ? `Add ${field.name}` : `Change ${field.name}`} title={fileId === null ? "Add file" : "Change file"}><Paperclip size={14} strokeWidth={1.9} aria-hidden /></IconButton> : null}
+    {editable ? <IconButton tabIndex={stop} className={`ml-auto shrink-0${target}`} aria-label={fileId === null ? `Add ${field.name}` : `Change ${field.name}`} title={fileId === null ? "Add file" : "Change file"}><Paperclip size={14} strokeWidth={1.9} aria-hidden /></IconButton> : null}
   </span>;
 }
 

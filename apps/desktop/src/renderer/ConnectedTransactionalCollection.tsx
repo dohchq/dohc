@@ -54,11 +54,19 @@ export interface ConnectedTransactionalCollectionProps {
   historyRequested?: boolean;
   /** The page took the ask; the asker clears it. */
   onHistoryShown?(): void;
+  /** The record the Collection's tab shows open in its panel when the page starts, by the record's key. */
+  initialOpenRecord?: string | null;
+  /** The page opened a record in its panel, or closed the panel, for null. The host keeps it with the tab. */
+  onOpenRecordChange?(record: string | null): void;
+  /** The record panel's width when the page starts. */
+  initialRecordPanelWidth?: number;
+  /** A resize of the record panel ended. */
+  onRecordPanelWidthChange?(width: number): void;
 }
 export function ConnectedTransactionalCollection(props: ConnectedTransactionalCollectionProps) {
   return <ScopedCollection key={`${props.workspaceId}:${props.datasetPath}:${props.tableId}`} {...props} />;
 }
-function ScopedCollection({ workspaceId, datasetPath, tableId, onError: reportError, onKeepCollections, onSettled, onFormCreated, onLifecycleChanged, onNotice, onOpenFile, onOpenScheduleSettings, historyRequested, onHistoryShown, owner = true }: ConnectedTransactionalCollectionProps) {
+function ScopedCollection({ workspaceId, datasetPath, tableId, onError: reportError, onKeepCollections, onSettled, onFormCreated, onLifecycleChanged, onNotice, onOpenFile, onOpenScheduleSettings, historyRequested, onHistoryShown, initialOpenRecord, onOpenRecordChange, initialRecordPanelWidth, onRecordPanelWidthChange, owner = true }: ConnectedTransactionalCollectionProps) {
   const [dataset, setDataset] = useState<DatasetDescription | null>(null);
   const datasetId = dataset?.datasetId ?? "";
   // A request that only waited for this Collection's move, which stopped,
@@ -274,6 +282,10 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError: reportEr
     buttons={buttonColumns}
     automations={automations.toggle}
     panel={automations.panel}
+    initialOpenRecord={initialOpenRecord}
+    onOpenRecordChange={onOpenRecordChange}
+    initialRecordPanelWidth={initialRecordPanelWidth}
+    onRecordPanelWidthChange={onRecordPanelWidthChange}
     fieldMarks={automations.fieldMarks}
     activeView={views?.active ?? null}
     views={views ?? undefined}

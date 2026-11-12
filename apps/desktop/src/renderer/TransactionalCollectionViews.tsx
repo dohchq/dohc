@@ -29,6 +29,8 @@ interface Props {
   /** A read showed records, so the page drops what a failed read left. */
   onLoaded(): void;
   onOpen(row: TransactionalRow): void;
+  /** The record the page shows open in its panel, by its key. Its card or entry is marked. */
+  openRecord?: string | null;
   onMove(row: TransactionalRow, fieldId: string, value: AppBackendJson): void;
   canMove(fieldId: string): boolean;
 }
@@ -124,7 +126,7 @@ export function TransactionalCollectionViews(props: Props) {
     const { onError, onBusy } = latest.current;
     setLoaded(null); setBusy(true); onBusy(true); reading.current = true;
     void readView(abort.signal).then(next => {
-      // Record details, open over a view that opens afresh after a change to its fields, take its new values.
+      // A record open in the panel, beside a view that opens afresh after a change to its fields, takes its new values.
       if (request===current.current&&!abort.signal.aborted) { setLoaded(next); latest.current.onLoaded(); latest.current.onReadInPlace(next.calendar?.rows ?? next.columns.flatMap(column=>column.page.rows)); }
     }).catch(error => {
       if(request===current.current&&!abort.signal.aborted) onError("dohc could not open this view.",error,()=>{if(request===current.current)setAttempt(value=>value+1);});
@@ -179,7 +181,7 @@ export function TransactionalCollectionViews(props: Props) {
   return <div className="flex min-h-0 flex-1 flex-col gap-2" aria-busy={busy}>
     {props.view.kind==="board" ? <>
       <div className="min-h-0 flex-1"><BoardView schema={schema} groups={groups} groupBy={props.view.groupBy!} fieldLabel={fieldLabel} visibleFields={visibleFields.length > 1 ? visibleFields.filter(fieldId=>fieldId!==props.view.groupBy) : visibleFields}
-        onCellChange={!disabled&&props.canMove(props.view.groupBy!)?move:undefined} onOpenRecord={record=>{const row=indexed.get(record.id);if(row&&!disabled)props.onOpen(row);}}
+        onCellChange={!disabled&&props.canMove(props.view.groupBy!)?move:undefined} onOpenRecord={record=>{const row=indexed.get(record.id);if(row&&!disabled)props.onOpen(row);}} openRecordId={props.openRecord}
         groupCount={(_group,index)=>`${loaded.columns[index]!.page.rows.length}${loaded.columns[index]!.page.nextCursor ? "+" : ""}`}
         groupFooter={(_group,index)=>{const column=loaded.columns[index]!,key=JSON.stringify(column.value);return pageControls(positions[key]??beginning(),column.page,next=>setPositions({...positions,[key]:next}),display(column.value)||"No value",false);}} /></div>
       {groups.length===0&&<p className="m-0 text-sm text-muted">No records match this board. Change the filters or add a record.</p>}
@@ -189,7 +191,7 @@ export function TransactionalCollectionViews(props: Props) {
     </> : <>
       <div className="min-h-80 flex-1"><CalendarView schema={schema} records={rows.map(row=>visualRecord(row,props.fields))} dateField={props.view.dateField!} visibleFields={visibleFields}
         date={month} nearbyDates={loaded.nearby} onNavigate={date=>{if(!disabled){setMonth(date);setCalendarPosition(beginning());}}}
-        onCellChange={!disabled&&props.canMove(props.view.dateField!)?move:undefined} onOpenRecord={record=>{const row=indexed.get(record.id);if(row&&!disabled)props.onOpen(row);}} /></div>
+        onCellChange={!disabled&&props.canMove(props.view.dateField!)?move:undefined} onOpenRecord={record=>{const row=indexed.get(record.id);if(row&&!disabled)props.onOpen(row);}} openRecordId={props.openRecord} /></div>
       <span className="text-[12px] text-muted">Records without a date appear in the table.</span>
       {pageControls(calendarPosition,loaded.calendar!,setCalendarPosition,"this calendar")}
     </>}

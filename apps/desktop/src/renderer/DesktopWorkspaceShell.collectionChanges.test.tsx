@@ -17,7 +17,7 @@ import type { Workspace } from "./DesktopWorkspaceShell";
 
 // The shell, the Collection's page around the table, and the table's queue
 // are real. Only the table stands aside: buttons that change, keep, and
-// delete records through the queue, as its cells and its record details do.
+// delete records through the queue, as its cells and its record panel do.
 vi.mock("./TransactionalCollectionPage", async () => {
   const { useLayoutEffect, useState } = await import("react");
   const { writeQueueFor } = await import("./transactionalWriteQueue");

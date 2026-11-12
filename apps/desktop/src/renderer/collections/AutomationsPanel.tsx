@@ -509,6 +509,8 @@ function OwnerAutomationsPanel(props: {
   /** The panel took the start request; the page forgets it, so a new panel does not take it again. */
   onStarted?: () => void;
   onClose: () => void;
+  /** The builder kept its draft, so the panel did not leave it as asked, as when the page asked it to close. */
+  onStayed?: () => void;
   onOpenFile: (path: string) => void;
   /** Opens the setting where the owner chooses which computer runs schedules. */
   onOpenScheduleSettings: () => void;
@@ -568,6 +570,11 @@ function OwnerAutomationsPanel(props: {
   const leave = (then: () => void) => {
     if (editingRef.current) setLeaving(() => then);
     else then();
+  };
+  // The builder keeps its draft, so a leave it was asked for does not happen, and what asked hears that.
+  const stay = () => {
+    if (leavingRef.current) props.onStayed?.();
+    setLeaving(null);
   };
   // A switched-off automation's notice, and Try again on its run, go to its
   // switch in the list, which takes focus once its row shows.
@@ -840,7 +847,7 @@ function OwnerAutomationsPanel(props: {
     const { original } = open;
     const now = original === null ? undefined : listed.find((entry) => entry.id === original.id);
     const stopLeaving = () => {
-      if (editingRef.current?.session === open.session) setLeaving(null);
+      if (editingRef.current?.session === open.session) stay();
     };
     if (original !== null && now === undefined) {
       stopLeaving();
@@ -980,7 +987,7 @@ function OwnerAutomationsPanel(props: {
               setLeaving(null);
               then?.();
             }}
-            onStay={() => setLeaving(null)}
+            onStay={stay}
             onDraftChange={(draft) => {
               latestDraft.current = draft;
             }}

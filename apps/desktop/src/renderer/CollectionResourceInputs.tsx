@@ -35,7 +35,7 @@ export function CollectionAttachmentInput(props: InputProps & { upload: NonNulla
       setFile(uploaded); props.onChange(uploaded.fileId);
     } catch (cause) {
       if (alive.current && !abort.signal.aborted) props.onError(`dohc could not upload ${request.file.name}.`, cause, () => { if (alive.current) void upload(request); });
-    // An upload ends its busy state even when its input closed first, as when record details closes, so the page unlocks.
+    // An upload ends its busy state even when its input closed first, as when a record's panel closes, so the page unlocks.
     } finally { if (alive.current) { locked.current = false; setPending(false); } props.onBusy(false); }
   }
   return <div className="flex flex-col gap-2">

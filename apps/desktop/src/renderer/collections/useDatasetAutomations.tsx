@@ -39,8 +39,12 @@ export function useDatasetAutomations(props: {
   /** Opens the dialog that adds fields, such as a Button field; undefined where this person cannot. */
   onOpenFields?: () => void;
 }): {
-  /** What the page's Automations button and menu row show and do. */
-  toggle: { open: boolean; count: number; onToggle: () => void };
+  /**
+   * What the page's Automations button and menu row show and do. `close` asks
+   * the open panel to close, then runs `then`. A person who keeps a draft
+   * there keeps the panel, and `then` never runs.
+   */
+  toggle: { open: boolean; count: number; onToggle: () => void; close: (then: () => void) => void };
   panel: ReactNode;
   fieldMarks: FieldMarks;
   /** Opens the panel's builder on a new automation, such as one a button starts. */
@@ -96,9 +100,14 @@ export function useDatasetAutomations(props: {
   useEffect(() => bridge().onCollectionAutomationsChanged((event) => {
     if (event.workspaceId === workspaceId) void find();
   }), [workspaceId, find]);
+  // What runs once the panel has closed at the page's asking.
+  const afterClose = useRef<(() => void) | null>(null);
   const close = useCallback(() => {
     setOpen(false);
     setStart(null);
+    const then = afterClose.current;
+    afterClose.current = null;
+    then?.();
   }, []);
   const fields = useMemo(() => builderFields(described?.fields ?? []), [described]);
   const full = collectionPath !== null && table !== undefined;
@@ -107,6 +116,12 @@ export function useDatasetAutomations(props: {
     open,
     count: automationCount(automations.file, table),
     onToggle: () => (!open ? setOpen(true) : full ? setCloseAsk((ask) => ask + 1) : close()),
+    close: (then: () => void) => {
+      if (!open) return then();
+      afterClose.current = then;
+      if (full) setCloseAsk((ask) => ask + 1);
+      else close();
+    },
   };
   const panel = !open ? null : full ? (
     <AutomationsPanel
@@ -120,6 +135,9 @@ export function useDatasetAutomations(props: {
       onStarted={started}
       closeAsk={closeAsk}
       onClose={close}
+      onStayed={() => {
+        afterClose.current = null;
+      }}
       onOpenFile={props.onOpenFile}
       onOpenScheduleSettings={props.onOpenScheduleSettings}
       onOpenFields={props.onOpenFields}

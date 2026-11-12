@@ -3,13 +3,14 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BoardViewProps, CalendarViewProps } from "@dohc/collection-views";
 import type { AppBackendJson } from "@dohc/security-contract/app-backend";
+import { shortDate } from "@dohc/collection-views/values";
 import { deferred } from "../testing/deferred";
 import { resetKeptCollectionEditsForTests, TransactionalCollectionPage, type TransactionalInvoke, type TransactionalDatasetDescription } from "./TransactionalCollectionPage";
 import type { CollectionTableView } from "./collectionTableViews";
 import { admitCollectionChanges, openCollectionChangeShell } from "./collectionChangeShells";
 vi.mock("@dohc/collection-views",()=>({
-  BoardView: (props:BoardViewProps)=><div data-testid="board" data-field-names={props.schema.fields.map(field=>props.fieldLabel?.(field.name)??field.name).join("|")}>{props.groups.map((group,index)=><section key={index} aria-label={String(group.value)}>{group.records.map(record=><div key={record.id}>{record.values.find(value=>value.field==="name")?.value as string}<button disabled={!props.onCellChange} onClick={()=>props.onCellChange?.({recordId:record.id,recordPath:"",field:props.groupBy,value:"Done"})}>Move {record.id}</button><button onClick={()=>props.onOpenRecord?.(record)}>Show {record.id}</button></div>)}{props.groupFooter?.(group,index)}</section>)}</div>,
-  CalendarView: (props:CalendarViewProps)=><div><button onClick={()=>props.onNavigate?.(new Date(2027,0,1))}>January</button>{props.nearbyDates?.length ? <span>Nearby {props.nearbyDates.join(" ")}</span> : null}{props.records.map(record=><span key={record.id}>{record.id}<button onClick={()=>props.onOpenRecord?.(record)}>Show {record.id}</button></span>)}</div>,
+  BoardView: (props:BoardViewProps)=><div data-testid="board" data-open-record={props.openRecordId??""} data-field-names={props.schema.fields.map(field=>props.fieldLabel?.(field.name)??field.name).join("|")}>{props.groups.map((group,index)=><section key={index} aria-label={String(group.value)}>{group.records.map(record=><div key={record.id}>{record.values.find(value=>value.field==="name")?.value as string}<button disabled={!props.onCellChange} onClick={()=>props.onCellChange?.({recordId:record.id,recordPath:"",field:props.groupBy,value:"Done"})}>Move {record.id}</button><button onClick={()=>props.onOpenRecord?.(record)}>Show {record.id}</button></div>)}{props.groupFooter?.(group,index)}</section>)}</div>,
+  CalendarView: (props:CalendarViewProps)=><div data-testid="calendar" data-open-record={props.openRecordId??""}><button onClick={()=>props.onNavigate?.(new Date(2027,0,1))}>January</button>{props.nearbyDates?.length ? <span>Nearby {props.nearbyDates.join(" ")}</span> : null}{props.records.map(record=><span key={record.id}>{record.id}<button onClick={()=>props.onOpenRecord?.(record)}>Show {record.id}</button></span>)}</div>,
 }));
 const dataset:TransactionalDatasetDescription={datasetId:"dataset",name:"Work",revision:1,revisionSha256:"a".repeat(64),tables:[{tableId:"table",name:"Tasks",fields:[
   {fieldId:"name",name:"Name",type:"text",required:true,unique:false},
@@ -112,24 +113,25 @@ it("routes board moves through approved edits with the real version, then offers
   await screen.findByRole("button",{name:"Undo last edit"});
   expect(invoke.mock.calls.find(([request])=>request.operationId==="edit")?.[0]).toMatchObject({workspaceId:"w",datasetId:"dataset",revision:1,operationId:"edit",input:{id:4,expectedVersion:7,values:{status:"Done"}}});
 });
-it("opens a board edit with changes again in record details when its page closes and opens again",async()=>{
+it("opens a board card's record in the panel, marks its card, and changes its field through the approved edit with the record's version",async()=>{
   const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{
+    if(request.operationId==="edit")return {result:{id:4,version:8,priorValues:{status:"Todo"}}};
     const group=(request.input as Record<string,AppBackendJson>).group as {fieldId:string;value:string};
     return {result:{...empty,group,rows:group.value==="Todo"?[{id:4,version:7,values:{name:"Task",status:"Todo"}}]:[]}};
   });
-  const first=setup(invoke);
-  fireEvent.click(await screen.findByRole("button",{name:"Show 4"}));
-  const before=screen.getByRole("dialog",{name:"Record details"});
-  fireEvent.click(within(before).getByRole("button",{name:"Edit Status"}));
-  fireEvent.change(within(before).getByLabelText("Status"),{target:{value:"Done"}});
-  first.unmount();
-  render(<TransactionalCollectionPage {...first.props}/>);
-  const dialog=await screen.findByRole("dialog",{name:"Record details"});
-  const input=within(within(dialog).getByRole("form",{name:"Edit Status"})).getByLabelText<HTMLSelectElement>("Status");
-  expect(input.value).toBe("Done");
-  expect(document.activeElement).toBe(input);
-  fireEvent.keyDown(input,{key:"Escape"});
-  expect(document.activeElement).toBe(within(dialog).getByRole("button",{name:"Edit Status"}));
+  setup(invoke);
+  expect((await screen.findByTestId("board")).getAttribute("data-open-record")).toBe("");
+  fireEvent.click(screen.getByRole("button",{name:"Show 4"}));
+  const record=screen.getByRole("complementary",{name:"Task"});
+  // The board stays beside the panel, with the open record's card marked.
+  expect(screen.getByTestId("board").getAttribute("data-open-record")).toBe("4");
+  expect(document.activeElement).toBe(record);
+  fireEvent.click(within(within(record).getByRole("group",{name:"Status"})).getAllByRole("button")[0]!);
+  fireEvent.click(within(within(record).getByRole("listbox",{name:"Status options"})).getByRole("option",{name:"Done"}));
+  await waitFor(()=>expect(invoke.mock.calls.find(([request])=>request.operationId==="edit")?.[0]).toMatchObject({operationId:"edit",input:{id:4,expectedVersion:7,values:{status:"Done"}}}));
+  fireEvent.click(within(record).getByRole("button",{name:"Close record"}));
+  expect(screen.queryByRole("complementary")).toBeNull();
+  expect(screen.getByTestId("board").getAttribute("data-open-record")).toBe("");
 });
 it("moves a board's card through the approved edit with the record's version, without holding the page, and reads the board again in place",async()=>{
   const answer=deferred<{result:AppBackendJson}>();
@@ -327,8 +329,8 @@ it("finishes a board read and a read in place asked for in one render, and shows
   });
   const result=setup(invoke);
   fireEvent.click(await screen.findByRole("button",{name:"Show 4"}));
-  expect(screen.getByRole("dialog",{name:"Record details"}).textContent).toContain("First task");
-  fireEvent.click(screen.getByRole("button",{name:"Close"}));
+  expect(screen.getByRole("complementary").textContent).toContain("First task");
+  fireEvent.click(screen.getByRole("button",{name:"Close record"}));
   const held=deferred();gate=held.promise;name="Second task";
   result.rerender(<TransactionalCollectionPage {...result.props} recordsVersion={1} recordsChanged={1}/>);
   expect(await screen.findByText("Loading view…")).toBeTruthy();
@@ -339,7 +341,7 @@ it("finishes a board read and a read in place asked for in one render, and shows
   fireEvent.click(screen.getByRole("button",{name:"Show 4"}));
   name="Third task";
   result.rerender(<TransactionalCollectionPage {...result.props} recordsVersion={1} recordsChanged={2}/>);
-  await waitFor(()=>expect(screen.getByRole("dialog",{name:"Record details"}).textContent).toContain("Third task"));
+  await waitFor(()=>expect(screen.getByRole("complementary").textContent).toContain("Third task"));
   expect(screen.queryByText("Loading view…")).toBeNull();
   expect(result.props.onError).not.toHaveBeenCalled();
 });
@@ -360,17 +362,18 @@ it("reads an open Calendar record by its id once an automation moves it out of t
   const props={workspaceId:"w",dataset:keyed,tableId:"table",invoke,onError:vi.fn(),onNotice:vi.fn(),activeView:calendar};
   const {rerender}=render(<TransactionalCollectionPage {...props}/>);
   fireEvent.click(await screen.findByRole("button",{name:"Show 7"}));
-  const details=()=>screen.getByRole("dialog",{name:"Record details"});
-  expect(details().textContent).toContain(inMonth);
+  const details=()=>screen.getByRole("complementary");
+  // A calendar entry opens its record in the panel, and the calendar marks the entry.
+  expect(screen.getByTestId("calendar").getAttribute("data-open-record")).toBe("7");
+  expect(details().textContent).toContain(shortDate(inMonth));
   date=later;
   rerender(<TransactionalCollectionPage {...props} recordsChanged={1}/>);
-  await waitFor(()=>expect(details().textContent).toContain(later));
-  expect(details().textContent).toContain("Version 2");
+  await waitFor(()=>expect(details().textContent).toContain(shortDate(later)));
   expect(invoke.mock.calls.some(([request])=>JSON.stringify((request.input as Record<string,AppBackendJson>).filters)===JSON.stringify([{fieldId:"key",value:7}]))).toBe(true);
   date=null;
   rerender(<TransactionalCollectionPage {...props} recordsChanged={2}/>);
   await waitFor(()=>expect(details().textContent).toContain("This record is no longer in this Collection."));
-  expect(details().textContent).not.toContain(later);
+  expect(details().textContent).not.toContain(shortDate(later));
   expect(props.onError).not.toHaveBeenCalled();
 });
 it("drops a by-id read of an open Calendar record once a newer read finds it back in the month",async()=>{
@@ -391,7 +394,7 @@ it("drops a by-id read of an open Calendar record once a newer read finds it bac
   const props={workspaceId:"w",dataset:keyed,tableId:"table",invoke,onError:vi.fn(),onNotice:vi.fn(),activeView:calendar};
   const {rerender}=render(<TransactionalCollectionPage {...props}/>);
   fireEvent.click(await screen.findByRole("button",{name:"Show 7"}));
-  const details=()=>screen.getByRole("dialog",{name:"Record details"});
+  const details=()=>screen.getByRole("complementary");
   // Out of the month: the page reads the record by its id, and that read waits.
   date=later;version=2;
   rerender(<TransactionalCollectionPage {...props} recordsChanged={1}/>);
@@ -399,14 +402,13 @@ it("drops a by-id read of an open Calendar record once a newer read finds it bac
   // Back in the month before it answers: the newer read in place shows the record.
   date=back;version=3;
   rerender(<TransactionalCollectionPage {...props} recordsChanged={2}/>);
-  await waitFor(()=>expect(details().textContent).toContain("Version 3"));
+  await waitFor(()=>expect(details().textContent).toContain(shortDate(back)));
   const signal=invoke.mock.calls.find(([request])=>(request.input as Record<string,AppBackendJson>).filters!==undefined)![1];
   expect(signal.aborted).toBe(true);
   // The late answer, from while it was out of the month, changes nothing; nor would one saying it was gone.
   await act(async()=>byId.resolve({result:{rows:[{id:7,version:2,values:{key:"7",name:"Pay rent",status:"Todo",date:later}}],nextCursor:null}}));
-  expect(details().textContent).toContain("Version 3");
-  expect(details().textContent).toContain(back);
-  expect(details().textContent).not.toContain(later);
+  expect(details().textContent).toContain(shortDate(back));
+  expect(details().textContent).not.toContain(shortDate(later));
   expect(details().textContent).not.toContain("no longer");
 });
 it("reads a board again in place when fields it does not group by change, and opens it afresh when its group field changes",async()=>{
@@ -470,7 +472,7 @@ describe("when the Collection's rules change",()=>{
     const result=setup(invoke);
     await screen.findByText("First task");
     fireEvent.click(screen.getByRole("button",{name:"Show 1"}));
-    const details=screen.getByRole("dialog",{name:"Record details"});
+    const details=screen.getByRole("complementary");
     expect(within(details).getByText("Todo")).toBeTruthy();
     const regrouped=revision(2,dataset.tables[0]!.fields.map(field=>field.fieldId==="status"?{...field,options:["Todo","Doing","Done"]}:field));
     result.rerender(<TransactionalCollectionPage {...result.props} dataset={regrouped}/>);

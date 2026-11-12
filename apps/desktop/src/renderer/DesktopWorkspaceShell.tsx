@@ -320,6 +320,8 @@ import {
   serializeUiState,
   siteTabPath,
   setCollectionActiveView,
+  setCollectionOpenRecord,
+  setRecordPanelWidth,
   setFolderExpanded,
   setExplorerMode,
   setOpenEditorsHeight,
@@ -7064,6 +7066,12 @@ export function DesktopWorkspaceShell(props: {
                   onNotice={collectionReports.onNotice}
                   historyRequested={collectionHistoryTab !== null && tab === collectionHistoryTab}
                   onHistoryShown={clearCollectionHistory}
+                  initialOpenRecord={tabPath === null ? null : wb.openRecords[tabPath] ?? null}
+                  onOpenRecordChange={(record) => {
+                    if (tabPath !== null) mutateWb((state) => setCollectionOpenRecord(state, tabPath, record));
+                  }}
+                  initialRecordPanelWidth={wb.recordPanelWidth}
+                  onRecordPanelWidthChange={(width) => mutateWb((state) => setRecordPanelWidth(state, width))}
                   onFormCreated={appRoot => {
                     void refreshFiles().catch(error => reportShellError("Could not refresh workspace files.", error));
                     openVirtualTab(siteTabPath(appRoot));

@@ -32,11 +32,14 @@ const backend = vi.hoisted(() => ({ dataset: vi.fn(), createWorkspaceFile: vi.fn
 vi.mock("./bridge", () => ({ bridge: () => backend }));
 // The form dialog only approves public choices here, and records how that ended.
 const formDialog = vi.hoisted(() => ({ outcomes: [] as string[] }));
+// What the stand-in page did once the ⚡ panel closed at its asking, as the page opens a record.
+const handoff = vi.hoisted(() => ({ opened: 0 }));
 vi.mock("./CreateDatasetFormDialog", () => ({ CreateDatasetFormDialog: (props: { onApproveChoices?(input: { workspaceId: string; preparationId: string; revisionSha256: string; approvalDigest: string }, signal: AbortSignal): Promise<void> }) =>
   <button onClick={() => void props.onApproveChoices!({ workspaceId: "workspace-a", preparationId: "choices", revisionSha256: "a".repeat(64), approvalDigest: "d".repeat(64) }, new AbortController().signal)
     .then(() => formDialog.outcomes.push("approved"), (error: Error) => formDialog.outcomes.push(error.message))}>Approve public choices</button> }));
-vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (props: { automations?: { open: boolean; count: number; onToggle(): void }; panel?: ReactNode; views?: TransactionalViewControls; activeView?: CollectionTableView | null; onOpenSource?(): void; dataset?: { tables: Array<{ fields: Array<{ name: string }> }> }; recordsVersion?: number; recordsChanged?: number; buttons?: TransactionalButtons; onRefresh?(): void; onCreateForm?(): void; onHistory?(): void; onReviewSchema?(): void; onTransferCsv?(): void; onPendingResponses?(): void; onExportRecovery?(): void; onCustomize?(): void; onManageAccess?(): void }) => <>
+vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (props: { automations?: { open: boolean; count: number; onToggle(): void; close(then: () => void): void }; panel?: ReactNode; views?: TransactionalViewControls; activeView?: CollectionTableView | null; onOpenSource?(): void; dataset?: { tables: Array<{ fields: Array<{ name: string }> }> }; recordsVersion?: number; recordsChanged?: number; buttons?: TransactionalButtons; onRefresh?(): void; onCreateForm?(): void; onHistory?(): void; onReviewSchema?(): void; onTransferCsv?(): void; onPendingResponses?(): void; onExportRecovery?(): void; onCustomize?(): void; onManageAccess?(): void }) => <>
   {props.automations && <button data-testid="collection-automations-button" aria-pressed={props.automations.open} onClick={props.automations.onToggle}>Automations{props.automations.count > 0 ? props.automations.count : null}</button>}
+  {props.automations && <button onClick={() => props.automations!.close(() => { handoff.opened += 1; })}>Open a record</button>}
   {props.panel}
   {props.onOpenSource && <button onClick={props.onOpenSource}>Open source</button>}
   {props.views && <section aria-label="View tabs"><output aria-label="Open view">{props.activeView?.name ?? "All records"}</output>
@@ -58,7 +61,7 @@ vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const dataset: DatasetDescription = { datasetId: id(1), name: "Fundraiser", revision: 1, revisionSha256: "a".repeat(64), tables: [{ tableId: id(2), name: "Registrations", fields: [{ fieldId: id(3), name: "Name", type: "text", required: true, unique: false }] }], operations: [{ operationId: id(4), tableId: id(2), name: "create", label: "Create", kind: "create", access: "owner", readOnly: false, fieldIds: [id(3)] }] };
 // A builder left with changes keeps its draft for the next panel, so each test starts with none.
-afterEach(() => { cleanup(); resetAutomationButtonsForTests(); resetKeptAutomationDraftsForTests(); vi.clearAllMocks(); backend.settled.length = 0; });
+afterEach(() => { cleanup(); resetAutomationButtonsForTests(); resetKeptAutomationDraftsForTests(); vi.clearAllMocks(); backend.settled.length = 0; handoff.opened = 0; });
 
 it("shows no path above the page, and opens the Collection's file from Open source", async () => {
   backend.dataset.mockResolvedValue({ kind: "description", dataset });
@@ -524,6 +527,39 @@ describe("a dataset table's ⚡ panel", () => {
     expect((within(panel).getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe("Confirm");
     expect((within(panel).getByRole("combobox", { name: "Trigger" }) as HTMLSelectElement).value).toBe("button");
     expect((within(panel).getByRole("combobox", { name: "Button" }) as HTMLSelectElement).value).toBe("Confirm");
+  });
+
+  it("closes for a record the page opens, and keeps its place and its draft when the person keeps editing", async () => {
+    const withButton: DatasetDescription = { ...dataset, tables: [{ ...dataset.tables[0]!, fields: [...dataset.tables[0]!.fields, { fieldId: id(6), name: "Confirm", type: "button" }] }] };
+    backend.dataset.mockResolvedValue({ kind: "description", dataset: withButton });
+    backend.findDatasetCollection.mockResolvedValue({ status: "found", collectionPath: "Fundraiser" });
+    backend.listCollectionAutomations.mockResolvedValue({ status: "read", contentHash: "b".repeat(64), addsStay: [], automations: [] });
+    backend.onAutomationRunSettled.mockImplementation(() => () => undefined);
+    backend.listAutomationButtons.mockResolvedValue({ buttons: [{ field: "Confirm", table: "Registrations", state: { kind: "no-automation", reason: "No automation uses this button." } }] });
+    renderPage();
+    // With the panel closed, the page opens its record at once.
+    fireEvent.click(await screen.findByRole("button", { name: "Open a record" }));
+    expect(handoff.opened).toBe(1);
+    fireEvent.click(await screen.findByRole("button", { name: "Fields and names" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Choose what it does: Confirm" }));
+    const panel = await screen.findByTestId("collection-automations-panel");
+    fireEvent.change(within(panel).getByRole("textbox", { name: "Name" }), { target: { value: "Confirm twice" } });
+    // The builder holds a draft, so it asks. The person keeps editing: no record opens, and the draft stays.
+    fireEvent.click(screen.getByRole("button", { name: "Open a record" }));
+    fireEvent.click(within(await screen.findByTestId("automation-unsaved")).getByRole("button", { name: "Keep editing" }));
+    expect(handoff.opened).toBe(1);
+    expect((within(screen.getByTestId("collection-automations-panel")).getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe("Confirm twice");
+    // The panel closes later for another reason. The record asked for earlier does not open then.
+    fireEvent.click(screen.getByTestId("collection-automations-button"));
+    fireEvent.click(within(await screen.findByTestId("automation-unsaved")).getByRole("button", { name: "Discard" }));
+    await waitFor(() => expect(screen.queryByTestId("collection-automations-panel")).toBeNull());
+    expect(handoff.opened).toBe(1);
+    // Open with no draft, the panel closes for the record, which then opens.
+    fireEvent.click(screen.getByTestId("collection-automations-button"));
+    await screen.findByTestId("collection-automations-panel");
+    fireEvent.click(screen.getByRole("button", { name: "Open a record" }));
+    await waitFor(() => expect(screen.queryByTestId("collection-automations-panel")).toBeNull());
+    expect(handoff.opened).toBe(2);
   });
 
   it("adds an action as a button, closes Fields after approval, and opens the builder on it, saving nothing before Save", async () => {

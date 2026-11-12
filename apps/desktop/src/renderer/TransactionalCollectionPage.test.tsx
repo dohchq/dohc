@@ -89,7 +89,32 @@ const why = (field: string, row = 0) => cell(field, row).querySelector("[data-ce
 const press = (key: string) => fireEvent.keyDown(grid(), { key });
 /** The page's own controls work once a full read of records ends. */
 const loaded = () => waitFor(() => expect(screen.getByRole("region", { name: "People" }).getAttribute("aria-busy")).toBe("false"));
-const openDetails = () => { fireEvent.click(screen.getByRole("button", { name: "Open Alice" })); return screen.getByRole("dialog", { name: "Record details" }); };
+/** The record panel. A test that gives the page a ⚡ panel names the one it means. */
+const panel = () => screen.getByRole("complementary");
+/** Opens Alice's record in the panel, as a person does from its row. */
+const openPanel = () => { fireEvent.click(screen.getByRole("button", { name: "Open Alice" })); return panel(); };
+/** A field's row in the panel. */
+const property = (field: string) => within(panel()).getByRole("group", { name: field });
+/** The control that opens a panel field's editor. */
+const propertyValue = (field: string) => within(property(field)).getAllByRole("button")[0]!;
+const propertyEditor = (field: string) => property(field).querySelector<HTMLElement>("[data-cell-editor]");
+const propertyInput = (field: string) => propertyEditor(field)!.querySelector<HTMLInputElement>("input")!;
+/** What a panel field says about a change its host has not confirmed, or null. */
+const propertyMark = (field: string) => property(field).querySelector("[data-cell-status]")?.getAttribute("data-cell-status") ?? null;
+/** Opens a panel field's editor, types a value, and saves with Enter. */
+function typeInPanel(field: string, value: string): void {
+  fireEvent.click(propertyValue(field));
+  const input = propertyInput(field);
+  fireEvent.change(input, { target: { value } });
+  fireEvent.keyDown(input, { key: "Enter" });
+}
+/** The control that opens the record's name for typing. */
+const nameButton = () => within(within(panel()).getByRole("heading")).getByRole("button");
+/** A command in the panel's menu, which this opens. */
+function recordCommand(name: string): HTMLElement {
+  fireEvent.click(within(panel()).getByRole("button", { name: "Record actions" }));
+  return screen.getByRole("menuitem", { name });
+}
 
 it("offers a calendar before the Collection has a date field, and asks for one", async () => {
   const onAddDateField = vi.fn();
@@ -205,7 +230,7 @@ it("shows offline attachments as unavailable and never asks the host for file by
   setup({dataset:description,invoke,readFile,copy:{offline:true,savedAtMs:1}});
   expect(within(await screen.findByRole("grid")).getByText("File available when online")).toBeTruthy();
   expect(screen.queryByText(fileId)).toBeNull();
-  expect(within(openDetails()).getByText("File available when online")).toBeTruthy();
+  expect(within(openPanel()).getByText("File available when online")).toBeTruthy();
   expect(readFile).not.toHaveBeenCalled();
 });
 
@@ -228,7 +253,7 @@ describe("a Data Collection's table", () => {
     expect(editorInput().value).toBe("Alice");
     fireEvent.keyDown(editorInput(), { key: "Escape" });
     // Without the shell's confirmation there is no delete.
-    expect(within(openDetails()).queryByRole("button", { name: "Delete record…" })).toBeNull();
+    expect(within(openPanel()).queryByRole("button", { name: "Record actions" })).toBeNull();
   });
 
   it("pages 50 records at a time with Previous and Next, outside the table", async () => {
@@ -674,7 +699,7 @@ describe("a Data Collection's table", () => {
     const handlers = { onReviewSchema: vi.fn(), onRefresh: vi.fn(), onCustomize: vi.fn(), onCreateForm: vi.fn(), onManageAccess: vi.fn(), onTransferCsv: vi.fn(), onHistory: vi.fn(),
       onPendingResponses: vi.fn(), onExportRecovery: vi.fn(), onOpenSource: vi.fn(), onArchive: vi.fn() };
     const onToggle = vi.fn(), manage = vi.fn();
-    const full = setup({ dataset: description, ...handlers, automations: { open: false, count: 2, onToggle },
+    const full = setup({ dataset: description, ...handlers, automations: { open: false, count: 2, onToggle, close: vi.fn() },
       views: { list: [], busy: false, select: vi.fn(), create: vi.fn(), rename: vi.fn(), remove: vi.fn(), setField: vi.fn(), edit: vi.fn(), manage } });
     await screen.findByText("Alice");
     command("Refresh");
@@ -716,7 +741,7 @@ describe("a Data Collection's table", () => {
   it("holds the menu's commands while a form is open and says why, except what needs no records", async () => {
     const handlers = { onReviewSchema: vi.fn(), onOpenSource: vi.fn(), onArchive: vi.fn() };
     const onToggle = vi.fn();
-    setup({ ...handlers, automations: { open: false, count: 0, onToggle } }); await screen.findByText("Alice");
+    setup({ ...handlers, automations: { open: false, count: 0, onToggle, close: vi.fn() } }); await screen.findByText("Alice");
     fireEvent.click(screen.getAllByRole("button", { name: "New record" })[0]!);
     for (const name of ["Fields and names", "Refresh", "Archive"]) {
       const row = command(name);
@@ -893,215 +918,458 @@ describe("a Data Collection's files and relations", () => {
   });
 });
 
-describe("a Data Collection's record details and forms", () => {
-  it("opens record details and edits through the existing versioned action", async () => {
-    const result = setup(); await screen.findByText("Alice");
-    const details = within(openDetails());
-    expect(details.getByText("Alice")).toBeTruthy();
-    expect(details.queryByText("Private note")).toBeNull();
-    fireEvent.click(details.getByRole("button", { name: "Edit Name" }));
-    expect(document.activeElement).toBe(details.getByLabelText("Name"));
-    fireEvent.change(details.getByLabelText("Name"), { target: { value: "Alicia" } });
-    fireEvent.click(details.getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(sent(result.invoke, edit)).toHaveLength(1));
-    expect(sent(result.invoke, edit)[0]!.input).toEqual({ id: 1, expectedVersion: 2, values: { [name]: "Alicia" } });
-  });
-
-  it("edits a field in place in record details: Escape closes only the field, Enter saves, and focus returns to its pencil", async () => {
-    const { invoke } = setup(); await screen.findByText("Alice");
+describe("a Data Collection's record panel and forms", () => {
+  it("opens a record in a panel beside the table, with the fields the person may read and no key or version", async () => {
+    setup(); await screen.findByText("Alice");
     const open = screen.getByRole("button", { name: "Open Alice" });
     open.focus(); fireEvent.click(open);
-    const dialog = screen.getByRole("dialog", { name: "Record details" });
-    const pencil = within(dialog).getByRole("button", { name: "Edit Name" });
-    fireEvent.click(pencil);
-    // The input opens where the value was, with the caret after it, and Cancel and Save take the pencil's place.
-    const input = within(within(dialog).getByRole("form", { name: "Edit Name" })).getByLabelText<HTMLInputElement>("Name");
-    expect(document.activeElement).toBe(input);
-    expect([input.selectionStart, input.selectionEnd]).toEqual([5, 5]);
-    expect(within(input.closest("dd")!).getAllByRole("button").map(button => button.getAttribute("aria-label"))).toEqual(["Cancel", "Save"]);
-    fireEvent.change(input, { target: { value: "Alicia" } });
-    fireEvent.keyDown(input, { key: "Escape" });
-    expect(within(dialog).queryByRole("form", { name: "Edit Name" })).toBeNull();
-    expect(screen.getByRole("dialog", { name: "Record details" })).toBe(dialog);
-    expect(within(dialog).getByText("Alice")).toBeTruthy();
-    expect(document.activeElement).toBe(pencil);
-
-    fireEvent.click(pencil);
-    fireEvent.change(within(dialog).getByLabelText("Name"), { target: { value: "Alicia" } });
-    fireEvent.keyDown(within(dialog).getByLabelText("Name"), { key: "Enter" });
-    await waitFor(() => expect(sent(invoke, edit)[0]?.input).toEqual({ id: 1, expectedVersion: 2, values: { [name]: "Alicia" } }));
-    await waitFor(() => expect(document.activeElement).toBe(pencil));
-    expect(screen.getByRole("dialog", { name: "Record details" })).toBe(dialog);
-    // The next Escape closes details, and focus returns to the row.
-    fireEvent.keyDown(pencil, { key: "Escape" });
-    expect(screen.queryByRole("dialog", { name: "Record details" })).toBeNull();
-    await waitFor(() => expect(document.activeElement).toBe(open));
+    const record = screen.getByRole("complementary", { name: "Alice" });
+    // The panel is no dialog, and it takes focus without holding it.
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(record.getAttribute("aria-modal")).toBeNull();
+    expect(document.activeElement).toBe(record);
+    expect(within(record).getByRole("heading", { name: "Alice" })).toBeTruthy();
+    expect(within(record).getByText("People")).toBeTruthy();
+    // The record's name is the heading, not a row. The other fields it may read follow in the table's order.
+    expect(within(record).getAllByRole("group").map(group => document.getElementById(group.getAttribute("aria-labelledby")!)!.textContent)).toEqual(["Amount", "Status"]);
+    expect(within(record).queryByText("Private note")).toBeNull();
+    expect(within(record).queryByText("Do not show")).toBeNull();
+    expect(record.textContent).not.toMatch(/version|record 1/i);
+    // A Data record has no page to open.
+    expect(within(record).queryByRole("button", { name: "Open as page" })).toBeNull();
+    // The open record's row is marked, and the table beside the panel still takes an edit.
+    expect(grid().querySelector('[role="row"][aria-current="true"]')?.getAttribute("data-index")).toBe("0");
+    fireEvent.click(cell("Amount"));
+    expect(editor()).not.toBeNull();
+    expect(panel()).toBe(record);
   });
 
-  it("keeps a field open in details when dohc could not confirm its change, and its Save sends the exact request again", async () => {
+  it("edits a field in the panel through the queue, with no Save step, and shows the change on the field and on its cell until the host confirms it", async () => {
+    const write = deferred<{ result: AppBackendJson }>();
+    const invoke = vi.fn((request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => request.operationId === read ? Promise.resolve({ result: page() }) : write.promise);
+    setup({ invoke }); await screen.findByText("Alice");
+    const record = openPanel();
+    typeInPanel("Amount", "9");
+    await waitFor(() => expect(sent(invoke, edit)).toHaveLength(1));
+    expect(sent(invoke, edit)[0]!.input).toEqual({ id: 1, expectedVersion: 2, values: { [amount]: 9 } });
+    expect(within(record).queryByRole("button", { name: "Save" })).toBeNull();
+    expect(propertyEditor("Amount")).toBeNull();
+    expect([propertyMark("Amount"), mark("Amount")]).toEqual(["pending", "pending"]);
+    expect(property("Amount").textContent).toContain("9");
+    expect(cell("Amount").textContent).toContain("9");
+    await act(async () => write.resolve({ result: { id: 1, version: 3, priorValues: { [amount]: 5 } } }));
+    await waitFor(() => expect([propertyMark("Amount"), mark("Amount")]).toEqual([null, null]));
+  });
+
+  it("shows a change dohc could not confirm on the field and on its cell, and Try again in the panel sends the exact request again", async () => {
     let failed = false;
     const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
       if (request.operationId === read) return { result: page() };
       if (!failed) { failed = true; throw new Error("Connection ended after commit"); }
-      return { result: receipt() };
+      return { result: { id: 1, version: 3, priorValues: { [amount]: 5 } } };
     });
     setup({ invoke });
     await screen.findByText("Alice");
-    const dialog = within(openDetails());
-    fireEvent.click(dialog.getByRole("button", { name: "Edit Name" }));
-    fireEvent.change(dialog.getByLabelText("Name"), { target: { value: "Alicia" } }); fireEvent.click(dialog.getByRole("button", { name: "Save" }));
-    const error = await dialog.findByRole("alert");
-    expect(error.textContent).toBe("dohc could not confirm this change.");
-    const input = dialog.getByLabelText<HTMLInputElement>("Name"), save = dialog.getByRole<HTMLButtonElement>("button", { name: "Save" });
-    expect([input.value, input.disabled, input.getAttribute("aria-describedby")]).toEqual(["Alicia", true, error.id]);
-    expect(save.disabled).toBe(false); expect(document.activeElement).toBe(save);
-    // The form says it, so the page does not list the change as well.
-    expect(screen.queryByRole("group", { name: "Changes dohc did not confirm" })).toBeNull();
-    fireEvent.click(save);
-    await waitFor(() => expect(dialog.queryByRole("form", { name: "Edit Name" })).toBeNull());
-    const writes = sent(invoke, edit);
-    expect(writes).toHaveLength(2); expect(writes[1]).toEqual(writes[0]);
+    openPanel();
+    typeInPanel("Amount", "9");
+    await waitFor(() => expect(propertyMark("Amount")).toBe("unconfirmed"));
+    const note = within(within(property("Amount")).getByRole("note"));
+    expect(within(property("Amount")).getByRole("note").textContent).toContain("dohc could not confirm this change.");
+    expect(mark("Amount")).toBe("unconfirmed");
+    // The field and the cell say it, so the page does not list the change as well.
+    expect(strip()).toBeNull();
+    expect(note.getByRole("button", { name: "Discard" })).toBeTruthy();
+    fireEvent.click(note.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(sent(invoke, edit)).toHaveLength(2));
+    expect(sent(invoke, edit)[1]).toEqual(sent(invoke, edit)[0]);
+    await waitFor(() => expect([propertyMark("Amount"), mark("Amount")]).toEqual([null, null]));
   });
 
-  it("keeps a refused field open in details with what was typed, and says why under it", async () => {
+  it("keeps a refused value on the field and on its cell, with why, until it is dismissed", async () => {
     const invoke = vi.fn(async (request: TransactionalInvoke) => {
       if (request.operationId === read) return { result: page() };
       throw Object.assign(new Error("This record changed. Refresh the table."), { code: "operation_refused" });
     });
     const { onError } = setup({ invoke });
     await screen.findByText("Alice");
-    const dialog = within(openDetails());
-    fireEvent.click(dialog.getByRole("button", { name: "Edit Name" }));
-    fireEvent.change(dialog.getByLabelText("Name"), { target: { value: "Alicia" } }); fireEvent.click(dialog.getByRole("button", { name: "Save" }));
-    const error = await dialog.findByRole("alert");
-    expect(error.textContent).toBe("The Collection refused this change. This record changed. Refresh the table.");
-    const input = dialog.getByLabelText<HTMLInputElement>("Name");
-    expect([input.value, input.disabled, input.getAttribute("aria-invalid")]).toEqual(["Alicia", false, "true"]);
-    expect(document.activeElement).toBe(input);
+    openPanel();
+    typeInPanel("Amount", "9");
+    await waitFor(() => expect(propertyMark("Amount")).toBe("refused"));
+    expect(within(property("Amount")).getByRole("note").textContent).toContain("The Collection refused this change. This record changed. Refresh the table.");
+    expect(property("Amount").textContent).toContain("9");
+    expect(mark("Amount")).toBe("refused");
     expect(onError).toHaveBeenCalledWith("The Collection refused this change.", expect.objectContaining({ code: "operation_refused" }), null);
-    // The form shows it, so no cell holds the value as well.
-    expect(mark("Name")).toBeNull();
+    fireEvent.click(within(within(property("Amount")).getByRole("note")).getByRole("button", { name: "Dismiss" }));
+    expect([propertyMark("Amount"), mark("Amount")]).toEqual([null, null]);
+    expect(property("Amount").textContent).toContain("5");
   });
 
-  it("opens an edit with changes again in record details when its page closes and opens again", async () => {
-    const first = setup(); await screen.findByText("Alice");
-    const before = openDetails();
-    fireEvent.click(within(before).getByRole("button", { name: "Edit Name" }));
-    fireEvent.change(within(before).getByLabelText("Name"), { target: { value: "Alicia" } });
-    first.unmount();
-    render(<TransactionalCollectionPage {...first.props} />);
-    const dialog = await screen.findByRole("dialog", { name: "Record details" });
-    const input = within(within(dialog).getByRole("form", { name: "Edit Name" })).getByLabelText<HTMLInputElement>("Name");
-    expect(input.value).toBe("Alicia");
-    expect(document.activeElement).toBe(input);
-    // The record's version is the one the edit opened with.
+  it("changes the record's name in the heading by a cell's rules, and keeps a name the field can't take with why", async () => {
+    const { invoke } = setup(); await screen.findByText("Alice");
+    const record = openPanel();
+    fireEvent.click(nameButton());
+    const input = within(record).getByRole<HTMLInputElement>("textbox", { name: "Name" });
+    expect(input.value).toBe("Alice");
+    fireEvent.change(input, { target: { value: "Alicia" } });
     fireEvent.keyDown(input, { key: "Enter" });
-    await waitFor(() => expect(sent(first.invoke, edit)[0]?.input).toEqual({ id: 1, expectedVersion: 2, values: { [name]: "Alicia" } }));
+    await waitFor(() => expect(sent(invoke, edit)[0]?.input).toEqual({ id: 1, expectedVersion: 2, values: { [name]: "Alicia" } }));
+    await waitFor(() => expect(mark("Name")).toBeNull());
+    // Name is required, so an empty one is not sent. The heading says why, as the cell does.
+    fireEvent.click(nameButton());
+    fireEvent.change(within(panel()).getByRole("textbox", { name: "Name" }), { target: { value: "" } });
+    fireEvent.keyDown(within(panel()).getByRole("textbox", { name: "Name" }), { key: "Enter" });
+    expect(within(panel()).getByRole("note").textContent).toContain("Enter Name.");
+    expect(why("Name")).toBe("Enter Name.");
+    expect(sent(invoke, edit)).toHaveLength(1);
   });
-  it("closes only the field of an edit opened again on Escape, and gives focus to its pencil", async () => {
+
+  it("heads a record that has no name as Untitled, and shows its key nowhere", async () => {
+    const optional = dataset();
+    optional.tables[0]!.fields.find(entry => entry.fieldId === name)!.required = false;
+    const invoke = vi.fn(async (): Promise<{ result: AppBackendJson }> => ({ result: { rows: [{ id: 41, version: 2, values: { [name]: null, [amount]: 5, [status]: "New" } }], nextCursor: null } }));
+    setup({ dataset: optional, invoke });
+    // The table's Open control and the panel call the record the same thing for a screen reader.
+    fireEvent.click(await screen.findByRole("button", { name: "Open record 41" }));
+    const record = screen.getByRole("complementary", { name: "record 41" });
+    expect(within(record).getByRole("heading", { name: "Untitled" })).toBeTruthy();
+    expect(record.textContent).not.toContain("41");
+    // The name can still be given there.
+    fireEvent.click(nameButton());
+    expect(within(record).getByRole<HTMLInputElement>("textbox", { name: "Name" }).value).toBe("");
+  });
+
+  it("closes the innermost thing on Escape: an open editor, the open name, then the panel, and returns focus to what opened it", async () => {
+    const { invoke } = setup(); await screen.findByText("Alice");
+    const open = screen.getByRole("button", { name: "Open Alice" });
+    open.focus(); fireEvent.click(open);
+    const record = panel();
+    const value = propertyValue("Amount");
+    fireEvent.click(value);
+    fireEvent.change(propertyInput("Amount"), { target: { value: "9" } });
+    fireEvent.keyDown(propertyInput("Amount"), { key: "Escape" });
+    expect(propertyEditor("Amount")).toBeNull();
+    expect(panel()).toBe(record);
+    expect(document.activeElement).toBe(value);
+
+    fireEvent.click(nameButton());
+    fireEvent.change(within(record).getByRole("textbox", { name: "Name" }), { target: { value: "Alicia" } });
+    fireEvent.keyDown(within(record).getByRole("textbox", { name: "Name" }), { key: "Escape" });
+    expect(within(record).queryByRole("textbox")).toBeNull();
+    expect(panel()).toBe(record);
+    expect(document.activeElement).toBe(nameButton());
+
+    fireEvent.keyDown(nameButton(), { key: "Escape" });
+    expect(screen.queryByRole("complementary")).toBeNull();
+    expect(document.activeElement).toBe(open);
+    expect(sent(invoke, edit)).toHaveLength(0);
+  });
+
+  it("opens the selected cell's record on Ctrl+Enter, and replaces the panel's record when another opens", async () => {
+    const invoke = vi.fn(async (): Promise<{ result: AppBackendJson }> => ({ result: twoRecords() }));
+    setup({ invoke }); await screen.findByText("Alice");
+    fireEvent.click(cell("Status"));
+    fireEvent.keyDown(grid(), { key: "Enter", ctrlKey: true });
+    expect(screen.getByRole("complementary", { name: "Alice" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Open Bea" }));
+    expect(screen.getAllByRole("complementary")).toHaveLength(1);
+    expect(screen.getByRole("complementary", { name: "Bea" })).toBeTruthy();
+    expect(property("Amount").textContent).toContain("7");
+    expect([...grid().querySelectorAll('[role="row"][aria-current="true"]')].map(row => row.getAttribute("data-index"))).toEqual(["1"]);
+  });
+
+  it("keeps the table's rows as they are when the panel opens, resizes and closes", async () => {
+    setup(); await screen.findByText("Alice");
+    const row = grid().querySelector('[role="row"][data-index="0"]')!, amountCell = cell("Amount"), value = within(amountCell).getByRole("button");
+    const record = openPanel();
+    fireEvent.keyDown(within(record).getByRole("separator", { name: "Resize record" }), { key: "ArrowLeft" });
+    fireEvent.click(within(panel()).getByRole("button", { name: "Close record" }));
+    expect(screen.queryByRole("complementary")).toBeNull();
+    expect(grid().querySelector('[role="row"][data-index="0"]')).toBe(row);
+    expect(cell("Amount")).toBe(amountCell);
+    expect(within(cell("Amount")).getByRole("button")).toBe(value);
+  });
+
+  it("tells its host which record is open, and opens it again when the page starts with it", async () => {
+    const onOpenRecordChange = vi.fn();
+    const first = setup({ onOpenRecordChange }); await screen.findByText("Alice");
+    openPanel();
+    expect(onOpenRecordChange).toHaveBeenLastCalledWith("1");
+    // Text being typed is no part of what the host keeps.
+    fireEvent.click(propertyValue("Amount"));
+    fireEvent.change(propertyInput("Amount"), { target: { value: "9" } });
+    expect(onOpenRecordChange).toHaveBeenCalledTimes(1);
+    fireEvent.keyDown(propertyInput("Amount"), { key: "Escape" });
+    fireEvent.click(within(panel()).getByRole("button", { name: "Close record" }));
+    expect(onOpenRecordChange).toHaveBeenLastCalledWith(null);
+    first.unmount();
+    // The host kept the record with the tab. The page starts with it and takes no focus for it.
+    render(<TransactionalCollectionPage {...first.props} initialOpenRecord="1" />);
+    const record = await screen.findByRole("complementary", { name: "Alice" });
+    expect(document.activeElement).not.toBe(record);
+    expect(within(record).getByRole("heading", { name: "Alice" })).toBeTruthy();
+    expect(onOpenRecordChange).toHaveBeenCalledTimes(2);
+  });
+
+  describe("a record that is not among the table's", () => {
+    const keyed = () => { const description = dataset(); description.tables[0]!.primaryKeyFieldId = name; return description; };
+    const bea: AppBackendJson = { rows: [{ id: 2, version: 4, values: { [name]: "Bea", [amount]: 7, [status]: "New" } }], nextCursor: null };
+    const byKey = (request: TransactionalInvoke) => (request.input as { filters?: unknown[] }).filters !== undefined;
+
+    it("is read by its key, shows as loading until then, and takes a change as a record of the table does", async () => {
+      const answer = deferred<{ result: AppBackendJson }>();
+      const invoke = vi.fn((request: TransactionalInvoke): Promise<{ result: AppBackendJson }> =>
+        byKey(request) ? answer.promise : Promise.resolve({ result: request.operationId === read ? page() : { id: 2, version: 5, priorValues: { [amount]: 7 } } }));
+      setup({ dataset: keyed(), invoke, initialOpenRecord: "2" });
+      await screen.findByText("Alice");
+      const record = screen.getByRole("complementary", { name: "Record" });
+      expect(record.getAttribute("aria-busy")).toBe("true");
+      expect(within(record).queryByRole("heading")).toBeNull();
+      await waitFor(() => expect(sent(invoke, read).some(request => JSON.stringify(request.input) === JSON.stringify({ limit: 1, filters: [{ fieldId: name, value: 2 }] }))).toBe(true));
+      await act(async () => answer.resolve({ result: bea }));
+      expect(screen.getByRole("complementary", { name: "Bea" })).toBe(record);
+      typeInPanel("Amount", "8");
+      await waitFor(() => expect(sent(invoke, edit)[0]?.input).toEqual({ id: 2, expectedVersion: 4, values: { [amount]: 8 } }));
+    });
+
+    it("says in one line that a record is gone, could not be read, or was never one, and offers Close", async () => {
+      const onOpenRecordChange = vi.fn();
+      const gone = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => ({ result: byKey(request) ? { rows: [], nextCursor: null } : page() }));
+      setup({ dataset: keyed(), invoke: gone, initialOpenRecord: "2", onOpenRecordChange });
+      expect((await within(await screen.findByRole("complementary")).findByRole("status")).textContent).toBe("This record is no longer in this Collection.");
+      fireEvent.click(within(panel()).getByRole("button", { name: "Close" }));
+      expect(screen.queryByRole("complementary")).toBeNull();
+      expect(onOpenRecordChange).toHaveBeenLastCalledWith(null);
+      cleanup(); resetKeptCollectionEditsForTests();
+
+      const failing = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => { if (byKey(request)) throw new Error("Lost reply"); return { result: page() }; });
+      setup({ dataset: keyed(), invoke: failing, initialOpenRecord: "2" });
+      expect((await within(await screen.findByRole("complementary")).findByRole("status")).textContent).toBe("dohc could not read this record. Close it, then open it again.");
+      cleanup(); resetKeptCollectionEditsForTests();
+
+      // A kept key that names no record is never sent to the Collection.
+      const foreign = vi.fn(async (_request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => ({ result: page() }));
+      setup({ dataset: keyed(), invoke: foreign, initialOpenRecord: "{not a key" });
+      expect((await within(await screen.findByRole("complementary")).findByRole("status")).textContent).toBe("This record is no longer in this Collection.");
+      expect(foreign.mock.calls.some(([request]) => byKey(request))).toBe(false);
+    });
+
+    it("ignores a by-key answer that comes after the panel shows another record, after it closed, and after the page left for another workspace, Collection or table", async () => {
+      const answers: Array<ReturnType<typeof deferred<{ result: AppBackendJson }>>> = [];
+      const invoke = vi.fn((request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+        if (!byKey(request)) return Promise.resolve({ result: page() });
+        answers.push(deferred<{ result: AppBackendJson }>());
+        return answers.at(-1)!.promise;
+      });
+      const view = setup({ dataset: keyed(), invoke, initialOpenRecord: "2" });
+      await screen.findByText("Alice");
+      await waitFor(() => expect(answers).toHaveLength(1));
+      // Another record opens before the answer for the first.
+      openPanel();
+      expect(screen.getByRole("complementary", { name: "Alice" })).toBeTruthy();
+      await act(async () => answers[0]!.resolve({ result: bea }));
+      expect(screen.getByRole("complementary", { name: "Alice" })).toBeTruthy();
+      expect(screen.queryByText("Bea")).toBeNull();
+      // The panel closes before the answer.
+      view.unmount(); resetKeptCollectionEditsForTests();
+      const closed = setup({ dataset: keyed(), invoke, initialOpenRecord: "2" });
+      await screen.findByText("Alice");
+      await waitFor(() => expect(answers).toHaveLength(2));
+      fireEvent.click(within(panel()).getByRole("button", { name: "Close record" }));
+      await act(async () => answers[1]!.resolve({ result: bea }));
+      expect(screen.queryByRole("complementary")).toBeNull();
+      closed.unmount(); resetKeptCollectionEditsForTests();
+      // The page leaves for another workspace, another Collection, or another table before the answer.
+      const elsewhere: Array<Partial<React.ComponentProps<typeof TransactionalCollectionPage>>> = [
+        { workspaceId: "workspace-B" }, { dataset: { ...keyed(), datasetId: id(77) } }, { tableId: id(78) }];
+      for (const [index, other] of elsewhere.entries()) {
+        const left = setup({ dataset: keyed(), invoke, initialOpenRecord: "2" });
+        await screen.findByRole("complementary", { name: "Record" });
+        await waitFor(() => expect(answers).toHaveLength(3 + index));
+        left.rerender(<TransactionalCollectionPage {...left.props} {...other} initialOpenRecord={null} />);
+        await act(async () => answers[2 + index]!.resolve({ result: bea }));
+        expect(screen.queryByRole("complementary")).toBeNull();
+        expect(screen.queryByText("Bea")).toBeNull();
+        left.unmount(); resetKeptCollectionEditsForTests();
+      }
+    });
+  });
+
+  it("says a record a read left out is no longer in this view, keeps it open, and gives the table focus when it closes", async () => {
+    let rows = page();
+    const invoke = vi.fn(async (): Promise<{ result: AppBackendJson }> => ({ result: rows }));
+    const { props, rerender } = setup({ invoke }); await screen.findByText("Alice");
+    const record = openPanel();
+    // The record leaves this page of records, so its row and its Open control go.
+    rows = { rows: [{ id: 2, version: 4, values: { [name]: "Bea", [amount]: 7, [status]: "New" } }], nextCursor: null };
+    rerender(<TransactionalCollectionPage {...props} recordsVersion={1} />);
+    await screen.findByText("Bea");
+    expect(panel()).toBe(record);
+    expect(within(record).getByRole("status").textContent).toBe("This record is no longer in this view. Close it, then search for it.");
+    expect(within(record).queryByRole("heading")).toBeNull();
+    fireEvent.click(within(record).getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("complementary")).toBeNull();
+    expect(document.activeElement).toBe(grid());
+  });
+
+  it("starts at the width its host kept, and tells the host the width once a resize ends", async () => {
+    const onRecordPanelWidthChange = vi.fn();
+    setup({ initialRecordPanelWidth: 420, onRecordPanelWidthChange }); await screen.findByText("Alice");
+    const record = openPanel();
+    expect(record.style.width).toBe("420px");
+    fireEvent.keyDown(within(record).getByRole("separator", { name: "Resize record" }), { key: "ArrowLeft" });
+    expect(onRecordPanelWidthChange).toHaveBeenCalledExactlyOnceWith(436);
+    expect(panel().style.width).toBe("436px");
+  });
+
+  it("shows one side panel at a time: asks the ⚡ panel to close first, opens no record while that panel stays, and closes when the ⚡ panel opens", async () => {
+    const close = vi.fn<(then: () => void) => void>(), onOpenRecordChange = vi.fn();
+    const automations = (open: boolean) => ({ open, count: 1, onToggle: vi.fn(), close });
+    const drawer = <aside aria-label="Automations" />;
+    const { props, rerender } = setup({ automations: automations(true), panel: drawer, onOpenRecordChange });
+    await screen.findByText("Alice");
+    fireEvent.click(screen.getByRole("button", { name: "Open Alice" }));
+    // The ⚡ panel holds a draft and has not closed: no record opens, and nothing of the draft is lost.
+    expect(close).toHaveBeenCalledOnce();
+    expect(screen.getAllByRole("complementary").map(side => side.getAttribute("aria-label"))).toEqual(["Automations"]);
+    expect(onOpenRecordChange).not.toHaveBeenCalled();
+    // It closes, and the record opens in its place.
+    rerender(<TransactionalCollectionPage {...props} automations={automations(false)} panel={null} />);
+    await act(async () => close.mock.calls[0]![0]());
+    expect(screen.getAllByRole("complementary").map(side => side.getAttribute("aria-label"))).toEqual(["Alice"]);
+    expect(onOpenRecordChange).toHaveBeenLastCalledWith("1");
+    // The ⚡ panel opens again and takes the place back.
+    rerender(<TransactionalCollectionPage {...props} automations={automations(true)} panel={drawer} />);
+    expect(screen.getAllByRole("complementary").map(side => side.getAttribute("aria-label"))).toEqual(["Automations"]);
+    expect(onOpenRecordChange).toHaveBeenLastCalledWith(null);
+  });
+
+  it("keeps text typed in a panel field and not saved when its page closes, and shows it on its cell", async () => {
     const first = setup(); await screen.findByText("Alice");
-    const before = openDetails();
-    fireEvent.click(within(before).getByRole("button", { name: "Edit Name" }));
-    fireEvent.change(within(before).getByLabelText("Name"), { target: { value: "Alicia" } });
+    openPanel();
+    fireEvent.click(propertyValue("Amount"));
+    fireEvent.change(propertyInput("Amount"), { target: { value: "9" } });
     first.unmount();
     render(<TransactionalCollectionPage {...first.props} />);
-    const dialog = await screen.findByRole("dialog", { name: "Record details" });
-    fireEvent.keyDown(within(dialog).getByLabelText("Name"), { key: "Escape" });
-    expect(document.activeElement).toBe(within(dialog).getByRole("button", { name: "Edit Name" }));
+    await screen.findByText("Alice");
+    expect([mark("Amount"), why("Amount")]).toEqual(["refused", "This edit was still open, so dohc did not save it."]);
+    expect(cell("Amount").textContent).toContain("9");
+    expect(sent(first.invoke, edit)).toHaveLength(0);
   });
-  it("keeps an edit it has not opened again when its page closes before its records load", async () => {
+
+  it("opens a new record's form again with what was typed when its page closes and opens again, even when it closed before its records loaded", async () => {
     const first = setup(); await screen.findByText("Alice");
-    const before = openDetails();
-    fireEvent.click(within(before).getByRole("button", { name: "Edit Name" }));
-    fireEvent.change(within(before).getByLabelText("Name"), { target: { value: "Alicia" } });
+    fireEvent.click(within(grid()).getByRole("button", { name: "New record" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Bob" } });
     first.unmount();
     // The Collection opens again, and another file opens before its records load.
     render(<TransactionalCollectionPage {...first.props} invoke={() => new Promise<never>(() => undefined)} />).unmount();
     render(<TransactionalCollectionPage {...first.props} />);
-    expect((await screen.findByLabelText<HTMLInputElement>("Name")).value).toBe("Alicia");
+    const form = await screen.findByRole("form", { name: "New record" });
+    expect(within(form).getByLabelText<HTMLInputElement>("Name").value).toBe("Bob");
   });
-  it("opens no edit again that was cancelled or has no changes, and flags a kept value whose field changed meanwhile", async () => {
+  it("opens no form again that was cancelled or has no changes, and flags a kept value whose field changed meanwhile", async () => {
     const reopen = async (props: React.ComponentProps<typeof TransactionalCollectionPage>, typed: string | null, cancel = false) => {
       const view = render(<TransactionalCollectionPage {...props} />);
       await screen.findByText("Alice");
-      const dialog = within(openDetails());
-      fireEvent.click(dialog.getByRole("button", { name: "Edit Name" }));
-      if (typed !== null) fireEvent.change(dialog.getByLabelText("Name"), { target: { value: typed } });
-      if (cancel) fireEvent.click(dialog.getByRole("button", { name: "Cancel" }));
+      fireEvent.click(within(grid()).getByRole("button", { name: "New record" }));
+      if (typed !== null) fireEvent.change(screen.getByLabelText("Name"), { target: { value: typed } });
+      if (cancel) fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
       view.unmount();
     };
     const { props } = setup(); cleanup();
     await reopen(props, null);
-    await reopen(props, "Alicia", true);
+    await reopen(props, "Bob", true);
     const unchanged = render(<TransactionalCollectionPage {...props} />);
     await screen.findByText("Alice");
-    expect(screen.queryByLabelText("Name")).toBeNull();
+    expect(screen.queryByRole("form", { name: "New record" })).toBeNull();
     unchanged.unmount();
-    await reopen(props, "Alicia");
+    await reopen(props, "Bob");
     const retyped = dataset(); retyped.revision = 2; retyped.revisionSha256 = "b".repeat(64);
     retyped.tables[0]!.fields.find(field => field.fieldId === name)!.type = "number";
     render(<TransactionalCollectionPage {...props} dataset={retyped} />);
-    const kept = await screen.findByLabelText<HTMLInputElement>("Name");
-    expect(kept.readOnly).toBe(true); expect(kept.value).toBe("Alicia");
+    const kept = within(await screen.findByRole("form", { name: "New record" })).getByLabelText<HTMLInputElement>("Name");
+    expect(kept.readOnly).toBe(true); expect(kept.value).toBe("Bob");
     expect(screen.getByText("This field changed, so this value can't be saved. Copy it if you need it, then clear it.")).toBeTruthy();
   });
 
-  it("cancels a field open in details on Escape from Done, and the next Escape closes details", async () => {
-    setup(); await screen.findByText("Alice");
-    const dialog = openDetails();
-    fireEvent.click(within(dialog).getByRole("button", { name: "Edit Name" }));
-    fireEvent.change(within(dialog).getByLabelText("Name"), { target: { value: "Alicia" } });
-    const done = within(dialog).getByRole("button", { name: "Done" });
-    done.focus();
-    fireEvent.keyDown(done, { key: "Escape" });
-    expect(within(dialog).queryByRole("form", { name: "Edit Name" })).toBeNull();
-    expect(screen.getByRole("dialog", { name: "Record details" })).toBe(dialog);
-    expect(document.activeElement).toBe(done);
-    fireEvent.keyDown(done, { key: "Escape" });
-    expect(screen.queryByRole("dialog", { name: "Record details" })).toBeNull();
-  });
-
-  it("unlocks the page when details closes during an attachment upload", async () => {
+  it("stops an upload when the panel closes, and holds none of the page's controls for it", async () => {
     const description = dataset(); description.tables[0]!.fields.find(field => field.fieldId === amount)!.type = "attachment";
     const pendingUpload = deferred<import("@dohc/security-contract/app-backend").AppBackendFile>();
     const uploadFile = vi.fn<NonNullable<React.ComponentProps<typeof TransactionalCollectionPage>["uploadFile"]>>(() => pendingUpload.promise);
-    setup({ dataset: description, uploadFile }); await screen.findByText("Alice");
-    const dialog = openDetails();
-    fireEvent.click(within(dialog).getByRole("button", { name: "Edit Amount" }));
-    fireEvent.change(within(dialog).getByLabelText("Amount"), { target: { files: [new File(["abc"], "receipt.txt")] } });
-    fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+    const { onError } = setup({ dataset: description, uploadFile }); await screen.findByText("Alice");
+    const record = openPanel();
+    // A file's value is drawn and changed by the page's own cell and editor, never the shared text editor.
+    fireEvent.click(within(property("Amount")).getByRole("button", { name: "Add Amount" }));
+    expect(propertyEditor("Amount")!.querySelector('input[type="text"]')).toBeNull();
+    fireEvent.change(propertyEditor("Amount")!.querySelector('input[type="file"]')!, { target: { files: [new File(["abc"], "receipt.txt")] } });
+    expect(uploadFile).toHaveBeenCalledOnce();
+    fireEvent.click(within(record).getByRole("button", { name: "Close record" }));
     expect(uploadFile.mock.calls[0]![1].aborted).toBe(true);
     await act(async () => pendingUpload.reject(new DOMException("The upload was cancelled.", "AbortError")));
+    expect(onError).not.toHaveBeenCalled();
     expect(command("Refresh").getAttribute("aria-disabled")).toBeNull();
   });
 
-  it("closes details on Escape and returns keyboard focus to the row", async () => {
+  it("downloads a record's file from the panel through the table's read action", async () => {
+    const description = dataset(); description.tables[0]!.fields.find(field => field.fieldId === amount)!.type = "attachment";
+    const invoke = vi.fn(async (): Promise<{ result: AppBackendJson }> => ({ result: { rows: [{ id: 1, version: 2, values: { [name]: "Alice", [amount]: "abcdefghijklmnop", [status]: "New" } }], nextCursor: null } }));
+    const readFile = vi.fn<NonNullable<React.ComponentProps<typeof TransactionalCollectionPage>["readFile"]>>(() => new Promise(() => undefined));
+    const view = setup({ dataset: description, invoke, readFile }); await screen.findByText("Alice");
+    openPanel();
+    fireEvent.click(within(property("Amount")).getByRole("button", { name: "Download Amount" }));
+    expect(readFile).toHaveBeenCalledExactlyOnceWith({ workspaceId: "workspace-A", datasetId: id(1), revision: 1, revisionSha256: "a".repeat(64), fileId: "abcdefghijklmnop",
+      read: { operationId: read, fieldId: amount, input: { limit: 1, filters: [{ fieldId: amount, value: "abcdefghijklmnop" }] } } }, expect.any(AbortSignal));
+    // The press downloads the file. It opens no editor.
+    expect(propertyEditor("Amount")).toBeNull();
+    // An answer for the old workspace is stopped before it downloads or reports anything.
+    view.rerender(<TransactionalCollectionPage {...view.props} workspaceId="workspace-B" />);
+    expect(readFile.mock.calls[0]![1].aborted).toBe(true);
+    expect(view.onError).not.toHaveBeenCalled();
+  });
+
+  it("opens a custom action from the panel only for the record's own table, and keeps the panel open", async () => {
+    const description = dataset();
+    description.operations.push(
+      { operationId: id(20), name: "approve", label: "Approve", kind: "action", access: "owner", readOnly: false, tableId: id(2), fieldIds: [] },
+      { operationId: id(21), name: "other", label: "Other table action", kind: "action", access: "owner", readOnly: false, tableId: id(9), fieldIds: [] });
+    const onCustomAction = vi.fn();
+    setup({ dataset: description, onCustomAction }); await screen.findByText("Alice");
+    const record = openPanel();
+    expect(within(record).queryByRole("button", { name: "Open Other table action" })).toBeNull();
+    fireEvent.click(within(record).getByRole("button", { name: "Open Approve" }));
+    expect(onCustomAction).toHaveBeenCalledExactlyOnceWith(id(20));
+    expect(panel()).toBe(record);
+  });
+
+  it("closes the panel on Escape and returns keyboard focus to the row", async () => {
     setup(); await screen.findByText("Alice");
     const open = screen.getByRole("button", { name: "Open Alice" });
     open.focus();
     fireEvent.click(open);
-    fireEvent.keyDown(document, { key: "Escape" });
-    expect(screen.queryByRole("dialog", { name: "Record details" })).toBeNull();
-    await waitFor(() => expect(document.activeElement).toBe(open));
+    fireEvent.keyDown(panel(), { key: "Escape" });
+    expect(screen.queryByRole("complementary")).toBeNull();
+    expect(document.activeElement).toBe(open);
   });
 
-  it("deletes a record from its details, after the shell's confirmation, with the approved operation and the record's version", async () => {
+  it("deletes a record from the panel's menu, after the shell's confirmation, with the approved operation and the record's version", async () => {
     let asked: (confirmed: boolean) => void = () => undefined;
     const confirmDelete = vi.fn(() => new Promise<boolean>(resolve => { asked = resolve; }));
     const { invoke } = setup({ confirmDelete });
     await screen.findByText("Alice");
     // No row of the table carries a delete control.
     expect(within(grid()).queryByRole("button", { name: /Delete/ })).toBeNull();
-    fireEvent.click(within(openDetails()).getByRole("button", { name: "Delete record…" }));
+    openPanel();
+    fireEvent.click(recordCommand("Delete record…"));
     expect(confirmDelete).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: 1, version: 2 }));
     // A second press while the shell asks does nothing, and nothing is deleted before the answer.
-    fireEvent.click(within(screen.getByRole("dialog", { name: "Record details" })).getByRole("button", { name: "Delete record…" }));
+    fireEvent.click(recordCommand("Delete record…"));
     expect(confirmDelete).toHaveBeenCalledOnce();
     expect(sent(invoke, remove)).toHaveLength(0);
+    expect(screen.getByRole("complementary", { name: "Alice" })).toBeTruthy();
     await act(async () => asked(true));
     await waitFor(() => expect(sent(invoke, remove)).toHaveLength(1));
     expect(sent(invoke, remove)[0]!.input).toEqual({ id: 1, expectedVersion: 2 });
-    expect(screen.queryByRole("dialog", { name: "Record details" })).toBeNull();
+    expect(screen.queryByRole("complementary")).toBeNull();
   });
 
   it("deletes nothing when the shell's confirmation is cancelled, and a deletion follows the record's queued change", async () => {
@@ -1109,12 +1377,14 @@ describe("a Data Collection's record details and forms", () => {
     const confirmDelete = vi.fn(() => new Promise<boolean>(resolve => { answers.push(resolve); }));
     const { invoke } = setup({ confirmDelete });
     await screen.findByText("Alice");
-    fireEvent.click(within(openDetails()).getByRole("button", { name: "Delete record…" }));
+    openPanel();
+    fireEvent.click(recordCommand("Delete record…"));
     await act(async () => answers[0]!(false));
-    expect(screen.getByRole("dialog", { name: "Record details" })).toBeTruthy();
-    fireEvent.click(within(screen.getByRole("dialog", { name: "Record details" })).getByRole("button", { name: "Close" }));
+    expect(screen.getByRole("complementary", { name: "Alice" })).toBeTruthy();
+    fireEvent.click(within(panel()).getByRole("button", { name: "Close record" }));
     type("Name", "Alicia");
-    fireEvent.click(within(openDetails()).getByRole("button", { name: "Delete record…" }));
+    openPanel();
+    fireEvent.click(recordCommand("Delete record…"));
     await act(async () => answers[1]!(true));
     await waitFor(() => expect(sent(invoke, remove)).toHaveLength(1));
     // The deletion uses the version the edit left the record at.
@@ -1139,10 +1409,13 @@ describe("a Data Collection's record details and forms", () => {
       for (const key of ["Enter", "x", "Delete"]) press(key);
       expect(editor()).toBeNull();
     }
-    const dialog = within(openDetails());
-    expect(dialog.queryByRole("button", { name: "Delete record…" })).toBeNull();
-    expect(dialog.queryByRole("button", { name: "Edit Name" })).toBeNull();
-    fireEvent.click(dialog.getByRole("button", { name: "Close" }));
+    // The panel shows the record with no way to change it, delete it, or run an action, and says why.
+    const record = openPanel();
+    expect(within(record).queryByRole("button", { name: "Record actions" })).toBeNull();
+    expect(within(within(record).getByRole("heading")).queryByRole("button")).toBeNull();
+    for (const field of ["Amount", "Status"]) expect(within(property(field)).queryByRole("button")).toBeNull();
+    expect(within(record).getByText("Offline copy · Read-only")).toBeTruthy();
+    fireEvent.click(within(record).getByRole("button", { name: "Close record" }));
     fireEvent.click(command("Refresh")); expect(onRefresh).toHaveBeenCalledOnce();
     expect(invoke).toHaveBeenCalledOnce();
   });
@@ -1206,20 +1479,6 @@ describe("a Data Collection's record details and forms", () => {
     expect(field.getAttribute("aria-invalid")).toBeNull();
     expect(status.getAttribute("aria-invalid")).toBe("true");
 
-    // A field open in record details does the same.
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    const dialog = within(openDetails());
-    fireEvent.click(dialog.getByRole("button", { name: "Edit Name" }));
-    const input = dialog.getByLabelText("Name");
-    fireEvent.change(input, { target: { value: "" } });
-    const save = dialog.getByRole("button", { name: "Save" });
-    save.focus(); fireEvent.click(save);
-    const editError = await dialog.findByRole("alert");
-    expect(editError.textContent).toBe("Enter Name.");
-    expect(input.parentElement!.contains(editError)).toBe(true);
-    expect(input.getAttribute("aria-invalid")).toBe("true");
-    expect(input.getAttribute("aria-describedby")).toBe(editError.id);
-    expect(document.activeElement).toBe(input);
   });
 
   it("lists a new record dohc could not confirm with Try again, and sends the exact request again", async () => {
@@ -1404,46 +1663,56 @@ it("draws each Button field as a labelled column after the fields, and in the re
   fireEvent.click(cell("Mark paid"));
   press("Enter");
   expect(editor()).toBeNull();
-  expect(within(openDetails()).getByRole("button", { name: "Mark paid for record 1" })).toBeTruthy();
+  expect(within(within(openPanel()).getByTestId("record-buttons")).getByRole("button", { name: "Mark paid for record 1" })).toBeTruthy();
 });
 
-it("keeps an open record's details, and the focus in them, when the records are read again", async () => {
+it("keeps an open record's panel, and the focus in it, when the records are read again", async () => {
   const render = (field: string, row: { id: string | number }) => <button type="button">{`${field} for record ${String(row.id)}`}</button>;
   let text = "Alice";
   const invoke = vi.fn(async (): Promise<{ result: AppBackendJson }> => ({ result: page(text) }));
   const { props, rerender } = setup({ invoke, buttons: { fields: ["Mark paid"], render } });
   await screen.findByText("Alice");
-  const details = openDetails();
-  const button = within(details).getByRole("button", { name: "Mark paid for record 1" });
+  const record = openPanel();
+  const button = within(record).getByRole("button", { name: "Mark paid for record 1" });
   button.focus();
   text = "Alice Paid";
   rerender(<TransactionalCollectionPage {...props} recordsVersion={1} />);
-  await waitFor(() => expect(within(screen.getByRole("dialog", { name: "Record details" })).getByText("Alice Paid")).toBeTruthy());
+  await waitFor(() => expect(screen.getByRole("complementary", { name: "Alice Paid" })).toBe(record));
   expect(document.activeElement).toBe(button);
-  // A record the new read no longer holds closes its details.
+  // A record the new read no longer holds keeps its panel, which says so instead of showing old values.
   invoke.mockResolvedValue({ result: { rows: [], nextCursor: null } });
   rerender(<TransactionalCollectionPage {...props} recordsVersion={2} />);
-  await waitFor(() => expect(screen.queryByRole("dialog", { name: "Record details" })).toBeNull());
+  await waitFor(() => expect(within(panel()).getByRole("status").textContent).toBe("This record is no longer in this view. Close it, then search for it."));
 });
 
 it("shows records an automation changed in place, with no loading line, nothing disabled, and an open record kept open", async () => {
   const invoke = vi.fn(async (): Promise<{ result: AppBackendJson }> => ({ result: page() }));
   const { props, rerender } = setup({ invoke });
   await screen.findByText("Alice");
-  openDetails();
+  const record = openPanel();
+  // An editor open in the panel stays open, with what it holds, while the record changes under it.
+  fireEvent.click(propertyValue("Amount"));
+  const input = propertyInput("Amount");
+  fireEvent.change(input, { target: { value: "9" } });
   const reread = deferred<{ result: AppBackendJson }>();
   invoke.mockReturnValueOnce(reread.promise);
   rerender(<TransactionalCollectionPage {...props} recordsChanged={1} />);
   await waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
   expect(screen.queryByText("Loading records…")).toBeNull();
-  expect(screen.getByRole("region", { name: "People", hidden: true }).getAttribute("aria-busy")).toBe("false");
-  expect((screen.getAllByRole("button", { name: "New record", hidden: true })[0]! as HTMLButtonElement).disabled).toBe(false);
-  // A record the read left out keeps its dialog open, which says so instead of showing old values.
-  await act(async () => reread.resolve({ result: { rows: [], nextCursor: null } }));
-  expect(within(screen.getByRole("dialog", { name: "Record details" })).getByRole("status").textContent).toBe("This record is no longer in this view. Close it, then search for it.");
-  invoke.mockResolvedValueOnce({ result: page("Alice Paid") });
+  expect(screen.getByRole("region", { name: "People" }).getAttribute("aria-busy")).toBe("false");
+  expect((screen.getAllByRole("button", { name: "New record" })[0]! as HTMLButtonElement).disabled).toBe(false);
+  await act(async () => reread.resolve({ result: page("Alice Paid") }));
+  expect(screen.getByRole("complementary", { name: "Alice Paid" })).toBe(record);
+  expect(propertyInput("Amount")).toBe(input);
+  expect(input.value).toBe("9");
+  fireEvent.keyDown(input, { key: "Escape" });
+  // A record the read left out keeps its panel open, which says so instead of showing old values.
+  invoke.mockResolvedValueOnce({ result: { rows: [], nextCursor: null } });
   rerender(<TransactionalCollectionPage {...props} recordsChanged={2} />);
-  await waitFor(() => expect(within(screen.getByRole("dialog", { name: "Record details" })).getByText("Alice Paid")).toBeTruthy());
+  await waitFor(() => expect(within(panel()).getByRole("status").textContent).toBe("This record is no longer in this view. Close it, then search for it."));
+  invoke.mockResolvedValueOnce({ result: page("Alice Paid") });
+  rerender(<TransactionalCollectionPage {...props} recordsChanged={3} />);
+  await waitFor(() => expect(within(panel()).getByRole("heading", { name: "Alice Paid" })).toBeTruthy());
   expect(screen.queryByText("Loading records…")).toBeNull();
 });
 
@@ -1484,7 +1753,7 @@ it("stands lines in for records not yet shown, and keeps the words while a shown
 it("shows the ⚡ button before New record, and a ⚡ that names the automations on each field they set", async () => {
   const onToggle = vi.fn();
   setup({
-    automations: { open: false, count: 2, onToggle },
+    automations: { open: false, count: 2, onToggle, close: vi.fn() },
     fieldMarks: new Map([["Amount", ["Round the amount"]], ["Status", ["Review new people", "Stamp"]]]),
   });
   await screen.findByText("Alice");
@@ -1501,7 +1770,8 @@ it("shows the ⚡ button before New record, and a ⚡ that names the automations
   fireEvent.focus(sortStatus);
   expect(screen.getByRole("tooltip").textContent).toBe('"Review new people" and "Stamp" set this field');
   fireEvent.blur(sortStatus);
-  expect(within(openDetails()).getAllByRole("img", { name: "Automation" })).toHaveLength(2);
+  // The panel marks the same fields, with the same words.
+  expect(within(openPanel()).getAllByTestId("table-field-mark").map(found => found.getAttribute("aria-label"))).toEqual(['"Round the amount" sets this field', '"Review new people" and "Stamp" set this field']);
 });
 
 describe("when the Collection's fields change", () => {
@@ -1560,9 +1830,8 @@ describe("when the Collection's fields change", () => {
     const current = deferred<{ result: AppBackendJson }>();
     const invoke = vi.fn((request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => request.revision === 2 ? current.promise : Promise.resolve({ result: page() }));
     const result = setup({ invoke }); await screen.findByText("Alice");
-    openDetails();
+    const details = within(openPanel());
     result.rerender(<TransactionalCollectionPage {...result.props} dataset={revised(2, retype(amount, "text"))} />);
-    const details = within(screen.getByRole("dialog", { name: "Record details" }));
     expect(details.getByText("Alice")).toBeTruthy();
     expect(details.queryByText("5")).toBeNull();
     await act(async () => current.resolve({ result: { rows: [{ id: 1, version: 2, values: { [name]: "Alice", [amount]: "five", [status]: "New" } }], nextCursor: null } }));
@@ -1768,16 +2037,16 @@ describe("when the Collection's fields change", () => {
     fireEvent.click(screen.getByRole("button", { name: "Search" }));
     await waitFor(() => expect(reads(result.invoke).at(-1)!.input).toMatchObject({ search: "Ali" }));
     await loaded();
-    openDetails();
+    const record = openPanel();
     const table = screen.getByRole("grid", { hidden: true });
     result.rerender(<TransactionalCollectionPage {...result.props} copy={{ offline: true, savedAtMs: 1 }} />);
     expect(screen.getByRole("grid", { hidden: true })).toBe(table);
-    expect(screen.getByRole("dialog", { name: "Record details" })).toBeTruthy();
+    expect(panel()).toBe(record);
     expect(screen.getByRole<HTMLInputElement>("searchbox", { hidden: true }).value).toBe("Ali");
     await waitFor(() => expect(reads(result.invoke).at(-1)!.input).toMatchObject({ search: "Ali" }));
     result.rerender(<TransactionalCollectionPage {...result.props} copy={{ offline: false, savedAtMs: 2 }} />);
     expect(screen.getByRole("grid", { hidden: true })).toBe(table);
-    expect(screen.getByRole("dialog", { name: "Record details" })).toBeTruthy();
+    expect(panel()).toBe(record);
     expect(screen.getByRole("button", { name: "Undo last edit", hidden: true })).toBeTruthy();
   });
 
@@ -1812,54 +2081,66 @@ describe("when the Collection's fields change", () => {
     await waitFor(() => expect(sent(result.invoke, create)).toHaveLength(1));
   });
 
-  it("keeps a field being edited in record details, and its focus, when its edit is gone, offline, or its field is gone", async () => {
+  it("keeps a field being edited in the panel, and its focus, through a field change, while offline, and when its edit is gone", async () => {
     const result = setup(); await screen.findByText("Alice");
-    const dialog = openDetails();
-    fireEvent.click(within(dialog).getByRole("button", { name: "Edit Name" }));
-    const input = within(dialog).getByLabelText<HTMLInputElement>("Name");
-    fireEvent.change(input, { target: { value: "Alicia" } }); input.focus();
+    const record = openPanel();
+    fireEvent.click(propertyValue("Amount"));
+    const input = propertyInput("Amount");
+    fireEvent.change(input, { target: { value: "9" } }); input.focus();
     const show = (description: TransactionalDatasetDescription, offline = false) =>
       result.rerender(<TransactionalCollectionPage {...result.props} dataset={description} copy={offline ? { offline: true, savedAtMs: 1 } : undefined} />);
-    // A rename elsewhere keeps the dialog and the focus in it.
-    show(revised(2, next => { field(next, amount).name = "Total"; }));
-    expect(screen.getByRole("dialog", { name: "Record details" })).toBe(dialog);
+    // A rename elsewhere keeps the panel, the editor and the focus in it.
+    show(revised(2, next => { field(next, status).name = "Stage"; }));
+    expect(panel()).toBe(record);
+    expect(within(record).getByRole("group", { name: "Stage" })).toBeTruthy();
+    expect(propertyInput("Amount")).toBe(input);
     expect(document.activeElement).toBe(input);
-    show(revised(3, next => { next.operations = next.operations.filter(entry => entry.operationId !== edit); }));
-    expect(within(dialog).getByLabelText<HTMLInputElement>("Name").value).toBe("Alicia");
-    expect(within(dialog).getByText("The Collection's rules no longer allow this change. Copy what you need, then choose Cancel.")).toBeTruthy();
-    show(revised(4), true);
-    expect(within(dialog).getByLabelText<HTMLInputElement>("Name").value).toBe("Alicia");
-    expect(within(dialog).getByText("You can save this once the Collection is back online.")).toBeTruthy();
-    show(revised(5, next => {
-      next.tables[0]!.fields = next.tables[0]!.fields.filter(entry => entry.fieldId !== name);
-      for (const entry of next.operations) entry.fieldIds = entry.fieldIds.filter(fieldId => fieldId !== name);
-    }));
-    expect(within(dialog).getByLabelText<HTMLInputElement>("Name").value).toBe("Alicia");
-    expect(within(dialog).getByText(CHANGED)).toBeTruthy();
-    fireEvent.click(within(dialog).getByRole("button", { name: "Clear value" }));
-    expect(within(dialog).queryByLabelText("Name")).toBeNull();
+    // Offline, the editor waits with what it holds.
+    show(revised(3), true);
+    expect(propertyInput("Amount")).toBe(input);
+    expect([input.value, input.matches(":disabled")]).toEqual(["9", true]);
+    // Back online with no edit action, saving keeps the value on the field and says why.
+    show(revised(4, next => { next.operations = next.operations.filter(entry => entry.operationId !== edit); }));
+    expect(propertyInput("Amount")).toBe(input);
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(within(property("Amount")).getByRole("note").textContent).toContain("The Collection's rules no longer allow this change, so dohc did not save it.");
+    expect(property("Amount").textContent).toContain("9");
+    expect(sent(result.invoke, edit)).toHaveLength(0);
   });
 
-  it("keeps a field open in details, with what was typed, when the rules change while its change is in flight", async () => {
+  it("keeps what was typed in a panel field where the person can copy it when the field goes", async () => {
+    const result = setup(); await screen.findByText("Alice");
+    openPanel();
+    fireEvent.click(propertyValue("Amount"));
+    fireEvent.change(propertyInput("Amount"), { target: { value: "9" } });
+    result.rerender(<TransactionalCollectionPage {...result.props} dataset={revised(2, next => {
+      next.tables[0]!.fields = next.tables[0]!.fields.filter(entry => entry.fieldId !== amount);
+      for (const entry of next.operations) entry.fieldIds = entry.fieldIds.filter(fieldId => fieldId !== amount);
+    })} />);
+    expect(within(panel()).queryByRole("group", { name: "Amount" })).toBeNull();
+    expect(within(strip()!).getByLabelText<HTMLInputElement>("Amount").value).toBe("9");
+    expect(within(strip()!).getByRole("button", { name: "Copy value" })).toBeTruthy();
+    expect(sent(result.invoke, edit)).toHaveLength(0);
+  });
+
+  it("keeps a value on its field in the panel, with why, when the rules change while its change is in flight", async () => {
     const old = deferred<{ result: AppBackendJson }>();
     const invoke = vi.fn((request: TransactionalInvoke) => request.operationId === read ? Promise.resolve({ result: page(request.revision === 1 ? "Alice" : "Current records") }) : old.promise);
     const result = setup({ invoke });
     await screen.findByText("Alice");
-    const dialog = within(openDetails());
-    fireEvent.click(dialog.getByRole("button", { name: "Edit Name" }));
-    fireEvent.change(dialog.getByLabelText("Name"), { target: { value: "Alicia" } });
-    fireEvent.click(dialog.getByRole("button", { name: "Save" }));
+    openPanel();
+    typeInPanel("Amount", "9");
     await waitFor(() => expect(sent(invoke, edit)).toHaveLength(1));
     result.rerender(<TransactionalCollectionPage {...result.props} dataset={revised(2)} />);
     expect(result.onError.mock.calls.at(-1)![0]).toContain("Check the records");
-    // The field stays open and can be saved again, under the new rules.
-    const input = dialog.getByLabelText<HTMLInputElement>("Name");
-    expect([input.value, input.disabled]).toEqual(["Alicia", false]);
-    expect(dialog.getByRole("alert").textContent).toBe("The Collection's rules changed before dohc confirmed this change. Check the record, then make the change again.");
+    // The value stays on the field, in the panel and in the table, and can be saved again under the new rules.
+    expect(within(property("Amount")).getByRole("note").textContent).toContain("The Collection's rules changed before dohc confirmed this change. Check the record, then make the change again.");
+    expect(property("Amount").textContent).toContain("9");
+    expect(mark("Amount")).toBe("refused");
     await act(async () => old.resolve({ result: receipt() }));
     expect(sent(invoke, edit)).toHaveLength(1);
     expect(result.onNotice).not.toHaveBeenCalled();
-    expect(screen.queryByRole("button", { name: "Undo last edit", hidden: true })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Undo last edit" })).toBeNull();
   });
 
   it("offers the related records of a relation field's new table once its table changes", async () => {
@@ -1875,25 +2156,6 @@ describe("when the Collection's fields change", () => {
     result.rerender(<TransactionalCollectionPage {...result.props} dataset={revised(2, relation(id(42)))} />);
     expect(await screen.findByRole("button", { name: "Blue team" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Old team" })).toBeNull();
-  });
-
-  it("reopens a kept edit in record details without values read under a field's old type, and reads the record again", async () => {
-    const first = setup(); await screen.findByText("Alice");
-    const before = openDetails();
-    fireEvent.click(within(before).getByRole("button", { name: "Edit Name" }));
-    fireEvent.change(within(before).getByLabelText("Name"), { target: { value: "Alicia" } });
-    first.unmount();
-    // Amount became text while the page was closed, and the record is no longer on the first page.
-    const byId = deferred<{ result: AppBackendJson }>();
-    const invoke = vi.fn((request: TransactionalInvoke): Promise<{ result: AppBackendJson }> =>
-      (request.input as { filters?: unknown[] }).filters ? byId.promise : Promise.resolve({ result: { rows: [], nextCursor: null } }));
-    const reopened = revised(2, next => { retype(amount, "text")(next); next.tables[0]!.primaryKeyFieldId = name; });
-    render(<TransactionalCollectionPage {...first.props} invoke={invoke} dataset={reopened} />);
-    const dialog = await screen.findByRole("dialog", { name: "Record details" });
-    expect(within(dialog).getByLabelText<HTMLInputElement>("Name").value).toBe("Alicia");
-    expect(within(dialog).queryByText("5")).toBeNull();
-    await act(async () => byId.resolve({ result: { rows: [{ id: 1, version: 2, values: { [name]: "Alice", [amount]: "five", [status]: "New" } }], nextCursor: null } }));
-    expect(within(dialog).getByText("five")).toBeTruthy();
   });
 
   it("keeps a form for a create action that takes no fields open", async () => {
@@ -2242,7 +2504,8 @@ describe("what a change that did not save leaves for the person", () => {
     });
     const view = setup({ invoke, confirmDelete: async () => true });
     await screen.findByText("Alice");
-    fireEvent.click(within(openDetails()).getByRole("button", { name: "Delete record…" }));
+    openPanel();
+    fireEvent.click(recordCommand("Delete record…"));
     const words = "dohc did not delete Alice. The Collection refused this change. Paid records stay.";
     const line = await screen.findByText(words);
     expect(strip()!.contains(line)).toBe(true);
@@ -2559,15 +2822,15 @@ describe("what a change that did not save leaves for the person", () => {
     await waitFor(() => expect(view.onNotice).toHaveBeenCalledExactlyOnceWith("Saved the edit in People"));
   });
 
-  it("sends null for a text value cleared in a form, as the table does", async () => {
+  it("sends null for a name cleared in the panel's heading, as the table does", async () => {
     const optional = dataset();
     optional.tables[0]!.fields.find(entry => entry.fieldId === name)!.required = false;
     const { invoke } = setup({ dataset: optional });
     await screen.findByText("Alice");
-    const dialog = within(openDetails());
-    fireEvent.click(dialog.getByRole("button", { name: "Edit Name" }));
-    fireEvent.change(dialog.getByLabelText("Name"), { target: { value: "" } });
-    fireEvent.click(dialog.getByRole("button", { name: "Save" }));
+    const record = openPanel();
+    fireEvent.click(nameButton());
+    fireEvent.change(within(record).getByRole("textbox", { name: "Name" }), { target: { value: "" } });
+    fireEvent.keyDown(within(record).getByRole("textbox", { name: "Name" }), { key: "Enter" });
     await waitFor(() => expect(sent(invoke, edit)).toHaveLength(1));
     expect(sent(invoke, edit)[0]!.input).toEqual({ id: 1, expectedVersion: 2, values: { [name]: null } });
   });
@@ -2582,7 +2845,8 @@ describe("what a change that did not save leaves for the person", () => {
     await screen.findByText("Alice");
     type("Name", "Alicia");
     await waitFor(() => expect(mark("Name")).toBe("unconfirmed"));
-    fireEvent.click(within(openDetails()).getByRole("button", { name: "Delete record…" }));
+    openPanel();
+    fireEvent.click(recordCommand("Delete record…"));
     const words = await screen.findByText("The deletion of record 1 is waiting for an earlier change to this record.");
     expect(strip()!.contains(words)).toBe(true);
     expect(sent(invoke, remove)).toHaveLength(0);
