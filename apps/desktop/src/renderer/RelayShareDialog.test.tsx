@@ -2624,6 +2624,38 @@ codex mcp login dohc-share`);
     expect(screen.queryByTestId("share-link-create")).toBeNull();
   });
 
+  it("keeps focus on a new link's Copy link as it moves into its row", async () => {
+    const existing = readableLink("focus-existing", { shareId: "share-focus", access: "view" });
+    const added = readableLink("focus-added", { shareId: "share-focus", access: "comment" });
+    const refresh = controllable<{ links: ReadableLink[] }>();
+    bridgeMock.listRelayShareLinks
+      .mockResolvedValueOnce({ links: [existing] })
+      .mockReturnValueOnce(refresh.promise);
+    bridgeMock.addRelayShareLink.mockResolvedValueOnce({ shareId: "share-focus", grantId: "focus-added", url: LINK_URL_B });
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+
+    await addLinkWith(user, await screen.findByTestId("share-link-group-share-focus"), "Can comment");
+    const fresh = await screen.findByTestId("share-link-new");
+    await vi.waitFor(() => {
+      expect(document.activeElement).toBe(within(fresh).getByTestId("share-link-copy"));
+    });
+    await act(async () => {
+      refresh.resolve({ links: [existing, { ...added, url: LINK_URL_B }] });
+    });
+    expect(screen.queryByTestId("share-link-new")).toBeNull();
+    expect(document.activeElement).toBe(
+      within(screen.getByTestId("share-link-row-focus-added")).getByTestId("share-link-copy"),
+    );
+  });
+
   it("keeps Create link when no share matches and honors a changed access choice", async () => {
     bridgeMock.listRelayShareLinks.mockResolvedValue({ links: [] });
     const user = userEvent.setup();
@@ -2939,11 +2971,13 @@ codex mcp login dohc-share`);
     });
     expect(screen.queryByTestId("share-link-url")).toBeNull();
     expect(screen.queryByRole("button", { name: "Copy link" })).toBeNull();
-    // The reset may have landed, so the row neither copies nor offers another reset.
+    // The reset may have landed, so the row stops copying and does not claim there is no copy.
     const unsureRow = screen.getByTestId("share-link-row-kept-reset");
     expect(within(unsureRow).queryByTestId("share-link-no-copy")).toBeNull();
     expect(within(unsureRow).getByTestId("share-link-unsure").textContent).toBe("dohc could not load the current link.");
-    await user.click(within(unsureRow).getByRole("button", { name: "Try again" }));
+    // The list's error already offers Try again, so the row does not repeat it.
+    expect(within(unsureRow).queryByRole("button", { name: "Try again" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Try again" }));
     expect((await screen.findByTestId("share-link-url")).textContent).toBe(LINK_URL_B);
   });
 

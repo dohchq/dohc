@@ -531,21 +531,38 @@ export function useRelayShareLinkPane(props: {
   // Links whose last change may have landed without its answer: no URL
   // shows for them until the list reads again.
   const [unsureUrls, setUnsureUrls] = useState<ReadonlySet<string>>(() => new Set());
-  // Where focus goes once the next render has it: a new link's Copy link,
-  // or the access choice of the separate link just opened.
-  const focusAfterRender = useRef<{ kind: "copy"; grantId: string } | { kind: "separate" } | null>(null);
+  // Where focus goes once a render has it: a new link's Copy link, or the
+  // access choice of the separate link just opened. A new link shows first
+  // on its own and then in its row, so its focus follows it there.
+  const focusAfterRender = useRef<
+    { kind: "copy"; grantId: string; shown: boolean } | { kind: "separate" } | null
+  >(null);
   useLayoutEffect(() => {
     const target = focusAfterRender.current;
     if (target === null) return;
-    const element = target.kind === "separate"
-      ? document.querySelector<HTMLElement>('[data-testid="share-link-create-section"] [role="radio"][aria-checked="true"]')
-      : [...document.querySelectorAll<HTMLElement>("[data-link-url-for]")]
-          .find((box) => box.dataset.linkUrlFor === target.grantId)
-          ?.querySelector<HTMLElement>('[data-testid="share-link-copy"]');
-    if (element) {
+    if (!props.visible) {
       focusAfterRender.current = null;
-      element.focus();
+      return;
     }
+    if (target.kind === "separate") {
+      const radio = document.querySelector<HTMLElement>(
+        '[data-testid="share-link-create-section"] [role="radio"][aria-checked="true"]',
+      );
+      if (radio) {
+        focusAfterRender.current = null;
+        radio.focus();
+      }
+      return;
+    }
+    const boxes = [...document.querySelectorAll<HTMLElement>("[data-link-url-for]")]
+      .filter((box) => box.dataset.linkUrlFor === target.grantId);
+    const inRow = boxes.find((box) => box.closest("article") !== null);
+    const copy = (inRow ?? boxes[0])?.querySelector<HTMLElement>('[data-testid="share-link-copy"]');
+    if (!copy) return;
+    // Once the link has shown, focus moves only if it was left nowhere.
+    const free = !target.shown || document.activeElement === null || document.activeElement === document.body;
+    if (free && document.activeElement !== copy) copy.focus();
+    focusAfterRender.current = inRow ? null : { ...target, shown: true };
   });
   const [minted, setMinted] = useState<{ grantId: string; url: string } | null>(null);
   const [links, setLinks] = useState<RelayShareLinkRow[]>([]);
@@ -695,6 +712,7 @@ export function useRelayShareLinkPane(props: {
     setLinkError(null);
     setMinted(null);
     setUnsureUrls(new Set());
+    focusAfterRender.current = null;
     setLinks([]);
     linksKey.current = null;
     setLinksLoading(false);
@@ -1589,7 +1607,7 @@ export function useRelayShareLinkPane(props: {
         return;
       }
       setMinted({ grantId: result.grantId, url: result.url });
-      focusAfterRender.current = { kind: "copy", grantId: result.grantId };
+      focusAfterRender.current = { kind: "copy", grantId: result.grantId, shown: false };
       if (action.kind === "create") setSeparateOpen(false);
       void refreshLinks(scopeGeneration);
     } catch (cause) {
@@ -2028,9 +2046,12 @@ export function useRelayShareLinkPane(props: {
             <p data-testid="share-link-unsure" className="m-0 min-w-0 flex-1 text-[12px] leading-relaxed text-muted">
               dohc could not load the current link.
             </p>
-            <SecondaryButton size="compact" disabled={linksLoading} onClick={() => void refreshLinks()}>
-              Try again
-            </SecondaryButton>
+            {/* The list's own error already offers Try again. */}
+            {linksError === null ? (
+              <SecondaryButton size="compact" disabled={linksLoading} onClick={() => void refreshLinks()}>
+                Try again
+              </SecondaryButton>
+            ) : null}
           </div>
         ) : active && !damaged ? (
           <p data-testid="share-link-no-copy" className="m-0 text-[12px] leading-relaxed text-muted">

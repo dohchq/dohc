@@ -2317,6 +2317,8 @@ describe("owner link inventory and impact preconditions", () => {
     );
     expect(grantIds).toEqual(expectedGrantIds);
     expect(new Set(grantIds).size).toBe(expectedGrantIds.length);
+    // Each person's access, which Share shows beside their name.
+    expect(new Set([...firstGrants, ...secondGrants].map((row) => row.access))).toEqual(new Set(["comment"]));
   }, 120_000);
 
   it("pages 1,001 links without splitting dependents or losing concurrent changes", async () => {
