@@ -116,7 +116,7 @@ export async function runPublicAutomaticView(options: Options) {
     }
     for (let index = 0; index < h.concurrency; index++) peers.push(await h.openLink(link.url, index));
     const writer = peers.at(-1)!;
-    await writer.page.getByRole("button", {name: "Back to shared files", exact: true}).click();
+    await writer.page.getByRole("button", {name: "Done", exact: true}).click();
     await browserExpect.poll(h.listeners, {timeout: h.timeoutMs}).toBe(h.concurrency - 1);
     socket = await h.wire.connect(writer.context, await h.wire.ticket(writer.context, writer.discriminator, objectId), "automatic-view-writer"); await socket.sync();
     await browserExpect.poll(h.listeners, {timeout: h.timeoutMs}).toBe(h.concurrency);

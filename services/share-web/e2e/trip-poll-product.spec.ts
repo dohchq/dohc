@@ -31,6 +31,7 @@ test('production viewer discovers and launches compiled trip poll with real shar
     const open=async(colorScheme:'light'|'dark',width:number,secret=fixture!.secret)=>{
       const context=await browser!.newContext({viewport:{width,height:900},colorScheme,reducedMotion:'reduce'}),page=await context.newPage();page.on('pageerror',error=>errors.push(error.message));
       await page.goto('https://viewer.example.com/s/#'+secret);
+      await page.getByRole('button',{name:'Apps',exact:true}).click();
       await expect(page.getByRole('button',{name:'Open app',exact:true})).toBeVisible();
       await page.screenshot({path:evidence+'/p5-trip-viewer-discovery.png'});
       await page.getByRole('button',{name:'Open app',exact:true}).click();
@@ -59,7 +60,7 @@ test('production viewer discovers and launches compiled trip poll with real shar
     fixture.withdraw();
     await Promise.all([first,second].map(async opened=>{await expect(opened.page.getByRole('status')).toHaveText('This app session ended. Reopen the share link.',{timeout:30000});await expect(opened.page.locator('iframe')).toHaveCount(0);}));
     const discovery=second.page.waitForResponse(response=>new URL(response.url()).pathname==='/api/apps');
-    await second.page.goto('https://viewer.example.com/s/#'+fixture.secret);expect((await discovery).status()).toBe(200);await expect(second.page.getByText('No apps are available on this link. Ask the owner to publish one.')).toBeVisible();await expect(second.page.getByRole('button',{name:'Open app',exact:true})).toHaveCount(0);
+    await second.page.goto('https://viewer.example.com/s/#'+fixture.secret);expect((await discovery).status()).toBe(200);await expect(second.page.locator('.viewer')).toBeVisible();await expect(second.page.getByRole('button',{name:'Apps',exact:true})).toHaveCount(0);await expect(second.page.getByRole('button',{name:'Open app',exact:true})).toHaveCount(0);
     expect(events.some(event=>event.path==='/api/apps'&&event.status===200)).toBe(true);expect(events.some(event=>event.path==='/bootstrap'&&event.origin==='null'&&event.status===200)).toBe(true);expect(events.filter(event=>event.path==='/collection'&&event.status===200).length).toBeGreaterThanOrEqual(4);expect(errors).toEqual([]);
     writeFileSync(evidence+'/p5-trip-product-browser.json',JSON.stringify({ok:true,...fixture.artifact,browser:await browser.version(),serverPort:address.port,events,checks:['production viewer app discovery','successful null-origin bootstrap','actual compiled React trip poll','actual SQLite relay collection approval and writes','two independent respondents write with distinct private and public principals','same compiled bundle separately published and approved under two grants','revoking the second grant ends its session while the first grant still reads all three responses','publication withdrawal ends both remaining browser sessions','withdrawn app confirmed absent by ready empty discovery state','bootstrap frame starts at zero and displays as block','light desktop and dark mobile screenshots captured'],errors},null,2));
   }finally{
