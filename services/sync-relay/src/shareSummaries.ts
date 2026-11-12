@@ -26,7 +26,11 @@ function storedSelectorKind(
   try {
     const parsed: unknown = JSON.parse(selectorJson);
     const kind = (parsed as { kind?: unknown } | null)?.kind;
-    if (typeof parsed === "object" && parsed !== null && (kind === "chat" || kind === "group" || kind === "workspace")) {
+    if (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      (kind === "chat" || kind === "group" || kind === "workspace")
+    ) {
       return { selectorKind: kind };
     }
   } catch {
@@ -37,11 +41,13 @@ function storedSelectorKind(
 
 // A workspace share's grants carry a file level; chat and Group grants carry a chat level.
 function readableAccess(selector: StoredAnyShareSelector, access: string): boolean {
-  return "kind" in selector && selector.kind !== "workspace" ? isChatShareAccessValue(access) : isShareAccessValue(access);
+  return "kind" in selector && selector.kind !== "workspace"
+    ? isChatShareAccessValue(access)
+    : isShareAccessValue(access);
 }
 
 export function createShareSummaries(
-  storage: Pick<SyncRelayStorage, "findChannelCreateKind">,
+  storage: Pick<SyncRelayStorage, "findChannelCreateKind" | "workspaceRoleOf">,
   labels: (
     shareId: string,
     reader: ShareLabelReader,
@@ -164,6 +170,22 @@ export function createShareSummaries(
     };
   };
 
+  // A received membership says which role the recipient holds. The level
+  // alone cannot tell an admin from a member at Edit.
+  const workspaceRoleOfRow = (row: SyncRelayShareWithGrantRow, selector: unknown) => {
+    if (
+      !selector ||
+      typeof selector !== "object" ||
+      (selector as { kind?: unknown }).kind !== "workspace"
+    )
+      return {};
+    const userId = row.grant.principalUserId;
+    const role = userId ? storage.workspaceRoleOf(row.share.workspaceId, userId)?.role : undefined;
+    return role === "admin" || role === "member"
+      ? { selector: { kind: "workspace", role } }
+      : { selector: null, damaged: true as const, selectorKind: "workspace" };
+  };
+
   const receivedShareSummary = (
     row: SyncRelayShareWithGrantRow,
     granterEmail: string | null,
@@ -173,8 +195,10 @@ export function createShareSummaries(
     // Received summaries deliberately omit the workspace id: the recipient's
     // access is share-scoped, and the granter's workspace identity is not
     // theirs to see. Only the detail route adds a recipient source handle.
+    const base = shareSummaryBase(row);
     return {
-      ...shareSummaryBase(row, "member"),
+      ...base,
+      ...workspaceRoleOfRow(row, base.selector),
       granterUserId: row.share.granterUserId,
       granterEmail,
       sharerName,

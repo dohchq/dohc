@@ -212,7 +212,7 @@ describe("what a member reaches", () => {
     const { h } = await seed();
     await invited(h, "ana");
     const row = await workspaceShare(h, "ana");
-    expect(row).toMatchObject({ selector: { kind: "workspace" }, access: "comment" });
+    expect(row).toMatchObject({ selector: { kind: "workspace", role: "member" }, access: "comment" });
     const shareId = row!.shareId as string;
 
     const files = await pulledText(h, "ana", shareId);
