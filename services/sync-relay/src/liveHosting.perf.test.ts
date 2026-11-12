@@ -181,7 +181,7 @@ it.skipIf(process.env.DOHC_LIVE_HOST_MEASURE !== "1")("measures the Postgres fre
     relayExchangeKeyConfigured: true, hasValidRelayExchangeKey: () => true, nowMs: () => Date.now(),
     requireLinkCapability: personalOnly, requireFreshLinkRead: personalOnly,
   });
-  const modes = [["direct", resolver(readEpoch)], ["single-flight", resolver(singleFlightFenceReads(readEpoch))]] as const;
+  const modes = [["direct", resolver(readEpoch)], ["single-flight", resolver(singleFlightFenceReads(readEpoch, () => new Error("The fence read timed out.")))]] as const;
   const authorities = await Promise.all(requests.map(request => modes[0][1].personal(request)));
   // Open the pool's connections, as a running relay has.
   for (const [, reads] of modes) await Promise.all(authorities.map(authority => reads.freshPersonal(authority)));

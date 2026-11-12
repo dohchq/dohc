@@ -305,6 +305,8 @@ const accountResolvers: {actor: ResolveActor; session?: ResolveAccountSession; s
       const { createWorkspaceAuth } = await import("@dohc/workspace-auth/betterAuth");
       pool = new Pool({
         connectionString: process.env.POSTGRES_URL ?? defaultPostgresUrl,
+        // A request waiting for a connection Postgres can't give fails instead of hanging.
+        connectionTimeoutMillis: 5_000,
       });
       // pg pools emit 'error' for idle-client failures (Postgres restart,
       // network partition). Without a listener that is an uncaught 'error'
