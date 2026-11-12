@@ -830,16 +830,16 @@ it('rolls back the full activation when its retained-state quota charge fails',a
 type RunDocument=ConstructorParameters<typeof ServiceActivationDriver>[0]['runDocument']
 function activationDriver(f:ReturnType<typeof fixture>,captureOwnerActivation:ReturnType<typeof vi.fn>,sendRequest:ReturnType<typeof vi.fn>=vi.fn(async()=>({result:{released:true}})),
   runDocument:RunDocument=(_document,_signal,operation)=>operation(),native:object={},config:Partial<ServiceActivationConfig>={}){
-  const pull=vi.fn(async()=>({hasMore:false})),target={workspaceId:'workspace',path:'docs/a.md'}
+  const pull=vi.fn(async()=>({hasMore:false})),wake=vi.fn(),target={workspaceId:'workspace',path:'docs/a.md'}
   const driver=new ServiceActivationDriver({trustedAccount:accountId=>({accountId,name:'Owner'}),storage:f.storage,history:f.history,host,
     client:{...native,captureOwnerActivation,sendRequest} as never,
     workspace:id=>id==='workspace'?{handle:'native-workspace',replica:{pull,publish:vi.fn()},identity:{replicationEpoch:'epoch',streamIdentity:'stream'}}:undefined,
     config:{targets:[target],validateActivation,validateAdmission:validateJournal,maxCaptureBytes:1_000_000,maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000,
       maxDocumentsPerPass:1,pollIntervalMs:1000,passDeadlineMs:10_000,idleUnloadMs:600_000,idleRetryMs:30_000,...config},
     adoption:{maxBytes:1_000_000,maxEvents:10},nextRequestId:()=>1,deadlineMs:1000,assertCurrent(){},registered(){},
-    runDocument,
+    runDocument,lifetime:new AbortController().signal,wake,
   })
-  return {driver,target,pull}
+  return {driver,target,pull,wake}
 }
 
 // A completed service activation: adopted, seed accepted and applied natively.
@@ -1364,6 +1364,33 @@ it('checks for a free validation slot after the catch-up pull, just before it ca
     expect(await d.driver.activate(d.target,new AbortController().signal)).toEqual({kind:'pending',reason:'Live validation is busy.'})
     expect(d.pull).toHaveBeenCalledTimes(1)
     expect(capture).not.toHaveBeenCalled()
+  }finally{f.close()}
+})
+// Issue #1967: a capture that found validation busy was tried again only by the next periodic pass.
+// Proves: the driver waits once for the slot, however many passes find it busy, and wakes one pass once it may
+// be free. A slot taken between the check and validation waits the same way after its capture.
+it('wakes one pass once the validation slot a capture found busy may be free',async()=>{
+  const f=fixture()
+  try{
+    const waits:(AbortSignal|undefined)[]=[]
+    let free=false,release=()=>{}
+    const waitForCapacity=(signal?:AbortSignal)=>{waits.push(signal);return new Promise<void>(resolve=>{release=resolve})}
+    const validateActivation=Object.assign(async()=>({kind:'retry' as const,reason:'admission-unavailable' as const}),{hasCapacity:()=>free,waitForCapacity})
+    const capture=vi.fn(async()=>f.capture),d=activationDriver(f,capture,undefined,undefined,undefined,{validateActivation})
+    const busy={kind:'pending',reason:'Live validation is busy.'}
+    for(let pass=0;pass<3;pass++)expect(await d.driver.activate(d.target,new AbortController().signal)).toEqual(busy)
+    expect(capture).not.toHaveBeenCalled()
+    expect(waits.map(signal=>signal?.aborted)).toEqual([false])
+    expect(d.wake).not.toHaveBeenCalled()
+    release()
+    await vi.waitFor(()=>expect(d.wake).toHaveBeenCalledTimes(1))
+    free=true
+    expect(await d.driver.activate(d.target,new AbortController().signal)).toEqual(busy)
+    expect(capture).toHaveBeenCalledTimes(1)
+    expect(waits).toHaveLength(2)
+    expect(d.wake).toHaveBeenCalledTimes(1)
+    release()
+    await vi.waitFor(()=>expect(d.wake).toHaveBeenCalledTimes(2))
   }finally{f.close()}
 })
 // Going live ends the wait, so a later failure is again the first, retried on the next pass.

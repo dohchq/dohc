@@ -205,6 +205,13 @@ pub fn originate_ydoc_base_in_tx(
     } else {
         None
     };
+    // After the catch-up check, which needs the head settled, and before the
+    // encode, so the first version names its schema version (#3790).
+    if !dohc_engine_collab::add_missing_schema_version_in_tx(tx, key, now_ms)
+        .map_err(SyncError::corrupt)?
+    {
+        return Ok(BaseOrigination::NothingToDo);
+    }
     let Some(encoded) =
         dohc_engine_collab::encode_origination_base_in_tx(tx, key).map_err(SyncError::corrupt)?
     else {

@@ -300,17 +300,19 @@ fn read_blob(
 
 /// Receive-side echo proof reuses the already hydrated, bounded incoming update.
 /// One accepted checkpoint read is bounded by the same public document limit.
+/// `path` is `None` for an update the owner held: a recovery may have moved
+/// the binding's path since, and the bytes alone show whether it is an echo.
 pub fn contains_observed_update_in(
     conn: &Connection,
     key: &DocKey,
-    path: &str,
+    path: Option<&str>,
     lineage: &str,
     update: &[u8],
 ) -> Result<Option<bool>, OwnerOutboxError> {
     let Some(draft) = super::draft::descriptor_for_key_in(conn, key)? else {
         return Ok(None);
     };
-    if draft.binding.current_path != path
+    if path.is_some_and(|path| draft.binding.current_path != path)
         || draft.binding.lineage_claim_id != lineage
         || update.len() > crate::limits::MAX_YDOC_UPDATE_BYTES
     {

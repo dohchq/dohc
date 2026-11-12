@@ -1611,6 +1611,7 @@ impl Request {
                             coordinate,
                             now_ms,
                             faults.as_ref(),
+                            decide_owner_holds,
                         )
                     } else {
                         owner.fence_restore(
@@ -1620,6 +1621,7 @@ impl Request {
                             coordinate,
                             now_ms,
                             faults.as_ref(),
+                            decide_owner_holds,
                         )
                     }
                     .map_err(Into::into)
@@ -2201,6 +2203,18 @@ impl ActorHandle {
         })
         .await
     }
+}
+
+/// What the owner holds for its service host, decided by a restore fence: an
+/// echo leaves, and anything else is refused and kept.
+fn decide_owner_holds(
+    tx: &rusqlite::Transaction<'_>,
+    key: &dohc_engine_collab::DocKey,
+) -> Result<(), ApplicationError> {
+    dohc_engine_sync::decide_owner_holds_in_tx(tx, key).map_err(|error| match error {
+        dohc_engine_sync::SyncError::Storage(storage) => ApplicationError::Storage(storage),
+        _ => ApplicationError::Corrupt,
+    })
 }
 
 #[cfg(test)]

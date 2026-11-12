@@ -671,6 +671,7 @@ mod tests {
                 coordinate.clone(),
                 200,
                 &NoFaults,
+                |_, _| Ok(()),
             )
             .unwrap();
         assert_eq!(receipt.local_head_sequence, 0);
@@ -715,7 +716,8 @@ mod tests {
                     input.clone(),
                     coordinate.clone(),
                     203,
-                    &NoFaults
+                    &NoFaults,
+                    |_, _| Ok(()),
                 )
                 .unwrap(),
             receipt
@@ -723,7 +725,15 @@ mod tests {
         let mut conflict = input;
         conflict.operation_id = "different".into();
         assert!(owner
-            .fence_restore(&mut store, None, conflict, coordinate, 204, &NoFaults)
+            .fence_restore(
+                &mut store,
+                None,
+                conflict,
+                coordinate,
+                204,
+                &NoFaults,
+                |_, _| Ok(())
+            )
             .is_err());
         assert_eq!(store.table_row_count("live_restore_fences").unwrap(), 1);
     }
@@ -1033,7 +1043,15 @@ mod tests {
         let cut = read_applied_sync(&store, &handle, &[0], sync_policy(), || true).unwrap();
         let (fence, coordinate) = fence_input(&handle);
         owner
-            .fence_restore(&mut store, None, fence, coordinate, 200, &NoFaults)
+            .fence_restore(
+                &mut store,
+                None,
+                fence,
+                coordinate,
+                200,
+                &NoFaults,
+                |_, _| Ok(()),
+            )
             .unwrap();
         assert!(read_applied_sync(&store, &handle, &[0], sync_policy(), || true).is_err());
         assert!(read_next_applied(&store, &handle, &cut.position, sync_policy(), || true).is_err());
@@ -1097,6 +1115,7 @@ mod tests {
                     coordinate.clone(),
                     200,
                     &NoFaults,
+                    |_, _| Ok(()),
                 )
                 .unwrap();
             store
@@ -1107,7 +1126,15 @@ mod tests {
                 .unwrap();
             assert!(
                 owner
-                    .fence_restore(&mut store, None, input, coordinate, 201, &NoFaults)
+                    .fence_restore(
+                        &mut store,
+                        None,
+                        input,
+                        coordinate,
+                        201,
+                        &NoFaults,
+                        |_, _| Ok(())
+                    )
                     .is_err(),
                 "{sql}"
             );
@@ -1146,7 +1173,8 @@ mod tests {
                     input.clone(),
                     coordinate.clone(),
                     200,
-                    &Crash(point)
+                    &Crash(point),
+                    |_, _| Ok(()),
                 )
                 .is_err());
             drop(handle);
@@ -1170,7 +1198,15 @@ mod tests {
                     .unwrap();
             }
             let receipt = owner
-                .fence_restore(&mut store, None, input, coordinate, 202, &NoFaults)
+                .fence_restore(
+                    &mut store,
+                    None,
+                    input,
+                    coordinate,
+                    202,
+                    &NoFaults,
+                    |_, _| Ok(()),
+                )
                 .unwrap();
             assert_eq!(receipt.recorded_at_ms, if committed { 200 } else { 202 });
         }
@@ -1218,7 +1254,15 @@ mod tests {
             let before = counts(&store);
             assert!(
                 owner
-                    .fence_restore(&mut store, None, input, coordinate, 200, &NoFaults)
+                    .fence_restore(
+                        &mut store,
+                        None,
+                        input,
+                        coordinate,
+                        200,
+                        &NoFaults,
+                        |_, _| Ok(())
+                    )
                     .is_err(),
                 "{field}"
             );
@@ -1275,6 +1319,7 @@ mod tests {
                 coordinate,
                 202,
                 &Exit(value["after"].as_bool().unwrap()),
+                |_, _| Ok(()),
             )
             .unwrap();
         panic!("process did not reach its commit boundary");
@@ -1327,7 +1372,15 @@ mod tests {
                     .unwrap();
             }
             let receipt = owner
-                .fence_restore(&mut store, None, input, coordinate, 204, &NoFaults)
+                .fence_restore(
+                    &mut store,
+                    None,
+                    input,
+                    coordinate,
+                    204,
+                    &NoFaults,
+                    |_, _| Ok(()),
+                )
                 .unwrap();
             assert_eq!(receipt.recorded_at_ms, if after { 202 } else { 204 });
             assert_eq!(receipt.local_head_sequence, 0);

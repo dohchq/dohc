@@ -89,7 +89,9 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
         waiters.delete(wake);
         signal?.removeEventListener("abort", abort);
       };
+      // A slot another kind of work may not take leaves this waiter waiting.
       const wake = () => {
+        if (!closed && !hasCapacity(auxiliary)) return;
         dispose();
         if (closed) reject(new Error("Live validation closed."));
         else resolve();
@@ -257,7 +259,10 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
       });
     return Object.assign(validate, { waitForCapacity, hasCapacity });
   }
-  /** Activation does not wait for a slot. A pass checks `hasCapacity` before it captures; a slot taken since answers `retry`. */
+  /**
+   * Activation does not wait for a slot. A pass checks `hasCapacity` before it captures; a slot taken since answers `retry`.
+   * `waitForCapacity` settles once a slot may be free, so the host can run the pass that captures again.
+   */
   function ordinaryActivation(policy: OrderedLiveUpdateCutPolicy): OrdinaryActivationValidator {
     const ownedPolicy = Object.freeze({ ...policy });
     return Object.assign((input: OrdinaryActivationWork, signal?: AbortSignal) =>
@@ -265,7 +270,7 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
         { kind: "activation", policy: ownedPolicy, input },
         { kind: "capacity-refused" },
         signal,
-      ), { hasCapacity: () => hasCapacity(true) });
+      ), { hasCapacity: () => hasCapacity(true), waitForCapacity: (signal?: AbortSignal) => waitForCapacity(signal, true) });
   }
   /** Preparation refuses a busy pool; admission waits with its captured reads and cancellation signal. */
   function restore(policy: OrderedLiveUpdateCutPolicy): LiveRestoreValidator {

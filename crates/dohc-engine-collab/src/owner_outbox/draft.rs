@@ -488,6 +488,20 @@ pub fn install_observed_binding_in_tx(
         return Err(OwnerOutboxError::ParentMismatch);
     }
     require_ordinary_write(tx, &key).map_err(collab)?;
+    // The end of a binding decides every service-host update queued under it
+    // (`unbind_owner_in_tx`), so one left here is an undecided row a new
+    // binding would hold as its own.
+    let undecided: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 \
+             AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND deferred_while_bound=1)",
+            params![b.workspace_id, b.main_version_id, b.object_id, b.lineage_claim_id],
+            |row| row.get(0),
+        )
+        .map_err(read_sql)?;
+    if undecided {
+        return Err(OwnerOutboxError::Corrupt);
+    }
     put_binary_blob_with_sha(tx, &bytes, &observed.checkpoint_digest)?;
     tx.execute(
         "INSERT INTO ydoc_owner_bindings VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",

@@ -175,6 +175,7 @@ fn binding_refusal_precedes_all_writes_and_saved_fences_stay_retryable() {
             f.host.clone(),
             90,
             &NoFaults,
+            |_, _| Ok(()),
         );
         stop_watching_fence_writes(&mut f, &writes);
         if let Some(saved) = saved {
@@ -203,7 +204,8 @@ fn fence_conflicts_and_operation_collisions_are_not_typed_refusals() {
             invalid_cut,
             f.host.clone(),
             50,
-            &NoFaults
+            &NoFaults,
+            |_, _| Ok(()),
         ),
         Err(ApplicationError::Conflict)
     ));
@@ -211,8 +213,15 @@ fn fence_conflicts_and_operation_collisions_are_not_typed_refusals() {
     let mut collision = saved.operation.clone();
     collision.point.receipt_digest = "f".repeat(64);
     assert!(matches!(
-        f.owner
-            .fence_restore(&mut f.store, None, collision, f.host.clone(), 51, &NoFaults),
+        f.owner.fence_restore(
+            &mut f.store,
+            None,
+            collision,
+            f.host.clone(),
+            51,
+            &NoFaults,
+            |_, _| Ok(())
+        ),
         Err(ApplicationError::Conflict)
     ));
     let mut another_document = saved.operation.clone();
@@ -224,7 +233,8 @@ fn fence_conflicts_and_operation_collisions_are_not_typed_refusals() {
             another_document,
             f.host.clone(),
             51,
-            &NoFaults
+            &NoFaults,
+            |_, _| Ok(()),
         ),
         Err(ApplicationError::Conflict)
     ));
@@ -236,7 +246,8 @@ fn fence_conflicts_and_operation_collisions_are_not_typed_refusals() {
                 saved.operation.clone(),
                 f.host.clone(),
                 52,
-                &NoFaults
+                &NoFaults,
+                |_, _| Ok(()),
             )
             .unwrap(),
         saved
@@ -280,6 +291,7 @@ fn impossible_prefix_refuses_before_fencing(case: &str) {
         f.host.clone(),
         50,
         &NoFaults,
+        |_, _| Ok(()),
     );
     assert_refusal(result, &expected_operation, case);
     assert_eq!(
@@ -1866,6 +1878,7 @@ impl Fixture {
                 self.host.clone(),
                 50,
                 &NoFaults,
+                |_, _| Ok(()),
             )
             .unwrap();
         NativeRestorePreparation { fence, point }
@@ -2109,6 +2122,7 @@ fn a_hosted_document_that_is_not_ready_refuses_a_new_restore_fence() {
             f.host.clone(),
             50,
             &NoFaults,
+            |_, _| Ok(()),
         )
     };
     assert!(matches!(
@@ -2222,6 +2236,7 @@ fn interrupted_fences_replay_after_restart_instead_of_becoming_refusals() {
             f.host.clone(),
             50,
             &CrashAt(fault),
+            |_, _| Ok(()),
         );
         assert!(
             matches!(result, Err(ApplicationError::Interrupted)),
@@ -2247,6 +2262,7 @@ fn interrupted_fences_replay_after_restart_instead_of_becoming_refusals() {
                 f.host.clone(),
                 70,
                 &NoFaults,
+                |_, _| Ok(()),
             )
             .unwrap();
         assert_eq!(receipt.operation, operation);
@@ -2613,7 +2629,8 @@ fn native_restore_apply_commits_once_and_replays_the_original_operation_after_re
                 prep.fence.operation.clone(),
                 f.host.clone(),
                 100,
-                &NoFaults
+                &NoFaults,
+                |_, _| Ok(()),
             )
             .unwrap(),
         prep.fence
@@ -2776,7 +2793,8 @@ fn native_restore_apply_replay_refuses_damaged_saved_admission_and_application()
                     prep.fence.operation,
                     f.host.clone(),
                     100,
-                    &NoFaults
+                    &NoFaults,
+                    |_, _| Ok(()),
                 )
                 .is_err(),
             "fence damage {damage}"
@@ -2817,7 +2835,8 @@ fn native_restore_fence_replay_checks_candidate_bytes_after_length_precharge() {
             prep.fence.operation.clone(),
             f.host.clone(),
             100,
-            &NoFaults
+            &NoFaults,
+            |_, _| Ok(()),
         )
         .is_err());
     assert_eq!(
@@ -2844,7 +2863,8 @@ fn native_restore_fence_replay_checks_candidate_bytes_after_length_precharge() {
                 prep.fence.operation.clone(),
                 f.host.clone(),
                 100,
-                &NoFaults
+                &NoFaults,
+                |_, _| Ok(()),
             )
             .unwrap(),
         prep.fence
@@ -3761,7 +3781,8 @@ fn fence_waits_for_this_documents_settlement_moments_to_reach_the_relay() {
             input.clone(),
             f.host.clone(),
             50,
-            &NoFaults
+            &NoFaults,
+            |_, _| Ok(()),
         ),
         Err(ApplicationError::PublicationPending)
     ));
@@ -3782,6 +3803,7 @@ fn fence_waits_for_this_documents_settlement_moments_to_reach_the_relay() {
             f.host.clone(),
             50,
             &NoFaults,
+            |_, _| Ok(()),
         )
         .unwrap();
     // The committed fence replays without asking about publication again.
@@ -3794,7 +3816,8 @@ fn fence_waits_for_this_documents_settlement_moments_to_reach_the_relay() {
                 input,
                 f.host.clone(),
                 51,
-                &NoFaults
+                &NoFaults,
+                |_, _| Ok(()),
             )
             .unwrap(),
         fenced
@@ -3862,7 +3885,8 @@ fn fence_waits_for_retained_settlement_history_to_be_exported() {
             input.clone(),
             f.host.clone(),
             50,
-            &NoFaults
+            &NoFaults,
+            |_, _| Ok(()),
         ),
         Err(ApplicationError::PublicationPending)
     ));
@@ -3877,6 +3901,7 @@ fn fence_waits_for_retained_settlement_history_to_be_exported() {
             f.host.clone(),
             50,
             &NoFaults,
+            |_, _| Ok(()),
         )
         .unwrap();
     assert_eq!(fences(&f), 1);
@@ -4574,6 +4599,7 @@ fn restore_fence_quarantines_observed_collection_drafts_with_history() {
                 f.host.clone(),
                 now,
                 &NoFaults,
+                |_, _| Ok(()),
             )
             .unwrap();
     }
@@ -4645,6 +4671,7 @@ fn restore_fence_keeps_host_progress_when_its_observed_checkpoint_is_stale() {
                 f.host.clone(),
                 now,
                 &NoFaults,
+                |_, _| Ok(()),
             )
             .unwrap();
     }
@@ -4945,6 +4972,7 @@ fn reader_to_native_restore_validates_the_prefix_artifact_and_cached_authority()
                 f.host.clone(),
                 50,
                 &NoFaults,
+                |_, _| Ok(()),
             );
             assert_refusal(result, &operation, case);
             assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 0);
@@ -5184,6 +5212,7 @@ fn assert_preflight_refusal(f: &mut Fixture, operation: NativeRestoreFence, case
         f.host.clone(),
         50,
         &NoFaults,
+        |_, _| Ok(()),
     );
     assert_refusal(result, &expected_operation, case);
     assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 0);
@@ -5254,7 +5283,8 @@ fn old_fence_receipts_without_the_selection_are_refused() {
             prep.fence.operation.clone(),
             f.host.clone(),
             51,
-            &NoFaults
+            &NoFaults,
+            |_, _| Ok(()),
         ),
         Err(ApplicationError::Conflict)
     ));
@@ -5315,9 +5345,15 @@ fn recheck_selected_terminal(unknown_history: bool) {
         }
         Authorization::Allow
     }))).unwrap();
-    let result =
-        f.owner
-            .fence_restore(&mut f.store, None, operation, f.host.clone(), 50, &NoFaults);
+    let result = f.owner.fence_restore(
+        &mut f.store,
+        None,
+        operation,
+        f.host.clone(),
+        50,
+        &NoFaults,
+        |_, _| Ok(()),
+    );
     f.store
         .hooks_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
         .unwrap();
@@ -5365,7 +5401,15 @@ fn native_fence_does_not_rebuild_the_selected_point() {
         })
         .unwrap();
     f.owner
-        .fence_restore(&mut f.store, None, operation, f.host.clone(), 50, &NoFaults)
+        .fence_restore(
+            &mut f.store,
+            None,
+            operation,
+            f.host.clone(),
+            50,
+            &NoFaults,
+            |_, _| Ok(()),
+        )
         .unwrap();
     f.store
         .hooks_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
@@ -5407,6 +5451,7 @@ fn fence_rechecks_reader_history_signal_before_writing() {
         f.host.clone(),
         50,
         &NoFaults,
+        |_, _| Ok(()),
     );
     f.store
         .hooks_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
@@ -5419,7 +5464,15 @@ fn fence_rechecks_reader_history_signal_before_writing() {
     assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 0);
     // A conservative signal only adds preflight work; an honest retry still succeeds.
     f.owner
-        .fence_restore(&mut f.store, None, operation, f.host.clone(), 51, &NoFaults)
+        .fence_restore(
+            &mut f.store,
+            None,
+            operation,
+            f.host.clone(),
+            51,
+            &NoFaults,
+            |_, _| Ok(()),
+        )
         .unwrap();
 }
 
@@ -5591,8 +5644,15 @@ fn fence_authenticates_the_selected_history_receipt() {
         let before = binding_state(&f);
         assert!(
             matches!(
-                f.owner
-                    .fence_restore(&mut f.store, None, operation, f.host.clone(), 50, &NoFaults),
+                f.owner.fence_restore(
+                    &mut f.store,
+                    None,
+                    operation,
+                    f.host.clone(),
+                    50,
+                    &NoFaults,
+                    |_, _| Ok(())
+                ),
                 Err(ApplicationError::Conflict)
             ),
             "{field}"
@@ -5748,7 +5808,15 @@ fn pre_upgrade_lineage_rebuilds_the_selected_point_before_fencing() {
         })
         .unwrap();
     f.owner
-        .fence_restore(&mut f.store, None, operation, f.host.clone(), 50, &NoFaults)
+        .fence_restore(
+            &mut f.store,
+            None,
+            operation,
+            f.host.clone(),
+            50,
+            &NoFaults,
+            |_, _| Ok(()),
+        )
         .unwrap();
     f.store
         .hooks_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))

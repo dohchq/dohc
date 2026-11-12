@@ -417,6 +417,7 @@ mod tests {
                 coordinate.clone(),
                 20,
                 &NoFaults,
+                |_, _| Ok(()),
             )
             .unwrap();
         let point = Ydoc::wire();
@@ -545,6 +546,7 @@ mod tests {
                     coordinate.clone(),
                     20,
                     &NoFaults,
+                    |_, _| Ok(()),
                 )
                 .unwrap();
             let pending = owner_outbox::OwnerOutboxAppendInput {
@@ -578,7 +580,15 @@ mod tests {
             let mut owner = ApplicationOwner::new("workspace".into()).unwrap();
             assert_eq!(
                 owner
-                    .fence_restore(&mut store, None, input, coordinate, 22, &NoFaults)
+                    .fence_restore(
+                        &mut store,
+                        None,
+                        input,
+                        coordinate,
+                        22,
+                        &NoFaults,
+                        |_, _| Ok(())
+                    )
                     .unwrap(),
                 receipt
             );
@@ -623,6 +633,7 @@ mod tests {
                 coordinate.clone(),
                 20,
                 &NoFaults,
+                |_, _| Ok(()),
             )
             .unwrap();
         assert!(receipt.local_head_sequence > receipt.operation.applied_sequence);
@@ -663,7 +674,15 @@ mod tests {
         let mut owner = ApplicationOwner::new("workspace".into()).unwrap();
         assert_eq!(
             owner
-                .fence_restore(&mut store, None, input, coordinate, 22, &NoFaults)
+                .fence_restore(
+                    &mut store,
+                    None,
+                    input,
+                    coordinate,
+                    22,
+                    &NoFaults,
+                    |_, _| Ok(())
+                )
                 .unwrap(),
             receipt
         );

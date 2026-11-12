@@ -3963,6 +3963,22 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             if let Some(pending) = released.waiting {
                 return Ok(Applying::Suspended(pending));
             }
+        } else {
+            // What the pass applied can end an owner's hold on its service
+            // host's update: the audit after it, or anything else.
+            let decided = crate::ydoc_apply::decide_owner_holds_in_workspace(
+                store,
+                cache,
+                workspace_id,
+                faults,
+            )
+            .map_err(|error| self.local(error))?;
+            for refusal in decided.refusals {
+                push_refusal_once(&mut p.pass.refusals, refusal);
+            }
+            if let Some(pending) = decided.waiting {
+                return Ok(Applying::Suspended(pending));
+            }
         }
         let drained = crate::moment_apply::pending::drain_and_claim(
             store,

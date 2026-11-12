@@ -37,8 +37,12 @@ export type OrdinaryActivationBaseline=Pick<LiveMarkdownRegistrationEvidence,"pr
 export interface OrdinaryActivationProof {readonly charged:number;readonly projections:readonly (Projection&{readonly index:number})[]}
 export type OrdinaryActivationValidation={kind:"accepted";baseline:OrdinaryActivationBaseline;proof?:OrdinaryActivationProof}|{kind:"refused";message:string}|
   {kind:"over-budget";message:string}|{kind:"capacity-refused"}|{kind:"retry";reason:"admission-unavailable"};
-/** `hasCapacity` says whether a validation slot is free now, so a pass captures nothing while the pool is busy. */
-export type OrdinaryActivationValidator=((work:OrdinaryActivationWork,signal?:AbortSignal)=>Promise<OrdinaryActivationValidation>)&{readonly hasCapacity?:()=>boolean};
+/**
+ * `hasCapacity` says whether a validation slot is free now, so a pass captures nothing while the pool is busy.
+ * `waitForCapacity` settles once one may be free, which another operation can still take first.
+ */
+export type OrdinaryActivationValidator=((work:OrdinaryActivationWork,signal?:AbortSignal)=>Promise<OrdinaryActivationValidation>)&
+  {readonly hasCapacity?:()=>boolean;readonly waitForCapacity?:(signal?:AbortSignal)=>Promise<void>};
 /**
  * Validates a capture against the history `readOrdinaryActivationHistory` read for it. Runs in a
  * validation process; it reads no storage. Each refusal message is the one activation reports.

@@ -1087,6 +1087,10 @@ pub(super) fn applied_tip(
 
 impl ApplicationOwner {
     /// Replays need no ordinary registration, which stays refused after restart.
+    /// `decide_owner_holds` decides, in the fence's transaction, each update
+    /// the owner holds for its service host, since the fence's recovery
+    /// checkpoints need the note's queue empty.
+    #[allow(clippy::too_many_arguments)]
     pub fn fence_restore(
         &mut self,
         store: &mut EngineStore,
@@ -1095,12 +1099,26 @@ impl ApplicationOwner {
         coordinate: ApplicationHostCoordinate,
         now_ms: i64,
         faults: &dyn FaultInjector,
+        decide_owner_holds: impl FnOnce(
+            &rusqlite::Transaction<'_>,
+            &DocKey,
+        ) -> Result<(), ApplicationError>,
     ) -> Result<NativeRestoreFenceReceipt, ApplicationError> {
-        self.fence_restore_inner(store, resolver, input, coordinate, now_ms, faults, false)
+        self.fence_restore_inner(
+            store,
+            resolver,
+            input,
+            coordinate,
+            now_ms,
+            faults,
+            false,
+            decide_owner_holds,
+        )
     }
 
     /// The authenticated host adapter holds its current connection output guard.
     /// Resume a saved old cut without registering or adopting the document again.
+    #[allow(clippy::too_many_arguments)]
     pub fn fence_restore_after_reconnect(
         &mut self,
         store: &mut EngineStore,
@@ -1109,8 +1127,21 @@ impl ApplicationOwner {
         coordinate: ApplicationHostCoordinate,
         now_ms: i64,
         faults: &dyn FaultInjector,
+        decide_owner_holds: impl FnOnce(
+            &rusqlite::Transaction<'_>,
+            &DocKey,
+        ) -> Result<(), ApplicationError>,
     ) -> Result<NativeRestoreFenceReceipt, ApplicationError> {
-        self.fence_restore_inner(store, resolver, input, coordinate, now_ms, faults, true)
+        self.fence_restore_inner(
+            store,
+            resolver,
+            input,
+            coordinate,
+            now_ms,
+            faults,
+            true,
+            decide_owner_holds,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1123,6 +1154,10 @@ impl ApplicationOwner {
         now_ms: i64,
         faults: &dyn FaultInjector,
         after_reconnect: bool,
+        decide_owner_holds: impl FnOnce(
+            &rusqlite::Transaction<'_>,
+            &DocKey,
+        ) -> Result<(), ApplicationError>,
     ) -> Result<NativeRestoreFenceReceipt, ApplicationError> {
         input.validate()?;
         coordinate.validate()?;
@@ -1264,6 +1299,9 @@ impl ApplicationOwner {
                 "INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,operation_id,input_json,receipt_json,previous_operation_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
                 params![b.workspace_id,b.main_version_id,b.object_id,held.namespace,input.operation_id,input_json,serde_json::to_string(&receipt).map_err(|_| ApplicationError::Corrupt)?,previous],
             ).map_err(write_sql)?;
+            // The owner's feed may never reach what it holds, and the recovery
+            // checkpoints need the note's queue empty, so the fence decides it.
+            decide_owner_holds(tx, &key)?;
             crate::owner_outbox::keep_recovery_checkpoints_in_tx(tx, b).map_err(|error| match error {
                 crate::OwnerOutboxError::Storage(error) => ApplicationError::Storage(error),
                 crate::OwnerOutboxError::AcceptedStateIncomplete => {

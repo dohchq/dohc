@@ -649,6 +649,14 @@ test("cloud matrices run every JavaScript and Rust shard with separate evidence"
     const ownReceipt = reporting.findIndex(step => step.with?.name === `verification-${scope}-0-\${{ github.run_attempt }}`);
     const wait = reporting.findIndex(step => step.run?.startsWith("node scripts/verification/cloud-aggregate.mjs wait "));
     assert.ok(run >= 0 && ownReceipt > run && wait > ownReceipt, "partition zero must execute and publish its receipt before reporting waits");
+    assert.equal(reporting[wait].name, `Wait for the complete ${scope === "js-worker" ? "JavaScript" : "Rust"} group`);
+    const verify = reporting.findIndex(step => step.run === `node scripts/verification/cloud-aggregate.mjs ${scope === "js-worker" ? "js" : "rust"}`);
+    assert.ok(verify > wait);
+    assert.match(reporting[verify].name, /^Require complete proof and /u);
+    const downloads = reporting.slice(wait + 1, verify).filter(step => step.uses?.startsWith("actions/download-artifact@"));
+    assert.equal(downloads.length, 1);
+    // The completed check finds this step by its default name.
+    assert.equal(downloads[0].name, undefined);
   }
 });
 
@@ -792,10 +800,13 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
   assert.equal(failedJavascript.status, 1);
   assert.match(failedJavascript.stdout, /PASS \(rust completed group\)/,
     "a failed JavaScript gate must not omit the Rust group's completed timing verdict");
-  for (const [gate, finalJob, budget] of [["js", "typecheck + tests", 300], ["rust", "engine gate", 600]]) {
+  for (const [gate, finalJob, target, budget] of [["js", "typecheck + tests", 300, 400], ["rust", "engine gate", 600, 700]]) {
     const manual = jobs(undefined, undefined, gate === "js" ? "success" : "skipped", gate === "rust" ? "success" : "skipped", "success");
     const at = seconds => completed.map(row => row.name === finalJob ? {...row, completed_at: new Date(started + seconds * 1000).toISOString()} : row);
     assert.equal(run(manual, "workflow_dispatch", gate, at(budget)).status, 0);
+    const overTarget = run(manual, "workflow_dispatch", gate, at(target + 1));
+    assert.equal(overTarget.status, 0);
+    assert.match(overTarget.stderr, new RegExp(`::warning::${gate} timing over target: ${target + 1}s exceeds the ${target}s target; the gate fails above ${budget}s\\.`));
     const late = run(manual, "workflow_dispatch", gate, at(budget + 1));
     assert.equal(late.status, 1, `${gate} must include reporting after the aggregate receipt`);
     assert.match(late.stderr, /complete.*budget/);

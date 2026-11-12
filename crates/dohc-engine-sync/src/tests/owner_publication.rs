@@ -317,7 +317,7 @@ fn old_update_and_original_base_remain_echoes_after_frame_receipt_pruning() {
                     dohc_engine_collab::owner_outbox::publication::contains_observed_update_in(
                         conn,
                         &key,
-                        "owner.md",
+                        Some("owner.md"),
                         &observed.binding.lineage_claim_id,
                         bytes
                     )
@@ -906,7 +906,7 @@ fn current_checkpoint_echo_requires_exact_binding_and_retained_blob_integrity() 
                 contains_observed_update_in(
                     conn,
                     &key,
-                    "owner.md",
+                    Some("owner.md"),
                     &observed.binding.lineage_claim_id,
                     &checkpoint
                 )
@@ -917,16 +917,34 @@ fn current_checkpoint_echo_requires_exact_binding_and_retained_blob_integrity() 
                 contains_observed_update_in(
                     conn,
                     &key,
-                    "other.md",
+                    Some("other.md"),
                     &observed.binding.lineage_claim_id,
                     &checkpoint
                 )
                 .unwrap(),
                 Some(false)
             );
+            // A held update's echo is told by its bytes, whatever its path.
             assert_eq!(
-                contains_observed_update_in(conn, &key, "owner.md", &"f".repeat(64), &checkpoint)
-                    .unwrap(),
+                contains_observed_update_in(
+                    conn,
+                    &key,
+                    None,
+                    &observed.binding.lineage_claim_id,
+                    &checkpoint
+                )
+                .unwrap(),
+                Some(true)
+            );
+            assert_eq!(
+                contains_observed_update_in(
+                    conn,
+                    &key,
+                    Some("owner.md"),
+                    &"f".repeat(64),
+                    &checkpoint
+                )
+                .unwrap(),
                 Some(false)
             );
             Ok::<_, SyncError>(())
@@ -963,7 +981,7 @@ fn current_checkpoint_echo_requires_exact_binding_and_retained_blob_integrity() 
                 contains_observed_update_in(
                     conn,
                     &key,
-                    "owner.md",
+                    Some("owner.md"),
                     &observed.binding.lineage_claim_id,
                     &checkpoint
                 )
