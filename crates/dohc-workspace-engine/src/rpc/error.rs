@@ -486,7 +486,9 @@ fn map_runtime_inner(error: &RuntimeError) -> WireError {
             return WireError::new(ErrorCode::WorkspaceUnavailable, "workspace-hardlinked");
         }
         RuntimeError::Domain(error) => return map_domain(error),
-        RuntimeError::Collab(error) => map_collab_code(error),
+        RuntimeError::Collab(error) => {
+            return WireError::new(map_collab_code(error), error.code());
+        }
         RuntimeError::Sync(error) => map_sync_code(error),
         RuntimeError::Relay(error) => map_relay_code(error),
         RuntimeError::Search(error) => map_search_code(error),
@@ -498,40 +500,11 @@ fn map_runtime_inner(error: &RuntimeError) -> WireError {
     WireError::new(code, "workspace operation failed")
 }
 
-fn internal_refusal(code: ErrorCode, error: &(dyn std::error::Error + 'static)) -> Option<String> {
-    if code != ErrorCode::Internal {
-        return None;
-    }
-    let mut line = format!("engine: internal refusal: {error}");
-    let mut source = error.source();
-    while let Some(cause) = source {
-        let text = cause.to_string();
-        if !line
-            .strip_suffix(text.as_str())
-            .is_some_and(|head| head.ends_with(": "))
-        {
-            line.push_str(": ");
-            line.push_str(&text);
-        }
-        source = cause.source();
-    }
-    let mut escaped = String::with_capacity(line.len());
-    for ch in line.chars() {
-        if ch.is_control() {
-            escaped.extend(ch.escape_default());
-        } else {
-            escaped.push(ch);
-        }
-    }
-    if escaped.len() > 4096 {
-        let mut end = 4096 - '…'.len_utf8();
-        while !escaped.is_char_boundary(end) {
-            end -= 1;
-        }
-        escaped.truncate(end);
-        escaped.push('…');
-    }
-    Some(escaped)
+/// The wire code and the error's code word only. A server's hosting engine
+/// writes this line to the server's log, and an error's text can name a file.
+fn internal_refusal(code: ErrorCode, error: &RuntimeError) -> Option<String> {
+    (code == ErrorCode::Internal)
+        .then(|| format!("engine: internal refusal: {} {}", code.as_str(), error.code()))
 }
 
 /// The error followed by each of its sources, for migration wire messages.

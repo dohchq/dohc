@@ -852,7 +852,7 @@ impl Ydoc {
             }
         }
         if bytes != [0, 0] && !meta.contains_key(&txn, "schemaVersion") {
-            return Err(invalid());
+            return Err(CollabError::BaselineSchemaVersionMissing);
         }
         if matches!(
             meta.get(&txn, FRONTMATTER_SOURCE_META_KEY),
