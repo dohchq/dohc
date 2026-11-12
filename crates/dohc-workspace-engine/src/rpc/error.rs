@@ -503,8 +503,13 @@ fn map_runtime_inner(error: &RuntimeError) -> WireError {
 /// The wire code and the error's code word only. A server's hosting engine
 /// writes this line to the server's log, and an error's text can name a file.
 fn internal_refusal(code: ErrorCode, error: &RuntimeError) -> Option<String> {
-    (code == ErrorCode::Internal)
-        .then(|| format!("engine: internal refusal: {} {}", code.as_str(), error.code()))
+    (code == ErrorCode::Internal).then(|| {
+        format!(
+            "engine: internal refusal: {} {}",
+            code.as_str(),
+            error.code()
+        )
+    })
 }
 
 /// The error followed by each of its sources, for migration wire messages.
@@ -960,9 +965,8 @@ mod tests {
     #[test]
     fn internal_refusal_line_names_no_path() {
         let path = "notes/secret plan.md";
-        let (wire, logged) = map_runtime_logged(RuntimeError::CaptureNotOwnedAfterHold {
-            path: path.into(),
-        });
+        let (wire, logged) =
+            map_runtime_logged(RuntimeError::CaptureNotOwnedAfterHold { path: path.into() });
         assert_eq!(wire.code, ErrorCode::Internal);
         let line = logged.expect("an internal refusal is logged");
         assert_eq!(line, "engine: internal refusal: INTERNAL capture-not-owned");
@@ -1540,7 +1544,10 @@ mod tests {
         assert_eq!(generic.message, "workspace operation failed");
         assert_eq!(wire.retry, generic.retry);
         // The engine's log line names no path.
-        assert_eq!(logged.as_deref(), Some("engine: internal refusal: INTERNAL relay-failed"));
+        assert_eq!(
+            logged.as_deref(),
+            Some("engine: internal refusal: INTERNAL relay-failed")
+        );
     }
 
     #[test]
