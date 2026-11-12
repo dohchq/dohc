@@ -27,7 +27,8 @@ export function javascriptGroups(tasks) {
       native: Boolean(files[0].native), resource: databasePackages.has(files[0].package) ? "postgres" : files[0].package === "@dohc/mobile" ? "mobile-editor" : null,
       weight: Math.max(...chunk.tasks.map(task => task.weight), chunk.weight / (files[0].package === "@dohc/app-backend-runtime" ? 1 : 2)) + 4 })));
   }
-  groups.push(...tasks.filter(task => task.kind !== "vitest").map(task => ({ id: task.id, kind: task.kind, tasks: [task], native: Boolean(task.native), resource: task.resource, weight: task.weight })));
+  groups.push(...tasks.filter(task => task.kind !== "vitest").map(task => ({ id: task.id, kind: task.kind, tasks: [task], native: Boolean(task.native), resource: task.resource,
+    ...(["desktop", "accounts"].includes(task.kind) ? { slots: 2, weight: 2 * task.weight } : { weight: task.weight }) })));
   return groups;
 }
 

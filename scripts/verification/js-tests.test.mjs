@@ -20,6 +20,78 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
+for (const [limit, slots] of [[3, 2], [2, 2], [2, 4]]) {
+  test(`slot reservations at limit ${limit} keep a ${slots}-slot task within its capacity`, async () => {
+    const hold = deferred(), started = [], active = new Set(), snapshots = [];
+    const tasks = [{name: "wide", slots}, {name: "one"}, {name: "two"}];
+    const run = runBounded(tasks, async task => {
+      started.push(task.name); active.add(task);
+      snapshots.push([...active]);
+      await hold.promise;
+      active.delete(task);
+    }, limit);
+    try {
+      await new Promise(setImmediate);
+      assert.deepEqual(started, limit === 3 ? ["wide", "one"] : ["wide"]);
+    } finally { hold.resolve(); await run; }
+    assert.equal(started.length, tasks.length);
+    for (const snapshot of snapshots) {
+      assert.ok(snapshot.length === 1 || snapshot.reduce((n, task) => n + (task.slots ?? 1), 0) <= limit);
+    }
+  });
+}
+
+test("slots preserve first-runnable order, resource exclusions, preparation and widening", async () => {
+  const preparation = deferred(), more = deferred(), started = [], controls = new Map();
+  const tasks = [{name:"native", slots:2, native:true, resource:"postgres"}, {name:"same-resource", native:true, resource:"postgres"},
+    ...["one", "two", "three"].map(name => ({name}))];
+  for (const task of tasks) controls.set(task.name, deferred());
+  let ready = false, followerReady = false;
+  const changed = preparation.promise.then(() => { ready = true; });
+  const run = runBounded(tasks, async task => { started.push(task.name); await controls.get(task.name).promise; },
+    2, more.promise, {changed, canRun: task => (!task.native || ready) && (task.name !== "same-resource" || followerReady)});
+  try {
+    await new Promise(setImmediate);
+    assert.deepEqual(started, ["one", "two"]);
+    preparation.resolve(); more.resolve();
+    await new Promise(setImmediate);
+    assert.deepEqual(started, ["one", "two", "three"]);
+    controls.get("one").resolve(); controls.get("two").resolve();
+    await new Promise(setImmediate);
+    assert.deepEqual(started, ["one", "two", "three", "native"]);
+    followerReady = true;
+    controls.get("three").resolve();
+    await new Promise(setImmediate);
+    assert.ok(!started.includes("same-resource"));
+    controls.get("native").resolve();
+    await new Promise(setImmediate);
+    assert.equal(started.at(-1), "same-resource");
+  } finally { for (const control of controls.values()) control.resolve(); await run; }
+});
+
+test("a failing two-slot task stops new starts and drains its sibling", async () => {
+  const fail = deferred(), hold = deferred(), started = [], error = Error("browser failed");
+  const run = runBounded([{name:"browser", slots:2}, {name:"sibling"}, {name:"waiting"}], async task => {
+    started.push(task.name);
+    if (task.name === "browser") { await fail.promise; throw error; }
+    await hold.promise;
+  }, 3);
+  const outcome = assert.rejects(run, cause => cause === error);
+  try {
+    await new Promise(setImmediate);
+    assert.deepEqual(started, ["browser", "sibling"]);
+    fail.resolve();
+    await new Promise(setImmediate);
+    assert.deepEqual(started, ["browser", "sibling"]);
+  } finally { fail.resolve(); hold.resolve(); await outcome; }
+});
+
+test("task slot reservations are positive integers", async () => {
+  for (const slots of [0, -1, 1.5, NaN]) {
+    await assert.rejects(runBounded([{slots}], () => {}, 2), /slots.*positive integer/);
+  }
+});
+
 test("package scheduling bounds concurrency and serializes shared database consumers", async () => {
   const tasks = [{name: "db-one", resource: "postgres"}, {name: "db-two", resource: "postgres"}, {name: "disk"}, {name: "last"}];
   const controls = new Map(tasks.map(task => [task.name, deferred()]));

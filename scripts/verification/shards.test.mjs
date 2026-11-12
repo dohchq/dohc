@@ -105,6 +105,23 @@ test("native preparation does not leave one worker with most of the native work"
   assertTaskCoverage(groups, shards.map((shard, part) => ({ part, verdict: "PASS", completed: shard.map(group => group.id) })));
 });
 
+test("only browser groups reserve two slots and double their partition cost", () => {
+  const tasks = ["desktop", "accounts", "self-host-native", "command"].map(kind => ({id:kind, kind, weight:20, native:true}));
+  const files = [{id:"file", kind:"vitest", package:"example", weight:20}];
+  const groups = javascriptGroups([...tasks, ...files]);
+  for (const task of tasks) {
+    const group = groups.find(group => group.id === task.id);
+    assert.equal(group.weight, ["desktop", "accounts"].includes(task.kind) ? 40 : 20);
+    assert.equal(group.slots, ["desktop", "accounts"].includes(task.kind) ? 2 : undefined);
+    assert.equal(task.weight, 20);
+  }
+  const vitest = groups.find(group => group.kind === "vitest");
+  assert.equal(vitest.weight, 24);
+  assert.equal(vitest.slots, undefined);
+  assert.deepEqual(partitionTasks(groups.filter(group => group.kind !== "vitest"), 2)
+    .map(shard => shard.reduce((n, group) => n + group.weight, 0)), [60, 60]);
+});
+
 test("JavaScript receipts reject missing, failed, duplicated, or different-head work", () => {
   const records = [{ part: "prepare-0", commit: "head", verdict: "PASS" }];
   for (let index = 0; index < JS_SHARDS; index++) records.push({

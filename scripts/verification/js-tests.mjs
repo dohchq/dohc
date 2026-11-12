@@ -33,17 +33,22 @@ export function testPlan(packages) {
 export async function runBounded(tasks, execute, concurrency = 2, more, availability) {
   if (!Number.isInteger(concurrency) || concurrency < 1) throw new Error("Test concurrency must be a positive integer.");
   const pending = [...tasks], active = new Set(), resources = new Set();
-  let failure, limit = concurrency;
+  if (pending.some(task => !Number.isInteger(task.slots ?? 1) || (task.slots ?? 1) < 1)) throw new Error("Task slots must be a positive integer.");
+  let failure, limit = concurrency, slotsInUse = 0;
   let widening = more?.then(() => { limit += 1; widening = undefined; }, error => { failure ??= error; widening = undefined; });
   let ready = availability?.changed.then(() => { ready = undefined; }, error => { failure ??= error; ready = undefined; });
   while (pending.length || active.size) {
-    while (!failure && active.size < limit) {
-      const index = pending.findIndex(task => (!availability || availability.canRun(task)) && (!task.resource || !resources.has(task.resource)));
+    while (!failure && slotsInUse < limit) {
+      const index = pending.findIndex(task => (!availability || availability.canRun(task)) && (!task.resource || !resources.has(task.resource))
+        && (!active.size || slotsInUse + (task.slots ?? 1) <= limit));
       if (index < 0) break;
       const [task] = pending.splice(index, 1);
+      const slots = task.slots ?? 1;
+      slotsInUse += slots;
       if (task.resource) resources.add(task.resource);
       const work = Promise.resolve().then(() => execute(task)).catch(error => { failure ??= error; }).finally(() => {
         active.delete(work);
+        slotsInUse -= slots;
         if (task.resource) resources.delete(task.resource);
       });
       active.add(work);
