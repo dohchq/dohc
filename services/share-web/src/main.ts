@@ -15,6 +15,7 @@ import {createNamedLiveRelayRoute, namedLiveGatewayRequest} from "./namedLiveRel
 import { clientAddress } from "./clientAddress";
 import {
   createShareWebApplication,
+  SHARE_WEB_REQUEST_LOG,
   SHARE_WEB_SECURITY_HEADERS,
   shareWebRefusalBody,
   streamsRequestBody,
@@ -59,6 +60,7 @@ const application = createShareWebApplication({
 
 const server = serveFetchHandler({
   handler: application.handle,
+  requestLog: SHARE_WEB_REQUEST_LOG,
   maxBodyBytes: url => signInBodyLimit(url.pathname) ?? (["/api/live/link-document", "/api/live/link-ticket"].includes(url.pathname) && config.linkLive ? config.linkLive.requests.maxRequestBytes : ["/api/live/named-session", "/api/live/named-ticket", "/api/live/named-documents", "/api/named-chat/messages"].includes(url.pathname) && config.namedBrowserSessionLimits
     ? config.namedBrowserSessionLimits.maxRequestBytes : MAX_REQUEST_BODY_BYTES),
   streamBody: streamsRequestBody,

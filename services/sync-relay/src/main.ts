@@ -60,6 +60,7 @@ import { createLiveHostReports } from "./namedLiveHostReports";
 import {createLinkLiveResolver} from "./linkLiveBrowserAuth";
 import {normalizeLinkRefusal, opaqueLinkRefusal} from "./linkRefusal";
 import {isLinkEndpointPath, isLinkLivePath} from "./linkEndpointPath";
+import {relayEntryPattern, SYNC_RELAY_REQUEST_LOG} from "./requestLog";
 import {createLinkLiveHttp} from "./linkLiveHttp";
 import {createLiveMembershipRegistry} from "./liveMembership";
 import {createLiveConnectionAdmission} from "./liveConnectionAdmission";
@@ -500,15 +501,26 @@ const deletions = createAccountDeletionRoute({storage: storage as StorageContext
 const pendingDeletions = pool ? await fencePendingAccountDeletions(pool, deletions) : [];
 const signUpInvites = secret.length >= 32 ? createSignUpInviteRoute({storage, key: signUpInviteKey(secret)}) : undefined;
 const fetchHandler = async (request: Request): Promise<Response> => {
-  if (secret.length >= 32 && new URL(request.url).pathname === ACCOUNT_DELETION_PATH) return deletions.handle(request);
-  if (signUpInvites && new URL(request.url).pathname === SIGN_UP_INVITE_PATH) return signUpInvites(request);
+  const entry = relayEntryPattern(request.headers.get("authorization"), new URL(request.url).pathname);
+  if (entry) SYNC_RELAY_REQUEST_LOG.mark(request, entry);
+  // These four answer before relayHandler, whatever the bearer, so each marks its own route.
+  if (secret.length >= 32 && new URL(request.url).pathname === ACCOUNT_DELETION_PATH) {
+    SYNC_RELAY_REQUEST_LOG.mark(request, "/internal/account-deletion");
+    return deletions.handle(request);
+  }
+  if (signUpInvites && new URL(request.url).pathname === SIGN_UP_INVITE_PATH) {
+    SYNC_RELAY_REQUEST_LOG.mark(request, "/internal/sign-up-invite");
+    return signUpInvites(request);
+  }
   if (new URL(request.url).pathname === "/ready") {
+    SYNC_RELAY_REQUEST_LOG.mark(request, "/ready");
     const ready = !storage.unavailable.aborted && (!selfHostedLive || (!!selfHost && !selfHost.unavailable));
     return Response.json({ok: ready, service: "sync-relay", selfHostedLive: selfHostedLive && ready, apiVersions: RELAY_API_VERSIONS,
       automations: !automationsOn ? "off" : automations && !automations.unavailable ? "on" : "unavailable"},
       {status: ready ? 200 : 503, headers: {"cache-control": "no-store"}});
   }
   if (new URL(request.url).pathname === "/health") {
+    SYNC_RELAY_REQUEST_LOG.mark(request, "/health");
     // The presence hub footprint is exposed only under the dev/test seam so
     // integration tests can assert parked waiters are released on disconnect;
     // production health stays a bare liveness probe.
@@ -593,6 +605,7 @@ setInterval(() => {
 const server = serveFetchHandler({
   handler: fetchHandler,
   streamBody: streamsRequestBody,
+  requestLog: SYNC_RELAY_REQUEST_LOG,
   maxBodyBytes: (url) => automationHostMaxBodyBytes(url.pathname) ?? (
     isServiceHostEnrollmentPath(url.pathname) ? 16 * 1024 :
     url.pathname === PERSONAL_LIVE_DOCUMENT_PATH ? PERSONAL_LIVE_DOCUMENT_MAX_BODY_BYTES :

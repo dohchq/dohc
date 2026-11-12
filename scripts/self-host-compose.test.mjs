@@ -31,6 +31,7 @@ test('production services use built images without source mounts or install comm
     assert.ok(service.healthcheck.test);
     assert.ok(!(service.volumes ?? []).some(value => value.startsWith('.:')));
     assert.equal(service.ports, undefined);
+    assert.deepEqual(service.logging, { driver: 'json-file', options: { 'max-size': '10m', 'max-file': '5' } });
   }
 });
 

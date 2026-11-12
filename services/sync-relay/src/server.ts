@@ -1,5 +1,7 @@
 import {accountIsFenced} from "./storage/accountDeletion";
 import {parseRoute} from "./relayRoute";
+import {RELAY_ROUTE_PATTERNS, SYNC_RELAY_REQUEST_LOG} from "./requestLog";
+export {SYNC_RELAY_REQUEST_LOG} from "./requestLog";
 import {createWorkReferenceRoutes} from "./workReferenceRoutes";
 import {parsePublicEditRelease, type PublicEditRelease} from "@dohc/security-contract";
 import {normalizeLinkRefusal} from "./linkRefusal";
@@ -881,6 +883,7 @@ export function createSyncRelayHandler({
         return push ? await push(request) : errorResponse(notFound());
       }
       const route = parseRoute(request);
+      SYNC_RELAY_REQUEST_LOG.mark(request, RELAY_ROUTE_PATTERNS[route.route]);
       if (route.route === "work-reference" || route.route === "work-references" || route.route === "share-work-references" || route.route === "internal-work-reference") {
         if (request.headers.has("cookie")) throw notFound();
         if (route.route === "internal-work-reference" &&
