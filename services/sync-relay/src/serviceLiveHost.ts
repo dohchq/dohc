@@ -28,6 +28,7 @@ import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory.j
 import type { LiveHostConnectionCoordinate, SyncRelayStorage } from "./storage.js";
 import { parseLiveSettlementConfig, type LiveSettlementConfig } from "./liveSettlementConfig.js";
 import {settlementPending} from "./liveSettlement.js";
+import { activationFailureLine } from "./activationFailureLine.js";
 import {snapshotStopRestoreLookup} from "./liveRestoreDelivery.js";
 import {relayError} from "./errors.js";
 import type {StopRestoreLookup} from "./storage/liveRestoreOperation.js";
@@ -1508,10 +1509,7 @@ export async function startServiceLiveHost(options: {
           try{await work();}
           catch(error){
             failed=true;
-            const message=error instanceof Error?error.message:String(error);
-            // A refusal also names its code and the engine call refused, never what the call carried.
-            const shown=error instanceof EngineRequestError
-              ?`${message} (code ${error.wireError?.code}${error.method===undefined?"":`, method ${error.method}`})`:message;
+            const shown=activationFailureLine(error);
             if(!signal.aborted && shown!==lastError){
               lastError=shown;
               try{console.error("Service activation pass failed.",shown);}catch{ /* Reporting must not stop activation. */ }
