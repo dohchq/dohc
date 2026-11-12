@@ -1,6 +1,6 @@
 import { workspaceIsDeleted } from "./storage/accountDeletion";
 import {createHash, randomBytes} from "node:crypto";
-import {mkdir, readdir, rm, stat, writeFile} from "node:fs/promises";
+import {mkdir, open as openFile, readdir, rm, stat, writeFile} from "node:fs/promises";
 import {join} from "node:path";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
@@ -243,7 +243,7 @@ export async function startAutomationReplicas(options: {
       const reader = (await engine()).engine;
       // A handle the read left open keeps the folder until a removal path closes it.
       await readFolder(reader, nextRequestId, join(home, "workspace"), workspaceId,
-        (read) => settleOperations(storage, records, read, reason, nowMs()), (handle) => {
+        (read) => settleOperations(storage, records, markingSettled(home, read), reason, nowMs()), (handle) => {
           const held = heldOpen.get(folderOf(workspaceId)) ?? new Set<{engine: EngineClient; handle: string}>();
           held.add({engine: reader, handle});
           heldOpen.set(folderOf(workspaceId), held);
@@ -536,8 +536,17 @@ export async function startAutomationReplicas(options: {
           try {
             // The server lost this replica's folder, and its engine with it.
             // The phone's writes in that folder can never publish, and none replays in a new one.
-            if (await missing(join(folderOf(workspaceId), String(row.incarnation)))) {
+            const home = join(folderOf(workspaceId), String(row.incarnation));
+            if (await missing(home)) {
               await settleCopy(workspaceId, row.incarnation, COULD_NOT_SEND);
+              opening = storage.replaceLostAutomationReplica({workspaceId, incarnation: row.incarnation, nowMs: nowMs()});
+            } else if (await isSettled(home)) {
+              // Settlement read this folder and made its writes final, but it stayed, as when its read's
+              // handle didn't close: it is never opened for sync again. It goes, and the copy starts
+              // over as if it were lost. Writes a crash left unrecorded after the read settle first.
+              await settleCopy(workspaceId, row.incarnation, COULD_NOT_SEND);
+              await closeHeld(folderOf(workspaceId));
+              await rm(home, {recursive: true, force: true});
               opening = storage.replaceLostAutomationReplica({workspaceId, incarnation: row.incarnation, nowMs: nowMs()});
             }
             if (opening !== null) await open(opening);
@@ -911,6 +920,30 @@ function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
   });
 }
 
+// Beside the engine's folder: settlement read this incarnation's folder, so its unsent writes are final.
+const SETTLED_MARKER = "settled";
+
+const isSettled = async (home: string) => !(await missing(join(home, SETTLED_MARKER)));
+
+/**
+ * A receipt reader that, once the receipts are read and before any verdict
+ * is recorded, marks the folder settled, durably, so no later open, after a
+ * restart too, reuses it for sync.
+ */
+function markingSettled(home: string, read: ReceiptReader): ReceiptReader {
+  return async (stageKeys) => {
+    const state = await read(stageKeys);
+    const marker = await openFile(join(home, SETTLED_MARKER), "w", 0o600);
+    try { await marker.sync(); } finally { await marker.close(); }
+    // Windows cannot open a folder to sync it.
+    if (process.platform !== "win32") {
+      const folder = await openFile(home, "r");
+      try { await folder.sync(); } finally { await folder.close(); }
+    }
+    return state;
+  };
+}
+
 async function missing(path: string): Promise<boolean> {
   try {
     await stat(path);
@@ -1014,7 +1047,7 @@ async function settleRemovedCopies(storage: SyncRelayStorage, root: string, sett
         try {
           if (await missing(home)) await settleOperations(storage, records, null, COULD_NOT_SEND, Date.now());
           else await readFolder(engineClient, nextRequestId, join(home, "workspace"), workspaceId,
-            (read) => settleOperations(storage, records, read, COULD_NOT_SEND, Date.now()));
+            (read) => settleOperations(storage, records, markingSettled(home, read), COULD_NOT_SEND, Date.now()));
         } catch (error) {
           console.error(`[sync-relay] The phone's writes in the copy of workspace "${workspaceId}" couldn't be settled.`, error);
         }

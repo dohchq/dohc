@@ -2113,16 +2113,20 @@ describe("the automation replicas", () => {
     const clock = options.clock ?? { ms: 0 };
     const passes = passEnds();
     const first = passes.next();
+    const report: (error: unknown, workspaceId?: string) => void = options.onError ?? unexpectedErrors();
     const running = await startAutomationReplicas({ storage, root, engineExecutable: process.execPath, relayOrigin: "https://relay.example",
-      key, namespace, wanted, nowMs: () => clock.ms, onError: options.onError ?? unexpectedErrors(), onReconciled: passes.onReconciled });
+      key, namespace, wanted, nowMs: () => clock.ms, onReconciled: passes.onReconciled,
+      // A pass that fails as a whole ends too, reported with no workspace.
+      onError: (error, workspaceId) => { report(error, workspaceId); if (workspaceId === undefined) passes.onReconciled(); } });
     cleanup.push(async () => { await running.close(); await rm(root, { recursive: true, force: true }); });
     // The first pass is asked for at once.
     await vi.advanceTimersByTimeAsync(0);
     await first;
-    const pass = async (workspaceId?: string) => {
+    // `waitMs` is how long the pass waits: 100 ms once asked for, or a failed pass's delay.
+    const pass = async (workspaceId?: string, waitMs = 100) => {
       const ended = passes.next();
       running.reconcile(workspaceId);
-      await vi.advanceTimersByTimeAsync(100);
+      await vi.advanceTimersByTimeAsync(waitMs);
       await ended;
     };
     return { running, root, pass };
@@ -2336,6 +2340,89 @@ describe("the automation replicas", () => {
       .toBeGreaterThan(sent.lastIndexOf(`workspace.close ${engine.folderHandles[1]}`));
     expect(existsSync(folder)).toBe(false);
     expect(storage.listAutomationWorkspaces()).toEqual([]);
+  });
+
+  // A copy that retired with an unsent write: settlement read its folder and refused the write, and the
+  // read's close failed, so the folder stayed. The sentinel shows whether a later copy reuses that folder.
+  async function refusedBehindFailedClose(storage: SyncRelayStorage, raw: ReturnType<typeof inspectDatabase>, engine: ReturnType<typeof fakeEngine>) {
+    let wanted = new Map<string, readonly CopyReason[]>([[WORKSPACE, ["account"]]]);
+    const errors: unknown[] = [];
+    const copy = await stepped(storage, () => wanted, { onError: (error) => errors.push(error) });
+    const home = join(copy.running.replica(WORKSPACE)!.root, "..");
+    const sentinel = join(home, "workspace", "sentinel");
+    await writeFile(sentinel, "");
+    phoneWrite(storage, "unsent");
+    engine.receipts(new Map([receipt("unsent", 1, "pending")]));
+    storage.setShowOnPhone({ ownerUserId: "owner", workspaceId: WORKSPACE, showOnPhone: false });
+    wanted = new Map();
+    engine.failFolderCloses(1);
+    await copy.pass();
+    expect(outcome(raw, "unsent")).toEqual(["refused", "pending", { threadId: "thread", reason: "Couldn't send" }]);
+    expect(existsSync(sentinel), "the folder stays while its read's handle is open").toBe(true);
+    expect(existsSync(join(home, "settled")), "marked settled").toBe(true);
+    expect(errors).toHaveLength(1);
+    // An account visit wants the copy again.
+    return { ...copy, home, sentinel, wantAgain: () => { wanted = new Map([[WORKSPACE, ["account"]]]); } };
+  }
+  // Whether the copy open now is a fresh one: the settled folder, with its unsent records, is gone, and the write stays refused.
+  function freshCopy(running: { replica(workspaceId: string): unknown }, raw: ReturnType<typeof inspectDatabase>, sentinel: string) {
+    expect(running.replica(WORKSPACE), "the visit has a copy").toBeDefined();
+    expect(existsSync(sentinel), "not the settled folder").toBe(false);
+    expect(outcome(raw, "unsent")[0], "the refused write stays refused").toBe("refused");
+  }
+
+  it("never reopens a settled folder whose read didn't close when a visit wants the copy before the retry", async () => {
+    const { storage, raw } = await relay();
+    const engine = fakeEngine();
+    const { running, pass, sentinel, wantAgain } = await refusedBehindFailedClose(storage, raw, engine);
+    const [read] = engine.folderHandles;
+    wantAgain();
+    await pass();
+    freshCopy(running, raw, sentinel);
+    const sent = engine.sent;
+    const closedAt = sent.findLastIndex((request) => request.method === "workspace.close" && request.workspace === read);
+    const openedAt = sent.findLastIndex((request) => request.method === "workspace.open" && request.params.relay !== undefined);
+    expect(closedAt, "the read's handle closed again").toBeGreaterThan(sent.findIndex((request) => request.workspace === read));
+    expect(closedAt, "before the copy opened for sync").toBeLessThan(openedAt);
+  });
+
+  it("never reopens a settled folder whose read didn't close after a restart", async () => {
+    const { storage, raw } = await relay();
+    const engine = fakeEngine();
+    const { running, root, sentinel } = await refusedBehindFailedClose(storage, raw, engine);
+    await running.close();
+    // The restart's first pass wants the copy.
+    const { running: restarted } = await stepped(storage, () => new Map([[WORKSPACE, ["account"]]]), { root });
+    freshCopy(restarted, raw, sentinel);
+  });
+
+  it("never reopens an orphan folder the sweep settled but couldn't close when a visit joins the copy again", async () => {
+    const { storage, raw } = await relay();
+    const engine = fakeEngine();
+    const first = await stepped(storage, () => new Map([[WORKSPACE, ["account"]]]));
+    const home = join(first.running.replica(WORKSPACE)!.root, "..");
+    const sentinel = join(home, "workspace", "sentinel");
+    await writeFile(sentinel, "");
+    // Hidden from the phone, the write no longer keeps the copy.
+    storage.setShowOnPhone({ ownerUserId: "owner", workspaceId: WORKSPACE, showOnPhone: false });
+    phoneWrite(storage, "unsent");
+    await first.pass();
+    await first.running.close();
+    // The copy's row goes, so its folder is an orphan the sweep settles.
+    inspectDatabase(storagePath(storage), { foreignKeys: true }).prepare("DELETE FROM sync_relay_automation_workspaces WHERE workspace_id = ?").run(WORKSPACE);
+    engine.receipts(new Map([receipt("unsent", 1, "pending")]));
+    engine.failFolderCloses(1);
+    let wanted = new Map<string, readonly CopyReason[]>();
+    const errors: unknown[] = [];
+    const later = await stepped(storage, () => wanted, { root: first.root, onError: (error) => errors.push(error) });
+    expect(outcome(raw, "unsent")[0]).toBe("refused");
+    expect(existsSync(sentinel), "the sweep keeps the folder while its read's handle is open").toBe(true);
+    expect(errors.map((error) => (error as Error).name)).toEqual(["CopyFolderStillOpen"]);
+    // A visit joins the copy again, at incarnation 1, the settled folder's own, before the sweep retries.
+    wanted = new Map([[WORKSPACE, ["account"]]]);
+    await later.pass(undefined, 2_000);
+    expect(later.running.replica(WORKSPACE)).toMatchObject({ incarnation: 1 });
+    freshCopy(later.running, raw, sentinel);
   });
 
   // An account's deletion, as main.ts runs it, over the copies, and the folder of the copy of WORKSPACE.
