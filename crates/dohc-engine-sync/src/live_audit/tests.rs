@@ -3,7 +3,7 @@ use crate::{ApplyDisposition, NoLiveLeases, RelayCursor};
 use dohc_engine_collab::WriterDocCache;
 use dohc_engine_collab::live_update_application::{
     ApplicationHandle, ApplicationHostCoordinate, ApplicationOwner, BootstrapResult,
-    LiveApplicationBootstrap, bootstrap_committed,
+    LiveApplicationBootstrap, ServerDerivedLiveUpdateAuthority, bootstrap_committed,
 };
 use dohc_engine_domain::VersionedTextStore;
 use dohc_engine_storage::{NoFaults, put_binary_blob};
@@ -2157,37 +2157,126 @@ fn declared_owner_history_exports_and_imports_with_its_agent() {
         .unwrap();
 }
 
-/// Only the relay writes a personal agent's work. An owner device's audit
-/// record that names one in its author snapshot or checkpoint coverage, or
-/// claims one's personal authority, with every digest recomputed, is refused,
-/// so History never shows a personal agent editing a document. History the
-/// relay committed before it refused personal agents can name one, so the same
-/// metadata still decodes as a committed event.
+const DEVICE: &str = "owner-origin";
+const HOST: &str = "service-host:host";
+
+fn personal_authority(agent_id: &str) -> ServerDerivedLiveUpdateAuthority {
+    ServerDerivedLiveUpdateAuthority::Personal {
+        principal_id: agent_id.into(),
+    }
+}
+
+/// The owner, named and link authorities an ordinary record can carry.
+fn ordinary_authorities() -> [Option<ServerDerivedLiveUpdateAuthority>; 3] {
+    [
+        None,
+        Some(ServerDerivedLiveUpdateAuthority::Named {
+            principal_id: "guest".into(),
+            grant_id: "grant".into(),
+            grant_generation: 1,
+        }),
+        Some(ServerDerivedLiveUpdateAuthority::Link {
+            principal_id: "link-principal".into(),
+            grant_id: "grant".into(),
+            grant_generation: 1,
+        }),
+    ]
+}
+
+/// Only the relay admits a personal agent's work. A device's audit record
+/// that names one in its author snapshot or checkpoint coverage, or claims
+/// one's personal authority, with every digest recomputed, is refused, so
+/// History never shows a device crediting a personal agent. Owner, named and
+/// link records still import. History the relay committed before it refused
+/// personal agents can name one, so the same metadata still decodes as a
+/// committed event.
 #[test]
 fn an_audit_record_naming_a_personal_agent_is_refused() {
     let ordinary = format!("q-{}", "b".repeat(26));
     let personal = format!("p-{}", "b".repeat(26));
-    assert!(!audit_record_refused(None, None, None));
-    assert!(!audit_record_refused(None, Some(&ordinary), None));
-    assert!(audit_record_refused(Some(&personal), None, None));
-    assert!(audit_record_refused(None, Some(&personal), None));
-    assert!(audit_record_refused(None, None, Some(&personal)));
+    for authority in ordinary_authorities() {
+        assert!(!audit_record_refused(DEVICE, authority.clone(), None, None));
+        assert!(!audit_record_refused(
+            DEVICE,
+            authority.clone(),
+            None,
+            Some(&ordinary)
+        ));
+        assert!(audit_record_refused(
+            DEVICE,
+            authority.clone(),
+            Some(&personal),
+            None
+        ));
+        assert!(audit_record_refused(
+            DEVICE,
+            authority,
+            None,
+            Some(&personal)
+        ));
+    }
+    assert!(audit_record_refused(
+        DEVICE,
+        Some(personal_authority(&personal)),
+        None,
+        None
+    ));
+    assert!(audit_record_refused(
+        DEVICE,
+        Some(personal_authority(&personal)),
+        Some(&personal),
+        None
+    ));
+}
+
+/// The live host's replica records each update it applies, from its
+/// `service-host:` origin. A personal agent's update there credits that agent
+/// alone, and a checkpoint can credit a personal agent from earlier in its
+/// window, so an owner device imports both. Any other record from the host
+/// still credits no personal agent in its own snapshot.
+#[test]
+fn the_hosts_audit_record_of_a_personal_agents_work_imports() {
+    let ordinary = format!("q-{}", "b".repeat(26));
+    let personal = format!("p-{}", "b".repeat(26));
+    let other = format!("p-{}", "c".repeat(26));
+    let host_personal = |snapshot: &str, coverage: Option<&str>| {
+        audit_record_refused(
+            HOST,
+            Some(personal_authority(&personal)),
+            Some(snapshot),
+            coverage,
+        )
+    };
+    assert!(!host_personal(&personal, None));
+    assert!(!host_personal(&personal, Some(&other)));
+    assert!(host_personal(&other, None));
+    assert!(host_personal(&ordinary, None));
+    for authority in ordinary_authorities() {
+        assert!(!audit_record_refused(HOST, authority.clone(), None, None));
+        assert!(!audit_record_refused(
+            HOST,
+            authority.clone(),
+            None,
+            Some(&personal)
+        ));
+        assert!(audit_record_refused(HOST, authority, Some(&personal), None));
+    }
 }
 
 /// Publishes an owner's audit record that declares an agent, then forges it
-/// with the record's digests recomputed: `snapshot` renames the agent,
-/// `coverage` adds a checkpoint author and `personal` claims that agent's
-/// personal authority. Says whether a peer refuses the forged record, whose
-/// metadata still decodes as committed history.
+/// with the record's digests recomputed: `authority` replaces the owner's,
+/// `snapshot` renames the agent and `coverage` adds a checkpoint author. Says
+/// whether a peer refuses the forged record from `origin`, whose metadata
+/// still decodes as committed history.
 fn audit_record_refused(
+    origin: &str,
+    authority: Option<ServerDerivedLiveUpdateAuthority>,
     snapshot: Option<&str>,
     coverage: Option<&str>,
-    personal: Option<&str>,
 ) -> bool {
     use dohc_engine_collab::live_update_application::{
         AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, ApplicationResult, LiveAuthorEntry,
-        LiveCheckpointAuthorCoverage, LiveUpdateReceipt, RelayAcceptedLiveUpdate,
-        ServerDerivedLiveUpdateAuthority, apply_committed,
+        LiveCheckpointAuthorCoverage, LiveUpdateReceipt, RelayAcceptedLiveUpdate, apply_committed,
     };
     use std::io::{Read, Write};
     fn agent(agent_id: &str) -> LiveAuthorEntry {
@@ -2283,10 +2372,8 @@ fn audit_record_refused(
             deletion_ranges: Vec::new(),
         }]
     });
-    if let Some(agent_id) = personal {
-        metadata.accepted.authority = ServerDerivedLiveUpdateAuthority::Personal {
-            principal_id: agent_id.into(),
-        };
+    if let Some(authority) = authority {
+        metadata.accepted.authority = authority;
     }
     let after = serde_json::to_string(&metadata).unwrap();
     let rewritten = evidence(previous, &metadata);
@@ -2311,6 +2398,13 @@ fn audit_record_refused(
         panic!("record write rolled back")
     };
     ops[at].payload["manifest"] = serde_json::to_value(forged_manifest).unwrap();
+    if origin != DEVICE {
+        // Another origin's first op. The record is the owner's last, so the
+        // owner's own sequence stays whole.
+        assert_eq!(at + 1, ops.len());
+        ops[at].origin_id = origin.into();
+        ops[at].origin_seq = 0;
+    }
     let mut refused = false;
     for (index, mut op) in ops.into_iter().enumerate() {
         op.relay_seq = Some(op.origin_seq + 1);
