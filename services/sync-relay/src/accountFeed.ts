@@ -6,16 +6,6 @@ import { observeAcceptedLiveUpdates } from "./relayWriteChanges";
 import type { SyncRelayStorage } from "./storage";
 import type { AccountFeedStanding } from "./storage/accountFeed";
 
-// An account's change feed for one workspace. A cursor names how far the
-// relay log and the accepted live-update journal had reached, and the log
-// floor the workspace's last restore set. A write to a secret file moves the
-// cursor too, so a poll can tell that a hidden change happened, though never
-// what or where; only the owner's own credentials reach the cursor. Each read
-// through a server copy answers the cursor its copy had synced to, so a feed
-// started from the oldest of them misses no change made after the read. The
-// feed reads the log and journal only, never a copy, and leaves out every
-// hidden file.
-
 // The server's own path rules: the copies live on its disk.
 const PLATFORM = process.platform;
 

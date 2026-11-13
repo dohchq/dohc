@@ -276,15 +276,6 @@ export function createWorkspaceReplicationRoutes(
     throw relayError("method_not_allowed");
   }
 
-  // A held read tells a device when its log has an op past `since`, so an
-  // idle device can pull only when there is something to pull. It answers
-  // `hasMore` and the current watch boolean, and never serves an op. With
-  // `known`, it answers `hasMore` only for more than that many rows, and
-  // echoes the count it applied: zero once an epoch floor hides rows past
-  // `since`, and none above the limit, where it wakes for any row. `hold` is an
-  // upper bound. The relay answers at once when the log already has an op,
-  // and also when its parked reads are at capacity, so a device must not
-  // read an early empty answer as a promise to hold the next one.
   async function waitForLogChange(
     request: Request,
     workspaceId: string,

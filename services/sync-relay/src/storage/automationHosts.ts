@@ -56,16 +56,6 @@ export function initializeAutomationReachHandoverSchema(db: SqliteDb): void {
   `);
 }
 
-// The server's own schedule state for each workspace it has run, kept in
-// the relay database so it survives a restart of the process that runs it.
-// `through_ms` is the latest schedule mark the server reached, in any copy
-// of the workspace: it ran nothing after it. `host_generation` and
-// `host_released_ms` are the host record the server last started from, in
-// the copy `incarnation` names, so a restart does not start it again.
-// `taken_generation` is the latest release the copy was given to take, and
-// `fence_generation` the latest one an earlier copy was given: a rebuilt
-// copy lost that copy's engine, so a release at or before the fence was
-// already taken, and the new copy cannot take it again.
 export function initializeAutomationServerScheduleSchema(db: SqliteDb): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS sync_relay_automation_server_schedules (
@@ -188,7 +178,6 @@ export interface AutomationServerRun {
   claimId: string;
 }
 
-/** One run whose changes the copies that lost it may not have sent. */
 export interface LostAutomationServerRun {
   claimId: string;
   /** When it first started in a copy that lost it. */

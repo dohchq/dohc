@@ -48,7 +48,6 @@ async function fixture() {
   };
   let requestId = 0;
   let syncError: Error | null = null;
-  // A sync that waits, once it started, until the test releases it.
   let heldSync: { reached(): void; open: Promise<void> } | null = null;
   const lifetime = new AbortController();
   const copy: AutomationReplica = {

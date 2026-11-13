@@ -208,7 +208,6 @@ export interface CreateSyncRelayHandlerOptions {
   pressDataset?: Parameters<typeof createDatasetRoutes>[2]["pressDataset"];
   // This server's runs, for their owners; undefined while it runs no automations.
   serverRuns?: () => ServerRuns | undefined;
-  // This server's copies of workspaces, which the account routes read through; undefined until they start.
   serverCopies?: () => ServerCopies | undefined;
   // An account's reads and writes through those copies, keyed by sign-in.
   accountOperationRateLimiter?: TokenBucketLimiter;

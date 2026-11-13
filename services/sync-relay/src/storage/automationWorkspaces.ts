@@ -6,14 +6,6 @@ import { rebuildTables } from "./rebuildTables";
 import { getWorkspaceIdentity } from "./workspaces";
 import type { SqliteDb } from "./types";
 
-// The workspaces this server keeps a replica of, to run their automations
-// or to answer their owner's account. Each row holds the workspace's sync identity and owner when the replica
-// was made, the nonce its replication credential derives from, and the
-// replica's incarnation, which rises when a changed identity forces a new
-// replica. `started_at_ms` is when that incarnation began: its schedules
-// start after it. A workspace no condition needs any more is `unwanted`
-// from then; one that stayed unwanted long enough has `left`, and its
-// credential stops working.
 export function initializeAutomationWorkspaceSchema(db: SqliteDb): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS sync_relay_automation_workspaces (

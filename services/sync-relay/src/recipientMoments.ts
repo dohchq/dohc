@@ -1,35 +1,5 @@
 import type { ObjectMomentRow, ShareProposalOpRow, SyncRelayStorage } from "./storage";
 
-// How a recipient's change becomes one of the granter's own moments. Two
-// lanes use it: an accepted proposal, and a direct write to a Collection's
-// own files, which the relay mints at once under a named author.
-//
-// A recipient states a NET CHANGE, never a moment: the served moment drops
-// `momentId`, `objectId` and every `before*` field (`shareFilter.ts`), so a
-// recipient never learns a granter moment id and could not state a lineage the
-// granter recognizes. This module is where the relay turns the change into one
-// of the granter's OWN moments, built from facts the granter's log already
-// holds.
-//
-// The rewrite is what makes accept free. The granter's engine decides "does
-// this moment's base match my head?" by comparing its snapshot's
-// `latest_moment_id` against the payload's `beforeLatestMomentId`
-// (`crates/dohc-engine-sync/src/moment_apply.rs`, `head_fast_forward`). A
-// mismatch is not an error — apply falls through to the conflict branch and
-// opens a durable conflict row. So:
-//
-//   - the recipient was current -> the base IS the object's head -> clean
-//     apply, no conflict;
-//   - the file drifted -> the base is a real, older granter moment -> one
-//     conflict with a correct three-way base, resolved in the conflict UI that
-//     already exists;
-//   - the base resolves to no moment -> the payload states `beforePresent:
-//     "null"`, which fast-forwards only onto an object the granter does not
-//     have. A file the granter does have therefore opens a conflict instead of
-//     being silently overwritten by a change with no stated base.
-//
-// No new merge code, no new arbitration.
-
 export interface ProposalMomentContext {
   // The one version the share exposes, from the selector.
   versionId: string;

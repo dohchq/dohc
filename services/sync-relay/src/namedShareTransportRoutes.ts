@@ -358,16 +358,6 @@ export function createNamedShareTransportRoutes(
         headers: { "content-type": "application/octet-stream" },
       });
     }
-    // A recipient's blob, charged to the GRANTER's workspace.
-    // Same level gate as the proposal route, same refusal, so a probe cannot
-    // tell the level from the code.
-    //
-    // It needs no bound of its own. Three already apply and all three are
-    // the granter's: MAX_BLOB_BYTES per blob, the granter's workspace quota
-    // per workspace (`putBlob` charges it), and the unreferenced-blob sweep,
-    // which reclaims anything no open proposal claims. A blob count would
-    // bound bytes less tightly than the byte quota that already refuses
-    // them.
     if (route.route === "share-blob" && request.method === "PUT") {
       await claimPendingShares(actor.userId);
       const authorized = requireShareAction(route.shareId, actor.userId, "propose");

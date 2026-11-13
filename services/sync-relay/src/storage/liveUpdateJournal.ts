@@ -476,7 +476,6 @@ export async function readReplicaLiveJournal(storage: StorageContext, input: Rep
   });
   const rows: (ReplicaLiveJournalRow | ReplicaLiveJournalCancellation)[] = [];
   let workBytes = 0, rowBytes = 0, nextCursor = after, hasMore = snapshot.hasMore, control = 0;
-  // Serves the control entries ordered before `cursor`. False once the page is full.
   const serveControls = (cursor: number) => {
     for (; control < snapshot.controls.length && snapshot.controls[control]!.journalCursor < cursor; control++) {
       const entry = snapshot.controls[control]!, encodedBytes = Buffer.byteLength(JSON.stringify(entry));

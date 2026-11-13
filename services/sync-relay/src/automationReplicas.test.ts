@@ -274,7 +274,6 @@ describe("the automation replicas", () => {
     // Pull pages the relay holds for the copy beyond the one every pull answers, and the cursor each page moves to.
     let pullPages = 0;
     let pullCursor = 0;
-    // Pulls wait here, once one started, until the test releases them.
     let pullGate: { reached(): void; open: Promise<void> } | null = null;
     const engines: Array<{ exit(): void; close: ReturnType<typeof vi.fn>; waitForExit: ReturnType<typeof vi.fn> }> = [];
     spawn.mockImplementation(async (spawned: { env?: Record<string, string>; onExit?: () => void; authToken?: string }) => {
@@ -382,7 +381,6 @@ describe("the automation replicas", () => {
     return { promise, resolve };
   }
 
-  // Answers a function that holds each engine start from then until it is called.
   function holdStartups() {
     const answer = spawn.getMockImplementation()!;
     let held: Promise<void> = Promise.resolve();
@@ -1468,7 +1466,6 @@ describe("the automation replicas", () => {
     expect(folders(root)).toHaveLength(1);
   });
 
-  // Holds the engine's opening of `workspaceId` until the answer is released.
   function holdOpen(engine: ReturnType<typeof fakeEngine>, workspaceId: string) {
     const answer = spawn.getMockImplementation()!;
     const held = gate();
@@ -1680,7 +1677,6 @@ describe("the automation replicas", () => {
     await vi.advanceTimersByTimeAsync(0);
     const before = pulls();
     log(1);
-    // Asked for now, the pass runs at once, not after the broken one's retry delay.
     const asked = nextPass();
     running.reconcile();
     await vi.advanceTimersByTimeAsync(100);
@@ -2144,7 +2140,6 @@ describe("the automation replicas", () => {
     const row = raw.prepare("SELECT stage, message_state, result_json FROM sync_relay_account_operations WHERE operation_id = ?").get(id);
     return [row?.stage, row?.message_state, row?.result_json == null ? null : JSON.parse(String(row?.result_json))];
   };
-  // What the server's copies want: each copy whose phone writes may still publish, as serverCopies gives them a place.
   const publishing = (storage: SyncRelayStorage) => () =>
     new Map(storage.publishingCopies().map((copy): [string, readonly CopyReason[]] => [copy.workspaceId, ["publication"]]));
   const count = (engine: ReturnType<typeof fakeEngine>, method: string) => engine.methods().filter((sent) => sent === method).length;
@@ -2165,7 +2160,6 @@ describe("the automation replicas", () => {
     const report: (error: unknown, workspaceId?: string) => void = options.onError ?? unexpectedErrors();
     const running = await startAutomationReplicas({ storage, root, engineExecutable: process.execPath, relayOrigin: "https://relay.example",
       key, namespace, wanted, nowMs: () => clock.ms, onReconciled: passes.onReconciled,
-      // A pass that fails as a whole ends too, reported with no workspace.
       onError: (error, workspaceId) => { report(error, workspaceId); if (workspaceId === undefined) passes.onReconciled(); } });
     cleanup.push(async () => { await running.close(); await rm(root, { recursive: true, force: true }); });
     // The first pass is asked for at once.
@@ -2216,7 +2210,6 @@ describe("the automation replicas", () => {
     expect(after.slice(closedAt + 1)).not.toContain("sync.push");
     expect([outcome(raw, "lost"), outcome(raw, "unwritten")]).toEqual([
       ["saved", "published", { threadId: "thread" }],
-      // Its stage never committed, so it never published.
       ["refused", "pending", { threadId: null, reason: "Couldn't send" }],
     ]);
     expect(folders(root)).toEqual([]);
@@ -3076,7 +3069,6 @@ describe("the automation replicas", () => {
     expect(reopened, "the copy opened again and synced").toBeDefined();
     const closed = closes();
 
-    // Its sync goes on succeeding, and the copy stays open until the retry is due.
     await pass(WORKSPACE);
     await pass();
     expect(closes()).toBe(closed);

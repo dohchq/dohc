@@ -30,16 +30,6 @@ import {
 } from "./storage/agentConnections";
 import { PERSONAL_AGENT_ID, PERSONAL_REACH_LEVELS, type PersonalAgentChoice } from "./storage/personalAgents";
 
-// share-web calls the internal routes over the relay exchange key. They hold
-// the durable half of MCP sign-in for share links and personal agents: client
-// registrations, the consent request, its single-use code, and the
-// connection's tokens. share-web keeps the public OAuth routes, the consent
-// page, and the MCP transport.
-//
-// The two families never mix. The resource an agent signs in at picks the
-// tables: a share link's MCP address, or a personal one under
-// `/mcp/agent/w/<workspaceId>`. A code or token is looked up only in its own
-// family's tables.
 export type AgentConnectionRoute =
   | { route: "agent-clients" }
   | { route: "agent-authorizations"; action: "begin" | "consent" | "decision" | "personal-consent" | "personal-decision" }

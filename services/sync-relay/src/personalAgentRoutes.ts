@@ -202,13 +202,6 @@ export function createPersonalAgentToolRoutes(input: {
     });
   }
 
-  // The workspace's Groups, read through this server's copy as the account's
-  // phone reads them, under the account executor's capacity and refusals. The
-  // agent's DM and people's DMs are never listed, nor a Group without a
-  // channel id to read or post by. The visit checks the agent's authority at
-  // the account's current fence, and its reach, once the copy opens, once it
-  // has synced, and before the answer. A server that keeps no copies says so,
-  // after the reach check.
   async function groups(authority: PersonalAuthority, body: Record<string, unknown>, signal: AbortSignal): Promise<Response> {
     fields(body, ["workspaceId"], []);
     const workspaceId = parseWorkspaceId(body.workspaceId);
@@ -406,14 +399,6 @@ export function createPersonalAgentToolRoutes(input: {
     }
   }
 
-  // Answers with the messages for the agent across its reach: a human post by
-  // its account, not from the CLI, in the agent's DM, mentioning its current
-  // handle, or in a thread it posted in. Only the first row a scan reads may
-  // pass the scan's byte budget. Every workspace shares one scan
-  // budget. A scan that finds nothing but is behind answers at once; one that
-  // is caught up parks on every workspace in reach until a wake, the
-  // deadline, or running work ending. Access is checked before every scan and
-  // again before the answer leaves.
   async function wait(authority: PersonalAuthority, body: Record<string, unknown>, signal: AbortSignal): Promise<Response> {
     fields(body, [], ["cursor", "timeoutMs"]);
     const timeoutMs = body.timeoutMs === undefined ? AGENT_CHAT_MAX_WAIT_MS

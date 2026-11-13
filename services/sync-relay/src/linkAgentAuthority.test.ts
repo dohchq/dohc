@@ -127,7 +127,6 @@ function internal(f: Pick<Fixture, "h">, path: string, body: unknown, exchangeKe
   }));
 }
 
-// Signs an agent in on `link`, as share-web's sign-in does.
 async function connect(f: Pick<Fixture, "h">, link: Link, exchangeKey = RELAY_EXCHANGE_KEY): Promise<Agent> {
   const send = (path: string, body: unknown) => internal(f, path, body, exchangeKey);
   const clientId = String((await ok(await send("agent-clients", {

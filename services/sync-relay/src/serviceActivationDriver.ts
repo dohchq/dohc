@@ -123,9 +123,7 @@ export class ServiceActivationDriver {
   readonly #owners=new Map<string,Owner>();
   // Targets this driver may have loaded into the engine since it started.
   readonly #loaded=new Set<string>();
-  // Hosted targets the engine unloaded while idle, with their documents. Passes skip them until they wake.
   readonly #dormant=new Map<string,string>();
-  // Targets a hosted pass left held, with the reason, until the engine captures them again.
   readonly #held=new Map<string,ServiceHostedHold["reason"]>();
   // Targets that cannot progress, with why. Each failed its one capture; passes skip it until `unblock` allows one more.
   // One without lineage also tries once more when the relay holds a Y.Doc update for its document newer than `update`, the latest before that capture's pull.

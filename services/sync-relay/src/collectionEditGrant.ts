@@ -4,12 +4,6 @@ import { collectionEditSelector, coversCollectionFolder, type ShareSelector } fr
 import { readCurrentShareGrant } from "./storage/currentShareGrant";
 import type { SyncRelayStorage } from "./storage/types";
 
-// Who may change a shared Collection from outside its owner's computers: a
-// recipient's own named grant with Edit on files, never one opened from a
-// public link until the owner promotes it. A direct write to a Collection's
-// files and a relayed Button press both answer to this one rule, so the
-// two cannot drift.
-
 type GrantStorage = Pick<
   SyncRelayStorage,
   "findChannelCreateKind" | "getShare" | "getShareGrant" | "listActiveShareGrantsForRecipient" | "workspaceIsOwnedBy"

@@ -326,8 +326,6 @@ describe("relayed Button presses", () => {
     const presses = await list(r);
     expect(presses).toEqual([{ hostPressId: "relay-id-1", definitionHash: HASH, state: "pending", automationId: AUTOMATION, collectionPath: "trip/packing", recordId: "rec-12", pressedBy: RECIPIENT, createdAtMs: 10_000, confirmed: [] }]);
 
-    // The host's engine takes it. The list still names it until it settles,
-    // so a host that restarts before pressing it finds it again.
     expect(await (await post(r, "accept", { hostPressIds: ["relay-id-1"] })).json()).toEqual({ ok: true, accepted: ["relay-id-1"] });
     expect(await list(r)).toMatchObject([{ hostPressId: "relay-id-1", state: "accepted" }]);
     const settled = await post(r, "settle", { hostPressId: "relay-id-1", outcome: "done", error: null });

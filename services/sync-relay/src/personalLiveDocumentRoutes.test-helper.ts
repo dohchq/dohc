@@ -21,7 +21,6 @@ const namespace = "personal-live-route-test";
 const hostId = "self-host-personal-live-route-test";
 const RESOURCE = `${SHARE_WEB_ORIGIN}/mcp/agent/w/${scope.workspaceId}`;
 
-/** The Postgres fence as the relay reads it: every account at epoch 0, until it is down. */
 class Fence implements CredentialFence {
   down = false;
   /** While set, each epoch read waits for it, as a slow Postgres does. */

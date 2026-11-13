@@ -76,21 +76,6 @@ function checkedButtonAuthority<T>(read: () => T): T {
   }
 }
 
-// This server runs the automations of every workspace whose host record
-// names it (docs/engineering/security-boundaries.md). Each workspace
-// runs in the server's replica of it, through the same executor the owner's
-// computers run, with the owner's authority from the relay's own records:
-// its owner, its editors, and its host. The server follows the host record
-// in process. When the record names it, it runs the workspace's schedules,
-// Group triggers, and presses from shared views; when the owner moves them
-// to a computer, it stops its Group triggers, steps its schedules one last
-// time, and releases with its Group coverage and reach verdicts. A write to
-// the relay wakes it; nothing polls.
-//
-// One tenant must not starve another: runs are bounded per workspace by a
-// token bucket and across the server by a count of runs at once. A claim
-// past either stays pending in its replica's engine.
-
 /** At most this many runs at once across the server. */
 export const SERVER_CONCURRENT_RUNS = 4;
 /** Each workspace may start this many runs at once... */
@@ -189,7 +174,6 @@ interface WorkspaceState {
   closed: boolean;
   syncing: Promise<void> | null;
   syncAgain: boolean;
-  /** Syncs that failed in a row, and the timer that tries again. */
   syncFailures: number;
   syncTimer: ReturnType<typeof setTimeout> | undefined;
   reporting: Promise<void>;
@@ -663,7 +647,6 @@ export async function startAutomationServer(options: AutomationServerOptions) {
           }
           after = page.next;
         } while (after !== null);
-        // Until it is delivered, no sync confirms that a run's changes were sent.
         if (undelivered !== null) options.onError(`deliver automation record "${undelivered}" in workspace "${workspaceId}"`,
           new Error("The record has updates the server has not sent, because no outbox holds them or the shared file set them aside. Until they are sent, the server confirms no run's changes as sent."));
         if (failures.length) throw failures[0];
@@ -1362,7 +1345,6 @@ export function createRunGate(input: {
   const bucketOf = (workspaceId: string) => {
     const now = input.nowMs();
     const bucket = buckets.get(workspaceId) ?? { tokens: burst, atMs: now };
-    // A clock that stepped back refills nothing until it passes the last reading.
     bucket.tokens = Math.min(burst, bucket.tokens + Math.max(0, now - bucket.atMs) / refillMs);
     bucket.atMs = Math.max(bucket.atMs, now);
     buckets.set(workspaceId, bucket);
@@ -1434,7 +1416,6 @@ export function createRunGate(input: {
   };
 }
 
-/** The server's name as the owner's settings show it: DOHC_SERVER_NAME, printable and bounded, or "This server". */
 export function automationServerLabel(name: string | undefined): string {
   const printable = (name ?? "").replace(/[\u0000-\u001f\u007f]/gu, "").trim();
   const label = [...printable].slice(0, AUTOMATION_COMPUTER_LABEL_MAX_CHARS).join("").trim();

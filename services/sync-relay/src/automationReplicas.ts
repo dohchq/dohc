@@ -446,7 +446,6 @@ export async function startAutomationReplicas(options: {
     const syncRounds = (rounds: number, callerSignal?: AbortSignal): Promise<boolean> => {
       running += 1;
       syncGeneration += 1;
-      // Until this sync finishes caught up, the copy may be behind what the relay holds now.
       pulledCurrent = false;
       const run = syncChain.then(async () => {
         replicaSignal.throwIfAborted(); callerSignal?.throwIfAborted(); current();

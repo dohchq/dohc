@@ -16,16 +16,6 @@ import type { SqliteDb } from "./types";
 import type {AutomationDeclaration} from "@dohc/live-session-contract/live-authorship";
 import { markNotices, noticeIdFrom } from "./notices";
 
-// Button presses from shared views, waiting for the workspace's automation
-// host (ADR 0012). A press is recorded for the recipient's named Edit grant
-// on the Collection's folder, and checked again whenever the host is offered
-// it, so a grant that ends first runs nothing. The host passes the relay's
-// own id to its engine, so no recipient's id can collide with another press.
-//
-// Every press, settled or not, stays for the whole retention window, so a
-// press id sent again inside it always finds its press and never runs twice.
-// Storage is bounded by refusing new presses, never by forgetting old ones.
-
 // A grant's presses the host has not settled. More waits for the host first.
 export const AUTOMATION_PRESSES_UNSETTLED_PER_GRANT = 50;
 // A grant's presses inside the retention window. More are refused.

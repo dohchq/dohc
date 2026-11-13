@@ -50,10 +50,6 @@ const TAKEDOWN_SQL = `CREATE TABLE sync_relay_app_publication_takedowns (
   reason TEXT NOT NULL CHECK (length(reason) BETWEEN 1 AND 1024 AND length(CAST(reason AS BLOB)) <= 4096 AND instr(reason, char(0)) = 0)
 ) STRICT`;
 
-// A takedown holds app publishing for the owner's whole account until the
-// operator lifts it. Each takedown keeps its own row, with no foreign key, so
-// any of them still lifts the hold after its publication or workspace is
-// deleted. Deleting the account removes them.
 const HOLD_MIGRATION = "app-publishing-holds-v1";
 const HOLD_TABLE = "sync_relay_app_publishing_holds";
 const HOLD_SQL = `CREATE TABLE sync_relay_app_publishing_holds (

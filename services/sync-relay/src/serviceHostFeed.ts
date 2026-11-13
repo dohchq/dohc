@@ -286,12 +286,6 @@ export function createServiceHostFeed(storage: SyncRelayStorage, activity: Pick<
     }
 
     if (head === "log" && route.length === 1 && request.method === "POST") {
-      // Each coordinate gets its own decision. A refused op still takes its
-      // coordinate, as a relay-written refusal, so the host's later ops land.
-      // What the scope already rules out is refused, and a blob out of reach
-      // fails the request, before preparation, which must never probe a blob
-      // the host may not name; the rest is decided again under the append's
-      // writer, where the scope cannot move.
       const received = new WeakMap<SyncRelayLogInput, string>();
       const refuse = (op: SyncRelayLogInput, reason: HostedRefusalReason) =>
         refuseOp(op, { opKind: op.opKind, payloadSha256: received.get(op)!, reason });

@@ -172,7 +172,6 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
   }
   // In memory, on this server's clock: a restart allows one more grace period.
   const missingSince = new Map<string, number>();
-  /** The apps of a deleted Collection stop. Its records stay until its owner restores its files. */
   function requireCollectionFile(workspaceId: string, datasetId: string): void {
     const key = JSON.stringify([workspaceId, datasetId]), now = nowMs();
     if (collectionFilePresent(storage, workspaceId, datasetId, now)) { missingSince.delete(key); return; }

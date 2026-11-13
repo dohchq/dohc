@@ -14,17 +14,6 @@ export const UNFINISHED_INDEX = "idx_sync_relay_account_operations_unfinished";
 const UNFINISHED = "stage NOT IN ('saved', 'refused') AND command_json IS NOT NULL";
 const MARKER = "account-operations-v1";
 
-// One row per phone write, keyed by the account and the phone's operation ID,
-// written before the engine changes anything. It binds the write to the
-// workspace, the operation, its arguments, and the copy it was made on, and
-// holds what a retry or a restart needs to finish it. A row settled long ago
-// becomes a tombstone that keeps only its key, binding, and final stage, so
-// a retry of a forgotten write can still be told apart from a new one.
-// Deleting a workspace leaves its rows as tombstones at once, so the table
-// has no foreign key to the workspace. `log_floor` and `log_ceiling` bound
-// the relay log rows the write's records can be: after the log's head when
-// it was recorded, and no later than the head when the workspace's identity
-// moved on from the one it was recorded under.
 const SCHEMA = {
   [ACCOUNT_OPERATIONS]: `CREATE TABLE sync_relay_account_operations (
   account_id TEXT NOT NULL CHECK (length(account_id) BETWEEN 1 AND 256),

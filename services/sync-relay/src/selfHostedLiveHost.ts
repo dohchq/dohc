@@ -51,7 +51,6 @@ function canonicalPath(value: string, directory: boolean): string {
   return actual;
 }
 
-/** The service host id the self-hosted live host provisions for the relay's history. */
 export const selfHostedLiveHostId = (namespace: string) => `self-host-${namespace}`;
 const movedKey = (row: ServiceHostEnrollment) => JSON.stringify([row.workspaceId, row.objectId, row.path, row.replicationEpoch, row.streamIdentity]);
 const atPath = (storage: SyncRelayStorage, row: ServiceHostEnrollment) =>
@@ -83,7 +82,6 @@ export function selectHostedDocuments(storage: SyncRelayStorage, cursor: Service
     if (departs(row, holds)) (matching(row) ? departing : obsolete).push(row);
     else if (matching(row)) (atPath(storage, row) ? targets : away).push(row);
   }
-  // A document moved from its enrolled path leaves its replica as a departed one does, until the replica confirms it gone.
   const still = new Set(away.map(movedKey));
   for (const key of moved) if (!still.has(key)) moved.delete(key);
   departing.push(...away.filter(row => !moved.has(movedKey(row)) || storage.serviceRestoreInProgress(row)));
