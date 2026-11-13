@@ -230,7 +230,10 @@ describe("share-web sessions", () => {
       await writeFile(join(viewerAssetsDir, "index.html"), "page");
       await writeFile(join(viewerAssetsDir, "assets", "link-AbC12_-9.js"), "script");
       await writeFile(join(viewerAssetsDir, "assets", "viewer.js"), "unhashed");
-      await writeFile(join(viewerAssetsDir, "assets", "fonts", "Virgil", "Virgil-Regular.woff2"), "font");
+      await writeFile(
+        join(viewerAssetsDir, "assets", "fonts", "Virgil", "Virgil-Regular.woff2"),
+        "font",
+      );
       const handler = createShareWebHandler({
         relayUrl: "http://relay.test",
         publicHosts: new Set([HOST]),
