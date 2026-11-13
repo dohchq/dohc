@@ -1337,8 +1337,8 @@ function typeNote(f:ReturnType<typeof fixture>,entries:number){
     sourceDigest:projected.evidence.projectedMarkdownSha256,sourceByteLength:projected.evidence.projectedMarkdownByteLength,
     fullStateDigest:hash(fullState),fullStateByteLength:fullState.length})
 }
-// 1,075 rows is the longest note on the real server; 2,000 rows is about 400 words typed before a note is first shared,
-// and the most one read takes. One row more is folded.
+// 1,075 rows is the longest note on the real server; 2,000 rows, the self-host entry limit, is about 400 words typed
+// before a note is first shared. Each folds its rows into a checkpoint before its last read, which walks at most one page.
 const selfHostEntryLimit=selfHostLiveProfile().service.activation.maxActivationHistoryEntries
 it.each([1_075,selfHostEntryLimit,selfHostEntryLimit+1])('activates a typed note with %i rows since its base under the self-host limits',async entries=>{
   const config=selfHostActivation(),f=fixture();try{

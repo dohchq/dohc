@@ -5420,7 +5420,8 @@ async function reclaimedBlocked(block: "refused" | "history-over-budget", {share
 // Proves: a document reclaimed while idle with a block keeps reporting it
 // while it is not hosted, and keeps it once an open hosts it again. A refused
 // one is not captured again. One whose history was past the read budget keeps
-// the wait it had.
+// the wait it had, so it is captured again only once that wait ends, as it
+// would have been had it never left.
 it.each(["refused", "history-over-budget"] as const)("keeps a %s block for a document reclaimed while idle, through the next open", async block => {
   const o = await reclaimedBlocked(block);
   expect(o.host.blocked(o.sibling)).toBe(block);

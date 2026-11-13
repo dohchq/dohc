@@ -157,7 +157,7 @@ it("a note typed within today's entry limit activates", async () => {
   expect((await activate(note)).outcome).toEqual({document: note.document, replayed: false, completed: false});
 });
 
-// One keystroke past the most history one read takes: the activation folds the rest.
+// One keystroke past today's entry limit: the activation folds its rows into a checkpoint before its last read.
 it("a note typed past today's entry limit activates", async () => {
   const note = await typedRelayNote(ACTIVATION.maxActivationHistoryEntries + 1);
   expect((await activate(note)).outcome).toEqual({document: note.document, replayed: false, completed: false});
@@ -176,7 +176,7 @@ it("a typed note's final read walks at most one page of rows after its checkpoin
 });
 
 it("an activation whose lineage folds further between its read and its transaction is refused as stale, and the next one activates", {timeout: 120_000}, async () => {
-  const note = await typedRelayNote(2_400), validate = validation();
+  const note = await typedRelayNote(2_000), validate = validation();
   const storage = note.deployment.storage as unknown as StorageContext;
   const scope = lineageOf(note, validate);
   const foldPage: OrdinaryFoldValidator = async (work, signal) => {
@@ -186,7 +186,7 @@ it("an activation whose lineage folds further between its read and its transacti
   };
   const foldOnce = () => foldOrdinaryCheckpointPages(storage, {scope, pages: 1, validate: foldPage, nowMs: () => 3,
     bounds: {pageRows: ORDINARY_FOLD_PAGE_ROWS, pageBytes: ACTIVATION.maxBytesPerDrain}});
-  // After one page, fewer rows follow the checkpoint than one read takes, so the activation reads from it without folding.
+  // After one page, less than a page follows the checkpoint, so the activation reads from it without folding.
   expect(await foldOnce()).toMatchObject({kind: "folded", reachedCursor: false});
   let folded = false;
   const folding: Validate = Object.assign(async (...[work, signal]: Parameters<Validate>) => {
