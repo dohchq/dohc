@@ -158,14 +158,6 @@ export function createAgentChatRoutes(input: {
     return jsonResponse({ ok: true, message: linkChatMessage(message) });
   }
 
-  // Holds until a message for this agent arrives in its link's channel, or
-  // the deadline passes. A message is for the agent when it mentions the
-  // agent or replies in a thread the agent posted in; a thread filter only
-  // narrows that. Other rows, and the agent's own posts, move the cursor
-  // without ending the hold. A scan reads one page of the log: one that
-  // finds nothing but has more answers at once with the cursor it reached.
-  // Access is checked before every scan, so before parking and after each
-  // wake, and again before the answer leaves.
   async function wait(body: Record<string, unknown>, signal: AbortSignal): Promise<Response> {
     fields(body, ["accessToken", "resource"], ["cursor", "threadId", "timeoutMs"]);
     const check = credential(body);

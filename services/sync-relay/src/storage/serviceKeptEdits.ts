@@ -49,7 +49,6 @@ export const SERVICE_KEPT_EDITS_PAGE = 256;
 export type ServiceKeptEditsReason = "provenance-refused" | "delivery-conflict" | "capacity-refused" | "invalid-update";
 export const SERVICE_KEPT_EDITS_REASONS: readonly string[] = ["provenance-refused", "delivery-conflict", "capacity-refused", "invalid-update"];
 
-/** The workspace identity whose hosted store holds a queue. */
 export interface ServiceKeptEditsIdentity {readonly replicationEpoch: string; readonly streamIdentity: string}
 /** One queue, in the store of one workspace identity. */
 export interface ServiceKeptEditsQueue {readonly workspaceId: string; readonly identity: ServiceKeptEditsIdentity; readonly outboxId: string}

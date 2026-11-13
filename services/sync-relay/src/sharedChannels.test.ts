@@ -692,7 +692,6 @@ describe("shared channels (MU-C4)", () => {
       "hello from member A",
       "replying to the owner",
     ]);
-    // And member A sees their own echo plus the owner's history identically.
     const opsForA = await fetchSharePage(h, MEMBER_A, shareA);
     expect(opsForA.map((op) => op.opKind)).toEqual(opsForB.map((op) => op.opKind));
     // A poll a member resolves names one of its choices; a choice outside

@@ -43,11 +43,6 @@ export const LINK_DISCUSSION_MESSAGE_FIXED_STORAGE_BYTES =
 export const LINK_DISCUSSION_PRINCIPAL_FIXED_STORAGE_BYTES =
   LINK_DISCUSSION_NAME_BYTE_LIMIT + 5 * LINK_DISCUSSION_SQLITE_INTEGER_BYTES;
 export const MAX_DISCUSSION_REVISION = Number.MAX_SAFE_INTEGER;
-// Retention grace for freshly-uploaded blobs (0P sync-hardening item 4). Blob
-// upload is two-phase (PUT /blobs/:sha, then POST /log referencing it); GC that
-// runs between the two must not reclaim the blob just because no log row
-// references it yet. Any blob younger than this window is untouchable. Ten
-// minutes comfortably covers a slow/retried push.
 export const DEFAULT_BLOB_GRACE_MS = 10 * 60 * 1000;
 export const RETIRED_LINK_CREDENTIAL_HISTORY_LIMIT = 10;
 export const ACTIVE_LINK_DEPENDENT_GRANT_LIMIT = 1_000;

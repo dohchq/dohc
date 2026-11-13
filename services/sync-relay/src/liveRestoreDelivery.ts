@@ -99,7 +99,6 @@ export async function deliverStopRestore(options: {
           const settled = await settlementResponse(c.client.sendRequest({...request(), method: "liveApplication.settle",
             params: {registrationId, terminalReceipt: next.predecessor ? {...next.predecessor} : null}}, signal), next.predecessor);
           check();
-          // Its file write has not landed; the next attempt retries after it does.
           if (settlementPending(settled)) return settled;
           if (!settled.materialized) return {kind: "pending", reason: "settlement-materialization-pending"};
           settledSinceApply = true;

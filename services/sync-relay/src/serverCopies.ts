@@ -3,18 +3,6 @@ import { startAutomationReplicas, type AutomationReplica } from "./automationRep
 import { notFound, RelayError } from "./errors";
 import type { CopyReason } from "./storage/automationWorkspaces";
 
-// Copies of workspaces this server keeps, for its automations and for its
-// owners' accounts. Only an open visit holds one of the
-// AUTOMATION_SERVER_MAX_WORKSPACES places, besides the workspaces whose
-// automations run here. Account visits use at most ACCOUNT_VISIT_WORKSPACES
-// of them, so automations always keep the rest. One account holds at most
-// ACCOUNT_VISITS_PER_ACCOUNT visits at once, so it cannot take the accounts'
-// share, and one caller at most ACCOUNT_VISITS_PER_CALLER, so one phone or
-// agent cannot take its account's. A phone write that may still publish
-// keeps its copy in the accounts' share too: the workspaces an account
-// visits and those its writes keep come to ACCOUNT_VISITS_PER_ACCOUNT at
-// most together. A copy whose writes have all stalled takes no place.
-
 /** The workspaces account visits may hold open at once, of AUTOMATION_SERVER_MAX_WORKSPACES. */
 export const ACCOUNT_VISIT_WORKSPACES = 48;
 /** The account visits one account may hold at once, across its credentials. */

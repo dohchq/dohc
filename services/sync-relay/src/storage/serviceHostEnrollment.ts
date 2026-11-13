@@ -27,16 +27,6 @@ export const SERVICE_HOST_ENROLLMENTS = "sync_relay_service_host_enrollments";
 const MIGRATION = "service-host-enrollments-v2";
 const DRAIN_MIGRATION = "service-host-enrollments-v3";
 const DEMAND_MIGRATION = "service-host-enrollments-v4";
-// `owner_stop` is the owner's Pause or Stop. Stop applies at once. Pause cuts
-// the service host's reads and live admission at once and applies in full once
-// the host no longer holds the document; until then the enrollment stays
-// enabled, so the host keeps its credential while applied work settles.
-// `created_at_ms` holds the enrollment's run token (`runToken`).
-// `share_id` names a share whose Edit grant covered the document, a hint for
-// the coverage check. `demand_at_ms` records hosting demand that no share
-// creates: the last personal open, owner open or Resume. `owner_demand` is 1
-// once the owner opened or resumed the document, which takes it out of the
-// agent-only caps.
 const SQL = `CREATE TABLE ${SERVICE_HOST_ENROLLMENTS} (
   workspace_id TEXT NOT NULL,
   object_id TEXT NOT NULL,

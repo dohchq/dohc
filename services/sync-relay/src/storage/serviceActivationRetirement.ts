@@ -44,11 +44,6 @@ const currentIdentity = (table: string) => `EXISTS(SELECT 1 FROM sync_relay_work
   WHERE current_identity.workspace_id=${table}.workspace_id
     AND current_identity.replication_epoch=json_extract(${table}.source_json,'$.replicationEpoch')
     AND current_identity.stream_identity=json_extract(${table}.source_json,'$.streamIdentity'))`;
-/**
- * An obligation is open from its request until the activation retires, while the
- * workspace keeps the identity the activation was captured under. A later
- * identity leaves its lineage stale, so it could never retire.
- */
 export const OPEN_RETIREMENT = `${SERVICE_ACTIVATIONS}.retire_requested_at_ms IS NOT NULL AND ${SERVICE_ACTIVATIONS}.retired_at_ms IS NULL
   AND ${currentIdentity(SERVICE_ACTIVATIONS)}`;
 

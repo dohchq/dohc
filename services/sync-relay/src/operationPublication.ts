@@ -15,13 +15,6 @@ import type { SyncRelayStorage } from "./storage";
 import { OPERATION_TOMBSTONE_BATCH, type OperationRecord } from "./storage/operationRecords";
 import { REFUSED_OP_KIND } from "./storage/relayAdmission";
 
-// A phone write is saved only once the relay holds every record it made, as
-// the relay accepted them. The engine writes a receipt for each stage of the
-// write, naming the journal rows the stage added; the copy pushes them; the
-// relay's row at each of those coordinates is then checked against what the
-// write's stored command expects. Until then the write is pending. One whose
-// folder goes first settles from what the relay holds then.
-
 /** The answers a refused write gives the phone. No relay or engine text reaches it. */
 export type RefusalReason =
   | "already answered"
@@ -44,7 +37,6 @@ export function isRefusalReason(reason: string): reason is RefusalReason {
 
 /** How long a request waits for its write to publish before it answers pending. */
 export const PUBLICATION_DEADLINE_MS = 20_000;
-// The wait between a request's attempts, doubling up to the most.
 const FIRST_POLL_MS = 100;
 const MAX_POLL_MS = 2_000;
 const RECEIPT_DEADLINE_MS = 30_000;

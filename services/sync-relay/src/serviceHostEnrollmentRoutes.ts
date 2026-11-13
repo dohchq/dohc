@@ -172,10 +172,6 @@ function readTurns(max: number) {
     return () => {if (released) return; released = true; active--; waiting.shift()?.();};
   };
 }
-// A page's body keeps its read slot until the client took all of it, cancels it
-// or goes away, or stops taking it for the drain timeout. The slot ends at the
-// read after the body's one chunk, which a writer under backpressure makes only
-// once that chunk drained.
 function heldResponse(body: unknown, release: () => void, signal: AbortSignal): Response {
   const bytes = new TextEncoder().encode(JSON.stringify(body));
   let sent = false;

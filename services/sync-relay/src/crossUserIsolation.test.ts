@@ -25,30 +25,6 @@ import {
   type ChatOp as RawOp,
 } from "./testing";
 
-// MU-C5 — the consolidated cross-user isolation sweep. The per-lane suites
-// (MU-C0 authorship, MU-C1 presence, MU-C2 reactions, MU-C3 DMs, MU-C4 shared
-// channels) each proved one invariant against one surface. This file proves the
-// cross-cutting invariants hold together — across path shares and chat
-// shares AND DMs at once — using planted SENTINEL values so a leak is a literal
-// substring match, not an inference. It deliberately does not re-run the
-// per-lane matrices; it is the sentinel proof that ties them together.
-//
-// The six invariants (one describe block each):
-//   1. Byte-identical denial: every share-scoped route denies a non-recipient
-//      identically to a share that never existed — same status, same body,
-//      before parsing body/origin. A stale agent-channel grant does too.
-//   2. No-forge (MU-C0): a member cannot append a chat op authored as another
-//      user; the member-append gate rejects it 403 authorship_mismatch.
-//   3. Revocation closes cleanly: after revoke, read and append both fail
-//      byte-identically to an absent share.
-//   4. filterOpForShare leak sentinels: across every served op kind, the served
-//      payload excludes every planted internal SENTINEL-* value.
-//   5. Presence never journaled: after presence traffic on a workspace scope
-//      and a share scope, no durable table holds a presence row.
-//   6. In-request revoke race (closed): a revoke that lands between the
-//      member-append route's entry and its transactional insert aborts the
-//      write via the in-transaction guard.
-
 afterEach(closeTestStorages);
 
 // A shared PresenceHub can be injected so a test can assert the hub holds the

@@ -297,8 +297,6 @@ export function validateLinkCapability(input: {
   };
 }
 
-// What a link session may read now. Link requests and an app published through
-// the link both admit the session through this check.
 export function authorizeLinkSession(
   storage: Parameters<typeof authorizeLinkShareAction>[0]["storage"],
   session: SyncRelayLinkSessionRow,

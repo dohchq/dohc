@@ -291,15 +291,6 @@ export function createProposalRoutes(
     }
     if (route.route === "share-proposals") throw relayError("method_not_allowed");
 
-    // The reverse path submitting owes (`AGENTS.md`): a recipient can take
-    // its changes back while they are still open.
-    //
-    // Deliberately not gated on the level. A downgrade from edit to comment
-    // stops new submits, and a reverse path that a downgrade removes is not
-    // a reverse path — it would strand the recipient's already-sent changes
-    // in front of a granter who may never answer them. Membership is still
-    // proven (`authorizeShareAction`), and the proposal must be this share's
-    // and this person's.
     if (route.route === "share-proposal-withdraw" && request.method === "POST") {
       await claimPendingShares(actorUserId);
       const authorized = requireShareAction(
@@ -327,19 +318,6 @@ export function createProposalRoutes(
     route: WorkspaceProposalRoute,
     actorUserId: string,
   ): Promise<Response> => {
-    // What the granter still has to answer, and nothing else: this route
-    // serves open proposals only, so it states no `state` and no
-    // `settledAtMs` — both would be constants. A settled proposal is
-    // history, and this surface asks one question.
-    // A summary, because this is what a timer polls. The review surface
-    // renders a sender and a count from it; it does not draw files until a
-    // granter opens one. Serving every op of every open proposal here
-    // resolved a base per op on every tick to build rows nobody read.
-    //
-    // Who sent them is resolved here from the server-derived user id on the
-    // proposal row. The granter's client used to rebuild this by fetching
-    // its whole share list and matching share ids — a second request per
-    // review, and wrong the moment a share has more than one recipient.
     if (route.route === "workspace-proposals" && request.method === "GET") {
       const rows = await Promise.all(
         storage.listShareProposalsForWorkspace(route.workspaceId).map(async (proposal) => ({
@@ -420,14 +398,6 @@ export function createProposalRoutes(
       // proposal record is the real provenance.
       const summary = proposerEmail ? `Accepted changes from ${proposerEmail}` : null;
       const versionId = proposal.versionId;
-      // This proposal's own origin stream, never the recipient's push
-      // origin. The recipient numbers its own stream densely from its own
-      // journal, so ops the relay inserted there would take sequence
-      // numbers the recipient's next push claims — and `appendLogBatch`
-      // refuses a re-used sequence with different content, permanently. One
-      // accept would wedge the recipient's chat for the life of the share.
-      // A fresh origin per proposal cannot collide with anything: nothing
-      // else ever writes it.
       const originId = `share:${proposal.shareId}:${PROPOSAL_ORIGIN_PREFIX}${route.proposalId}`;
       // The relay assigns the coordinates, because a proposal's ops carry
       // none: they were never a log. A concurrent accept that took the same

@@ -995,8 +995,6 @@ it.skipIf(engine.missing).each(["recipient-only", "owner-and-recipient"] as cons
   const peerMoment = await peerHistory.getMoment({workspaceId: WORKSPACE, momentId: recipientMoment.momentId});
   expect(peerMoment).toMatchObject({syncRecordOnly: true, authors: expect.arrayContaining(confirmedAuthors)});
   expect(peerMoment?.authors).toHaveLength(confirmedAuthors.length);
-  // Publication refreshed the hosting computer's moment to the admitted
-  // authors, and the relay's acceptance confirms each person there too.
   const refreshedAuthors = (await moments()).find(moment => moment.momentId === recipientMoment.momentId)?.authors;
   expect(refreshedAuthors).toEqual(expect.arrayContaining(confirmedAuthors));
   expect(refreshedAuthors).toHaveLength(confirmedAuthors.length);

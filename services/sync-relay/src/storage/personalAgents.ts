@@ -27,17 +27,6 @@ import { nullableText } from "./rows";
 import type { SqliteDb } from "./types";
 import { workspaceIsOwnedBy } from "./workspaces";
 
-// A personal agent is an MCP agent signed in as its account's own agent. It
-// reaches only workspaces that account owns here, each at a level. Its
-// authorizations, connections, and tokens have their own tables: a link
-// token is never found here, and a personal token is never found in the link
-// tables. Client registration and the token helpers are shared.
-//
-// Two counters revoke it. The agent's epoch increases on Sign out, Remove,
-// and signing in again as that agent. The account's credential fence, in
-// Postgres, increases when its password changes. Every authorization and
-// connection stores both, and every check compares both.
-
 export const PERSONAL_AGENT_ID = /^p-[a-z2-7]{26}$/u;
 export const PERSONAL_AGENT_REACH_LIMIT = 20;
 export const PERSONAL_AGENTS_PER_ACCOUNT_LIMIT = 50;
@@ -795,11 +784,6 @@ export function changePersonalAgent(storage: StorageContext, input: {
 
 // --- revocation ----------------------------------------------------------------
 
-/**
- * Signs out the account's active agents left with no connection. Each keeps
- * its epoch, so a sign-in the owner approved for it still redeems until its
- * code expires. Bumps the roster once if any changed.
- */
 function signOutAgentsWithoutConnections(storage: StorageContext, ownerUserId: string): void {
   const signedOut = storage.db.prepare(`UPDATE sync_relay_personal_agents SET status = 'signed_out'
     WHERE owner_user_id = ? AND status = 'active'
@@ -874,11 +858,6 @@ export function initializeWorkspaceDisplayName(db: SqliteDb): void {
 
 // --- activity --------------------------------------------------------------------
 
-/**
- * The version a client reports at registration, and the agent's last sign-in
- * with the version it reported then. An agent from before these columns has
- * none until it signs in again.
- */
 export function initializePersonalAgentActivity(db: SqliteDb): void {
   const marker = "personal-agent-activity-v1";
   if (db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(marker)) return;

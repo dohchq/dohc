@@ -4,15 +4,6 @@ export const AUTOMATION_HOSTS = "sync_relay_automation_hosts";
 export const AUTOMATION_COMPUTERS = "sync_relay_automation_computers";
 const MARKER = "automation-hosts-v1";
 
-// One host per workspace: the computer that runs its schedules and
-// Group-message automations. `generation` rises on every change.
-// `handover_from` names the computer still running them after the owner
-// chose another. `released_through_ms` is the latest time any computer
-// that handed over reported when it stopped; it stays through later
-// handovers and never goes back.
-//
-// The owner's computers, as each last checked in. The relay keeps a bounded
-// list per workspace and forgets the computer seen longest ago.
 const AUTOMATION_HOST_SCHEMA = {
   [AUTOMATION_HOSTS]: `CREATE TABLE sync_relay_automation_hosts (
   workspace_id TEXT NOT NULL PRIMARY KEY

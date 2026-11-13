@@ -1840,10 +1840,6 @@ it("retires a document refused at a seed nothing applied before its copy, and ac
   expect(k.row()).toMatchObject({copied: false});
 });
 
-// Proves: Opus's F2. Resume while a stopped document's retirement waits, on a queue frozen at a seed nothing
-// applied, leaves the retirement running on every pass, which proves the seed absent and abandons it. As for
-// any Resume before a retirement finished, the obligation stays until the document departs again; then it
-// completes without waiting for a recovery copy, and the next Resume activates the successor.
 it("keeps retiring a document resumed while its retirement on a refused seed waited, and activates the successor after it departs", async () => {
   const o = await enrolledServiceHost({freshRegistrations: true}), k = keptEdits(o);
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -2300,10 +2296,6 @@ it("closes a deleted workspace's recovery handle first, and fails the deletion w
   expect(r.closes()).toEqual(["recovery-1", "recovery-1"]);
 });
 
-// Proves: an edit the engine applied but whose reply, and every ACK read after
-// it, the relay lost before Stop settles. The engine's reconciliation reports
-// its application, the relay records it as its tip, and the retirement settles
-// and releases through it. It sends no application and reads no ACK.
 it("records an edit whose application reply was lost before Stop, and retires through it", async () => {
   const o = await enrolledServiceHost();
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -2555,13 +2547,6 @@ it("keeps a document that moved while no daemon ran until its owner copies the e
   expect(o.calls(sent)).not.toContain("liveApplication.unloadDocument");
 });
 
-// Proves: retention for a recovery copy follows the moved document, not its
-// old path. With another document hosted at that path, and after that one
-// leaves too, the moved document's queue stays readable, and its workspace
-// attached, until its owner confirms a copy. Its retirement then completes.
-// The fake engine captures only the fixture document, so the replacement's
-// capture is refused: it is attempted at the old path, and never prepares or
-// releases an owner activation.
 it("keeps a moved document's queue readable while a replacement holds its old path, and after the replacement leaves", async () => {
   const o = await enrolledServiceHost(), k = keptEdits(o);
   const errors = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -2684,11 +2669,6 @@ it("keeps a stopped activation retiring, and out of activation, when its owner r
   expect(o.client().captureOwnerActivation).toHaveBeenCalledTimes(captures);
 });
 
-// Proves: Stop, its retirement, then Resume. The retired activation's
-// successor activates once its document is hosted again: native capture names
-// the retired predecessor, the relay prepares it, and it adopts at the
-// predecessor's released boundary. The relay admits nothing and the document
-// is not ready until the successor completed; then edits reach it.
 it("activates a retired activation's successor after Resume, which admits edits only once it completed", async () => {
   const o = await enrolledServiceHost();
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -2799,16 +2779,6 @@ it("keeps a released document hosted while its retirement waits for a restore", 
   expect(retiredRow(o).retired).toBe(true);
 });
 
-// Proves: a retirement the owner's Pause opens during their restore keeps the
-// restore's route through the host until the restore ends. While
-// it is unfinished, retirement passes send the engine nothing and keep the
-// document's activation target, which a restarted host rebuilds, so the
-// restore fences and is declined through the host. The engine then releases
-// the activation at the generation the Decline restored, and it retires. A
-// document whose queue is frozen at its owner's adoption seed, which departs as
-// an ordinary unload instead, waits for the restore the same way. A Decline
-// after the native fence committed keeps the fenced generation, which that
-// seed no longer freezes, so the document then retires.
 it.each([
   {restart: false, seeded: false, fenceCommitted: false}, {restart: true, seeded: false, fenceCommitted: false},
   {restart: false, seeded: true, fenceCommitted: false}, {restart: true, seeded: true, fenceCommitted: false},
@@ -3252,7 +3222,6 @@ it("keeps the owner editing a note after restoring it, when the restore ended it
   const fence = o.binding.restoreFenceGeneration + 1;
   const intent = () => String(o.raw.prepare("SELECT intent_json FROM sync_relay_live_restore_operations WHERE operation_id='restore'").get()!.intent_json);
   const request = restoreRequest(o), begun = o.f.storage.beginStopRestore(request, 40), charged = usage(o), marked = intent();
-  // The same request again, after its reply was lost, writes nothing.
   expect(o.f.storage.beginStopRestore(request, 40)).toEqual(begun);
   expect(usage(o)).toBe(charged);
   expect(intent()).toBe(marked);

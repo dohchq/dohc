@@ -283,7 +283,6 @@ describe("an agent's posts through its link", () => {
     })).toBe(true);
     await expectCode(await post(f, agent, { idempotencyKey: "post-2" }), 403, "link_discussion_blocked");
 
-    // Another agent on the link posts until the owner pauses the share.
     const other = await connect(f, "read-write", agent);
     await ok(await post(f, other));
     expect(f.storage.setShareLinkWritesPaused({ shareId: f.shareId, workspaceId, actorUserId: OWNER, pausedAtMs: 2_500 })).toBe(true);

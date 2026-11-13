@@ -12,14 +12,6 @@ import { badRequest, notFound, relayError } from "./errors";
 import { relayPathSegments } from "./requestInputs";
 import type { SyncRelayStorage } from "./storage";
 
-// The owner's view of the automations this server runs in one workspace:
-// its runs, Try again, Undo, Stop and restore, and the steps it holds for
-// Allow. The server keeps its runs where they ran (ADR 0008), and nobody can
-// open the server's own panel, so the owner's computers show them through
-// these routes. Every route acts for the workspace owner only: it checks
-// ownership before it reads the body, and the server checks it again against
-// its copy before it acts.
-
 // A Stop and restore names the definitions one person wrote.
 export const AUTOMATION_SERVER_MAX_BODY_BYTES = 256 * 1024;
 const MAX_RESTORE_DEFINITIONS = 2_000;
