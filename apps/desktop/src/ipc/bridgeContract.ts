@@ -6667,6 +6667,9 @@ export type CheckSharedViewAccessPayload = z.infer<typeof CheckSharedViewAccessP
 export const CheckSharedViewAccessResult = z.object({
   status: z.enum(["current", "ended", "unverified", "needs-reopen"]),
   access: z.enum(["view", "comment", "edit"]).optional(),
+  // A membership's role, and whether this check changed its level.
+  role: z.enum(["admin", "member"]).optional(),
+  levelChanged: z.literal(true).optional(),
 });
 export type CheckSharedViewAccessResult = z.infer<typeof CheckSharedViewAccessResult>;
 

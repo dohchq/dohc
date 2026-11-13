@@ -211,7 +211,7 @@ export async function fetchShareViewAccess(input: {
   relay: SyncRelayConnection;
   shareId: string;
   signal?: AbortSignal;
-}): Promise<ShareAccess> {
+}): Promise<{ access: ShareAccess; role?: WorkspaceRole }> {
   const response = await (input.relay.fetch ?? relayApiFetch())(
     shareUrl(input.relay, `/sync/shares/${encodeURIComponent(input.shareId)}/access`),
     { headers: { authorization: `Bearer ${input.relay.token}` }, signal: input.signal },
@@ -240,7 +240,11 @@ export async function fetchShareViewAccess(input: {
   ) {
     throw new ShareSelectorInvalidError(input.shareId);
   }
-  return body.access;
+  // A membership also names its role.
+  if (!("role" in body)) return { access: body.access };
+  const role = readWorkspaceRole(body);
+  if (role === null) throw new ShareSelectorInvalidError(input.shareId);
+  return { access: body.access, role };
 }
 
 export async function probeShareViewLog(input: {

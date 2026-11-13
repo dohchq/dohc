@@ -29,6 +29,11 @@ it("recognizes only the relay's access-removed reason", async () => {
   );
   await expect(check(404, { code: "not_found" })).rejects.not.toBeInstanceOf(ShareUnavailableError);
   await expect(check(401, {})).rejects.toBeInstanceOf(RelayUnauthorizedError);
-  await expect(check(200, { status: "current", access: "edit" })).resolves.toBe("edit");
+  await expect(check(200, { status: "current", access: "edit" })).resolves.toEqual({ access: "edit" });
   await expect(check(200, { access: "admin" })).rejects.toThrow();
+  // A membership names its role, so the desktop can tell an admin at Edit
+  // from a member at Edit.
+  await expect(check(200, { status: "current", access: "comment", role: "admin" })).resolves.toEqual({ access: "comment", role: "admin" });
+  await expect(check(200, { status: "current", access: "comment", role: "member" })).resolves.toEqual({ access: "comment", role: "member" });
+  await expect(check(200, { status: "current", access: "comment", role: "owner" })).rejects.toThrow();
 });

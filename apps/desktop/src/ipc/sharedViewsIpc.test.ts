@@ -270,7 +270,7 @@ describe("metadata-only access checks", () => {
   );
   it("publishes narrowing even when capture cannot save a file", async () => {
     const h = await harness();
-    h.fetchAccess.mockResolvedValue("view");
+    h.fetchAccess.mockResolvedValue({ access: "view" });
     h.narrow.mockImplementationOnce(async (_lease, _target, assertCurrent, commit) => {
       assertCurrent();
       await commit(["docs/locked.md"], {
@@ -338,7 +338,7 @@ describe("metadata-only access checks", () => {
   it("narrows Edit to View without expanding the pinned paths or version", async () => {
     const h = await harness();
     h.workspace.shareView!.grantedSelector.versionId = "saved-version";
-    h.fetchAccess.mockResolvedValue("view");
+    h.fetchAccess.mockResolvedValue({ access: "view" });
     expect(
       await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload),
     ).toEqual({ status: "current", access: "view" });
@@ -347,7 +347,7 @@ describe("metadata-only access checks", () => {
       versionId: "saved-version",
       access: "view",
     });
-    h.fetchAccess.mockResolvedValue("edit");
+    h.fetchAccess.mockResolvedValue({ access: "edit" });
     expect(
       await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload),
     ).toEqual({ status: "current", access: "view" });
@@ -363,10 +363,10 @@ describe("metadata-only access checks", () => {
       access: "view",
       wholeWorkspace: true,
     };
-    h.fetchAccess.mockResolvedValue("edit");
+    h.fetchAccess.mockResolvedValue({ access: "edit" });
     expect(
       await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload),
-    ).toEqual({ status: "current", access: "edit" });
+    ).toEqual({ status: "current", access: "edit", levelChanged: true });
     expect(h.workspace.shareView!.grantedSelector).toEqual({
       paths: [],
       versionId: null,
@@ -375,10 +375,10 @@ describe("metadata-only access checks", () => {
     });
     expect(h.narrow).not.toHaveBeenCalled();
     expect(h.notify).toHaveBeenCalledWith({ workspaceId: "existing", summaryChanged: true });
-    h.fetchAccess.mockResolvedValue("comment");
+    h.fetchAccess.mockResolvedValue({ access: "comment" });
     expect(
       await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload),
-    ).toEqual({ status: "current", access: "comment" });
+    ).toEqual({ status: "current", access: "comment", levelChanged: true });
     expect(h.narrow).toHaveBeenCalledOnce();
     expect(h.workspace.shareView!.grantedSelector).toEqual({
       paths: [],
@@ -386,12 +386,35 @@ describe("metadata-only access checks", () => {
       access: "comment",
       wholeWorkspace: true,
     });
+    expect(
+      await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload),
+    ).toEqual({ status: "current", access: "comment" });
+  });
+  it("names a membership's role, and never a path share's", async () => {
+    const h = await harness();
+    h.fetchAccess.mockResolvedValue({ access: "edit", role: "admin" });
+    expect(
+      await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload),
+    ).toEqual({ status: "current", access: "edit" });
+    h.workspace.shareView!.grantedSelector = {
+      paths: [],
+      versionId: null,
+      access: "edit",
+      wholeWorkspace: true,
+    };
+    expect(
+      await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload),
+    ).toEqual({ status: "current", access: "edit", role: "admin" });
+    h.fetchAccess.mockResolvedValue({ access: "edit", role: "member" });
+    expect(
+      await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload),
+    ).toEqual({ status: "current", access: "edit", role: "member" });
   });
   it.each(["workspace", "credentials", "close"])(
     "discards a deferred 404 after %s changes",
     async (change) => {
       const h = await harness();
-      const response = deferred<"edit" | "view">();
+      const response = deferred<{ access: "edit" | "view" }>();
       h.fetchAccess.mockReturnValueOnce(response.promise);
       const result = h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload);
       await vi.waitFor(() => expect(h.fetchAccess).toHaveBeenCalledTimes(1));
@@ -444,7 +467,7 @@ describe("registered received-view handlers", () => {
       workspaceId: "existing",
     });
     await started.promise;
-    if (change === "view") h.fetchAccess.mockResolvedValueOnce("view");
+    if (change === "view") h.fetchAccess.mockResolvedValueOnce({ access: "view" });
     else h.fetchAccess.mockRejectedValueOnce(new ShareUnavailableError());
     await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, {
       workspaceId: "existing",
@@ -476,7 +499,7 @@ describe("registered received-view handlers", () => {
       workspaceId: "existing",
     });
     await vi.waitFor(() => expect(h.fetchInfo).toHaveBeenCalledOnce());
-    h.fetchAccess.mockResolvedValueOnce("view");
+    h.fetchAccess.mockResolvedValueOnce({ access: "view" });
     await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, {
       workspaceId: "existing",
     });
@@ -1047,24 +1070,50 @@ describe("background share pulls", () => {
   });
   it("holds a membership's pull at the relay and says when its level changed", async () => {
     const h = await primed();
-    const bodies = [{ ops: [], hasMore: false, nextCursor: 42 }, { ops: [], hasMore: false, nextCursor: 42, levelChanged: true }];
+    const bodies = [
+      { ops: [], hasMore: false, nextCursor: 42 },
+      { ops: [], hasMore: false, nextCursor: 42, levelChanged: true },
+    ];
     const fetch = vi.fn<typeof globalThis.fetch>(async () => Response.json(bodies.shift()));
-    h.probeLog.mockImplementation(input => probeShareViewLog({ ...input, relay: { ...input.relay, fetch } }));
-    await expect(h.invoke(channel, { ...payload, trigger: "held" }))
-      .resolves.toMatchObject({ ok: true, status: "unchanged", probed: true, held: true });
-    expect(fetch).toHaveBeenLastCalledWith("https://relay.example.test/sync/shares/share/log?since=42&hold=25000", expect.anything());
+    h.probeLog.mockImplementation((input) =>
+      probeShareViewLog({ ...input, relay: { ...input.relay, fetch } }),
+    );
+    await expect(h.invoke(channel, { ...payload, trigger: "held" })).resolves.toMatchObject({
+      ok: true,
+      status: "unchanged",
+      probed: true,
+      held: true,
+    });
+    expect(fetch).toHaveBeenLastCalledWith(
+      "https://relay.example.test/sync/shares/share/log?since=42&hold=25000",
+      expect.anything(),
+    );
     const changed = await h.invoke(channel, { ...payload, trigger: "held" });
-    expect(changed).toMatchObject({ ok: true, status: "unchanged", probed: true, held: true, levelChanged: true });
+    expect(changed).toMatchObject({
+      ok: true,
+      status: "unchanged",
+      probed: true,
+      held: true,
+      levelChanged: true,
+    });
     noLocalWork(h);
     // A plain background pull neither holds nor asks to be held again.
     bodies.push({ ops: [], hasMore: false, nextCursor: 42 });
     const plain = await h.invoke(channel, payload);
     expect(plain).not.toHaveProperty("held");
-    expect(fetch).toHaveBeenLastCalledWith("https://relay.example.test/sync/shares/share/log?since=42", expect.anything());
+    expect(fetch).toHaveBeenLastCalledWith(
+      "https://relay.example.test/sync/shares/share/log?since=42",
+      expect.anything(),
+    );
   });
   it("asks for the next held pull after a held pull brought changes", async () => {
-    const h = await primed(); h.probeLog.mockResolvedValue({ unchanged: false });
-    await expect(h.invoke(channel, { ...payload, trigger: "held" })).resolves.toMatchObject({ ok: true, status: "updated", held: true });
+    const h = await primed();
+    h.probeLog.mockResolvedValue({ unchanged: false });
+    await expect(h.invoke(channel, { ...payload, trigger: "held" })).resolves.toMatchObject({
+      ok: true,
+      status: "updated",
+      held: true,
+    });
     expect(h.reconcile).toHaveBeenCalledOnce();
   });
   it("runs the full path once for new ops, keeps its committed cursor and skips metadata and identity", async () => {

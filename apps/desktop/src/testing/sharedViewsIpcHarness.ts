@@ -139,7 +139,7 @@ export async function createSharedViewsIpcHarness(
   const probeLog = vi.fn<Dependencies["probeShareViewLog"]>(async () => ({ unchanged: true }));
   const registryRead = vi.fn((id: string) => registry.get(id)!);
   const workspaceOperation = vi.fn(withRendererWorkspaceOperation);
-  const fetchAccess = vi.fn<Dependencies["fetchShareViewAccess"]>(async () => "edit");
+  const fetchAccess = vi.fn<Dependencies["fetchShareViewAccess"]>(async () => ({ access: "edit" }));
   const readDir = vi.fn(async (_root: string) => [] as string[]);
   const mkdir = vi.fn(async () => {
     steps.push("mkdir");

@@ -889,9 +889,9 @@ export function registerSharedViewsIpcHandlers<
               ) {
                 return { status: "unverified" };
               }
-              let statedAccess;
+              let stated;
               try {
-                statedAccess = await dependencies.fetchShareViewAccess({
+                stated = await dependencies.fetchShareViewAccess({
                   relay: { baseUrl: credentials.relayUrl, token: credentials.token },
                   shareId: view.shareId,
                   signal: AbortSignal.any([controller.signal, operation.signal]),
@@ -920,6 +920,7 @@ export function registerSharedViewsIpcHandlers<
               }
               scoped.assertCurrent();
               clearTimeout(timeout);
+              const statedAccess = stated.access;
               // Preserve the file/version pin. A metadata read can narrow access,
               // but cannot expand the scope this local copy was admitted with.
               // A membership's level is the owner's member level now, so it also
@@ -972,9 +973,18 @@ export function registerSharedViewsIpcHandlers<
               const committed = operation.workspace.shareView;
               if (committed?.ended) return { status: "ended" };
               const committedPin = recordedShareSelector(committed?.grantedSelector);
-              return committed?.shareId === view.shareId && committedPin
-                ? { status: "current", access: committedPin.access }
-                : { status: "unverified" };
+              if (committed?.shareId !== view.shareId || !committedPin)
+                return { status: "unverified" };
+              // Only a membership has a role, and a level that the owner changes
+              // for everyone; the window says so when this check moved it.
+              return committedPin.wholeWorkspace === true
+                ? {
+                    status: "current",
+                    access: committedPin.access,
+                    ...(stated.role ? { role: stated.role } : {}),
+                    ...(committedPin.access !== pin.access ? { levelChanged: true } : {}),
+                  }
+                : { status: "current", access: committedPin.access };
             },
           );
         } catch {
