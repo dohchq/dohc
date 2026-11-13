@@ -743,12 +743,16 @@ export function createNoticeStore(deps: {
         const file = await loadAccount(account);
         // A mark replaced while the batch was on its way stays for the next one.
         file.marks = file.marks.filter((waiting) => !batch.includes(waiting));
-        // Keep the marks on the rows until the next pull brings them back.
+        // Keep the marks on the rows until the next pull brings them back. The relay kept each
+        // marked row for the mark's retention, so a pull that fails can't let this copy go first.
         for (const { noticeId, mark, atMs } of batch) {
           const row = file.rows.find((candidate) => candidate.noticeId === noticeId);
           if (!row) continue;
           if (mark === "read") row.readAtMs ??= atMs;
           else row.dismissedAtMs ??= atMs;
+          const retentionMs =
+            mark === "read" ? NOTICE_READ_RETENTION_MS : NOTICE_DISMISSED_RETENTION_MS;
+          row.expiresAtMs = Math.max(row.expiresAtMs, atMs + retentionMs);
         }
         await saveAccount(account, file);
       });

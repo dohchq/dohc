@@ -540,6 +540,35 @@ describe("notices on one person's computers", () => {
     expect((await restarted.store.list()).notices.map((row) => row.readAtMs)).toEqual([13_500]);
   });
 
+  it("keeps a row it marked read past its old expiry when the pull after the mark fails", async () => {
+    const DAY = 24 * 60 * 60_000;
+    const server = await relay();
+    const laptop = await computer(account(server, "ana"));
+    await laptop.store.postNotice(notice());
+    await laptop.store.sync();
+    // Read a day before its unread expiry; the mark reaches the relay half a day later.
+    clock = 10_000 + 179 * DAY;
+    await laptop.store.mark(
+      [{ store: "account", noticeId: "agent-run:1" }],
+      "read",
+      laptop.signedIn?.key ?? null,
+    );
+    clock = 10_000 + 179.5 * DAY;
+    server.failPulls = true;
+    await laptop.store.sync();
+    const expiry = async (on: Computer) =>
+      ((await file(on, "account")).rows as Array<{ expiresAtMs: number }>)[0]?.expiresAtMs;
+    expect(await expiry(laptop)).toBe(10_000 + (179 + 90) * DAY);
+
+    clock = 10_000 + 185 * DAY;
+    const restarted = await computer(laptop.signedIn, { directory: laptop.directory });
+    expect(await titles(restarted)).toEqual(["account:Your agent finished (read)"]);
+    server.failPulls = false;
+    await restarted.store.sync();
+    expect(await expiry(restarted)).toBe(10_000 + (179.5 + 90) * DAY);
+    expect(await titles(restarted)).toEqual(["account:Your agent finished (read)"]);
+  });
+
   it("keeps a row as long as the relay does after a phone's unread, past the expiry its arrival gave it", async () => {
     const DAY = 24 * 60 * 60_000;
     const server = await relay();
