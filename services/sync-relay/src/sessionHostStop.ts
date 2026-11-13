@@ -15,8 +15,9 @@ export function stopWithoutSessionHost<T>(
       error.sessionHost !== undefined
     )
       throw error;
+    // The session host's state can name the document's earlier path, so the log names only its code.
     console.error(
-      `Live editing Stop for workspace ${document.workspaceId}, object ${document.objectId}. Session host: ${refusal.sessionHost}`,
+      `Live editing Stop for workspace ${document.workspaceId}, object ${document.objectId}. Session host refusal: ${refusal.code}`,
     );
     throw new RelayError(refusal.code, undefined, undefined, refusal.sessionHost, refusal.path);
   }

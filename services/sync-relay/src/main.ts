@@ -132,6 +132,7 @@ import {
   AUTOMATION_REPLICA_BEARER_PREFIX,
   authorizeAutomationReplication,
 } from "./automationReplicaCredential";
+import { serverLogLine } from "./serverLogWords";
 
 const SHUTDOWN_GRACE_PERIOD_MS = parseGracePeriodMs(
   process.env.NODE_ENV === "test"
@@ -452,7 +453,7 @@ const accountResolvers: {
       // event and takes the whole relay process down; with one, only the
       // in-flight requests fail (as a 5xx via the handler's error path).
       pool.on("error", (error) => {
-        console.error("[sync-relay] postgres pool error", error);
+        console.error("[sync-relay] postgres pool error", serverLogLine(error));
       });
       const auth = createWorkspaceAuth({
         pool,
@@ -487,9 +488,7 @@ const documentProjection = projectionExecutable
       engineExecutable: projectionExecutable,
       allowUnisolatedProjection: projectionOptIn === "1",
     }).catch((error: unknown) =>
-      fatal(
-        `FATAL: Document projection could not start: ${error instanceof Error ? error.message : "unknown engine failure"}`,
-      ),
+      fatal(`FATAL: Document projection could not start: ${serverLogLine(error)}`),
     )
   : undefined;
 const storageOptions = {
@@ -516,7 +515,7 @@ const datasetHost = await storage.createDatasetHost({
   compileOperations: compileDatasetOperations,
   startupExclusive: Boolean(deployment),
   onShutdownError(error) {
-    console.error("[sync-relay] dataset shutdown failed", error);
+    console.error("[sync-relay] dataset shutdown failed", serverLogLine(error));
   },
 });
 
@@ -911,16 +910,16 @@ setInterval(() => {
   try {
     storage.purgeExpiredShareRemovals(Date.now());
   } catch (error) {
-    console.error("[sync-relay] share removal prune failed:", error);
+    console.error("[sync-relay] share removal prune failed:", serverLogLine(error));
   }
   pruneAutomationPresses(storage, Date.now()).catch((error: unknown) => {
-    console.error("[sync-relay] automation press prune failed:", error);
+    console.error("[sync-relay] automation press prune failed:", serverLogLine(error));
   });
   tombstoneSettledOperations(storage, Date.now()).catch((error: unknown) => {
-    console.error("[sync-relay] account operation tombstones failed:", error);
+    console.error("[sync-relay] account operation tombstones failed:", serverLogLine(error));
   });
   sweepChatWakesInBatches(storage, Date.now()).catch((error: unknown) => {
-    console.error("[sync-relay] chat wake sweep failed:", error);
+    console.error("[sync-relay] chat wake sweep failed:", serverLogLine(error));
   });
 }, AUTOMATION_PRESS_PRUNE_INTERVAL_MS).unref();
 
@@ -1027,9 +1026,8 @@ if (process.env.DOHC_DEVICE_CONTROL_LIMITS !== undefined) {
         : {}),
     });
   } catch (error) {
-    fatal(
-      `FATAL: Invalid device control configuration. ${error instanceof Error ? error.message : String(error)}`,
-    );
+    // A configuration file that cannot be read is named by its path.
+    fatal(`FATAL: Invalid device control configuration. ${serverLogLine(error)}`);
   }
 }
 if (deviceControl) {
@@ -1056,13 +1054,16 @@ const ownerAdmissionRun =
         storage,
         history: deployment.history,
         control: deviceControl,
-        onError: (error) => console.error("[sync-relay] private owner delivery:", error),
+        onError: (error) =>
+          console.error("[sync-relay] private owner delivery:", serverLogLine(error)),
       })
     : undefined;
 const stopOwnerAdmission = () => {
   void ownerAdmissionRun
     ?.close()
-    .catch((error) => console.error("[sync-relay] private owner delivery shutdown:", error));
+    .catch((error) =>
+      console.error("[sync-relay] private owner delivery shutdown:", serverLogLine(error)),
+    );
 };
 server.once("close", stopOwnerAdmission);
 server.once("close", () => void relayApplication.dispose());
@@ -1104,7 +1105,8 @@ const selfHost = selfHostedLive
       engineExecutable: process.env.DOHC_RELAY_ENGINE_EXECUTABLE!,
       relayOrigin: process.env.DOHC_RELAY_PUBLIC_ORIGIN!,
       key: Buffer.from(linkKey!),
-      onError: (error) => console.error("[sync-relay] self-host live service:", error),
+      onError: (error) =>
+        console.error("[sync-relay] self-host live service:", serverLogLine(error)),
     })
   : undefined;
 const serviceHost = () => selfHost?.current() ?? configuredServiceHost;
@@ -1414,7 +1416,8 @@ automations =
               },
             }
           : {}),
-        onError: (context, error) => console.error(`[sync-relay] automations: ${context}:`, error),
+        onError: (context, error) =>
+          console.error(`[sync-relay] automations: ${context}:`, serverLogLine(error)),
       })
     : undefined;
 copies =
@@ -1428,7 +1431,7 @@ copies =
             workspaceId === undefined
               ? "[sync-relay] copies of workspaces:"
               : `[sync-relay] copy of workspace "${workspaceId}":`,
-            error,
+            serverLogLine(error),
           ),
       })
     : undefined);

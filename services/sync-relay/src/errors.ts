@@ -1,6 +1,7 @@
 import { jsonResponse } from "@dohc/service-http";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
 import { LINK_REFUSALS } from "@dohc/security-contract/link-refusal";
+import { serverLogLine } from "./serverLogWords";
 
 export const RELAY_ERROR_STATUSES = Object.freeze({
   ambiguous_selector: 400,
@@ -231,8 +232,8 @@ export function errorBody(code: RelayErrorCode): Response {
 /**
  * The response for a thrown value. Relay errors and the auth layer's
  * `UnauthorizedError` answer with their own status and code. Anything else
- * is unexpected (SQLite, the auth database): it is logged server-side and
- * answered with a generic 500, never with its message.
+ * is unexpected (SQLite, the auth database): the server log shows only its
+ * `serverLogLine`, and the answer is a generic 500, never its message.
  */
 export function errorResponse(error: unknown): Response {
   if (error instanceof RelayError) {
@@ -250,7 +251,7 @@ export function errorResponse(error: unknown): Response {
   if (error instanceof UnauthorizedError) {
     return jsonResponse({ ok: false, error: error.message, code: error.code }, error.statusCode);
   }
-  console.error("[sync-relay] unhandled error", error);
+  console.error("[sync-relay] unhandled error", serverLogLine(error));
   return errorBody("internal_error");
 }
 

@@ -1,6 +1,7 @@
 import type { SqliteDb } from "./types";
 import { assertJournalCoveragePair, journalCoverageRange } from "./liveUpdateJournal";
 import { parseLiveUpdateStructRange } from "@dohc/live-session-contract/live-update-admission";
+import { serverLogClass, serverLogCode } from "../serverLogWords";
 
 const documentColumns = "workspace_id,main_version_id,object_id,lineage_claim_id";
 const documentWhere = "workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?";
@@ -9,12 +10,7 @@ const day = 86_400_000;
 function errorDetails(error: unknown) {
   const fault = error as { code?: unknown; name?: unknown; errcode?: unknown } | null;
   return {
-    errorCode:
-      typeof fault?.code === "string"
-        ? fault.code
-        : typeof fault?.name === "string"
-          ? fault.name
-          : "UnknownError",
+    errorCode: serverLogCode(fault?.code) ?? serverLogClass(fault?.name),
     ...(typeof fault?.errcode === "number" ? { errcode: fault.errcode } : {}),
   };
 }

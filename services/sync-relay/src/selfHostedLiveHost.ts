@@ -26,6 +26,7 @@ import { startServiceLiveHost, type ServiceHostedSet } from "./serviceLiveHost";
 import { selfHostLiveProfile } from "./selfHostLiveProfile";
 import { discoverServiceHostDocuments } from "./serviceHostEnrollmentRoutes";
 import { RECLAIM_RETENTION_MS, RECLAIM_SWEEP_MS } from "./liveHostingLimits";
+import { serverLogLine, ServerLogError } from "./serverLogWords";
 
 type WorkspaceIdentity = {
   workspaceId: string;
@@ -224,8 +225,10 @@ export async function startSelfHostedLiveHost(options: {
   // stays detached, untouched, and releases nothing. A marker beside the store
   // keeps it so after a restart, before any pull could find the divergence again.
   const marker = (name: string) => divergedMarker(root, name);
-  const recovery = (name: string) =>
-    `Recovery is not automatic yet. The store and every edit in it are kept. Keep ${marker(name)}. Without it the next relay start attaches the store again and checks it against the relay before anyone can edit.`;
+  // The operator's lines name a store by its folder under the root and a document by its object id, since a path
+  // can name the owner's files.
+  const recovery =
+    "Recovery is not automatic yet. The store and every edit in it are kept. Keep the store's .diverged marker beside it. Without it the next relay start attaches the store again and checks it against the relay before anyone can edit.";
   const diverged = new Set(
     (await readdir(root)).flatMap((name) => /^([0-9a-f]{64})\.diverged$/.exec(name)?.[1] ?? []),
   );
@@ -270,8 +273,8 @@ export async function startSelfHostedLiveHost(options: {
   };
   for (const name of diverged)
     options.onError?.(
-      new Error(
-        `The live editing copy in store ${join(root, name)} diverged from the relay earlier. It stays detached. ${recovery(name)}`,
+      new ServerLogError(
+        `The live editing copy in store ${name} diverged from the relay earlier. It stays detached. ${recovery}`,
       ),
     );
   // Diverged stores whose marker is not yet durable, with whether its failure was reported.
@@ -443,8 +446,8 @@ export async function startSelfHostedLiveHost(options: {
         diverged.add(name);
         unmarked.set(name, { workspaceId, reported: false });
         options.onError?.(
-          new Error(
-            `The live editing copy of workspace ${workspaceId} diverged from the relay. It stays detached, and its store is kept at ${store}. ${recovery(name)}`,
+          new ServerLogError(
+            `The live editing copy of workspace ${workspaceId} diverged from the relay. It stays detached, and its store ${name} is kept. ${recovery}`,
           ),
         );
       }
@@ -455,8 +458,8 @@ export async function startSelfHostedLiveHost(options: {
         } catch (error) {
           if (!pending.reported)
             options.onError?.(
-              new Error(
-                `Could not write ${marker(name)}. It is retried while the relay runs; a relay restart before it lands attaches the store again.`,
+              new ServerLogError(
+                `Could not write the .diverged marker of store ${name} for workspace ${pending.workspaceId} (${serverLogLine(error)}). It is retried while the relay runs; a relay restart before it lands attaches the store again.`,
                 { cause: error },
               ),
             );
@@ -508,17 +511,18 @@ export async function startSelfHostedLiveHost(options: {
         }
         if (refused.has(key)) continue;
         refused.add(key);
-        const store = `Its store is kept at ${join(root, storeName(row))}.`;
+        const document = `Live editing of object ${row.objectId} in workspace ${row.workspaceId}`,
+          store = `Its store ${storeName(row)} is kept.`;
         // Until the session host can start a document's Y.Doc itself (#2069), a device must.
         options.onError?.(
-          new Error(
+          new ServerLogError(
             block === "without-lineage"
-              ? `Live editing of ${row.path} in workspace ${row.workspaceId} cannot start: the document has no live-editing history. It starts once its owner opens it in dohc on a desktop. ${store}`
+              ? `${document} cannot start: the document has no live-editing history. It starts once its owner opens it in dohc on a desktop. ${store}`
               : block === "live-edit-unadmitted"
-                ? `Live editing of ${row.path} in workspace ${row.workspaceId} is held: the session host hasn't applied an edit to the document. Its owner can resume live editing in dohc to try again. ${store}`
+                ? `${document} is held: the session host hasn't applied an edit to the document. Its owner can resume live editing in dohc to try again. ${store}`
                 : block === "history-over-budget"
-                  ? `Live editing of ${row.path} in workspace ${row.workspaceId} cannot start: its edit history is past what this server reads or checks. It tries again later, or when its owner resumes live editing in dohc. ${store}`
-                  : `Live editing of ${row.path} in workspace ${row.workspaceId} stopped until its owner tries again. ${store}`,
+                  ? `${document} cannot start: its edit history is past what this server reads or checks. It tries again later, or when its owner resumes live editing in dohc. ${store}`
+                  : `${document} stopped until its owner tries again. ${store}`,
           ),
         );
       }

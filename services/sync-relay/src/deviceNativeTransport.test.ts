@@ -99,6 +99,19 @@ it.each([
       },
     });
     await ready;
+    // The engine's stderr can name a file, so the log shows only its internal refusal lines and counts the rest.
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    child.stderr.emit(
+      "data",
+      Buffer.from(
+        "engine: internal refusal: INTERNAL relay-failed\nengine: live document notes/private plan.md history needs attention\n",
+      ),
+    );
+    expect(log.mock.calls).toEqual([
+      ["[device-live-host] engine: internal refusal: INTERNAL relay-failed"],
+      ["[device-live-host] withheld 1 stderr line that can name files."],
+    ]);
+    log.mockRestore();
     const options = spawn.mock.calls[0]![2];
     if (reader) expect(options.env.DOHC_ENGINE_READER_CONFIG).toBe(JSON.stringify(reader));
     else expect(options.env.DOHC_ENGINE_READER_CONFIG).toBeUndefined();

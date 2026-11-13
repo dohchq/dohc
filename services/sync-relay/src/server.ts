@@ -138,6 +138,7 @@ import {
 } from "./shareAuthorization";
 import { errorResponse, invalidLinkCapability, notFound, relayError } from "./errors";
 import { MAX_LOG_PAGE_SIZE } from "./wireLimits";
+import { serverLogLine } from "./serverLogWords";
 
 export { MAX_BLOB_BYTES, MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
 export { MAX_KEY_ENVELOPE_BYTES } from "./keyEnvelopeRoutes";
@@ -481,7 +482,7 @@ export function createSyncRelayHandler({
         }
         storage.noticeShareReceived({ grantId, ...(await label), nowMs: nowMs() });
       } catch (error) {
-        console.error("[sync-relay] share notice failed", error);
+        console.error("[sync-relay] share notice failed", serverLogLine(error));
       }
     }
   };

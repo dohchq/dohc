@@ -168,9 +168,13 @@ it.each(["overlap", "adjacency", "parent", "baseline", "boundary"])(
   },
 );
 
-it.each(["ERR_OUT_OF_RANGE", undefined])(
-  "continues past an unreadable document and logs only its code or name (%s)",
-  async (code) => {
+it.each([
+  ["ERR_OUT_OF_RANGE", "ERR_OUT_OF_RANGE"],
+  [undefined, "RangeError"],
+  ["notes/private document content.md", "RangeError"],
+])(
+  "continues past an unreadable document and logs only its known code or name (%s)",
+  async (code, logged) => {
     const db = fixture(1),
       report = vi.fn(),
       originalPrepare = db.prepare.bind(db);
@@ -201,7 +205,7 @@ it.each(["ERR_OUT_OF_RANGE", undefined])(
       await vi.advanceTimersByTimeAsync(1100);
       expect(report.mock.calls[0]).toEqual([
         "[sync-relay] live journal unreadable",
-        { document, errorCode: code ?? "RangeError" },
+        { document, errorCode: logged },
       ]);
       expect(report.mock.calls[1]?.[0]).toBe("[sync-relay] live journal damaged");
       expect(report.mock.calls[1]?.[1].document.objectId).toBe("second");

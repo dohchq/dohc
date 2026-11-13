@@ -378,10 +378,7 @@ it("answers a dataset read its client closed as closed, without an error line, a
     expect(errors).not.toHaveBeenCalled();
     // A connection the server closed itself, as at shutdown, is not a client leaving: it logs and answers 500.
     expect((await read(f.handler)).status).toBe(500);
-    expect(errors).toHaveBeenCalledWith(
-      "[sync-relay] unhandled error",
-      expect.objectContaining({ name: "AbortError" }),
-    );
+    expect(errors).toHaveBeenCalledWith("[sync-relay] unhandled error", "AbortError");
     errors.mockClear();
     // Only the close itself is quiet: another failure after the client left still logs and answers 500.
     const failing = createSyncRelayHandler({
@@ -395,10 +392,7 @@ it("answers a dataset read its client closed as closed, without an error line, a
       },
     });
     expect((await read(failing, new ClientClosedRequest())).status).toBe(500);
-    expect(errors).toHaveBeenCalledWith(
-      "[sync-relay] unhandled error",
-      expect.objectContaining({ message: "actor lookup failed" }),
-    );
+    expect(errors).toHaveBeenCalledWith("[sync-relay] unhandled error", "Error");
   } finally {
     errors.mockRestore();
   }
