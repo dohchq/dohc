@@ -2210,7 +2210,12 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return this.owner.write(run);
   }
 
-  tx<T>(run: () => T): T {
+  /**
+   * `document` limits the write to that document's journal and delivery
+   * state, which no connection on another document is authorized by. Live
+   * connections on other documents then skip their standing check.
+   */
+  tx<T>(run: () => T, document?: LiveDocumentKey): T {
     if (!hasRelayWriteObservers(this)) return this.owner.write(run);
     const revision = this.db.prepare(
       "SELECT total_changes() AS changes,(SELECT schema_version FROM pragma_schema_version) AS schema_version",
@@ -2224,7 +2229,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       try {
         changed = this.unavailable.aborted || JSON.stringify(revision.get()) !== before;
       } catch {}
-      if (changed) notifyRelayWrite(this);
+      if (changed) notifyRelayWrite(this, this.unavailable.aborted ? undefined : document);
     }
   }
 

@@ -872,7 +872,7 @@ export class LiveCommittedDeliveryStore {
       const row = this.#ownerRow(host, document);
       integrity(row);
       this.#advanceOwnerTip(host, document, row, receipt, ack);
-    });
+    }, document);
   }
   // Moves the owner tip to the next accepted receipt, whose ACK the caller matched.
   #advanceOwnerTip(
@@ -3507,86 +3507,90 @@ export class LiveCommittedDeliveryStore {
     input: unknown,
   ): void {
     const ack = parseLiveUpdateHostApplicationAck(input),
-      previous = predecessor === null ? null : parseLiveUpdateReceipt(predecessor);
-    this.#storage.tx(() => {
-      const capture = this.#capture(drain),
-        progress = this.#progress(capture);
-      integrity(progress.bootstrap.local_ydoc_sequence !== null);
-      integrity(capture.terminal && ack.journalCursor <= capture.terminal.journalCursor);
-      const repeated = this.#storage.db
-        .prepare(`SELECT * FROM ${EDGES} WHERE bootstrap_id=? AND journal_cursor=?`)
-        .get(capture.baseline.bootstrapId, ack.journalCursor);
-      if (repeated) {
-        integrity(
-          sameReceipt(
-            receipt(repeated),
-            parseLiveUpdateReceipt({
-              deliveryId: ack.deliveryId,
-              updateDigest: ack.updateDigest,
-              journalCursor: ack.journalCursor,
-              acceptingHostEpoch: ack.acceptingHostEpoch,
-            }),
-          ) &&
-            repeated.predecessor_cursor === (previous?.journalCursor ?? 0) &&
-            repeated.local_ydoc_sequence === ack.localYDocSequence,
-        );
-        if (previous) {
-          const original = this.#storage.db
-            .prepare(`SELECT * FROM ${EDGES} WHERE bootstrap_id=? AND journal_cursor=?`)
-            .get(capture.baseline.bootstrapId, previous.journalCursor);
-          integrity(original && sameReceipt(receipt(original), previous));
+      previous = predecessor === null ? null : parseLiveUpdateReceipt(predecessor),
+      scope = this.#drains.get(drain);
+    this.#storage.tx(
+      () => {
+        const capture = this.#capture(drain),
+          progress = this.#progress(capture);
+        integrity(progress.bootstrap.local_ydoc_sequence !== null);
+        integrity(capture.terminal && ack.journalCursor <= capture.terminal.journalCursor);
+        const repeated = this.#storage.db
+          .prepare(`SELECT * FROM ${EDGES} WHERE bootstrap_id=? AND journal_cursor=?`)
+          .get(capture.baseline.bootstrapId, ack.journalCursor);
+        if (repeated) {
+          integrity(
+            sameReceipt(
+              receipt(repeated),
+              parseLiveUpdateReceipt({
+                deliveryId: ack.deliveryId,
+                updateDigest: ack.updateDigest,
+                journalCursor: ack.journalCursor,
+                acceptingHostEpoch: ack.acceptingHostEpoch,
+              }),
+            ) &&
+              repeated.predecessor_cursor === (previous?.journalCursor ?? 0) &&
+              repeated.local_ydoc_sequence === ack.localYDocSequence,
+          );
+          if (previous) {
+            const original = this.#storage.db
+              .prepare(`SELECT * FROM ${EDGES} WHERE bootstrap_id=? AND journal_cursor=?`)
+              .get(capture.baseline.bootstrapId, previous.journalCursor);
+            integrity(original && sameReceipt(receipt(original), previous));
+          }
+          return;
         }
-        return;
-      }
-      integrity(sameReceipt(progress.predecessor, previous));
-      const expected = this.#nextReceipt(capture, previous?.journalCursor ?? 0);
-      integrity(
-        expected &&
-          expected.deliveryId === ack.deliveryId &&
-          expected.updateDigest === ack.updateDigest &&
-          expected.journalCursor === ack.journalCursor &&
-          expected.acceptingHostEpoch === ack.acceptingHostEpoch,
-      );
-      const h = capture.host,
-        values = [
-          capture.baseline.bootstrapId,
-          capture.document.workspaceId,
+        integrity(sameReceipt(progress.predecessor, previous));
+        const expected = this.#nextReceipt(capture, previous?.journalCursor ?? 0);
+        integrity(
+          expected &&
+            expected.deliveryId === ack.deliveryId &&
+            expected.updateDigest === ack.updateDigest &&
+            expected.journalCursor === ack.journalCursor &&
+            expected.acceptingHostEpoch === ack.acceptingHostEpoch,
+        );
+        const h = capture.host,
+          values = [
+            capture.baseline.bootstrapId,
+            capture.document.workspaceId,
+            ack.journalCursor,
+            previous?.journalCursor ?? 0,
+            ack.deliveryId,
+            ack.updateDigest,
+            ack.acceptingHostEpoch,
+            ack.localYDocSequence,
+            h.mode,
+            h.hostEpoch,
+            h.instanceId,
+            h.connectionId,
+          ];
+        const charge = Buffer.byteLength(JSON.stringify(values));
+        consumeLiveDeliveryReservation(
+          this.#storage,
+          capture.document,
+          h.hostId,
           ack.journalCursor,
-          previous?.journalCursor ?? 0,
-          ack.deliveryId,
-          ack.updateDigest,
-          ack.acceptingHostEpoch,
-          ack.localYDocSequence,
-          h.mode,
-          h.hostEpoch,
-          h.instanceId,
-          h.connectionId,
-        ];
-      const charge = Buffer.byteLength(JSON.stringify(values));
-      consumeLiveDeliveryReservation(
-        this.#storage,
-        capture.document,
-        h.hostId,
-        ack.journalCursor,
-        charge,
-        true,
-      );
-      this.#storage.db
-        .prepare(
-          `INSERT INTO ${EDGES}(bootstrap_id,workspace_id,journal_cursor,predecessor_cursor,delivery_id,update_digest,accepting_host_epoch,local_ydoc_sequence,ack_host_mode,ack_host_epoch,ack_instance_id,ack_connection_id,accounted_bytes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        )
-        .run(...values, charge);
-      const inserted = this.#storage.db
-        .prepare(`SELECT * FROM ${EDGES} WHERE bootstrap_id=? AND journal_cursor=?`)
-        .get(capture.baseline.bootstrapId, ack.journalCursor);
-      integrity(
-        inserted &&
-          sameReceipt(receipt(inserted), expected) &&
-          inserted.predecessor_cursor === (previous?.journalCursor ?? 0) &&
-          inserted.local_ydoc_sequence === ack.localYDocSequence,
-      );
-      capture.progress = { predecessor: expected, tip: inserted };
-    });
+          charge,
+          true,
+        );
+        this.#storage.db
+          .prepare(
+            `INSERT INTO ${EDGES}(bootstrap_id,workspace_id,journal_cursor,predecessor_cursor,delivery_id,update_digest,accepting_host_epoch,local_ydoc_sequence,ack_host_mode,ack_host_epoch,ack_instance_id,ack_connection_id,accounted_bytes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          )
+          .run(...values, charge);
+        const inserted = this.#storage.db
+          .prepare(`SELECT * FROM ${EDGES} WHERE bootstrap_id=? AND journal_cursor=?`)
+          .get(capture.baseline.bootstrapId, ack.journalCursor);
+        integrity(
+          inserted &&
+            sameReceipt(receipt(inserted), expected) &&
+            inserted.predecessor_cursor === (previous?.journalCursor ?? 0) &&
+            inserted.local_ydoc_sequence === ack.localYDocSequence,
+        );
+        capture.progress = { predecessor: expected, tip: inserted };
+      },
+      scope && !scope.restore ? scope.document : undefined,
+    );
   }
   close(drain: CommittedDeliveryDrain): void {
     this.#drains.delete(drain);
