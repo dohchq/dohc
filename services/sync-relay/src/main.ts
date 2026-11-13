@@ -1026,9 +1026,8 @@ if (process.env.DOHC_DEVICE_CONTROL_LIMITS !== undefined) {
         : {}),
     });
   } catch (error) {
-    fatal(
-      `FATAL: Invalid device control configuration. ${error instanceof Error ? error.message : String(error)}`,
-    );
+    // A configuration file that cannot be read is named by its path.
+    fatal(`FATAL: Invalid device control configuration. ${serverLogLine(error)}`);
   }
 }
 if (deviceControl) {

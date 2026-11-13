@@ -15,6 +15,7 @@ import {
   type DeviceLiveHostStart,
 } from "@dohc/live-session-contract/device-control";
 import type { DeviceLiveHostConfig } from "./deviceLiveHostConfig.js";
+import { childStderrLog } from "./serverLogWords.js";
 
 /** Owns the device child and both byte queues until stdio has closed. */
 export function startDeviceNativeTransport(options: {
@@ -112,9 +113,8 @@ export function startDeviceNativeTransport(options: {
       launched.stdin.on("error", fail);
       launched.stdout.on("error", fail);
       launched.stderr.on("error", fail);
-      launched.stderr.on("data", (bytes: Buffer) =>
-        console.error("[device-live-host]", bytes.toString("utf8").trimEnd()),
-      );
+      const forward = childStderrLog("[device-live-host]");
+      launched.stderr.on("data", (bytes: Buffer) => forward(bytes.toString("utf8")));
       input = new BoundedSendQueue({
         maxBytes: config.maxQueuedBytes,
         maxSegmentBytes: limits.maxPayloadBytes,

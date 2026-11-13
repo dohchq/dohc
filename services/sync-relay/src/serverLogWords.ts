@@ -34,6 +34,7 @@ export function refusalHead(message: string): string {
 
 // The engine's code-word form: lowercase words joined by hyphens, with no space, dot or slash, so no file name with an
 // extension and no folder fits it. The engine adds code words with each new refusal, so a list here would fall behind.
+// A bare lowercase name would fit too, so this relies on the engine starting each refusal message with its code word.
 const CODE_WORD = /^[a-z0-9][a-z0-9-]{0,63}$/;
 // The engine's wire codes, such as CONFLICT, and the relay's request methods, such as live.apply.
 const WIRE_CODE = /^[A-Z][A-Z_]{0,39}$/;
