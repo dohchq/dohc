@@ -546,6 +546,7 @@ function makeBaseBridge(
     changePersonalAgent: vi.fn(async (): Promise<PersonalAgentChangeResult> => ({ ok: true, personalAgents: { accounts: [] } })),
     registerChatDispatchNotices: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, revision: 0, notices: [] })),
     dismissChatDispatchNotice: vi.fn(async () => {}),
+    retryChatWakes: vi.fn(async () => {}),
     stepWindowZoom: vi.fn(async (payload: { step: "in" | "out" | "reset" }) => ({
       settings: {
         ...DEFAULT_USER_SETTINGS,

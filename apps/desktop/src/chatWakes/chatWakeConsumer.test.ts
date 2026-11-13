@@ -7,7 +7,7 @@ import { deferred } from "../testing/deferred";
 import { createTestScratch } from "../workspaces/testTemp";
 import { ChatWakeAnswerError, ChatWakeBusyError, ChatWakeMissingError, type ChatWakeClient, type ChatWakePageAnswer } from "./chatWakeClient";
 import {
-  chatWakeAgentMatches, chatWakeThreadVisibility, createChatWakeConsumer,
+  CHAT_WAKE_CONFIRM_MISSES, chatWakeAgentMatches, chatWakeThreadVisibility, createChatWakeConsumer,
   type ChatWakeAgent, type ChatWakeConsumerDeps, type ChatWakeDecision, type ChatWakeMessage, type ChatWakeThreadVisibility,
 } from "./chatWakeConsumer";
 import { createChatWakeIntents, ChatWakeIntentsUnreadableError, type ChatWakeIntent, type ChatWakeIntents } from "./chatWakeIntents";
@@ -217,6 +217,7 @@ async function setup() {
       nowMs: () => 0,
       holdMs: 25_000,
       onError: vi.fn(),
+      onStuck: vi.fn(),
       ...over,
     };
     return { deps, consumer: createChatWakeConsumer(deps) };
@@ -775,6 +776,12 @@ describe("local checks", () => {
     expect(chatWakeThreadVisibility(thread("notes.md"), { status: "found", objectId: "o1", path: ".env" }, "linux")).toBe("hidden");
     expect(chatWakeThreadVisibility(thread("notes.md"), { status: "found", objectId: "o1", path: "plan.md" }, "linux")).toBe("visible");
     expect(chatWakeThreadVisibility(thread("notes.md"), { status: "absent" }, "linux")).toBe("visible");
+    // A deleted file: another thread's hidden hint on it hides this one too, as the server's reads do.
+    expect(chatWakeThreadVisibility(thread("notes.md"), { status: "absent" }, "linux", ["notes.md", ".env"])).toBe("hidden");
+    expect(chatWakeThreadVisibility(thread(), { status: "absent" }, "linux", [".env"])).toBe("hidden");
+    expect(chatWakeThreadVisibility(thread("notes.md"), { status: "absent" }, "linux", ["notes.md", "plan.md"])).toBe("visible");
+    // Only a deleted file reads other threads' hints.
+    expect(chatWakeThreadVisibility(thread("notes.md"), { status: "found", objectId: "o1", path: "plan.md" }, "linux", [".env"])).toBe("visible");
     expect(chatWakeThreadVisibility(thread(), { status: "absent" }, "linux")).toBe("unknown");
     expect(chatWakeThreadVisibility(thread("notes.md"), { status: "invalid" }, "linux")).toBe("unknown");
     expect(chatWakeThreadVisibility(thread("notes.md"), undefined, "linux")).toBe("unknown");
@@ -982,6 +989,30 @@ describe("fix round 1", () => {
     },
   );
 
+  it("retries a saved intent after its backoff when the first recovery can't read the saved wakes", async () => {
+    const w = await setup();
+    vi.useFakeTimers();
+    w.relay.add({ state: "claimed", winnerLabel: "Mac" });
+    w.relay.rows.get(WAKE)!.winner = "mac";
+    const intents = memoryIntents();
+    await intents.save(intentOf("recorded"));
+    intents.failNextList = true;
+    const { consumer, deps } = w.consumer({ sleep: timerSleep, intents });
+    consumer.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(intents.failNextList).toBe(false);
+    expect(w.relay.calls.confirms).toEqual([]);
+    expect(deps.onError).toHaveBeenCalledWith(expect.objectContaining({ message: "The saved wakes could not be read just now." }));
+    // Nothing calls resume; the backoff alone finishes it.
+    await vi.advanceTimersByTimeAsync(999);
+    expect(w.relay.calls.confirms).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(w.relay.calls.confirms).toEqual(["mac"]);
+    expect(w.relay.state()).toBe("queued");
+    expect(intents.rows).toEqual([]);
+    await consumer.stop();
+  });
+
   it("keeps owing a refused confirmation when a retry pass can't read the saved wakes, and confirms on a later pass", async () => {
     const w = await setup();
     vi.useFakeTimers();
@@ -1013,6 +1044,58 @@ describe("fix round 1", () => {
     expect(intents.rows).toEqual([]);
     expect(w.mac.local.recorded).toEqual([true]);
     expect(deps.onError).toHaveBeenCalledWith(expect.objectContaining({ message: "The saved wakes could not be read just now." }));
+    await consumer.stop();
+  });
+});
+
+describe("a wake this computer can't finish", () => {
+  it("reports a claim the relay no longer lists as dropped", async () => {
+    const w = await setup();
+    await createChatWakeIntents(w.file).save(intentOf("claim-pending"));
+    const { consumer, deps } = await w.settled();
+    expect(deps.onStuck).toHaveBeenCalledExactlyOnceWith(intentOf("claim-pending"), "dropped");
+    expect(await w.intents()).toEqual([]);
+    expect(w.mac.local.ledger.size).toBe(0);
+    await consumer.stop();
+  });
+
+  it("parks a won intent while its workspace is gone, and records it once the workspace is back", async () => {
+    const w = await setup();
+    w.relay.add({ state: "claimed", winnerLabel: "Mac" });
+    w.relay.rows.get(WAKE)!.winner = "mac";
+    await createChatWakeIntents(w.file).save(intentOf("won"));
+    w.mac.local.registered = false;
+    const { consumer, deps } = await w.settled();
+    expect(deps.onStuck).toHaveBeenCalledExactlyOnceWith(intentOf("won"), "parked");
+    expect(await w.intents()).toEqual([intentOf("won")]);
+    expect(w.mac.local.ledger.size).toBe(0);
+    w.mac.local.registered = true;
+    await consumer.resume();
+    expect(w.mac.local.recorded).toEqual([true]);
+    expect(w.relay.state()).toBe("queued");
+    expect(await w.intents()).toEqual([]);
+    expect(deps.onStuck).toHaveBeenCalledTimes(1);
+    await consumer.stop();
+  });
+
+  it("stops confirming a recorded wake the relay keeps missing, reports it once, and keeps the intent", async () => {
+    const w = await setup();
+    vi.useFakeTimers();
+    const intents = memoryIntents();
+    await intents.save(intentOf("recorded"));
+    const { consumer, deps } = w.consumer({ sleep: timerSleep, intents });
+    consumer.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(w.relay.calls.confirms).toEqual(["mac"]);
+    // Backoffs of 1, 2, 3, and 4 seconds bring the misses to the cap.
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(w.relay.calls.confirms).toHaveLength(CHAT_WAKE_CONFIRM_MISSES);
+    expect(deps.onStuck).toHaveBeenCalledExactlyOnceWith(intentOf("recorded"), "unconfirmed");
+    await vi.advanceTimersByTimeAsync(600_000);
+    await consumer.resume();
+    expect(w.relay.calls.confirms).toHaveLength(CHAT_WAKE_CONFIRM_MISSES);
+    expect(intents.rows).toEqual([intentOf("recorded")]);
+    expect(w.mac.local.ledger.size).toBe(0);
     await consumer.stop();
   });
 });

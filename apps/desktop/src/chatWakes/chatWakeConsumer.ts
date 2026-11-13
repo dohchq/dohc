@@ -68,6 +68,16 @@ export interface ChatWakeWorkspace {
   release(): Promise<void>;
 }
 
+/**
+ * A saved wake this computer can't finish by itself. dropped: the relay no longer lists a claim this computer
+ * may have sent, so nothing ran here. parked: it won, and its workspace is no longer this account's synced
+ * workspace here. unconfirmed: its trigger is recorded, and the relay keeps answering that it has no such wake.
+ */
+export type ChatWakeStuck = "dropped" | "parked" | "unconfirmed";
+
+/** How many times in a row a confirmation may answer 404 before this lifetime stops asking. */
+export const CHAT_WAKE_CONFIRM_MISSES = 5;
+
 export interface ChatWakeConsumerDeps {
   account: ChatWakeAccount;
   /** The credential lifetime this consumer runs for is still the current one. */
@@ -75,7 +85,10 @@ export interface ChatWakeConsumerDeps {
   /** Bound to that lifetime's relay connection. */
   client: ChatWakeClient;
   intents: ChatWakeIntents;
-  /** The registered physical workspace with this account's active remote, opened for background work; null when there is none. */
+  /**
+   * The registered physical workspace with this account's active remote, opened for background work. Null when
+   * this account no longer syncs it here; a failure that can pass, such as an engine still starting, throws.
+   */
   openWorkspace(workspaceId: string): Promise<ChatWakeWorkspace | null>;
   /** Resolves after `ms`, or when `signal` aborts. */
   sleep(ms: number, signal: AbortSignal): Promise<void>;
@@ -84,6 +97,7 @@ export interface ChatWakeConsumerDeps {
   nowMs(): number;
   holdMs?: number;
   onError(error: unknown): void;
+  onStuck(intent: ChatWakeIntent, reason: ChatWakeStuck): void;
 }
 
 export interface ChatWakeConsumer {
@@ -110,14 +124,19 @@ export function chatWakeAgentMatches(name: string, matched: ChatWakeCandidate["m
 
 /**
  * Whether a thread reads as the server's filtered reads would: hidden when
- * its hint or its file's current path is a secret or ignored file. A thread
- * on a deleted file stays visible by its hint; with no hint, or no answer
- * for where its file is, it is unknown.
+ * its hint or its file's current path is a secret or ignored file. On a
+ * deleted file, the hints of every thread on that file count too, as the
+ * server's do; the thread stays visible by its own hint. With no hint, or no
+ * answer for where its file is, it is unknown. The server also keeps a
+ * deleted file's last path, which this computer doesn't have, so a deleted
+ * file with no hint here defers rather than claims.
  */
 export function chatWakeThreadVisibility(
   thread: Pick<ChatThread, "linkedFile"> | null,
   placement: FileResolution | undefined,
   platform: NodeJS.Platform,
+  /** On a deleted file: the hints of the threads on it. */
+  fileHints: readonly string[] = [],
 ): ChatWakeThreadVisibility {
   if (thread === null) return "missing";
   const linked = thread.linkedFile;
@@ -125,6 +144,7 @@ export function chatWakeThreadVisibility(
   const hidden = (path: string) => classifyEngineFilePathForRead(path, platform).kind !== "tracked";
   if (linked.pathHint !== undefined && hidden(linked.pathHint)) return "hidden";
   if (placement?.status === "found") return hidden(placement.path) ? "hidden" : "visible";
+  if (placement?.status === "absent" && fileHints.some(hidden)) return "hidden";
   if (placement?.status === "absent" && linked.pathHint !== undefined) return "visible";
   return "unknown";
 }
@@ -153,6 +173,9 @@ export function createChatWakeConsumer(deps: ChatWakeConsumerDeps): ChatWakeCons
   const deferred = new Map<string, WaitingChatWake>();
   // Waiting wakes this computer will never claim in this lifetime.
   const rejected = new Set<string>();
+  // Confirmations answered 404 in a row, and the recorded wakes this lifetime stopped confirming.
+  const misses = new Map<string, number>();
+  const unconfirmed = new Set<string>();
 
   const ours = (intent: ChatWakeIntent) =>
     intent.account === account.scope && intent.userId === account.userId && intent.installId === account.installId;
@@ -205,6 +228,7 @@ export function createChatWakeConsumer(deps: ChatWakeConsumerDeps): ChatWakeCons
       // candidate, or the row is gone. None of these comes back, so it is not retried.
       if (error instanceof ChatWakeMissingError) {
         await deps.intents.remove(intent);
+        deps.onStuck(intent, "dropped");
         return null;
       }
       throw error;
@@ -243,9 +267,21 @@ export function createChatWakeConsumer(deps: ChatWakeConsumerDeps): ChatWakeCons
   }
 
   async function confirm(intent: ChatWakeIntent): Promise<void> {
-    if (!live()) return;
-    // A missing wake throws and the intent stays: the trigger was recorded, and that is never undone here.
-    const wake = await deps.client.confirmQueued(intent.wakeId, intent.installId, abort.signal);
+    if (!live() || unconfirmed.has(intent.wakeId)) return;
+    // A missing wake keeps the intent: the trigger was recorded, and that is never undone here. After
+    // CHAT_WAKE_CONFIRM_MISSES answers in a row, this lifetime stops asking and reports it instead.
+    let wake: ChatWakeView;
+    try { wake = await deps.client.confirmQueued(intent.wakeId, intent.installId, abort.signal); }
+    catch (error) {
+      if (!(error instanceof ChatWakeMissingError)) throw error;
+      const missed = (misses.get(intent.wakeId) ?? 0) + 1;
+      misses.set(intent.wakeId, missed);
+      if (missed < CHAT_WAKE_CONFIRM_MISSES) throw error;
+      unconfirmed.add(intent.wakeId);
+      deps.onStuck(intent, "unconfirmed");
+      return;
+    }
+    misses.delete(intent.wakeId);
     if (!sameWake(intent, wake) || wake.state !== "queued") throw new ChatWakeAnswerError("Wake confirmation");
     await deps.intents.remove(intent);
   }
@@ -256,7 +292,13 @@ export function createChatWakeConsumer(deps: ChatWakeConsumerDeps): ChatWakeCons
     if (next.phase === "claim-pending") next = await claim(next);
     if (next?.phase === "won") {
       const won = next;
-      next = held ? await record(won, held) : await opened(won.workspaceId, (workspace) => record(won, workspace));
+      if (held) next = await record(won, held);
+      else {
+        const result = await opened(won.workspaceId, async (workspace) => ({ next: await record(won, workspace) }));
+        // Its trigger can't be recorded anywhere else, so it waits for its workspace to come back.
+        if (result === null) deps.onStuck(won, "parked");
+        next = result?.next ?? null;
+      }
     }
     if (next?.phase === "recorded") await confirm(next);
   }
@@ -288,6 +330,7 @@ export function createChatWakeConsumer(deps: ChatWakeConsumerDeps): ChatWakeCons
   async function recover(): Promise<void> {
     for (const intent of (await deps.intents.list()).filter(ours)) {
       if (!live()) return;
+      if (unconfirmed.has(intent.wakeId)) continue;
       try {
         if (intent.phase === "claim-pending") {
           // It may be a claim this computer cancelled when its attachment retired, with a removal that failed.
@@ -370,8 +413,14 @@ export function createChatWakeConsumer(deps: ChatWakeConsumerDeps): ChatWakeCons
     await reconsider();
   }
 
+  // A pass that fails before reaching each intent, such as a failed list, owes them all.
+  function passFailed(error: unknown): void {
+    deps.onError(error);
+    owe();
+  }
+
   async function read(): Promise<void> {
-    await serial(recover).catch(deps.onError);
+    await serial(recover).catch(passFailed);
     // The feed lists only waiting wakes that changed after `since`; a restart starts again from 0.
     let since = 0;
     let failures = 0;
@@ -405,7 +454,7 @@ export function createChatWakeConsumer(deps: ChatWakeConsumerDeps): ChatWakeCons
       return pass ??= serial(async () => {
         pass = null;
         await again();
-      }).catch(deps.onError);
+      }).catch(passFailed);
     },
     async stop() {
       stopped = true;
