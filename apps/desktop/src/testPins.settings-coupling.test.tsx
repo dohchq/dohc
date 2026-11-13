@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { SettingsDialog } from "./renderer/settings/SettingsDialog";
 import { SETTINGS_SECTIONS, type SettingsSectionId } from "./renderer/settings/settingsRegistry";
+import { WorkspaceSessionProvider } from "./renderer/workspace/workspaceSession";
 import { desktopPins, settingsNavPin, settingsSectionPin } from "./testPins";
 
 vi.mock("./testPins", async (importOriginal) => {
@@ -37,7 +38,7 @@ vi.mock("./renderer/settings/ScheduleHostRow", () => ({ ScheduleHostRow: () => n
 beforeEach(() => { Element.prototype.scrollIntoView = vi.fn(); });
 afterEach(cleanup);
 function renderSettings(initialSection?: SettingsSectionId) {
-  render(<SettingsDialog workspaceIsReady workspaceId="fixture" workspacePath="/fixture" onClose={() => {}} initialSection={initialSection} />);
+  render(<SettingsDialog workspaceIsReady workspaceId="fixture" workspacePath="/fixture" onClose={() => {}} initialSection={initialSection} />, { wrapper: WorkspaceSessionProvider });
 }
 it.each(["settingsDialog", "settingsSearch", "settingsWarning", "settingsEmptySearch"] as const)(
   "couples the %s literal to its producer", async (key) => {

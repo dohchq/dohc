@@ -1,65 +1,38 @@
-import { useCallback, useLayoutEffect, useRef, useState } from "react";
+import { useCallback } from "react";
 import type { ChatLinksPage } from "@dohc/workspace-contracts/chat-links";
 import { bridge } from "../bridge";
+import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
+import { useWorkspaceSession } from "../workspace/workspaceSession";
 
 type Page = NonNullable<ChatLinksPage>;
-type Status = "idle" | "loaded" | "unavailable";
+type More = { cursor: string; pages: Page[] };
+const NO_PAGES: Page[] = [];
 
-// Reads only when opened or paged by the caller. Each scope owns its requests.
+// Reads only when opened or paged by the caller. A refresh supersedes a page
+// still loading.
 export function useChatLinks({ workspaceId, channelWireId, onError }: {
   workspaceId: string;
   channelWireId: string;
   onError(error: unknown): void;
 }) {
-  const scope = useRef({ workspaceId, channelWireId, sequence: 0, busy: false, mounted: true });
-  if (scope.current.workspaceId !== workspaceId || scope.current.channelWireId !== channelWireId) {
-    scope.current = { workspaceId, channelWireId, sequence: 0, busy: false, mounted: true };
-  }
-  const current = scope.current;
-  const [state, setState] = useState<{ scope: typeof current; pages: Page[]; status: Status; loading: boolean }>({
-    scope: current, pages: [], status: "idle", loading: false,
+  const query = useWorkspaceQuery(useWorkspaceSession(), {
+    key: `${workspaceId}\0${channelWireId}`,
+    manual: true,
+    report: onError,
+    load: async (_signal, more?: More) => {
+      const page = await bridge().chatLinks({ workspaceId, channelWireId, ...(more ? { cursor: more.cursor } : {}) });
+      return page
+        ? { pages: [...(more?.pages ?? []), page], status: "loaded" as const }
+        : { pages: [], status: "unavailable" as const };
+    },
   });
-  const pages = state.scope === current ? state.pages : [];
-  const latest = useRef(pages);
-  latest.current = pages;
-  useLayoutEffect(() => {
-    current.mounted = true;
-    return () => { current.mounted = false; current.sequence++; };
-  }, [current]);
-  const read = useCallback(async (cursor?: string) => {
-    if (scope.current !== current || !current.mounted || (cursor && current.busy)) return;
-    const sequence = ++current.sequence;
-    const active = () => scope.current === current && current.mounted && current.sequence === sequence;
-    current.busy = true;
-    setState(previous => ({
-      scope: current, pages: previous.scope === current ? previous.pages : [],
-      status: previous.scope === current ? previous.status : "idle", loading: true,
-    }));
-    try {
-      const page = await bridge().chatLinks({ workspaceId, channelWireId, ...(cursor ? { cursor } : {}) });
-      if (!active()) return;
-      setState(previous => ({
-        scope: current, pages: page ? [...(cursor && previous.scope === current ? previous.pages : []), page] : [],
-        status: page ? "loaded" : "unavailable", loading: false,
-      }));
-    } catch (error) {
-      if (active()) {
-        setState(previous => ({ ...previous, status: "unavailable", loading: false }));
-        onError(error);
-      }
-    } finally {
-      if (active()) {
-        current.busy = false;
-        setState(previous => ({ ...previous, loading: false }));
-      }
-    }
-  }, [current, workspaceId, channelWireId, onError]);
-  const load = useCallback(() => read(), [read]);
+  const { retry, pending: loading } = query;
+  const pages = query.value?.pages ?? NO_PAGES;
+  const load = useCallback(() => retry(), [retry]);
   const loadMore = useCallback(() => {
-    const cursor = latest.current.at(-1)?.nextCursor;
-    return cursor ? read(cursor) : Promise.resolve();
-  }, [read]);
-  const loading = state.scope === current && state.loading;
-  const status = state.scope !== current ? "idle" : loading ? "loading" : state.status;
+    const cursor = pages.at(-1)?.nextCursor;
+    return cursor && !loading ? retry({ cursor, pages }) : Promise.resolve();
+  }, [loading, pages, retry]);
+  const status = loading ? "loading" : query.error !== null ? "unavailable" : query.value?.status ?? "idle";
   return { pages, status, loading, load, loadMore };
 }

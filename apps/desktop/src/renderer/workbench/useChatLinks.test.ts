@@ -2,6 +2,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { deferred } from "../../testing/deferred";
+import { WorkspaceSessionProvider } from "../workspace/workspaceSession";
 import { useChatLinks } from "./useChatLinks";
 
 function page(wire="a", nextCursor:string|null="next") {
@@ -12,7 +13,7 @@ function setup() {
   const read=vi.fn(),onError=vi.fn();
   vi.stubGlobal("dohcDesktop",{chatLinks:read});
   const hook=renderHook(({workspaceId,channelWireId})=>useChatLinks({workspaceId,channelWireId,onError}),
-    {initialProps:{workspaceId:"w",channelWireId:"a"}});
+    {initialProps:{workspaceId:"w",channelWireId:"a"},wrapper:WorkspaceSessionProvider});
   return {...hook,read,onError};
 }
 afterEach(()=>vi.unstubAllGlobals());
