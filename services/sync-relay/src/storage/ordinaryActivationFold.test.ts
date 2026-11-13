@@ -145,9 +145,10 @@ it("a fold another fold overtook saves nothing", async () => {
   expect(f.read()!.foldedEntries).toBe(65);
 });
 
-// The plan's bars, 250 ms to validate a page and 10 ms of lock to save it, are reported here rather than asserted: a
-// shared runner's timing would fail a hard bar without a regression.
-it("a long note folds page by page to its replayed state, and reports its slowest page and longest save", {timeout: 600_000}, async () => {
+// The plan's targets, 250 ms to validate a page and 10 ms of lock to save it, are reported rather than asserted. The
+// ceilings, four and five times looser, catch a gross regression without failing on a shared runner's noise.
+const PAGE_CEILING_MS = 1_000, LOCK_CEILING_MS = 50;
+it("a long note folds page by page to its replayed state within loose time ceilings, and reports its slowest page and longest save", {timeout: 600_000}, async () => {
   const note = await seed(10_000), timed: number[] = [], locks: number[] = [];
   const f = folding(note, {pageRows: 1_024, pageBytes: ACTIVATION.maxBytesPerDrain}, async work => {
     const start = performance.now();
@@ -157,6 +158,8 @@ it("a long note folds page by page to its replayed state, and reports its slowes
   f.storage.tx = run => {const start = performance.now(); try {return tx(run);} finally {locks.push(performance.now() - start);}};
   expect(await f.all()).toEqual({kind: "current"});
   expect(f.read()!.stateSha256).toBe(replayed(note, 10_000).stateUpdateSha256);
-  console.log(`[fold] 10000 keystrokes: ${timed.length} pages, slowest page ${Math.round(Math.max(...timed))} ms (bar 250), ` +
-    `longest save ${Math.max(...locks).toFixed(1)} ms of lock (bar 10)`);
+  console.log(`[fold] 10000 keystrokes: ${timed.length} pages, slowest page ${Math.round(Math.max(...timed))} ms (target 250), ` +
+    `longest save ${Math.max(...locks).toFixed(1)} ms of lock (target 10)`);
+  expect(Math.max(...timed), "slowest page").toBeLessThanOrEqual(PAGE_CEILING_MS);
+  expect(Math.max(...locks), "longest save").toBeLessThanOrEqual(LOCK_CEILING_MS);
 });
