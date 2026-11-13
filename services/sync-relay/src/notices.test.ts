@@ -885,7 +885,8 @@ describe("pulling changes", () => {
     // A computer takes the first page of the whole list, then stops.
     const first = await pull(h, "ana", undefined, 1);
     expect(first.notices.map((row) => row.noticeId)).toEqual(["from:owner:n0"]);
-    expect(first.nextCursor).toBe(`1.${NOTICE_ROWS_PER_SENDER}`);
+    // Ana's share took her list's first change.
+    expect(first.nextCursor).toBe(`2.${NOTICE_ROWS_PER_SENDER + 1}`);
 
     // n0 leaves to make room, and its tombstone expires with no post to
     // sweep it before the computer resumes.

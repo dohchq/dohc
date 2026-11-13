@@ -19,19 +19,23 @@ import {
   type PostableNoticeKind,
   type NoticeMark,
   type NoticeReach,
+  type NoticeScope,
   type NoticeTarget,
   type RelayNotice,
   type RelayNoticePage,
 } from "@dohc/workspace-contracts/relay";
 import { cutText } from "@dohc/workspace-contracts/names";
 import { validateUserWritePath } from "@dohc/workspace-core";
+import { hiddenFile } from "../accountFeed";
 import { badRequest, relayError, RelayError } from "../errors";
+import { notifyNoticeChange } from "../relayWriteChanges";
 import { authorizeShareGrantAction } from "../shareAuthorization";
 import {
   fileSideOf,
   parseStoredAnyShareSelectorJson,
   type ShareSelector,
 } from "../shareFilter";
+import { threadPathsInTransaction } from "./accountFeed";
 import type { StorageContext } from "./context";
 import { currentShareGrantSql, readCurrentShareGrant } from "./currentShareGrant";
 import type { SyncRelayShareRow } from "./types";
@@ -72,6 +76,8 @@ export interface ReadNoticeChangesInput {
   cursor: NoticeCursor | null;
   limit: number;
   nowMs: number;
+  // Absent reads the whole list.
+  scope?: NoticeScope;
 }
 
 // "<seq>" or, while taking the whole list, "<seq>.<snapshotHead>". Anything
@@ -516,27 +522,145 @@ export function readNoticeChanges(
        ORDER BY change_seq LIMIT ?`,
     ).all(input.recipientUserId, since, input.nowMs, snapshotHead ?? 0, input.limit + 1);
     const hasMore = rows.length > input.limit;
-    const readWake = storage.db.prepare("SELECT payload_json FROM sync_relay_automation_wakes WHERE recipient_user_id = ? AND notice_id = ?");
-    const notices = rows.slice(0, input.limit).map((row) => {
-      const notice = rowToNotice(row);
-      if (notice.kind === "automation-wake" && !notice.removed && notice.workspaceId !== null &&
-        storage.workspaceIsOwnedBy(notice.workspaceId, input.recipientUserId)) {
-        const payload = readWake
-          .get(input.recipientUserId, notice.noticeId);
-        if (payload) notice.wake = JSON.parse(String(payload.payload_json)) as AutomationWake;
-      }
-      return notice;
-    });
-    // Every change after the last row served is expired or replaced by a
-    // later change, so a finished pull can move its cursor to the head.
+    const scanned = rows.slice(0, input.limit).map(rowToNotice);
+    const notices = input.scope === "phone"
+      ? phoneNotices(storage, input.recipientUserId, scanned)
+      : withWakes(storage, input.recipientUserId, scanned);
+    // Every change after the last row read is expired or replaced by a later
+    // change, so a finished pull can move its cursor to the head. The phone's
+    // scope moves past the rows it left out.
     const nextCursor = hasMore
-      ? formatNoticeCursor({ seq: notices.at(-1)!.changeSeq, snapshotHead })
+      ? formatNoticeCursor({ seq: scanned.at(-1)!.changeSeq, snapshotHead })
       : formatNoticeCursor({ seq: head, snapshotHead: null });
     return {
       notices, nextCursor, hasMore, replace,
       personalAgentsRevision: storage.personalRosterRevision(input.recipientUserId),
     };
   });
+}
+
+// The whole list gives the owner's computers each automation wake's payload.
+function withWakes(storage: StorageContext, recipientUserId: string, notices: RelayNotice[]): RelayNotice[] {
+  const readWake = storage.db.prepare("SELECT payload_json FROM sync_relay_automation_wakes WHERE recipient_user_id = ? AND notice_id = ?");
+  for (const notice of notices) {
+    if (notice.kind === "automation-wake" && !notice.removed && notice.workspaceId !== null &&
+      storage.workspaceIsOwnedBy(notice.workspaceId, recipientUserId)) {
+      const payload = readWake.get(recipientUserId, notice.noticeId);
+      if (payload) notice.wake = JSON.parse(String(payload.payload_json)) as AutomationWake;
+    }
+  }
+  return notices;
+}
+
+/**
+ * The phone's scope of rows already read for the recipient. It never carries
+ * a wake payload, and it serves a row only when it can confirm the row is safe
+ * to show. It leaves out:
+ * - a row in a workspace the recipient owns with "Show on phone" off;
+ * - a row whose target reach settlement removed, which took the evidence;
+ * - a path, thread, or message target it may not look up: in a workspace the
+ *   recipient doesn't own, or through a share that doesn't admit the path.
+ *   This depends only on the recipient's own access, never on what another
+ *   account's workspace holds;
+ * - a path that doesn't normalize, is secret or ignored, or whose file the
+ *   main version last placed at such a path;
+ * - a thread whose create the log doesn't hold, names a hidden path or hint,
+ *   or links a file the relay can't place or last placed at a hidden path;
+ * - a message target without its thread: the relay finds a message's thread
+ *   only by scanning its log.
+ * A removed row stays, so a phone drops what it holds, without its title.
+ */
+function phoneNotices(storage: StorageContext, recipientUserId: string, notices: RelayNotice[]): RelayNotice[] {
+  const ownership = new Map<string, boolean>();
+  const owned = (workspaceId: string) => {
+    let known = ownership.get(workspaceId);
+    if (known === undefined) {
+      known = storage.workspaceIsOwnedBy(workspaceId, recipientUserId);
+      ownership.set(workspaceId, known);
+    }
+    return known;
+  };
+  const reach = shareReach(storage, recipientUserId);
+  const threads = new Map<string, boolean>();
+  const safeThread = (workspaceId: string, threadId: string) => {
+    const key = JSON.stringify([workspaceId, threadId]);
+    let known = threads.get(key);
+    if (known === undefined) {
+      const paths = threadPathsInTransaction(storage, workspaceId, threadId);
+      known = paths.created && !paths.named.some(hiddenFile) &&
+        (paths.linkedObjectId === null || (paths.lastKnownPath !== null && !hiddenFile(paths.lastKnownPath)));
+      threads.set(key, known);
+    }
+    return known;
+  };
+  // The object the main version last placed at a path, even one it has since moved away.
+  const lastAtPath = storage.db.prepare(
+    `SELECT object_id FROM sync_relay_object_moments
+     WHERE workspace_id = ? AND version_id = 'main' AND path = ? ORDER BY relay_seq DESC LIMIT 1`,
+  );
+  // Where the main version has the object now; null once main deleted it. A share admits main only, so
+  // no other version may decide what a share's Notice shows.
+  const mainPathOf = storage.db.prepare(
+    `SELECT path FROM sync_relay_object_moments
+     WHERE workspace_id = ? AND object_id = ? AND version_id = 'main' ORDER BY relay_seq DESC LIMIT 1`,
+  );
+  // Through a share, `admitted` keeps a file's later place private: one that has left the share reads the
+  // same whether it moved to a secret path, moved elsewhere, or was deleted.
+  const safePath = (workspaceId: string, path: string, admitted?: (path: string) => boolean) => {
+    const validated = validateUserWritePath(path);
+    if (!validated.ok || hiddenFile(path) || hiddenFile(validated.normalized)) return false;
+    const objectId = lastAtPath.get(workspaceId, validated.normalized)?.object_id;
+    if (typeof objectId !== "string") return true;
+    if (admitted !== undefined) {
+      const now = mainPathOf.get(workspaceId, objectId)?.path;
+      return typeof now === "string" && admitted(now) && !hiddenFile(now);
+    }
+    return !hiddenFile(storage.objectLastKnownPath(workspaceId, objectId));
+  };
+  const safeTarget = (notice: RelayNotice) => {
+    const target = notice.target;
+    if (target === null) return false;
+    if (target.path === undefined && target.thread === undefined && target.message === undefined) return true;
+    if (target.thread === undefined && target.message !== undefined) return false;
+    let workspaceId: string;
+    let admitted: ((path: string) => boolean) | undefined;
+    if (notice.workspaceId !== null) {
+      if (!owned(notice.workspaceId)) return false;
+      workspaceId = notice.workspaceId;
+    } else {
+      // Through a share, only a path it admits. A thread is never looked up there: an admitted path can't
+      // prove the thread is readable, and what the owner's thread holds must not decide what the phone shows.
+      const share = notice.recipientShareId === null ? null : storage.getShare(notice.recipientShareId);
+      if (share === null || target.path === undefined || target.thread !== undefined ||
+        !admits(reach.sidesOn(share.shareId), target.path)) return false;
+      workspaceId = share.workspaceId;
+      const sides = reach.sidesOn(share.shareId);
+      admitted = (path) => admits(sides, path);
+    }
+    return (target.path === undefined || safePath(workspaceId, target.path, admitted)) &&
+      (target.thread === undefined || safeThread(workspaceId, target.thread));
+  };
+  return notices.flatMap((notice) => {
+    if (notice.removed) return [{ ...notice, title: "" }];
+    if (notice.workspaceId !== null && owned(notice.workspaceId) && !storage.showsOnPhone(recipientUserId, notice.workspaceId)) return [];
+    return safeTarget(notice) ? [notice] : [];
+  });
+}
+
+/** The recipient's change head; zero for a list that never changed. */
+export function noticeHead(storage: StorageContext, recipientUserId: string): number {
+  return Number(storage.db.prepare("SELECT change_seq FROM sync_relay_notice_lists WHERE recipient_user_id = ?")
+    .get(recipientUserId)?.change_seq ?? 0);
+}
+
+/**
+ * Moves the recipient's head with no row, inside the caller's transaction, for
+ * a change a read must answer before its row exists: its personal agents'
+ * revision, or a named share whose Notice the next read delivers. A waiting
+ * read then answers the new cursor.
+ */
+export function advanceNoticeHead(storage: StorageContext, recipientUserId: string): void {
+  nextChangeSeq(storage, recipientUserId);
 }
 
 /**
@@ -1018,7 +1142,10 @@ function raiseFloors(storage: StorageContext, deleted: readonly Record<string, u
   const raise = storage.db.prepare(
     "UPDATE sync_relay_notice_lists SET floor_seq = max(floor_seq, ?) WHERE recipient_user_id = ?",
   );
-  for (const [recipient, floor] of floors) raise.run(floor, recipient);
+  for (const [recipient, floor] of floors) {
+    raise.run(floor, recipient);
+    notifyNoticeChange(storage, recipient);
+  }
 }
 
 function nextChangeSeq(storage: StorageContext, recipientUserId: string): number {
@@ -1032,7 +1159,12 @@ function changeSequence(storage: StorageContext, recipientUserId: string): () =>
      ON CONFLICT (recipient_user_id) DO UPDATE SET change_seq = change_seq + 1
      RETURNING change_seq`,
   );
-  return () => Number(increment.get(recipientUserId)!.change_seq);
+  // Every change to a list takes its sequence here, so this is where waiting reads hear of it.
+  return () => {
+    const seq = Number(increment.get(recipientUserId)!.change_seq);
+    notifyNoticeChange(storage, recipientUserId);
+    return seq;
+  };
 }
 
 function rowToNotice(row: Record<string, unknown>): RelayNotice {

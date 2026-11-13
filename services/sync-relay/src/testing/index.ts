@@ -540,7 +540,8 @@ export function seedFullNoticeList(
     db.exec("BEGIN");
     db.prepare(
       `INSERT INTO sync_relay_notice_lists (recipient_user_id, change_seq, floor_seq, reach_token)
-       VALUES (?, ?, 0, NULL)`,
+       VALUES (?, ?, 0, NULL)
+       ON CONFLICT (recipient_user_id) DO UPDATE SET change_seq = MAX(change_seq, excluded.change_seq)`,
     ).run(input.recipientUserId, NOTICE_LIST_ROW_LIMIT);
     const insert = db.prepare(
       `INSERT INTO sync_relay_notices (

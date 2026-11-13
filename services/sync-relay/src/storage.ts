@@ -794,6 +794,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return noticeStorage.readNoticeChanges(this, input);
   }
 
+  noticeHead(recipientUserId: string): number {
+    return noticeStorage.noticeHead(this, recipientUserId);
+  }
+
   markNotices(input: noticeStorage.MarkNoticesInput): string[] {
     return noticeStorage.markNotices(this, input);
   }

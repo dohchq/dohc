@@ -5,6 +5,7 @@ import { agentChannelWireId } from "@dohc/security-contract/chat-wire-ids";
 
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
 import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
+import type { RelayNoticePage } from "@dohc/workspace-contracts/relay";
 import type {
   ConsentCredentials,
   CredentialFence,
@@ -682,6 +683,17 @@ describe("the owner's controls", () => {
     expect((await roster(f)).agents[0]?.reach).toEqual([{ workspaceId: WS_A, level: "view" }]);
     await ok(await setReach([{ workspaceId: WS_A, level: "edit" }]));
     expect((await roster(f)).agents[0]?.reach).toEqual([{ workspaceId: WS_A, level: "edit" }]);
+  });
+
+  it("moves the Notice head with each roster change, so a read from before it answers the new revision and no row", async () => {
+    const f = await fixture();
+    const agent = await signIn(f);
+    const read = async (query = "") => await ok(await f.h(request(OWNER, `/sync/notices${query}`))) as unknown as RelayNoticePage;
+    const before = await read();
+    await ok(await owner(f, `/${agent.agentId}/name`, { method: "PUT", body: { name: "Research" } }));
+    const after = await read(`?cursor=${before.nextCursor}`);
+    expect(after).toMatchObject({ notices: [], hasMore: false, replace: false, personalAgentsRevision: before.personalAgentsRevision + 1 });
+    expect(Number(after.nextCursor)).toBe(Number(before.nextCursor) + 1);
   });
 
 });

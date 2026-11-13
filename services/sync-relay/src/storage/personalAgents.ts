@@ -22,7 +22,7 @@ import {
 } from "./agentConnections";
 import type { StorageContext } from "./context";
 import { appendLogBatchInTransaction, maxOriginSeq } from "./log";
-import { noticePersonalAgentSignedIn } from "./notices";
+import { advanceNoticeHead, noticePersonalAgentSignedIn } from "./notices";
 import { nullableText } from "./rows";
 import type { SqliteDb } from "./types";
 import { workspaceIsOwnedBy } from "./workspaces";
@@ -246,9 +246,11 @@ function agentById(storage: StorageContext, agentId: string): PersonalAgentRow |
   return row ? rowToAgent(storage, row) : null;
 }
 
+// The owner's Notice page reports this revision, so its head moves with it and a waiting read answers.
 function bumpRoster(storage: StorageContext, ownerUserId: string): number {
   const row = storage.db.prepare(`INSERT INTO sync_relay_personal_agent_rosters (owner_user_id, revision) VALUES (?, 1)
     ON CONFLICT (owner_user_id) DO UPDATE SET revision = revision + 1 RETURNING revision`).get(ownerUserId);
+  advanceNoticeHead(storage, ownerUserId);
   return Number(row?.revision);
 }
 
