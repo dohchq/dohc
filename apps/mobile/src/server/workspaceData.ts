@@ -5,7 +5,7 @@ import type { CacheFiles, SavedView } from "./cacheFiles";
 import { requestGenerations, ServerError, shownProblem, type ServerClient } from "./client";
 import { sleep } from "./deviceFlow";
 import {
-  earlierCursor, FEED_HOLD_MS, isCursor, laterCursor, readChanges, readChats, readFiles, readPage, readStream, readThread,
+  earlierCursor, FEED_HOLD_MS, isCursor, laterCursor, markThreadRead, readChanges, readChats, readFiles, readPage, readStream, readThread,
   type ChatGroup, type ChatThread, type FeedAnswer, type FeedChanges, type GroupStream, type MissingChat, type PageRead, type Read, type WorkspaceFile,
 } from "./workspaceReads";
 import type { SavedList } from "./workspaceList";
@@ -290,6 +290,11 @@ export interface WorkspaceData {
   pause(): void;
   /** Ends everything this store started. */
   stop(): void;
+  /**
+   * Marks the account's place in a thread at a message a screen shows. Each thread's mark at a message is sent once;
+   * one that fails says nothing, and the next showing sends it again.
+   */
+  markRead(threadId: string, messageId: string): void;
 }
 
 export const FEED_RETRY_MS = 1000;
@@ -376,6 +381,8 @@ export function createWorkspaceData(options: {
   }
 
   const live = () => !stopped && signIn.isCurrent();
+  // The message each thread's mark was last sent at.
+  const marked = new Map<string, string>();
   const isGone = (error: unknown) => error instanceof ServerError && error.problem === "not-found";
   let hasGone = false;
 
@@ -571,6 +578,13 @@ export function createWorkspaceData(options: {
       running = false;
       stopFeed();
       everything.abort();
+    },
+    markRead(threadId, messageId) {
+      if (!live() || marked.get(threadId) === messageId) return;
+      marked.set(threadId, messageId);
+      void markThreadRead(signIn.client, workspaceId, threadId, messageId, everything.signal).catch(() => {
+        if (marked.get(threadId) === messageId) marked.delete(threadId);
+      });
     },
   };
   return store;

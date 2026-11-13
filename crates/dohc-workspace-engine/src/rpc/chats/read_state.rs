@@ -14,6 +14,7 @@ use crate::rpc::request::parse;
 use dohc_engine_domain::AgentReader;
 use dohc_engine_domain::ChatAgentReadState;
 use dohc_engine_domain::ChatThreadReadState;
+use dohc_engine_domain::MarkAccountThreadRead;
 use dohc_engine_domain::MarkThreadRead;
 use dohc_engine_protocol::error::ErrorCode;
 use dohc_engine_protocol::error::WireError;
@@ -160,6 +161,18 @@ struct ChatReadStateMarkParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatReadStateMarkAccountParams {
+    thread_id: String,
+    message_id: String,
+    // The workspace owner when the caller holds the owner's replication
+    // context. Only then does the mark journal.
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    replication_owner_user_id: Option<String>,
+    now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatReadStateSeedAccountParams {
     account_user_id: String,
     seed_local: bool,
@@ -206,6 +219,35 @@ impl EngineService {
                     thread_id: params.thread_id,
                     up_to_sequence: params.up_to_sequence,
                     expected_revision: params.expected_revision,
+                    replication_owner_user_id: params.replication_owner_user_id,
+                    now_ms: params.now_ms.unwrap_or(now_ms()?),
+                },
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(read_state_json(&state))
+    }
+
+    /// Move the account's mark in a thread forward to one of its messages, at
+    /// the message's own coordinate. The local count stays.
+    pub(crate) async fn chats_read_state_mark_account_read(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatReadStateMarkAccountParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let state = Self::read_under_ctx(
+            &cancellation,
+            "chats.readState.markAccountRead",
+            open.actor.chat_read_state_mark_account_thread_read(
+                MarkAccountThreadRead {
+                    workspace_id: open.workspace_id.clone(),
+                    thread_id: params.thread_id,
+                    message_id: params.message_id,
                     replication_owner_user_id: params.replication_owner_user_id,
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                 },

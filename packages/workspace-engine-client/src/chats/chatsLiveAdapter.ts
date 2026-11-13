@@ -350,6 +350,24 @@ export class ChatsLiveAdapter {
     });
   }
 
+  // Moves the account's mark in a thread forward to one of its messages. It
+  // journals only with the owner's replication context.
+  async markAccountThreadRead(input: {
+    workspaceId: string;
+    threadId: string;
+    messageId: string;
+    replicationOwnerUserId?: string;
+  }): Promise<ChatThreadReadState> {
+    this.assertWorkspace(input.workspaceId);
+    return this.request(CHATS_METHOD.readStateMarkAccountRead, {
+      threadId: input.threadId,
+      messageId: input.messageId,
+      ...(input.replicationOwnerUserId !== undefined
+        ? { replicationOwnerUserId: input.replicationOwnerUserId }
+        : {}),
+    });
+  }
+
   // Records, once per workspace, the account whose read places this copy
   // shows. With `seedLocal`, this copy's local counts seed that account.
   async seedAccountReads(input: {

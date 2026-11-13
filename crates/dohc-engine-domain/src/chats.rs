@@ -1004,6 +1004,19 @@ pub struct MarkThreadRead {
     pub now_ms: i64,
 }
 
+/// Inputs to [`LinkedChatStore::mark_account_thread_read`].
+#[derive(Debug, Clone)]
+pub struct MarkAccountThreadRead {
+    pub workspace_id: String,
+    pub thread_id: String,
+    /// A message in the thread. The mark moves to its own coordinate.
+    pub message_id: String,
+    /// The workspace owner, when the caller holds the owner's replication
+    /// context. Only then does the mark journal.
+    pub replication_owner_user_id: Option<String>,
+    pub now_ms: i64,
+}
+
 /// Inputs to [`LinkedChatStore::send_message`].
 #[derive(Debug, Clone)]
 pub struct SendMessage {
@@ -5328,6 +5341,63 @@ impl<'a> LinkedChatStore<'a> {
         committed(outcome)
     }
 
+    /// Move the account's mark in one thread forward to a message in it, at
+    /// the message's own coordinate, as a phone that showed that message asks
+    /// through a server copy. The local count stays. On a copy that shows no
+    /// account's read places, and for a joined Group's thread, nothing moves.
+    /// It journals `chat.thread.read.set` only when
+    /// `replication_owner_user_id` names that account. A message outside the
+    /// thread fails with `message-not-found`.
+    pub fn mark_account_thread_read(
+        &mut self,
+        input: &MarkAccountThreadRead,
+        faults: &dyn FaultInjector,
+    ) -> Result<ChatThreadReadState, DomainError> {
+        let replication_owner_user_id = input
+            .replication_owner_user_id
+            .as_deref()
+            .map(|owner| normalize_feed_identity(owner, "Replication read account"))
+            .transpose()?;
+        let ws = input.workspace_id.clone();
+        let tid = input.thread_id.clone();
+        let mid = input.message_id.clone();
+        let now_ms = input.now_ms;
+        let outcome = self.write_with_pending_chat_replay(&ws, faults, |tx| {
+            require_thread(tx, &ws, &tid)?;
+            let created_at_ms: Option<i64> = tx
+                .query_row(
+                    "SELECT created_at_ms FROM chat_messages \
+                     WHERE workspace_id = ?1 AND thread_id = ?2 AND message_id = ?3",
+                    params![ws, tid, mid],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(DomainError::sql_corrupt)?;
+            let Some(created_at_ms) = created_at_ms else {
+                return Err(DomainError::chat(
+                    "message-not-found",
+                    "Chat message was not found.",
+                ));
+            };
+            let mut state = read_state_for_thread(tx, &ws, &tid)?;
+            if let Some(account) = account_read_scope_for_thread(tx, &ws, &tid)? {
+                let journal = replication_owner_user_id.as_deref() == Some(account.as_str());
+                advance_account_thread_read(
+                    tx,
+                    &ws,
+                    &account,
+                    &tid,
+                    (created_at_ms, mid.clone()),
+                    now_ms,
+                    journal,
+                )?;
+                state.last_read_sequence = account_thread_position(tx, &ws, &account, &tid)?.0;
+            }
+            Ok(state)
+        })?;
+        committed(outcome)
+    }
+
     /// The current read state for a thread (`readStateForThread`), defaulting to
     /// `(0, 0, 0)` when no row exists. On a copy that shows an account's read
     /// places, `last_read_sequence` is the account's place.
@@ -8144,7 +8214,9 @@ fn thread_read_journaled(
 /// mark stored without a record, for example while signed out, is published
 /// by the next authorized mark at the same coordinate. Once a record of the
 /// coordinate exists, a repeat writes nothing. A local-only message never
-/// names a mark in the account's log. Answers whether anything was written.
+/// names a mark in the account's log: when the target is one, the record
+/// names the newest message at or below it that replicates, and the mark
+/// here stays at the target. Answers whether anything was written.
 fn advance_account_thread_read(
     tx: &Transaction<'_>,
     workspace_id: &str,
@@ -8176,26 +8248,41 @@ fn advance_account_thread_read(
             stored < wanted
         }
     };
-    let publish = journal
-        && tx
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM chat_messages \
-                 WHERE workspace_id = ?1 AND thread_id = ?2 AND message_id = ?3 \
-                   AND author_user_id IS NOT NULL)",
-                params![workspace_id, thread_id, message_id],
-                |row| row.get::<_, bool>(0),
-            )
-            .map_err(DomainError::sql_corrupt)?
-        && (moves
+    // The newest coordinate at or below the target that the account's other
+    // copies can hold. A message written while signed out never leaves this
+    // copy, so a mark naming it would never apply there.
+    let replicable: Option<(i64, String)> = if journal {
+        tx.query_row(
+            "SELECT created_at_ms, message_id FROM chat_messages \
+             WHERE workspace_id = ?1 AND thread_id = ?2 AND author_user_id IS NOT NULL \
+               AND (created_at_ms, message_id) <= (?3, ?4) \
+             ORDER BY created_at_ms DESC, message_id DESC LIMIT 1",
+            params![workspace_id, thread_id, created_at_ms, message_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?
+    } else {
+        None
+    };
+    // A new target needs no lookup; any other coordinate publishes once.
+    let mut publish: Option<(i64, String)> = None;
+    if let Some((published_at_ms, published_id)) = replicable {
+        let new_target = moves && published_at_ms == created_at_ms && published_id == message_id;
+        if new_target
             || !thread_read_journaled(
                 tx,
                 workspace_id,
                 account_user_id,
                 thread_id,
-                created_at_ms,
-                &message_id,
-            )?);
-    if !moves && !publish {
+                published_at_ms,
+                &published_id,
+            )?
+        {
+            publish = Some((published_at_ms, published_id));
+        }
+    }
+    if !moves && publish.is_none() {
         return Ok(false);
     }
     // A later update time keeps the stored cell pointing at this write.
@@ -8203,20 +8290,26 @@ fn advance_account_thread_read(
         now_ms.max(updated_at_ms.saturating_add(1))
     });
     let (origin_id, origin_seq) = local_replication_coordinate(tx, workspace_id, at_ms)?;
-    merge_account_thread_read(
-        tx,
-        &AccountThreadReadCell {
-            workspace_id,
-            account_user_id,
-            thread_id,
-            created_at_ms,
-            message_id: &message_id,
-            updated_at_ms: at_ms,
-            origin_id: &origin_id,
-            origin_seq,
-        },
-    )?;
-    if publish {
+    // A record of an earlier coordinate leaves the stored mark as it was.
+    let publishes_target = publish
+        .as_ref()
+        .is_some_and(|(at, id)| *at == created_at_ms && *id == message_id);
+    if moves || publishes_target {
+        merge_account_thread_read(
+            tx,
+            &AccountThreadReadCell {
+                workspace_id,
+                account_user_id,
+                thread_id,
+                created_at_ms,
+                message_id: &message_id,
+                updated_at_ms: at_ms,
+                origin_id: &origin_id,
+                origin_seq,
+            },
+        )?;
+    }
+    if let Some((published_at_ms, published_id)) = publish {
         insert_local_replication_op(
             tx,
             workspace_id,
@@ -8226,8 +8319,8 @@ fn advance_account_thread_read(
             &serde_json::json!({
                 "accountUserId": account_user_id,
                 "threadId": thread_id,
-                "lastReadCreatedAtMs": created_at_ms,
-                "lastReadMessageId": message_id,
+                "lastReadCreatedAtMs": published_at_ms,
+                "lastReadMessageId": published_id,
                 "atMs": at_ms,
             }),
             at_ms,

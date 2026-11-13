@@ -64,14 +64,21 @@ export interface ChatGroup {
   readonly kind: ChatGroupKind;
   /** The threads in it, so a change to one can find the chat it's in. */
   readonly threadIds: readonly string[];
+  /** The account's unread messages across its threads. */
+  readonly unreadCount: number;
 }
 
-/** The workspace's groups, direct messages and agent chats. A phone's read never creates General. */
+/** The workspace's groups, direct messages and agent chats, with the account's unread counts. A phone's read never creates General. */
 export function readChats(client: ServerClient, workspaceId: string, signal: AbortSignal): Promise<Read<readonly ChatGroup[]>> {
   return operation(client, workspaceId, "groupsFull", {}, result => each(okAnswer(result)?.groups, group => {
     if (!isFields(group) || !text(group.id, 256) || !text(group.name, 500) || !isGroupKind(group.kind)) return null;
-    const threadIds = each(group.threads, thread => isFields(thread) && text(thread.id, 256) ? thread.id : null);
-    return threadIds && { id: group.id, name: group.name, kind: group.kind, threadIds };
+    const threads = each(group.threads, thread =>
+      isFields(thread) && text(thread.id, 256) && count(thread.unreadCount) ? { id: thread.id, unreadCount: thread.unreadCount } : null);
+    if (threads === null) return null;
+    const unreadCount = threads.reduce((sum, thread) => sum + thread.unreadCount, 0);
+    return Number.isSafeInteger(unreadCount)
+      ? { id: group.id, name: group.name, kind: group.kind, threadIds: threads.map(thread => thread.id), unreadCount }
+      : null;
   }), signal);
 }
 
@@ -153,6 +160,8 @@ function readMessage(item: unknown): ChatMessage | null {
 }
 
 export interface StreamItem {
+  /** A post, which opens its thread, or a message in the chat's conversation. */
+  readonly lane: "posts" | "chat";
   readonly message: ChatMessage;
   /** The replies under a post, which open its thread. */
   readonly replyCount: number;
@@ -167,13 +176,28 @@ export interface MissingChat {
 const missingChat = (result: unknown): MissingChat | null =>
   isFields(result) && result.ok === false && result.refusal === "missing" ? { kind: "missing" } : null;
 
+/** Where an item sits in a chat's stream. */
+interface StreamPosition {
+  readonly createdAtMs: number;
+  readonly lane: "posts" | "chat";
+  readonly id: string;
+}
+
 export interface GroupStream {
   readonly kind: "stream";
   readonly name: string;
   readonly groupKind: ChatGroupKind;
   /** Oldest first. */
   readonly items: readonly StreamItem[];
+  /** The newest item the account has read, or null when it has read none. */
+  readonly readPosition: StreamPosition | null;
 }
+
+const isLane = (value: unknown): value is "posts" | "chat" => value === "posts" || value === "chat";
+const readPosition = (value: unknown): StreamPosition | null =>
+  isFields(value) && count(value.createdAtMs) && isLane(value.lane) && text(value.id, 200)
+    ? { createdAtMs: value.createdAtMs, lane: value.lane, id: value.id }
+    : null;
 
 /** The most a stream read asks for: the server's own cap. */
 export const STREAM_PAGE = 100;
@@ -187,12 +211,15 @@ export function readStream(client: ServerClient, workspaceId: string, groupId: s
     if (!isFields(stream) || !isFields(stream.group) || !text(stream.group.name, 500) || !isGroupKind(stream.group.kind)) return null;
     const items = each(stream.items, item => {
       const message = isFields(item) ? readMessage(item.message) : null;
-      if (!isFields(item) || message === null) return null;
+      const position = isFields(item) ? readPosition(item.position) : null;
+      if (!isFields(item) || message === null || position === null) return null;
       const post: Fields | null = isFields(item.post) ? item.post : null;
       const replyCount = post && count(post.replyCount) ? post.replyCount : 0;
-      return { message, replyCount, lastReplyAtMs: post && count(post.lastReplyAtMs) ? post.lastReplyAtMs : null };
+      return { lane: position.lane, message, replyCount, lastReplyAtMs: post && count(post.lastReplyAtMs) ? post.lastReplyAtMs : null };
     });
-    return items && { kind: "stream", name: stream.group.name, groupKind: stream.group.kind, items };
+    const read = stream.readPosition === null ? null : readPosition(stream.readPosition);
+    if (items === null || (stream.readPosition !== null && read === null)) return null;
+    return { kind: "stream", name: stream.group.name, groupKind: stream.group.kind, items, readPosition: read };
   }, signal);
 }
 
@@ -214,6 +241,20 @@ export function readThread(client: ServerClient, workspaceId: string, threadId: 
     const messages = each(answer?.messages, readMessage);
     return messages && { kind: "thread", id: thread.id, title: thread.title, messages };
   }, signal);
+}
+
+/**
+ * Marks the account's place in a thread at a message the phone showed. The server moves the mark only forward, so a
+ * repeat, or an older one, changes nothing. Resolves once the server took it, or a missing thread or message, which it
+ * answers as reads do; rejects on any other answer.
+ */
+export function markThreadRead(client: ServerClient, workspaceId: string, threadId: string, messageId: string,
+  signal: AbortSignal): Promise<void> {
+  return client.send("POST", `/sync/${segment(workspaceId)}/ops/markRead`, body => {
+    const answer = okAnswer(body);
+    if (!answer || !isFields(answer.result)) return null;
+    return answer.result.ok === true || missingChat(answer.result) ? undefined : null;
+  }, { threadId, messageId }, { signal });
 }
 
 // --- pages --------------------------------------------------------------------------------------------------------

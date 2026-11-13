@@ -1,13 +1,14 @@
 import { workspaceWords } from "@dohc/interface-words/workspace";
 import { LegendList } from "@legendapp/list/react-native";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
-import { useCallback, useMemo } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 import { StyleSheet, Text, View } from "react-native";
+import { useAccount } from "../account/AccountProvider";
 import { ProblemLine } from "../account/ProblemLine";
 import { chatTitle } from "../chats/chatLabels";
 import type { ChatKind } from "../chats/sample";
 import { views, type ViewState } from "../server/workspaceData";
-import type { ChatGroupKind, ChatThread, GroupStream, MissingChat } from "../server/workspaceReads";
+import type { ChatGroupKind, ChatMessage, ChatThread, GroupStream, MissingChat } from "../server/workspaceReads";
 import { useTheme, workspaceMarkFills } from "../theme";
 import { EmptyLine, HoldRow, NoWorkspace, ScreenFailure, useWorkspaceGap } from "../workspace/ListStates";
 import { useKeptContentProblem, useProblemText, useView } from "../workspace/useView";
@@ -17,8 +18,9 @@ import { conversationItems, serverMessage } from "./serverMessages";
 
 
 // A chat or a thread in a signed-in build, read-only, as the server holds it: oldest at the top, newest at the bottom.
-// A chat's posts open their threads. The phone writes nothing yet, so it has no composer. The view reads again when
-// the feed reports a change to one of its threads.
+// A chat's posts open their threads. The phone has no composer yet. The view reads again when the feed reports a change
+// to one of its threads. A thread, and a chat's conversation, are read up to the newest message shown, as on the
+// desktop; a post in a chat is read once its thread opens.
 export function ServerConversation() {
   const { id = "", name } = useLocalSearchParams<{ id: string; name?: string }>();
   return id.startsWith("thread-") ? <Thread threadId={id} /> : <Stream groupId={id} name={name ?? ""} />;
@@ -28,6 +30,8 @@ function Stream({ groupId, name }: { groupId: string; name: string }) {
   const view = useMemo(() => views.stream(groupId), [groupId]);
   const { state, retry } = useView(view);
   const stream = state.value?.kind === "stream" ? state.value : null;
+  const conversation = useMemo(() => stream?.items.filter(item => item.lane === "chat").map(item => item.message) ?? null, [stream]);
+  useMarkShown(conversation);
   const messages = useMemo(() => stream?.items.map(item => serverMessage(item.message,
     item.replyCount > 0 ? { count: item.replyCount, lastMs: item.lastReplyAtMs ?? item.message.createdAtMs } : null, workspaceMarkFills)) ?? null, [stream]);
   return <Conversation title={chatTitle(kindOf(stream?.groupKind ?? "group"), stream?.name ?? name)} state={state} messages={messages} retry={retry} />;
@@ -37,6 +41,7 @@ function Thread({ threadId }: { threadId: string }) {
   const view = useMemo(() => views.thread(threadId), [threadId]);
   const { state, retry } = useView(view);
   const thread = state.value?.kind === "thread" ? state.value : null;
+  useMarkShown(thread?.messages ?? null);
   const messages = useMemo(() => thread?.messages.map(entry => serverMessage(entry, null, workspaceMarkFills)) ?? null, [thread]);
   return <Conversation title={thread?.title || workspaceWords.thread} state={state} messages={messages} retry={retry} />;
 }
@@ -100,6 +105,22 @@ function Conversation({ title, state, messages, retry }: {
 }
 
 const kindOf = (kind: ChatGroupKind): ChatKind => kind === "dm" ? "person" : kind;
+
+/** Marks each thread read at the newest of its messages shown, by time and then ID, as the engine orders them. */
+function useMarkShown(messages: readonly ChatMessage[] | null) {
+  const { data } = useAccount();
+  useEffect(() => {
+    if (!data || !messages) return;
+    const newest = new Map<string, ChatMessage>();
+    for (const message of messages) {
+      const known = newest.get(message.threadId);
+      if (!known || message.createdAtMs > known.createdAtMs || (message.createdAtMs === known.createdAtMs && message.id > known.id)) {
+        newest.set(message.threadId, message);
+      }
+    }
+    for (const message of newest.values()) data.markRead(message.threadId, message.id);
+  }, [data, messages]);
+}
 
 const styles = StyleSheet.create({
   screen: { flex: 1 },

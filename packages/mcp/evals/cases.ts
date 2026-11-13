@@ -33,7 +33,7 @@ function threadRead(read: ReturnType<typeof thread>, messages: ReturnType<typeof
 function group(id: string, name: string, kind: "group" | "dm", threads: { id: string; title: string }[] = []) {
   return {
     id, name, slug: name.toLowerCase().replace(/\s+/g, "-"), kind, threadCount: threads.length,
-    threads: threads.map((each) => ({ ...each, messageCount: 2, updatedAtMs: AT })),
+    threads: threads.map((each) => ({ ...each, messageCount: 2, unreadCount: 0, updatedAtMs: AT })),
   };
 }
 

@@ -132,6 +132,19 @@ function isLoopbackHostname(hostname: string): boolean {
   );
 }
 
+/** Whether `value` is exactly an absolute HTTP(S) origin, such as `https://relay.example.com`. */
+function isHttpOrigin(value: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  return value.trim() === value && (parsed.protocol === "http:" || parsed.protocol === "https:") &&
+    parsed.username === "" && parsed.password === "" && !value.includes("@") && parsed.pathname === "/" &&
+    !value.includes("?") && !value.includes("#");
+}
+
 function validateShareWebOrigin(value: string | undefined): string | undefined {
   if (value === undefined) {
     if (!isDevOrTest) {
@@ -350,6 +363,10 @@ const datasetHost = await storage.createDatasetHost({directory: datasetDirectory
 const resolveActor = resolveAccountActor;
 if (copiesOn && (!deployment || !linkKey || !process.env.DOHC_RELAY_SERVICE_HOST_ROOT || !process.env.DOHC_RELAY_ENGINE_EXECUTABLE || !process.env.DOHC_RELAY_PUBLIC_ORIGIN)) {
   fatal("FATAL: Copies of workspaces on this server require a deployment, the link key, a persistent host root, the native engine executable, and the public HTTPS relay origin.");
+}
+// The copies sync with this origin, and it issues the actor key of each phone write.
+if (copiesOn && !isHttpOrigin(process.env.DOHC_RELAY_PUBLIC_ORIGIN!)) {
+  fatal("FATAL: DOHC_RELAY_PUBLIC_ORIGIN must be an absolute HTTP(S) origin, without credentials, a path, a query, or a fragment.");
 }
 const automationServer = automationsOn ? {label: automationServerLabel(process.env.DOHC_SERVER_NAME)} : undefined;
 const automationReplicaKey = copiesOn ? {key: Buffer.from(linkKey!), namespace: deployment!.history.namespace} : undefined;

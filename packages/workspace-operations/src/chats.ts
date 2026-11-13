@@ -529,6 +529,7 @@ export async function listGroupsWithThreads(host: ChatsHost): Promise<CliResultB
           id: entry.thread.id,
           title: entry.thread.title,
           messageCount: entry.messageCount,
+          unreadCount: entry.unreadCount,
           lane: entry.thread.lane,
           updatedAtMs: entry.thread.updatedAtMs,
         })),

@@ -11,7 +11,7 @@ const ops = (result: unknown, cursor: string): Answer => ({ status: 200, body: {
 const files = (...paths: [string, string][]) => ({ ok: true, files: paths.map(([path, objectId]) => ({ path, objectId, contentKind: "text", byteLength: 1 })), folders: [] });
 const groups = (...entries: [string, string[]][]) => ({
   ok: true, groups: entries.map(([id, threads]) => ({ id, name: id, slug: id, kind: "group", threadCount: threads.length,
-    threads: threads.map(thread => ({ id: thread, title: "", messageCount: 1, updatedAtMs: 1 })) })),
+    threads: threads.map(thread => ({ id: thread, title: "", messageCount: 1, unreadCount: 0, updatedAtMs: 1 })) })),
 });
 const message = (id: string, threadId: string, body: string) => ({
   id, threadId, authorKind: "human", authorDisplayName: "Maya Chen", body, createdAtMs: 1, attachments: [], needsDecision: false,
@@ -556,5 +556,33 @@ describe("the read cache and the sign-in", () => {
     expect(data.state(views.page("a.md")).value).toBeNull();
     expect(cache.entries(scope)).toHaveLength(0);
     expect(server.paths().filter(path => path.includes("/ops/"))).toHaveLength(3);
+  });
+});
+
+describe("a workspace's read marks", () => {
+  it("sends a thread's mark at a message once, again after it fails, and none once the store stops", async () => {
+    const server = testServer();
+    const path = "/sync/ws-a/ops/markRead";
+    server.on("POST", path, ops({ ok: true }, "0.1.1"), { status: 503, body: { ok: false, code: "server_busy" } }, ops({ ok: true }, "0.1.1"));
+    const { data } = open(server);
+    data.markRead("thread-1", "message-1");
+    data.markRead("thread-1", "message-1");
+    await vi.waitFor(() => expect(count(server, path)).toBe(1));
+    data.markRead("thread-1", "message-2");
+    await vi.waitFor(() => expect(count(server, path)).toBe(2));
+    // The failed mark is sent again once a screen shows the message again, after the failure lands.
+    await vi.waitFor(() => {
+      data.markRead("thread-1", "message-2");
+      expect(count(server, path)).toBe(3);
+    });
+    expect(server.calls.filter(call => call.path === path).map(call => call.body)).toEqual([
+      { threadId: "thread-1", messageId: "message-1" },
+      { threadId: "thread-1", messageId: "message-2" },
+      { threadId: "thread-1", messageId: "message-2" },
+    ]);
+    data.stop();
+    data.markRead("thread-2", "message-3");
+    await settled();
+    expect(count(server, path)).toBe(3);
   });
 });

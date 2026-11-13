@@ -107,6 +107,7 @@ const results = {
           id: thread.id,
           title: thread.title,
           messageCount: 1,
+          unreadCount: 0,
           updatedAtMs: thread.updatedAtMs,
         }],
       },

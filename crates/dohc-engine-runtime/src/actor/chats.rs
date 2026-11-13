@@ -7,10 +7,10 @@ use dohc_engine_domain::{
     ChatFeedPage, ChatFeedReadState, ChatFollow, ChatMention, ChatMessage, ChatMessagePage,
     ChatProjectionFileAccess, ChatReaction, ChatStagePublication, ChatThread, ChatThreadLane,
     ChatThreadProjection, ChatThreadReadState, CreateFileThread, DispatchClaim, DispatchRecovery,
-    FollowTargetKind, LinkedChatStore, MarkThreadRead, MentionCursor, PendingBookmarkRow,
-    ResolveDecision, RunRecordLink, SaveBookmark, SendMessage, SetFollow, SetReaction,
-    StartChannelThread, StreamPage, StreamPosition, ThreadDispatchPause, ThreadWithChannel,
-    UnreadFileThread,
+    FollowTargetKind, LinkedChatStore, MarkAccountThreadRead, MarkThreadRead, MentionCursor,
+    PendingBookmarkRow, ResolveDecision, RunRecordLink, SaveBookmark, SendMessage, SetFollow,
+    SetReaction, StartChannelThread, StreamPage, StreamPosition, ThreadDispatchPause,
+    ThreadWithChannel, UnreadFileThread,
 };
 use dohc_engine_storage::NoFaults;
 use tokio_util::sync::CancellationToken;
@@ -496,6 +496,23 @@ impl ActorHandle {
             } else {
                 chats
                     .mark_thread_read(&input, &NoFaults)
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
+    }
+
+    pub async fn chat_read_state_mark_account_thread_read(
+        &self,
+        input: MarkAccountThreadRead,
+        token: CancellationToken,
+    ) -> Result<ChatThreadReadState, RuntimeError> {
+        self.run_chats(move |chats| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                chats
+                    .mark_account_thread_read(&input, &NoFaults)
                     .map_err(RuntimeError::from)
             }
         })

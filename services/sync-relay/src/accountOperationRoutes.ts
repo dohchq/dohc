@@ -1,6 +1,6 @@
 import { jsonResponse, readBoundedJson, TokenBucketLimiter } from "@dohc/service-http";
 import type { ResolveAccountSession } from "@dohc/workspace-auth/session";
-import { isPhoneWriteOperation, parsePhoneWrite, runAccountWrite } from "./accountChatWrites";
+import { isPhoneWriteOperation, parseMarkRead, parsePhoneWrite, runAccountMarkRead, runAccountWrite } from "./accountChatWrites";
 import { accountDisplayName, type LookupUserDisplayName } from "./accountDisplayName";
 import { readAccountFeed, type AccountFeedWaits } from "./accountFeed";
 import { isAccountOperation, runAccountOperation } from "./accountOperations";
@@ -37,7 +37,7 @@ export function parseAccountOperationRoute(parts: readonly string[]): AccountOpe
 }
 
 /**
- * A signed-in account's reads and chat writes in a workspace it owns,
+ * A signed-in account's reads, chat writes and read marks in a workspace it owns,
  * through this server's copy of it, while it shows on the phone, and its
  * change feed, at `GET .../ops/changes?since=&hold=`. Only a Bearer session
  * reaches them, and the route checks the operation and the owner before it
@@ -80,7 +80,8 @@ export function createAccountOperationRoute(options: {
     const reaches = (userId: string) =>
       storage.workspaceIsOwnedBy(route.workspaceId, userId) && storage.showsOnPhone(userId, route.workspaceId);
     const write = isPhoneWriteOperation(route.operation);
-    if (!(feed || write || isAccountOperation(route.operation)) || !reaches(caller.userId)) throw notFound();
+    const mark = route.operation === "markRead";
+    if (!(feed || write || mark || isAccountOperation(route.operation)) || !reaches(caller.userId)) throw notFound();
     const authorize = async () => {
       const current = await session(request);
       if (current.sessionId !== caller.sessionId || current.userId !== caller.userId || !reaches(caller.userId)) throw notFound();
@@ -119,6 +120,12 @@ export function createAccountOperationRoute(options: {
     }
     const copies = options.copies();
     if (copies === undefined) throw copiesUnavailable();
+    if (mark) {
+      const { result, cursor } = await runAccountMarkRead({ storage, copies }, {
+        workspaceId: route.workspaceId, accountId: caller.userId, mark: parseMarkRead(args), visitor, authorize,
+      });
+      return jsonResponse({ ok: true, result, cursor });
+    }
     const { result, cursor } = await runAccountOperation({ storage, copies }, {
       owner: caller.userId, workspaceId: route.workspaceId, operation: route.operation, args, authorize, visitor,
     });
