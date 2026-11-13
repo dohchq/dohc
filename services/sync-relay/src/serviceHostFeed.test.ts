@@ -400,6 +400,18 @@ it("fails a write naming a blob the host never fetched or uploaded as missing, a
     ["ydoc.update", ydoc(binding.objectId, "docs/a.md", Y)]])).json()).toMatchObject({inserted: 2});
 });
 
+it("serves a refused row and its status without granting its blobs", async () => {
+  const f = await fixture();
+  const op = parseLogOp({originSeq: 0, opKind: "moment.append", recordedAtMs: 1, payload: write(binding.objectId, "docs/a.md", P, {momentId: "refused"})});
+  op.settlementAdmission = {status: "refused", settlementId: "settlement", reason: "authorship-mismatch"};
+  f.storage.appendLogBatch({workspaceId: ws, originId: "settling-device", ops: [op]});
+  const served = (await f.read()).ops.find(row => row.originId === "settling-device");
+  expect(served).toMatchObject({payload: {momentId: "refused", payloadAfterBlobSha256: P.sha256}, settlementAdmission: {status: "refused"}});
+  expect(await f.blobStatus(P.sha256)).toBe(404);
+  const have = await f.request("POST", "blobs/have", JSON.stringify({sha256s: [P.sha256]}));
+  expect(await have.json()).toEqual({ok: true, missing: [P.sha256]});
+});
+
 it("drops upload proof with its collected blob, and fails the write as retryable until the host uploads it again", async () => {
   const f = await fixture();
   const collected = blob("collected upload");

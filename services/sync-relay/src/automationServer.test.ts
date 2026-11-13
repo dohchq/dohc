@@ -1,3 +1,5 @@
+import type {RelayButtonInspection} from "@dohc/workspace-contracts/relay";
+import {SHARED_BUTTON_DENIED, SHARED_BUTTON_HELD, SHARED_BUTTON_MOVED, SHARED_BUTTON_FIELD_CHANGED, SHARED_BUTTON_UNCHECKED} from "@dohc/automation-executor/button-presser";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import type { ScheduledAutomation, CollectionAutomationRun, CollectionAutomationsOptions, CollectionAutomationHold } from "@dohc/automation-executor/collection-automations";
@@ -61,8 +63,8 @@ function fakeExecutor(
   options: CollectionAutomationsOptions,
   marks: Map<string, { automationId: string; scheduleHash: string; throughMs: number }>,
   engine: { answers: boolean } = { answers: true },
+  scheduled: ScheduledAutomation[] = [HOURLY],
 ) {
-  const scheduled: ScheduledAutomation[] = [HOURLY];
   let opened = false;
   let marksAsked = 0;
   const claims: Array<{ run: number[]; throughMs: number }> = [];
@@ -153,6 +155,8 @@ async function relay() {
 async function server(storage: SyncRelayStorage, h: Pick<ReturnType<typeof testHandler>, "readOwnerShares">, input: {
   datasetHost?: RelayDatasetHost;
   incarnation?: number;
+  schedules?: ScheduledAutomation[];
+  inspection?: RelayButtonInspection;
   engine?: { answers: boolean };
   client?: EngineClient;
   recordDelivery?: AutomationServerOptions["recordDelivery"];
@@ -189,7 +193,8 @@ async function server(storage: SyncRelayStorage, h: Pick<ReturnType<typeof testH
     },
     ...(input.recordDelivery ? {recordDelivery: input.recordDelivery} : {}),
     createExecutor: (options) => {
-      const fake = fakeExecutor(options, marks, input.engine);
+      const fake = fakeExecutor(options, marks, input.engine, input.schedules);
+      if (input.inspection) fake.executor.inspectRelayedBatch = async ids => ids.map(() => input.inspection!);
       executors.push(fake);
       return fake.executor;
     },
@@ -371,6 +376,33 @@ describe("a server that runs a workspace's automations", () => {
     expect(s.errors).toEqual([]);
   });
 
+  it("takes no Group coverage or reach verdicts an earlier copy took, even one with no schedules, and takes a later release", async () => {
+    clock = at(8);
+    const { storage, h, host } = await relay();
+    await host("/check-in", { installId: "laptop", label: "Laptop", claim: false });
+    await host("/choose", { installId: "laptop", generation: 0 });
+    await host("/choose", { installId: "server", generation: 1 });
+    await host("/release", { installId: "laptop", generation: 2, releasedThroughMs: at(8), groups: groups(at(8), "message-on-laptop"), groupsWatched: 1, reach: reach("stopped", 4) });
+    // The first copy, which ran no schedules, was given the laptop's release.
+    const first = await server(storage, h, { incarnation: 1, schedules: [] });
+    const taking = await first.openReplica();
+    expect(await taking.options.groupRelayRecord(3, new AbortController().signal)).toEqual({ generation: 3, handover: groups(at(8), "message-on-laptop") });
+    await first.run.close();
+    const s = await server(storage, h, { incarnation: 2 });
+    const fake = await s.openReplica();
+    expect(await fake.options.groupRelayRecord(3, new AbortController().signal), "Group triggers start from now").toEqual({ generation: 3, handover: null });
+    expect(await fake.options.reachRelayRecord(3, new AbortController().signal), "what it cannot prove, it holds").toEqual({ generation: 3, reach: null, everShared: false });
+
+    // The owner moves the automations to the laptop and back: that release is new to this copy.
+    clock = at(9);
+    await host("/choose", { installId: "laptop", generation: 3 });
+    await vi.waitFor(async () => expect((await host("")).body.host).toMatchObject({ installId: "laptop", generation: 5 }));
+    await host("/choose", { installId: "server", generation: 5 });
+    await host("/release", { installId: "laptop", generation: 6, releasedThroughMs: at(9), groups: groups(at(9), "later"), groupsWatched: 5, reach: reach("held", 6) });
+    expect(await fake.options.groupRelayRecord(7, new AbortController().signal)).toEqual({ generation: 7, handover: groups(at(9), "later") });
+    expect(await fake.options.reachRelayRecord(7, new AbortController().signal)).toEqual({ generation: 7, reach: reach("held", 6), everShared: false });
+  });
+
   it("resumes a rebuilt copy again after a restart that came before its marks landed", async () => {
     clock = at(8);
     const { storage, h, host } = await relay();
@@ -392,6 +424,49 @@ describe("a server that runs a workspace's automations", () => {
     await vi.waitFor(() => expect(fake.claims).toEqual([{ run: [], throughMs: at(10) }]));
     await vi.waitFor(() => expect(storage.readAutomationServerSchedules(WORKSPACE)).toMatchObject({ incarnation: 2, hostGeneration: 1 }));
   });
+  it.each([
+    [{kind: "unchecked", reason: "Host unavailable"}, SHARED_BUTTON_UNCHECKED],
+    [{kind: "denied", reason: "carol@x cannot view Payroll"}, SHARED_BUTTON_DENIED],
+    [{kind: "denied", reason: "Private Collection does not support this step"}, SHARED_BUTTON_DENIED],
+    [{kind: "denied", reason: SHARED_BUTTON_HELD}, SHARED_BUTTON_HELD],
+    [{kind: "denied", reason: SHARED_BUTTON_MOVED}, SHARED_BUTTON_MOVED],
+    [{kind: "denied", reason: SHARED_BUTTON_FIELD_CHANGED}, SHARED_BUTTON_FIELD_CHANGED],
+  ] satisfies Array<[RelayButtonInspection, string]>)("answers an inspection safely with an initial press backlog: %j", async (inspectionResult, safeReason) => {
+    clock = at(8);
+    const { storage, h, host } = await relay();
+    await host("/check-in", { installId: "laptop", label: "Laptop", claim: true });
+    const shareId = await createShare(h, OWNER, WORKSPACE, { recipientUserId: "ana", paths: ["Tasks"], access: "edit" });
+    const grant = storage.listActiveShareGrantsForRecipient(shareId, "ana")[0]!;
+    const s = await server(storage, h, {inspection: inspectionResult});
+    expect((await h(request("ana", `/sync/shares/${shareId}/automation-presses`, jsonBody({
+      pressId: "initial", automationId: PRESSED, collectionPath: "Tasks", definitionHash: "0123456789abcdef", recordId: "rec-12", confirmed: [],
+    })))).status).toBe(200);
+    const list = storage.listAutomationPresses.bind(storage);
+    const controller = new AbortController();
+    let inspection: ReturnType<SyncRelayStorage["inspectAutomationButton"]> | undefined;
+    let queued = 0;
+    const spy = vi.spyOn(storage, "listAutomationPresses").mockImplementation(scope => {
+      const presses = list(scope);
+      if (presses.length > 0 && inspection === undefined) {
+        inspection = storage.inspectAutomationButton({
+          target: { automationId: PRESSED, collectionPath: "Tasks", definitionHash: "0123456789abcdef" },
+          source: { workspaceId: WORKSPACE, shareId, grantId: grant.grantId, grantGeneration: grant.generation, userId: "ana" },
+          id: "busy-server", signal: controller.signal, wake: () => {},
+        });
+        queued = storage.listButtonInspections(scope).length;
+      }
+      return presses;
+    });
+    try {
+      const fake = await s.openReplica();
+      await vi.waitFor(() => expect(fake.pressed).toHaveLength(1));
+      expect(queued).toBe(1);
+      // The fake executor answers unchecked; receiving it proves the request reached the host.
+      await expect(inspection).resolves.toEqual({ kind: inspectionResult.kind, reason: safeReason });
+      expect(s.errors.some(([, error]) => error instanceof Error && error.message === inspectionResult.reason)).toBe(true);
+    } finally { controller.abort(); spy.mockRestore(); }
+  });
+
 
   it("runs a press from a share view as the person who pressed, and tells them when it fails", async () => {
     clock = at(8);

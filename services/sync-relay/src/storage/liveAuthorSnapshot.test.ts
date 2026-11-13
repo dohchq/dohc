@@ -104,6 +104,14 @@ it("leaves a different public link context unnamed, including its agent declarat
   expect(workspaceUsageBytes(storage, "workspace")).toBe(before);
 });
 
+it("checks the enrolled principal's grant when an existing mapping matches", () => {
+  const storage = fixture(), publicId = storage.tx(() => ensureLiveLinkPublicPrincipal(storage, link));
+  const principal = storage.getLinkPrincipal(link.principalId)!;
+  const read = vi.spyOn(storage, "getLinkPrincipal").mockReturnValue({...principal, grantId: "other-grant"});
+  expect(() => deriveLiveAuthorSnapshot(storage, link, {kind: "link", publicPrincipalId: publicId})).toThrow(/principal changed/);
+  read.mockRestore();
+});
+
 it("refuses a fresh mapping at quota without leaving a partial write", () => {
   const storage = fixture();
   const before = workspaceUsageBytes(storage, "workspace");

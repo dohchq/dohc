@@ -37,6 +37,33 @@ it("keeps owner Undo independent of the recipient's revoked grant", () => {
     expect(f.storage.commitLiveUpdateJournal(undo).result).toMatchObject({kind: "accepted", replayed: false});
   } finally {f.close();}
 });
+it("refuses a press borrowed from another automation or presser", () => {
+  const f = fixture();
+  try {
+    for (const changed of [
+      {...declaration, attribution: {...declaration.attribution, onBehalfOf: "other-reader"}}]) {
+      expect(f.storage.commitLiveUpdateJournal({...f.input, trustedAutomation: changed}).result)
+        .toEqual({kind: "refused", reason: "authority-refused"});
+    }
+    expect(f.journalRows().journal).toHaveLength(0);
+  } finally {f.close();}
+});
+
+it.each([false, true])("refuses a target outside the original share even with another View grant (revoked: %s)", revoked => {
+  const f = fixture();
+  try {
+    f.write(db => db.exec(`UPDATE sync_relay_shares SET selector_json='{"paths":["source"],"versionId":null}' WHERE share_id='share';
+      UPDATE sync_relay_automation_presses SET collection_path='source' WHERE host_press_id='press';
+      INSERT INTO sync_relay_shares (share_id,workspace_id,granter_user_id,selector_json,created_at_ms)
+        VALUES ('target-share','workspace','owner','{"paths":["docs"],"versionId":null}',0);
+      INSERT INTO sync_relay_share_grants
+        (grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
+        VALUES ('target-grant','target-share','user','reader',NULL,'view',1,'active',0,NULL,NULL);`));
+    if (revoked) f.write(db => db.exec("UPDATE sync_relay_share_grants SET status='revoked',revoked_at_ms=2 WHERE grant_id='target-grant'"));
+    expect(f.storage.commitLiveUpdateJournal(f.input).result).toEqual({kind: "refused", reason: "authority-refused"});
+  } finally {f.close();}
+});
+
 
 it.each(["failed"])("admits delayed writes after an accepted press settles as %s", outcome => {
   const f = fixture();

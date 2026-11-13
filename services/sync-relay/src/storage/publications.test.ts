@@ -342,6 +342,23 @@ it("does not revive a cached launch guard when its publication is explicitly rea
   f.storage.reactivateAppPublication({...state, expectedAuthorityRevision: 2, limits});
   expect(() => guard(20)).toThrow();
 });
+it("discovers only currently authorized active apps in bounded pages", async () => {
+  const f = linkFixture(), ids = [f.published.publicationId];
+  for (let index=0;index<26;index++) {const input=request();input.candidate.sourceRevision=digest(`discovery-${index}`);ids.push(f.storage.publishAppPublication(input).publicationId);}
+  ids.sort();
+  const firstResponse = await f.http("/sync/link/app-publications");expect(firstResponse.status).toBe(200);
+  const first=await firstResponse.json();expect(first.publications).toHaveLength(25);expect(first.nextCursor).toBe(ids[24]);
+  expect(first.publications[0]).toEqual({publicationId:ids[0],name:"app"});
+  const last=await (await f.http(`/sync/link/app-publications?cursor=${first.nextCursor}`)).json();expect(last.publications).toHaveLength(2);expect(last.nextCursor).toBeNull();
+  expect((await f.http("/sync/link/app-publications?grantId=g")).status).toBe(400);
+  const held=await f.http("/sync/link/app-publications");
+  f.storage.withdrawAppPublication({workspaceId:"w",ownerUserId:"owner",publicationId:ids[0]!,expectedAuthorityRevision:1});
+  await expect(held.text()).rejects.toThrow();
+  const after=await (await f.http("/sync/link/app-publications")).json();expect(after.publications.some((row:{publicationId:string})=>row.publicationId===ids[0])).toBe(false);
+  f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({paths:["app"],versionId:null}));
+  expect((await (await f.http("/sync/link/app-publications")).json()).publications).toEqual([]);
+});
+
 
 it("records the approving agent with exact immutable source and exposure facts across restart", () => {
   const f=fixture(), input=request(), agent={kind:"agent" as const,label:"Builder",labelSource:"agent-declared" as const};

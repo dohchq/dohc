@@ -210,6 +210,18 @@ describe("relayed Button presses", () => {
       automationId: AUTOMATION, collectionPath: "trip/packing", definitionHash: HASH }))), 403, "share_read_only");
   });
 
+  it("settles a waiting press as failed when its grant ends, so the host never runs it", async () => {
+    const r = await relay();
+    await host(r);
+    await press(r);
+    expect(r.storage.revokeShareGrant({ shareId: r.shareId, grantId: r.grantId, revokedAtMs: clock }).ok).toBe(true);
+    expect(await list(r)).toEqual([]);
+    const db = inspectDatabase(storagePath(r.storage), { readOnly: true });
+    const row = { ...db.prepare("SELECT state, outcome, error FROM sync_relay_automation_presses").get() };
+    db.close();
+    expect(row).toEqual({ state: "settled", outcome: "failed", error: "Your access to this Collection changed before the button ran." });
+  });
+
   it.each([
     "trip/../private",
   ])("refuses an invalid or non-normalized Collection path: %s", async (collectionPath) => {
@@ -284,6 +296,29 @@ describe("relayed Button presses", () => {
     expect(response.status).toBe(500);
     spy.mockRestore();
     expect(await list(r)).toMatchObject([{ hostPressId: "relay-id-1", state: "pending" }]);
+  });
+
+  it("accepts nothing at a host generation a handover replaced", async () => {
+    const r = await relay();
+    await host(r, "laptop");
+    await press(r);
+    await r.h(request(OWNER, `/sync/${WORKSPACE}/automation-host/check-in`, jsonBody({ installId: "desktop", label: "desktop", claim: false })));
+    await r.h(request(OWNER, `/sync/${WORKSPACE}/automation-host/choose`, jsonBody({ installId: "desktop", generation: 1 })));
+    // The owner chose the laptop back, so it runs again, at a new generation.
+    await r.h(request(OWNER, `/sync/${WORKSPACE}/automation-host/choose`, jsonBody({ installId: "laptop", generation: 2 })));
+    await expectCode(await post(r, "accept", { hostPressIds: ["relay-id-1"], generation: 1 }), 409, "conflict");
+    expect(await (await post(r, "accept", { hostPressIds: ["relay-id-1"], generation: 3 })).json()).toEqual({ ok: true, accepted: ["relay-id-1"] });
+  });
+
+  it("checks the grant again when a restarted host asks for a press it accepted", async () => {
+    const r = await relay();
+    await host(r);
+    await press(r);
+    await post(r, "accept", { hostPressIds: ["relay-id-1"] });
+    expect(await (await post(r, "accept", { hostPressIds: ["relay-id-1"] })).json()).toEqual({ ok: true, accepted: ["relay-id-1"] });
+    expect(r.storage.revokeShareGrant({ shareId: r.shareId, grantId: r.grantId, revokedAtMs: clock }).ok).toBe(true);
+    expect(await (await post(r, "accept", { hostPressIds: ["relay-id-1"] })).json()).toEqual({ ok: true, accepted: [] });
+    expect(await list(r)).toEqual([]);
   });
 
 });

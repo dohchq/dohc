@@ -173,6 +173,15 @@ describe("owner restore options", () => {
       principalKind: "link", userId: null, email: null});
   });
 
+  it("refuses a stale current path and a retired baseline", async () => {
+    const f = await fixture();
+    f.raw.prepare("UPDATE sync_relay_object_moments SET path='moved.md' WHERE object_id=?").run(binding.objectId);
+    expect(() => f.read()).toThrow("no longer retained");
+    f.raw.prepare("UPDATE sync_relay_live_documents SET lineage_state='retired',admission_state='closed',retired_at_ms=10 WHERE object_id=?")
+      .run(binding.objectId);
+    expect(() => f.read()).toThrow("not found");
+  });
+
   it("recovers the pending operation even after its grant is revoked", async () => {
     const f = await fixture(); f.begin();
     expect(f.read().pendingOperation).toEqual({operationId: "restore", phase: "authority-invalidated", proposalDigest: null});
@@ -181,6 +190,13 @@ describe("owner restore options", () => {
     expect(status.phase).toBe("authority-invalidated"); expect(status.proposalDigest).toBeNull();
     expect(status.intent).not.toHaveProperty("ownerUserId");
     expect(() => f.storage.readOwnerRestoreStatus({workspaceId: scope.workspaceId, ownerUserId: scope.userId, operationId: "restore"})).toThrow("not found");
+  });
+
+  it("does not report resumed when the retained lifecycle cannot authenticate it", async () => {
+    const f = await fixture(), {lookup} = nativeFenced(f);
+    f.raw.prepare("UPDATE sync_relay_live_restore_operations SET phase='resumed' WHERE operation_id='restore'").run();
+    expect(() => f.storage.readOwnerRestoreStatus(lookup))
+      .toThrow("could not be verified");
   });
 
   it.each(["relay-admitted", "resumed"] as const)("authenticates bounded %s receipts without reading blobs", async phase => {

@@ -837,6 +837,50 @@ async function emptyServiceHost(options: {frameChanges?: boolean; maxDocumentsPe
     nextPass: () => afterPasses(o.f)};
 }
 const stay = {departing: []};
+it("answers a held-document read its detach or retired registration overtook as nothing there", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace];
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  const send = o.client().sendRequest, through = send.getMockImplementation()! as (...args: unknown[]) => ReturnType<typeof send>;
+  let engine: () => Promise<unknown> = async () => null;
+  send.mockImplementation(async (...args: unknown[]) => {
+    const request = args[0] as {id: number; method: string};
+    return request.method === "sync.heldDocument" ? {id: request.id, result: await engine()} as never : through(...args);
+  });
+  // The engine's next held-document answers wait for `release`, once one is asked, then `answer`.
+  const holding = (answer: () => unknown) => {
+    const asked = deferred<void>(), release = deferred<void>();
+    engine = async () => {asked.resolve(); await release.promise; return answer();};
+    return {asked: asked.promise, release: () => release.resolve()};
+  };
+  const routes = createHeldDocumentRoutes({storage: o.f.storage, host: () => o.host});
+  const read = () => routes(new Request("http://relay.test/sync/workspace/held-documents/object"),
+    {route: "held-documents", workspaceId: "workspace", objectId: "object"}, "owner");
+
+  engine = async () => {throw new Error("engine connection closed");};
+  await expect(o.host.heldDocument("workspace", "object", {markdown: false})).rejects.toThrow("engine connection closed");
+  await expect(read()).rejects.toThrow("engine connection closed");
+
+  // The engine's connection to the workspace ends with it: the read fails, and the recheck finds why.
+  const detaching = holding(() => {throw new Error("engine connection closed");}), detached = read();
+  await detaching.asked;
+  await o.host.update({workspaces: [], documents: [], ...stay});
+  detaching.release();
+  await expect(detached).rejects.toMatchObject({code: "not_found"});
+
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  cleanup.push(async () => log.mockRestore());
+  // The engine answers, but the host that asked no longer stands.
+  const retiring = holding(() => null), retired = o.host.heldDocument("workspace", "object", {markdown: false});
+  await retiring.asked;
+  o.raw.exec("UPDATE sync_relay_session_host_control SET admission_state='closed', registered_connection_id=NULL");
+  retiring.release();
+  await expect(retired).resolves.toEqual({invalidated: "registration"});
+  await expect(read()).rejects.toMatchObject({code: "not_found"});
+});
+
 
 // Proves: the engine's cancellation, sent in place of an answer it already had,
 // frees a cancelled held read's lane slot well before the request deadline. The
@@ -1075,6 +1119,12 @@ it("keeps a frozen seed's stopped document until its owner copies the accepted s
 // closes after the last copy. Since the engine opens one per workspace, a read
 // of another earlier store closes the open handle first, and a read its
 // caller abandons closes its handle too.
+it("opens no earlier store for a read whose refusal changed while it waited", async () => {
+  const r = await rotatedServiceHost();
+  await expect(r.read({...r.earlier, generation: r.earlier.generation + 1_000})).resolves.toEqual({kind: "readChanged"});
+  expect(r.k.engine("liveApplication.openRecoveryStore")).toEqual([]);
+});
+
 it("reads an earlier store's kept edits through one recovery handle, and closes it after the last copy", async () => {
   const o = await enrolledServiceHost(), k = keptEdits(o);
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -2259,6 +2309,41 @@ it("detaches a deleted workspace at once and removes its store", async () => {
   expect(o.host.automationLedger("workspace")).toBeNull();
   expect(o.host.automationLedger("workspace-2")).not.toBeNull();
 });
+
+it.each([false, true])("detaches a workspace at once when its identity changes, leaving its pending document unsettled (new documents at once: %s)", async newAtOnce => {
+  const o = await emptyServiceHost();
+  const siblingRoot = join(o.f.root, "workspace-2"), rotatedRoot = join(o.f.root, "workspace-rotated");
+  await mkdir(siblingRoot); await mkdir(rotatedRoot);
+  const sibling = {...o.workspace, root: siblingRoot, workspaceId: "workspace-2"}, siblingDocument = {...o.other, workspaceId: "workspace-2"};
+  const rotated = {...o.workspace, root: rotatedRoot,
+    hostedReplication: {...o.workspace.hostedReplication!, identity: {replicationEpoch: "epoch-2", streamIdentity: "stream-2"}}};
+  await o.host.update({workspaces: [o.workspace, sibling], documents: [o.other, siblingDocument], ...stay});
+  expect(o.host.retains(o.other)).toBe(true);
+  o.membership.splice(0);
+  // Settlement under the old identity is refused, so an unload would stay pending forever.
+  o.unloads.push({status: "pending", reason: "settlement-pending"});
+  expect(o.f.storage.rotateWorkspaceIdentity({workspaceId: "workspace", ownerUserId: "owner", replicationEpoch: "epoch-2", streamIdentity: "stream-2", rotatedAtMs: 10})).toBe("rotated");
+  const attach = {...o.attach, params: {...o.attach.params, root: rotatedRoot}};
+  const rotatedSet = {workspaces: [rotated, sibling], documents: [o.other, siblingDocument], ...stay};
+  if (!newAtOnce) {
+    await o.host.update({workspaces: [sibling], documents: [siblingDocument], ...stay});
+    expect(o.membership).toEqual([o.detach]);
+    expect(o.host.settled(o.other)).toBe(false);
+    expect(o.host.automationLedger("workspace")).toBeNull();
+    // Nothing is left to retry.
+    await o.host.update({workspaces: [sibling], documents: [siblingDocument], ...stay});
+    expect(o.membership).toEqual([o.detach]);
+  }
+  await o.host.update(rotatedSet);
+  expect(o.membership).toEqual([o.detach, attach]);
+  expect(o.host.retains(o.other)).toBe(true);
+  // The sibling workspace keeps its attachment and document throughout.
+  expect(o.host.retains(siblingDocument)).toBe(true);
+  expect(o.host.automationLedger("workspace-2")).not.toBeNull();
+  expect(o.membership.every(row => row.workspace !== "attached-workspace-2")).toBe(true);
+  expect(o.spawned()).toBe(1); expect(o.client().close).not.toHaveBeenCalled();
+});
+
 
 it("removes a detached configured root after restart and keeps unrelated roots", async () => {
   const root = await mkdtemp(join(tmpdir(), "dohc-configured-root-deletion-"));

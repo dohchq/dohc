@@ -187,6 +187,15 @@ it.each<[string, string, (f: ReturnType<typeof seedFixture>) => Promise<DrainOpt
   expect(f.applyThrough).not.toHaveBeenCalled();
   expect(f.receipts).toEqual([]);
 });
+it.each([["another adoption", seedKey("other", 7)], ["another adopted head", seedKey("adoption", 6)]])(
+  "refuses a seed key from %s without delivering it", async (_name, key) => {
+    const f = fixture(1, 10_000, undefined, key);
+    await expect(f.run()).rejects.toThrow("Owner outbox holds another adoption's seed.");
+    expect(f.applied).not.toHaveBeenCalled();
+    expect(f.storage.commitLiveUpdateJournal).not.toHaveBeenCalled();
+    expect(f.applyThrough).not.toHaveBeenCalled();
+  });
+
 
 it("drains small edits when their immutable base exceeds the aggregate drain budget", async () => {
   const run = fixture();

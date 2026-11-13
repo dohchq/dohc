@@ -1,3 +1,5 @@
+import {createHash} from "node:crypto";
+import {parseLiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
 import {maximumBindingBytes, nativeSettlementId, prepareHostedSettlements, restorePublicationReservation, settlementRecordDigest} from "../../../services/sync-relay/src/storage/hostedSettlement.js";
 import {appendValidatedLiveJournal, readReplicaLiveJournal} from "../../../services/sync-relay/src/storage/liveUpdateJournal.js";
 
@@ -266,6 +268,21 @@ it("frames exact byte views, snapshots caller storage, and refuses truncation, i
     expect(() => encodeNativeRestoreProposal(JSON.stringify(f.receipt), {...f.bytes, nativeSourceBytes: [Uint8Array.of(0, 0)]}, f.input)).toThrow();
   } finally {f.close();}
 });
+it.each([{actorOriginId: "other-agent"}, {chainDepth: 63}, {onBehalfOf: null}, {actorKind: "human", chainDepth: 0, onBehalfOf: null}])(
+  "refuses an adopted native source whose accepted delivery declared other provenance: %j", patch => {
+    const f = contentProposalFixture("owner", "device", false, true);
+    try {
+      const changed = structuredClone(f.receipt), native = changed.nativeSources[0]!;
+      Object.assign(native.source.origin, patch);
+      native.appendKey = `adopted-local:${jsonHash(native.source)}`;
+      changed.nativeSourceManifestDigest = jsonHash([changed.fence, changed.nativeSources]);
+      // The source parses on its own; its accepted copy declared the fixture's agent.
+      parseNativeRestoreProposalReceipt(JSON.stringify(changed), f.input);
+      expect(() => f.store.captureStopRestoreProposal(f.input, JSON.stringify(changed))).toThrow();
+      expect(() => f.store.captureStopRestoreProposal(f.input, JSON.stringify(f.receipt))).not.toThrow();
+    } finally {f.close();}
+  });
+
 
 it("authenticates an enrolled owner draft's identity and declaration without a native sequence", () => {
   const f = proposalSourcesFixture("bootstrap", "service");
@@ -338,6 +355,20 @@ it("uses existing owner progress and never bootstraps over its document",()=>{
     f.store.acknowledgeStopRestoreApplication(capture,one,applicationAck(two,2));
     expect(f.store.completeStopRestoreCut(capture)).toMatchObject({kind:"owner",sourceId:"adoption",terminal:two});
     expect(f.raw.prepare("SELECT COUNT(*) AS n FROM sync_relay_live_delivery_bootstraps").get()!.n).toBe(0);
+  }finally{f.close();}
+});
+
+it.each([false,true])("refuses a changed owner binding record before allocating the fence, changed=%s",changed=>{
+  const f=fixture("owner");try{
+    f.adopt();beginStopRestore(f.context,f.intent,40);
+    if(changed){
+      const origin=JSON.parse(String(f.raw.prepare("SELECT origin_json FROM sync_relay_live_delivery_owners").get()!.origin_json));
+      const binding=parseLiveObjectBinding({...origin.originalBinding,selectorPaths:["docs"]});
+      f.raw.prepare("UPDATE sync_relay_live_delivery_owners SET origin_json=?").run(JSON.stringify({...origin,originalBinding:binding,
+        bindingDigest:createHash("sha256").update(JSON.stringify(binding)).digest("hex")}));
+      expect(()=>advanceStopRestoreFence(f.context,f.lookup,50)).toThrow();
+    }else advanceStopRestoreFence(f.context,f.lookup,50);
+    expect(f.raw.prepare("SELECT restore_fence_generation FROM sync_relay_live_documents").get()).toEqual({restore_fence_generation:changed?1:2});
   }finally{f.close();}
 });
 
@@ -1012,6 +1043,56 @@ it.each([true])("refuses a missing or altered cancellation proof, native fence s
     expect(f.rows()).toEqual(before);
     expect(cancellations()).toEqual(requested);
     expect(f.store.pendingStopRestoreCancellation(f.lookup)).not.toBeNull();
+  } finally {f.close();}
+});
+
+function declinedAtFence(restart: boolean, answer: "cancelled" | "fenceCancelled" = "fenceCancelled") {
+  const f = readyNativeFence("owner", "device", true);
+  let reopened: ReturnType<typeof openSyncRelayStorage> | undefined;
+  const generation = answer === "cancelled" ? 1 : 2;
+  try {
+    if (answer === "fenceCancelled") f.store.acknowledgeStopRestoreFence(f.lookup, f.receipt);
+    const answers = cancellationAnswers(f);
+    declineStopRestore(f.context, f.lookup, 150);
+    expect(f.store.acknowledgeStopRestoreCancellation(f.lookup, answers[answer], 170).phase).toBe("declined");
+    expect(documentState(f)).toEqual({restore_fence_generation: generation, admission_state: "closed"});
+    f.write(db => db.prepare("UPDATE sync_relay_share_grants SET status='active',generation=6,revoked_at_ms=NULL WHERE grant_id='grant'").run());
+    let storage = f.storage, history = f.history;
+    if (restart) {
+      f.storage.close();
+      storage = reopened = openSyncRelayStorage(f.path);
+      history = createLiveJournalHistoryAuthority({namespace: "restore-test", reconciled: true});
+    }
+    const context = storage as StorageContext;
+    const g = {...f, storage, history, context, store: storage.createLiveCommittedDeliveryStore(history),
+      write: (sql: string, ...values: string[]) => context.tx(() => context.db.prepare(sql).run(...values)),
+      close: () => {if (reopened) {f.raw.close(); reopened.close();} else f.close();}};
+    const next = {...f.intent, operationId: "restore-b", expectedFence: generation, expectedGrantGeneration: 6};
+    const plan = () => storage.readStopRestorePlan({operationId: next.operationId, ownerUserId: "owner", document: f.document, shareId: next.shareId,
+      grantId: next.grantId, restorePointCursor: 0, restorePointReceiptDigest: next.restorePointReceiptDigest, maxOutputBytes: 1_000_000});
+    return {...g, next, nextLookup: {...f.lookup, operationId: next.operationId}, plan};
+  } catch (error) {if (reopened) {f.raw.close(); reopened.close();} else f.close(); throw error;}
+}
+
+it.each([false, true])("refuses a restore after a Decline at another fence or lineage, restart=%s", restart => {
+  const f = declinedAtFence(restart);
+  try {
+    const lineage = f.document.lineageClaimId, other = "e".repeat(64);
+    const operations = () => f.raw.prepare("SELECT * FROM sync_relay_live_restore_operations").all(), before = operations();
+    const damage: [() => void, () => void, number][] = [
+      [() => f.write("UPDATE sync_relay_live_documents SET restore_fence_generation=3"), () => f.write("UPDATE sync_relay_live_documents SET restore_fence_generation=2"), 3],
+      [() => f.write("UPDATE sync_relay_live_restore_cancellations SET acknowledgment_json=replace(acknowledgment_json,?,?)", lineage, other),
+        () => f.write("UPDATE sync_relay_live_restore_cancellations SET acknowledgment_json=replace(acknowledgment_json,?,?)", other, lineage), 2],
+    ];
+    for (const [apply, undo, expectedFence] of damage) {
+      apply();
+      expect(() => f.plan()).toThrow("Live restore operation conflicts with current authority.");
+      expect(() => beginStopRestore(f.context, {...f.next, expectedFence}, 180)).toThrow("Live restore operation conflicts with current authority.");
+      expect(operations()).toEqual(before);
+      expect(f.storage.getShareGrant("grant")).toMatchObject({status: "active", generation: 6});
+      undo();
+    }
+    expect(beginStopRestore(f.context, f.next, 180).previousOperationId).toBe("restore");
   } finally {f.close();}
 });
 

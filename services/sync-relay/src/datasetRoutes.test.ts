@@ -213,6 +213,35 @@ it("restricts lifecycle management and archived discovery to owners and rejects 
   expect(await (await f.http("w/datasets", undefined, helper)).json()).toEqual({datasets: [], nextCursor: null});
 });
 
+it("mediates named native file uploads and downloads through explicitly granted attachment actions", async () => {
+  const f = await httpFixture();
+  const nativeDefinition = structuredClone(definition); nativeDefinition.datasetId = id(20);
+  nativeDefinition.operations[0]!.fieldIds.push(id(7));
+  nativeDefinition.operations[1]!.fieldIds.push(id(7));
+  const nativeSource = operationSource.replace("return ctx.db.query('SELECT * FROM requests ORDER BY id');", `return {rows:ctx.db.query('SELECT * FROM requests ORDER BY id').map(row=>({id:row.id,values:{'${id(7)}':row.receipt}}))};`);
+  const nativeRevision = describeDatasetRevision({definition: nativeDefinition, revision: 1, schemaSql, operationSource: nativeSource});
+  const ownerPath = `w/datasets/${id(20)}`, namedPath = `shares/s/datasets/${id(20)}`, headers = {authorization: "Bearer helper"};
+  expect((await f.http(`${ownerPath}/activate`, {revision: nativeRevision, schemaSql, operationSource: nativeSource})).status).toBe(200);
+  f.storage.tx(() => f.storage.db.prepare(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
+    VALUES('native-files','s','user','helper',NULL,'view',1,'active',1,NULL,NULL)`).run());
+  const pinned = {revision: 1, revisionSha256: nativeRevision.revisionSha256};
+  const bytesBase64 = Buffer.from([137,80,78,71,13,10,26,10,0]).toString("base64");
+  const upload = {...pinned, fieldId: id(7), name: "receipt.png", contentType: "image/png", bytesBase64, idempotencyKey: "native-upload"};
+  expect((await f.http(`${namedPath}/upload`, upload, headers)).status).toBe(404);
+  await f.http(`${ownerPath}/grants`, {grantId: "native-files", grant: {...pinned, operationIds: [id(5),id(6)], discover: true}});
+  const response = await f.http(`${namedPath}/upload`, upload, headers); expect(response.status).toBe(200);
+  const {file} = await response.json();
+  const read = {...pinned, fileId: file.fileId, read: {operationId: id(6), fieldId: id(7), input: {}}};
+  expect((await f.http(`${namedPath}/file`, read, headers)).status).toBe(404);
+  expect((await f.http(`${namedPath}/invoke`, {...pinned, operationId: id(5), input: {name: "Helper", fileId: file.fileId}, idempotencyKey: "native-submit"}, headers)).status).toBe(200);
+  expect(await (await f.http(`${namedPath}/file`, read, headers)).json()).toEqual({file, bytesBase64});
+  expect((await f.http(`${namedPath}/file`, {...read, read: {...read.read, fieldId: id(4)}}, headers)).status).toBe(404);
+  expect((await f.http(`${namedPath}/upload`, {...upload, fieldId: id(4)}, headers)).status).toBe(404);
+  await f.http(`${ownerPath}/grants`, {grantId: "native-files", grant: null});
+  expect((await f.http(`${namedPath}/file`, read, headers)).status).toBe(404);
+});
+
+
 it("rejects ambient credentials and forged request authority before changing data", async () => {
   const f = await httpFixture(); await f.activate();
   const credentialCases: Record<string,string>[] = [{cookie: "ambient"}, {authorization: ""}, f.publicHeaders, {authorization: "Bearer stranger"}];
@@ -292,6 +321,34 @@ it("keeps staged files private to their caller and rolls attachment back with a 
   f.storage.tx(() => f.storage.db.prepare("DELETE FROM sync_relay_dataset_usage WHERE workspace_id='w'").run());
   expect(f.storage.db.prepare("SELECT count(*) AS n FROM sync_relay_dataset_files").get()!.n).toBe(0);
 });
+
+it("retains the first participant attempt across lost replies and clears only its captured token", async () => {
+  const f = await httpFixture(); await f.activate(); const publicationId = f.publish();
+  await f.http(`${f.path}/binding`, {publicationId, enabled: true});
+  const path = `link/app-publications/${publicationId}/backend`;
+  const request = (action: object, headers = f.publicHeaders) => f.http(`${path}/attempt`, {authorityRevision: 1, operation: "submit", ...action}, headers);
+  expect(await (await request({action: "get"})).json()).toEqual({attempt: null});
+  const save = {action: "save", idempotencyKey: "original", input: {name: "Friend"}};
+  const first = await request(save); expect(first.status).toBe(200);
+  const saved = await first.json(); expect(saved.attempt).toMatchObject({idempotencyKey: "original", input: {name: "Friend"}});
+  expect(await (await request({...save, idempotencyKey: "other-tab", input: {name: "Changed"}})).json()).toEqual(saved);
+  expect(await (await request({action: "get"})).json()).toEqual(saved);
+  const invoke = {authorityRevision: 1, operation: "submit", idempotencyKey: saved.attempt.idempotencyKey, input: saved.attempt.input};
+  expect((await f.http(`${path}/invoke`, invoke, f.publicHeaders)).status).toBe(200);
+  expect(await (await f.http(`${path}/invoke`, invoke, f.publicHeaders)).json()).toMatchObject({revision: 1, replayed: true});
+  expect(await (await f.invoke()).json()).toMatchObject({result: [{name: "Friend"}]});
+  expect(await (await request({action: "get"}, {...f.publicHeaders, "x-dohc-link-profile-secret": "Q".repeat(43)})).json()).toEqual({attempt: null});
+  expect((await request({action: "clear", token: "x".repeat(43)})).status).not.toBe(200);
+  expect(await (await request({action: "get"})).json()).toEqual(saved);
+  expect(await (await request({action: "clear", token: saved.attempt.token})).json()).toEqual({attempt: null});
+  const next = await (await request({...save, idempotencyKey: "next"})).json();
+  expect(next.attempt.token).not.toBe(saved.attempt.token);
+  expect((await request({action: "clear", token: saved.attempt.token})).status).not.toBe(200);
+  expect((await request({...save, principalKey: "other"})).status).toBe(400);
+  await f.http(`${f.path}/binding`, {publicationId, enabled: false});
+  expect((await request({action: "get"})).status).toBe(404);
+});
+
 it("exposes immutable approved rule history only through the owner route", async () => {
   const f = await httpFixture(); expect((await f.activate()).status).toBe(200);
   const path = `${f.path}/history-revision?revisionSha256=${revision.revisionSha256}`;

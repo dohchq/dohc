@@ -417,6 +417,20 @@ describe("personal agent sign-in", () => {
     await ok(await allow(f, requestId, { reach: [{ workspaceId: WS_A, level: "edit" }, { workspaceId: WS_B, level: "view" }] }));
   });
 
+  it("refuses redemption when the account no longer owns a workspace in the reach", async () => {
+    const f = await fixture();
+    const clientId = await registerClient(f);
+    const { code, resource } = await approve(f, { clientId, reach: [{ workspaceId: WS_A, level: "view" }, { workspaceId: WS_B, level: "view" }] });
+    const db = inspectDatabase(f.dbPath, { foreignKeys: true });
+    db.prepare("UPDATE sync_relay_workspaces SET owner_user_id = ? WHERE workspace_id = ?").run(OTHER, WS_B);
+    db.close();
+    await expectRefused(await redeem(f, { clientId, code, resource }));
+    expect((await roster(f)).agents).toEqual([]);
+
+    const owned = await approve(f, { clientId });
+    await ok(await redeem(f, { clientId, ...owned }));
+  });
+
 });
 
 describe("families never mix", () => {
@@ -643,6 +657,31 @@ describe("the owner's controls", () => {
 
     expect(revisions).toEqual([1, 2, 3, 4, 5, 6, 7]);
     expect((await roster(f)).revision).toBe(7);
+  });
+
+  it("answers only the agent's own account", async () => {
+    const f = await fixture();
+    const agent = await signIn(f);
+    await expectRefused(await owner(f, `/${agent.agentId}/name`, { method: "PUT", body: { name: "Mine" } }, OTHER));
+    await expectRefused(await owner(f, `/${agent.agentId}/sign-out`, { method: "POST" }, OTHER));
+    await expectRefused(await owner(f, `/p-${"a".repeat(26)}/name`, { method: "PUT", body: { name: "Nobody" } }));
+    expect((await roster(f, OTHER)).agents).toEqual([]);
+    expect((await roster(f)).agents).toEqual([expect.objectContaining({ name: "Helper", status: "active" })]);
+    await expectPersonal(f, agent).resolves.toMatchObject({ agentId: agent.agentId });
+  });
+
+  it("sets reach only to the account's own workspaces, at View, Comment, or Edit", async () => {
+    const f = await fixture();
+    const agent = await signIn(f);
+    const setReach = (reach: unknown) => owner(f, `/${agent.agentId}/reach`, { method: "PUT", body: { reach } });
+    expect((await setReach([{ workspaceId: OTHER_WS, level: "view" }])).status).toBe(400);
+    expect((await setReach([{ workspaceId: WS_A, level: "admin" }])).status).toBe(400);
+    expect((await setReach([{ workspaceId: WS_A, level: "view" }, { workspaceId: WS_A, level: "comment" }])).status).toBe(400);
+    expect((await setReach([{ workspaceId: WS_A, level: "view", extra: 1 }])).status).toBe(400);
+    expect((await owner(f, `/${agent.agentId}/reach`, { method: "POST" })).status).toBe(405);
+    expect((await roster(f)).agents[0]?.reach).toEqual([{ workspaceId: WS_A, level: "view" }]);
+    await ok(await setReach([{ workspaceId: WS_A, level: "edit" }]));
+    expect((await roster(f)).agents[0]?.reach).toEqual([{ workspaceId: WS_A, level: "edit" }]);
   });
 
 });

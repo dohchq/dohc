@@ -292,6 +292,14 @@ it("exposes complete migration previews only to the current owner and commits th
   const rows=await f.host.invoke("owner",{...scope,revision:2,revisionSha256:revision.revisionSha256,operationId:id(9),input:{},idempotencyKey:"after"});
   expect(rows.result).toEqual([candidate.preview.firstPage.changes[0]!.after]);
 });
+it("invalidates prepared migration authority after archive and restore",async()=>{
+  const f=await fixture();await f.activate();
+  const expected=f.host.approvedArtifacts("owner",scope).cursor,revision=describeDatasetRevision({definition,revision:2,schemaSql,operationSource});
+  const candidate=await f.host.prepareMigration("owner",{workspaceId:scope.workspaceId,revision,schemaSql,operationSource,expected,migrationSql:"SELECT 1;"});
+  f.host.archiveDataset("owner",scope);f.host.restoreDataset("owner",scope);
+  await expect(f.host.approveMigration("owner",{...scope,candidateId:candidate.candidateId,checkpointSha256:candidate.checkpointSha256})).rejects.toThrow("You do not have access to this Collection.");
+});
+
 
 it("migrates records atomically and retains stale grants for explicit reapproval", async () => {
   const f = await fixture(); await f.activate(); await f.invoke("owner", id(6), { value: "saved" });
@@ -359,6 +367,19 @@ it("enforces a form's create-field subset before operation execution", async () 
   }
   expect(f.journal.head(scope,()=>{}).cursor.revision).toBe(0);
   await expect(invoke({values:{[id(4)]:"allowed"}})).resolves.toMatchObject({result:{accepted:true},revision:1});
+});
+
+it("rechecks grants and data revision when a protected resource is read",async()=>{
+  const f=await fixture();await f.activate();
+  f.host.setDataGrant("owner",{...scope,principalKey:"helper",grant:{revision:1,revisionSha256:prepared.revision.revisionSha256,operationIds:[id(7)],discover:true}});
+  const request={...scope,revision:1,revisionSha256:prepared.revision.revisionSha256,operationId:id(7),input:{},idempotencyKey:"file"};
+  let read=false;
+  const pending=f.host.readOperation("helper",request,()=>{read=true;return Buffer.from("file");});
+  f.host.setDataGrant("owner",{...scope,principalKey:"helper",grant:null});
+  await expect(pending).rejects.toThrow("You do not have access to this Collection.");expect(read).toBe(false);
+  await expect(f.host.readOperation("owner",request,()=>Buffer.from("file"))).resolves.toEqual(Buffer.from("file"));
+  await expect(f.host.readOperation("owner",request,async()=>{read=true;})).rejects.toThrow("synchronous");expect(read).toBe(false);
+  await expect(f.host.readOperation("owner",{...request,operationId:id(6)},()=>"file")).rejects.toThrow("only reads");
 });
 
 it("refuses file disclosure when a committed row change removes visibility after the read result",async()=>{
@@ -525,6 +546,15 @@ it("confines approved reads to their own table after a full-table operation", as
     return original(input);
   });
   await expect(f.invoke("friend", id(7))).resolves.toMatchObject({ result: { rows: [{ values: { [id(4)]: "First" } }] } });
+});
+
+it("refuses changed stored source even after the generated verdict is cached", async () => {
+  const f = await linkReadFixture();
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.approved });
+  await f.invoke("friend", id(7));
+  const saved = f.host.approvedArtifacts("owner", scope);
+  f.db.prepare("UPDATE dohc_dataset_catalog SET artifacts_json=?").run(JSON.stringify({ schemaSql: saved.schemaSql, operationSource: "tampered" }));
+  await expect(f.invoke("friend", id(7))).rejects.toThrow("access");
 });
 
 

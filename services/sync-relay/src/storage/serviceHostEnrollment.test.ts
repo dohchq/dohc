@@ -349,6 +349,27 @@ it("refuses an enrollment table it does not recognize", async () => {
   for (const f of [unmarked, altered]) expect(f.raw.prepare(`SELECT count(*) AS count FROM ${SERVICE_HOST_ENROLLMENTS}`).get()!.count).toBe(1);
 });
 
+it("retired rows stay hidden until an explicit reactivation and still reject foreign identities", async () => {
+  const f = await fixture(), first = f.enroll();
+  expect(f.storage.hasKeptServiceHostEnrollment(scope.workspaceId, first.path)).toBe(true);
+  expect(f.storage.hasKeptServiceHostEnrollment(scope.workspaceId, "docs/absent.md")).toBe(false);
+  expect(() => f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: true as unknown as false, retire: true})).toThrow("Invalid");
+  expect(f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true, ownerUserId: "other"})).toBeNull();
+  // Stop fences acceptance immediately.
+  expect(f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true})).toMatchObject({enabled: false, retired: true, ownerStop: "retire"});
+  expect(f.storage.listServiceHostEnrollments()).toHaveLength(0);
+  expect(f.release()).toMatchObject({hostDrainedAtMs: 25});
+  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, first.path)).toMatchObject({shareId: first.shareId, retired: true, enabled: false});
+  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, "docs/absent.md")).toBeNull();
+  expect(f.storage.listServiceHostEnrollments()).toEqual([]);
+  expect(f.storage.listServiceHostEnrollments(scope.workspaceId)).toEqual([]);
+  expect(f.storage.currentServiceHostWorkspace(scope.workspaceId)).toBeNull();
+  expect(f.setEnabled(false)).toMatchObject({retired: true, enabled: false});
+  expect(f.storage.listServiceHostEnrollments()).toEqual([]);
+  expect(f.resume()).toMatchObject({retired: false, enabled: true});
+  expect(f.storage.listServiceHostEnrollments()).toHaveLength(1);
+});
+
 // Proves: live admission needs an Edit grant of the enrollment's owner that
 // covers its path, as its departure does. Deleting the last one refuses the
 // owner's binding at once, though the enrollment stays enabled until its

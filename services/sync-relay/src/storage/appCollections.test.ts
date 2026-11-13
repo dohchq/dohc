@@ -183,6 +183,12 @@ it("reads owner-updated projection and only approved fields, including adopted r
   expect(()=>f.storage.readAppCollection({...f.input,limit:10})).toThrow();
 });
 
+it("refuses approval widening and unselected collections before updating revision",()=>{
+  const f=fixture();
+  for(const approval of [{...capability,allowedFields:[...capability.allowedFields,"secret"]},{...capability,requiredFields:[]},{...capability,collectionPath:"private"},{...capability,readFields:[...capability.readFields,"secret"]}])expect(()=>f.storage.approveAppCollection({...f.owner,expectedAuthorityRevision:2,capability:approval})).toThrow();
+  expect(f.storage.readAppPublication(f.owner).authorityRevision).toBe(2);
+});
+
 async function writer(path:string) {
   const child=fork(writerEntry,[path],{execArgv:[],stdio:["ignore","ignore","pipe","ipc"]});
   children.set(child,new Promise(resolve=>child.once("close",()=>resolve())));

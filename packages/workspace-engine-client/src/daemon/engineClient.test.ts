@@ -132,6 +132,18 @@ describe("private owner delivery transport", () => {
       else await expect(pending).rejects.toThrow(scenario === "cursor mismatch" ? "Draft cursor differs from page" : TypeError);
     } finally { transport.close(); }
   });
+  it.each(["valid", "binding mismatch", "namespace mismatch"])("preserves observed-enrollment target comparisons: %s", async (scenario) => {
+    const peer = new FakePeerConnection(), transport = client(peer, { privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 1 } });
+    peer.acknowledge(); await transport.ready();
+    const draft = { ...target, binding: { ...target.binding, objectId: scenario === "binding mismatch" ? "other" : "object" }, relayDatabaseNamespace: scenario === "namespace mismatch" ? "other" : "relay", revision: 1, acceptedCursor: 0, nativeHeadSequence: 2, nativeUnsettled: false, outboxId: null, pendingBytes: 0, state: null };
+    peer.onEnvelope = e => { if (e.type === "request") peer.send({ type: "response", id: e.id, result: { status: "observed", draft } }); };
+    try {
+      const pending = transport.ownerYDocPrepareEnrollment(request, target);
+      if (scenario === "valid") await expect(pending).resolves.toEqual({ status: "observed", draft });
+      else await expect(pending).rejects.toThrow("Owner enrollment target changed");
+    } finally { transport.close(); }
+  });
+
   it.each(["binding", "cursor"])("preserves enrollment %s comparisons after upload", async (scenario) => {
     const peer = new FakePeerConnection(), transport = client(peer, { privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 1 } });
     peer.acknowledge(); await transport.ready();

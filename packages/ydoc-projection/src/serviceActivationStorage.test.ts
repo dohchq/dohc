@@ -973,6 +973,41 @@ it("refuses a bootstrap Stop restore of a service activation's lineage before it
   }finally{f.close()}
 })
 
+it.each([false,true])("refuses a never-adopted retirement on another host of an activation that adopted (completed: %s)",async completedHere=>{
+  const f=fixture();try{
+    enroll(f)
+    if(completedHere)await completeActivation(f)
+    else{
+      await f.prepare()
+      const delivery=f.storage.createLiveCommittedDeliveryStore(f.history,f.store.pending(f.document,host))
+      const adoption=delivery.captureOwnerCut({host,document:f.document,actor,adoptionId:f.capture.activationId,expectedLocalSequence:2,maxBytes:1_000_000,maxEvents:100,throughCursor:0})
+      delivery.acknowledgeOwnerAdoption(adoption,{adoptionId:f.capture.activationId,localYDocSequence:2,terminalCursor:0,adoptionReplayed:false})
+    }
+    const ledger=unaccounted(f)
+    const device=transitionHost(f,host,'device','device'),other=transitionHost(f,device,'service','other') as typeof host
+    stopDocument(f,50)
+    const open=retirement(f.storage)!,rows=()=>f.raw.prepare(`SELECT (SELECT json_group_array(host_id) FROM sync_relay_live_delivery_owners) AS owners,
+      (SELECT count(*) FROM sync_relay_live_delivery_reservations) AS reservations,(SELECT usage_bytes FROM sync_relay_workspace_usage) AS usage,
+      (SELECT retired_at_ms FROM sync_relay_service_activations) AS retired`).get()
+    const before=rows()
+    expect(()=>f.store.completeRetirement({workspaceId:'workspace',key:keyOf(open),boundary:null,host:other,registeredAtMs:60,nowMs:60,guard(){}}))
+      .toThrow('Retiring activation adopted on another host.')
+    expect(rows()).toEqual(before)
+    expect(retirement(f.storage)).toEqual(open)
+    expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor})).toEqual(refused)
+    // Back on A, the configured host provisions and registers as before.
+    const again=transitionHost(f,transitionHost(f,other,'device','device'),'service','service') as typeof host
+    expect(f.storage.registerLiveHost({...again,updatedAtMs:70,guard(){}}).ok).toBe(true)
+    expect(unaccounted(f)).toBe(ledger)
+    const boundary=completedHere?ownerBoundary(f):{terminalReceipt:null,eventCount:0,historyEvidenceDigest:initialAcceptedHistoryDigest('history',f.document)}
+    expect(f.store.completeRetirement({workspaceId:'workspace',key:keyOf(open),boundary,host:again,registeredAtMs:80,nowMs:80,guard(){}}))
+      .toEqual({status:'retired',replayed:false})
+    expect(retirement(f.storage)).toBeNull()
+    expect(f.raw.prepare("SELECT host_id,journal_cursor FROM sync_relay_live_delivery_reservations WHERE host_id<>'service'").all()).toEqual([])
+    expect(unaccounted(f)).toBe(ledger)
+  }finally{f.close()}
+})
+
 // Proves: an activation adopts on one host. Once the configuration moved, its
 // adoption on the new host is refused with nothing changed, and A keeps provisioning.
 it.each([true])("refuses an activation's adoption on the host its configuration moved to after it adopted on another (completed: %s)",async completedHere=>{

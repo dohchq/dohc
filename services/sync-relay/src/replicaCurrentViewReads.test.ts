@@ -120,6 +120,22 @@ it("requires the link session check in every replica storage reader",async()=>{
   }
 });
 
+it.each([{grantId:"another",generation:1},{grantId:"link",generation:2}])("refuses a session that does not match the replica input: %j",async session=>{
+  const f=await fixture();seedLinkGrant(f.storage,{grantId:"link",shareId:"s",secretHash:"hash",access:"edit"});f.save();
+  const input={grantId:"link",generation:1,principal:{kind:"link" as const,requireSession:()=>session}};
+  for(const read of [
+    ()=>withReplicaCurrentView(f.storage as unknown as StorageContext,input,undefined,()=>"leaked"),
+    ()=>f.storage.listReplicaCurrentViewFiles(input),
+    ()=>f.storage.readReplicaCurrentViewFile({...input,path:"docs/a.md"}),
+    ()=>f.storage.listReplicaHistoryPins(input),
+    ()=>f.storage.readReplicaHistoryPin({...input,pinId:"pin"}),
+  ]) expect.soft(read()).toEqual({status:"denied"});
+  if(false) {
+    // @ts-expect-error A session check must return a validated session, never null.
+    f.storage.listReplicaCurrentViewFiles({...input,principal:{kind:"link",requireSession:()=>null}});
+  }
+});
+
 it("accountless paths use the existing relative projection in both directions", async () => {
   const f = await fixture(); seedLinkGrant(f.storage, {grantId:"link", shareId:"s", secretHash:"hash"}); f.save();
   const input = {grantId:"link", generation:1, principal:{kind:"link" as const,requireSession(){return {grantId:"link",generation:1};}}};

@@ -348,6 +348,19 @@ describe("held document read admission", () => {
     expect((await next).status).toBe(200);
   });
 
+  it("answer a caller who lost ownership while their read runs as a missing document, not 429", async () => {
+    const h = heldReads(), f = await relay(h.host);
+    const first = f.get(details);
+    await h.asked(1);
+    f.raw.prepare("UPDATE sync_relay_workspaces SET owner_user_id='owner-2' WHERE workspace_id=?").run(scope.workspaceId);
+    const refused = await f.get(details);
+    expect(refused.status).toBe(404);
+    expect(await refused.json()).toMatchObject({code: "not_found"});
+    h.reads[0]!.answer();
+    expect((await first).status).toBe(404);
+    expect(h.reads).toHaveLength(1);
+  });
+
   it("free the slot after a failed read, the host's deadline, and a client that disconnected", async () => {
     const h = heldReads(), f = await relay(h.host), log = vi.spyOn(console, "error").mockImplementation(() => {});
     try {

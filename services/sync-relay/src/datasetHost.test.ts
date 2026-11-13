@@ -1,3 +1,4 @@
+import {createDatasetAppRoutes} from "./datasetRoutes";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -188,6 +189,15 @@ it("rolls quota refusal back with the event and receipt, then accepts the same r
   f.storage.options.workspaceQuotaBytes = quota;
   expect((await f.invoke(owner, id(5), {name: "pending"})).revision).toBe(1);
   expect((await f.invoke(owner, id(6))).result).toMatchObject([{name: "pending"}]);
+});
+
+it("rechecks app access after the account sender lookup", async () => {
+  const f = await fixture(); await f.activate(); const publicationId = f.publish(); f.addHelper();
+  const route = createDatasetAppRoutes(f.host, f.storage, {nowMs: () => 10, shareSenderLabel: async () => {
+    f.storage.revokeShareGrant({shareId: "s", grantId: "helper-grant", revokedAtMs: 11});
+    return "Ana (owner@dohc.test)";
+  }});
+  await expect(route(new Request("https://relay.test/summary"), {route: "app-backend", action: "summary", publicationId, workspaceId: "w"}, helper)).rejects.toThrow();
 });
 
 it("keeps a published form and its original capability alive after a field rename without republishing", async () => {

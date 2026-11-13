@@ -92,6 +92,31 @@ function claimStorageWorkspace(storage: SyncRelayStorage): void {
 }
 
 describe("createShare storage boundary", () => {
+  it("refuses mismatched share and grant ids without persisting either row", async () => {
+    const storage = await testStorage();
+    claimStorageWorkspace(storage);
+    const input = directShareInput("share-mismatch", "grant-mismatch");
+    input.grant.shareId = "share-other";
+
+    expect(() => storage.createShare(input)).toThrow("share and grant ids do not match");
+    expect(storage.getShare("share-mismatch")).toBeNull();
+    expect(storage.getShareGrant("grant-mismatch")).toBeNull();
+  });
+
+  it("refuses a link grant without persisting either row", async () => {
+    const storage = await testStorage();
+    claimStorageWorkspace(storage);
+    const input = directShareInput("share-link", "grant-link");
+    input.grant.principalKind = "link";
+    input.grant.principalUserId = null;
+
+    expect(() => storage.createShare(input)).toThrow(
+      "a link grant requires an existing share and a credential",
+    );
+    expect(storage.getShare("share-link")).toBeNull();
+    expect(storage.getShareGrant("grant-link")).toBeNull();
+  });
+
 
   it("rolls the share insert back when the grant insert fails", async () => {
     const storage = await testStorage();

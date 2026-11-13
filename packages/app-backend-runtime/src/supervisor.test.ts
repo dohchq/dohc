@@ -231,6 +231,16 @@ it("keeps independent datasets isolated while evicting idle workers", async () =
   expect((await f.invoke({}, { readOnly: true })).result).toEqual([{ id: "first", value: "private" }]);
 });
 
+it("rechecks authority before returning a structured refusal", async () => {
+  let revoke = () => {};
+  const f = await fixture({ launch: launcher((command, controls) => {
+    if (command.command.kind === "prepare") revoke();
+    controls.deliver();
+  }) });
+  revoke = () => f.db.exec("UPDATE grants SET allowed=0");
+  await expect(f.invoke({ refuse: true })).rejects.toThrow("denied");
+});
+
 it("stops a worker that is still starting on close",async()=>{
   let launched!:()=>void,ended!:(signal:NodeJS.Signals|null)=>void;
   const starting=new Promise<void>(resolve=>{launched=resolve;}),exit=new Promise<NodeJS.Signals|null>(resolve=>{ended=resolve;});
