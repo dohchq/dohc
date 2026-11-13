@@ -237,7 +237,7 @@ type PageError = (message: string, cause?: unknown, retry?: () => Promise<void>)
 
 const WHILE_BUSY = [
   { value: "line", label: "Wait in line" },
-  { value: "steer", label: "Forward right away" },
+  { value: "steer", label: "Go right away" },
 ] as const;
 const ACCESS_READ_FAILED = "dohc could not check whether T3 Code allows it.";
 
@@ -399,7 +399,7 @@ function ThreadAgentBoxes(props: {
             </>
           }
         >
-          <span className="ml-auto shrink-0">
+          <span className="ml-auto shrink-0 [&_button]:whitespace-nowrap">
             <SegmentedControl
               label="While it works"
               testId="agent-while-busy"

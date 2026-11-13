@@ -372,7 +372,7 @@ it("saves the forwarding switch, what a message does while the thread works, and
   expect(page.getByRole("radio", { name: "Wait in line" }).getAttribute("aria-checked")).toBe(
     "true",
   );
-  await userEvent.click(page.getByRole("radio", { name: "Forward right away" }));
+  await userEvent.click(page.getByRole("radio", { name: "Go right away" }));
   expect(saved().whileBusy).toBe("steer");
   rerender({ ...WITH_CHIEF, agents: { ...SETTINGS.agents, "t3-code": saved() } });
   expect(

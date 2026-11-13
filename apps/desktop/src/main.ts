@@ -308,7 +308,7 @@ import {
 } from "node:fs";
 import { execFile } from "node:child_process";
 import { lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
-import { hostname, release as osRelease, type as osType } from "node:os";
+import { homedir, hostname, release as osRelease, type as osType } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import {
   SitePreviewReplacedEvent,
@@ -1536,7 +1536,9 @@ let cachedAgentThreads: ReturnType<typeof createAgentThreads> | null = null;
 let cachedT3Code: T3CodeConnection | null = null;
 function t3Code(): T3CodeConnection {
   cachedT3Code ??= createT3CodeConnection({
-    home: join(app.getPath("home"), ".t3"),
+    // The home folder the process was given, as the agent tools are found. A
+    // test run gives the app its own, so it never reaches the person's T3 Code.
+    home: join(homedir(), ".t3"),
     store: createT3CodeSignInStore({
       dir: stateDir(),
       cipher: mayUseKeychain({
