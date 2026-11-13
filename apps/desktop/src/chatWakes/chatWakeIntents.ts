@@ -50,7 +50,12 @@ export interface ChatWakeIntents {
 const same = (a: ChatWakeIntent, b: ChatWakeIntent) =>
   a.account === b.account && a.installId === b.installId && a.wakeId === b.wakeId;
 
-/** Every read, change, and write runs after the one before it settles. A failed write leaves the file as it was. */
+/**
+ * Every read, change, and write runs after the one before it settles. A write
+ * that fails before its rename leaves the file as it was. A failed directory
+ * sync can leave the new contents in place although the write rejected, so a
+ * caller trusts a row it reads back only after saving it again.
+ */
 export function createChatWakeIntents(file: string, operations?: DurableFileOperations): ChatWakeIntents {
   let queue: Promise<unknown> = Promise.resolve();
   const serial = <T>(work: () => Promise<T>): Promise<T> => {

@@ -1,7 +1,8 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { open, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChatWakeCandidate, ChatWakeView, WaitingChatWake } from "@dohc/workspace-contracts/chat-wakes";
+import type { DurableFileOperations } from "../atomicReplaceFile";
 import { deferred } from "../testing/deferred";
 import { createTestScratch } from "../workspaces/testTemp";
 import { ChatWakeAnswerError, ChatWakeBusyError, ChatWakeMissingError, type ChatWakeClient, type ChatWakePageAnswer } from "./chatWakeClient";
@@ -42,7 +43,11 @@ function fakeRelay() {
   const rows = new Map<string, Row>();
   const pages: Array<(installId: string, since: number) => Promise<ChatWakePageAnswer>> = [];
   const calls = { waits: [] as number[], claims: [] as string[], confirms: [] as string[] };
-  const hooks: { claim?: (installId: string) => Promise<void>; confirm?: () => Promise<void> } = {};
+  // `before…` runs before the relay commits, as a refusal does; the others run after it commits, before the answer.
+  const hooks: {
+    beforeClaim?: () => Promise<void>; claim?: (installId: string) => Promise<void>;
+    beforeConfirm?: () => Promise<void>; confirm?: () => Promise<void>;
+  } = {};
   let parks = 0;
   let watchers: Array<{ parks: number; resolve: () => void }> = [];
   const untilParks = (count: number) => count <= parks ? Promise.resolve()
@@ -68,6 +73,7 @@ function fakeRelay() {
     },
     async claimWake(wakeId, installId) {
       calls.claims.push(installId);
+      await hooks.beforeClaim?.();
       const row = rows.get(wakeId);
       const mine = row?.candidates.find((each) => each.installId === installId);
       if (!row || !mine) throw new ChatWakeMissingError();
@@ -80,6 +86,7 @@ function fakeRelay() {
     },
     async confirmQueued(wakeId, installId) {
       calls.confirms.push(installId);
+      await hooks.beforeConfirm?.();
       const row = rows.get(wakeId);
       if (!row || row.winner !== installId) throw new ChatWakeMissingError();
       if (row.view.state === "claimed" || row.view.state === "unconfirmed") row.view = { ...row.view, state: "queued" };
@@ -130,7 +137,7 @@ function fakeComputer() {
     released: 0,
     syncs: 0,
     dispatches: 0,
-    hooks: {} as { message?: () => Promise<void>; record?: () => Promise<void> },
+    hooks: {} as { message?: () => Promise<void>; decisions?: () => Promise<void>; record?: () => Promise<void> },
   };
   const open: ChatWakeConsumerDeps["openWorkspace"] = async (workspaceId) => {
     if (!local.registered || workspaceId !== "ws") return null;
@@ -143,7 +150,10 @@ function fakeComputer() {
         return local.messages.get(messageId) ?? null;
       },
       threadVisibility: async () => local.visibility,
-      decisions: async () => local.decisions,
+      async decisions() {
+        await local.hooks.decisions?.();
+        return local.decisions;
+      },
       agent: async (agentId) => local.agents.get(agentId) ?? null,
       async recordTrigger({ triggerMessageId, threadId, agentId }) {
         const key = JSON.stringify(["ws", triggerMessageId, agentId]);
@@ -160,6 +170,24 @@ function fakeComputer() {
   };
   return { local, open };
 }
+
+/** Intents in memory, so a fake clock flushes every step between its timers. */
+function memoryIntents(): ChatWakeIntents & { readonly rows: ChatWakeIntent[] } {
+  let rows: ChatWakeIntent[] = [];
+  const same = (a: ChatWakeIntent, b: ChatWakeIntent) => a.account === b.account && a.installId === b.installId && a.wakeId === b.wakeId;
+  return {
+    get rows() { return rows; },
+    list: async () => [...rows],
+    save: async (intent) => { rows = [...rows.filter((row) => !same(row, intent)), intent]; },
+    remove: async (intent) => { rows = rows.filter((row) => !same(row, intent)); },
+  };
+}
+
+/** A backoff on the (fake) timer clock that ends early when the consumer stops. */
+const timerSleep = (ms: number, signal: AbortSignal) => new Promise<void>((resolve) => {
+  const timer = setTimeout(resolve, ms);
+  signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
+});
 
 async function setup() {
   const file = join(await createTestScratch("chat-wakes-"), "chat-wakes.json");
@@ -672,10 +700,7 @@ describe("reading wakes", () => {
     vi.useFakeTimers();
     w.relay.answer(async () => { throw new ChatWakeBusyError(); });
     w.relay.answer(async () => { throw new ChatWakeBusyError(); });
-    const sleep = (ms: number, signal: AbortSignal) => new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, ms);
-      signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
-    });
+    const sleep = timerSleep;
     const parked = w.relay.nextPark();
     // In memory, so every step before a timer is a microtask the fake clock flushes.
     const intents: ChatWakeIntents = { list: async () => [], save: async () => undefined, remove: async () => undefined };
@@ -744,4 +769,157 @@ describe("local checks", () => {
     expect(chatWakeThreadVisibility(thread("notes.md"), { status: "invalid" }, "linux")).toBe("unknown");
     expect(chatWakeThreadVisibility(thread("notes.md"), undefined, "linux")).toBe("unknown");
   });
+});
+
+describe("fix round 1", () => {
+  it.each(["claim-pending", "won", "recorded"] as const)(
+    "saves a %s intent read back after a failed folder sync again before its next step",
+    async (phase) => {
+      const w = await setup();
+      let syncFails = false;
+      const flakyFolderSync: NonNullable<DurableFileOperations["open"]> = async (path, flags, mode) => {
+        const handle = await open(path, flags, mode);
+        return {
+          writeFile: (data: string) => handle.writeFile(data),
+          close: () => handle.close(),
+          sync: async () => {
+            if (flags === "r" && syncFails) throw new Error("fsync failed");
+            await handle.sync();
+          },
+        };
+      };
+      const intents = createChatWakeIntents(w.file, { open: flakyFolderSync, platform: "linux" });
+      w.relay.add();
+      w.relay.offer(1);
+      if (phase === "claim-pending") syncFails = true;
+      if (phase === "won") w.relay.hooks.claim = async () => { syncFails = true; };
+      if (phase === "recorded") w.mac.local.hooks.record = async () => { syncFails = true; };
+      const { consumer } = await w.settled({ intents });
+      // The rename happened, so the phase reads back although its save rejected.
+      expect(await w.intents()).toEqual([intentOf(phase)]);
+      const sent = { claims: [...w.relay.calls.claims], recorded: [...w.mac.local.recorded], confirms: [...w.relay.calls.confirms] };
+
+      // Folder syncs keep failing: recovery reads the row, can't save it again, and takes no next step.
+      await consumer.resume();
+      await consumer.resume();
+      expect(w.relay.calls.claims).toEqual(sent.claims);
+      expect(w.mac.local.recorded).toEqual(sent.recorded);
+      expect(w.relay.calls.confirms).toEqual(sent.confirms);
+      expect(sent.claims).toEqual(phase === "claim-pending" ? [] : ["mac"]);
+      expect(sent.recorded).toEqual(phase === "recorded" ? [true] : []);
+      expect(sent.confirms).toEqual([]);
+
+      syncFails = false;
+      w.relay.hooks.claim = undefined;
+      w.mac.local.hooks = {};
+      await consumer.resume();
+      expect(w.relay.calls.claims).toEqual(["mac"]);
+      expect(w.mac.local.ledger.size).toBe(1);
+      expect(w.mac.local.recorded).toEqual([true]);
+      expect(w.relay.calls.confirms).toEqual(["mac"]);
+      expect(w.relay.state()).toBe("queued");
+      expect(await w.intents()).toEqual([]);
+      await consumer.stop();
+    },
+  );
+
+  it.each([
+    ["renamed", { name: "Claudia", enabled: true, launch: true, admitted: true }, []],
+    ["paused", { name: "Claude", enabled: false, launch: true, admitted: true }, [intentOf("won")]],
+  ] as const)("records nothing when the agent is %s while the decision is read before the enqueue", async (_name, agent, left) => {
+    const w = await setup();
+    w.relay.add({ prerequisiteMessageId: "q1" });
+    w.relay.offer(1);
+    w.mac.local.decisions = [{ messageId: "q1", state: "resolved", resolvedByMessageId: "m1" }];
+    const reached = deferred();
+    const release = deferred();
+    let reads = 0;
+    // The first read admits the claim; the second is the check before the enqueue.
+    w.mac.local.hooks.decisions = async () => {
+      if (++reads !== 2) return;
+      reached.resolve();
+      await release.promise;
+    };
+    const parked = w.relay.nextPark();
+    const { consumer } = w.consumer();
+    consumer.start();
+    await reached.promise;
+    w.mac.local.agents.set("default", { ...agent });
+    release.resolve();
+    await parked;
+    expect(w.relay.calls.claims).toEqual(["mac"]);
+    expect(w.mac.local.ledger.size).toBe(0);
+    expect(await w.intents()).toEqual(left);
+    await consumer.stop();
+  });
+
+  it("drops an unsent claim when the attachment retires during its save, and claims once it is back", async () => {
+    const w = await setup();
+    w.relay.add();
+    w.relay.offer(1);
+    const real = createChatWakeIntents(w.file);
+    const reached = deferred();
+    const release = deferred();
+    let held = false;
+    const intents: ChatWakeIntents = {
+      ...real,
+      save: async (intent) => {
+        await real.save(intent);
+        if (intent.phase !== "claim-pending" || held) return;
+        held = true;
+        reached.resolve();
+        await release.promise;
+      },
+    };
+    const parked = w.relay.nextPark();
+    const { consumer } = w.consumer({ intents });
+    consumer.start();
+    await reached.promise;
+    w.mac.local.current = false;
+    release.resolve();
+    await parked;
+    expect(w.relay.calls.claims).toEqual([]);
+    expect(await w.intents()).toEqual([]);
+    expect(w.relay.state()).toBe("waiting");
+    w.mac.local.current = true;
+    await consumer.resume();
+    expect(w.relay.calls.claims).toEqual(["mac"]);
+    expect(w.mac.local.recorded).toEqual([true]);
+    await consumer.stop();
+  });
+
+  it.each(["claim", "confirmation"] as const)(
+    "tries a %s the server refused as busy again after its backoff, with nothing calling resume",
+    async (step) => {
+      const w = await setup();
+      vi.useFakeTimers();
+      w.relay.add();
+      w.relay.offer(1);
+      let refused = false;
+      const refuseOnce = async () => {
+        if (refused) return;
+        refused = true;
+        throw new ChatWakeBusyError();
+      };
+      if (step === "claim") w.relay.hooks.beforeClaim = refuseOnce;
+      else w.relay.hooks.beforeConfirm = refuseOnce;
+      const intents = memoryIntents();
+      const { consumer } = w.consumer({ sleep: timerSleep, intents });
+      consumer.start();
+      await vi.advanceTimersByTimeAsync(0);
+      const sends = () => (step === "claim" ? w.relay.calls.claims : w.relay.calls.confirms).length;
+      expect(sends()).toBe(1);
+      expect(w.relay.state()).toBe(step === "claim" ? "waiting" : "claimed");
+      expect(intents.rows).toEqual([intentOf(step === "claim" ? "claim-pending" : "recorded")]);
+      // No hot loop: nothing is sent again before the backoff ends.
+      await vi.advanceTimersByTimeAsync(999);
+      expect(sends()).toBe(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(sends()).toBe(2);
+      expect(w.mac.local.recorded).toEqual([true]);
+      expect(w.relay.state()).toBe("queued");
+      expect(intents.rows).toEqual([]);
+      await consumer.stop();
+    },
+  );
 });

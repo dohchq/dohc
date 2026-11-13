@@ -17,7 +17,10 @@ import type { ChatWakeIntent, ChatWakeIntents } from "./chatWakeIntents";
 // Order, each step saved before the next: claim-pending, claim, won, the
 // local trigger, recorded, the dispatch scan, queued, removed. A restart
 // finishes each saved intent from its phase; an intent of another account
-// or another install waits in the file for its own lifetime.
+// or another install waits in the file for its own lifetime. A save that
+// failed can still have reached the file, so a phase read back is saved again
+// before the step it allows. A step that fails after its intent is saved is
+// tried again with backoff until it settles, with or without a resume.
 
 /** The lifetime's account: its scope as chatShareSessionKey names it, its user, and this computer's install. */
 export interface ChatWakeAccount {
@@ -175,9 +178,6 @@ export function createChatWakeConsumer(deps: ChatWakeConsumerDeps): ChatWakeCons
     const visibility = await workspace.threadVisibility(wake.threadId);
     if (visibility === "hidden" || visibility === "missing") return "reject";
     if (visibility === "unknown") return "defer";
-    const agent = await workspace.agent(wake.candidate.agentId);
-    if (agent === null || !chatWakeAgentMatches(agent.name, wake.candidate.matched)) return "reject";
-    if (!agent.enabled || !agent.launch || !agent.admitted) return "defer";
     if (wake.prerequisiteMessageId !== null) {
       const decision = (await workspace.decisions(wake.threadId)).find((row) => row.messageId === wake.prerequisiteMessageId);
       if (decision === undefined || decision.state !== "resolved") {
@@ -186,6 +186,11 @@ export function createChatWakeConsumer(deps: ChatWakeConsumerDeps): ChatWakeCons
       }
       if (decision.resolvedByMessageId !== wake.messageId) return "reject";
     }
+    // The agent is read last, and `record` awaits nothing between this read and its enqueue,
+    // so a rename or pause during an earlier read is seen here.
+    const agent = await workspace.agent(wake.candidate.agentId);
+    if (agent === null || !chatWakeAgentMatches(agent.name, wake.candidate.matched)) return "reject";
+    if (!agent.enabled || !agent.launch || !agent.admitted) return "defer";
     return workspace.current() ? "ready" : "defer";
   }
 
@@ -196,6 +201,8 @@ export function createChatWakeConsumer(deps: ChatWakeConsumerDeps): ChatWakeCons
     try { answer = await deps.client.claimWake(intent.wakeId, intent.installId, abort.signal); }
     catch (error) {
       // Nothing was recorded here, so nothing runs. A claim that did commit ends unconfirmed on the server.
+      // A 404 means the account was deleted, the workspace changed owner, this computer is no longer a
+      // candidate, or the row is gone. None of these comes back, so it is not retried.
       if (error instanceof ChatWakeMissingError) {
         await deps.intents.remove(intent);
         return null;
@@ -253,19 +260,45 @@ export function createChatWakeConsumer(deps: ChatWakeConsumerDeps): ChatWakeCons
     if (next?.phase === "recorded") await confirm(next);
   }
 
+  // Saved intents that failed a step and are owed another try. One loop retries them with backoff.
+  let owed = false;
+  let retrying: Promise<void> | null = null;
+  function owe(): void {
+    owed = true;
+    if (retrying !== null || !live()) return;
+    retrying = (async () => {
+      for (let failures = 1; owed && live(); failures += 1) {
+        await deps.sleep(deps.backoffMs(failures), abort.signal);
+        if (!live()) break;
+        owed = false;
+        await serial(again).catch(deps.onError);
+      }
+    })().catch(deps.onError).finally(() => {
+      retrying = null;
+      // Owed by a step that failed after the loop's last check.
+      if (owed) owe();
+    });
+  }
+
   async function recover(): Promise<void> {
     for (const intent of (await deps.intents.list()).filter(ours)) {
       if (!live()) return;
-      try { await settle(intent); }
-      catch (error) { deps.onError(error); }
+      try {
+        await deps.intents.save(intent);
+        await settle(intent);
+      } catch (error) {
+        deps.onError(error);
+        owe();
+      }
     }
   }
 
   async function consider(row: WaitingChatWake): Promise<void> {
     deferred.delete(row.wakeId);
     let outcome: Verdict | null = null;
-    // Once its intent is saved, the wake is the intent's to finish, whatever happens next.
-    let saved = false;
+    // Saved: the wake is its intent's to finish. Saving: a failed save may or may not have reached the file,
+    // so the row stays deferred and recovery is owed; a pass skips the row if its intent is there.
+    let stage = "admit" as "admit" | "saving" | "saved";
     try {
       outcome = await opened(row.workspaceId, async (workspace): Promise<Verdict> => {
         const verdict = await admit(workspace, row);
@@ -276,16 +309,24 @@ export function createChatWakeConsumer(deps: ChatWakeConsumerDeps): ChatWakeCons
           messageId: row.messageId, prerequisiteMessageId: row.prerequisiteMessageId, candidate: row.candidate,
           phase: "claim-pending",
         };
+        stage = "saving";
         await deps.intents.save(intent);
-        saved = true;
+        // The attachment can retire while the save waits on disk. No claim was sent, so the intent goes.
+        if (!workspace.current()) {
+          await deps.intents.remove(intent);
+          stage = "admit";
+          return "defer";
+        }
+        stage = "saved";
         await settle(intent, workspace);
         return "ready";
       });
     } catch (error) {
       deps.onError(error);
+      if (stage !== "admit") owe();
     }
     if (outcome === "reject") rejected.add(row.wakeId);
-    else if (!saved) deferred.set(row.wakeId, row);
+    else if (stage !== "saved") deferred.set(row.wakeId, row);
   }
 
   // Accounts for every row of a page, or throws before any when the saved intents can't be read.
@@ -305,6 +346,12 @@ export function createChatWakeConsumer(deps: ChatWakeConsumerDeps): ChatWakeCons
       if (saved.has(row.wakeId)) deferred.delete(row.wakeId);
       else await consider(row);
     }
+  }
+
+  async function again(): Promise<void> {
+    if (!live()) return;
+    await recover();
+    await reconsider();
   }
 
   async function read(): Promise<void> {
@@ -341,15 +388,14 @@ export function createChatWakeConsumer(deps: ChatWakeConsumerDeps): ChatWakeCons
       if (stopped) return Promise.resolve();
       return pass ??= serial(async () => {
         pass = null;
-        if (!live()) return;
-        await recover();
-        await reconsider();
+        await again();
       }).catch(deps.onError);
     },
     async stop() {
       stopped = true;
       abort.abort();
       await running;
+      await retrying;
       await queue;
     },
   };
