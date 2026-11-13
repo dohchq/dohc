@@ -120,6 +120,21 @@ function logWriter(storage: SyncRelayStorage, workspaceId = "trip") {
   });
 }
 
+// Ben shares his notes with Ana by name. Without `deliver`, its share-received Notice is settled at once.
+function shareNotesWithAna(storage: SyncRelayStorage, options: { deliver?: boolean } = {}): void {
+  storage.createShare({
+    share: { shareId: "share-ben", workspaceId: "bens", granterUserId: "ben", selectorJson: JSON.stringify({ paths: ["notes"], versionId: null }), createdAtMs: 1 },
+    grant: {
+      grantId: "grant-ben", shareId: "share-ben", principalKind: "user", principalUserId: "ana", principalEmail: null,
+      access: "view", generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null,
+    },
+  });
+  if (options.deliver) return;
+  const db = inspectDatabase(storagePath(storage));
+  db.prepare("DELETE FROM sync_relay_share_notice_deliveries WHERE grant_id = 'grant-ben'").run();
+  db.close();
+}
+
 it("reads with scope or wait only under the account's Bearer session", async () => {
   const { storage, h, read, post } = await relay();
   post("n-1");
@@ -168,17 +183,12 @@ it("leaves hidden workspaces, secret targets, and wake payloads out of the phone
   write("chat.thread.create", { threadId: "thread-keys", linkedPathHint: ".env" });
   write("chat.thread.create", { threadId: "thread-on-moved", linkedObjectId: "object-moved", linkedPathHint: "docs/moved.md" });
   write("chat.thread.create", { threadId: "thread-plain", linkedObjectId: "object-gone", linkedPathHint: "docs/gone.md" });
-  // Ben shares his notes with Ana by name; she keeps a notice of her own there.
-  storage.createShare({
-    share: { shareId: "share-ben", workspaceId: "bens", granterUserId: "ben", selectorJson: JSON.stringify({ paths: ["notes"], versionId: null }), createdAtMs: 1 },
-    grant: {
-      grantId: "grant-ben", shareId: "share-ben", principalKind: "user", principalUserId: "ana", principalEmail: null,
-      access: "view", generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null,
-    },
-  });
-  const db = inspectDatabase(storagePath(storage));
-  db.prepare("DELETE FROM sync_relay_share_notice_deliveries WHERE grant_id = 'grant-ben'").run();
-  db.close();
+  write("chat.thread.create", { threadId: "thread-chat" });
+  // A linked file the relay never placed, with no hint and with an ordinary one.
+  write("chat.thread.create", { threadId: "thread-unplaced", linkedObjectId: "object-never" });
+  write("chat.thread.create", { threadId: "thread-unplaced-hint", linkedObjectId: "object-never-2", linkedPathHint: "docs/new.md" });
+  // Ana keeps notices of her own in Ben's shared notes.
+  shareNotesWithAna(storage);
 
   post("plain", { target: { path: "docs/plan.md" } });
   post("hidden-workspace", { ...DIARY, target: { path: "diary/today.md" } });
@@ -186,12 +196,22 @@ it("leaves hidden workspaces, secret targets, and wake payloads out of the phone
   post("secret-nested", { target: { path: "config/.env.production" } });
   post("ignored", { target: { path: "docs/.DS_Store." } });
   post("moved", { title: "Moved file", target: { path: "docs/moved.md" } });
+  // Classified as it normalizes: the moved file again.
+  post("unnormalized", { target: { path: "docs//moved.md" } });
   post("deleted", { target: { path: "docs/gone.md" } });
   post("thread-secret", { title: "Keys thread", target: { thread: "thread-keys", message: "m-1" } });
   post("thread-moved", { target: { thread: "thread-on-moved" } });
   post("thread-plain", { target: { thread: "thread-plain" } });
-  post("thread-unknown", { target: { thread: "thread-nowhere" } });
+  post("thread-chat", { target: { thread: "thread-chat" } });
+  // Its create hasn't reached the relay, as when a computer's Notice outbox beats its chat sync.
+  post("thread-unknown", { title: "Unknown thread", body: "KEY=from-an-agent-reply", target: { thread: "thread-nowhere", run: "run-1" } });
+  post("thread-unplaced", { target: { thread: "thread-unplaced" } });
+  post("thread-unplaced-hint", { target: { thread: "thread-unplaced-hint" } });
+  // A message in the keys thread, named without its thread.
+  post("message-only", { title: "Message in keys", target: { message: "m-1" } });
   post("through-share", { reach: { shareId: "share-ben" }, target: { path: "notes/list.md" } });
+  // Through a share, only a path it admits is looked up.
+  post("share-thread", { reach: { shareId: "share-ben" }, target: { thread: "thread-ben" } });
   const wake: AutomationWake = { automationId: "digest", name: "Digest", depth: 1, body: "Summarize the day" };
   const { noticeId: wakeId } = storage.postAutomationWake({
     workspaceId: "trip", ownerUserId: "ana", effectId: "effect-1", claimId: "claim-1", keySeed: "seed-1", startedAtMs: NOW,
@@ -201,16 +221,64 @@ it("leaves hidden workspaces, secret targets, and wake payloads out of the phone
   const response = await read("scope=phone&limit=200");
   const text = await response.clone().text();
   const phone = await page(response);
-  expect(ids(phone)).toEqual(["plain", "deleted", "thread-plain", "thread-unknown", "through-share", wakeId]);
+  const kept = ["plain", "deleted", "thread-plain", "thread-chat", "through-share", wakeId];
+  expect(ids(phone)).toEqual(kept);
   expect(phone.notices.find((notice) => notice.noticeId === "through-share")).toMatchObject({ workspaceId: null, recipientShareId: "share-ben" });
   expect(phone.notices.find((notice) => notice.noticeId === wakeId)).not.toHaveProperty("wake");
   // Title and body go with the row, not just its target.
-  for (const left of ["API key rotated", ".env", "Moved file", "Keys thread", "Summarize the day", "diary"]) expect(text).not.toContain(left);
+  for (const left of ["API key rotated", ".env", "Moved file", "Keys thread", "Unknown thread", "KEY=", "Message in keys", "Summarize the day", "diary"]) {
+    expect(text).not.toContain(left);
+  }
 
   const whole = await full();
-  expect(whole.notices).toHaveLength(13);
+  expect(whole.notices).toHaveLength(19);
+  for (const left of ids(whole).filter((id) => !kept.includes(id))) expect(text, left).not.toContain(`"noticeId":"${left}"`);
   expect(whole.notices.find((notice) => notice.noticeId === wakeId)?.wake).toEqual(wake);
   expect(ids(whole)).toEqual(expect.arrayContaining(["hidden-workspace", "secret", "moved", "thread-secret"]));
+});
+
+it("decides a row in another account's workspace by a fixed rule that reads nothing there", async () => {
+  const { storage, read, post } = await relay();
+  // Ana's own notices can name any workspace ID, Ben's included.
+  post("probe-path", { reach: { workspaceId: "bens" }, target: { path: "deploy/config.yaml" } });
+  post("probe-thread", { reach: { workspaceId: "bens" }, target: { thread: "thread-ben" } });
+  post("probe-plain", { reach: { workspaceId: "bens" }, target: {} });
+  const before = await (await read("scope=phone")).text();
+  const write = logWriter(storage, "bens");
+  write("moment.append", { objectId: "object-config", path: "deploy/config.yaml" });
+  write("moment.append", { objectId: "object-config", path: ".env" });
+  write("chat.thread.create", { threadId: "thread-ben", linkedPathHint: ".env" });
+  const after = await read("scope=phone");
+  expect(await after.clone().text()).toBe(before);
+  expect(ids(await page(after))).toEqual(["probe-plain"]);
+});
+
+it("leaves out a share-placed row whose target reach settlement removed, even after the whole list was read", async () => {
+  const { storage, read, full, post } = await relay();
+  shareNotesWithAna(storage);
+  // The share never admits a secret file, so the next read's reach check takes the target and keeps the words.
+  post("share-secret", { reach: { shareId: "share-ben" }, title: "Ben's keys", body: "KEY=hunter2", target: { path: "notes/.env" } });
+  expect((await full()).notices.find((notice) => notice.noticeId === "share-secret")).toMatchObject({ target: null, title: "Ben's keys" });
+  const response = await read("scope=phone");
+  const text = await response.clone().text();
+  expect(ids(await page(response))).toEqual([]);
+  for (const left of ["Ben's keys", "hunter2"]) expect(text).not.toContain(left);
+});
+
+it("answers a held read at once when a named share arrives during its last sign-in check, and the next read delivers it", async () => {
+  const { storage, read, post, holdSession } = await relay();
+  fakeTime();
+  post("n-1");
+  // The request's own check is the first; the check before the read is the second.
+  const held = holdSession(2);
+  const reading = read(`scope=phone&cursor=1&wait=${MAX}`);
+  await held.reached;
+  shareNotesWithAna(storage, { deliver: true });
+  held.release();
+  // No timer moves: the share moved the head, so the read never parks.
+  expect(await page(await reading)).toMatchObject({ notices: [], nextCursor: "2" });
+  const next = await page(await read("scope=phone&cursor=2"));
+  expect(next.notices.map((notice) => [notice.kind, notice.recipientShareId])).toEqual([["share-received", "share-ben"]]);
 });
 
 it("moves the phone's cursor past the rows it leaves out", async () => {

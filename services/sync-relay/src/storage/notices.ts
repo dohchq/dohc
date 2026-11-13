@@ -554,30 +554,41 @@ function withWakes(storage: StorageContext, recipientUserId: string, notices: Re
 
 /**
  * The phone's scope of rows already read for the recipient. It never carries
- * a wake payload. It leaves out a row in a workspace the recipient owns with
- * "Show on phone" off, and a row whose target the account's reads keep from
- * the phone: a secret or ignored path, a path whose file the relay last placed
- * at one, or a thread whose create names one or whose file the relay last
- * placed at one. A removed row stays, so a phone drops what it holds, without
- * its title.
+ * a wake payload, and it serves a row only when it can confirm the row is safe
+ * to show. It leaves out:
+ * - a row in a workspace the recipient owns with "Show on phone" off;
+ * - a row whose target reach settlement removed, which took the evidence;
+ * - a path, thread, or message target it may not look up: in a workspace the
+ *   recipient doesn't own, or through a share that doesn't admit the path.
+ *   This depends only on the recipient's own access, never on what another
+ *   account's workspace holds;
+ * - a path that doesn't normalize, is secret or ignored, or whose file the
+ *   main version last placed at such a path;
+ * - a thread whose create the log doesn't hold, names a hidden path or hint,
+ *   or links a file the relay can't place or last placed at a hidden path;
+ * - a message target without its thread: the relay finds a message's thread
+ *   only by scanning its log.
+ * A removed row stays, so a phone drops what it holds, without its title.
  */
 function phoneNotices(storage: StorageContext, recipientUserId: string, notices: RelayNotice[]): RelayNotice[] {
-  const shown = new Map<string, boolean>();
-  const shownOnPhone = (workspaceId: string) => {
-    let known = shown.get(workspaceId);
+  const ownership = new Map<string, boolean>();
+  const owned = (workspaceId: string) => {
+    let known = ownership.get(workspaceId);
     if (known === undefined) {
-      known = !storage.workspaceIsOwnedBy(workspaceId, recipientUserId) || storage.showsOnPhone(recipientUserId, workspaceId);
-      shown.set(workspaceId, known);
+      known = storage.workspaceIsOwnedBy(workspaceId, recipientUserId);
+      ownership.set(workspaceId, known);
     }
     return known;
   };
+  const reach = shareReach(storage, recipientUserId);
   const threads = new Map<string, boolean>();
-  const secretThread = (workspaceId: string, threadId: string) => {
+  const safeThread = (workspaceId: string, threadId: string) => {
     const key = JSON.stringify([workspaceId, threadId]);
     let known = threads.get(key);
     if (known === undefined) {
       const paths = threadPathsInTransaction(storage, workspaceId, threadId);
-      known = paths.named.some(hiddenFile) || hiddenFile(paths.lastKnownPath ?? undefined);
+      known = paths.created && !paths.named.some(hiddenFile) &&
+        (paths.linkedObjectId === null || (paths.lastKnownPath !== null && !hiddenFile(paths.lastKnownPath)));
       threads.set(key, known);
     }
     return known;
@@ -587,21 +598,34 @@ function phoneNotices(storage: StorageContext, recipientUserId: string, notices:
     `SELECT object_id FROM sync_relay_object_moments
      WHERE workspace_id = ? AND version_id = 'main' AND path = ? ORDER BY relay_seq DESC LIMIT 1`,
   );
-  const secretTarget = (notice: RelayNotice) => {
+  const safePath = (workspaceId: string, path: string) => {
+    const validated = validateUserWritePath(path);
+    if (!validated.ok || hiddenFile(path) || hiddenFile(validated.normalized)) return false;
+    const objectId = lastAtPath.get(workspaceId, validated.normalized)?.object_id;
+    return typeof objectId !== "string" || !hiddenFile(storage.objectLastKnownPath(workspaceId, objectId));
+  };
+  const safeTarget = (notice: RelayNotice) => {
     const target = notice.target;
     if (target === null) return false;
-    if (hiddenFile(target.path)) return true;
-    const workspaceId = notice.workspaceId ??
-      (notice.recipientShareId === null ? undefined : storage.getShare(notice.recipientShareId)?.workspaceId);
-    if (workspaceId === undefined) return false;
-    const objectId = target.path === undefined ? undefined : lastAtPath.get(workspaceId, target.path)?.object_id;
-    if (typeof objectId === "string" && hiddenFile(storage.objectLastKnownPath(workspaceId, objectId))) return true;
-    return target.thread !== undefined && secretThread(workspaceId, target.thread);
+    if (target.path === undefined && target.thread === undefined && target.message === undefined) return true;
+    if (target.thread === undefined && target.message !== undefined) return false;
+    let workspaceId: string;
+    if (notice.workspaceId !== null) {
+      if (!owned(notice.workspaceId)) return false;
+      workspaceId = notice.workspaceId;
+    } else {
+      // Through a share, only a path it admits, and then that path's thread.
+      const share = notice.recipientShareId === null ? null : storage.getShare(notice.recipientShareId);
+      if (share === null || target.path === undefined || !admits(reach.sidesOn(share.shareId), target.path)) return false;
+      workspaceId = share.workspaceId;
+    }
+    return (target.path === undefined || safePath(workspaceId, target.path)) &&
+      (target.thread === undefined || safeThread(workspaceId, target.thread));
   };
   return notices.flatMap((notice) => {
     if (notice.removed) return [{ ...notice, title: "" }];
-    if (notice.workspaceId !== null && !shownOnPhone(notice.workspaceId)) return [];
-    return secretTarget(notice) ? [] : [notice];
+    if (notice.workspaceId !== null && owned(notice.workspaceId) && !storage.showsOnPhone(recipientUserId, notice.workspaceId)) return [];
+    return safeTarget(notice) ? [notice] : [];
   });
 }
 
@@ -613,8 +637,9 @@ export function noticeHead(storage: StorageContext, recipientUserId: string): nu
 
 /**
  * Moves the recipient's head with no row, inside the caller's transaction, for
- * a change the page reports outside its rows: its personal agents' revision.
- * A waiting read then answers the new cursor.
+ * a change a read must answer before its row exists: its personal agents'
+ * revision, or a named share whose Notice the next read delivers. A waiting
+ * read then answers the new cursor.
  */
 export function advanceNoticeHead(storage: StorageContext, recipientUserId: string): void {
   nextChangeSeq(storage, recipientUserId);

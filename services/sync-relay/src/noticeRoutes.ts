@@ -100,7 +100,8 @@ export function createNoticeWaits(storage: object, hub: Pick<DiscussionActivityH
     wakeAccount(userId: string): void {
       hub.wake(noticeWaitGroup(userId));
     },
-    /** Ends every held read, which then answers its page, and stops listening. */
+    closed: () => closing.signal.aborted,
+    /** Ends every held read, which then answers the caught-up page it held, and stops listening. */
     close(): void {
       closing.abort();
       stopObserving();
@@ -166,6 +167,8 @@ export function createNoticeRoutes(
       });
       if (parked === null) return jsonResponse({ ok: true, ...page }, 200);
       await parked;
+      // Closing: the held page is caught up, so it carries no row, and storage may already be gone.
+      if (account.waits.closed()) return jsonResponse({ ok: true, ...page }, 200);
     }
   }
 
