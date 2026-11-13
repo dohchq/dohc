@@ -847,12 +847,13 @@ async function openSelfHostProof(name: string) {
     const store = join(hostRoot, hash(Buffer.from(JSON.stringify(["hosted-v1", history.namespace, "workspace", identity.replicationEpoch, identity.streamIdentity]))));
     // What the supervisor tells the operator.
     const reports: string[] = [];
-    // The activation passes every daemon of this proof has ended.
-    let passes = 0;
+    // How many passes in a row the daemons of this proof ended idle. Below zero, the next pass to end does not count.
+    // And how many reconciliations its supervisors ended.
+    let idlePasses = 0, reconciliations = 0;
     const startSupervisor = async () => {
       supervisor = await startSelfHostedLiveHost({trustedAccount: (accountId: string) => ({accountId, name: accountId}), storage, history, frameChanges, root: hostRoot, engineExecutable: executable,
-        relayOrigin: "https://service-activation-relay.example.test", key: Buffer.from(ticketKey), onError: error => {reports.push(error instanceof Error ? error.message : String(error));},
-        startHost: options => startServiceLiveHost({...options, onPass: () => {passes++;}})});
+        relayOrigin: "https://service-activation-relay.example.test", key: Buffer.from(ticketKey), onError: error => {reports.push(error instanceof Error ? error.message : String(error));}, onReconcile: () => {reconciliations++;},
+        startHost: options => startServiceLiveHost({...options, onPass: idle => {idlePasses = idle ? idlePasses + 1 : Math.min(idlePasses, 0);}})});
       enrollment = createServiceHostEnrollmentRoutes({storage, history, host: supervisor, resolveActor});
     };
     const activation = (path = "docs/a.md") => activations.read("workspace", path, 1_000_000);
@@ -979,8 +980,17 @@ async function openSelfHostProof(name: string) {
         .get(object) as {state: string; reason: string | null} | undefined),
       /** Engine RPCs the service host started. */
       started: (method: string) => harness.calls.filter(call => call.method === method && call.status === "started").length,
-      /** How many activation passes the service host has ended. */
-      passes: () => passes,
+      /**
+       * Resolves once a reconciliation that began after the call ended, and the service host then ended two idle
+       * passes in a row that began after it.
+       */
+      async settled() {
+        // The first reconciliation to end, and then the first pass, may have begun before.
+        const from = reconciliations;
+        await vi.waitFor(() => expect(reconciliations).toBeGreaterThanOrEqual(from + 2), {timeout: 30000});
+        idlePasses = -1;
+        await vi.waitFor(() => expect(idlePasses).toBeGreaterThanOrEqual(2), {timeout: 30000});
+      },
       /** The rows the service host wrote that the relay does not have. */
       unpushed: () => serviceRead(engine => engine.prepare("SELECT origin_id,origin_seq,op_kind,payload_json FROM replication_log WHERE workspace_id='workspace' AND imported=0")
         .all() as {origin_id: string; origin_seq: number; op_kind: string; payload_json: string}[])
@@ -1002,12 +1012,10 @@ async function openSelfHostProof(name: string) {
   }
 }
 type SelfHostProof = Awaited<ReturnType<typeof openSelfHostProof>>["proof"];
-// Resolves once the service host ended twelve more passes. Each waits 250 ms, so they outlast a two-second reconciliation.
+// Resolves once the supervisor reconciled and the service host then found nothing to do for two passes in a row.
+// It waits on the reconciliation itself, since a recovery probe can cut an idle host's pause to 250 ms.
 // A quiet workspace pulls only for a relay change, so a count of its pulls says nothing of how many passes ran.
-async function twelvePasses(proof: SelfHostProof) {
-  const passes = proof.passes();
-  await vi.waitFor(() => expect(proof.passes()).toBeGreaterThan(passes + 12), {timeout: 30000});
-}
+const settledPasses = (proof: SelfHostProof) => proof.settled();
 
 async function withSelfHostProof(name: string, run: (proof: SelfHostProof) => Promise<Record<string, unknown>>) {
   const {proof, close} = await openSelfHostProof(name);
@@ -1443,7 +1451,7 @@ it("resumes a document its owner edited while live editing was stopped as a succ
   expect(proof.hosted()).toEqual({state: "ready", reason: null});
   expect(readdirSync(proof.hostRoot).sort()).toEqual([".recovery", basename(proof.store)].sort());
   // Later passes capture nothing more.
-  await twelvePasses(proof);
+  await settledPasses(proof);
   expect(attempts()).toBe(before + 1);
   // The operator is told of nothing they need to do.
   expect(proof.reports.filter(report => report.startsWith("Live editing of docs/a.md"))).toEqual([]);
@@ -1476,7 +1484,7 @@ it("keeps a document retired without a Stop parked until an owner open reaches t
   await proof.ownerEdit(doc => doc.getMap("frontmatter").set("whileRetired", "ordinary-owner"));
   const attempts = () => proof.started("captureOwnerActivation"), before = attempts();
   // Until asked, passes capture nothing while docs/b.md keeps its workspace attached.
-  await twelvePasses(proof);
+  await settledPasses(proof);
   expect(attempts()).toBe(before);
   expect(await proof.documents()).toEqual([proof.ready("docs/b.md")]);
   expect(proof.hosted()?.state).toBe("parked");
@@ -1638,7 +1646,7 @@ it("retires a paused document's activation at once, and Resume starts a successo
   }, {timeout: 30000});
   expect(attempts()).toBe(captured + 1);
   // Later passes capture nothing more, and the operator is told of nothing they need to do.
-  await twelvePasses(proof);
+  await settledPasses(proof);
   expect(attempts()).toBe(captured + 1);
   expect(proof.reports.filter(report => report.startsWith("Live editing of docs/a.md"))).toEqual([]);
   expect(proof.storage.readServiceHostEnrollment("workspace", "docs/a.md")).toMatchObject({ownerStop: null, enabled: true, retired: false});
@@ -1705,7 +1713,7 @@ it("blocks a document written only as text, and activates it once its owner open
   expect(failures().filter(message => !message?.includes("hosted-document-unready"))).toEqual([expect.stringContaining("live-document-without-lineage")]);
   // Later passes leave it alone.
   const blocked = attempts();
-  await twelvePasses(proof);
+  await settledPasses(proof);
   expect(attempts()).toBe(blocked);
   expect(proof.reports.filter(report => report.startsWith("Live editing of docs/plain.md"))).toEqual([
     `Live editing of docs/plain.md in workspace workspace cannot start: the document has no live-editing history. It starts once its owner opens it in dohc on a desktop. Its store is kept at ${proof.store}.`]);
@@ -1849,10 +1857,12 @@ for (const ending of ["its owner stops live editing", "its last link ends"] as c
     expect(proof.journal(note.objectId)).toEqual([]);
     expect(await proof.documents()).not.toContainEqual(expect.objectContaining({path}));
     // Later passes do nothing more for it: no pull for unfinished work, no departure left waiting, no capture.
-    await twelvePasses(proof);
+    // The host first finds nothing to do after a reconciliation. Another reconciliation and the passes after it
+    // then add none of the three.
+    await settledPasses(proof);
     const work = () => ({pulls: proof.live().hostedPulls("workspace").reasons.pending ?? 0, waiting: proof.live().passCounts().lifecycleRetries, captures: proof.started("captureOwnerActivation")});
     const settled = work();
-    await twelvePasses(proof);
+    await settledPasses(proof);
     expect(work()).toEqual(settled);
     return {refusals: refusals(), ...settled};
   }), 120000);

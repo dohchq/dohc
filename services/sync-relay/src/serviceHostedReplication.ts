@@ -80,6 +80,7 @@ export class ServiceHostedReplication {
   #departedAfter: string | undefined;
   // Whether a pass ran whose page never reached activation, as when its reply or its commit's was lost.
   #unheard = false;
+  #pushedAll = false;
   constructor(readonly connection: {
     client: Pick<EngineClient, "sendRequest">; workspace: string; workspaceId: string;
     nextRequestId(): number; deadlineMs: number; signal: AbortSignal; assertCurrent(): void;
@@ -96,6 +97,8 @@ export class ServiceHostedReplication {
   get departedNone(): boolean { return this.#departedNone; }
   /** Whether the next pass lists held and departed documents from the first, and activation heard every page. */
   get listsWrapped(): boolean { return this.#heldAfter === undefined && this.#departedAfter === undefined && !this.#unheard; }
+  /** Whether the last push or publication pushed nothing, with nothing more to push and none waiting for owner admission. */
+  get pushedAll(): boolean { return this.#pushedAll; }
   #check(signal: AbortSignal): void { signal.throwIfAborted(); this.connection.assertCurrent(); }
   async #request(method: string, params: Record<string, string | {kind: string; token: string}>, signal: AbortSignal) {
     this.#check(signal);
@@ -194,9 +197,11 @@ export class ServiceHostedReplication {
     });
   }
   async #push(signal: AbortSignal) {
+    this.#pushedAll = false;
     const result = decodeHostedSyncResult("sync.push", await this.#request("sync.push", {}, signal));
-    return {pushed: result.pushed, hasMore: result.hasMore, sharingDeclined: result.sharingDeclined,
-      admissionPending: result.ownerAdmissionPending.length > 0};
+    const admissionPending = result.ownerAdmissionPending.length > 0;
+    this.#pushedAll = result.pushed === 0 && !result.hasMore && !admissionPending;
+    return {pushed: result.pushed, hasMore: result.hasMore, sharingDeclined: result.sharingDeclined, admissionPending};
   }
   async push(callerSignal?: AbortSignal) {
     return this.#run(callerSignal, async signal => {

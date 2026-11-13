@@ -840,7 +840,7 @@ function activationDriver(f:ReturnType<typeof fixture>,captureOwnerActivation:Re
     client:{...native,captureOwnerActivation,sendRequest} as never,
     workspace:id=>id==='workspace'?{handle:'native-workspace',replica:{pull,publish:vi.fn()},identity:{replicationEpoch:'epoch',streamIdentity:'stream'}}:undefined,
     config:{targets:[target],validateActivation,validateAdmission:validateJournal,maxCaptureBytes:1_000_000,maxActivationHistoryEntries:10,maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000,
-      maxDocumentsPerPass:1,pollIntervalMs:1000,passDeadlineMs:10_000,idleUnloadMs:600_000,idleRetryMs:30_000,...config},
+      maxDocumentsPerPass:1,pollIntervalMs:1000,idlePollIntervalMs:1000,passDeadlineMs:10_000,idleUnloadMs:600_000,idleRetryMs:30_000,...config},
     adoption:{maxBytes:1_000_000,maxEvents:10},nextRequestId:()=>1,deadlineMs:1000,assertCurrent(){},registered(){},
     runDocument,lifetime:new AbortController().signal,wake,
   })

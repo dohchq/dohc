@@ -98,6 +98,8 @@ export async function startSelfHostedLiveHost(options: {
   startHost?: typeof startServiceLiveHost;
   /** How long reconciliation waits between periodic runs, unless a test holds them. Relay writes and host progress also run one. */
   reconcileIntervalMs?: number;
+  /** Called as each reconciliation ends, so a test can wait on reconciliations rather than on their interval. */
+  onReconcile?: () => void;
   onError?(error: unknown): void;
 }) {
   const {storage, history} = options, profile = selfHostLiveProfile();
@@ -339,7 +341,7 @@ export async function startSelfHostedLiveHost(options: {
         yield* Effect.promise(() => exclusive(stopCurrent));
       }),
     );
-    yield* Effect.forkScoped(Effect.forever(pause(options.reconcileIntervalMs ?? 2_000).pipe(Effect.andThen(Effect.sync(schedule)))));
+    yield* Effect.forkScoped(Effect.forever(pause(options.reconcileIntervalMs ?? profile.reconcileIntervalMs).pipe(Effect.andThen(Effect.sync(schedule)))));
     // Once a minute, starting a retention period in: after a restart, clients reconnect before any document counts as unconnected.
     yield* Effect.forkScoped(pause(RECLAIM_RETENTION_MS).pipe(Effect.andThen(Effect.forever(Effect.sync(sweep).pipe(Effect.andThen(pause(RECLAIM_SWEEP_MS)))))));
     schedule();
@@ -350,6 +352,7 @@ export async function startSelfHostedLiveHost(options: {
       // File operations and daemon starts may ignore cancellation. Drain them
       // before finalization, so a late start cannot escape its owner's close.
       yield* Effect.uninterruptible(Effect.promise(() => exclusive(reconcile)));
+      options.onReconcile?.();
     }
   })), {signal});
   return {

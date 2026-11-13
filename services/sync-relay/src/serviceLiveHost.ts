@@ -18,7 +18,7 @@ import { isDeepStrictEqual } from "node:util";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Scope from "effect/Scope";
-import { createEngineClient, EngineRequestError, isHostedDocumentUnready } from "@dohc/workspace-engine-client/daemon";
+import { createEngineClient, EngineRequestError, isHostedDocumentUnready, type EngineClient } from "@dohc/workspace-engine-client/daemon";
 import { OwnerYDocOutbox, VersionedLiveAdapter, type Event, type JsonValue } from "@dohc/workspace-engine-client";
 import { RecoveryCopyRefusal, sameKeptEditsIdentity, type ServiceKeptEdits, type ServiceKeptEditsIdentity } from "./storage/serviceKeptEdits.js";
 import type { LiveClaimLedger } from "./automationLiveClaims.js";
@@ -217,6 +217,13 @@ interface HostedAttachment {
    */
   overlapped: boolean;
 }
+// The engine requests a pass sends when it finds nothing to do: it asks for each document's waiting owner edits and pushes each workspace.
+const IDLE_PASS_REQUESTS = new Set(["liveApplication.ownerState", "sync.push"]);
+// The two reads a live connection makes of what the host applied: its opening sync, and the read after each change
+// notice for its document, which every pass that visits the document raises. Each takes one request number and
+// changes nothing a pass acts on, so it counts with the requests an idle pass sends. Otherwise a pass that ran
+// beside an open connection would never be idle.
+const CONNECTION_READS = new Set<PropertyKey>(["openLiveAppliedSync", "readNextLiveApplied"]);
 // Whether the departed list of a pull numbered at least `required` reached the document; for `goneSince`, without listing it.
 const reachedSince = (attached: HostedAttachment, objectId: string, required: number) => (attached.reached.get(objectId)?.pull ?? 0) >= required;
 const goneSince = (attached: HostedAttachment, objectId: string, required: number) =>
@@ -237,8 +244,13 @@ export async function startServiceLiveHost(options: {
    * the next idle deadline, unless a test injects others.
    */
   idleClock?: {nowMs: () => number; schedule: (atMs: number, fire: () => void) => () => void};
-  /** Called as each activation pass ends, so a test can wait on passes rather than on the requests they send. */
-  onPass?: () => void;
+  /**
+   * Called as each activation pass ends, with whether it was idle, so a test can wait on passes rather than on the
+   * requests they send.
+   */
+  onPass?: (idle: boolean) => void;
+  /** The timer that ends the pause between passes, on the clock `nowMs` reads, unless a test injects another. Returns its cancel. */
+  pauseTimer?: (delayMs: number, fire: () => void) => () => void;
 }) {
   const { storage, history } = options;
   const config = readServiceLiveHostConfig(options.configPath, id => !workspaceIsDeleted(options.storage,id));
@@ -328,7 +340,13 @@ export async function startServiceLiveHost(options: {
   // A wake during a pass runs one more pass after it; one during the pause ends the pause.
   // Only the pause clears it, so a wake that lands while its pass runs is not lost.
   let woken = false, rouse: (() => void) | undefined;
-  const wakePass = () => {woken = true; rouse?.();};
+  // Whether anything asked for a pass since the last one ended, and what cuts a long pause short.
+  let stirred = false, hurry: (() => void) | undefined;
+  const wakePass = () => {woken = true; stirred = true; rouse?.();};
+  // An input that may leave a pass work, such as a relay write, has the next pass start no later than one poll
+  // interval after the last one ended, as when every pause lasted that long. It ends no pause sooner than that,
+  // so a pass whose own writes are noticed cannot run passes back to back.
+  const nudgePass = () => {stirred = true; hurry?.();};
   // A publication that pushed a page and has more wakes the pass that pushes the rest. One that pushed nothing waits.
   const paged = async <T extends {pushed: number; hasMore: boolean}>(work: Promise<T>): Promise<T> => {
     const page = await work;
@@ -371,7 +389,11 @@ export async function startServiceLiveHost(options: {
   const touch = (key: string) => {idle.set(key, {due: idleClock.nowMs() + config.activation!.idleUnloadMs, generation: ++generation}); armIdle();};
   const restore = config.restore ? new LiveRestorePreparation(config.restore) : undefined;
   let registered = false, closing: Promise<void> | undefined;
-  let requestId = 0;
+  // Engine requests the host numbered so far, requests sent through its client, and how many of those were ones an idle pass sends.
+  // And the requests of recovery probes that brought nothing. They are credited once the probe ends, after they were
+  // sent, so only a pass, which holds its whole probe, counts them as idle. A delivery never does: the credit of a probe
+  // that ended while it ran would stand for requests sent before it began, and could hide as many of its own.
+  let requestId = 0, sentRequests = 0, idleRequests = 0, probeCredits = 0;
   const nextRequestId = () => {
     if (requestId === Number.MAX_SAFE_INTEGER) throw new Error("Service host request IDs exhausted.");
     return ++requestId;
@@ -430,14 +452,21 @@ export async function startServiceLiveHost(options: {
   };
   // A restore can fence the binding while a call waits for the document or the
   // engine. The call then fails as incomplete; cancellation, lost standing,
-  // and damage on the same binding stay visible.
+  // and damage on the same binding stay visible. A pass then settles or publishes
+  // what the call delivered or settled, as after an editor's accepted edit, so a
+  // call that sent the engine anything but what an idle pass sends asks for one
+  // as it ends. One that applied and settled nothing, as when an idle desktop's
+  // connection opens with nothing to deliver, left a pass nothing and asks for none.
+  // The counts are the host's, so another caller's request while the call runs
+  // asks for a pass too.
   const deliver = <T>(document: LiveDocumentKey, callerSignal: AbortSignal | undefined,
     run: (consumer: ReturnType<typeof configuredConsumer>, joined: AbortSignal) => Promise<T>) => {
     configuredConsumer(document);
     return runDocument(document, callerSignal, async joined => {
-      const consumer = configuredConsumer(document);
+      const consumer = configuredConsumer(document), numbered = requestId, sent = sentRequests, counted = idleRequests;
       try { return await run(consumer, joined); }
       catch (error) { joined.throwIfAborted(); check(); configuredConsumer(document); throw error; }
+      finally { if (requestId - numbered !== idleRequests - counted || sentRequests - sent !== idleRequests - counted) nudgePass(); }
     });
   };
   const drain = async (value: LiveDocumentKey, callerSignal?: AbortSignal): Promise<CommittedDeliveryOutcome> => {
@@ -457,11 +486,13 @@ export async function startServiceLiveHost(options: {
       const stop = changes || config.activation ? observeRelayWrites(storage, () => {
         for (const attached of attachments.values()) attached.check = true;
         changes?.notify();
+        nudgePass();
       }) : () => {};
       signal.addEventListener("abort",stop,{once: true});
       return stop;
     }),stop => Effect.sync(() => signal.removeEventListener("abort",stop)));
-    // Every connection change restarts the document's idle period.
+    // Every connection change restarts the document's idle period. It asks for no pass: a connection that opens and
+    // closes leaves a pass nothing, and what it delivers, or a reload it causes, asks for one itself.
     yield* Effect.acquireRelease(Effect.sync(() => editors.subscribe(document => {
       const key = hostedKey(document);
       if (key) touch(key);
@@ -488,9 +519,25 @@ export async function startServiceLiveHost(options: {
       return stop;
     }),stop => Effect.sync(() => signal.removeEventListener("abort",stop)));
     // Caller input retention and native upload buffers each have their own cap.
-    const client = changes ? queueLiveHostRequests(native, {maxPendingReads: changes.maxListeners, maxPendingWrites: changes.maxListeners,
+    const queued = changes ? queueLiveHostRequests(native, {maxPendingReads: changes.maxListeners, maxPendingWrites: changes.maxListeners,
       maxRetainedInputBytes: config.client.aggregateBytes,
       deadlineMs: config.client.requestDeadlineMs, signal, retire: abort}) : native;
+    // Counts each request sent through the client, and those an idle pass sends. A request the host numbers takes one of
+    // its numbers whichever client method sends it. One a caller numbers itself, as the automation ledger's are, takes
+    // none and is counted here alone. A pass sent only idle requests when all three counts moved alike. A connection's
+    // read is numbered by its caller and sent by its own client method, so it is counted as sent and as idle here.
+    const sendRequest: EngineClient["sendRequest"] = (request, ...rest) => {
+      sentRequests++;
+      if (IDLE_PASS_REQUESTS.has(request.method)) idleRequests++;
+      return queued.sendRequest(request, ...rest);
+    };
+    const client = new Proxy(queued, {get(target, property) {
+      if (property === "sendRequest") return sendRequest;
+      const value: unknown = Reflect.get(target, property, target);
+      if (typeof value !== "function") return value;
+      if (!CONNECTION_READS.has(property)) return value.bind(target);
+      return (...args: unknown[]): unknown => {sentRequests++; idleRequests++; return value.apply(target, args);};
+    }});
     if (signal.aborted) throw new Error("Service host startup cancelled.");
     const discovery = yield* Effect.promise(() => client.sendRequest({ id: nextRequestId(), method: "liveApplication.hosts", params: {}, deadlineMs: config.client.requestDeadlineMs }));
     const reply = record(discovery.result, ["relayNamespace", "host", "workspaces"]);
@@ -552,6 +599,11 @@ export async function startServiceLiveHost(options: {
       attached.confirmed = number;
       attached.last = result.hasMore ? "more" : "done";
       if (!result.hasMore) {attached.seen = state; attached.overlapped = attached.check; attached.probeAt = now() + HOSTED_RECOVERY_PROBE_MS;}
+      // A recovery probe that brought nothing found the relay as the host knew it, so its pass can still be idle:
+      // the three requests of each of its pages count, for that pass, with the ones an idle pass sends.
+      if (reason === "probe" && !result.hasMore && result.pages.every(page => page.committed && page.fetched === 0 && page.applied === 0 &&
+        page.refused === 0 && page.skipped === 0 && page.conflictsOpened === 0 && page.changedPaths.length === 0 && page.held.length === 0 &&
+        page.newlyHeld.listed.length === 0 && page.departed.listed.length === 0)) probeCredits += 3 * result.pages.length;
       // A departure is confirmed only by a pull whose departed list reaches it, so while one has not, the next pull
       // moves the list on toward it. Its workspace drains only at a pull that reads that list from its start and
       // finds nothing departed, so a list that ended empty partway through is read once more from its start. Both
@@ -1100,14 +1152,17 @@ export async function startServiceLiveHost(options: {
         const row = hosted.get(key);
         if (!row || !activation!.dormant(row.target)) return;
         const workspaceId = row.target.workspaceId;
-        // While a sibling is mid-activation the open skips catch-up, as awake documents
-        // do, and converges once that sibling resolves. Waiting here would let one stuck
-        // sibling keep every dormant document in the workspace from opening.
-        if (activation!.workspaceReady(workspaceId) && (await pull(attachments.get(workspaceId)!, joined, "open")).hasMore) {
-          throw new Error("Hosted replication has more pages.");
-        }
-        activation!.wake(row.target); touch(key);
-        await activation!.activate(row.target, joined, settleTarget);
+        // A pass continues a catch-up that stopped at its page budget or failed, and publishes what a reload settled.
+        try {
+          // While a sibling is mid-activation the open skips catch-up, as awake documents
+          // do, and converges once that sibling resolves. Waiting here would let one stuck
+          // sibling keep every dormant document in the workspace from opening.
+          if (activation!.workspaceReady(workspaceId) && (await pull(attachments.get(workspaceId)!, joined, "open")).hasMore) {
+            throw new Error("Hosted replication has more pages.");
+          }
+          activation!.wake(row.target); touch(key);
+          await activation!.activate(row.target, joined, settleTarget);
+        } finally {nudgePass();}
       }));
     };
     // A held-document read asks the engine for a workspace this daemon replicates,
@@ -1432,6 +1487,8 @@ export async function startServiceLiveHost(options: {
         }
         // Only membership changes send updates, so a wake after one that failed runs one more pass, not a loop.
         if (lifecycle) wakePass();
+        // A document or workspace it added waits for the next pass.
+        nudgePass();
         armIdle();
       }
     }));
@@ -1618,6 +1675,7 @@ export async function startServiceLiveHost(options: {
           });
         }
         if(!failed)lastError=undefined;
+        return failed;
       });
       // Unloads hosted documents with no live connection for the idle period.
       // Unfinished delivery, settlement, publication, or engine work keeps a
@@ -1641,30 +1699,86 @@ export async function startServiceLiveHost(options: {
         }
         if(visited===0)idleSweepsBeforeDue++;
       };
+      // Whether nothing is left for a pass to do until a wake, a nudge or a deadline: no document leaves, parks,
+      // recovers, unloads or is kept, none that moved away is still listed, every activation finished or blocked, and
+      // every workspace is checked, ready, pushed and quiet with its relay state read and its recovery probe not due.
+      const settled=()=>{
+        if(leaving.size || recovering.size || parking.size || retained.size || movedRestores.size || movedDepartures.size || unloading.size ||
+          activation!.unfinished)return false;
+        for(const [workspaceId,attached] of attachments){
+          if(!attached.hosted.checked || attached.hosted.diverged || !attached.hosted.pushedAll || !activation!.workspaceReady(workspaceId))return false;
+          if(!hostedReplicaQuiet(pullDuties(workspaceId,attached)) || attached.seen===undefined ||
+            attached.overlapped || attached.check || now()>=attached.probeAt)return false;
+        }
+        return true;
+      };
+      // How long the next pause lasts, and how many passes in a row were idle. A pass is idle when no step failed,
+      // no idle sweep ran, it sent the engine nothing but what an idle pass sends, nothing asked for a pass since
+      // the last one ended, and nothing is left to do. Once idle passes have visited every document, each pause
+      // lasts twice the one before, and ends by the next recovery probe. A pass visits maxDocumentsPerPass awake
+      // documents, so the longest pause is idlePollIntervalMs divided by the passes that visit them all: while the
+      // same documents stay awake, an idle host visits each within idlePollIntervalMs, apart from the passes' own
+      // time. Any other pass puts the pause back to pollIntervalMs, and the pause grows again only after that many
+      // idle passes in a row. When documents wake during a long pause, the passes that follow visit from where the
+      // last one stopped, so a document can wait that pause and then one rotation of the larger set at
+      // pollIntervalMs. The host schedules no pause shorter than pollIntervalMs. A wake can still end one sooner.
+      let rest=config.activation.pollIntervalMs,doubled=rest,idlePasses=0;
+      const judge=(clean:boolean)=>{
+        const bounds=config.activation!,idle=clean && !stirred && settled();
+        stirred=false;
+        idlePasses=idle?idlePasses+1:0;
+        const awake=activation!.targets.filter(target=>!activation!.dormant(target)).length;
+        const rotation=Math.max(1,Math.ceil(awake/bounds.maxDocumentsPerPass));
+        if(idlePasses<rotation){rest=doubled=bounds.pollIntervalMs;return idle;}
+        doubled=Math.min(Math.max(bounds.pollIntervalMs,Math.floor(bounds.idlePollIntervalMs/rotation)),doubled*2);
+        let probe=Infinity;
+        for(const attached of attachments.values())probe=Math.min(probe,attached.probeAt);
+        rest=Math.max(bounds.pollIntervalMs,Math.min(doubled,probe-now()));
+        return idle;
+      };
+      const pauseTimer = options.pauseTimer ?? ((delayMs: number, fire: () => void) => {
+        const timer = setTimeout(fire,delayMs);
+        timer.unref();
+        return () => clearTimeout(timer);
+      });
       const pause = Effect.callback<void>(resume => {
-        let ended = false;
+        const poll = config.activation!.pollIntervalMs, began = now();
+        // A nudge since the pass was judged came before this pause could hear it.
+        let ended = false, lasts = stirred ? poll : rest, cancel = () => {};
         const end = () => {
           if (ended) return;
-          ended = true; woken = false; rouse = undefined;
-          clearTimeout(timer);
+          ended = true; woken = false; rouse = undefined; hurry = undefined;
+          cancel();
           resume(Effect.void);
         };
-        const timer = setTimeout(end,config.activation!.pollIntervalMs);
-        timer.unref();
+        cancel = pauseTimer(lasts,end);
+        // A nudge leaves a pause of one poll interval or less as it is.
+        hurry = () => {
+          if (lasts <= poll) return;
+          lasts = poll;
+          const left = poll - (now() - began);
+          if (left <= 0) {end(); return;}
+          cancel();
+          cancel = pauseTimer(left,end);
+        };
         if (woken) end(); else rouse = end;
-        return Effect.sync(() => {rouse = undefined; clearTimeout(timer);});
+        return Effect.sync(() => {rouse = undefined; hurry = undefined; cancel();});
       });
       yield* Effect.forkScoped(Effect.gen(function* () {
         while (!signal.aborted) {
+          let idle = false;
           // Native passes retain ownership until their actual work settles.
           // A sweep runs only once an idle deadline is due. Its timer, armed after each pass, wakes the pass that runs it.
           yield* Effect.uninterruptible(Effect.promise(() => exclusive(async () => {
-            await pass();
-            const due = nextIdleDue();
-            if (due !== undefined && due <= idleClock.nowMs()) await sweep();
+            const numbered = requestId, sent = sentRequests, counted = idleRequests + probeCredits;
+            const failed = await pass();
+            const due = nextIdleDue(), sweeping = due !== undefined && due <= idleClock.nowMs();
+            if (sweeping) await sweep();
             armIdle(); checkProgress();
+            const idled = idleRequests + probeCredits - counted;
+            idle = judge(!failed && !sweeping && requestId - numbered === idled && sentRequests - sent === idled);
           })));
-          options.onPass?.();
+          options.onPass?.(idle);
           yield* pause;
         }
       }));
@@ -1776,8 +1890,9 @@ export async function startServiceLiveHost(options: {
        * whether it was blocked or its owner saw it failing.
        */
       unblock(document: {workspaceId: string; objectId: string}): boolean {
-        const key = hostedKey(document);
-        return key !== undefined && activation!.unblock(hosted.get(key)!.target);
+        const key = hostedKey(document), unblocked = key !== undefined && activation!.unblock(hosted.get(key)!.target);
+        if (unblocked) nudgePass();
+        return unblocked;
       },
       /**
        * Reads one bounded page of a refused queue this host keeps, as the

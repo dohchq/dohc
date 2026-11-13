@@ -45,7 +45,7 @@ const movedKey=(target:ServiceActivationTarget,objectId:string)=>JSON.stringify(
 /** A host can start with no targets; the self-hosted supervisor adds them as documents are shared. */
 export function parseServiceActivationConfig(value:unknown){
   if(value===undefined)return undefined;
-  const row=configRecord(value,["targets","validation","maxCaptureBytes","maxActivationHistoryEntries","maxEntriesPerDrain","maxBytesPerDrain","maxDocumentsPerPass","pollIntervalMs","passDeadlineMs","idleUnloadMs","idleRetryMs"]);
+  const row=configRecord(value,["targets","validation","maxCaptureBytes","maxActivationHistoryEntries","maxEntriesPerDrain","maxBytesPerDrain","maxDocumentsPerPass","pollIntervalMs","idlePollIntervalMs","passDeadlineMs","idleUnloadMs","idleRetryMs"]);
   if(!Array.isArray(row.targets) || row.targets.length>64)throw new Error("Invalid service activation targets.");
   const targets=row.targets.map(parseServiceActivationTarget);
   if(new Set(targets.map(targetKey)).size!==targets.length)throw new Error("Duplicate service activation target.");
@@ -56,7 +56,11 @@ export function parseServiceActivationConfig(value:unknown){
     validateAdmission:liveValidation.validator(validation),maxCaptureBytes:positive(row.maxCaptureBytes),
     maxActivationHistoryEntries:positive(row.maxActivationHistoryEntries),
     maxEntriesPerDrain:positive(row.maxEntriesPerDrain),maxBytesPerDrain:positive(row.maxBytesPerDrain),
-    maxDocumentsPerPass:positive(row.maxDocumentsPerPass),pollIntervalMs:positive(row.pollIntervalMs),passDeadlineMs:positive(row.passDeadlineMs),
+    maxDocumentsPerPass:positive(row.maxDocumentsPerPass),pollIntervalMs:positive(row.pollIntervalMs),
+    // The longest an idle host goes without a pass. A pass visits maxDocumentsPerPass awake documents, so its longest
+    // pause is this divided by the passes that visit them all, and never less than pollIntervalMs: while the same
+    // documents stay awake, each is visited at least this often, apart from the passes' own time.
+    idlePollIntervalMs:positive(row.idlePollIntervalMs),passDeadlineMs:positive(row.passDeadlineMs),
     idleUnloadMs:positive(row.idleUnloadMs),idleRetryMs:positive(row.idleRetryMs)});
 }
 export type ServiceActivationConfig=NonNullable<ReturnType<typeof parseServiceActivationConfig>>;
@@ -140,6 +144,8 @@ export class ServiceActivationDriver {
   readonly #enrolled=new Map<string,string>();
   // Owner refusals received but not yet recorded, kept across every owner this driver replaces.
   readonly #refusals=new OwnerKnownRefusals();
+  // Targets whose last activation neither finished nor blocked, so a later pass continues it.
+  readonly #unfinished=new Set<string>();
   // Whether a wait for the validation slot a capture found busy is running. It wakes the pass that captures again.
   #awaitingCapacity=false;
   constructor(readonly options:{trustedAccount: OwnerOutboxAdmission["trustedAccount"];storage:SyncRelayStorage;history:LiveJournalHistoryAuthority;client:EngineClient;host:LiveHostConnectionCoordinate;
@@ -181,9 +187,14 @@ export class ServiceActivationDriver {
   #forget(key:string){
     this.#targets=this.#targets.filter(row=>targetKey(row)!==key);
     this.#completedTargets.delete(key);this.#staleLeases.delete(key);this.#loaded.delete(key);this.#dormant.delete(key);this.#held.delete(key);this.#blocked.delete(key);this.#objects.delete(key);this.#enrolled.delete(key);
-    this.#failures.delete(key);
+    this.#failures.delete(key);this.#unfinished.delete(key);
     for(const [document,owner] of this.#owners)if(owner.target===key)this.#owners.delete(document);
   }
+  /**
+   * Whether a target's last activation left work for a later pass: it failed, or ended pending without blocking.
+   * A finished one found no owner edit waiting in the engine. A blocked one waits for its owner or the relay instead.
+   */
+  get unfinished(){return this.#unfinished.size>0;}
   /**
    * Clears readiness of documents a hosted pass left held. The engine has
    * already ended their sessions; each activates again once its capture
@@ -636,8 +647,11 @@ export class ServiceActivationDriver {
       const outcome=await this.#activate(target,signal,settle,catchUp,objectId);
       // Only an activation that finished ends the count: a pass that only waits can alternate with failures.
       if(outcome.kind==="done")this.#failures.delete(key);
+      if(outcome.kind==="done" || this.#blocked.has(key))this.#unfinished.delete(key);
+      else this.#unfinished.add(key);
       return outcome;
     }catch(error){
+      this.#unfinished.add(key);
       // A document the engine has not readied only waits for it, and a pass that was stopped, or had ended before it reached
       // the document, says nothing about the document. One that ran out of its deadline here counts, so a document that keeps running past it backs off.
       const timedOut=signal.aborted && !endedBefore && signal.reason instanceof DOMException && signal.reason.name==="TimeoutError";

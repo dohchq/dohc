@@ -22,6 +22,9 @@ export function selfHostLiveProfile() {
   return {
     frames, nativeIngress, nativeClient, editor, gateway, requests, validation,
     desktopReadiness: {maxPendingRequests: 64, maxPendingPerUser: 4, timeoutMs: 30_000},
+    // The session host's supervisor selects the hosted documents again at least this often, so it sees an
+    // enrollment or grant change no relay write notice announced, such as one another process wrote.
+    reconcileIntervalMs: 2_000,
     owner: {frames, nativeIngress, nativeClient, attemptTimeoutMs: 30_000, retryDelayMs: 2_000},
     browserSessions: {...requests, maxSessions: 256, retentionMs: 12 * 60 * 60 * 1000},
     namedLive: {version: 1, tickets: {retainedTicketsPerPrincipalGrant: 8, expiredTicketCleanupBatchSize: 64},
@@ -40,7 +43,15 @@ export function selfHostLiveProfile() {
       // maxActivationHistoryEntries rows since the note's base, about 400 words
       // typed; the owner outbox drain pages maxEntriesPerDrain at a time.
       activation: {validation, maxCaptureBytes: 4 * MiB, maxActivationHistoryEntries: 2_000, maxEntriesPerDrain: 128, maxBytesPerDrain: 4 * MiB,
-        maxDocumentsPerPass: 8, pollIntervalMs: 250, passDeadlineMs: 30_000, idleUnloadMs: 10 * 60 * 1000, idleRetryMs: 30_000},
+        maxDocumentsPerPass: 8, pollIntervalMs: 250, passDeadlineMs: 30_000, idleUnloadMs: 10 * 60 * 1000, idleRetryMs: 30_000,
+        // Each bound here leaves out the passes' own time. An idle host starts a pass no later than this after
+        // the last one ended, and each pass checks every hosted document's authority: a Pause, a Stop or a
+        // revocation another process wrote to the relay database, which no signal announces, waits no longer
+        // than this for that pass. While the same documents stay awake, an idle host also visits each of them
+        // at least this often. When more wake during a long pause, a document can wait that pause and then one
+        // rotation of the awake documents at pollIntervalMs: under four seconds with the 64 documents a host
+        // may hold.
+        idlePollIntervalMs: 2_000},
       // Copying and migrating an earlier store for its owner's recovery copy
       // may take this long, the longest the engine answers a request.
       recovery: {preparationDeadlineMs: 300_000}},
