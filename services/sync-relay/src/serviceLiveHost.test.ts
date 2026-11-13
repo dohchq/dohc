@@ -10,7 +10,7 @@ import * as Y from "yjs";
 import { openRelayDeployment } from "./relayDeployment.js";
 import { openEmptyRelayTestDeployment } from "./testing/emptyRelayDeployment.js";
 import { startServiceLiveHost, deleteConfiguredServiceWorkspaceRoots, type ServiceWorkspace } from "./serviceLiveHost.js";
-import { EngineRequestError } from "@dohc/workspace-engine-client/daemon";
+import { EngineRequestDeadlineError, EngineRequestError } from "@dohc/workspace-engine-client/daemon";
 import {errorResponse} from "./errors.js";
 import {parseLogOp} from "./relayLogInputs.js";
 import {createNamedFrameChanges} from "./liveHostChanges.js";
@@ -137,6 +137,39 @@ it("closes the daemon immediately when storage loses continuity standing", async
   expect(captured.client.close).toHaveBeenCalledTimes(1);
   await host.close();
   expect(existsSync(captured.nativePath)).toBe(false);
+});
+
+// Proves: an engine that ends by itself is logged with its exit code and signal, and the host stops with it.
+it("logs an engine that exits by itself with its code and signal", async () => {
+  const f = await fixture(); let exit!: (code: number | null, signal: NodeJS.Signals | null) => void;
+  spawn.mockImplementation(async options => {exit = options.onExit; return clientFrom(options).client;});
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  const host = await startServiceLiveHost(f);
+  try {
+    exit(null, "SIGKILL");
+    expect(host.invalidated.aborted).toBe(true);
+    expect(log.mock.calls.filter(([message]) => String(message).startsWith("Live host"))).toEqual([["Live host engine exited.", {code: null, signal: "SIGKILL"}]]);
+  } finally {await host.close(); log.mockRestore();}
+});
+
+// Proves: an engine the relay stops after a missed request deadline is logged as stopped by the relay, and its exit
+// that follows as one the relay caused.
+it("logs an engine the relay stops for a missed deadline, then its exit", async () => {
+  const f = await fixture(); let captured!: ReturnType<typeof clientFrom>, exit!: (code: number | null, signal: NodeJS.Signals | null) => void;
+  spawn.mockImplementation(async options => {
+    captured = clientFrom(options); exit = options.onExit;
+    captured.client.sendRequest.mockRejectedValue(new EngineRequestDeadlineError(1, "liveApplication.hosts", 50));
+    return captured.client;
+  });
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    await expect(startServiceLiveHost({...f, frameChanges: createNamedFrameChanges(16)})).rejects.toBeInstanceOf(EngineRequestDeadlineError);
+    expect(captured.client.close).toHaveBeenCalled();
+    exit(0, null);
+    expect(log.mock.calls.filter(([message]) => String(message).startsWith("Live host"))).toEqual([
+      ["Live host stopped an engine that did not answer in time.", {method: "liveApplication.hosts", deadlineMs: 50}],
+      ["Live host engine exited after the relay stopped it.", {code: 0, signal: null}]]);
+  } finally {log.mockRestore();}
 });
 
 async function configureActivation(f: Awaited<ReturnType<typeof fixture>>,limits = {}) {
