@@ -420,6 +420,43 @@ async fn duplicate_live_bound_copy_undo_refusal_names_the_copy() {
     );
 }
 
+/// A page whose live editing can't resume keeps its owner binding here, with
+/// no current activation. Duplicate is the way out for it, so it must copy.
+#[tokio::test]
+async fn duplicate_copies_a_page_this_computer_owns_live() {
+    let (root, mut store) = fixture();
+    seed(&mut store, root.path(), "source.md", "source", "Original");
+    let source: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT object_id FROM moments WHERE moment_id='source'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    bind_owner(&mut store, &source);
+    let copy = duplicate(&mut store, root.path(), Arc::new(NoFaults))
+        .await
+        .unwrap();
+    assert_ne!(copy.moments[0].object_id, source);
+    place(&mut store, root.path(), &copy);
+    assert_eq!(
+        std::fs::read_to_string(root.join("copy.md")).unwrap(),
+        "Original"
+    );
+    let still_bound: bool = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM ydoc_owner_bindings WHERE object_id=?1)",
+                [&source],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert!(still_bound);
+}
+
 /// Undo of a copy deletes it, which would leave its owner binding behind.
 #[tokio::test]
 async fn duplicate_undo_refuses_a_copy_this_computer_owns_live() {
