@@ -2,7 +2,7 @@ import { ChatFileMentionsInput } from "@dohc/workspace-contracts/chat-file-menti
 import { LinksEdgesInput, LinksInInput, LinksResolveInput } from "@dohc/workspace-contracts/links";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import type { z } from "zod";
-import { CHAT_WATCH_TIMEOUT_MS, CHAT_WATCH_MAX_TIMEOUT_MS, cliAgentIdSchema, APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, chatLinksGroupInputSchema, type CliLinkTarget, chatWorkReportSchema, LIVE_DOCUMENT_REASON_STEPS, type CliActor, type CliStreamPosition, type CliWorkReport, DECLARED_VERBS, type DeclaredOperation, type DeclaredRequestInput, type DeclaredVerb } from "./protocol";
+import { CHAT_WATCH_TIMEOUT_MS, CHAT_WATCH_MAX_TIMEOUT_MS, cliAgentIdSchema, cliWorkspaceIdSchema, APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, chatLinksGroupInputSchema, type CliLinkTarget, chatWorkReportSchema, LIVE_DOCUMENT_REASON_STEPS, type CliActor, type CliStreamPosition, type CliWorkReport, DECLARED_VERBS, type DeclaredOperation, type DeclaredRequestInput, type DeclaredVerb } from "./protocol";
 import { CHAT_WORK_STATUSES, isChatWorkStatus } from "@dohc/workspace-contracts/chat-work";
 import { DohcCliError } from "./errors";
 import { OwnerAppPublicationRequest } from "./appPublication";
@@ -14,6 +14,7 @@ import { AccessObjectRef } from "@dohc/workspace-contracts/access";
 interface ParsedCliBase {
   actor: CliActor;
   agentId?: string;
+  workspaceId?: string;
   json: boolean;
 }
 
@@ -1710,6 +1711,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = withDeclar
 export const GLOBAL_FLAGS: readonly CliFlag[] = [
   { name: "--as-agent", text: "Post and read chat as an agent." },
   { name: "--agent-id", value: "id", text: "Work as this agent you run, by its id in Settings › Agents. Implies --as-agent." },
+  { name: "--workspace", value: "id", text: "Work in this workspace, by its id, instead of the one this folder is in. Relative paths then start at the workspace's folder." },
   { name: "--json", text: "Print the result as JSON." },
   { name: "--help", text: "Show help. -h does the same." },
 ];
@@ -1723,11 +1725,13 @@ const VALUE_FLAGS = new Set(
 function stripGlobalFlags(argv: readonly string[]): {
   actorFlag: boolean;
   agentId?: string;
+  workspaceId?: string;
   json: boolean;
   tokens: string[];
 } {
   let actorFlag = false;
   let agentId: string | undefined;
+  let workspaceId: string | undefined;
   let json = false;
   let optionsEnded = false;
   let expectsOptionValue = false;
@@ -1754,6 +1758,12 @@ function stripGlobalFlags(argv: readonly string[]): {
       index += 1;
       continue;
     }
+    if (!optionsEnded && token === "--workspace") {
+      workspaceId = takeValue(argv, index, token);
+      if (!cliWorkspaceIdSchema.safeParse(workspaceId).success) fail("--workspace requires a workspace's id");
+      index += 1;
+      continue;
+    }
     if (!optionsEnded && token === "--json") {
       json = true;
       continue;
@@ -1763,7 +1773,7 @@ function stripGlobalFlags(argv: readonly string[]): {
       expectsOptionValue = true;
     }
   }
-  return { actorFlag, ...(agentId === undefined ? {} : { agentId }), json, tokens };
+  return { actorFlag, ...(agentId === undefined ? {} : { agentId }), ...(workspaceId === undefined ? {} : { workspaceId }), json, tokens };
 }
 
 /** Leads into the help command for an unknown name, with the name it likely meant when there is one. */
@@ -1790,5 +1800,5 @@ export function parseCliArguments(
   if (help) return { help: [commandName, verbName] };
   const agent = (commandName === "history" && verbName === "undo") || commandName === "document" || commandName === "file" || global.actorFlag || global.agentId !== undefined || (commandName === "chat" && (verbName === "watch" || env.DOHC_CHAT_ACTOR === "agent"));
   const body = verb.parse(readVerbInput(`${commandName} ${verbName}`, verb, tokens));
-  return { actor: agent ? "agent" : "human", ...(global.agentId === undefined ? {} : { agentId: global.agentId }), json: global.json, ...body };
+  return { actor: agent ? "agent" : "human", ...(global.agentId === undefined ? {} : { agentId: global.agentId }), ...(global.workspaceId === undefined ? {} : { workspaceId: global.workspaceId }), json: global.json, ...body };
 }
