@@ -5902,81 +5902,95 @@ mod tests {
 
     #[test]
     fn own_agent_drafts_sent_as_one_group_keep_their_run() {
-        let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
-        let mut outbox_id = String::new();
-        for (append_key, value) in [("head", "a"), ("second", "b"), ("third", "c")] {
-            let draft = crate::owner_outbox::append(
-                &mut store,
-                "workspace-1",
-                crate::owner_outbox::OwnerOutboxAppendInput {
-                    binding: binding(),
-                    base_update: Ydoc::wire().encode_full_state(),
-                    append_key: append_key.into(),
-                    update: Ydoc::wire().frontmatter_set("status", value).unwrap(),
-                    limits: crate::owner_outbox::OwnerOutboxLimits {
-                        max_pending_bytes: 100_000,
-                        max_pending_age_ms: 100_000,
+        // The relay's receipt reaches this computer after the frame, or first.
+        for receipt_first in [false, true] {
+            let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
+            let mut outbox_id = String::new();
+            for (append_key, value) in [("head", "a"), ("second", "b"), ("third", "c")] {
+                let draft = crate::owner_outbox::append(
+                    &mut store,
+                    "workspace-1",
+                    crate::owner_outbox::OwnerOutboxAppendInput {
+                        binding: binding(),
+                        base_update: Ydoc::wire().encode_full_state(),
+                        append_key: append_key.into(),
+                        update: Ydoc::wire().frontmatter_set("status", value).unwrap(),
+                        limits: crate::owner_outbox::OwnerOutboxLimits {
+                            max_pending_bytes: 100_000,
+                            max_pending_age_ms: 100_000,
+                        },
+                        created_at_ms: 1,
                     },
-                    created_at_ms: 1,
-                },
-            )
-            .unwrap();
-            outbox_id = draft.outbox_id;
-        }
-        // The agent's drafts as its draft appends leave them: the head alone
-        // in run-a, the two typed behind it one group in run-g.
-        store
-            .write_with(&NoFaults, |tx| {
-                tx.execute(
-                    "UPDATE owner_ydoc_outbox_entries SET agent_declaration_json=?1, \
-                     agent_run_id=CASE sequence WHEN 1 THEN 'run-a' ELSE 'run-g' END, \
-                     delivery_group=CASE sequence WHEN 1 THEN NULL ELSE 2 END",
-                    params![serde_json::to_string(&declared("trip-agent").unwrap()).unwrap()],
                 )
-                .map_err(StorageError::persist_public)?;
-                Ok::<_, StorageError>(())
-            })
-            .unwrap();
-        let pending = crate::owner_outbox::read_pending(&store, "workspace-1", &outbox_id).unwrap();
-        assert_eq!(pending.entries.len(), 2);
-        // Each delivery is applied, then acknowledged, so the group is the
-        // head when its frame arrives.
-        for (cursor, entry) in (1..).zip(pending.entries) {
-            let mut update = event(&entry.delivery_id, cursor, entry.update);
-            snapshot(&mut update.metadata, declared("trip-agent"));
-            sees(&mut update, &Ydoc::wire());
-            ack(apply(&mut store, &mut cache, &handle, update));
-            crate::owner_outbox::acknowledge(
-                &mut store,
-                "workspace-1",
-                &outbox_id,
-                &[crate::owner_outbox::OwnerDeliveryReceipt {
-                    delivery_id: entry.delivery_id,
+                .unwrap();
+                outbox_id = draft.outbox_id;
+            }
+            // The agent's drafts as its draft appends leave them: the head alone
+            // in run-a, the two typed behind it one group in run-g.
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(
+                        "UPDATE owner_ydoc_outbox_entries SET agent_declaration_json=?1, \
+                         agent_run_id=CASE sequence WHEN 1 THEN 'run-a' ELSE 'run-g' END, \
+                         delivery_group=CASE sequence WHEN 1 THEN NULL ELSE 2 END",
+                        params![serde_json::to_string(&declared("trip-agent").unwrap()).unwrap()],
+                    )
+                    .map_err(StorageError::persist_public)?;
+                    Ok::<_, StorageError>(())
+                })
+                .unwrap();
+            let pending =
+                crate::owner_outbox::read_pending(&store, "workspace-1", &outbox_id).unwrap();
+            assert_eq!(pending.entries.len(), 2);
+            // Each delivery is acknowledged before the next, so the group is
+            // the head when its frame arrives, or already acknowledged.
+            for (cursor, entry) in (1..).zip(pending.entries) {
+                let receipt = crate::owner_outbox::OwnerDeliveryReceipt {
+                    delivery_id: entry.delivery_id.clone(),
                     update_digest: entry.update_digest,
                     journal_cursor: cursor,
                     accepting_host_epoch: 1,
-                }],
+                };
+                let acknowledge = |store: &mut EngineStore| {
+                    crate::owner_outbox::acknowledge(
+                        store,
+                        "workspace-1",
+                        &outbox_id,
+                        std::slice::from_ref(&receipt),
+                    )
+                    .unwrap()
+                };
+                if receipt_first {
+                    acknowledge(&mut store);
+                }
+                let mut update = event(&entry.delivery_id, cursor, entry.update);
+                snapshot(&mut update.metadata, declared("trip-agent"));
+                sees(&mut update, &Ydoc::wire());
+                ack(apply(&mut store, &mut cache, &handle, update));
+                if !receipt_first {
+                    acknowledge(&mut store);
+                }
+            }
+            let interval: serde_json::Value = serde_json::from_str(
+                &store
+                    .read_with(|conn| crate::author_coverage::interval_in(conn, &key(), i64::MAX))
+                    .unwrap()
+                    .json(),
             )
             .unwrap();
-        }
-        let interval: serde_json::Value = serde_json::from_str(
-            &store
-                .read_with(|conn| crate::author_coverage::interval_in(conn, &key(), i64::MAX))
+            let runs: Vec<&serde_json::Value> = interval
+                .as_array()
                 .unwrap()
-                .json(),
-        )
-        .unwrap();
-        let runs: Vec<&serde_json::Value> = interval
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|author| author["kind"] == "agent")
-            .map(|author| &author["agentRunId"])
-            .collect();
-        assert_eq!(
-            runs,
-            [&serde_json::json!("run-a"), &serde_json::json!("run-g")]
-        );
+                .iter()
+                .filter(|author| author["kind"] == "agent")
+                .map(|author| &author["agentRunId"])
+                .collect();
+            assert_eq!(
+                runs,
+                [&serde_json::json!("run-a"), &serde_json::json!("run-g")],
+                "receipt first: {receipt_first}"
+            );
+        }
     }
 
     /// The person this computer records while nobody is signed in.
