@@ -642,6 +642,8 @@ export interface SyncRelayStorage {
   ensureOwnedLiveDocuments(inputs: readonly import("./serviceHostEnrollment").EnsureOwnedLiveDocumentInput[]): readonly import("./serviceHostEnrollment").ServiceHostEnrollment[];
   ensureOwnedLiveDocument(input: import("./serviceHostEnrollment").EnsureOwnedLiveDocumentInput): import("./serviceHostEnrollment").ServiceHostEnrollment;
   renewPersonalSessionDemand(input: {workspaceId: string; objectId: string; nowMs: number}): boolean;
+  /** Reclaims the documents only recorded demand keeps that went unused for the retention period. Returns those it reclaimed. */
+  reclaimIdleLiveDocuments(nowMs: number): readonly import("./serviceHostEnrollment").ServiceHostEnrollment[];
   listServiceHostEnrollments(workspaceId?: string): readonly import("./serviceHostEnrollment").ServiceHostEnrollment[];
   listUndrainedServiceHostEnrollments(after?: import("./serviceHostEnrollment").ServiceHostEnrollmentCursor): {
     documents: readonly import("./serviceHostEnrollment").ServiceHostEnrollment[]; nextCursor: import("./serviceHostEnrollment").ServiceHostEnrollmentCursor | null;

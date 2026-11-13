@@ -14,8 +14,11 @@ import {forgetServiceHostUploads} from "./serviceHostUploads";
 import {listServiceActivationRetirements, OPEN_RETIREMENT, openServiceActivationRetirement, retirableServiceActivation, serviceActivationRetirementOpen,
   type RetirableServiceActivation} from "./serviceActivationRetirement";
 import {SERVICE_ACTIVATIONS} from "./serviceActivationSchema";
+import {LIVE_JOURNAL_TABLE} from "./schema";
 import {badRequest, notFound, relayError} from "../errors";
-import {AGENT_ONLY_MAX_DOCUMENTS, AGENT_ONLY_MAX_WORKSPACES, SERVICE_HOST_MAX_DOCUMENTS, SERVICE_HOST_MAX_WORKSPACES} from "../liveHostingLimits";
+import {liveEditors} from "../liveEditors";
+import {AGENT_ONLY_MAX_DOCUMENTS, AGENT_ONLY_MAX_WORKSPACES, RECLAIM_MAX_DEPARTING, RECLAIM_MIN_HOLD_MS, RECLAIM_RETENTION_MS, SERVICE_HOST_MAX_DOCUMENTS,
+  SERVICE_HOST_MAX_WORKSPACES} from "../liveHostingLimits";
 import type {PersonalCredential} from "./personalAgentChat";
 import {personalReachIn, readPersonalAuthority} from "./personalAgents";
 
@@ -361,24 +364,119 @@ function agentOnly(storage: StorageContext, enrollment: Pick<ServiceHostEnrollme
  * Room for one more unretired enrollment in the workspace. Every intent fits
  * within the host's 64 documents in 16 workspaces. A document that would be
  * agent-only, as a personal open leaves one, must also fit within the
- * agent-only caps. `full` is the intent's answer when it doesn't.
+ * agent-only caps. Without room, the open reclaims, in its own transaction,
+ * the least recently used document idle past the minimum hold that makes
+ * room: a personal open only an agent-only one, any other intent an
+ * agent-only one first. It reclaims none while the host is still letting go
+ * of `RECLAIM_MAX_DEPARTING` retired documents. `full` is the intent's
+ * answer when none does.
  */
-function assertCapacity(storage: StorageContext, workspaceId: string, full: () => Error, enrolling?: Parameters<typeof agentOnly>[1]): void {
+function assertCapacity(storage: StorageContext, workspaceId: string, full: () => Error, nowMs: number, personal?: Parameters<typeof agentOnly>[1]): void {
   const all = storage.db.prepare(`SELECT * FROM ${SERVICE_HOST_ENROLLMENTS} WHERE retired=0 LIMIT ?`).all(SERVICE_HOST_MAX_DOCUMENTS + 1);
-  if (all.length >= SERVICE_HOST_MAX_DOCUMENTS || (!all.some(row => row.workspace_id === workspaceId) && new Set(all.map(row => row.workspace_id)).size >= SERVICE_HOST_MAX_WORKSPACES)) {
-    throw full();
-  }
-  if (!enrolling || !agentOnly(storage, enrolling)) return;
-  const rows = all.map(row), byWorkspace = new Map<string, boolean>();
-  let documents = 0;
-  for (const enrollment of rows) {
-    const only = agentOnly(storage, enrollment);
-    if (only) documents++;
-    byWorkspace.set(enrollment.workspaceId, (byWorkspace.get(enrollment.workspaceId) ?? true) && only);
-  }
-  const workspaces = [...byWorkspace.values()].filter(Boolean).length;
-  // A workspace with other kinds of rows stays mixed; an empty one becomes agent-only.
-  if (documents >= AGENT_ONLY_MAX_DOCUMENTS || (!byWorkspace.has(workspaceId) && workspaces >= AGENT_ONLY_MAX_WORKSPACES)) throw full();
+  const capped = personal !== undefined && agentOnly(storage, personal);
+  if (!capped && all.length < SERVICE_HOST_MAX_DOCUMENTS && (all.some(row => row.workspace_id === workspaceId) ||
+    new Set(all.map(row => row.workspace_id)).size < SERVICE_HOST_MAX_WORKSPACES)) return;
+  const rows = all.map(row), known = new Map<ServiceHostEnrollment, boolean>();
+  // Coverage is read once for each row.
+  const only = (enrollment: ServiceHostEnrollment) => {
+    let value = known.get(enrollment);
+    if (value === undefined) known.set(enrollment, value = agentOnly(storage, enrollment));
+    return value;
+  };
+  const fits = (kept: readonly ServiceHostEnrollment[]) => {
+    const workspaces = new Set(kept.map(enrollment => enrollment.workspaceId));
+    if (kept.length >= SERVICE_HOST_MAX_DOCUMENTS || (!workspaces.has(workspaceId) && workspaces.size >= SERVICE_HOST_MAX_WORKSPACES)) return false;
+    if (!capped) return true;
+    const byWorkspace = new Map<string, boolean>();
+    let documents = 0;
+    for (const enrollment of kept) {
+      if (only(enrollment)) documents++;
+      byWorkspace.set(enrollment.workspaceId, (byWorkspace.get(enrollment.workspaceId) ?? true) && only(enrollment));
+    }
+    // A workspace with other kinds of rows stays mixed; an empty one becomes agent-only.
+    return documents < AGENT_ONLY_MAX_DOCUMENTS && (byWorkspace.has(workspaceId) || [...byWorkspace.values()].filter(Boolean).length < AGENT_ONLY_MAX_WORKSPACES);
+  };
+  if (fits(rows)) return;
+  if (departingAtLimit(storage)) throw full();
+  const idleBefore = nowMs - RECLAIM_MIN_HOLD_MS;
+  const candidates = rows.flatMap(enrollment => {
+    if (personal !== undefined && !only(enrollment)) return [];
+    const since = idleSince(storage, enrollment, idleBefore);
+    return since === null ? [] : [{enrollment, since, agentOnly: only(enrollment)}];
+  }).sort((a, b) => Number(b.agentOnly) - Number(a.agentOnly) || a.since - b.since);
+  const freeing = candidates.find(candidate => fits(rows.filter(enrollment => enrollment !== candidate.enrollment)));
+  if (!freeing) throw full();
+  reclaim(storage, freeing.enrollment, nowMs);
+}
+/** Whether the host is still letting go of as many retired documents as reclaim may add to. */
+const departingAtLimit = (storage: StorageContext) =>
+  Number(storage.db.prepare(`SELECT count(*) AS count FROM (SELECT 1 FROM ${SERVICE_HOST_ENROLLMENTS} WHERE retired=1 AND host_drained_at_ms IS NULL LIMIT ?)`)
+    .get(RECLAIM_MAX_DEPARTING)!.count) >= RECLAIM_MAX_DEPARTING;
+/** When the document's last admitted update in its current lineage arrived, read through the document index, or 0 with none. */
+function lastAdmittedAtMs(storage: StorageContext, document: {workspaceId: string; objectId: string}): number {
+  const value = storage.db.prepare(`SELECT received_at_ms FROM ${LIVE_JOURNAL_TABLE} WHERE workspace_id=? AND main_version_id='main' AND object_id=?
+    AND lineage_claim_id=(SELECT lineage_claim_id FROM sync_relay_live_documents WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_state='current')
+    ORDER BY journal_cursor DESC LIMIT 1`).get(document.workspaceId, document.objectId, document.workspaceId, document.objectId);
+  return value ? timestamp(value.received_at_ms) : 0;
+}
+/**
+ * Whether the host is still activating the document's current lineage: its
+ * activation has not completed, and no retirement began. A refused note has
+ * no activation, so this never keeps one.
+ */
+const activationPending = (storage: StorageContext, document: {workspaceId: string; objectId: string}) =>
+  storage.db.prepare(`SELECT 1 FROM ${SERVICE_ACTIVATIONS} a JOIN sync_relay_live_documents d USING(workspace_id,main_version_id,object_id,lineage_claim_id)
+    WHERE a.workspace_id=? AND a.main_version_id='main' AND a.object_id=? AND d.lineage_state='current'
+      AND a.completion_json IS NULL AND a.retire_requested_at_ms IS NULL AND a.retired_at_ms IS NULL`).get(document.workspaceId, document.objectId) !== undefined;
+/**
+ * When the document was last used, if only its recorded demand keeps it and
+ * that use is before `idleBefore`: the later of its demand and its last
+ * admitted update. Null while anything else keeps it: an Edit grant, the
+ * owner's restore, a Pause or Stop, a live connection open in this relay
+ * process, or an activation, retirement or restore that is still open.
+ */
+function idleSince(storage: StorageContext, enrollment: ServiceHostEnrollment, idleBefore: number): number | null {
+  const {workspaceId, objectId, demandAtMs} = enrollment;
+  if (enrollment.retired || enrollment.ownerStop !== null || demandAtMs === null || demandAtMs >= idleBefore || liveEditors(storage).connected(enrollment)) return null;
+  const since = Math.max(demandAtMs, lastAdmittedAtMs(storage, enrollment));
+  return since < idleBefore && !coveredByEditGrant(storage, enrollment) && !serviceHostOwnerRetains(storage, enrollment) &&
+    !serviceActivationRetirementOpen(storage, enrollment) && !activationPending(storage, enrollment) && !restoreInProgress(storage, workspaceId, objectId)
+    ? since : null;
+}
+/**
+ * Inside the caller's transaction, ends an idle document's run, opens its
+ * activation's retirement, retires it at once without a Stop and clears its
+ * demand. Its slot is free at commit. The host drains it, and the next open
+ * of any intent enrolls it again.
+ */
+function reclaim(storage: StorageContext, enrollment: ServiceHostEnrollment, nowMs: number): void {
+  endServiceHostRun(storage, enrollment, nowMs);
+  openServiceActivationRetirement(storage, enrollment, nowMs);
+  storage.db.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET enabled=0,retired=1,owner_demand=0,demand_at_ms=NULL,updated_at_ms=max(updated_at_ms,?)
+    WHERE workspace_id=? AND object_id=?`).run(nowMs, enrollment.workspaceId, enrollment.objectId);
+  // As after Stop, the retirement it opened keeps the host's upload proof until it completes.
+  forgetIdleServiceHostUploads(storage, enrollment.workspaceId);
+}
+/**
+ * Reclaims every document that only recorded demand keeps and that went
+ * unused for the retention period. Reads at most the host's capacity of
+ * rows, and writes nothing when none is idle. Each reclaim reads its row
+ * again in its own transaction, so an open that commits first keeps it, and
+ * stops once the host is letting go of `RECLAIM_MAX_DEPARTING` retired
+ * documents. Returns the documents it reclaimed.
+ */
+export function reclaimIdleLiveDocuments(storage: StorageContext, nowMs: number): readonly ServiceHostEnrollment[] {
+  const now = timestamp(nowMs), idleBefore = now - RECLAIM_RETENTION_MS, standing = storage.captureStanding();
+  const idle = storage.db.prepare(`SELECT * FROM ${SERVICE_HOST_ENROLLMENTS} WHERE retired=0 AND owner_stop IS NULL AND demand_at_ms<? LIMIT ?`)
+    .all(idleBefore, SERVICE_HOST_MAX_DOCUMENTS).map(row).filter(enrollment => idleSince(storage, enrollment, idleBefore) !== null);
+  return idle.flatMap(enrollment => storage.tx(() => {
+    standing();
+    const value = storage.db.prepare(`SELECT * FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=? AND object_id=?`).get(enrollment.workspaceId, enrollment.objectId);
+    const current = value ? row(value) : null;
+    if (!current || idleSince(storage, current, idleBefore) === null || departingAtLimit(storage)) return [];
+    reclaim(storage, current, now);
+    return [read(storage, current.workspaceId, current.path)!];
+  }));
 }
 
 /** Checks automatic enrollment without changing retained documents or consuming capacity. */
@@ -469,7 +567,7 @@ function ensureInsideTransaction(storage: StorageContext, input: EnsureOwnedLive
       throw new LiveHostingRefusal(input.intent === "owner-open" ? "paused" : "live_paused_by_owner");
     }
     const enabling = current.retired || !current.enabled || current.ownerStop !== null;
-    if (current.retired) assertCapacity(storage, workspaceId, full, input.intent === "personal-open" ? current : undefined);
+    if (current.retired) assertCapacity(storage, workspaceId, full, nowMs, input.intent === "personal-open" ? current : undefined);
     if (held) retireHeldActivation(storage, current, identity, held, nowMs);
     if (enabling) {
       storage.db.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET owner_stop=NULL,enabled=1,retired=0,host_drained_at_ms=NULL,updated_at_ms=? WHERE workspace_id=? AND object_id=?`)
@@ -480,7 +578,7 @@ function ensureInsideTransaction(storage: StorageContext, input: EnsureOwnedLive
     return read(storage, workspaceId, path)!;
   }
   if (moved(objectId)) throw relayError("conflict", MOVED);
-  assertCapacity(storage, workspaceId, full, input.intent === "personal-open" ? {workspaceId, ownerUserId, path, shareId, ownerDemand: false} : undefined);
+  assertCapacity(storage, workspaceId, full, nowMs, input.intent === "personal-open" ? {workspaceId, ownerUserId, path, shareId, ownerDemand: false} : undefined);
   const charge = Buffer.byteLength(JSON.stringify([workspaceId, objectId, path, ownerUserId, shareId, identity.replicationEpoch, identity.streamIdentity])) + 64;
   assertWorkspaceQuota(storage, workspaceId, charge);
   storage.db.prepare(`INSERT INTO ${SERVICE_HOST_ENROLLMENTS}(workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,enabled,created_at_ms,updated_at_ms,demand_at_ms,accounted_bytes) VALUES (?,?,?,?,?,?,?,1,?,?,?,?)`)

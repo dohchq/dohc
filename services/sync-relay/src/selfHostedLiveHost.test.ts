@@ -17,6 +17,7 @@ import {attachLiveJournalHistory, createLiveJournalHistoryAuthority} from "./sto
 import {createNamedFrameChanges} from "./liveHostChanges";
 import {hasRelayWriteObservers, notifyRelayWrite} from "./relayWriteChanges";
 import {serviceHostDocumentEnabled, SERVICE_HOST_MAX_WORKSPACES} from "./storage/serviceHostEnrollment";
+import {RECLAIM_RETENTION_MS, RECLAIM_SWEEP_MS} from "./liveHostingLimits";
 import type {StorageContext} from "./storage/context";
 
 // While `error` is set, opening a divergence marker fails, as on a full disk.
@@ -39,9 +40,27 @@ vi.mock("node:fs/promises", async importOriginal => {
     return Object.assign(handle, {sync: async () => {await sync(); markerFailure.synced++;}});
   }};
 });
+// The reclaim sweep's waits, in order. Each lasts until a test passes it or its signal aborts. Every other wait keeps the real clock.
+const sweepWaits = vi.hoisted(() => [] as Array<{ms: number; signal: AbortSignal | undefined; pass(): void}>);
+vi.mock("node:timers/promises", async importOriginal => {
+  const actual = await importOriginal<typeof import("node:timers/promises")>();
+  const {RECLAIM_RETENTION_MS, RECLAIM_SWEEP_MS} = await import("./liveHostingLimits");
+  return {...actual, setTimeout: <T>(ms?: number, value?: T, options?: {signal?: AbortSignal; ref?: boolean}) => ms !== RECLAIM_SWEEP_MS && ms !== RECLAIM_RETENTION_MS
+    ? actual.setTimeout(ms, value, options)
+    : new Promise<T>((resolve, reject) => {
+      const signal = options?.signal;
+      if (signal?.aborted) {reject(signal.reason); return;}
+      signal?.addEventListener("abort", () => reject(signal.reason), {once: true});
+      sweepWaits.push({ms: ms!, signal, pass: () => resolve(value as T)});
+    })};
+});
 
 const cleanup: Array<() => Promise<void>> = [];
-afterEach(async () => {Object.assign(markerFailure, {error: undefined, synced: 0, hold: undefined}); folderFailure.error = undefined; vi.restoreAllMocks(); for (const close of cleanup.splice(0).reverse()) await close();});
+afterEach(async () => {
+  Object.assign(markerFailure, {error: undefined, synced: 0, hold: undefined}); folderFailure.error = undefined; vi.restoreAllMocks();
+  for (const close of cleanup.splice(0).reverse()) await close();
+  sweepWaits.length = 0;
+});
 type Configuration = {workspaces: unknown[]; activation: {targets: unknown[]}; hostId: string; instanceId: string};
 type Hosted = ServiceHostedSet["documents"][number];
 type Workspace = ServiceHostedSet["workspaces"][number];
@@ -1153,6 +1172,49 @@ it("closes the daemon and observer when storage becomes unavailable", async () =
   expect(f.host.current()).toBeUndefined();
   expect(hasRelayWriteObservers(f.storage)).toBe(false);
   expect(f.onError).not.toHaveBeenCalled();
+});
+
+// Proves: the host sweeps first once a retention period has passed, not at
+// start, so clients a restart dropped can reconnect first, and then each minute.
+// A failed sweep goes to onError, and the next one tries again and reclaims
+// the note only its owner's long-past open keeps, which the host then
+// drains. Closing the host aborts the pending wait, and no sweep follows.
+it("sweeps idle documents each minute from one retention period after start, tries again after a failure, and stops when closed", async () => {
+  const f = await fixture({seed: async (_data, relay) => {vi.spyOn(relay.storage, "reclaimIdleLiveDocuments");}});
+  const sweeps = vi.mocked(f.storage.reclaimIdleLiveDocuments);
+  await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
+  await vi.waitFor(() => expect(sweepWaits).toHaveLength(1));
+  expect(sweepWaits[0]!.ms).toBe(RECLAIM_RETENTION_MS);
+  expect(sweeps).not.toHaveBeenCalled();
+  sweepWaits[0]!.pass();
+  // The first sweep found the shared note covered, so it wrote nothing.
+  await vi.waitFor(() => {expect(sweeps).toHaveBeenCalledTimes(1); expect(sweepWaits).toHaveLength(2);});
+  expect(sweepWaits[1]!.ms).toBe(RECLAIM_SWEEP_MS);
+  expect(sweeps.mock.results[0]).toEqual({type: "return", value: []});
+  f.storage.ensureOwnedLiveDocument({intent: "owner-open", ...f.input, nowMs: 20});
+  expect(f.storage.revokeShareGrant({shareId: scope.shareId, grantId: scope.grantId, revokedAtMs: 20}).ok).toBe(true);
+  await f.waitPasses();
+  expect(f.updates.at(-1)!.documents.map(row => row.path)).toEqual(["docs/a.md"]);
+  const failure = new Error("Reclaim failed.");
+  sweeps.mockImplementationOnce(() => {throw failure;});
+  sweepWaits[1]!.pass();
+  await vi.waitFor(() => expect(f.onError).toHaveBeenCalledWith(failure));
+  expect(f.enrollment()).toMatchObject({enabled: true, retired: false, ownerDemand: true, demandAtMs: 20});
+  f.onError.mockClear();
+  await vi.waitFor(() => expect(sweepWaits).toHaveLength(3));
+  sweepWaits[2]!.pass();
+  await f.waitUpdate([]);
+  await vi.waitFor(() => expect(f.enrollment()).toMatchObject({retired: true, ownerStop: null, demandAtMs: null, hostDrainedAtMs: expect.any(Number)}), {timeout: 10_000});
+  expect(sweeps).toHaveBeenCalledTimes(3);
+  await vi.waitFor(() => expect(sweepWaits).toHaveLength(4));
+  const settled = f.enrollment();
+  await f.host.close();
+  expect(sweepWaits[3]!.signal?.aborted).toBe(true);
+  sweepWaits[3]!.pass();
+  await Promise.resolve();
+  expect(sweeps).toHaveBeenCalledTimes(3);
+  expect(sweepWaits).toHaveLength(4);
+  expect(f.enrollment()).toEqual(settled);
 });
 
 it("retries a failed daemon start without another enrollment write", async () => {

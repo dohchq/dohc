@@ -1,7 +1,8 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { AGENT_ONLY_MAX_DOCUMENTS, AGENT_ONLY_MAX_WORKSPACES } from "./liveHostingLimits";
+import { AGENT_ONLY_MAX_DOCUMENTS, AGENT_ONLY_MAX_WORKSPACES, RECLAIM_MIN_HOLD_MS, RECLAIM_RETENTION_MS, SERVICE_HOST_MAX_DOCUMENTS } from "./liveHostingLimits";
 import { binding, scope } from "./liveTickets.test-helper";
 import { personalRouteFixture, type PersonalRouteFixtureOptions } from "./personalLiveDocumentRoutes.test-helper";
+import { SERVICE_HOST_ENROLLMENTS } from "./storage/serviceHostEnrollment";
 import { request } from "./testing";
 
 const cleanup: Array<() => Promise<void> | void> = [];
@@ -99,6 +100,78 @@ it("refuses an agent's open in a 13th workspace only agents keep, and fits a sha
   await expectCode(await a.open({ workspaceId: scope.workspaceId, path: "notes/b.md" }), 409, "live_host_full");
   expect(f.storage.listServiceHostEnrollments(scope.workspaceId)).toEqual([]);
   expect(f.storage.ensureOwnedLiveDocument({ intent: "share", ...f.input })).toMatchObject({ enabled: true, shareId: scope.shareId });
+});
+
+/** The fixture's docs/a.md, retired without a Stop once its only Edit grant ended, for an agent's open to enroll again. */
+function retireShared(f: Awaited<ReturnType<typeof fixture>>) {
+  f.storage.ensureOwnedLiveDocument({ intent: "share", ...f.input });
+  f.revoke();
+  expect(f.release()).toMatchObject({ retired: true, ownerStop: null });
+}
+const retiredObjects = (f: Awaited<ReturnType<typeof fixture>>) =>
+  f.raw.prepare(`SELECT object_id FROM ${SERVICE_HOST_ENROLLMENTS} WHERE retired=1 ORDER BY object_id`).all().map(row => row.object_id);
+
+// Proves: at the agent-only cap, an agent's open reclaims the least recently
+// used document only agents keep once it is idle past the minimum hold, and
+// is held until its own document is ready. Within the hold, the same open
+// gets live_host_full and writes nothing.
+it("reclaims the least recently used agent-only document idle past the hold for an agent's open at the agent-only cap", async () => {
+  let now = RECLAIM_MIN_HOLD_MS;
+  const f = await fixture({ nowMs: () => now }), a = f.agent("editor");
+  retireShared(f);
+  for (let document = 0; document < AGENT_ONLY_MAX_DOCUMENTS; document++) f.agentOnly(scope.workspaceId, `agent-object-${document}`, `notes/${document}.md`);
+  // Used before every other one.
+  f.raw.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET demand_at_ms=0 WHERE object_id='agent-object-7'`).run();
+  await expectCode(await a.open(), 409, "live_host_full");
+  expect(retiredObjects(f)).toEqual([binding.objectId]);
+  expect(f.read()).toMatchObject({ retired: true, demandAtMs: null });
+  now = RECLAIM_MIN_HOLD_MS + 2;
+  const held = a.open();
+  await f.holding(1, 1);
+  expect(retiredObjects(f)).toEqual(["agent-object-7"]);
+  expect(f.read()).toMatchObject({ enabled: true, retired: false, ownerDemand: false, demandAtMs: now });
+  f.ready();
+  f.route.evaluateWaiting();
+  expect(await body(await held, 200)).toEqual(ready);
+});
+
+// Proves: an agent's open never reclaims a document its owner opened. With
+// only those at the host's 64, it gets live_host_full and writes nothing.
+// When one of them is kept only by agents, idle past the hold, the same open
+// reclaims it.
+it("never reclaims an owner-opened document for an agent's open, and reclaims one only agents keep", async () => {
+  const f = await fixture({ nowMs: () => RECLAIM_MIN_HOLD_MS + 2 }), a = f.agent("editor");
+  retireShared(f);
+  for (let document = 0; document < SERVICE_HOST_MAX_DOCUMENTS; document++) f.agentOnly(scope.workspaceId, `owned-object-${document}`, `notes/${document}.md`);
+  f.raw.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET owner_demand=1 WHERE retired=0`).run();
+  const stored = () => f.raw.prepare(`SELECT * FROM ${SERVICE_HOST_ENROLLMENTS} ORDER BY object_id`).all();
+  const before = stored();
+  await expectCode(await a.open(), 409, "live_host_full");
+  expect(stored()).toEqual(before);
+  f.raw.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET owner_demand=0 WHERE object_id='owned-object-9'`).run();
+  const held = a.open();
+  await f.holding(1, 1);
+  expect(retiredObjects(f)).toEqual(["owned-object-9"]);
+  expect(f.read()).toMatchObject({ enabled: true, retired: false, ownerDemand: false });
+  f.ready();
+  f.route.evaluateWaiting();
+  expect(await body(await held, 200)).toEqual(ready);
+});
+
+// Proves: an agent's open of a note refused for having no native history
+// leaves demand on its enrollment. The sweep keeps it through the retention
+// period and clears it once the note is idle past it.
+it("clears the demand a refused note's open left once it is idle past retention, and keeps it until then", async () => {
+  const f = await fixture(), a = f.agent("editor");
+  f.revoke();
+  f.blocked.set(binding.objectId, "without-lineage");
+  await expectCode(await a.open(), 409, "live-document-without-lineage");
+  const refused = f.read();
+  expect(refused).toMatchObject({ enabled: true, retired: false, ownerDemand: false, demandAtMs: 2_000 });
+  expect(f.storage.reclaimIdleLiveDocuments(2_000 + RECLAIM_RETENTION_MS)).toEqual([]);
+  expect(f.read()).toEqual(refused);
+  expect(f.storage.reclaimIdleLiveDocuments(2_000 + RECLAIM_RETENTION_MS + 1))
+    .toMatchObject([{ objectId: binding.objectId, enabled: false, retired: true, ownerStop: null, ownerDemand: false, demandAtMs: null }]);
 });
 
 // Proves: the owner's Sign out ends a held open as it commits, releasing its
