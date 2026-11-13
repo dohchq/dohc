@@ -452,12 +452,12 @@ impl<'de> Visitor<'de> for MetadataSeed<'_> {
         )
         .map_err(|error| decode_failure(error, self.storage_failure))?;
         let previous = &preceding.endpoint.history_evidence_digest;
-        if let Some(terminal) = &preceding.endpoint.terminal_receipt {
-            if accepted.receipt.journal_cursor <= terminal.journal_cursor {
-                return Err(serde::de::Error::custom(
-                    "live audit cursor did not advance",
-                ));
-            }
+        if let Some(terminal) = &preceding.endpoint.terminal_receipt
+            && accepted.receipt.journal_cursor <= terminal.journal_cursor
+        {
+            return Err(serde::de::Error::custom(
+                "live audit cursor did not advance",
+            ));
         }
         let mut chain = Sha256::new();
         let mut chain_v2 = Sha256::new();
@@ -1144,11 +1144,11 @@ pub(crate) fn annotate_drained_projection_in_tx(
         authors
             .union_json(&coordinate_authors.json())
             .map_err(SyncError::corrupt)?;
-        if origin != origin_id || *seq != origin_seq {
-            if let Some(base) = base.as_mut() {
-                base.union_json(&coordinate_authors.json())
-                    .map_err(SyncError::corrupt)?;
-            }
+        if (origin != origin_id || *seq != origin_seq)
+            && let Some(base) = base.as_mut()
+        {
+            base.union_json(&coordinate_authors.json())
+                .map_err(SyncError::corrupt)?;
         }
     }
     tx.execute(

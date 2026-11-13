@@ -2315,10 +2315,9 @@ fn capture_ingest_in_tx(
             &projection.source_state_vector_sha256,
             prepared.authors.as_deref(),
             input.now_ms,
-        )? {
-            if let Some(batch) = batch.as_deref_mut() {
-                batch.capture.commit_recovery_order(order)?;
-            }
+        )? && let Some(batch) = batch.as_deref_mut()
+        {
+            batch.capture.commit_recovery_order(order)?;
         }
     }
     if admitted && !kept_binary_head {

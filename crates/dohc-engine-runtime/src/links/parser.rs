@@ -135,14 +135,13 @@ fn local(literal: &str) -> bool {
     if s.is_empty() || s.starts_with("//") || s.contains('\0') {
         return false;
     }
-    if let Some((scheme, _)) = s.split_once(':') {
-        if scheme.starts_with(|c: char| c.is_ascii_alphabetic())
-            && scheme
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
-        {
-            return false;
-        }
+    if let Some((scheme, _)) = s.split_once(':')
+        && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    {
+        return false;
     }
     true
 }

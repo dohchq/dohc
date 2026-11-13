@@ -316,11 +316,11 @@ impl WorkspaceSupervisor {
         // threads of their own, so its worker's end stopped none of them: a
         // reader past the close bound keeps the store, and the reservation
         // becomes the draining slot.
-        if let Some(mut dead) = dead {
-            if let Err(RuntimeError::StoreInUse) = dead.close() {
-                self.release_markers(&[], [(identity, dead.held_proofs())]);
-                return Err(RuntimeError::StoreInUse);
-            }
+        if let Some(mut dead) = dead
+            && let Err(RuntimeError::StoreInUse) = dead.close()
+        {
+            self.release_markers(&[], [(identity, dead.held_proofs())]);
+            return Err(RuntimeError::StoreInUse);
         }
 
         let held_limit = self.held_proofs.clone();
@@ -399,11 +399,11 @@ impl WorkspaceSupervisor {
         // Close the predecessor outside the lock; a WorkerPanicked from a dead
         // predecessor is expected here, not an error. A held proof's reader
         // past the close bound is: the reservation becomes the draining slot.
-        if let Some(Slot::Active(mut actor)) = old {
-            if let Err(RuntimeError::StoreInUse) = actor.close() {
-                self.release_markers(&[], [(identity, actor.held_proofs())]);
-                return Err(RuntimeError::StoreInUse);
-            }
+        if let Some(Slot::Active(mut actor)) = old
+            && let Err(RuntimeError::StoreInUse) = actor.close()
+        {
+            self.release_markers(&[], [(identity, actor.held_proofs())]);
+            return Err(RuntimeError::StoreInUse);
         }
 
         let spawned = WorkspaceActor::spawn_with_mode(

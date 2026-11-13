@@ -119,10 +119,10 @@ impl Fixture {
     }
 
     async fn close(self) {
-        if let Some(reader) = self.reader.lock().unwrap().take() {
-            if !reader.is_autocommit() {
-                reader.execute_batch("ROLLBACK").unwrap();
-            }
+        if let Some(reader) = self.reader.lock().unwrap().take()
+            && !reader.is_autocommit()
+        {
+            reader.execute_batch("ROLLBACK").unwrap();
         }
         drop(self.writer);
         self.files.close().await;
