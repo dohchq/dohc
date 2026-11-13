@@ -470,7 +470,7 @@ function workflowContext({ enabled = "", buildSize = "", event = "pull_request",
 
 function evaluatedJobs(context) {
   const { jobs } = load(workflow);
-  for (const job of Object.values(jobs)) if (job.strategy) {
+  for (const job of Object.values(jobs)) if (typeof job.strategy?.matrix?.shard === "string") {
     job.strategy.matrix.shard = workflowExpression(job.strategy.matrix.shard, context);
   }
   return jobs;
@@ -509,7 +509,7 @@ test("Boat is dispatch-only, overrides runner variables only for that dispatch, 
   for (const enabled of ["", "false", "true", "boat"]) for (const buildSize of ["", "4", "8", "boat"]) {
     for (const event of ["pull_request", "workflow_dispatch"]) for (const provider of ["github", "blacksmith", "blacksmith-builds", "boat", "unknown"]) for (const size of ["4", "8", "32", ""]) {
       const context = workflowContext({ enabled, buildSize, event, provider, size });
-      // Even a forged input on a PR cannot opt in.
+      // This workflow ignores forged PR inputs; forks can change the workflow itself.
       context.inputs.runner_provider = provider;
       context.vars.BOAT_ENABLED = "true";
       const boat = event === "workflow_dispatch" && provider === "boat";
@@ -529,6 +529,11 @@ test("Boat is dispatch-only, overrides runner variables only for that dispatch, 
           assert.equal(jobShell ? workflowExpression(jobShell, context) : "bash -e {0}", expectedShell, `${id}: ${step.name ?? step.id}`);
         }
         if (computeJobs.includes(id)) assert.equal(workflowExpression(job.steps[0].if, context), boatRunner, id);
+        const rustCacheKey = {"javascript-prepare": "js-daemon", "rust-policy": "engine-policy", rust: "engine-archive"}[id];
+        if (rustCacheKey) {
+          const cache = job.steps.find(step => step.uses?.startsWith("Swatinem/rust-cache@"));
+          assert.equal(workflowExpression(cache.with["shared-key"], context), rustCacheKey + (boat ? "-boat" : ""), id);
+        }
         for (const cache of [undefined, "", "warm", "cold", "unknown"]) {
           const cacheContext = { ...context, inputs: { ...context.inputs, cache } };
           const enabledCache = cache !== "cold" && !boatRunner;
@@ -551,11 +556,11 @@ test("Boat is dispatch-only, overrides runner variables only for that dispatch, 
         }
       }
       const expanded = evaluatedJobs(context);
-      for (const [id, key] of [["javascript-workers", "js"], ["rust-tests", "rust"]]) {
+      const selection = {...context, needs: {changes: {result: "success", outputs: {js: "true", rust: "true"}}}};
+      for (const [id, key] of [["javascript-workers", "js"], ["javascript-boat-workers", "js"], ["rust-tests", "rust"]]) {
+        if (!workflowExpression(jobs[id].if, selection)) continue;
         assert.deepEqual(expanded[id].strategy.matrix.shard, Array.from({ length: CLOUD_SHAPES[boat ? "boat" : "standard"][key] - 1 }, (_, index) => index + 1));
       }
-      assert.deepEqual(expanded["javascript-boat-workers"].strategy.matrix.shard, [1, 2, 3]);
-      const selection = {...context, needs: {changes: {result: "success", outputs: {js: "true", rust: "true"}}}};
       assert.equal(workflowExpression(jobs["javascript-boat-workers"].if, selection), boat);
       for (const id of ["javascript-workers", "rust-archive", "rust-tests"]) assert.equal(workflowExpression(jobs[id].if, selection), !boat, id);
     }
@@ -579,7 +584,7 @@ test("Boat workers build locally and the engine builds and tests its own archive
   const tests = steps.findIndex(step => step.run === "node scripts/verification/cloud-rust.mjs tests 0");
   assert.ok(compile >= 0 && tests > compile);
   const cache = jobs.rust.steps.find(step => step.uses?.startsWith("Swatinem/rust-cache@"));
-  assert.equal(cache.with["shared-key"], "engine-archive");
+  assert.equal(workflowExpression(cache.with["shared-key"], context), "engine-archive-boat");
   for (const provider of ["github", "blacksmith", "blacksmith-builds", "boat"]) for (const condition of ["warm", "cold"]) {
     const selected = {...context, inputs: {...context.inputs, runner_provider: provider, cache: condition}};
     assert.equal(workflowExpression(cache.if, selected), provider === "boat" && condition === "warm");
@@ -828,7 +833,7 @@ test(`${shapeName} cloud matrices run every JavaScript and Rust shard with separ
     ["rust-tests", RUST_SHARDS, "rust", "rust-tests", "node scripts/verification/cloud-rust.mjs tests 0"],
   ]) {
     const job = jobs[name];
-    assert.deepEqual(job.strategy.matrix, {shard: Array.from({length: count - 1}, (_, index) => index + 1)}, name);
+    if (CLOUD_JOB_GRAPH[name].names.length) assert.deepEqual(job.strategy.matrix, {shard: Array.from({length: count - 1}, (_, index) => index + 1)}, name);
     assert.equal(job.strategy["fail-fast"], false, "one failed shard must not cancel the others' evidence");
     assert.match(job.name, /\$\{\{ matrix\.shard \}\}/);
     const upload = job.steps.find(step => step.uses?.startsWith("actions/upload-artifact@"));

@@ -10,7 +10,6 @@ import { stageReaderTestNode } from "../../tools/rust-engine-program/reader-test
 import { CLOUD_SHAPES, cloudShape, rustReaderShard } from "./cloud-shape.mjs";
 
 export const RUST_SHARDS = cloudShape().rust;
-export const RUST_READER_SHARD = rustReaderShard(cloudShape());
 export const RUST_POLICY_STEPS = ["tree provenance", "native target", "fixture drift", "fmt --check", "clippy -D warnings", "doctests", "build daemon", "cargo-deny", "cargo-audit", "scratch leak"];
 export const RUST_ARCHIVE_PROOFS = ["test fixtures"];
 export const RUST_TEST_PROOFS = ["reader tests"];
@@ -89,7 +88,7 @@ export async function cloudRust(part, index = 0) {
       report.completed = passedRustTests(result.stdout + "\n" + result.stderr);
       save();
       if (JSON.stringify([...report.completed].sort()) !== JSON.stringify([...report.assigned].sort())) throw new Error("The Rust shard did not pass every assigned test exactly once.");
-      if (index === RUST_READER_SHARD) await step("reader tests", process.execPath, ["tools/rust-engine-program/reader-tests.mjs", ...reused],
+      if (index === rustReaderShard(cloudShape())) await step("reader tests", process.execPath, ["tools/rust-engine-program/reader-tests.mjs", ...reused],
         { env: { ...process.env, DOHC_TEST_EMPTY_STORE_IMAGE: image, DOHC_TEST_SCRATCH_ROOT: scratch } });
     } else throw new Error("Use archive or tests with a valid shard index.");
     report.verdict = "PASS";

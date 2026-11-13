@@ -11,6 +11,7 @@ import { javascriptConcurrency, runJavascript } from "./cloud.mjs";
 import { runBounded, testPlan, testWorkspace } from "./js-tests.mjs";
 import { affectedPackages, packageReferences } from "./selection.mjs";
 import { copyFlakyFixture } from "./flaky-fixture.mjs";
+import { CLOUD_SHAPES } from "./cloud-shape.mjs";
 
 test("a malformed proof continuation cannot silently omit proofs", async () => {
   await assert.rejects(testWorkspace({runProofs: true}), /runProofs must be a function/);
@@ -22,16 +23,17 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-test("cloud workers scale command slots with CPUs and drain readers before replacing the runtime", async () => {
-  for (const [cpus, limit] of [[2, 2], [4, 2], [8, 4], [16, 8]]) {
-    assert.equal(javascriptConcurrency(cpus), limit);
+test("only Boat workers scale command slots with CPUs and all workers drain readers before replacing the runtime", async () => {
+  for (const shape of Object.values(CLOUD_SHAPES)) for (const [cpus, boatLimit] of [[2, 2], [4, 2], [8, 4], [16, 8]]) {
+    const limit = shape === CLOUD_SHAPES.boat ? boatLimit : 2;
+    assert.equal(javascriptConcurrency(cpus, shape), limit);
     const hold = deferred(), started = [];
     let active = 0, peak = 0;
     const tasks = Array.from({ length: 12 }, (_, index) => ({ id: `reader-${index}`, kind: "command", command: "node", args: [String(index)], cwd: "." }));
     tasks.push({ id: "stage-app-backend-runtime.test.mjs", kind: "command", command: "node", args: ["runtime"], cwd: "." });
     const record = { steps: [], tests: [], completed: [] };
     const running = runJavascript(tasks.map((task, index) => ({ ...task, tasks: [task], weight: 100 - index })), record, () => {}, undefined, {
-      cpus, executeCommand: async (_command, args) => {
+      cpus, shape, executeCommand: async (_command, args) => {
         if (args[0] === "runtime") {
           assert.equal(active, 0);
           assert.equal(record.completed.length, 12);
@@ -170,10 +172,10 @@ test("package scheduling bounds concurrency and serializes shared database consu
   assert.equal(active.size, 0);
 });
 
-test("pure work overlaps preparation and native work waits for build validation", async () => {
-  const build = deferred(), preparation = deferred(), release = deferred(), second = deferred(), native = deferred(), started = [];
+test("pure work fills both lanes before native preparation and admits native work when ready", async () => {
+  const preparation = deferred(), release = deferred(), second = deferred(), native = deferred(), started = [];
   let ready = false;
-  const changed = build.promise.then(() => preparation.promise).then(() => { ready = true; });
+  const changed = preparation.promise.then(() => { ready = true; });
   const tasks = [{ name: "native", native: true }, { name: "pure-one" }, { name: "pure-two" }];
   const run = runBounded(tasks, async task => {
     started.push(task.name);
@@ -184,9 +186,6 @@ test("pure work overlaps preparation and native work waits for build validation"
   }, 2, undefined, { changed, canRun: task => !task.native || ready });
   await second.promise;
   assert.deepEqual(started, ["pure-one", "pure-two"]);
-  build.resolve();
-  await new Promise(setImmediate);
-  assert.deepEqual(started, ["pure-one", "pure-two"], "a build must pass validation before native tests start");
   preparation.resolve();
   await native.promise;
   assert.deepEqual(started, ["pure-one", "pure-two", "native"]);

@@ -2,7 +2,7 @@
 // and 1..256 Rust partitions. Update the guarded workflow lists and shape pins
 // when tuning these counts. For one Rust partition, also skip rust-tests in
 // that shape before matrix expansion; keep its needs edges and partition zero.
-// For 3 Boat JS workers, set js to 3, remove 3 from both Boat workflow lists,
+// For 3 Boat JS workers, set js to 3, remove 3 from the Boat worker matrix,
 // and update the guarded job-count and peak pins.
 export const CLOUD_SHAPES = {
   standard: { js: 20, rust: 20 },

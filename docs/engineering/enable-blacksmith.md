@@ -90,6 +90,14 @@ Rust test partitions wait for the JavaScript worker matrix; the JavaScript aggre
 The Rust phase also permits at most 25 jobs: its partitions, JavaScript reporting, preparation, Rust policy, and both confinement jobs.
 
 The experimental `boat` option runs only on explicit manual dispatches. No repository variable enables it.
+Dispatch this layout from a non-default branch.
+The `runner_provider` condition is not a security boundary.
+A fork pull request runs its own workflow file and can name the provider's runner label.
+For public-repository jobs, restrict Boat's GitHub app to this repository.
+Allow only named maintainers or manual dispatches to use its runners.
+Require approval for every outside contributor's run.
+Inspect workflow changes before approving a run.
+
 It uses `boat-large` for shared preparation and `boat-xlarge` for 4 JavaScript workers, the engine gate, and Rust policy.
 Each JavaScript worker builds its own engine and desktop outputs while tests that need no build run.
 The engine gate builds its own Rust archive and runs every Rust test and the reader tests from it in one partition.
@@ -102,12 +110,13 @@ Boat's Landlock ABI 4 lacks the ABI 5 and 6 features that compiler confinement r
 The Boat dispatch overrides Blacksmith runner variables for that run.
 Boat's runner user can read files regardless of their permissions, so Boat jobs drop that capability before running commands.
 Boat jobs skip the pnpm store cache.
+Boat jobs use separate Rust cache keys with a `-boat` suffix.
 
 Compare cold and warm runs before choosing larger runners or shorter timeouts.
 Record elapsed time, billed cost, peak memory, and disk use for each gate.
 The first Linux cloud run remains a launch check; local verification cannot establish its runtime or cost.
 
-Run the first benchmark on `main`, then repeat it to measure cache reuse.
+For GitHub or Blacksmith, run the first benchmark on `main`, then repeat it to measure cache reuse.
 PRs can restore caches from their base branch and the default branch.
 Caches created by a PR cannot warm unrelated PRs.
 Confirm that a warm PR run restores the `main` cache before budgeting for reuse.

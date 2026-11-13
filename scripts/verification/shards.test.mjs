@@ -6,7 +6,7 @@ import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { assertTaskCoverage, javascriptGroups, javascriptTasks, nativeTestFiles, partitionJavascript, partitionTasks, preparedArtifactPaths } from "./shards.mjs";
 import { readWorkspacePackages } from "./selection.mjs";
-import { CLOUD_JOB_GRAPH, cloudJobGraph, aggregateCloud, aggregateJavascript, aggregateRust, completedGateTiming, verifyCompletedCloud, waitForGate } from "./cloud-aggregate.mjs";
+import { cloudJobGraph, aggregateCloud, aggregateJavascript, aggregateRust, completedGateTiming, verifyCompletedCloud, waitForGate } from "./cloud-aggregate.mjs";
 import { CLOUD_SHAPES, cloudShape, rustReaderShard } from "./cloud-shape.mjs";
 import { JS_SHARDS } from "./cloud.mjs";
 import { RUST_ARCHIVE_PROOFS, RUST_POLICY_STEPS, RUST_SHARDS, RUST_TEST_PROOFS, passedRustTests, rustTestInventory } from "./cloud-rust.mjs";
@@ -315,7 +315,7 @@ function withRunnerWait(jobs, name, seconds, shape = cloudShape()) {
 }
 
 test("the timing fixture covers every current workflow job name exactly once", () => {
-  const expected = Object.values(CLOUD_JOB_GRAPH).flatMap(job => job.names).sort();
+  const expected = Object.values(cloudJobGraph()).flatMap(job => job.names).sort();
   assert.deepEqual(passingCloudJobs().filter(job => expected.includes(job.name)).map(job => job.name).sort(), expected);
 });
 
