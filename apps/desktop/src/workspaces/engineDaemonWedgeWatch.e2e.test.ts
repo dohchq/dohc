@@ -1,7 +1,11 @@
 import { createEngineClient, type EngineDaemonLifecycle } from "@dohc/workspace-engine-client/daemon";
 import { afterEach, describe, expect, it } from "vitest";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
-import { createRealDaemonLifecycle, REAL_DAEMON_TEST_TIMEOUT_MS } from "../testing/realDaemonWorkspaceSessions";
+import {
+  createRealDaemonLifecycle,
+  REAL_DAEMON_DEADLINE_MS,
+  REAL_DAEMON_TEST_TIMEOUT_MS,
+} from "../testing/realDaemonWorkspaceSessions";
 
 // The lifecycle unit suite drives a fake client. A fake cannot prove that the
 // real daemon serves engine.ping, nor that the real client reports its answer
@@ -10,7 +14,6 @@ import { createRealDaemonLifecycle, REAL_DAEMON_TEST_TIMEOUT_MS } from "../testi
 // because EngineClient arms its own per-request deadline timer and that timer
 // turned a wedged daemon's silence into a rejection the detector read as life.
 // This suite is the counterweight: a real binary, the real transport.
-const requestTimeoutMs = 2_000;
 const engine = requireEngineBinaryOrSkip();
 const lifecycles: EngineDaemonLifecycle[] = [];
 
@@ -27,7 +30,7 @@ describe("engine.ping against a real daemon", () => {
     const failures: Error[] = [];
     let complete!: () => void, refuse!: (error: Error) => void, stalled = false;
     const smoke = new Promise<void>((resolve,reject) => {complete=resolve;refuse=reject;});
-    const lifecycle = createRealDaemonLifecycle({command:engine.require(),maxRestarts:0,requestTimeoutMs,
+    const lifecycle = createRealDaemonLifecycle({command:engine.require(),maxRestarts:0,
       onFailure(error) {failures.push(error);refuse(error);},
       launch:async options => {
         const client = await createEngineClient(options);
@@ -39,7 +42,7 @@ describe("engine.ping against a real daemon", () => {
               // Freeze only this process after the pipe write. The lifecycle sends
               // its request timeout as the daemon's deadline, so the real daemon
               // queues its reply inside it, and the freeze outlasts both.
-              setImmediate(() => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,requestTimeoutMs + 1_000));
+              setImmediate(() => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,REAL_DAEMON_DEADLINE_MS + 1_000));
             }
             const response = await pending;
             if (request.method === "workspace.close") complete();
