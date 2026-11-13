@@ -241,30 +241,31 @@ pub(super) fn find_in(
     delivery_id: &str,
     update_digest: &str,
 ) -> Result<Option<KnownDelivery>, OwnerOutboxError> {
-    let own: Option<(i64, String, bool, Option<String>, Option<String>)> = conn
+    let own = conn
         .query_row(
-            "SELECT sequence,update_digest,pending,accepted_receipt_json,terminal_reason \
+            "SELECT sequence,pending,update_digest,accepted_receipt_json,terminal_reason \
              FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND delivery_id=?2",
             params![outbox_id, delivery_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            |r| {
+                let known = KnownDelivery {
+                    update_digest: r.get(2)?,
+                    pending: None,
+                    receipt_json: r.get(3)?,
+                    terminal_reason: r.get(4)?,
+                };
+                Ok((r.get::<_, i64>(0)?, r.get::<_, bool>(1)?, known))
+            },
         )
         .optional()
         .map_err(read_sql)?;
-    if let Some((sequence, update_digest, pending, receipt_json, terminal_reason)) = own {
-        let pending = if pending {
+    if let Some((sequence, pending, mut known)) = own {
+        if pending {
             match starting_at_in(conn, outbox_id, sequence)? {
-                Some(alone) if !alone.is_group() => Some(alone),
+                Some(alone) if !alone.is_group() => known.pending = Some(alone),
                 _ => return Ok(None),
             }
-        } else {
-            None
-        };
-        return Ok(Some(KnownDelivery {
-            update_digest,
-            pending,
-            receipt_json,
-            terminal_reason,
-        }));
+        }
+        return Ok(Some(known));
     }
     if let Some(head) = pending_in(conn, outbox_id, 1)?.pop() {
         if head.delivery_id == delivery_id {
