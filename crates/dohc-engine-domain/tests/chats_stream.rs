@@ -6,7 +6,7 @@ use dohc_engine_domain::{
     LinkedChatStore, NoFaults, SendMessage, StartChannelThread, StreamAgentRequest,
     StreamAgentRequestState, StreamPage, StreamPosition, ThreadWork,
 };
-use dohc_engine_storage::EngineStore;
+use dohc_engine_storage::{EngineStore, StorageError};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
 
 const NO_FAULTS: NoFaults = NoFaults;
@@ -436,4 +436,141 @@ fn a_message_that_names_two_agents_shows_each_agents_own_request() {
         .list_messages(WS, &chat, 10, None)
         .expect("thread");
     assert_eq!(thread.agent_requests.get("m-both"), Some(&expected));
+}
+/// Times a group's stream over 10,000 items, with and without the stream
+/// indexes. Run it in release:
+/// `cargo test --release -p dohc-engine-domain --test chats_stream -- --ignored --nocapture stream_timings`
+#[test]
+#[ignore = "timing, run by hand"]
+fn stream_timings() {
+    use std::time::{Duration, Instant};
+
+    const ITEMS: i64 = 10_000;
+    const RUNS: usize = 25;
+
+    fn median(store: &mut EngineStore, before: Option<&StreamPosition>) -> Duration {
+        let mut times: Vec<Duration> = (0..RUNS)
+            .map(|_| {
+                let started = Instant::now();
+                let page = page(store, before, 50);
+                let elapsed = started.elapsed();
+                assert_eq!(page.items.len(), 50);
+                elapsed
+            })
+            .collect();
+        times.sort();
+        times[RUNS / 2]
+    }
+
+    fn time(name: &str, store: &mut EngineStore, items: i64) {
+        // An older page starts halfway back.
+        let mut before: Option<StreamPosition> = None;
+        for _ in 0..items / 2 / 100 {
+            before = Some(page(store, before.as_ref(), 100).items[0].position.clone());
+        }
+        let older = before.expect("an older page");
+        let indexed = (median(store, None), median(store, Some(&older)));
+        let dropped = store
+            .write_with(&NO_FAULTS, |tx| {
+                tx.execute_batch(
+                    "DROP INDEX idx_chat_threads_channel_lane_created; \
+                     DROP INDEX idx_chat_messages_thread_top_created;",
+                )
+                .map_err(StorageError::persist_public)?;
+                Ok::<_, StorageError>(())
+            })
+            .expect("drop indexes");
+        assert!(matches!(
+            dropped,
+            dohc_engine_storage::TxnOutcome::Committed(())
+        ));
+        let unindexed = (median(store, None), median(store, Some(&older)));
+        println!(
+            "{name}: first page {:?} without the indexes, {:?} with; older page {:?} without, {:?} with",
+            unindexed.0, indexed.0, unindexed.1, indexed.1
+        );
+    }
+
+    // 10,000 posts, each with two replies.
+    {
+        let (_scratch, mut store) = store();
+        group(&mut store);
+        for index in 0..ITEMS {
+            let thread = start(
+                &mut store,
+                "group",
+                &format!("post-{index:05}"),
+                &format!("p-{index:05}"),
+                ChatThreadLane::Posts,
+                index * 10,
+            );
+            for reply in 0..2 {
+                send(
+                    &mut store,
+                    reply_input(
+                        &thread,
+                        &format!("r-{index:05}-{reply}"),
+                        index * 10 + reply + 1,
+                    ),
+                );
+            }
+        }
+        time("posts", &mut store, ITEMS);
+    }
+
+    // One conversation of 10,000 messages.
+    {
+        let (_scratch, mut store) = store();
+        group(&mut store);
+        let chat = start(
+            &mut store,
+            "group",
+            "chat",
+            "c-00000",
+            ChatThreadLane::Chat,
+            0,
+        );
+        for index in 1..ITEMS {
+            send(
+                &mut store,
+                reply_input(&chat, &format!("c-{index:05}"), index * 10),
+            );
+        }
+        time("conversation messages", &mut store, ITEMS);
+    }
+
+    // A conversation of 1,000 messages with 10,000 replies under them.
+    {
+        let (_scratch, mut store) = store();
+        group(&mut store);
+        let chat = start(
+            &mut store,
+            "group",
+            "chat",
+            "c-00000",
+            ChatThreadLane::Chat,
+            0,
+        );
+        for index in 1..1_000 {
+            send(
+                &mut store,
+                reply_input(&chat, &format!("c-{index:05}"), index * 100),
+            );
+        }
+        for index in 0..ITEMS {
+            let parent = index % 1_000;
+            send(
+                &mut store,
+                SendMessage {
+                    parent_message_id: Some(format!("c-{parent:05}")),
+                    ..reply_input(
+                        &chat,
+                        &format!("r-{index:05}"),
+                        parent * 100 + 1 + index / 1_000,
+                    )
+                },
+            );
+        }
+        time("a conversation with many replies", &mut store, 1_000);
+    }
 }

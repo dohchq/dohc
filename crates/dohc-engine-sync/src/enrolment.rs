@@ -2055,6 +2055,48 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "release cursor sweep measurement"]
+    fn cursor_sweep_many_retained_heads() {
+        let (_scratch, _, mut store) = open_store();
+        seed_main(&mut store);
+        seed_retained_artifact_as(&mut store, "- parent\n  - nested\n", ContentKind::Richdoc);
+        enroll(&mut store).expect("enroll benchmark seed");
+        store.write_with(&NoFaults, |tx| (|| {
+            tx.execute_batch("CREATE TEMP TABLE benchmark_ids AS WITH RECURSIVE ids(n) AS \
+                (VALUES(1) UNION ALL SELECT n+1 FROM ids WHERE n<9999) SELECT n FROM ids;")?;
+            for table in ["file_objects", "moments", "snapshots", "ydoc_docs", "ydoc_updates"] {
+                let columns = tx.prepare(&format!("PRAGMA table_info({table})"))?
+                    .query_map([], |r| r.get::<_, String>(1))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                let expressions = columns.iter().map(|column| match column.as_str() {
+                    "object_id" => "'bench-'||n".to_owned(),
+                    "moment_id" | "latest_moment_id" => "'bench-moment-'||n".to_owned(),
+                    "moment_order" => "n+1".to_owned(),
+                    "path" | "payload_after_path" => "'bench-'||n||'.md'".to_owned(),
+                    _ => format!("source.{column}"),
+                }).collect::<Vec<_>>().join(",");
+                tx.execute_batch(&format!("INSERT INTO {table} ({}) SELECT {expressions} \
+                    FROM {table} source CROSS JOIN benchmark_ids WHERE source.object_id='seed-object'",
+                    columns.join(",")))?;
+            }
+            tx.execute_batch("INSERT INTO replication_log \
+                (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) \
+                SELECT 'ws','other',n,'moment.append',json_object('versionId','main', \
+                    'objectId','other-'||n,'momentId','other-moment-'||n),1,0 FROM benchmark_ids;")?;
+            Ok::<_, rusqlite::Error>(())
+        })().map_err(SyncError::persist)).expect("bulk fixture");
+        // Separate first-use cost from recurring unchanged-head cost.
+        for pass in 0..4 {
+            let start = std::time::Instant::now();
+            sweep(&mut store, 200 + pass);
+            println!(
+                "CURSOR_BENCH documents=10000 moments=10000 journal_moments=9999 pass={pass} elapsed_ms={:.3}",
+                start.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+    }
+
+    #[test]
     fn candidate_load_kind_and_projection_errors_do_not_abort_cursor_or_other_exports() {
         for failure in ["load", "kind", "projection", "journal"] {
             let (_scratch, _, mut store) = open_store();

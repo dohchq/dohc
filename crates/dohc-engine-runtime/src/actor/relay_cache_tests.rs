@@ -314,6 +314,55 @@ async fn ordinary_remote_between_pushes_matches_fresh_replay() {
     supervisor.close(&path).unwrap();
 }
 
+#[tokio::test]
+#[ignore = "release paired benchmark; run alone with --ignored --nocapture"]
+async fn writer_cache_push_benchmark() {
+    for size in [50 * 1024, 1024 * 1024] {
+        for interval in [1, 5, 20] {
+            let mut append_ns = Vec::new();
+            let mut push_ns = Vec::new();
+            let mut reconstructions = 0;
+            for round in 0..5 {
+                let (_scratch, path, producer) = document_fixture(true, true, size);
+                let supervisor = WorkspaceSupervisor::new();
+                let actor = supervisor.open(&path, 1000).unwrap().actor;
+                append(&actor, producer.plaintext_insert(size as u32, "w")).await;
+                let before = actor.ydoc_cache_stats_for_test().await.unwrap();
+                for index in 0..100 {
+                    if index % interval == 0 {
+                        let started = std::time::Instant::now();
+                        push(&actor).await;
+                        if round > 0 {
+                            push_ns.push(started.elapsed().as_nanos());
+                        }
+                    }
+                    let bytes = producer.plaintext_insert((size + index + 1) as u32, "x");
+                    let started = std::time::Instant::now();
+                    append(&actor, bytes).await;
+                    if round > 0 {
+                        append_ns.push(started.elapsed().as_nanos());
+                    }
+                }
+                if round > 0 {
+                    reconstructions +=
+                        actor.ydoc_cache_stats_for_test().await.unwrap().misses - before.misses;
+                }
+                supervisor.close(&path).unwrap();
+            }
+            append_ns.sort_unstable();
+            push_ns.sort_unstable();
+            println!(
+                "{}",
+                serde_json::json!({"benchmark":"writer_cache_push", "size":size, "interval":interval,
+                "samples":append_ns.len(), "append_median_ns":append_ns[append_ns.len()/2],
+                "append_p95_ns":append_ns[(append_ns.len()*95).div_ceil(100)-1],
+                "push_median_ns":push_ns[push_ns.len()/2], "push_p95_ns":push_ns[(push_ns.len()*95).div_ceil(100)-1],
+                "reconstructions":reconstructions})
+            );
+        }
+    }
+}
+
 pub(crate) struct CursorFaults;
 thread_local! { static CRASH_CURSOR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 impl dohc_engine_storage::FaultInjector for CursorFaults {

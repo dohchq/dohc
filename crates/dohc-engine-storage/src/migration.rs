@@ -5196,6 +5196,75 @@ mod tests {
     #[cfg(feature = "fault-injection")]
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    fn field_history_link_upgrade(rows: i64) {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let mut conn = open_bare(&path);
+        let ctx = MigrationContext::current(1000);
+        let target = BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.id == "v2-field-history-link-author")
+            .unwrap_or(BASELINE_MIGRATIONS.len());
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..target], &ctx, &NoFaults).unwrap();
+        conn.execute_batch("INSERT INTO versioned_workspaces VALUES ('ws','main'); INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES ('ws','main','main','main',0);").unwrap();
+        let tx = conn.transaction().unwrap();
+        {
+            let mut insert = tx.prepare("INSERT INTO collection_field_history(workspace_id,version_id,record_id,field_name,previous_value_json,next_value_json,author_origin_id,source_origin_id,source_origin_seq,recorded_at_ms,actor_kind,on_behalf_of,chain_depth,automation_claim_id,automation_name) VALUES ('ws','main','record','status','\"before\"','\"after\"','actor','source',?1,?1,'automation','person',2,'claim','Stamp')").unwrap();
+            for id in 1..=rows {
+                insert.execute([id]).unwrap();
+            }
+        }
+        tx.commit().unwrap();
+        let root = |conn: &Connection| {
+            conn.query_row(
+                "SELECT rootpage FROM sqlite_schema WHERE name='collection_field_history'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+        };
+        let before_root = root(&conn);
+        let start = std::time::Instant::now();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        println!(
+            "field_history_link_migration: rows={rows} on_disk=true elapsed_ns={}",
+            start.elapsed().as_nanos()
+        );
+        assert_eq!(root(&conn), before_root, "the table was not rebuilt");
+        let unchanged: i64 = conn.query_row("SELECT count(*) FROM collection_field_history WHERE history_id=source_origin_seq AND recorded_at_ms=history_id AND workspace_id='ws' AND version_id='main' AND record_id='record' AND field_name='status' AND previous_value_json='\"before\"' AND next_value_json='\"after\"' AND author_origin_id='actor' AND source_origin_id='source' AND actor_kind='automation' AND on_behalf_of='person' AND chain_depth=2 AND automation_claim_id='claim' AND automation_name='Stamp' AND link_author_json IS NULL", [], |row| row.get(0)).unwrap();
+        assert_eq!(unchanged, rows);
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM collection_field_history", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            rows
+        );
+        conn.execute("INSERT INTO collection_field_history(workspace_id,version_id,record_id,field_name,recorded_at_ms,link_author_json) VALUES ('ws','main','record','status',?1,?2)", rusqlite::params![rows+1, r#"{"kind":"link","grantId":"grant","grantGeneration":1,"publicPrincipalId":"public"}"#]).unwrap();
+        assert_eq!(conn.last_insert_rowid(), rows + 1);
+        assert_eq!(conn.query_row("SELECT count(*) FROM sqlite_schema WHERE name IN ('collection_field_history_by_record','collection_field_history_by_source')", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
+        drop(conn);
+        let mut conn = open_bare(&path);
+        assert_eq!(root(&conn), before_root);
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM collection_field_history", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            rows + 1
+        );
+        assert_eq!(
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 0 }
+        );
+    }
+
+    #[test]
+    #[ignore = "manual migration timing on one million persisted rows"]
+    fn field_history_link_migration_million_rows() {
+        field_history_link_upgrade(1_000_000);
+    }
+
     /// Editing a shipped migration strands every store that already applied
     /// it: the ledger checksum stops matching and the open fails closed. A
     /// schema change appends a migration. Change a pin here only to reject
@@ -5597,6 +5666,79 @@ mod tests {
                 "the {id} migration changed after it shipped"
             );
         }
+    }
+
+    #[test]
+    #[ignore = "scheduled migration 65 alias-index measurement"]
+    fn conversation_links_measure_migration_alias_index_on_large_store() {
+        assert!(
+            !std::hint::black_box(cfg!(debug_assertions)),
+            "run with --release"
+        );
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-chat-conversation-file-links");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys=ON; BEGIN;
+            INSERT INTO versioned_workspaces VALUES('ws','v-0');",
+        )
+        .unwrap();
+        for i in 0..10 {
+            conn.execute("INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES('ws',?1,'named','Measured',1)",[format!("v-{i}")]).unwrap();
+        }
+        {
+            let mut object = conn
+                .prepare_cached("INSERT INTO file_objects VALUES('ws',?1,1)")
+                .unwrap();
+            for i in 0..50_000 {
+                object.execute([format!("f-{i:06}")]).unwrap();
+            }
+            let mut alias = conn
+                .prepare_cached("INSERT INTO path_aliases VALUES('ws',?1,?2,?3)")
+                .unwrap();
+            for version in 0..10 {
+                for i in 0..50_000 {
+                    alias
+                        .execute(rusqlite::params![
+                            format!("v-{version}"),
+                            format!("notes/{}/file-{i:06}.md", "long-label/".repeat(8)),
+                            format!("f-{i:06}")
+                        ])
+                        .unwrap();
+                }
+            }
+        }
+        conn.execute_batch("COMMIT; PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        let bytes_before = std::fs::metadata(dir.join("engine.db")).unwrap().len();
+        let start = std::time::Instant::now();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let migration_us = start.elapsed().as_micros();
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        let bytes_after = std::fs::metadata(dir.join("engine.db")).unwrap().len();
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM chat_conversation_file_link_state",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        // Measure just the alias-index DDL too, on the same populated store.
+        conn.execute_batch(
+            "DROP INDEX conversation_file_link_alias; PRAGMA wal_checkpoint(TRUNCATE);",
+        )
+        .unwrap();
+        let start = std::time::Instant::now();
+        conn.execute_batch("CREATE INDEX conversation_file_link_alias ON path_aliases(workspace_id,version_id,object_id,path);").unwrap();
+        let index_us = start.elapsed().as_micros();
+        println!(
+            "CONVERSATION_LINKS_MIGRATION_MEASUREMENT {{\"aliases\":500000,\"objects\":50000,\"versions\":10,\"migrationUs\":{migration_us},\"aliasIndexUs\":{index_us},\"databaseBytesBefore\":{bytes_before},\"databaseBytesAfter\":{bytes_after}}}"
+        );
     }
 
     /// The rebuild that admits `personal` authority keeps every application,
@@ -6047,6 +6189,35 @@ mod tests {
         );
     }
 
+    /// Times the held-records migration on a large log of ordinary ops, and
+    /// on one of refused audits.
+    #[test]
+    #[ignore = "measurement; run with --ignored --nocapture"]
+    fn held_records_migration_time_on_a_large_log() {
+        let ordinary = "'moment.append','applied',json_object('momentId',hex(randomblob(16)),'versionId','main','objectId',hex(randomblob(8)),'path','notes/'||i||'.md','sha256',hex(randomblob(32)))";
+        let refused = "'live.audit.application','refused',json_object('relayDatabaseNamespace','relay','mainVersionId','main','objectId','doc'||(i%1000),'lineageClaimId',hex(randomblob(32)),'eventCount',i/1000+1,'manifest',json_object('sha256',hex(randomblob(32))))";
+        for (log, row) in [("ordinary", ordinary), ("refused", refused)] {
+            let dir = tempdir();
+            let mut conn = open_bare(&dir.join("engine.db"));
+            let ctx = MigrationContext::current(1);
+            let before = migration_index("v2-live-audit-held-records");
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+            conn.execute_batch(&format!(
+                "BEGIN; WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i<999999)
+                 INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,apply_disposition,payload_json,recorded_at_ms,imported)
+                 SELECT 'ws','peer',i,{row},i,1 FROM n; COMMIT;"
+            ))
+            .unwrap();
+            let started = std::time::Instant::now();
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap();
+            let elapsed = started.elapsed();
+            let rows: i64 = conn
+                .query_row("SELECT count(*) FROM replication_log", [], |row| row.get(0))
+                .unwrap();
+            eprintln!("held-records migration on {rows} {log} log rows: {elapsed:?}");
+        }
+    }
+
     /// Where a migration sits in the shipped list, so an upgrade test runs
     /// everything before it however many migrations come after.
     fn migration_index(id: &str) -> usize {
@@ -6054,6 +6225,46 @@ mod tests {
             .iter()
             .position(|migration| migration.id == id)
             .expect("a shipped migration")
+    }
+
+    #[test]
+    #[ignore = "manual migration cost measurement"]
+    fn capture_file_hold_migration_cost_100000_objects() {
+        let scratch = tempdir();
+        let source = scratch.join("source.db");
+        let mut conn = open_bare(&source);
+        let ctx = MigrationContext::current(10);
+        let before = migration_index("v2-capture-file-holds");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute("INSERT INTO versioned_workspaces VALUES ('ws','main')", [])
+            .unwrap();
+        conn.execute("INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES ('ws','main','main','Main',1)", []).unwrap();
+        conn.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000) INSERT INTO file_objects SELECT 'ws','object-'||x,1 FROM n", []).unwrap();
+        drop(conn);
+        let mut samples = Vec::new();
+        for sample in 0..33 {
+            let copy = scratch.join(format!("copy-{sample}.db"));
+            std::fs::copy(&source, &copy).unwrap();
+            let mut conn = open_bare(&copy);
+            let start = std::time::Instant::now();
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+            let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+            let objects: i64 = conn
+                .query_row("SELECT COUNT(*) FROM file_objects", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(objects, 100000);
+            drop(conn);
+            std::fs::remove_file(copy).unwrap();
+            if sample >= 3 {
+                samples.push(elapsed);
+            }
+        }
+        samples.sort_by(f64::total_cmp);
+        println!(
+            "migration_100000_objects warmups=3 samples=30 median_ms={:.6} p95_ms={:.6}",
+            (samples[14] + samples[15]) / 2.0,
+            samples[28]
+        );
     }
 
     fn migration_29_history_fixture(conn: &Connection) -> (String, String) {

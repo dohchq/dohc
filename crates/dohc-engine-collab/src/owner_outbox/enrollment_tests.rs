@@ -3,6 +3,58 @@ use crate::{owner_outbox::draft::open_draft_in, DocKey};
 use dohc_engine_domain::{VersionedTextStore, WriteText};
 use dohc_test_scratch::ScratchDir;
 
+#[test]
+#[ignore = "paired release measurement"]
+fn measure_adopted_owner_apply_per_row() {
+    use crate::owner_outbox::accepted::{apply_frame_in_tx, OwnerAcceptedFrameInput};
+    let mut samples = Vec::new();
+    for _ in 0..21 {
+        let (_dir, mut store, observed, baseline) = fixture();
+        let enrollment = input(&store, &observed, baseline.clone());
+        enroll(&mut store, &enrollment, &observed.limits).unwrap();
+        let observed = store
+            .read_with(|conn| super::super::draft::read_observed_in(conn, &observed.binding))
+            .unwrap()
+            .unwrap();
+        let doc = crate::Ydoc::wire();
+        doc.apply(&baseline).unwrap();
+        let mut position = (
+            observed.revision,
+            observed.native_head_sequence,
+            observed.accepted_cursor,
+        );
+        let mut elapsed = 0.0;
+        for _ in 0..100 {
+            let input = OwnerAcceptedFrameInput {
+                binding: observed.binding.clone(),
+                relay_database_namespace: "relay".into(),
+                expected_revision: position.0,
+                expected_native_head_sequence: position.1,
+                previous_accepted_cursor: position.2,
+                journal_cursor: position.2 + 1,
+                update_bytes: doc.richdoc_append_paragraph("Applied paragraph."),
+            };
+            let start = std::time::Instant::now();
+            let result = store
+                .write_with(&NoFaults, |tx| {
+                    apply_frame_in_tx(tx, "workspace", &input, 11)
+                })
+                .unwrap();
+            elapsed += start.elapsed().as_secs_f64() * 1_000_000.0;
+            let dohc_engine_storage::TxnOutcome::Committed(r) = result else {
+                panic!("committed")
+            };
+            position = (r.revision, r.native_head_sequence, r.accepted_cursor);
+        }
+        samples.push(elapsed / 100.0);
+    }
+    samples.sort_by(f64::total_cmp);
+    println!(
+        "ADOPTED_APPLY_US_PER_ROW median={} p95={} samples=21 rows=100",
+        samples[10], samples[19]
+    );
+}
+
 fn fixture() -> (ScratchDir, EngineStore, ObservedOwnerBinding, Vec<u8>) {
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
         "../../tests/owner-source/owner-source-seed.json"
@@ -1061,6 +1113,36 @@ fn stop_preserves_old_generation_work_and_start_can_enroll_again() {
             .unwrap(),
         preserved
     );
+}
+
+#[test]
+#[ignore = "manual first-enrollment guard timing"]
+fn measure_prepare_stop_guard() {
+    let (_dir, store, observed, _) = fixture();
+    let binding = &observed.binding;
+    store.read_with(|conn| {
+        let baseline = || {
+            validate_identifier("relay", "invalid relay namespace").unwrap();
+            assert!(super::super::draft::descriptor_for_key_in(conn, &key(binding).unwrap()).unwrap().is_none());
+            binding.validate_canonical().unwrap();let key = key(binding).unwrap();
+            let configured:bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM live_device_application_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)",params![key.workspace_id,key.version_id,key.object_id],|r|r.get(0)).unwrap();
+            assert!(!configured && !super::super::has_adopted_owner_in(conn,&key).unwrap());
+            super::super::draft::require_ordinary_write(conn,&key).unwrap();
+            crate::live_update_application::require_restore_open(conn,&key).unwrap();
+            let marker = crate::read_marker_in(conn,&key).unwrap().unwrap();
+            assert_eq!(marker.content_kind,crate::ContentKind::Richdoc);assert_eq!(marker.regime,crate::Regime::Replicated);
+            assert_eq!(marker.lineage_claim_id.as_ref(),Some(&binding.lineage_claim_id));assert_eq!(marker.path.as_ref(),Some(&binding.current_path));
+            let doc = crate::load_doc_in(conn,&key).unwrap();assert!(!doc.has_pending_dependencies());
+            std::hint::black_box(OwnerEnrollmentCapture {native_head_sequence:marker.head_update_seq,local_state_digest:hex_sha256(&bounded(&doc).unwrap())});
+        };
+        for _ in 0..100 {baseline();std::hint::black_box(prepare_in(conn,binding,"relay",false).unwrap());}
+        for round in 0..5 {
+            let time = |guard: bool| {let start = std::time::Instant::now();for _ in 0..1_000 {if guard {std::hint::black_box(prepare_in(conn,binding,"relay",false).unwrap());} else {baseline();}} start.elapsed().as_secs_f64()*1_000.0};
+            let (before,after) = if round%2==0 {(time(false),time(true))} else {let after=time(true);(time(false),after)};
+            println!("prepare_stop_guard round={round} samples=1000 baseline_ms={before:.3} guarded_ms={after:.3}");
+        }
+        Ok::<_, OwnerOutboxError>(())
+    }).unwrap();
 }
 
 fn successor_input(

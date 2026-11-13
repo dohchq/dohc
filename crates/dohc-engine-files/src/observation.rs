@@ -1311,4 +1311,104 @@ mod tests {
         assert!(response.facts.is_empty());
         assert_eq!(feed.state.lock().unwrap().listing.len(), 400);
     }
+    #[test]
+    #[ignore = "manual 10,000-file cost measurement"]
+    fn observation_large_workspace_cost() {
+        let f = Fixture::new();
+        for i in 0..10_000 {
+            f.write(&format!("dir-{}/file-{i}.md", i / 100), "abc");
+        }
+        let baseline = Scanner::new(ScanBounds::default()).unwrap();
+        let crate::ScanOutcome::Completed(listing) = baseline
+            .scan(f.root.path(), &CancellationToken::new())
+            .unwrap()
+        else {
+            panic!("cancelled")
+        };
+        let prior = crate::ScanManifest::from_entries(listing.files.into_iter().map(|e| {
+            (
+                e.path,
+                crate::ManifestEntry {
+                    size: e.size,
+                    sha256: e.sha256,
+                    mtime_ms: e.mtime_ms,
+                },
+            )
+        }));
+        f.scan(&f.cursor());
+        let mut times = Vec::new();
+        let mut baseline_times = Vec::new();
+        for _ in 0..20 {
+            let start = std::time::Instant::now();
+            baseline
+                .scan_with_prior(f.root.path(), &prior, &CancellationToken::new())
+                .unwrap();
+            baseline_times.push(start.elapsed());
+            let start = std::time::Instant::now();
+            f.scanner
+                .observe(f.root.path(), &CancellationToken::new())
+                .unwrap();
+            times.push(start.elapsed());
+        }
+        times.sort();
+        baseline_times.sort();
+        let state = f.feed.state.lock().unwrap();
+        let memory: usize = state.listing.capacity() * std::mem::size_of::<ObservedEntry>()
+            + state
+                .listing
+                .iter()
+                .map(|e| {
+                    let bytes = e.path.capacity();
+                    #[cfg(any(windows, target_vendor = "apple"))]
+                    let bytes = bytes + e.key.capacity();
+                    bytes
+                })
+                .sum::<usize>();
+        let listing = state.listing.clone();
+        drop(state);
+        let start = std::time::Instant::now();
+        for _ in 0..100 {
+            f.feed
+                .publish(listing.clone(), BTreeMap::new(), &[], 200_000, FOLDS)
+                .unwrap();
+        }
+        eprintln!(
+            "OBSERVATION_COST files=10000 baseline_scan_median_ms={:.3} observed_scan_median_ms={:.3} listing_clone_sort_diff_ms={:.3} listing_bytes={} bytes_per_path={:.1}",
+            baseline_times[10].as_secs_f64() * 1000.0,
+            times[10].as_secs_f64() * 1000.0,
+            start.elapsed().as_secs_f64() * 10.0,
+            memory,
+            memory as f64 / 10000.0
+        );
+    }
+
+    #[test]
+    #[ignore = "manual deep, narrow tree cost measurement"]
+    fn observation_deep_workspace_cost() {
+        const DEPTH: usize = 400;
+        let f = Fixture::new();
+        let mut folder = String::new();
+        for depth in 0..DEPTH {
+            folder.push_str("d/");
+            f.write(&format!("{folder}file-{depth}.md"), "abc");
+        }
+        let cursor = f.cursor();
+        f.scan(&cursor);
+        f.scan(&cursor);
+        let mut times = Vec::new();
+        for _ in 0..21 {
+            let start = std::time::Instant::now();
+            f.scanner
+                .observe(f.root.path(), &CancellationToken::new())
+                .unwrap();
+            times.push(start.elapsed());
+        }
+        times.sort();
+        assert_eq!(f.feed.state.lock().unwrap().listing.len(), DEPTH);
+        eprintln!(
+            "OBSERVATION_DEEP_COST folders={DEPTH} files={DEPTH} observed_scan_median_ms={:.3}",
+            times[10].as_secs_f64() * 1000.0,
+        );
+    }
+
 }

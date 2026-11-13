@@ -182,6 +182,69 @@ fn markdown_witness_source_cap_is_two_megabytes_and_invalid_inputs_start_no_chil
     finish(&mut reader);
 }
 
+#[test]
+#[ignore = "requires DOHC_ENGINE_READER_CONFIG and DOHC_READER_FIXTURES for the real staged bundle"]
+fn markdown_witness_real_pipe_agrees_with_the_commonmark_meaning_controls() {
+    let config =
+        serde_json::from_str(&std::env::var("DOHC_ENGINE_READER_CONFIG").unwrap()).unwrap();
+    let checkpoint = fs::read(
+        PathBuf::from(std::env::var_os("DOHC_READER_FIXTURES").unwrap()).join("note.checkpoint"),
+    )
+    .unwrap();
+    let examples: Value = serde_json::from_str(include_str!(
+        "../../../packages/ydoc-projection/src/fixtures/commonmark-edit-meaning.json"
+    ))
+    .unwrap();
+    let mut sources = vec![("# Safe\n\nPlain paragraph.\n".to_owned(), true)];
+    sources.extend([148, 161, 192, 193, 572, 575, 577].map(|number| {
+        let example = examples["examples"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["example"] == number)
+            .unwrap();
+        (example["markdown"].as_str().unwrap().to_owned(), false)
+    }));
+    let mut reader = Reader::new(Some(config));
+    for (source, expected) in sources {
+        let mut input = request("note.md");
+        input.document.main_version_id = "main".into();
+        input.document.object_id = "fixture".into();
+        input.source = source.as_bytes().to_vec();
+        input.checkpoint = checkpoint.clone();
+        let Outcome::Constructed { proof, .. } = run(reader.request(input)).unwrap() else {
+            panic!("the real reader must import the meaning control");
+        };
+        let input = CheckMarkdownWitness {
+            source: source.into_bytes(),
+            source_sha256: proof.source_sha256,
+            projection_sha256: proof.projection_sha256,
+        };
+        let Outcome::WitnessChecked {
+            keeps_meaning,
+            checker_identity,
+            ..
+        } = run(reader.check_markdown_witness(input.clone())).unwrap()
+        else {
+            panic!("the real pipe must answer the witness request");
+        };
+        assert_eq!(keeps_meaning, expected);
+        assert_eq!(Some(checker_identity), reader.checker_identity());
+        let wrong = CheckMarkdownWitness {
+            projection_sha256: wire::sha(b"different projection"),
+            ..input
+        };
+        assert!(matches!(
+            run(reader.check_markdown_witness(wrong)),
+            Ok(Outcome::WitnessChecked {
+                keeps_meaning: false,
+                ..
+            })
+        ));
+    }
+    finish(&mut reader);
+}
+
 fn wait(reader: &Reader, predicate: impl Fn(&State) -> bool) {
     let end = Instant::now() + Duration::from_secs(15);
     let mut s = reader.shared.state.lock().unwrap();

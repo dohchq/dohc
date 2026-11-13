@@ -592,6 +592,22 @@ async fn deliver_seen(
     (receipt, result)
 }
 
+struct PrefixRival {
+    path: PathBuf,
+    fired: std::sync::atomic::AtomicBool,
+}
+
+impl dohc_engine_storage::FaultInjector for PrefixRival {
+    fn poll(&self, point: dohc_engine_storage::FaultPoint) -> dohc_engine_storage::FaultAction {
+        if point == dohc_engine_storage::FaultPoint::MaterializeBeforePreimageRevalidate
+            && !self.fired.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            std::fs::write(&self.path, "rival survives").unwrap();
+        }
+        dohc_engine_storage::FaultAction::Continue
+    }
+}
+
 #[tokio::test]
 async fn configured_pending_edits_do_not_escape_through_ordinary_index_journal_or_settlement() {
     let f = Fixture::new();
@@ -2513,6 +2529,51 @@ async fn pending_release_fixture_updates(
 }
 
 #[tokio::test]
+#[ignore = "manual shipped-profile fold and full-cap count timing"]
+async fn measure_stop_fold_limits_and_full_cap_count() {
+    for (count, bytes) in [(8, 1024), (32, 4096), (64, 16384)] {
+        if count > MAX_RELEASE_ENTRIES as usize {
+            continue;
+        }
+        for run in 0..21 {
+            let (f, supervisor, actor) = pending_release_fixture_sized(count, Some(bytes)).await;
+            let started = std::time::Instant::now();
+            let rows = stop_action(&actor, &f, "release").await.unwrap();
+            let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+            assert!(rows[0].deferred.is_none());
+            let native_count: i64 = f
+                .store
+                .read_with(|conn| {
+                    conn.query_row("SELECT COUNT(*) FROM ydoc_updates", [], |r| r.get(0))
+                })
+                .unwrap();
+            assert_eq!(native_count, count as i64);
+            println!("stop_fold entries={count} bytes={bytes} run={run} ms={elapsed:.3}");
+            supervisor.close_all().unwrap();
+        }
+    }
+    let (mut f, supervisor, actor) = pending_release_fixture_sized(1, Some(128)).await;
+    f.store.write_with(&NoFaults, |tx| {
+        // 524,288 metadata rows of 128 bytes exactly fill the 64 MiB profile.
+        tx.execute("WITH RECURSIVE n(i) AS (VALUES(2) UNION ALL SELECT i+1 FROM n WHERE i<524288) INSERT INTO owner_ydoc_outbox_entries(outbox_id,sequence,append_key,delivery_id,update_digest,update_blob_digest,byte_length,created_at_ms,pending,result_pending_bytes,result_oldest_entry_at_ms,result_state,draft_binding_revision,person_edit) SELECT e.outbox_id,n.i,'cap-'||n.i,'cap-'||n.i,e.update_digest,e.update_blob_digest,128,e.created_at_ms,1,n.i*128,e.result_oldest_entry_at_ms,e.result_state,e.draft_binding_revision,e.person_edit FROM n CROSS JOIN owner_ydoc_outbox_entries e WHERE e.sequence=1", []).unwrap();
+        tx.execute("UPDATE owner_ydoc_outbox_entries SET byte_length=128 WHERE sequence=1",[]).unwrap();
+        tx.execute("UPDATE owner_ydoc_outboxes SET pending_bytes=67108864,next_sequence=524289,state='sealed'",[]).unwrap();
+        tx.execute("UPDATE ydoc_owner_bindings SET max_pending_bytes=67108864",[]).unwrap();
+        Ok::<_,dohc_engine_storage::StorageError>(())
+    }).unwrap();
+    let rows = stop_action(&actor, &f, "release").await.unwrap();
+    assert_eq!(rows[0].deferred.as_ref().unwrap().unsent_edits, 524288);
+    for run in 0..21 {
+        let started = std::time::Instant::now();
+        let rows = stop_action(&actor, &f, "list").await.unwrap();
+        let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+        assert_eq!(rows[0].deferred.as_ref().unwrap().unsent_edits, 524288);
+        println!("stop_full_cap_list entries=524288 bytes=67108864 run={run} ms={elapsed:.3}");
+    }
+    supervisor.close_all().unwrap();
+}
+
+#[tokio::test]
 async fn stop_release_entry_and_byte_bounds_are_inclusive() {
     for count in [0, MAX_RELEASE_ENTRIES as usize] {
         let (f, supervisor, actor) = pending_release_fixture(count).await;
@@ -2875,6 +2936,284 @@ async fn stop_defers_above_one_turn_without_publishing_or_losing_entries() {
     assert_eq!(f.store.table_row_count("owner_live_stops").unwrap(), 0);
     assert_eq!(release_snapshot(&f)[1..], after_edit[1..]);
     restarted.close_all().unwrap();
+}
+
+#[tokio::test]
+#[ignore = "manual shipped-profile Stop command timing"]
+async fn measure_stop_release_pending_entries() {
+    struct TraceFaults(
+        std::time::Instant,
+        std::sync::Mutex<Vec<(dohc_engine_storage::FaultPoint, f64)>>,
+    );
+    impl dohc_engine_storage::FaultInjector for TraceFaults {
+        fn poll(&self, point: dohc_engine_storage::FaultPoint) -> dohc_engine_storage::FaultAction {
+            self.1
+                .lock()
+                .unwrap()
+                .push((point, self.0.elapsed().as_secs_f64() * 1000.0));
+            dohc_engine_storage::FaultAction::Continue
+        }
+    }
+    for count in [
+        0,
+        MAX_RELEASE_ENTRIES as usize,
+        MAX_RELEASE_ENTRIES as usize + 1,
+    ] {
+        let mut samples = Vec::new();
+        for run in 0..21 {
+            let (mut f, supervisor, actor) = pending_release_fixture(count).await;
+            let declaration = serde_json::to_string(&AgentDeclaration {
+                agent_id: "agent-A".into(),
+                on_behalf_of: Some("person-A".into()),
+                depth: 1,
+            })
+            .unwrap();
+            f.store.write_with(&NoFaults,|tx| {
+                tx.execute("UPDATE owner_ydoc_outbox_entries SET person_edit=NULL,agent_declaration_json=?1 WHERE sequence%2=0",[declaration]).unwrap();
+                Ok::<_,dohc_engine_storage::StorageError>(())
+            }).unwrap();
+            let started = std::time::Instant::now();
+            let trace = Arc::new(TraceFaults(started, std::sync::Mutex::new(Vec::new())));
+            let rows = stop_action(&actor, &f, "release").await.unwrap();
+            let fold_ms = started.elapsed().as_secs_f64() * 1000.0;
+            if count <= MAX_RELEASE_ENTRIES as usize {
+                actor
+                    .ydoc_open_state(
+                        "workspace".into(),
+                        40,
+                        false,
+                        Some(DocKey::new("workspace", "main", "object").unwrap()),
+                        "main".into(),
+                        f.binding.current_path.clone(),
+                        Some(ContentKind::Richdoc),
+                        CancellationToken::new(),
+                    )
+                    .await
+                    .unwrap();
+                assert!(
+                    f.ordinary_settle_with_faults(&actor, trace.clone())
+                        .await
+                        .unwrap()
+                        .settled()
+                        .unwrap()
+                        .materialized
+                );
+            } else {
+                assert_eq!(
+                    rows[0].deferred.as_ref().unwrap().unsent_edits,
+                    count as i64
+                );
+            }
+            let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+            samples.push(elapsed_ms);
+            for (point, ms) in trace.1.lock().unwrap().iter() {
+                println!("stop_phase entries={count} run={run} point={point:?} ms={ms:.3}");
+            }
+            println!(
+                "stop_release entries={count} run={run} fold_ms={fold_ms:.3} command_ms={elapsed_ms:.3}"
+            );
+            let credits = f
+                .store
+                .read_with(|conn| {
+                    let mut stmt = conn
+                        .prepare("SELECT actor_origin_id FROM ydoc_updates ORDER BY seq")
+                        .unwrap();
+                    Ok::<_, rusqlite::Error>(
+                        stmt.query_map([], |r| r.get::<_, String>(0))
+                            .unwrap()
+                            .map(|r| r.unwrap())
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .unwrap();
+            assert_eq!(
+                credits.len(),
+                if count <= MAX_RELEASE_ENTRIES as usize {
+                    count
+                } else {
+                    0
+                }
+            );
+            for (index, credit) in credits.iter().enumerate() {
+                assert_eq!(
+                    credit,
+                    if index % 2 == 0 {
+                        "local-person"
+                    } else {
+                        "agent-A"
+                    }
+                );
+            }
+            supervisor.close_all().unwrap();
+        }
+        samples.sort_by(f64::total_cmp);
+        println!(
+            "stop_release_summary entries={count} samples=21 median_ms={:.3} p95_ms={:.3}",
+            samples[10], samples[19]
+        );
+    }
+    let mut release_samples = Vec::new();
+    let mut append_samples = Vec::new();
+    let mut tails = Vec::new();
+    for run in 0..21 {
+        let (release, append, tail) = release_contention_sample().await;
+        println!(
+            "stop_writer_sample run={run} release_ms={release:.3} append_ms={append:.3} tail_ms={tail:.3}"
+        );
+        release_samples.push(release);
+        append_samples.push(append);
+        tails.push(tail);
+    }
+    for (name, mut samples) in [
+        ("release", release_samples),
+        ("append", append_samples),
+        ("tail", tails),
+    ] {
+        samples.sort_by(f64::total_cmp);
+        println!(
+            "stop_writer_summary component={name} samples=21 median_ms={:.3} p95_ms={:.3}",
+            samples[10], samples[19]
+        );
+    }
+}
+
+async fn release_contention_sample() -> (f64, f64, f64) {
+    use dohc_engine_storage::{FaultAction, FaultInjector, FaultPoint};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct ObserveCommit(Arc<AtomicBool>);
+    impl FaultInjector for ObserveCommit {
+        fn poll(&self, point: FaultPoint) -> FaultAction {
+            if point == FaultPoint::StorageBeforePersist {
+                assert!(
+                    self.0.load(Ordering::SeqCst),
+                    "the other append was submitted during release"
+                );
+            }
+            FaultAction::Continue
+        }
+    }
+    let (mut f, supervisor, actor) = pending_release_fixture(MAX_RELEASE_ENTRIES as usize).await;
+    let key = DocKey::new("workspace", "main", "other").unwrap();
+    dohc_engine_domain::VersionedTextStore::new(&mut f.store)
+        .write_text(
+            &dohc_engine_domain::WriteText {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                object_id: "other".into(),
+                path: "notes/other.md".into(),
+                text: f.text.clone(),
+                moment_id: "other-base".into(),
+                metadata_origin: "api".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 19,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    dohc_engine_collab::claim_base(
+        &mut f.store,
+        &key,
+        ContentKind::Richdoc,
+        &f.bytes,
+        &NoFaults,
+        20,
+    )
+    .unwrap();
+    let other = Ydoc::wire();
+    other.apply(&f.bytes).unwrap();
+    let record_other = |update, request_id: &str, now_ms| {
+        actor.ydoc_record_update(
+            key.clone(),
+            "notes/other.md".into(),
+            ContentKind::Richdoc,
+            Regime::Replicated,
+            update,
+            Some("local-person".into()),
+            None,
+            Some(f.binding.lineage_claim_id.clone()),
+            false,
+            None,
+            Some(request_id.into()),
+            now_ms,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            None,
+        )
+    };
+    record_other(
+        other.richdoc_append_paragraph("Warm other document"),
+        "other-warm",
+        37,
+    )
+    .await
+    .unwrap();
+    let solo_started = std::time::Instant::now();
+    record_other(
+        other.richdoc_append_paragraph("Solo document edit"),
+        "other-solo",
+        38,
+    )
+    .await
+    .unwrap();
+    let solo_append = solo_started.elapsed();
+    let update = other.richdoc_append_paragraph("Other document edit");
+    let submitted = Arc::new(AtomicBool::new(false));
+    let start = std::time::Instant::now();
+    let release = async {
+        actor
+            .owner_ydoc_stop(
+                "workspace".into(),
+                None,
+                Some(f.binding.clone()),
+                None,
+                Some(0),
+                None,
+                "release".into(),
+                40,
+                Arc::new(ObserveCommit(submitted.clone())),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        start.elapsed()
+    };
+    let append = async {
+        submitted.store(true, Ordering::SeqCst);
+        record_other(update, "other-append", 41).await.unwrap();
+        start.elapsed()
+    };
+    let (release, append) = tokio::join!(release, append);
+    println!(
+        "stop_writer release_ms={:.3} other_append_ms={:.3} tail_ms={:.3}",
+        release.as_secs_f64() * 1_000.0,
+        append.as_secs_f64() * 1_000.0,
+        append.saturating_sub(release).as_secs_f64() * 1_000.0
+    );
+    println!(
+        "stop_writer_baseline solo_append_ms={:.3}",
+        solo_append.as_secs_f64() * 1_000.0
+    );
+    let persisted = dohc_engine_collab::load_persisted(&f.store, &key)
+        .unwrap()
+        .unwrap();
+    assert!(
+        persisted
+            .doc
+            .project(ContentKind::Richdoc)
+            .unwrap()
+            .content
+            .contains("Other document edit")
+    );
+    supervisor.close_all().unwrap();
+    (
+        release.as_secs_f64() * 1000.0,
+        append.as_secs_f64() * 1000.0,
+        append.saturating_sub(release).as_secs_f64() * 1000.0,
+    )
 }
 
 #[tokio::test]

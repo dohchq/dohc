@@ -4861,6 +4861,34 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "manual per-frame timing, 30 accepted link field edits"]
+    fn field_history_link_frame_cost() {
+        let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
+        let source = Ydoc::wire();
+        let mut samples = Vec::new();
+        for cursor in 1..=35 {
+            let update = link_frame(
+                &format!("cost-{cursor}"),
+                cursor,
+                source
+                    .frontmatter_set("status", &format!("value-{cursor}"))
+                    .unwrap(),
+            );
+            let start = std::time::Instant::now();
+            ack(apply(&mut store, &mut cache, &handle, update));
+            if cursor > 5 {
+                samples.push(start.elapsed().as_nanos());
+            }
+        }
+        samples.sort_unstable();
+        println!(
+            "field_history_link_frame_cost: n={} median_ns={}",
+            samples.len(),
+            (samples[14] + samples[15]) / 2
+        );
+    }
+
+    #[test]
     fn field_history_without_a_confirmed_account_stays_unattributed() {
         for kind in [
             "empty",
@@ -5322,4 +5350,33 @@ mod tests {
             ]
         );
     }
+    #[test]
+    #[ignore = "manual per-frame timing, 30 accepted field edits"]
+    fn field_history_frame_cost() {
+        let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
+        let source = Ydoc::wire();
+        let mut samples = Vec::new();
+        for cursor in 1..=35 {
+            let update = account_frame(
+                &format!("cost-{cursor}"),
+                cursor,
+                source
+                    .frontmatter_set("status", &format!("value-{cursor}"))
+                    .unwrap(),
+                true,
+            );
+            let start = std::time::Instant::now();
+            ack(apply(&mut store, &mut cache, &handle, update));
+            if cursor > 5 {
+                samples.push(start.elapsed().as_nanos());
+            }
+        }
+        samples.sort_unstable();
+        println!(
+            "field_history_frame_cost: n={} median_ns={}",
+            samples.len(),
+            (samples[14] + samples[15]) / 2
+        );
+    }
+
 }

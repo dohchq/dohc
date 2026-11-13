@@ -24,7 +24,8 @@ use dohc_engine_sync::{
 };
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use yrs::types::Attrs;
 use yrs::{Any, Doc, OffsetKind, Options, ReadTxn, Text, Transact};
 
 /// A locally-originated relay-visible op, shaped as a peer receives it.
@@ -377,6 +378,88 @@ async fn capture_seed(
         .expect("capture")
         .snapshot
         .object_id
+}
+
+struct OversizedLineage {
+    base: Vec<u8>,
+}
+
+/// One projectable document whose accumulated CRDT history is too large to
+/// originate as a base. The visible text stays at 1 MiB while interior
+/// replacements add the unbounded revision-churn headroom described by #549.
+fn oversized_lineage() -> &'static OversizedLineage {
+    static LINEAGE: OnceLock<OversizedLineage> = OnceLock::new();
+    LINEAGE.get_or_init(|| {
+        let doc = Doc::with_options(Options {
+            offset_kind: OffsetKind::Utf16,
+            ..Options::default()
+        });
+        let text = doc.get_or_insert_text(dohc_engine_collab::ROOT_PLAINTEXT);
+        let visible_bytes = 1024 * 1024;
+        text.insert(&mut doc.transact_mut(), 0, &"x".repeat(visible_bytes));
+
+        let limit = dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES;
+        {
+            let mut txn = doc.transact_mut();
+            for revision in 0..1_000_u32 {
+                let value = format!("revision-{revision:04}-{}", "x".repeat(22 * 1024));
+                text.format(
+                    &mut txn,
+                    revision,
+                    1,
+                    Attrs::from([("revision".into(), Any::String(value.into()))]),
+                );
+            }
+        }
+        let base = doc
+            .transact()
+            .encode_state_as_update_v1(&yrs::StateVector::default());
+        assert!(
+            base.len() > limit,
+            "the fixture must exceed MAX_YDOC_UPDATE_BYTES: {} <= {limit}",
+            base.len()
+        );
+        let projected = Ydoc::wire();
+        projected.apply(&base).expect("apply oversized fixture");
+        assert_eq!(
+            projected
+                .project(ContentKind::Plaintext)
+                .expect("the oversized state remains projectable")
+                .content
+                .len(),
+            visible_bytes
+        );
+        OversizedLineage { base }
+    })
+}
+
+fn seed_unclaimed_oversized_lineage(db: &Path, key: &DocKey, path: &str) {
+    let fixture = oversized_lineage();
+    let mut store = EngineStore::open(db, 9_107).expect("open store");
+    let base_sha = store
+        .put_binary_blob(&fixture.base)
+        .expect("store oversized private base");
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO ydoc_docs \
+                 (workspace_id, version_id, object_id, content_kind, regime, \
+                  head_update_seq, head_snapshot_seq, lineage_claim_status, updated_at_ms, path) \
+                 VALUES (?1, ?2, ?3, 'plaintext', 'replicated', 1, 0, 'unclaimed', 150, ?4)",
+                rusqlite::params![key.workspace_id, key.version_id, key.object_id, path],
+            )
+            .map_err(StorageError::persist_public)?;
+            tx.execute(
+                "INSERT INTO ydoc_updates \
+                 (workspace_id, version_id, object_id, seq, update_blob_sha256, \
+                  actor_origin_id, recorded_at_ms) \
+                 VALUES (?1, ?2, ?3, 1, ?4, NULL, 150)",
+                rusqlite::params![key.workspace_id, key.version_id, key.object_id, base_sha,],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("seed unclaimed oversized lineage");
 }
 
 /// The fresh-creation path: a first edit on a synced workspace mints exactly
@@ -1389,6 +1472,84 @@ async fn opening_a_document_with_a_deferred_different_seed_requires_conflict_rev
         dohc_engine_domain::ConflictStatus::Resolved
     );
     supervisor.close(&a).unwrap();
+}
+
+#[test]
+#[ignore = "explicit oversized performance measurement"]
+fn oversized_encoding_and_origination_lane_measurement() {
+    let fixture = oversized_lineage();
+    let doc = Ydoc::wire();
+    doc.apply(&fixture.base).unwrap();
+    let mut encode_ms = Vec::new();
+    for _ in 0..3 {
+        let start = std::time::Instant::now();
+        let bytes = doc.encode_full_state();
+        encode_ms.push(start.elapsed().as_secs_f64() * 1000.0);
+        assert!(bytes.len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES);
+    }
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    let key = DocKey::new("measure", "main", "doc").unwrap();
+    let mut store = EngineStore::open(&db, 1).unwrap();
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version("measure", "main", 1, &NoFaults)
+        .unwrap();
+    VersionedTextStore::new(&mut store)
+        .write_text(
+            &WriteText {
+                workspace_id: "measure".into(),
+                version_id: "main".into(),
+                object_id: "doc".into(),
+                path: "doc.md".into(),
+                text: "x".repeat(1024 * 1024),
+                moment_id: "seed".into(),
+                metadata_origin: "api".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 2,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    drop(store);
+    seed_unclaimed_oversized_lineage(&db, &key, "doc.md");
+    enable_sync(&db, "measure");
+    let mut store = EngineStore::open(&db, 3).unwrap();
+    let mut before_ms = Vec::new();
+    let mut after_ms = Vec::new();
+    for lane in [0, 1] {
+        for _ in 0..3 {
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute("UPDATE ydoc_docs SET file_export_lane=?1", [lane])
+                        .unwrap();
+                    let start = std::time::Instant::now();
+                    let result = dohc_engine_sync::originate_ydoc_base_in_tx(
+                        tx, &key, "doc.md", None, None, 4,
+                    )
+                    .unwrap();
+                    let ms = start.elapsed().as_secs_f64() * 1000.0;
+                    if lane == 0 {
+                        assert!(matches!(
+                            result,
+                            dohc_engine_sync::BaseOrigination::Declined(_)
+                        ));
+                        before_ms.push(ms);
+                    } else {
+                        assert_eq!(result, dohc_engine_sync::BaseOrigination::NothingToDo);
+                        after_ms.push(ms);
+                    }
+                    Ok::<_, StorageError>(())
+                })
+                .unwrap();
+        }
+    }
+    println!(
+        "OVERSIZED_ENGINE_MEASUREMENT {}",
+        serde_json::json!({"baseBytes":fixture.base.len(),"visibleBytes":1024*1024,"nativeFullEncodeMs":encode_ms,"originationWithoutLaneMs":before_ms,"originationWithLaneMs":after_ms,"method":"Three direct native full-state encodes; three matched origination calls with the lane disabled and enabled. Origination includes durable reconstruction and encode. The enabled lane encodes zero times."})
+    );
 }
 
 /// The rich-document schema version a stored Y.Doc update names, if any.

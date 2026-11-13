@@ -102,6 +102,12 @@ async fn history_operation_large_undo_rpc_is_bounded_and_paged() {
     undo_rpc_proof(128).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "5000-member end-to-end measurement runs separately under the build budget"]
+async fn history_operation_5000_member_undo_rpc_budget() {
+    undo_rpc_proof(5000).await;
+}
+
 async fn undo_rpc_proof(n: usize) {
     let (scratch, transport, handle) = fixture(n).await;
     let start = Instant::now();

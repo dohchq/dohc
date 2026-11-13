@@ -708,6 +708,63 @@ fn a_binding_lists_every_protected_namespace() {
     }
 }
 
+/// What a protected remote apply adds over half a mebibyte of Markdown:
+/// rebuilding the head, here from one snapshot, the full-state digest the
+/// binding names, and structural inspection of a safe append and of a disk
+/// fold. Only an apply in a protected lineage pays it.
+#[test]
+#[ignore = "measurement"]
+fn measure_protected_inspection_over_half_a_mebibyte() {
+    let paragraph = "A paragraph of prose someone wrote in their plan, long enough to be typical. ".repeat(4);
+    let mut markdown = String::new();
+    while markdown.len() < 512 * 1024 {
+        markdown.push_str(&paragraph);
+        markdown.push_str("\n\n");
+    }
+    let markdown = markdown.trim_end().to_owned();
+    let doc = Ydoc::wire();
+    doc.rewrite_content_to_markdown(ContentKind::Richdoc, &markdown).unwrap();
+    let head = Ydoc::wire();
+    head.apply(&doc.encode_full_state()).unwrap();
+    let append = doc.richdoc_append_paragraph("Appended.");
+    let fold = Ydoc::wire();
+    fold.apply(&head.encode_full_state()).unwrap();
+    // The disk edit changes the last paragraph, so the fold deletes it.
+    let fold = fold.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, &format!("{markdown} A disk edit.")).unwrap();
+    let time = |run: &dyn Fn()| {
+        let mut samples: Vec<f64> = (0..7)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                run();
+                started.elapsed().as_secs_f64() * 1000.0
+            })
+            .collect();
+        samples.sort_by(f64::total_cmp);
+        samples[samples.len() / 2]
+    };
+    let full_state = head.encode_full_state();
+    let reconstruction = time(&|| {
+        Ydoc::wire().apply(&full_state).unwrap();
+    });
+    let digest = time(&|| {
+        hex_sha256(&head.encode_full_state());
+    });
+    let safe = time(&|| assert_eq!(crate::inspect_update(&head, &append), crate::UpdateInspection::Admissible));
+    let destructive = time(&|| assert!(matches!(crate::inspect_update(&head, &fold), crate::UpdateInspection::Hold(_))));
+    println!(
+        "PROTECTED_INSPECTION_MEASUREMENT {}",
+        serde_json::json!({
+            "markdownBytes": markdown.len(),
+            "fullStateBytes": full_state.len(),
+            "headFromOneSnapshotMedianMs": reconstruction,
+            "headDigestMedianMs": digest,
+            "safeAppendInspectionMedianMs": safe,
+            "diskFoldInspectionMedianMs": destructive,
+            "samples": 7,
+        })
+    );
+}
+
 /// An update lands off a protected tail's binding at another path, or after
 /// a restore its release did not bind. Invalid coverage keeps the release
 /// binding; a release or window that does not read cannot show an update

@@ -264,6 +264,324 @@ fn vector(name: &str) -> Vec<u8> {
     .unwrap()
 }
 
+const HISTORY_INTERVAL: usize = 32;
+
+const HISTORY_MAX_APPLICATIONS: usize = 128;
+
+const HISTORY_PUBLICATION_BUDGET: usize = 32 << 20;
+
+/// Four full 4,095-event checkpoint segments precede a long scenario's
+/// measured interval, so its accepted suffix holds 32 events like a short one.
+const HISTORY_LONG_PREFIX: usize = 4 * 4_095;
+
+const HISTORY_MAX_UPDATE_BYTES: usize = 64 << 10;
+
+const HISTORY_MAX_BOOTSTRAP_BYTES: usize = 1 << 20;
+
+const HISTORY_MAX_CORPUS_BYTES: usize = 64 << 20;
+
+/// Name, visible document, and what accepted history holds before the
+/// measured interval. Short scenarios carry their visible document in the
+/// bootstrap. `long-empty-updates` is a history-only control: empty updates
+/// precede short-small's exact bytes, so accepted history grows while native
+/// state does not.
+const HISTORY_SCENARIOS: [(&str, &str, &str); 5] = [
+    ("short-small", "small", "none"),
+    ("short-large", "large", "none"),
+    ("long-small", "small", "status edits"),
+    ("long-large", "large", "status and paragraph edits"),
+    ("long-empty-updates", "small", "empty updates"),
+];
+
+const HISTORY_LIMITS: [&str; 2] = [
+    "The operating system file cache is warm. First calls follow a new connection or actor restart, not a cold disk.",
+    "Nearest-rank p95 of fewer than 20 samples is the slowest sample.",
+];
+
+fn history_env(name: &str, default: &str) -> String {
+    std::env::var(name).unwrap_or_else(|_| default.into())
+}
+
+fn elapsed_ms(started: std::time::Instant) -> f64 {
+    started.elapsed().as_secs_f64() * 1_000.0
+}
+
+fn dir_bytes(path: &std::path::Path) -> u64 {
+    std::fs::read_dir(path).map_or(0, |entries| {
+        entries
+            .filter_map(Result::ok)
+            .map(|entry| match entry.file_type() {
+                Ok(kind) if kind.is_dir() => dir_bytes(&entry.path()),
+                _ => entry.metadata().map_or(0, |m| m.len()),
+            })
+            .sum()
+    })
+}
+
+/// Nearest-rank summary of raw milliseconds. With fewer than 20 samples, p95
+/// is the slowest sample.
+fn summary(samples: &[f64]) -> serde_json::Value {
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let rank = |q: f64| {
+        sorted
+            .get(((q * sorted.len() as f64).ceil() as usize).max(1) - 1)
+            .copied()
+    };
+    serde_json::json!({
+        "count": sorted.len(),
+        "medianMs": rank(0.5),
+        "p95Ms": rank(0.95),
+        "maxMs": sorted.last(),
+    })
+}
+
+/// Edit `i` of the long realistic lineage, unchanged from the first frozen
+/// corpus: a status change on most edits and a short Unicode paragraph every
+/// 64th, never a full-body replacement.
+fn history_edit(doc: &Ydoc, i: usize) -> Vec<u8> {
+    if i % 64 == 63 {
+        doc.richdoc_append_paragraph(&format!("Revision {i}: Ã¼nÃ¯cÃ¸dÃ© âœ“ ðŸš€"))
+    } else {
+        history_status(doc, i)
+    }
+}
+
+fn history_status(doc: &Ydoc, i: usize) -> Vec<u8> {
+    doc.frontmatter_set("status", ["draft", "review", "done"][i % 3])
+        .unwrap()
+}
+
+/// A fresh generation of `name`: its own bootstrap, unless it uses the
+/// `rich-unicode` fixture, and its accepted updates. Every scenario ends with
+/// edits 16380..16412 of the realistic lineage, so each measured interval
+/// makes the same edits to the same visible document.
+fn history_generate(name: &str) -> (Option<Vec<u8>>, Vec<Vec<u8>>) {
+    let doc = Ydoc::wire();
+    doc.apply(&vector("rich-unicode")).unwrap();
+    let (bootstrap, mut updates) = match name {
+        "short-small" | "short-large" => {
+            // The realistic prefix's visible result, without its history.
+            history_status(&doc, HISTORY_LONG_PREFIX - 1);
+            if name == "short-large" {
+                for i in (63..HISTORY_LONG_PREFIX).step_by(64) {
+                    history_edit(&doc, i);
+                }
+            }
+            (Some(doc.encode_full_state()), Vec::new())
+        }
+        "long-small" => (
+            None,
+            (0..HISTORY_LONG_PREFIX)
+                .map(|i| history_status(&doc, i))
+                .collect(),
+        ),
+        "long-large" => (
+            None,
+            (0..HISTORY_LONG_PREFIX)
+                .map(|i| history_edit(&doc, i))
+                .collect(),
+        ),
+        _ => unreachable!("{name} has no generator"),
+    };
+    updates.extend(
+        (HISTORY_LONG_PREFIX..HISTORY_LONG_PREFIX + HISTORY_INTERVAL)
+            .map(|i| history_edit(&doc, i)),
+    );
+    (bootstrap, updates)
+}
+
+fn encode_frames(updates: &[Vec<u8>]) -> Vec<u8> {
+    updates
+        .iter()
+        .flat_map(|u| {
+            (u.len() as u32)
+                .to_le_bytes()
+                .into_iter()
+                .chain(u.iter().copied())
+        })
+        .collect()
+}
+
+fn decode_frames(encoded: &[u8], expected: usize) -> Vec<Vec<u8>> {
+    let (mut updates, mut rest) = (Vec::with_capacity(expected), encoded);
+    while !rest.is_empty() {
+        assert!(
+            updates.len() < expected,
+            "corpus holds more than {expected} updates"
+        );
+        let Some((length, tail)) = rest.split_first_chunk::<4>() else {
+            panic!("corpus ends inside frame {}", updates.len());
+        };
+        let length = u32::from_le_bytes(*length) as usize;
+        assert!(
+            length <= HISTORY_MAX_UPDATE_BYTES && length <= tail.len(),
+            "corpus frame {} is truncated or exceeds 64 KiB",
+            updates.len()
+        );
+        let (update, tail) = tail.split_at(length);
+        updates.push(update.to_vec());
+        rest = tail;
+    }
+    assert_eq!(updates.len(), expected, "corpus update count");
+    updates
+}
+
+fn read_capped(path: &std::path::Path, cap: usize) -> Vec<u8> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .unwrap()
+        .take(cap as u64 + 1)
+        .read_to_end(&mut bytes)
+        .unwrap();
+    assert!(bytes.len() <= cap, "{} exceeds {cap} bytes", path.display());
+    bytes
+}
+
+/// Replay `updates` beside a fresh generation and compare projections at the
+/// bootstrap, at the end of the prefix, and after each measured update. Yrs
+/// client ids differ between the two; the visible edits must not.
+fn history_validate(
+    name: &str,
+    bootstrap: &[u8],
+    updates: &[Vec<u8>],
+    reference_bootstrap: &[u8],
+    reference: &[Vec<u8>],
+) -> Ydoc {
+    let (loaded, fresh) = (Ydoc::wire(), Ydoc::wire());
+    let project = |doc: &Ydoc| doc.project(ContentKind::Richdoc).unwrap().content;
+    loaded.apply(bootstrap).unwrap();
+    fresh.apply(reference_bootstrap).unwrap();
+    assert_eq!(project(&loaded), project(&fresh), "{name}: bootstrap");
+    let prefix = updates.len() - HISTORY_INTERVAL;
+    for (index, (update, expected)) in updates.iter().zip(reference).enumerate() {
+        assert!(update.len() > 2, "{name}: update {index} is empty");
+        loaded.apply(update).unwrap();
+        fresh.apply(expected).unwrap();
+        if index + 1 >= prefix {
+            assert_eq!(
+                project(&loaded),
+                project(&fresh),
+                "{name}: projection after update {}",
+                index + 1
+            );
+        }
+    }
+    loaded
+}
+
+#[derive(Clone)]
+struct HistoryCorpus {
+    bootstrap: Vec<u8>,
+    updates: Vec<Vec<u8>>,
+    identity: serde_json::Value,
+    /// The replayed corpus's terminal projection and native sizes.
+    markdown: String,
+    full_state_bytes: usize,
+    delete_set_bytes: usize,
+}
+
+/// `name`'s bootstrap and length-prefixed update frames, frozen under
+/// DOHC_LIVE_HISTORY_CORPUS_DIR as `<name>.updates` and, for a scenario with
+/// its own bootstrap, `<name>.bootstrap`. Frozen files keep native bytes
+/// identical across builds; a fresh `Ydoc::wire()` picks a new Yrs client id.
+/// A scenario with none of its files is generated and frozen. Existing files
+/// are never rewritten: a partial or invalid scenario stops the run.
+fn history_corpus(name: &str) -> HistoryCorpus {
+    let (own_bootstrap, generated) = history_generate(name);
+    let dir = std::env::var_os("DOHC_LIVE_HISTORY_CORPUS_DIR").map(PathBuf::from);
+    let path = |extension: &str| {
+        dir.as_ref()
+            .map(|dir| dir.join(format!("{name}.{extension}")))
+    };
+    let bootstrap_path = path("bootstrap").filter(|_| own_bootstrap.is_some());
+    let updates_path = path("updates");
+    let bootstrap_source = if own_bootstrap.is_some() {
+        "scenario"
+    } else {
+        "fixture rich-unicode"
+    };
+    let fresh_bootstrap = own_bootstrap.unwrap_or_else(|| vector("rich-unicode"));
+    let present: Vec<bool> = updates_path
+        .iter()
+        .chain(&bootstrap_path)
+        .map(|path| path.try_exists().unwrap())
+        .collect();
+    let frozen = present.contains(&true);
+    assert!(
+        !frozen || !present.contains(&false),
+        "{name}: frozen corpus is incomplete; restore or remove its files"
+    );
+    let (bootstrap, encoded) = if frozen {
+        (
+            bootstrap_path.as_ref().map_or_else(
+                || fresh_bootstrap.clone(),
+                |path| read_capped(path, HISTORY_MAX_BOOTSTRAP_BYTES),
+            ),
+            read_capped(updates_path.as_ref().unwrap(), HISTORY_MAX_CORPUS_BYTES),
+        )
+    } else {
+        (fresh_bootstrap.clone(), encode_frames(&generated))
+    };
+    let updates = decode_frames(&encoded, generated.len());
+    let doc = history_validate(name, &bootstrap, &updates, &fresh_bootstrap, &generated);
+    if !frozen {
+        for (path, bytes) in [(&bootstrap_path, &bootstrap), (&updates_path, &encoded)] {
+            use std::io::Write;
+            let Some(path) = path else { continue };
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .unwrap()
+                .write_all(bytes)
+                .unwrap();
+        }
+    }
+    let source = match (frozen, &dir) {
+        (true, _) => "frozen",
+        (false, Some(_)) => "generated-and-frozen",
+        (false, None) => "generated",
+    };
+    HistoryCorpus {
+        identity: serde_json::json!({
+            "scenario": name,
+            "source": source,
+            "sha256": hex_sha256(&encoded),
+            "updates": updates.len(),
+            "usedBytes": updates.iter().map(Vec::len).sum::<usize>(),
+            "bootstrapSource": bootstrap_source,
+        }),
+        markdown: doc.project(ContentKind::Richdoc).unwrap().content,
+        full_state_bytes: doc.encode_full_state().len(),
+        delete_set_bytes: doc.encode_delete_set().len(),
+        bootstrap,
+        updates,
+    }
+}
+
+/// The `long-empty-updates` control: empty updates before short-small's
+/// exact bootstrap and update bytes, so it shares their native state.
+fn history_empty_updates(short_small: &HistoryCorpus) -> HistoryCorpus {
+    let updates: Vec<Vec<u8>> = std::iter::repeat_n(vec![0, 0], HISTORY_LONG_PREFIX)
+        .chain(short_small.updates.iter().cloned())
+        .collect();
+    HistoryCorpus {
+        identity: serde_json::json!({
+            "scenario": "long-empty-updates",
+            "sha256": hex_sha256(&encode_frames(&updates)),
+            "updates": updates.len(),
+            "usedBytes": updates.iter().map(Vec::len).sum::<usize>(),
+            "emptyUpdates": HISTORY_LONG_PREFIX,
+            "base": short_small.identity,
+        }),
+        updates,
+        ..short_small.clone()
+    }
+}
+
 impl Fixture {
     async fn new() -> Self {
         Self::with_relay(false).await
@@ -1624,6 +1942,405 @@ async fn configured_settlement_recovers_committed_projection_and_pending_materia
         assert_eq!(f.counts(), counts);
         assert!(repaired.materialized);
         f.assert_projection();
+    }
+}
+
+/// Manual measurement of native accepted-history publication and settlement.
+/// Raw samples only, no timing assertions; correctness checks run after each
+/// timer stops.
+///
+/// The scenarios vary accepted-history length and visible document size
+/// independently. Short scenarios hold 32 accepted updates on a bootstrap
+/// that already carries their document. Long ones hold 16412, with the latest
+/// checkpoint at event 16380. Large documents add 255 paragraphs to small
+/// ones. Scenarios with the same document size end with the same projected
+/// Markdown, and every measured interval makes the same 32 edits. Their
+/// native bytes still differ: a long edit history leaves tombstones that the
+/// native state and each update's delete set carry. `long-empty-updates`
+/// holds native state fixed and grows only accepted history. Each result
+/// records native sizes instead of assuming them.
+///
+/// Each scenario admits authentic incremental updates at monotonic cursors
+/// and settles the prefix in 32-update intervals plus one shorter final
+/// interval. Copies of that closed template then each take one fresh
+/// settlement of the last 32 updates. Half settle on the actor that admitted
+/// them; half restart the actor first. The template then settles the same
+/// interval and measures warm same-terminal replay, `owner_publication_prefix`
+/// on the settlement's journaled `moment.append` (first call on a new
+/// connection, then warm), and per actor restart the first replay and first
+/// publication. The operating system's file cache stays warm throughout.
+///
+/// Build the executable once under the repository's cargo budget, then run
+/// it serially. The first run writes the corpus; later runs and other builds
+/// read the same bytes. A `long-large.updates` copied from the first
+/// benchmark's single-file corpus reproduces that corpus's bytes. Scratch
+/// fixtures stay under DOHC_TEST_SCRATCH_ROOT and are removed on drop.
+///
+///   CARGO_BUILD_JOBS=<cores/4> cargo test -p dohc-engine-runtime --release --test live_settlement --no-run
+///   DOHC_TEST_SCRATCH_ROOT=<task>/scratch DOHC_LIVE_HISTORY_CORPUS_DIR=<task>/corpus \
+///     <live_settlement executable> live_history_publication_and_settlement_benchmark \
+///     --ignored --exact --nocapture --test-threads=1
+///
+/// DOHC_LIVE_HISTORY_SCENARIOS (all five, comma separated),
+/// DOHC_LIVE_HISTORY_SAMPLES (31), DOHC_LIVE_HISTORY_FRESH (5 of each fresh
+/// kind), and DOHC_LIVE_HISTORY_RESTARTS (5) override the defaults.
+#[tokio::test]
+#[ignore = "manual live history benchmark; run without competing workloads"]
+async fn live_history_publication_and_settlement_benchmark() {
+    use dohc_engine_sync::{ReplicationEnvelope, owner_publication_prefix};
+    use std::time::Instant;
+    let all = HISTORY_SCENARIOS.map(|(name, ..)| name).join(",");
+    let scenarios: Vec<_> = history_env("DOHC_LIVE_HISTORY_SCENARIOS", &all)
+        .split(',')
+        .map(|name| {
+            *HISTORY_SCENARIOS
+                .iter()
+                .find(|(known, ..)| *known == name.trim())
+                .unwrap_or_else(|| panic!("unknown scenario {name}"))
+        })
+        .collect();
+    let count = |name: &str, default: &str| history_env(name, default).parse::<usize>().unwrap();
+    let samples = count("DOHC_LIVE_HISTORY_SAMPLES", "31");
+    let fresh_samples = count("DOHC_LIVE_HISTORY_FRESH", "5");
+    let restarts = count("DOHC_LIVE_HISTORY_RESTARTS", "5");
+    assert!(
+        samples <= 1_000 && (5..=50).contains(&fresh_samples) && restarts <= 100,
+        "samples exceed 1000, fresh samples are outside 5..=50, or restarts exceed 100"
+    );
+    // Every corpus is generated or validated before any fixture work.
+    // Short-small loads once, so the empty-update control reuses its bytes.
+    let short_small = scenarios
+        .iter()
+        .any(|(name, ..)| matches!(*name, "short-small" | "long-empty-updates"))
+        .then(|| history_corpus("short-small"));
+    let corpora: Vec<HistoryCorpus> = scenarios
+        .iter()
+        .map(|(name, ..)| match *name {
+            "short-small" => short_small.clone().unwrap(),
+            "long-empty-updates" => history_empty_updates(short_small.as_ref().unwrap()),
+            name => history_corpus(name),
+        })
+        .collect();
+    let find = |wanted: &str| {
+        scenarios
+            .iter()
+            .zip(&corpora)
+            .find(|((name, ..), _)| *name == wanted)
+            .map(|(_, corpus)| corpus)
+    };
+    if let (Some(small), Some(empty)) = (find("short-small"), find("long-empty-updates")) {
+        assert_eq!(
+            small.bootstrap, empty.bootstrap,
+            "long-empty-updates: bootstrap bytes"
+        );
+        assert_eq!(
+            small.updates[..],
+            empty.updates[HISTORY_LONG_PREFIX..],
+            "long-empty-updates: measured update bytes"
+        );
+    }
+    for ((name, document, _), corpus) in scenarios.iter().zip(&corpora) {
+        let (_, first) = scenarios
+            .iter()
+            .zip(&corpora)
+            .find(|((_, other, _), _)| other == document)
+            .unwrap();
+        assert_eq!(
+            corpus.markdown, first.markdown,
+            "{name}: final projection differs within the {document} document"
+        );
+    }
+    for ((name, document, history), corpus) in scenarios.iter().zip(&corpora) {
+        let size = corpus.updates.len();
+        let prior = size - HISTORY_INTERVAL;
+        let incomplete = |reason: &str| {
+            println!(
+                "LIVE_HISTORY_BENCH {}",
+                serde_json::json!({ "scenario": name, "acceptedUpdates": size, "outcome": "incomplete", "reason": reason })
+            )
+        };
+        if corpus.markdown.len() > 1 << 20 || corpus.full_state_bytes > 8 << 20 {
+            incomplete("projection exceeds 1 MiB or native state exceeds 8 MiB");
+            continue;
+        }
+        let started = Instant::now();
+        let mut f =
+            Fixture::build(true, corpus.bootstrap.clone(), "notes/example.md", |_| {}).await;
+        // First-bootstrap materialization stays out of the measured interval.
+        f.settle_interval(None).await.unwrap();
+        let (before, suffix) = corpus.updates.split_at(prior);
+        let mut over = false;
+        for (index, interval) in before.chunks(HISTORY_INTERVAL).enumerate() {
+            let after = index * HISTORY_INTERVAL;
+            let terminal = f.admit(after, interval).await;
+            let settled = f.settle_interval(Some(terminal)).await.unwrap();
+            assert!(settled.materialized);
+            assert_eq!(settled.terminal_cursor, (after + interval.len()) as i64);
+            over = dir_bytes(f.root.path()) > 256 << 20;
+            if over {
+                break;
+            }
+        }
+        if over {
+            incomplete("workspace exceeds 256 MiB");
+            continue;
+        }
+        let setup_ms = elapsed_ms(started);
+
+        let check = |f: &Fixture, settled: &LiveSettlementResult| {
+            assert!(settled.materialized);
+            assert_eq!(
+                (
+                    settled.previous_cursor,
+                    settled.terminal_cursor,
+                    settled.application_count
+                ),
+                (prior as i64, size as i64, HISTORY_INTERVAL)
+            );
+            f.assert_projection();
+        };
+        // Each fresh sample settles its own copy of the closed template, so no
+        // sample repeats work that another already settled.
+        let (mut admitted, mut restarted) = (Vec::new(), Vec::new());
+        for index in 0..2 * fresh_samples {
+            let started = Instant::now();
+            let mut copy = f.copy().await;
+            let terminal = copy.admit(prior, suffix).await;
+            if index % 2 == 1 {
+                copy.reopen().await;
+            }
+            let prepare_ms = elapsed_ms(started);
+            let started = Instant::now();
+            let settled = copy.settle_interval(Some(terminal)).await;
+            let settle_ms = elapsed_ms(started);
+            let settled = settled.unwrap();
+            check(&copy, &settled);
+            let sample = serde_json::json!({
+                "settleMs": settle_ms,
+                "prepareMs": prepare_ms,
+                "settlementId": settled.settlement_id,
+                "momentId": settled.moment_id,
+            });
+            if index % 2 == 0 {
+                admitted.push((settle_ms, sample));
+            } else {
+                restarted.push((settle_ms, sample));
+            }
+        }
+        let fresh = |samples: Vec<(f64, serde_json::Value)>| {
+            let (ms, raw): (Vec<f64>, Vec<_>) = samples.into_iter().unzip();
+            serde_json::json!({ "summary": summary(&ms), "samples": raw })
+        };
+
+        f.reopen().await;
+        let terminal = Some(f.admit(prior, suffix).await);
+        let settled = f.settle_interval(terminal.clone()).await.unwrap();
+        check(&f, &settled);
+        let file = f.root.path().join(&f.binding.current_path);
+        let (counts, bytes) = (f.counts(), std::fs::read(&file).unwrap());
+        let replayed = |f: &Fixture, again: LiveSettlementResult| {
+            assert_eq!(
+                (again.settlement_id, again.moment_id),
+                (settled.settlement_id.clone(), settled.moment_id.clone())
+            );
+            assert_eq!(f.counts(), counts);
+            assert_eq!(std::fs::read(&file).unwrap(), bytes);
+        };
+        let mut replay_ms = Vec::new();
+        for _ in 0..samples {
+            let started = Instant::now();
+            let again = f.settle_interval(terminal.clone()).await;
+            replay_ms.push(elapsed_ms(started));
+            replayed(&f, again.unwrap());
+        }
+
+        let published = f.read(|db| {
+            db.query_row(
+                "SELECT origin_id,origin_seq,recorded_at_ms,payload_json FROM replication_log WHERE imported=0 AND op_kind='moment.append' AND json_extract(payload_json,'$.momentId')=?1",
+                [&settled.moment_id],
+                |r| {
+                    Ok(ReplicationEnvelope {
+                        settlement_admission: None,
+                        admitted_author_snapshot: None,
+                        workspace_id: "workspace".into(),
+                        origin_id: r.get(0)?,
+                        origin_seq: r.get(1)?,
+                        op_kind: "moment.append".into(),
+                        recorded_at_ms: r.get(2)?,
+                        relay_seq: None,
+                        payload: serde_json::from_str(&r.get::<_, String>(3)?).unwrap(),
+                    })
+                },
+            )
+            .unwrap()
+        });
+        let references = [
+            "payloadBeforeBlobSha256",
+            "payloadAfterBlobSha256",
+            "beforeBlobSha256",
+        ]
+        .iter()
+        .filter(|name| {
+            published.payload[**name]
+                .as_str()
+                .is_some_and(|d| !d.is_empty())
+        })
+        .count();
+        let publish = |store: &EngineStore| {
+            let started = Instant::now();
+            let prefix = owner_publication_prefix(
+                store,
+                "workspace",
+                std::slice::from_ref(&published),
+                HISTORY_PUBLICATION_BUDGET,
+            );
+            let elapsed = elapsed_ms(started);
+            let prefix = prefix.unwrap();
+            assert_eq!(
+                (prefix.allowed_ops, prefix.pending, prefix.budget_exhausted),
+                (1, None, false)
+            );
+            elapsed
+        };
+        let store = EngineStore::open(&f.db, 20).unwrap();
+        let publication_first_ms = publish(&store);
+        let publication_warm_ms: Vec<f64> = (0..samples).map(|_| publish(&store)).collect();
+        drop(store);
+
+        let mut restart_samples = Vec::new();
+        for _ in 0..restarts {
+            let started = Instant::now();
+            f.reopen().await;
+            let prepare_ms = elapsed_ms(started);
+            let started = Instant::now();
+            let again = f.settle_interval(terminal.clone()).await;
+            let replay_ms = elapsed_ms(started);
+            replayed(&f, again.unwrap());
+            let started = Instant::now();
+            let store = EngineStore::open(&f.db, 20).unwrap();
+            let store_open_ms = elapsed_ms(started);
+            let publication_ms = publish(&store);
+            drop(store);
+            restart_samples.push(serde_json::json!({
+                "prepareMs": prepare_ms,
+                "replayMs": replay_ms,
+                "storeOpenMs": store_open_ms,
+                "publicationMs": publication_ms,
+            }));
+        }
+
+        let names = [
+            "acceptedEvents",
+            "checkpoints",
+            "latestCheckpointEvent",
+            "latestCheckpointStateBytes",
+            "suffixEvents",
+            "suffixBytes",
+            "applicationReceipts",
+            "settlements",
+            "moments",
+            "replicationOps",
+            "localSnapshots",
+            "localSnapshotBytes",
+            "localTailUpdates",
+            "localTailBytes",
+        ];
+        let storage: Vec<Option<i64>> = f.read(|db| {
+            db.query_row(
+                "SELECT (SELECT count(*) FROM live_accepted_updates),
+                    (SELECT count(*) FROM live_accepted_checkpoints),
+                    (SELECT max(event_count) FROM live_accepted_checkpoints),
+                    (SELECT b.byte_length FROM live_accepted_checkpoints c JOIN binary_blobs b ON b.sha256=c.state_sha256 ORDER BY c.event_count DESC LIMIT 1),
+                    (SELECT suffix_count FROM live_accepted_updates ORDER BY event_count DESC LIMIT 1),
+                    (SELECT suffix_bytes FROM live_accepted_updates ORDER BY event_count DESC LIMIT 1),
+                    (SELECT count(*) FROM live_device_update_applications),
+                    (SELECT count(*) FROM live_device_settlements),
+                    (SELECT count(*) FROM moments),
+                    (SELECT count(*) FROM replication_log),
+                    (SELECT count(*) FROM ydoc_snapshots),
+                    (SELECT b.byte_length FROM ydoc_snapshots s JOIN binary_blobs b ON b.sha256=s.snapshot_blob_sha256 ORDER BY s.up_to_seq DESC LIMIT 1),
+                    (SELECT count(*) FROM ydoc_updates WHERE seq>(SELECT coalesce(max(up_to_seq),0) FROM ydoc_snapshots)),
+                    (SELECT coalesce(sum(b.byte_length),0) FROM ydoc_updates u JOIN binary_blobs b ON b.sha256=u.update_blob_sha256 WHERE u.seq>(SELECT coalesce(max(up_to_seq),0) FROM ydoc_snapshots))",
+                [],
+                |r| (0..names.len()).map(|i| r.get(i)).collect(),
+            )
+            .unwrap()
+        });
+        let layout = (storage[2], storage[4]);
+        let mut wal = f.db.clone().into_os_string();
+        wal.push("-wal");
+        let restart_ms = |field: &str| {
+            let ms: Vec<f64> = restart_samples
+                .iter()
+                .map(|sample| sample[field].as_f64().unwrap())
+                .collect();
+            summary(&ms)
+        };
+        println!(
+            "LIVE_HISTORY_BENCH {}",
+            serde_json::json!({
+                "outcome": "complete",
+                "scenario": name,
+                "document": document,
+                "historyBeforeMeasure": history,
+                "acceptedUpdates": size,
+                "settledBeforeMeasure": prior,
+                "measuredUpdateBytes": suffix.iter().map(Vec::len).sum::<usize>(),
+                "parameters": {
+                    "measuredInterval": HISTORY_INTERVAL,
+                    "linkAuthorityUpdates": size / 8,
+                    "maxApplications": HISTORY_MAX_APPLICATIONS,
+                    "publicationBudgetBytes": HISTORY_PUBLICATION_BUDGET,
+                },
+                "corpus": corpus.identity,
+                "bootstrapBytes": corpus.bootstrap.len(),
+                "bootstrapSha256": hex_sha256(&corpus.bootstrap),
+                "projectedMarkdownBytes": corpus.markdown.len(),
+                "projectedMarkdownSha256": hex_sha256(corpus.markdown.as_bytes()),
+                "fullStateBytes": corpus.full_state_bytes,
+                "deleteSetBytes": corpus.delete_set_bytes,
+                "storage": names.iter().zip(storage).map(|(n, v)| (n.to_string(), serde_json::Value::from(v))).collect::<serde_json::Map<_, _>>(),
+                "files": {
+                    "dbBytes": std::fs::metadata(&f.db).map_or(0, |m| m.len()),
+                    "walBytes": std::fs::metadata(&wal).map_or(0, |m| m.len()),
+                    "workspaceBytes": dir_bytes(f.root.path()),
+                },
+                "process": {
+                    "pid": std::process::id(),
+                    "executable": std::env::current_exe().unwrap(),
+                    "os": std::env::consts::OS,
+                    "arch": std::env::consts::ARCH,
+                    "cpus": std::thread::available_parallelism().map_or(0, |n| n.get()),
+                    "debugAssertions": cfg!(debug_assertions),
+                },
+                "limits": HISTORY_LIMITS,
+                "setupMs": setup_ms,
+                "freshSettlement": {
+                    "afterAdmission": fresh(admitted),
+                    "afterRestart": fresh(restarted),
+                },
+                "replayWarmMs": replay_ms,
+                "publicationReferences": references,
+                "publicationAllowedOps": 1,
+                "publicationFirstMs": publication_first_ms,
+                "publicationWarmMs": publication_warm_ms,
+                "restarts": restart_samples,
+                "summaries": {
+                    "replayWarm": summary(&replay_ms),
+                    "publicationWarm": summary(&publication_warm_ms),
+                    "restartReplay": restart_ms("replayMs"),
+                    "restartPublication": restart_ms("publicationMs"),
+                },
+                "settlementId": settled.settlement_id,
+                "momentId": settled.moment_id,
+            })
+        );
+        // Long and short scenarios compare equal accepted suffixes.
+        assert_eq!(
+            layout,
+            (Some(prior as i64), Some(HISTORY_INTERVAL as i64)),
+            "{name}: latest checkpoint event and suffix events"
+        );
     }
 }
 

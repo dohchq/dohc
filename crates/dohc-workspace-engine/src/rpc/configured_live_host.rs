@@ -2453,6 +2453,110 @@ mod tests {
         );
     }
 
+    /// Prepares an earlier store of `RECOVERY_LARGE_STORE_MB` megabytes, from
+    /// a build 10 migrations behind, and prints how long it took and how much
+    /// its copy folder held at its peak, sampled while it ran.
+    #[tokio::test]
+    #[ignore = "measures a large store; run by hand"]
+    async fn a_large_earlier_store_prepares_within_its_deadline() {
+        let megabytes: usize = std::env::var("RECOVERY_LARGE_STORE_MB")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(512);
+        let (reference, store, sibling, copies) = (
+            dohc_engine_testkit::ScratchDir::new().unwrap(),
+            dohc_engine_testkit::ScratchDir::new().unwrap(),
+            dohc_engine_testkit::ScratchDir::new().unwrap(),
+            dohc_engine_testkit::ScratchDir::new().unwrap(),
+        );
+        let (service, owner, _ingress) =
+            EngineService::configured_live_host(recovering(copies.path()))
+                .await
+                .unwrap();
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        detached_store(&service, &ctx, reference.path()).await;
+        host_identity(reference.path(), "epoch");
+        older_copy_of(reference.path(), store.path(), |db| {
+            dohc_engine_storage::recovery::create_earlier_store_for_test(db, 10).unwrap()
+        });
+        let daemon = service
+            .configured_live_host
+            .get()
+            .unwrap()
+            .copies
+            .clone()
+            .unwrap();
+        // Samples every file under the daemon's copy folder until stopped.
+        let sampling = Arc::new(AtomicBool::new(false));
+        let sampler = std::thread::spawn({
+            let (sampling, folder) = (sampling.clone(), daemon.daemon().to_path_buf());
+            move || {
+                fn size(path: &Path) -> u64 {
+                    std::fs::read_dir(path).map_or(0, |entries| {
+                        entries
+                            .flatten()
+                            .map(|entry| match entry.file_type() {
+                                Ok(kind) if kind.is_dir() => size(&entry.path()),
+                                _ => entry.metadata().map_or(0, |metadata| metadata.len()),
+                            })
+                            .sum()
+                    })
+                }
+                let mut peak = 0;
+                while !sampling.load(Ordering::Relaxed) {
+                    peak = peak.max(size(&folder));
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                peak
+            }
+        });
+        {
+            let conn = rusqlite::Connection::open(database(store.path())).unwrap();
+            let tx = conn.unchecked_transaction().unwrap();
+            let mut chunk = vec![0_u8; 1024 * 1024];
+            for index in 0..megabytes {
+                chunk[..8].copy_from_slice(&(index as u64).to_le_bytes());
+                dohc_engine_storage::put_binary_blob(&tx, &chunk).unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        let source_bytes = std::fs::metadata(database(store.path())).unwrap().len();
+        let started = Instant::now();
+        let opened = service
+            .dispatch(ctx.clone(), recover(store.path(), "workspace", "epoch"))
+            .await
+            .unwrap()
+            .response
+            .result;
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspaceHandle"].clone()).unwrap();
+        let attach_started = Instant::now();
+        detached_store(&service, &ctx, sibling.path()).await;
+        let attached_in = attach_started.elapsed();
+        let preparing_after_attach = first_page(&service, ctx.clone(), &handle, "outbox")
+            .await
+            .is_ok_and(|page| page["kind"] == "preparing");
+        prepared(&service, &handle).await;
+        let prepared_in = started.elapsed();
+        assert!(matches!(
+            service.recovery_read(Some(&handle)),
+            Some(Ok(RecoveryPage::Read(_)))
+        ));
+        sampling.store(true, Ordering::Relaxed);
+        let peak = sampler.join().unwrap();
+        println!(
+            "recovery preparation: source {source_bytes} bytes, 10 migrations behind, prepared in \
+             {prepared_in:?}, copy folder at most {peak} bytes; an unrelated attach and detach \
+             took {attached_in:?} (still preparing after it: {preparing_after_attach})"
+        );
+        service
+            .dispatch(ctx.clone(), close_request(&handle))
+            .await
+            .unwrap();
+        assert!(prepared_in < daemon.deadline);
+    }
+
     #[tokio::test]
     async fn a_closed_recovery_store_keeps_its_root_until_its_reads_end() {
         let store = dohc_engine_testkit::ScratchDir::new().unwrap();

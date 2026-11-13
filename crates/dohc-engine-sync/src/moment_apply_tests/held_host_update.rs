@@ -929,3 +929,54 @@ fn ending_the_binding_decides_what_the_owner_holds() {
     assert_eq!(record["rows"]["kept"], json!(digest_of(&two)));
     assert_eq!(record_of(&owner, 0)["rows"]["disposition"], "applied");
 }
+/// What holds add to the owner's typing path: after each committed frame the
+/// runtime reads whether the note holds any update, and with none does
+/// nothing more. Each round times the same frames' commits without the read,
+/// then with it, and the read alone.
+#[test]
+#[ignore = "manual frame-commit timing, run on Linux for the PR"]
+fn owner_frame_commit_timing_with_and_without_the_hold_check() {
+    use std::time::{Duration, Instant};
+    fn summary(mut samples: Vec<Duration>) -> String {
+        samples.sort_unstable();
+        let at = |percent: usize| samples[(samples.len() - 1) * percent / 100].as_secs_f64() * 1e6;
+        let mean = samples.iter().sum::<Duration>().as_secs_f64() * 1e6 / samples.len() as f64;
+        format!(
+            "p50_us={:.1} p95_us={:.1} mean_us={mean:.1}",
+            at(50),
+            at(95)
+        )
+    }
+    const FRAMES: usize = 400;
+    for round in 1..=5 {
+        for check in [false, true] {
+            let mut owner = restore_owner();
+            let host = Ydoc::wire();
+            host.apply(&owner.checkpoint).unwrap();
+            let frames: Vec<Vec<u8>> = (0..FRAMES)
+                .map(|index| host.richdoc_append_paragraph(&format!("typing {index}")))
+                .collect();
+            let mut commits = Vec::with_capacity(FRAMES);
+            let mut reads = Vec::with_capacity(FRAMES);
+            for (index, frame) in frames.into_iter().enumerate() {
+                let started = Instant::now();
+                apply_test_owner_frame(&mut owner, frame, index as i64 + 1);
+                if check {
+                    let read = Instant::now();
+                    assert!(!crate::ydoc_apply::owner_holds_queued(&owner.store, &key()).unwrap());
+                    reads.push(read.elapsed());
+                }
+                commits.push(started.elapsed());
+            }
+            let read = if check {
+                format!(" read {}", summary(reads))
+            } else {
+                String::new()
+            };
+            println!(
+                "== TIMING round={round} check={check} frames={FRAMES} frame {}{read}",
+                summary(commits)
+            );
+        }
+    }
+}

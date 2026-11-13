@@ -576,6 +576,37 @@ fn audit_apply_live_audit_checksum_precedes_wrong_chunk_length_refusal() {
 }
 
 #[test]
+#[ignore = "manual valid live audit import measurement"]
+fn relay_pull_live_audit_valid_import_measurement() {
+    for sample in 0..21 {
+        let (_scratch, mut receiver, client, _) = length_claim_pull(LengthClaim::Valid);
+        let started = std::time::Instant::now();
+        let result = client
+            .pull_chat_workspace(
+                &mut receiver,
+                &mut WriterDocCache::new(),
+                "ws",
+                &NoFaults,
+                &NoLiveLeases,
+                302,
+            )
+            .unwrap();
+        let micros = started.elapsed().as_micros();
+        assert!(matches!(
+            result,
+            crate::SyncPassOutcome::Complete {
+                applied: 2,
+                refused: 0,
+                ..
+            }
+        ));
+        if sample > 0 {
+            println!("AUDITSTALL valid_import sample={sample} micros={micros}");
+        }
+    }
+}
+
+#[test]
 fn deferred_settlement_exports_its_companion_moment_after_evidence_once() {
     deferred_settlement_export(true);
 }
