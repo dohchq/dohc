@@ -475,6 +475,25 @@ describe("named live browser provider", () => {
     expect(getDohcYDocBodyFragment(doc).toString()).toBe(value.body.toString());
     expect(value.body.toString()).toContain("base draft a b c");
   });
+  it("keeps a lone sent update unchanged when admission was unavailable and edits follow", async () => {
+    const { value, host, doc } = await live(); vi.useFakeTimers();
+    edit(value, " draft"); const first = await host.submitted();
+    if (first.begin.purpose !== "submit-update") throw new Error("Expected submit.");
+    await host.send({ kind: "result", result: "retry", deliveryId: first.begin.deliveryId, updateDigest: first.begin.digest, reason: "admission-unavailable" });
+    edit(value, " a"); edit(value, " b");
+    expect(value.state().pendingUpdates).toBe(2);
+    await vi.advanceTimersByTimeAsync(250);
+    const retry = await host.submitted(2);
+    expect(retry.bytes).toEqual(first.bytes);
+    expect(retry.begin).toMatchObject({ deliveryId: first.begin.deliveryId, digest: first.begin.digest });
+    await host.ack(retry);
+    const merged = await host.submitted(3);
+    await host.ack(merged, 1, 2);
+    expect(value.state()).toMatchObject({ status: "live", pendingUpdates: 0, pendingBytes: 0 });
+    Y.applyUpdate(doc, first.bytes); Y.applyUpdate(doc, merged.bytes);
+    expect(getDohcYDocBodyFragment(doc).toString()).toBe(value.body.toString());
+    expect(value.body.toString()).toContain("base draft a b");
+  });
   it("starts another update when merging would pass the update byte limit", async () => {
     const { value, host, doc } = await live();
     edit(value, " first"); const first = await host.submitted();
