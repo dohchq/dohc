@@ -113,7 +113,8 @@ export function useChatDispatchNotices(
         // Dropped is over: nothing ran here. The others stay until they end. Try again can end all but a refusal,
         // which ends when the agents in Settings change.
         const stuck = isWake(reason) && reason !== "wake-dropped";
-        const retries = stuck && reason !== "wake-runners-refused";
+        // A message that waits for an agent's thread is tried again the same way.
+        const retries = (stuck && reason !== "wake-runners-refused") || reason === "forward-stuck";
         report({
           message: notice.message,
           kind: kinds[reason],

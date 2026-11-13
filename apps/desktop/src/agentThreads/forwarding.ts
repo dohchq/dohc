@@ -269,6 +269,15 @@ export function createForwarding(dependencies: ForwardingDependencies) {
       });
       for (const request of last.values()) await markRead(workspaceId, agent, request);
     },
+    /** Ends the wait to try a workspace again, and takes back its problems. Call it when the workspace leaves this computer. */
+    leave(workspaceId: string): void {
+      clearTimeout(retries.get(workspaceId)?.timer);
+      retries.delete(workspaceId);
+      for (const key of [...stuck]) {
+        const [stuckIn, agentId] = key.split("\n");
+        if (stuckIn === workspaceId) report(workspaceId, agentId || null, null);
+      }
+    },
     stop(): void {
       stopped = true;
       for (const { timer } of retries.values()) clearTimeout(timer);

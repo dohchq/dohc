@@ -489,7 +489,8 @@ export async function openT3CodeSession(input: {
             "needs-more-access",
             "This thread runs with more access than dohc has in T3 Code. Allow dohc again, and pick the thread's mode on T3 Code's page.",
           );
-        throw new T3CodeError("refused", words ?? "T3 Code refused the call.");
+        // T3 Code's own words reach Notices, so they are kept short.
+        throw new T3CodeError("refused", words?.slice(0, 300) ?? "T3 Code refused the call.");
       }
       return result.structuredContent;
     },

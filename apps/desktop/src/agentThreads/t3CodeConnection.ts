@@ -53,6 +53,8 @@ export function createT3CodeConnection(dependencies: {
 }): T3CodeConnection {
   const { store } = dependencies;
   let opening: Promise<T3CodeSession> | null = null;
+  // Counts the sign-ins kept, so a refusal of an older one cannot drop a newer one.
+  let kept = 0;
 
   const address = async () => {
     const found = await readT3CodeAddress(dependencies.home);
@@ -79,12 +81,14 @@ export function createT3CodeConnection(dependencies: {
 
   async function use<T>(call: (session: T3CodeSession) => Promise<T>): Promise<T> {
     const current = (opening ??= open());
+    const signedIn = kept;
     try {
       return await call(await current);
     } catch (error) {
       if (opening === current) drop();
       // T3 Code no longer takes this sign-in, so dohc keeps it no longer.
-      if (error instanceof T3CodeError && error.problem === "not-allowed") await store.clear();
+      if (error instanceof T3CodeError && error.problem === "not-allowed" && signedIn === kept)
+        await store.clear();
       throw error;
     }
   }
@@ -104,6 +108,7 @@ export function createT3CodeConnection(dependencies: {
         fetch: dependencies.fetch,
       });
       await store.save(signIn);
+      kept += 1;
       drop();
     },
     projects: () => use(listT3CodeProjects),

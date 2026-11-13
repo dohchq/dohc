@@ -1561,6 +1561,9 @@ function t3Code(): T3CodeConnection {
 // The agents whose messages wait in each workspace, with why. Notices shows
 // one row for the workspace: the first agent still waiting.
 const forwardProblems = new Map<string, Map<string, unknown>>();
+// Each change to a workspace's problems writes its row once: a change that
+// lands while an earlier one reads the agents' names takes over the write.
+const forwardNoticeWrites = new Map<string, number>();
 async function reportForwardProblem(
   workspaceId: string,
   agentId: string,
@@ -1569,19 +1572,22 @@ async function reportForwardProblem(
   const waiting = forwardProblems.get(workspaceId) ?? new Map<string, unknown>();
   if (problem === null) waiting.delete(agentId);
   else waiting.set(agentId, problem);
-  if (waiting.size === 0) {
-    forwardProblems.delete(workspaceId);
+  if (waiting.size === 0) forwardProblems.delete(workspaceId);
+  else forwardProblems.set(workspaceId, waiting);
+  const write = (forwardNoticeWrites.get(workspaceId) ?? 0) + 1;
+  forwardNoticeWrites.set(workspaceId, write);
+  const { agents } = (await readCachedUserSettingsFile(stateDir())).settings;
+  if (forwardNoticeWrites.get(workspaceId) !== write) return;
+  const first = forwardProblems.get(workspaceId)?.entries().next().value;
+  if (first === undefined) {
     chatDispatchNotices.clear(workspaceId, "forward-stuck");
     return;
   }
-  forwardProblems.set(workspaceId, waiting);
-  const [[firstId, first]] = waiting as unknown as [[string, unknown]];
-  const { agents } = (await readCachedUserSettingsFile(stateDir())).settings;
-  const name = agents[firstId]?.name;
+  const [firstId, why] = first;
   chatDispatchNotices.report(workspaceId, {
     reason: "forward-stuck",
     ...(firstId ? { agentId: firstId } : {}),
-    message: forwardProblemWords(name ?? null, first),
+    message: forwardProblemWords(agents[firstId]?.name ?? null, why),
   });
 }
 
@@ -2927,7 +2933,12 @@ const forgetWorkspace = createWorkspaceForget({
   removePhysicalWorkspace,
   trust: workspaceTrust,
   forgottenShareViews,
-  clearNotices: (workspaceId) => chatDispatchNotices.clearWorkspace(workspaceId),
+  clearNotices: (workspaceId) => {
+    // The forwarder lets the workspace go first, so it files no row after this.
+    cachedAgentThreads?.unwatch(workspaceId);
+    forwardProblems.delete(workspaceId);
+    chatDispatchNotices.clearWorkspace(workspaceId);
+  },
   notifyRenderer,
 });
 
@@ -10695,8 +10706,9 @@ function registerIpcHandlers(): void {
   registerOperations(operationBoundary, chatDispatchNoticeOperations, {
     registerChatDispatchNotices: (input) => chatDispatchNotices.register(input.workspaceId),
     dismissChatDispatchNotice: (input) => chatDispatchNotices.dismiss(input.workspaceId, input.id),
-    retryChatWakes: () => {
+    retryChatWakes: ({ workspaceId }) => {
       chatWakes.retry();
+      cachedAgentThreads?.retry(workspaceId);
     },
   });
 
@@ -10737,12 +10749,20 @@ function registerIpcHandlers(): void {
         nextCursor: page.nextCursor,
       };
     },
-    readyAgentThread: ({ workspaceId, agentId, name, threadId }) =>
-      agentThreads().connect(workspaceId, {
+    readyAgentThread: async ({ workspaceId, agentId, name, threadId }) => {
+      const { agents } = (await readCachedUserSettingsFile(stateDir())).settings;
+      // A new agent only: this marks the agent's unread messages read.
+      if (agents[agentId]) throw new Error("An agent already has this id. Add the agent again.");
+      // One thread is one agent. A second agent on it would put another
+      // workspace's messages in the same thread with no warning (ADR 0016).
+      const connected = Object.values(agents).find((agent) => agent.thread?.id === threadId);
+      if (connected) throw new Error(`${connected.name} is already connected to this thread.`);
+      await agentThreads().connect(workspaceId, {
         id: agentId,
         name,
         thread: { tool: "t3-code", id: threadId },
-      }),
+      });
+    },
   });
 
   registerOperations(operationBoundary, chatDispatchPauseOperations, {

@@ -144,6 +144,19 @@ describe("dohc's connection to T3 Code", () => {
     expect(await store.load()).not.toBeNull();
   });
 
+  it("keeps a new sign-in when a call made with the old one is refused late", async () => {
+    const { t3, store, connection, forward } = await setup();
+    await store.save({ origin: t3.origin, token: "revoked", expiresAtMs: Date.now() + 60_000 });
+    // The call with the old sign-in is on its way when the person allows dohc again.
+    const late = problemOf(forward("f1"));
+    await connection.signIn({ open: browser });
+
+    expect(await late).toBe("not-allowed");
+
+    expect((await store.load())?.token).toBe("token-1");
+    await forward("f2");
+  });
+
   it("forgets the sign-in on request", async () => {
     const { connection, forward } = await setup();
     await connection.signIn({ open: browser });

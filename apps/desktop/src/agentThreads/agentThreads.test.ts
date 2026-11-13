@@ -49,10 +49,11 @@ function setup(agents: Record<string, unknown>, unread: string[] = ["m1"]) {
     order.push(`sent ${input.forwardId.startsWith("dohc-intro-") ? "intro" : "message"}`);
     sent.push(input);
   });
+  const forget = vi.fn(async () => {});
   const agentThreads = createAgentThreads({
     cli: "dohc",
     cliFolder: null,
-    t3Code: { forward } as unknown as T3CodeConnection,
+    t3Code: { forward, forget } as unknown as T3CodeConnection,
     chats,
     readSettings: async () => ({ agents: settings }),
     workspace: (workspaceId) =>
@@ -67,6 +68,7 @@ function setup(agents: Record<string, unknown>, unread: string[] = ["m1"]) {
     order,
     readers,
     forward,
+    forget,
     save: (next: Record<string, unknown>) => {
       settings = AgentsSettings.parse(next);
     },
@@ -161,6 +163,57 @@ describe("agent threads", () => {
     await expect(
       agentThreads.connect("ws-gone", { id: "chief", name: "Chief", thread }),
     ).rejects.toThrow("no longer has this workspace");
+  });
+
+  it("drops dohc's sign-in when the last agent with a thread is removed", async () => {
+    const { agentThreads, forget, save } = started(
+      setup({ chief, other: { ...chief, name: "Other" } }, []),
+    );
+    agentThreads.watch(WORKSPACE);
+    await settled();
+
+    save({ chief });
+    agentThreads.settingsChanged();
+    await settled();
+    expect(forget).not.toHaveBeenCalled();
+
+    save({ started: testAgent({ name: "Started" }) });
+    agentThreads.settingsChanged();
+    await vi.waitFor(() => expect(forget).toHaveBeenCalledTimes(1));
+
+    // Nothing more to drop while no agent has a thread.
+    agentThreads.settingsChanged();
+    await settled();
+    expect(forget).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops a sign-in no agent needs when dohc starts, and keeps one a person just allowed", async () => {
+    const { agentThreads, forget } = started(setup({}, []));
+
+    agentThreads.watch(WORKSPACE);
+    await vi.waitFor(() => expect(forget).toHaveBeenCalledTimes(1));
+
+    // The person allows dohc, and a setting is saved before they add the agent.
+    agentThreads.watch("ws-other");
+    agentThreads.settingsChanged();
+    await settled();
+    expect(forget).toHaveBeenCalledTimes(1);
+  });
+
+  it("forwards nothing for a workspace that left this computer, and tries again only for one it watches", async () => {
+    const { agentThreads, sent, arrive } = started(setup({ chief }, []));
+    agentThreads.watch(WORKSPACE);
+    await settled();
+
+    agentThreads.unwatch(WORKSPACE);
+    arrive("m1");
+    agentThreads.retry(WORKSPACE);
+    agentThreads.settingsChanged();
+    await settled();
+    expect(sent).toEqual([]);
+
+    agentThreads.watch(WORKSPACE);
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
   });
 
   it("forwards nothing after it stops", async () => {

@@ -99,6 +99,17 @@ export function createAgentThreads(dependencies: AgentThreadsDependencies) {
     },
   });
   const watched = new Map<string, () => void>();
+  // Whether any agent had a thread when dohc last looked. Null before the first look.
+  let hadThreadAgent: boolean | null = null;
+  // dohc drops its sign-in when the last agent that needs it is removed
+  // (ADR 0016). At the first look nothing was there before, so a sign-in no
+  // agent needs is dropped then too. A drop that fails is tried at the next change.
+  async function keepOrDropSignIn(): Promise<void> {
+    const { agents } = await dependencies.readSettings();
+    const has = Object.values(agents).some((agent) => agent.thread !== undefined);
+    if (!has && hadThreadAgent !== false) await dependencies.t3Code.forget();
+    hadThreadAgent = has;
+  }
 
   return {
     /** Forwards this workspace's messages from now on. Call it when the workspace opens. */
@@ -108,10 +119,22 @@ export function createAgentThreads(dependencies: AgentThreadsDependencies) {
           workspaceId,
           subscribeChatWrites(workspaceId, () => void forwarding.wake(workspaceId)),
         );
+      if (hadThreadAgent === null) void keepOrDropSignIn().catch(() => undefined);
       void forwarding.wake(workspaceId);
+    },
+    /** Stops forwarding a workspace's messages. Call it when the workspace leaves this computer. */
+    unwatch(workspaceId: string): void {
+      watched.get(workspaceId)?.();
+      watched.delete(workspaceId);
+      forwarding.leave(workspaceId);
+    },
+    /** Tries a workspace's waiting messages again now. */
+    retry(workspaceId: string): void {
+      if (watched.has(workspaceId)) void forwarding.wake(workspaceId);
     },
     /** Call it after settings are saved, so work that started before the change stops. */
     settingsChanged(): void {
+      void keepOrDropSignIn().catch(() => undefined);
       for (const workspaceId of watched.keys()) void forwarding.wake(workspaceId, true);
     },
     /**

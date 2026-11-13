@@ -448,6 +448,23 @@ describe("forwarding", () => {
     forwarding.stop();
   });
 
+  it("takes back a workspace's problems and stops trying when the workspace leaves", async () => {
+    vi.useFakeTimers();
+    const { forwarding, tool, problems } = setup([request("m1", 10)]);
+    const down = new Error("down");
+    tool.forward.mockRejectedValue(down);
+
+    await forwarding.wake(WORKSPACE);
+    expect(vi.getTimerCount()).toBe(1);
+    forwarding.leave(WORKSPACE);
+
+    expect(vi.getTimerCount()).toBe(0);
+    expect(problems).toEqual([
+      [WORKSPACE, "chief", down],
+      [WORKSPACE, "chief", null],
+    ]);
+  });
+
   it("keeps each workspace's messages in that workspace", async () => {
     // Two workspaces hold a message with the same id, in a chat thread with
     // the same id, for an agent with the same id.
