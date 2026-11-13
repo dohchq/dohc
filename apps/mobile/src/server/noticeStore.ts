@@ -269,7 +269,8 @@ export function createNoticeStore(options: {
   /**
    * What the marks the server took left each row as, and the row's sequence when sent. A read the server answered
    * before a mark landed can arrive after its answer: its row, at that sequence or older, takes the result again. A row
-   * past that sequence holds the mark, or another device's later change, and ends the entry.
+   * past that sequence holds the mark, or another device's later change, and ends the entry. So does the result's
+   * expiry, and a whole list without the row.
    */
   const acked = new Map<string, { readonly seq: number; readonly result: MarkResult }>();
   let known = false;
@@ -311,6 +312,9 @@ export function createNoticeStore(options: {
       pruned = true;
     }
     if (pruned) saveList();
+    // By the result's expiry the relay has let the row go, a retention after the mark landed, and no read stays on its
+    // way that long. The held row, given the result's expiry, goes in the same pass.
+    for (const [id, entry] of acked) if (entry.result.expiresAtMs <= at) acked.delete(id);
     const waiting = new Map<string, PendingMark[]>();
     for (const mark of marks) {
       const found = waiting.get(mark.noticeId);
@@ -645,7 +649,12 @@ export function createNoticeStore(options: {
             const mark = taken(entry, sent);
             if (sent && mark.result) {
               sentRows.set(entry.noticeId, { ...sent, ...mark.result });
-              acked.set(entry.noticeId, { seq: sent.changeSeq, result: mark.result });
+              // A newer row held already ends the entry: a read on its way brings that row or a newer one.
+              const superseded = [rows, building].some(
+                (target) => (target?.get(entry.noticeId)?.changeSeq ?? -1) > sent.changeSeq,
+              );
+              if (!superseded)
+                acked.set(entry.noticeId, { seq: sent.changeSeq, result: mark.result });
             }
             if (known) settling.push(mark);
           }

@@ -860,6 +860,51 @@ describe("marks on the account's Notices", () => {
     expect(ids()).toEqual(["a"]);
   });
 
+  // In the next two tests, a late copy of the row at the sequence Done was sent at shows whether the store still
+  // holds Done's result for it: a held result would hide the copy. A mark made later shows the list again at the
+  // clock's new time.
+  it("holds no result for a taken Done whose row changed before its answer, once that row expires", async () => {
+    let clock = NOW;
+    const { server, store, ids } = setup({ now: () => clock });
+    store.resume();
+    const held = await reply(server, server.read(), [relayRow("a")], { replace: true });
+    store.mark("a", "dismissed");
+    const done = await server.marks();
+    // Another device restored the row (3) after Done landed (2), before Done's answer came.
+    const call = await reply(
+      server,
+      held,
+      [relayRow("a", { changeSeq: 3, expiresAtMs: NOW + 100 })],
+      { nextCursor: "3" },
+    );
+    done.answer(200, { ok: true, dismissed: ["a"] });
+    // One request at a time: this one goes once Done's answer is taken.
+    store.mark("x", "read");
+    await server.marks();
+    expect(ids()).toEqual(["a"]);
+    clock = NOW + 100;
+    store.mark("y", "read");
+    expect(ids()).toEqual([]);
+    await reply(server, call, [relayRow("a", { expiresAtMs: 10 ** 12 })]);
+    expect(ids()).toEqual(["a"]);
+  });
+
+  it("holds no result for a taken Done once the result expires", async () => {
+    let clock = NOW;
+    const { server, store, ids } = setup({ now: () => clock });
+    store.resume();
+    const call = await reply(server, server.read(), [relayRow("a")], { replace: true });
+    store.mark("a", "dismissed");
+    (await server.marks()).answer(200, { ok: true, dismissed: ["a"] });
+    // One request at a time: this one goes once Done's answer is taken.
+    store.mark("x", "read");
+    await server.marks();
+    clock = DONE_RESULT.expiresAtMs;
+    store.mark("y", "read");
+    await reply(server, call, [relayRow("a", { expiresAtMs: 10 ** 12 })]);
+    expect(ids()).toEqual(["a"]);
+  });
+
   it("marks read only the rows shown unread", async () => {
     const { server, store } = setup();
     store.resume();
