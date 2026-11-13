@@ -765,6 +765,18 @@ export interface SyncRelayStorage {
   /** Gives exactly those copies the `publication` reason. */
   restorePublicationReasons(): void;
   tombstoneSettledAccountOperations(nowMs: number): number;
+  /** Replaces one computer's declared agents in a workspace the account owns. False, writing nothing, when it doesn't own it. */
+  replaceChatRunners(input: Parameters<typeof import("./chatWakes").replaceChatRunners>[1]): boolean;
+  enabledChatRunners(input: { accountId: string; workspaceId: string }): import("./chatWakes").ChatRunner[];
+  chatWakeHead(accountId: string): number;
+  listWaitingChatWakes(input: Parameters<typeof import("./chatWakes").listWaitingChatWakes>[1]): ReturnType<typeof import("./chatWakes").listWaitingChatWakes>;
+  claimChatWake(input: Parameters<typeof import("./chatWakes").claimChatWake>[1]): ReturnType<typeof import("./chatWakes").claimChatWake>;
+  confirmChatWakeQueued(input: Parameters<typeof import("./chatWakes").confirmChatWakeQueued>[1]): import("./chatWakes").ChatWakeView | null;
+  /** The threads of every wake a retry could answer: the wake it names, and the generation its binding answered. */
+  retryWakeThreads(input: Parameters<typeof import("./chatWakes").retryWakeThreads>[1]): string[];
+  retryChatWake(input: Parameters<typeof import("./chatWakes").retryChatWake>[1]): import("./chatWakes").ChatWakeRetry;
+  /** Ends wakes whose wait ran out and deletes those ended long ago, a batch at a time. Answers how many rows changed. */
+  sweepChatWakes(nowMs: number): number;
   accountFeedStanding(workspaceId: string): import("./accountFeed").AccountFeedStanding | null;
   accountFeedLogRows(input: { workspaceId: string; after: number; through: number; limit: number }): import("./accountFeed").AccountFeedLogRow[];
   accountFeedJournalRows(input: { workspaceId: string; after: number; through: number; limit: number }): Array<{ journalCursor: number; objectId: string; path: string }>;

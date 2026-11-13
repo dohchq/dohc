@@ -128,6 +128,7 @@ import * as automationHostStorage from "./storage/automationHosts";
 import * as automationWorkspaceStorage from "./storage/automationWorkspaces";
 import * as accountWorkspaceStorage from "./storage/accountWorkspaces";
 import * as operationRecordStorage from "./storage/operationRecords";
+import * as chatWakeStorage from "./storage/chatWakes";
 import * as accountFeedStorage from "./storage/accountFeed";
 import * as collectionWriteStorage from "./storage/collectionWrites";
 import * as ownerCollectionWriteStorage from "./storage/ownerCollectionWrites";
@@ -994,6 +995,42 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   tombstoneSettledAccountOperations(nowMs: number) {
     return operationRecordStorage.tombstoneSettledOperations(this, nowMs);
+  }
+
+  replaceChatRunners(input: Parameters<typeof chatWakeStorage.replaceChatRunners>[1]) {
+    return chatWakeStorage.replaceChatRunners(this, input);
+  }
+
+  enabledChatRunners(input: { accountId: string; workspaceId: string }) {
+    return chatWakeStorage.enabledChatRunners(this, input);
+  }
+
+  chatWakeHead(accountId: string) {
+    return chatWakeStorage.chatWakeHead(this, accountId);
+  }
+
+  listWaitingChatWakes(input: Parameters<typeof chatWakeStorage.listWaitingChatWakes>[1]) {
+    return chatWakeStorage.listWaitingChatWakes(this, input);
+  }
+
+  claimChatWake(input: Parameters<typeof chatWakeStorage.claimChatWake>[1]) {
+    return chatWakeStorage.claimChatWake(this, input);
+  }
+
+  confirmChatWakeQueued(input: Parameters<typeof chatWakeStorage.confirmChatWakeQueued>[1]) {
+    return chatWakeStorage.confirmChatWakeQueued(this, input);
+  }
+
+  retryWakeThreads(input: Parameters<typeof chatWakeStorage.retryWakeThreads>[1]) {
+    return chatWakeStorage.retryWakeThreads(this, input);
+  }
+
+  retryChatWake(input: Parameters<typeof chatWakeStorage.retryChatWake>[1]) {
+    return chatWakeStorage.retryChatWake(this, input);
+  }
+
+  sweepChatWakes(nowMs: number) {
+    return chatWakeStorage.sweepChatWakes(this, nowMs);
   }
 
   accountFeedStanding(workspaceId: string) {

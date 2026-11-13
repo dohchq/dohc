@@ -1,10 +1,9 @@
 import { createHash } from "node:crypto";
-import { phoneMarkReadArgsSchema, phoneWriteArgsSchemas, type PhoneWriteOperation } from "@dohc/cli/protocol";
+import { phoneMarkReadArgsSchema, phoneRetryWakeArgsSchema, phoneWriteArgsSchemas, type PhoneWriteOperation } from "@dohc/cli/protocol";
 import { createActorIssuer, deriveLocalActor, serializeActorKey } from "@dohc/workspace-contracts/actor-identity";
 import type { ChatMessage, ChatThread, ChatThreadLane } from "@dohc/workspace-contracts/engine";
-import { cutText } from "@dohc/workspace-contracts/names";
 import { asRecord } from "@dohc/workspace-core";
-import { ChatsLiveAdapter, DaemonRefusalError, type JsonValue } from "@dohc/workspace-engine-client";
+import { CHATS_METHOD, ChatsLiveAdapter, DaemonRefusalError, type JsonValue } from "@dohc/workspace-engine-client";
 import { EngineRequestError } from "@dohc/workspace-engine-client/daemon";
 import {
   answerDecision, answerWithReply, checkedContent, engineTrim, postToGroup, reactToMessage, replyInThread, sendToStream,
@@ -15,6 +14,7 @@ import { currentAccountFeedCursor } from "./accountFeed";
 import { serverChats, type MissingResult } from "./accountOperations";
 import type { AutomationReplica } from "./automationReplicas";
 import { stableJsonStringify } from "./canonicalJson";
+import { frozenWakes, resolveWakeTargets, shownName, TooManyWakeCandidates, type DmSource, type FrozenWakes, type WakeSources } from "./chatWakes";
 import { badRequest, notFound, RelayError } from "./errors";
 import {
   COULD_NOT_SEND, PUBLICATION_DEADLINE_MS, TOO_OLD, WORKSPACE_CHANGED, commandStages, isRefusalReason, publishOperation, receiptReader,
@@ -22,6 +22,7 @@ import {
 } from "./operationPublication";
 import type { CopyVisitor, ServerCopies } from "./serverCopies";
 import type { SyncRelayStorage } from "./storage";
+import type { ChatWakeView } from "./storage/chatWakes";
 import type { OperationRecord } from "./storage/operationRecords";
 
 // The phone's chat writes on this server's copy of a workspace its account
@@ -31,9 +32,11 @@ import type { OperationRecord } from "./storage/operationRecords";
 // with its canonical command, is written before the engine's first stage, and
 // every stage carries its derived key and asks the engine for a receipt. A
 // stage that a crash or a lost answer left unwritten replays from that stored
-// command, when the copy opens or the phone retries. The account operations
-// route calls `runAccountWrite`, and `runAccountMarkRead` for a read mark,
-// which has no row: a repeat, or an older mark, moves nothing.
+// command, when the copy opens or the phone retries. The agents a message
+// wakes are resolved once, before the row, and frozen in its command. The
+// account operations route calls `runAccountWrite`, `runAccountMarkRead` for
+// a read mark, which has no row: a repeat, or an older mark, moves nothing,
+// and `runAccountRetryWake` for a wake's Try again.
 
 /** The bounds of a phone write's operation ID, in UTF-16 code units, which storage's bound in characters admits. */
 export const OPERATION_ID_MIN_LENGTH = 1;
@@ -92,8 +95,8 @@ type ReactWrite = { kind: "react"; threadId: string; messageId: string; emoji: s
 /** A write's resolved targets and derived IDs. A start's thread is a proposal: a running conversation can take its message. */
 export type WriteCommand = StartWrite | ReplyWrite | AnswerWrite | ReactWrite;
 
-/** What a write's row keeps as its command: its publication, the write, and its author. */
-export type StoredWrite = { stages: PublicationStage[]; write: WriteCommand; author: AuthorSnapshot };
+/** What a write's row keeps as its command: its publication, the write, its author, and the agents its message wakes. */
+export type StoredWrite = { stages: PublicationStage[]; write: WriteCommand; author: AuthorSnapshot; wakes: FrozenWakes };
 
 /** The answer a phone write gives. A missing or hidden target answers exactly as reads answer one. */
 export type PhoneWriteAnswer =
@@ -175,12 +178,9 @@ function refusedByEngine(error: unknown): boolean {
 
 const toJson = (value: unknown): JsonValue => JSON.parse(JSON.stringify(value)) as JsonValue;
 
-// The characters the engine drops from a name (names.rs, shown_name), keeping ZWNJ, ZWJ, and variation selectors.
-const HIDDEN_IN_NAMES = /(?![\u200C\u200D\p{Variation_Selector}])[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/gu;
-
 // The name as the engine stores it, so the published row can be compared with it exactly.
 function authorName(name: string | null): string {
-  return cutText(name?.replace(HIDDEN_IN_NAMES, "").trim() || "Unnamed", 40);
+  return shownName(name ?? "") || "Unnamed";
 }
 
 function authorOf(writer: PhoneWriter, workspaceId: string): AuthorSnapshot {
@@ -273,7 +273,10 @@ export function storedWrite(command: JsonValue): StoredWrite | null {
   if (actorKey !== null && typeof actorKey !== "string") return null;
   // This module wrote it, so its kind and the IDs every kind has are enough to know its shape.
   if (!WRITE_KINDS.has(String(write.kind)) || typeof write.threadId !== "string" || typeof write.messageId !== "string") return null;
-  return { stages, write: value as WriteCommand, author: { accountId, displayName, actorKey: typeof actorKey === "string" ? actorKey : null } };
+  return {
+    stages, write: value as WriteCommand, author: { accountId, displayName, actorKey: typeof actorKey === "string" ? actorKey : null },
+    wakes: frozenWakes(command),
+  };
 }
 
 function stageKey(stored: StoredWrite, role: Role): string {
@@ -368,6 +371,47 @@ function visibleTargets(storage: SyncRelayStorage, copy: AutomationReplica) {
       const fits = lane === "posts" ? found.kind === "channel" && found.type !== "chat" : found.kind !== "channel" || found.type !== "posts";
       if (!fits) throw new WriteInvalid(lane === "posts" ? "This group takes no posts." : "This group has no chat.");
     },
+    // A visible thread's first message.
+    async opening(threadId: string): Promise<ChatMessage | null> {
+      return (await adapter.listMessagesPage({ workspaceId, threadId, limit: 1 })).messages[0] ?? null;
+    },
+    // The agent of an agent's DM, or null for any other channel.
+    async dmAgent(channelId: string): Promise<string | null> {
+      const found = (await chats.store.listChannels({ workspaceId })).find((each) => each.id === channelId);
+      return found?.kind === "agent" ? found.agentId ?? null : null;
+    },
+    // The newest message `pick` keeps in the channel's threads of both lanes, replies included, by `(createdAtMs, id)`,
+    // when a fixed budget reads all of them. Message order is arrival order, and a synced message keeps its sender's
+    // time, so no page or thread proves the newest until every message is read. Each thread is read from its end, a
+    // page at a time; its message count gives where its last page starts, since its message orders count from zero.
+    // A listing with more threads than it returned, or a budget that runs out, answers incomplete, with no message.
+    async latest(channelId: string, pick: (message: ChatMessage) => boolean): Promise<DmSource> {
+      // The raw listing skips the secret-file filter safely: that filter hides only threads on a file, and every thread
+      // on a file is skipped here. A channel's threads are never on one.
+      const lanes = await Promise.all((["posts", "chat"] as const)
+        .map((lane) => adapter.request(CHATS_METHOD.threadsListForChannel, { channelId, lane, pageLimit: DM_THREADS_PER_LANE })));
+      if (lanes.some((page) => (page.nextCursor ?? null) !== null)) return { complete: false };
+      let newest: ChatMessage | null = null;
+      let pages = 0, read = 0;
+      for (const { thread, messageCount } of lanes.flatMap((page) => page.threads)) {
+        if (thread.linkedFile !== undefined) continue;
+        for (let end = messageCount; end > 0;) {
+          if (pages === DM_MESSAGE_PAGES || read === DM_MESSAGES) return { complete: false };
+          const start = Math.max(0, end - MESSAGE_PAGE, end - (DM_MESSAGES - read));
+          const page = await adapter.listMessagesPage({
+            workspaceId, threadId: thread.id, limit: end - start, ...(start === 0 ? {} : { afterMessageOrder: start - 1 }),
+          });
+          pages += 1;
+          read += end - start;
+          for (const message of page.messages) {
+            if (pick(message) && (newest === null || message.createdAtMs > newest.createdAtMs ||
+              (message.createdAtMs === newest.createdAtMs && message.id > newest.id))) newest = message;
+          }
+          end = start;
+        }
+      }
+      return { complete: true, message: newest };
+    },
     // IDs a write would create. One a hidden row already holds answers as missing, so no engine conflict reveals it.
     async unclaimed(ids: { threadId?: string; messageId: string }): Promise<void> {
       if (ids.threadId !== undefined && (await adapter.listThreads({ workspaceId })).some((each) => each.id === ids.threadId) &&
@@ -379,6 +423,33 @@ function visibleTargets(storage: SyncRelayStorage, copy: AutomationReplica) {
 }
 
 type Targets = ReturnType<typeof visibleTargets>;
+// The engine's largest message page.
+const MESSAGE_PAGE = 500;
+// What finding a DM's agent reads at most: the newest threads of each lane, message pages, and messages.
+const DM_THREADS_PER_LANE = 8;
+const DM_MESSAGE_PAGES = 4;
+const DM_MESSAGES = 2_000;
+
+// What wake resolution reads: the account's enabled agents, and the copy through the reads' filter, a hidden target
+// reading as a missing one. A failed read fails the write before its row.
+function wakeSources(storage: SyncRelayStorage, copy: AutomationReplica, targets: Targets, accountId: string): WakeSources {
+  const hidden = async <T>(read: () => Promise<T>): Promise<T | null> => {
+    try {
+      return await read();
+    } catch (error) {
+      if (error instanceof TargetMissing) return null;
+      throw error;
+    }
+  };
+  return {
+    runners: storage.enabledChatRunners({ accountId, workspaceId: copy.workspaceId }),
+    message: (messageId) => hidden(() => targets.message(messageId)),
+    thread: (threadId) => hidden(() => targets.thread(threadId)),
+    opening: (threadId) => targets.opening(threadId),
+    dmAgent: (channelId) => targets.dmAgent(channelId),
+    latest: (channelId, pick) => targets.latest(channelId, pick),
+  };
+}
 
 function advance(storage: SyncRelayStorage, record: OperationRecord, nowMs: number,
   change: { stage?: "reply-written" | "answer-written"; threadId?: string }): void {
@@ -727,6 +798,7 @@ function refusalBeforeRecord(error: unknown, signal: AbortSignal | undefined): P
   if (error instanceof OperationError) return missing(error.message);
   if (error instanceof WriteInvalid) throw badRequest(error.message);
   if (error instanceof CopyReplaced) return refused(WORKSPACE_CHANGED);
+  if (error instanceof TooManyWakeCandidates) return refused(COULD_NOT_SEND);
   const { reason } = failure(error, COULD_NOT_SEND, "operation-only");
   return refused(isRefusalReason(reason) ? reason : COULD_NOT_SEND);
 }
@@ -832,7 +904,8 @@ export async function runPhoneWrite(input: PhoneWriteInput): Promise<PhoneWriteA
       try {
         const command = await canonicalWrite(write, ids, targets);
         const author = authorOf(writer, workspaceId);
-        stored = { stages: publicationStages(command, author, ids.key), write: command, author };
+        const wakes = await resolveWakeTargets(wakeSources(storage, copy, targets, writer.accountId), writer.accountId, command);
+        stored = { stages: publicationStages(command, author, ids.key), write: command, author, wakes };
       } catch (error) {
         return await failedBeforeRecord(error);
       }
@@ -977,6 +1050,102 @@ export async function runAccountMarkRead(
     }
     await input.authorize();
     return { result, cursor };
+  });
+}
+
+/** The phone's Try again on a wake, as its strict request schema admits it. */
+type PhoneRetryWake = ReturnType<(typeof phoneRetryWakeArgsSchema)["parse"]>;
+
+/** The Try again a request names. Arguments outside its schema reject with a bad request. */
+export function parseRetryWake(args: unknown): PhoneRetryWake {
+  const parsed = phoneRetryWakeArgsSchema.safeParse(args);
+  if (!parsed.success) throw badRequest("the arguments do not fit retryWake");
+  return parsed.data;
+}
+
+/** A Try again's answer: the generation to show, a refusal from the closed list, or a wake the account can't see, as reads answer one. */
+type RetryWakeAnswer = { ok: true; wake: ChatWakeView } | { ok: false; refusal: "refused"; reason: RefusalReason } | MissingResult;
+
+/**
+ * Tries a wake again, in a visit to the account's copy of `workspaceId`,
+ * after the copy syncs. Every wake the retry could answer, the one it names
+ * and the generation a repeat answers, has its thread read through the
+ * reads' secret-file filter. A thread the account may no longer see answers
+ * as a wake that isn't there, and nothing changes; so does an answer whose
+ * thread wasn't read and shown. The relay log's head bounds what any sync of the copy
+ * can pull, so the thread is judged against it: when the head is unchanged
+ * from before the copy synced, through the read and the last session check,
+ * the read still holds, and the retry commits with nothing awaited after
+ * that check. When the head moved, the copy syncs and reads once more; a
+ * second move answers "Couldn't send", with no generation and no binding.
+ * The caller authenticates the account, checks that it owns the workspace
+ * and that the workspace shows on the phone, and parses the request.
+ */
+export async function runAccountRetryWake(
+  server: { storage: SyncRelayStorage; copies: ServerCopies },
+  input: {
+    workspaceId: string;
+    accountId: string;
+    retry: PhoneRetryWake;
+    visitor: Extract<CopyVisitor, { reason: "account" }>;
+    authorize(): Promise<void>;
+    nowMs(): number;
+  },
+): Promise<{ result: RetryWakeAnswer; cursor: string }> {
+  const { storage } = server;
+  const { workspaceId, accountId } = input;
+  const { operationId, wakeId } = input.retry;
+  const { signal } = input.visitor;
+  const missingWake: RetryWakeAnswer = { ok: false, reason: `no such wake: ${wakeId}`, refusal: "missing" };
+  const notSent: RetryWakeAnswer = { ok: false, refusal: "refused", reason: COULD_NOT_SEND };
+  const logHead = () => storage.accountFeedStanding(workspaceId)?.log ?? null;
+  return await server.copies.withServerCopy(accountId, workspaceId, input.visitor, async (copy) => {
+    await input.authorize();
+    const cursor = currentAccountFeedCursor(storage, workspaceId);
+    const answered = async (result: RetryWakeAnswer) => {
+      await input.authorize();
+      return { result, cursor };
+    };
+    // The threads of the wakes this retry could answer, and those of them the account may see now. A wake it doesn't
+    // have has no thread here; the retry answers it without one.
+    const read = async () => {
+      const threads = storage.retryWakeThreads({ accountId, workspaceId, operationId, wakeId });
+      const shown = new Set<string>();
+      for (const threadId of threads) {
+        try {
+          await visibleTargets(storage, copy).thread(threadId);
+          shown.add(threadId);
+        } catch (error) {
+          if (!(error instanceof TargetMissing)) throw error;
+        }
+      }
+      return { hidden: shown.size < threads.length, shown };
+    };
+    for (let attempt = 1; ; attempt += 1) {
+      const head = logHead();
+      let threads: Awaited<ReturnType<typeof read>>;
+      try {
+        await copy.sync(signal);
+        threads = await read();
+      } catch (error) {
+        if (error instanceof RelayError || signal.aborted) throw error;
+        return await answered(notSent);
+      }
+      await input.authorize();
+      // Nothing is awaited from this check to the commit.
+      if (logHead() === head) {
+        if (threads.hidden) return await answered(missingWake);
+        const retried = storage.retryChatWake({ accountId, workspaceId, operationId, wakeId, nowMs: input.nowMs() });
+        // A generation returns only with a thread read and shown above. A new one is made only from the named wake,
+        // whose thread was read, so this check guards the answer, never a commit.
+        if (retried.kind === "retried") {
+          return await answered(threads.shown.has(retried.wake.threadId) ? { ok: true, wake: retried.wake } : missingWake);
+        }
+        if (retried.kind === "missing") return await answered(missingWake);
+        return await answered({ ok: false, refusal: "refused", reason: retried.kind === "too-old" ? TOO_OLD : COULD_NOT_SEND });
+      }
+      if (attempt === 2) return await answered(notSent);
+    }
   });
 }
 

@@ -44,6 +44,29 @@ export function notifyAcceptedLiveUpdate(storage: object, workspaceId: string): 
   });
 }
 
+const chatWakeObservers = new WeakMap<object, Set<(accountId: string) => void>>();
+
+/** Hears each change to an account's chat wakes, by the account. */
+export function observeChatWakeChanges(storage: object, changed: (accountId: string) => void): () => void {
+  let listeners = chatWakeObservers.get(storage);
+  if (!listeners) { listeners = new Set(); chatWakeObservers.set(storage, listeners); }
+  listeners.add(changed);
+  return () => {
+    listeners.delete(changed);
+    if (listeners.size === 0) chatWakeObservers.delete(storage);
+  };
+}
+
+/** Called where a chat wake changes. Listeners hear it after the write leaves SQLite; one rolled back wakes them for nothing. */
+export function notifyChatWakeChange(storage: object, accountId: string): void {
+  if (!chatWakeObservers.has(storage)) return;
+  queueMicrotask(() => {
+    for (const listener of [...(chatWakeObservers.get(storage) ?? [])]) {
+      try { listener(accountId); } catch { /* One listener cannot suppress another's wake. */ }
+    }
+  });
+}
+
 /** Notify after leaving SQLite. Ambiguous failures also require a fresh authority check. */
 export function notifyRelayWrite(storage: object): void {
   if (!observers.has(storage) || queued.has(storage)) return;

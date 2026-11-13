@@ -1,6 +1,7 @@
 import {parseAccountOperationRoute, type AccountOperationRoute} from "./accountOperationRoutes";
 import {parseAccountSessionRoute, type AccountSessionRoute} from "./accountSessionRoutes";
 import {parseAccountRoute, type AccountWorkspaceRoute} from "./accountWorkspaceRoutes";
+import {parseChatRunnersRoute, parseChatWakeRoute, type ChatWakeRoute} from "./chatWakeRoutes";
 import type {AgentChatRoute} from "./agentChatRoutes";
 import type {AgentConnectionRoute} from "./agentConnectionRoutes";
 import type {AppBackendRoute} from "./appBackendRoutes";
@@ -37,6 +38,7 @@ export type SyncRelayRoute =
   | AccountOperationRoute
   | AccountSessionRoute
   | AccountWorkspaceRoute
+  | ChatWakeRoute
   | AgentConnectionRoute
   | WorkReferenceRoute
   | AgentChatRoute
@@ -179,11 +181,13 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
     return { route: "workspaces" };
   }
   if (parts[0] !== "sync" || !parts[1]) throw notFound();
-  // "workspaces", "personal-agents" and "account" are reserved as workspace ids (parseWorkspaceId), like "notices".
+  // "workspaces", "personal-agents", "account" and "wakes" are reserved as workspace ids (parseWorkspaceId), like "notices".
   if (parts[1] === "workspaces") {
     if (parts.length === 4 && parts[3] === "name") return { route: "workspace-name", workspaceId: parseWorkspaceId(parts[2]) };
+    if (parts.length === 4 && parts[3] === "runners") return parseChatRunnersRoute(parts[2]);
     throw notFound();
   }
+  if (parts[1] === "wakes") return parseChatWakeRoute(parts);
   if (parts[1] === "personal-agents") return parsePersonalAgentRoute(parts);
   if (parts[1] === "account") return parts[2] === "sessions" ? parseAccountSessionRoute(parts) : parseAccountRoute(parts);
   // "notices" is reserved as a workspace id (parseWorkspaceId), like "shares".
