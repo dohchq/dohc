@@ -1590,12 +1590,15 @@ export async function startServiceLiveHost(options: {
         // origin does neither.
         for(const [workspaceId,attached] of [...attachments]){
           if(!attached.hosted.checked)continue;
-          if(activation!.workspaceReady(workspaceId))await step(async()=>{
-            await attached.hosted.push(passSignal);
-            // The pull uses the attachment standing now, not one the pass saw before the push.
-            const current=checked(workspaceId),reason=current && tailPull(workspaceId,current);
-            if(current && reason)await pull(current,passSignal,reason);
-          });
+          if(activation!.workspaceReady(workspaceId)){
+            // A refused push does not cost the pull, so departures are still confirmed while the push keeps failing.
+            await step(()=>attached.hosted.push(passSignal));
+            await step(async()=>{
+              // The pull uses the attachment standing after the push, not one the pass saw before it.
+              const current=checked(workspaceId),reason=current && tailPull(workspaceId,current);
+              if(current && reason)await pull(current,passSignal,reason);
+            });
+          }
           else{
             // A refused push does not cost the pull, so held lists still page while the push keeps failing.
             if(activation!.workspacePushes(workspaceId))await step(()=>attached.hosted.push(passSignal));

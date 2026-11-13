@@ -7668,6 +7668,32 @@ it("retires a stopped document while another workspace's update keeps failing, w
   expect(o.host.automationLedger("workspace-2")).toBeNull();
 });
 
+// Proves: a ready workspace whose push keeps failing, here while it waits for owner admission, still pulls after
+// each refused push. Those pulls confirm a stopped document left, so the relay asks for its release while the push
+// still fails. The engine keeps the release pending while the document's settled output is unpushed; once a push
+// takes it, the document retires, with no periodic pass.
+it("confirms a stopped document's departure while its ready workspace's push keeps failing, with passes held", async () => {
+  const polls = heldPolls(), o = await enrolledServiceHost({polls});
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  const tip = o.tip(), key = retiringKey(o, tip);
+  await vi.waitFor(() => expect(polls.paused()).toBe(true));
+  o.replies.push = {ownerAdmissionPending: [{workspaceId: "workspace", originId: "origin", originSeq: 3, versionId: "main", objectId: "object", path: "docs/a.md"}]};
+  o.stop();
+  const sent = o.ownerCalls().length;
+  await o.depart();
+  await vi.waitFor(() => expect(log).toHaveBeenCalledWith("Service activation pass failed.", expect.stringContaining("Hosted publication is waiting for owner admission.")), {timeout: 10_000});
+  await vi.waitFor(() => expect(o.ownerCalls().slice(sent)).toContainEqual(["liveApplication.releaseActivation", key]), {timeout: 10_000});
+  await vi.waitFor(() => expect(log).toHaveBeenCalledWith(...waiting("Waiting for its hosted replica to confirm the document parked.")), {timeout: 10_000});
+  expect(o.engine.unpushed).toBeGreaterThan(0);
+  expect(o.host.retains(o.sibling)).toBe(true);
+  o.replies.push = {};
+  await polls.until(o.f, () => o.host.drained("workspace"));
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true), {timeout: 10_000});
+  expect(retiredRow(o)).toEqual({retired: true, boundary: o.engine.boundary});
+  expect(o.host.retains(o.sibling)).toBe(false);
+  expect(polls.early()).toBeGreaterThan(0);
+});
+
 // Proves: a retirement whose departure was already confirmed, and whose publication then pushed a page and has
 // more, wakes the pass that pushes the rest and retires it. Nothing else it waits on changes then, so only the
 // publication's own wake moves it on, with no periodic pass.
