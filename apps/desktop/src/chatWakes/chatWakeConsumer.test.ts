@@ -835,7 +835,7 @@ describe("fix round 1", () => {
 
   it.each([
     ["renamed", { name: "Claudia", enabled: true, launch: true, admitted: true }, []],
-    ["paused", { name: "Claude", enabled: false, launch: true, admitted: true }, [intentOf("won")]],
+    ["paused", { name: "Claude", enabled: false, launch: true, admitted: true }, [intentOf("won", { prerequisiteMessageId: "q1" })]],
   ] as const)("records nothing when the agent is %s while the decision is read before the enqueue", async (_name, agent, left) => {
     const w = await setup();
     w.relay.add({ prerequisiteMessageId: "q1" });
