@@ -414,6 +414,7 @@ it("edits and pauses through the desktop capture, IPC, renderer mirror and a rea
         hosts,
         tickets,
         changes: sharedChanges,
+        hostsMemberDocuments: () => true,
         readinessLimits: { maxPendingRequests: 8, maxPendingPerUser: 4, timeoutMs: 30000 },
         limits: { ...browserLimits, maxSessions: 16, retentionMs: 120000 },
         editorLimits: {
