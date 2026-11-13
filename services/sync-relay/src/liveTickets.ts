@@ -84,7 +84,7 @@ export function createLiveTickets(options: LiveTicketOptions) {
         const before = storage.resolveLiveObjectHostBinding(scope, objectId);
         // A live host that changed or went away while this ran, as when it reconnects, is a
         // failure to ask again after, not a refusal. The link route answers the same before minting.
-        const refused = (report: TicketHostReport | null) => {
+        const refuseUnlessHostChanged = (report: TicketHostReport | null) => {
           if (before.kind !== "current") return null;
           const now = storage.resolveLiveObjectHostBinding(scope, objectId);
           const changed =
@@ -98,7 +98,7 @@ export function createLiveTickets(options: LiveTicketOptions) {
         };
         const candidate = await currentBinding({ ...scope }, objectId, signal);
         signal?.throwIfAborted();
-        if (candidate === null) return refused(null);
+        if (candidate === null) return refuseUnlessHostChanged(null);
         let report: TicketHostReport;
         try {
           report = snapshotTicketHostReport(candidate);
@@ -115,7 +115,7 @@ export function createLiveTickets(options: LiveTicketOptions) {
           ticketId: newTicketId(),
           tokenHash,
         });
-        return minted === null ? refused(report) : { token, ...minted };
+        return minted === null ? refuseUnlessHostChanged(report) : { token, ...minted };
       } catch {
         throw new Error("Live-ticket operation failed.");
       }

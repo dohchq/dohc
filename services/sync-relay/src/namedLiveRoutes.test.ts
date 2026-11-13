@@ -1881,6 +1881,16 @@ describe("a link ticket while the relay is busy", () => {
     expect(await ask(f)).toEqual(tryAgain);
   });
 
+  it.each(["linkDiscussionPrincipalLimit", "workspaceQuotaBytes"] as const)(
+    "stops a new holder that %s turns away",
+    async (limit) => {
+      const f = await fixture(limits, true);
+      // The storage context holds its limits here; the public storage type does not show them.
+      (f.storage as unknown as { options: Record<typeof limit, number> }).options[limit] = 0;
+      expect(await ask(f)).toEqual(opaque);
+    },
+  );
+
   it("tells a caller with neither a capability nor an agent token nothing", async () => {
     const f = await fixture(limits, true);
     f.routes.close();

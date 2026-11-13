@@ -78,6 +78,7 @@ import type { LiveTicketScope } from "../liveBrowserContext";
 import { authorizeNamedLiveEditShareGrant } from "../shareAuthorization";
 import { readLiveHostControl, parseHostControlTimestamp } from "./hostControl";
 import { assertWorkspaceQuota } from "./workspaces";
+import { SyncRelayQuotaExceededError } from "./errors";
 import {
   prepareLiveDeliveryWorkspace,
   registerLiveDeliveryBaseline,
@@ -1105,16 +1106,21 @@ export function mintLiveTicket(
         const principalId =
           link.enrollment.principal?.principalId ??
           parseLiveUpdateIdentifier(storage.newDiscussionId(), "link principal ID");
+        // A full workspace refuses a new browser the way a full link does.
         if (!link.enrollment.principal)
-          assertWorkspaceQuota(
-            storage,
-            owned.scope.workspaceId,
-            linkPrincipalStorageBytes(
-              principalId,
-              owned.scope.grantId,
-              owned.scope.profileTokenHash,
-            ),
-          );
+          try {
+            assertWorkspaceQuota(
+              storage,
+              owned.scope.workspaceId,
+              linkPrincipalStorageBytes(
+                principalId,
+                owned.scope.grantId,
+                owned.scope.profileTokenHash,
+              ),
+            );
+          } catch (error) {
+            throw error instanceof SyncRelayQuotaExceededError ? LIVE_TICKET_REFUSED : error;
+          }
         commitLinkEnrollment(storage, {
           ...owned.scope,
           enrollment: link.enrollment,
