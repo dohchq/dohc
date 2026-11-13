@@ -378,6 +378,37 @@ it("keeps a link socket through bearer refresh and closes it on revocation", asy
   expect(f.raw.prepare("SELECT link_session_id FROM sync_relay_live_session_tickets").get()).toEqual({ link_session_id: old.sessionId });
 });
 
+/** Sends one ping and reports whether its pong or the socket's close came first. */
+async function pingOutcome(socket: ReturnType<Awaited<ReturnType<typeof fixture>>["connect"]>) {
+  const pong = once(socket.ws, "pong").then(() => "pong", () => "error");
+  socket.ws.ping("keepalive");
+  return Promise.race([pong, socket.closed.then(() => "closed")]);
+}
+
+it.each([false, true])("keeps a share page editor open while its gateway pings and closes it once pings stop; link=%s", async link => {
+  const routeLimits = {...limits, idleTimeoutMs: 1000};
+  const f = await fixture(routeLimits, link), browser = f.connect((await f.mint()).token);
+  expect(await browser.status).toBe(101);
+  await browser.until(() => browser.received.some(frame => frame.kind === "welcome"));
+  // The gateway pings every half idle period; these come faster, for three idle periods.
+  const opened = performance.now();
+  while (performance.now() - opened < 3 * routeLimits.idleTimeoutMs) {
+    expect(await pingOutcome(browser)).toBe("pong");
+    await new Promise(resolve => setTimeout(resolve, routeLimits.idleTimeoutMs / 5));
+  }
+  await browser.closed;
+});
+
+it("closes a link editor on the gateway's first ping after its link session expires", async () => {
+  const f = await fixture(limits, true), browser = f.connect((await f.mint()).token);
+  expect(await browser.status).toBe(101);
+  await browser.until(() => browser.received.some(frame => frame.kind === "welcome"));
+  expect(await pingOutcome(browser)).toBe("pong");
+  // The fixture's link session expires at 61 s.
+  vi.mocked(Date.now).mockReturnValue(61_000);
+  expect(await pingOutcome(browser)).toBe("closed");
+});
+
 it.each<Record<string, string>>([
   { authorization: "" }, { "x-dohc-link-profile-secret": "" }, { "x-dohc-link-profile-secret": Buffer.alloc(32, 9).toString("base64url") },
   { origin: "https://other.example" }, { host: "other.example" }, { "x-dohc-relay-exchange-key": "forged" },
