@@ -1,4 +1,5 @@
 import { visibleSharePath } from "@dohc/security-contract/share-selector";
+import { CHAT_FILE_LINK_WITHHELD } from "@dohc/workspace-contracts/chat-mentions";
 import { describe, expect, it } from "vitest";
 import {
   MAX_SHARE_VERSION_ID_CHARS,
@@ -1079,6 +1080,44 @@ describe("chat share op filter", () => {
         createdAtMs: 4,
       }).allowed,
     ).toBe(false);
+  });
+
+  it("keeps only the file links a share's files cover in what a recipient reads, and stores an append as written", () => {
+    const group = { kind: "group" as const, channelWireId: "wire-shared", paths: ["team"], versionId: null, access: "read-write" as const };
+    const work = `@[work:${"a".repeat(43)}]`;
+    const body = `See @[team/plan.md#Goals] and ${work}, not @[finance/budget.md#Q3], @[team/./plan.md], ` +
+      "`@[finance/x.md]`, @[a @[b] or @[finance/open\nnext line";
+    const withheld = CHAT_FILE_LINK_WITHHELD;
+    const message = { messageId: "m1", threadId: "thread-in", authorKind: "human", body, createdAtMs: 1,
+      work: { status: "Wrote @[finance/budget.md]", url: "https://example.test/x" } };
+    const read = filterOpForShare(group, "chat.message.append", JSON.stringify(message), resolver);
+    expect(read.allowed).toBe(true);
+    if (!read.allowed) return;
+    expect((read.payload as {body: string}).body).toBe(`See @[team/plan.md#Goals] and ${work}, not ${withheld}, ${withheld}, ` +
+      `\`${withheld}\`, ${withheld} or ${withheld}\nnext line`);
+    expect((read.payload as {work: unknown}).work).toEqual({ status: `Wrote ${withheld}`, url: "https://example.test/x" });
+    // A share without files covers no file.
+    const chatOnly = filterOpForShare(channelShare, "chat.message.append", JSON.stringify({ ...message, body: "@[team/plan.md]" }), resolver);
+    expect(chatOnly.allowed && (chatOnly.payload as {body: string}).body).toBe(withheld);
+    // Every field with words in it reads the same way.
+    const linked = "@[finance/budget.md]";
+    const served = [
+      filterOpForShare(group, "chat.thread.create", JSON.stringify({ threadId: "thread-new", title: linked, createdAtMs: 1,
+        channelSlug: linked, channelWireId: "wire-shared", lane: "chat" }), resolver),
+      filterOpForShare(group, "chat.decision.set", JSON.stringify({ threadId: "thread-in", messageId: "m1", state: "open", atMs: 1,
+        options: [linked, "Keep"], chosenOption: linked }), resolver),
+      filterOpForShare(group, "chat.reaction.set", JSON.stringify({ reactionId: "r1", messageId: "m1", threadId: "thread-in", emoji: linked,
+        authorId: "u", authorKind: "human", authorDisplayName: linked, state: "on", atMs: 1 }), resolver),
+      filterOpForShare(group, "chat.channel.create", JSON.stringify({ channelId: "c1", name: linked, slug: "team", kind: "channel",
+        createdAtMs: 1, wireId: "wire-shared", purpose: linked, folderPath: "team" }), resolver),
+    ];
+    for (const decision of served) {
+      expect(decision.allowed).toBe(true);
+      expect(JSON.stringify(decision.allowed && decision.payload)).not.toContain("finance");
+    }
+    // What a member appends is stored whole; the owner reads it so.
+    const append = filterOpForShareAppend(channelShare, "chat.message.append", JSON.stringify({ ...message, body: linked }), resolver);
+    expect(append.allowed && (append.payload as {body: string}).body).toBe(linked);
   });
 
   it("excludes another channel's ops with sentinel content (fail-closed leak test)", () => {

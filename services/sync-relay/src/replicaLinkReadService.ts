@@ -109,7 +109,7 @@ export function createReplicaLinkReadService(storage:StorageContext, source:Deve
         const selector=fileSideOf(s.authorized.effectiveSelector)!;
         const epochLogFloor=storage.getEpochLogFloor(s.workspace);
         return {ok:true,effectiveSelector:createAccountlessPathProjection(selector).selector,
-          access:selector.access,subjectName:storage.getShareLabels(s.authorized.share.shareId).subjectName,
+          access:selector.access,subjectName:storage.getShareLabels(s.authorized.share.shareId, "link").subjectName,
           files:s.files.map(f=>{
             const current=file(s,f.path),row=s.rows.get(f.path)!;
             const folder=row.path.slice(0,-"/automations.yaml".length);

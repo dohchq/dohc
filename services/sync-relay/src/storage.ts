@@ -14,6 +14,7 @@ import * as shareLabelsStorage from "./storage/shareLabels";
 import * as replicaReads from "./storage/replicaReads";
 import * as buttonInspections from "./automationButtonInspections";
 import type {ShareLabels} from "@dohc/security-contract/share-labels";
+import type {ShareLabelReader} from "./shareFilter";
 import type { ServiceActivationAccess } from "./storage/serviceActivationAccess";
 import { ServiceActivationStore } from "./storage/serviceActivation";
 import * as serviceHostEnrollmentStorage from "./storage/serviceHostEnrollment";
@@ -1478,7 +1479,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   shareHasActiveGrants(shareId: string): boolean {
     return !!this.db.prepare("SELECT 1 FROM sync_relay_share_grants WHERE share_id = ? AND status = 'active' LIMIT 1").get(shareId);
   }
-  getShareLabels(shareId: string): ShareLabels { return shareLabelsStorage.getShareLabels(this, shareId); }
+  getShareLabels(shareId: string, reader?: ShareLabelReader): ShareLabels { return shareLabelsStorage.getShareLabels(this, shareId, reader); }
   setShareLabels(shareId: string, labels: ShareLabels, updatedAtMs: number): void { shareLabelsStorage.setShareLabels(this, shareId, labels, updatedAtMs); }
   getShare(shareId: string): SyncRelayShareRow | null {
     return sharesStorage.getShare(this, shareId);

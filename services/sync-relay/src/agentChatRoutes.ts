@@ -3,7 +3,7 @@ import { chatMentionTokens, handleForName, normalizeHandle } from "@dohc/workspa
 import { DiscussionActivityCapacityError, linkLogWaitGroup, type DiscussionActivityHub } from "./discussionActivity";
 import { errorResponse, notFound, RelayError, relayError } from "./errors";
 import { agentAccessCheck } from "./linkAuthority";
-import { linkChatMessage, refusePost, LINK_CHAT_MAX_POST_BYTES, type LinkChatMessage } from "./linkChatRoutes";
+import { linkChatMessage, linkReaderChatMessage, refusePost, LINK_CHAT_MAX_POST_BYTES, type LinkChatMessage } from "./linkChatRoutes";
 import { messageFromOp } from "./namedRecipientChat";
 import { authorizeLinkChatAction } from "./shareAuthorization";
 import { filterOpForShare } from "./shareFilter";
@@ -185,7 +185,7 @@ export function createAgentChatRoutes(input: {
         const { authorized } = current(check);
         if (authorized.effectiveSelector.channelWireId !== channelWireId) throw new Refused();
         const page = storage.fetchChatMessages({ workspaceId, channelWireId, cursor: position, direction: "newer", limit: WAIT_PAGE_ROWS });
-        const found: LinkChatMessage[] = [];
+        const found: LinkChatMessage[] = [], read = linkReaderChatMessage(authorized.effectiveSelector);
         const ownThreads = page.rows.length === 0 ? new Set<string>() : storage.linkPrincipalThreadIds(workspaceId, principalId);
         for (const row of page.rows) {
           if (row.settlementAdmission?.status === "refused") continue;
@@ -193,7 +193,7 @@ export function createAgentChatRoutes(input: {
           if (!decision.allowed || (decision.payload as { linkPrincipalId?: unknown }).linkPrincipalId === principalId) continue;
           const message = messageFromOp({ relaySeq: row.relaySeq, opKind: row.opKind, payload: decision.payload }, row.originId);
           if (!message || !(ownThreads.has(message.threadId) || mentions(message.body, mention))) continue;
-          if (threadId === null || message.threadId === threadId) found.push(linkChatMessage(message));
+          if (threadId === null || message.threadId === threadId) found.push(read(message));
         }
         position = page.nextCursor;
         return { found, more: page.hasMore };
@@ -219,7 +219,7 @@ export function createAgentChatRoutes(input: {
       if (signal.aborted) throw new Refused();
       current(check);
       const answer: AgentChatWaitBody = {
-        ok: true, group: { channelWireId, name: storage.getShareLabels(shareId).subjectName }, mention, messages: [], cursor: position,
+        ok: true, group: { channelWireId, name: storage.getShareLabels(shareId, "link").subjectName }, mention, messages: [], cursor: position,
       };
       for (const message of result.found) {
         const next = { ...answer, messages: [...answer.messages, message], cursor: message.relaySeq };

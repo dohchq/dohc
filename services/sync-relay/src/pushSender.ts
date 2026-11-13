@@ -2,6 +2,7 @@ import { createCipheriv, createECDH, hkdfSync, randomBytes, sign } from "node:cr
 import { Resolver } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
 import { BlockList, isIP } from "node:net";
+import { withholdChatFileLinks } from "@dohc/workspace-contracts/chat-mentions";
 import { pushMessageAccess, pushPlainText, readPushMessage, type PushMessage } from "./chatMessageInterest";
 import type { PushConfig } from "./pushConfig";
 import { pushEndpointUrl } from "./pushEndpoints";
@@ -211,8 +212,9 @@ export function createPushSender(options: {
         ? `${fresh.message.senderLabel} (${ownerName}'s ${authorKind})`
         : fresh.message.authorUserId ? ownerName : fresh.message.senderLabel;
       const place = fresh.access.place;
-      const label = delivery.reason === "mention" ? `${sender} mentioned you in ${place}` :
-        delivery.reason === "dm" ? `${sender} sent you a message` : `${sender} replied in ${place}`;
+      // A push names no share, so its words keep no file link.
+      const label = withholdChatFileLinks(delivery.reason === "mention" ? `${sender} mentioned you in ${place}` :
+        delivery.reason === "dm" ? `${sender} sent you a message` : `${sender} replied in ${place}`, () => false);
       const prepared = preparePushRequest(config, fresh.subscription, destination, {
         label, link, reason: delivery.reason, deliveryId: delivery.deliveryId, generation: delivery.generation, tag: `dohc-${delivery.deliveryId}`,
       }, now(), Math.max(1, Math.min(PUSH_DELIVERY_TTL_SECONDS, Math.floor((delivery.expiresAtMs - now()) / 1000))));

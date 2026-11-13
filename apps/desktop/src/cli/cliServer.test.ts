@@ -10,7 +10,7 @@ import { mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, writeFil
 import { tmpdir } from "node:os";
 import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
-import { createApp, importData, replyToChat, writeWorkspaceFile, type ToolContext } from "../../../../packages/mcp/src/tools";
+import { createApp, importData, replyToChat, startGroupChat, writeWorkspaceFile, type ToolContext } from "../../../../packages/mcp/src/tools";
 import { createActorIssuer, deriveMomentActor, parseActorKey } from "@dohc/workspace-contracts/actor-identity";
 import { executeCli } from "@dohc/cli";
 import { CLI_PROTOCOL_VERSION, cliTransportResponseSchema, parseCliResult, type CliLinkTarget, type CliRequest, type CliResultByVerb, type CliTransportResponse, type CliVerb } from "@dohc/cli/protocol";
@@ -216,7 +216,7 @@ describe("CLI socket server", () => {
   let debugLines: string[];
   let registryWorkspace: CliRegistryWorkspace;
   // The registry row the real chatWrites module reads its gates from.
-  let chatRow: Pick<RegistryEntry, "remote" | "shareView" | "sharedChannels">;
+  let chatRow: Pick<RegistryEntry, "remote" | "shareView" | "sharedChannels" | "shareRoster">;
   let context: CliWorkspaceContext;
   let serverOptions: CliServerOptions;
   // The chain depth of the agent run in progress in each workspace, as main
@@ -1522,6 +1522,36 @@ describe("CLI socket server", () => {
       workspaceId: scopedWorkspaceId,
       threadId: startedThread.id,
     })).toHaveLength(2);
+  });
+
+  it("refuses an agent's post through the CLI and through MCP that links a file the Group's share does not cover", async () => {
+    if (!store) throw new Error("Store is not available");
+    const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const channelWireId = await store.getChannelWireId({ workspaceId: WORKSPACE_ID, channelId: general.id });
+    if (!channelWireId) throw new Error("Channel has no wire id");
+    chatRow.shareRoster = {
+      grants: [{
+        granterUserId: "verified-user-id", granterEmail: null, subjectName: null, sharerName: null,
+        shareId: "share-general", grantId: "grant-general", generation: 1, status: "active",
+        recipientUserId: "peer-user-id", recipientEmail: null,
+        selector: { kind: "group", channelWireId, paths: ["team"], versionId: null },
+        access: "read-write", fileScope: "served",
+      }],
+      links: [], formerGrants: [], endedGrants: [], version: 1, listedAtMs: SERVER_NOW_MS,
+    };
+    const refusal = "This Group's share doesn't include finance/budget.md. Remove the link or share the file first.";
+    await expect(post({ actor: "agent", title: "Budget", body: "See @[finance/budget.md]" })).rejects.toThrow(refusal);
+    const ctx: ToolContext = { root: workspaceRoot, home: stateDir, request: (value) => invoke(value.verb, value.args) };
+    await expect(startGroupChat(ctx, { group: "general", title: "Budget", body: "See @[finance/budget.md]" }))
+      .resolves.toMatchObject({ ok: false, reason: expect.stringContaining(refusal) });
+    expect(await store.listChannelThreads({ workspaceId: WORKSPACE_ID, channelId: general.id })).toEqual([]);
+    const existing = await store.startChannelThread({
+      authorActorKey: null, workspaceId: WORKSPACE_ID, channelId: general.id,
+      author: { kind: "human", displayName: "Sam" }, body: "Plans",
+    });
+    await expect(replyToChat(ctx, { threadId: existing.thread.id, body: "And @[finance/budget.md]" }))
+      .resolves.toMatchObject({ ok: false, reason: expect.stringContaining(refusal) });
+    expect(await store.listMessages({ workspaceId: WORKSPACE_ID, threadId: existing.thread.id })).toHaveLength(1);
   });
 
   // Only the run itself says it has nothing to report, and the chat's own

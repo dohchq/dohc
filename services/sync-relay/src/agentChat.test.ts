@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { CHAT_FILE_LINK_WITHHELD } from "@dohc/workspace-contracts/chat-mentions";
 import {
   AGENT_CHAT_MAX_WAIT_MS, MAX_AGENT_CHAT_WAITS_PER_CONNECTION, MAX_AGENT_CHAT_WAITS_PER_LINK, MAX_AGENT_CHAT_WAITS_PER_WORKSPACE,
 } from "./agentChatRoutes";
@@ -72,14 +73,14 @@ function appendOwnerOps(storage: SyncRelayStorage, ops: ChatOp[]) {
   ownerSeq += ops.length;
 }
 
-async function fixture(): Promise<Fixture> {
+async function fixture(folder = "team"): Promise<Fixture> {
   ownerSeq = 0;
   const storage = await testStorage();
   const clock = { value: 2_000 };
   const activity = new DiscussionActivityHub();
   storage.claimWorkspace({ workspaceId, ownerUserId: OWNER, createdAtMs: 1 });
   appendOwnerOps(storage, [
-    chatChannelCreate(channelWireId, { name: "Team", type: "both", folderPath: "team" }),
+    chatChannelCreate(channelWireId, { name: "Team", type: "both", folderPath: folder }),
     chatThreadCreate("thread-team", channelWireId),
     chatThreadCreate("thread-other", channelWireId),
     chatMessageAppend("owner-first", "thread-team", "welcome", { authorUserId: OWNER, authorDisplayName: "Ada" }),
@@ -88,7 +89,7 @@ async function fixture(): Promise<Fixture> {
   ]);
   const h = testHandler(storage, { ...released, discussionActivity: activity, nowMs: () => clock.value });
   const created = await h(request(OWNER, `/sync/${workspaceId}/shares`, jsonBody({
-    recipientUserId: MEMBER, channelWireId, paths: ["team"], access: "read-write", subjectName: "Team",
+    recipientUserId: MEMBER, channelWireId, paths: [folder], access: "read-write", subjectName: "Team",
   })));
   expect(created.status, await created.clone().text()).toBe(200);
   return { storage, h, activity, shareId: String((await json(created)).shareId), clock };
@@ -434,6 +435,19 @@ describe("an agent waiting for messages", () => {
     expect(again.cursor).toBe(first.cursor);
     // The first answer's cursor resumes after it.
     expect(await ok(await wait(f, agent, { cursor: first.cursor, timeoutMs: 0 }))).toMatchObject({ messages: [], cursor: first.cursor });
+  });
+
+  it("reads a file link by the path its link's files show it at", async () => {
+    const f = await fixture("clients/acme/team");
+    await ok(await f.h(request(OWNER, `/sync/shares/${f.shareId}`, { ...jsonBody({ subjectName: "Plan @[clients/acme/team/plan.md]" }), method: "PUT" })));
+    const agent = await connect(f, "read-write");
+    await ok(await post(f, agent, { threadId: "thread-team" }));
+    ownerSays(f, "owner-reply", "thread-team", "see @[clients/acme/team/plan.md#Goals] and @[clients/acme/budget.md]");
+    const read = await ok(await wait(f, agent, { timeoutMs: 0 })) as WaitAnswer;
+    expect(read.messages).toEqual([expect.objectContaining({
+      messageId: "owner-reply", body: `see @[team/plan.md#Goals] and ${CHAT_FILE_LINK_WITHHELD}`,
+    })]);
+    expect(read.group.name).toBe("Plan @[team/plan.md]");
   });
 
   it("keeps a mention in another thread for a later wait without a thread filter", async () => {
