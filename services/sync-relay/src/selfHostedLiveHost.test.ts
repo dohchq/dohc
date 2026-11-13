@@ -17,7 +17,6 @@ import {attachLiveJournalHistory, createLiveJournalHistoryAuthority} from "./sto
 import {createNamedFrameChanges} from "./liveHostChanges";
 import {hasRelayWriteObservers} from "./relayWriteChanges";
 import {serviceHostDocumentEnabled} from "./storage/serviceHostEnrollment";
-import {RECLAIM_RETENTION_MS, RECLAIM_SWEEP_MS} from "./liveHostingLimits";
 import type {StorageContext} from "./storage/context";
 
 // While `error` is set, opening a divergence marker fails, as on a full disk.

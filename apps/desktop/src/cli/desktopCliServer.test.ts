@@ -37,7 +37,6 @@ import { createWorkspaceAuthorityOwner } from "../workspaces/workspaceAuthorityO
 import { createWorkspaceFolder } from "../workspaces/createWorkspaceFolder";
 import { realpathSync } from "node:fs";
 import { readDeleteRecovery, waitForRecovery } from "../workspaces/workspaceDeleteRecovery";
-import * as recovery from "../workspaces/workspaceDeleteRecovery";
 import { openedLocalState } from "../testing/preparedLocalState";
 
 function deferred() {

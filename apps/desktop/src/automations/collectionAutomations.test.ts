@@ -16,7 +16,7 @@ import { desktopRecordEditContext, type DesktopRecordEditHost } from "../workspa
 import { createTestScratch } from "../workspaces/testTemp";
 
 import { createAutomationFormulaEvaluator, type AutomationFormulaEvaluator } from "@dohc/automation-executor/automation-evaluator-host";
-import { definitionHash, localIsoTime } from "@dohc/automation-executor/automation-plan";
+import { localIsoTime } from "@dohc/automation-executor/automation-plan";
 import { type ReachRoster, type RosterGrant } from "@dohc/automation-executor/automation-reach";
 import { createAutomationRunStore, type AutomationRunStore, type ReportedFailure, type StoredRun, type StoredSubscription } from "@dohc/automation-executor/automation-run-store";
 import { fakeLocalStateOpens, preparedAutomationStoreFolder } from "../testing/preparedLocalState";

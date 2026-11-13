@@ -9,7 +9,7 @@ import { createCaptureLiveStores } from "../workspaces/workspaceEngineCaptureLiv
 import { createWorkspaceEngineCapture, type WorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
 import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import { parseAutomationsFile, writeAutomationsFile, type Automation } from "@dohc/workspace-contracts/automations";
-import { collectionAutomationId, definitionHash } from "@dohc/automation-executor/automation-plan";
+import { collectionAutomationId } from "@dohc/automation-executor/automation-plan";
 import { CollectionAutomations, type KeptAutomationField } from "@dohc/automation-executor/collection-automations";
 import { CHANNELS } from "./channels";
 import { SHARED_LIVE_RESTORE_BODY, sharedLiveRestoreDetail, sharedLiveRestoreTitle } from "./errorWords";

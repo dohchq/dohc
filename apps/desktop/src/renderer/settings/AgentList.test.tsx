@@ -10,7 +10,7 @@ import { deferred } from "../../testing/deferred";
 import { AgentList } from "./AgentList";
 
 let pausedListener: ((event: ChatDispatchPausedEvent) => void) | null = null;
-let listeningListener: ((event: AgentsListeningEvent) => void) | null = null;
+let _listeningListener: ((event: AgentsListeningEvent) => void) | null = null;
 
 let personalListener: ((event: PersonalAgentsEvent) => void) | null = null;
 const bridgeMock = {
@@ -28,8 +28,8 @@ const bridgeMock = {
   setChatArchived: vi.fn(async (_payload: { workspaceId: string; channelId: string; state: string }): Promise<DesktopUserSettingsResult> => ({ settings: SETTINGS, source: "stored" })),
   readAgentsListening: vi.fn(async (_payload: Record<string, never>): Promise<AgentsListeningEvent> => ({ agentIds: [] })),
   onAgentsListening: vi.fn((listener: (event: AgentsListeningEvent) => void) => {
-    listeningListener = listener;
-    return () => { listeningListener = null; };
+    _listeningListener = listener;
+    return () => { _listeningListener = null; };
   }),
   readPersonalAgents: vi.fn(async (_payload: { refresh: boolean }): Promise<PersonalAgentsEvent> => ({ accounts: [] })),
   onPersonalAgents: vi.fn((listener: (event: PersonalAgentsEvent) => void) => {
@@ -59,7 +59,7 @@ const SETTINGS: DesktopUserSettings = {
 beforeEach(() => {
   vi.clearAllMocks();
   pausedListener = null;
-  listeningListener = null;
+  _listeningListener = null;
   personalListener = null;
 });
 afterEach(cleanup);
