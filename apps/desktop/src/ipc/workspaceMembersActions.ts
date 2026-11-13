@@ -257,3 +257,57 @@ export function createWorkspaceMembersActions<Workspace extends MembersWorkspace
     );
   };
 }
+
+export interface JoinedWorkspaceGroupInput {
+  name: string;
+  type?: "posts" | "chat" | "both";
+  purpose?: string;
+}
+
+/**
+ * New group in a joined workspace, for an admin. The relay reads the role
+ * from its own records and writes the Group into the owner's workspace; the
+ * view's next pull brings it here. Main names the share and the account.
+ */
+export function createJoinedWorkspaceGroupAction<Credentials extends { userId: string; relayUrl?: string }>(dependencies: {
+  credentials(): Promise<Credentials | null>;
+  relayUrlsMatch(left: string, right: string): boolean;
+  relayResponse(credentials: Credentials, path: string, init: RequestInit): Promise<Response>;
+}) {
+  return async function createJoinedWorkspaceGroup(
+    view: { shareId?: string; relayUrl?: string; recipientUserId?: string } | undefined,
+    input: JoinedWorkspaceGroupInput,
+  ): Promise<{ channelWireId: string }> {
+    const credentials = await dependencies.credentials();
+    if (!view?.shareId || !credentials?.relayUrl || !view.relayUrl ||
+      !dependencies.relayUrlsMatch(credentials.relayUrl, view.relayUrl) || view.recipientUserId !== credentials.userId) {
+      throw new Error("Sign in to the account that joined this workspace.");
+    }
+    let response: Response;
+    try {
+      response = await dependencies.relayResponse(credentials, WORKSPACE_MEMBER_ROUTES.groupCreate, {
+        method: "POST",
+        headers: { accept: "application/json", "content-type": "application/json" },
+        body: JSON.stringify({ shareId: view.shareId, ...input }),
+      });
+    } catch {
+      throw new Error(MEMBERS_UNREACHABLE);
+    }
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      switch (response.status) {
+        case 400: throw new Error("Use 1 to 80 characters, including at least one letter or number.");
+        case 403: throw new Error(`dohc could not create ${input.name} because only admins create Groups here.`);
+        case 404: throw new Error(`dohc could not create ${input.name} because your membership ended.`);
+        case 413: throw new Error(`dohc could not create ${input.name} because this workspace is out of space.`);
+        default: throw new Error(`dohc could not create ${input.name}. The server answered ${response.status}. Try again.`);
+      }
+    }
+    const data: unknown = await response.json().catch(() => null);
+    const channelWireId = typeof data === "object" && data !== null ? (data as { channelWireId?: unknown }).channelWireId : undefined;
+    if (typeof channelWireId !== "string" || channelWireId.length === 0) {
+      throw new Error(`dohc could not read your server's answer. Look for ${input.name} in Chats before you try again.`);
+    }
+    return { channelWireId };
+  };
+}

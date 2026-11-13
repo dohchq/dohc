@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { WorkspaceMembersView } from "@dohc/security-contract/workspace-members";
-import { createWorkspaceMembersActions, MEMBERS_UNREACHABLE } from "./workspaceMembersActions";
+import { createJoinedWorkspaceGroupAction, createWorkspaceMembersActions, MEMBERS_UNREACHABLE } from "./workspaceMembersActions";
 import { memberOperations, MEMBERS_INACTIVE_MESSAGE } from "./memberOperations";
 import { operationBridge, registerOperations } from "./operationTable";
 import { deferred } from "../testing/deferred";
@@ -356,5 +356,52 @@ describe("workspace members actions", () => {
       }),
     ).rejects.toThrow();
     expect(h.relay).not.toHaveBeenCalled();
+  });
+});
+
+describe("an admin's New group in a joined workspace", () => {
+  type Joined = { userId: string; token: string; relayUrl?: string };
+  const membership = { shareId: "share-1", relayUrl: "https://relay.test", recipientUserId: "u-ana" };
+  function group(credentials: Joined | null = { userId: "u-ana", token: "secret", relayUrl: "https://relay.test/" }) {
+    const relay = vi.fn(async (_credentials: Joined, _path: string, _init: RequestInit): Promise<Response> => json({ ok: true, channelWireId: "channel_wire_new", name: "Team" }));
+    const create = createJoinedWorkspaceGroupAction<Joined>({
+      credentials: async () => credentials,
+      relayUrlsMatch: (left, right) => left.replace(/\/$/, "") === right.replace(/\/$/, ""),
+      relayResponse: relay,
+    });
+    return { create, relay };
+  }
+
+  it("asks the relay for the Group as the account that joined", async () => {
+    const g = group();
+    await expect(g.create(membership, { name: "Team", type: "chat" })).resolves.toEqual({ channelWireId: "channel_wire_new" });
+    expect(calls(g.relay)).toEqual([`POST /sync/members/groups {"shareId":"share-1","name":"Team","type":"chat"}`]);
+  });
+
+  it.each([
+    [null, "signed out"],
+    [{ userId: "u-sam", token: "secret", relayUrl: "https://relay.test" }, "another account"],
+    [{ userId: "u-ana", token: "secret", relayUrl: "https://other.test" }, "another server"],
+  ] as const)("refuses before the relay when %s (%s)", async (credentials, _why) => {
+    const g = group(credentials);
+    await expect(g.create(membership, { name: "Team" })).rejects.toThrow("Sign in to the account that joined this workspace.");
+    expect(g.relay).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [400, "Use 1 to 80 characters, including at least one letter or number."],
+    [403, "dohc could not create Team because only admins create Groups here."],
+    [404, "dohc could not create Team because your membership ended."],
+    [413, "dohc could not create Team because this workspace is out of space."],
+  ])("names a %i refusal", async (status, words) => {
+    const g = group();
+    g.relay.mockResolvedValueOnce(json({ error: "refused" }, status));
+    await expect(g.create(membership, { name: "Team" })).rejects.toThrow(words);
+  });
+
+  it("says the server cannot be reached when the request fails", async () => {
+    const g = group();
+    g.relay.mockRejectedValueOnce(new TypeError("fetch failed"));
+    await expect(g.create(membership, { name: "Team" })).rejects.toThrow(MEMBERS_UNREACHABLE);
   });
 });

@@ -243,6 +243,7 @@ function fixture(
     projectChatBookmarks: vi.fn(),
     queueCloudSync: vi.fn(),
     syncSharedChannelsForChatTarget: async () => undefined,
+    pushShareViewChat: async () => undefined,
     scanChatDispatch: async () => undefined,
     betweenDispatchScans: (_workspaceId, write) => write(),
     notifyRenderer: () => undefined,

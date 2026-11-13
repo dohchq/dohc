@@ -4,6 +4,7 @@ import { CHATS_STOPPED, chatOperations } from "./chatOperations";
 import { isReceivedObject } from "@dohc/workspace-contracts/workspace-ref";
 import { workspaceFileRefs } from "../workspaces/workspaceFileReferenceScopes";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
+import { recordedShareSelector } from "../workspaces/shareViewRecords";
 import { createActorPresentationRequest } from "../workspaces/actorPresentation";
 import type { ActorPresentation, ChatDecisionRecord, ChatThreadWorkRecord } from "./bridgeContract";
 import { type EngineFileResolver } from "../workspaces/resolveEngineFiles";
@@ -153,6 +154,20 @@ export function chatMessageForIpc(
   };
 }
 
+// In a joined workspace every other person shows their account name, so the
+// viewer's own messages say "You", whatever name this computer wrote them under.
+function namedForViewer<
+  Record extends {
+    authorKind: string;
+    authorDisplayName: string;
+    presentation: ActorPresentation | null;
+  },
+>(scope: Pick<ChatScope, "kind">, record: Record): Record {
+  return scope.kind === "share" && record.authorKind === "human" && record.presentation?.self
+    ? { ...record, authorDisplayName: "You" }
+    : record;
+}
+
 type StoreDecision = Awaited<ReturnType<DesktopLinkedChatStore["listThreadDecisions"]>>[number];
 
 function chatDecisionForIpc(decision: StoreDecision): ChatDecisionRecord {
@@ -244,6 +259,14 @@ export function registerChatsIpcHandlers<
   automationCollectionOf(workspaceId: string): AutomationCollectionOf;
   // A group is a folder. Main creates it when the group is created.
   ensureGroupFolder(workspace: RegistryEntry, folderPath: string): Promise<void>;
+  // An admin's New group in a joined workspace: the relay creates it in the
+  // owner's workspace and decides the role.
+  createJoinedWorkspaceGroup(
+    view: RegistryEntry["shareView"],
+    input: { name: string; type?: "posts" | "chat" | "both"; purpose?: string },
+  ): Promise<{ channelWireId: string }>;
+  // Calls back after each write or pull that changed this workspace's chats.
+  subscribeChatWrites(workspaceId: string, listener: () => void): () => void;
   // Whether the person's message asks an agent that Restricted Mode holds.
   agentWaitsForTrust(workspaceId: string, messageId: string): Promise<boolean>;
 }) {
@@ -270,6 +293,8 @@ export function registerChatsIpcHandlers<
     ensureGroupFolder,
     automationCollectionOf,
     agentWaitsForTrust,
+    createJoinedWorkspaceGroup,
+    subscribeChatWrites,
   } = dependencies;
   const { requireChatScope, chatFileObjectId, resolveChatFileReferences } = dependencies.chatScope;
   const { materializeChatBookmark } = desktopChatBookmarks;
@@ -443,7 +468,8 @@ export function registerChatsIpcHandlers<
   const listChatMessages: ChatHandler<"listChatMessages"> = async (input, { event, operation }) => {
     // Reachable from a share view at every level, for a thread on
     // a file the share already served.
-    const { workspace, store } = await requireChatScope(input.workspaceId);
+    const scope = await requireChatScope(input.workspaceId);
+    const { workspace, store } = scope;
     const messages = await store.listMessages({
       workspaceId: workspace.workspaceId,
       threadId: input.threadId,
@@ -452,10 +478,13 @@ export function registerChatsIpcHandlers<
     return ListChatMessagesResult.parse({
       messages: await Promise.all(
         messages.map(async (message) =>
-          chatMessageForIpc(
-            message,
-            automationCollectionOf(workspace.workspaceId),
-            await presentation(message, message.threadId),
+          namedForViewer(
+            scope,
+            chatMessageForIpc(
+              message,
+              automationCollectionOf(workspace.workspaceId),
+              await presentation(message, message.threadId),
+            ),
           ),
         ),
       ),
@@ -553,10 +582,13 @@ export function registerChatsIpcHandlers<
         operation.assertCurrent,
       );
       return SendChatMessageResult.parse({
-        message: chatMessageForIpc(
-          message,
-          automationCollectionOf(scope.workspace.workspaceId),
-          await presentation(message, message.threadId),
+        message: namedForViewer(
+          scope,
+          chatMessageForIpc(
+            message,
+            automationCollectionOf(scope.workspace.workspaceId),
+            await presentation(message, message.threadId),
+          ),
         ),
         ...(await askedDecision(scope.store, scope.workspace.workspaceId, input, message)),
         // A question another reply answered first comes back as it left it.
@@ -786,10 +818,12 @@ export function registerChatsIpcHandlers<
     };
   }
 
+  // Follows and the feed's read mark are the reader's own, kept in the store
+  // they read, as read state is. A joined workspace keeps them in its view's
+  // store, and they never leave this computer.
   const listChatFollows: ChatHandler<"listChatFollows"> = async (input) => {
-    const { workspace } = await requireEngineCapture(input.workspaceId, "Chats");
+    const { workspace, store } = await requireChatScope(input.workspaceId);
     await warmCredentialCache();
-    const store = linkedChatStoreFor(workspace);
     const ownerUserId = localUserId();
     await store.ensureDefaultChannelFollows({
       workspaceId: workspace.workspaceId,
@@ -803,10 +837,10 @@ export function registerChatsIpcHandlers<
   };
 
   const setChatFollow: ChatHandler<"setChatFollow"> = async (input) => {
-    const { workspace } = await requireEngineCapture(input.workspaceId, "Chats");
-    assertWritableWorkspace(workspace);
+    const scope = await requireChatScope(input.workspaceId);
+    const { workspace, store } = scope;
+    if (scope.kind === "workspace") assertWritableWorkspace(workspace);
     await warmCredentialCache();
-    const store = linkedChatStoreFor(workspace);
     let targetKind: "person" | "agent" | "channel" | "thread";
     let targetId: string;
     if (input.target.kind === "channel") {
@@ -837,7 +871,10 @@ export function registerChatsIpcHandlers<
       targetId = message.authorUserId;
     }
     const ownerUserId = localUserId();
-    const replicationOwnerUserId = resolveWorkspaceRelayAuthorId(workspace, currentCredentials());
+    const replicationOwnerUserId =
+      scope.kind === "workspace"
+        ? resolveWorkspaceRelayAuthorId(workspace, currentCredentials())
+        : undefined;
     const follow = await store.setFollow({
       workspaceId: workspace.workspaceId,
       ownerUserId,
@@ -855,10 +892,12 @@ export function registerChatsIpcHandlers<
     input,
     { event, operation },
   ) => {
-    const { workspace } = await requireEngineCapture(input.workspaceId, "Chats");
+    // A joined workspace reads its feed from the view's own store.
+    const scope = await requireChatScope(input.workspaceId);
+    const { workspace, store } = scope;
     await warmCredentialCache();
-    const rowsUncovered = await syncWorkspaceSharedChannels(workspace.workspaceId);
-    const store = linkedChatStoreFor(workspace);
+    const rowsUncovered =
+      scope.kind === "workspace" ? await syncWorkspaceSharedChannels(workspace.workspaceId) : 0;
     const presentation = await presentationRequest(workspace, store, operation.assertCurrent);
     const ownerUserId = localUserId();
     await store.ensureDefaultChannelFollows({
@@ -911,10 +950,13 @@ export function registerChatsIpcHandlers<
       ...(rowsUncovered > 0 ? { sharedChannelRowsUncovered: rowsUncovered } : {}),
       items: await Promise.all(
         page.items.map(async (item) => ({
-          message: chatMessageForIpc(
-            item.message,
-            automationCollectionOf(workspace.workspaceId),
-            await presentation(item.message, item.message.threadId),
+          message: namedForViewer(
+            scope,
+            chatMessageForIpc(
+              item.message,
+              automationCollectionOf(workspace.workspaceId),
+              await presentation(item.message, item.message.threadId),
+            ),
           ),
           thread: chatThreadForIpc(item.thread),
           viewerAuthorId: viewerByThread.get(item.thread.id) ?? localFallbackAuthorId,
@@ -943,19 +985,25 @@ export function registerChatsIpcHandlers<
             : {}),
           ...(item.parentMessage
             ? {
-                parentMessage: chatMessageForIpc(
-                  item.parentMessage,
-                  automationCollectionOf(workspace.workspaceId),
-                  await presentation(item.parentMessage, item.parentMessage.threadId),
+                parentMessage: namedForViewer(
+                  scope,
+                  chatMessageForIpc(
+                    item.parentMessage,
+                    automationCollectionOf(workspace.workspaceId),
+                    await presentation(item.parentMessage, item.parentMessage.threadId),
+                  ),
                 ),
               }
             : {}),
           ...(item.openingMessage
             ? {
-                openingMessage: chatMessageForIpc(
-                  item.openingMessage,
-                  automationCollectionOf(workspace.workspaceId),
-                  await presentation(item.openingMessage, item.openingMessage.threadId),
+                openingMessage: namedForViewer(
+                  scope,
+                  chatMessageForIpc(
+                    item.openingMessage,
+                    automationCollectionOf(workspace.workspaceId),
+                    await presentation(item.openingMessage, item.openingMessage.threadId),
+                  ),
                 ),
               }
             : {}),
@@ -971,11 +1019,15 @@ export function registerChatsIpcHandlers<
     });
   };
   const markPersonalChatFeedSeen: ChatHandler<"markPersonalChatFeedSeen"> = async (input) => {
-    const { workspace } = await requireEngineCapture(input.workspaceId, "Chats");
+    const scope = await requireChatScope(input.workspaceId);
+    const { workspace, store } = scope;
     await warmCredentialCache();
     const ownerUserId = localUserId();
-    const replicationOwnerUserId = resolveWorkspaceRelayAuthorId(workspace, currentCredentials());
-    await linkedChatStoreFor(workspace).markPersonalFeedSeen({
+    const replicationOwnerUserId =
+      scope.kind === "workspace"
+        ? resolveWorkspaceRelayAuthorId(workspace, currentCredentials())
+        : undefined;
+    await store.markPersonalFeedSeen({
       workspaceId: workspace.workspaceId,
       ownerUserId,
       ...(replicationOwnerUserId ? { replicationOwnerUserId } : {}),
@@ -984,7 +1036,68 @@ export function registerChatsIpcHandlers<
     if (replicationOwnerUserId) activity.queueCloudSync(workspace.workspaceId);
   };
 
-  const createChatChannel: ChatHandler<"createChatChannel"> = async (input) => {
+  // The Group a joined workspace's next pull brings, once it is in the
+  // view's store. The relay wakes the held pull as soon as it writes the
+  // Group, so this waits for that pull, not for a timer.
+  async function joinedGroupArrived(scope: ChatScope, channelWireId: string, signal: AbortSignal) {
+    const find = async () =>
+      (await scope.store.listChannels({ workspaceId: scope.workspace.workspaceId })).find(
+        (channel) => channel.id === channelWireId,
+      );
+    let wake = () => {};
+    const unsubscribe = subscribeChatWrites(scope.workspace.workspaceId, () => wake());
+    try {
+      for (;;) {
+        const woke = new Promise<void>((resolve) => {
+          wake = resolve;
+        });
+        const found = await find();
+        if (found) return found;
+        signal.throwIfAborted();
+        await Promise.race([
+          woke,
+          new Promise<void>((resolve) =>
+            signal.addEventListener("abort", () => resolve(), { once: true }),
+          ),
+        ]);
+      }
+    } finally {
+      unsubscribe();
+    }
+  }
+
+  const createChatChannel: ChatHandler<"createChatChannel"> = async (input, { operation }) => {
+    // An admin's New group in a joined workspace. A path share stays behind
+    // capture, which refuses it.
+    const view = dependencies.readWorkspace(input.workspaceId)?.shareView;
+    if (
+      shareViewIsPresent(view) &&
+      recordedShareSelector(view?.grantedSelector)?.wholeWorkspace === true
+    ) {
+      const scope = await requireChatScope(input.workspaceId);
+      if (input.folderPath !== undefined)
+        throw new Error("A joined workspace's Groups have no folder of their own.");
+      const { channelWireId } = await createJoinedWorkspaceGroup(scope.workspace.shareView, {
+        name: input.name,
+        ...(input.type ? { type: input.type } : {}),
+        ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
+      });
+      operation.assertCurrent();
+      const channel = await joinedGroupArrived(
+        scope,
+        channelWireId,
+        AbortSignal.timeout(30_000),
+      ).catch((error: unknown) => {
+        operation.assertCurrent();
+        throw new Error(
+          `dohc created ${input.name}, and it has not reached this computer yet. It shows in Chats when it does.`,
+          { cause: error },
+        );
+      });
+      return CreateChatChannelResult.parse({
+        channel: { ...chatChannelForIpc(channel), wireId: channelWireId },
+      });
+    }
     const { workspace } = await requireEngineCapture(input.workspaceId, "Chats");
     assertWritableWorkspace(workspace);
     const channel = await createGroup(
@@ -1014,7 +1127,8 @@ export function registerChatsIpcHandlers<
     { event, operation },
   ) => {
     // A joined workspace reads its Groups from the view's own store.
-    const { workspace, store } = await requireChatScope(input.workspaceId);
+    const scope = await requireChatScope(input.workspaceId);
+    const { workspace, store } = scope;
     const localFallbackAuthorId = localInstallationId();
     const presentation = await presentationRequest(workspace, store, operation.assertCurrent);
     const viewerAuthorId = await chatViewerAuthorId({
@@ -1057,19 +1171,26 @@ export function registerChatsIpcHandlers<
               : null,
           ),
         ),
+      ).then((threads) =>
+        threads.map((thread) =>
+          thread.openingMessage
+            ? { ...thread, openingMessage: namedForViewer(scope, thread.openingMessage) }
+            : thread,
+        ),
       ),
       viewerAuthorId,
     });
   };
   const startChannelThread: ChatHandler<"startChannelThread"> = (input, { event }) =>
     sendOnce(event, input.workspaceId, async (operation, onSaved) => {
-      const { workspace, capture } = await requireEngineCapture(input.workspaceId, "Chats");
+      const scope = await requireChatScope(input.workspaceId);
+      const { workspace, store } = scope;
       const host = chatWrites.host(
-        { workspaceId: workspace.workspaceId, store: linkedChatStoreFor(workspace) },
+        chatWritePlace(scope),
         {
           writer: RENDERER,
           resolveAttachments: () =>
-            resolveChatFileReferences(workspace, capture.fileObjectIdForPath, input.fileReferences),
+            resolveChatFileReferences(workspace, (path) => chatFileObjectId(scope, path), input.fileReferences),
           onSaved,
         },
       );
@@ -1087,7 +1208,7 @@ export function registerChatsIpcHandlers<
           : await postToGroup(host, message);
       const presentation = await presentationRequest(
         workspace,
-        linkedChatStoreFor(workspace),
+        store,
         operation.assertCurrent,
       );
       return StartChannelThreadResult.parse({
@@ -1103,18 +1224,16 @@ export function registerChatsIpcHandlers<
           undefined,
           null,
         ),
-        message: chatMessageForIpc(
-          started.message,
-          automationCollectionOf(workspace.workspaceId),
-          await presentation(started.message, started.message.threadId),
+        message: namedForViewer(
+          scope,
+          chatMessageForIpc(
+            started.message,
+            automationCollectionOf(workspace.workspaceId),
+            await presentation(started.message, started.message.threadId),
+          ),
         ),
         viewerAuthorId: started.message.authorUserId ?? localInstallationId(),
-        ...(await askedDecision(
-          linkedChatStoreFor(workspace),
-          workspace.workspaceId,
-          input,
-          started.message,
-        )),
+        ...(await askedDecision(store, workspace.workspaceId, input, started.message)),
         ...(await waitsForTrust(workspace.workspaceId, started.message.id)),
       });
     });

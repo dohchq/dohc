@@ -563,6 +563,7 @@ describe("CLI socket server", () => {
         async syncSharedChannelsForChatTarget(_workspaceId, target) {
           writeTargets.push(target);
         },
+        pushShareViewChat: async () => undefined,
         scanChatDispatch: async () => undefined,
         betweenDispatchScans: (_workspaceId, write) => write(),
         notifyRenderer: () => undefined,

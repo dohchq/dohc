@@ -279,7 +279,10 @@ import {
 import { createShareCopyHandler, createShareCopyReader } from "./ipc/shareCopyHandler";
 import { shareCopyOperations } from "./ipc/shareCopyOperations";
 import { createShareLinkAgentActions } from "./ipc/shareLinkAgentActions";
-import { createWorkspaceMembersActions } from "./ipc/workspaceMembersActions";
+import {
+  createJoinedWorkspaceGroupAction,
+  createWorkspaceMembersActions,
+} from "./ipc/workspaceMembersActions";
 import { memberOperations } from "./ipc/memberOperations";
 import { accessOperations } from "./ipc/accessOperations";
 import { assertResolvedWorkspacePath } from "./workspaces/workspaceRealPath";
@@ -646,7 +649,7 @@ import { requireCredentials } from "./workspaces/credentialScopedOperation";
 import { createExactMountOperationRunner } from "./workspaces/exactMountOperation";
 import { CredentialSessionCache } from "./workspaces/credentialSessionCache";
 import { createRelaySyncEngine } from "./workspaces/relaySyncEngine";
-import { signalChatWrite } from "./workspaces/chatWriteSignals";
+import { signalChatWrite, subscribeChatWrites } from "./workspaces/chatWriteSignals";
 import { createMoveAcceptedEditsGuard } from "./workspaces/moveAcceptedEditsGuard";
 import { createRelayLogWait } from "./workspaces/relayLogWait";
 import {
@@ -6780,6 +6783,47 @@ const localDatasetHostFor = async (
     operation.assertCurrent();
     return host;
   });
+// Sends a joined workspace's own Group posts to the owner, at Comment or
+// Edit, for the account that joined. Anything else sends nothing.
+function shareViewChatPush(
+  workspace: RegistryEntry & { attachmentId?: symbol },
+  relay: { baseUrl: string; token: string },
+): Promise<unknown> | null {
+  const view = workspace.shareView;
+  const pin = recordedShareSelector(view?.grantedSelector);
+  if (!view || view.ended || !view.shareId || pin?.wholeWorkspace !== true || pin.access === "view")
+    return null;
+  return receivedShareEngine
+    .relayFor({
+      engineWorkspaceId: workspace.workspaceId,
+      rootPath: workspace.rootPath,
+      ...(workspace.attachmentId ? { attachmentId: workspace.attachmentId } : {}),
+      relay,
+    })
+    .pushShareViewChat({ shareId: view.shareId, grantedSelector: pin });
+}
+
+async function pushShareViewChat(workspaceId: string): Promise<unknown> {
+  await warmCredentialCache();
+  return await workspaceAuthorities.withAuthority(workspaceId, async (lease) => {
+    const workspace = canonicalWorkspaceFor(lease);
+    const credentials = cachedCredentials;
+    const view = workspace.shareView;
+    if (
+      !view ||
+      !credentials?.relayUrl ||
+      !view.relayUrl ||
+      !relayUrlsMatch(credentials.relayUrl, view.relayUrl) ||
+      view.recipientUserId !== credentials.userId
+    )
+      return null;
+    return await shareViewChatPush(workspace, {
+      baseUrl: credentials.relayUrl,
+      token: credentials.token,
+    });
+  });
+}
+
 const chatWrites = createChatWrites({
   findWorkspace,
   warmCredentials: warmCredentialCache,
@@ -6801,6 +6845,7 @@ const chatWrites = createChatWrites({
   projectChatBookmarks: (workspaceId) => void projectPendingChatBookmarks(workspaceId),
   queueCloudSync: (workspaceId) => activity.queueCloudSync(workspaceId),
   syncSharedChannelsForChatTarget,
+  pushShareViewChat,
   scanChatDispatch: (workspaceId) => chatDispatchService.scanWorkspace(workspaceId),
   betweenDispatchScans: (workspaceId, write) =>
     chatDispatchService.betweenScans(workspaceId, write),
@@ -7620,8 +7665,8 @@ function createShareViewFilesForOperation(operation: DesktopWorkspaceOperation):
       }
       return { baseUrl: credentials.relayUrl, token: credentials.token };
     },
-    pull: async (target, relay, input) =>
-      receivedShareEngine
+    pull: async (target, relay, input) => {
+      const pulled = await receivedShareEngine
         .relayFor({
           engineWorkspaceId: target.storeWorkspaceId,
           rootPath: target.rootPath,
@@ -7634,7 +7679,26 @@ function createShareViewFilesForOperation(operation: DesktopWorkspaceOperation):
           recordRefusals: input.recordRefusals,
           recordCollisions: input.recordCollisions,
           recordChangedPaths: input.recordChangedPaths,
-        }),
+        });
+      // Each pull of a joined workspace also sends any post a failed send
+      // left in its store. A refusal or outage keeps the post queued and
+      // never fails the pull.
+      // Windows and a waiting New group hear of chat the pull brought.
+      if (pulled.applied > 0) signalChatWrite(target.workspaceId);
+      if (target.kind === "standalone") {
+        const workspace = currentWorkspace();
+        await shareViewChatPush(
+          {
+            ...workspace,
+            workspaceId: target.storeWorkspaceId,
+            rootPath: target.rootPath,
+            ...(target.attachmentId ? { attachmentId: target.attachmentId } : {}),
+          },
+          relay,
+        )?.catch((error: unknown) => console.error("[desktop] joined workspace chat push:", error));
+      }
+      return pulled;
+    },
     recordRefusals: async (target, refusals) => {
       const recorder =
         target.kind === "standalone"
@@ -10744,6 +10808,16 @@ function registerIpcHandlers(): void {
     },
     agentWaitsForTrust: (workspaceId, messageId) =>
       chatDispatchService.waitsForTrust(workspaceId, messageId),
+    createJoinedWorkspaceGroup: createJoinedWorkspaceGroupAction<CloudSessionCredentials>({
+      credentials: async () => {
+        await warmCredentialCache();
+        return cachedCredentials;
+      },
+      relayUrlsMatch,
+      relayResponse: (credentials, path, init) =>
+        relayShareResponseWithCredentials(credentials, path, init),
+    }),
+    subscribeChatWrites,
   });
 
   agentRunsIpc.registerChatRunRecords();

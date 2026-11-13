@@ -39,7 +39,7 @@ import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { deferred } from "../testing/deferred";
 import { createRendererWorkspaceOperationRunner } from "../window/rendererWorkspaceOperation";
 
-type ScopeKind = "local" | "view" | "comment" | "edit" | "ended" | "damaged";
+type ScopeKind = "local" | "view" | "comment" | "edit" | "ended" | "damaged" | "member";
 type Event = { sender: { trusted: boolean } };
 type Operation = { workspace: RegistryEntry; assertCurrent(): void };
 
@@ -58,6 +58,16 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
     mode: "local-first",
   };
   if (kind === "damaged") Object.assign(workspace, { shareView: null });
+  // A joined workspace: a membership at Comment.
+  else if (kind === "member")
+    workspace.shareView = {
+      shareId: "share",
+      granterEmail: null,
+      genericChatWritable: false,
+      relayUrl: "https://relay.test",
+      recipientUserId: "owner",
+      grantedSelector: { paths: [], versionId: null, access: "comment", wholeWorkspace: true },
+    };
   else if (kind !== "local")
     workspace.shareView = {
       shareId: "share",
@@ -294,6 +304,19 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
   const openWorkspaceActivity = vi.fn(async (): Promise<void> => undefined);
   const activity = { queueCloudSync: vi.fn() };
   const syncSharedChannelsForChatTarget = vi.fn(async () => 0);
+  const pushShareViewChat = vi.fn(async (_workspaceId: string) => undefined);
+  const createJoinedWorkspaceGroup = vi.fn(
+    async (_view: RegistryEntry["shareView"], _input: { name: string }) => ({
+      channelWireId: "channel_wire_joined",
+    }),
+  );
+  const chatWriteListeners = new Set<() => void>();
+  const subscribeChatWrites = vi.fn((_workspaceId: string, listener: () => void) => {
+    chatWriteListeners.add(listener);
+    return () => {
+      chatWriteListeners.delete(listener);
+    };
+  });
   const resolveEngineFiles = vi.fn<
     import("../workspaces/resolveEngineFiles").EngineFileResolver<
       import("@dohc/workspace-engine-client/daemon").EngineWorkspace
@@ -372,6 +395,7 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
     projectChatBookmarks,
     queueCloudSync: activity.queueCloudSync,
     syncSharedChannelsForChatTarget,
+    pushShareViewChat,
     scanChatDispatch,
     betweenDispatchScans: (_workspaceId, write) => write(),
     notifyRenderer: () => undefined,
@@ -438,6 +462,8 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
     automationCollectionOf: () => () => null,
     ensureGroupFolder,
     agentWaitsForTrust,
+    createJoinedWorkspaceGroup,
+    subscribeChatWrites,
   });
   async function invoke(channel: string, payload: unknown, event: Event = { sender }) {
     const handler = handlers.get(channel);
@@ -472,6 +498,12 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
     projectChatBookmarks,
     desktopChatBookmarks,
     agentWaitsForTrust,
+    pushShareViewChat,
+    createJoinedWorkspaceGroup,
+    subscribeChatWrites,
+    signalChatWrite: () => {
+      for (const listener of [...chatWriteListeners]) listener();
+    },
     signOutChatWrites: () => {
       chatCredentials = null;
     },
@@ -1219,15 +1251,30 @@ describe("registered chat reads and reader-local state", () => {
   // A joined workspace lists its Groups as an owned one does, so a Group's
   // threads and their parts read from the view's own store.
   it.each([
-    { channel: chatOperations.listChannelThreads.channel, payload: { channelId: "channel" }, method: "listChannelThreads" },
-    { channel: chatOperations.listChatThreadDecisions.channel, payload: { threadId: "thread" }, method: "listThreadDecisions" },
-    { channel: chatOperations.listChatThreadAttachments.channel, payload: { threadId: "thread" }, method: "listThreadAttachments" },
-  ] as const)("reads $method from a share view's own store", async ({ channel, payload, method }) => {
-    const test = fixture("view");
-    await test.invoke(channel, { workspaceId: "workspace", ...payload });
-    expect(test.storeMethods[method]).toHaveBeenCalledOnce();
-    expect(test.requireEngineCapture).not.toHaveBeenCalled();
-  });
+    {
+      channel: chatOperations.listChannelThreads.channel,
+      payload: { channelId: "channel" },
+      method: "listChannelThreads",
+    },
+    {
+      channel: chatOperations.listChatThreadDecisions.channel,
+      payload: { threadId: "thread" },
+      method: "listThreadDecisions",
+    },
+    {
+      channel: chatOperations.listChatThreadAttachments.channel,
+      payload: { threadId: "thread" },
+      method: "listThreadAttachments",
+    },
+  ] as const)(
+    "reads $method from a share view's own store",
+    async ({ channel, payload, method }) => {
+      const test = fixture("view");
+      await test.invoke(channel, { workspaceId: "workspace", ...payload });
+      expect(test.storeMethods[method]).toHaveBeenCalledOnce();
+      expect(test.requireEngineCapture).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe("registered channels and personal chat projections", () => {
@@ -1428,19 +1475,12 @@ describe("registered channels and personal chat projections", () => {
 
   it.each([
     chatOperations.createChatChannel.channel,
-    chatOperations.startChannelThread.channel,
     chatOperations.saveChatBookmark.channel,
     chatOperations.archiveChatBookmark.channel,
-    chatOperations.setChatFollow.channel,
   ] as const)("keeps workspace-only operation %s behind capture", async (channel) => {
     const test = fixture("edit");
     const payloads = {
       [chatOperations.createChatChannel.channel]: { workspaceId: "workspace", name: "General" },
-      [chatOperations.startChannelThread.channel]: {
-        workspaceId: "workspace",
-        channelId: "channel",
-        body: "First",
-      },
       [chatOperations.saveChatBookmark.channel]: {
         workspaceId: "workspace",
         target: { kind: "thread", threadId: "thread" },
@@ -1450,11 +1490,6 @@ describe("registered channels and personal chat projections", () => {
         workspaceId: "workspace",
         bookmarkId: "bookmark",
       },
-      [chatOperations.setChatFollow.channel]: {
-        workspaceId: "workspace",
-        target: { kind: "thread", threadId: "thread" },
-        state: "following",
-      },
     };
     await expect(test.invoke(channel, payloads[channel])).rejects.toThrow(
       "A shared view has no capture.",
@@ -1462,6 +1497,174 @@ describe("registered channels and personal chat projections", () => {
     expect(test.linkedChatStoreFor).not.toHaveBeenCalled();
     for (const method of Object.values(test.storeMethods)) expect(method).not.toHaveBeenCalled();
     expect(test.desktopChatBookmarks.archiveChatBookmark).not.toHaveBeenCalled();
+  });
+
+  it("refuses a new Group thread in a path share before writing", async () => {
+    const test = fixture("edit");
+    await expect(
+      test.invoke(chatOperations.startChannelThread.channel, {
+        workspaceId: "workspace",
+        channelId: "channel",
+        body: "First",
+      }),
+    ).rejects.toThrow("Chats are read-only in this shared view.");
+    for (const method of Object.values(test.storeMethods)) expect(method).not.toHaveBeenCalled();
+  });
+
+  it.each(["edit", "member"] as const)(
+    "keeps a %s view's follows and feed mark in its own store, never sent anywhere",
+    async (kind) => {
+      const test = fixture(kind);
+      await test.invoke(chatOperations.setChatFollow.channel, {
+        workspaceId: "workspace",
+        target: { kind: "thread", threadId: "thread" },
+        state: "following",
+      });
+      expect(test.storeMethods.setFollow).toHaveBeenCalledWith({
+        workspaceId: "workspace",
+        ownerUserId: "owner",
+        targetKind: "thread",
+        targetId: "thread",
+        state: "following",
+      });
+      await test.invoke(chatOperations.markPersonalChatFeedSeen.channel, {
+        workspaceId: "workspace",
+        headCursor: "cursor",
+      });
+      expect(test.storeMethods.markPersonalFeedSeen).toHaveBeenCalledWith({
+        workspaceId: "workspace",
+        ownerUserId: "owner",
+        headCursor: "cursor",
+      });
+      expect(test.requireEngineCapture).not.toHaveBeenCalled();
+      expect(test.activity.queueCloudSync).not.toHaveBeenCalled();
+    },
+  );
+});
+
+describe("a joined workspace", () => {
+  it("lists Home from the view's own store without syncing the owner's channels", async () => {
+    const test = fixture("member");
+    test.storeMethods.listPersonalFeed.mockResolvedValueOnce({
+      items: [
+        {
+          message: test.message,
+          thread: test.thread,
+          reactions: [],
+          matchedBy: ["thread" as const],
+        },
+      ],
+    });
+    const result = (await test.invoke(chatOperations.listPersonalChatFeed.channel, {
+      workspaceId: "workspace",
+    })) as { items: unknown[] };
+    expect(result.items).toHaveLength(1);
+    expect(test.storeMethods.listPersonalFeed).toHaveBeenCalledOnce();
+    expect(test.syncWorkspaceSharedChannels).not.toHaveBeenCalled();
+    expect(test.requireEngineCapture).not.toHaveBeenCalled();
+  });
+
+  it("names the viewer's own messages You and everyone else by name", async () => {
+    const test = fixture("member");
+    const own = {
+      ...test.message,
+      author: { kind: "human" as const, displayName: "Sam Rivera" },
+      authorUserId: "owner",
+      authorActorKey: '{"kind":"installation","installationId":"local-owner"}',
+    };
+    const other = {
+      ...test.message,
+      id: "other",
+      author: { kind: "human" as const, displayName: "Alice Chen" },
+      authorUserId: "alice",
+    };
+    test.storeMethods.listMessages.mockResolvedValueOnce([own, other]);
+    const listed = (await test.invoke(chatOperations.listChatMessages.channel, {
+      workspaceId: "workspace",
+      threadId: "thread",
+    })) as { messages: ChatMessageRecord[] };
+    expect(listed.messages.map((message) => message.authorDisplayName)).toEqual([
+      "You",
+      "Alice Chen",
+    ]);
+  });
+
+  it("keeps your own name in your own workspace", async () => {
+    const test = fixture();
+    const own = {
+      ...test.message,
+      authorActorKey: '{"kind":"installation","installationId":"local-owner"}',
+    };
+    test.storeMethods.listMessages.mockResolvedValueOnce([own]);
+    const listed = (await test.invoke(chatOperations.listChatMessages.channel, {
+      workspaceId: "workspace",
+      threadId: "thread",
+    })) as { messages: ChatMessageRecord[] };
+    expect(listed.messages[0]!.authorDisplayName).toBe("Sam");
+  });
+
+  const arrived = {
+    id: "channel_wire_joined",
+    workspaceId: "workspace",
+    name: "Team",
+    slug: "team",
+    kind: "channel" as const,
+    type: "both" as const,
+    purpose: "",
+    createdAtMs: 1,
+    updatedAtMs: 1,
+    threadCount: 0,
+    unreadCount: 0,
+  };
+
+  it("creates an admin's Group through the relay and returns it once the pull brings it", async () => {
+    const test = fixture("member");
+    test.storeMethods.listChannels.mockResolvedValueOnce([]);
+    const created = test.invoke(chatOperations.createChatChannel.channel, {
+      workspaceId: "workspace",
+      name: "Team",
+      type: "both",
+    });
+    await vi.waitFor(() => expect(test.storeMethods.listChannels).toHaveBeenCalledOnce());
+    test.storeMethods.listChannels.mockResolvedValue([arrived]);
+    test.signalChatWrite();
+    await expect(created).resolves.toMatchObject({
+      channel: { id: "channel_wire_joined", name: "Team", wireId: "channel_wire_joined" },
+    });
+    expect(test.createJoinedWorkspaceGroup).toHaveBeenCalledWith(test.workspace.shareView, {
+      name: "Team",
+      type: "both",
+    });
+    expect(test.storeMethods.createChannel).not.toHaveBeenCalled();
+    expect(test.ensureGroupFolder).not.toHaveBeenCalled();
+    expect(test.activity.queueCloudSync).not.toHaveBeenCalled();
+    expect(test.requireEngineCapture).not.toHaveBeenCalled();
+  });
+
+  it("refuses a folder for a joined workspace's Group before asking the relay", async () => {
+    const test = fixture("member");
+    await expect(
+      test.invoke(chatOperations.createChatChannel.channel, {
+        workspaceId: "workspace",
+        name: "Team",
+        folderPath: "Team",
+      }),
+    ).rejects.toThrow("A joined workspace's Groups have no folder of their own.");
+    expect(test.createJoinedWorkspaceGroup).not.toHaveBeenCalled();
+  });
+
+  it("shows the relay's refusal of a member's New group", async () => {
+    const test = fixture("member");
+    test.createJoinedWorkspaceGroup.mockRejectedValueOnce(
+      new Error("dohc could not create Team because only admins create Groups here."),
+    );
+    await expect(
+      test.invoke(chatOperations.createChatChannel.channel, {
+        workspaceId: "workspace",
+        name: "Team",
+      }),
+    ).rejects.toThrow("only admins create Groups here");
+    expect(test.storeMethods.listChannels).not.toHaveBeenCalled();
   });
 });
 
@@ -1745,7 +1948,7 @@ describe("poll IPC writes", () => {
   );
   it.each(doors)(
     "refuses a poll in a share view on $name before persistence",
-    async ({ channel, target, name }) => {
+    async ({ channel, target }) => {
       const test = fixture("view");
       await expect(
         test.invoke(channel, {
@@ -1755,11 +1958,7 @@ describe("poll IPC writes", () => {
           needsDecision: true,
           options: ["Monday", "Tuesday"],
         }),
-      ).rejects.toThrow(
-        name === "send"
-          ? "Chats are read-only in this shared view."
-          : "A shared view has no capture.",
-      );
+      ).rejects.toThrow("Chats are read-only in this shared view.");
       for (const method of Object.values(test.storeMethods)) expect(method).not.toHaveBeenCalled();
       expect(test.activity.queueCloudSync).not.toHaveBeenCalled();
     },
