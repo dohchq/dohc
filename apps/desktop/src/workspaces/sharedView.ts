@@ -1,5 +1,4 @@
 import { errorMessage } from "./workspaceError";
-import { createHash } from "node:crypto";
 import { atomicReplaceFile } from "../atomicReplaceFile";
 import {
   lstat,

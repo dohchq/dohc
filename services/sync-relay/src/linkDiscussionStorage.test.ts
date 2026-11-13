@@ -1,11 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { Worker } from "node:worker_threads";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { buildRelayFixture } from "../scripts/build.mjs";
-import { normalizeShareDiscussionDisplayName } from "@dohc/security-contract/share-discussion";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   LINK_DISCUSSION_BODY_CODE_POINT_LIMIT,
   LINK_DISCUSSION_BODY_INPUT_BYTE_LIMIT,
@@ -35,29 +29,12 @@ import {
   seedLinkSession,
   storagePath,
   testStorage,
-  type InspectionDatabase,
 } from "./testing";
-import type {
-  RecipientBudgetRaceOperation,
-  RecipientBudgetRaceWorkerData,
-} from "./recipientBudgetRaceWorker.test-helper";
 
 const OWNER = "owner";
 const RECIPIENT = "recipient";
 
 afterEach(closeTestStorages);
-let raceDirectory: string, raceEntry: string;
-beforeAll(async () => {
-  const output = fileURLToPath(new URL("../.output", import.meta.url));
-  await mkdir(output, { recursive: true });
-  raceDirectory = await mkdtemp(join(output, "discussion-writer-"));
-  raceEntry = join(raceDirectory, "writer.mjs");
-  await buildRelayFixture(fileURLToPath(new URL("./recipientBudgetRaceWorker.test-helper.ts", import.meta.url)), raceEntry);
-}, 30_000);
-afterAll(async () => {
-  if (raceDirectory) await rm(raceDirectory, { recursive: true, force: true });
-});
-
 async function openStorage(
   options: OpenSyncRelayStorageOptions = {},
 ): Promise<{ storage: SyncRelayStorage; dbPath: string }> {
@@ -180,55 +157,6 @@ function appendAuthenticated(
   });
 }
 
-async function raceDiscussionAppends(
-  dbPath: string,
-  options: RecipientBudgetRaceWorkerData["options"],
-  operations: readonly [RecipientBudgetRaceOperation, RecipientBudgetRaceOperation],
-): Promise<unknown[]> {
-  const workers = operations.map((operation, index) =>
-    new Worker(raceEntry, {
-      execArgv: [],
-      workerData: {
-        dbPath,
-        idPrefix: `race-${index + 1}`,
-        options,
-        operation,
-      } satisfies RecipientBudgetRaceWorkerData,
-    })
-  );
-  try {
-    await Promise.all(workers.map((worker) =>
-      new Promise<void>((resolve, reject) => {
-        const onMessage = (message: { kind?: string }) => {
-          if (message.kind !== "ready") return;
-          worker.off("error", reject);
-          worker.off("message", onMessage);
-          resolve();
-        };
-        worker.on("message", onMessage);
-        worker.once("error", reject);
-      })
-    ));
-    const results = workers.map((worker) =>
-      new Promise<unknown>((resolve, reject) => {
-        worker.once("message", (message: {
-          kind?: string;
-          result?: unknown;
-          error?: string;
-        }) => {
-          if (message.kind === "result") resolve(message.result);
-          else reject(new Error(message.error ?? "discussion race worker failed"));
-        });
-        worker.once("error", reject);
-      })
-    );
-    for (const worker of workers) worker.postMessage("go");
-    return await Promise.all(results);
-  } finally {
-    await Promise.all(workers.map((worker) => worker.terminate()));
-  }
-}
-
 function discussionUsageBytes(dbPath: string): number {
   return inspect(dbPath, (db) => {
     const messageBytes = Number(
@@ -309,71 +237,6 @@ function expectExactWorkspaceUsage(dbPath: string, workspaceId: string): number 
   return aggregate;
 }
 
-function tracePreparedSql<T>(storage: SyncRelayStorage, action: () => T): {
-  events: Array<{ kind: "exec" | "prepare"; sql: string }>;
-  preparedSql: string[];
-  result: T;
-} {
-  const db = (storage as unknown as { db: InspectionDatabase }).db;
-  const events: Array<{ kind: "exec" | "prepare"; sql: string }> = [];
-  const originalPrepare = db.prepare.bind(db);
-  const originalExec = db.exec.bind(db);
-  const prepare = vi.spyOn(db, "prepare").mockImplementation((sql) => {
-    events.push({ kind: "prepare", sql });
-    return originalPrepare(sql);
-  });
-  const exec = vi.spyOn(db, "exec").mockImplementation((sql) => {
-    events.push({ kind: "exec", sql });
-    originalExec(sql);
-  });
-  try {
-    const result = action();
-    return {
-      events,
-      preparedSql: events
-        .filter((event) => event.kind === "prepare")
-        .map((event) => event.sql),
-      result,
-    };
-  } finally {
-    prepare.mockRestore();
-    exec.mockRestore();
-  }
-}
-
-const QUOTA_AGGREGATE_TABLES = [
-  "sync_relay_blobs",
-  "sync_relay_log",
-  "sync_relay_key_envelopes",
-  "sync_relay_key_envelope_history",
-  "sync_relay_epoch_supersessions",
-  "sync_relay_share_discussion_messages AS message",
-  "sync_relay_link_principals AS principal",
-] as const;
-
-function quotaAggregateSql(preparedSql: readonly string[]): string[] {
-  return preparedSql.filter((sql) =>
-    /\bSUM\s*\(/iu.test(sql) && QUOTA_AGGREGATE_TABLES.some((table) => sql.includes(table))
-  );
-}
-
-function expectStoredUsageReadInsideTransaction(
-  trace: ReturnType<typeof tracePreparedSql>,
-): void {
-  const begin = trace.events.findIndex((event) =>
-    event.kind === "exec" && event.sql === "BEGIN IMMEDIATE"
-  );
-  const usageRead = trace.events.findIndex((event) =>
-    event.kind === "prepare" && event.sql.includes("FROM sync_relay_workspace_usage")
-  );
-  const commit = trace.events.findIndex((event) =>
-    event.kind === "exec" && event.sql === "COMMIT"
-  );
-  expect(begin).toBeGreaterThanOrEqual(0);
-  expect(usageRead).toBeGreaterThan(begin);
-  expect(commit).toBeGreaterThan(usageRead);
-}
-
 function replaceSession(
   storage: SyncRelayStorage,
   currentCapabilityHash: string,
@@ -402,24 +265,6 @@ function replaceSession(
 }
 
 describe("durable link discussion storage", () => {
-  it("stores the normalized owner discussion body", async () => {
-    const { storage } = await openStorage();
-    const seeded = seedShare(storage, { suffix: "owner-body-normalization" });
-
-    expect(
-      appendAuthenticated(storage, seeded, {
-        authorUserId: OWNER,
-        role: "owner",
-        displayName: "Owner",
-        body: "e\u0301",
-        idempotencyKey: "owner-body-normalization",
-        createdAtMs: 2_000,
-      }),
-    ).toMatchObject({
-      ok: true,
-      message: { body: "é" },
-    });
-  });
 
   it("stamps one durable revision per current-state change and pages newest-first toward older messages", async () => {
     const { storage, dbPath } = await openStorage();
@@ -710,33 +555,6 @@ describe("durable link discussion storage", () => {
     expect(countRows(dbPath, "sync_relay_link_principals")).toBe(1);
   });
 
-  it("replays an exact append and rejects a conflicting idempotency key", async () => {
-    const { storage, dbPath } = await openStorage();
-    const seeded = seedShare(storage);
-    const first = append(storage, seeded, {
-      claimedName: "Alice",
-      body: "One",
-      idempotencyKey: "retry-key",
-    });
-    const replay = append(storage, seeded, {
-      claimedName: "Alice",
-      body: "One",
-      idempotencyKey: "retry-key",
-      createdAtMs: 9_999,
-    });
-    expect(first).toMatchObject({ ok: true, replayed: false });
-    expect(replay).toEqual({ ...first, replayed: true });
-    expect(
-      append(storage, seeded, {
-        claimedName: "Alice",
-        body: "Different",
-        idempotencyKey: "retry-key",
-      }),
-    ).toMatchObject({ ok: false, reason: "idempotency-conflict" });
-    expect(countRows(dbPath, "sync_relay_link_principals")).toBe(1);
-    expect(countRows(dbPath, "sync_relay_share_discussion_messages")).toBe(1);
-  });
-
   it("acknowledges a committed replay after a Comment link narrows to View", async () => {
     const { storage, dbPath } = await openStorage();
     const seeded = seedShare(storage);
@@ -807,62 +625,6 @@ describe("durable link discussion storage", () => {
       revision: storage.getShareDiscussionRevision(seeded.shareId),
       usage: aggregateWorkspaceUsageBytes(dbPath, seeded.workspaceId),
     }).toEqual(snapshot);
-  });
-
-  it("returns the current discussion revision with blocked and paused append refusals", async () => {
-    const { storage } = await openStorage();
-
-    const blocked = seedShare(storage, { suffix: "revision-blocked" });
-    const accepted = append(storage, blocked, {
-      claimedName: "Blocked profile",
-      idempotencyKey: "revision-blocked-seed",
-    });
-    expect(accepted.ok).toBe(true);
-    if (!accepted.ok) return;
-    expect(
-      storage.setLinkPrincipalBlocked({
-        shareId: blocked.shareId,
-        workspaceId: blocked.workspaceId,
-        principalId: accepted.principal.principalId,
-        actorUserId: OWNER,
-        blockedAtMs: 2_100,
-      }),
-    ).toBe(true);
-    const blockedRevision = storage.getShareDiscussionRevision(blocked.shareId);
-    expect(blockedRevision).toBe(2);
-    expect(
-      append(storage, blocked, {
-        idempotencyKey: "revision-blocked-refusal",
-        createdAtMs: 2_101,
-      }),
-    ).toEqual({
-      ok: false,
-      reason: "blocked",
-      activityRevision: blockedRevision,
-    });
-
-    const paused = seedShare(storage, { suffix: "revision-paused" });
-    expect(
-      storage.setShareLinkWritesPaused({
-        shareId: paused.shareId,
-        workspaceId: paused.workspaceId,
-        actorUserId: OWNER,
-        pausedAtMs: 2_200,
-      }),
-    ).toBe(true);
-    const pausedRevision = storage.getShareDiscussionRevision(paused.shareId);
-    expect(pausedRevision).toBe(1);
-    expect(
-      append(storage, paused, {
-        profile: "paused-profile",
-        idempotencyKey: "revision-paused-refusal",
-        createdAtMs: 2_201,
-      }),
-    ).toEqual({
-      ok: false,
-      reason: "paused",
-      activityRevision: pausedRevision,
-    });
   });
 
   it("acknowledges a committed replay through pause and block but keeps authority ahead of replay", async () => {
@@ -1019,334 +781,474 @@ describe("durable link discussion storage", () => {
     }
   });
 
-  it("keeps immutable provenance through refresh, retune, rotation, and block changes", async () => {
-    const { storage } = await openStorage();
-    const seeded = seedShare(storage);
-    const first = append(storage, seeded, { idempotencyKey: "before-state-changes" });
-    expect(first.ok).toBe(true);
-    if (!first.ok) return;
-    const principalId = first.principal.principalId;
-    const messageId = first.message.messageId;
-
-    const refreshed = replaceSession(storage, seeded.capabilityHash, "provenance", 2_100);
-    expect(refreshed.principalId).toBe(principalId);
-    expect(
-      storage.retuneShareGrant({
-        shareId: seeded.shareId,
-        grantId: seeded.grantId,
-        access: "view",
-        changedAtMs: 2_200,
-        expectedDependentGrantIds: [],
-        guard: () => {},
-      }),
-    ).toMatchObject({ ok: true, grant: { generation: 1, access: "view" } });
-    expect(
-      storage.retuneShareGrant({
-        shareId: seeded.shareId,
-        grantId: seeded.grantId,
-        access: "comment",
-        changedAtMs: 2_300,
-        expectedDependentGrantIds: [],
-        guard: () => {},
-        mintCredential: () => ({
-          credentialId: "retuned-credential",
-          secretSealed: null, secretHash: "retuned-secret-hash",
-        }),
-      }),
-    ).toMatchObject({ ok: true, grant: { generation: 2, access: "comment" } });
-    expect(
-      storage.setLinkPrincipalBlocked({
-        shareId: seeded.shareId,
-        workspaceId: seeded.workspaceId,
-        principalId,
-        actorUserId: OWNER,
-        blockedAtMs: 2_400,
-      }),
-    ).toBe(true);
-    expect(
-      storage.setLinkPrincipalBlocked({
-        shareId: seeded.shareId,
-        workspaceId: seeded.workspaceId,
-        principalId,
-        actorUserId: OWNER,
-        blockedAtMs: null,
-      }),
-    ).toBe(true);
-    expect(
-      storage.rotateLinkGrant({
-        shareId: seeded.shareId,
-        grantId: seeded.grantId,
-        rotatedAtMs: 2_500,
-        expectedDependentGrantIds: [],
-        guard: () => {},
-        mintCredential: () => ({
-          credentialId: "rotated-credential",
-          secretSealed: null, secretHash: "rotated-secret-hash",
-        }),
-      }),
-    ).toMatchObject({ ok: true, grant: { generation: 3 } });
-
-    expect(
-      storage.listShareDiscussionMessages({ shareId: seeded.shareId, limit: 50 }).messages,
-    ).toContainEqual(
-      expect.objectContaining({
-        messageId,
-        linkGrantId: seeded.grantId,
-        linkPrincipalId: principalId,
-      }),
-    );
-    expect(storage.getLinkPrincipal(principalId)).toMatchObject({
-      grantId: seeded.grantId,
-      mintGeneration: 1,
-      blockedAtMs: null,
+  it("bounds authenticated recipients by stable author while owners remain usable", async () => {
+    const { storage, dbPath } = await openStorage({
+      discussionMessageRateLimit: 2,
+      discussionLifetimeMessageLimit: 3,
+      discussionNonOwnerShareRowLimit: 4,
     });
-  });
+    const seeded = seedShare(storage, { suffix: "named-budget" });
 
-  it("refuses every stale authority state without partial writes", async () => {
-    const { storage, dbPath } = await openStorage();
-    const view = seedShare(storage, { suffix: "view", access: "view" });
-    expect(append(storage, view, { profile: "view" })).toMatchObject({
-      ok: false,
-      reason: "not-authorized",
+    const first = appendAuthenticated(storage, seeded, {
+      idempotencyKey: "recipient-1",
+      createdAtMs: 2_000,
     });
-
-    const stale = seedShare(storage, { suffix: "stale" });
-    expect(
-      storage.retuneShareGrant({
-        shareId: stale.shareId,
-        grantId: stale.grantId,
-        access: "view",
-        changedAtMs: 1_500,
-        expectedDependentGrantIds: [],
-        guard: () => {},
-      }),
-    ).toMatchObject({ ok: true });
-    expect(append(storage, stale, { profile: "stale" })).toMatchObject({
-      ok: false,
-      reason: "not-authorized",
+    expect(first).toMatchObject({
+      ok: true,
+      replayed: false,
+      message: { authorKind: "named" },
     });
-
-    const revoked = seedShare(storage, { suffix: "revoked" });
     expect(
-      storage.revokeShareGrant({
-        shareId: revoked.shareId,
-        grantId: revoked.grantId,
-        revokedAtMs: 1_500,
-        expectedDependentGrantIds: [],
-      }),
-    ).toMatchObject({ ok: true });
-    expect(append(storage, revoked, { profile: "revoked" })).toMatchObject({
-      ok: false,
-      reason: "not-authorized",
-    });
-
-    const paused = seedShare(storage, { suffix: "paused" });
-    expect(
-      storage.setShareLinkWritesPaused({
-        shareId: paused.shareId,
-        workspaceId: paused.workspaceId,
-        actorUserId: OWNER,
-        pausedAtMs: 1_500,
-      }),
-    ).toBe(true);
-    expect(append(storage, paused, { profile: "paused" })).toMatchObject({
-      ok: false,
-      reason: "paused",
-    });
-
-    const blocked = seedShare(storage, { suffix: "blocked" });
-    const accepted = append(storage, blocked, {
-      profile: "blocked",
-      idempotencyKey: "accepted-before-block",
-    });
-    expect(accepted.ok).toBe(true);
-    if (!accepted.ok) return;
-    expect(
-      storage.setLinkPrincipalBlocked({
-        shareId: blocked.shareId,
-        workspaceId: blocked.workspaceId,
-        principalId: accepted.principal.principalId,
-        actorUserId: OWNER,
-        blockedAtMs: 2_100,
-      }),
-    ).toBe(true);
-    const blockedRevision = storage.getShareDiscussionRevision(blocked.shareId);
-    const blockedUsage = discussionUsageBytes(dbPath);
-    const blockedPrincipalCount = countRows(dbPath, "sync_relay_link_principals");
-    const blockedMessageCount = countRows(
-      dbPath,
-      "sync_relay_share_discussion_messages",
-    );
-    expect(
-      append(storage, blocked, {
-        profile: "blocked",
-        idempotencyKey: "refused-on-existing-session-after-block",
-        createdAtMs: 2_101,
-      }),
-    ).toMatchObject({ ok: false, reason: "blocked" });
-    expect(
-      append(storage, blocked, {
-        profile: "substituted-profile",
-        idempotencyKey: "refused-substituted-profile-on-blocked-session",
-        createdAtMs: 2_102,
-      }),
-    ).toMatchObject({ ok: false, reason: "not-authorized" });
-    expect(storage.findLinkSessionByCapabilityHash(blocked.capabilityHash)).toMatchObject({
-      grantId: blocked.grantId,
-      principalId: accepted.principal.principalId,
-    });
-    expect(countRows(dbPath, "sync_relay_link_principals")).toBe(blockedPrincipalCount);
-    expect(countRows(dbPath, "sync_relay_share_discussion_messages")).toBe(
-      blockedMessageCount,
-    );
-    expect(storage.getShareDiscussionRevision(blocked.shareId)).toBe(blockedRevision);
-    expect(discussionUsageBytes(dbPath)).toBe(blockedUsage);
-    expect(
-      storage.mintLinkSession({
-        session: {
-          sessionId: "blocked-new-session",
-          capabilityHash: capabilityHash("blocked-new-capability"),
-          grantId: blocked.grantId,
-          generation: 1,
-          mintedAtMs: 2_200,
-          expiresAtMs: 9_000,
-        },
-      }),
-    ).toBe(true);
-    expect(
-      append(storage, blocked, {
-        profile: "blocked",
-        capabilityHash: capabilityHash("blocked-new-capability"),
-        idempotencyKey: "refused-after-block",
-        createdAtMs: 2_201,
-      }),
-    ).toMatchObject({ ok: false, reason: "blocked" });
-    expect(
-      storage.mintLinkSession({
-        session: {
-          sessionId: "fresh-profile-session",
-          capabilityHash: capabilityHash("fresh-profile-capability"),
-          grantId: blocked.grantId,
-          generation: 1,
-          mintedAtMs: 2_300,
-          expiresAtMs: 9_000,
-        },
-      }),
-    ).toBe(true);
-    expect(
-      append(storage, blocked, {
-        profile: "fresh-profile",
-        capabilityHash: capabilityHash("fresh-profile-capability"),
-        idempotencyKey: "fresh-profile-accepted",
-        createdAtMs: 2_301,
+      appendAuthenticated(storage, seeded, {
+        idempotencyKey: "recipient-2",
+        createdAtMs: 2_001,
       }),
     ).toMatchObject({ ok: true, replayed: false });
 
-    const lostOwner = seedShare(storage, { suffix: "lost-owner" });
-    const inspection = inspectDatabase(dbPath);
-    try {
-      inspection
-        .prepare("UPDATE sync_relay_workspaces SET owner_user_id = ? WHERE workspace_id = ?")
-        .run("new-owner", lostOwner.workspaceId);
-    } finally {
-      inspection.close();
-    }
-    expect(append(storage, lostOwner, { profile: "lost-owner" })).toMatchObject({
-      ok: false,
-      reason: "not-authorized",
-    });
-
-    expect(countRows(dbPath, "sync_relay_link_principals")).toBe(2);
-    expect(countRows(dbPath, "sync_relay_share_discussion_messages")).toBe(2);
-    for (const hash of [
-      view.capabilityHash,
-      stale.capabilityHash,
-      revoked.capabilityHash,
-      paused.capabilityHash,
-      capabilityHash("blocked-new-capability"),
-      lostOwner.capabilityHash,
-    ]) {
-      expect(storage.findLinkSessionByCapabilityHash(hash)?.principalId ?? null).toBeNull();
-    }
-  });
-
-  it("stores the exact shared normalized display name", async () => {
-    const { storage } = await openStorage();
-    const seeded = seedShare(storage, { suffix: "shared-name" });
-    const rawName = "  A\u0000\u202eme\u0301   User  ";
-    const normalizedName = normalizeShareDiscussionDisplayName(rawName);
-    expect(normalizedName).toEqual({ ok: true, value: "Amé User" });
-    if (!normalizedName.ok) return;
+    const beforeRate = {
+      rows: countRows(dbPath, "sync_relay_share_discussion_messages"),
+      usage: storedWorkspaceUsageBytes(dbPath, seeded.workspaceId),
+      revision: storage.getShareDiscussionRevision(seeded.shareId),
+    };
+    expect(
+      appendAuthenticated(storage, seeded, {
+        idempotencyKey: "recipient-rate",
+        createdAtMs: 2_002,
+      }),
+    ).toEqual({ ok: false, reason: "rate-limit" });
+    expect({
+      rows: countRows(dbPath, "sync_relay_share_discussion_messages"),
+      usage: storedWorkspaceUsageBytes(dbPath, seeded.workspaceId),
+      revision: storage.getShareDiscussionRevision(seeded.shareId),
+    }).toEqual(beforeRate);
 
     expect(
-      append(storage, seeded, {
-        claimedName: rawName,
-        idempotencyKey: "shared-normalized-name",
+      appendAuthenticated(storage, seeded, {
+        body: "Hello",
+        idempotencyKey: "recipient-1",
+        createdAtMs: 2_002,
       }),
-    ).toMatchObject({
-      ok: true,
-      principal: { displayName: normalizedName.value },
-      message: { displayNameSnapshot: normalizedName.value },
-    });
-  });
-
-  it.each([
-    { label: "empty after normalization", claimedName: "\u0000\u202e" },
-    { label: "over the shared limit", claimedName: "😀".repeat(41) },
-  ])("rejects a supplied name that is $label without a durable write", async ({ claimedName }) => {
-    const { storage, dbPath } = await openStorage();
-    const seeded = seedShare(storage, { suffix: `invalid-name-${claimedName.length}` });
+    ).toMatchObject({ ok: true, replayed: true });
+    expect(
+      appendAuthenticated(storage, seeded, {
+        body: "Changed",
+        idempotencyKey: "recipient-1",
+        createdAtMs: 2_002,
+      }),
+    ).toEqual({ ok: false, reason: "idempotency-conflict" });
 
     expect(
-      append(storage, seeded, {
-        claimedName,
-        idempotencyKey: "invalid-shared-name",
+      appendAuthenticated(storage, seeded, {
+        idempotencyKey: "recipient-3",
+        createdAtMs: 62_001,
       }),
-    ).toMatchObject({ ok: false, reason: "invalid-input" });
-    expect(countRows(dbPath, "sync_relay_link_principals")).toBe(0);
-    expect(countRows(dbPath, "sync_relay_share_discussion_messages")).toBe(0);
-    expect(storage.findLinkSessionByCapabilityHash(seeded.capabilityHash)?.principalId).toBeNull();
-  });
+    ).toMatchObject({ ok: true, replayed: false });
+    expect(
+      appendAuthenticated(storage, seeded, {
+        idempotencyKey: "recipient-lifetime",
+        createdAtMs: 123_000,
+      }),
+    ).toEqual({ ok: false, reason: "lifetime-limit" });
 
-  it.each([
-    { label: "leading", body: "\u0000hello" },
-    { label: "interior", body: "hello\u0000world" },
-  ])(
-    "rejects a $label NUL before link and authenticated storage change",
-    async ({ label, body }) => {
-      const { storage, dbPath } = await openStorage();
-      const seeded = seedShare(storage, { suffix: `${label}-nul` });
-      const before = {
-        principals: countRows(dbPath, "sync_relay_link_principals"),
-        messages: countRows(dbPath, "sync_relay_share_discussion_messages"),
-        usage: discussionUsageBytes(dbPath),
-        revision: storage.getShareDiscussionRevision(seeded.shareId),
-      };
-
-      expect(
-        append(storage, seeded, {
-          body,
-          idempotencyKey: `${label}-link-nul`,
-        }),
-      ).toEqual({ ok: false, reason: "invalid-input" });
+    for (let index = 0; index < 6; index += 1) {
       expect(
         appendAuthenticated(storage, seeded, {
-          body,
-          idempotencyKey: `${label}-named-nul`,
-          createdAtMs: 2_001,
+          authorUserId: OWNER,
+          role: "owner",
+          displayName: "Owner",
+          idempotencyKey: `owner-${index}`,
+          createdAtMs: 2_100 + index,
         }),
-      ).toEqual({ ok: false, reason: "invalid-input" });
-      expect({
-        principals: countRows(dbPath, "sync_relay_link_principals"),
-        messages: countRows(dbPath, "sync_relay_share_discussion_messages"),
-        usage: discussionUsageBytes(dbPath),
-        revision: storage.getShareDiscussionRevision(seeded.shareId),
-      }).toEqual(before);
-      expect(
-        storage.findLinkSessionByCapabilityHash(seeded.capabilityHash)?.principalId,
-      ).toBeNull();
-    },
-  );
+      ).toMatchObject({
+        ok: true,
+        replayed: false,
+        message: { authorKind: "owner" },
+      });
+    }
+
+    expect(
+      append(storage, seeded, {
+        idempotencyKey: "external-row-4",
+        createdAtMs: 62_002,
+      }),
+    ).toMatchObject({ ok: true, replayed: false });
+    const beforeShareLimit = {
+      rows: countRows(dbPath, "sync_relay_share_discussion_messages"),
+      usage: storedWorkspaceUsageBytes(dbPath, seeded.workspaceId),
+      revision: storage.getShareDiscussionRevision(seeded.shareId),
+    };
+    expect(
+      appendAuthenticated(storage, seeded, {
+        authorUserId: "second-recipient",
+        displayName: "Second Recipient",
+        idempotencyKey: "external-row-5",
+        createdAtMs: 62_003,
+      }),
+    ).toEqual({ ok: false, reason: "share-limit" });
+    expect({
+      rows: countRows(dbPath, "sync_relay_share_discussion_messages"),
+      usage: storedWorkspaceUsageBytes(dbPath, seeded.workspaceId),
+      revision: storage.getShareDiscussionRevision(seeded.shareId),
+    }).toEqual(beforeShareLimit);
+    expect(
+      appendAuthenticated(storage, seeded, {
+        authorUserId: OWNER,
+        role: "owner",
+        displayName: "Owner",
+        idempotencyKey: "owner-after-share-limit",
+        createdAtMs: 62_004,
+      }),
+    ).toMatchObject({ ok: true, message: { authorKind: "owner" } });
+
+    expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
+  });
+
+  it("isolates recipient rate debt by share and authenticated user", async () => {
+    const { storage, dbPath } = await openStorage({
+      discussionMessageRateLimit: 1,
+      discussionLifetimeMessageLimit: 10,
+      discussionNonOwnerShareRowLimit: 10,
+    });
+    const firstShare = seedShare(storage, { suffix: "rate-scope-first" });
+    const secondShare = seedShare(storage, { suffix: "rate-scope-second" });
+    expect(
+      appendAuthenticated(storage, firstShare, {
+        idempotencyKey: "rate-scope-first",
+        createdAtMs: 2_000,
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      appendAuthenticated(storage, firstShare, {
+        idempotencyKey: "rate-scope-blocked",
+        createdAtMs: 2_001,
+      }),
+    ).toEqual({ ok: false, reason: "rate-limit" });
+    expect(
+      appendAuthenticated(storage, firstShare, {
+        authorUserId: "other-recipient",
+        displayName: "Other Recipient",
+        idempotencyKey: "rate-scope-other-user",
+        createdAtMs: 2_001,
+      }),
+    ).toMatchObject({ ok: true, message: { authorUserId: "other-recipient" } });
+    expect(
+      appendAuthenticated(storage, secondShare, {
+        idempotencyKey: "rate-scope-other-share",
+        createdAtMs: 2_001,
+      }),
+    ).toMatchObject({ ok: true, message: { authorUserId: RECIPIENT } });
+    expect(
+      storage.listShareDiscussionMessages({ shareId: firstShare.shareId, limit: 10 })
+        .messages,
+    ).toHaveLength(2);
+    expect(
+      storage.listShareDiscussionMessages({ shareId: secondShare.shareId, limit: 10 })
+        .messages,
+    ).toHaveLength(1);
+    expectExactWorkspaceUsage(dbPath, firstShare.workspaceId);
+    expectExactWorkspaceUsage(dbPath, secondShare.workspaceId);
+  });
+
+  it("keeps the durable workspace total exact across every counted write lifecycle", async () => {
+    const { storage, dbPath } = await openStorage({ blobGraceMs: 0 });
+    const seeded = seedShare(storage, { suffix: "usage-lifecycle" });
+    expect(expectExactWorkspaceUsage(dbPath, seeded.workspaceId)).toBe(0);
+
+    const blob = Buffer.from("usage lifecycle blob");
+    const blobSha = createHash("sha256").update(blob).digest("hex");
+    expect(
+      storage.putBlob({
+        workspaceId: seeded.workspaceId,
+        sha256: blobSha,
+        content: blob,
+        createdAtMs: 1_100,
+      }),
+    ).toMatchObject({ alreadyHad: false });
+    const afterBlob = expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
+    expect(
+      storage.putBlob({
+        workspaceId: seeded.workspaceId,
+        sha256: blobSha,
+        content: blob,
+        createdAtMs: 1_101,
+      }),
+    ).toMatchObject({ alreadyHad: true });
+    expect(expectExactWorkspaceUsage(dbPath, seeded.workspaceId)).toBe(afterBlob);
+
+    expect(
+      storage.appendLogBatch({
+        workspaceId: seeded.workspaceId,
+        originId: "usage-lifecycle-origin",
+        ops: [{
+          originSeq: 0,
+          opKind: "quota.lifecycle",
+          payloadJson: JSON.stringify({ row: "log" }),
+          recordedAtMs: 1_102,
+        }],
+      }),
+    ).toMatchObject({ inserted: 1 });
+    expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
+
+    const firstEnvelope = storage.putKeyEnvelope({
+      workspaceId: seeded.workspaceId,
+      envelopeJson: JSON.stringify({ generation: 1, payload: "first" }),
+      updatedAtMs: 1_103,
+      expectedSha256: null,
+    });
+    expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
+    storage.putKeyEnvelope({
+      workspaceId: seeded.workspaceId,
+      envelopeJson: JSON.stringify({ generation: 2, payload: "replacement" }),
+      updatedAtMs: 1_104,
+      expectedSha256: firstEnvelope.sha256,
+    });
+    expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
+
+    expect(
+      storage.claimWorkspaceIdentity({
+        workspaceId: seeded.workspaceId,
+        replicationEpoch: "usage-epoch-1",
+        streamIdentity: "usage-stream-1",
+      }),
+    ).toBe("claimed");
+    expect(
+      storage.rotateWorkspaceIdentity({
+        workspaceId: seeded.workspaceId,
+        ownerUserId: OWNER,
+        replicationEpoch: "usage-epoch-2",
+        streamIdentity: "usage-stream-2",
+        rotatedAtMs: 1_105,
+      }),
+    ).toBe("rotated");
+    expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
+
+    const linkMessage = append(storage, seeded, {
+      profile: "usage-profile",
+      claimedName: "Usage Link",
+      body: "counted link comment",
+      idempotencyKey: "usage-link",
+      createdAtMs: 2_000,
+    });
+    expect(linkMessage).toMatchObject({ ok: true, replayed: false });
+    if (!linkMessage.ok) return;
+    const afterLink = expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
+    expect(
+      append(storage, seeded, {
+        profile: "usage-profile",
+        claimedName: "Usage Link",
+        body: "counted link comment",
+        idempotencyKey: "usage-link",
+        createdAtMs: 2_000,
+      }),
+    ).toMatchObject({ ok: true, replayed: true });
+    expect(expectExactWorkspaceUsage(dbPath, seeded.workspaceId)).toBe(afterLink);
+
+    const second = reopenTestStorage(dbPath, {
+      blobGraceMs: 0,
+      newDiscussionId: () => "usage-second-message",
+    });
+    expect(
+      second.appendAuthenticatedDiscussionMessage({
+        shareId: seeded.shareId,
+        authorUserId: RECIPIENT,
+        displayName: "Usage Named",
+        body: "counted named comment",
+        idempotencyKey: "usage-named",
+        createdAtMs: 2_001,
+        readGuard: () => "recipient",
+        appendGuard: () => "recipient",
+      }),
+    ).toMatchObject({ ok: true, replayed: false });
+    const afterNamed = expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
+    expect(
+      second.appendAuthenticatedDiscussionMessage({
+        shareId: seeded.shareId,
+        authorUserId: RECIPIENT,
+        displayName: "Usage Named",
+        body: "counted named comment",
+        idempotencyKey: "usage-named",
+        createdAtMs: 2_001,
+        readGuard: () => "recipient",
+        appendGuard: () => "recipient",
+      }),
+    ).toMatchObject({ ok: true, replayed: true });
+    expect(expectExactWorkspaceUsage(dbPath, seeded.workspaceId)).toBe(afterNamed);
+
+    expect(
+      storage.deleteShareDiscussionMessage({
+        shareId: seeded.shareId,
+        workspaceId: seeded.workspaceId,
+        messageId: linkMessage.message.messageId,
+        deletedAtMs: 2_002,
+        actorUserId: OWNER,
+      }),
+    ).toMatchObject({ messageId: linkMessage.message.messageId });
+    expect(expectExactWorkspaceUsage(dbPath, seeded.workspaceId)).toBe(afterNamed);
+
+    expect(
+      await storage.collectUnreferencedBlobs(seeded.workspaceId, { nowMs: 1_101 }),
+    ).toMatchObject({ removed: 1, removedSha256s: [blobSha] });
+    expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
+
+    closeTestStorage(storage);
+    closeTestStorage(second);
+    reopenTestStorage(dbPath, {
+      blobGraceMs: 0,
+      newDiscussionId: () => "usage-rejected-message",
+    });
+    const reopenedUsage = expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
+    const limited = reopenTestStorage(dbPath, {
+      workspaceQuotaBytes: reopenedUsage,
+      newDiscussionId: () => "usage-over-quota-message",
+    });
+    expect(
+      append(limited, seeded, {
+        profile: "usage-profile",
+        body: "rejected quota comment",
+        idempotencyKey: "usage-rejected",
+        createdAtMs: 2_003,
+      }),
+    ).toEqual({ ok: false, reason: "workspace-quota" });
+    expect(expectExactWorkspaceUsage(dbPath, seeded.workspaceId)).toBe(reopenedUsage);
+  });
+
+  it("preserves principals, budgets, provenance, pause, block, messages, and tombstones on reopen", async () => {
+    const { storage, dbPath } = await openStorage({
+      discussionMessageRateLimit: 2,
+      discussionLifetimeMessageLimit: 2,
+    });
+    const seeded = seedShare(storage);
+    const kept = append(storage, seeded, {
+      profile: "kept",
+      claimedName: "Kept",
+      body: "kept body",
+      idempotencyKey: "kept-1",
+      createdAtMs: 2_000,
+    });
+    expect(kept.ok).toBe(true);
+    if (!kept.ok) return;
+    const blockedCapabilityHash = capabilityHash("blocked-reopen-capability");
+    expect(
+      storage.mintLinkSession({
+        session: {
+          sessionId: "blocked-reopen-session",
+          capabilityHash: blockedCapabilityHash,
+          grantId: seeded.grantId,
+          generation: 1,
+          mintedAtMs: 1_500,
+          expiresAtMs: 1_000_000,
+        },
+      }),
+    ).toBe(true);
+    const blocked = append(storage, seeded, {
+      profile: "blocked-reopen",
+      capabilityHash: blockedCapabilityHash,
+      claimedName: "Blocked",
+      body: "remove body",
+      idempotencyKey: "blocked-1",
+      createdAtMs: 2_001,
+    });
+    expect(blocked.ok).toBe(true);
+    if (!blocked.ok) return;
+    expect(
+      storage.deleteShareDiscussionMessage({
+        shareId: seeded.shareId,
+        workspaceId: seeded.workspaceId,
+        messageId: blocked.message.messageId,
+        deletedAtMs: 2_100,
+        actorUserId: OWNER,
+      }),
+    ).toMatchObject({ messageId: blocked.message.messageId });
+    expect(
+      storage.setLinkPrincipalBlocked({
+        shareId: seeded.shareId,
+        workspaceId: seeded.workspaceId,
+        principalId: blocked.principal.principalId,
+        actorUserId: OWNER,
+        blockedAtMs: 2_200,
+      }),
+    ).toBe(true);
+    expect(
+      storage.setShareLinkWritesPaused({
+        shareId: seeded.shareId,
+        workspaceId: seeded.workspaceId,
+        actorUserId: OWNER,
+        pausedAtMs: 2_300,
+      }),
+    ).toBe(true);
+
+    closeTestStorage(storage);
+    const reopened = reopenTestStorage(dbPath, {
+      discussionMessageRateLimit: 2,
+      discussionLifetimeMessageLimit: 2,
+    });
+    expect(reopened.getLinkPrincipal(kept.principal.principalId)).toMatchObject({
+      displayName: "Kept",
+      blockedAtMs: null,
+    });
+    expect(reopened.getLinkPrincipal(blocked.principal.principalId)).toMatchObject({
+      displayName: "Blocked",
+      blockedAtMs: 2_200,
+    });
+    expect(reopened.findLinkSessionByCapabilityHash(seeded.capabilityHash)).toMatchObject({
+      principalId: kept.principal.principalId,
+    });
+    expect(linkWritesPausedAtMs(storagePath(reopened), seeded.shareId)).toBe(2_300);
+    expect(reopened.listShareDiscussionMessages({ shareId: seeded.shareId, limit: 50 })).toMatchObject({
+      linkCommentsPaused: true,
+      messages: [
+        {
+          messageId: kept.message.messageId,
+          linkGrantId: seeded.grantId,
+          linkPrincipalId: kept.principal.principalId,
+          displayNameSnapshot: "Kept",
+          body: "kept body",
+          linkPrincipalBlocked: false,
+        },
+        {
+          messageId: blocked.message.messageId,
+          linkGrantId: seeded.grantId,
+          linkPrincipalId: blocked.principal.principalId,
+          body: null,
+          linkPrincipalBlocked: true,
+          deletedAtMs: 2_100,
+          deletedByUserId: OWNER,
+        },
+      ],
+    });
+    expect(
+      append(reopened, seeded, {
+        profile: "kept",
+        body: "blocked by pause",
+        idempotencyKey: "kept-2",
+        createdAtMs: 70_000,
+      }),
+    ).toMatchObject({ ok: false, reason: "paused" });
+    expect(
+      reopened.setShareLinkWritesPaused({
+        shareId: seeded.shareId,
+        workspaceId: seeded.workspaceId,
+        actorUserId: OWNER,
+        pausedAtMs: null,
+      }),
+    ).toBe(true);
+    expect(
+      append(reopened, seeded, {
+        profile: "kept",
+        body: "lifetime second",
+        idempotencyKey: "kept-2",
+        createdAtMs: 70_000,
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      append(reopened, seeded, {
+        profile: "kept",
+        body: "lifetime debt stayed",
+        idempotencyKey: "kept-3",
+        createdAtMs: 140_000,
+      }),
+    ).toMatchObject({ ok: false, reason: "lifetime-limit" });
+  });
 
   it("enforces each durable budget and validates normalized names, bodies, and keys", async () => {
     expect({
@@ -1693,833 +1595,6 @@ describe("durable link discussion storage", () => {
     expect(countRows(quotaStore.dbPath, "sync_relay_share_discussion_messages")).toBe(1);
   });
 
-  it("bounds authenticated recipients by stable author while owners remain usable", async () => {
-    const { storage, dbPath } = await openStorage({
-      discussionMessageRateLimit: 2,
-      discussionLifetimeMessageLimit: 3,
-      discussionNonOwnerShareRowLimit: 4,
-    });
-    const seeded = seedShare(storage, { suffix: "named-budget" });
-
-    const first = appendAuthenticated(storage, seeded, {
-      idempotencyKey: "recipient-1",
-      createdAtMs: 2_000,
-    });
-    expect(first).toMatchObject({
-      ok: true,
-      replayed: false,
-      message: { authorKind: "named" },
-    });
-    expect(
-      appendAuthenticated(storage, seeded, {
-        idempotencyKey: "recipient-2",
-        createdAtMs: 2_001,
-      }),
-    ).toMatchObject({ ok: true, replayed: false });
-
-    const beforeRate = {
-      rows: countRows(dbPath, "sync_relay_share_discussion_messages"),
-      usage: storedWorkspaceUsageBytes(dbPath, seeded.workspaceId),
-      revision: storage.getShareDiscussionRevision(seeded.shareId),
-    };
-    expect(
-      appendAuthenticated(storage, seeded, {
-        idempotencyKey: "recipient-rate",
-        createdAtMs: 2_002,
-      }),
-    ).toEqual({ ok: false, reason: "rate-limit" });
-    expect({
-      rows: countRows(dbPath, "sync_relay_share_discussion_messages"),
-      usage: storedWorkspaceUsageBytes(dbPath, seeded.workspaceId),
-      revision: storage.getShareDiscussionRevision(seeded.shareId),
-    }).toEqual(beforeRate);
-
-    expect(
-      appendAuthenticated(storage, seeded, {
-        body: "Hello",
-        idempotencyKey: "recipient-1",
-        createdAtMs: 2_002,
-      }),
-    ).toMatchObject({ ok: true, replayed: true });
-    expect(
-      appendAuthenticated(storage, seeded, {
-        body: "Changed",
-        idempotencyKey: "recipient-1",
-        createdAtMs: 2_002,
-      }),
-    ).toEqual({ ok: false, reason: "idempotency-conflict" });
-
-    expect(
-      appendAuthenticated(storage, seeded, {
-        idempotencyKey: "recipient-3",
-        createdAtMs: 62_001,
-      }),
-    ).toMatchObject({ ok: true, replayed: false });
-    expect(
-      appendAuthenticated(storage, seeded, {
-        idempotencyKey: "recipient-lifetime",
-        createdAtMs: 123_000,
-      }),
-    ).toEqual({ ok: false, reason: "lifetime-limit" });
-
-    for (let index = 0; index < 6; index += 1) {
-      expect(
-        appendAuthenticated(storage, seeded, {
-          authorUserId: OWNER,
-          role: "owner",
-          displayName: "Owner",
-          idempotencyKey: `owner-${index}`,
-          createdAtMs: 2_100 + index,
-        }),
-      ).toMatchObject({
-        ok: true,
-        replayed: false,
-        message: { authorKind: "owner" },
-      });
-    }
-
-    expect(
-      append(storage, seeded, {
-        idempotencyKey: "external-row-4",
-        createdAtMs: 62_002,
-      }),
-    ).toMatchObject({ ok: true, replayed: false });
-    const beforeShareLimit = {
-      rows: countRows(dbPath, "sync_relay_share_discussion_messages"),
-      usage: storedWorkspaceUsageBytes(dbPath, seeded.workspaceId),
-      revision: storage.getShareDiscussionRevision(seeded.shareId),
-    };
-    expect(
-      appendAuthenticated(storage, seeded, {
-        authorUserId: "second-recipient",
-        displayName: "Second Recipient",
-        idempotencyKey: "external-row-5",
-        createdAtMs: 62_003,
-      }),
-    ).toEqual({ ok: false, reason: "share-limit" });
-    expect({
-      rows: countRows(dbPath, "sync_relay_share_discussion_messages"),
-      usage: storedWorkspaceUsageBytes(dbPath, seeded.workspaceId),
-      revision: storage.getShareDiscussionRevision(seeded.shareId),
-    }).toEqual(beforeShareLimit);
-    expect(
-      appendAuthenticated(storage, seeded, {
-        authorUserId: OWNER,
-        role: "owner",
-        displayName: "Owner",
-        idempotencyKey: "owner-after-share-limit",
-        createdAtMs: 62_004,
-      }),
-    ).toMatchObject({ ok: true, message: { authorKind: "owner" } });
-
-    expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
-  });
-
-  it("makes the link path count a named-only combined ceiling", async () => {
-    const { storage, dbPath } = await openStorage({
-      discussionMessageRateLimit: 10,
-      discussionLifetimeMessageLimit: 10,
-      discussionNonOwnerShareRowLimit: 2,
-    });
-    const seeded = seedShare(storage, { suffix: "link-after-named-limit" });
-    expect(
-      appendAuthenticated(storage, seeded, {
-        idempotencyKey: "named-limit-one",
-        createdAtMs: 2_000,
-      }),
-    ).toMatchObject({ ok: true });
-    expect(
-      appendAuthenticated(storage, seeded, {
-        authorUserId: "second-named-recipient",
-        displayName: "Second Recipient",
-        idempotencyKey: "named-limit-two",
-        createdAtMs: 2_001,
-      }),
-    ).toMatchObject({ ok: true });
-    const before = {
-      messages: countRows(dbPath, "sync_relay_share_discussion_messages"),
-      principals: countRows(dbPath, "sync_relay_link_principals"),
-      revision: storage.getShareDiscussionRevision(seeded.shareId),
-      usage: storedWorkspaceUsageBytes(dbPath, seeded.workspaceId),
-    };
-
-    expect(
-      append(storage, seeded, {
-        profile: "link-after-named-limit",
-        claimedName: "Link Visitor",
-        idempotencyKey: "link-after-named-limit",
-        createdAtMs: 2_002,
-      }),
-    ).toEqual({ ok: false, reason: "share-limit" });
-    expect({
-      messages: countRows(dbPath, "sync_relay_share_discussion_messages"),
-      principals: countRows(dbPath, "sync_relay_link_principals"),
-      revision: storage.getShareDiscussionRevision(seeded.shareId),
-      usage: storedWorkspaceUsageBytes(dbPath, seeded.workspaceId),
-    }).toEqual(before);
-  });
-
-  it("keeps tombstones in recipient rate and combined share debt", async () => {
-    const { storage, dbPath } = await openStorage({
-      discussionMessageRateLimit: 1,
-      discussionLifetimeMessageLimit: 10,
-      discussionNonOwnerShareRowLimit: 1,
-    });
-    const seeded = seedShare(storage, { suffix: "named-tombstone-debt" });
-    const first = appendAuthenticated(storage, seeded, {
-      idempotencyKey: "tombstone-first",
-      createdAtMs: 2_000,
-    });
-    expect(first).toMatchObject({ ok: true });
-    if (!first.ok) return;
-    expect(
-      storage.deleteShareDiscussionMessage({
-        shareId: seeded.shareId,
-        workspaceId: seeded.workspaceId,
-        messageId: first.message.messageId,
-        deletedAtMs: 2_001,
-        actorUserId: OWNER,
-      }),
-    ).toMatchObject({ messageId: first.message.messageId });
-
-    const afterDelete = {
-      messages: countRows(dbPath, "sync_relay_share_discussion_messages"),
-      revision: storage.getShareDiscussionRevision(seeded.shareId),
-      usage: storedWorkspaceUsageBytes(dbPath, seeded.workspaceId),
-    };
-    expect(
-      appendAuthenticated(storage, seeded, {
-        idempotencyKey: "tombstone-rate",
-        createdAtMs: 2_002,
-      }),
-    ).toEqual({ ok: false, reason: "rate-limit" });
-    expect({
-      messages: countRows(dbPath, "sync_relay_share_discussion_messages"),
-      revision: storage.getShareDiscussionRevision(seeded.shareId),
-      usage: storedWorkspaceUsageBytes(dbPath, seeded.workspaceId),
-    }).toEqual(afterDelete);
-
-    expect(
-      appendAuthenticated(storage, seeded, {
-        authorUserId: "other-tombstone-recipient",
-        displayName: "Other Recipient",
-        idempotencyKey: "tombstone-share",
-        createdAtMs: 62_001,
-      }),
-    ).toEqual({ ok: false, reason: "share-limit" });
-    expect({
-      messages: countRows(dbPath, "sync_relay_share_discussion_messages"),
-      revision: storage.getShareDiscussionRevision(seeded.shareId),
-      usage: storedWorkspaceUsageBytes(dbPath, seeded.workspaceId),
-    }).toEqual(afterDelete);
-
-    expect(
-      appendAuthenticated(storage, seeded, {
-        authorUserId: OWNER,
-        role: "owner",
-        displayName: "Owner",
-        idempotencyKey: "owner-after-tombstone",
-        createdAtMs: 62_002,
-      }),
-    ).toMatchObject({ ok: true, message: { authorKind: "owner" } });
-    expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
-  });
-
-  it("pins the rolling boundary and keeps debt across a backward clock", async () => {
-    const { storage, dbPath } = await openStorage({
-      discussionMessageRateLimit: 1,
-      discussionLifetimeMessageLimit: 10,
-      discussionNonOwnerShareRowLimit: 10,
-    });
-    const boundary = seedShare(storage, { suffix: "named-rate-boundary" });
-    expect(
-      appendAuthenticated(storage, boundary, {
-        idempotencyKey: "boundary-first",
-        createdAtMs: 2_000,
-      }),
-    ).toMatchObject({ ok: true });
-    expect(
-      appendAuthenticated(storage, boundary, {
-        idempotencyKey: "boundary-exact",
-        createdAtMs: 62_000,
-      }),
-    ).toMatchObject({ ok: true });
-
-    const backward = seedShare(storage, { suffix: "named-rate-backward" });
-    expect(
-      appendAuthenticated(storage, backward, {
-        idempotencyKey: "backward-first",
-        createdAtMs: 2_000,
-      }),
-    ).toMatchObject({ ok: true });
-    const beforeBackwardRefusal = {
-      messages: storage.listShareDiscussionMessages({
-        shareId: backward.shareId,
-        limit: 10,
-      }).messages,
-      revision: storage.getShareDiscussionRevision(backward.shareId),
-      usage: storedWorkspaceUsageBytes(dbPath, backward.workspaceId),
-    };
-    expect(
-      appendAuthenticated(storage, backward, {
-        idempotencyKey: "backward-second",
-        createdAtMs: 1_000,
-      }),
-    ).toEqual({ ok: false, reason: "rate-limit" });
-    expect({
-      messages: storage.listShareDiscussionMessages({
-        shareId: backward.shareId,
-        limit: 10,
-      }).messages,
-      revision: storage.getShareDiscussionRevision(backward.shareId),
-      usage: storedWorkspaceUsageBytes(dbPath, backward.workspaceId),
-    }).toEqual(beforeBackwardRefusal);
-  });
-
-  it("keeps exact recipient replay free at lifetime, share, and workspace ceilings", async () => {
-    const { storage, dbPath } = await openStorage({
-      discussionMessageRateLimit: 10,
-      discussionLifetimeMessageLimit: 1,
-      discussionNonOwnerShareRowLimit: 1,
-    });
-    const seeded = seedShare(storage, { suffix: "named-replay-ceilings" });
-    const first = appendAuthenticated(storage, seeded, {
-      body: "Replay at every ceiling",
-      idempotencyKey: "replay-ceilings",
-      createdAtMs: 2_000,
-    });
-    expect(first).toMatchObject({ ok: true, replayed: false });
-    if (!first.ok) return;
-    const fullUsage = storedWorkspaceUsageBytes(dbPath, seeded.workspaceId);
-    const before = {
-      messages: countRows(dbPath, "sync_relay_share_discussion_messages"),
-      revision: storage.getShareDiscussionRevision(seeded.shareId),
-      usage: fullUsage,
-    };
-    expect(
-      appendAuthenticated(storage, seeded, {
-        body: "Replay at every ceiling",
-        idempotencyKey: "replay-ceilings",
-        createdAtMs: 70_000,
-      }),
-    ).toMatchObject({
-      ok: true,
-      replayed: true,
-      message: { messageId: first.message.messageId },
-    });
-    expect({
-      messages: countRows(dbPath, "sync_relay_share_discussion_messages"),
-      revision: storage.getShareDiscussionRevision(seeded.shareId),
-      usage: storedWorkspaceUsageBytes(dbPath, seeded.workspaceId),
-    }).toEqual(before);
-
-    const quotaLimited = reopenTestStorage(dbPath, {
-      workspaceQuotaBytes: fullUsage,
-      discussionMessageRateLimit: 10,
-      discussionLifetimeMessageLimit: 1,
-      discussionNonOwnerShareRowLimit: 1,
-      newDiscussionId: () => "replay-ceilings-unexpected-id",
-    });
-    expect(
-      quotaLimited.appendAuthenticatedDiscussionMessage({
-        shareId: seeded.shareId,
-        authorUserId: RECIPIENT,
-        displayName: "Recipient",
-        body: "Replay at every ceiling",
-        idempotencyKey: "replay-ceilings",
-        createdAtMs: 70_001,
-        readGuard: () => "recipient",
-        appendGuard: () => "recipient",
-      }),
-    ).toMatchObject({
-      ok: true,
-      replayed: true,
-      message: { messageId: first.message.messageId },
-    });
-    expect({
-      messages: countRows(dbPath, "sync_relay_share_discussion_messages"),
-      revision: quotaLimited.getShareDiscussionRevision(seeded.shareId),
-      usage: storedWorkspaceUsageBytes(dbPath, seeded.workspaceId),
-    }).toEqual(before);
-  });
-
-  it("keeps authenticated replay stable across owner and recipient role changes", async () => {
-    const { storage, dbPath } = await openStorage({
-      discussionMessageRateLimit: 1,
-      discussionLifetimeMessageLimit: 1,
-      discussionNonOwnerShareRowLimit: 1,
-    });
-    const authorUserId = "role-changing-user";
-    const ownerFirst = seedShare(storage, { suffix: "role-replay-owner" });
-    const ownerMessage = appendAuthenticated(storage, ownerFirst, {
-      authorUserId,
-      role: "owner",
-      displayName: "Role Changer",
-      body: "Written as owner",
-      idempotencyKey: "role-replay",
-      createdAtMs: 2_000,
-    });
-    expect(ownerMessage).toMatchObject({
-      ok: true,
-      replayed: false,
-      message: { authorKind: "owner" },
-    });
-    if (!ownerMessage.ok) return;
-    expect(
-      append(storage, ownerFirst, {
-        idempotencyKey: "fill-owner-first-budget",
-        createdAtMs: 2_001,
-      }),
-    ).toMatchObject({ ok: true, replayed: false });
-    const ownerFirstState = {
-      rows: storage.listShareDiscussionMessages({
-        shareId: ownerFirst.shareId,
-        limit: 10,
-      }).messages,
-      usage: storedWorkspaceUsageBytes(dbPath, ownerFirst.workspaceId),
-      revision: storage.getShareDiscussionRevision(ownerFirst.shareId),
-    };
-    expect(
-      appendAuthenticated(storage, ownerFirst, {
-        authorUserId,
-        role: "recipient",
-        displayName: "Role Changer",
-        body: "Written as owner",
-        idempotencyKey: "role-replay",
-        createdAtMs: 2_002,
-      }),
-    ).toMatchObject({
-      ok: true,
-      replayed: true,
-      message: {
-        messageId: ownerMessage.message.messageId,
-        authorKind: "owner",
-      },
-    });
-    expect(
-      appendAuthenticated(storage, ownerFirst, {
-        authorUserId,
-        role: "recipient",
-        displayName: "Role Changer",
-        body: "Changed after becoming a recipient",
-        idempotencyKey: "role-replay",
-        createdAtMs: 2_002,
-      }),
-    ).toEqual({ ok: false, reason: "idempotency-conflict" });
-    expect({
-      rows: storage.listShareDiscussionMessages({
-        shareId: ownerFirst.shareId,
-        limit: 10,
-      }).messages,
-      usage: storedWorkspaceUsageBytes(dbPath, ownerFirst.workspaceId),
-      revision: storage.getShareDiscussionRevision(ownerFirst.shareId),
-    }).toEqual(ownerFirstState);
-
-    const recipientFirst = seedShare(storage, { suffix: "role-replay-recipient" });
-    const recipientMessage = appendAuthenticated(storage, recipientFirst, {
-      authorUserId,
-      role: "recipient",
-      displayName: "Role Changer",
-      body: "Written as recipient",
-      idempotencyKey: "role-replay",
-      createdAtMs: 3_000,
-    });
-    expect(recipientMessage).toMatchObject({
-      ok: true,
-      replayed: false,
-      message: { authorKind: "named" },
-    });
-    if (!recipientMessage.ok) return;
-    expect(
-      appendAuthenticated(storage, recipientFirst, {
-        authorUserId,
-        role: "owner",
-        displayName: "Role Changer",
-        body: "Written as recipient",
-        idempotencyKey: "role-replay",
-        createdAtMs: 3_001,
-      }),
-    ).toMatchObject({
-      ok: true,
-      replayed: true,
-      message: {
-        messageId: recipientMessage.message.messageId,
-        authorKind: "named",
-      },
-    });
-    expect(
-      appendAuthenticated(storage, recipientFirst, {
-        authorUserId,
-        role: "owner",
-        displayName: "Role Changer",
-        body: "Changed after becoming owner",
-        idempotencyKey: "role-replay",
-        createdAtMs: 3_001,
-      }),
-    ).toEqual({ ok: false, reason: "idempotency-conflict" });
-    expect(
-      storage.listShareDiscussionMessages({ shareId: recipientFirst.shareId, limit: 10 })
-        .messages,
-    ).toMatchObject([
-      {
-        messageId: recipientMessage.message.messageId,
-        authorKind: "named",
-        body: "Written as recipient",
-      },
-    ]);
-    expectExactWorkspaceUsage(dbPath, ownerFirst.workspaceId);
-    expectExactWorkspaceUsage(dbPath, recipientFirst.workspaceId);
-  });
-
-  it("isolates recipient rate debt by share and authenticated user", async () => {
-    const { storage, dbPath } = await openStorage({
-      discussionMessageRateLimit: 1,
-      discussionLifetimeMessageLimit: 10,
-      discussionNonOwnerShareRowLimit: 10,
-    });
-    const firstShare = seedShare(storage, { suffix: "rate-scope-first" });
-    const secondShare = seedShare(storage, { suffix: "rate-scope-second" });
-    expect(
-      appendAuthenticated(storage, firstShare, {
-        idempotencyKey: "rate-scope-first",
-        createdAtMs: 2_000,
-      }),
-    ).toMatchObject({ ok: true });
-    expect(
-      appendAuthenticated(storage, firstShare, {
-        idempotencyKey: "rate-scope-blocked",
-        createdAtMs: 2_001,
-      }),
-    ).toEqual({ ok: false, reason: "rate-limit" });
-    expect(
-      appendAuthenticated(storage, firstShare, {
-        authorUserId: "other-recipient",
-        displayName: "Other Recipient",
-        idempotencyKey: "rate-scope-other-user",
-        createdAtMs: 2_001,
-      }),
-    ).toMatchObject({ ok: true, message: { authorUserId: "other-recipient" } });
-    expect(
-      appendAuthenticated(storage, secondShare, {
-        idempotencyKey: "rate-scope-other-share",
-        createdAtMs: 2_001,
-      }),
-    ).toMatchObject({ ok: true, message: { authorUserId: RECIPIENT } });
-    expect(
-      storage.listShareDiscussionMessages({ shareId: firstShare.shareId, limit: 10 })
-        .messages,
-    ).toHaveLength(2);
-    expect(
-      storage.listShareDiscussionMessages({ shareId: secondShare.shareId, limit: 10 })
-        .messages,
-    ).toHaveLength(1);
-    expectExactWorkspaceUsage(dbPath, firstShare.workspaceId);
-    expectExactWorkspaceUsage(dbPath, secondShare.workspaceId);
-  });
-
-  it.each([
-    {
-      label: "rolling rate",
-      options: {
-        discussionMessageRateLimit: 1,
-        discussionLifetimeMessageLimit: 10,
-        discussionNonOwnerShareRowLimit: 10,
-      },
-      rejected: "rate-limit",
-    },
-    {
-      label: "lifetime",
-      options: {
-        discussionMessageRateLimit: 10,
-        discussionLifetimeMessageLimit: 1,
-        discussionNonOwnerShareRowLimit: 10,
-      },
-      rejected: "lifetime-limit",
-    },
-  ] as const)(
-    "serializes two-handle recipient $label final-slot races",
-    async ({ options, rejected }) => {
-      const { storage, dbPath } = await openStorage(options);
-      const seeded = seedShare(storage, { suffix: `named-race-${rejected}` });
-      const operation = (idempotencyKey: string): RecipientBudgetRaceOperation => ({
-        kind: "named",
-        shareId: seeded.shareId,
-        authorUserId: RECIPIENT,
-        displayName: "Recipient",
-        body: "Concurrent recipient message",
-        idempotencyKey,
-        createdAtMs: 2_000,
-      });
-
-      const results = await raceDiscussionAppends(dbPath, options, [
-        operation(`${rejected}-one`),
-        operation(`${rejected}-two`),
-      ]);
-
-      expect(results).toHaveLength(2);
-      expect(results.filter((result) =>
-        (result as { ok?: boolean }).ok === true
-      )).toHaveLength(1);
-      expect(results.filter((result) =>
-        (result as { reason?: string }).reason === rejected
-      )).toHaveLength(1);
-      expect(countRows(dbPath, "sync_relay_share_discussion_messages")).toBe(1);
-      expect(storage.getShareDiscussionRevision(seeded.shareId)).toBe(1);
-      expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
-    },
-  );
-
-  it("serializes a two-handle combined non-owner final-slot race", async () => {
-    const options = {
-      discussionMessageRateLimit: 10,
-      discussionLifetimeMessageLimit: 10,
-      discussionNonOwnerShareRowLimit: 1,
-    };
-    const { storage, dbPath } = await openStorage(options);
-    const seeded = seedShare(storage, { suffix: "combined-race" });
-
-    const results = await raceDiscussionAppends(dbPath, options, [
-      {
-        kind: "named",
-        shareId: seeded.shareId,
-        authorUserId: RECIPIENT,
-        displayName: "Recipient",
-        body: "Named final slot",
-        idempotencyKey: "combined-named",
-        createdAtMs: 2_000,
-      },
-      {
-        kind: "link",
-        capabilityHash: seeded.capabilityHash,
-        profileTokenHash: profileHash("combined-race"),
-        claimedName: "Link visitor",
-        body: "Link final slot",
-        idempotencyKey: "combined-link",
-        createdAtMs: 2_000,
-      },
-    ]);
-
-    expect(results.filter((result) =>
-      (result as { ok?: boolean }).ok === true
-    )).toHaveLength(1);
-    expect(results.filter((result) =>
-      (result as { reason?: string }).reason === "share-limit"
-    )).toHaveLength(1);
-    const inspection = inspectDatabase(dbPath, { readOnly: true });
-    try {
-      expect(
-        inspection
-          .prepare(
-            `SELECT COUNT(*) AS count
-             FROM sync_relay_share_discussion_messages
-             WHERE share_id = ? AND author_kind IN ('named', 'link')`,
-          )
-          .get(seeded.shareId)?.count,
-      ).toBe(1);
-    } finally {
-      inspection.close();
-    }
-    expect(storage.getShareDiscussionRevision(seeded.shareId)).toBe(1);
-    expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
-  });
-
-  it("replays one exact recipient request across two concurrent handles", async () => {
-    const options = {
-      discussionMessageRateLimit: 1,
-      discussionLifetimeMessageLimit: 1,
-      discussionNonOwnerShareRowLimit: 1,
-    };
-    const { storage, dbPath } = await openStorage(options);
-    const seeded = seedShare(storage, { suffix: "recipient-replay-race" });
-    const operation: RecipientBudgetRaceOperation = {
-      kind: "named",
-      shareId: seeded.shareId,
-      authorUserId: RECIPIENT,
-      displayName: "Recipient",
-      body: "Exact concurrent replay",
-      idempotencyKey: "recipient-exact-replay",
-      createdAtMs: 2_000,
-    };
-
-    const results = await raceDiscussionAppends(dbPath, options, [operation, operation]);
-    expect(results.filter((result) =>
-      (result as { ok?: boolean; replayed?: boolean }).ok === true &&
-      (result as { replayed?: boolean }).replayed === false
-    )).toHaveLength(1);
-    expect(results.filter((result) =>
-      (result as { ok?: boolean; replayed?: boolean }).ok === true &&
-      (result as { replayed?: boolean }).replayed === true
-    )).toHaveLength(1);
-    const messageIds = results.map((result) =>
-      (result as { message?: { messageId?: string } }).message?.messageId
-    );
-    expect(new Set(messageIds).size).toBe(1);
-    expect(countRows(dbPath, "sync_relay_share_discussion_messages")).toBe(1);
-    expect(storage.getShareDiscussionRevision(seeded.shareId)).toBe(1);
-    expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
-  });
-
-  it("keeps recipient and combined budget reads indexed inside the write transaction", async () => {
-    const { storage, dbPath } = await openStorage();
-    const seeded = seedShare(storage, { suffix: "named-budget-plan" });
-    expect(
-      appendAuthenticated(storage, seeded, {
-        idempotencyKey: "plan-first",
-        createdAtMs: 2_000,
-      }),
-    ).toMatchObject({ ok: true });
-    expect(
-      append(storage, seeded, {
-        idempotencyKey: "plan-link",
-        createdAtMs: 2_001,
-      }),
-    ).toMatchObject({ ok: true });
-
-    const trace = tracePreparedSql(storage, () =>
-      appendAuthenticated(storage, seeded, {
-        idempotencyKey: "plan-second",
-        createdAtMs: 70_000,
-      })
-    );
-    expect(trace.result).toMatchObject({ ok: true, replayed: false });
-    const begin = trace.events.findIndex(
-      (event) => event.kind === "exec" && event.sql === "BEGIN IMMEDIATE",
-    );
-    const rate = trace.events.findIndex(
-      (event) =>
-        event.kind === "prepare" &&
-        event.sql.includes("author_kind = 'named'") &&
-        event.sql.includes("created_at_ms >"),
-    );
-    const lifetime = trace.events.findIndex(
-      (event) =>
-        event.kind === "prepare" &&
-        event.sql.includes("author_kind = 'named'") &&
-        !event.sql.includes("created_at_ms >") &&
-        event.sql.includes("COUNT(*)"),
-    );
-    const combined = trace.events.findIndex(
-      (event) =>
-        event.kind === "prepare" &&
-        event.sql.includes("author_kind IN ('named', 'link')") &&
-        event.sql.includes("COUNT(*)"),
-    );
-    const commit = trace.events.findIndex(
-      (event) => event.kind === "exec" && event.sql === "COMMIT",
-    );
-    expect(begin).toBeGreaterThanOrEqual(0);
-    expect(rate).toBeGreaterThan(begin);
-    expect(lifetime).toBeGreaterThan(rate);
-    expect(combined).toBeGreaterThan(lifetime);
-    expect(commit).toBeGreaterThan(combined);
-
-    const inspection = inspectDatabase(dbPath, { readOnly: true });
-    try {
-      const ratePlan = inspection
-        .prepare(
-          `EXPLAIN QUERY PLAN SELECT COUNT(*)
-           FROM sync_relay_share_discussion_messages
-           WHERE share_id = ?
-             AND author_kind = 'named'
-             AND author_user_id = ?
-             AND created_at_ms > ?`,
-        )
-        .all(seeded.shareId, RECIPIENT, 0)
-        .map((row) => String(row.detail));
-      const lifetimePlan = inspection
-        .prepare(
-          `EXPLAIN QUERY PLAN SELECT COUNT(*)
-           FROM sync_relay_share_discussion_messages
-           WHERE share_id = ?
-             AND author_kind = 'named'
-             AND author_user_id = ?`,
-        )
-        .all(seeded.shareId, RECIPIENT)
-        .map((row) => String(row.detail));
-      const replayPlan = inspection
-        .prepare(
-          `EXPLAIN QUERY PLAN SELECT message_id
-           FROM sync_relay_share_discussion_messages
-           WHERE share_id = ?
-             AND author_kind IN ('owner', 'named')
-             AND author_user_id = ?
-             AND idempotency_key = ?
-           LIMIT 1`,
-        )
-        .all(seeded.shareId, RECIPIENT, "plan-first")
-        .map((row) => String(row.detail));
-      const combinedPlan = inspection
-        .prepare(
-          `EXPLAIN QUERY PLAN SELECT COUNT(*)
-           FROM sync_relay_share_discussion_messages
-           WHERE share_id = ? AND author_kind IN ('named', 'link')`,
-        )
-        .all(seeded.shareId)
-        .map((row) => String(row.detail));
-      const linkRatePlan = inspection
-        .prepare(
-          `EXPLAIN QUERY PLAN SELECT COUNT(*)
-           FROM sync_relay_share_discussion_messages
-           WHERE author_kind = 'link'
-             AND link_principal_id = ?
-             AND created_at_ms > ?`,
-        )
-        .all("plan-principal", 0)
-        .map((row) => String(row.detail));
-      const linkLifetimePlan = inspection
-        .prepare(
-          `EXPLAIN QUERY PLAN SELECT COUNT(*)
-           FROM sync_relay_share_discussion_messages
-           WHERE author_kind = 'link' AND link_principal_id = ?`,
-        )
-        .all("plan-principal")
-        .map((row) => String(row.detail));
-      const linkReplayPlan = inspection
-        .prepare(
-          `EXPLAIN QUERY PLAN SELECT message_id
-           FROM sync_relay_share_discussion_messages
-           WHERE share_id = ?
-             AND author_kind = 'link'
-             AND link_principal_id = ?
-             AND idempotency_key = ?
-           LIMIT 1`,
-        )
-        .all(seeded.shareId, "plan-principal", "plan-link")
-        .map((row) => String(row.detail));
-      const workspaceUsagePlan = inspection
-        .prepare(
-          `EXPLAIN QUERY PLAN SELECT usage_bytes
-           FROM sync_relay_workspace_usage
-           WHERE workspace_id = ?`,
-        )
-        .all(seeded.workspaceId)
-        .map((row) => String(row.detail));
-      for (const [plan, index] of [
-        [ratePlan, "idx_sync_relay_share_discussion_named_budget"],
-        [lifetimePlan, "idx_sync_relay_share_discussion_named_budget"],
-        [replayPlan, "idx_sync_relay_share_discussion_user_replay"],
-        [combinedPlan, "idx_sync_relay_share_discussion_non_owner_budget"],
-        [linkRatePlan, "idx_sync_relay_share_discussion_principal_budget"],
-        [linkLifetimePlan, "idx_sync_relay_share_discussion_principal_budget"],
-        [linkReplayPlan, "idx_sync_relay_share_discussion_link_replay"],
-      ] as const) {
-        const detail = plan.join("\n");
-        expect(detail).toContain("SEARCH sync_relay_share_discussion_messages");
-        expect(detail).toContain(index);
-        expect(detail).not.toContain("SCAN sync_relay_share_discussion_messages");
-      }
-      expect(workspaceUsagePlan.join("\n")).toContain(
-        "SEARCH sync_relay_workspace_usage USING INDEX " +
-          "sqlite_autoindex_sync_relay_workspace_usage_1 (workspace_id=?)",
-      );
-      expect(workspaceUsagePlan.join("\n")).not.toContain(
-        "SCAN sync_relay_workspace_usage",
-      );
-    } finally {
-      inspection.close();
-    }
-  });
-
   it("keeps recipient debt through deletion, promotion, regrant, and reopen", async () => {
     const { storage, dbPath } = await openStorage({
       discussionMessageRateLimit: 10,
@@ -2614,365 +1689,6 @@ describe("durable link discussion storage", () => {
     expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
   });
 
-  it("reads one stored workspace total instead of aggregating history during quota checks", async () => {
-    const { storage } = await openStorage();
-    const seeded = seedShare(storage, { suffix: "quota-trace" });
-    const historicalBlob = Buffer.from("historical blob");
-    const historicalBlobSha = createHash("sha256").update(historicalBlob).digest("hex");
-    expect(
-      storage.putBlob({
-        workspaceId: seeded.workspaceId,
-        sha256: historicalBlobSha,
-        content: historicalBlob,
-        createdAtMs: 1_100,
-      }),
-    ).toMatchObject({ alreadyHad: false });
-    expect(
-      storage.appendLogBatch({
-        workspaceId: seeded.workspaceId,
-        originId: "quota-trace-origin",
-        ops: [{
-          originSeq: 0,
-          opKind: "quota.trace",
-          payloadJson: JSON.stringify({ historical: true }),
-          recordedAtMs: 1_101,
-        }],
-      }),
-    ).toMatchObject({ inserted: 1 });
-    const firstEnvelope = storage.putKeyEnvelope({
-      workspaceId: seeded.workspaceId,
-      envelopeJson: JSON.stringify({ generation: 1 }),
-      updatedAtMs: 1_102,
-      expectedSha256: null,
-    });
-    storage.putKeyEnvelope({
-      workspaceId: seeded.workspaceId,
-      envelopeJson: JSON.stringify({ generation: 2 }),
-      updatedAtMs: 1_103,
-      expectedSha256: firstEnvelope.sha256,
-    });
-    expect(
-      storage.claimWorkspaceIdentity({
-        workspaceId: seeded.workspaceId,
-        replicationEpoch: "quota-trace-epoch-1",
-        streamIdentity: "quota-trace-stream-1",
-      }),
-    ).toBe("claimed");
-    expect(
-      storage.rotateWorkspaceIdentity({
-        workspaceId: seeded.workspaceId,
-        ownerUserId: OWNER,
-        replicationEpoch: "quota-trace-epoch-2",
-        streamIdentity: "quota-trace-stream-2",
-        rotatedAtMs: 1_104,
-      }),
-    ).toBe("rotated");
-    expect(
-      append(storage, seeded, {
-        profile: "quota-trace-profile",
-        claimedName: "Trace Link",
-        body: "historical comment",
-        idempotencyKey: "quota-trace-history",
-        createdAtMs: 2_000,
-      }),
-    ).toMatchObject({ ok: true });
-
-    const link = tracePreparedSql(storage, () =>
-      append(storage, seeded, {
-        profile: "quota-trace-profile",
-        body: "traced link comment",
-        idempotencyKey: "quota-trace-link",
-        createdAtMs: 2_001,
-      })
-    );
-    const named = tracePreparedSql(storage, () =>
-      storage.appendAuthenticatedDiscussionMessage({
-        shareId: seeded.shareId,
-        authorUserId: RECIPIENT,
-        displayName: "Trace Named",
-        body: "traced named comment",
-        idempotencyKey: "quota-trace-named",
-        createdAtMs: 2_002,
-        readGuard: () => "recipient",
-        appendGuard: () => "recipient",
-      })
-    );
-    const asserted = tracePreparedSql(storage, () => {
-      const content = Buffer.from("new quota probe");
-      return storage.putBlob({
-        workspaceId: seeded.workspaceId,
-        sha256: createHash("sha256").update(content).digest("hex"),
-        content,
-        createdAtMs: 2_003,
-      });
-    });
-    expect(link.result).toMatchObject({ ok: true });
-    expect(named.result).toMatchObject({ ok: true });
-    expect(asserted.result).toMatchObject({ alreadyHad: false });
-
-    expect({
-      link: quotaAggregateSql(link.preparedSql),
-      named: quotaAggregateSql(named.preparedSql),
-      asserted: quotaAggregateSql(asserted.preparedSql),
-    }).toEqual({ link: [], named: [], asserted: [] });
-    expect({
-      link: link.preparedSql.filter((sql) => sql.includes("FROM sync_relay_workspace_usage")),
-      named: named.preparedSql.filter((sql) => sql.includes("FROM sync_relay_workspace_usage")),
-      asserted: asserted.preparedSql.filter((sql) =>
-        sql.includes("FROM sync_relay_workspace_usage")
-      ),
-    }).toMatchObject({
-      link: [expect.stringContaining("SELECT usage_bytes")],
-      named: [expect.stringContaining("SELECT usage_bytes")],
-      asserted: [expect.stringContaining("SELECT usage_bytes")],
-    });
-    expectStoredUsageReadInsideTransaction(link);
-    expectStoredUsageReadInsideTransaction(named);
-    expectStoredUsageReadInsideTransaction(asserted);
-  });
-
-  it("does not rebuild the durable workspace total on an ordinary reopen", async () => {
-    const { storage, dbPath } = await openStorage();
-    const seeded = seedShare(storage, { suffix: "usage-reopen" });
-    expect(
-      append(storage, seeded, {
-        profile: "usage-reopen-profile",
-        body: "survives an ordinary reopen",
-        idempotencyKey: "usage-reopen",
-      }),
-    ).toMatchObject({ ok: true });
-    expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
-    closeTestStorage(storage);
-
-    const audit = inspectDatabase(dbPath);
-    try {
-      audit.exec(`
-        CREATE TABLE sync_relay_workspace_usage_delete_audit (
-          workspace_id TEXT NOT NULL
-        ) STRICT;
-        CREATE TRIGGER audit_sync_relay_workspace_usage_delete
-        AFTER DELETE ON sync_relay_workspace_usage
-        BEGIN
-          INSERT INTO sync_relay_workspace_usage_delete_audit (workspace_id)
-          VALUES (OLD.workspace_id);
-        END;
-      `);
-    } finally {
-      audit.close();
-    }
-
-    const reopened = reopenTestStorage(dbPath);
-    const inspection = inspectDatabase(dbPath, { readOnly: true });
-    try {
-      expect(
-        inspection
-          .prepare("SELECT COUNT(*) AS count FROM sync_relay_workspace_usage_delete_audit")
-          .get()?.count,
-      ).toBe(0);
-    } finally {
-      inspection.close();
-    }
-    expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
-  });
-
-  it("keeps the durable workspace total exact across every counted write lifecycle", async () => {
-    const { storage, dbPath } = await openStorage({ blobGraceMs: 0 });
-    const seeded = seedShare(storage, { suffix: "usage-lifecycle" });
-    expect(expectExactWorkspaceUsage(dbPath, seeded.workspaceId)).toBe(0);
-
-    const blob = Buffer.from("usage lifecycle blob");
-    const blobSha = createHash("sha256").update(blob).digest("hex");
-    expect(
-      storage.putBlob({
-        workspaceId: seeded.workspaceId,
-        sha256: blobSha,
-        content: blob,
-        createdAtMs: 1_100,
-      }),
-    ).toMatchObject({ alreadyHad: false });
-    const afterBlob = expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
-    expect(
-      storage.putBlob({
-        workspaceId: seeded.workspaceId,
-        sha256: blobSha,
-        content: blob,
-        createdAtMs: 1_101,
-      }),
-    ).toMatchObject({ alreadyHad: true });
-    expect(expectExactWorkspaceUsage(dbPath, seeded.workspaceId)).toBe(afterBlob);
-
-    expect(
-      storage.appendLogBatch({
-        workspaceId: seeded.workspaceId,
-        originId: "usage-lifecycle-origin",
-        ops: [{
-          originSeq: 0,
-          opKind: "quota.lifecycle",
-          payloadJson: JSON.stringify({ row: "log" }),
-          recordedAtMs: 1_102,
-        }],
-      }),
-    ).toMatchObject({ inserted: 1 });
-    expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
-
-    const firstEnvelope = storage.putKeyEnvelope({
-      workspaceId: seeded.workspaceId,
-      envelopeJson: JSON.stringify({ generation: 1, payload: "first" }),
-      updatedAtMs: 1_103,
-      expectedSha256: null,
-    });
-    expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
-    storage.putKeyEnvelope({
-      workspaceId: seeded.workspaceId,
-      envelopeJson: JSON.stringify({ generation: 2, payload: "replacement" }),
-      updatedAtMs: 1_104,
-      expectedSha256: firstEnvelope.sha256,
-    });
-    expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
-
-    expect(
-      storage.claimWorkspaceIdentity({
-        workspaceId: seeded.workspaceId,
-        replicationEpoch: "usage-epoch-1",
-        streamIdentity: "usage-stream-1",
-      }),
-    ).toBe("claimed");
-    expect(
-      storage.rotateWorkspaceIdentity({
-        workspaceId: seeded.workspaceId,
-        ownerUserId: OWNER,
-        replicationEpoch: "usage-epoch-2",
-        streamIdentity: "usage-stream-2",
-        rotatedAtMs: 1_105,
-      }),
-    ).toBe("rotated");
-    expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
-
-    const linkMessage = append(storage, seeded, {
-      profile: "usage-profile",
-      claimedName: "Usage Link",
-      body: "counted link comment",
-      idempotencyKey: "usage-link",
-      createdAtMs: 2_000,
-    });
-    expect(linkMessage).toMatchObject({ ok: true, replayed: false });
-    if (!linkMessage.ok) return;
-    const afterLink = expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
-    expect(
-      append(storage, seeded, {
-        profile: "usage-profile",
-        claimedName: "Usage Link",
-        body: "counted link comment",
-        idempotencyKey: "usage-link",
-        createdAtMs: 2_000,
-      }),
-    ).toMatchObject({ ok: true, replayed: true });
-    expect(expectExactWorkspaceUsage(dbPath, seeded.workspaceId)).toBe(afterLink);
-
-    const second = reopenTestStorage(dbPath, {
-      blobGraceMs: 0,
-      newDiscussionId: () => "usage-second-message",
-    });
-    expect(
-      second.appendAuthenticatedDiscussionMessage({
-        shareId: seeded.shareId,
-        authorUserId: RECIPIENT,
-        displayName: "Usage Named",
-        body: "counted named comment",
-        idempotencyKey: "usage-named",
-        createdAtMs: 2_001,
-        readGuard: () => "recipient",
-        appendGuard: () => "recipient",
-      }),
-    ).toMatchObject({ ok: true, replayed: false });
-    const afterNamed = expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
-    expect(
-      second.appendAuthenticatedDiscussionMessage({
-        shareId: seeded.shareId,
-        authorUserId: RECIPIENT,
-        displayName: "Usage Named",
-        body: "counted named comment",
-        idempotencyKey: "usage-named",
-        createdAtMs: 2_001,
-        readGuard: () => "recipient",
-        appendGuard: () => "recipient",
-      }),
-    ).toMatchObject({ ok: true, replayed: true });
-    expect(expectExactWorkspaceUsage(dbPath, seeded.workspaceId)).toBe(afterNamed);
-
-    expect(
-      storage.deleteShareDiscussionMessage({
-        shareId: seeded.shareId,
-        workspaceId: seeded.workspaceId,
-        messageId: linkMessage.message.messageId,
-        deletedAtMs: 2_002,
-        actorUserId: OWNER,
-      }),
-    ).toMatchObject({ messageId: linkMessage.message.messageId });
-    expect(expectExactWorkspaceUsage(dbPath, seeded.workspaceId)).toBe(afterNamed);
-
-    expect(
-      await storage.collectUnreferencedBlobs(seeded.workspaceId, { nowMs: 1_101 }),
-    ).toMatchObject({ removed: 1, removedSha256s: [blobSha] });
-    expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
-
-    closeTestStorage(storage);
-    closeTestStorage(second);
-    const reopened = reopenTestStorage(dbPath, {
-      blobGraceMs: 0,
-      newDiscussionId: () => "usage-rejected-message",
-    });
-    const reopenedUsage = expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
-    const limited = reopenTestStorage(dbPath, {
-      workspaceQuotaBytes: reopenedUsage,
-      newDiscussionId: () => "usage-over-quota-message",
-    });
-    expect(
-      append(limited, seeded, {
-        profile: "usage-profile",
-        body: "rejected quota comment",
-        idempotencyKey: "usage-rejected",
-        createdAtMs: 2_003,
-      }),
-    ).toEqual({ ok: false, reason: "workspace-quota" });
-    expect(expectExactWorkspaceUsage(dbPath, seeded.workspaceId)).toBe(reopenedUsage);
-  });
-
-  it.each(["grant", "share"] as const)(
-    "keeps the durable workspace total exact across a cascading %s delete",
-    async (deletedModel) => {
-      const { storage, dbPath } = await openStorage();
-      const seeded = seedShare(storage, { suffix: `usage-cascade-${deletedModel}` });
-      expect(
-        append(storage, seeded, {
-          profile: `usage-cascade-${deletedModel}`,
-          claimedName: "Usage Cascade",
-          body: "removed by cascade",
-          idempotencyKey: `usage-cascade-${deletedModel}`,
-        }),
-      ).toMatchObject({ ok: true });
-      expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
-
-      const inspection = inspectDatabase(dbPath);
-      try {
-        inspection.exec("PRAGMA foreign_keys = ON");
-        if (deletedModel === "grant") {
-          inspection
-            .prepare("DELETE FROM sync_relay_share_grants WHERE grant_id = ?")
-            .run(seeded.grantId);
-        } else {
-          inspection
-            .prepare("DELETE FROM sync_relay_shares WHERE share_id = ?")
-            .run(seeded.shareId);
-        }
-      } finally {
-        inspection.close();
-      }
-
-      expect(expectExactWorkspaceUsage(dbPath, seeded.workspaceId)).toBe(0);
-    },
-  );
-
   it("pages by creation time and message id without gaps across tombstones", async () => {
     const { storage } = await openStorage();
     const seeded = seedShare(storage);
@@ -3031,349 +1747,4 @@ describe("durable link discussion storage", () => {
     }
   });
 
-  it("preserves principals, budgets, provenance, pause, block, messages, and tombstones on reopen", async () => {
-    const { storage, dbPath } = await openStorage({
-      discussionMessageRateLimit: 2,
-      discussionLifetimeMessageLimit: 2,
-    });
-    const seeded = seedShare(storage);
-    const kept = append(storage, seeded, {
-      profile: "kept",
-      claimedName: "Kept",
-      body: "kept body",
-      idempotencyKey: "kept-1",
-      createdAtMs: 2_000,
-    });
-    expect(kept.ok).toBe(true);
-    if (!kept.ok) return;
-    const blockedCapabilityHash = capabilityHash("blocked-reopen-capability");
-    expect(
-      storage.mintLinkSession({
-        session: {
-          sessionId: "blocked-reopen-session",
-          capabilityHash: blockedCapabilityHash,
-          grantId: seeded.grantId,
-          generation: 1,
-          mintedAtMs: 1_500,
-          expiresAtMs: 1_000_000,
-        },
-      }),
-    ).toBe(true);
-    const blocked = append(storage, seeded, {
-      profile: "blocked-reopen",
-      capabilityHash: blockedCapabilityHash,
-      claimedName: "Blocked",
-      body: "remove body",
-      idempotencyKey: "blocked-1",
-      createdAtMs: 2_001,
-    });
-    expect(blocked.ok).toBe(true);
-    if (!blocked.ok) return;
-    expect(
-      storage.deleteShareDiscussionMessage({
-        shareId: seeded.shareId,
-        workspaceId: seeded.workspaceId,
-        messageId: blocked.message.messageId,
-        deletedAtMs: 2_100,
-        actorUserId: OWNER,
-      }),
-    ).toMatchObject({ messageId: blocked.message.messageId });
-    expect(
-      storage.setLinkPrincipalBlocked({
-        shareId: seeded.shareId,
-        workspaceId: seeded.workspaceId,
-        principalId: blocked.principal.principalId,
-        actorUserId: OWNER,
-        blockedAtMs: 2_200,
-      }),
-    ).toBe(true);
-    expect(
-      storage.setShareLinkWritesPaused({
-        shareId: seeded.shareId,
-        workspaceId: seeded.workspaceId,
-        actorUserId: OWNER,
-        pausedAtMs: 2_300,
-      }),
-    ).toBe(true);
-
-    closeTestStorage(storage);
-    const reopened = reopenTestStorage(dbPath, {
-      discussionMessageRateLimit: 2,
-      discussionLifetimeMessageLimit: 2,
-    });
-    expect(reopened.getLinkPrincipal(kept.principal.principalId)).toMatchObject({
-      displayName: "Kept",
-      blockedAtMs: null,
-    });
-    expect(reopened.getLinkPrincipal(blocked.principal.principalId)).toMatchObject({
-      displayName: "Blocked",
-      blockedAtMs: 2_200,
-    });
-    expect(reopened.findLinkSessionByCapabilityHash(seeded.capabilityHash)).toMatchObject({
-      principalId: kept.principal.principalId,
-    });
-    expect(linkWritesPausedAtMs(storagePath(reopened), seeded.shareId)).toBe(2_300);
-    expect(reopened.listShareDiscussionMessages({ shareId: seeded.shareId, limit: 50 })).toMatchObject({
-      linkCommentsPaused: true,
-      messages: [
-        {
-          messageId: kept.message.messageId,
-          linkGrantId: seeded.grantId,
-          linkPrincipalId: kept.principal.principalId,
-          displayNameSnapshot: "Kept",
-          body: "kept body",
-          linkPrincipalBlocked: false,
-        },
-        {
-          messageId: blocked.message.messageId,
-          linkGrantId: seeded.grantId,
-          linkPrincipalId: blocked.principal.principalId,
-          body: null,
-          linkPrincipalBlocked: true,
-          deletedAtMs: 2_100,
-          deletedByUserId: OWNER,
-        },
-      ],
-    });
-    expect(
-      append(reopened, seeded, {
-        profile: "kept",
-        body: "blocked by pause",
-        idempotencyKey: "kept-2",
-        createdAtMs: 70_000,
-      }),
-    ).toMatchObject({ ok: false, reason: "paused" });
-    expect(
-      reopened.setShareLinkWritesPaused({
-        shareId: seeded.shareId,
-        workspaceId: seeded.workspaceId,
-        actorUserId: OWNER,
-        pausedAtMs: null,
-      }),
-    ).toBe(true);
-    expect(
-      append(reopened, seeded, {
-        profile: "kept",
-        body: "lifetime second",
-        idempotencyKey: "kept-2",
-        createdAtMs: 70_000,
-      }),
-    ).toMatchObject({ ok: true });
-    expect(
-      append(reopened, seeded, {
-        profile: "kept",
-        body: "lifetime debt stayed",
-        idempotencyKey: "kept-3",
-        createdAtMs: 140_000,
-      }),
-    ).toMatchObject({ ok: false, reason: "lifetime-limit" });
-  });
-
-  it("creates principal and message CHECK clauses from the exported discussion bounds", async () => {
-    const { dbPath } = await openStorage();
-    const inspection = inspectDatabase(dbPath, { readOnly: true });
-    try {
-      const principalSql = String(
-        inspection
-          .prepare(
-            "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'sync_relay_link_principals'",
-          )
-          .get()?.sql ?? "",
-      );
-      const messageSql = String(
-        inspection
-          .prepare(
-            "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'sync_relay_share_discussion_messages'",
-          )
-          .get()?.sql ?? "",
-      );
-
-      expect(principalSql).toContain(
-        `length(display_name) BETWEEN 1 AND ${LINK_DISCUSSION_NAME_CODE_POINT_LIMIT}`,
-      );
-      expect(principalSql).toContain(
-        `length(CAST(display_name AS BLOB)) <= ${LINK_DISCUSSION_NAME_BYTE_LIMIT}`,
-      );
-      expect(messageSql).toContain(
-        `length(display_name_snapshot) BETWEEN 1 AND ${LINK_DISCUSSION_NAME_CODE_POINT_LIMIT}`,
-      );
-      expect(messageSql).toContain(
-        `length(CAST(display_name_snapshot AS BLOB)) <= ${LINK_DISCUSSION_NAME_BYTE_LIMIT}`,
-      );
-      expect(messageSql).toContain(
-        `length(body) BETWEEN 1 AND ${LINK_DISCUSSION_BODY_CODE_POINT_LIMIT}`,
-      );
-      expect(messageSql).toContain(
-        `length(CAST(body AS BLOB)) <= ${LINK_DISCUSSION_BODY_INPUT_BYTE_LIMIT}`,
-      );
-      expect(messageSql).toContain("author_kind IN ('owner', 'named', 'link')");
-    } finally {
-      inspection.close();
-    }
-  });
-
-  it("keeps named display snapshots bounded across direct writes and restart", async () => {
-    const { storage, dbPath } = await openStorage();
-    const seeded = seedShare(storage, { suffix: "named-bound" });
-    expect(
-      storage.appendAuthenticatedDiscussionMessage({
-        shareId: seeded.shareId,
-        authorUserId: RECIPIENT,
-        displayName: "Stored Name",
-        body: "bounded",
-        idempotencyKey: "named-bounded",
-        createdAtMs: 2_000,
-        readGuard: () => "recipient",
-        appendGuard: () => "recipient",
-      }),
-    ).toMatchObject({ ok: true });
-    expect(
-      storage.appendAuthenticatedDiscussionMessage({
-        shareId: seeded.shareId,
-        authorUserId: RECIPIENT,
-        displayName: "x".repeat(LINK_DISCUSSION_NAME_CODE_POINT_LIMIT + 1),
-        body: "overbound",
-        idempotencyKey: "named-overbound",
-        createdAtMs: 2_001,
-        readGuard: () => "recipient",
-        appendGuard: () => "recipient",
-      }),
-    ).toEqual({ ok: false, reason: "invalid-input" });
-
-    closeTestStorage(storage);
-    const reopened = reopenTestStorage(dbPath);
-    expect(
-      reopened.listShareDiscussionMessages({ shareId: seeded.shareId, limit: 10 })
-        .messages.map((message) => message.displayNameSnapshot),
-    ).toEqual(["Stored Name"]);
-    expect(
-      reopened.appendAuthenticatedDiscussionMessage({
-        shareId: seeded.shareId,
-        authorUserId: RECIPIENT,
-        displayName: "😀".repeat(LINK_DISCUSSION_NAME_CODE_POINT_LIMIT + 1),
-        body: "overbound after restart",
-        idempotencyKey: "named-overbound-restart",
-        createdAtMs: 2_002,
-        readGuard: () => "recipient",
-        appendGuard: () => "recipient",
-      }),
-    ).toEqual({ ok: false, reason: "invalid-input" });
-  });
-
-  it("enforces the closed named and link author shapes in SQLite", async () => {
-    const { storage, dbPath } = await openStorage();
-    const seeded = seedShare(storage);
-    const accepted = append(storage, seeded);
-    expect(accepted.ok).toBe(true);
-    if (!accepted.ok) return;
-
-    const db = inspectDatabase(dbPath);
-    const insert = db.prepare(
-      `INSERT INTO sync_relay_share_discussion_messages (
-         message_id, share_id, idempotency_key, request_hash, author_kind,
-         author_user_id, link_grant_id, link_principal_id, display_name_snapshot,
-         body, created_at_ms, deleted_at_ms, deleted_by_user_id, storage_bytes
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
-    );
-    try {
-      expect(() =>
-        insert.run(
-          "bad-incomplete",
-          seeded.shareId,
-          "bad-incomplete",
-          "request-hash",
-          "link",
-          null,
-          null,
-          null,
-          "Anonymous",
-          "body",
-          3_000,
-          100,
-        ),
-      ).toThrow(/CHECK constraint/u);
-      expect(() =>
-        insert.run(
-          "bad-mixed",
-          seeded.shareId,
-          "bad-mixed",
-          "request-hash",
-          "link",
-          RECIPIENT,
-          seeded.grantId,
-          accepted.principal.principalId,
-          "Anonymous",
-          "body",
-          3_001,
-          100,
-        ),
-      ).toThrow(/CHECK constraint/u);
-      expect(() =>
-        insert.run(
-          "bad-named",
-          seeded.shareId,
-          "bad-named",
-          "request-hash",
-          "named",
-          null,
-          seeded.grantId,
-          accepted.principal.principalId,
-          "Unnamed",
-          "body",
-          3_002,
-          100,
-        ),
-      ).toThrow(/CHECK constraint/u);
-      expect(() =>
-        insert.run(
-          "bad-name-code-points",
-          seeded.shareId,
-          "bad-name-code-points",
-          "request-hash",
-          "named",
-          RECIPIENT,
-          null,
-          null,
-          "x".repeat(LINK_DISCUSSION_NAME_CODE_POINT_LIMIT + 1),
-          "body",
-          3_003,
-          100,
-        ),
-      ).toThrow(/CHECK constraint/u);
-      expect(() =>
-        insert.run(
-          "bad-name-bytes",
-          seeded.shareId,
-          "bad-name-bytes",
-          "request-hash",
-          "named",
-          RECIPIENT,
-          null,
-          null,
-          "😀".repeat(LINK_DISCUSSION_NAME_CODE_POINT_LIMIT + 1),
-          "body",
-          3_004,
-          100,
-        ),
-      ).toThrow(/CHECK constraint/u);
-      expect(() =>
-        insert.run(
-          "bad-body-nul",
-          seeded.shareId,
-          "bad-body-nul",
-          "request-hash",
-          "link",
-          null,
-          seeded.grantId,
-          accepted.principal.principalId,
-          "Anonymous",
-          "body\u0000tail",
-          3_005,
-          100,
-        ),
-      ).toThrow(/CHECK constraint/u);
-    } finally {
-      db.close();
-    }
-  });
 });

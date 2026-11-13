@@ -9,7 +9,8 @@ export function observeStartupReadiness({ workspaceName, path, content, timeoutM
       clearTimeout(deadline);
       clearTimeout(poll);
       cancelAnimationFrame(frame);
-      error ? reject(error) : resolve(value);
+      if (error) reject(error);
+      else resolve(value);
     };
     const deadline = setTimeout(() => finish(Error(`Expected visible editable document did not become ready: ${workspaceName}/${path}`)), timeoutMs);
     const visible = element => {

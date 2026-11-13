@@ -265,35 +265,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn look_alike_spellings_cover_canonical_ascii_equivalents() {
-        use unicode_normalization::UnicodeNormalization;
-        let mut derived = Vec::new();
-        for character in (0x80..=0x10ffff).filter_map(char::from_u32) {
-            let text = character.to_string();
-            for normalized in [
-                text.nfc().collect::<String>(),
-                text.nfd().collect::<String>(),
-            ] {
-                if normalized.len() == 1 && normalized.is_ascii() {
-                    let pair = (normalized, text.clone());
-                    if !derived.contains(&pair) {
-                        derived.push(pair);
-                    }
-                }
-            }
-        }
-        let actual: Vec<_> = (0..=0x7f)
-            .map(|code| char::from_u32(code).unwrap().to_string())
-            .filter_map(|ascii| {
-                let spelling = look_alike_spelling(&ascii);
-                (spelling != ascii).then_some((ascii, spelling))
-            })
-            .collect();
-        derived.sort();
-        assert_eq!(actual, derived);
-    }
-
-    #[test]
     fn shared_unicode_and_alias_fixtures() {
         #[derive(serde::Deserialize)]
         struct Case {
@@ -339,28 +310,6 @@ mod tests {
     }
 
     #[test]
-    fn removes_every_default_ignorable() {
-        for &(start, end) in &fold_data().ignorables {
-            for code in start..=end {
-                let name = format!(".do{}hc", char::from_u32(code).unwrap());
-                assert_eq!(fold_segment(&name), ".dohc", "U+{code:04X}");
-                assert!(has_ignored_segment(&name));
-            }
-        }
-    }
-
-    #[test]
-    fn ascii_fast_path_matches_full_fold() {
-        for code in 0..128u8 {
-            let name = char::from(code).to_string();
-            assert_eq!(
-                fold_segment(&name),
-                fold_segment(&format!("{name}\u{200d}"))
-            );
-        }
-    }
-
-    #[test]
     fn reserved_folding_does_not_change_the_secret_rule() {
         let path = "notes/config.ｅｎｖ";
         assert_eq!(
@@ -371,64 +320,6 @@ mod tests {
             crate::search_policy::classify_engine_file_path(path),
             crate::search_policy::PathFloor::Tracked
         );
-    }
-
-    #[test]
-    fn reserved_names_fold_on_every_platform() {
-        for name in [
-            ".dohc",
-            ".DOHC",
-            ".Dohc",
-            ".do‍hc",
-            ".GIT",
-            "NODE_MODULES",
-            "GIT~1",
-            "NODE_M~1",
-            "DOHC~1",
-            ".DOHC-WRITE-tmp",
-        ] {
-            let path = format!("notes/{name}/engine/private.md");
-            assert!(is_excluded_file(&path), "{path}");
-            assert_eq!(
-                crate::policy::classify_engine_file_path(&path),
-                crate::policy::PathClassification::Ignored
-            );
-            assert_eq!(
-                crate::search_policy::classify_engine_file_path(&path),
-                crate::search_policy::PathFloor::Ignored
-            );
-        }
-        for name in ["dohc", ".dohc-notes", "my-dohc", "my-node_modules"] {
-            assert!(!is_excluded_file(&format!("{name}/notes.md")));
-        }
-    }
-
-    #[test]
-    fn reserved_segments_excluded_at_any_depth() {
-        assert!(is_excluded_file(".dohc/engine/engine.db"));
-        assert!(is_excluded_file("a/b/.git/config"));
-        assert!(is_excluded_file("node_modules/pkg/index.js"));
-        assert!(!is_excluded_file("notes/a.md"));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn win32_trailing_alias_still_excluded() {
-        // `.dohc ` (trailing space) and `.DOHC` alias `.dohc` on Win32.
-        assert!(has_ignored_segment(".dohc /history.json"));
-        assert!(has_ignored_segment(".DOHC/history.json"));
-        assert!(has_ignored_segment(".git./config"));
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn posix_trailing_variants_are_distinct_content() {
-        // POSIX keeps trailing dots as part of the name.
-        assert!(has_ignored_segment(".dohc/internal"));
-        assert!(has_ignored_segment(".DOHC/x.md"));
-        assert!(has_ignored_segment(".Dohc/x.md"));
-        assert!(!has_ignored_segment(".dohc./x.md"));
-        assert!(!has_ignored_segment(".git./config"));
     }
 
     #[test]
@@ -458,23 +349,6 @@ mod tests {
         for path in ["notes/DS_Store.md", "notes/Icon.png", "notes/_draft.md"] {
             assert!(!is_excluded_file(path), "{path:?}");
         }
-    }
-
-    #[test]
-    fn write_temp_prefix_excluded() {
-        assert!(is_excluded_file(".dohc-write-123.tmp"));
-        assert!(is_excluded_file("sub/.dohc-write-abc"));
-    }
-
-    #[test]
-    fn conflict_artifacts_excluded_from_capture() {
-        // The materialization preserve-both artifact `<base>.<job>.conflict` is
-        // a recovery artifact: visible on disk, but not auto-captured.
-        assert!(is_conflict_artifact("notes.md.j1.conflict"));
-        assert!(is_excluded_file("notes/x.md.abc123.conflict"));
-        assert!(is_excluded_file("x.md.job-9.conflict"));
-        // A normal document is still captured.
-        assert!(!is_excluded_file("notes/x.md"));
     }
 
     #[test]

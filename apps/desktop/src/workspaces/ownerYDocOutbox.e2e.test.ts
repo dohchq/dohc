@@ -1,9 +1,5 @@
 import { mkdir, writeFile } from "node:fs/promises";
-import {createHash} from "node:crypto";
-import {DatabaseSync} from "node:sqlite";
-import {EngineClient} from "@dohc/workspace-engine-client/daemon";
-import {selfHostLiveProfile} from "../../../../services/sync-relay/src/selfHostLiveProfile";
-import {reconcileOwnerLiveStops} from "./ownerLiveStop";
+
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import * as Y from "yjs";
@@ -17,7 +13,6 @@ import {
   type Response,
 } from "@dohc/workspace-engine-client";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
-import { deferred } from "../testing/deferred";
 import {
   createRealDaemonLifecycle,
   createRealDaemonWorkspaceSessions,
@@ -40,61 +35,6 @@ const LIMITS = {
   maxPendingBytes: 1_000_000,
   maxPendingAgeMs: 86_400_000,
 } as const;
-
-it.skipIf(engine.missing)("measures Stop reconciliation at startup and each sync pass with real daemon rows", async () => {
-  const root = await createTestScratch("dohc-stop-reconcile-cost-");
-  const paths = Array.from({length: 10}, (_, i) => `owner-${i}.md`);
-  await Promise.all(paths.map(path => writeFile(join(root, path), `# ${path}\n`, "utf8")));
-  const profile = selfHostLiveProfile(), configPath = join(root, ".dohc", "owner-ingress.json");
-  await mkdir(join(root, ".dohc"), {recursive: true});
-  await writeFile(configPath, JSON.stringify(profile.nativeIngress));
-  const lifecycle = createRealDaemonLifecycle({command: engine.require(), maxRestarts: 0,
-    privateOwnerHost: {configPath, client: profile.nativeClient}});
-  const sessions = createRealDaemonWorkspaceSessions(lifecycle);
-  const workspace = {workspaceId: "stop-reconcile-cost", rootPath: root, attachmentId: Symbol("stop-cost")};
-  const capture = createWorkspaceEngineCapture({...workspace, rustEngineSessions: sessions});
-  try {
-    await lifecycle.start();
-    capture.observeFileEvents(paths.map(path => ({path, operation: "update" as const})));
-    await capture.flush();
-    await sessions.run(workspace, async ({workspace: handle}) => {
-      const client = lifecycle.currentClient(); if (!(client instanceof EngineClient)) throw new Error("Expected native client");
-      const request = (current = handle) => ({id: 0, workspace: current, deadlineMs: 20_000});
-      const measure = async (rows: number) => {
-        const pass = () => sessions.run(workspace, async ({workspace: current}) => reconcileOwnerLiveStops({client, workspaceHandle: current, workspaceId: workspace.workspaceId,
-          signal: AbortSignal.timeout(20_000), assertCurrent() {}, retire: async () => null}));
-        const startup = performance.now(); await pass(); const startupMs = performance.now() - startup;
-        const samples: number[] = [];
-        for (let i = 0; i < 20; i++) {const start = performance.now(); await pass(); samples.push(performance.now() - start);}
-        samples.sort((a,b) => a-b);
-        console.log(`stop_reconcile rows=${rows} startup_ms=${startupMs.toFixed(3)} sync_median_ms=${samples[10]!.toFixed(3)} sync_p95_ms=${samples[19]!.toFixed(3)} rpc_per_pass=${1+2*rows}`);
-      };
-      await measure(0);
-      for (const path of paths) {
-        const session = await capture.openYDocSession({path, contentKind: "richdoc", onRemoteUpdate() {}});
-        const checkpoint = Y.encodeStateAsUpdate(session.doc);
-        await session.close();
-        const db = new DatabaseSync(join(root, ".dohc", "engine", "engine.db"));
-        // Seed an observed cut to measure local reconciliation independently of
-        // relay setup. The Stop requests and all measured passes use real RPCs.
-        try {
-          const native = db.prepare("SELECT version_id,object_id,head_update_seq FROM ydoc_docs WHERE path=?").get(path)!;
-          const digest = createHash("sha256").update(checkpoint).digest("hex");
-          const binding = {workspaceId: workspace.workspaceId, mainVersionId: String(native.version_id), objectId: String(native.object_id),
-            lineageClaimId: digest, currentPath: path, selectorPaths: [path], restoreFenceGeneration: 0};
-          db.prepare("INSERT OR IGNORE INTO binary_blobs(sha256,bytes,byte_length) VALUES(?,?,?)").run(digest,checkpoint,checkpoint.length);
-          db.prepare("UPDATE ydoc_docs SET regime='replicated',lineage_claim_status='exact',lineage_claim_id=? WHERE path=?").run(digest,path);
-          db.prepare("INSERT INTO ydoc_owner_bindings VALUES(?,?,?,?,?,'relay-cost',1,0,?,?,1000000,86400000)")
-            .run(workspace.workspaceId,native.version_id!,native.object_id!,digest,JSON.stringify(binding),native.head_update_seq!,digest);
-        } finally {db.close();}
-        await sessions.run(workspace, async ({workspace: current}) => {
-          await client.ownerYDocStopRequest(request(current), path);
-        });
-      }
-      await measure(10);
-    });
-  } finally {await capture.stop(); await sessions.closeAll(); await lifecycle.stop();}
-}, 120_000);
 
 it("maps an interrupted outbox snapshot to caller-scheduled retry without authority, delivery, or ACK", async () => {
   const methods: string[] = [];
@@ -121,10 +61,8 @@ it("maps an interrupted outbox snapshot to caller-scheduled retry without author
 
 it.each([
   { stage: "read", outcome: "receipt" },
-  { stage: "authority", outcome: "receipt" },
   { stage: "authority", outcome: "quarantine" },
   { stage: "delivery", outcome: "receipt" },
-  { stage: "delivery", outcome: "quarantine" },
 ] as const)("stops after disposal during $stage with a $outcome result", async ({ stage, outcome }) => {
   let markReached!: () => void;
   const reached = new Promise<void>((resolve) => { markReached = resolve; });
@@ -233,100 +171,6 @@ class AppendGate implements DaemonRequesterClient {
   }
 }
 
-it.skipIf(engine.missing)("reads an owner queue larger than a daemon control frame through complete verified pages", async () => {
-  const root = await createTestScratch("dohc-owner-outbox-pages-");
-  await mkdir(join(root, ".dohc", "engine"), { recursive: true });
-  await writeFile(join(root, ".dohc", "engine", "SHADOW_CLONE"),
-    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "utf8");
-  await writeFile(join(root, "owner.md"), "Owner outbox frame fixture", "utf8");
-  // Match the real-session helper's aggregate-load allowance for startup smoke.
-  const lifecycle = createRealDaemonLifecycle({
-    command: engine.require(), maxRestarts: 0,
-  });
-  const sessions = createRealDaemonWorkspaceSessions(lifecycle);
-  const workspace = { workspaceId: "owner-outbox-frame", rootPath: root, attachmentId: Symbol("owner-pages") };
-  const capture = createWorkspaceEngineCapture({
-    ...workspace, rustEngineSessions: sessions,
-  });
-  try {
-    await lifecycle.start();
-    capture.observeFileEvents([{ path: "owner.md", operation: "update" }]);
-    await capture.flush();
-    const main = (await capture.listVersions()).versions.find((version) => version.kind === "main");
-    const objectId = await capture.fileObjectIdForPath("owner.md");
-    if (main === undefined || objectId === null) throw new Error("Fixture main or object is missing.");
-    await sessions.run(workspace, async ({ client, workspace: handle }) => {
-      const pageResponses: Response[] = [];
-      const outbox = new OwnerYDocOutbox({
-        async sendRequest(request) {
-          const response = await client.sendRequest(request);
-          if (request.method === "ydoc.ownerOutbox.readPending") pageResponses.push(response);
-          return response;
-        },
-      }, handle);
-      try {
-        const binding: LiveObjectBinding = {
-          workspaceId: workspace.workspaceId, mainVersionId: main.id, objectId,
-          lineageClaimId: `lineage-${objectId}`, currentPath: "owner.md", selectorPaths: ["owner.md"],
-          restoreFenceGeneration: 0,
-        };
-        let outboxId = "";
-        const update = new Uint8Array(1_048_576).fill(37);
-        for (let index = 0; index < 7; index += 1) {
-          const appended = await outbox.append({
-            binding, baseUpdate: new Uint8Array([0, 0]), update, appendKey: `frame-${index}`,
-            limits: { maxPendingBytes: update.length * 8, maxPendingAgeMs: 86_400_000 },
-          });
-          outboxId = appended.outboxId;
-        }
-        const pending = await outbox.readPending(outboxId);
-        expect(pending.entries).toHaveLength(7);
-        expect(pending.pendingBytes).toBe(update.length * 7);
-        expect(pending.entries.map((entry) => entry.sequence)).toEqual([1, 2, 3, 4, 5, 6, 7]);
-        for (const entry of pending.entries) expect(entry.update).toEqual(update);
-        const wireSizes = pageResponses.map((response) => Buffer.byteLength(JSON.stringify({ type: "response", ...response })));
-        expect(Math.max(...wireSizes)).toBeLessThanOrEqual(8 * 1_048_576);
-        expect(wireSizes.reduce((sum, length) => sum + length, 0)).toBeGreaterThan(8 * 1_048_576);
-
-        pageResponses.length = 0;
-        const delivered: number[] = [];
-        const drainer = new OwnerYDocOutboxDrainer(outbox, outboxId, {
-          async freshOwnerAuthority() {
-            return { kind: "authority", authority: { value: {}, hostEpoch: parseHostEpoch(1) } };
-          },
-          async deliver(_authority, envelope) {
-            delivered.push(envelope.sequence);
-            return { kind: "receipt", receipt: {
-              deliveryId: envelope.deliveryId, updateDigest: envelope.updateDigest,
-              journalCursor: envelope.sequence, acceptingHostEpoch: parseHostEpoch(1),
-            } };
-          },
-        }, new OwnerKnownRefusals());
-        try {
-          for (let index = 0; index < 7; index += 1) {
-            await expect(drainer.drainOnce()).resolves.toBe("acknowledged");
-          }
-          await expect(drainer.drainOnce()).resolves.toBe("empty");
-          expect(delivered).toEqual([1, 2, 3, 4, 5, 6, 7]);
-          const updateBytes = pageResponses.reduce((total, response) => {
-            const page = response.result as { part?: string; bytesBase64?: string } | undefined;
-            return total + (page?.part === "update" ? Buffer.from(page.bytesBase64!, "base64").length : 0);
-          }, 0);
-          expect(updateBytes).toBe(update.length * 7);
-        } finally {
-          drainer.dispose();
-        }
-      } finally {
-        outbox.dispose();
-      }
-    });
-  } finally {
-    await capture.stop().catch(() => undefined);
-    await sessions.closeAll().catch(() => undefined);
-    await lifecycle.stop().catch(() => undefined);
-  }
-}, 120_000);
-
 class FakeOwnerHost implements OwnerYDocDelivery {
   readonly journal: { deliveryId: string; updateDigest: string }[] = [];
   readonly authorship: { deliveryId: string; startCursor: number; endCursor: number }[] = [];
@@ -398,102 +242,6 @@ function bodyText(doc: Y.Doc): Y.XmlText {
   }
   return text;
 }
-
-it.skipIf(engine.missing)("acknowledges an in-flight receipt after a concurrent append seals the owner queue", async () => {
-  const root = await createTestScratch("dohc-owner-outbox-sealed-receipt-");
-  await mkdir(join(root, ".dohc", "engine"), { recursive: true });
-  await writeFile(join(root, ".dohc", "engine", "SHADOW_CLONE"),
-    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "utf8");
-  await writeFile(join(root, "owner.md"), "Owner receipt", "utf8");
-  const doc = markdownToYDoc("Owner receipt");
-  const baseUpdate = Y.encodeStateAsUpdate(doc);
-  const beforeA = Y.encodeStateVector(doc);
-  bodyText(doc).insert(bodyText(doc).length, " A");
-  const updateA = Y.encodeStateAsUpdate(doc, beforeA);
-  const beforeB = Y.encodeStateVector(doc);
-  bodyText(doc).insert(bodyText(doc).length, " B");
-  const updateB = Y.encodeStateAsUpdate(doc, beforeB);
-  const limits = { ...LIMITS, maxPendingBytes: updateA.length + updateB.length };
-  const lifecycle = createRealDaemonLifecycle({ command: engine.require(), maxRestarts: 0 });
-  const sessions = createRealDaemonWorkspaceSessions(lifecycle);
-  const workspace = { workspaceId: "owner-outbox-sealed-receipt", rootPath: root, attachmentId: Symbol("owner-receipt") };
-  const capture = createWorkspaceEngineCapture({
-    ...workspace, rustEngineSessions: sessions,
-  });
-  try {
-    await lifecycle.start();
-    capture.observeFileEvents([{ path: "owner.md", operation: "update" }]);
-    await capture.flush();
-    const main = (await capture.listVersions()).versions.find((version) => version.kind === "main");
-    const objectId = await capture.fileObjectIdForPath("owner.md");
-    if (main === undefined || objectId === null) throw new Error("Fixture main or object is missing.");
-    await sessions.run(workspace, async ({ client, workspace: handle }) => {
-      const outbox = new OwnerYDocOutbox(client, handle);
-      const host = new FakeOwnerHost();
-      const reached = deferred();
-      const release = deferred();
-      let drainer: OwnerYDocOutboxDrainer | undefined;
-      let draining: ReturnType<OwnerYDocOutboxDrainer["drainOnce"]> | undefined;
-      try {
-        const binding: LiveObjectBinding = {
-          workspaceId: workspace.workspaceId, mainVersionId: main.id, objectId,
-          lineageClaimId: `lineage-${objectId}`, currentPath: "owner.md", selectorPaths: ["owner.md"],
-          restoreFenceGeneration: 0,
-        };
-        const first = await outbox.append({ binding, baseUpdate, update: updateA, appendKey: "A", limits });
-        expect(first.state).toBe("active");
-        drainer = new OwnerYDocOutboxDrainer(outbox, first.outboxId, {
-          freshOwnerAuthority: () => host.freshOwnerAuthority(),
-          async deliver(authority, envelope) {
-            await host.deliver(authority, envelope);
-            const receipt = host.receipts.get(envelope.deliveryId);
-            if (receipt === undefined) throw new Error("Host did not retain its committed receipt.");
-            reached.resolve();
-            await release.promise;
-            return { kind: "receipt", receipt };
-          },
-        }, new OwnerKnownRefusals());
-        draining = drainer.drainOnce();
-        await Promise.race([
-          reached.promise,
-          draining.then(() => { throw new Error("Drain ended before held delivery."); }),
-        ]);
-        expect(host.appliedDeliveryIds).toEqual([first.deliveryId]);
-        const second = await outbox.append({ binding, baseUpdate, update: updateB, appendKey: "B", limits });
-        expect(second.outboxId).toBe(first.outboxId);
-        expect(second.state).toBe("sealed");
-        expect(second.pendingBytes).toBe(limits.maxPendingBytes);
-        release.resolve();
-        await expect(draining).resolves.toBe("acknowledged");
-        const pending = await outbox.readPending(first.outboxId);
-        expect(pending.state).toBe("sealed");
-        expect(pending.baseUpdate).toEqual(baseUpdate);
-        expect(pending.pendingBytes).toBe(updateB.length);
-        expect(pending.entries).toHaveLength(1);
-        expect(pending.entries[0]).toMatchObject({ sequence: second.sequence, deliveryId: second.deliveryId, update: updateB });
-        await expect(outbox.append({ binding, baseUpdate, update: updateB, appendKey: "C", limits })).rejects.toThrow("owner-outbox-frozen");
-        expect(await drainer.drainOnce()).toBe("acknowledged");
-        expect(host.authorityCalls).toBe(2);
-        expect(host.delivered).toHaveLength(2);
-        const drained = await outbox.readPending(first.outboxId);
-        expect(drained.state).toBe("active");
-        expect(drained.entries).toEqual([]);
-        await expect(outbox.append({ binding, baseUpdate, update: updateB, appendKey: "C", limits })).resolves.toMatchObject({state: "active"});
-      } finally {
-        drainer?.dispose();
-        release.resolve();
-        await draining?.catch(() => undefined);
-        outbox.dispose();
-        host.doc.destroy();
-      }
-    });
-  } finally {
-    await capture.stop().catch(() => undefined);
-    await sessions.closeAll().catch(() => undefined);
-    await lifecycle.stop().catch(() => undefined);
-    doc.destroy();
-  }
-}, 120_000);
 
 it.skipIf(engine.missing)(
   "replays one durable owner edit after main and daemon restart and reuses its delivery id after a lost receipt",

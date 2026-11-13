@@ -511,6 +511,7 @@ export class EngineWorkspaceSessions {
         ? { workspaceId: entry.workspaceId, rootPath, attachmentId: key }
         : { workspaceId: entry.workspaceId, rootPath });
     }
+    // oxlint-disable-next-line typescript/await-thenable -- await needed: some entries are promises
     await Promise.all(workspaces.map((workspace) => this.openInProgress(workspace)));
     for (const workspace of workspaces) {
       const binding = this.currentBinding(workspace);

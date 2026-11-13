@@ -795,15 +795,20 @@ describe("fix round 1", () => {
     async (phase) => {
       const w = await setup();
       let syncFails = false;
+      // The folder sync is simulated whole: Windows can't flush a folder handle, and production skips that step there.
       const flakyFolderSync: NonNullable<DurableFileOperations["open"]> = async (path, flags, mode) => {
+        if (flags === "r") {
+          return {
+            writeFile: async () => { throw new Error("a folder is not written"); },
+            close: async () => undefined,
+            sync: async () => { if (syncFails) throw new Error("fsync failed"); },
+          };
+        }
         const handle = await open(path, flags, mode);
         return {
           writeFile: (data: string) => handle.writeFile(data),
           close: () => handle.close(),
-          sync: async () => {
-            if (flags === "r" && syncFails) throw new Error("fsync failed");
-            await handle.sync();
-          },
+          sync: () => handle.sync(),
         };
       };
       const intents = createChatWakeIntents(w.file, { open: flakyFolderSync, platform: "linux" });

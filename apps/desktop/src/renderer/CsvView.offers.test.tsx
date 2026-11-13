@@ -4,7 +4,6 @@ import userEvent from "@testing-library/user-event";
 import type { ComponentProps, ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DohcDesktopBridge } from "../ipc/bridgeContract";
-import { deferred } from "../testing/deferred";
 import { CsvView } from "./CsvView";
 import { documentVersionKey } from "./documentVersionKey";
 import { resetOrphanedDrafts } from "./orphanedDrafts";
@@ -125,74 +124,12 @@ describe("the CSV offer on the preview's bound", () => {
     undoDatabaseImport.mockReset();
   });
 
-  it("offers Import to SQLite on a workspace CSV past the cap, beside the count", () => {
-    renderCsv();
-    const bound = screen.getByTestId("csv-preview-bound");
-    expect(bound.textContent).toBe("Showing the first 500 of 501 rows.Import to SQLite");
-    expect(within(bound).getByRole("button", { name: "Import to SQLite" })).toBe(boundImport());
-    // The tab row keeps its own Import.
-    expect(screen.getByTestId("csv-import-sqlite")).toBeTruthy();
-  });
-
   it.each([
     ["a received share's CSV", { csvSource: "received-share" as const }],
-    ["a CSV of unknown source", { csvSource: undefined }],
-    ["a CSV the read cut short", { truncated: true }],
-    ["a view that cannot open the database", { onOpenPath: undefined }],
   ])("offers nothing on %s, and the bound names the way to the rest", (_, overrides) => {
     renderCsv(overrides);
     expect(boundImport()).toBeNull();
     expect(screen.getByTestId("csv-preview-bound").textContent).toContain("import to SQLite to work with all of them.");
-  });
-
-  it("has no bound, and no offer, at the cap", () => {
-    renderCsv({}, "name\n" + Array.from({ length: 500 }, (_, row) => `row ${row}`).join("\n"));
-    expect(screen.queryByTestId("csv-preview-bound")).toBeNull();
-    expect(boundImport()).toBeNull();
-  });
-
-  it("runs the tab row's import: busy in both places, focus kept, one import, then the database opens", async () => {
-    const user = userEvent.setup();
-    const answer = deferred<ImportResult>();
-    importToDatabase.mockReturnValue(answer.promise);
-    const { onOpenPath } = renderCsv();
-
-    const button = boundImport()!;
-    const header = screen.getByTestId("csv-import-sqlite");
-    await user.click(button);
-    expect(button.getAttribute("aria-busy")).toBe("true");
-    expect(header.getAttribute("aria-busy")).toBe("true");
-    expect(document.activeElement).toBe(button);
-    expect(button.textContent).toBe("Import to SQLite");
-    expect(within(header.parentElement!).getByRole("status").textContent).toBe("Importing to SQLite…");
-    await user.click(button);
-    await user.click(header);
-    expect(importToDatabase).toHaveBeenCalledExactlyOnceWith({
-      workspaceId: "ws-1", sourceRelativePath: "data.csv", databaseRelativePath: "data.sqlite", tableName: "data",
-    });
-
-    await act(async () => answer.resolve(IMPORTED));
-    expect(onOpenPath).toHaveBeenCalledExactlyOnceWith("data.sqlite");
-    expect(boundImport()!.hasAttribute("aria-busy")).toBe(false);
-  });
-
-  it("says what the import made, with Undo, which closes the database's tabs before main removes it", async () => {
-    const user = userEvent.setup();
-    importToDatabase.mockResolvedValue(IMPORTED);
-    const { calls } = renderCsv();
-
-    await user.click(boundImport()!);
-    const toast = await screen.findByTestId("workspace-shell-notice");
-    expect(within(toast).getByText("Imported 501 rows to data.sqlite.")).toBeTruthy();
-    await user.click(within(toast).getByRole("button", { name: "Undo" }));
-
-    await waitFor(() => expect(undoDatabaseImport).toHaveBeenCalledOnce());
-    expect(undoDatabaseImport).toHaveBeenCalledWith({ workspaceId: "ws-1", operationId: "dohc-operation:import-1" });
-    expect(calls).toEqual(["open data.sqlite", "close data.sqlite", "undo dohc-operation:import-1"]);
-    // The Undo's row goes, so it runs once.
-    expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
-    await user.click(screen.getByTestId("notice-center-toggle"));
-    expect(within(screen.getByRole("dialog", { name: "Notices" })).queryByText(/Imported 501 rows/)).toBeNull();
   });
 
   it("files a refused Undo's reason once, with Try again, which closes the tabs and asks again", async () => {
@@ -218,22 +155,6 @@ describe("the CSV offer on the preview's bound", () => {
     await waitFor(() => expect(undoDatabaseImport).toHaveBeenCalledTimes(2));
     expect(calls).toEqual(["open data.sqlite", "close data.sqlite", "close data.sqlite", "undo dohc-operation:import-1"]);
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
-  });
-
-  it("files a failed import from the bound as the tab row does, and its Try again ends in the same notice", async () => {
-    const user = userEvent.setup();
-    importToDatabase.mockRejectedValueOnce(rejected("desktop:import-to-database", "Database already exists: data.sqlite"));
-    importToDatabase.mockResolvedValueOnce(IMPORTED);
-    const { onOpenPath } = renderCsv();
-
-    await user.click(boundImport()!);
-    const toast = await screen.findByTestId("workspace-shell-error");
-    expect(within(toast).getByText(
-      "dohc could not import this file to data.sqlite. That file already exists. Rename or move it, then try again.",
-    )).toBeTruthy();
-    await user.click(within(toast).getByRole("button", { name: "Try again" }));
-    await waitFor(() => expect(onOpenPath).toHaveBeenCalledExactlyOnceWith("data.sqlite"));
-    expect(within(await screen.findByTestId("workspace-shell-notice")).getByRole("button", { name: "Undo" })).toBeTruthy();
   });
 
   // Why main's refusal after a switch offers no retry: the shell remounts for

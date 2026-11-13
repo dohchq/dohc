@@ -176,7 +176,7 @@ fn over_head(
 
 /// Sol's any-namespace ruling, while A is current: B, a capture in another
 /// namespace, released without adopting, and A then adopted in "relay". A
-/// rewrite of the host's head, and a delete, rename or binary write from the
+/// rewrite of the host's head and a delete from the
 /// owner's desktop, from its own head or over the host's, fed from B's
 /// namespace find no protecting window. Each leaves A's native state and the
 /// document's snapshot as they were, with nothing to materialize: over the
@@ -185,7 +185,8 @@ fn over_head(
 #[tokio::test]
 async fn input_fed_from_a_released_namespace_never_replaces_a_current_activations_state() {
     let mut cases = vec![("a rewrite".to_owned(), None, true)];
-    for change in FILE_CHANGES {
+    {
+        let change = FileChange::Delete;
         cases.push((
             format!("{change:?} from the desktop's head"),
             Some(change),

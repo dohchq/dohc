@@ -202,6 +202,8 @@ function rewrite(tree: MdRoot, texts: readonly string[]): { hides: boolean } {
       case "code":
         if (node.lang || node.meta) hides = true;
         break;
+      default:
+        break;
     }
     for (const field of ["value", "alt", "title", "url", "label", "lang", "meta"] as const) {
       const value = (node as Partial<Record<typeof field, unknown>>)[field];

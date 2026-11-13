@@ -175,7 +175,6 @@ function buttonInspectionFailure(error: unknown): RelayButtonInspection {
 export const AUTOMATIONS_FILE_NAME = "automations.yaml";
 const DATASET_FILE_NAME = "dataset.json";
 const WATCHED_FILES = new Set([AUTOMATIONS_FILE_NAME, "collection.yaml", DATASET_FILE_NAME]);
-const KEPT_ANOTHER_WAY_UNDO = "This run ran before this Collection changed how it keeps its records, so dohc cannot undo it.";
 const MOVED_SINCE_PRESSED = "This Collection moved after the button was pressed. Press it again.";
 const DATASET_NOT_APPROVED = "This Collection's rules are not approved yet, so its automations cannot run.";
 // A dataset's records are kept on one computer, and its schedules and Group messages run only there.

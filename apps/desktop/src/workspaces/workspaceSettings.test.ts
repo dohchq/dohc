@@ -1,8 +1,6 @@
 import { chmod, link, lstat, mkdir, readdir, readFile, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { defaultWorkspaceMode } from "@dohc/workspace-core";
 import { describe, expect, it, vi } from "vitest";
-import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import {
   DEFAULT_WORKSPACE_SETTINGS,
   mergeWorkspaceSettings,
@@ -551,7 +549,6 @@ describe("workspace settings file store", () => {
 
   it("saves normally over a readable file, touching only the patched keys", async () => {
     const workspace = await openedWorkspace();
-    const root = workspace.rootPath;
     await writeWorkspaceSettingsFile(workspace, {
       ...DEFAULT_WORKSPACE_SETTINGS,
       files: { attachmentLocation: "global-folder", attachmentFolderName: "media" },
@@ -571,7 +568,6 @@ describe("workspace settings file store", () => {
 
   it("saves over a missing file — a new workspace is not born refused", async () => {
     const workspace = await openedWorkspace();
-    const root = workspace.rootPath;
     expect(
       await saveWorkspaceSettingsFile(workspace, { privacy: { confirmExternalLinks: false } }),
     ).toEqual({
@@ -588,7 +584,6 @@ describe("workspace settings file store", () => {
     // read the same old file and the later merge drops the earlier patch —
     // while the dialog reports it saved.
     const workspace = await openedWorkspace();
-    const root = workspace.rootPath;
     await writeWorkspaceSettingsFile(workspace, DEFAULT_WORKSPACE_SETTINGS);
 
     const [first, second] = await Promise.all([
@@ -608,7 +603,6 @@ describe("workspace settings file store", () => {
     // writes its merge back after the reset returns, so the dialog says the
     // reset landed while the file sits somewhere the user never asked for.
     const workspace = await openedWorkspace();
-    const root = workspace.rootPath;
     await writeWorkspaceSettingsFile(workspace, {
       ...DEFAULT_WORKSPACE_SETTINGS,
       files: { attachmentLocation: "global-folder", attachmentFolderName: "media" },

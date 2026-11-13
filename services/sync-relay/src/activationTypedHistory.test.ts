@@ -10,6 +10,7 @@ import type { StorageContext } from "./storage/context.js";
 import { CHECKPOINT_MOMENTS, readOrdinaryCheckpoint, type OrdinaryCheckpointScope } from "./storage/ordinaryActivationCheckpoint.js";
 import { foldOrdinaryCheckpointPages, ORDINARY_FOLD_PAGE_ROWS, ORDINARY_FOLD_RUN_PAGES, type OrdinaryFoldValidator } from "./storage/ordinaryActivationFold.js";
 import { ServiceActivationStaleCut } from "./storage/ordinaryActivationSource.js";
+import { createLiveMarkdownRegistrationValidator } from "../../../packages/ydoc-projection/src/liveDocumentValidation.js";
 import { ACTIVATION, typedNote, typedRelayNote as seedTypedRelayNote, type TypedRelayNote } from "./testing/typedNotes.js";
 
 const cleanup: (() => Promise<void>)[] = [];
@@ -277,6 +278,75 @@ it("a note whose typing passes through a state no live document has, at the end 
   expect((await activate(fromBase.note, unfolded, fromBase.capture)).outcome).toEqual(activated(fromBase.note));
   const folding = await strayKey(at);
   expect((await activate(folding.note, validate, folding.capture)).outcome).toEqual(activated(folding.note));
+});
+
+/**
+ * A typed note in which, at each crossing, two devices format the same five letters at once, one as bold and one as
+ * code, which no live document holds together. The bold is row `bold`, the code the row after it, and the typing device
+ * types on with both for `crossed - 1` rows. It then removes its bold, types on to the next crossing, and after the last
+ * types past today's entry limit. Returns the note, the owner's capture of the result, and, for the first crossing, the
+ * states after each device's own format and after both.
+ */
+async function crossedMarks(...crossings: {bold: number; crossed: number}[]) {
+  const note = await typedRelayNote(crossings[0]!.bold - 2);
+  const device = (clientID: number, state: Uint8Array) => {const doc = new Y.Doc({gc: false}); doc.clientID = clientID; Y.applyUpdate(doc, state); return doc;};
+  const typist = device(4, note.note.fullState), others: Y.Doc[] = [], states: Uint8Array[] = [];
+  const text = (doc: Y.Doc) => (doc.getXmlFragment("body").get(0) as Y.XmlElement).get(0) as Y.XmlText, typing = text(typist);
+  const edit = (doc: Y.Doc, change: () => void) => {const before = Y.encodeStateVector(doc); change(); return Y.encodeStateAsUpdate(doc, before);};
+  let origin = crossings[0]!.bold;
+  const append = (update: Uint8Array) => {note.appendUpdate(update); origin++;};
+  const type = (rows: number, letters = "ab ") => {for (let typed = 0; typed < rows; typed++) append(edit(typist, () => typing.insert(typing.length, letters[typed % letters.length]!)));};
+  note.raw.exec("BEGIN");
+  try {
+    for (const [index, {bold, crossed}] of crossings.entries()) {
+      type(bold - origin);
+      const other = device(3 + 2 * index, Y.encodeStateAsUpdate(typist)), from = 6 * index;
+      others.push(other);
+      const bolded = edit(other, () => text(other).format(from, 5, {bold: {}}));
+      const code = edit(typist, () => typing.format(from, 5, {code: {}}));
+      if (index === 0) states.push(Y.encodeStateAsUpdate(other), Y.encodeStateAsUpdate(typist));
+      Y.applyUpdate(typist, bolded);
+      if (index === 0) states.push(Y.encodeStateAsUpdate(typist));
+      for (const update of [bolded, code]) append(update);
+      type(crossed - 1, "x");
+      append(edit(typist, () => typing.format(from, 5, {bold: null})));
+    }
+    type(ACTIVATION.maxActivationHistoryEntries);
+    note.raw.exec("COMMIT");
+  } catch (error) {note.raw.exec("ROLLBACK"); throw error;}
+  const capture = note.captureAt(Y.encodeStateAsUpdate(typist));
+  for (const doc of [typist, ...others]) doc.destroy();
+  const [boldOnly, codeOnly, both] = states as [Uint8Array, Uint8Array, Uint8Array];
+  return {note, capture, boldOnly, codeOnly, both};
+}
+/** The origin row at which a typed note's first fold page ends. */
+async function firstPageEnd(validate: Validate) {
+  const probe = await typedRelayNote(2_000);
+  expect(await foldOnePage(probe, validate)).toMatchObject({kind: "folded", reachedCursor: false});
+  const end = readOrdinaryCheckpoint(storageOf(probe), lineageOf(probe, validate))!.throughRelaySeq;
+  return Number(probe.raw.prepare("SELECT origin_seq FROM sync_relay_log WHERE relay_seq=?").get(end)!.origin_seq);
+}
+const relayRow = (note: TypedRelayNote, origin: number) => Number(note.raw.prepare("SELECT relay_seq FROM sync_relay_log WHERE origin_seq=?").get(origin)!.relay_seq);
+
+// Two devices that format the same words at once leave a state no live document has, until one of them edits it again.
+// A fold page that ends there cannot keep a note past today's entry limit from activating. The page ends instead at the
+// bold, whether it lies near the page's end or before its middle.
+it.each([1, 4, 600])("a note past today's entry limit whose devices formatted the same words at once, %i rows before a fold page ends, activates", {timeout: 300_000}, async crossed => {
+  const validate = validation(), at = await firstPageEnd(validate);
+  const {note, capture, boldOnly, codeOnly, both} = await crossedMarks({bold: at - crossed, crossed});
+  const project = createLiveMarkdownRegistrationValidator(ACTIVATION.validation);
+  const projects = (state: Uint8Array) => project({document: note.document, currentPath: note.path, checkpoint: state}).kind;
+  expect([projects(boldOnly), projects(codeOnly), projects(both)]).toEqual(["accepted", "accepted", "refused"]);
+  expect(await foldOnePage(note, validate)).toEqual({kind: "folded", throughRelaySeq: relayRow(note, at - crossed), reachedCursor: false});
+  expect((await activate(note, validate, capture)).outcome).toEqual(activated(note));
+});
+
+// An earlier crossing in the same page does not hide the rows between it and the later one.
+it("a note past today's entry limit whose devices formatted the same words at once twice in one fold page ends that page at the later bold, and activates", {timeout: 300_000}, async () => {
+  const validate = validation(), at = await firstPageEnd(validate);
+  const {note, capture} = await crossedMarks({bold: at - 900, crossed: 500}, {bold: at - 1, crossed: 1});
+  expect(await foldOnePage(note, validate)).toEqual({kind: "folded", throughRelaySeq: relayRow(note, at - 1), reachedCursor: false});
+  expect((await activate(note, validate, capture)).outcome).toEqual(activated(note));
 });
 
 // The relay saves a fold's checkpoint before the activation registers. A relay that stops between the two, and starts

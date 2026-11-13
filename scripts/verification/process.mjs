@@ -87,6 +87,7 @@ export function run(command, args, { cwd = repoRoot, env = process.env, log, onS
       if (cancellation) return cancellation;
       clearTimeout(escalation);
       cancellation = (async () => {
+        // oxlint-disable-next-line typescript/no-unsafe-unary-minus -- pid is set: stopGroup runs only after interrupt saw it
         try { process.kill(-child.pid, "SIGKILL"); }
         catch (error) { if (error.code === "ESRCH") return; throw error; }
         await waitForGroupExit(child.pid);

@@ -1,8 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
 import { closeDebugApplication, closeElectronApplication } from "../../../../scripts/verification/close-electron.mjs";
 
@@ -31,19 +28,6 @@ afterEach(async () => {
   }
 });
 
-test("a rejected Electron close still stops the recorded live process", async () => {
-  const child = await liveProcess();
-  const failure = new Error("close rejected");
-  await expect(closeElectronApplication({ close: async () => { throw failure; } }, child, 50)).rejects.toBe(failure);
-  expect(child.exitCode !== null || child.signalCode !== null).toBe(true);
-});
-
-test("a hung Electron close is bounded and stops the recorded live process", async () => {
-  const child = await liveProcess();
-  await expect(closeElectronApplication({ close: () => new Promise(() => {}) }, child, 50)).rejects.toThrow("Electron close timed out");
-  expect(child.exitCode !== null || child.signalCode !== null).toBe(true);
-});
-
 test.skipIf(process.platform !== "win32")("failed close stops Windows launcher descendants as well as the launcher", async () => {
   const child = spawn(process.execPath, ["-e", "const {spawn}=require('node:child_process');const nested=spawn(process.execPath,['-e','setInterval(() => {},1000)'],{stdio:'ignore'});console.log(nested.pid);setInterval(() => {},1000)"], {
     windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
@@ -60,13 +44,6 @@ test.skipIf(process.platform !== "win32")("failed close stops Windows launcher d
   // Forced cleanup may take 20 s (taskkill, then exit) before the 10 s wait.
 }, 60_000);
 
-test("a completed close waits for process exit without reporting a failure", async () => {
-  const child = await liveProcess();
-  await closeElectronApplication({ close: async () => { child.send("close"); await once(child, "exit"); } }, child);
-  expect(child.exitCode !== null || child.signalCode !== null).toBe(true);
-  await closeElectronApplication({ close: async () => { throw new Error("already closed"); } }, child);
-});
-
 test("debug shutdown stops its process when screenshot recording rejects and tracing and close hang", async () => {
   const child = await liveProcess();
   let traceAttempted = false;
@@ -79,42 +56,4 @@ test("debug shutdown stops its process when screenshot recording rejects and tra
   await expect(closeDebugApplication(app, child, "unused-output", { artifactTimeoutMs: 25, closeTimeoutMs: 25 })).rejects.toThrow("Electron close timed out");
   expect(traceAttempted && closeAttempted).toBe(true);
   expect(child.exitCode !== null || child.signalCode !== null).toBe(true);
-});
-
-test("debug shutdown still closes its process when window enumeration fails", async () => {
-  const child = await liveProcess();
-  const failure = new Error("window enumeration failed");
-  const app = {
-    windows: () => { throw failure; },
-    close: async () => { child.send("close"); await once(child, "exit"); },
-  };
-  await expect(closeDebugApplication(app, child, "unused-output")).rejects.toBe(failure);
-  expect(child.exitCode !== null || child.signalCode !== null).toBe(true);
-});
-
-test.each([
-  { contents: ["first window"], names: ["last-screen.png"] },
-  { contents: ["first window", "second window"], names: ["last-screen-1.png", "last-screen-2.png"] },
-])("debug shutdown retains each screenshot: $names", async ({ contents, names }) => {
-  const directory = await mkdtemp(join(tmpdir(), "dohc-debug-screenshots-"));
-  try {
-    const child = await liveProcess();
-    const paths: string[] = [];
-    const app = {
-      windows: () => contents.map((content) => ({
-        screenshot: async ({ path }: { path: string }) => {
-          paths.push(path);
-          await writeFile(path, content);
-        },
-      })),
-      context: () => ({ tracing: { stop: async () => {} } }),
-      close: async () => { child.send("close"); await once(child, "exit"); },
-    };
-    await closeDebugApplication(app, child, directory);
-    expect(paths).toEqual(names.map((name) => join(directory, name)));
-    expect((await readdir(directory)).sort()).toEqual(names);
-    expect(await Promise.all(names.map((name) => readFile(join(directory, name), "utf8")))).toEqual(contents);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
 });

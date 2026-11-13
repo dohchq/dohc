@@ -19,6 +19,7 @@ import { conversationItems, serverMessage } from "./serverMessages";
 
 
 export function ServerConversation() {
+  // oxlint-disable-next-line typescript/no-useless-default-assignment -- a route can omit id at runtime despite the declared type
   const { id = "", name } = useLocalSearchParams<{ id: string; name?: string }>();
   return id.startsWith("thread-") ? <Thread threadId={id} /> : <Stream groupId={id} name={name ?? ""} />;
 }

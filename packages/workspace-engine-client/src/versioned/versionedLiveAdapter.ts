@@ -163,7 +163,6 @@ function hydratedConflictByteCost(conflict: ConflictRecord): number {
   }
   return total;
 }
-const INBAND_CONTENT_CAP_BYTES = 48 * 1024;
 // JSON byte arrays are collections, so the negotiated collection bound is
 // stricter than the content-size bound used by base64/blob transports.
 const INBAND_BINARY_COLLECTION_CAP_BYTES = 16_384;

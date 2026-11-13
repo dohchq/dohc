@@ -872,7 +872,6 @@ describe("WorkspaceFileMutationOwner", () => {
       join(test.rootPath, "alias"),
       process.platform === "win32" ? "junction" : "dir",
     );
-    const finishRename = vi.fn(async () => undefined);
     const changePathsAs = observePathChanges(test);
     test.setCapture({
       changePathsAs,
@@ -904,7 +903,6 @@ describe("WorkspaceFileMutationOwner", () => {
       join(test.rootPath, "alias"),
       process.platform === "win32" ? "junction" : "dir",
     );
-    const finishRename = vi.fn(async () => undefined);
     const changePathsAs = observePathChanges(test);
     test.setCapture({
       changePathsAs,

@@ -7,16 +7,17 @@ import { isDeepStrictEqual } from "node:util";
 import type { EngineClient, NativeAppliedPosition } from "@dohc/workspace-engine-client/daemon";
 import { limitLiveDeclaredAgents, liveAuthorCheckpointAnticipated } from "./storage/liveAuthorWindow";
 import { parseRedeemedLiveTicket, type RedeemedLiveTicket } from "@dohc/live-session-contract/live-ticket";
-import { parseLiveUpdateDigest, parseLiveUpdateIdentifier, parseServerDerivedLiveUpdateAuthority, type ServerDerivedLiveUpdateAuthority, type LiveDocumentKey, type LiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
+import { LIVE_UPDATE_REFUSAL_VALUES, LIVE_UPDATE_RETRY_VALUES, parseLiveUpdateDigest, parseLiveUpdateIdentifier, parseServerDerivedLiveUpdateAuthority, type ServerDerivedLiveUpdateAuthority, type LiveDocumentKey, type LiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
 import type { LiveFrameLease } from "@dohc/live-session-contract/live-frame";
 import { parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import type { CurrentLiveBindingRequest, LiveHostConnectionCoordinate, SyncRelayStorage } from "./storage.js";
 import { snapshotCurrentBindingRequest } from "./storage/liveDocumentAuthority.js";
 import type { CapacityLiveAdmissionValidator } from "./ownerOutboxDelivery.js";
-import type { NamedFrameAppliedUpdate, NamedFrameHostSession, NamedFrameSync } from "./namedLiveFrameSession.js";
+import type { NamedFrameAppliedUpdate, NamedFrameHostSession, NamedFrameSubmissionResult, NamedFrameSync } from "./namedLiveFrameSession.js";
 import type { NamedFrameChanges } from "./liveHostChanges.js";
 import { claimsPersonalAgent, deriveLiveAuthorSnapshot, personalLiveAuthorSnapshot, type TrustedLiveAccount } from "./storage/liveAuthorSnapshot.js";
 import { RelayError } from "./errors.js";
+import { createLogLineCap } from "./logLineCap.js";
 export { createNamedFrameChanges, type NamedFrameChanges } from "./liveHostChanges.js";
 
 export interface NamedFrameNativeHost {
@@ -47,6 +48,39 @@ export interface NamedFrameValidationBudget {
   reserveBytes(size: number): () => void;
 }
 class ValidationExceedsBudget extends Error {}
+
+/** When one submission reached each step, from `performance.now()`. */
+interface SubmitTiming {
+  readonly startedAt: number;
+  /** The last journal commit's start and end. */
+  commitAt?: number;
+  committedAt?: number;
+  /** The journal admitted it, so the rest is its application and ACK read. */
+  admitted?: boolean;
+}
+const SLOW_SUBMIT_MS = 500;
+const RESULT_WORDS: readonly string[] = ["success", ...LIVE_UPDATE_REFUSAL_VALUES, ...LIVE_UPDATE_RETRY_VALUES];
+const submitLines = createLogLineCap();
+/**
+ * Logs a submission that did not succeed, or took over half a second, with
+ * its document id cut to eight characters, who submitted it as the server
+ * knows them, timings and a fixed result word. Each document
+ * and result logs at most once a minute; the next line counts what it held back.
+ */
+function reportLiveSubmit(objectId: string, submitter: CurrentLiveBindingRequest["actor"]["kind"], timing: SubmitTiming, answer: NamedFrameSubmissionResult, nowMs: number) {
+  const word = answer.result === "success" ? answer.result : answer.reason;
+  const result = RESULT_WORDS.includes(word) ? word : "unrecognized";
+  if (result === "success" && nowMs - timing.startedAt <= SLOW_SUBMIT_MS) return;
+  // Keyed by the whole id, so two documents that share a logged prefix keep their own minute.
+  const repeated = submitLines(`${objectId} ${result}`, nowMs);
+  if (repeated === undefined) return;
+  const ms = (from: number | undefined, to: number | undefined) => from === undefined || to === undefined ? null : Math.round(to - from);
+  try {
+    console.error("Live submit answered.", {submitter, object: objectId.slice(0, 8),
+      checkMs: ms(timing.startedAt, timing.commitAt ?? nowMs), commitMs: ms(timing.commitAt, timing.committedAt),
+      drainMs: timing.admitted ? ms(timing.committedAt, nowMs) : null, result, ...(repeated ? {repeated} : {})});
+  } catch { /* Reporting must not change the answer. */ }
+}
 
 /**
  * A personal agent's access read again from Postgres. It rejects with
@@ -210,6 +244,127 @@ function captureLiveFrameHost(options: {
     if (signal.aborted) resolve();
     return { promise, dispose() { remove(); signal.removeEventListener("abort", resolve); } };
   }
+  async function admitSubmission(input: Parameters<NamedFrameHostSession["submit"]>[0], caller: AbortSignal, timing: SubmitTiming): Promise<NamedFrameSubmissionResult> {
+    check(caller);
+    if (submitting) throw new Error("A named submission already owns admission.");
+    let releaseBytes: (() => void) | undefined, releaseValidation: (() => void) | undefined;
+    const releaseValidationBytes = () => { releaseBytes?.(); releaseBytes = undefined; };
+    submitting = true;
+    const signal = signalFor(caller);
+    try {
+      const deliveryId = parseLiveUpdateIdentifier(input.deliveryId), updateDigest = parseLiveUpdateDigest(input.updateDigest);
+      const updateBytes = input.updateBytes;
+      const trustedAutomation = input.trustedAutomation === undefined ? undefined : parseAutomationDeclaration(input.trustedAutomation);
+      const trustedAutomationPress = input.trustedAutomationPress === undefined ? undefined : {
+        hostPressId: parseLiveUpdateIdentifier(input.trustedAutomationPress.hostPressId),
+        automationId: parseLiveUpdateIdentifier(input.trustedAutomationPress.automationId),
+      };
+      if (trustedAutomation && actor.kind !== "owner") return {result: "refused", reason: "authority-refused"};
+      if (trustedAutomationPress && (!trustedAutomation || actor.kind !== "owner")) return {result: "refused", reason: "authority-refused"};
+      const trustedAutomationGrant = input.trustedAutomationGrant;
+      if (trustedAutomationGrant && (!trustedAutomation || actor.kind !== "owner" || trustedAutomationPress)) return {result: "refused", reason: "authority-refused"};
+      // A personal agent's authorship comes from its authority, so any context it sends is ignored.
+      const authorContext = input.authorContext === undefined || freshRead ? undefined : parseLiveAuthorContext(input.authorContext);
+      // Only the relay attributes work to a personal agent.
+      if (!trustedAutomation && claimsPersonalAgent(authorContext)) return { result: "refused", reason: "provenance-refused" };
+      if (updateBytes.length < 1) return { result: "refused", reason: "invalid-update" };
+      if (updateBytes.length > bounds.maxSubmissionBytes) return { result: "refused", reason: "capacity-refused" };
+      if (createHash("sha256").update(updateBytes).digest("hex") !== updateDigest) return { result: "refused", reason: "invalid-update" };
+      if (options.validationBudget) {
+        releaseValidation = options.validationBudget.reserve() ?? undefined;
+        if (!releaseValidation) return {result: "retry", reason: "admission-unavailable"};
+      }
+      const deadline = new AbortController();
+      const timer = setTimeout(() => deadline.abort(new Error("Named admission deadline exceeded.")), Math.min(native.deadlineMs, 2_147_483_647));
+      const admissionSignal = AbortSignal.any([signal, deadline.signal]);
+      let receipt: LiveUpdateReceipt;
+      try {
+        let retryDelayMs = 10;
+        let waitForCapacity = validate.waitForCapacity?.bind(validate);
+        for (;;) {
+          releaseValidationBytes();
+          await waitForCapacity?.(admissionSignal);
+          check(admissionSignal);
+          if (validate.hasCapacity?.() === false) continue;
+          const read = storage.readLiveUpdateJournalCut({ document }, options.validationBudget ? size => {
+            const charge = size + 3 * updateBytes.length;
+            if (charge > options.validationBudget!.maxBytes) throw new ValidationExceedsBudget();
+            releaseBytes = options.validationBudget!.reserveBytes(charge);
+          } : undefined);
+          if (read.kind !== "cut") return { result: "refused", reason: read.reason };
+          const cut = read.cut;
+          if (cut.checkpoint.bytes.length + cut.suffix.reduce((sum, row) => sum + row.bytes.length, updateBytes.length) > bounds.maxAdmissionBytes) {
+            return { result: "refused", reason: "capacity-refused" };
+          }
+          const validation = await validate({ document, currentPath: binding.currentPath, checkpoint: cut.checkpoint.bytes,
+            suffix: cut.suffix.map(row => row.bytes), candidate: updateBytes,
+            retainStateUpdate: (actor.kind === "owner" && liveAuthorCheckpointAnticipated(cut.suffix.map(row => row.metadata), [])) || liveAuthorCheckpointAnticipated(cut.suffix.map(row => row.metadata),
+              limitLiveDeclaredAgents(cut.suffix.map(row => row.metadata), authority,
+                trustedAutomation ? [{kind: "automation", ...trustedAutomation}]
+                  : authority.principalKind === "personal" ? personalLiveAuthorSnapshot(storage as StorageContext, authority)
+                  : deriveLiveAuthorSnapshot(storage as StorageContext, authority, authorContext, trustedAccount))) }, admissionSignal);
+          check(admissionSignal);
+          if (validation.kind === "retry") {
+            waitForCapacity = validation.waitForCapacity.bind(validation);
+            continue;
+          }
+          // Read again from Postgres just before the journal transaction. While
+          // it can't answer, nothing is admitted and the agent may try again.
+          if (freshRead) {
+            try { await untilAborted(freshRead(), admissionSignal); }
+            catch (error) {
+              admissionSignal.throwIfAborted();
+              if (error instanceof RelayError && error.code === "personal_agent_unavailable") {
+                check(admissionSignal);
+                return { result: "retry", reason: "admission-unavailable" };
+              }
+              close();
+              return { result: "refused", reason: "authority-refused" };
+            }
+            check(admissionSignal);
+          }
+          timing.commitAt = performance.now();
+          const committed = storage.commitLiveUpdateJournal({ host: native.coordinate, actor, expectedAuthority: authority,
+            ...(trustedAccount ? {trustedAccount} : {}),
+            ...(trustedAutomation ? {trustedAutomation} : {}),
+            ...(trustedAutomationPress ? {trustedAutomationPress} : {}),
+            ...(trustedAutomationGrant ? {trustedAutomationGrant} : {}),
+            metadata: { deliveryId, updateDigest, binding, ...(authorContext ? {authorContext} : {}) }, cutToken: cut, validation, updateBytes, receivedAtMs: Date.now() });
+          timing.committedAt = performance.now();
+          if (committed.result.kind === "refused") return { result: "refused", reason: committed.result.reason };
+          if (committed.result.kind === "retry") {
+            releaseValidationBytes();
+            await delay(retryDelayMs, undefined, { signal: admissionSignal });
+            check(admissionSignal);
+            retryDelayMs = Math.min(100, retryDelayMs * 2);
+            continue;
+          }
+          receipt = committed.result.receipt;
+          break;
+        }
+      } catch (error) {
+        if (deadline.signal.aborted) {
+          check(signal);
+          return { result: "retry", reason: "admission-unavailable" };
+        }
+        throw error;
+      } finally { clearTimeout(timer); }
+      timing.admitted = true;
+      // An ambiguous drain can still have committed the application. Read the exact durable ACK.
+      try { await native.drain(document, signal); } catch { check(signal); }
+      check(signal);
+      const ack = await native.client.readLiveApplicationAck(request(), { deliveryId, updateDigest }, signal);
+      check(signal);
+      if (!ack) return { result: "retry", reason: "application-pending" };
+      if (ack.deliveryId !== deliveryId || ack.updateDigest !== updateDigest || ack.journalCursor !== receipt.journalCursor ||
+        ack.acceptingHostEpoch !== receipt.acceptingHostEpoch) throw new Error("Native application ACK identity changed.");
+      return { result: "success", ack };
+    } catch (error) {
+      if (error instanceof ValidationExceedsBudget) return {result: "refused", reason: "capacity-refused"};
+      if (error instanceof LiveConnectionLimitError) return {result: "retry", reason: "admission-unavailable"};
+      throw error;
+    } finally { submitting = false; releaseValidationBytes(); releaseValidation?.(); }
+  }
   return {
     hostEpoch, invalidated: lifetime.signal, assertCurrent: () => check(), close,
     async openSync(clientVector, caller): Promise<NamedFrameSync> {
@@ -266,122 +421,10 @@ function captureLiveFrameHost(options: {
       };
     },
     async submit(input, caller) {
-      check(caller);
-      if (submitting) throw new Error("A named submission already owns admission.");
-      let releaseBytes: (() => void) | undefined, releaseValidation: (() => void) | undefined;
-      const releaseValidationBytes = () => { releaseBytes?.(); releaseBytes = undefined; };
-      submitting = true;
-      const signal = signalFor(caller);
-      try {
-        const deliveryId = parseLiveUpdateIdentifier(input.deliveryId), updateDigest = parseLiveUpdateDigest(input.updateDigest);
-        const updateBytes = input.updateBytes;
-        const trustedAutomation = input.trustedAutomation === undefined ? undefined : parseAutomationDeclaration(input.trustedAutomation);
-        const trustedAutomationPress = input.trustedAutomationPress === undefined ? undefined : {
-          hostPressId: parseLiveUpdateIdentifier(input.trustedAutomationPress.hostPressId),
-          automationId: parseLiveUpdateIdentifier(input.trustedAutomationPress.automationId),
-        };
-        if (trustedAutomation && actor.kind !== "owner") return {result: "refused", reason: "authority-refused"};
-        if (trustedAutomationPress && (!trustedAutomation || actor.kind !== "owner")) return {result: "refused", reason: "authority-refused"};
-        const trustedAutomationGrant = input.trustedAutomationGrant;
-        if (trustedAutomationGrant && (!trustedAutomation || actor.kind !== "owner" || trustedAutomationPress)) return {result: "refused", reason: "authority-refused"};
-        // A personal agent's authorship comes from its authority, so any context it sends is ignored.
-        const authorContext = input.authorContext === undefined || freshRead ? undefined : parseLiveAuthorContext(input.authorContext);
-        // Only the relay attributes work to a personal agent.
-        if (!trustedAutomation && claimsPersonalAgent(authorContext)) return { result: "refused", reason: "provenance-refused" };
-        if (updateBytes.length < 1) return { result: "refused", reason: "invalid-update" };
-        if (updateBytes.length > bounds.maxSubmissionBytes) return { result: "refused", reason: "capacity-refused" };
-        if (createHash("sha256").update(updateBytes).digest("hex") !== updateDigest) return { result: "refused", reason: "invalid-update" };
-        if (options.validationBudget) {
-          releaseValidation = options.validationBudget.reserve() ?? undefined;
-          if (!releaseValidation) return {result: "retry", reason: "admission-unavailable"};
-        }
-        const deadline = new AbortController();
-        const timer = setTimeout(() => deadline.abort(new Error("Named admission deadline exceeded.")), Math.min(native.deadlineMs, 2_147_483_647));
-        const admissionSignal = AbortSignal.any([signal, deadline.signal]);
-        let receipt: LiveUpdateReceipt;
-        try {
-          let retryDelayMs = 10;
-          let waitForCapacity = validate.waitForCapacity?.bind(validate);
-          for (;;) {
-            releaseValidationBytes();
-            await waitForCapacity?.(admissionSignal);
-            check(admissionSignal);
-            if (validate.hasCapacity?.() === false) continue;
-            const read = storage.readLiveUpdateJournalCut({ document }, options.validationBudget ? size => {
-              const charge = size + 3 * updateBytes.length;
-              if (charge > options.validationBudget!.maxBytes) throw new ValidationExceedsBudget();
-              releaseBytes = options.validationBudget!.reserveBytes(charge);
-            } : undefined);
-            if (read.kind !== "cut") return { result: "refused", reason: read.reason };
-            const cut = read.cut;
-            if (cut.checkpoint.bytes.length + cut.suffix.reduce((sum, row) => sum + row.bytes.length, updateBytes.length) > bounds.maxAdmissionBytes) {
-              return { result: "refused", reason: "capacity-refused" };
-            }
-            const validation = await validate({ document, currentPath: binding.currentPath, checkpoint: cut.checkpoint.bytes,
-              suffix: cut.suffix.map(row => row.bytes), candidate: updateBytes,
-              retainStateUpdate: (actor.kind === "owner" && liveAuthorCheckpointAnticipated(cut.suffix.map(row => row.metadata), [])) || liveAuthorCheckpointAnticipated(cut.suffix.map(row => row.metadata),
-                limitLiveDeclaredAgents(cut.suffix.map(row => row.metadata), authority,
-                  trustedAutomation ? [{kind: "automation", ...trustedAutomation}]
-                    : authority.principalKind === "personal" ? personalLiveAuthorSnapshot(storage as StorageContext, authority)
-                    : deriveLiveAuthorSnapshot(storage as StorageContext, authority, authorContext, trustedAccount))) }, admissionSignal);
-            check(admissionSignal);
-            if (validation.kind === "retry") {
-              waitForCapacity = validation.waitForCapacity.bind(validation);
-              continue;
-            }
-            // Read again from Postgres just before the journal transaction. While
-            // it can't answer, nothing is admitted and the agent may try again.
-            if (freshRead) {
-              try { await untilAborted(freshRead(), admissionSignal); }
-              catch (error) {
-                admissionSignal.throwIfAborted();
-                if (error instanceof RelayError && error.code === "personal_agent_unavailable") {
-                  check(admissionSignal);
-                  return { result: "retry", reason: "admission-unavailable" };
-                }
-                close();
-                return { result: "refused", reason: "authority-refused" };
-              }
-              check(admissionSignal);
-            }
-            const committed = storage.commitLiveUpdateJournal({ host: native.coordinate, actor, expectedAuthority: authority,
-              ...(trustedAccount ? {trustedAccount} : {}),
-              ...(trustedAutomation ? {trustedAutomation} : {}),
-              ...(trustedAutomationPress ? {trustedAutomationPress} : {}),
-              ...(trustedAutomationGrant ? {trustedAutomationGrant} : {}),
-              metadata: { deliveryId, updateDigest, binding, ...(authorContext ? {authorContext} : {}) }, cutToken: cut, validation, updateBytes, receivedAtMs: Date.now() });
-            if (committed.result.kind === "refused") return { result: "refused", reason: committed.result.reason };
-            if (committed.result.kind === "retry") {
-              releaseValidationBytes();
-              await delay(retryDelayMs, undefined, { signal: admissionSignal });
-              check(admissionSignal);
-              retryDelayMs = Math.min(100, retryDelayMs * 2);
-              continue;
-            }
-            receipt = committed.result.receipt;
-            break;
-          }
-        } catch (error) {
-          if (deadline.signal.aborted) {
-            check(signal);
-            return { result: "retry", reason: "admission-unavailable" };
-          }
-          throw error;
-        } finally { clearTimeout(timer); }
-        // An ambiguous drain can still have committed the application. Read the exact durable ACK.
-        try { await native.drain(document, signal); } catch { check(signal); }
-        check(signal);
-        const ack = await native.client.readLiveApplicationAck(request(), { deliveryId, updateDigest }, signal);
-        check(signal);
-        if (!ack) return { result: "retry", reason: "application-pending" };
-        if (ack.deliveryId !== deliveryId || ack.updateDigest !== updateDigest || ack.journalCursor !== receipt.journalCursor ||
-          ack.acceptingHostEpoch !== receipt.acceptingHostEpoch) throw new Error("Native application ACK identity changed.");
-        return { result: "success", ack };
-      } catch (error) {
-        if (error instanceof ValidationExceedsBudget) return {result: "refused", reason: "capacity-refused"};
-        if (error instanceof LiveConnectionLimitError) return {result: "retry", reason: "admission-unavailable"};
-        throw error;
-      } finally { submitting = false; releaseValidationBytes(); releaseValidation?.(); }
+      const timing: SubmitTiming = {startedAt: performance.now()};
+      const answer = await admitSubmission(input, caller, timing);
+      reportLiveSubmit(document.objectId, actor.kind, timing, answer, performance.now());
+      return answer;
     },
   };
 }

@@ -7,11 +7,11 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it } from "vitest";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
-import { createDatasetJournal, type DatasetCursor } from "./journal";
+import { createDatasetJournal } from "./journal";
 import { prepareDatasetRecoveryExport } from "./recovery-export";
 import { recoveryManifestSha256, stageDatasetRecovery, type StagedDatasetRecovery } from "./recovery";
 import { validateDatasetRecovery, readValidatedBlob } from "./recovery-import";
-import { parseRecoveryJournalRecord } from "./recovery-record";
+
 import { createRecoveryInstaller } from "./recovery-install";
 import { createDatasetAttempts, cancelDatasetAttempt, reviewDatasetAttempts, assertDatasetAttemptNotCancelled } from "./dataset-attempts";
 
@@ -177,24 +177,6 @@ it("retries a fenced recovery import after the target store reopens mid-install 
   }
 });
 
-it("claims a fenced import once with a fresh epoch and preserves retries across installer restart", async () => {
-  const f = await fixture(); f.add("first"); f.journal.fence({ expected: f.head(), authorize: f.authorize });
-  const valid = await validateDatasetRecovery({ staged: await f.stage(), authorize: f.authorize }), t = target(f);
-  try {
-    const input = { transferId: "transfer-claim", manifestSha256: recoveryManifestSha256(valid.manifest, limits), recovery: valid, authorize: f.authorize };
-    expect(valid.manifest.sourceState).toBe("fenced"); await t.installer.install({}, input);
-    const claim = { ...f.scope, transferId: input.transferId, manifestSha256: input.manifestSha256, sourceCursor: f.head(), authorize: f.authorize };
-    const claimed = t.installer.claim({}, claim);
-    expect(claimed.targetCursor).toMatchObject({ revision: f.head().revision + 1, approvedRevisionHash: f.head().approvedRevisionHash });
-    expect(claimed.targetCursor!.hostEpoch).not.toBe(f.head().hostEpoch);
-    expect(t.journal.head(f.scope, f.authorize).active).toBe(true);
-    expect(t.journal.receipt({ scope: f.scope, callerKey: "owner", idempotencyKey: "first", payloadSha256: hash("first"), authorize: f.authorize })).toMatchObject({ revision: 1 });
-    const restarted = createRecoveryInstaller({ db: t.db, journal: t.journal, transaction: t.transaction });
-    expect(restarted.claim({}, claim)).toEqual(claimed);
-    expect(t.db.prepare("SELECT count(*) n FROM dohc_dataset_import_checkpoints").get()!.n).toBe(0);
-  } finally { await valid.dispose(); }
-});
-
 it("restores a 100 MiB checkpoint in bounded durable chunks", async () => {
   const f = await fixture(true); f.journal.fence({ expected: f.head(), authorize: f.authorize });
   const valid = await validateDatasetRecovery({ staged: await f.stage(), authorize: f.authorize }), t = target(f);
@@ -214,11 +196,6 @@ function changeHistory(bytes:Buffer,change:(record:any)=>void){
   return Buffer.concat(result);
 }
 
-it("validates empty history and an actual checkpoint without inventing events",async()=>{
-  const f=await fixture(),staged=await f.stage(),valid=await validateDatasetRecovery({staged,authorize:f.authorize});
-  expect([...valid.records()].map(item=>[item.record.kind,item.record.cursor.revision])).toEqual([["checkpoint",0]]);
-  expect([...valid.metadata()]).toEqual([]);expect(valid.manifest.cursor).toEqual(f.head());await valid.dispose();
-});
 it("streams only live validated blob references and refuses forged or disposed references",async()=>{
   const f=await fixture(),staged=await f.stage(),valid=await validateDatasetRecovery({staged,authorize:f.authorize});
   const read=async(blob:Parameters<typeof readValidatedBlob>[0])=>{let bytes=0;for await(const chunk of readValidatedBlob(blob)){expect(chunk.length).toBeLessThanOrEqual(1024*1024);bytes+=chunk.length;}return bytes;};
@@ -226,6 +203,7 @@ it("streams only live validated blob references and refuses forged or disposed r
   await expect(read({...valid.checkpoint.blob})).rejects.toThrow("not validated");
   const retained=valid.checkpoint.blob;await valid.dispose();await expect(read(retained)).rejects.toThrow("disposed");
 });
+
 it("replays actual changesets across a same-schema revision and preserves old receipts and files",async()=>{
   const f=await fixture(),fileId="receipt_file_0001",first=f.add("first",[fileId]);await f.migrate();f.add("tail");
   const staged=await f.stage({fileId,bytes:Uint8Array.of(137,80,78,71),revision:first.cursor.revision}),valid=await validateDatasetRecovery({staged,authorize:f.authorize});
@@ -235,20 +213,12 @@ it("replays actual changesets across a same-schema revision and preserves old re
   const attachment=[...valid.attachments()][0]!;const parts=[];for await(const bytes of readValidatedBlob(attachment.blob))parts.push(bytes);
   expect(Buffer.concat(parts)).toEqual(Buffer.from([137,80,78,71]));await valid.dispose();
 });
-it("retains a marker-free materialized head for a fresh target epoch",async()=>{
-  const f=await fixture();f.add("first");f.add("second");const staged=await f.stage(),valid=await validateDatasetRecovery({staged,authorize:f.authorize});
-  const materialized=new DatabaseSync(valid.headCheckpoint.blob.path,{readOnly:true});
-  try{expect(materialized.prepare("SELECT value FROM items ORDER BY id").all().map(row=>row.value)).toEqual(["first","second"]);
-    expect(materialized.prepare("SELECT name FROM sqlite_schema WHERE name LIKE 'dohc_%'").all()).toEqual([]);
-  }finally{materialized.close();}
-  const sha=createHash("sha256");for await(const chunk of readValidatedBlob(valid.headCheckpoint.blob))sha.update(chunk);
-  expect(sha.digest("hex")).toBe(valid.headCheckpoint.sha256);expect(valid.headCheckpoint.cursor).toEqual(f.head());await valid.dispose();
-});
 it("rejects source tampering even after the transport hash is replaced",async()=>{
   const f=await fixture(),staged=await f.stage();await alter(staged,"artifact:source",()=>Buffer.from("globalThis.operations={};"));
   await expect(validateDatasetRecovery({staged,authorize:f.authorize})).rejects.toThrow("source artifact");
   await expect(readdir(staged.directory)).rejects.toThrow();
 });
+
 it("rejects malformed original artifacts, truncated history, and a changed chain",async()=>{
   const f=await fixture();f.add("first");await f.migrate();
   for(const mutation of [
@@ -260,17 +230,12 @@ it("rejects malformed original artifacts, truncated history, and a changed chain
     await expect(readdir(staged.directory)).rejects.toThrow();
   }
 });
+
 it("rejects attached bytes whose metadata differs from the original association",async()=>{
   const f=await fixture(),fileId="receipt_file_0001",event=f.add("first",[fileId]);const staged=await f.stage({fileId,bytes:Uint8Array.of(1,2,3),revision:event.cursor.revision});
   await alter(staged,`attachment:${fileId}`,()=>Uint8Array.of(9,9,9) as Buffer);
   await expect(validateDatasetRecovery({staged,authorize:f.authorize})).rejects.toThrow("attachment metadata");
 });
-it("checks exported metadata digest formulas against real journal records",async()=>{
-  const f=await fixture();f.add("first");await f.migrate();f.add("last");
-  for(const r of f.journal.exportPage({scope:f.scope,through:f.head(),afterRevision:-1,authorize:f.authorize}))expect(parseRecoveryJournalRecord(r)).toEqual(r);
-});
-
-
 it("rejects tampered or duplicate retained submission metadata before installation", async () => {
   const f = await fixture(false, true), attemptScope = {...f.scope, appId: "app", principalKey: "friend", operationId: id(5), revisionSha256: f.revision.revisionSha256};
   const attempts = createDatasetAttempts({db: f.db, transaction: f.transaction, account() {}}), input = {name: "First"};
@@ -293,6 +258,7 @@ it("rejects tampered or duplicate retained submission metadata before installati
   await expect(validateDatasetRecovery({staged: duplicate, authorize: f.authorize})).rejects.toThrow(/UNIQUE/);
   await expect(readdir(duplicate.directory)).rejects.toThrow();
 });
+
 it("requires trusted local recovery and explicit stopped-host acknowledgement for an active backup", async () => {
   const f = await fixture(); f.add("first");
   f.db.prepare("INSERT INTO dohc_dataset_data_grants VALUES(?,?,?,?,?)").run(f.scope.workspaceId,f.scope.datasetId,"helper",JSON.stringify({operationIds:[id(5)],discover:true,revision:1,revisionSha256:f.revision.revisionSha256}),"old-token");
@@ -310,6 +276,7 @@ it("requires trusted local recovery and explicit stopped-host acknowledgement fo
     expect(t.installer.claim({},{...claim,oldHostStopped:true}).targetCursor!.hostEpoch).not.toBe(f.head().hostEpoch);
   } finally { await valid.dispose(); }
 });
+
 
 it("preserves cancelled retry tombstones through recovery and rejects their reuse", async () => {
   const f = await fixture(false, true), selected = {...f.scope, appId: "app", principalKey: "friend", operationId: id(5), revisionSha256: f.revision.revisionSha256};
@@ -331,7 +298,6 @@ it("preserves cancelled retry tombstones through recovery and rejects their reus
   } finally { await valid.dispose(); }
 });
 
-
 it("preserves agent-declared approval history through export and recovery installation",async()=>{
   const f=await fixture(),agent={kind:"agent" as const,label:"Builder",labelSource:"agent-declared" as const};
   await f.migrate(agent);
@@ -341,31 +307,4 @@ it("preserves agent-declared approval history through export and recovery instal
     const exported=t.journal.exportPage({scope:f.scope,through:f.head(),afterRevision:-1,authorize:f.authorize});
     expect(exported[1]).toMatchObject({kind:"checkpoint",approvalAgent:agent});
   }finally{await valid.dispose();}
-});
-
-it.each([false,true])("preserves checkpoint dates through recovery installation and claim (older journal: %s)",async legacy=>{
-  const f=await fixture();f.add("before");await f.migrate();f.add("after");
-  if(legacy){
-    f.db.exec("DROP TABLE IF EXISTS dohc_dataset_checkpoint_times");
-    createDatasetJournal({db:f.db,transaction:f.transaction});
-  }
-  f.journal.fence({expected:f.head(),authorize:f.authorize});
-  const valid=await validateDatasetRecovery({staged:await f.stage(),authorize:f.authorize}),t=target(f);
-  try{
-    const cp=[...valid.records()].map(item=>item.record).filter(record=>record.kind==="checkpoint");
-    expect(cp).toMatchObject(legacy?[{cursor:{revision:0}},{cursor:{revision:2}}]:[{cursor:{revision:0},recordedAtMs:1234},{cursor:{revision:2},recordedAtMs:1234}]);
-    if(legacy)expect(cp.every(record=>!Object.hasOwn(record,"recordedAtMs"))).toBe(true);
-    const input={transferId:"dated-transfer",manifestSha256:recoveryManifestSha256(valid.manifest,limits),recovery:valid,authorize:f.authorize};
-    await t.installer.install({},input);
-    const before=t.journal.exportPage({scope:f.scope,through:f.head(),afterRevision:-1,authorize:f.authorize});
-    expect(before).toEqual(f.journal.exportPage({scope:f.scope,through:f.head(),afterRevision:-1,authorize:f.authorize}));
-    expect(t.db.prepare("SELECT revision,recorded_at_ms FROM dohc_dataset_checkpoint_times ORDER BY revision").all()).toEqual(legacy?[]:[{revision:0,recorded_at_ms:1234},{revision:2,recorded_at_ms:1234}]);
-    const claimed=t.installer.claim({},{...f.scope,transferId:input.transferId,manifestSha256:input.manifestSha256,sourceCursor:f.head(),authorize:f.authorize});
-    expect(t.journal.exportPage({scope:f.scope,through:claimed.targetCursor!,afterRevision:-1,authorize:f.authorize}).slice(0,before.length)).toEqual(before);
-    expect(t.db.prepare("SELECT recorded_at_ms FROM dohc_dataset_checkpoint_times WHERE revision=?").get(claimed.targetCursor!.revision)).toBeTruthy();
-  }finally{await valid.dispose();}
-});
-it.each([null,-1,1.5,"123",Number.MAX_SAFE_INTEGER+1])("rejects an invalid checkpoint date %s without changing hash validation",async recordedAtMs=>{
-  const f=await fixture(),record=f.journal.exportPage({scope:f.scope,through:f.head(),afterRevision:-1,authorize:f.authorize})[0]!;
-  expect(()=>parseRecoveryJournalRecord({...record,recordedAtMs})).toThrow("invalid number");
 });

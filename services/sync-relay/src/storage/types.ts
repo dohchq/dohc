@@ -1,4 +1,5 @@
 import type {ShareLabels} from "@dohc/security-contract/share-labels";
+import type {ShareLabelReader} from "../shareFilter";
 import type { LiveAuthorSnapshot } from "@dohc/live-session-contract/live-authorship";
 import type { ServiceActivationAccess } from "./serviceActivationAccess";
 import type { ServiceActivationStore } from "./serviceActivation";
@@ -1244,7 +1245,7 @@ export interface SyncRelayStorage {
   // same normalized address a claim uses.
   hasPendingInvite(email: string): boolean;
   shareHasActiveGrants(shareId: string): boolean;
-  getShareLabels(shareId: string): ShareLabels;
+  getShareLabels(shareId: string, reader?: ShareLabelReader): ShareLabels;
   setShareLabels(shareId: string, labels: ShareLabels, updatedAtMs: number): void;
   getShare(shareId: string): SyncRelayShareRow | null;
   listActiveShareGrantsForRecipient(

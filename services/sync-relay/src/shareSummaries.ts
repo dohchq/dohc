@@ -2,7 +2,7 @@ import {
   isChatShareAccessValue,
   isShareAccessValue,
 } from "@dohc/security-contract";
-import { chatSideOf, groupChannelIsOrdinary, isGroupSelector, effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSelectorJson, type StoredAnyShareSelector } from "./shareFilter";
+import { chatSideOf, groupChannelIsOrdinary, isGroupSelector, effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSelectorJson, type ShareLabelReader, type StoredAnyShareSelector } from "./shareFilter";
 import type {
   SyncRelayStorage,
   SyncRelayGrantedShareRow,
@@ -31,7 +31,7 @@ function storedSelectorKind(
 
 export function createShareSummaries(
   storage: Pick<SyncRelayStorage, "findChannelCreateKind">,
-  labels: (shareId: string) => import("@dohc/security-contract/share-labels").ShareLabels,
+  labels: (shareId: string, reader: ShareLabelReader) => import("@dohc/security-contract/share-labels").ShareLabels,
   lookupUserEmail?: (userId: string) => Promise<string | null> | string | null,
   namedBrowserOrigin?: string,
 ) {
@@ -54,6 +54,7 @@ export function createShareSummaries(
   };
   const shareSummaryBase = (
     row: SyncRelayShareWithGrantRow,
+    reader: ShareLabelReader,
     storedSelector = parseStoredAnyShareSelectorJson(row.share.selectorJson),
   ): Record<string, unknown> => {
     const { share, grant } = row;
@@ -69,7 +70,7 @@ export function createShareSummaries(
         : null;
     return {
       shareId: share.shareId,
-      ...labels(share.shareId),
+      ...labels(share.shareId, reader),
       sharerName: null,
       // An unreadable row says so. It does not get a stand-in scope: empty
       // paths with no version would claim the entire live workspace, on a row
@@ -109,7 +110,8 @@ export function createShareSummaries(
       : grant.principalEmail;
     const selector = parseStoredAnyShareSelectorJson(share.selectorJson);
     return {
-      ...shareSummaryBase(row, selector),
+      // The granter reads the label as they wrote it, so a refresh compares like with like.
+      ...shareSummaryBase(row, "owner", selector),
       ...(roster ? { granterUserId: share.granterUserId, granterEmail: roster.granterEmail, status: grant.status } : {}),
       workspaceId: share.workspaceId,
       recipientUserId: grant.principalUserId,
@@ -132,7 +134,7 @@ export function createShareSummaries(
     // access is share-scoped, and the granter's workspace identity is not
     // theirs to see. Only the detail route adds a recipient source handle.
     return {
-      ...shareSummaryBase(row),
+      ...shareSummaryBase(row, "member"),
       granterUserId: row.share.granterUserId,
       granterEmail,
       sharerName,
@@ -234,7 +236,7 @@ export function createShareSummaries(
     return {
       shareId: share.shareId,
       grantId: grant.grantId,
-      ...labels(share.shareId),
+      ...labels(share.shareId, "owner"),
       sharerName: null,
       selector,
       ...(selector

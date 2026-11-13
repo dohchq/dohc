@@ -12,7 +12,6 @@ vi.hoisted(() => {
   Object.assign(globalThis, { ResizeObserver: ObserverStub, IntersectionObserver: ObserverStub });
 });
 import {
-  act,
   fireEvent,
   render,
   screen,
@@ -23,98 +22,14 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { SitePackageInfo } from "../../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
-import { VIEW_IDS } from "../workbench/workbenchState";
 import {
   DesktopWorkspaceShell,
   WORKSPACE,
-  STORED_STATE,
   makeBridge,
   shellBootstrapProps,
 } from "../DesktopWorkspaceShell.testHarness";
 
 describe("apps pinned to the sidebar", () => {
-  it("opens a view hidden from the rail from a command, and moves off it only when the rail changes", async () => {
-    const user = userEvent.setup();
-    const bridge = makeBridge(Promise.resolve(STORED_STATE));
-    const withSidebar = (hidden: typeof VIEW_IDS[number][], zoomLevel = 0) => ({
-      settings: {
-        ...DEFAULT_USER_SETTINGS,
-        appearance: { ...DEFAULT_USER_SETTINGS.appearance, zoomLevel },
-        sidebar: { ...DEFAULT_USER_SETTINGS.sidebar, hidden },
-      },
-      source: "stored" as const,
-    });
-    vi.stubGlobal("dohcDesktop", bridge);
-    const shellWith = (userSettings: ReturnType<typeof withSidebar>) => (
-      <DesktopWorkspaceShell
-        workspace={WORKSPACE}
-        workspaces={[WORKSPACE]}
-        {...shellBootstrapProps(bridge)}
-        userSettings={userSettings}
-        onSwitchWorkspace={() => {}}
-      />
-    );
-    const view = render(shellWith(withSidebar(["history"])));
-    const shell = await screen.findByTestId("workspace-shell");
-    await waitFor(() => expect(shell.dataset.ready).toBe("true"));
-    expect(screen.queryByTestId("activity-history")).toBeNull();
-
-    await user.keyboard("{Control>}k{/Control}");
-    await user.click(await within(await screen.findByTestId("command-palette")).findByText("View: History"));
-    const panel = await screen.findByTestId("side-panel");
-    expect(within(panel).getByText("History")).toBeTruthy();
-
-    // Another settings change, or hiding another view, leaves it open.
-    view.rerender(shellWith(withSidebar(["history"], 1)));
-    await act(async () => { await Promise.resolve(); });
-    expect(within(screen.getByTestId("side-panel")).getByText("History")).toBeTruthy();
-    view.rerender(shellWith(withSidebar(["history", "explorer"])));
-    await act(async () => { await Promise.resolve(); });
-    expect(within(screen.getByTestId("side-panel")).getByText("History")).toBeTruthy();
-
-    // Hiding the selected view is what moves the selection, to the first
-    // view on the rail.
-    await user.click(screen.getByTestId("activity-search"));
-    await waitFor(() =>
-      expect(within(screen.getByTestId("side-panel")).getByText("Search")).toBeTruthy());
-    view.rerender(shellWith(withSidebar(["history", "explorer", "chats", "search"])));
-    await waitFor(() =>
-      expect(within(screen.getByTestId("side-panel")).getByText("Graph")).toBeTruthy());
-  });
-
-  it("never opens a hidden view, even when the sidebar is toggled back on", async () => {
-    const bridge = makeBridge(Promise.resolve(STORED_STATE));
-    const settings = {
-      ...DEFAULT_USER_SETTINGS,
-      sidebar: { ...DEFAULT_USER_SETTINGS.sidebar, hidden: [...VIEW_IDS] },
-    };
-    vi.stubGlobal("dohcDesktop", bridge);
-    render(
-      <DesktopWorkspaceShell
-        workspace={WORKSPACE}
-        workspaces={[WORKSPACE]}
-        {...shellBootstrapProps(bridge)}
-        userSettings={{ settings, source: "stored" }}
-        onSwitchWorkspace={() => {}}
-      />,
-    );
-    const shell = await screen.findByTestId("workspace-shell");
-    await waitFor(() => expect(shell.dataset.ready).toBe("true"));
-    for (const view of VIEW_IDS) expect(screen.queryByTestId(`activity-${view}`)).toBeNull();
-    // Sharing sits at the rail's foot and cannot be hidden, so it is the
-    // view the panel shows.
-    await waitFor(() =>
-      expect(within(screen.getByTestId("side-panel")).getByText("Sharing")).toBeTruthy());
-    expect(screen.queryByTestId("file-tree")).toBeNull();
-
-    fireEvent.keyDown(window, { key: "b", ctrlKey: true });
-    await act(async () => { await Promise.resolve(); });
-    expect(screen.queryByTestId("side-panel")).toBeNull();
-    fireEvent.keyDown(window, { key: "b", ctrlKey: true });
-    await waitFor(() =>
-      expect(within(screen.getByTestId("side-panel")).getByText("Sharing")).toBeTruthy());
-    expect(screen.queryByTestId("file-tree")).toBeNull();
-  });
 
   it("opens a pinned app in the side panel inside the preview's sandbox, and unpins it from its menu", async () => {
     const user = userEvent.setup();

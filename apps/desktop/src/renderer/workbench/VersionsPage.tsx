@@ -421,6 +421,7 @@ function VersionRow(props: {
         "count-retry",
         // As tall as the details line, so the row keeps its height while the
         // count fails. Its ring sits inside, where the line doesn't clip it.
+        // oxlint-disable-next-line react/jsx-key -- the pair's key is applied where the pairs are rendered
         <button
           type="button"
           data-testid="versions-page-count-retry"
@@ -434,6 +435,7 @@ function VersionRow(props: {
         </button>,
       ]);
     } else if (props.count !== undefined) {
+      // oxlint-disable-next-line react/jsx-key -- the pair's key is applied where the pairs are rendered
       parts.push(["count", <span data-testid="versions-page-count">{filesDiffer(props.count)}</span>]);
     }
   }

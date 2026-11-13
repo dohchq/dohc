@@ -247,6 +247,7 @@ async function withBodyAtMost(request: Request, maxBytes: number): Promise<Reque
   } finally {
     reader.releaseLock();
   }
+  // oxlint-disable-next-line unicorn/no-invalid-fetch-options -- the method is inherited from request, which has a body
   return "bytes" in read ? new Request(request, { body: read.bytes }) : null;
 }
 

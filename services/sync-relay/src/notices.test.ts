@@ -1033,7 +1033,7 @@ describe("notices after access ends", () => {
   });
 
   it("digests every read the access check makes", async () => {
-    const { h, storage, shareId } = await sharedTrip();
+    const { storage, shareId } = await sharedTrip();
     grant({ paths: ["trip/tasks"], recipientUserId: "ana" });
     seedLinkGrant(storage, { grantId: "link-1", shareId, secretHash: sha256("secret"), access: "view" });
     seedDependentGrant(storage, {

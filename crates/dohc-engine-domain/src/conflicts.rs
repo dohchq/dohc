@@ -52,23 +52,10 @@ pub const CONFLICT_ROW_CONSTRAINT: &str = "CONFLICT_METADATA_BUDGET_BYTES";
 ///    row's own JSON scaffolding, fit that cap.
 /// 4. The scaffolding is a fixed schema — keys, punctuation, and the numbers
 ///    beside each withheld body — so 64 KiB bounds it with room to spare.
-///    `a_fully_withheld_conflict_row_fits_the_structural_headroom` measures
-///    the real figure — 1,514 bytes — against that 64 KiB.
 ///
-/// Hence `CONFLICT_ROW_HARD_CAP_BYTES - 64 KiB`. The sum below is of ENCODED
-/// lengths, and counts each string once per place the ROW carries it — a
-/// side's metadata pair is stored once but served twice, so it is counted
-/// twice — which is what makes the sum a true upper bound rather than an
-/// under-estimate. See
-/// `side_metadata_is_measured_at_the_two_copies_the_row_actually_carries`.
-///
-/// The bound therefore refuses only conflicts that would dead-end the listing,
-/// and accepts every conflict the listing can carry. Healthy work is nowhere
-/// near it: `healthy_conflict_metadata_sits_far_inside_the_row_budget`
-/// measures an ordinary conflict at under 4 KiB of non-withheld strings, and
-/// the legitimate worst case — every free-form metadata field at the 16 KiB
-/// cap the sibling write paths enforce, on the conflict and all three sides —
-/// at about 226 KiB, some thirty-five times inside this budget.
+/// Hence `CONFLICT_ROW_HARD_CAP_BYTES - 64 KiB`. The sum below uses encoded
+/// lengths and counts each string once per place the row carries it. Each
+/// side's metadata pair is stored once but served twice, so it counts twice.
 ///
 /// This is the shared pre-persistence path, so it covers all three routes
 /// that mint a conflict: the local RPC, a peer's replicated open, and the

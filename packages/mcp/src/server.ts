@@ -1,5 +1,5 @@
 import { ChatLinksInput } from "@dohc/workspace-contracts/chat-links";
-import { ChatFileMentionsInput, ChatFileMentionsPage } from "@dohc/workspace-contracts/chat-file-mentions";
+import { ChatFileMentionsInput } from "@dohc/workspace-contracts/chat-file-mentions";
 // The dohc MCP server. The user's AI tool (Claude Code, Codex) is the client,
 // launching it as a stdio child via its own config:
 //   { mcpServers: { dohc: { command, args: ["--workspace", root, "--home", home] } } }

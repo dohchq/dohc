@@ -10,7 +10,7 @@ import {getCookies} from "better-auth/cookies";
 import { Client, Pool } from "pg";
 import { expect, it } from "vitest";
 import * as Y from "yjs";
-import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
+import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { createLiveValidationExecutor } from "../../sync-relay/src/liveValidation.js";
 import { createLiveMarkdownRegistrationValidator } from "../../../packages/ydoc-projection/src/liveDocumentValidation.js";
 import { createEngineClient } from "../../../packages/workspace-engine-client/src/daemon/engineClient.js";

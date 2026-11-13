@@ -584,7 +584,7 @@ export function createSyncRelayHandler({
     independentGrantSummary,
     linkInventorySummary,
     namedBrowserInvitation,
-  } = createShareSummaries(storage, (shareId) => storage.getShareLabels(shareId), lookupUserEmail, namedBrowser ? shareWebOrigin : undefined);
+  } = createShareSummaries(storage, (shareId, reader) => storage.getShareLabels(shareId, reader), lookupUserEmail, namedBrowser ? shareWebOrigin : undefined);
 
   const shareInventoryRoutes = (claim: (userId: string) => Promise<void>) => createShareInventoryRoutes(
     storage,

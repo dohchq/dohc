@@ -1,5 +1,4 @@
 import { rm } from "node:fs/promises";
-import { join } from "node:path";
 import { wrapWorkspaceDataKey } from "@dohc/security-contract/secret-key-envelope";
 import type {
   DaemonErrorCode,

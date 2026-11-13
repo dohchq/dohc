@@ -51,11 +51,9 @@ function armProjectionGate(): () => void {
 // while nothing can reach the engine, and every later edit re-captures the
 // whole document state through the same recovery path.
 function refusingBridge(initialUpdate: Uint8Array) {
-  let openedSessionId: string | null = null;
   return {
     platform: "linux" as const,
     async openEngineYDocSession(payload: { sessionId: string }) {
-      openedSessionId = payload.sessionId;
       return {
         available: true,
         initialUpdate,
@@ -71,7 +69,6 @@ function refusingBridge(initialUpdate: Uint8Array) {
     onEngineYDocLineageReplacement: () => () => undefined,
     onEngineYDocSaveState: () => () => undefined,
     async closeEngineYDocSession() {
-      openedSessionId = null;
       return undefined;
     },
   };

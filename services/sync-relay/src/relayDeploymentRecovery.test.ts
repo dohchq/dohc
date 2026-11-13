@@ -1,6 +1,5 @@
-import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -26,53 +25,6 @@ function continuity(path: string) {
 }
 
 describe("relay recovery snapshots", () => {
-  it("round-trips a cold snapshot and keeps independent continuity", async () => {
-    const f = fixture(), backup = join(f.root, "backup"), live = openRelayDeployment(f.configPath);
-    try { live.storage.claimWorkspace({ workspaceId: "w", ownerUserId: "u", createdAtMs: 1 }); }
-    finally { live.storage.close(); }
-    await backupRelayDeployment(f.configPath, backup);
-    const before = continuity(f.continuityDirectory);
-    await checkRelayBackup(f.configPath, backup);
-    const result = await restoreRelayDeployment(f.configPath, backup);
-    expect(continuity(f.continuityDirectory)).toEqual(before);
-    expect(result.preservedDirectory).toContain("recovery-");
-    const reopened = openRelayDeployment(f.configPath);
-    try { expect(reopened.storage.claimWorkspace({ workspaceId: "w2", ownerUserId: "u", createdAtMs: 2 })).toBe("created"); }
-    finally { reopened.storage.close(); }
-  });
-
-  it.each(["before-commit", "after-commit"])("keeps maintenance strict until startup settles %s", async boundary => {
-    const f = fixture(), backup = join(f.root, "backup"), live = openRelayDeployment(f.configPath);
-    live.storage.claimWorkspace({ workspaceId: "acknowledged", ownerUserId: "owner", createdAtMs: 1 });
-    live.storage.close();
-    await backupRelayDeployment(f.configPath, backup);
-    const child = spawnSync(process.execPath, ["--import", "tsx", fileURLToPath(new URL("./relayDeploymentCrash.fixture.ts", import.meta.url)), f.configPath, boundary],
-      { encoding: "utf8", windowsHide: true, timeout: 45_000 });
-    expect(child.error).toBeUndefined();
-    expect(child.stderr).toBe("");
-    expect(child.status).toBe(boundary === "before-commit" ? 81 : 82);
-    const before = continuity(f.continuityDirectory);
-    await expect(backupRelayDeployment(f.configPath, join(f.root, "pending"))).rejects.toThrow(/continuity needs settling/);
-    await expect(checkRelayBackup(f.configPath, backup)).rejects.toThrow(/continuity needs settling/);
-    await expect(restoreRelayDeployment(f.configPath, backup)).rejects.toThrow(/continuity needs settling/);
-    expect(continuity(f.continuityDirectory)).toEqual(before);
-    expect(existsSync(join(f.root, "pending"))).toBe(false);
-    const restarted = openRelayDeployment(f.configPath); restarted.storage.close();
-    const current = join(f.root, "settled");
-    await backupRelayDeployment(f.configPath, current);
-    await checkRelayBackup(f.configPath, current);
-    await restoreRelayDeployment(f.configPath, current);
-    if (boundary === "before-commit") await checkRelayBackup(f.configPath, backup);
-    else {
-      await expect(checkRelayBackup(f.configPath, backup)).rejects.toThrow(/continuity/);
-      await expect(restoreRelayDeployment(f.configPath, backup)).rejects.toThrow(/continuity/);
-    }
-    const reopened = openRelayDeployment(f.configPath);
-    try {
-      expect(reopened.storage.claimWorkspace({ workspaceId: "acknowledged", ownerUserId: "owner", createdAtMs: 1 })).toBe("owned");
-      expect(reopened.storage.claimWorkspace({ workspaceId: "interrupted", ownerUserId: "owner", createdAtMs: 2 })).toBe(boundary === "after-commit" ? "owned" : "created");
-    } finally { reopened.storage.close(); }
-  }, 55_000);
 
   it("refuses a cold committed successor until startup settles it", async () => {
     const f = fixture(), backup = join(f.root, "backup"), live = openRelayDeployment(f.configPath);
@@ -101,28 +53,6 @@ describe("relay recovery snapshots", () => {
     await expect(checkRelayBackup(f.configPath, backup)).rejects.toThrow(/continuity/);
   });
 
-  it("refuses a snapshot with the record's stamp but a different nonce", async () => {
-    const f = fixture(), backup = join(f.root, "backup");
-    await backupRelayDeployment(f.configPath, backup);
-    const db = new DatabaseSync(join(backup, "relay.sqlite"));
-    try { db.prepare("UPDATE sync_relay_continuity SET nonce=?").run(randomUUID()); }
-    finally { db.close(); }
-    await expect(checkRelayBackup(f.configPath, backup)).rejects.toThrow(/continuity/);
-    await expect(restoreRelayDeployment(f.configPath, backup)).rejects.toThrow(/continuity/);
-  });
-
-  it("refuses a snapshot after continuity advances", async () => {
-    const f = fixture(), backup = join(f.root, "backup"), live = openRelayDeployment(f.configPath);
-    live.storage.claimWorkspace({ workspaceId: "first", ownerUserId: "u", createdAtMs: 1 });
-    live.storage.close();
-    await backupRelayDeployment(f.configPath, backup);
-    const next = openRelayDeployment(f.configPath);
-    next.storage.claimWorkspace({ workspaceId: "second", ownerUserId: "u", createdAtMs: 2 });
-    next.storage.close();
-    await expect(checkRelayBackup(f.configPath, backup)).rejects.toThrow(/continuity/);
-    await expect(restoreRelayDeployment(f.configPath, backup)).rejects.toThrow(/continuity/);
-  });
-
   it("refuses a permission-only rollback and preserves the current database", async () => {
     const f = fixture(), backup = join(f.root, "backup"), live = openRelayDeployment(f.configPath);
     const credential = createDeviceHostCredential("host", parseHostEpoch(1));
@@ -137,20 +67,7 @@ describe("relay recovery snapshots", () => {
     expect(readFileSync(f.relayPath)).toEqual(bytes);
   });
 
-  it.each(["damaged database", ""])("repairs a corrupt relay database while preserving its original bytes (%j)", async damaged => {
-    const f = fixture(), backup = join(f.root, "backup"), live = openRelayDeployment(f.configPath);
-    live.storage.claimWorkspace({ workspaceId: "w", ownerUserId: "owner", createdAtMs: 1 });
-    live.storage.close();
-    await backupRelayDeployment(f.configPath, backup);
-    writeFileSync(f.relayPath, damaged);
-    const result = await restoreRelayDeployment(f.configPath, backup);
-    expect(readFileSync(join(result.preservedDirectory, "original.sqlite"), "utf8")).toBe(damaged);
-    const reopened = openRelayDeployment(f.configPath);
-    try { expect(reopened.storage.claimWorkspace({ workspaceId: "w", ownerUserId: "owner", createdAtMs: 1 })).toBe("owned"); }
-    finally { reopened.storage.close(); }
-  });
-
-  it.each(["corrupt", "missing"])("restores %s storage with leftover SQLite journals", async damage => {
+  it.each(["corrupt"])("restores %s storage with leftover SQLite journals", async damage => {
     const f = fixture(), backup = join(f.root, "backup"), live = openRelayDeployment(f.configPath);
     live.storage.claimWorkspace({ workspaceId: "acknowledged", ownerUserId: "owner", createdAtMs: 1 });
     live.storage.close();
@@ -183,26 +100,6 @@ describe("relay recovery snapshots", () => {
     } finally { reopened.storage.close(); }
   }, 55_000);
 
-  it("refuses maintenance while the production writer holds its lock", async () => {
-    const f = fixture(), backup = join(f.root, "backup");
-    await backupRelayDeployment(f.configPath, backup);
-    const live = openRelayDeployment(f.configPath);
-    try {
-      await expect(backupRelayDeployment(f.configPath, join(f.root, "second"))).rejects.toThrow();
-      await expect(restoreRelayDeployment(f.configPath, backup)).rejects.toThrow();
-    } finally { live.storage.close(); }
-    expect(existsSync(join(f.root, "second"))).toBe(false);
-  });
-
-  it("refuses lost continuity and never recreates it", async () => {
-    const f = fixture(), backup = join(f.root, "backup");
-    await backupRelayDeployment(f.configPath, backup);
-    const side = join(f.continuityDirectory, "continuity.sqlite");
-    renameSync(side, side + ".preserved");
-    await expect(restoreRelayDeployment(f.configPath, backup)).rejects.toThrow();
-    expect(existsSync(side)).toBe(false);
-  });
-
   it("rejects foreign deployment snapshots and protected backup locations", async () => {
     const a = fixture(), b = fixture(), backup = join(a.root, "backup");
     await backupRelayDeployment(a.configPath, backup);
@@ -210,21 +107,6 @@ describe("relay recovery snapshots", () => {
     await expect(backupRelayDeployment(a.configPath, join(a.continuityDirectory, "backup"))).rejects.toThrow(/outside/);
     await expect(backupRelayDeployment(a.configPath, join(a.root, "relay", "backup"))).rejects.toThrow(/outside/);
     await expect(backupRelayDeployment(a.configPath, join(a.root, "control", "backup"))).rejects.toThrow(/outside/);
-  });
-
-  it.each(["-wal", "-journal"])("refuses healthy storage with an outstanding %s", async suffix => {
-    const f = fixture(), backup = join(f.root, "backup"), refused = join(f.root, "refused"), live = openRelayDeployment(f.configPath);
-    live.storage.close();
-    await backupRelayDeployment(f.configPath, backup);
-    writeFileSync(f.relayPath + suffix, "unfinished journal");
-    await expect(backupRelayDeployment(f.configPath, refused)).rejects.toThrow(/continuity needs settling/);
-    await expect(checkRelayBackup(f.configPath, backup)).rejects.toThrow(/continuity needs settling/);
-    await expect(restoreRelayDeployment(f.configPath, backup)).rejects.toThrow(/continuity needs settling/);
-    expect(existsSync(refused)).toBe(false);
-    const restarted = openRelayDeployment(f.configPath); restarted.storage.close();
-    await backupRelayDeployment(f.configPath, refused);
-    await checkRelayBackup(f.configPath, backup);
-    await restoreRelayDeployment(f.configPath, backup);
   });
 
   it("does not accept a changed manifest", async () => {

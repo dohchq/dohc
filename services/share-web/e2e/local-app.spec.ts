@@ -1,5 +1,4 @@
 import { test, expect } from "@playwright/test";
-import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -12,7 +11,6 @@ import { openedLocalState } from "../../../apps/desktop/src/testing/preparedLoca
 import { unguardedCollections } from "../../../apps/desktop/src/testing/collectionsHolder";
 import { createLocalAppLaunchHost, type LocalAppLaunchHost } from "../../../apps/desktop/src/workspaces/localAppLaunch";
 
-const hash = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const id = (value: number) => `00000000-0000-4000-8000-${String(value).padStart(12, "0")}`;
 const definition: DatasetDefinition = {
   formatVersion: 1, datasetId: id(1), name: "Orders", schemaPath: "data/schema.sql", operationsPath: "data/operations.js",

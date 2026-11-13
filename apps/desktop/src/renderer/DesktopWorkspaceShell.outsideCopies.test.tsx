@@ -2,7 +2,7 @@
 import "./DesktopWorkspaceShell.testSupport";
 import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, expect, it } from "vitest";
 import type { SyncStatusResult } from "../ipc/bridgeContract";
 import { deferred } from "../testing/deferred";
 import { makeBridge, renderShell, SYNC_STATUS, WORKSPACE } from "./DesktopWorkspaceShell.testHarness";

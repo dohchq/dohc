@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { type CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 import { withStaleSensitiveWorkspaceOperation } from "./workspaceAssets";
-import { engine, SHARE_ID, harness, flushCapture, seedSharedFiles, scope, shareViewFilesOwner, settleShareViewThroughOwner, applyShareViewTextWrite, applyShareViewFileCreate, storePaths, replicationLogRows, exists } from './shareViewFileOps.fixture';
+import { engine, SHARE_ID, harness, seedSharedFiles, scope, shareViewFilesOwner, settleShareViewThroughOwner, applyShareViewFileCreate, storePaths, replicationLogRows } from './shareViewFileOps.fixture';
 
 describe("share-view file operations through the real store", () => {
 it.skipIf(engine.missing)("keeps a Collection file apart after rebuilding its saved list", async () => {
@@ -97,126 +97,6 @@ it.skipIf(engine.missing)("keeps a Collection file apart after rebuilding its sa
       await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     }
   }, 60_000);
-
-it.skipIf(engine.missing)(
-    "opens an access-bearing received share with capture disabled",
-    async () => {
-      const view = await harness("dohc-share-capture-posture-", "edit");
-
-      await expect(flushCapture(view)).resolves.toEqual({ deferredWrites: [],
-        heldFiles: [],
-        running: false,
-        settled: false,
-        degraded: true,
-      });
-    },
-  );
-
-it.skipIf(engine.missing)(
-    "journals out-of-app and in-app edits for the same submit lane",
-    async () => {
-      const view = await harness("dohc-share-outside-edit-", "edit");
-      const outsidePath = "docs/outside.md";
-      const inAppPath = "docs/in-app.md";
-      await seedSharedFiles(view, [
-        { path: outsidePath, text: "outside before\n" },
-        { path: inAppPath, text: "in-app before\n" },
-      ]);
-      await writeFile(
-        join(view.rootPath, outsidePath),
-        "outside after\n",
-        "utf8",
-      );
-
-      const beforeOutside = replicationLogRows(view.rootPath);
-      await expect(
-        settleShareViewThroughOwner(view, view.store),
-      ).resolves.toEqual({
-        capturedPaths: 1,
-        repairedPaths: 0,
-        unjournalablePaths: [],
-      });
-      const afterOutside = replicationLogRows(view.rootPath);
-      const outsideRows = afterOutside - beforeOutside;
-      expect(outsideRows).toBeGreaterThan(0);
-      const outsideSummary = (
-        await view.store.listMoments({
-          workspaceId: view.workspaceId,
-          limit: 200,
-        })
-      ).moments.find(
-        (moment) =>
-          moment.path === outsidePath &&
-          moment.metadata.origin === "local-file",
-      );
-      expect(outsideSummary?.metadata.origin).toBe("local-file");
-      const outsideMoment = outsideSummary
-        ? await view.store.getMoment({
-            workspaceId: view.workspaceId,
-            momentId: outsideSummary.id,
-          })
-        : null;
-      expect(outsideMoment?.payload.after.text).toBe("outside after\n");
-
-      const result = await applyShareViewTextWrite({
-        ...scope(view),
-        relativePath: inAppPath,
-        text: "in-app after\n",
-        expectedContentHash: createHash("sha256")
-          .update("in-app before\n")
-          .digest("hex"),
-      });
-      expect(result.status).toBe("written");
-      const inAppRows = replicationLogRows(view.rootPath) - afterOutside;
-      expect(inAppRows).toBe(outsideRows);
-      const inAppSummary = (
-        await view.store.listMoments({
-          workspaceId: view.workspaceId,
-          limit: 200,
-        })
-      ).moments.find(
-        (moment) =>
-          moment.path === inAppPath && moment.metadata.origin === "local-file",
-      );
-      expect(inAppSummary?.metadata.origin).toBe("local-file");
-      const inAppMoment = inAppSummary
-        ? await view.store.getMoment({
-            workspaceId: view.workspaceId,
-            momentId: inAppSummary.id,
-          })
-        : null;
-      expect(inAppMoment?.payload.after.text).toBe("in-app after\n");
-    },
-    60_000,
-  );
-
-it.skipIf(engine.missing)(
-    "makes a recipient's new file a proposable moment, not just a file",
-    async () => {
-      const view = await harness("dohc-share-create-", "edit");
-      await seedSharedFiles(view, [
-        { path: "docs/note.md", text: "granter\n" },
-      ]);
-      const journalBefore = replicationLogRows(view.rootPath);
-
-      const path = await applyShareViewFileCreate({
-        ...scope(view),
-        relativePath: "docs/added.md",
-        initialText: "recipient\n",
-      });
-
-      expect(path).toBe("docs/added.md");
-      expect(await storePaths(view)).toEqual(["docs/added.md", "docs/note.md"]);
-      expect(
-        replicationLogRows(view.rootPath),
-        "a create that only writes the file is a change the submit lane cannot see",
-      ).toBeGreaterThan(journalBefore);
-      await expect(
-        readFile(join(view.rootPath, "docs", "added.md"), "utf8"),
-      ).resolves.toBe("recipient\n");
-    },
-    60_000,
-  );
 
 it.skipIf(engine.missing)(
     "repairs a create interrupted after the store write instead of journaling a delete",

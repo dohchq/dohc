@@ -1,11 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
-import { access, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { afterAll, afterEach, beforeAll, beforeEach, expect, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, vi } from "vitest";
 import { requireEngineBinaryOrSkip } from "../../../apps/desktop/src/testing/engineBinary";
 import { buildRelay } from "../scripts/build.mjs";
 
@@ -372,25 +372,6 @@ syncBuiltinESMExports();
       headers: authHeaders({ "content-type": "application/json" }),
       body: JSON.stringify(value),
     });
-  }
-
-  async function seedExchangeLink(baseUrl: string, workspaceId: string): Promise<string> {
-    expect((await postJson(baseUrl, "/sync/workspaces", { workspaceId })).status).toBe(200);
-    const shareResponse = await postJson(baseUrl, `/sync/${workspaceId}/shares`, {
-      recipientUserId: "link-recipient",
-      paths: ["docs"],
-      access: "view",
-    });
-    expect(shareResponse.status).toBe(200);
-    const share = (await shareResponse.json()) as { shareId: string };
-    const linkResponse = await postJson(
-      baseUrl,
-      `/sync/${workspaceId}/shares/${share.shareId}/links`,
-      { access: "view" },
-    );
-    expect(linkResponse.status).toBe(200);
-    const link = (await linkResponse.json()) as { url: string };
-    return new URL(link.url).hash.slice(1);
   }
 
   function exchangeLink(

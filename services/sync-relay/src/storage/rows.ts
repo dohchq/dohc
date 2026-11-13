@@ -1,5 +1,4 @@
 import {parseSettlementAuthors} from "./hostedSettlement";
-import { parseLiveAuthorSnapshot } from "@dohc/live-session-contract/live-authorship";
 import {
   type ObjectMomentRow,
   type ShareProposalRow,

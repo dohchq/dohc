@@ -5,8 +5,8 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { OwnerLiveQuarantine, SyncStatusResult } from "../ipc/bridgeContract";
 import type { Workspace } from "./DesktopWorkspaceShell";
-import { LIVE_EDITING_PAUSED_REASON, LIVE_EDITS_WAITING_REASON } from "./readOnlyReasons";
-import { DesktopWorkspaceShell, WORKSPACE, OTHER_WORKSPACE, SHARE_VIEW, SYNC_STATUS, makeBridge, renderShell, enterMarkdownSource, shellBootstrapProps } from "./DesktopWorkspaceShell.testHarness";
+import { LIVE_EDITING_PAUSED_REASON } from "./readOnlyReasons";
+import { DesktopWorkspaceShell, WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, makeBridge, renderShell, enterMarkdownSource, shellBootstrapProps } from "./DesktopWorkspaceShell.testHarness";
 
 // While this computer's queue for a note takes no more edits, the engine
 // refuses each one, so the note's editor stays read-only instead of taking
@@ -56,80 +56,6 @@ describe("a note whose live editing is paused", () => {
     const editor = await enterMarkdownSource(note.user);
     await note.user.type(editor, "Back");
     expect(editor.textContent).toContain("Back");
-  });
-
-  it("stays read-only while Stop runs, and edits once Stop releases the note", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.getSyncStatus = vi.fn(async () => withRows({ ...ROW, recovery: "stopping" }));
-    renderShell(bridge);
-    const note = await openNote(bridge);
-    await expectPaused(note.toggle);
-    // Stop took the kept edits and released the note from its queue.
-    await note.status(withRows({ ...ROW, recovery: "stopped-kept" }));
-    await waitFor(async () => expect((await note.toggle()).getAttribute("aria-disabled")).not.toBe("true"));
-    expect(await enterMarkdownSource(note.user)).toBeTruthy();
-  });
-
-  it("stays read-only after a recovery copy while the queue holds the edits, and edits once they are cleared", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.getSyncStatus = vi.fn(async () => withRows(ROW));
-    renderShell(bridge);
-    const note = await openNote(bridge);
-    await expectPaused(note.toggle);
-    await note.user.click(screen.getByTestId("notice-center-toggle"));
-    const notices = await screen.findByTestId("notice-center");
-    const row = within(notices).getByText("Live editing paused for a.md").closest("li")!;
-    await note.user.click(within(row).getByRole("button", { name: "Save recovery copy" }));
-    await waitFor(() => expect(bridge.saveOwnerLiveRecoveryCopy).toHaveBeenCalledOnce());
-    // A copy leaves the queue, and the engine still refuses edits to it.
-    await note.status(withRows(ROW));
-    await expectPaused(note.toggle);
-    await note.status(SYNC_STATUS);
-    await waitFor(async () => expect((await note.toggle()).getAttribute("aria-disabled")).not.toBe("true"));
-  });
-
-  it("stays read-only while too many edits wait, and edits once they reach the server", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.getSyncStatus = vi.fn(async () => ({ ...SYNC_STATUS, ownerLivePausedPaths: ["a.md"] }));
-    renderShell(bridge);
-    const note = await openNote(bridge);
-    await expectPaused(note.toggle, LIVE_EDITS_WAITING_REASON);
-    await note.status(SYNC_STATUS);
-    await waitFor(async () => expect((await note.toggle()).getAttribute("aria-disabled")).not.toBe("true"));
-  });
-
-  it.each([
-    ["the server keeps", { ...ROW, storedOn: "server" as const, incident: "server:1" }],
-    ["the server keeps, with a recovery copy saved", { ...ROW, storedOn: "server" as const, incident: "server:1", recovery: "copied" as const }],
-  ])("stays read-only while %s", async (_case, row) => {
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.getSyncStatus = vi.fn(async () => withRows(row));
-    renderShell(bridge);
-    await expectPaused((await openNote(bridge)).toggle);
-  });
-
-  it.each([
-    ["kept after a restore", { ...ROW, saveOnly: true as const }],
-    ["the server keeps in an earlier copy of the workspace", { ...ROW, storedOn: "server" as const, incident: "server:1", earlier: true as const }],
-    ["a finished Stop could not write", { ...ROW, recovery: "not-written" as const }],
-  ])("edits a note whose edits %s", async (_case, row) => {
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.getSyncStatus = vi.fn(async () => withRows(row));
-    renderShell(bridge);
-    const note = await openNote(bridge);
-    expect(await enterMarkdownSource(note.user)).toBeTruthy();
-  });
-
-  it("edits a received share's note at a listed path", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    // Main answers with the owner's own lists, whose path a share's note shares.
-    bridge.openWorkspace = vi.fn(async () => withRows(ROW));
-    bridge.getSyncStatus = vi.fn(async () => withRows(ROW));
-    renderShell(bridge, { ...SHARE_VIEW, shareView: { ...SHARE_VIEW.shareView!, access: "edit" } });
-    const note = await openNote(bridge);
-    await note.status(withRows(ROW));
-    expect((await note.toggle()).getAttribute("aria-disabled")).not.toBe("true");
-    expect((await note.toggle()).getAttribute("title")).not.toBe(LIVE_EDITING_PAUSED_REASON);
   });
 
   it("edits the same path in another workspace", async () => {

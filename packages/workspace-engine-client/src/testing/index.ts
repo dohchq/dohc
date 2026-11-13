@@ -8,4 +8,3 @@ export {
 } from "./versionedLoopbackEngine";
 export { ChatsLoopbackEngine } from "./chatsLoopbackEngine";
 export { YdocLoopbackEngine } from "./ydocLoopbackEngine";
-export { encodeFixtureBigInts } from "./fixtureBigInts";

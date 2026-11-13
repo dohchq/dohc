@@ -72,7 +72,8 @@ export async function startWindowController({
       const item = pending.get(response.id);
       if (!item) throw Error('Unexpected window helper response id');
       pending.delete(response.id); clearTimeout(item.timer);
-      response.error ? item.reject(new WindowRequestError(response.error)) : item.resolve(response.value);
+      if (response.error) item.reject(new WindowRequestError(response.error));
+      else item.resolve(response.value);
     } catch (error) { fail(error); }
   });
   const request = async payload => {

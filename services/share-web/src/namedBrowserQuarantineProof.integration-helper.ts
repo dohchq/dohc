@@ -34,7 +34,7 @@ export async function createNamedBrowserQuarantineProof(input: {relayUrl: string
   function until(condition: () => boolean) {
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => finish(new Error("Network proof condition deadline")), timeoutMs);
-      const finish = (error?: Error) => {clearTimeout(timer); watchers.delete(check); error ? reject(error) : resolve();};
+      const finish = (error?: Error) => {clearTimeout(timer); watchers.delete(check); if (error) reject(error); else resolve();};
       const check = () => {if (failures.length) finish(new Error(failures.join("\n"))); else if (condition()) finish();};
       watchers.add(check); check();
     });

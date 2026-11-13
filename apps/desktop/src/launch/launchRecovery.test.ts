@@ -7,7 +7,7 @@ const electron = vi.hoisted(() => ({
   app: {
     isPackaged: true,
     getVersion: vi.fn(() => "1.0.0"),
-    getPath: vi.fn(() => "C:\profile"),
+    getPath: vi.fn(() => "C:profile"),
     whenReady: vi.fn(async () => undefined),
     quit: vi.fn(),
     on: vi.fn(),

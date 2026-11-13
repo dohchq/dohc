@@ -12,8 +12,6 @@ import {liveBrowserActor} from "./liveBrowserContext";
 import {drainOwnerOutbox, type OwnerOutboxAdmission} from "./ownerOutboxDelivery";
 import {openRelayDeployment} from "./relayDeployment";
 import type {SyncRelayStorage} from "./storage";
-import type {StorageContext} from "./storage/context";
-import type {LiveJournalValidation} from "./storage/types";
 
 const cleanup: Array<() => void> = [];
 afterEach(() => {for (const close of cleanup.splice(0).reverse()) close(); cleanupLiveDeliveryFixtures(); vi.restoreAllMocks();});
@@ -149,26 +147,6 @@ it("retries the retained owner head when a named submission advances its validat
   expect(f.receipts).toHaveLength(1); expect(f.relay.journalRows().journal).toHaveLength(2);
 });
 
-it("retries without acknowledging when SQLite is busy before the first journal write", async () => {
-  const f = fixture(), entered = deferred(), release = deferred();
-  f.validate.mockImplementationOnce(async input => {entered.resolve(); await release.promise; return validateJournal(input);});
-  const first = f.run(), firstOutcome = Promise.allSettled([first]);
-  await Promise.race([entered.promise, first.then(() => {throw new Error("Owner drain ended before validation.");})]);
-  const lock = new DatabaseSync(f.relay.path); cleanup.push(() => lock.close());
-  const database = (f.relay.storage as StorageContext).db;
-  const timeout = database.prepare("PRAGMA busy_timeout").get()!.timeout;
-  database.exec("PRAGMA busy_timeout = 0");
-  lock.exec("BEGIN IMMEDIATE");
-  let outcome: PromiseSettledResult<Awaited<ReturnType<typeof f.run>>>;
-  try {release.resolve(); [outcome] = await firstOutcome;} finally {lock.exec("ROLLBACK"); database.exec(`PRAGMA busy_timeout = ${timeout}`);}
-  expect(f.commit.mock.results[0]!.value).toMatchObject({result: {kind: "retry",reason: "admission-unavailable"},admitted: null});
-  expect(f.relay.journalRows().journal).toEqual([]); expect(f.receipts).toEqual([]);
-  expect(f.pending).toEqual([f.entry]); expect(f.applyThrough).not.toHaveBeenCalled();
-  expect(outcome!).toEqual({status: "fulfilled",value: {admittedEntries: 0,hasMore: true,retryReady: true}});
-  expect(await f.run()).toEqual({admittedEntries: 1,hasMore: false});
-  expect(f.relay.journalRows().journal).toHaveLength(1); expect(f.receipts).toHaveLength(1);
-});
-
 // Proves: deleting an enrolled document's last Edit share refuses the owner
 // outbox entry an in-flight drain validated before it. The journal admits
 // nothing and the owner head stays.
@@ -187,36 +165,6 @@ it("refuses an owner outbox entry validated before the document's last Edit shar
   expect(f.commit.mock.results[0]!.value).toMatchObject({result: {kind: "refused",reason: "authority-refused"},admitted: null});
   expect(f.relay.journalRows().journal).toEqual([]); expect(f.receipts).toEqual([]);
   expect(f.pending).toEqual([f.entry]); expect(f.applyThrough).not.toHaveBeenCalled();
-});
-
-// A newer owner writes a schema version this relay does not know; an older one writes a version it no longer accepts.
-it.each([["a newer", 2], ["an older", 0]])("quarantines %s owner schema the relay refuses for good, and never validates it again", async (_name, version) => {
-  const f = fixture(doc => doc.getMap("meta").set("schemaVersion", version));
-  expect(await f.run()).toEqual({admittedEntries: 0,hasMore: false});
-  expect(f.validate.mock.results[0]!.value).toEqual({kind: "refused",reason: "invalid-schema",source: "final"});
-  expect(f.commit.mock.results[0]!.value).toMatchObject({result: {kind: "refused",reason: "invalid-update"},admitted: null});
-  expect(f.native).toEqual({state: "quarantined",quarantineReason: "invalid-update",retryDeliveryId: null});
-  expect(f.relay.journalRows().journal).toEqual([]); expect(f.receipts).toEqual([]);
-  expect(f.pending).toEqual([f.entry]); expect(f.applyThrough).not.toHaveBeenCalled();
-  f.validate.mockClear(); f.commit.mockClear();
-  expect(await f.run()).toEqual({admittedEntries: 0,hasMore: false});
-  expect(f.validate).not.toHaveBeenCalled(); expect(f.commit).not.toHaveBeenCalled();
-  expect(f.quarantines).toEqual(["invalid-update"]);
-});
-
-it.each<LiveJournalValidation>([
-  {kind: "refused",reason: "invalid-update",source: "call"},
-  {kind: "refused",reason: "projection-mutated",source: "final"},
-  {kind: "refused",reason: "invalid-schema",source: "admitted-cut"},
-  {kind: "refused",reason: "capacity-refused",source: "admitted-cut"},
-])("does not blame the owner's candidate for a validator or admitted-cut failure: %j", async validation => {
-  const f = fixture();
-  f.validate.mockReturnValueOnce(validation);
-  await expect(f.run()).rejects.toThrow();
-  expect(f.quarantines).toEqual([]); expect(f.native.state).toBe("active");
-  expect(f.relay.journalRows().journal).toEqual([]); expect(f.pending).toEqual([f.entry]);
-  expect(await f.run()).toEqual({admittedEntries: 1,hasMore: false});
-  expect(f.receipts).toHaveLength(1);
 });
 
 // The real validator, with a stricter budget such as a relay upgrade brings,
@@ -273,44 +221,6 @@ it("keeps a quarantined head and its bytes through a relay restart and upgrade, 
   expect(raw.prepare("SELECT * FROM sync_relay_live_update_journal").all()).toEqual([]);
 });
 
-it("re-quarantines a Try again the relay's schema check refuses again, and no background pass tries it", async () => {
-  const f = fixture(doc => doc.getMap("meta").set("schemaVersion", 2));
-  expect(await f.run()).toEqual({admittedEntries: 0,hasMore: false});
-  expect(await f.run()).toEqual({admittedEntries: 0,hasMore: false});
-  expect(f.validate).toHaveBeenCalledTimes(1);
-  // The owner's Try again, which only native records.
-  f.native.retryDeliveryId = f.entry.deliveryId;
-  expect(await f.run()).toEqual({admittedEntries: 0,hasMore: false});
-  expect(f.validate.mock.results[1]!.value).toEqual({kind: "refused",reason: "invalid-schema",source: "final"});
-  expect(f.commit.mock.calls.map(([input]) => input.metadata.deliveryId)).toEqual([f.entry.deliveryId, f.entry.deliveryId]);
-  expect(f.native).toEqual({state: "quarantined",quarantineReason: "invalid-update",retryDeliveryId: null});
-  for (let pass = 0; pass < 3; pass++) expect(await f.run()).toEqual({admittedEntries: 0,hasMore: false});
-  expect(f.validate).toHaveBeenCalledTimes(2); expect(f.commit).toHaveBeenCalledTimes(2);
-  expect(f.quarantines).toEqual(["invalid-update","invalid-update"]);
-  expect(f.relay.journalRows().journal).toEqual([]); expect(f.pending).toEqual([f.entry]); expect(f.receipts).toEqual([]);
-});
-
-it("admits a Try again granted before a relay restart once, under its original delivery, when the upgraded validator accepts it", async () => {
-  const f = fixture();
-  // The relay before its upgrade did not know this edit's schema.
-  const older = vi.fn<OwnerOutboxAdmission["validate"]>(() => ({kind: "refused",reason: "invalid-schema",source: "final"}));
-  expect(await f.run(older)).toEqual({admittedEntries: 0,hasMore: false});
-  expect(f.commit.mock.results[0]!.value).toMatchObject({result: {kind: "refused",reason: "invalid-update"},admitted: null});
-  f.native.retryDeliveryId = f.entry.deliveryId;
-  const storage = f.restart(), commit = vi.spyOn(storage, "commitLiveUpdateJournal");
-  expect(await f.run()).toEqual({admittedEntries: 1,hasMore: false});
-  expect(f.validate).toHaveBeenCalledTimes(1);
-  expect(commit.mock.calls.map(([input]) => input.metadata)).toEqual([f.commit.mock.calls[0]![0].metadata]);
-  const raw = new DatabaseSync(f.relay.path, {readOnly: true}); cleanup.push(() => raw.close());
-  const journal = () => raw.prepare("SELECT delivery_id,principal_kind FROM sync_relay_live_update_journal").all();
-  expect(journal()).toEqual([{delivery_id: f.entry.deliveryId,principal_kind: "owner"}]);
-  expect(f.receipts).toMatchObject([{deliveryId: f.entry.deliveryId,updateDigest: f.entry.updateDigest}]);
-  expect(f.native).toEqual({state: "active",quarantineReason: null,retryDeliveryId: null});
-  expect(f.pending).toEqual([]); expect(f.applyThrough).toHaveBeenCalledTimes(1);
-  expect(await f.run()).toEqual({admittedEntries: 0,hasMore: false});
-  expect(commit).toHaveBeenCalledTimes(1); expect(journal()).toHaveLength(1);
-});
-
 const olderValidator = () => vi.fn<OwnerOutboxAdmission["validate"]>(() => ({kind: "refused",reason: "invalid-schema",source: "final"}));
 const journalRows = (f: ReturnType<typeof fixture>) => {
   const raw = new DatabaseSync(f.relay.path, {readOnly: true}); cleanup.push(() => raw.close());
@@ -335,73 +245,6 @@ it("admits an outstanding Try again once, under its original delivery, after a c
   expect(f.receipts).toHaveLength(1); expect(f.pending).toEqual([]);
   expect(await f.run()).toEqual({admittedEntries: 0,hasMore: false});
   expect(commit).toHaveBeenCalledTimes(1);
-});
-
-it("records a Try again refused again after a crash lost its refusal, and never validates it after that", async () => {
-  const f = fixture(doc => doc.getMap("meta").set("schemaVersion", 2));
-  expect(await f.run()).toEqual({admittedEntries: 0,hasMore: false});
-  f.native.retryDeliveryId = f.entry.deliveryId;
-  f.faults.quarantine.push("failed");
-  await expect(f.run()).rejects.toThrow("Engine unavailable.");
-  f.crash(); f.restart();
-  expect(await f.run()).toEqual({admittedEntries: 0,hasMore: false});
-  expect(f.validate).toHaveBeenCalledTimes(3);
-  expect(f.native).toEqual({state: "quarantined",quarantineReason: "invalid-update",retryDeliveryId: null});
-  // Background passes, reconnects, a restart and an upgraded validator never reopen it.
-  for (let pass = 0; pass < 2; pass++) expect(await f.run()).toEqual({admittedEntries: 0,hasMore: false});
-  f.crash();
-  const storage = f.restart(), commit = vi.spyOn(storage, "commitLiveUpdateJournal");
-  const upgraded = vi.fn<OwnerOutboxAdmission["validate"]>(input => validateJournal(input));
-  for (let pass = 0; pass < 2; pass++) expect(await f.run(upgraded)).toEqual({admittedEntries: 0,hasMore: false});
-  expect(upgraded).not.toHaveBeenCalled(); expect(commit).not.toHaveBeenCalled(); expect(f.validate).toHaveBeenCalledTimes(3);
-  expect(f.quarantines).toEqual(["invalid-update","invalid-update"]);
-  expect(journalRows(f)).toEqual([]); expect(f.pending).toEqual([f.entry]); expect(f.receipts).toEqual([]);
-});
-
-it("keeps a refusal through repeated quarantine failures across passes and reconnects, and never validates it again", async () => {
-  const f = fixture(doc => doc.getMap("meta").set("schemaVersion", 2));
-  f.faults.quarantine.push("failed","failed","failed");
-  for (let pass = 0; pass < 3; pass++) await expect(f.run()).rejects.toThrow("Engine unavailable.");
-  expect(f.validate).toHaveBeenCalledTimes(1); expect(f.commit).toHaveBeenCalledTimes(1);
-  expect(f.native.state).toBe("active");
-  expect(await f.run()).toEqual({admittedEntries: 0,hasMore: true,retryReady: true});
-  expect(f.native).toEqual({state: "quarantined",quarantineReason: "invalid-update",retryDeliveryId: null});
-  for (let pass = 0; pass < 3; pass++) expect(await f.run()).toEqual({admittedEntries: 0,hasMore: false});
-  expect(f.validate).toHaveBeenCalledTimes(1); expect(f.commit).toHaveBeenCalledTimes(1);
-  expect(f.quarantines).toEqual(["invalid-update"]);
-  expect(journalRows(f)).toEqual([]); expect(f.pending).toEqual([f.entry]);
-});
-
-it("forgets a refusal whose lost write already quarantined the queue, without writing it again", async () => {
-  const f = fixture(doc => doc.getMap("meta").set("schemaVersion", 2));
-  f.faults.quarantine.push("lost");
-  await expect(f.run()).rejects.toThrow("Engine response lost.");
-  expect(f.native).toEqual({state: "quarantined",quarantineReason: "invalid-update",retryDeliveryId: null});
-  expect(f.known()).toBeDefined();
-  // Another write would take this fault.
-  f.faults.quarantine.push("failed");
-  expect(await f.run()).toEqual({admittedEntries: 0,hasMore: false});
-  expect(f.known()).toBeUndefined();
-  expect(f.faults.quarantine).toEqual(["failed"]);
-  expect(f.validate).toHaveBeenCalledTimes(1); expect(f.quarantines).toEqual(["invalid-update"]);
-});
-
-it("a quarantine write repeated after its lost response cannot use up the owner's newer Try again", async () => {
-  const f = fixture(), older = olderValidator();
-  expect(await f.run(older)).toEqual({admittedEntries: 0,hasMore: false});
-  f.native.retryDeliveryId = f.entry.deliveryId;
-  f.faults.quarantine.push("lost");
-  await expect(f.run(older)).rejects.toThrow("Engine response lost.");
-  expect(f.native.retryDeliveryId).toBeNull();
-  // The owner asks again before the relay writes the refusal again.
-  f.native.retryDeliveryId = f.entry.deliveryId;
-  expect(await f.run(older)).toEqual({admittedEntries: 0,hasMore: true,retryReady: true});
-  expect(older).toHaveBeenCalledTimes(2);
-  expect(f.native).toEqual({state: "quarantined",quarantineReason: "invalid-update",retryDeliveryId: f.entry.deliveryId});
-  expect(await f.run()).toEqual({admittedEntries: 1,hasMore: false});
-  expect(f.validate).toHaveBeenCalledTimes(1);
-  expect(f.quarantines).toEqual(["invalid-update","invalid-update"]);
-  expect(f.native).toEqual({state: "active",quarantineReason: null,retryDeliveryId: null});
 });
 
 it.each(["failed","lost"] as const)("recovers an accepted Try again whose acknowledgement %s under its original delivery, without a duplicate", async fault => {

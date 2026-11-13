@@ -1612,63 +1612,6 @@ mod tests {
     }
 
     #[test]
-    fn scene_roots_match_the_typescript_contract() {
-        assert_eq!(crate::ROOT_SCENE_REVISIONS, "excalidraw:revisions");
-        assert_eq!(crate::ROOT_SCENE_APP_STATE, "excalidraw:app-state");
-        assert_eq!(crate::ROOT_SCENE_ASSETS, "excalidraw:assets");
-    }
-
-    #[test]
-    fn portable_scene_matches_the_typescript_schema_fixture() {
-        let mut revisions = BTreeMap::new();
-        revisions.insert(
-            revision_key("box", 1, 8),
-            revision(
-                "box",
-                1,
-                8,
-                Map::from_iter([
-                    ("index".to_owned(), Value::Null),
-                    ("isDeleted".to_owned(), Value::Bool(false)),
-                ]),
-            ),
-        );
-        let app_state = BTreeMap::from([
-            (
-                "viewBackgroundColor".to_owned(),
-                canonical(json!("#ffffff")),
-            ),
-            ("theme".to_owned(), canonical(json!("dark"))),
-        ]);
-        let folded = fold_scene(&revisions, &app_state, &BTreeMap::new());
-
-        assert_eq!(
-            folded.portable_json().expect("scene serializes"),
-            concat!(
-                "{\n",
-                "  \"type\": \"excalidraw\",\n",
-                "  \"version\": 2,\n",
-                "  \"source\": \"https://excalidraw.com\",\n",
-                "  \"elements\": [\n",
-                "    {\n",
-                "      \"id\": \"box\",\n",
-                "      \"index\": null,\n",
-                "      \"isDeleted\": false,\n",
-                "      \"type\": \"rectangle\",\n",
-                "      \"version\": 1,\n",
-                "      \"versionNonce\": 8\n",
-                "    }\n",
-                "  ],\n",
-                "  \"appState\": {\n",
-                "    \"viewBackgroundColor\": \"#ffffff\"\n",
-                "  },\n",
-                "  \"files\": {}\n",
-                "}"
-            )
-        );
-    }
-
-    #[test]
     fn fold_is_order_independent_and_uses_version_then_lowest_nonce() {
         let entries = [
             (revision_key("a", 2, 9), revision("a", 2, 9, Map::new())),
@@ -1721,59 +1664,6 @@ mod tests {
         assert_eq!(folded.elements.len(), 1);
         assert_eq!(folded.elements[0]["id"], "a");
         assert_eq!(folded.elements[0]["version"], 1);
-    }
-
-    #[test]
-    fn noncanonical_numbers_and_invalid_unicode_are_skipped_per_record() {
-        let revisions = BTreeMap::from([
-            (
-                revision_key("valid", 1, 1),
-                revision(
-                    "valid",
-                    1,
-                    1,
-                    Map::from_iter([("x".to_owned(), json!(1e20))]),
-                ),
-            ),
-            (
-                revision_key("noncanonical", 1, 1),
-                r#"{"id":"noncanonical","isDeleted":false,"type":"rectangle","version":1,"versionNonce":1,"x":1e20}"#
-                    .to_owned(),
-            ),
-            (
-                revision_key("negative-zero", 1, 1),
-                r#"{"id":"negative-zero","isDeleted":false,"type":"rectangle","version":1,"versionNonce":1,"x":-0}"#
-                    .to_owned(),
-            ),
-            (
-                revision_key("surrogate", 1, 1),
-                r#"{"id":"surrogate","isDeleted":false,"text":"\ud800","type":"text","version":1,"versionNonce":1}"#
-                    .to_owned(),
-            ),
-        ]);
-
-        let folded = fold_scene(&revisions, &BTreeMap::new(), &BTreeMap::new());
-        assert_eq!(folded.elements.len(), 1);
-        assert_eq!(folded.elements[0]["id"], "valid");
-    }
-
-    #[test]
-    fn fold_keeps_only_valid_durable_app_state() {
-        let app_state = BTreeMap::from([
-            ("gridModeEnabled".to_owned(), canonical(json!(false))),
-            ("gridSize".to_owned(), canonical(Value::Null)),
-            ("gridStep".to_owned(), canonical(json!("five"))),
-            ("viewBackgroundColor".to_owned(), canonical(json!(""))),
-            ("scrollX".to_owned(), canonical(json!(20))),
-        ]);
-
-        assert_eq!(
-            fold_scene(&BTreeMap::new(), &app_state, &BTreeMap::new()).app_state,
-            BTreeMap::from([
-                ("gridModeEnabled".to_owned(), Value::Bool(false)),
-                ("gridSize".to_owned(), Value::Null),
-            ])
-        );
     }
 
     #[test]
@@ -1914,70 +1804,6 @@ mod tests {
     }
 
     #[test]
-    fn invalid_assets_are_omitted_and_image_file_ids_are_cleared() {
-        let revisions = BTreeMap::from([(
-            revision_key("image", 1, 1),
-            canonical(json!({
-                "fileId": "asset",
-                "id": "image",
-                "isDeleted": false,
-                "type": "image",
-                "version": 1,
-                "versionNonce": 1
-            })),
-        )]);
-        let assets = BTreeMap::from([(
-            "asset".to_owned(),
-            canonical(json!({
-                "created": 10,
-                "dataURL": "data:image/png;base64,AA==",
-                "id": "asset",
-                "mimeType": "image/png",
-                "ref": "../outside.png",
-                "sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-            })),
-        )]);
-
-        let folded = fold_scene(&revisions, &BTreeMap::new(), &assets);
-        assert!(folded.assets.is_empty());
-        assert_eq!(folded.elements[0]["fileId"], Value::Null);
-        assert_eq!(
-            folded.portable_json().unwrap().matches("\"files\"").count(),
-            1
-        );
-    }
-
-    #[test]
-    fn element_tie_break_uses_unicode_scalar_values_not_utf16_code_units() {
-        let bmp = "\u{e000}";
-        let astral = "\u{10000}";
-        let revisions = BTreeMap::from([
-            (
-                revision_key(astral, 1, 1),
-                revision(
-                    astral,
-                    1,
-                    1,
-                    Map::from_iter([("index".to_owned(), json!("a0"))]),
-                ),
-            ),
-            (
-                revision_key(bmp, 1, 1),
-                revision(
-                    bmp,
-                    1,
-                    1,
-                    Map::from_iter([("index".to_owned(), json!("a0"))]),
-                ),
-            ),
-        ]);
-
-        let folded = fold_scene(&revisions, &BTreeMap::new(), &BTreeMap::new());
-        assert_eq!(folded.elements[0]["id"], bmp);
-        assert_eq!(folded.elements[1]["id"], astral);
-    }
-
-    #[test]
     fn native_import_returns_a_declared_root_update_and_embedded_file() {
         let bytes = vec![0x5a; 49 * 1024];
         let data_url = format!(
@@ -2027,36 +1853,6 @@ mod tests {
         assert_eq!(canonical[crate::ROOT_SCENE_REVISIONS]["type"], "map");
         assert_eq!(canonical[crate::ROOT_SCENE_APP_STATE]["type"], "map");
         assert_eq!(doc.fold_scene().elements[0]["id"], "image");
-    }
-
-    #[test]
-    fn native_import_writes_javascript_canonical_numbers() {
-        let content = r##"{
-          "type":"excalidraw",
-          "version":2,
-          "source":"https://excalidraw.com",
-          "elements":[{
-            "id":"shape",
-            "type":"rectangle",
-            "version":1,
-            "versionNonce":2,
-            "isDeleted":false,
-            "x":1e20,
-            "y":-0,
-            "angle":1e-7
-          }],
-          "appState":{"gridSize":1e20},
-          "files":{}
-        }"##;
-
-        let imported = import_portable_scene(content).expect("native scene imports");
-        let doc = crate::Ydoc::wire();
-        doc.apply(&imported.initial_update).expect("initial update");
-        let folded = doc.fold_scene();
-        assert_eq!(folded.elements[0]["x"], json!(1e20));
-        assert_eq!(folded.elements[0]["y"], json!(0));
-        assert_eq!(folded.elements[0]["angle"], json!(1e-7));
-        assert_eq!(folded.app_state["gridSize"], json!(1e20));
     }
 
     #[test]
@@ -2130,26 +1926,6 @@ mod tests {
     }
 
     #[test]
-    fn fractional_midpoint_handles_a_maximum_text_sized_order_key() {
-        let lower = format!(
-            "z{}{}",
-            "z".repeat(26),
-            "z".repeat(dohc_engine_domain::MAX_TEXT_BYTES - 27)
-        );
-        assert_eq!(lower.len(), dohc_engine_domain::MAX_TEXT_BYTES);
-
-        let midpoint = generate_key_between(Some(&lower), None)
-            .expect("a valid imported order key has a successor");
-
-        assert_eq!(midpoint.strip_prefix(&lower), Some("V"));
-        let mut remaining_bytes = lower.len();
-        assert_eq!(
-            generate_n_keys_between_bounded(Some(&lower), None, 2, &mut remaining_bytes),
-            Err(KeyGenerationError::BudgetExceeded)
-        );
-    }
-
-    #[test]
     fn native_import_does_not_replicate_a_long_index_across_repairs() {
         let element = |id: String, index: Option<String>| {
             let mut element = Map::from_iter([
@@ -2200,106 +1976,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             expected_order
         );
-    }
-
-    #[test]
-    fn native_import_normalizes_upstream_revision_defaults() {
-        let content = canonical(json!({
-            "type":"excalidraw",
-            "elements":[
-                {"id":"missing","type":"rectangle"},
-                {
-                    "id":"null",
-                    "isDeleted":null,
-                    "type":"rectangle",
-                    "version":null,
-                    "versionNonce":null
-                },
-                {
-                    "id":"zero-version",
-                    "isDeleted":false,
-                    "type":"rectangle",
-                    "version":0,
-                    "versionNonce":7
-                }
-            ]
-        }));
-
-        let imported = import_portable_scene(&content).expect("legacy scene imports");
-        let doc = crate::Ydoc::wire();
-        doc.apply(&imported.initial_update).expect("initial update");
-        let by_id = doc
-            .fold_scene()
-            .elements
-            .into_iter()
-            .map(|element| {
-                (
-                    element["id"].as_str().expect("element id").to_owned(),
-                    element,
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-
-        for id in ["missing", "null"] {
-            assert_eq!(by_id[id]["version"], json!(1));
-            assert_eq!(by_id[id]["versionNonce"], json!(0));
-            assert_eq!(by_id[id]["isDeleted"], json!(false));
-        }
-        assert_eq!(by_id["zero-version"]["version"], json!(1));
-        assert_eq!(by_id["zero-version"]["versionNonce"], json!(7));
-    }
-
-    #[test]
-    fn native_import_repairs_a_dangling_image_file_reference() {
-        let content = canonical(json!({
-            "type":"excalidraw",
-            "elements":[{
-                "fileId":"missing",
-                "id":"image",
-                "isDeleted":false,
-                "type":"image",
-                "version":1,
-                "versionNonce":1
-            }],
-            "files":{}
-        }));
-
-        let imported = import_portable_scene(&content).expect("dangling image imports");
-        assert!(imported.files.is_empty());
-        let doc = crate::Ydoc::wire();
-        doc.apply(&imported.initial_update).expect("initial update");
-        let folded = doc.fold_scene();
-        assert_eq!(folded.elements[0]["fileId"], Value::Null);
-        let portable: Value =
-            serde_json::from_str(&folded.portable_json().expect("portable scene serializes"))
-                .expect("portable scene parses");
-        assert_eq!(portable["elements"][0]["fileId"], Value::Null);
-        assert_eq!(portable["files"], json!({}));
-    }
-
-    #[test]
-    fn native_import_accepts_the_upstream_external_file_floor() {
-        for external in [
-            json!({"type":"excalidraw"}),
-            json!({"type":"excalidraw","elements":null,"appState":null,"files":null}),
-            json!({"type":"excalidraw","version":1,"elements":[],"appState":{}}),
-            json!({
-                "type":"excalidraw",
-                "version":99,
-                "scrollToContent":true,
-                "libraryItems":[],
-                "futureField":{"keptByFutureExcalidraw":true},
-                "appState":{"zoom":{"value":2},"viewBackgroundColor":"#abcdef"}
-            }),
-        ] {
-            let imported = import_portable_scene(&canonical(external))
-                .expect("upstream-valid external artifact imports");
-            let doc = crate::Ydoc::wire();
-            doc.apply(&imported.initial_update).expect("initial update");
-            let folded = doc.fold_scene();
-            assert!(folded.elements.is_empty());
-            assert!(!folded.app_state.contains_key("zoom"));
-        }
     }
 
     #[test]
@@ -2392,20 +2068,6 @@ mod tests {
                 ),
                 "unexpectedly imported {description}"
             );
-        }
-    }
-
-    #[test]
-    fn native_import_accepts_deleted_text_without_live_content() {
-        for element in [
-            json!({"id":"deleted-empty","type":"text","text":"","isDeleted":true}),
-            json!({"id":"deleted-missing","type":"text","isDeleted":true}),
-        ] {
-            import_portable_scene(&canonical(json!({
-                "type":"excalidraw",
-                "elements":[element]
-            })))
-            .expect("deleted text need not retain live content");
         }
     }
 

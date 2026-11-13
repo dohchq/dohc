@@ -274,7 +274,7 @@ describe("materialization keeps outside bytes before replacement", () => {
   });
 
   it("leaves the original when preserving the copy fails", async () => {
-    const { rootPath, copies, recorded, isRecorded } = await setup();
+    const { rootPath, copies, isRecorded } = await setup();
     await writeFile(join(rootPath, "n.md"), "AGENT-1");
     const replace = vi.fn();
     await expect((async () => {
@@ -286,7 +286,7 @@ describe("materialization keeps outside bytes before replacement", () => {
   });
 
   it("does not replace the original if the durable receipt fails", async () => {
-    const { rootPath, copies, recorded, isRecorded } = await setup();
+    const { rootPath, copies, isRecorded } = await setup();
     await writeFile(join(rootPath, "n.md"), "AGENT-1");
     vi.spyOn(durableFiles, "atomicWriteFile").mockRejectedValueOnce(new Error("receipt flush failed"));
     const cause = await copies.beforeWrite("n.md", Buffer.from("OWNER-1"), () => undefined, isRecorded).catch(error => error as unknown);
@@ -451,7 +451,7 @@ describe("materialization keeps outside bytes before replacement", () => {
   });
 
   it("does not reuse a copy replaced with a hard link to the original", async () => {
-    const { rootPath, copies, recorded, isRecorded } = await setup();
+    const { rootPath, copies, isRecorded } = await setup();
     await writeFile(join(rootPath, "n.md"), "AGENT-1");
     await copies.beforeWrite("n.md", Buffer.from("OWNER-1"), () => undefined, isRecorded);
     await rm(join(rootPath, "n (kept copy).md"));
@@ -463,7 +463,7 @@ describe("materialization keeps outside bytes before replacement", () => {
   });
 
   it("never overwrites an existing copy name", async () => {
-    const { rootPath, copies, recorded, isRecorded } = await setup();
+    const { rootPath, copies, isRecorded } = await setup();
     await writeFile(join(rootPath, "n.md"), "AGENT-1");
     await writeFile(join(rootPath, "n (kept copy).md"), "earlier copy");
     await copies.beforeWrite("n.md", Buffer.from("OWNER-1"), () => undefined, isRecorded);
@@ -472,7 +472,7 @@ describe("materialization keeps outside bytes before replacement", () => {
   });
 
   it("keeps outside bytes before deletion, but creates nothing for an absent file", async () => {
-    const { rootPath, copies, recorded, isRecorded } = await setup();
+    const { rootPath, copies, isRecorded } = await setup();
     await copies.beforeWrite("absent.md", null, () => undefined, isRecorded);
     await writeFile(join(rootPath, "n.md"), "AGENT-1");
     await copies.beforeWrite("n.md", null, () => undefined, isRecorded);

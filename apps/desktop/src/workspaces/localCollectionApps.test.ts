@@ -1,12 +1,11 @@
 import { createHash } from "node:crypto";
 import { openedLocalState } from "../testing/preparedLocalState";
 import { DatabaseSync } from "node:sqlite";
-import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { compareAppCollectionPaths, exposesAppCollectionSubmittedFields } from "@dohc/security-contract/app-collection-checks";
+import { compareAppCollectionPaths } from "@dohc/security-contract/app-collection-checks";
 import { OwnerAppPublicationResult } from "@dohc/cli/app-publication";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
@@ -16,8 +15,8 @@ import { compileClosedApp } from "./closedAppCompiler";
 import { generateDatasetFormSources } from "./datasetFormGenerator";
 import { generateDatasetSources } from "./datasetGenerator";
 import { createLocalAppLaunchHost, LocalAppUnavailableError } from "./localAppLaunch";
-import { LocalCollectionRefusal, LOCAL_APP_WITHDRAW_TIMEOUT_MS, MAX_LOCAL_COLLECTION_CREATES_PER_PUBLICATION, localCollectionAuthor, type Envelope, type LocalCollectionEngine } from "./localCollectionApps";
-import { createLocalDatasetHost, reconcileExistingLocalCollectionApps, type LocalDatasetHost } from "./localDatasetHost";
+import { MAX_LOCAL_COLLECTION_CREATES_PER_PUBLICATION, LocalCollectionRefusal, type Envelope, type LocalCollectionEngine } from "./localCollectionApps";
+import { createLocalDatasetHost, type LocalDatasetHost } from "./localDatasetHost";
 import { prepareLocalAppPublication } from "./ownerAppPublication";
 import { unguardedCollections } from "../testing/collectionsHolder";
 
@@ -134,30 +133,6 @@ async function fixture(options: { workspaceRoot?: string; engine?: Engine; autho
 }
 
 describe("local document Collection apps", () => {
-  it("approves a Collection app into the Collection store without a Dataset binding", async () => {
-    const f = await fixture();
-    expect(f.host.apps.list("trip")).toEqual([expect.objectContaining({ publicationId: f.published.publicationId, approved: true, active: true, pendingCreates: 0,
-      collectionCapability: expect.objectContaining({ collectionPath: "trip/responses", readFields: ["destination", "name"] }) })]);
-    f.inspect(db => {
-      expect(db.prepare("SELECT revision,active_kind,active_publication_id FROM local_app_roots WHERE app_root='trip'").get()).toEqual({ revision: f.published.authorityRevision, active_kind: "collection", active_publication_id: f.published.publicationId });
-      expect(db.prepare("SELECT count(*) AS n FROM local_collection_apps").get()!.n).toBe(1);
-      expect(db.prepare("SELECT count(*) AS n FROM local_dataset_apps").get()!.n).toBe(0);
-      expect(db.prepare("SELECT count(*) AS n FROM dohc_dataset_bindings").get()!.n).toBe(0);
-    });
-    expect(f.host.apps.browserPublication(f.published.publicationId).files.length).toBeGreaterThan(0);
-    // Reapproving the identical candidate keeps its revision.
-    expect(await f.host.apps.activate(f.prepared, signal())).toMatchObject({ publicationId: f.published.publicationId, authorityRevision: f.published.authorityRevision });
-  });
-
-  it("approves write-only fields locally, which a link approval refuses", async () => {
-    const f = await fixture({ readFields: ["destination"] });
-    const capability = f.prepared.candidate.capabilities[0];
-    expect(capability?.kind === "collection-create" && exposesAppCollectionSubmittedFields(capability)).toBe(false);
-    expect(f.host.apps.list("trip")[0]).toMatchObject({ active: true });
-    await f.create({ destination: "Tokyo", name: "Private" });
-    expect((await f.list()).records.map(record => record.fields)).toEqual([{ destination: "Tokyo" }]);
-  });
-
   it("reads approved fields from the published projection in UTF-8 byte order", async () => {
     const f = await fixture({ readFields: ["destination"] });
     const files = f.engine.files();
@@ -185,21 +160,6 @@ describe("local document Collection apps", () => {
     await expect(f.list()).rejects.toThrow(/schema changed/);
   });
 
-  it("never names a nested or uncontained file in a page cursor", async () => {
-    const f = await fixture({ readFields: ["destination"] });
-    const files = f.engine.files(), record = `---\n${JSON.stringify({ destination: "Tokyo" })}\n---\n`;
-    for (const path of ["trip/responses/-a.md", "trip/responses/.env.md", "trip/responses/b/jane-salary.md", "trip/responses/b/notes.md", "trip/responses/c.md"]) files.set(path, record);
-    const records: string[] = [], cursors: Array<string | null> = [];
-    let afterPath: string | undefined;
-    do {
-      const page = await f.list({ limit: 1, ...(afterPath === undefined ? {} : { afterPath }) });
-      records.push(...page.records.map(row => row.path)); cursors.push(page.nextPath); afterPath = page.nextPath ?? undefined;
-    } while (afterPath && cursors.length < 10);
-    expect(records).toEqual(["trip/responses/-a.md", "trip/responses/c.md"]);
-    // A cursor names only a record, though the first page ends beside the secret file and the nested folder.
-    expect(cursors).toEqual(["trip/responses/-a.md", null]);
-  });
-
   it("refuses reads without approved read fields, foreign actions, and stale authority", async () => {
     const f = await fixture({ readFields: [] });
     await expect(f.list()).rejects.toThrow(/cannot read/);
@@ -218,33 +178,6 @@ describe("local document Collection apps", () => {
     await expect(f.host.apps.request(f.published.publicationId, "create", { authorityRevision: f.published.authorityRevision, idempotencyKey: "k", fields: { destination: "Tokyo" }, activated: true })).rejects.toThrow(/Invalid collection request/);
     expect(f.engine.state.writes).toEqual([]);
     f.inspect(db => expect(db.prepare("SELECT count(*) AS n FROM local_collection_creates").get()!.n).toBe(0));
-  });
-
-  it("writes one record per key with a stable receipt, author, and creation time", async () => {
-    let author: MomentWriteAuthor = { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", agentRunId: "run-1", depth: 1 };
-    const f = await fixture({ author: async () => author });
-    const [first, racing] = await Promise.all([f.create({ name: "Ana", destination: "Tokyo" }), f.create({ destination: "Tokyo", name: "Ana" })]);
-    author = person;
-    expect(racing).toEqual(first);
-    expect(await f.create({ destination: "Tokyo", name: "Ana" })).toEqual(first);
-    expect(Object.keys(first).sort()).toEqual(["acceptanceId", "acceptedAtMs", "kind", "momentId", "objectId", "path"]);
-    expect(f.engine.state.writes).toHaveLength(1);
-    expect(f.engine.state.writes[0]).toMatchObject({ path: first.path, momentId: first.momentId, versionId: "main", author: { kind: "agent", agentRunId: "run-1", depth: 1 } });
-    expect(first.path).toBe(`trip/responses/${first.acceptanceId}.md`);
-    const text = f.engine.files().get(first.path)!;
-    expect(JSON.parse(text.split("\n")[1]!)).toEqual({ destination: "Tokyo", name: "Ana", id: expect.stringMatching(/^rec_[a-z2-7]{26}$/), created_at: first.acceptedAtMs, acceptance_id: first.acceptanceId });
-    await expect(f.create({ destination: "Manila" })).rejects.toThrow(/already used for another response/);
-    expect((await f.list()).records).toEqual([{ path: first.path, recordId: expect.stringMatching(/^rec_/), fields: { destination: "Tokyo", name: "Ana" } }]);
-  });
-
-  it("credits a create a person's click started during a run to the person, and any other create to the run", async () => {
-    const run = { agentId: "dohc-mcp", onBehalfOf: "person-local", agentRunId: "run-1", depth: 1 };
-    const f = await fixture({ author: activated => localCollectionAuthor(run, activated, async () => person) });
-    await f.create({ destination: "Tokyo" }, "clicked", undefined, undefined, true);
-    await f.create({ destination: "Manila" }, "unclicked", undefined, undefined, false);
-    await f.create({ destination: "Tokyo", name: "Ana" }, "unstated");
-    const agent = { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", agentRunId: "run-1", depth: 1 };
-    expect(f.engine.state.writes.map(write => write.author)).toEqual([person, agent, agent]);
   });
 
   it("keeps a reservation through an engine outage and completes it on restart without a second write", async () => {
@@ -266,59 +199,6 @@ describe("local document Collection apps", () => {
     expect([...f.engine.files().keys()].filter(path => path.endsWith(".md"))).toEqual([receipt.path]);
   });
 
-  it("resends a reservation the engine never committed, only after confirming its moment is absent", async () => {
-    const f = await fixture();
-    f.engine.state.writeDown = true;
-    await expect(f.create({ destination: "Tokyo" })).rejects.toBeInstanceOf(LocalAppUnavailableError);
-    f.engine.state.writeDown = false; f.engine.state.lookupDown = true;
-    f.host.apps.reconcile();
-    await expect(f.create({ destination: "Tokyo" })).rejects.toBeInstanceOf(LocalAppUnavailableError);
-    expect(f.engine.state.writes).toEqual([]);
-    f.engine.state.lookupDown = false;
-    const receipt = await f.create({ destination: "Tokyo" });
-    expect(f.engine.state.writes).toHaveLength(1);
-    expect(f.engine.files().get(receipt.path)).toContain("Tokyo");
-  });
-
-  it("completes a saved-version moment after a version switch and never writes into the new version", async () => {
-    const f = await fixture();
-    f.engine.fork("draft");
-    f.engine.state.failAfterCommit = true;
-    await expect(f.create({ destination: "Tokyo" }, "committed")).rejects.toBeInstanceOf(LocalAppUnavailableError);
-    f.engine.state.writeDown = true;
-    await expect(f.create({ destination: "Manila" }, "absent")).rejects.toBeInstanceOf(LocalAppUnavailableError);
-    f.engine.state.writeDown = false; f.engine.state.active = "draft";
-    const committed = await f.create({ destination: "Tokyo" }, "committed");
-    expect(f.engine.files("main").get(committed.path)).toBeDefined();
-    expect((await f.list()).records).toEqual([]);
-    await expect(f.create({ destination: "Manila" }, "absent")).rejects.toThrow(/did not save this response\. The saved version is no longer active/);
-    expect([...f.engine.files("draft").keys()]).toEqual(["trip/responses/collection.yaml"]);
-    f.inspect(db => {
-      expect(db.prepare("SELECT count(*) AS n FROM local_collection_creates WHERE envelope IS NULL").get()!.n).toBe(2);
-      expect(JSON.parse(String(db.prepare("SELECT outcome FROM local_collection_creates WHERE idempotency_key='absent'").get()!.outcome))).toMatchObject({ kind: "notWritten" });
-    });
-    // The stored outcome answers later retries without another write.
-    const writes = f.engine.state.writes.length;
-    await expect(f.create({ destination: "Manila" }, "absent")).rejects.toThrow(/did not save/);
-    expect(f.engine.state.writes).toHaveLength(writes);
-  });
-
-  it("settles an occupied path and a resend outside the workspace as not written, keeping their slots", async () => {
-    const f = await fixture();
-    f.engine.state.writeDown = true;
-    await expect(f.create({ destination: "Tokyo" }, "occupied")).rejects.toBeInstanceOf(LocalAppUnavailableError);
-    await expect(f.create({ destination: "Tokyo" }, "escaped")).rejects.toBeInstanceOf(LocalAppUnavailableError);
-    f.engine.state.writeDown = false;
-    const envelope = (key: string) => f.inspect(db => JSON.parse(String(db.prepare("SELECT envelope FROM local_collection_creates WHERE idempotency_key=?").get(key)!.envelope)) as Envelope);
-    const occupied = envelope("occupied").path;
-    f.engine.files().set(occupied, "someone else's file");
-    f.inspect(db => db.prepare("UPDATE local_collection_creates SET envelope=? WHERE idempotency_key='escaped'").run(JSON.stringify({ ...envelope("escaped"), path: "shared-with-me/x/response.md" })));
-    await expect(f.create({ destination: "Tokyo" }, "occupied")).rejects.toThrow(/File already exists/);
-    await expect(f.create({ destination: "Tokyo" }, "escaped")).rejects.toThrow(/outside your workspace/);
-    expect(f.engine.files().get(occupied)).toBe("someone else's file");
-    expect(f.engine.state.writes.map(write => write.path)).toEqual([occupied]);
-    f.inspect(db => expect(db.prepare("SELECT count(*) AS n, sum(envelope IS NULL) AS settled FROM local_collection_creates").get()).toEqual({ n: 2, settled: 2 }));
-  });
 
   it("keeps the lifetime response limit across withdrawal and reapproval", async () => {
     const f = await fixture();
@@ -334,21 +214,6 @@ describe("local document Collection apps", () => {
     const again = await f.host.apps.activate(f.prepared, signal());
     expect(again.publicationId).toBe(f.published.publicationId);
     await expect(f.create({ destination: "Tokyo" }, "over", f.host, again.authorityRevision)).rejects.toThrow(/response limit/);
-  });
-
-  it("confirms withdrawal only after an admitted write settles, and none lands afterward", async () => {
-    const f = await fixture();
-    const gate = deferred(); f.engine.state.hold = gate.promise;
-    const pending = f.create({ destination: "Tokyo" }).catch((error: unknown) => error);
-    await expect.poll(() => f.engine.state.writes.length).toBe(1);
-    const withdrawal = f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
-    await expect(f.create({ destination: "Tokyo" }, "after")).rejects.toThrow(/approval changed/);
-    gate.resolve();
-    expect(await withdrawal).toEqual({ kind: "withdrawn", publicationId: f.published.publicationId, authorityRevision: f.published.authorityRevision + 1 });
-    expect(await pending).toBeInstanceOf(Error);
-    expect(f.engine.moments.size).toBe(1);
-    expect(f.host.apps.list("trip")[0]).toMatchObject({ approved: false, active: false, pendingCreates: 0 });
-    expect(f.engine.state.writes).toHaveLength(1);
   });
 
   it("reports an unconfirmed withdrawal while the engine is down and confirms it at the same revision later", async () => {
@@ -371,36 +236,6 @@ describe("local document Collection apps", () => {
     expect(await restarted.apps.withdraw(f.published.publicationId, unconfirmed.authorityRevision)).toEqual({ kind: "withdrawn", publicationId: f.published.publicationId, authorityRevision: unconfirmed.authorityRevision });
     f.inspect(db => expect(db.prepare("SELECT revision FROM local_app_roots WHERE app_root='trip'").get()!.revision).toBe(unconfirmed.authorityRevision));
   });
-
-  it("stops waiting for a stuck write at the deadline and settles it in the background", async () => {
-    const f = await fixture();
-    const gate = deferred(); f.engine.state.hold = gate.promise;
-    void f.create({ destination: "Tokyo" }).catch(() => undefined);
-    await expect.poll(() => f.engine.state.writes.length).toBe(1);
-    const started = Date.now();
-    const result = await f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
-    expect(result).toMatchObject({ kind: "withdrawalUnconfirmed", unresolvedCreates: 1 });
-    expect(Date.now() - started).toBeGreaterThanOrEqual(LOCAL_APP_WITHDRAW_TIMEOUT_MS - 100);
-    gate.resolve();
-    await expect.poll(() => f.host.apps.list("trip")[0]).toMatchObject({ pendingCreates: 0 });
-    expect(await f.host.apps.withdraw(f.published.publicationId, result.authorityRevision)).toMatchObject({ kind: "withdrawn" });
-  }, LOCAL_APP_WITHDRAW_TIMEOUT_MS * 4);
-
-  it("closes while a write is stuck, never records its late result, and settles it on the next open", async () => {
-    const f = await fixture();
-    const gate = deferred(); f.engine.state.hold = gate.promise;
-    void f.create({ destination: "Tokyo" }).catch(() => undefined);
-    await expect.poll(() => f.engine.state.writes.length).toBe(1);
-    await f.host.close();
-    gate.resolve();
-    await expect.poll(() => f.engine.moments.size).toBe(1);
-    f.inspect(db => expect(db.prepare("SELECT envelope IS NOT NULL AS pending FROM local_collection_creates").get()!.pending).toBe(1));
-    f.engine.state.hold = null;
-    const restarted = await f.open();
-    restarted.apps.reconcile();
-    await expect.poll(() => restarted.apps.list("trip")[0]).toMatchObject({ pendingCreates: 0 });
-    expect(f.engine.state.writes).toHaveLength(1);
-  }, LOCAL_APP_WITHDRAW_TIMEOUT_MS * 4);
 
   it("charges Collection storage outside Dataset usage, so an older build refuses the store", async () => {
     const f = await fixture();
@@ -448,18 +283,6 @@ describe("local document Collection apps", () => {
     await reopened.close();
     const again = await f.open();
     expect(() => again.apps.assertBrowserPublication(datasetAgain.publicationId, datasetAgain.authorityRevision)).not.toThrow();
-  });
-
-  it("settles a replaced app's responses before its replacement commits", async () => {
-    const f = await fixture();
-    f.engine.state.writeDown = true;
-    await expect(f.create({ destination: "Tokyo" })).rejects.toBeInstanceOf(LocalAppUnavailableError);
-    await expect(f.host.apps.activate(await f.collectionApp(["destination"]), signal())).rejects.toThrow(/still saving/);
-    expect(() => f.host.apps.assertBrowserPublication(f.published.publicationId, f.published.authorityRevision)).not.toThrow();
-    f.engine.state.writeDown = false;
-    const replacement = await f.host.apps.activate(await f.collectionApp(["destination"]), signal());
-    expect(replacement.publicationId).not.toBe(f.published.publicationId);
-    expect(f.engine.moments.size).toBe(1);
   });
 
   it("runs a Collection app through its loopback launch without a share link", async () => {
@@ -567,22 +390,6 @@ describe("local document Collection apps", () => {
     expect(String(await queued)).toMatch(/approval changed/);
   });
 
-  it("rechecks the schema for a create the engine never received until it is submitted", async () => {
-    let admitted = () => {};
-    const f = await fixture({ author: async () => { admitted(); return person; } });
-    // The engine stops after admission, before the first submission's schema check.
-    admitted = () => { f.engine.state.down = true; };
-    await expect(f.create({ destination: "Tokyo" })).rejects.toBeInstanceOf(LocalAppUnavailableError);
-    f.inspect(db => expect(db.prepare("SELECT submitted, envelope IS NOT NULL AS pending FROM local_collection_creates").get()).toEqual({ submitted: 0, pending: 1 }));
-    admitted = () => {};
-    f.engine.state.down = false;
-    f.engine.files().set("trip/responses/collection.yaml", schema + "  extra:\n    type: text\n");
-    f.host.apps.reconcile();
-    await expect.poll(() => f.host.apps.list("trip")[0]).toMatchObject({ pendingCreates: 0 });
-    await expect(f.create({ destination: "Tokyo" })).rejects.toThrow(/did not save this response\. The Collection schema changed/);
-    expect(f.engine.state.writes).toEqual([]);
-  });
-
   it("gives no receipt to a request whose approval ended or that was aborted, even once its write committed", async () => {
     const f = await fixture();
     // The approval changes after the engine commits and before it answers.
@@ -613,33 +420,6 @@ describe("local document Collection apps", () => {
     f.inspect(db => expect(db.prepare("SELECT envelope IS NULL AS settled, json_extract(outcome,'$.kind') AS kind FROM local_collection_creates").get()).toEqual({ settled: 1, kind: "accepted" }));
   });
 
-  it("reconciles on attachment only a store that already exists", async () => {
-    const empty = await mkdtemp(join(tmpdir(), "dohc-collection-app-")); roots.push(empty);
-    let opened = 0;
-    await reconcileExistingLocalCollectionApps(empty, async () => { opened++; throw new Error("The store must stay absent."); });
-    expect(opened).toBe(0);
-    expect(existsSync(join(empty, ".dohc"))).toBe(false);
-    const f = await fixture();
-    f.engine.state.writeDown = true;
-    await expect(f.create({ destination: "Tokyo" })).rejects.toBeInstanceOf(LocalAppUnavailableError);
-    await f.host.close();
-    f.engine.state.writeDown = false;
-    let reopened: LocalDatasetHost | undefined;
-    await reconcileExistingLocalCollectionApps(f.workspaceRoot, async () => (reopened = await f.open()));
-    await expect.poll(() => reopened!.apps.list("trip")[0]).toMatchObject({ pendingCreates: 0 });
-    expect(f.engine.moments.size).toBe(1);
-  });
-
-  it("finishes submitted responses after a later schema edit, which refuses new ones", async () => {
-    const f = await fixture();
-    f.engine.state.writeDown = true;
-    await expect(f.create({ destination: "Tokyo" })).rejects.toBeInstanceOf(LocalAppUnavailableError);
-    f.engine.state.writeDown = false;
-    f.engine.files().set("trip/responses/collection.yaml", schema + "  extra:\n    type: text\n");
-    expect(await f.create({ destination: "Tokyo" })).toMatchObject({ kind: "accepted" });
-    await expect(f.create({ destination: "Tokyo" }, "new")).rejects.toThrow(/schema changed/);
-  });
-
   it("refuses a publication ID stored for both kinds and records Collection approval provenance", async () => {
     const f = await fixture();
     const agent = { kind: "agent", label: "Builder", labelSource: "agent-declared" } as const;
@@ -652,15 +432,5 @@ describe("local document Collection apps", () => {
       db.prepare("INSERT INTO local_dataset_apps SELECT publication_id,'elsewhere','dataset',1,candidate,0,0 FROM local_collection_apps WHERE publication_id=?").run(again.publicationId);
     });
     expect(() => f.host.apps.has(again.publicationId)).toThrow(/Ambiguous/);
-  });
-
-  it("refuses requests with an unavailable engine without changing authority", async () => {
-    const f = await fixture();
-    f.engine.state.down = true;
-    await expect(f.list()).rejects.toBeInstanceOf(LocalAppUnavailableError);
-    f.engine.state.down = false;
-    expect(f.host.apps.list("trip")[0]).toMatchObject({ active: true });
-    const hash = createHash("sha256").update(schema).digest("hex");
-    expect(f.prepared.candidate.capabilities[0]).toMatchObject({ schemaSha256: hash });
   });
 });

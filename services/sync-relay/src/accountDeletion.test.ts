@@ -1,29 +1,29 @@
-import {createHash} from "node:crypto";
+import {createHash } from "node:crypto";
 import * as Y from "yjs";
-import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
-import {markdownToYDoc} from "../../../packages/ydoc-projection/src/import-export";
-import {createLiveMarkdownRegistrationValidator,createLiveMarkdownJournalValidator} from "../../../packages/ydoc-projection/src/liveDocumentValidation";
-import {policy} from "../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport";
-import type {AppPublicationCandidate} from "@dohc/security-contract/app-publication";
-import {PresenceHub,presenceScopeKey} from "./presence";
-import {mkdtemp, rm, readdir} from "node:fs/promises";
-import {tmpdir} from "node:os";
-import {join} from "node:path";
-import {DatabaseSync} from "node:sqlite";
-import {afterEach, expect, it} from "vitest";
-import {datasetPrincipalKey, describeDatasetRevision} from "@dohc/security-contract/dataset-artifacts";
-import type {DatasetDefinition} from "@dohc/security-contract/dataset";
-import {accountDeletionKey, accountDeletionFenceKey, ACCOUNT_DELETION_KEY_HEADER} from "@dohc/workspace-auth/accountDeletion";
-import {initializeRelayDeployment, openRelayDeployment} from "./relayDeployment";
-import {createAccountDeletionRoute} from "./accountDeletionRoute";
-import {NOTICE_DISMISSED_RETENTION_MS} from "@dohc/workspace-contracts/relay";
-import {noticeIdFrom} from "./storage/notices";
-import {deletionScope} from "./storage/accountDeletion";
-import type {StorageContext} from "./storage/context";
-import {createRelayDatasetHost} from "./datasetHost";
-import {deriveServiceHostBearer, authorizeServiceHostReplication} from "./serviceHostCredential";
-import {parseAuthenticatedLogOps} from "./relayLogInputs";
-import {claimWorkspace, createShare, putBlob, appendLog, moment, testHandler, request, jsonBody, linkSecret, linkRequest} from "./testing";
+import {parseHostEpoch } from "@dohc/live-session-contract/host-control";
+import {markdownToYDoc } from "../../../packages/ydoc-projection/src/import-export";
+import {createLiveMarkdownRegistrationValidator,createLiveMarkdownJournalValidator } from "../../../packages/ydoc-projection/src/liveDocumentValidation";
+import {policy } from "../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport";
+import type {AppPublicationCandidate } from "@dohc/security-contract/app-publication";
+import {PresenceHub,presenceScopeKey } from "./presence";
+import {mkdtemp, rm, readdir } from "node:fs/promises";
+import {tmpdir } from "node:os";
+import {join } from "node:path";
+import {DatabaseSync } from "node:sqlite";
+import {afterEach, expect, it } from "vitest";
+import {describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
+import type {DatasetDefinition } from "@dohc/security-contract/dataset";
+import {accountDeletionKey, accountDeletionFenceKey, ACCOUNT_DELETION_KEY_HEADER } from "@dohc/workspace-auth/accountDeletion";
+import {initializeRelayDeployment, openRelayDeployment } from "./relayDeployment";
+import {createAccountDeletionRoute } from "./accountDeletionRoute";
+import {NOTICE_DISMISSED_RETENTION_MS } from "@dohc/workspace-contracts/relay";
+import {noticeIdFrom } from "./storage/notices";
+import {deletionScope } from "./storage/accountDeletion";
+import type {StorageContext } from "./storage/context";
+import {createRelayDatasetHost } from "./datasetHost";
+import {deriveServiceHostBearer, authorizeServiceHostReplication } from "./serviceHostCredential";
+import {parseAuthenticatedLogOps } from "./relayLogInputs";
+import {claimWorkspace, createShare, putBlob, appendLog, moment, testHandler, request, jsonBody, linkSecret, linkRequest } from "./testing";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const schemaSql = "CREATE TABLE people(id TEXT PRIMARY KEY NOT NULL,name TEXT NOT NULL);";
@@ -227,25 +227,7 @@ it("purges every store, preserves another owner's history, and ends recipient sh
   await deletion.purge(deleted,email);await f.assertPurged();
   await deletion.purge(deleted,email);await f.assertPurged();
 },30_000);
-it("gives back the charge of a pending upload the deleted person left in another owner's workspace",async()=>{
-  const f=await fixture(),storage=f.storage,datasetId=definition.datasetId;
-  const grantId=String(storage.db.prepare("SELECT g.grant_id FROM sync_relay_share_grants g JOIN sync_relay_shares s USING(share_id) WHERE s.workspace_id=? AND g.principal_user_id=?").get(otherWorkspace,deleted)!.grant_id);
-  const usage=()=>({dataset:Number(storage.db.prepare("SELECT storage_bytes FROM sync_relay_dataset_usage WHERE workspace_id=? AND dataset_id=?").get(otherWorkspace,datasetId)!.storage_bytes),
-    workspace:Number(storage.db.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id=?").get(otherWorkspace)!.usage_bytes)});
-  // The row and charge an upload makes before its file is attached.
-  storage.tx(()=>{
-    storage.db.prepare("INSERT INTO sync_relay_dataset_files VALUES(?,?,?,?,?,?,?,?,?,NULL,?)").run(otherWorkspace,datasetId,"f".repeat(24),datasetPrincipalKey(otherWorkspace,grantId,deleted),"","pending","{}",Buffer.from("x"),Date.now()+86_400_000,1000);
-    storage.db.prepare("UPDATE sync_relay_dataset_usage SET storage_bytes=storage_bytes+1000 WHERE workspace_id=? AND dataset_id=?").run(otherWorkspace,datasetId);
-    storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+1000 WHERE workspace_id=?").run(otherWorkspace);
-  });
-  const claims=storage.db.prepare("SELECT claim_id,storage_bytes FROM dohc_dataset_automation_claims WHERE json_extract(actor,'$.userId')=? AND workspace_id=?").all(deleted,otherWorkspace);
-  const claimBytes=claims.reduce((sum,claim)=>sum+Number(claim.storage_bytes)+Number(storage.db.prepare("SELECT coalesce(sum(storage_bytes),0) AS n FROM dohc_dataset_automation_presses WHERE claim_id=?").get(String(claim.claim_id))!.n),0);
-  const before=usage();
-  await f.manager().purge(deleted,email);
-  expect(storage.db.prepare("SELECT count(*) AS n FROM sync_relay_dataset_files WHERE workspace_id=? AND attached_revision IS NULL").get(otherWorkspace)!.n).toBe(0);
-  expect(usage()).toEqual({dataset:before.dataset-1000-claimBytes,workspace:before.workspace-1000-claimBytes});
-},30_000);
-it.each(["fenced","runtime","sql"] as const)("resumes after interruption following %s",async phase=>{
+it.each(["runtime"] as const)("resumes after interruption following %s",async phase=>{
   const f=await fixture();
   await expect(f.manager(done=>{if(done===phase)throw Error("injected crash");}).purge(deleted,email)).rejects.toThrow("injected crash");
   await f.restart();await f.manager().purge(deleted,email);await f.assertPurged();

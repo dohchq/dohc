@@ -763,7 +763,8 @@ export function registerStopAndRestoreIpc<
         await automations.savePendingRestore({id: pending.id, session: pending.session});
       }
       return UndoStopAndRestoreResult.parse({ files, ...(publishedRecoveries.length ? {recovered: publishedRecoveries} : {}), errorMessage: null });
-    } catch (error) {
+    } catch (caught) {
+      let error = caught;
       try { await receipts.flush(); }
       catch (flushError) { error = flushError; }
       return UndoStopAndRestoreResult.parse({ files, ...(publishedRecoveries.length ? {recovered: publishedRecoveries} : {}), errorMessage: (error instanceof Error ? error.message : String(error)).slice(0, 2_000) });

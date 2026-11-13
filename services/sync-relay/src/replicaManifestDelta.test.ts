@@ -308,7 +308,7 @@ it.each(["sha","path","kind","lineage","generation","add","remove"])("R1: classi
   if(change==="kind")Object.assign(next,{contentKind:"binary"});
   if(change==="lineage")Object.assign(next,{lineageClaimId:sha256("lineage"),restoreGeneration:1});
   if(change==="generation")Object.assign(next,{lineageClaimId:sha256("lineage"),restoreGeneration:2});
-  if(change==="add")next.objectId="new",next.path="docs/new.md";
+  if(change==="add"){next.objectId="new";next.path="docs/new.md";}
   f.update({files:change==="remove"?[]:[next],removed:change==="remove"?[old]:[],texts:change==="sha"?[{sha256:sha256("a"),text:"a"}]:[]});
   try {await f.supervisor.activate("w");expect(save.mock.calls.length).toBe(change==="sha"?0:1);}
   finally {await f.supervisor.close();}

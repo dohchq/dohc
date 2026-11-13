@@ -276,10 +276,6 @@ function pathBasename(path: string): string {
   return path === "" ? "" : path.split("/").at(-1) ?? path;
 }
 
-function sitePath(root: string, child: string): string {
-  return root === "" ? child : `${root}/${child}`;
-}
-
 function hasIgnoredSiteSegment(path: string): boolean {
   const segments = path.replaceAll("\\", "/").toLowerCase().split("/");
   return segments.some((segment, index) => {
