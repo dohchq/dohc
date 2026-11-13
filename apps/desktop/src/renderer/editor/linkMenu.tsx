@@ -318,7 +318,6 @@ export function LinkMenu({
     setInvalid(false);
     const frame = requestAnimationFrame(() => inputRef.current?.select());
     return () => cancelAnimationFrame(frame);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
 
   useEffect(() => {

@@ -31,7 +31,6 @@ function callHandlePaste(
   view: Parameters<NonNullable<LinkPlugin["props"]["handlePaste"]>>[0],
   event: ClipboardEvent,
 ): boolean | void | undefined {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return plugin.props.handlePaste?.call(plugin, view, event, undefined as any);
 }
 
@@ -140,7 +139,6 @@ describe("openLinkExternally", () => {
     const openExternalUrl = vi.fn().mockRejectedValue(error);
     vi.mocked(bridge).mockReturnValue({
       openExternalUrl,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any);
 
     try {
@@ -352,7 +350,6 @@ describe("makeLinkMenuPlugin: click", () => {
     const openExternalUrl = vi.fn().mockResolvedValue(undefined);
     vi.mocked(bridge).mockReturnValue({
       openExternalUrl,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any);
 
     const editor = makeEditor(
@@ -417,7 +414,6 @@ describe("makeLinkMenuPlugin: click", () => {
     const openExternalUrl = vi.fn().mockResolvedValue(undefined);
     vi.mocked(bridge).mockReturnValue({
       openExternalUrl,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any);
 
     const editor = makeEditor(
@@ -451,7 +447,6 @@ describe("makeLinkMenuPlugin: click", () => {
     const openExternalUrl = vi.fn().mockResolvedValue(undefined);
     vi.mocked(bridge).mockReturnValue({
       openExternalUrl,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any);
 
     const editor = makeEditor('<p><a href="mailto:hi@dohc.ai">email</a></p>');
@@ -478,7 +473,6 @@ describe("makeLinkMenuPlugin: click", () => {
     const openExternalUrl = vi.fn().mockResolvedValue(undefined);
     vi.mocked(bridge).mockReturnValue({
       openExternalUrl,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any);
 
     const editor = makeEditor(
@@ -616,7 +610,6 @@ describe("makeLinkMenuPlugin: click", () => {
     const openExternalUrl = vi.fn().mockResolvedValue(undefined);
     vi.mocked(bridge).mockReturnValue({
       openExternalUrl,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any);
     const editor = makeEditor(
       '<p><a href="https://example.com/plan?mode=preview#risks">plan</a></p>',
@@ -676,7 +669,6 @@ describe("makeLinkMenuPlugin: click", () => {
     const openExternalUrl = vi.fn().mockResolvedValue(undefined);
     vi.mocked(bridge).mockReturnValue({
       openExternalUrl,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any);
 
     const editor = makeEditor(`<p><a href="${href}">target</a></p>`);
@@ -728,7 +720,6 @@ describe("makeLinkMenuPlugin: click", () => {
     const openExternalUrl = vi.fn().mockResolvedValue(undefined);
     vi.mocked(bridge).mockReturnValue({
       openExternalUrl,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any);
 
     const editor = makeEditor("<p>network path</p>");
@@ -765,7 +756,6 @@ describe("makeLinkMenuPlugin: click", () => {
     const openExternalUrl = vi.fn().mockResolvedValue(undefined);
     vi.mocked(bridge).mockReturnValue({
       openExternalUrl,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any);
 
     const editor = makeEditor("<p>bad</p>");
@@ -843,7 +833,6 @@ describe("makeLinkMenuPlugin: click", () => {
     const openExternalUrl = vi.fn().mockResolvedValue(undefined);
     vi.mocked(bridge).mockReturnValue({
       openExternalUrl,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any);
 
     const editor = makeEditor('<p><a href="#risks">risks</a></p>');
@@ -899,7 +888,6 @@ describe("makeLinkMenuPlugin: click", () => {
     const openExternalUrl = vi.fn().mockResolvedValue(undefined);
     vi.mocked(bridge).mockReturnValue({
       openExternalUrl,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any);
 
     const editor = makeEditor(
@@ -938,7 +926,6 @@ describe("makeLinkMenuPlugin: click", () => {
     const openExternalUrl = vi.fn().mockResolvedValue(undefined);
     vi.mocked(bridge).mockReturnValue({
       openExternalUrl,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any);
 
     // Tiptap strips this scheme while parsing normal document input. Use a

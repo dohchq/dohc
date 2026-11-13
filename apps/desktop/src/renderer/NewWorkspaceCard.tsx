@@ -84,7 +84,6 @@ export function NewWorkspaceCard(props: {
     nameField.current?.select();
     suggestDefaultRoot();
     // rootRequests is a stable ref holder.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // A new suggestion stays selected in the focused field.

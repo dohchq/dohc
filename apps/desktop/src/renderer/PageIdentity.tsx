@@ -245,7 +245,6 @@ export function PageIdentity(props: PageIdentityProps) {
   const locked = useMemo(
     () => (ydoc ? frontmatterEditsRefused(ydoc) : markdownFrontmatterEditsRefused(body)),
     // ydocRevision re-reads the document after a shared write.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [body, ydoc, ydocRevision],
   );
   const readOnly = (props.readOnly ?? false) || opening || locked;
@@ -254,7 +253,6 @@ export function PageIdentity(props: PageIdentityProps) {
     if (ydoc) return mapToObject(ydoc.getMap(FRONTMATTER_FIELD));
     return parseFrontmatter(body).meta;
     // ydocRevision re-reads the observed map after a shared write.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [body, ydoc, ydocRevision]);
 
   const title = displayFrontmatterValue(meta.title);
@@ -332,7 +330,6 @@ export function PageIdentity(props: PageIdentityProps) {
       window.removeEventListener("focus", elsewhere);
     };
     // endComposition reads only refs and state setters.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [blurHeld]);
   useLayoutEffect(() => {
     const caret = titleCaret.current;

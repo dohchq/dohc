@@ -256,14 +256,12 @@ export function StopAndRestoreDialog({
     // A run started as the dialog opened keeps its own state.
     const listed = (list: StopTarget[]) =>
       setState((current) => current.kind === "loading" ? { kind: "choose", targets: list } : { ...current, targets: list });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId]);
 
   // A Try again from the Notices row runs as the dialog opens again.
   useEffect(() => {
     if (start === "stop") void stop();
     if (start === "undo") void undo();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const targets = state.kind === "loading" ? [first] : state.targets;

@@ -422,7 +422,6 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
       }
     }
     // closeWarning is read once, at the moment the count reaches zero.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [warningOpen, liveCount]);
   useEffect(() => {
     if (!warningVisible) return;
@@ -612,7 +611,6 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
     // rearmGuard and hasUnapprovedDrafts read refs and the module store, never
     // render state, so the first closure stays correct; the handlers register
     // once.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   return (
     <>

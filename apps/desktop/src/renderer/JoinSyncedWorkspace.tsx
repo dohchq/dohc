@@ -102,7 +102,6 @@ export function JoinSyncedWorkspace(props: {
       sessionRef.next();
     };
     // Session check runs once on mount; CloudLogin's onConnected re-runs it.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // The passphrase field appears after a join that needed it, with its error.

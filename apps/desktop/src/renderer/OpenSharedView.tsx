@@ -152,7 +152,6 @@ export function OpenSharedView(props: {
       suggestRequestRef.next();
     };
     // Session check runs once on mount; CloudLogin's onConnected re-runs it.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const shareCode = props.resolvedShare?.shareCode ?? code.trim();
@@ -211,7 +210,6 @@ export function OpenSharedView(props: {
         if (suggestRequestRef.isCurrent(request)) setSettledSuggestionShareId(shareId);
       });
     // suggestRequestRef is a stable ref holder.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mounting, shareId]);
 
   const folder =

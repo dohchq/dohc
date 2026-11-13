@@ -192,7 +192,6 @@ export function OwnerRestoreDialog({workspaceId, path, operationId, onClose, onB
     void (operationId === undefined ? load(token) : resume(token, operationId))
       .catch(error => {if (current(token)) setState({kind: "error", message: ipcErrorMessage(error)});})
       .finally(() => {if (current(token)) {running.current = false; setBusy(false);}});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId, path, operationId]);
   async function review(token: number) {
     const saved = await bridge().ownerRestore({workspaceId, action: "status", operationId: operation.current!.operationId});

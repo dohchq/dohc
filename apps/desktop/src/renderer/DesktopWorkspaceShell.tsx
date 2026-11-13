@@ -5618,7 +5618,6 @@ export function DesktopWorkspaceShell(props: {
     });
     shareRefreshFlight.current = { admission: workspaceAdmission, promise, trigger };
     return promise;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shareView, shareViewEnded, shareViewDamaged, workspaceId, workspaceIsReady, workspaceAdmission, reloadShareSkipped]);
   refreshShareViewRef.current = refreshShareView;
   const refreshAfterLiveReadOnly = useCallback(() => void refreshShareViewRef.current(), []);
@@ -5735,7 +5734,6 @@ export function DesktopWorkspaceShell(props: {
     } finally {
       if (!workspaceAdmission.superseded && owned === myShareChangeToken.current) setShareChangesSubmitting(false);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId, workspaceAdmission, reloadMyShareChanges]);
   useShareDirectWrites({
     workspaceId,
@@ -5772,7 +5770,6 @@ export function DesktopWorkspaceShell(props: {
       } finally {
         if (owned === myShareChangeToken.current) setShareChangesSubmitting(false);
       }
-      // eslint-disable-next-line react-hooks/exhaustive-deps
     },
     [workspaceId, reloadMyShareChanges],
   );

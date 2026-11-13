@@ -850,7 +850,6 @@ export function VersionMergeDialog(props: {
   // A notice's Try again merges once, as the dialog opens.
   useEffect(() => {
     if (props.runOnOpen) void runMerge();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // A failure takes focus to Merge into Main, which merges again. The button

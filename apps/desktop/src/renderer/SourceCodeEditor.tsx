@@ -225,7 +225,6 @@ export function SourceCodeEditor(props: {
     };
     // The editor is intentionally created once; reactive pieces are
     // reconfigured through compartments/effects below.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
