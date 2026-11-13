@@ -107,7 +107,7 @@ it("shows a document whose live start keeps failing, with the server's reason to
   await user.click(within(failing).getByRole("button", {name: "Copy the server's reason"}));
   expect(await navigator.clipboard.readText()).toBe(line);
   expect(actions("docs/failing.md").filter(name => name?.endsWith("live editing"))).toEqual(["Resume live editing", "Stop live editing"]);
-  await user.click(within(failing).getByRole("button", {name: "Resume live editing"}));
+  await user.click(within(failing).getByRole("button", {name: "Resume live editing for docs/failing.md"}));
   expect(h.resume).toHaveBeenCalledWith("ws-1", "docs/failing.md");
 });
 

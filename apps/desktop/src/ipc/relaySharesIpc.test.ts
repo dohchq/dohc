@@ -880,7 +880,11 @@ describe("owner live document enrollment", () => {
     await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "live.md"})).rejects.toThrow();
   });
 
-  it.each(["status", "reason"] as const)("keeps known active and retired rows beside an unknown %s, using the last raw cursor", async field => {
+  // A status this build doesn't know leaves nothing to show, so its row is dropped. A reason it doesn't know leaves the row by its status alone.
+  it.each([
+    ["drops a row with an unknown status", "status", []],
+    ["keeps a row with an unknown reason as a row by its status", "reason", [{path: "unknown.md", objectId: "unknown", status: "ready", canResume: false}]],
+  ] as const)("%s, beside the known active and retired rows, using the last raw cursor", async (_name, field, kept) => {
     const h = harness();
     const unknown = (status: string) => ({path: "unknown.md", objectId: "unknown", status, [field]: "future-value"});
     h.request.mockImplementation(async (_credentials, path) => path.includes("retired=1")
@@ -889,6 +893,7 @@ describe("owner live document enrollment", () => {
         {path: "held.md", objectId: "held", status: "unavailable", reason: "conflict-parent-withheld"}]});
     await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId})).resolves.toEqual({documents: [
       {path: "old.md", objectId: "old", status: "retired", canResume: true},
+      ...kept,
       {path: "live.md", objectId: "live", status: "ready", canResume: false},
       {path: "held.md", objectId: "held", status: "unavailable", reason: "conflict-parent-withheld", canResume: false},
     ], nextCursor: "unknown.md"});
