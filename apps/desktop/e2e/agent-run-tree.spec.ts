@@ -15,8 +15,6 @@ import {
   type TempWorkspace,
 } from "./helpers/workspace";
 
-// Everything an agent run starts ends with the run: when the agent exits, and
-// when dohc is killed outright, as a crash or `taskkill /F` without /T kills it.
 test.skip(process.platform !== "win32", "Windows only for now");
 
 const fakeRunner = resolve(desktopRoot, "e2e/fixtures/fakeChatRunner.mjs");

@@ -114,7 +114,6 @@ test("settings search finds matching sections and shows an empty result", async 
   let desktop: LaunchedDesktopApp | null = null;
 
   try {
-    // Searching for "mcp" opens the Agents section, which detects agent tools.
     desktop = await openWorkspace(temp, await installFakeAgentTools(temp));
     await openSettings(desktop.page);
     await desktop.page.getByTestId(desktopPins.settingsSearch).fill("theme");
@@ -160,8 +159,6 @@ test("MCP config copies the canonical workspace path", async () => {
     desktop = await openWorkspace(temp, await installFakeAgentTools(temp));
     await openSettings(desktop.page);
     await desktop.page.getByTestId(settingsNavPin("agents")).click();
-    // Each agent you run copies its own config, with the workspace's real
-    // path in forward-slash form and the agent's id.
     const canonicalRootPath = canonicalWorkspaceRoot(temp.rootPath);
     const page = desktop.page;
     await page.getByTestId("agent-add").click();
@@ -198,8 +195,6 @@ test("corrupt settings recover with a warning and a usable dialog", async () => 
   let desktop: LaunchedDesktopApp | null = null;
 
   try {
-    // Intentionally malformed JSON verifies tolerant recovery from a corrupt
-    // user settings file.
     await writeFile(join(temp.homeDir, "dohc-settings.json"), "{not json");
     desktop = await openWorkspace(temp);
     await openSettings(desktop.page);
@@ -211,7 +206,6 @@ test("corrupt settings recover with a warning and a usable dialog", async () => 
   }
 });
 
-// The surfaces around open work that a theme change repaints.
 const THEMED_SURFACES = {
   "active tab": '[data-testid="editor-tabs"] [role="tab"][aria-selected="true"]',
   "other tab": '[data-testid="editor-tabs"] [role="tab"][aria-selected="false"]',
@@ -250,8 +244,6 @@ async function watchNextThemeChange(page: Page): Promise<void> {
   }, THEMED_SURFACES);
 }
 
-// The first frame after the change already has the colors the window keeps
-// once every transition has ended.
 async function expectThemeChangeInOneFrame(page: Page): Promise<void> {
   const first = await page.evaluate(
     () => (window as Window & { themeWatch?: ThemeWatch }).themeWatch!.firstFrame,
@@ -331,7 +323,6 @@ test("a theme change repaints open tabs and the editor in one frame", async () =
       scrollTop: 600,
       selection: "export const limit40 = 40;",
     });
-    // A transition already on screen keeps running through the change.
     await page.evaluate(async () => {
       const element = document.body.appendChild(document.createElement("div"));
       element.id = "running-transition";
@@ -367,10 +358,8 @@ test("attachment location setting persists across reopen", async () => {
     await desktop.page.getByTestId(settingsNavPin("files")).click();
     await expect(desktop.page.getByTestId(settingsSectionPin("files"))).toBeVisible();
 
-    // The folder name can be edited for the default (per-document) location.
     await expect(desktop.page.getByTestId("attachment-folder-input")).toBeEnabled();
     await desktop.page.getByTestId("attachment-location-same-folder").click();
-    // Beside the document uses no folder, so its name cannot be edited.
     await expect(desktop.page.getByTestId("attachment-folder-input")).toBeDisabled();
 
     await closeSettings(desktop.page);

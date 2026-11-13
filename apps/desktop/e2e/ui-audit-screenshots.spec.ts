@@ -217,7 +217,6 @@ test("@ui-audit capture baseline screenshots", async () => {
     desktop = await launchDesktopApp({ workspace: temp });
     const page = desktop.page;
 
-    // 01 — first-run surface (before opening the workspace)
     const openFolder = page
       .getByTestId("workspace-manager")
       .getByRole("button", { name: "Open folder", exact: true });
@@ -228,11 +227,9 @@ test("@ui-audit capture baseline screenshots", async () => {
     await setTheme(page, "light");
     await openWorkspaceFromFirstRun(page, temp);
 
-    // 02 — shell + explorer (workspace open, nothing focused)
     await expect(explorerRow(page, "notes")).toBeVisible();
     await shot(page, "02-shell-explorer-light");
 
-    // 03 — rich markdown doc in the WYSIWYG editor
     await explorerRow(page, "notes").click();
     await explorerRow(page, "notes/product-plan.md").click();
     await expect(page.getByTestId("markdown-editor")).toBeVisible({
@@ -241,19 +238,16 @@ test("@ui-audit capture baseline screenshots", async () => {
     await page.waitForTimeout(800);
     await shot(page, "03-editor-doc-light");
 
-    // 04 — editor dark
     await setTheme(page, "dark");
     await shot(page, "04-editor-doc-dark");
     await setTheme(page, "light");
 
-    // 05 — bubble menu (select a paragraph)
     const editor = page.getByTestId("markdown-editor");
     const paragraph = editor.getByText("dohc turns messy work", { exact: false });
     await paragraph.click({ clickCount: 3 });
     await page.waitForTimeout(400);
     await shot(page, "05-editor-bubble-menu-light");
 
-    // 06 — slash menu (new line + "/")
     await editor.click();
     await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.press("Enter");
@@ -263,7 +257,6 @@ test("@ui-audit capture baseline screenshots", async () => {
     await page.keyboard.press("Escape");
     await page.keyboard.press("Backspace");
 
-    // 07 — search view with results
     await page.getByTestId(activityPin("search")).click();
     const searchInput = page.locator('input[type="search"], input[placeholder*="earch"]').first();
     await searchInput.waitFor({ state: "visible", timeout: 5_000 });
@@ -271,7 +264,6 @@ test("@ui-audit capture baseline screenshots", async () => {
     await page.waitForTimeout(1_200);
     await shot(page, "07-search-light");
 
-    // 08 — Chats view (left side panel)
     await page.getByTestId(activityPin("chats")).click();
     await page.waitForTimeout(800);
     await shot(page, "08-chats-light");
@@ -281,12 +273,10 @@ test("@ui-audit capture baseline screenshots", async () => {
     // Back to Search so later shots keep their earlier composition.
     await page.getByTestId(activityPin("search")).click();
 
-    // 09 — graph view
     await page.getByTestId(activityPin("graph")).click();
     await page.waitForTimeout(1_000);
     await shot(page, "09-graph-light");
 
-    // 10 — history view
     await page.getByTestId(activityPin("history")).click();
     await page.waitForTimeout(800);
     await shot(page, "10-history-light");
@@ -294,19 +284,16 @@ test("@ui-audit capture baseline screenshots", async () => {
     // (Slots 11 and 12 stay vacant so later shot names keep matching earlier
     // audit runs.)
 
-    // 13 — command palette
     await page.keyboard.press("ControlOrMeta+k");
     await page.waitForTimeout(400);
     await shot(page, "13-command-palette-light");
     await page.keyboard.press("Escape");
 
-    // 14 — quick open
     await page.keyboard.press("ControlOrMeta+p");
     await page.waitForTimeout(400);
     await shot(page, "14-quick-open-light");
     await page.keyboard.press("Escape");
 
-    // 15 — settings dialog
     await page.getByTestId(activityPin("settings")).click();
     await page.waitForTimeout(600);
     await shot(page, "15-settings-light");
@@ -315,14 +302,12 @@ test("@ui-audit capture baseline screenshots", async () => {
     await setTheme(page, "light");
     await page.keyboard.press("Escape");
 
-    // 16 — CSV table view
     await page.getByTestId(activityPin("explorer")).click();
     await explorerRow(page, "data").click();
     await explorerRow(page, "data/funnel.csv").click();
     await page.waitForTimeout(1_000);
     await shot(page, "16-csv-light");
 
-    // 17 — dark shell overview (explorer + editor)
     await explorerRow(page, "notes/product-plan.md").click();
     await expect(page.getByTestId("markdown-editor")).toBeVisible({
       timeout: 20_000,
@@ -332,13 +317,11 @@ test("@ui-audit capture baseline screenshots", async () => {
     await shot(page, "17-shell-dark");
     await setTheme(page, "light");
 
-    // 18 — new page, before its file exists
     await page.keyboard.press("ControlOrMeta+n");
     await expect(page.getByLabel("Page title")).toBeFocused();
     await shot(page, "18-new-page-light");
     await page.keyboard.press("ControlOrMeta+w");
 
-    // 19 — settings: appearance section
     await page.getByTestId(activityPin("settings")).click();
     await page.waitForTimeout(500);
     const appearanceNav = page.getByRole("button", { name: /appearance/i }).first();
@@ -348,8 +331,6 @@ test("@ui-audit capture baseline screenshots", async () => {
     await shot(page, "19-settings-appearance-light");
     await page.keyboard.press("Escape");
 
-    // 20 — inline properties under the title. They render in the document
-    // flow now (no toggle), so just open the doc and capture.
     if (
       !(await explorerRow(page, "notes")
         .isVisible()

@@ -143,7 +143,6 @@ test("picking the agent in a group's post says it runs when you send, and the of
     await expect(page.getByTestId("chats-run-command")).toHaveText(command);
     await expect(page.getByTestId("chats-run-id")).not.toBeEmpty();
     await expect(page.getByTestId("chats-run-exit-code")).toHaveText("0");
-    // The command and log path wrap inside the popover, Copy included.
     expect(
       await page
         .getByTestId("chats-run-popover")
@@ -168,7 +167,6 @@ test("the agent dispatches a fresh successful run for each human message", async
     const page = desktop.page;
     await openMyAgent(page);
 
-    // An agent DM opens on its conversation.
     const composer = page.getByTestId("chats-lane-composer");
     await composer.fill("audit the projections");
     await composer.press("Enter");
@@ -233,7 +231,6 @@ test("an agent's reply in Notices opens its conversation at the reply, washed an
     await composer.press("Enter");
     const agentReplies = page.getByTestId("chats-lane-message").filter({ hasText: REPORT });
     await expect(agentReplies).toHaveCount(1);
-    // Its notice arrived and left the list while the chat was still open.
     await expect
       .poll(
         () => runNotices.evaluate(async (state) => state.arrived && (await state.listed()) === 0),
@@ -295,7 +292,6 @@ test("an agent's reply in Notices opens its conversation at the reply, washed an
       }
     };
 
-    // The reply arrives as a toast with what it said and its Open, before it fades.
     const toast = page.getByTestId("sent-notice-toast").filter({ hasText: "Nova" });
     const toastOpen = toast.getByTestId("sent-notice-toast-open");
     await expect(toastOpen).toBeVisible();
@@ -314,7 +310,6 @@ test("an agent's reply in Notices opens its conversation at the reply, washed an
     await expect(row).toBeVisible();
     await row.hover();
     await shots("notice-row-hover");
-    // The whole row is the target, with the pointer.
     expect(
       await row.evaluate(
         (node) =>
@@ -323,21 +318,17 @@ test("an agent's reply in Notices opens its conversation at the reply, washed an
             "pointer",
       ),
     ).toBe(true);
-    // The row says what the reply said, and is its own Open.
     await expect(row).toContainText(REPORT);
     await expect(row.getByRole("button", { name: "Open", exact: true })).toHaveCount(0);
-    // At rest the row's corner shows when; the pointer on it shows its ×.
     await expect(row.getByTestId(/-dismiss$/u)).toBeVisible();
     await page.mouse.move(0, 0);
     await expect(row.locator("time")).toBeVisible();
     await shots("notice-row-rest");
-    // The keyboard reaches the row through its one stop, and rings the row.
     await page.mouse.move(0, 0);
     await page.keyboard.press("ArrowDown");
     await expect(row.locator("[data-notice-open]")).toBeFocused();
     await shots("notice-row-focus");
 
-    // A press anywhere on the row, not only its Open, lands on the reply.
     await row.click();
     await expect(center).toHaveCount(0);
     await expect(page.getByTestId("chats-channel-title")).toHaveText("Nova");
@@ -360,11 +351,8 @@ test("an agent's reply in Notices opens its conversation at the reply, washed an
         });
       }
     }
-    // The wash clears on its own.
     await expect(landed).toHaveCount(0);
 
-    // Both replies exist now. The only Nova row is the one just opened at the
-    // second reply.
     await page.getByTestId("notice-center-toggle").click();
     await expect(
       center.locator('li[data-testid^="sent-notice-"]').filter({ hasText: "Nova" }),
@@ -439,7 +427,6 @@ test("a dispatched run's credential stays out of its log, History, and chat", as
         },
         { id: workspaceId, threadId: run.threadId },
       );
-    // The run wrote as itself, so History credits Nova, not the unnamed agent.
     await expect
       .poll(
         async () =>
@@ -449,7 +436,6 @@ test("a dispatched run's credential stays out of its log, History, and chat", as
     const { messages, moments } = await read();
     expect(JSON.stringify(messages)).toContain(REPORT);
 
-    // The run's log holds its tool results, and none of what the run left holds its secret.
     const logs = join(temp.homeDir, "run-logs");
     const files = (await readdir(logs, { withFileTypes: true })).filter((entry) => entry.isFile());
     const left = await Promise.all(files.map((entry) => readFile(join(logs, entry.name), "utf8")));
@@ -484,8 +470,6 @@ test("an agent's question with choices is a poll; picking one answers it and the
     await page.getByTestId("chats-lane-composer").fill("plan the release");
     await page.getByTestId("chats-lane-composer").press("Enter");
 
-    // The agent asks with choices. The question is a poll: its choices are
-    // on screen and there is no bare Answer button.
     const question = page
       .getByTestId("chats-lane-message")
       .filter({ hasText: "Which day do we ship?" });
@@ -496,7 +480,6 @@ test("an agent's question with choices is a poll; picking one answers it and the
     await expect(options).toHaveText(["Friday", "Monday"]);
     await expect(question.getByTestId("chats-lane-decision-resolve")).toHaveCount(0);
 
-    // Picking a choice answers the poll with that choice.
     await options.nth(1).click();
     await expect(question.getByTestId("chats-lane-decision-resolved")).toHaveText("Answered");
     await expect(options.nth(1)).toHaveAttribute("data-chosen", "true");
@@ -542,7 +525,6 @@ test("an agent's open question shows Answer, which starts the reply that answers
     await page.getByTestId("chats-lane-composer").fill("name the file");
     await page.getByTestId("chats-lane-composer").press("Enter");
 
-    // An open question without choices says so in words, with Answer beside it.
     const question = page
       .getByTestId("chats-lane-message")
       .filter({ hasText: "What should I call the file?" });
@@ -561,7 +543,6 @@ test("an agent's open question shows Answer, which starts the reply that answers
     await expect(question.getByTestId("chats-lane-decision-resolved")).toHaveText("Answered");
     await expect(question.getByTestId("chats-lane-decision-resolve")).toHaveCount(0);
 
-    // The answer reaches the agent's next run, which replies in the thread.
     const thread = page.getByTestId("chats-lane-thread-panel");
     await expect(thread.getByText("calling it notes.md")).toHaveCount(1);
     await shoot("open-question-answered");
@@ -587,9 +568,6 @@ test("a runner that exits silently says why under the message and posts a notice
     await page.getByTestId("chats-lane-composer").fill("audit the projections");
     await page.getByTestId("chats-lane-composer").press("Enter");
 
-    // The words sit under the message that asked, with Try again, since
-    // the request has had one attempt and posted nothing. While Try again
-    // can run, nothing offers to ask the agent again.
     const words = "Nova didn't reply. Its run ended with an error.";
     const nextStep = "Message Nova to ask again.";
     const line = page.getByTestId("chats-lane-run-failed");
@@ -615,7 +593,6 @@ test("a runner that exits silently says why under the message and posts a notice
     );
     await expect(messages).toContainText("audit the projections");
 
-    // The message's thread repeats the line under it.
     await page.keyboard.press("Escape");
     await messages.hover();
     await page.getByTestId("chats-lane-reply-in-thread").click();
@@ -623,9 +600,6 @@ test("a runner that exits silently says why under the message and posts a notice
     const panelLine = panel.getByTestId("chats-lane-run-failed");
     await expect(panelLine.getByRole("status")).toHaveText([words]);
 
-    // The second attempt fails the same way. With no Try again left, the
-    // line says to ask the agent again, and so does its Notices row. In its
-    // own chat a message asks it.
     await panelLine.getByTestId("chats-lane-run-try-again").click();
     await expect(panelLine.getByRole("status")).toHaveText([words, nextStep]);
     await expect(page.getByTestId("chats-lane-run-try-again")).toHaveCount(0);
@@ -685,9 +659,6 @@ test("a runner that exits silently says why under the message and posts a notice
     const toastsBottom = await toasts.evaluate((node) => node.getBoundingClientRect().bottom);
     expect(toastsBottom).toBeLessThanOrEqual(boxTop);
 
-    // Its Open goes to the post, which says the same under its opening
-    // message, with Try again. After the second attempt, a button readies a
-    // comment to @Nova and sends nothing.
     await toasts.getByTestId("sent-notice-toast-open").click();
     const postLine = page.getByTestId("chats-run-failed");
     await expect(postLine.getByRole("status")).toHaveText([words]);
@@ -730,8 +701,6 @@ async function setDispatchPaused(page: Page, paused: boolean): Promise<void> {
   );
 }
 
-// What the pointer reaches at a toast's center: the toast, a workbench
-// modal (`data-dohc-modal` on its backdrop), something else, or nothing.
 function hitAtCenter(toast: Locator): Promise<string> {
   return toast.evaluate((element) => {
     const bounds = element.getBoundingClientRect();
@@ -746,10 +715,6 @@ function hitAtCenter(toast: Locator): Promise<string> {
   });
 }
 
-// Toasts sit above every dialog and its scrim (NoticeCenter), so a failed
-// check says so inside Settings and its reason is reachable in the toast while
-// Settings stays open. Copy and Dismiss leave Settings in place. The row stays
-// in Notices after the toast is gone.
 test("failed agent checks stay readable above Settings and remain in Notices", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
@@ -765,7 +730,6 @@ test("failed agent checks stay readable above Settings and remain in Notices", a
     await page.getByTestId("agent-row").click();
     await page.getByTestId("agent-check").click();
     await expect(page.getByTestId("agent-check-state")).toContainText("Didn't reply.");
-    // The toast names the agent; Copy details carries why.
     const message = "Nova didn't reply to the check.";
     const reason = "Runner exited before reporting self-test success.";
     const toast = page.getByTestId("workspace-shell-error");

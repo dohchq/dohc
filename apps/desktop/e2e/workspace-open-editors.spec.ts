@@ -51,7 +51,6 @@ test("open editors list caps its height and keeps the active row in view", async
     const list = page.getByTestId("open-editors-list");
     await expect(list.getByTestId("open-editor-row")).toHaveCount(14);
 
-    // Bounded and internally scrollable.
     const metrics = await list.evaluate((el) => ({
       clientHeight: el.clientHeight,
       scrollHeight: el.scrollHeight,
@@ -65,23 +64,18 @@ test("open editors list caps its height and keeps the active row in view", async
     expect(await rowInView(list, names[13])).toBe(true);
     expect(await rowInView(list, names[0])).toBe(false);
 
-    // Activating the first file from the tab strip scrolls its open-editors
-    // row back into view — without disturbing the sidebar's outer scroll.
     const nav = page.getByTestId("file-tree");
     const navScrollBefore = await nav.evaluate((el) => el.scrollTop);
     await page.getByTestId(editorTabTestId(names[0])).click();
     await expect.poll(async () => rowInView(list, names[0])).toBe(true);
     expect(await nav.evaluate((el) => el.scrollTop)).toBe(navScrollBefore);
 
-    // Collapse/expand keeps the section intact and the active row in view.
     await page.getByTestId("open-editors-toggle").click();
     await expect(page.getByTestId("open-editors-list")).toHaveCount(0);
     await page.getByTestId("open-editors-toggle").click();
     await expect(list.getByTestId("open-editor-row")).toHaveCount(14);
     await expect.poll(async () => rowInView(list, names[0])).toBe(true);
 
-    // With only a few editors the list shrinks below the cap — no reserved
-    // empty space, nothing to scroll.
     for (const name of names.slice(4)) {
       const row = list.locator(`[data-path="${name}"]`);
       await row.hover();
@@ -99,7 +93,6 @@ test("open editors list caps its height and keeps the active row in view", async
   }
 });
 
-// Scrolls `scroller` so `element`'s top or bottom edge meets the scroller's.
 async function scrollFlush(
   scroller: Locator,
   element: Locator,
@@ -116,8 +109,6 @@ async function scrollFlush(
   );
 }
 
-// Where the focused element's outline reaches: its own box grown by the
-// outline's offset plus its width, or not at all when the outline is inset.
 async function outlineInside(element: Locator, scroller: Locator): Promise<string> {
   const box = await scroller.elementHandle();
   return element.evaluate((node, scrollerNode) => {
@@ -177,7 +168,6 @@ test("a focused row scrolled flush to its list's edge keeps its whole focus outl
       await expect(page.getByTestId(`tab-${name}`)).toBeVisible();
     }
 
-    // An Open editors row, reached from the keyboard, at each edge of its list.
     const list = page.getByTestId("open-editors-list");
     const row = list.locator(`[data-path="${opened[5]}"]`);
     const open = row.locator("button").first();
@@ -198,7 +188,6 @@ test("a focused row scrolled flush to its list's edge keeps its whole focus outl
     const [rowBox, openBox] = await Promise.all([row.boundingBox(), open.boundingBox()]);
     expect(openBox?.width).toBeCloseTo(rowBox?.width ?? 0, 0);
 
-    // A file tree row, reached from the keyboard, at each edge of the sidebar.
     const tree = page.getByTestId("file-tree");
     await explorerRow(page, names[39]).focus();
     await page.keyboard.press("ArrowDown");
@@ -235,7 +224,6 @@ test("the Open editors list at its smallest shows two whole rows", async () => {
       await expect(page.getByTestId(`tab-${name}`)).toBeVisible();
     }
 
-    // Dragged far past the minimum, the list stops at it.
     const handle = page.getByTestId("open-editors-resize");
     const box = await handle.boundingBox();
     if (!box) throw new Error("no Open editors resize handle");

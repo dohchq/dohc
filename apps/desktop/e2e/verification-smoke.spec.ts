@@ -33,7 +33,6 @@ test("@verification-smoke an editor change reaches disk and survives restart", a
       "data-state",
       "saved",
     );
-    // The saved note ends with exactly one line break after the edit.
     await expect
       .poll(() => readFile(join(workspace.rootPath, "proof.md"), "utf8"))
       .toMatch(/Durable verification edit\.\n$/);

@@ -63,7 +63,6 @@ test("a named agent replies to a group mention with its owner on hover and focus
       await badge.hover();
       const hover = reply.getByRole("tooltip");
       await expect(hover).toContainText("Owned by Ada");
-      // Your agent's card says it runs your command, and names it in full on hover.
       const runsWith = hover.getByTestId("chats-comment-agent-runs-with");
       await expect(runsWith).toHaveText("Your runner command");
       await expect(runsWith).toHaveAttribute("title", command);

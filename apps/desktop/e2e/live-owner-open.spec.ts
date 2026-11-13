@@ -110,7 +110,6 @@ test("@live-owner-open an owner edit queued while the server hosts the note nowh
         await waitForCliEndpoint(ownerTemp.homeDir);
         return opened;
       });
-    // Whether the owner's list names the note live.
     const hosted = async () => {
       const listed = await page.evaluate(
         (workspaceId) =>
@@ -121,7 +120,6 @@ test("@live-owner-open an owner edit queued while the server hosts the note nowh
       );
       return listed.documents.some((row) => row.path === PATH && row.status === "ready");
     };
-    // The owner's queued changes the server has not accepted, or why the store can't say.
     const unaccepted = () => {
       const outbox = ownerOutboxDeclarations(ownerTemp.rootPath);
       return outbox === null || "error" in outbox ? outbox : outbox.pending;
@@ -167,7 +165,6 @@ test("@live-owner-open an owner edit queued while the server hosts the note nowh
           .toBe(true);
         return created;
       });
-    // The activation the share's hosting started, which the retirement ends.
     const started =
       stack
         .liveHosting(workspace.workspaceId, PATH)
@@ -231,7 +228,6 @@ test("@live-owner-open an owner edit queued while the server hosts the note nowh
       await closeNote(page);
       await openNote(page);
       await expect.poll(hosted, { timeout: 120_000, intervals: [1_000] }).toBe(true);
-      // One current activation, which follows the one the retirement ended.
       await expect
         .poll(
           () =>

@@ -17,10 +17,6 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// The Sharing view on a real relay: the owner shares a file, finds the share
-// under Shared by me from Settings search and from the rail, copies its code,
-// and ends it there.
-
 const GRANTER_TOKEN = "test:e2e-granter";
 const RECIPIENT_TOKEN = "test:e2e-recipient";
 const RECIPIENT_EMAIL = "e2e-recipient@dohc.test";
@@ -72,8 +68,6 @@ test("sharing view: lists a share this workspace granted and ends it", async () 
     const shareId = shareCode.split(":")[1]!;
     await dialog.getByTestId("share-done").click();
 
-    // Settings keeps values only; its search still finds the share and opens
-    // the Sharing view on its row.
     await page.getByTestId(activityPin("settings")).click();
     await page.getByTestId(settingsNavPin("cloud")).click();
     await expect(page.getByTestId("settings-section-cloud")).not.toContainText("Shared by me");
@@ -83,14 +77,12 @@ test("sharing view: lists a share this workspace granted and ends it", async () 
     await expect(view).toBeVisible();
     await expect(page.getByTestId(activityPin("sharing"))).toHaveAttribute("aria-current", "page");
 
-    // Shared by me lists the grant with what it covers and who can do what, focused.
     const row = view.getByTestId("sharing-granted-row").filter({ hasText: "plan.md" });
     await expect(row).toBeVisible();
     await expect(row.getByTestId("sharing-row-who")).toHaveText(`${RECIPIENT_EMAIL} can view`);
     await expect(row).toHaveAttribute("data-status", "active");
     await expect(row.locator("[data-sharing-row-focus]")).toBeFocused();
 
-    // The row hands out the share's code from its actions, by keyboard.
     await page.keyboard.press("Tab");
     await expect(row.getByTestId("sharing-granted-actions").locator(":focus")).toHaveCount(1);
     await holdSystemClipboard(test.info(), async (remainingMs) => {
@@ -103,7 +95,6 @@ test("sharing view: lists a share this workspace granted and ends it", async () 
         .toBe(shareCode);
     });
 
-    // The rail button closes and reopens the same view.
     await page.getByTestId(activityPin("sharing")).click();
     await expect(view).toBeHidden();
     await page.getByTestId(activityPin("sharing")).click();
@@ -120,7 +111,6 @@ test("sharing view: lists a share this workspace granted and ends it", async () 
     await confirm.getByTestId("sharing-end").click();
     await expect(confirm).toBeHidden();
 
-    // The relay ended it: the recipient's next fetch is refused.
     await expect
       .poll(
         async () =>
@@ -217,7 +207,6 @@ test("sharing view: a removed share on this computer, its skipped changes, and R
     await page.getByRole("menuitem", { name: "Show skipped changes" }).click();
     await expect(skipped).toHaveCount(1);
 
-    // Remove takes the share off this computer.
     await row.locator("[data-sharing-row-focus]").hover();
     await row.getByRole("button", { name: "Share actions" }).click();
     await page.getByRole("menuitem", { name: "Remove from workspace" }).click();

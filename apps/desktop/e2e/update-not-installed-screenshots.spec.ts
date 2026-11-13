@@ -88,7 +88,6 @@ test("@ui-audit an update a person chose that dohc opened without", async () => 
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   let devUpdateConfig: string | null = null;
   try {
-    // A person pressed Update on this version, and dohc opens on it again.
     await writeFile(
       join(workspace.homeDir, "chosen-update.json"),
       JSON.stringify({ version: CHOSEN, from: ELECTRON }),
@@ -134,8 +133,6 @@ test("@ui-audit an update a person chose that dohc opened without", async () => 
     await expect(notices.getByText(TITLE)).toBeVisible();
     await shoot(page, "04-notices-row");
 
-    // Try again starts the download: the toast and the row go at once, and
-    // the title bar shows the download. Running a row's action closes Notices.
     await notices.getByRole("button", { name: "Try again" }).click();
     await expect(notices).toBeHidden();
     await expect(toast).toHaveCount(0);

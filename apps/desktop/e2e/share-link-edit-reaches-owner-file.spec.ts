@@ -24,11 +24,6 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// A link holder opens an Edit share link in a browser and types into a live
-// document. The owner's Markdown file on disk gets the exact bytes the
-// engine's Markdown projection settles, with a real owner desktop, relay,
-// live host, share-web, and browser.
-
 type Api = DohcDesktopBridge;
 const WORKSPACE_ID = "share-link-edit-owner";
 const OWNER = "e2e-share-link-edit-owner";
@@ -73,7 +68,6 @@ test("@link-lane a link holder's edit through an Edit share link reaches the own
     });
     proxy.routeRelayTo(relay.baseUrl);
 
-    // --- The owner syncs the workspace and opens the note -------------------
     await seedWorkspaceManifest(temp, WORKSPACE_ID);
     await writeWorkspaceFiles(temp, [{ path: PATH, contents: CONTENTS }]);
     await seedWorkspaceRegistry(temp, [{ workspaceId: WORKSPACE_ID, rootPath: temp.rootPath }]);
@@ -117,7 +111,6 @@ test("@link-lane a link holder's edit through an Edit share link reaches the own
       timeout: 30_000,
     });
 
-    // --- The owner makes an Edit link, and the live host serves the note ----
     const created = await relayJson(relay.baseUrl, TOKEN, `/sync/${WORKSPACE_ID}/shares/links`, {
       method: "POST",
       body: JSON.stringify({ paths: [PATH], access: "edit" }),
@@ -142,7 +135,6 @@ test("@link-lane a link holder's edit through an Edit share link reaches the own
       )
       .toBe(true);
 
-    // --- A link holder types into the note in a browser ---------------------
     shared = await startSharedDatasetBrowser({
       relayUrl: relay.baseUrl,
       exchangeKey,
@@ -163,8 +155,6 @@ test("@link-lane a link holder's edit through an Edit share link reaches the own
     await browserPage.keyboard.press("End");
     await browserPage.keyboard.insertText(marker);
 
-    // --- The owner's file gets the projection's bytes -----------------------
-    // The Markdown projection ends the note with one newline, as the file did.
     const expected = Buffer.from(CONTENTS.replace(PARAGRAPH, `${PARAGRAPH}${marker}`), "utf8");
     // The engine replaces the file with two renames, so a read can land between them and find no file.
     await expect

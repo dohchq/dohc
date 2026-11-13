@@ -76,8 +76,6 @@ test("@ui-audit Customize files, the Explorer's Apps section, and Settings from 
     await expect(collections.getByTestId("collections-refusal")).toBeHidden();
     await page.getByTestId("explorer-mode-files").click();
 
-    // A file-backed Collection with automations.yaml, then keyboard focus on
-    // the first row's controls after Close.
     let dialog = await openCustomize(page, "trips", "Trips");
     await expect(dialog.getByText("trips/automations.yaml")).toBeVisible();
     await shoot(page, "customize-with-automations");
@@ -88,14 +86,12 @@ test("@ui-audit Customize files, the Explorer's Apps section, and Settings from 
     await page.keyboard.press("Escape");
     await expect(dialog).toBeHidden();
 
-    // A file-backed Collection before its first automation.
     dialog = await openCustomize(page, "tasks", "Tasks");
     await expect(dialog.getByText("tasks/automations.yaml")).toBeVisible();
     await shoot(page, "customize-without-automations");
     await page.keyboard.press("Escape");
     await expect(dialog).toBeHidden();
 
-    // A database-backed Collection.
     await desktop.app.evaluate(({ BrowserWindow }) =>
       BrowserWindow.getAllWindows()[0]!.webContents.send("desktop:menu-command", "new-collection"),
     );
@@ -111,8 +107,6 @@ test("@ui-audit Customize files, the Explorer's Apps section, and Settings from 
     await page.keyboard.press("Escape");
     await expect(dialog).toBeHidden();
 
-    // The Explorer without apps, whose Apps section says so, and then with an
-    // app, which takes the line's place.
     await openExplorerHome(page);
     await expect(page.getByTestId("explorer-pages")).toBeVisible();
     await expect(page.getByTestId("explorer-apps-empty")).toBeVisible();
@@ -124,7 +118,6 @@ test("@ui-audit Customize files, the Explorer's Apps section, and Settings from 
     await expect(page.getByTestId("explorer-apps-empty")).toHaveCount(0);
     await shoot(page, "apps-with-apps");
 
-    // Settings opened from the sidebar's Customize…, then the settings file row.
     await page.getByRole("button", { name: "Sidebar actions" }).click();
     await page.getByRole("menuitem", { name: "Customize…" }).click();
     await expect(page.getByTestId("settings-row-sidebar")).toHaveAttribute(

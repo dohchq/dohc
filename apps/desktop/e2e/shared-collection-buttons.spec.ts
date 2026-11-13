@@ -296,7 +296,6 @@ test("@two-client shared Buttons use host identity and show the named presser in
       }),
     );
     await openTable(owner.page);
-    // The record opens in the panel, whose menu holds its History.
     await owner.page.getByRole("button", { name: "Open Shared first", exact: true }).click();
     await owner.page
       .getByTestId("collection-record-panel")

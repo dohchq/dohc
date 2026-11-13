@@ -87,8 +87,6 @@ test("a document past the in-band cap reaches disk, and the editor never claims 
     await page.keyboard.insertText(TAIL_SENTINEL);
 
     await expect(editor).toContainText(TAIL_SENTINEL, { timeout: 15_000 });
-    // The edit registered: the indicator left "Saved" for the typing. From
-    // here on, the next "Saved" is a claim about this content.
     await expect(saveState).toHaveAttribute("data-state", "saving", {
       timeout: 15_000,
     });
@@ -120,8 +118,6 @@ test("a document past the in-band cap reaches disk, and the editor never claims 
       true,
     );
 
-    // The whole document is there — not a truncated prefix, not a cap-sized
-    // slice. Both the size and the last byte typed.
     const finalText = await readFile(absolute, "utf8");
     const finalSize = (await stat(absolute)).size;
     expect(finalSize).toBeGreaterThan(INBAND_CAP_BYTES);
@@ -132,12 +128,9 @@ test("a document past the in-band cap reaches disk, and the editor never claims 
     expect(finalText).toContain(TAIL_SENTINEL);
     expect(finalText).toContain("Start small.");
 
-    // And the editor's own claim is now backed by that file.
     await expect(saveState).toHaveAttribute("data-state", "saved");
     await expect(saveState).toHaveText("Saved");
 
-    // The engine recorded it as history too — the settle committed a moment
-    // carrying the full body, not just a materialized file.
     expect(
       momentTextsForPath(temp.rootPath, "load/big.md").some((text) => text.includes(TAIL_SENTINEL)),
     ).toBe(true);
@@ -169,14 +162,12 @@ test("a document past the in-band cap reaches disk, and the editor never claims 
         timeout: 15_000,
       })
       .toBe(true);
-    // A retire journals a moment; none may appear for this path after restart.
     expect(
       momentTextsForPath(temp.rootPath, "load/big.md").filter((text) =>
         text.includes("Stopped tracking"),
       ),
       "the startup reconcile journaled a retire for the over-cap doc",
     ).toEqual([]);
-    // And the file itself is untouched.
     expect(await readFile(absolute, "utf8")).toContain(TAIL_SENTINEL);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);

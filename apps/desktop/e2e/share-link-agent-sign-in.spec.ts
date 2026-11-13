@@ -175,7 +175,6 @@ test("@share-link-agent-sign-in an agent signs in to a share link, keeps working
     const otherAddress = `${otherUrl.origin}/mcp/s/${otherUrl.hash.slice(1)}`;
     await closeDialog(dialog);
 
-    // The Comment link the agents use, and the address Copy for an agent gives.
     dialog = await openLinkPane(page, PATH);
     await dialog
       .getByRole("radiogroup", { name: "Link access" })
@@ -227,8 +226,6 @@ test("@share-link-agent-sign-in an agent signs in to a share link, keeps working
       result: { ok: true },
     });
 
-    // 4. A wrong resource: the token is refused at another link's address,
-    // and so is a refresh naming it. Neither ends the agent's connection.
     await expectInvalidToken(
       await shareWebRequest(handle, otherAddress, {
         method: "POST",
@@ -266,8 +263,6 @@ test("@share-link-agent-sign-in an agent signs in to a share link, keeps working
       "Last action",
     );
 
-    // 5. Disconnect from the list: that agent's next call gets the challenge,
-    // and the other agent keeps working.
     await agents.getByRole("button", { name: "Disconnect Codex" }).click();
     await expect(agents.getByRole("listitem")).toHaveCount(1);
     await expect(agents).not.toContainText("Codex");
@@ -275,8 +270,6 @@ test("@share-link-agent-sign-in an agent signs in to a share link, keeps working
     expect((await claude.rpc("tools/list")).status).toBe(200);
     await closeDialog(dialog);
 
-    // 2. Refresh: a new token pair that works. Reusing the spent refresh
-    // token is refused and ends the connection, new tokens included.
     const refreshed = await claude.refresh(claude.refreshToken!);
     expect(refreshed.status).toBe(200);
     const next = (await refreshed.json()) as {

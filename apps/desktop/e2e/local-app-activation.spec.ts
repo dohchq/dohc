@@ -5,7 +5,6 @@ import {
   type LocalAppLaunchBackend,
 } from "../src/workspaces/localAppLaunch";
 
-// A Collection app that writes when it loads, when its button is pressed, and when its page asks it to, all with no input of its own.
 const app = `
   const button = document.createElement('button');
   button.textContent = 'Vote'; button.style = 'display:block;width:200px;height:80px'; document.body.append(button);

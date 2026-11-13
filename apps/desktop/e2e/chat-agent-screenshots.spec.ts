@@ -81,8 +81,6 @@ test("@ui-audit adding an agent, its screen, and an answered question", async ()
     await page.getByTestId("chats-add-agent-agent-name").fill("Nova");
     await expect(page.getByRole("button", { name: "Refresh", exact: true })).toBeEnabled();
     await shoot(page, "agent-tool-cards");
-    // The dialog keeps its top, and its fields their left edge, when a pick
-    // adds the profile under the cards.
     const dialogTop = async () => (await page.getByTestId("chats-add-agent").boundingBox())?.y;
     const nameLeft = async () =>
       (await page.getByTestId("chats-add-agent-agent-name").boundingBox())?.x;
@@ -148,14 +146,12 @@ test("@ui-audit adding an agent, its screen, and an answered question", async ()
     await expect(page.getByTestId("chats-add-agent")).toHaveCount(0);
     await expect(page.getByTestId("chats-manage-agent")).toBeVisible();
 
-    // A ready agent's chat opens on its conversation, with its settings in the header.
     await page.locator('[data-testid="chats-my-agent"][data-agent-id="default"]').click();
     await expect(page.getByTestId("chats-channel-title")).toHaveText("Nova");
     await expect(page.getByTestId("chats-agent-settings")).toBeVisible();
     await expect(page.getByTestId("chats-agent-problem")).toHaveCount(0);
     await shoot(page, "agent-screen");
 
-    // A question with choices is a poll; picking one answers it.
     await page.getByTestId("chats-lane-composer").fill("plan the release");
     await page.getByTestId("chats-lane-composer").press("Enter");
     const question = page
@@ -200,7 +196,6 @@ const SAID = {
   linkHolderComment: "A dock wins it for me.",
 } as const;
 
-// What a screen reader hears of the author marks in one row, in order.
 async function spokenMarks(row: Locator): Promise<string[]> {
   return row.evaluate((node) =>
     [...node.querySelectorAll(".sr-only")]
@@ -226,7 +221,6 @@ async function relayPost(
   return JSON.parse(text) as Record<string, unknown>;
 }
 
-// The Group as the relay holds it, once the owner's chat and the agent's post have synced.
 function groupOnRelay(ops: readonly RelayOp[], postThreadId: string) {
   const channel = ops.find(
     (op) => op.opKind === "chat.channel.create" && op.payload.name === "Trip plan",
@@ -293,7 +287,6 @@ test("@ui-audit link agent and link holder marks", async () => {
       return (JSON.parse(result.body) as { ops: RelayOp[] }).ops;
     };
 
-    // --- The owner syncs a Group with a chat and posts --------------------
     await seedWorkspaceManifest(temp, LINK_WORKSPACE_ID);
     await seedWorkspaceRegistry(temp, [
       { workspaceId: LINK_WORKSPACE_ID, rootPath: temp.rootPath },
@@ -324,7 +317,6 @@ test("@ui-audit link agent and link holder marks", async () => {
     await expect(channelView.getByTestId("chats-channel-title")).toHaveText("Trip plan");
     await waitForWorkspaceFile(page, LINK_WORKSPACE_ID, "trip-plan");
 
-    // The owner's first chat message starts the Group's chat.
     await channelView.getByTestId("chats-group-lane-chat").click();
     await channelView.getByTestId("chats-lane-composer").fill(SAID.kickoff);
     await channelView.getByTestId("chats-lane-composer").press("Enter");
@@ -332,7 +324,6 @@ test("@ui-audit link agent and link holder marks", async () => {
       channelView.getByTestId("chats-lane-message-body").filter({ hasText: SAID.kickoff }),
     ).toBeVisible();
 
-    // The owner's agent, at the default color, posts, then answers in the chat.
     await waitForCliEndpoint(temp.homeDir);
     const posted = await runDohcCli(temp, ["chat", "post", "trip-plan", "--as-agent", SAID.post]);
     const handle = posted.stdout.match(/^posted\s+(\S+)\s/mu)?.[1];
@@ -355,7 +346,6 @@ test("@ui-audit link agent and link holder marks", async () => {
     ]);
     expect(replied.stdout).toContain("replied");
 
-    // --- The owner shares the Group and makes a read-write link -----------
     const shared = await relayJson(relay.baseUrl, LINK_TOKEN, `/sync/${LINK_WORKSPACE_ID}/shares`, {
       method: "POST",
       body: JSON.stringify({
@@ -381,7 +371,6 @@ test("@ui-audit link agent and link holder marks", async () => {
     const secret = new URL((JSON.parse(created.body) as { url: string }).url).hash.slice(1);
     const exchange = { "x-dohc-relay-exchange-key": exchangeKey };
 
-    // --- An agent signs in with the link, as share-web's MCP sign-in does --
     const resource = `${sharedDatasetViewerOrigin}/mcp/s/${secret}`;
     const { clientId } = await relayPost(
       relay.baseUrl,
@@ -429,7 +418,6 @@ test("@ui-audit link agent and link holder marks", async () => {
         exchange,
       );
 
-    // --- A person opens the link in a browser -----------------------------
     const { capabilityToken } = await relayPost(
       relay.baseUrl,
       "/sync/link-exchange",
@@ -448,7 +436,6 @@ test("@ui-audit link agent and link holder marks", async () => {
         browser,
       );
 
-    // Both write in the Group's chat after the owner's agent, then comment on its post.
     await agentPost(SAID.linkAgent, group.laneThreadId, "chat-1");
     await holderPost(SAID.linkHolder, group.laneThreadId, "chat-1");
     await agentPost(SAID.linkAgentComment, postThreadId, "comment-1");
@@ -495,7 +482,6 @@ test("@ui-audit link agent and link holder marks", async () => {
     await page.mouse.move(0, 0);
     await shoot(page, "link-marks-group");
 
-    // --- The post card, its thread, and the link agent's comment ----------
     await channelView.getByTestId("chats-group-lane-posts").click();
     const card = channelView.getByTestId("chats-post-card").filter({ hasText: SAID.post });
     await expect(card).toBeVisible();
@@ -523,7 +509,6 @@ test("@ui-audit link agent and link holder marks", async () => {
     await page.mouse.move(0, 0);
     await shoot(page, "link-marks-thread");
 
-    // The agent's badge names it, with no owner: nobody in the workspace owns it.
     const badge = comment(SAID.linkAgentComment).getByTestId("chats-comment-agent-badge");
     await expect(badge).toHaveAccessibleName("agent");
     await badge.focus();

@@ -22,7 +22,6 @@ async function openNote(page: Page, path: string): Promise<void> {
   await expect(page.getByTestId("markdown-editor")).toBeVisible();
 }
 
-// An agent replaces the note's file outside dohc, by rename.
 async function replaceOutside(rootPath: string, path: string, text: string): Promise<void> {
   await writeFile(join(rootPath, `${path}.tmp`), text);
   await rename(join(rootPath, `${path}.tmp`), join(rootPath, path));
@@ -50,7 +49,6 @@ test("an open note that changed outside dohc reloads, or keeps the person's typi
     for (const path of notes) await waitForWorkspaceFile(page, workspace.workspaceId, path);
     await page.emulateMedia({ reducedMotion: "reduce" });
 
-    // Nothing unsaved: the editor takes in the new text and says so for a moment.
     for (const theme of ["light", "dark"] as const) {
       const path = `untouched-${theme}.md`;
       await page.evaluate(
@@ -71,7 +69,6 @@ test("an open note that changed outside dohc reloads, or keeps the person's typi
       expect(await recoveredCopy(temp.rootPath, path)).toBeNull();
     }
 
-    // Unsaved typing: the editor keeps it, and Reload keeps it in a copy.
     await openNote(page, "typed-reload.md");
     await page.getByTestId("markdown-editor").click();
     await page.keyboard.press(DOCUMENT_END);
@@ -88,7 +85,6 @@ test("an open note that changed outside dohc reloads, or keeps the person's typi
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       await page.screenshot({ path: test.info().outputPath(`changed-outside-${theme}.png`) });
     }
-    // Reach Reload by keyboard and activate it without a pointer.
     const reload = notice.getByRole("button", { name: "Reload" });
     for (
       let i = 0;
@@ -117,7 +113,6 @@ test("an open note that changed outside dohc reloads, or keeps the person's typi
     ).toBeVisible({ timeout: 30_000 });
     await page.screenshot({ path: test.info().outputPath("reloaded-with-copy-dark.png") });
 
-    // Unsaved typing, then the person closes the note instead.
     await openNote(page, "typed-close.md");
     await page.getByTestId("markdown-editor").click();
     await page.keyboard.press(DOCUMENT_END);

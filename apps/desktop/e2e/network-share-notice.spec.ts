@@ -10,7 +10,6 @@ import {
 const TITLE = "This workspace is on a network share";
 
 test("@network-share-notice a workspace on a network share warns once on this computer", async () => {
-  // Two launches of the app.
   test.setTimeout(120_000);
   const workspace = await createTempWorkspace();
   const env = { DOHC_TEST_NETWORK_SHARE: "1" };
@@ -36,7 +35,6 @@ test("@network-share-notice a workspace on a network share warns once on this co
       });
     }
 
-    // The toast's controls take the keyboard: Details, then dismiss.
     const details = toast.getByRole("button", { name: "Details" });
     await details.focus();
     await expect(details).toBeFocused();
@@ -45,7 +43,6 @@ test("@network-share-notice a workspace on a network share warns once on this co
     await page.keyboard.press("Enter");
     await expect(toast).toHaveCount(0);
 
-    // Closing the toast keeps the row.
     await page.getByTestId("notice-center-toggle").click();
     const notices = page.getByRole("dialog", { name: "Notices", exact: true });
     await expect(notices.getByText(TITLE)).toHaveCount(1);

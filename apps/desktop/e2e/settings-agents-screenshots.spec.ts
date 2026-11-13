@@ -170,7 +170,6 @@ test("@ui-audit Settings › Agents with local and personal agents, their pages,
     await page.mouse.move(0, 0);
     await shoot(page, section, "settings-agents");
 
-    // Nova's page: its switch, its test, what it can do and how dohc starts it.
     await row("default").click();
     const agentPage = section.getByTestId("agent-page");
     await expect(agentPage).toHaveAttribute("data-agent-id", "default");
@@ -179,7 +178,6 @@ test("@ui-audit Settings › Agents with local and personal agents, their pages,
     await page.mouse.move(0, 0);
     await shoot(page, section, "settings-agents-page");
 
-    // Tab from the back button to the switch.
     await agentPage.getByTestId("agent-back").focus();
     for (
       let presses = 0;
@@ -192,7 +190,6 @@ test("@ui-audit Settings › Agents with local and personal agents, their pages,
     await shoot(page, section, "settings-agents-switch-focus");
     await agentPage.getByTestId("agent-back").click();
 
-    // Add agent with Agent link chosen: the link this workspace's agents sign in with.
     await section.getByTestId("agent-add").click();
     const addSheet = page.getByTestId("agent-add-sheet");
     await addSheet.getByTestId("agent-runs-with-link").click();
@@ -203,7 +200,6 @@ test("@ui-audit Settings › Agents with local and personal agents, their pages,
     await addSheet.getByRole("button", { name: "Cancel" }).click();
     await expect(addSheet).toBeHidden();
 
-    // Grok Bot's page: its color, what it can reach, its activity and Sign out.
     await row(GROK).click();
     await expect(agentPage).toHaveAttribute("data-agent-id", GROK);
     await expect(agentPage).toHaveAttribute("data-status", "active");
@@ -211,7 +207,6 @@ test("@ui-audit Settings › Agents with local and personal agents, their pages,
     await page.mouse.move(0, 0);
     await shoot(page, section, "settings-agents-personal-page");
 
-    // Its reach sheet, with this workspace at Comment and Budget at View.
     await agentPage.getByTestId("personal-agent-reach").click();
     const reachSheet = page.getByTestId("personal-agent-reach-sheet");
     await expect(reachSheet.getByTestId("personal-agent-reach-row")).toHaveCount(2);
@@ -221,7 +216,6 @@ test("@ui-audit Settings › Agents with local and personal agents, their pages,
     await expect(reachSheet).toBeHidden();
     await agentPage.getByTestId("agent-back").click();
 
-    // Mira signed out: dimmed, no reach, and a way to sign in again.
     await row(MIRA).click();
     await expect(agentPage).toHaveAttribute("data-agent-id", MIRA);
     await expect(agentPage).toHaveAttribute("data-status", "signed_out");

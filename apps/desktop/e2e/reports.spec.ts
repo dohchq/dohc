@@ -25,8 +25,6 @@ async function openPrivacy(temp: TempWorkspace): Promise<LaunchedDesktopApp> {
 const usageSwitch = (page: Page) => page.getByRole("switch", { name: "Send usage reports" });
 const errorSwitch = (page: Page) => page.getByRole("switch", { name: "Send error reports" });
 
-// A development build names no report service, so it sends nothing and
-// shows no notice. The switches, diagnostics, copy, and save still work.
 test("@telemetry-smoke report switches persist, and diagnostics show, copy, and save", async () => {
   test.setTimeout(120_000);
   const temp = await createTempWorkspace();
@@ -45,7 +43,6 @@ test("@telemetry-smoke report switches persist, and diagnostics show, copy, and 
       "This launch sends no error reports.",
     );
 
-    // Keyboard: the switch takes focus and Space changes only that switch.
     await usageSwitch(page).focus();
     await page.keyboard.press("Space");
     await expect(usageSwitch(page)).toHaveAttribute("aria-checked", "false");

@@ -19,7 +19,6 @@ test("emoji reactions and floating mentions stay visible without moving the comp
     await openWorkspaceFromFirstRun(page, temp);
     await page.getByTestId(activityPin("chats")).click();
     await page.getByTestId("chats-channel").click();
-    // An empty Posts page has nothing to scroll.
     await expect(page.getByTestId("chats-channel-empty")).toBeVisible();
     for (const theme of ["light", "dark"]) {
       await page.evaluate(
@@ -63,8 +62,6 @@ test("emoji reactions and floating mentions stay visible without moving the comp
       expect(closedBox!.y).toBe(openBox!.y);
       await composer.fill("");
     }
-    // The opening post's actions show, and take the pointer, on hover. Both
-    // themes are shot from one open picker, before the reaction is added.
     const trigger = view.getByTestId("chats-add-reaction").first();
     await view.locator('article[data-testid="chats-message"]').hover();
     await expect(trigger).toBeVisible();
@@ -80,8 +77,6 @@ test("emoji reactions and floating mentions stay visible without moving the comp
       await waitForVisibleAnimations(page);
       await page.screenshot({ path: testInfo.outputPath(`reactions-${theme}.png`) });
     }
-    // Picking it adds the reaction; picking it again from the picker takes it
-    // back, so the later shots show the post as it was.
     const astronautPill = view.locator('[data-testid="chats-reaction-pill"][data-emoji="🧑🏽‍🚀"]');
     await astronaut.click();
     await expect(astronautPill).toBeVisible();
@@ -119,7 +114,6 @@ test("emoji reactions and floating mentions stay visible without moving the comp
     ).toBeVisible();
     await page.getByTestId("chats-feed-link").click();
     const homeTrigger = view.getByTestId("chats-feed-like").first();
-    // Home's actions sit in each row's toolbar, shown on hover and on focus.
     const homeToolbar = view.getByTestId("chats-feed-message-toolbar").first();
     await page.mouse.move(0, 0);
     await expect(homeToolbar).toHaveCSS("opacity", "0");
@@ -147,7 +141,6 @@ test("emoji reactions and floating mentions stay visible without moving the comp
         theme,
       );
       const homeCard = view.getByTestId("chats-feed-item").first();
-      // Compared at rest: a hovered row takes a fill and rounded corners.
       await page.mouse.move(0, 0);
       await expect(homeCard).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
       await waitForVisibleAnimations(page);

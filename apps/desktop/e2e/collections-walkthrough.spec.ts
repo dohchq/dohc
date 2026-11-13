@@ -197,7 +197,6 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
 
-    // --- The relation target: a small "clients" collection.
     await newCollectionFromFileMenu(desktop);
     const newCollection = page.getByTestId("new-collection-dialog");
     await expect(newCollection).toBeVisible();
@@ -214,14 +213,11 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
       timeout: 30_000,
     });
 
-    // New record adds the record in the table, named as it is typed.
     await newRecordNamed(page, "Acme");
     await expect(recordRows(page)).toHaveCount(1, { timeout: 30_000 });
     await expect(fieldCell(recordRows(page).first(), 0)).toContainText("Acme", { timeout: 30_000 });
     await expect(page.getByTestId(editorTabTestId("clients/Acme.md"))).toHaveCount(0);
 
-    // Three more records typed with no pause: each Enter saves its row, and
-    // the first key after it is typed in the next row. Every one is made.
     await page.getByTestId("collection-new-record").click();
     await expect(page.locator("[data-cell-editor] input")).toBeFocused();
     for (const name of ["Birch", "Cedar", "Dune"]) {
@@ -235,7 +231,6 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
       ).toBeVisible({ timeout: 30_000 });
     }
 
-    // --- The main "projects" collection.
     await newCollectionFromFileMenu(desktop);
     await expect(newCollection).toBeVisible();
     await newCollection.getByRole("radio", { name: "Documents", exact: true }).check();
@@ -255,9 +250,6 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
     await expect(recordRows(page)).toHaveCount(1, { timeout: 30_000 });
     await expect(page.getByTestId(editorTabTestId("projects/Web.md"))).toHaveCount(0);
 
-    // --- Every v1 field type, added through the Fields dialog (Name/text
-    // came from the New collection dialog).
-    // Fields and Views are commands in the Collection's actions menu.
     await page.getByRole("button", { name: "Collection actions", exact: true }).click();
     await page.getByTestId("collection-fields-button").click();
     await expect(page.getByTestId("collection-fields-dialog")).toBeVisible();
@@ -272,7 +264,6 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
     await addField(page, { name: "Site", type: "url" });
     await page.keyboard.press("Escape");
     await expect(page.getByTestId("collection-fields-dialog")).toHaveCount(0);
-    // The table re-reads the schema: the last-added column arrives.
     await expect(page.getByRole("columnheader").filter({ hasText: "Site" })).toBeVisible({
       timeout: 30_000,
     });
@@ -284,7 +275,6 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
     await editInputCell(row1, 0, "Website");
     const websiteRow = recordRows(page).filter({ hasText: "Website" });
     await editInputCell(websiteRow, 1, "3");
-    // Checkbox cells edit in place — no editor to open.
     const doneBox = fieldCell(websiteRow, 2).locator('input[type="checkbox"]');
     await doneBox.click();
     await expect(doneBox).toBeChecked({ timeout: 30_000 });
@@ -316,15 +306,12 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
       await ownerInput.press("Enter");
       await expect(ownerCell).toContainText("ice", { timeout: 30_000 });
     }
-    // Relation: the picker lists the clients records by label in the overlay.
     const clientCell = fieldCell(websiteRow, 8);
     await clientCell.getByRole("button").click();
     await overlay.getByRole("option", { name: "Acme" }).click();
     await expect(clientCell).toContainText("Acme", { timeout: 30_000 });
     await editInputCell(websiteRow, 9, "https://website.example");
 
-    // --- A second record: the board's target column and the calendar's
-    // second-date-field proof.
     await newRecordNamed(page, "Launch");
     await expect(recordRows(page)).toHaveCount(2, { timeout: 30_000 });
     const launchRow = recordRows(page).filter({ hasText: "Launch" });
@@ -347,8 +334,6 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
       timeout: 30_000,
     });
 
-    // --- Board drag: Website moves Todo → Doing, and the write LANDS IN
-    // THE RECORD'S FILE.
     await switchView(page, "Board");
     await expect(
       boardColumn(page, "Todo").locator('[role="listitem"][aria-label="Website"]'),
@@ -364,8 +349,6 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
     // header count is what tells the user the rest exist. After the drag
     // the Doing column holds both records.
     await expect(boardColumn(page, "Doing").getByTestId("board-column-count")).toHaveText("2");
-    // The md file IS the record: the grouped-field write settles into its
-    // frontmatter on disk.
     await expect
       .poll(
         async () => {
@@ -379,11 +362,8 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
         { timeout: 30_000, intervals: [500] },
       )
       .toBe(true);
-    // A completed drag is not a click: the record tab must not have opened.
     await expect(page.getByTestId(editorTabTestId("projects/Web.md"))).toHaveCount(0);
 
-    // --- Calendar rekey: keyed to Due only Website renders (day 10); keyed
-    // to Started only Launch renders (day 20). The events moved with the key.
     await switchView(page, "Due dates");
     await expect(page.locator(".rbc-event").filter({ hasText: "Website" })).toBeVisible({
       timeout: 30_000,

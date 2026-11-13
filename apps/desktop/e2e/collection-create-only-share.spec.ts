@@ -125,7 +125,6 @@ test("a shared collection reaches a link holder, converges a cross-device edit, 
       workspaceId: WORKSPACE_ID,
     });
 
-    // Device A of the granter seeds the collection and a private file.
     const deviceA = new RelayFilePeer({
       baseUrl: relay.baseUrl,
       token: GRANTER_TOKEN,
@@ -139,7 +138,6 @@ test("a shared collection reaches a link holder, converges a cross-device edit, 
     ]);
     const recordHead = heads[1]!;
 
-    // The share selects the collection folder.
     const create = await relayJson(relay.baseUrl, GRANTER_TOKEN, `/sync/${WORKSPACE_ID}/shares`, {
       method: "POST",
       body: JSON.stringify({
@@ -151,7 +149,6 @@ test("a shared collection reaches a link holder, converges a cross-device edit, 
     expect(create.status).toBe(200);
     const shareId = (JSON.parse(create.body) as { shareId: string }).shareId;
 
-    // The named recipient reaches the collection through the share.
     const namedLog = await relayJson(
       relay.baseUrl,
       RECIPIENT_TOKEN,
@@ -160,7 +157,6 @@ test("a shared collection reaches a link holder, converges a cross-device edit, 
     expect(namedLog.status).toBe(200);
     expect(namedLog.body.includes("ledger")).toBe(false);
 
-    // A View link on the same share, created relay-side.
     const linkCreate = await relayJson(
       relay.baseUrl,
       GRANTER_TOKEN,
@@ -190,7 +186,6 @@ test("a shared collection reaches a link holder, converges a cross-device edit, 
     expect(exchange.status).toBe(200);
     const capability = (JSON.parse(exchange.body) as { capabilityToken: string }).capabilityToken;
 
-    // The link holder reads the schema and the record, and nothing private.
     const linkLogResponse = await readViewLink(
       relay.baseUrl,
       capability,
@@ -216,8 +211,6 @@ test("a shared collection reaches a link holder, converges a cross-device edit, 
     );
     expect(privateBlob.status).toBe(404);
 
-    // Device B of the granter edits the record field; the edit converges
-    // through the relay and the link holder reads the converged state.
     const deviceB = new RelayFilePeer({
       baseUrl: relay.baseUrl,
       token: GRANTER_TOKEN,
@@ -255,9 +248,6 @@ test("a shared collection reaches a link holder, converges a cross-device edit, 
     expect(convergedBlob.status).toBe(200);
     expect(convergedBlob.body).toBe(RECORD_V2);
 
-    // Revocation stops every collection operation over the share. The link
-    // becomes byte-identical to never-valid; the named grant tells its
-    // former recipient that access was removed.
     const revoke = await relayJson(relay.baseUrl, GRANTER_TOKEN, `/sync/shares/${shareId}/revoke`, {
       method: "POST",
     });

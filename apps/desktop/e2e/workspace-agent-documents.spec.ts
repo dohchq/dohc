@@ -46,7 +46,6 @@ async function agentCli<Verb extends CliVerb>(
   return await sendCliRequest<Verb>(request, { stateDir: temp.homeDir });
 }
 
-// Expands the document's folder unless an earlier open already did.
 async function openDocument(page: Page, path: string): Promise<void> {
   const segments = path.split("/");
   for (let index = 0; index < segments.length - 1; index += 1) {
@@ -338,8 +337,6 @@ test("an agent's edit merges into a document the person is typing in", async ({}
       }),
     ).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("ask the person") });
 
-    // Main takes the held typing, and the person keeps typing where the
-    // cursor was.
     await releaseEditorUpdates(desktop);
     await page.keyboard.type(" Typed after.");
 
@@ -348,7 +345,6 @@ test("an agent's edit merges into a document the person is typing in", async ({}
     await expect(editor.getByRole("heading", { name: "Added by the agent" })).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath("agent-edit-merged.png") });
 
-    // Both people's text reaches the agent's next read and the file.
     const merged = [
       "The person wrote here. Typed before. Queued. Typed after.",
       "The agent edited this line.\n\n## Added by the agent\n\nA new section.",
@@ -406,8 +402,6 @@ test("an agent creates a document and comments on it where the person reads comm
     await waitForWorkspaceFile(page, workspace.workspaceId, "notes/readme.md");
     await waitForCliEndpoint(temp.homeDir);
 
-    // The agent creates a document. Its text is in the file when the call
-    // returns.
     const created = await agentCli(temp, "documentCreate", {
       agent: "e2e-agent",
       path: "notes/itinerary.md",
@@ -422,7 +416,6 @@ test("an agent creates a document and comments on it where the person reads comm
       }),
     ).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("already exists") });
 
-    // The person sees the new document and opens it.
     await waitForWorkspaceFile(page, workspace.workspaceId, "notes/itinerary.md");
     await openDocument(page, "notes/itinerary.md");
     const editor = page.getByTestId("markdown-editor");
@@ -454,7 +447,6 @@ test("an agent creates a document and comments on it where the person reads comm
       page.locator('[data-testid="linked-chat-message-author"][data-author-kind="agent"]'),
     ).toHaveCount(1);
 
-    // The person answers in the same chat, and the agent reads the answer.
     const composer = page.getByTestId("linked-chat-composer");
     await composer.fill("Yes, 5 is fine.");
     await composer.press("Enter");

@@ -98,7 +98,6 @@ async function pressApp(page: Page, app: ElectronApplication, id: number, select
   )) as [number, number];
   await page.mouse.click(view.x + frameX + x, view.y + frameY + y);
 }
-// A <webview> that dohc didn't issue, added by the window's own page with its own preload and partition.
 async function injectGuest(page: Page, src: string, preload: string) {
   await page.evaluate(
     ({ src, preload }) => {
@@ -112,7 +111,6 @@ async function injectGuest(page: Page, src: string, preload: string) {
     { src, preload },
   );
 }
-// A person's drag of a tab into another group, as workspace-editor-groups.spec.ts makes it.
 async function dragTabTo(page: Page, tab: Locator, group: Locator) {
   const from = (await tab.boundingBox())!;
   const to = (await group.boundingBox())!;
@@ -166,7 +164,6 @@ async function overlayAboveApp(page: Page, overlay: Locator) {
       overlay.evaluate((element) => {
         const app = document.querySelector('[data-testid="app-view-webview"]');
         if (!app) return false;
-        // The overlay must cover part of the app, and be on top at the middle of that part.
         const a = app.getBoundingClientRect(),
           b = element.getBoundingClientRect();
         const left = Math.max(a.left, b.left),
@@ -181,7 +178,6 @@ async function overlayAboveApp(page: Page, overlay: Locator) {
     .toBe(true);
 }
 
-// A Collection with a form app whose page is the fixture above.
 async function createFormApp(
   electronApp: ElectronApplication,
   page: Page,
@@ -266,7 +262,6 @@ test("@app-view approved app guests preserve isolation, links, permissions, over
       );
 
     await createFormApp(electronApp, page, workspace);
-    // Only Explorer Home lists apps.
     await openExplorerHome(page);
     const row = page.locator(`[data-testid="sites-row"][data-root="${appRoot}"]`);
     await shown(row);
@@ -311,7 +306,6 @@ test("@app-view approved app guests preserve isolation, links, permissions, over
         ),
       )
       .toBe("App isolation fixture");
-    // The app fills the tab from its top edge, and the page around it doesn't scroll.
     expect(
       await inFrame(
         electronApp,
@@ -398,7 +392,6 @@ test("@app-view approved app guests preserve isolation, links, permissions, over
           electronApp.evaluate(({ webContents }, id) => webContents.fromId(id)!.getURL(), guestId),
         )
         .toMatch(/^http:\/\/127\.0\.0\.1:\d+\/bootstrap$/);
-      // The link left through main, and the app's frame still shows the app.
       expect(await inFrame(electronApp, guestId, "document.querySelector('h1')?.textContent")).toBe(
         "App isolation fixture",
       );
@@ -492,12 +485,10 @@ test("@app-view approved app guests preserve isolation, links, permissions, over
           inFrame(electronApp, guestId, "matchMedia('(prefers-color-scheme: dark)').matches"),
         )
         .toBe(theme === "dark");
-      // The fixture sets no colors, so in either theme its black text sits on a light page, as on a share link.
       expect(
         await inFrame(electronApp, guestId, "getComputedStyle(document.querySelector('h1')).color"),
       ).toBe("rgb(0, 0, 0)");
       await expect.poll(() => appBackground(page, electronApp)).toBe("light");
-      // An app that declares it follows the system theme gets that theme's page.
       await inFrame(
         electronApp,
         guestId,
@@ -631,8 +622,6 @@ test("@app-view an app keeps its page when its tab moves to another editor group
       .poll(() => inFrame(electronApp, guestId, "document.querySelector('h1')?.textContent"))
       .toBe("App isolation fixture");
 
-    // What the person typed, a count, and a value only this load of the page holds. A reload resets all three, and
-    // keeps the guest's ID.
     const typed = "lisbon";
     await pressApp(page, electronApp, guestId, "#focus");
     await expect
@@ -664,11 +653,9 @@ test("@app-view an app keeps its page when its tab moves to another editor group
     await leftGroup.getByTestId(appTab).click({ position: { x: 16, y: 16 } });
     await ready(page);
 
-    // Tab follows the screen with the app beside the note. Keys pressed in the app reach only the app.
     const appControls =
       "[...document.querySelectorAll('a[href], button:not([disabled]), input:not([disabled])')]";
     const divider = page.getByRole("separator", { name: "Resize editor groups" });
-    // Shift+Tab out of the app's first control reaches its page's toolbar.
     await pressApp(page, electronApp, guestId, "#focus");
     await inFrame(electronApp, guestId, `${appControls}[0].focus(); true`);
     await page.keyboard.press("Shift+Tab");
@@ -684,18 +671,14 @@ test("@app-view an app keeps its page when its tab moves to another editor group
         }),
       )
       .toBe(true);
-    // Shift+Tab from the divider after the app's group goes in at the app's last control, not where it last was.
     await divider.focus();
     await page.keyboard.press("Shift+Tab");
     await expect
       .poll(() => inFrame(electronApp, guestId, `document.activeElement === ${appControls}.at(-1)`))
       .toBe(true);
-    // Tab out of the app's last control reaches the divider.
     await page.keyboard.press("Tab");
     await expect(divider).toBeFocused();
 
-    // With the note's group active, Tab from the sidebar reaches each control of the app's group in order. Focus on
-    // one makes that group active, and the app leaves focus there.
     const webview = page.getByTestId("app-view-webview");
     const noteGroupActive = async () => {
       await rightGroup
@@ -723,7 +706,6 @@ test("@app-view an app keeps its page when its tab moves to another editor group
       await expect(control).toBeFocused();
     }
     await expect(leftGroup).toHaveAttribute("data-active");
-    // Enter on the app's tab puts focus in the app, and so does a click on it.
     await noteGroupActive();
     await sidebarEnd.focus();
     await page.keyboard.press("Tab");
@@ -733,7 +715,6 @@ test("@app-view an app keeps its page when its tab moves to another editor group
     await noteGroupActive();
     await leftGroup.getByTestId(appTab).click({ position: { x: 16, y: 16 } });
     await expect(webview).toBeFocused();
-    // A click on All tabs in the app's group opens its menu, and the menu keeps focus.
     await noteGroupActive();
     await allTabs.click();
     const allTabsMenu = page.getByTestId("tabs-overflow-menu");
@@ -749,7 +730,6 @@ test("@app-view an app keeps its page when its tab moves to another editor group
     await expect(rightGroup.getByTestId(appTab)).toBeVisible();
     await expect(leftGroup.getByTestId(appTab)).toHaveCount(0);
     await ready(page);
-    // The page now lies over the group it moved to.
     await expect
       .poll(async () => {
         const [view, group] = [
@@ -764,7 +744,6 @@ test("@app-view an app keeps its page when its tab moves to another editor group
         );
       })
       .toBe(true);
-    // The drop releases a press on the app's tab, so focus is in the app.
     await expect(webview).toBeFocused();
     expect(await guestIds(electronApp)).toEqual([guestId]);
     expect(await inFrame(electronApp, guestId, "window.pageLoad")).toBe(load);
@@ -775,7 +754,6 @@ test("@app-view an app keeps its page when its tab moves to another editor group
       await inFrame(electronApp, guestId, "document.getElementById('count').textContent"),
     ).toBe("2");
 
-    // Closing the note's group, which held focus, puts focus in the app.
     await leftGroup.getByTestId(editorTabTestId("notes.md")).click({ position: { x: 16, y: 16 } });
     await expect(leftGroup).toHaveAttribute("data-active");
     await allTabs.click();

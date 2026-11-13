@@ -83,7 +83,6 @@ test("an MCP move and delete each show one History row under the agent", async (
       '[data-testid="engine-moment-open"][data-moment-path^="archive/plans/"]',
     );
     await expect(moved).toHaveCount(1);
-    // History shows the name a connected agent gave, beside the plug.
     await expect(moved.getByTestId("engine-moment-source")).toHaveText("Mover agent");
     await expect(moved.locator('[data-agent-mark="connected"]')).toHaveCount(1);
     const deleted = page.locator('[data-testid="engine-moment-open"][data-moment-path="old.txt"]');

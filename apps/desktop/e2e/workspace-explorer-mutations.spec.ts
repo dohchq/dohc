@@ -69,8 +69,6 @@ test("Explorer creates, renames, deletes from its menu, and undoes the delete", 
     await expect(notice).toContainText("Renamed notes.md to plan.md");
     await expect(notice.getByRole("button", { name: "Undo" })).toBeVisible();
 
-    // The row's menu, opened from the keyboard, focuses its first entry and
-    // gives focus back on Escape.
     const menu = page.getByTestId("explorer-menu");
     await renamed.click();
     await renamed.press("Shift+F10");
@@ -80,7 +78,6 @@ test("Explorer creates, renames, deletes from its menu, and undoes the delete", 
     await expect(menu).toHaveCount(0);
     await expect(renamed).toBeFocused();
 
-    // A delete goes to the trash at once, and its notice offers Undo.
     await renamed.click({ button: "right" });
     await menu.getByRole("menuitem", { name: "Delete" }).click();
     await expect(page.getByTestId("delete-confirm")).toHaveCount(0);
@@ -220,8 +217,6 @@ test("dropping a folder from the OS imports it whole", async ({}, testInfo) => {
     expect(await pathExists(join(temp.rootPath, "Trip", "photos", ".DS_Store"))).toBe(false);
     await page.screenshot({ path: testInfo.outputPath("folder-drop.png") });
 
-    // A drop of empty folders lands no file, and the folder it landed is
-    // selected all the same.
     await mkdir(join(outside, "Empty", "Inner"), { recursive: true });
     await dropFromOs(join(outside, "Empty"));
     await expect(explorerRow(page, "Empty")).toHaveAttribute("aria-selected", "true");

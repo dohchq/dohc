@@ -44,7 +44,6 @@ test.skip(
 type Api = DohcDesktopBridge;
 const editor = (page: Page) => page.getByTestId("markdown-editor");
 
-/** New page as Ctrl N makes it: the title, then Enter, then the body, with no wait between them. */
 async function typeNewPage(page: Page, title: string, body: string): Promise<string> {
   await page.keyboard.press("ControlOrMeta+n");
   await expect(page.getByLabel("Page title")).toBeFocused();
@@ -96,7 +95,6 @@ test("@new-page-edit-link a note made with New page goes live through an Edit li
       editLinks: true,
     });
 
-    // --- The owner connects an account and syncs the workspace ---------------
     const existing = "existing.md";
     await writeWorkspaceFiles(temp, [{ path: existing, contents: "# Existing\n" }]);
     owner = await launchDesktopApp({ workspace: temp, env: stack.trustEnv });
@@ -133,12 +131,6 @@ test("@new-page-edit-link a note made with New page goes live through an Edit li
           .filter((line) => /activation pass failed|refus/iu.test(line)),
       );
 
-    /**
-     * Makes an Edit link for `path` with the desktop's own call, runs
-     * `afterLink`, and waits for the note to go live. With `linkHolder`, a
-     * link holder then types a marker after `body`, and it must reach the
-     * owner's file.
-     */
     const shareAndEdit = async (
       name: string,
       path: string,
@@ -189,7 +181,6 @@ test("@new-page-edit-link a note made with New page goes live through an Edit li
       expect.soft(live, `${name}: the note goes live; last status ${status}`).toBe(true);
       if (!linkHolder) return;
 
-      // The share page lists a file in a folder by its own name.
       const fileButton = path.slice(path.lastIndexOf("/") + 1);
       const browserPage = await shared!.browser.newPage();
       browserPage.on("pageerror", (error) => shared!.failures.push(error.message));
@@ -239,7 +230,6 @@ test("@new-page-edit-link a note made with New page goes live through an Edit li
       await browserPage.close();
     };
 
-    // --- Control: a file the app wrote and captured before its editor opened --
     const written = "notes/written.md";
     const writtenBody = "Written by the app. Then typed.";
     await page.evaluate(
@@ -275,7 +265,6 @@ test("@new-page-edit-link a note made with New page goes live through an Edit li
       true,
     );
 
-    // --- New page, typed, and closed before any share ------------------------
     const closedBody = "Typed, closed, then shared.";
     const closed = await typeNewPage(page, "Closed page", closedBody);
     await page.keyboard.press("ControlOrMeta+w");
