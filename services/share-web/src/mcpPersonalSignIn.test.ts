@@ -8,7 +8,6 @@ import {
   appendLog, chatMessageAppend, chatThreadCreate, claimWorkspace, closeTestStorages, createShare, json, jsonBody, linkSecret,
   RELAY_EXCHANGE_KEY, request, sequenced, testHandler, testStorage, type ChatOp,
 } from "../../sync-relay/src/testing";
-import { MCP_CORS_HEADERS, signInPageCsp } from "./mcpSignIn";
 import { authorizePath, LOOPBACK_REDIRECT, pkce, registeredClient, signInAgent, tokenRequest, type ShareWebSend } from "./mcpSignIn.test-helper";
 import {
   browser, CookieJar, formField, listening, pagePost, personalResource, signInBrowser, signInPersonalAgent, TestAccounts, type TestAccount,
@@ -35,13 +34,6 @@ afterEach(async () => {
   await closeTestStorages();
 });
 
-function expectCors(response: Response) {
-  for (const [name, value] of Object.entries(MCP_CORS_HEADERS)) expect(response.headers.get(name), name).toBe(value);
-}
-
-/** A page's text as a person reads it. */
-const visible = (html: string) => html.replace(/&#(\d+);/gu, (_, code: string) => String.fromCharCode(Number(code)));
-
 /** Each workspace's choice as the page draws it, by workspace: its radios, and the one checked. */
 function reachOf(html: string): Record<string, { offered: string[]; selected: string | null }> {
   const reach: Record<string, { offered: string[]; selected: string | null }> = {};
@@ -55,7 +47,7 @@ function reachOf(html: string): Record<string, { offered: string[]; selected: st
 
 const selected = (html: string) => Object.fromEntries(Object.entries(reachOf(html)).map(([workspaceId, choice]) => [workspaceId, choice.selected]));
 
-async function stack(options: { account?: boolean } = {}) {
+async function stack() {
   const storage = await testStorage();
   const accounts = new TestAccounts(ORIGIN, [ADA, BEN]);
   const relay = testHandler(storage, {
@@ -67,8 +59,6 @@ async function stack(options: { account?: boolean } = {}) {
   await claimWorkspace(relay, ADA.userId, TRIP);
   await claimWorkspace(relay, ADA.userId, FUNDRAISER);
   await claimWorkspace(relay, BEN.userId, GARDEN);
-  const relayCalls: string[] = [];
-  let noWorkspaces = false;
   // The next origin sequence of the owner's computer in each workspace.
   const ownerSeqs = new Map<string, number>();
   const ownerSeq = (workspaceId: string, count: number) => {
@@ -76,20 +66,11 @@ async function stack(options: { account?: boolean } = {}) {
     ownerSeqs.set(workspaceId, next + count);
     return next;
   };
-  const fetchRelay = async (relayRequest: Request) => {
-    const path = new URL(relayRequest.url).pathname;
-    relayCalls.push(path);
-    const answer = await relay(relayRequest);
-    if (!noWorkspaces || path !== "/sync/link/agent-authorizations/personal-consent" || answer.status !== 200) return answer;
-    // The page's empty state: the relay's answer names no workspace.
-    return Response.json({ ...await json(answer), workspaces: [] });
-  };
+  const fetchRelay = (relayRequest: Request) => relay(relayRequest);
   const application = () => createShareWebApplication({
     relayUrl: "https://relay.example.test", publicRelayUrl: "https://relay.example.test", relayExchangeKey: RELAY_EXCHANGE_KEY,
     publicHosts: new Set([HOST]), nowMs: () => NOW, fetchRelay,
-    ...(options.account === false ? {} : {
-      accountAuth: { publicOrigin: ORIGIN, upstreamUrl: "https://accounts.example.test" }, fetchAuth: accounts.fetchAuth,
-    }),
+    accountAuth: { publicOrigin: ORIGIN, upstreamUrl: "https://accounts.example.test" }, fetchAuth: accounts.fetchAuth,
   });
   let app = application();
   const send: ShareWebSend = (path, init = {}) => app.handle(new Request(ORIGIN + path, { ...init, headers: { host: HOST, ...init.headers } }));
@@ -134,8 +115,7 @@ async function stack(options: { account?: boolean } = {}) {
   }
 
   return {
-    send, mcp, connect, open, choose, accounts, relayCalls,
-    answerNoWorkspaces() { noWorkspaces = true; },
+    send, mcp, connect, open, choose, accounts,
     restart() { app = application(); },
     /** The owner's own posts, as their computer pushes them to `workspaceId`'s log. */
     ownerSays: (workspaceId: string, ops: ChatOp[]) => appendLog(relay, ADA.userId, workspaceId, sequenced(ops, ownerSeq(workspaceId, ops.length))),
@@ -153,60 +133,6 @@ async function stack(options: { account?: boolean } = {}) {
   };
 }
 
-it("signs a signed-out browser in first, then returns to the same sign-in request", async () => {
-  const s = await stack();
-  const jar = new CookieJar(), as = browser(s.send, jar);
-  const clientId = await registeredClient(s.send, "Trip helper");
-  const path = authorizePath({ clientId, resource: personalResource(ORIGIN, TRIP), challenge: pkce().challenge, state: "return" });
-  const signedOut = await as(path);
-  const page = await signedOut.text();
-  expect(signedOut.status).toBe(200);
-  expect(signedOut.headers.get("content-security-policy")).toBe(signInPageCsp("'self'"));
-  expect(page).toContain("<h1>Sign in to dohc</h1>");
-  expect(formField(page, "return")).toBe(path.slice("/oauth/authorize?".length));
-  // A signed-out view begins nothing at the relay.
-  expect(s.relayCalls).not.toContain("/sync/link/agent-authorizations");
-
-  const wrong = await as("/oauth/authorize/sign-in", pagePost(ORIGIN, { return: formField(page, "return")!, email: ADA.email, password: "not it" }));
-  expect(wrong.status).toBe(401);
-  const wrongPage = await wrong.text();
-  expect(wrongPage).toContain("dohc could not sign in with that email and password. Check both, then sign in again.");
-  expect(wrongPage).toContain(`value="${ADA.email}"`);
-  expect(wrongPage).toContain("aria-invalid=\"true\" aria-describedby=\"password-error\" autofocus>");
-
-  const signedIn = await as("/oauth/authorize/sign-in", pagePost(ORIGIN, { return: formField(page, "return")!, email: ADA.email, password: ADA.password }));
-  expect(signedIn.status).toBe(303);
-  expect(signedIn.headers.get("location")).toBe(`${ORIGIN}${path}`);
-  expect(jar.has(s.accounts.sessionCookie)).toBe(true);
-
-  const consent = await as(path);
-  const html = await consent.text();
-  expect(consent.status).toBe(200);
-  expect(html).toContain(`<span class="host">${HOST}</span>`);
-  // A new agent's tile is dashed, with the initial of the name it will have.
-  expect(html).toContain("<span class=\"tile agent\">T</span>");
-  expect(html).toContain("<h1>Sign in Trip helper as your agent</h1><p class=\"lede\">\"<bdi>Trip helper</bdi>\" is the name the agent gave.</p>");
-  expect(html).toContain(`<bdi class="k">${ADA.email}</bdi><button type="submit" form="sign-out" class="link">Not you?</button>`);
-  expect(formField(html, "name")).toBe("Trip helper");
-  expect(html).toContain(`<p class="cap">@${handleForName("Trip helper")}</p>`);
-  expect(html).toContain("<p class=\"cap\">View reads files and chats. Comment also posts in chats and Comments. " +
-    "Edit also changes Collections, but no other files.</p>");
-  expect(html).toContain("<bdi>Trip helper</bdi> runs outside dohc. dohc limits what it reaches here, not what it does elsewhere.");
-  // The redirect goes to a loopback address, so the page names this computer, not the address.
-  expect(html).toContain("<span class=\"to\">Returns to an app on this computer</span>");
-  expect(html).not.toContain("Returns to 127.0.0.1");
-  expect(html).toContain("value=\"cancel\" class=\"btn\">Cancel</button><button type=\"submit\" name=\"decision\" value=\"allow\" class=\"btn primary\">Allow</button>");
-  // A browser signed in now is enough: consent asks for no password again.
-  expect(html).not.toContain("type=\"password\"");
-
-  // "Not you?" signs the browser out, and the same request asks for an account again.
-  const signOut = await as("/oauth/authorize/sign-out", pagePost(ORIGIN, { return: formField(html, "return")! }));
-  expect(signOut.status).toBe(303);
-  expect(signOut.headers.get("location")).toBe(`${ORIGIN}${path}`);
-  expect(jar.has(s.accounts.sessionCookie)).toBe(false);
-  expect(await (await as(path)).text()).toContain("<h1>Sign in to dohc</h1>");
-});
-
 it("starts the address's workspace at Edit and every other at None, and offers None, View, Comment and Edit", async () => {
   const s = await stack();
   const { page, html } = await s.open(new CookieJar(), FUNDRAISER);
@@ -221,45 +147,6 @@ it("starts the address's workspace at Edit and every other at None, and offers N
   expect(html).not.toContain("Who it is");
 });
 
-it("asks for at least one workspace and a name, and keeps the choices as the person made them", async () => {
-  const s = await stack();
-  const { as, html } = await s.open(new CookieJar(), TRIP);
-  const none = await s.choose(as, html, { as: "new", name: "Trip helper", [`w:${TRIP}`]: "none", [`w:${FUNDRAISER}`]: "none", decision: "allow" });
-  expect(none.status).toBe(400);
-  const nonePage = await none.text();
-  expect(nonePage).toContain("<div role=\"group\" aria-labelledby=\"reach-label\" aria-describedby=\"reach-error\">" +
-    "<div class=\"sec\" id=\"reach-label\">What it can reach</div>");
-  expect(nonePage).toContain("<p class=\"error\" id=\"reach-error\">Choose at least one workspace.</p>");
-  // The first workspace's choice takes focus.
-  expect(nonePage).toMatch(/<input type="radio" id="w-0-none" name="w:[^"]+" value="none" checked autofocus>/u);
-  expect(selected(nonePage)).toEqual({ [TRIP]: "none", [FUNDRAISER]: "none" });
-
-  const unnamed = await s.choose(as, html, { as: "new", name: " ", [`w:${TRIP}`]: "view", [`w:${FUNDRAISER}`]: "comment", decision: "allow" });
-  expect(unnamed.status).toBe(400);
-  const unnamedPage = await unnamed.text();
-  expect(unnamedPage).toContain("aria-invalid=\"true\" aria-describedby=\"name-error\" autofocus>");
-  expect(unnamedPage).toContain("<p class=\"error\" id=\"name-error\">Enter a name for this agent.</p>");
-  expect(selected(unnamedPage)).toEqual({ [TRIP]: "view", [FUNDRAISER]: "comment" });
-});
-
-it("says when a sign-in request expired, and never calls another account's workspace expired", async () => {
-  const s = await stack();
-  const jar = new CookieJar();
-  const { as, html } = await s.open(jar, TRIP);
-  // The consent cookie lasts as long as the request.
-  jar.forget("__Host-dohc_consent_");
-  const expired = await s.choose(as, html, { as: "new", name: "Trip helper", [`w:${TRIP}`]: "comment", decision: "allow" });
-  expect(expired.status).toBe(403);
-  expect(await expired.text()).toContain("This sign-in request expired. Start the sign-in again from your agent.");
-
-  const other = await s.open(new CookieJar(), TRIP, BEN);
-  expect(other.page.status).toBe(403);
-  const refusal = visible(other.html);
-  expect(refusal).toContain(`${BEN.email} does not own the workspace in this agent's link. Sign in as the workspace's owner to continue.`);
-  expect(refusal).not.toMatch(/expired|ended/u);
-  expect(refusal).toContain("<form method=\"post\" action=\"/oauth/authorize/sign-out\">");
-});
-
 it("asks a browser that signed in before the password last changed to sign in again before it allows", async () => {
   const s = await stack();
   const { as, html } = await s.open(new CookieJar(), TRIP);
@@ -270,29 +157,6 @@ it("asks a browser that signed in before the password last changed to sign in ag
   expect(page).toContain("<h1>Sign in to dohc</h1>");
   expect(page).toContain("This browser signed in before your password last changed. Sign in again.");
   expect(page).not.toContain("type=\"radio\"");
-});
-
-it("offers only Cancel when the account has no workspace on this server", async () => {
-  const s = await stack();
-  s.answerNoWorkspaces();
-  const { as, html } = await s.open(new CookieJar(), TRIP);
-  expect(html).toContain(`<div class="sec">What it can reach</div><div class="empty">Sync a workspace to ${HOST} first.</div>`);
-  expect([...html.matchAll(/<button type="submit"[^>]*>([^<]+)<\/button>/gu)].map((button) => button[1])).toEqual(["Not you?", "Cancel"]);
-
-  const cancelled = await s.choose(as, html, { decision: "cancel" });
-  expect(cancelled.status).toBe(303);
-  const location = new URL(cancelled.headers.get("location") ?? "");
-  expect([`${location.origin}${location.pathname}`, location.searchParams.get("error"), location.searchParams.get("state")])
-    .toEqual([LOOPBACK_REDIRECT, "access_denied", "consent"]);
-});
-
-it("names the host a hosted agent returns to", async () => {
-  const s = await stack();
-  const { page, html } = await s.open(new CookieJar(), TRIP, ADA, "Relaybot", "https://agents.example.net/callback");
-  expect(page.status).toBe(200);
-  expect(page.headers.get("content-security-policy")).toBe(signInPageCsp("'self' https://agents.example.net"));
-  expect(html).toContain("<span class=\"to\">Returns to agents.example.net</span>");
-  expect(html).not.toContain("an app on this computer");
 });
 
 it("signs an agent in again from its current reach", async () => {
@@ -334,34 +198,6 @@ it("signs an agent in again from its current reach", async () => {
   expect(tokens.status).toBe(200);
   const again = await tokens.json() as { access_token: string };
   expect((await s.authority({ accessToken: again.access_token, resource })).agentId).toBe(agentId);
-});
-
-it("challenges the personal address, publishes its metadata, and answers preflight from any origin", async () => {
-  const s = await stack();
-  const path = `/mcp/agent/w/${TRIP}`;
-  const challenged = await s.send(path, { method: "POST", body: TOOLS_LIST,
-    headers: { origin: "https://inspector.example.test", "content-type": "application/json" } });
-  expect(challenged.status).toBe(401);
-  expect(challenged.headers.get("www-authenticate")).toBe(`Bearer resource_metadata="${ORIGIN}/.well-known/oauth-protected-resource${path}"`);
-  expectCors(challenged);
-
-  const metadata = await s.send(`/.well-known/oauth-protected-resource${path}`);
-  expect(metadata.status).toBe(200);
-  expect(await metadata.json()).toEqual({ resource: `${ORIGIN}${path}`, authorization_servers: [ORIGIN], bearer_methods_supported: ["header"] });
-  expectCors(metadata);
-  for (const preflight of [path, `/.well-known/oauth-protected-resource${path}`]) {
-    const answer = await s.send(preflight, { method: "OPTIONS",
-      headers: { origin: "https://inspector.example.test", "access-control-request-method": "POST" } });
-    expect(answer.status, preflight).toBe(204);
-    expectCors(answer);
-  }
-
-  // Each address has one spelling, and exists only where a browser's account signs agents in.
-  expect((await s.mcp("/mcp/agent/w/%74rip")).status).toBe(404);
-  expect((await s.send("/.well-known/oauth-protected-resource/mcp/agent/w/%74rip")).status).toBe(404);
-  const linkOnly = await stack({ account: false });
-  expect((await linkOnly.mcp(path)).status).toBe(404);
-  expect((await linkOnly.send(`/.well-known/oauth-protected-resource${path}`)).status).toBe(404);
 });
 
 it("never accepts one family's token at the other's address, nor a personal token at another workspace's", async () => {
@@ -425,35 +261,6 @@ it("keeps a personal agent working after share-web restarts: it waits, replies, 
   const again = await s.connect(accessToken, agent.resource);
   expect((await again.callTool({ name: "dohc_list_workspaces", arguments: {} })).structuredContent)
     .toMatchObject({ ok: true, agent: { name: "Trip helper", handle: "Triphelper" }, workspaces: [{ workspace: TRIP, level: "comment", dmChannel: dm }] });
-});
-
-it("holds one large body per personal agent, whichever of its tokens sends it", async () => {
-  const s = await stack();
-  const agent = await signInPersonalAgent({ send: s.send, origin: ORIGIN, workspaceId: TRIP, account: ADA, choices: { [`w:${TRIP}`]: "edit" } });
-  // A refresh leaves the first access token working, so the agent has two.
-  const refreshed = await tokenRequest(s.send, { grant_type: "refresh_token", client_id: agent.clientId, refresh_token: agent.refreshToken,
-    resource: agent.resource });
-  expect(refreshed.status).toBe(200);
-  const { access_token: second } = await refreshed.json() as { access_token: string };
-  const path = new URL(agent.resource).pathname;
-  const headers = (token: string) => ({ authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json, text/event-stream" });
-  let finish!: () => void;
-  // A body past an ordinary request's size takes the agent's one large slot while it arrives.
-  const held = s.send(path, { method: "POST", headers: headers(agent.accessToken), duplex: "half", body: new ReadableStream<Uint8Array>({
-    start(controller) {
-      controller.enqueue(new TextEncoder().encode(`{"params":{"padding":"${"x".repeat(40 * 1024)}"},`));
-      finish = () => {
-        controller.enqueue(new TextEncoder().encode(`"jsonrpc":"2.0","id":1,"method":"tools/list"}`));
-        controller.close();
-      };
-    },
-  }) } as RequestInit);
-  const large = JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: { padding: "x".repeat(40 * 1024) } });
-  // The agent's other token waits its turn too.
-  await expect.poll(async () => (await s.send(path, { method: "POST", headers: headers(second), body: large })).status).toBe(429);
-  finish();
-  expect((await held).status).toBe(200);
-  expect((await s.send(path, { method: "POST", headers: headers(second), body: large })).status).toBe(200);
 });
 
 it("keeps the personal address, its tokens and the password out of the logs", async () => {

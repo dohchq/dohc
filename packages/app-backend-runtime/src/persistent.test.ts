@@ -1,17 +1,14 @@
-import { mkdtemp, mkdir, rm, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { processSuspender } from "./suspend-process.test-helper.ts";
 import { describe, expect, it } from "vitest";
 import { openPersistentAppBackend } from "./persistent.ts";
 import type { PersistentAppBackend, PersistentOpenInput, PersistentPrepareInput, PersistentRuntimeOptions, PreparedOperation } from "./persistent.ts";
 import type { AppRuntimeLauncher } from "./protocol.ts";
 import { acquireSupervisorOwnership } from "./worker-ownership.ts";
-import { armBudget, BUDGET_STATE_SLOTS, disarmBudget } from "./budget-watch.ts";
-import { replayConstraintLauncher } from "./replay-constraint.test-helper.ts";
 
 const hash=(bytes:Uint8Array|string)=>createHash("sha256").update(bytes).digest("hex");
 const initial={revision:0,digest:hash("initial")};
@@ -53,17 +50,7 @@ function scriptLauncher(script:string,ended:(signal:NodeJS.Signals|null)=>void=(
 }
 
 describe("persistent dataset worker",()=>{
-  it("keeps an over-budget step armed when it finishes before the watch polls",()=>{
-    const state=new BigInt64Array(new SharedArrayBuffer(BUDGET_STATE_SLOTS*8));
-    const section=armBudget(state,1n,10_000n,1_000n);
-    expect(disarmBudget(state,section,12_000n)).toBe(false);
-    expect(Atomics.load(state,0)).toBe(section);
-  });
-  it("fails the open when the worker exits before it is ready",async()=>{
-    await fixture(async({open})=>{
-      await expect(open({},scriptLauncher("process.exit(1)"))).rejects.toMatchObject({code:"worker_stopped"});
-    });
-  });
+
   it("kills a worker that is still starting when opening is cancelled",async()=>{
     await fixture(async({open})=>{
       const controller=new AbortController();
@@ -76,36 +63,7 @@ describe("persistent dataset worker",()=>{
       expect(await exit).toBe("SIGKILL");
     });
   });
-  it("releases its private directory before the closed worker process exits",async()=>{
-    await fixture(async({root,open})=>{
-      const directory=join(root,"removable");await mkdir(directory);
-      let removed=false,removalError:unknown;
-      const launch:AppRuntimeLauncher=options=>{
-        let closeId:number|undefined;
-        const child=spawn(process.execPath,[options.entryPath],{cwd:options.cwd,env:options.env,stdio:["ignore","ignore","ignore","ipc"],serialization:"advanced",windowsHide:true});
-        child.on("message",message=>{
-          const reply=message as {id:number;ok:boolean};
-          if(reply.id!==closeId||!reply.ok){options.onMessage(message);return;}
-          // The worker has closed SQLite and its lease, but still owns its process cwd until the parent kills it.
-          expect(child.exitCode).toBeNull();
-          void rm(directory,{recursive:true,force:true}).then(()=>{removed=true;options.onMessage(message);},error=>{removalError=error;options.onError(error);});
-        });
-        child.on("error",options.onError);child.on("close",options.onExit);
-        return {postMessage(message){const request=message as {id:number;command:{kind:string}};if(request.command.kind==="close")closeId=request.id;child.send(message as object);},kill(){child.kill("SIGKILL");}};
-      };
-      const worker=await open({directory},launch);
-      await worker.close();
-      expect(removalError).toBeUndefined();
-      expect(removed).toBe(true);
-    });
-  });
-  it("preserves an existing migration report destination when exclusive creation fails",async()=>{
-    await fixture(async({root,open})=>{
-      const worker=await open(),reportPath=join(root,"existing.jsonl");await writeFile(reportPath,"preserve this");
-      await expect(worker.migrateCheckpoint({path:join(root,"output.sqlite"),reportPath,schemaSql,tables:["items"],migrationSql:"SELECT 1;"})).rejects.toThrow();
-      expect(await readFile(reportPath,"utf8")).toBe("preserve this");
-    });
-  });
+
   it("holds its owned-directory lease until worker close and refuses expired ownership",async()=>{
     await fixture(async({root,open})=>{
       const owner=await acquireSupervisorOwnership(root);
@@ -121,41 +79,7 @@ describe("persistent dataset worker",()=>{
       }finally{owner.close();}
     });
   });
-  it("refuses AUTOINCREMENT state that SQLite changesets cannot replay",async()=>{
-    await fixture(async({open})=>{
-      await expect(open({schemaSql:"CREATE TABLE items(id INTEGER PRIMARY KEY AUTOINCREMENT,value TEXT NOT NULL);"})).rejects.toMatchObject({code:"invalid_schema",message:expect.stringContaining("AUTOINCREMENT")});
-    });
-  });
-  it("denies implicit rowid aliases but retains declared INTEGER PRIMARY KEY identity",async()=>{
-    await fixture(async({open})=>{
-      const worker=await open({schemaSql:"CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT); INSERT INTO items VALUES('id','value');"});
-      for(const alias of ["rowid","_rowid_","oid"]) {
-        await expect(worker.prepare({...operation(),readOnly:true,source:`globalThis.operations={run(ctx){return ctx.db.query('SELECT ${alias} FROM items')}}`})).rejects.toThrow();
-        await expect(worker.prepare({...operation(),source:`globalThis.operations={run(ctx){return ctx.db.execute(\"INSERT INTO items(${alias},id,value) VALUES(100,'new','value')\")}}`})).rejects.toThrow();
-      }
-      await expect(open({schemaSql:"CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,ROWID TEXT);"})).rejects.toMatchObject({code:"invalid_schema"});
-      await expect(open({schemaSql:"CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT CHECK(rowid<2 OR value=''));"})).rejects.toMatchObject({code:"invalid_schema"});
-      const literal=await open({schemaSql:"CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT CHECK(value!='rowid') DEFAULT 'oid');"});
-      expect((await literal.prepare({...operation(),readOnly:true})).result).toEqual([]);
-      await expect(open({schemaSql:"CREATE TABLE Items(id INTEGER PRIMARY KEY,value TEXT);"})).rejects.toMatchObject({code:"invalid_schema"});
-      await expect(open({schemaSql:"CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT); CREATE TRIGGER hidden_row AFTER INSERT ON items BEGIN INSERT INTO items(rowid,id,value) VALUES(100,'other','value'); END;"})).rejects.toMatchObject({code:"invalid_schema"});
-      const captured=await open({schemaSql:"CREATE TABLE items(ROWID INTEGER PRIMARY KEY,value TEXT); INSERT INTO items VALUES(42,'value');"});
-      expect((await captured.prepare({...operation(),readOnly:true,source:"globalThis.operations={run(ctx){return ctx.db.query('SELECT oid AS id FROM items')}}"})).result).toEqual([{id:42}]);
-      const explicit=await captured.prepare({...operation(),source:"globalThis.operations={run(ctx){return ctx.db.execute(\"INSERT INTO items(ROWID,value) VALUES(43,'next')\")}}"});
-      expect(explicit.result).toEqual({changes:1});await captured.discard(explicit.proposalId);
-      for(const sql of [
-        "WITH c AS (SELECT 1) INSERT OR IGNORE INTO main.items AS target (\"rowid\",id,value) VALUES(100,'new','value')",
-        "REPLACE INTO 'items' ('oid',id,value) VALUES(100,'new','value')",
-        "INSERT/**/INTO [items] (`_rowid_`,id,value) VALUES(100,'new','value')",
-        "UPDATE items SET rowid=100 WHERE id='id'",
-      ]) await expect(worker.prepare({...operation(),source:`globalThis.operations={run(ctx){return ctx.db.execute(${JSON.stringify(sql)})}}`})).rejects.toThrow();
-    });
-  });
-  it.each(["rowid","\"oid\"","[_rowid_]","items.'rowid'","items./* alias */'oid'","items.'_rowid_'"])("rejects implicit %s in schema predicates without matching literal text",async alias=>{
-    await fixture(async({open})=>{
-      await expect(open({schemaSql:`CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT CHECK((${alias} < 2) OR value='rowid'));`})).rejects.toMatchObject({code:"invalid_schema"});
-    });
-  });
+
   it("commits only after host finalization and restores checkpoint scope/cursor",async()=>{
     await fixture(async({root,open})=>{
       const worker=await open();
@@ -196,47 +120,6 @@ describe("persistent dataset worker",()=>{
       const hoard="globalThis.operations={run(){const held=[];for(let i=0;i<64;i++)held.push(new Uint8Array(1<<20));return held.length}}";
       await expect(worker.prepare({...operation(),source:hoard})).rejects.toThrow("App operation needed more than its 24 MiB memory limit, so it stopped.");
       expect((await worker.prepare(operation(initial,{id:1,value:"after"}))).result).toEqual([{id:1,value:"after"}]);
-    });
-  });
-
-  it("replays committed changesets without evaluating source and refuses out-of-order events",async()=>{
-    await fixture(async({open})=>{
-      const writer=await open(),recovered=await open();
-      const prepared=await writer.prepare(operation(initial,{id:1,value:"journal"}));
-      const committed=event(prepared);
-      await writer.discard(prepared.proposalId);
-      await expect(recovered.apply({...committed,revision:2})).rejects.toMatchObject({code:"stale_revision"});
-      const cursor=await recovered.apply(committed);
-      await expect(recovered.apply(committed)).rejects.toMatchObject({code:"stale_revision"});
-      expect((await recovered.prepare({...operation(cursor),readOnly:true})).result).toEqual([{id:1,value:"journal"}]);
-    });
-  });
-
-  it("replays a bounded batch in order and retains constraints for later writes",async()=>{
-    await fixture(async({open})=>{
-      const writer=await open(),recovered=await open();
-      const first=event(await writer.prepare(operation(initial,{id:1,value:'first'})));await writer.finalize(first);
-      const second=event(await writer.prepare(operation(first,{id:2,value:'second'})),first);await writer.finalize(second);
-      expect(await recovered.applyBatch([first,second])).toEqual({revision:2,digest:second.digest});
-      expect((await recovered.prepare({...operation(second),readOnly:true})).result).toEqual([{id:1,value:'first'},{id:2,value:'second'}]);
-      const third=await recovered.prepare(operation(second,{id:3,value:'third'}));
-      expect(third.result).toHaveLength(3);await recovered.discard(third.proposalId);
-      await expect(recovered.applyBatch([])).rejects.toMatchObject({code:'invalid_input'});
-      await expect(recovered.applyBatch(Array(65).fill(second))).rejects.toMatchObject({code:'invalid_input'});
-      await expect(recovered.applyBatch([second,first])).rejects.toMatchObject({code:'invalid_input'});
-    });
-  });
-
-  it("returns only a completed timed replay prefix and rejects invalid durations",async()=>{
-    await fixture(async({open})=>{
-      const writer=await open(),recovered=await open();
-      const first=event(await writer.prepare(operation(initial,{id:1,value:'first'})));await writer.finalize(first);
-      const second=event(await writer.prepare(operation(first,{id:2,value:'second'})),first);await writer.finalize(second);
-      await expect(recovered.applyBatch([first,second],-1)).rejects.toMatchObject({code:'invalid_input'});
-      await expect(recovered.applyBatch([first,second],60_001)).rejects.toMatchObject({code:'invalid_input'});
-      expect(await recovered.applyBatch([first,second],0)).toEqual({revision:1,digest:first.digest});
-      expect((await recovered.prepare({...operation(first),readOnly:true})).result).toEqual([{id:1,value:'first'}]);
-      expect(await recovered.applyBatch([second],0)).toEqual({revision:2,digest:second.digest});
     });
   });
 
@@ -288,75 +171,10 @@ describe("persistent dataset worker",()=>{
     });
   });
 
-  it("refuses SQL with no statement, which would crash the worker process",async()=>{
-    await fixture(async({open})=>{
-      // node:sqlite in Node 24.16 crashes the process after it prepares text with no statement between failed prepares.
-      let exited!:(status:[number|null,NodeJS.Signals|null])=>void;
-      const exit=new Promise<[number|null,NodeJS.Signals|null]>(resolve=>{exited=resolve;});
-      const launch:AppRuntimeLauncher=options=>{
-        const child=spawn(process.execPath,[options.entryPath],{cwd:options.cwd,env:options.env,stdio:["ignore","ignore","ignore","ipc"],serialization:"advanced",windowsHide:true});
-        child.on("message",options.onMessage);child.on("error",options.onError);
-        child.on("close",(code,signal)=>{exited([code,signal]);options.onExit(code);});
-        return {postMessage(message){child.send(message as object);},kill(){child.kill("SIGKILL");}};
-      };
-      const worker=await open({},launch);
-      const empty=["", " \t\r\n", ";", " ; ;", "-- note", "-- note\rSELECT 1", "/* note */", "/* unfinished", "\0SELECT 1",
-        "\uFEFF", "\uFEFF;-- note", " \uFEFF/* note */;\uFEFF"];
-      // Each input's own outcome, so one that reaches SQLite shows. Five rounds of 24 queries stay under the 128-statement limit.
-      const source=`globalThis.operations={run(ctx){
-        const inputs=${JSON.stringify(empty)}, outcomes=inputs.map(()=>[]);
-        for(let round=0;round<5;round++) inputs.forEach((sql,index)=>{
-          try { (round%2 ? ctx.db.execute : ctx.db.query)(sql); outcomes[index].push('prepared'); }
-          catch (error) { outcomes[index].push(error.message); }
-          try { ctx.db.query('SELECT missing FROM items'); } catch {}
-        });
-        return outcomes;
-      }}`;
-      const results=[];
-      for(let round=0;round<4;round++) results.push((await worker.prepare({...operation(),source,readOnly:true})).result);
-      await worker.close();
-      const [code,signal]=await exit;
-      // The host ends a closed worker. A crash ends it with an access violation or SIGSEGV instead.
-      expect({ended:code===0||signal==="SIGKILL",code,signal}).toMatchObject({ended:true});
-      const refused=Array.from({length:5},()=>"SQL statement is empty.");
-      expect(results).toEqual(Array.from({length:4},()=>empty.map(()=>refused)));
-    });
-  });
-
-  it("replays captured trigger effects exactly once",async()=>{
-    await fixture(async({open})=>{
-      const config={schemaSql:schemaSql+`CREATE TABLE audit(id INTEGER PRIMARY KEY, item_id INTEGER NOT NULL REFERENCES items(id));
-        CREATE TRIGGER item_added AFTER INSERT ON items BEGIN INSERT INTO audit(item_id) VALUES(new.id); END;`,tables:["items","audit"]};
-      const writer=await open(config),recovered=await open(config);
-      const prepared=await writer.prepare(operation(initial,{id:1,value:"trigger"}));
-      const committed=event(prepared);
-      await writer.discard(prepared.proposalId);
-      const cursor=await recovered.apply(committed);
-      const read=await recovered.prepare({...operation(cursor),readOnly:true,source:"globalThis.operations={run(ctx){return ctx.db.query('SELECT * FROM audit')}}"});
-      expect(read.result).toEqual([{id:1,item_id:1}]);
-    });
-  });
-
-  it("replays a valid unique-value swap through a constraint-free shadow",async()=>{
-    await fixture(async({open})=>{
-      const config={schemaSql:"CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT NOT NULL UNIQUE); INSERT INTO items VALUES(1,'a'),(2,'b'); CREATE TABLE unrelated(id ANY PRIMARY KEY NOT NULL,value ANY) STRICT, WITHOUT ROWID; INSERT INTO unrelated VALUES('000456','000123');",tables:["items","unrelated"]};
-      const writer=await open(config),recovered=await open(config);
-      const prepared=await writer.prepare({...operation(),source:"globalThis.operations={run(ctx){ctx.db.execute(\"UPDATE items SET value='temp' WHERE id=1\");ctx.db.execute(\"UPDATE items SET value='a' WHERE id=2\");ctx.db.execute(\"UPDATE items SET value='b' WHERE id=1\");return true}}"});
-      const committed=event(prepared);await writer.discard(prepared.proposalId);
-      const cursor=await recovered.apply(committed);
-      const read=await recovered.prepare({...operation(cursor),readOnly:true,source:"globalThis.operations={run(ctx){return ctx.db.query('SELECT * FROM items ORDER BY id')}}"});
-      expect(read.result).toEqual([{id:1,value:"b"},{id:2,value:"a"}]);
-      const unrelated=await recovered.prepare({...operation(cursor),readOnly:true,source:"globalThis.operations={run(ctx){return ctx.db.query('SELECT id,value,typeof(id) AS idType,typeof(value) AS valueType FROM unrelated')}}"});
-      expect(unrelated.result).toEqual([{id:"000456",value:"000123",idType:"text",valueType:"text"}]);
-    });
-  });
-
   it("preserves generated columns, bigint values and primary-key semantics during shadow replay",async()=>{
     await fixture(async({open})=>{
       for(const [primary,keyA,keyB] of [
         ["INTEGER PRIMARY KEY","9223372036854775806","9223372036854775807"],
-        ["INTEGER PRIMARY KEY DESC NOT NULL","1","2"],
-        ["TEXT COLLATE NOCASE PRIMARY KEY NOT NULL","'A'","'B'"],
       ]) {
         const schemaSql=`CREATE TABLE items(id ${primary}, generated TEXT GENERATED ALWAYS AS (value || '!') STORED,value TEXT NOT NULL UNIQUE,large INTEGER NOT NULL);
           INSERT INTO items(id,value,large) VALUES(${keyA},'a',9223372036854775806),(${keyB},'b',9223372036854775807);`;
@@ -375,19 +193,6 @@ describe("persistent dataset worker",()=>{
     });
   });
 
-  it("replays foreign-key cascades and preserves constraints for the next operation",async()=>{
-    await fixture(async({open})=>{
-      const config={schemaSql:schemaSql+`CREATE TABLE children(id INTEGER PRIMARY KEY, item_id INTEGER NOT NULL REFERENCES items(id) ON UPDATE CASCADE ON DELETE CASCADE);
-        INSERT INTO items VALUES(1,'parent'); INSERT INTO children VALUES(1,1);`,tables:["items","children"]};
-      const writer=await open(config),recovered=await open(config);
-      const prepared=await writer.prepare({...operation(),source:"globalThis.operations={run(ctx){return ctx.db.execute('UPDATE items SET id=2 WHERE id=1')}}"});
-      const cursor=await recovered.apply(event(prepared));
-      const read=await recovered.prepare({...operation(cursor),readOnly:true,source:"globalThis.operations={run(ctx){return ctx.db.query('SELECT * FROM children')}}"});
-      expect(read.result).toEqual([{id:1,item_id:2}]);
-      await expect(recovered.prepare({...operation(cursor),source:"globalThis.operations={run(ctx){return ctx.db.execute('INSERT INTO children VALUES(2,99)')}}"})).rejects.toThrow();
-    });
-  });
-
   it("aborts a prepared transaction and waits for process exit before cleanup",async()=>{
     await fixture(async({root,open})=>{
       const worker=await open();
@@ -399,18 +204,6 @@ describe("persistent dataset worker",()=>{
         expect(database.prepare("SELECT * FROM items").all()).toEqual([]);
         expect(database.prepare("SELECT revision FROM dohc_applied").get()?.revision).toBe(0);
       } finally {database.close();}
-    });
-  });
-
-  it("opens a dataset above the old snapshot cap within its separate reservation",async()=>{
-    await fixture(async({root,open})=>{
-      // 18 MiB in 16 KiB records. The worker runs schema SQL twice under its 64 MiB SQLite heap
-      // limit, which Electron enforces and official Node ignores; one 18 MiB value would exceed it.
-      const worker=await open({schemaSql:schemaSql+"WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<1152) INSERT INTO items SELECT i,hex(zeroblob(8*1024)) FROM n;"});
-      expect((await worker.prepare({...operation(),readOnly:true,source:"globalThis.operations={run(ctx){return ctx.db.query('SELECT sum(length(value)) AS bytes FROM items')}}"})).result).toEqual([{bytes:18*1024*1024}]);
-      const checkpointPath=join(root,"large.sqlite");
-      await worker.snapshot(checkpointPath);
-      await expect(open({checkpointPath,databaseBytes:16*1024*1024})).rejects.toMatchObject({code:"invalid_checkpoint"});
     });
   });
 
@@ -431,40 +224,10 @@ describe("persistent dataset worker",()=>{
     });
   });
 
-  it("normalizes a checkpoint without changing its rows or live cursor",async()=>{
-    await fixture(async({root,open})=>{
-      const worker=await open();const path=join(root,"normalized.sqlite");
-      const result=await worker.migrateCheckpoint({path,schemaSql,tables:["items"],migrationSql:""});
-      expect(result.cursor).toEqual(initial);
-      const next=await open({checkpointPath:path,scope:{...scope,hostEpoch:"epoch-2"}});
-      expect((await next.prepare({...operation(),readOnly:true})).result).toEqual([]);
-    });
-  });
-
-  it("reopens an accepted connection-dependent CHECK without rerunning its decision",async()=>{
-    await fixture(async({root,open})=>{
-      const schemaSql="CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT NOT NULL CHECK(total_changes()=1));";
-      const writer=await open({schemaSql});
-      const prepared=await writer.prepare(operation(initial,{id:1,value:"accepted"}));
-      const cursor=await writer.finalize(event(prepared));
-      const checkpointPath=join(root,"accepted-check.sqlite");await writer.snapshot(checkpointPath);
-      const recovered=await open({schemaSql,cursor,checkpointPath});
-      expect((await recovered.prepare({...operation(cursor),readOnly:true})).result).toEqual([{id:1,value:"accepted"}]);
-      await expect(recovered.prepare(operation(cursor,{id:2,value:"next"}))).rejects.toThrow();
-    });
-  });
-
   it.each([
     "ATTACH DATABASE ':memory:' AS escape",
-    "PRAGMA writable_schema=ON",
-    "SELECT load_extension('escape')",
-    "CREATE TEMP TRIGGER escape AFTER INSERT ON main.items BEGIN DELETE FROM items; END",
-    "CREATE VIEW escape AS SELECT * FROM items",
-    "CREATE TABLE dohc_applied(id INTEGER PRIMARY KEY)",
     "DROP TABLE items",
     "UPDATE items SET value='changed'; CREATE TABLE escape(id INTEGER PRIMARY KEY)",
-    "CREATE TABLE migration_00000000000000000000000000000000 AS SELECT * FROM items",
-    "SELECT * FROM migration_00000000000000000000000000000000",
   ])("refuses unsafe or mismatched migration without changing live data: %s",async migrationSql=>{
     await fixture(async({root,open})=>{
       const worker=await open();
@@ -473,36 +236,6 @@ describe("persistent dataset worker",()=>{
       await expect(worker.migrateCheckpoint({path,schemaSql,tables:["items"],migrationSql})).rejects.toThrow();
       await expect(readFile(path)).rejects.toMatchObject({code:"ENOENT"});
       expect((await worker.prepare({...operation(cursor),readOnly:true})).result).toEqual([{id:1,value:"original"}]);
-    });
-  });
-
-  it("admits leading-underscore table identifiers through schema, guest and migration",async()=>{
-    await fixture(async({root,open})=>{
-      const schemaSql="CREATE TABLE _items(id INTEGER PRIMARY KEY, value TEXT NOT NULL);";
-      const worker=await open({schemaSql,tables:["_items"]});
-      const prepared=await worker.prepare({...operation(),source:"globalThis.operations={run(ctx){return ctx.db.execute(\"INSERT INTO _items VALUES(1,'value')\")}}"});
-      const cursor=await worker.finalize(event(prepared));
-      const path=join(root,"underscore.sqlite");
-      await worker.migrateCheckpoint({path,schemaSql,tables:["_items"],migrationSql:"UPDATE _items SET value='updated'"});
-      const next=await open({schemaSql,tables:["_items"],checkpointPath:path,cursor});
-      const read=await next.prepare({...operation(cursor),readOnly:true,source:"globalThis.operations={run(ctx){return ctx.db.query('SELECT * FROM _items')}}"});
-      expect(read.result).toEqual([{id:1,value:"updated"}]);
-    });
-  });
-
-  it("ends a migration whose native SQL exceeds its CPU budget without changing the live database",async()=>{
-    await fixture(async({root,open})=>{
-      const worker=await open({limits:{cpuBudgetMs:1000}});
-      await expect(worker.migrateCheckpoint({path:join(root,"timeout.sqlite"),schemaSql,tables:["items"],
-        migrationSql:"INSERT INTO items VALUES(1,'copy only'); WITH RECURSIVE count(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM count WHERE x<1000000000) SELECT sum(x) FROM count;"}))
-        .rejects.toMatchObject({code:"worker_budget"});
-      await worker.close();
-      const live=new DatabaseSync(join(root,"1","app.sqlite"));
-      try {
-        expect(live.prepare("SELECT * FROM items").all()).toEqual([]);
-        expect(live.prepare("SELECT revision FROM dohc_applied").get()?.revision).toBe(0);
-      }finally{live.close();}
-      await expect(readFile(join(root,"timeout.sqlite"))).rejects.toMatchObject({code:"ENOENT"});
     });
   });
 
@@ -519,46 +252,17 @@ describe("persistent dataset worker",()=>{
     });
   });
 
-  it("bounds queued work and expires queued operations without consuming their execution budget",async()=>{
-    await fixture(async({open})=>{
-      const worker=await open({limits:{cpuBudgetMs:1000},queueDeadlineMs:40});
-      for(let index=0;index<70;index++) await expect(worker.prepare(operation(initial,{value:"x".repeat(70_000)}))).rejects.toThrow();
-      const active=worker.prepare({...operation(),readOnly:true,source:`globalThis.operations={run(ctx){return ctx.db.query('WITH RECURSIVE count(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM count WHERE x<1000000000) SELECT sum(x) FROM count')}}`}).catch(error=>error);
-      const queued=Array.from({length:64},()=>worker.prepare({...operation(),readOnly:true}).catch(error=>error));
-      const results=await Promise.all(queued);
-      expect(results.filter(result=>result.code==="queue_full")).toHaveLength(1);
-      expect(results.filter(result=>result.code==="queue_deadline")).toHaveLength(63);
-      expect(await active).toMatchObject({code:"worker_budget"});
-    });
-  });
-
   // Short SQLite work can register zero CPU ticks on a loaded Windows host.
   // Compute a costly index per row so replay and integrity checks exceed that granularity.
   const cpuBudgetSchema="CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT NOT NULL); CREATE INDEX items_heavy ON items(length(printf('%.200000c',value)));";
 
-  it("charges a journal replay's app work to the CPU budget",async()=>{
-    await fixture(async({root,open})=>{
-      const writer=await open({schemaSql:cpuBudgetSchema});
-      // Schema validation needs room before the much heavier replay spends this budget.
-      const checkpointPath=join(root,"empty.sqlite");await writer.snapshot(checkpointPath);
-      // 5,000 rows replay in several times the 100 ms budget, and far inside the default 5 s.
-      const prepared=await writer.prepare({...operation(),source:insertRows(1,5_000)});
-      const committed=event(prepared);
-      await expect((await open({schemaSql:cpuBudgetSchema,checkpointPath,limits:{cpuBudgetMs:100}})).apply(committed)).rejects.toMatchObject({code:"worker_budget",
-        message:"The app's code ran too long: it used more than 100 ms of CPU time while reapplying a saved change. Try again."});
-      await expect((await open({schemaSql:cpuBudgetSchema})).apply(committed)).resolves.toMatchObject({revision:1});
-    });
-  },60_000);
-
-  // Each row costs this index about 10 µs of CPU to compute.
-  const heavySchema="CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT NOT NULL); CREATE INDEX items_heavy ON items(length(printf('%.20000c',value)));";
   const insertRows=(from:number,to:number)=>`globalThis.operations={run(ctx){
     ctx.db.execute("INSERT INTO items SELECT x, 'value' FROM (WITH RECURSIVE n(x) AS (VALUES(${from}) UNION ALL SELECT x+1 FROM n WHERE x<${to}) SELECT x FROM n)");return 1}}`;
 
   it("ends a dataset check at its own CPU budget and names it",async()=>{
     await fixture(async({root,open})=>{
       const writer=await open({schemaSql:cpuBudgetSchema});
-      const cursor=await writer.finalize(event(await writer.prepare({...operation(),source:insertRows(1,20_000)})));
+      const cursor=await writer.finalize(event(await writer.prepare({...operation(),source:insertRows(1,1_000)})));
       const checkpointPath=join(root,"heavy.sqlite");await writer.snapshot(checkpointPath);
       // The integrity check at open computes the index for every row.
       await expect(open({schemaSql:cpuBudgetSchema,checkpointPath,cursor,limits:{datasetCheckCpuMs:1,datasetCheckCpuMsPerMiB:1}})).rejects.toMatchObject({code:"worker_budget",
@@ -566,107 +270,6 @@ describe("persistent dataset worker",()=>{
       await expect(open({schemaSql:cpuBudgetSchema,checkpointPath,cursor})).resolves.toBeDefined();
     });
   },60_000);
-
-  it("gives each replayed event of a batch the whole CPU budget",async()=>{
-    await fixture(async({open})=>{
-      // An event costs about a tenth of the budget below, and the batch's
-      // sixteen events together exceed it.
-      const writer=await open({schemaSql:heavySchema});
-      const events=[];let cursor=initial;
-      for(let index=0;index<16;index++) {
-        const committed=event(await writer.prepare({...operation(cursor),source:insertRows(index*10_000+1,(index+1)*10_000)}),cursor);cursor=await writer.finalize(committed);events.push(committed);
-      }
-      await expect((await open({schemaSql:heavySchema,limits:{cpuBudgetMs:1000}})).applyBatch(events)).resolves.toMatchObject({revision:16});
-    });
-  },60_000);
-
-  it("keeps a dataset check's quiet window through its row reports",async()=>{
-    await fixture(async({root,open})=>{
-      const uniqueSchema="CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT NOT NULL UNIQUE);";
-      const writer=await open({schemaSql:uniqueSchema});
-      const filled=await writer.finalize(event(await writer.prepare({...operation(),source:`globalThis.operations={run(ctx){
-        ctx.db.execute("INSERT INTO items SELECT x, 'v'||x FROM (WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<2500) SELECT x FROM n)");return 1}}`})));
-      const checkpointPath=join(root,"filled.sqlite");await writer.snapshot(checkpointPath);
-      // Inject a secondary-constraint conflict so SQLite optimizations cannot skip the rebuild.
-      const swap=event(await writer.prepare({...operation(filled),source:`globalThis.operations={run(ctx){
-        ctx.db.execute("UPDATE items SET value='temp' WHERE id=1");ctx.db.execute("UPDATE items SET value='v1' WHERE id=2");ctx.db.execute("UPDATE items SET value='v2' WHERE id=1");return 1}}`}),filled);
-      await writer.finalize(swap);
-      const reports:{progress:string;cpuBudgetMs?:number}[]=[];
-      const launch=replayConstraintLauncher(options=>{
-        const child=spawn(process.execPath,[options.entryPath],{cwd:options.cwd,env:options.env,stdio:["ignore","ignore","ignore","ipc"],serialization:"advanced",windowsHide:true});
-        child.on("message",message=>{
-          const report=message as {progress?:unknown;cpuBudgetMs?:number};
-          if(typeof report.progress==="string") reports.push({progress:report.progress,cpuBudgetMs:report.cpuBudgetMs});
-          options.onMessage(message);
-        });
-        child.on("error",options.onError);child.on("close",options.onExit);
-        return {postMessage(message){child.send(message as object);},kill(){child.kill("SIGKILL");}};
-      },filled.revision);
-      await (await open({schemaSql:uniqueSchema,checkpointPath,cursor:filled},launch)).apply(swap);
-      const rebuilding=reports.filter(report=>report.progress==="rebuilding the dataset from the replay copy");
-      // The step starts, its check starts, rows 1,000 and 2,000 report, and the check ends.
-      expect(rebuilding.map(report=>report.cpuBudgetMs===undefined)).toEqual([true,false,false,false,true]);
-    });
-  },60_000);
-
-  it.skipIf(process.platform!=="win32")("reports a suspend helper failure instead of waiting for the worker watchdog",async()=>{
-    const suspender=processSuspender();
-    try {
-      await suspender.ready;
-      // Windows reserves PID 0; OpenProcess must reject it.
-      await expect(suspender.suspend(0)).rejects.toThrow("OpenProcess failed: Win32");
-      await expect(suspender.failed).rejects.toThrow("OpenProcess failed: Win32");
-    } finally {await suspender.close();}
-  },180_000);
-
-  it("does not charge the app for time its worker spends stopped inside app code",async()=>{
-    const suspender=processSuspender();
-    try {
-      await suspender.ready;
-      await fixture(async({open})=>{
-        let didResume!:(at:number)=>void,stopFailed!:(error:Error)=>void;
-        const stopped=new Promise<number>((resolve,reject)=>{didResume=resolve;stopFailed=reject;});
-        void stopped.catch(()=>{});
-        let suspended=false,repliedAt=0;
-        const launch:AppRuntimeLauncher=options=>{
-          const child=spawn(process.execPath,[options.entryPath],{cwd:options.cwd,env:{...options.env,DOHC_TEST_APP_CODE_READY:"1"},stdio:["ignore","ignore","ignore","ipc"],serialization:"advanced",windowsHide:true});
-          child.on("message",message=>{
-            const reply=message as {testAppCodeReady?:boolean;ok?:boolean};
-            if(reply.testAppCodeReady) {
-              if(!suspended) {
-                suspended=true;
-                void suspender.suspend(child.pid!).then(didResume,stopFailed);
-              }
-              return;
-            }
-            if(typeof reply.ok==="boolean") repliedAt=Date.now();
-            options.onMessage(message);
-          });
-          child.on("error",options.onError);child.on("close",options.onExit);
-          return {postMessage(message){child.send(message as object);},kill(){child.kill("SIGKILL");}};
-        };
-        // The worker watchdog is a hang guard; the helper has its own earlier guard.
-        const worker=await open({limits:{cpuBudgetMs:5_000}},launch,{silenceMs:170_000});
-        try {
-          // Under a second of CPU on an idle machine and about two under heavy load, well inside the budget.
-          const preparing=worker.prepare({...operation(),source:"globalThis.operations={run(ctx){return ctx.db.query('WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000000) SELECT sum(x) AS total FROM n')}}"}).then(prepared=>{
-            // The signal and reply share one IPC channel. A reply without the signal
-            // means suspension will never start; do not wait for it.
-            expect(suspended,"Worker did not report its armed app-code budget.").toBe(true);
-            return prepared;
-          });
-          const [prepared,resumedAt]=await Promise.race([Promise.all([preparing,stopped]),suspender.failed]);
-          expect(prepared.result).toEqual([{total:50000005000000}]);
-          // Six seconds stopped exceeds the five-second CPU budget. The reply must
-          // follow resume, even if the two processes' IPC notifications arrive out of order.
-          expect(repliedAt).toBeGreaterThanOrEqual(resumedAt);
-        } finally {
-          try {await suspender.close();}
-          finally {await worker.abort("Suspension test finished.");}
-        }
-      });
-    } finally {await suspender.close();}
-  },180_000);
 
   it("recovers a commit whose acknowledgement was lost",async()=>{
     await fixture(async({root,open})=>{

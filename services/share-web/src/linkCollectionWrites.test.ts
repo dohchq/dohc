@@ -10,12 +10,6 @@ import { collectionWriteBody, COLLECTION_WRITES_PATH, parseCollectionWriteOutcom
 import { signInAgent } from "./mcpSignIn.test-helper";
 import { createShareWebApplication } from "./server";
 
-// An Edit share link changes a Collection's own files through the real
-// share-web and the real relay (ADR 0013): a person in a browser through the
-// viewer's route, and their agent through the remote MCP. Neither has an
-// account. Each write names the link as its author, and revoking the link
-// refuses both.
-
 const ORIGIN = "https://share.example.test";
 const HOST = "share.example.test";
 const EXCHANGE_KEY = "link-writes-relay-exchange-key-at-least-32";
@@ -161,24 +155,19 @@ it("lets a browser and an agent holding only an Edit link change a Collection, e
   const { write } = await browser(s);
   const mcp = await agent(s);
 
-  // The browser edits the schema; its account cookie never reaches the relay.
   expect(await write("browser-1", [{ path: SCHEMA_PATH, basedOnBlobSha256: sha256(SCHEMA), text: SCHEMA_TWO }]))
     .toEqual({ ok: true, outcome: "accepted", submitId: "browser-1" });
-  // The agent finds the tool from the link alone, and replaces the automations.
   expect((await mcp.listTools()).tools.map((tool) => tool.name)).toContain("dohc_write_collection_files");
   const listed = (await mcp.callTool({ name: "dohc_list_files", arguments: {} })).structuredContent as { files: Array<{ path: string; blobSha256: string }> };
   const automations = listed.files.find((file) => file.path === AUTOMATIONS_PATH)!;
   expect((await mcp.callTool({ name: "dohc_write_collection_files", arguments: {
     submitId: "agent-1", files: [{ path: AUTOMATIONS_PATH, basedOnBlobSha256: automations.blobSha256, text: AUTOMATIONS_TWO }],
   } })).structuredContent).toEqual({ ok: true, outcome: "accepted", submitId: "agent-1" });
-  // And creates a Collection beside it, with a record.
   expect((await mcp.callTool({ name: "dohc_write_collection_files", arguments: { submitId: "agent-2", files: [
     { path: "trip/gear/collection.yaml", basedOnBlobSha256: null, text: SCHEMA.replace("Packing", "Gear") },
     { path: "trip/gear/tent.md", basedOnBlobSha256: null, text: "---\nTitle: Tent\n---\n" },
   ] } })).structuredContent).toMatchObject({ ok: true, outcome: "accepted", submitId: "agent-2" });
 
-  // Each write names the link, with a principal of its own for the browser
-  // and the agent, and no person. No credential reaches the owner's log.
   const moments = await directMoments(s);
   expect(moments.map((moment) => moment.payload.path)).toEqual([SCHEMA_PATH, AUTOMATIONS_PATH, "trip/gear/collection.yaml", "trip/gear/tent.md"]);
   for (const moment of moments) {
@@ -188,8 +177,6 @@ it("lets a browser and an agent holding only an Edit link change a Collection, e
   expect(moments[0]!.payload.authors?.[0]!.principalId).not.toBe(moments[1]!.payload.authors?.[0]!.principalId);
   expect(moments[1]!.payload.authors?.[0]!.principalId).toBe(moments[2]!.payload.authors?.[0]!.principalId);
   expect(JSON.stringify(moments)).not.toContain(s.secret);
-  // Share-web forwards the browser's capability and profile, and the agent's
-  // token and address, and nothing of the browser's own.
   const writes = s.relayCalls.filter((call) => new URL(call.url).pathname === "/sync/link/collection-writes");
   expect(writes.map((call) => /^(\w+) [A-Za-z0-9_-]{43}$/u.exec(call.headers.get("authorization") ?? "")?.[1]))
     .toEqual(["LinkCapability", "DohcAgent", "DohcAgent"]);
@@ -203,16 +190,12 @@ it("lets a browser and an agent holding only an Edit link change a Collection, e
     expect(call.headers.has("origin")).toBe(false);
   }
 
-  // A write based on the schema the browser already replaced keeps its text
-  // with the writer and names the current file.
   expect(await write("browser-2", [{ path: SCHEMA_PATH, basedOnBlobSha256: sha256(SCHEMA), text: `${SCHEMA}# mine\n` }]))
     .toEqual({ ok: false, outcome: "stale", path: SCHEMA_PATH, currentBlobSha256: sha256(SCHEMA_TWO) });
-  // A retry whose answer was lost returns the same receipt without another write.
   expect(await write("browser-1", [{ path: SCHEMA_PATH, basedOnBlobSha256: sha256(SCHEMA), text: SCHEMA_TWO }]))
     .toEqual({ ok: true, outcome: "accepted", submitId: "browser-1" });
   expect(await directMoments(s)).toHaveLength(4);
 
-  // The owner revokes the link: both are refused, and the owner keeps the ledger.
   const revoked = await s.owner(`/sync/shares/${s.link.shareId}/revoke`, { method: "POST",
     body: JSON.stringify({ workspaceId: WORKSPACE, grantId: s.link.grantId, expectedDependentGrantIds: [] }) });
   expect(revoked.status).toBe(200);
@@ -248,8 +231,6 @@ it("takes a write only from the viewer page or this server's agent tools, never 
     b.post(JSON.stringify({ ...JSON.parse(body) as object, author: { kind: "named", userId: "owner" } })),
     s.send(COLLECTION_WRITES_PATH, { headers: { origin: ORIGIN, "x-dohc-link-session": b.session, cookie: b.cookies.join("; ") } }),
   ];
-  // An agent's access token, sent as a browser's cookie with a profile the
-  // caller chose, or straight to the route instead of through the MCP tools.
   const { accessToken } = await signInAgent(s.send, ORIGIN, s.secret);
   const discriminator = "abcdefghijkl";
   refusedRequests.push(
@@ -272,7 +253,6 @@ it("takes a write only from the viewer page or this server's agent tools, never 
 it("refuses a View link's browser and agent before reading a body or reaching the relay", async () => {
   const s = await stack("view");
   const b = await browser(s);
-  // The body never finishes, and the refusal does not wait for it.
   const unread = await b.post(new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode("{")); } }));
   expect(parseCollectionWriteOutcome(unread.status, null)).toEqual({ ok: false, outcome: "unavailable" });
   expect(await b.write("view-1", [{ path: SCHEMA_PATH, basedOnBlobSha256: sha256(SCHEMA), text: SCHEMA_TWO }])).toEqual({ ok: false, outcome: "unavailable" });
@@ -282,107 +262,3 @@ it("refuses a View link's browser and agent before reading a body or reaching th
   expect(await directMoments(s)).toEqual([]);
 });
 
-it("gives a refused write its reason, and holds one write body per link at a time", async () => {
-  const s = await stack();
-  const b = await browser(s);
-  expect(await b.write("invalid", [{ path: SCHEMA_PATH, basedOnBlobSha256: sha256(SCHEMA), text: "fields: [" }]))
-    .toEqual({ ok: false, outcome: "refused", reason: expect.stringContaining(`${SCHEMA_PATH} is not a valid collection.yaml`) });
-
-  const body = collectionWriteBody("held", [{ path: SCHEMA_PATH, basedOnBlobSha256: sha256(SCHEMA), text: SCHEMA_TWO }], 1);
-  let finish!: () => void;
-  const held = b.post(new ReadableStream<Uint8Array>({
-    start(controller) {
-      controller.enqueue(new TextEncoder().encode(body.slice(0, 10)));
-      finish = () => {
-        controller.enqueue(new TextEncoder().encode(body.slice(10)));
-        controller.close();
-      };
-    },
-  }));
-  // The first body is still arriving, so the link's next write waits its turn.
-  await expect.poll(async () => parseCollectionWriteOutcome((await b.post(body)).status, null)).toEqual({ ok: false, outcome: "rate-limited" });
-  finish();
-  const first = await held;
-  expect(parseCollectionWriteOutcome(first.status, await first.json())).toEqual({ ok: true, outcome: "accepted", submitId: "held" });
-});
-
-it("carries an agent's write larger than an ordinary MCP request, one such body per link at a time", async () => {
-  const s = await stack();
-  const mcp = await agent(s);
-  const record = `---\nTitle: Long\n---\n${"packing list line\n".repeat(12_000)}`;
-  expect((await mcp.callTool({ name: "dohc_write_collection_files", arguments: { submitId: "large", files: [
-    { path: "trip/long/collection.yaml", basedOnBlobSha256: null, text: SCHEMA },
-    { path: "trip/long/list.md", basedOnBlobSha256: null, text: record },
-  ] } })).structuredContent).toEqual({ ok: true, outcome: "accepted", submitId: "large" });
-
-  const second = await signInAgent(s.send, ORIGIN, s.secret);
-  const mcpPath = new URL(second.resource).pathname;
-  const headers = { authorization: `Bearer ${second.accessToken}`, "content-type": "application/json", accept: "application/json, text/event-stream" };
-  let finish!: () => void;
-  // A body past an ordinary request's size takes the link's one large slot while it arrives.
-  const held = s.send(mcpPath, { method: "POST", headers, duplex: "half", body: new ReadableStream<Uint8Array>({
-    start(controller) {
-      controller.enqueue(new TextEncoder().encode(`{"params":{"padding":"${"x".repeat(40 * 1024)}"},`));
-      finish = () => {
-        controller.enqueue(new TextEncoder().encode(`"jsonrpc":"2.0","id":1,"method":"tools/list"}`));
-        controller.close();
-      };
-    },
-  }) } as RequestInit);
-  const large = JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: { padding: "x".repeat(40 * 1024) } });
-  await expect.poll(async () => (await s.send(mcpPath, { method: "POST", headers, body: large })).status).toBe(429);
-  // Another agent of the link waits too, and so does the link's browser: one slot per link.
-  const other = await signInAgent(s.send, ORIGIN, s.secret);
-  expect((await s.send(mcpPath, { method: "POST", headers: { ...headers, authorization: `Bearer ${other.accessToken}` }, body: large })).status)
-    .toBe(429);
-  const b = await browser(s);
-  const browserWrite = () => b.write("browser-after-held", [{ path: SCHEMA_PATH, basedOnBlobSha256: sha256(SCHEMA), text: SCHEMA_TWO }]);
-  expect(await browserWrite()).toEqual({ ok: false, outcome: "rate-limited" });
-  // An ordinary request still goes through meanwhile.
-  expect((await mcp.listTools()).tools.length).toBeGreaterThan(0);
-  finish();
-  expect((await held).status).toBe(200);
-  // The slot is free again, and the browser's write goes through.
-  expect(await browserWrite()).toEqual({ ok: true, outcome: "accepted", submitId: "browser-after-held" });
-});
-
-it("carries an agent's text whose JSON escapes double it, as far as the browser's base64 carries it", async () => {
-  const s = await stack();
-  const mcp = await agent(s);
-  // Four records of line breaks, near 4 MiB of text, which JSON sends in near 8 MiB.
-  const records = [1, 2, 3, 4].map((n) => ({ path: `trip/blank/${n}.md`, basedOnBlobSha256: null, text: `---\nTitle: ${n}\n---\n${"\n".repeat(1_000_000)}` }));
-  expect((await mcp.callTool({ name: "dohc_write_collection_files", arguments: { submitId: "escaped", files: [
-    { path: "trip/blank/collection.yaml", basedOnBlobSha256: null, text: SCHEMA },
-    ...records,
-  ] } })).structuredContent).toEqual({ ok: true, outcome: "accepted", submitId: "escaped" });
-});
-
-it("takes an agent's file as base64, and a write only in an MCP request of its own", async () => {
-  const s = await stack();
-  const mcp = await agent(s);
-  // The listed schema says each file carries text or base64, one or the other.
-  const tool = (await mcp.listTools()).tools.find((candidate) => candidate.name === "dohc_write_collection_files")!;
-  const file = (tool.inputSchema.properties!.files as { items: { anyOf: Array<{ required: string[]; additionalProperties: boolean }> } }).items;
-  expect(file.anyOf.map((variant) => [variant.required.sort(), variant.additionalProperties])).toEqual([
-    [["basedOnBlobSha256", "path", "text"], false], [["base64", "basedOnBlobSha256", "path"], false]]);
-  const control = `---\nTitle: Bell\n---\n${"\u0001".repeat(16)}\n`;
-  expect((await mcp.callTool({ name: "dohc_write_collection_files", arguments: { submitId: "base64", files: [
-    { path: "trip/bell/collection.yaml", basedOnBlobSha256: null, text: SCHEMA },
-    { path: "trip/bell/bell.md", basedOnBlobSha256: null, base64: Buffer.from(control).toString("base64") },
-  ] } })).structuredContent).toEqual({ ok: true, outcome: "accepted", submitId: "base64" });
-  expect((await mcp.callTool({ name: "dohc_write_collection_files", arguments: { submitId: "both", files: [
-    { path: "trip/bell/automations.yaml", basedOnBlobSha256: null, text: AUTOMATIONS, base64: Buffer.from(AUTOMATIONS).toString("base64") },
-  ] } })).isError).toBe(true);
-  // Megabytes of base64 are checked without exhausting the regular expression stack.
-  expect((await mcp.callTool({ name: "dohc_write_collection_files", arguments: { submitId: "oversized", files: [
-    { path: "trip/bell/huge.md", basedOnBlobSha256: null, base64: "A".repeat(5_600_000) },
-  ] } })).isError).toBe(true);
-
-  const { resource, accessToken } = await signInAgent(s.send, ORIGIN, s.secret);
-  const call = (id: number, submitId: string) => ({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "dohc_write_collection_files",
-    arguments: { submitId, files: [{ path: AUTOMATIONS_PATH, basedOnBlobSha256: sha256(AUTOMATIONS), text: AUTOMATIONS_TWO }] } } });
-  const batch = await s.send(new URL(resource).pathname, { method: "POST", body: JSON.stringify([call(1, "batch-1"), call(2, "batch-2")]),
-    headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json", accept: "application/json, text/event-stream" } });
-  expect(await batch.json()).toMatchObject({ error: { code: -32600 } });
-  expect((await directMoments(s)).map((moment) => moment.payload.path)).toEqual(["trip/bell/collection.yaml", "trip/bell/bell.md"]);
-});

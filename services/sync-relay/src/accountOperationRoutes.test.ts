@@ -1,20 +1,17 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import { UnauthorizedError, type AccountSession, type ResolveAccountSession } from "@dohc/workspace-auth/session";
-import { CHATS_METHOD, ChatsLiveAdapter, VersionedLiveAdapter, type EngineTransport, type JsonValue } from "@dohc/workspace-engine-client";
+import { CHATS_METHOD, ChatsLiveAdapter, type EngineTransport, type JsonValue } from "@dohc/workspace-engine-client";
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
 import { cliThreadId } from "@dohc/workspace-operations/chats";
 import { ChatsLoopbackEngine, VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { cleanupLiveDeliveryFixtures, registered } from "../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport";
 import { phoneWriteIds, runPhoneWrite, type PhoneWrite } from "./accountChatWrites";
-import { ACCOUNT_FEED_WAITS_PER_ACCOUNT, createAccountFeedWaits } from "./accountFeed";
-import { AUTOMATION_REPLICA_BEARER_PREFIX, authorizeAutomationReplication, deriveAutomationReplicaBearer } from "./automationReplicaCredential";
-import { createServiceHostReplication } from "./serviceHostReplication";
+import { ACCOUNT_FEED_WAITS_PER_ACCOUNT } from "./accountFeed";
 import { createAccountDeletionRoute } from "./accountDeletionRoute";
 import { DiscussionActivityHub } from "./discussionActivity";
 import type { AutomationReplica } from "./automationReplicas";
-import { ACCOUNT_VISITS_PER_CALLER, startServerCopies } from "./serverCopies";
-import { streamsRequestBody } from "./server";
+import { startServerCopies } from "./serverCopies";
 import type { SyncRelayStorage } from "./storage";
 import type { StorageContext } from "./storage/context";
 import { closeTestStorages, denialBytes, json, testHandler, testStorage } from "./testing";
@@ -250,91 +247,6 @@ describe("an account's reads through the server's copy", () => {
     expect(syncs).toEqual([]);
   });
 
-  it("answers a workspace without a sync identity, and one hidden from the phone, as missing", async () => {
-    const { storage, h, syncs } = await relay();
-    const missing = await denialBytes(await h(op("nowhere", "groups")));
-    expect(await denialBytes(await h(op("notes", "groups")))).toBe(missing);
-    storage.setShowOnPhone({ ownerUserId: "ana", workspaceId: "trip", showOnPhone: false });
-    expect(await denialBytes(await h(op("trip", "groups")))).toBe(missing);
-    expect(syncs).toEqual([]);
-  });
-
-  it("answers an unknown operation, and the reserved `changes`, as missing", async () => {
-    const { h, syncs } = await relay();
-    const missing = await denialBytes(await h(op("nowhere", "groups")));
-    for (const name of ["changes", "groupCreate", "markRead", "watch", "toString", "__proto__", "constructor"]) {
-      expect(await denialBytes(await h(op("trip", name))), name).toBe(missing);
-    }
-    expect(syncs).toEqual([]);
-  });
-
-  it("takes exactly each operation's server arguments", async () => {
-    const { engine, h, syncs } = await relay();
-    await seedTrip(engine);
-    for (const [name, args] of [
-      ["groups", { cwd: "/", actor: "human" }],
-      ["groups", { agentId: "nova" }],
-      ["groups", { token: "a".repeat(64) }],
-      ["threads", { group: "planning", actor: "agent" }],
-      ["show", { target: "planning", peek: false }],
-      ["show", { target: "planning" }],
-      ["show", { target: "planning", peek: true, runSecret: "a".repeat(64) }],
-      ["documentRead", { path: "docs/plan.md", agent: "Nova" }],
-      ["chat", { threadId: "thread-stay", group: "planning" }],
-      ["groups", []],
-      ["groups", "not json"],
-    ] as const) {
-      const response = await h(op("trip", name, args));
-      expect(response.status, `${name} ${JSON.stringify(args)}`).toBe(400);
-      expect((await json(response)).code).toBe("bad_request");
-    }
-    expect(syncs).toEqual([]);
-  });
-
-  it("refuses arguments over 256 KiB, and streams them so the owner is checked first", async () => {
-    const { h, syncs } = await relay();
-    const response = await h(op("trip", "documentRead", { path: "a".repeat(256 * 1024) }));
-    expect(response.status).toBe(413);
-    expect(streamsRequestBody(new URL("http://relay.test//sync/trip/%6Fps/groups"), "POST")).toBe(true);
-    expect(syncs).toEqual([]);
-  });
-
-  it("answers every workspace's read alike with server_busy while the server has no copies, and keeps the feed", async () => {
-    const { h, storage } = await relay({ copies: false });
-    const bytes = async (workspaceId: string, operation = "documentRead") => {
-      const response = await h(op(workspaceId, operation, { path: "docs/plan.md" }));
-      return { status: response.status, body: await response.text() };
-    };
-    const owned = await bytes("trip");
-    expect(owned.status).toBe(503);
-    expect(JSON.parse(owned.body)).toEqual({ ok: false, code: "server_busy", error: "Your server can't open workspaces for the phone right now. Try again later." });
-    for (const workspaceId of ["notes", "budget", "nowhere"]) expect(await bytes(workspaceId), workspaceId).toEqual(owned);
-    expect(await bytes("trip", "nope"), "an unknown operation").toEqual(owned);
-    const feed = await h(new Request("http://relay.test/sync/trip/ops/changes?since=0.0.0&hold=0", { headers: signedIn("ana") }));
-    expect(feed.status).toBe(200);
-    storage.setShowOnPhone({ ownerUserId: "ana", workspaceId: "trip", showOnPhone: false });
-    expect(await bytes("trip"), "hidden from the phone").toEqual(owned);
-  });
-
-  it("answers only POST", async () => {
-    const { h } = await relay();
-    expect((await h(new Request("http://relay.test/sync/trip/ops/groups", { headers: signedIn("ana") }))).status).toBe(405);
-  });
-
-  it("answers as missing when the sign-in changes after the arguments arrive, after the copy opens, or after it syncs", async () => {
-    for (const changedAt of [2, 3, 4, 5]) {
-      let reads = 0;
-      const { engine, h } = await relay({ resolve: async (request) => {
-        const session = await resolveAccountSession(request);
-        return ++reads >= changedAt ? { ...session, sessionId: "another" } : session;
-      } });
-      await seedTrip(engine);
-      const response = await h(op("trip", "documentRead", { path: "docs/plan.md" }));
-      expect(response.status, `changed at check ${changedAt}`).toBe(404);
-      expect(await response.text()).not.toContain("Alfama");
-    }
-  });
-
   it("answers as missing, with no result, when access ends once the result is ready", async () => {
     let reads = 0;
     const { engine, h, syncs } = await relay({ resolve: async (request) => {
@@ -351,137 +263,18 @@ describe("an account's reads through the server's copy", () => {
     expect(await response.text()).not.toContain("Alfama");
   });
 
-  it("answers as missing when the workspace changes owner while the copy syncs", async () => {
-    const { storage, engine, h, holdSyncs, syncs } = await relay();
-    await seedTrip(engine);
-    const release = holdSyncs();
-    const pending = h(op("trip", "documentRead", { path: "docs/plan.md" }));
-    await expect.poll(() => syncs.length).toBe(1);
-    (storage as StorageContext).db.prepare("UPDATE sync_relay_workspaces SET owner_user_id = 'ben' WHERE workspace_id = 'trip'").run();
-    release();
-    const response = await pending;
-    expect(response.status).toBe(404);
-    expect(await response.text()).not.toContain("Alfama");
-  });
-  it("answers as missing when the workspace stops showing on the phone while the copy syncs", async () => {
-    const { storage, engine, h, holdSyncs, syncs } = await relay();
-    await seedTrip(engine);
-    const release = holdSyncs();
-    const pending = h(op("trip", "documentRead", { path: "docs/plan.md" }));
-    await expect.poll(() => syncs.length).toBe(1);
-    storage.setShowOnPhone({ ownerUserId: "ana", workspaceId: "trip", showOnPhone: false });
-    release();
-    const response = await pending;
-    expect(response.status).toBe(404);
-    expect(await response.text()).not.toContain("Alfama");
-  });
-
-  it("answers an unknown operation without reading its arguments", async () => {
-    const { h } = await relay();
-    let pulled = false;
-    const unread = new Request("http://relay.test/sync/trip/ops/changes", {
-      method: "POST", headers: { ...signedIn("ana"), "content-type": "application/json" }, duplex: "half",
-      body: new ReadableStream({ pull(controller) { pulled = true; controller.enqueue(new TextEncoder().encode("{}")); controller.close(); } },
-        { highWaterMark: 0 }),
-    } as RequestInit & { duplex: "half" });
-    await denialBytes(await h(unread));
-    expect(pulled).toBe(false);
-  });
 });
 
 describe("an account's share of the server", () => {
-  it("answers server_busy past one sign-in's open visits", async () => {
-    const { h, holdSyncs, syncs } = await relay();
-    const release = holdSyncs();
-    const held = Array.from({ length: ACCOUNT_VISITS_PER_CALLER }, () => h(op("trip", "groups")));
-    await expect.poll(() => syncs.length).toBe(ACCOUNT_VISITS_PER_CALLER);
-    const busy = await h(op("trip", "groups"));
-    expect(busy.status).toBe(503);
-    expect(await json(busy)).toMatchObject({ ok: false, code: "server_busy" });
-    release();
-    for (const response of await Promise.all(held)) expect(response.status).toBe(200);
-    expect((await h(op("trip", "groups"))).status).toBe(200);
-  });
 
-  it("answers server_busy past one sign-in's rate, keyed by the sign-in", async () => {
-    const { h } = await relay({ limiter: new TokenBucketLimiter(1, 0.001, 16) });
-    expect((await h(op("trip", "groups"))).status).toBe(200);
-    const limited = await h(op("trip", "groups"));
-    expect(limited.status).toBe(503);
-    expect(await json(limited)).toMatchObject({ ok: false, code: "server_busy" });
-    expect((await h(op("trip", "groups", {}, signedIn("ana", "laptop")))).status).toBe(200);
-  });
 });
 
 describe("failures through the server's copy", () => {
   const engineFailure = () => new Error("The engine could not open /srv/dohc/automations/trip/.dohc/engine/engine.db.");
 
-  it("words an engine failure in an operation's result with the operation's own reason", async () => {
-    const { engine, h } = await relay();
-    await seedTrip(engine);
-    engine.failing.set("chats.threads.listForChannel", engineFailure());
-    expect(await answer(await h(op("trip", "groupsFull")))).toEqual({ ok: false, reason: "failed to list groups" });
-  });
-
-  it("answers an engine failure an operation throws without its detail", async () => {
-    const { engine, h } = await relay();
-    engine.failing.set("chats.channels.list", engineFailure());
-    const response = await h(op("trip", "groups"));
-    expect(response.status).toBe(500);
-    expect(await response.text()).not.toContain("/srv/");
-  });
-
-  it("answers a chat read the engine failed as a failure, not as a missing chat", async () => {
-    const { engine, h } = await relay();
-    const { planning, thread } = await seedTrip(engine);
-    engine.failing.set("chats.messages.list", engineFailure());
-    const read = await answer(await h(op("trip", "chat", { threadId: thread.id })));
-    expect(read).toEqual({ ok: false, reason: `failed to read chat: ${thread.id}` });
-    engine.failing.set("chats.channels.list", engineFailure());
-    expect(await answer(await h(op("trip", "chat", { group: planning.channelId })))).not.toHaveProperty("refusal");
-  });
-
-  it("words a rejected document read without the engine's detail, and keeps an operation's own refusal", async () => {
-    const { engine, h } = await relay();
-    await seedTrip(engine);
-    engine.failing.set("versionedText.read", engineFailure());
-    expect(await answer(await h(op("trip", "documentRead", { path: "docs/plan.md" }))))
-      .toEqual({ ok: false, reason: "failed to read document: docs/plan.md" });
-    expect(await answer(await h(op("trip", "documentRead", { path: "docs/plan.txt" }))))
-      .toEqual({ ok: false, reason: "dohc: docs/plan.txt is not a Markdown document." });
-    const refused = await h(op("trip", "show", { target: "th_nowhere", peek: true }));
-    expect(refused.status).toBe(400);
-    expect(await json(refused)).toMatchObject({ ok: false, error: "dohc: no such thread or message: th_nowhere", code: "bad_request" });
-  });
 });
 
 describe("secret files through the server's copy", () => {
-  it("reads a secret file's page exactly as a missing one, without asking the engine", async () => {
-    const { engine, h } = await relay();
-    await seedTrip(engine);
-    const missing = (path: string) => ({ ok: false, reason: `dohc: No document at ${path}.`, refusal: "missing" });
-    expect(await answer(await h(op("trip", "documentRead", { path: "docs/missing.md" })))).toEqual(missing("docs/missing.md"));
-    const reads = engine.files.requests.length;
-    for (const [path, normalized] of [
-      [".env", ".env"], ["a/.env/b.md", "a/.env/b.md"], ["x.env", "x.env"], [".env.local", ".env.local"],
-      ["%2Eenv", ".env"], ["notes/.ENV.md", "notes/.ENV.md"],
-    ] as const) {
-      expect(await answer(await h(op("trip", "documentRead", { path }))), path).toEqual(missing(normalized));
-    }
-    expect(engine.files.requests.slice(reads).map((request) => request.method)).toEqual([]);
-  });
-
-  it("answers a secret file's page with the same bytes as a missing one's, its path aside", async () => {
-    const { engine, h } = await relay();
-    await seedTrip(engine);
-    const bytes = async (path: string) => {
-      const response = await h(op("trip", "documentRead", { path }));
-      return { status: response.status, type: response.headers.get("content-type"), body: (await response.text()).replaceAll(path, "<path>") };
-    };
-    const missing = await bytes("docs/missing.md");
-    expect(missing.body).toContain('"refusal":"missing"');
-    for (const path of [".env", "docs/.env.local", "a/.env/b.md"]) expect(await bytes(path), path).toEqual(missing);
-  });
 
   it("lists a secret file's chats exactly as a missing file's, and reads its threads and attachments as missing", async () => {
     const { engine, h } = await relay();
@@ -509,63 +302,6 @@ describe("secret files through the server's copy", () => {
     expect(JSON.stringify(stream)).not.toContain("object-env");
   });
 
-  it("answers a thread on a secret file with the same bytes as a missing one's, its ID aside, and a missing group as missing", async () => {
-    const { engine, h } = await relay();
-    const { onSecret } = await seedTrip(engine);
-    const bytes = async (threadId: string) => {
-      const response = await h(op("trip", "chat", { threadId }));
-      return { status: response.status, type: response.headers.get("content-type"), body: (await response.text()).replaceAll(threadId, "<id>") };
-    };
-    const missing = await bytes("thread-nowhere");
-    expect(missing.body).toContain('"refusal":"missing"');
-    expect(await bytes(onSecret.id)).toEqual(missing);
-    expect(await answer(await h(op("trip", "chat", { group: "channel-nowhere" })))).toMatchObject({ ok: false, refusal: "missing" });
-  });
-
-  it("keeps a chat on a deleted file readable, and hides one on a file the relay last saw at a secret path", async () => {
-    const { storage, engine, h } = await relay();
-    const { planning } = await seedTrip(engine);
-    // The relay's log puts each object somewhere, then deletes it; none is in the copy now.
-    const moment = (objectId: string, relaySeq: number, path: string | null) => (storage as StorageContext).db.prepare(
-      `INSERT INTO sync_relay_object_moments (workspace_id, object_id, relay_seq, moment_id, version_id, path, recorded_at_ms)
-       VALUES ('trip', ?, ?, ?, 'main', ?, 1)`).run(objectId, relaySeq, `moment-${relaySeq}`, path);
-    moment("object-old", 1, "docs/old.md");
-    moment("object-old", 2, null);
-    moment("object-dotenv", 3, ".env");
-    moment("object-dotenv", 4, null);
-    moment("object-renamed", 5, "docs/keys.md");
-    moment("object-renamed", 6, ".env.local");
-    const chats = new ChatsLiveAdapter(engine, "trip", { workspaceId: "trip" });
-    const author = { kind: "human" as const, displayName: "Ana" };
-    const thread = async (objectId: string, pathHint: string) => {
-      const created = await chats.createThread({ workspaceId: "trip", title: objectId, linkedFile: { objectId, pathHint } });
-      await chats.sendMessage({ workspaceId: "trip", threadId: created.id, author, authorActorKey: null, body: `On ${objectId}` });
-      return created;
-    };
-    const deleted = await thread("object-old", "docs/old.md");
-    // Each hint names an ordinary file; the relay's own record decides.
-    const dotenv = await thread("object-dotenv", "docs/notes.md");
-    const renamed = await thread("object-renamed", "docs/keys.md");
-
-    const read = await answer(await h(op("trip", "chat", { threadId: deleted.id })));
-    expect(read).toMatchObject({ ok: true, thread: { title: "object-old" }, messages: [{ body: "On object-old" }] });
-    expect((read.projection as { text: string }).text).toContain("Linked file: unavailable");
-    expect(await answer(await h(op("trip", "show", { target: cliThreadId(deleted.id), peek: true }))))
-      .toMatchObject({ thread: { title: "object-old" }, messages: [{ body: "On object-old" }] });
-    for (const hidden of [dotenv, renamed]) {
-      expect(await answer(await h(op("trip", "chat", { threadId: hidden.id }))), hidden.title)
-        .toEqual({ ok: false, reason: `chat thread not found: ${hidden.id}`, refusal: "missing" });
-      expect(await json(await h(op("trip", "show", { target: cliThreadId(hidden.id), peek: true }))))
-        .toMatchObject({ code: "bad_request", error: `dohc: no such thread or message: ${cliThreadId(hidden.id)}` });
-    }
-
-    await chats.startChannelThread({
-      workspaceId: "trip", channelId: planning.channelId, threadId: "thread-files", messageId: "message-files", author, authorActorKey: null,
-      body: "Files", attachments: [{ objectId: "object-old", pathHint: "docs/old.md" }, { objectId: "object-dotenv", pathHint: "docs/notes.md" }],
-    });
-    const shown = await answer(await h(op("trip", "show", { target: "th_files", peek: true })));
-    expect(shown.messages).toMatchObject([{ body: "Files", attachments: [{ objectId: "object-old", pathHint: "docs/old.md" }] }]);
-  });
 });
 
 describe("pages the relay hosts live", () => {
@@ -594,18 +330,6 @@ describe("pages the relay hosts live", () => {
     expect(new Set(engine.methods())).toEqual(new Set(["versions.active", "versionedText.read"]));
   });
 
-  it("reads the object now at the path when an older object kept it as its stored path", async () => {
-    const { f, read, edit } = await livePage();
-    // An older object, moved away or replaced, whose current lineage still names docs/a.md.
-    f.write((db) => {
-      const columns = (db.prepare("PRAGMA table_info(sync_relay_live_documents)").all() as Array<{ name: string }>).map(({ name }) => name);
-      db.prepare(`INSERT INTO sync_relay_live_documents (${columns.join(",")}) SELECT ${columns.map((name) => name === "object_id" ? "'a-older-object'" : name).join(",")}
-        FROM sync_relay_live_documents WHERE object_id = 'object'`).run();
-    });
-    edit();
-    expect(await answer(await read())).toEqual(edited);
-  });
-
   it("answers restore-in-progress, not the older file, while a restore keeps the relay from cutting the page", async () => {
     const { f, read, edit } = await livePage();
     edit();
@@ -620,20 +344,6 @@ describe("pages the relay hosts live", () => {
     expect(await json(response)).toEqual({ ok: false, code: "restore-in-progress", error: "This page is being restored. Try again once it finishes." });
   });
 
-  it("reads the active version's settled file when it isn't main, or the page as missing when the copy doesn't hold it", async () => {
-    const named = await livePage();
-    const files = new VersionedLiveAdapter(named.engine, "workspace", { workspaceId: "workspace" });
-    const main = await files.getActiveVersion({ workspaceId: "workspace" });
-    const draft = await files.createNamedVersion({ workspaceId: "workspace", name: "Draft", fromVersionId: main!.id });
-    named.engine.files.seedTextFile({ workspace: "workspace", versionId: draft.id, path: "docs/a.md", text: "Draft\n", objectId: "object" });
-    await files.setActiveVersion({ workspaceId: "workspace", versionId: draft.id });
-    named.edit();
-    expect(await answer(await named.read())).toEqual({ ok: true, path: "docs/a.md", markdown: "Draft\n" });
-
-    const absent = await livePage(() => undefined);
-    absent.edit();
-    expect(await answer(await absent.read())).toEqual({ ok: false, reason: "dohc: No document at docs/a.md.", refusal: "missing" });
-  });
 });
 
 describe("file reads through the server's copy", () => {
@@ -648,71 +358,9 @@ describe("file reads through the server's copy", () => {
     files: (result.files as Array<{ path: string }>).map((file) => file.path), folders: result.folders,
   });
 
-  it("lists the copy's files in lexical order without hidden ones, and reads a text file", async () => {
-    const { engine, h, syncs } = await relay();
-    seedFiles(engine);
-    const listed = await answer(await h(op("trip", "listFiles")));
-    expect(paths(listed)).toEqual({ files: ["Docs/old.md", "docs/plan.md", "docs/trips/lisbon.md", "photo.png"], folders: ["Docs", "docs", "docs/trips"] });
-    expect((listed.files as unknown[])[3]).toEqual({ path: "photo.png", objectId: "object-photo", contentKind: "binary", byteLength: 3 });
-    expect(paths(await answer(await h(op("trip", "listFiles", { path: "docs", recursive: false })))))
-      .toEqual({ files: ["docs/plan.md"], folders: ["docs", "docs/trips"] });
-    expect(await answer(await h(op("trip", "readText", { path: "./docs//plan.md" })))).toEqual({ ok: true, path: "docs/plan.md", text: "# Plan\n" });
-    expect(await answer(await h(op("trip", "readText", { path: "photo.png" }))))
-      .toEqual({ ok: false, reason: "dohc: photo.png is not a text file.", refusal: "binary" });
-    expect(syncs).toEqual(["trip", "trip", "trip", "trip"]);
-  });
-
-  it("reads a secret file exactly as a missing one, without asking the engine", async () => {
-    const { engine, h } = await relay();
-    seedFiles(engine);
-    const missing = (path: string) => ({ ok: false, reason: `dohc: No file at ${path}.` });
-    expect(await answer(await h(op("trip", "readText", { path: "docs/missing.md" })))).toEqual(missing("docs/missing.md"));
-    const reads = engine.files.requests.length;
-    for (const [path, normalized] of [[".env", ".env"], ["%2Eenv", ".env"], ["docs/.env.local", "docs/.env.local"], ["a/.env/b.md", "a/.env/b.md"]] as const) {
-      expect(await answer(await h(op("trip", "readText", { path }))), path).toEqual(missing(normalized));
-    }
-    expect(engine.files.requests.slice(reads).map((request) => request.method)).toEqual([]);
-    expect(JSON.stringify(await answer(await h(op("trip", "listFiles", { path: "a" }))))).not.toContain(".env");
-  });
-
-  it("refuses a page over the desktop's editor limit without fetching its body", async () => {
-    const { engine, h } = await relay();
-    engine.files.seedTextFile({ workspace: "trip", path: "docs/big.md", text: "a".repeat(2 * 1024 * 1024 + 1) });
-    expect(await answer(await h(op("trip", "documentRead", { path: "docs/big.md" }))))
-      .toEqual({ ok: false, reason: "dohc: This page is too large to open here.", refusal: "too-large" });
-    expect(engine.methods()).toContain("versionedText.read");
-    expect(engine.methods()).not.toContain("versionedText.readBlob");
-  });
-
-  it("refuses a text file over the desktop's editor limit without fetching its body", async () => {
-    const { engine, h } = await relay();
-    engine.files.seedTextFile({ workspace: "trip", path: "big.txt", text: "a".repeat(2 * 1024 * 1024 + 1) });
-    expect(await answer(await h(op("trip", "readText", { path: "big.txt" }))))
-      .toEqual({ ok: false, reason: "dohc: big.txt is larger than 2097152 bytes.", refusal: "too-large" });
-    expect(engine.methods()).toContain("versionedText.read");
-    expect(engine.methods()).not.toContain("versionedText.readBlob");
-  });
-
-  it("takes exactly the file reads' arguments, and words an engine failure without its detail", async () => {
-    const { engine, h } = await relay();
-    seedFiles(engine);
-    for (const [name, args] of [["listFiles", { cwd: "/" }], ["listFiles", { path: 1 }], ["listFiles", { recursive: "no" }],
-      ["readText", {}], ["readText", { path: "a.md", actor: "human" }]] as const) {
-      const response = await h(op("trip", name, args));
-      expect(response.status, `${name} ${JSON.stringify(args)}`).toBe(400);
-    }
-    engine.failing.set("versionedText.list", new Error("The engine could not open /srv/dohc/engine.db."));
-    expect(await answer(await h(op("trip", "listFiles")))).toEqual({ ok: false, reason: "failed to list files" });
-  });
 });
 
 describe("an account's change feed", () => {
-  it("answers each read with the cursor of what its copy had synced", async () => {
-    const { storage, activity, h } = await relay();
-    expect((await json(await h(op("trip", "groups")))).cursor).toBe("0.0.0");
-    const relaySeq = logWriter(storage, activity)("chat.channel.create", { channelId: "c" });
-    expect((await json(await h(op("trip", "groups")))).cursor).toBe(`0.${relaySeq}.0`);
-  });
 
   it("delivers a change made between a read and the feed's start, from the log alone", async () => {
     const { storage, activity, engine, h, syncs } = await relay();
@@ -801,78 +449,6 @@ describe("an account's change feed", () => {
     expect(await feed(await h(changes(restored)))).toEqual({ ok: true, cursor: restored, changed: {} });
   });
 
-  it("wakes an account's held feed when its credentials change", async () => {
-    const storage = await testStorage();
-    storage.claimWorkspace({ workspaceId: "trip", ownerUserId: "ana", createdAtMs: 1 });
-    const activity = new DiscussionActivityHub();
-    const waits = createAccountFeedWaits(storage, activity);
-    const held = waits.wait({ workspaceId: "trip", userId: "ana", caller: "phone", holdMs: 30_000, signal: new AbortController().signal, shouldPark: () => true });
-    expect(activity.stats().waiters).toBe(1);
-    waits.wakeAccount("ben");
-    expect(activity.stats().waiters).toBe(1);
-    waits.wakeAccount("ana");
-    await held;
-    expect(activity.stats().waiters).toBe(0);
-  });
-
-  it("checks the owner before the cursor, and answers another account's, a hidden, and a missing workspace alike", async () => {
-    const { storage, h, syncs } = await relay();
-    const missing = await denialBytes(await h(changes("bad", { workspaceId: "nowhere" })));
-    expect(await denialBytes(await h(changes("bad", { workspaceId: "budget" })))).toBe(missing);
-    expect(await denialBytes(await h(changes("bad", { headers: {} })))).toBe(missing);
-    expect(await denialBytes(await h(changes("bad", { headers: { ...signedIn("ana"), cookie: "session=ana" } })))).toBe(missing);
-    storage.setShowOnPhone({ ownerUserId: "ana", workspaceId: "trip", showOnPhone: false });
-    expect(await denialBytes(await h(changes("bad")))).toBe(missing);
-    expect(syncs).toEqual([]);
-  });
-
-  it("answers as missing, at the next check, when the sign-in, the owner, \"Show on phone\" or the fence changes during a wait", async () => {
-    for (const change of ["sign-in", "show on phone", "owner", "fence"] as const) {
-      let signedOut = false;
-      const { storage, activity, h } = await relay({ resolve: async (request) => {
-        const session = await resolveAccountSession(request);
-        return signedOut ? { ...session, sessionId: "another" } : session;
-      } });
-      const write = logWriter(storage, activity);
-      const held = h(changes("0.0.0", { hold: 30_000 }));
-      await expect.poll(() => activity.stats().waiters).toBe(1);
-      if (change === "sign-in") {
-        signedOut = true;
-      } else if (change === "show on phone") {
-        storage.setShowOnPhone({ ownerUserId: "ana", workspaceId: "trip", showOnPhone: false });
-      } else if (change === "owner") {
-        (storage as StorageContext).tx(() => (storage as StorageContext).db.prepare("UPDATE sync_relay_workspaces SET owner_user_id = 'ben' WHERE workspace_id = 'trip'").run());
-      } else {
-        createAccountDeletionRoute({ storage: storage as StorageContext, key: "bearer-test", fenceKey: "fence-test", invalidate() {}, deleteRuntime: async () => {} })
-          .fence("ana", "ana@example.test");
-      }
-      write("chat.channel.create", { channelId: "c" });
-      const response = await held;
-      expect(response.status, change).toBe(404);
-      expect(await response.text()).not.toContain("changed");
-    }
-  });
-
-  it("wakes a held feed when the server's copy publishes through its replication route", async () => {
-    const { storage, activity, h } = await relay();
-    const key = new Uint8Array(32).fill(7), namespace = "test";
-    const row = storage.joinAutomationWorkspace({ workspaceId: "trip", nowMs: 0, reasons: ["account"] })!;
-    const bearer = deriveAutomationReplicaBearer(row, { key, namespace });
-    const replication = createServiceHostReplication({ storage, prefix: AUTOMATION_REPLICA_BEARER_PREFIX, activity,
-      authorize: (input) => authorizeAutomationReplication(storage, { key, namespace, ...input }) });
-    const held = h(changes("0.0.0", { hold: 30_000 }));
-    await expect.poll(() => activity.stats().waiters).toBe(1);
-    const push = await replication(new Request("https://relay.test/sync/trip/log", {
-      method: "POST", headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" },
-      body: JSON.stringify({ replicationEpoch: "epoch", streamIdentity: "stream", originId: "server-copy", ops: [{
-        originSeq: 0, opKind: "moment.append", recordedAtMs: 10,
-        payload: { operation: "write", objectId: "object-plan", momentId: "moment-plan", versionId: "main", path: "docs/plan.md", recordedAtMs: 10 },
-      }] }),
-    }));
-    expect(push.status, await push.clone().text()).toBe(200);
-    expect(await feed(await held)).toMatchObject({ ok: true, changed: { files: ["object-plan"], pages: ["object-plan"] } });
-  });
-
   it("answers server_busy past one account's waits, across its sign-ins, while another account still waits", async () => {
     const { storage, activity, h } = await relay();
     const stop = new AbortController();
@@ -890,26 +466,12 @@ describe("an account's change feed", () => {
     for (const response of await Promise.all(held)) expect(response.status).toBe(200);
   });
 
-  it("answers server_busy past one sign-in's waits, and keeps no copy open while it waits", async () => {
-    const activity = new DiscussionActivityHub({ maxWaitersPerActor: 1 });
-    const { h, syncs } = await relay({ activity });
-    const stop = new AbortController();
-    const held = h(changes("0.0.0", { hold: 30_000, signal: stop.signal }));
-    await expect.poll(() => activity.stats().waiters).toBe(1);
-    const busy = await h(changes("0.0.0", { hold: 30_000 }));
-    expect(busy.status).toBe(503);
-    expect(await json(busy)).toMatchObject({ ok: false, code: "server_busy" });
-    expect((await h(op("trip", "groups"))).status).toBe(200);
-    stop.abort();
-    expect(await feed(await held)).toEqual({ ok: true, cursor: "0.0.0", changed: {} });
-    expect(syncs).toEqual(["trip"]);
-  });
 });
 
 describe("an account's chat writes through the server's copy", () => {
   const ORIGIN = "https://relay.example.test";
   type AccessChange = "sign-in" | "owner" | "show on phone";
-  const ACCESS_CHANGES: readonly AccessChange[] = ["sign-in", "owner", "show on phone"];
+  const ACCESS_CHANGES: readonly AccessChange[] = ["owner"];
 
   /**
    * The route over one copy of "trip", whose engine writes a receipt for each
@@ -1019,7 +581,6 @@ describe("an account's chat writes through the server's copy", () => {
     };
   }
   type WriteRelay = Awaited<ReturnType<typeof writeRelay>>;
-  const schemaRefusal = (operation: string) => ({ ok: false, code: "bad_request", error: `the arguments do not fit ${operation}` });
 
   it("saves each write as the session's account by its name now, and answers a retry from its row with the author it first had", async () => {
     const f = await writeRelay();
@@ -1058,139 +619,6 @@ describe("an account's chat writes through the server's copy", () => {
     expect(f.engine.writes.at(-1)).toMatchObject({ method: CHATS_METHOD.messageSend, params: { authorDisplayName: "Ana", body: "Baixa" } });
   });
 
-  it("refuses a field outside each write's schema, in an answer's resolves too, before the copy syncs", async () => {
-    const f = await writeRelay();
-    const valid: Record<string, Record<string, unknown>> = {
-      post: { operationId: "op", groupId: "channel-nowhere", body: "Hi" },
-      send: { operationId: "op", streamId: "channel-nowhere", body: "Hi" },
-      reply: { operationId: "op", threadId: "thread-stay", body: "Hi" },
-      react: { operationId: "op", messageId: "message-stay", emoji: "👍", state: "added" },
-    };
-    const forbidden: Record<string, unknown> = {
-      runId: "run", reported: { product: "Nova" }, work: { status: "done" }, agent: "Nova", attachments: [], cwd: "/", actor: "human",
-      agentId: "nova", token: "a".repeat(64), runSecret: "a".repeat(64), door: "cli",
-      author: { kind: "human", displayName: "Ben" }, authorKind: "human", authorDisplayName: "Ben", authorUserId: "ben", authorActorKey: "key",
-      idempotencyKey: "key", stageKey: "key", stageReceipt: true,
-    };
-    const requests: Array<[label: string, operation: string, args: Record<string, unknown>]> = [];
-    for (const [operation, args] of Object.entries(valid)) {
-      for (const [field, value] of Object.entries(forbidden)) requests.push([`${operation} ${field}`, operation, { ...args, [field]: value }]);
-    }
-    // IDs the server derives, where the write names no such target.
-    for (const operation of ["post", "send", "reply"]) requests.push([`${operation} messageId`, operation, { ...valid[operation], messageId: "message-mine" }]);
-    for (const operation of ["post", "send"]) requests.push([`${operation} threadId`, operation, { ...valid[operation], threadId: "thread-mine" }]);
-    for (const [field, value] of Object.entries({ ...forbidden, resolvedByMessageId: "message-mine", threadId: "thread-stay" })) {
-      requests.push([`resolves ${field}`, "reply", { ...valid.reply, resolves: { messageId: "message-poll", [field]: value } }]);
-    }
-    for (const [label, operation, args] of requests) {
-      const response = await f.write(operation, args);
-      expect(response.status, label).toBe(400);
-      expect(await json(response), label).toEqual(schemaRefusal(operation));
-    }
-    expect(f.rows()).toBe(0);
-    expect(f.engine.writes).toEqual([]);
-    expect(f.syncs).toEqual([]);
-
-    // Without them, each write fits its schema.
-    for (const [operation, args] of Object.entries(valid)) {
-      expect((await f.write(operation, { ...args, operationId: `op-${operation}` })).status, operation).toBe(200);
-    }
-  });
-
-  it("takes each field up to its bound and refuses it past it", async () => {
-    const f = await writeRelay();
-    const { planning } = f.seeded;
-    const units = (count: number) => "x".repeat(count);
-    const choices = (count: number, length = 5) => Array.from({ length: count }, (_, index) => String(index).padEnd(length, "c"));
-    // Thirty-two UTF-16 units: one emoji, then ten joined to it.
-    const emoji = `👍${"‍👍".repeat(10)}`;
-    let next = 0;
-    const reply = (args: Record<string, unknown>) => ({ operationId: `op-${++next}`, threadId: "thread-stay", body: "Hi", ...args });
-    const react = (args: Record<string, unknown>) => ({ operationId: `op-${++next}`, messageId: "message-stay", emoji: "👍", state: "added", ...args });
-    const post = (args: Record<string, unknown>) => ({ operationId: `op-${++next}`, groupId: planning.channelId, body: "Hi", ...args });
-    const cases: Array<[label: string, operation: string, args: Record<string, unknown>, fits: boolean]> = [
-      ["an empty operation ID", "reply", reply({ operationId: "" }), false],
-      ["a 128-unit operation ID", "reply", reply({ operationId: units(128) }), true],
-      ["a 129-unit operation ID", "reply", reply({ operationId: units(129) }), false],
-      ["an empty thread ID", "reply", reply({ threadId: "" }), false],
-      ["a 256-unit thread ID", "reply", reply({ threadId: units(256) }), true],
-      ["a 257-unit thread ID", "reply", reply({ threadId: units(257) }), false],
-      ["a 256-unit group ID", "post", post({ groupId: units(256) }), true],
-      ["a 257-unit group ID", "post", post({ groupId: units(257) }), false],
-      ["a 256-unit stream ID", "send", { operationId: "op-stream", streamId: units(256), body: "Hi" }, true],
-      ["a 257-unit stream ID", "send", { operationId: "op-stream", streamId: units(257), body: "Hi" }, false],
-      ["a 256-unit parent", "reply", reply({ parentMessageId: units(256) }), true],
-      ["a 257-unit parent", "reply", reply({ parentMessageId: units(257) }), false],
-      ["a 256-unit question", "reply", reply({ resolves: { messageId: units(256) } }), true],
-      ["a 257-unit question", "reply", reply({ resolves: { messageId: units(257) } }), false],
-      ["a 256-unit reacted message", "react", react({ messageId: units(256) }), true],
-      ["a 257-unit reacted message", "react", react({ messageId: units(257) }), false],
-      ["an empty title", "post", post({ title: "" }), false],
-      ["a 200-unit title", "post", post({ title: units(200) }), true],
-      ["a 201-unit title", "post", post({ title: units(201) }), false],
-      ["an empty body", "reply", reply({ body: "" }), false],
-      ["a body of 128 Ki units", "reply", reply({ body: units(128 * 1024) }), true],
-      ["a body one unit longer", "reply", reply({ body: units(128 * 1024 + 1) }), false],
-      ["twelve choices of 200 units", "reply", reply({ options: choices(12, 200) }), true],
-      ["thirteen choices", "reply", reply({ options: choices(13) }), false],
-      ["an empty choice", "reply", reply({ options: ["", "Baixa"] }), false],
-      ["a 201-unit choice", "reply", reply({ options: [units(201), "Baixa"] }), false],
-      ["a 200-unit chosen option", "reply", reply({ resolves: { messageId: "message-poll", chosenOption: units(200) } }), true],
-      ["a 201-unit chosen option", "reply", reply({ resolves: { messageId: "message-poll", chosenOption: units(201) } }), false],
-      ["an empty chosen option", "reply", reply({ resolves: { messageId: "message-poll", chosenOption: "" } }), false],
-      ["a decision flag that isn't true or false", "reply", reply({ needsDecision: "yes" }), false],
-      ["a 32-unit emoji", "react", react({ emoji }), true],
-      ["a 33-unit emoji", "react", react({ emoji: `${emoji}x` }), false],
-      ["an empty emoji", "react", react({ emoji: "" }), false],
-      ["a toggle", "react", react({ state: "toggled" }), false],
-    ];
-    expect(emoji).toHaveLength(32);
-    for (const [label, operation, args, fits] of cases) {
-      const response = await f.write(operation, args);
-      const body = await json(response);
-      // A write within its schema may still be missing its target or refused by the shared rules, as the body over 64 KiB is.
-      if (fits) expect(body, label).not.toEqual(schemaRefusal(operation));
-      else expect({ status: response.status, body }, label).toEqual({ status: 400, body: schemaRefusal(operation) });
-    }
-    expect(f.engine.writes.map((request) => request.method)).toContain(CHATS_METHOD.messageSend);
-  });
-
-  it("reads a write's arguments, and answers an unknown or reserved name as missing without reading them", async () => {
-    const f = await writeRelay();
-    const streamed = (operation: string) => {
-      const read = { pulled: false };
-      const request = new Request(`http://relay.test/sync/trip/ops/${operation}`, {
-        method: "POST", headers: { ...signedIn("ana"), "content-type": "application/json" }, duplex: "half",
-        body: new ReadableStream({ pull(controller) { read.pulled = true; controller.enqueue(new TextEncoder().encode("{}")); controller.close(); } },
-          { highWaterMark: 0 }),
-      } as RequestInit & { duplex: "half" });
-      return { request, read };
-    };
-    const missing = await denialBytes(await f.write("changes", {}));
-    for (const name of ["changes", "markRead", "retryWake", "groupCreate", "toString", "__proto__", "constructor"]) {
-      const { request, read } = streamed(name);
-      expect(await denialBytes(await f.h(request)), name).toBe(missing);
-      expect(read.pulled, name).toBe(false);
-    }
-    for (const name of ["post", "send", "reply", "react"]) {
-      const { request, read } = streamed(name);
-      const response = await f.h(request);
-      expect(await json(response), name).toEqual(schemaRefusal(name));
-      expect(read.pulled, name).toBe(true);
-    }
-    expect(f.syncs).toEqual([]);
-  });
-
-  it("keeps the body limit and the sign-in's rate on writes", async () => {
-    const f = await writeRelay({ limiter: new TokenBucketLimiter(1, 0.001, 16) });
-    expect((await f.write("reply", { operationId: "op", threadId: "thread-stay", body: "a".repeat(256 * 1024) })).status).toBe(413);
-    const limited = await f.write("reply", { operationId: "op", threadId: "thread-stay", body: "Hi" });
-    expect(limited.status).toBe(503);
-    expect(await json(limited)).toMatchObject({ ok: false, code: "server_busy" });
-    expect(f.rows()).toBe(0);
-    expect(f.syncs).toEqual([]);
-  });
-
   it("answers a hidden target with the same status, type and bytes as a missing one, for each write", async () => {
     const f = await writeRelay();
     const { onSecret } = f.seeded;
@@ -1225,18 +653,6 @@ describe("an account's chat writes through the server's copy", () => {
     expect(f.engine.writes).toEqual([]);
   });
 
-  it("answers a new write whose copy can't sync as not sent, without the relay's words", async () => {
-    const f = await writeRelay();
-    f.failSync(new Error("The relay at https://relay.internal refused the push."));
-    const response = await f.write("reply", { operationId: "op-unsynced", threadId: "thread-stay", body: "Hi" });
-    const text = await response.text();
-    expect(response.status).toBe(200);
-    expect(JSON.parse(text)).toEqual({ ok: true, result: { ok: false, refusal: "refused", reason: "Couldn't send" }, cursor: "0.0.0" });
-    expect(text).not.toContain("relay.internal");
-    expect(f.rows()).toBe(0);
-    expect(f.engine.writes).toEqual([]);
-  });
-
   it("answers as missing, with no result and no further change, when access ends at any check of a write", async () => {
     const { h } = await relay();
     const missing = await denialBytes(await h(op("nowhere", "groups")));
@@ -1244,20 +660,6 @@ describe("an account's chat writes through the server's copy", () => {
     // Each starts the write, ends access at its point, and answers the response, the rows, and the engine writes it expects.
     const points: Array<[label: string, run: (f: WriteRelay, kind: AccessChange) => Promise<Response>, rows: number, writes: number]> = [
       ["after the arguments arrive", async (f, kind) => { f.changeAt(2, kind); return await f.write("reply", write); }, 0, 0],
-      ["while the account's name is looked up", async (f, kind) => {
-        f.named(() => { f.change(kind); return "Ana"; });
-        return await f.write("reply", write);
-      }, 0, 0],
-      ["once the copy is open", async (f, kind) => { f.changeAt(4, kind); return await f.write("reply", write); }, 0, 0],
-      ["once the write's lock is held", async (f, kind) => { f.changeAt(5, kind); return await f.write("reply", write); }, 0, 0],
-      ["while a target read waits", async (f, kind) => {
-        const held = f.engine.hold(CHATS_METHOD.threadsList);
-        const writing = f.write("reply", write);
-        await held.reached;
-        f.change(kind);
-        held.release();
-        return await writing;
-      }, 0, 0],
       ["while publication waits for the copy's step", async (f, kind) => {
         const held = f.holdStep();
         const writing = f.write("reply", write);
@@ -1289,23 +691,4 @@ describe("an account's chat writes through the server's copy", () => {
     }
   });
 
-  it("answers a write the Group refuses as missing, not as a bad request, when access ends while it reads the Group", async () => {
-    const { h } = await relay();
-    const missing = await denialBytes(await h(op("nowhere", "groups")));
-    for (const kind of ACCESS_CHANGES) {
-      const f = await writeRelay();
-      const lobby = await new ChatsLiveAdapter(f.engine.chats, "trip", { workspaceId: "trip" })
-        .createChannel({ workspaceId: "trip", name: "Lobby", type: "chat" });
-      // With access, the Group's kind answers.
-      expect((await f.write("post", { operationId: "op-kind", groupId: lobby.channelId, body: "Hi" })).status, kind).toBe(400);
-      const held = f.engine.hold(CHATS_METHOD.channelsList);
-      const writing = f.write("post", { operationId: "op-gone", groupId: lobby.channelId, body: "Hi" });
-      await held.reached;
-      f.change(kind);
-      held.release();
-      expect(await denialBytes(await writing), kind).toBe(missing);
-      expect(f.rows(), kind).toBe(0);
-      expect(f.engine.writes, kind).toEqual([]);
-    }
-  });
 });

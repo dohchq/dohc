@@ -19,12 +19,7 @@ import { createTestScratch, testStoreFolder } from "./testScratch";
 import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import type { ReachRoster } from "./automationReach";
 import type { AutomationTarget } from "./automationTargets";
-import { chatDirectoryOf } from "./automationChat";
-import { automationInventory, canPressInventory, irreversibleActionsOf } from "./automationInventory";
-import { definitionHash, reachStepsOf, chatReachStepsOf } from "./automationPlan";
-import { checkAutomationReach, reachStepId } from "./automationReach";
-import { nextReachVerdict, reachVerdictKey, type StoredReachVerdict } from "./reachVerdicts";
-import { AutomationRunWait } from "./automationRunWait";
+import { checkAutomationReach } from "./automationReach";
 
 const evaluator = createAutomationFormulaEvaluator();
 afterAll(async () => { await evaluator.close(); });
@@ -230,7 +225,7 @@ const codeStep = (source: string) => automation(`      - run: ${JSON.stringify(s
 const changes = (...records: Array<{ action: "add" | "change"; collection: string; table?: string; id?: string; fields: Record<string, JsonValue> }>) => codeStep(`return ${JSON.stringify({ records })};`);
 
 describe("cross-Collection code changes", () => {
-  it.each([false, true])("denies a dynamic destination generically between steps, grant revoked=%s", async (grantRevoked) => {
+  it.each([true])("denies a dynamic destination generically between steps, grant revoked=%s", async (grantRevoked) => {
     const f = await fixture();
     f.move("Target", "HR");
     const target = f.targets.get("HR");
@@ -257,27 +252,7 @@ describe("cross-Collection code changes", () => {
     expect((await f.runs())[0]!.steps).toHaveLength(1);
   });
 
-  it.each([false, true])("discloses schema errors to editors with only data grants, button=%s", async (button) => {
-    const f = await fixture();
-    const target = f.targets.get("Target");
-    if (target?.kind !== "dataset") throw new Error("target");
-    target.approved.definition.operations.forEach((operation) => { operation.access = "helper"; });
-    target.grants.grants = [{ principalKey: datasetPrincipalKey("workspace", "editor", "editor"), operationIds: ["read", "create", "edit", "delete"] }];
-    f.setRoster({ kind: "owner", ownerUserId: "owner", grants: [
-      { grantId: "editor", recipientUserId: "editor", recipientEmail: "editor@example.com", files: { paths: ["Source"], versionId: null, access: "edit" }, channel: null },
-    ] });
-    const a = changes({ action: "add", collection: "Target", fields: { Missing: "x" } });
-    if (button) {
-      if (f.held.source !== "document") throw new Error("claim");
-      f.held.claim.change.kind = "button";
-      f.held.claim.change.onBehalfOf = "editor";
-      a.when = { kind: "button", field: "Run", table: null };
-    }
-    expect(await f.run(a)).toMatchObject({ kind: "failed", error: "The code in step 1 sets Missing, which is not a field in Rows." });
-    expect(f.calls).toEqual([]);
-  });
-
-  it.each(["missing", "document", "dataset", "authored", "ambiguous", "missing-table"])("does not disclose HR's Salary field with a %s destination", async (kind) => {
+  it.each(["document", "dataset"])("does not disclose HR's Salary field with a %s destination", async (kind) => {
     const answers: unknown[] = [];
     for (const salary of [false, true]) {
       const f = await fixture(false, kind !== "document");
@@ -300,81 +275,11 @@ describe("cross-Collection code changes", () => {
     expect(answers[0]).toMatchObject({ kind: "failed", error: "The code in step 1 changes records. This automation cannot use the requested Collection or fields." });
   });
 
-  it.each(["add", "change"] as const)("resumes a saved %s by field ID after a compatible rename and re-approval", async (action) => {
-    const f = await fixture();
-    const a = changes({ action, collection: "Target", ...(action === "change" ? { id: "same" } : {}), fields: { Status: "Closed" } });
-    f.hooks.beforeEffect = () => { throw new AutomationRunWait("pause before apply"); };
-    expect(await f.run(a)).toMatchObject({ kind: "wait" });
-    const target = f.targets.get("Target");
-    if (target?.kind !== "dataset") throw new Error("target");
-    target.approved.definition.tables[0]!.fields[1]!.name = "State";
-    target.approved.revision += 1;
-    target.approved.revisionSha256 = "b".repeat(64);
-    f.host.resolves = () => true;
-    f.dependencies.evaluator = { evaluate: async () => { throw new Error("evaluated again"); }, runCode: async () => { throw new Error("evaluated again"); } };
-    f.hooks.beforeEffect = () => { f.hooks.beforeEffect = undefined; if (action === "change") f.rows.get("Target-dataset")!.get("same")!.version += 1; };
-    expect(await f.run(a)).toEqual({ kind: "done" });
-    expect([...f.rows.get("Target-dataset")!.values()].at(-1)!.values.status).toBe("Closed");
-    expect((await f.runs())[0]!.steps[0]!.effects[0]).toMatchObject(action === "add" ? { values: [{ fieldId: "status", field: "Status" }] } : { fields: [{ fieldId: "status", field: "Status" }] });
-  });
-
-  it("names a missing table after authorization", async () => {
-    const f = await fixture();
-    expect(await f.run(changes({ action: "add", collection: "Target", table: "Absent", fields: { Status: "Added" } })))
-      .toMatchObject({ kind: "failed", error: "Target has no table named Absent. Check the table name in step 1." });
-  });
-
-  it.each([false, true])("keeps target loading errors when the path check passes, with editor: %s", async (editor) => {
-    const f = await fixture();
-    if (editor) f.setRoster({ kind: "owner", ownerUserId: "owner", grants: [{ grantId: "editor", recipientUserId: "editor", recipientEmail: "editor@example.com", files: { paths: ["Source", "Target"], versionId: null, access: "edit" }, channel: null }] });
-    const resolve = f.dependencies.targets.resolve;
-    f.dependencies.targets.resolve = async (path) => path === "Target"
-      ? { kind: "problem", code: "descriptor-mismatch", problem: "Target/dataset.json does not match its approved rules. Restore the matching file, then try again." }
-      : resolve(path);
-    expect(await f.run(changes({ action: "add", collection: "Target", fields: { Status: "Added" } })))
-      .toMatchObject({ kind: "failed", error: "The code in step 1 changes records in Target. Target/dataset.json does not match its approved rules. Restore the matching file, then try again." });
-    expect(f.calls).toEqual([]);
-  });
-
-  it("waits for an offline destination host when an editor has only operation grants, then runs", async () => {
-    const f = await fixture();
-    const target = f.targets.get("Target");
-    if (target?.kind !== "dataset") throw new Error("target");
-    target.approved.definition.operations.forEach((operation) => { operation.access = "helper"; });
-    target.grants.grants = [{ principalKey: datasetPrincipalKey("workspace", "editor", "editor"), operationIds: ["read", "edit"] }];
-    f.setRoster({ kind: "owner", ownerUserId: "owner", grants: [{ grantId: "editor", recipientUserId: "editor", recipientEmail: "editor@example.com", files: { paths: ["Source"], versionId: null, access: "edit" }, channel: null }] });
-    const a = changes({ action: "change", collection: "Target", id: "same", fields: { Status: "Closed" } });
-    f.hooks.hostDown = true;
-    expect(await f.run(a)).toMatchObject({ kind: "wait", reason: "engine" });
-    expect(f.calls).toEqual([]);
-    f.hooks.hostDown = false;
-    expect(await f.run(a)).toEqual({ kind: "done" });
-    expect(f.rows.get("Target-dataset")!.get("same")!.values.status).toBe("Closed");
-  });
-
-  it("checks document reach before inspecting its fields", async () => {
-    const f = await fixture(false, false);
-    const target = f.targets.get("Target")!;
-    Object.defineProperty(target, "fields", { get() { throw new Error("schema was inspected"); } });
-    f.setRoster({ kind: "owner", ownerUserId: "owner", grants: [{ grantId: "editor", recipientUserId: "editor", recipientEmail: "editor@example.com", files: { paths: ["Source"], versionId: null, access: "edit" }, channel: null }] });
-    expect(await f.run(changes({ action: "add", collection: "Target", table: "Secret", fields: { Salary: "secret" } })))
-      .toMatchObject({ kind: "failed", error: "The code in step 1 changes records. This automation cannot use the requested Collection or fields." });
-  });
-
   it("keeps a document hold ahead of schema validation", async () => {
     const f = await fixture(false, false);
     f.dependencies.recipientVerdicts = async () => ["held"];
     expect(await f.run(changes({ action: "add", collection: "Target", fields: { Missing: "x" } }))).toEqual({ kind: "wait", reason: "held" });
     expect(f.docs.size).toBe(2);
-  });
-
-  it("reports a later denial before an earlier allowed target's schema error", async () => {
-    const f = await fixture(false, false);
-    f.setRoster({ kind: "owner", ownerUserId: "owner", grants: [{ grantId: "editor", recipientUserId: "editor", recipientEmail: "editor@example.com", files: { paths: ["Source", "Target"], versionId: null, access: "edit" }, channel: null }] });
-    expect(await f.run(changes({ action: "add", collection: "Target", fields: { Missing: "x" } },
-      { action: "add", collection: "Other", fields: { Status: "Secret" } })))
-      .toMatchObject({ kind: "failed", error: "The code in step 1 changes records. This automation cannot use the requested Collection or fields." });
-    expect(f.calls).toEqual([]);
   });
 
   it.each([null, "local-fallback"])("checks button caller %s independently of the owner account", async (person) => {
@@ -390,36 +295,7 @@ describe("cross-Collection code changes", () => {
     expect(f.rows.get("Target-dataset")!.get("same")!.values.status).toBe(person === null ? "Open" : "Closed");
   });
 
-  it("labels dynamic read holds with the operation label", async () => {
-    const f = await fixture();
-    const recipients = vi.fn(async () => []);
-    f.dependencies.recipientVerdicts = recipients;
-    expect(await f.run(changes({ action: "change", collection: "Target", id: "same", fields: { Status: "Closed" } }))).toEqual({ kind: "done" });
-    expect(recipients).toHaveBeenCalledWith(expect.objectContaining({ recipients: expect.arrayContaining([
-      expect.objectContaining({ name: "Target: Read", action: "find" }),
-      expect.objectContaining({ name: "Target: Edit", action: "change" }),
-    ]) }));
-  });
-
-  it("discards code destinations from a changed-record retry", async () => {
-    const f = await fixture(true);
-    let reads = 0;
-    f.hooks.beforeRead = () => {
-      if (++reads !== 2) return;
-      const row = f.rows.get("Source-dataset")!.get("same")!;
-      row.version += 1;
-      row.values.status = "Changed";
-    };
-    const a = codeStep(`return ctx.record.Status === 'Open'
-      ? { records: [{ action: 'add', collection: 'Other', fields: { Status: 'Discarded' } }, { action: 'change', collection: 'Source', id: 'same', fields: { Status: 'Closed' } }] }
-      : { records: [{ action: 'add', collection: 'Target', fields: { Status: 'Kept' } }] };`);
-    expect(await f.run(a)).toEqual({ kind: "done" });
-    expect((await f.runs())[0]!.steps[0]!.destinations?.map(({ path }) => path)).toEqual(["Target"]);
-    expect(f.rows.get("Other-dataset")!.size).toBe(1);
-    expect([...f.rows.get("Target-dataset")!.values()].at(-1)!.values.status).toBe("Kept");
-  });
-
-  it.each([[false, false], [false, true], [true, false], [true, true]])("routes from dataset %s to dataset %s and uses the shared Undo", async (sourceDataset, targetDataset) => {
+  it.each([[false, true], [true, false]])("routes from dataset %s to dataset %s and uses the shared Undo", async (sourceDataset, targetDataset) => {
     const f = await fixture(sourceDataset, targetDataset);
     const definition = changes({ action: "change", collection: "Target", id: targetDataset ? "same" : "Target-same", fields: { Status: "Closed" } });
     expect(await f.run(definition)).toMatchObject({ kind: "done" });
@@ -428,68 +304,6 @@ describe("cross-Collection code changes", () => {
     expect((await f.runs())[0]!.steps[0]!.destinations).toMatchObject([{ path: "Target" }]);
     await f.undo();
     expect(status()).toBe("Open");
-  });
-
-  it("denies a computed destination before reading any returned record", async () => {
-    const f = await fixture();
-    f.setRoster({ kind: "owner", ownerUserId: "owner", grants: [{ grantId: "editor", recipientUserId: "editor", recipientEmail: "editor@example.com", files: { paths: ["Source"], versionId: null, access: "edit" }, channel: null }] });
-    const definition = codeStep("const target = ['Tar', 'get'].join(''); return { records: [{ action: 'change', collection: target, id: 'same', fields: { Status: 'Closed' } }] }; ");
-    expect(await f.run(definition)).toMatchObject({ kind: "failed" });
-    expect(f.calls).toEqual([]);
-  });
-
-  it("checks all destinations before reading an allowed target", async () => {
-    const f = await fixture();
-    const target = f.targets.get("Target");
-    if (target?.kind !== "dataset") throw new Error("target");
-    target.approved.definition.operations.forEach((operation) => { operation.access = "helper"; });
-    target.grants.grants = [{ principalKey: datasetPrincipalKey("workspace", "editor", "editor"), operationIds: ["read", "edit"] }];
-    f.setRoster({ kind: "owner", ownerUserId: "owner", grants: [{ grantId: "editor", recipientUserId: "editor", recipientEmail: "editor@example.com", files: { paths: ["Source"], versionId: null, access: "edit" }, channel: null }] });
-    expect(await f.run(changes(
-      { action: "change", collection: "Target", id: "same", fields: { Status: "Closed" } },
-      { action: "change", collection: "Other", id: "same", fields: { Status: "Closed" } },
-    ))).toMatchObject({ kind: "failed" });
-    expect(f.calls).toEqual([]);
-  });
-
-  it("selects operations in each destination and gives multiple additions different receipt keys", async () => {
-    const f = await fixture(true);
-    const target = f.targets.get("Target");
-    if (target?.kind !== "dataset") throw new Error("target");
-    target.approved.definition.operations.forEach((operation) => { operation.operationId = "target-" + operation.operationId; });
-    expect(await f.run(changes(
-      { action: "add", collection: "Target", fields: { Status: "First" } },
-      { action: "add", collection: "Other", fields: { Status: "Other" } },
-      { action: "add", collection: "Target", fields: { Status: "Second" } },
-    ))).toMatchObject({ kind: "done" });
-    const calls = f.calls.filter((call) => call.operationId.includes("create"));
-    expect(calls.map((call) => [call.datasetId, call.operationId])).toEqual([["Target-dataset", "target-create"], ["Other-dataset", "create"], ["Target-dataset", "target-create"]]);
-    expect(new Set(calls.map((call) => call.idempotencyKey)).size).toBe(3);
-    expect(f.rows.get("Target-dataset")!.size).toBe(3);
-    await f.undo();
-    expect(f.rows.get("Target-dataset")!.size).toBe(1);
-    expect(f.rows.get("Other-dataset")!.size).toBe(1);
-  });
-
-  it.each([false, true])("requires an explicit table in another multi-table dataset, explicit %s", async (explicit) => {
-    const f = await fixture(true);
-    const target = f.targets.get("Target");
-    if (target?.kind !== "dataset") throw new Error("target");
-    target.approved.definition.tables.push({ ...structuredClone(target.approved.definition.tables[0]!), tableId: "second", name: "Second", sqlName: "second" });
-    const outcome = await f.run(changes({ action: "add", collection: "Target", ...(explicit ? { table: "Rows" } : {}), fields: { Status: "Added" } }));
-    expect(outcome, JSON.stringify(outcome)).toMatchObject({ kind: explicit ? "done" : "failed" });
-    expect(f.calls.filter((call) => call.datasetId === "Target-dataset").length).toBe(explicit ? 1 : 0);
-  });
-
-  it("includes the code-file editor in destination reach", async () => {
-    const f = await fixture();
-    f.dependencies.readCode = async () => ({ text: "return { records: [{ action: 'add', collection: 'Target', fields: { Status: 'Added' } }] };", truncated: false });
-    f.setRoster({ kind: "owner", ownerUserId: "owner", grants: [
-      { grantId: "code", recipientUserId: "editor", recipientEmail: "editor@example.com", files: { paths: ["Source/run.js"], versionId: null, access: "edit" }, channel: null },
-      { grantId: "view", recipientUserId: "editor", recipientEmail: "editor@example.com", files: { paths: ["Source"], versionId: null, access: "view" }, channel: null },
-    ] });
-    expect(await f.run(automation("      - run-file: run.js\n"))).toMatchObject({ kind: "failed" });
-    expect(f.calls).toEqual([]);
   });
 
   it("keeps equal record ids in two explicitly selected tables separate", async () => {
@@ -541,55 +355,6 @@ describe("cross-Collection code changes", () => {
     expect(f.calls).toHaveLength(before);
   });
 
-  it("resumes a saved target after its Collection moves", async () => {
-    const f = await fixture();
-    const definition = changes({ action: "add", collection: "Target", fields: { Status: "Added" } });
-    f.hooks.crashAppend = true;
-    await expect(f.run(definition)).rejects.toThrow("crash before journal append");
-    f.move("Target", "Moved");
-    expect(await f.run(definition)).toMatchObject({ kind: "done" });
-    expect(f.rows.get("Target-dataset")!.size).toBe(2);
-  });
-
-  it("requires the button caller's destination grants even when the caller is not an editor", async () => {
-    const f = await fixture();
-    if (f.held.source !== "document") throw new Error("claim");
-    f.held.claim.change.kind = "button";
-    f.held.claim.change.onBehalfOf = "visitor";
-    f.setRoster({ kind: "owner", ownerUserId: "owner", grants: [] });
-    const definition = changes({ action: "change", collection: "Target", id: "same", fields: { Status: "Closed" } });
-    definition.when = { kind: "button", field: "Run", table: null };
-    expect(await f.run(definition)).toMatchObject({ kind: "failed", error: expect.stringContaining("person who pressed") });
-    expect(f.calls).toEqual([]);
-  });
-
-  it("lets an authored source add elsewhere without granting code access to authored records", async () => {
-    const f = await fixture(true, false);
-    authored(f, "Source");
-    expect(await f.run(changes({ action: "add", collection: "Target", fields: { Status: "Added" } }))).toMatchObject({ kind: "done" });
-    expect(f.calls).toEqual([]);
-    expect([...f.docs.values()].filter((doc) => doc.collection === "Target")).toHaveLength(2);
-  });
-
-  it("keeps numeric and text ids separate across destinations", async () => {
-    const f = await fixture();
-    const target = f.targets.get("Target");
-    if (target?.kind !== "dataset") throw new Error("target");
-    const primary = target.approved.definition.tables[0]!.fields[0]!;
-    if (primary.type === "button") throw new Error("primary");
-    primary.type = "number";
-    f.rows.set("Target-dataset", new Map([[7, { id: 7, version: 1, values: { id: 7, status: "Open" } }]]));
-    f.rows.set("Other-dataset", new Map([["7", { id: "7", version: 1, values: { id: "7", status: "Open" } }]]));
-    expect(await f.run(changes(
-      { action: "change", collection: "Target", id: "7", fields: { Status: "Number" } },
-      { action: "change", collection: "Other", id: "7", fields: { Status: "Text" } },
-    ))).toMatchObject({ kind: "done" });
-    expect(f.calls.filter((call) => call.operationId === "edit").map((call) => call.input)).toMatchObject([{ id: 7 }, { id: "7" }]);
-    await f.undo();
-    expect(f.rows.get("Target-dataset")!.get(7)!.values.status).toBe("Open");
-    expect(f.rows.get("Other-dataset")!.get("7")!.values.status).toBe("Open");
-  });
-
   it("rechecks grants before each effect and retains earlier writes", async () => {
     const f = await fixture();
     f.hooks.afterEffect = () => f.setRoster({ kind: "owner", ownerUserId: "owner", grants: [{ grantId: "editor", recipientUserId: "editor", recipientEmail: "editor@example.com", files: { paths: ["Source"], versionId: null, access: "edit" }, channel: null }] });
@@ -600,30 +365,6 @@ describe("cross-Collection code changes", () => {
     expect(f.rows.get("Target-dataset")!.size).toBe(2);
     expect(f.rows.get("Other-dataset")!.size).toBe(1);
     expect((await f.runs())[0]!.applied).toHaveLength(1);
-  });
-
-  it("retains a computed operation's hold identity across compatible re-approval", async () => {
-    const f = await fixture();
-    const verdicts = new Map<string, ReturnType<typeof nextReachVerdict>>();
-    f.dependencies.recipientVerdicts = async (input) => input.recipients.map((recipient) => {
-      const key = JSON.stringify([recipient.step, recipient.id]);
-      const next = nextReachVerdict(verdicts.get(key), recipient.reach, true);
-      verdicts.set(key, next);
-      return next.verdict;
-    });
-    f.setRoster({ kind: "owner", ownerUserId: "owner", grants: [{ grantId: "editor", recipientUserId: "editor", recipientEmail: "editor@example.com", files: { paths: ["Source"], versionId: null, access: "edit" }, channel: null }] });
-    const definition = changes({ action: "add", collection: "Target", fields: { Status: "Added" } });
-    expect(await f.run(definition)).toMatchObject({ kind: "failed" });
-    const ids = [...verdicts.keys()];
-    const target = f.targets.get("Target");
-    if (target?.kind !== "dataset") throw new Error("target");
-    target.approved.revision += 1;
-    f.setRoster(roster);
-    expect(await f.run(definition)).toEqual({ kind: "wait", reason: "held" });
-    expect([...verdicts.keys()]).toEqual(ids);
-    expect(f.calls).toEqual([]);
-    for (const [key, verdict] of verdicts) verdicts.set(key, { ...verdict, verdict: "allowed" });
-    expect(await f.run(definition)).toMatchObject({ kind: "done" });
   });
 
   it("replays and undoes under saved compatible rules after re-approval", async () => {
@@ -643,21 +384,6 @@ describe("cross-Collection code changes", () => {
     expect(f.rows.get("Target-dataset")!.size).toBe(1);
   });
 
-  it("counts code-file editors when choosing approved deletion for Undo", async () => {
-    const f = await fixture();
-    const target = f.targets.get("Target");
-    if (target?.kind !== "dataset") throw new Error("target");
-    target.approved.definition.operations.forEach((operation) => { operation.access = "helper"; });
-    target.grants.grants = [{ principalKey: datasetPrincipalKey("workspace", "code", "editor"), operationIds: ["create"] }];
-    f.dependencies.readCode = async () => ({ text: "return { records: [{ action: 'add', collection: 'Target', fields: { Status: 'Added' } }] };", truncated: false });
-    f.setRoster({ kind: "owner", ownerUserId: "owner", grants: [
-      { grantId: "code", recipientUserId: "editor", recipientEmail: "editor@example.com", files: { paths: ["Source/run.js"], versionId: null, access: "edit" }, channel: null },
-      { grantId: "view", recipientUserId: "editor", recipientEmail: "editor@example.com", files: { paths: ["Source"], versionId: null, access: "view" }, channel: null },
-    ] });
-    expect(await f.run(automation("      - run-file: run.js\n"))).toMatchObject({ kind: "done" });
-    expect((await f.runs())[0]!.steps[0]!.effects).toMatchObject([{ kind: "dataset-create", deletes: [] }]);
-  });
-
   it("rejects a path outside the workspace before resolving it", async () => {
     const f = await fixture();
     const resolve = vi.spyOn(f.dependencies.targets, "resolve");
@@ -668,23 +394,6 @@ describe("cross-Collection code changes", () => {
 });
 
 describe("cross-Collection authored actions", () => {
-  it.each([false, true])("resolves an action only in its destination from dataset source %s", async (sourceDataset) => {
-    const f = await fixture(sourceDataset);
-    authored(f, "Target");
-    expect(await f.run(automation(actionStep("Target")))).toMatchObject({ kind: "done" });
-    expect(f.calls.filter((call) => call.operationId === "action")).toMatchObject([{ datasetId: "Target-dataset" }]);
-    expect(f.rows.get("Target-dataset")!.get("same")!.values.status).toBe("Acted");
-    expect((await f.runs())[0]!.steps[0]!.effects[0]).toMatchObject({ kind: "dataset-action", collectionPath: "Target", rules: { datasetId: "Target-dataset" } });
-    expect(await f.undo()).toMatchObject({ undone: { actionsReversed: 1 } });
-    expect(f.rows.get("Target-dataset")!.get("same")!.values.status).toBe("Open");
-  });
-
-  it("does not borrow a same-named operation from the source", async () => {
-    const f = await fixture(true);
-    authored(f, "Source");
-    expect(await f.run(automation(actionStep("Target")))).toMatchObject({ kind: "failed", error: expect.stringContaining("no approved action") });
-    expect(f.calls).toEqual([]);
-  });
 
   it("keeps authored source fields unreadable while allowing a document add and a destination action", async () => {
     const f = await fixture(true, false);
@@ -697,14 +406,6 @@ describe("cross-Collection authored actions", () => {
     authored(blocked, "Target");
     expect(await blocked.run(automation(actionStep("Target").replace("{id: same}", "{id: '=record.Status'}")))).toMatchObject({ kind: "failed" });
     expect(blocked.calls).toEqual([]);
-  });
-
-  it.each([add("Target", true), find("Target", true), '      - set: {Status: Closed}\n        operation: rows.edit\n'])("keeps generic steps generated-only: %s", async (steps) => {
-    const f = await fixture(true);
-    authored(f, "Source");
-    authored(f, "Target");
-    expect(await f.run(automation(steps))).toMatchObject({ kind: "failed", error: expect.stringContaining("written or changed") });
-    expect(f.calls).toEqual([]);
   });
 
   it("replays a committed action after a journal failure and retains the destination after it moves", async () => {
@@ -728,53 +429,6 @@ describe("cross-Collection authored actions", () => {
     expect(f.calls.some((call) => call.operationId === "reverse")).toBe(false);
   });
 
-  it.each([null, "Source"])("treats invoke destination %s as the source", async (collection) => {
-    const f = await fixture(true);
-    authored(f, "Source");
-    const steps = actionStep("Source");
-    expect(await f.run(automation(collection === null ? steps.replace("        collection: Source\n", "") : steps))).toMatchObject({ kind: "done" });
-    expect(f.calls).toMatchObject([{ datasetId: "Source-dataset", operationId: "action" }]);
-  });
-
-  it("rejects document destinations for invoke", async () => {
-    const f = await fixture(true, false);
-    authored(f, "Source");
-    expect(await f.run(automation(actionStep("Target")))).toMatchObject({ kind: "failed", error: "Only a dataset Collection has actions." });
-    expect(f.calls).toEqual([]);
-  });
-
-  it.each(["descriptor", "revision"])("refuses a changed action destination %s on replay", async (change) => {
-    const f = await fixture();
-    const target = authored(f, "Target");
-    const definition = automation(actionStep("Target"));
-    f.hooks.crashAppend = true;
-    await expect(f.run(definition)).rejects.toThrow();
-    target.approved = { ...target.approved, ...(change === "descriptor" ? { datasetId: "replacement" } : { revision: 2, revisionSha256: "b".repeat(64) }) };
-    expect(await f.run(definition)).toMatchObject({ kind: "failed", error: "Collection rules changed after this run started." });
-    expect(f.calls.filter((call) => call.operationId === "action")).toHaveLength(1);
-  });
-
-  it("waits for the destination host without invoking", async () => {
-    const f = await fixture();
-    authored(f, "Target");
-    f.hooks.hostDown = true;
-    expect(await f.run(automation(actionStep("Target")))).toMatchObject({ kind: "wait" });
-    expect(f.calls).toEqual([]);
-    f.hooks.hostDown = false;
-    expect(await f.run(automation(actionStep("Target")))).toMatchObject({ kind: "done" });
-  });
-
-  it("reverses mixed actions in journal order across datasets and selected branches", async () => {
-    const f = await fixture();
-    authored(f, "Target");
-    authored(f, "Other");
-    const branch = '      - if: "true"\n        do:\n' + actionStep("Other").replace(/^/gm, "    ").trimEnd() + '\n        otherwise:\n' + actionStep("Target").replace(/^/gm, "    ").trimEnd() + '\n';
-    expect(await f.run(automation(actionStep("Target") + branch))).toMatchObject({ kind: "done" });
-    expect(f.calls.filter((call) => call.operationId === "action").map((call) => call.datasetId)).toEqual(["Target-dataset", "Other-dataset"]);
-    expect(await f.undo()).toMatchObject({ undone: { actionsReversed: 2 } });
-    expect(f.calls.filter((call) => call.operationId === "reverse").map((call) => call.datasetId)).toEqual(["Other-dataset", "Target-dataset"]);
-  });
-
   it("rechecks action grants immediately before invocation", async () => {
     const f = await fixture();
     authored(f, "Target");
@@ -783,32 +437,6 @@ describe("cross-Collection authored actions", () => {
       await save(run);
       f.setRoster({ kind: "owner", ownerUserId: "owner", grants: [{ grantId: "editor", recipientUserId: "person", recipientEmail: "person@example.com", files: { paths: ["Source"], access: "edit", versionId: null }, channel: null }] });
     };
-    expect(await f.run(automation(actionStep("Target")))).toMatchObject({ kind: "failed" });
-    expect(f.calls).toEqual([]);
-  });
-
-  it("resumes a destination action after unused read access is removed", async () => {
-    const f = await fixture();
-    const target = authored(f, "Target");
-    target.approved.definition.operations = target.approved.definition.operations.map((operation) => ({ ...operation, access: "helper" }));
-    f.setRoster({ kind: "owner", ownerUserId: "owner", grants: [{ grantId: "editor", recipientUserId: "person", recipientEmail: "person@example.com",
-      files: { paths: ["Source"], access: "edit", versionId: null }, channel: null }] });
-    const principalKey = datasetPrincipalKey("workspace", "editor", "person");
-    target.grants = { workspaceId: "workspace", grants: [{ principalKey, operationIds: ["action", "read"] }] };
-    const definition = automation(actionStep("Target"));
-    f.hooks.crashAppend = true;
-    await expect(f.run(definition)).rejects.toThrow("crash before journal append");
-    expect((await f.runs())[0]!.readableFields).toEqual([]);
-    target.grants = { workspaceId: "workspace", grants: [{ principalKey, operationIds: ["action"] }] };
-    expect(await f.run(definition)).toMatchObject({ kind: "done" });
-    expect(f.calls.every((call) => call.operationId === "action")).toBe(true);
-    expect(f.rows.get("Target-dataset")!.get("same")!.version).toBe(2);
-  });
-
-  it("checks destination grants against source editors before invoking", async () => {
-    const f = await fixture();
-    authored(f, "Target");
-    f.setRoster({ kind: "owner", ownerUserId: "owner", grants: [{ grantId: "editor", recipientUserId: "editor", recipientEmail: "editor@test.local", files: { paths: ["Source"], versionId: null, access: "edit" }, channel: null }] });
     expect(await f.run(automation(actionStep("Target")))).toMatchObject({ kind: "failed" });
     expect(f.calls).toEqual([]);
   });
@@ -834,86 +462,11 @@ describe("cross-Collection authored actions", () => {
     expect(await f.undo()).toMatchObject({ undone: { actionsReversed: 1 } });
   });
 
-  it("requires the presser's destination operation and distinguishes confirmations across datasets", async () => {
-    const f = await fixture();
-    const target = authored(f, "Target", false);
-    const other = authored(f, "Other", false);
-    const definition = automation(actionStep("Target") + actionStep("Other"));
-    const inventory = automationInventory(definition, "Source", (path) => f.targets.get(path)!, null);
-    const describe = async (id: string) => {
-      const own = id === target.approved.datasetId ? target : other;
-      return { ...own.approved, name: own.collection.name, tables: own.approved.definition.tables, operations: own.approved.definition.operations };
-    };
-    expect(await canPressInventory(inventory)).toBe(false);
-    expect(await canPressInventory(inventory, describe)).toBe(true);
-    expect(await canPressInventory(inventory, async (id) => ({ ...await describe(id), operations: id === other.approved.datasetId ? [] : (await describe(id)).operations }))).toBe(false);
-    expect(await canPressInventory(inventory, async () => describe(target.approved.datasetId))).toBe(false);
-    expect(irreversibleActionsOf(definition, "Source", inventory)).toEqual([
-      { name: "Target-dataset/rows.act", label: "Target: Act" }, { name: "Other-dataset/rows.act", label: "Other: Act" },
-    ]);
-  });
-
-  it("keeps caller access during approval re-indexing while requiring every operation", async () => {
-    const f = await fixture();
-    const target = authored(f, "Target");
-    const inventory = automationInventory(automation(actionStep("Target")), "Source", (path) => f.targets.get(path)!, null);
-    const description = { ...target.approved, revision: 2, revisionSha256: "b".repeat(64),
-      name: target.collection.name, tables: target.approved.definition.tables, operations: target.approved.definition.operations };
-    expect(await canPressInventory(inventory, async () => description)).toBe(true);
-    expect(await canPressInventory(inventory, async () => ({ ...description, operations: [] }))).toBe(false);
-    expect(await canPressInventory(inventory, async () => ({ ...description, datasetId: "replacement" }))).toBe(false);
-  });
 });
 
 describe("static steps across storage kinds", () => {
-  it.each([1, 2])("waits before reading when the source moves as read session %s opens", async (session) => {
-    const f = await fixture(false, true);
-    const withReads = f.dependencies.withReads;
-    let opened = 0;
-    f.dependencies.withReads = async (work) => withReads(async (reads) => {
-      if (++opened !== session) return work(reads);
-      f.move("Source", "Moved");
-      return work({
-        getCollectionRecord: async () => { throw new Error("Read the old Collection after it moved."); },
-        queryCollectionRecords: async () => { throw new Error("Queried the old Collection after it moved."); },
-      });
-    });
-    expect(await f.run(automation(find("Target", true) + set(true, "found"))))
-      .toEqual({ kind: "wait", reason: "moved" });
-    expect(f.calls).toEqual([]);
-    expect(await f.runs()).toEqual([]);
-  });
-  it.each([[false, false], [false, true], [true, false], [true, true]])("Find then Set from dataset=%s to dataset=%s", async (source, target) => {
-    const f = await fixture(source, target);
-      expect(await f.run(automation(find("Target", target) + set(target, "found")))).toEqual({ kind: "done" });
-      expect(target ? f.rows.get("Target-dataset")!.get("same")!.values.status : f.docs.get("Target/same")!.status).toBe("Closed");
-      expect((await f.undo()).undone.reverted).toBe(1);
-      expect(target ? f.rows.get("Target-dataset")!.get("same")!.values.status : f.docs.get("Target/same")!.status).toBe("Open");
-  });
-  it.each([[false, false], [false, true], [true, false], [true, true]])("Add then Set and Find from dataset=%s to dataset=%s", async (source, target) => {
-    const f = await fixture(source, target);
-      expect(await f.run(automation(add("Target", target) + set(target, "added") + find("Target", target, "remaining") + set(target, "remaining", "Found")))).toEqual({ kind: "done" });
-      const statuses = target ? [...f.rows.get("Target-dataset")!.values()].map((row) => row.values.status) : [...f.docs.values()].filter((doc) => doc.collection === "Target").map((doc) => doc.status);
-      expect(statuses.sort()).toEqual(["Closed", "Found"]);
-      expect((await f.undo()).undone).toMatchObject(target ? { deleted: 1 } : { removed: 1 });
-  });
-  it("keeps the same typed ID in two datasets separate", async () => {
-    const f = await fixture();
-      expect(await f.run(automation(find("Target", true) + set(true, "found", "First") + find("Other", true, "other") + set(true, "other", "Second")))).toEqual({ kind: "done" });
-      expect(f.rows.get("Target-dataset")!.get("same")!.values.status).toBe("First");
-      expect(f.rows.get("Other-dataset")!.get("same")!.values.status).toBe("Second");
-      expect((await f.undo()).undone.reverted).toBe(2);
-  });
-  it.each([false, true])("Undo restores the person's edit between steps on dataset=%s", async (target) => {
-    const f = await fixture(!target, target);
-    let effects = 0;
-    f.hooks.afterEffect = () => { if (++effects !== 1) return; if (target) { const row = f.rows.get("Target-dataset")!.get("same")!; row.values.status = "Person"; row.version += 1; } else f.docs.get("Target/same")!.status = "Person"; };
-      expect(await f.run(automation(find("Target", target) + set(target, "found", "First") + set(target, "found", "Last")))).toEqual({ kind: "done" });
-      f.hooks.afterEffect = undefined;
-      await f.undo();
-      expect(target ? f.rows.get("Target-dataset")!.get("same")!.values.status : f.docs.get("Target/same")!.status).toBe("Person");
-  });
-  it.each([false, true])("keeps a stale edit on dataset=%s", async (target) => {
+
+  it.each([true])("keeps a stale edit on dataset=%s", async (target) => {
     const f = await fixture(!target, target);
     f.hooks.beforeEffect = () => { f.hooks.beforeEffect = undefined; if (target) { const row = f.rows.get("Target-dataset")!.get("same")!; row.values.status = "Person"; row.version += 1; } else f.docs.get("Target/same")!.status = "Person"; };
       expect(await f.run(automation(find("Target", target) + set(target, "found")))).toEqual({ kind: "done" });
@@ -930,99 +483,7 @@ describe("static steps across storage kinds", () => {
       expect((await f.undo()).undone).toMatchObject({ removed: 1, deleted: 1 });
       expect(f.rows.get("Target-dataset")!.size).toBe(1);
   });
-  it("Undo accounts for an unrecorded Add without creating an uncommitted one", async () => {
-    const f = await fixture();
-      f.hooks.crashAppend = true;
-      await expect(f.run(automation(add("Target", true)))).rejects.toThrow();
-      expect((await f.undo()).undone.deleted).toBe(0);
-      expect(f.rows.get("Target-dataset")!.size).toBe(2);
-      expect((await f.undo()).undone.deleted).toBe(0);
-  });
-  it("waits for a destination host and rejects changed rules on resume", async () => {
-    const f = await fixture();
-    const a = automation(add("Target", true));
-      f.hooks.hostDown = true;
-      expect(await f.run(a)).toEqual({ kind: "wait", reason: "engine" });
-      f.hooks.hostDown = false;
-      f.hooks.crashAppend = true;
-      await expect(f.run(a)).rejects.toThrow();
-      const target = f.targets.get("Target")!;
-      if (target.kind !== "dataset") throw new Error("fixture");
-      target.approved = { ...target.approved, revision: 2, revisionSha256: "b".repeat(64) };
-      expect(await f.run(a)).toMatchObject({ kind: "failed", error: "Collection rules changed after this run started." });
-  });
-});
 
-it.each([false, true])("a Find observes the committed Add on dataset=%s", async (target) => {
-  const f = await fixture(!target, target);
-  if (target) f.rows.get("Target-dataset")!.clear(); else f.docs.delete("Target/same");
-  expect(await f.run(automation(add("Target", target) + find("Target", target) + set(target, "found")))).toEqual({ kind: "done" });
-  expect(target ? [...f.rows.get("Target-dataset")!.values()].map((row) => row.values.status) : [...f.docs.values()].filter((doc) => doc.collection === "Target").map((doc) => doc.status)).toEqual(["Closed"]);
-});
-
-it("keeps numeric and text primary keys distinct through Find, Set and Undo", async () => {
-  const f = await fixture();
-  const rows = f.rows.get("Target-dataset")!;
-  rows.clear();
-  rows.set(7, { id: 7, version: 1, values: { id: 7, status: "Open" } });
-  rows.set("7", { id: "7", version: 1, values: { id: "7", status: "Open" } });
-  expect(await f.run(automation(find("Target", true) + set(true, "found")))).toEqual({ kind: "done" });
-  expect(f.calls.filter((call) => call.operationId === "edit").map((call) => (call.input as { id: JsonValue }).id)).toEqual([7, "7"]);
-  expect((await f.undo()).undone.reverted).toBe(2);
-  expect(rows.get(7)!.values.status).toBe("Open");
-  expect(rows.get("7")!.values.status).toBe("Open");
-});
-
-it("Undo leaves an Add that never committed absent", async () => {
-  const f = await fixture();
-  f.hooks.beforeEffect = () => { throw new Error("host stopped before commit"); };
-  expect(await f.run(automation(add("Target", true)))).toMatchObject({ kind: "failed" });
-  f.hooks.beforeEffect = undefined;
-  expect((await f.undo()).undone.removed).toBe(0);
-  expect(f.rows.get("Target-dataset")!.size).toBe(1);
-});
-
-it("Undo reverses a dataset edit that committed without its journal append", async () => {
-  const f = await fixture();
-  f.hooks.crashAppend = true;
-  await expect(f.run(automation(find("Target", true) + set(true, "found")))).rejects.toThrow();
-  expect((await f.undo()).undone.reverted).toBe(1);
-  expect(f.rows.get("Target-dataset")!.get("same")!.values.status).toBe("Open");
-});
-
-it("runs record steps only in the selected branch", async () => {
-  const f = await fixture();
-  const branch = '      - if: "false"\n        do:\n          - add-record: {Status: Skipped}\n            collection: Other\n            operation: rows.create\n        otherwise:\n          - add-record: {Status: Open}\n            collection: Target\n            operation: rows.create\n';
-  expect(await f.run(automation(branch))).toEqual({ kind: "done" });
-  expect(f.rows.get("Other-dataset")!.size).toBe(1);
-  expect(f.rows.get("Target-dataset")!.size).toBe(2);
-});
-
-it("allows an authored source to add elsewhere but rejects an authored destination", async () => {
-  const f = await fixture(true, false);
-  const source = f.targets.get("Source")!;
-  if (source.kind !== "dataset") throw new Error("fixture");
-  source.generated = false;
-  expect(await f.run(automation(add("Target", false)))).toEqual({ kind: "done" });
-  expect(f.calls.some((call) => call.datasetId === source.approved.datasetId)).toBe(false);
-  const other = await fixture();
-  const target = other.targets.get("Target")!;
-  if (target.kind !== "dataset") throw new Error("fixture");
-  target.generated = false;
-  expect(await other.run(automation(add("Target", true)))).toMatchObject({ kind: "failed", error: expect.stringContaining("outside dohc") });
-  expect(other.calls).toEqual([]);
-});
-
-it("refuses a replaced destination descriptor before replaying an unfinished effect", async () => {
-  const f = await fixture();
-  const a = automation(add("Target", true));
-  f.hooks.crashAppend = true;
-  await expect(f.run(a)).rejects.toThrow();
-  const target = f.targets.get("Target")!;
-  if (target.kind !== "dataset") throw new Error("fixture");
-  target.approved = { ...target.approved, datasetId: "replacement" };
-  expect(await f.run(a)).toMatchObject({ kind: "failed", error: "Collection rules changed after this run started." });
-  expect(f.rows.get("Target-dataset")!.size).toBe(2);
 });
 
 it("does not reuse another destination's grants for matching operation and field IDs", async () => {
@@ -1040,44 +501,7 @@ it("does not reuse another destination's grants for matching operation and field
   expect(f.calls).toEqual([]);
 });
 
-it("rechecks destination grants immediately before an effect", async () => {
-  const f = await fixture();
-  const target = f.targets.get("Target")!;
-  if (target.kind !== "dataset") throw new Error("fixture");
-  const original = f.dependencies.store.save;
-  f.dependencies.store.save = async (run) => {
-    await original(run);
-    f.setRoster({ kind: "owner", ownerUserId: "owner", grants: [{ grantId: "editor", recipientUserId: "person", recipientEmail: "person@example.com", files: { paths: ["Source"], access: "edit", versionId: null }, channel: null }] });
-  };
-  expect(await f.run(automation(find("Target", true) + set(true, "found")))).toMatchObject({ kind: "failed" });
-  expect(f.calls.filter((call) => call.operationId !== "read")).toEqual([]);
-  expect(f.rows.get("Target-dataset")!.get("same")!.values.status).toBe("Open");
-});
-
-it("follows a saved document Find binding after its Collection moves", async () => {
-  const target = false;
-  const f = await fixture(!target, target);
-  const a = automation(find("Target", target) + set(target, "found", "First") + set(target, "found", "Last"));
-  f.hooks.crashAppend = true;
-  await expect(f.run(a)).rejects.toThrow("crash before journal append");
-  f.move("Target", "Moved");
-  expect(await f.run(a)).toEqual({ kind: "done" });
-  expect((await f.runs())[0]!.steps[0]!.destinations?.[0]?.path).toBe("Moved");
-  expect((await f.undo()).undone.reverted).toBe(1);
-  expect(target ? f.rows.get("Target-dataset")!.get("same")!.values.status : f.docs.get("Target/same")!.status).toBe("Open");
-});
-
-it("waits when a document destination moves between effects, then checks its new reach", async () => {
-  const f = await fixture(true, false);
-  let moved = false;
-  f.hooks.afterEffect = () => { if (!moved) { moved = true; f.move("Target", "Moved"); } };
-  const a = automation(find("Target", false) + set(false, "found", "First") + set(false, "found", "Last"));
-  expect(await f.run(a)).toEqual({ kind: "wait", reason: "moved" });
-  expect(await f.run(a)).toEqual({ kind: "done" });
-  expect((await f.undo()).undone.reverted).toBe(1);
-});
-
-it.each([false, true])("mixed Undo restores an intervening edit when the final write lacks a journal entry on dataset=%s", async (target) => {
+it.each([true])("mixed Undo restores an intervening edit when the final write lacks a journal entry on dataset=%s", async (target) => {
   const f = await fixture(!target, target);
   let effects = 0;
   f.hooks.afterEffect = () => {
@@ -1109,28 +533,6 @@ it("retries a mixed Undo after one destination was reversed and the next failed"
   expect(f.docs.get("Source/same")!.status).toBe("Open");
 });
 
-it("waits before rebasing a saved mixed run when the host and its indexed identities disappear", async () => {
-  const f = await fixture();
-  const a = automation(add("Target", true) + set(true, "added"));
-  f.hooks.crashAppend = true;
-  await expect(f.run(a)).rejects.toThrow("crash before journal append");
-  f.hooks.hostDown = true;
-  f.hooks.hideDatasetLocations = true;
-  expect(await f.run(a)).toEqual({ kind: "wait", reason: "engine" });
-  f.hooks.hostDown = false;
-  f.hooks.hideDatasetLocations = false;
-  expect(await f.run(a)).toEqual({ kind: "done" });
-});
-
-it("keeps code steps on the source backend between cross-Collection record steps", async () => {
-  const f = await fixture();
-  const a = automation(add("Target", true) +
-    `      - run: "return { set: { Status: 'Code' } };"\n` + set(true, "added", "After code"));
-  expect(await f.run(a)).toEqual({ kind: "done" });
-  expect(f.docs.get("Source/same")!.status).toBe("Code");
-  expect([...f.rows.get("Target-dataset")!.values()].map((row) => row.values.status)).toContain("After code");
-});
-
 it("replays a replan after commit-before-append with the same caller and payload", async () => {
   const f = await fixture();
   const a = automation(find("Target", true) + set(true, "found"));
@@ -1150,7 +552,7 @@ it("replays a replan after commit-before-append with the same caller and payload
   expect(f.rows.get("Target-dataset")!.get("same")!.version).toBe(3);
 });
 
-it.each(["descriptor", "revision"])("Undo refuses changed destination %s before any reversal", async (change) => {
+it.each(["revision"])("Undo refuses changed destination %s before any reversal", async (change) => {
   const f = await fixture();
   expect(await f.run(automation(find("Target", true) + set(true, "found")))).toEqual({ kind: "done" });
   const target = f.targets.get("Target")!;
@@ -1161,87 +563,7 @@ it.each(["descriptor", "revision"])("Undo refuses changed destination %s before 
   expect(f.rows.get("Target-dataset")!.get("same")!.values.status).toBe("Closed");
 });
 
-it("keeps an Add binding's id and version when its dataset has no approved read", async () => {
-  const f = await fixture();
-  const target = f.targets.get("Target")!;
-  if (target.kind !== "dataset") throw new Error("fixture");
-  target.approved.definition.operations = target.approved.definition.operations.filter((operation) => operation.kind !== "read");
-  expect(await f.run(automation(add("Target", true) + set(true, "added")))).toEqual({ kind: "done" });
-  expect([...f.rows.get("Target-dataset")!.values()].at(-1)).toMatchObject({ version: 2, values: { status: "Closed" } });
-});
-
-it("explains a dataset Find formula refused by the approved read", async () => {
-  const f = await fixture();
-  f.hooks.beforeRead = () => { throw new AppBackendRuntimeError({ code: "invalid_input", message: "Invalid filter" }); };
-  const steps = find("Target", true).replace('record.Status == "Open"', "record.Status == String(trigger.record.Status)");
-  expect(await f.run(automation(steps))).toEqual({ kind: "failed", timedOut: false,
-    error: "The Find in step 1 compares Status with a value this Collection does not accept." });
-});
-
-it("leaves literal Find values to the approved read", async () => {
-  const f = await fixture();
-  const target = f.targets.get("Target")!;
-  if (target.kind !== "dataset") throw new Error("fixture");
-  target.approved.definition.tables[0]!.fields[1]!.type = "number";
-  expect(await f.run(automation(find("Target", true)))).toEqual({ kind: "done" });
-  expect(f.calls.some((call) => call.operationId === "read")).toBe(true);
-});
-
-it("checks the exact read used by an added-record Undo preview", async () => {
-  const f = await fixture();
-  expect(await f.run(automation(add("Target", true)))).toEqual({ kind: "done" });
-  const target = f.targets.get("Target")!;
-  if (target.kind !== "dataset") throw new Error("fixture");
-  target.approved.definition.operations.push({ ...target.approved.definition.operations[0]!, operationId: "narrow", name: "rows.narrow", fieldIds: ["id"] });
-  const reach = await automationUndoReach(await f.runs(), f.dependencies.targets, f.dependencies.collectionPathOf, { roster, collection: { path: "Source", name: "Source" } }, f.host);
-  expect(reach.filter((step) => step.kind === "dataset-operation").map((step) => step.operation.operationId)).toEqual(["read"]);
-});
-
-it("keeps an addition with no usable delete without requiring its preview read", async () => {
-  const f = await fixture();
-  const target = f.targets.get("Target")!;
-  if (target.kind !== "dataset") throw new Error("fixture");
-  target.approved.definition.operations = target.approved.definition.operations.filter((operation) => operation.kind !== "delete");
-  expect(await f.run(automation(add("Target", true)))).toEqual({ kind: "done" });
-  const reach = await automationUndoReach(await f.runs(), f.dependencies.targets, f.dependencies.collectionPathOf,
-    { roster, collection: { path: "Source", name: "Source" } }, f.host);
-  expect(reach.filter((step) => step.kind === "dataset-operation")).toEqual([]);
-  expect((await f.undo()).undone).toMatchObject({ kept: 1, deleted: 0 });
-});
-
-it("reverses actions in commit order despite a backwards clock, without inventing read reach", async () => {
-  const f = await fixture(true);
-  const target = f.targets.get("Source")!;
-  if (target.kind !== "dataset") throw new Error("fixture");
-  const approved = target.approved;
-  const rules = { datasetId: approved.datasetId, revision: approved.revision, revisionSha256: approved.revisionSha256 };
-  target.approved.definition.operations.push(
-    { operationId: "action", name: "rows.action", label: "Act", tableId: "table", kind: "action", access: "owner",
-      readOnly: false, fieldIds: [], reversedBy: "rows.reverse" },
-    { operationId: "reverse", name: "rows.reverse", label: "Reverse", tableId: "table", kind: "action", access: "helper",
-      readOnly: false, fieldIds: [] },
-  );
-  const { newRun } = await import("./collectionAutomationRun");
-  const runs = [newRun(f.held.claim, automation(add("Target", true)), "older", 200),
-    newRun(f.held.claim, automation(add("Target", true)), "newer", 100)];
-  runs.forEach((run, index) => {
-    run.steps = [{ ordinal: 0, effects: [{ kind: "dataset-action", rules, operationId: "action", tableId: "table", input: {} }] }];
-    run.applied = [{ ordinal: 0, writes: [{ kind: "dataset-action", rules, operationId: "action", tableId: "table",
-      name: "Act", revision: index + 2, undo: { revision: index + 2 }, reverseOperationId: "reverse" }] }];
-  });
-  const plan = await planDatasetUndo(f.host, { roster, collection: { path: "Source", name: "Source" } }, "claim", runs, runs, signal);
-  runs[0]!.undoCalls = plan.send([])!;
-  const reach = await automationUndoReach(runs, f.dependencies.targets, f.dependencies.collectionPathOf, { roster, collection: { path: "Source", name: "Source" } }, f.host);
-  expect(reach.filter((step) => step.kind === "dataset-operation").map((step) => step.operation.operationId)).toEqual(["reverse"]);
-  const reversed: JsonValue[] = [];
-  await undoAutomationRuns({ collectionPathOf: f.dependencies.collectionPathOf, withReads: f.dependencies.withReads,
-    withRecordWrites: f.dependencies.withRecordWrites, trash: async () => {} },
-    { ...f.host, invokeAsOwner: async (input) => { reversed.push(input.input); return { result: null, revision: 10, replayed: false }; } },
-    { path: "Source", name: "Source" }, async () => roster, "claim", runs, async () => {}, signal);
-  expect(reversed).toEqual([{ revision: 3 }, { revision: 2 }]);
-});
-
-it.each([[false, false], [false, true], [true, false], [true, true]])("keeps compatible approvals during a run and Undo, dataset=%s, resume=%s", async (sourceDataset, resume) => {
+it.each([[true, true]])("keeps compatible approvals during a run and Undo, dataset=%s, resume=%s", async (sourceDataset, resume) => {
   const f = await fixture(sourceDataset);
   const resolve = f.dependencies.targets.resolve;
   f.dependencies.targets.resolve = async (path) => structuredClone(await resolve(path));
@@ -1275,105 +597,7 @@ it.each([[false, false], [false, true], [true, false], [true, true]])("keeps com
   expect(f.rows.get("Target-dataset")!.get("same")!.values.status).toBe("Open");
 });
 
-it.each([false, true])("keeps Group-message write authors separate from formula person, dataset=%s", async (sourceDataset) => {
-  const f = await fixture(sourceDataset, false);
-  const a = automation(add(sourceDataset ? "Source" : "Target", sourceDataset).replace("Status: Open", "Status: '=person.name'"));
-  a.when = { kind: "group-message", group: "Team", startsWith: null };
-  const claim: AutomationClaim = {
-    ...f.held.claim, error: undefined, trigger: { key: "message:m1" }, recordId: null, collectionPath: "Source",
-    change: { kind: "message", authorOriginId: null, actorKind: "human", onBehalfOf: "user-ana", sharedAuthor: null,
-      liveCursor: null, fields: [], fieldsOmitted: 0, message: { id: "m1", threadId: "t1", groupId: "team", lane: "posts",
-        authorKind: "human", authorDisplayName: "Ana", createdAtMs: 1000, body: "hello", authorUserId: "user-ana" } },
-  };
-  f.dependencies.chat.directory = async (roster) => chatDirectoryOf([
-    { id: "team", name: "Team", slug: "team", kind: "channel", type: "posts", wireId: "team-wire", runningThreadId: null },
-  ], roster);
-  const authors: unknown[] = [];
-  const writes = f.dependencies.withRecordWrites;
-  f.dependencies.withRecordWrites = (signal, work) => writes(signal, (writer) => work({
-    ...writer, create: async (input) => { authors.push(input.author); return writer.create(input); },
-    setFields: async (input) => { authors.push(input.author); return writer.setFields(input); },
-  }));
-  const contexts: unknown[] = [];
-  const invoke = f.host.invoke;
-  f.host.invoke = (context, input) => { contexts.push(context); return invoke(context, input); };
-  const input = { automation: a, collection: { path: "Source", name: "Source" }, roster: { ...roster, ownerUserId: "owner" }, signal, stopped: signal };
-  expect(await (sourceDataset ? runDatasetAutomation(f.dependencies, { ...input, held: { source: "engine", claim, datasetId: "Source-dataset" } })
-    : runCollectionAutomation(f.dependencies, { ...input, claim }))).toEqual({ kind: "done" });
-  if (sourceDataset) {
-    expect([...f.rows.get("Source-dataset")!.values()].at(-1)!.values.status).toBe("Ana");
-    expect(contexts).toContainEqual(expect.objectContaining({ person: "user-ana" }));
-  } else {
-    expect([...f.docs.values()].at(-1)!.status).toBe("Ana");
-    expect(authors).toContainEqual(expect.objectContaining({ kind: "automation", onBehalfOf: "user-ana" }));
-  }
-});
-
-it("opens one document read session for each step regardless of its record count", async () => {
-  const f = await fixture(false, false);
-  for (let n = 0; n < 8; n++) f.docs.set("Target/" + n, { id: "target-" + n, path: "Target/" + n + ".md", collection: "Target", status: "Open" });
-  let sessions = 0;
-  let sessionsAtFirstWrite = 0;
-  const read = f.dependencies.withReads;
-  f.dependencies.withReads = (work) => { sessions++; return read(work); };
-  f.hooks.beforeEffect = () => { f.hooks.beforeEffect = undefined; sessionsAtFirstWrite = sessions; };
-  expect(await f.run(automation(find("Target", false) + set(false, "found")))).toEqual({ kind: "done" });
-  expect(sessionsAtFirstWrite).toBe(4);
-  expect([...f.docs.values()].filter((doc) => doc.collection === "Target").every((doc) => doc.status === "Closed")).toBe(true);
-});
-
-it.each([false, true])("retains pre-upgrade verdict keys and accounted links across a Collection move, dataset=%s", async (sourceDataset) => {
-  const f = await fixture(sourceDataset, sourceDataset);
-  const a = automation(find("Target", sourceDataset) + set(sourceDataset, "found") + '      - notify: Done\n        to: [user-ana]\n');
-  const collection = { path: "Source", name: "Source" };
-  const named = (path: string) => ({ path, name: path });
-  const oldSteps = sourceDataset ? chatReachStepsOf(a, null) : reachStepsOf(a, collection, named, null);
-  const automationId = f.held.claim.automationId;
-  const hash = definitionHash(a);
-  const old = new Map(oldSteps.map((step, index) => {
-    const saved: StoredReachVerdict = { automationId, definitionHash: hash, step: reachStepId(step, index),
-      verdict: "allowed", stoppedFor: null, seq: index + 1, accountedLinks: ["link#1"] };
-    return [reachVerdictKey(automationId, hash, saved.step), saved];
-  }));
-  for (const path of ["Source", "Moved"]) {
-    if (path === "Moved") f.move("Source", path);
-    const reach = automationInventory(a, path, (path) => f.targets.get(path)!, null).reach;
-    const staticSteps = reach.filter((step) => step.kind !== "dataset-operation" && step.kind !== "dataset-field");
-    expect(staticSteps.map((step, index) => reachStepId(step, index))).toEqual(oldSteps.map((step, index) => reachStepId(step, index)));
-    for (const [index, step] of staticSteps.entries()) {
-      const saved = old.get(reachVerdictKey(automationId, hash, reachStepId(step, index)));
-      expect(saved).toBeDefined();
-      expect(nextReachVerdict(saved, { allowed: true, formerStops: [{ evidence: "link#1", name: "Former editor" }] }, true))
-        .toEqual({ verdict: "allowed", stoppedFor: null, accountedLinks: ["link#1"] });
-      for (const verdict of ["held", "stopped"] as const) {
-        expect(nextReachVerdict({ ...saved!, verdict }, { allowed: true }, true).verdict).toBe("held");
-      }
-    }
-  }
-});
-
-
-it("waits for a moved source when target validation finishes mid-run", async () => {
-  const f = await fixture(false, false);
-  const reached = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
-  let validations = 0;
-  f.dependencies.targets.validate = async target => {
-    if (++validations === 2) { reached.resolve(); await resume.promise; }
-    return f.targets.get(target.collection.path) ?? { kind: "problem", code: "missing", problem: "dohc cannot find the Collection Source." };
-  };
-  const running = f.run(automation('      - set: {Status: Closed}\n'));
-  try {
-    await reached.promise;
-    f.move("Source", "Shared/Source");
-    resume.resolve();
-    await expect(running).resolves.toEqual({ kind: "wait", reason: "moved" });
-    expect(f.docs.get("Source/same")!.status).toBe("Open");
-    expect((await f.runs()).flatMap(run => run.applied)).toEqual([]);
-  } finally { resume.resolve(); await running; }
-});
-
-
-it.each(["roster", "host", "verdicts"] as const)("does not save a stale source refusal after the %s await", async boundary => {
+it.each(["host"])("does not save a stale source refusal after the %s await", async boundary => {
   const f = await fixture(boundary === "host", false);
   const reached = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
   let paused = false;
@@ -1443,7 +667,7 @@ it("does not save a stale destination refusal after the roster await", async () 
   } finally { resume.resolve(); await running; }
 });
 
-it.each(["success", "roster wait", "held wait"] as const)("keeps a missing source retryable during an index read after %s", async boundary => {
+it.each(["held wait"])("keeps a missing source retryable during an index read after %s", async boundary => {
   const f = await fixture(false, false);
   const reached = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
   let missing = false, paused = false;

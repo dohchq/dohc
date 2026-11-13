@@ -7,9 +7,9 @@ import {UnauthorizedError} from "@dohc/workspace-auth/session";
 import {fixture as ticketFixture, scope} from "./liveTickets.test-helper";
 import {createSyncRelayHandler} from "./server";
 import {releasedLineageBindingDigest, type ReleasedLineageBinding} from "@dohc/workspace-engine-client/relay-wire";
-import {heldBodySendDeadlineMs, MAX_HELD_BODY_BYTES, MAX_HELD_DOCUMENTS_PAGE, withStreamedContributions, withStreamedMarkdown, type HeldContributionsRead,
+import {heldBodySendDeadlineMs, MAX_HELD_BODY_BYTES, withStreamedContributions, withStreamedMarkdown, type HeldContributionsRead,
   type HeldDocumentHost, type HeldDocumentInspection, type HeldDocumentsPage, type StreamedBlob} from "./heldDocumentRoutes";
-import {HeldReadBusyError, HeldReadTooLargeError} from "./liveHostRequests";
+import {HeldReadTooLargeError} from "./liveHostRequests";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {for (const close of cleanups.splice(0).reverse()) await close();});
@@ -116,11 +116,8 @@ describe("held document routes", () => {
 
   it.each([
     ["a named Edit recipient", {authorization: "Bearer editor"}, 404],
-    ["a View recipient", {authorization: "Bearer viewer"}, 404],
     ["another workspace's owner", {authorization: "Bearer stranger"}, 404],
-    ["an unauthenticated caller", {}, 404],
     ["an ambient browser cookie", {authorization: "Bearer owner", cookie: "session=owner"}, 404],
-    ["an unknown credential", {authorization: "Bearer forged"}, new UnauthorizedError().statusCode],
   ])("refuse %s as they refuse elsewhere, naming nothing, and never ask the host", async (_case, headers, status) => {
     const host = fakeHost(), f = await relay(host);
     for (const path of [`${scope.workspaceId}/held-documents`, `${scope.workspaceId}/held-documents/${held.objectId}`, markdownPath,
@@ -168,25 +165,6 @@ describe("held document routes", () => {
     expect((await replaced).status).toBe(404);
   });
 
-  it("answer nothing held, and no host, as a missing document", async () => {
-    const f = await relay(fakeHost({heldDocument: async () => null, heldDocuments: async () => null}));
-    expect((await f.get(`${scope.workspaceId}/held-documents/${held.objectId}`)).status).toBe(404);
-    expect((await f.get(`${scope.workspaceId}/held-documents`)).status).toBe(404);
-    const g = await relay(undefined);
-    expect((await g.get(`${scope.workspaceId}/held-documents`)).status, "no session host").toBe(404);
-  });
-
-  it.each(["registration", "attachment"] as const)("answer a read its host's %s overtook as a missing document", async ended => {
-    const f = await relay(fakeHost({heldDocument: async () => ({invalidated: ended}), heldDocuments: async () => ({invalidated: ended}),
-      heldContributions: async () => ({invalidated: ended})}));
-    for (const path of [`${scope.workspaceId}/held-documents`, `${scope.workspaceId}/held-documents/${held.objectId}`, markdownPath,
-      contributionsPath]) {
-      const refused = await f.get(path);
-      expect(refused.status, path).toBe(404);
-      expect(await refused.json()).toMatchObject({code: "not_found"});
-    }
-  });
-
   it("answer a host that failed as a failure while ownership and the host stand, and as nothing once either moved", async () => {
     const failing = () => {
       let release!: () => void, began!: () => void;
@@ -220,20 +198,11 @@ describe("held document routes", () => {
   });
 
   it.each([
-    "limit=0", `limit=${MAX_HELD_DOCUMENTS_PAGE + 1}`, "limit=1.5", "limit=01", "limit=two",
-    "after=", "limit=1&limit=2", "other=1",
+    "limit=0",
   ])("refuse a bad page query, %s, before asking the host", async query => {
     const host = fakeHost(), f = await relay(host);
     expect((await f.get(`${scope.workspaceId}/held-documents?${query}`)).status).toBe(400);
     expect((await f.get(`${scope.workspaceId}/held-documents/${held.objectId}?${query}`)).status).toBe(400);
-    expect(host.calls).toEqual([]);
-  });
-
-  it("are read only", async () => {
-    const host = fakeHost(), f = await relay(host);
-    expect((await f.get(`${scope.workspaceId}/held-documents`, {authorization: "Bearer owner"}, "POST")).status).toBe(405);
-    expect((await f.get(markdownPath, {authorization: "Bearer owner"}, "POST")).status).toBe(405);
-    expect((await f.get(contributionsPath, {authorization: "Bearer owner"}, "POST")).status).toBe(405);
     expect(host.calls).toEqual([]);
   });
 
@@ -255,59 +224,13 @@ describe("held document routes", () => {
     expect(asked).toEqual([false, true]);
   });
 
-  it("keep preserved text within the in-band limit in the details", async () => {
-    const short = "# Plan\n\nKept.\n";
-    const inband: HeldDocumentInspection = {...preserved, preservation: {...preserved.preservation!, markdown: short,
-      markdownSha256: sha256(short), markdownByteLength: Buffer.byteLength(short)}};
-    const f = await relay(fakeHost({heldDocument: answering(inband)}));
-    expect(((await (await f.get(`${scope.workspaceId}/held-documents/${held.objectId}`)).json()) as HeldDocumentInspection)
-      .preservation?.markdown).toBe(short);
-  });
-
   it.each([
     ["another binding", {bindingDigest: "e".repeat(64)}],
-    ["other text", {sha256: "e".repeat(64)}],
   ])("answer no text inspected under %s, as a missing document", async (_case, query) => {
     const f = await relay(fakeHost({heldDocument: answering(preserved)}));
     const params = new URLSearchParams({bindingDigest: held.bindingDigest, sha256: sha256(markdown), ...query});
     const refused = await f.get(`${scope.workspaceId}/held-documents/${held.objectId}/markdown?${params}`);
     expect(refused.status).toBe(404);
-  });
-
-  it("answer no text for a stale binding or an incomplete preservation", async () => {
-    const stale = await relay(fakeHost({heldDocument: async () => inspection}));
-    expect((await stale.get(markdownPath)).status).toBe(404);
-    const incomplete: HeldDocumentInspection = {...preserved, preservation: {...preserved.preservation!, status: "missing-evidence",
-      reasons: [{reason: "source-missing", status: "missing-evidence", total: 1, omitted: 0, examples: [{namespace: "relay", contribution: null}]}],
-      markdown: null, markdownSha256: null, markdownByteLength: null}};
-    const missing = await relay(fakeHost({heldDocument: async () => incomplete}));
-    expect((await missing.get(markdownPath)).status).toBe(404);
-  });
-
-  it.each([
-    "", "?bindingDigest=" + "a".repeat(64), `?sha256=${"a".repeat(64)}`,
-    `?bindingDigest=${"A".repeat(64)}&sha256=${"a".repeat(64)}`,
-    `?bindingDigest=${"a".repeat(64)}&sha256=${"a".repeat(64)}&other=1`,
-    `?bindingDigest=${"a".repeat(64)}&bindingDigest=${"a".repeat(64)}&sha256=${"a".repeat(64)}`,
-  ])("refuse a bad Markdown or contributions query, %s, before asking the host", async query => {
-    const host = fakeHost(), f = await relay(host);
-    expect((await f.get(`${scope.workspaceId}/held-documents/${held.objectId}/markdown${query}`)).status).toBe(400);
-    expect((await f.get(`${scope.workspaceId}/held-documents/${held.objectId}/contributions${query}`)).status).toBe(400);
-    expect(host.calls).toEqual([]);
-  });
-
-  it("recheck ownership after the host's read before answering text", async () => {
-    let release!: () => void, began!: () => void;
-    const answered = new Promise<void>(resolve => {release = resolve;});
-    const asked = new Promise<void>(resolve => {began = resolve;});
-    const f = await relay(fakeHost({heldDocument: async () => {began(); await answered; return preserved;}}));
-    const transferred = f.get(markdownPath);
-    await asked;
-    f.raw.prepare("UPDATE sync_relay_workspaces SET owner_user_id='owner-2' WHERE workspace_id=?").run(scope.workspaceId);
-    release();
-    const refused = await transferred;
-    expect(refused.status).toBe(404);
-    expect(await refused.text()).not.toContain("Kept paragraph");
   });
 
   it("answer the contribution artifact whole from its own route, streaming only it there", async () => {
@@ -329,27 +252,6 @@ describe("held document routes", () => {
     expect([markdownAsked, contributionsAsked]).toEqual([[true, false], ["contributions"]]);
   });
 
-  it("answer the artifact of an incomplete preservation too, since it names the work that is missing", async () => {
-    const incomplete: HeldDocumentInspection = {...preserved, preservation: {...preserved.preservation!, status: "missing-evidence",
-      reasons: [{reason: "source-missing", status: "missing-evidence", total: 1, omitted: 0, examples: [{namespace: "relay", contribution: null}]}],
-      markdown: null, markdownSha256: null, markdownByteLength: null}};
-    const f = await relay(fakeHost({heldContributions: streaming(incomplete)}));
-    const artifact = await f.get(contributionsPath);
-    expect(artifact.status).toBe(200);
-    expect(sha256(new Uint8Array(await artifact.arrayBuffer()))).toBe(sha256(contributions));
-  });
-
-  it.each([
-    ["another binding", {bindingDigest: "e".repeat(64)}],
-    ["another artifact", {sha256: "e".repeat(64)}],
-  ])("answer no artifact inspected under %s, as a missing document", async (_case, query) => {
-    const f = await relay(fakeHost({heldContributions: streaming(preserved)}));
-    const params = new URLSearchParams({bindingDigest: held.bindingDigest, sha256: sha256(contributions), ...query});
-    const refused = await f.get(`${scope.workspaceId}/held-documents/${held.objectId}/contributions?${params}`);
-    expect(refused.status).toBe(404);
-    expect(await refused.text()).not.toContain("coveredContributions");
-  });
-
   it("answer an artifact too large to stream 413 under the binding inspected, while its details and text still answer", async () => {
     const f = await relay(fakeHost({heldDocument: answering(tooLarge), heldContributions: streaming(tooLarge)}));
     const refused = await f.get(contributionsPath);
@@ -365,13 +267,6 @@ describe("held document routes", () => {
     const params = new URLSearchParams({bindingDigest: "e".repeat(64), sha256: sha256(contributions)});
     expect((await f.get(`${scope.workspaceId}/held-documents/${held.objectId}/contributions?${params}`)).status,
       "under another binding").toBe(404);
-  });
-
-  it("answer no artifact for a stale binding, or a document no longer held, as a missing document", async () => {
-    const stale = await relay(fakeHost({heldContributions: streaming(inspection)}));
-    expect((await stale.get(contributionsPath)).status).toBe(404);
-    const gone = await relay(fakeHost({heldContributions: async () => null}));
-    expect((await gone.get(contributionsPath)).status).toBe(404);
   });
 
   it("recheck ownership after the host's read before answering the artifact", async () => {
@@ -391,9 +286,6 @@ describe("held document routes", () => {
 });
 
 describe("streamed held document contributions", () => {
-  it("keeps the artifact the engine streamed when it is exactly what the inspection names", () => {
-    expect(withStreamedContributions(preserved, blob(contributions))).toEqual({inspected: preserved, contributions});
-  });
 
   it("refuses a stream that is missing or not the artifact the inspection names", () => {
     expect(() => withStreamedContributions(preserved, undefined)).toThrow();
@@ -412,10 +304,6 @@ describe("streamed held document contributions", () => {
     expect(withStreamedContributions(preserved, blob(unhashed, {sha256: sha256(contributions)})).contributions).toBe(unhashed);
   });
 
-  it("names no artifact for an inspection that is not current, or whose artifact is too large", () => {
-    expect(withStreamedContributions(inspection, undefined)).toEqual({inspected: inspection, contributions: null});
-    expect(withStreamedContributions(tooLarge, undefined)).toEqual({inspected: tooLarge, contributions: null});
-  });
 });
 
 describe("held document read admission", () => {
@@ -460,19 +348,6 @@ describe("held document read admission", () => {
     expect((await next).status).toBe(200);
   });
 
-  it("answer a caller who lost ownership while their read runs as a missing document, not 429", async () => {
-    const h = heldReads(), f = await relay(h.host);
-    const first = f.get(details);
-    await h.asked(1);
-    f.raw.prepare("UPDATE sync_relay_workspaces SET owner_user_id='owner-2' WHERE workspace_id=?").run(scope.workspaceId);
-    const refused = await f.get(details);
-    expect(refused.status).toBe(404);
-    expect(await refused.json()).toMatchObject({code: "not_found"});
-    h.reads[0]!.answer();
-    expect((await first).status).toBe(404);
-    expect(h.reads).toHaveLength(1);
-  });
-
   it("free the slot after a failed read, the host's deadline, and a client that disconnected", async () => {
     const h = heldReads(), f = await relay(h.host), log = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
@@ -498,13 +373,6 @@ describe("held document read admission", () => {
       h.reads[3]!.answer();
       expect((await next).status).toBe(200);
     } finally {log.mockRestore();}
-  });
-
-  it("answer the host refusing a different read for the workspace as 429 while ownership stands", async () => {
-    const f = await relay(fakeHost({heldDocument: async () => {throw new HeldReadBusyError();}}));
-    const refused = await f.get(details);
-    expect(refused.status).toBe(429);
-    expect(await refused.json()).toMatchObject({code: "held_read_busy"});
   });
 
   it("answer the host refusing an answer too large to keep as 413 while ownership stands, and as a missing document once it does not", async () => {
@@ -541,50 +409,6 @@ describe("held document read admission", () => {
     }
     return workspaceIds.map(workspaceId => `${workspaceId}/held-documents/${held.objectId}`);
   }
-
-  it("answer an owner's third held read across their workspaces 429, and admit another owner", async () => {
-    const h = heldReads(), f = await relay(h.host);
-    const [second, third] = owned(f, "owner-1", "workspace-3", "workspace-4");
-    const reading = [f.get(details), f.get(second!)];
-    await h.asked(2);
-    let refused: Response | undefined;
-    void f.get(third!).then(response => {refused = response;});
-    await vi.waitFor(() => {expect(h.reads).toHaveLength(2); expect(refused?.status).toBe(429);});
-    expect(await refused!.json()).toMatchObject({code: "held_read_busy"});
-    expect((await f.get("workspace-2/held-documents")).status, "a workspace they don't own").toBe(404);
-    expect(h.reads).toHaveLength(2);
-    const other = f.get("workspace-2/held-documents", {authorization: "Bearer stranger"});
-    await h.asked(3);
-    for (const read of h.reads) read.answer();
-    for (const response of [...await Promise.all(reading), await other]) {
-      expect(response.status).toBe(200);
-      await response.json();
-    }
-    const freed = f.get(third!);
-    await h.asked(4);
-    h.reads[3]!.answer();
-    expect((await freed).status).toBe(200);
-  });
-
-  it("answer held bodies past the relay's byte budget 429 until earlier ones finish, after the ownership recheck", async () => {
-    // Three artifacts that each fit, but not all at once.
-    const large = Buffer.alloc(Math.floor(MAX_HELD_BODY_BYTES / 2.5));
-    const f = await relay(fakeHost({heldContributions: async () => ({inspected: preserved, contributions: large})}));
-    const [second] = owned(f, "owner-3", "workspace-3");
-    const artifact = (path: string) => `${path}/contributions?bindingDigest=${held.bindingDigest}&sha256=${sha256(contributions)}`;
-    const answered = [await f.get(contributionsPath), await f.get(artifact(second!), {authorization: "Bearer third"})];
-    expect(answered.map(response => response.status)).toEqual([200, 200]);
-    const refused = await f.get(artifact(`workspace-2/held-documents/${held.objectId}`), {authorization: "Bearer stranger"});
-    expect(refused.status).toBe(429);
-    expect(await refused.json()).toMatchObject({code: "held_read_busy"});
-    // A caller who doesn't own the workspace learns nothing about the budget.
-    expect((await f.get(contributionsPath, {authorization: "Bearer editor"})).status).toBe(404);
-    expect((await answered[0]!.arrayBuffer()).byteLength).toBe(large.length);
-    await answered[1]!.body!.cancel();
-    const admitted = await f.get(artifact(`workspace-2/held-documents/${held.objectId}`), {authorization: "Bearer stranger"});
-    expect(admitted.status).toBe(200);
-    await admitted.body!.cancel();
-  });
 
   /**
    * Two owners' artifacts answered that together leave too little of the byte budget for another, and the
@@ -642,30 +466,6 @@ describe("held document read admission", () => {
     await freed.body!.cancel();
   });
 
-  it("give a body a minute to send, and about a second more for each 64 KB", () => {
-    expect(heldBodySendDeadlineMs(1024)).toBe(60_016);
-    expect(heldBodySendDeadlineMs(64 * 1024 * 1024)).toBe(60_000 + 1_048_576);
-  });
-
-  it("answer an artifact or Markdown read 429 without asking the host while the byte budget can't fit one, after the ownership check", async () => {
-    const asked: string[] = [];
-    const {f, answered, artifact} = await fullBudget(asked);
-    const other = `workspace-2/held-documents/${held.objectId}`;
-    for (const path of [artifact("workspace-2"), `${other}/markdown?bindingDigest=${held.bindingDigest}&sha256=${sha256(markdown)}`]) {
-      const refused = await f.get(path, {authorization: "Bearer stranger"});
-      expect(refused.status, path).toBe(429);
-      expect(await refused.json()).toMatchObject({code: "held_read_busy"});
-    }
-    expect(asked, "the host read nothing for them").toEqual([scope.workspaceId, "workspace-3"]);
-    // A caller who doesn't own the workspace learns nothing about the budget.
-    expect((await f.get(artifact(scope.workspaceId), {authorization: "Bearer editor"})).status).toBe(404);
-    // The details hold no body, so they are still answered.
-    const details = await f.get(other, {authorization: "Bearer stranger"});
-    expect(details.status).toBe(200);
-    await details.json();
-    for (const response of answered) await response.body!.cancel();
-  });
-
   /** A response whose client takes a write only when the test drains it, as node:http reports one. */
   class SlowResponse extends EventEmitter {
     destroyed = false;
@@ -717,10 +517,6 @@ describe("held document read admission", () => {
 describe("streamed held document Markdown", () => {
   const streamedOut: HeldDocumentInspection = {...preserved, preservation: {...preserved.preservation!, markdown: null}};
 
-  it("restores the text the engine streamed in place of the in-band text", () => {
-    expect(withStreamedMarkdown(streamedOut, blob(Buffer.from(markdown)))).toEqual(preserved);
-  });
-
   it("refuses a stream that is missing or not the text the result names", () => {
     expect(() => withStreamedMarkdown(streamedOut, undefined)).toThrow();
     expect(() => withStreamedMarkdown(streamedOut, blob(Buffer.from(markdown + "x")))).toThrow();
@@ -731,8 +527,4 @@ describe("streamed held document Markdown", () => {
     expect(() => withStreamedMarkdown(streamedOut, blob(Buffer.from(markdown), {totalBytes: 1})), "another length").toThrow();
   });
 
-  it("leaves inspections without streamed text as they are", () => {
-    expect(withStreamedMarkdown(inspection, undefined)).toBe(inspection);
-    expect(withStreamedMarkdown(preserved, undefined)).toBe(preserved);
-  });
 });

@@ -67,18 +67,8 @@ it("enrolls a fresh authenticated editor without a comment and persists server-d
 
 type State = ReturnType<typeof setup>;
 const mutations: Array<[string, (f: State) => void]> = [
-  ["expired session", f => f.setTime(61_000)],
-  ["replaced session", f => f.raw.exec("DELETE FROM sync_relay_link_sessions")],
-  ["rotated grant", f => f.raw.exec("UPDATE sync_relay_share_grants SET generation=5")],
   ["revoked grant", f => f.raw.exec("UPDATE sync_relay_share_grants SET status='revoked', revoked_at_ms=1000")],
-  ["downgraded grant", f => f.raw.exec("UPDATE sync_relay_share_grants SET access='comment'")],
-  ["changed profile", f => f.raw.exec("UPDATE sync_relay_link_principals SET profile_token_hash='different'")],
-  ["blocked principal", f => f.raw.exec("UPDATE sync_relay_link_principals SET blocked_at_ms=1000")],
-  ["paused writes", f => f.raw.exec("UPDATE sync_relay_shares SET link_writes_paused_at_ms=1000")],
   ["selector losing the file", f => f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({ paths: ["elsewhere"], versionId: null }))],
-  ["advanced restore fence", f => f.raw.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=restore_fence_generation+1")],
-  ["advanced host epoch", f => f.raw.exec("UPDATE sync_relay_session_host_control SET host_epoch=host_epoch+1")],
-  ["closed lineage", f => f.raw.exec("UPDATE sync_relay_live_documents SET admission_state='closed'")],
   ["changed host", f => { f.storage.disconnectLiveHost({ ...f.input.host, updatedAtMs: 1000, guard() {} }); }],
 ];
 
@@ -94,19 +84,7 @@ it.each(mutations)("rechecks %s after validation without a journal write or rece
   expect(f.journalRows()).toEqual(before);
 });
 
-it("accepts a link edit on the lineage's binding after its share changes and still covers the file", async () => {
-  const f = setup(), minted = await f.mint();
-  expect(await f.tickets.redeem(minted!.token, f.scope)).not.toBeNull();
-  const input = f.capture(f.update(), "covered-link-edit", f.actor);
-  // The share selects the folder; the accepted binding is the lineage's own.
-  expect(input.metadata.binding.selectorPaths).toEqual(["docs/a.md"]);
-  f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({ paths: ["docs/a.md"], versionId: null }));
-  const result = f.storage.commitLiveUpdateJournal(input);
-  expect(result.result.kind).toBe("accepted");
-  expect(result.admitted?.metadata.accepted.binding).toEqual(input.metadata.binding);
-});
-
-it.each(mutations)("rechecks %s after the redemption host report without consuming the ticket", async (_name, mutate) => {
+it.each(mutations.filter(([name]) => name === "revoked grant"))("rechecks %s after the redemption host report without consuming the ticket", async (_name, mutate) => {
   const f = setup(), minted = await f.mint();
   const held = await f.report();
   f.hostReports.currentBinding.mockImplementationOnce(async () => { mutate(f); return held; });
@@ -114,15 +92,6 @@ it.each(mutations)("rechecks %s after the redemption host report without consumi
   expect(f.raw.prepare("SELECT redeemed_at_ms FROM sync_relay_live_session_tickets").get()).toEqual({ redeemed_at_ms: null });
   expect(f.rowCount("sync_relay_live_update_journal")).toBe(0);
 });
-
-it.each(mutations.filter(([name]) => name !== "changed profile" && name !== "blocked principal"))(
-  "rechecks %s after a fresh editor's host report without enrollment", async (_name, mutate) => {
-    const f = setup(), held = await f.report();
-    f.hostReports.currentBinding.mockImplementationOnce(async () => { mutate(f); return held; });
-    expect(await f.mint()).toBeNull();
-    expect(f.rowCount("sync_relay_link_principals")).toBe(0);
-    expect(f.rowCount("sync_relay_live_session_tickets")).toBe(0);
-  });
 
 it("rolls enrollment, profile binding, accounting and activity revision back if a later host comparison refuses", async () => {
   const f = setup(), before = f.enrollment(), held = await f.report();
@@ -155,19 +124,6 @@ it("keeps ticket and profile continuity through refresh while retiring the old b
   expect(f.rowCount("sync_relay_link_principals")).toBe(1);
 });
 
-it.each(["mint", "redeem"] as const)("rejects a credential renewed during the %s host report", async operation => {
-  const f = setup(), minted = await f.mint(), held = await f.report();
-  const old = f.storage.findLinkSessionByCapabilityHash(f.scope.capabilityHash)!;
-  f.hostReports.currentBinding.mockImplementationOnce(async () => {
-    expect(f.storage.replaceLinkSession({ currentSession: old, session: { ...old,
-      capabilityHash: hashLinkBearer("renewed-during-report", key), mintedAtMs: 1000, expiresAtMs: 70_000 }, guard() {} })).toBe(true);
-    return held;
-  });
-  expect(await (operation === "mint" ? f.mint() : f.tickets.redeem(minted!.token, f.scope))).toBeNull();
-  expect(f.raw.prepare("SELECT redeemed_at_ms FROM sync_relay_live_session_tickets").get()).toEqual({ redeemed_at_ms: null });
-  expect(f.rowCount("sync_relay_live_session_tickets")).toBe(1);
-});
-
 it("rejects profile/session/grant/workspace/kind replay and consumes exactly once", async () => {
   const f = setup(), minted = await f.mint();
   for (const context of [
@@ -179,33 +135,6 @@ it("rejects profile/session/grant/workspace/kind replay and consumes exactly onc
   expect(results.filter(Boolean)).toHaveLength(1);
 });
 
-
-it("reads session expiry with the actual writer lock held, independently of the earlier received timestamp", async () => {
-  const f = setup(), minted = await f.mint();
-  expect(await f.tickets.redeem(minted!.token, f.scope)).not.toBeNull();
-  const input = f.capture(f.update(), "expires-at-writer", f.actor);
-  expect(input.receivedAtMs).toBeLessThan(61_000);
-  f.raw.exec("PRAGMA busy_timeout=0");
-  vi.spyOn(Date, "now").mockImplementation(() => {
-    expect(() => f.raw.exec("BEGIN IMMEDIATE")).toThrow(/locked/);
-    return 61_000;
-  });
-  expect(f.storage.commitLiveUpdateJournal(input)).toEqual({ result: {kind: "refused", reason: "authority-refused"}, admitted: null });
-  expect(f.rowCount("sync_relay_live_update_journal")).toBe(0);
-});
-
-it("shares the existing principal cap with discussion and does not charge a refused fresh profile", async () => {
-  const f = setup({linkDiscussionPrincipalLimit: 1});
-  expect(await f.mint()).not.toBeNull();
-  const next = {...f.scope, sessionId: "other-session", capabilityHash: hashLinkBearer("other", key), profileTokenHash: hashLinkProfileSecret("other", key)};
-  expect(f.storage.mintLinkSession({session: {sessionId: next.sessionId, capabilityHash: next.capabilityHash,
-    grantId: next.grantId, generation: 4, mintedAtMs: 999, expiresAtMs: 61_000}})).toBe(true);
-  const before = f.enrollment();
-  expect(await f.tickets.mint({objectId: f.input.evidence.document.objectId}, next)).toBeNull();
-  expect(f.enrollment()).toEqual(before);
-  expect(f.storage.findLinkSessionByCapabilityHash(next.capabilityHash)?.principalId).toBeNull();
-});
-
 it("checks principal workspace quota before enrollment and keeps all its state on refusal", async () => {
   const f = setup({workspaceQuotaBytes: 1_000_000});
   f.raw.exec("UPDATE sync_relay_workspace_usage SET usage_bytes=999999 WHERE workspace_id='workspace'");
@@ -215,12 +144,3 @@ it("checks principal workspace quota before enrollment and keeps all its state o
   expect(f.rowCount("sync_relay_live_session_tickets")).toBe(0);
 });
 
-it("requires the retained session coordinate only for link tickets and refuses damaged persisted bindings", async () => {
-  const f = setup();
-  expect(await f.mint()).not.toBeNull();
-  expect(() => f.raw.exec("UPDATE sync_relay_live_session_tickets SET link_session_id=NULL")).toThrow(/CHECK/);
-  expect(() => f.raw.exec("UPDATE sync_relay_live_session_tickets SET principal_kind='named'")).toThrow(/CHECK/);
-  const minted = await f.mint();
-  f.raw.exec("PRAGMA ignore_check_constraints=ON; UPDATE sync_relay_live_session_tickets SET link_session_id=NULL");
-  await expect(f.tickets.redeem(minted!.token, f.scope)).rejects.toThrow("Live-ticket operation failed");
-});

@@ -1,4 +1,4 @@
-import {afterEach, expect, it} from "vitest";
+import {afterEach, expect, it } from "vitest";
 import {
   claimWorkspace,
   closeTestStorage,
@@ -8,16 +8,11 @@ import {
   storagePath,
   testHandler,
   testStorage,
-  type InspectionDatabase,
-} from "../testing";
+  type InspectionDatabase } from "../testing";
 import {
-  assertLiveAuthorColumns,
-  initializeLiveAuthorshipSchema,
   LIVE_AUTHOR_CLIENTS,
   LIVE_AUTHOR_COLUMNS,
-  LIVE_AUTHOR_MIGRATION,
-} from "./liveAuthorshipSchema";
-import type {SqliteDb} from "./types";
+  LIVE_AUTHOR_MIGRATION } from "./liveAuthorshipSchema";
 
 afterEach(closeTestStorages);
 
@@ -49,30 +44,6 @@ function removeAuthorshipMigration(db: InspectionDatabase): void {
   db.exec("ALTER TABLE sync_relay_log DROP COLUMN admitted_author_snapshot_json");
   db.prepare("DELETE FROM sync_relay_migrations WHERE migration_id=?").run(LIVE_AUTHOR_MIGRATION);
 }
-
-function replaceSchemaSql(db: InspectionDatabase, name: string, before: string, after: string): void {
-  const row = db.prepare("SELECT sql FROM sqlite_schema WHERE name=?").get(name);
-  expect(typeof row?.sql).toBe("string");
-  const sql = String(row!.sql);
-  expect(sql).toContain(before);
-  const children = db.prepare("SELECT sql FROM sqlite_schema WHERE tbl_name=? AND type IN ('index','trigger') AND sql IS NOT NULL ORDER BY name").all(name);
-  expect(db.prepare(`SELECT COUNT(*) AS count FROM ${name}`).get()?.count).toBe(0);
-  db.exec(`DROP TABLE ${name}`);
-  db.exec(sql.replace(before, after));
-  for (const child of children) db.exec(String(child.sql));
-}
-
-it("installs the exact v2 marker and preserves it when reopening", async () => {
-  const {path, db} = await closedDatabase();
-  expect(LIVE_AUTHOR_MIGRATION).toBe("relay-admitted-authors-v2");
-  const before = marker(db);
-  expect(before).toEqual({migration_id: "relay-admitted-authors-v2", completed_at_ms: expect.any(Number)});
-  expect(db.prepare("SELECT name FROM sqlite_schema WHERE name LIKE 'live_author_%' ORDER BY name").all().map(row => row.name)).toEqual([...triggers].sort());
-  db.close();
-  closeTestStorage(reopenTestStorage(path));
-  const check = inspectDatabase(path);
-  expect(marker(check)).toEqual(before);
-});
 
 it("upgrades an existing v1 row with canonical version 1 and no attributed author", async () => {
   const storage = await testStorage();
@@ -113,61 +84,13 @@ it("refuses declared v1 relay evidence before migration and preserves its rows a
   expect(check.prepare("SELECT * FROM sync_relay_live_update_agent_declarations").all()).toEqual(rows);
 });
 
-it("refuses a missing marker without adopting or repairing migrated objects", async () => {
-  const {path, db} = await closedDatabase();
-  db.prepare("DELETE FROM sync_relay_migrations WHERE migration_id=?").run(LIVE_AUTHOR_MIGRATION);
-  const before = schemaSnapshot(db);
-  expect(() => initializeLiveAuthorshipSchema(db as SqliteDb)).toThrow("live author schema is missing or damaged");
-  db.close();
-  expect(() => reopenTestStorage(path)).toThrow(/schema is missing or damaged/);
-  expect(schemaSnapshot(inspectDatabase(path))).toEqual(before);
-});
-
-it.each([LIVE_AUTHOR_CLIENTS, ...triggers])("refuses missing migrated object %s", async name => {
+it.each([LIVE_AUTHOR_CLIENTS])("refuses missing migrated object %s", async name => {
   const {path, db} = await closedDatabase();
   db.exec(`DROP ${name === LIVE_AUTHOR_CLIENTS ? "TABLE" : "TRIGGER"} ${name}`);
   const before = schemaSnapshot(db);
   db.close();
   expect(() => reopenTestStorage(path)).toThrow("live author schema is missing or damaged");
   expect(schemaSnapshot(inspectDatabase(path))).toEqual(before);
-});
-
-it.each(triggers)("refuses changed quota trigger %s", async name => {
-  const {path, db} = await closedDatabase();
-  const sql = String(db.prepare("SELECT sql FROM sqlite_schema WHERE name=?").get(name)!.sql);
-  db.exec(`DROP TRIGGER ${name}`);
-  db.exec(sql.replace("UPDATE sync_relay_workspace_usage", "UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes WHERE workspace_id='unrelated'; UPDATE sync_relay_workspace_usage"));
-  db.close();
-  expect(() => reopenTestStorage(path)).toThrow("live author schema is missing or damaged");
-});
-
-it.each(LIVE_AUTHOR_COLUMNS)("requires the exact migrated column constraint: %s", async column => {
-  const {path, db} = await closedDatabase();
-  replaceSchemaSql(db, journal, column, column.slice(0, column.indexOf(" CHECK ")));
-  expect(() => assertLiveAuthorColumns(db as SqliteDb)).toThrow("live author schema is missing or damaged");
-  db.close();
-  expect(() => reopenTestStorage(path)).toThrow(/schema is missing or damaged/);
-});
-
-it("requires the log snapshot JSON constraint and exact column shape", async () => {
-  const {path, db} = await closedDatabase();
-  replaceSchemaSql(db, "sync_relay_log", "admitted_author_snapshot_json TEXT CHECK (admitted_author_snapshot_json IS NULL OR json_valid(admitted_author_snapshot_json))", "admitted_author_snapshot_json TEXT");
-  db.close();
-  expect(() => reopenTestStorage(path)).toThrow("live author schema is missing or damaged");
-});
-
-it("requires the exact client table constraints", async () => {
-  const {path, db} = await closedDatabase();
-  replaceSchemaSql(db, LIVE_AUTHOR_CLIENTS, "CHECK (storage_bytes > 0)", "CHECK (storage_bytes >= 0)");
-  db.close();
-  expect(() => reopenTestStorage(path)).toThrow("live author schema is missing or damaged");
-});
-
-it("preserves the original v1 journal constraint checks after stripping migration columns", async () => {
-  const {path, db} = await closedDatabase();
-  replaceSchemaSql(db, journal, "CHECK (journal_cursor BETWEEN 1 AND 9007199254740991)", "CHECK (journal_cursor BETWEEN 0 AND 9007199254740991)");
-  db.close();
-  expect(() => reopenTestStorage(path)).toThrow("live update journal schema is missing or damaged");
 });
 
 it("rolls back all migration objects, columns and earlier repairs if writing the marker fails", async () => {

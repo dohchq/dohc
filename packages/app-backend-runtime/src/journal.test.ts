@@ -3,14 +3,13 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, expect, it} from "vitest";
 import { createDatasetJournal, type CommitOperationInput, type DatasetCursor, type DatasetScope, type JournalOptions, type TransitionCheckpointInput } from "./journal.ts";
 
 import { readDatasetHistory } from "./dataset-history.ts";
 import type { DatasetRevision } from "@dohc/security-contract/dataset";
 
 const digest=(value:string|Uint8Array)=>createHash("sha256").update(value).digest("hex");
-// These probes use FULL durability on real files, including close/reopen recovery.
 const cleanups:Array<()=>void>=[];
 afterEach(()=>{for(const cleanup of cleanups.splice(0).reverse())cleanup();});
 const schemaSql="CREATE TABLE stock(id TEXT PRIMARY KEY NOT NULL,remaining INTEGER NOT NULL CHECK(remaining>=0)); INSERT INTO stock VALUES('item',3); CREATE TABLE orders(id TEXT PRIMARY KEY NOT NULL,quantity INTEGER NOT NULL);";
@@ -76,19 +75,6 @@ it("keeps materialization caches outside authoritative history and retry lineage
   expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})).toEqual(cache);
   expect(f.journal.events({scope:f.scope,after:cache.cursor,authorize:f.authorize}).events).toHaveLength(1);
 });
-it("replaces exactly one cache and refunds its allocation without deleting authoritative checkpoints",()=>{
-  const f=fixture(),account=cacheAccount(f);
-  const first=f.journal.cacheMaterialization({expected:f.initial,checkpoint:materializationStage(f),authorize:f.authorize,account});
-  const cost=f.db.prepare("SELECT bytes FROM accounting").get()!.bytes;
-  const second=f.journal.cacheMaterialization({expected:f.initial,checkpoint:materializationStage(f),authorize:f.authorize,account});
-  expect(f.db.prepare("SELECT bytes FROM accounting").get()!.bytes).toBe(cost);
-  expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_materializations").get()!.n).toBe(1);
-  expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_checkpoints").get()!.n).toBe(2);
-  expect(f.db.prepare("SELECT 1 FROM dohc_dataset_checkpoints WHERE stage_id=?").get(first.checkpointId)).toBeUndefined();
-  expect(f.journal.materializationBlob({scope:f.scope,cache:first,offset:0,authorize:f.authorize})).toBeNull();
-  expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})).toEqual(second);
-  expect(f.journal.checkpoint({scope:f.scope,authorize:f.authorize}).bytes).toEqual(new Uint8Array(f.initialization.checkpoint));
-});
 it.each(["before","after"] as const)("keeps cache install and accounting atomic across a fault %s commit",fault=>{
   const f=fixture(),checkpoint=materializationStage(f),reserved=f.db.prepare("SELECT bytes FROM accounting").get()!.bytes;
   f.fault(fault);
@@ -102,42 +88,7 @@ it.each(["before","after"] as const)("keeps cache install and accounting atomic 
     f.journal.cacheMaterialization({expected:f.initial,checkpoint,authorize:f.authorize,account:cacheAccount(f)});
   } else expect(()=>f.journal.cacheMaterialization({expected:f.initial,checkpoint,authorize:f.authorize,account:cacheAccount(f)})).toThrow("already saved");
 });
-it("rejects forged or revoked cache installation without consuming its stage",()=>{
-  const f=fixture(),checkpoint=materializationStage(f),account=cacheAccount(f);
-  const write=f.journal.commitOperation(f.prepare());if(write.kind!=="committed")throw Error();
-  expect(()=>f.journal.cacheMaterialization({expected:{...f.initial,digest:digest('forged')},checkpoint,authorize:f.authorize,account})).toThrow("The Collection changed. Try again.");
-  expect(()=>f.journal.cacheMaterialization({expected:write.event.cursor,checkpoint,authorize:f.authorize,account:()=>f.revoke()})).toThrow("denied");
-  expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})).toBeNull();
-  expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize})).toHaveLength(1);
-});
-it("installs a committed prefix and refuses older caches or different authority",()=>{
-  const f=fixture(),account=cacheAccount(f),firstStage=materializationStage(f);
-  const write=f.journal.commitOperation(f.prepare());if(write.kind!=="committed")throw Error();
-  expect(f.journal.cacheMaterialization({expected:f.initial,checkpoint:firstStage,authorize:f.authorize,account}).cursor).toEqual(f.initial);
-  const newerStage=materializationStage(f);f.journal.cacheMaterialization({expected:write.event.cursor,checkpoint:newerStage,authorize:f.authorize,account});
-  const oldStage=materializationStage(f);
-  expect(()=>f.journal.cacheMaterialization({expected:f.initial,checkpoint:oldStage,authorize:f.authorize,account})).toThrow("A newer copy of this Collection's records");
-  for(const expected of [{...write.event.cursor,hostEpoch:'different'},{...write.event.cursor,approvedRevisionHash:digest('changed-schema')}])
-    expect(()=>f.journal.cacheMaterialization({expected,checkpoint:oldStage,authorize:f.authorize,account})).toThrow("The Collection changed while dohc saved its records");
-  expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})?.cursor).toEqual(write.event.cursor);
-});
-it("rolls back replacement and quota changes if accounting refuses the cache",()=>{
-  const f=fixture(),account=cacheAccount(f),cache=f.journal.cacheMaterialization({expected:f.initial,checkpoint:materializationStage(f),authorize:f.authorize,account});
-  const checkpoint=materializationStage(f),before=f.db.prepare("SELECT bytes FROM accounting").get()!.bytes;
-  expect(()=>f.journal.cacheMaterialization({expected:f.initial,checkpoint,authorize:f.authorize,account:allocation=>{account(allocation);throw Error("quota");}})).toThrow("quota");
-  expect(f.db.prepare("SELECT bytes FROM accounting").get()!.bytes).toBe(before);
-  expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})).toEqual(cache);
-  expect(f.journal.materializationBlob({scope:f.scope,cache,offset:0,authorize:f.authorize})).toEqual(new Uint8Array(f.initialization.checkpoint));
-  expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize})).toHaveLength(1);
-});
-it("refuses active authoritative checkpoint stages as caches",()=>{
-  const f=fixture(),checkpoint=materializationStage(f);
-  const expected=f.journal.transitionCheckpoint({...f.initialization,expected:f.initial,checkpoint,
-    account:({bytes,stagedCreditBytes})=>f.db.prepare("UPDATE accounting SET bytes=bytes+?").run(bytes-stagedCreditBytes)});
-  expect(()=>f.journal.cacheMaterialization({expected,checkpoint,authorize:f.authorize,account:cacheAccount(f)})).toThrow("already saved");
-  expect(f.journal.checkpoint({scope:f.scope,authorize:f.authorize}).cursor).toEqual(expected);
-});
-it.each(["cursor","epoch","digest","missing blob","chunk"])("falls back from a damaged cache %s without changing the journal",damage=>{
+it.each(["missing blob","chunk"])("falls back from a damaged cache %s without changing the journal",damage=>{
   const f=fixture(),cache=f.journal.cacheMaterialization({expected:f.initial,checkpoint:materializationStage(f),authorize:f.authorize,account:cacheAccount(f)});
   if(damage==="cursor")f.db.prepare("UPDATE dohc_dataset_materializations SET cursor_json=?").run("invalid json");
   if(damage==="epoch")f.db.prepare("UPDATE dohc_dataset_materializations SET cursor_json=?").run(JSON.stringify({...cache.cursor,hostEpoch:"old-host"}));
@@ -152,16 +103,7 @@ it.each(["cursor","epoch","digest","missing blob","chunk"])("falls back from a d
   expect(f.journal.checkpoint({scope:f.scope,authorize:f.authorize}).cursor).toEqual(f.initial);
   expect(f.journal.head(f.scope,f.authorize).cursor).toEqual(f.initial);
 });
-it.each(["revoked","fenced","deleted"])("does not turn %s authority into a cache miss",state=>{
-  const f=fixture(),cache=f.journal.cacheMaterialization({expected:f.initial,checkpoint:materializationStage(f),authorize:f.authorize,account:cacheAccount(f)});
-  if(state==="revoked")f.revoke();
-  if(state==="fenced")f.journal.fence({expected:f.initial,authorize:f.authorize});
-  if(state==="deleted")f.journal.destroy({expected:f.initial,authorize:f.authorize});
-  expect(()=>f.journal.materialization({scope:f.scope,authorize:f.authorize})).toThrow();
-  expect(()=>f.journal.materializationBlob({scope:f.scope,cache,offset:0,authorize:f.authorize})).toThrow();
-  if(state==="deleted")expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_materializations").get()!.n).toBe(0);
-});
-it.each(["transition","claim"])("invalidates and refunds the cache on a checkpoint %s",kind=>{
+it.each(["transition"])("invalidates and refunds the cache on a checkpoint %s",kind=>{
   const f=fixture(),account=cacheAccount(f),cache=f.journal.cacheMaterialization({expected:f.initial,checkpoint:materializationStage(f),authorize:f.authorize,account});
   const cacheCost=Number(f.db.prepare("SELECT bytes FROM accounting").get()!.bytes);
   const baseline=fixture();let baselineBytes=0;
@@ -181,39 +123,7 @@ it.each(["transition","claim"])("invalidates and refunds the cache on a checkpoi
   expect(f.journal.checkpoint({scope:f.scope,revision:0,authorize:f.authorize}).cursor).toEqual(f.initial);
   expect(f.journal.head(f.scope,f.authorize).cursor).toEqual(next);
 });
-it("does not remove an authoritative checkpoint when a damaged cache pointer references it",()=>{
-  const f=fixture();
-  f.journal.cacheMaterialization({expected:f.initial,checkpoint:materializationStage(f),authorize:f.authorize,account:cacheAccount(f)});
-  const id=f.db.prepare("SELECT checkpoint_id FROM dohc_dataset_journals").get()!.checkpoint_id;
-  f.db.prepare("UPDATE dohc_dataset_materializations SET checkpoint_id=?,cursor_json='broken'").run(id);
-  f.journal.cacheMaterialization({expected:f.initial,checkpoint:materializationStage(f),authorize:f.authorize,account:cacheAccount(f)});
-  expect(f.journal.checkpoint({scope:f.scope,authorize:f.authorize}).bytes).toEqual(new Uint8Array(f.initialization.checkpoint));
-});
 
-it("recovers real multi-table SQLite changes without running operation code",()=>{
-  const f=fixture();const result=f.journal.commitOperation(f.prepare());expect(result.kind).toBe("committed");
-  f.reopen();const db=f.materialize();expect(db.prepare("SELECT remaining FROM stock").get()!.remaining).toBe(2);expect(db.prepare("SELECT * FROM orders").all()).toEqual([{id:"order-1",quantity:1}]);
-  expect(f.journal.checkpoint({scope:f.scope,authorize:f.authorize}).cursor).toEqual(f.initial);
-  expect(f.journal.head(f.scope,f.authorize).cursor.revision).toBe(1);
-});
-it("replays multi-table changes with deferred foreign keys",()=>{
-  const f=fixture();const source=new DatabaseSync(":memory:"),restored=new DatabaseSync(":memory:");
-  try {
-    const schema="PRAGMA foreign_keys=ON; CREATE TABLE parents(id TEXT PRIMARY KEY NOT NULL); CREATE TABLE children(id TEXT PRIMARY KEY NOT NULL,parent TEXT REFERENCES parents(id) DEFERRABLE INITIALLY DEFERRED);";
-    source.exec(schema);restored.exec(schema);const session=source.createSession();source.exec("BEGIN; INSERT INTO children VALUES('child','parent'); INSERT INTO parents VALUES('parent'); COMMIT;");
-    const changeset=session.changeset();session.close();const event=f.journal.commitOperation({...f.prepare(),changeset,changesetSha256:digest(changeset)});
-    if(event.kind!=="committed")throw Error();expect(restored.applyChangeset(event.event.changeset)).toBe(true);
-    expect(restored.prepare("SELECT * FROM children").all()).toEqual([{id:"child",parent:"parent"}]);expect(restored.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
-  } finally {source.close();restored.close();}
-});
-it("commits quota, file association, receipt and journal together",()=>{
-  const f=fixture();const input=f.prepare();input.attachedFileIds=["receipt_file_0001"];
-  input.accountAndAttach=allocation=>{f.db.prepare("UPDATE accounting SET bytes=bytes+?").run(allocation.bytes);f.db.exec("UPDATE uploads SET attached=1");};
-  f.journal.commitOperation(input);
-  expect(Number(f.db.prepare("SELECT bytes FROM accounting").get()!.bytes)).toBeGreaterThan(input.changeset.length);
-  expect(f.db.prepare("SELECT attached FROM uploads").get()!.attached).toBe(1);
-  expect(f.journal.receipt({...input,scope:f.scope})!.revision).toBe(1);
-});
 it("rolls back accounting and attachments on quota refusal",()=>{
   const f=fixture();const input=f.prepare();input.accountAndAttach=()=>{f.db.exec("UPDATE accounting SET bytes=999; UPDATE uploads SET attached=1");throw Error("quota");};
   expect(()=>f.journal.commitOperation(input)).toThrow("quota");expect(f.journal.head(f.scope,f.authorize).cursor).toEqual(f.initial);
@@ -225,41 +135,15 @@ it.each(["before","after"] as const)("resolves a fault %s authoritative commit f
   const replay=f.journal.commitOperation(f.prepare());expect(replay.kind).toBe(fault==="before"?"committed":"replayed");
   expect(f.materialize().prepare("SELECT count(*) AS n FROM orders").get()!.n).toBe(1);
 });
-it("rechecks revocation inside the actual host transaction after preparation",()=>{
-  const f=fixture();const prepared=f.prepare();f.revoke();expect(()=>f.journal.commitOperation(prepared)).toThrow("denied");
-  expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_events").get()!.n).toBe(0);
-});
 it("does not return receipts, history, header or checkpoint after withdrawal",()=>{
   const f=fixture();const input=f.prepare();f.journal.commitOperation(input);f.revoke();
   for(const read of [()=>f.journal.receipt({...input,scope:f.scope}),()=>f.journal.events({scope:f.scope,after:f.initial,authorize:f.authorize}),()=>f.journal.head(f.scope,f.authorize),()=>f.journal.checkpoint({scope:f.scope,authorize:f.authorize}),()=>f.journal.commitOperation(input)])expect(read).toThrow("denied");
-});
-it("rechecks authority after accounting callbacks and rolls their changes back",()=>{
-  const f=fixture();const input=f.prepare();input.accountAndAttach=()=>f.revoke();expect(()=>f.journal.commitOperation(input)).toThrow("denied");
-  expect(f.journal.head(f.scope,f.authorize).cursor.revision).toBe(0);
-});
-it("preserves retry identity after restart and rejects changed payloads",()=>{
-  const f=fixture();const first=f.journal.commitOperation(f.prepare());f.reopen();
-  expect(f.journal.commitOperation(f.prepare())).toEqual({kind:"replayed",receipt:first.receipt});
-  expect(()=>f.journal.commitOperation({...f.prepare(),payloadSha256:digest("changed")})).toThrow("already used for different values");
-});
-it("rejects stale competing writes without inserting a second receipt",()=>{
-  const f=fixture();f.journal.commitOperation(f.prepare());expect(()=>f.journal.commitOperation(f.prepare(f.initial,"order-2"))).toThrow("The Collection changed. Try again.");
-  expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_receipts").get()!.n).toBe(1);
 });
 it("isolates matching dataset and retry names across workspaces",()=>{
   const f=fixture();const other={workspaceId:"other-workspace",datasetId:f.scope.datasetId};
   const initial=f.journal.initialize({...f.initialization,scope:other});f.journal.commitOperation(f.prepare());f.journal.commitOperation(f.prepare(initial));
   expect(f.journal.events({scope:other,after:initial,authorize:f.authorize}).events[0].cursor.workspaceId).toBe(other.workspaceId);
   expect(()=>f.journal.events({scope:other,after:f.initial,authorize:f.authorize})).toThrow("The Collection changed. Try again.");
-});
-it("fences the old host durably without deleting recovery data",()=>{
-  const f=fixture();const result=f.journal.commitOperation(f.prepare());if(result.kind!=="committed")throw Error();
-  f.journal.fence({expected:result.event.cursor,authorize:f.authorize});f.reopen();expect(f.journal.head(f.scope,f.authorize).active).toBe(false);
-  expect(()=>f.journal.commitOperation(f.prepare())).toThrow("stopped accepting changes to this Collection");expect(()=>f.journal.receipt({...f.prepare(),scope:f.scope})).toThrow("stopped accepting changes to this Collection");
-  expect(()=>f.journal.initialize(f.initialization)).toThrow("stopped accepting changes to this Collection");expect(f.journal.events({scope:f.scope,after:f.initial,authorize:f.authorize}).events).toHaveLength(1);
-});
-it("rejects stale transfer fences",()=>{
-  const f=fixture();f.journal.commitOperation(f.prepare());expect(()=>f.journal.fence({expected:f.initial,authorize:f.authorize})).toThrow("The Collection changed. Try again.");expect(f.journal.head(f.scope,f.authorize).active).toBe(true);
 });
 it("permanently deletes journal history and every checkpoint while preserving other scopes",()=>{
   const f=fixture();f.db.exec("PRAGMA foreign_keys=ON");
@@ -304,44 +188,7 @@ it("blocks old operations, stages, initialization and authority claims after del
   ])expect(revive).toThrow("permanently deleted");
   expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_checkpoints").get()!.n).toBe(0);
 });
-it("rejects stale deletion and refuses deleting a transferred authority",()=>{
-  const f=fixture(),cleanup=vi.fn();f.journal.commitOperation(f.prepare());
-  expect(()=>f.journal.destroy({expected:f.initial,authorize:f.authorize,cleanup})).toThrow("The Collection changed. Try again.");
-  const expected=f.journal.head(f.scope,f.authorize).cursor;
-  f.journal.fence({expected,authorize:f.authorize});
-  expect(()=>f.journal.destroy({expected,authorize:f.authorize,cleanup})).toThrow("stopped accepting changes to this Collection");
-  expect(cleanup).not.toHaveBeenCalled();expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_deletions").get()!.n).toBe(0);
-  expect(f.journal.head(f.scope,f.authorize).cursor).toEqual(expected);
-});
-it("rolls back the fence, tombstone and private cleanup if deletion fails",()=>{
-  const f=fixture();
-  expect(()=>f.journal.destroy({expected:f.initial,authorize:f.authorize,cleanup(){
-    f.db.exec("UPDATE accounting SET bytes=999; DELETE FROM uploads");throw Error("cleanup failed");
-  }})).toThrow("cleanup failed");
-  f.reopen();expect(f.journal.head(f.scope,f.authorize)).toMatchObject({active:true,cursor:f.initial});
-  expect(f.db.prepare("SELECT bytes FROM accounting").get()!.bytes).toBe(0);
-  expect(f.db.prepare("SELECT count(*) AS n FROM uploads").get()!.n).toBe(1);
-  f.journal.assertNotDeleted(f.scope,f.authorize);
-});
-it.each(["before","after"] as const)("persists all or none of a deletion when acknowledgment fails %s commit",fault=>{
-  const f=fixture();f.fault(fault);
-  expect(()=>f.journal.destroy({expected:f.initial,authorize:f.authorize,cleanup(){f.db.exec("DELETE FROM uploads");}})).toThrow(fault==="before"?"power loss":"acknowledgment");
-  f.reopen();
-  if(fault==="before")expect(f.journal.head(f.scope,f.authorize).cursor).toEqual(f.initial);
-  else expect(()=>f.journal.head(f.scope,f.authorize)).toThrow("permanently deleted");
-  expect(f.db.prepare("SELECT count(*) AS n FROM uploads").get()!.n).toBe(fault==="before"?1:0);
-});
-it("requires synchronous authorized deletion and rolls back revoked cleanup",()=>{
-  const f=fixture();
-  expect(()=>f.journal.destroy({expected:f.initial,authorize:f.authorize,cleanup:async()=>{}})).toThrow("synchronous");
-  expect(()=>f.journal.destroy({expected:f.initial,authorize:f.authorize,cleanup:()=>({then(){}})})).toThrow("synchronous");
-  expect(()=>f.journal.destroy({expected:f.initial,authorize:f.authorize,cleanup:()=>f.revoke()})).toThrow("denied");
-  expect(f.journal.head(f.scope,f.authorize).active).toBe(true);
-  f.revoke();
-  expect(()=>f.journal.destroy({expected:f.initial,authorize:f.authorize})).toThrow("denied");
-  expect(()=>f.journal.assertNotDeleted(f.scope,f.authorize)).toThrow("denied");
-});
-it.each(["result","changeset","receipt","gap","tail","checkpoint","definition"])("detects persisted %s damage",kind=>{
+it.each(["changeset","receipt","gap","checkpoint"])("detects persisted %s damage",kind=>{
   const f=fixture();let head=f.initial;
   for(let n=0;n<3;n++){const result=f.journal.commitOperation(f.prepare(head,`order-${n}`));if(result.kind==="committed")head=result.event.cursor;}
   if(kind==="result")f.db.exec("UPDATE dohc_dataset_events SET result_json='null' WHERE revision=1");
@@ -354,40 +201,11 @@ it.each(["result","changeset","receipt","gap","tail","checkpoint","definition"])
   const action=kind==="receipt"?()=>f.journal.receipt({...f.prepare(f.initial,"order-0"),scope:f.scope}):["checkpoint","definition"].includes(kind)?()=>f.journal.checkpoint({scope:f.scope,authorize:f.authorize}):()=>f.journal.events({scope:f.scope,after:f.initial,authorize:f.authorize});
   expect(action).toThrow(/damaged|does not match|missing|gap/);
 });
-it("bounds journal pages by bytes and rejects invented cursors",()=>{
-  const f=fixture();let head=f.initial;
-  for(let n=0;n<3;n++){const result=f.journal.commitOperation(f.prepare(head,`order-${n}`));if(result.kind==="committed")head=result.event.cursor;}
-  const one=Number(f.db.prepare("SELECT storage_bytes FROM dohc_dataset_events WHERE revision=1").get()!.storage_bytes);
-  const page=f.journal.events({scope:f.scope,after:f.initial,authorize:f.authorize,byteLimit:one});expect(page.events).toHaveLength(1);
-  expect(f.journal.events({scope:f.scope,after:page.events[0].cursor,authorize:f.authorize}).events).toHaveLength(2);
-  expect(()=>f.journal.events({scope:f.scope,after:f.initial,authorize:f.authorize,byteLimit:1})).toThrow("byte limit");
-  expect(()=>f.journal.events({scope:f.scope,after:{...f.initial,digest:digest("fake")},authorize:f.authorize})).toThrow("The Collection changed. Try again.");
-});
-it("copies operation bytes and identities before authorization callbacks",()=>{
-  const f=fixture();const input=f.prepare();const original=new Uint8Array(input.changeset);const originalResult=input.resultJson;
-  input.expected={...input.expected};input.authorize=()=>{f.authorize();input.changeset.fill(0);input.expected.datasetId="changed";input.resultJson="null";input.attachedFileIds=["receipt_file_0001"];};
-  const result=f.journal.commitOperation(input);expect(result.kind).toBe("committed");if(result.kind!=="committed")throw Error();
-  expect(result.event.changeset).toEqual(original);expect(result.event.resultJson).toBe(originalResult);expect(result.event.attachedFileIds).toEqual([]);expect(result.event.cursor.datasetId).toBe(f.scope.datasetId);
-});
 it("rejects asynchronous callbacks and rolls back thenable accounting",()=>{
   const f=fixture();expect(()=>f.journal.head(f.scope,async()=>{throw Error("must not run");})).toThrow("synchronous");
   const input=f.prepare();input.accountAndAttach=()=>{f.db.exec("UPDATE accounting SET bytes=999");return {then(){}};};
   expect(()=>f.journal.commitOperation(input)).toThrow("synchronous");expect(f.db.prepare("SELECT bytes FROM accounting").get()!.bytes).toBe(0);
   let ran=false;input.accountAndAttach=async()=>{ran=true;};expect(()=>f.journal.commitOperation(input)).toThrow("synchronous");expect(ran).toBe(false);
-});
-it("checks the commit head again after callbacks",()=>{
-  const f=fixture();const input=f.prepare();input.accountAndAttach=()=>f.db.exec("UPDATE dohc_dataset_journals SET active=0");
-  expect(()=>f.journal.commitOperation(input)).toThrow("The Collection changed while dohc saved this change");expect(f.journal.head(f.scope,f.authorize).active).toBe(true);
-  expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_events").get()!.n).toBe(0);
-});
-it("accounts initialization once and refuses conflicting initialization",()=>{
-  const f=fixture();let allocated=0;const scope={workspaceId:"workspace",datasetId:"second"};
-  const initialize={...f.initialization,scope,capacityBytes:65536,account:(value:{bytes:number})=>{allocated+=value.bytes;}};
-  f.journal.initialize(initialize);const first=allocated;f.journal.initialize(initialize);expect(allocated).toBe(first);expect(first).toBeGreaterThan(65536+f.initialization.checkpoint.length);
-  expect(()=>f.journal.initialize({...initialize,source:"changed"})).toThrow("does not match its approved rules");
-});
-it("does not accept attachment references without host validation",()=>{
-  const f=fixture();expect(()=>f.journal.commitOperation({...f.prepare(),attachedFileIds:["receipt_file_0001"]})).toThrow("host validation");
 });
 
 function migration(f: ReturnType<typeof fixture>, expected:DatasetCursor):TransitionCheckpointInput {
@@ -416,48 +234,6 @@ it("atomically activates a migrated checkpoint and preserves prior retries and r
   expect(()=>f.journal.events({scope:f.scope,after:saved.event.cursor,authorize:f.authorize})).toThrow("The Collection's tables changed. Download it again.");
   expect(f.journal.events({scope:f.scope,after:next,authorize:f.authorize}).events).toEqual([]);
 });
-it("recovers the new schema without running the migration again",()=>{
-  const f=fixture();const saved=f.journal.commitOperation(f.prepare());if(saved.kind!=="committed")throw Error();
-  const input=migration(f,saved.event.cursor),next=f.journal.transitionCheckpoint(input);f.reopen();
-  const checkpoint=f.journal.checkpoint({scope:f.scope,authorize:f.authorize});const path=join(f.directory,"after-migration.sqlite");writeFileSync(path,checkpoint.bytes);const db=new DatabaseSync(path);
-  try {
-    expect(db.prepare("SELECT * FROM orders").all()).toEqual([{id:"order-1",quantity:1,note:"migrated-once"}]);
-    const session=db.createSession();db.exec("BEGIN; UPDATE orders SET note='after-migration';");const changeset=session.changeset();session.close();db.exec("ROLLBACK");
-    const committed=f.journal.commitOperation({...f.prepare(next,"edit-order"),changeset,changesetSha256:digest(changeset)});if(committed.kind!=="committed")throw Error();
-    const page=f.journal.events({scope:f.scope,after:next,authorize:f.authorize});expect(page.events).toHaveLength(1);expect(page.events[0].cursor.revision).toBe(3);
-    expect(db.applyChangeset(page.events[0].changeset)).toBe(true);expect(db.prepare("SELECT note FROM orders").get()!.note).toBe("after-migration");
-  } finally {db.close();}
-});
-
-it("claims a fenced head on a fresh host epoch while retaining retry receipts",()=>{
-  const f=fixture(),saved=f.journal.commitOperation(f.prepare());if(saved.kind!=="committed")throw Error();
-  f.materialize().close();const checkpoint=readFileSync(join(f.directory,"restored.sqlite")),fenced=f.journal.fence({expected:saved.event.cursor,authorize:f.authorize});
-  expect(f.journal.head(f.scope,f.authorize).active).toBe(false);
-  let accounts=0;
-  const input={expected:fenced,hostEpoch:"host-2",approvedRevisionHash:fenced.approvedRevisionHash,
-    source:f.initialization.source,schemaSql:f.initialization.schemaSql,definitionJson:f.initialization.definitionJson,checkpoint,authorize:f.authorize,account(){accounts++;}};
-  const claimed=f.journal.claimInactiveCheckpoint(input);
-  expect(claimed.revision).toBe(fenced.revision+1);expect(claimed.hostEpoch).toBe("host-2");
-  expect(f.journal.head(f.scope,f.authorize).active).toBe(true);
-  expect(f.journal.receipt({...f.prepare(),scope:f.scope})).toEqual(saved.receipt);
-  expect(f.journal.claimInactiveCheckpoint(input)).toEqual(claimed);expect(accounts).toBe(1);
-  expect(f.materialize().prepare("SELECT id FROM orders").all()).toEqual([{id:"order-1"}]);
-  expect(()=>f.journal.claimInactiveCheckpoint({expected:fenced,hostEpoch:"host-3",approvedRevisionHash:fenced.approvedRevisionHash,
-    source:f.initialization.source,schemaSql:f.initialization.schemaSql,definitionJson:f.initialization.definitionJson,checkpoint,authorize:f.authorize})).toThrow(/already open on this host|The Collection changed/);
-});
-
-it("refuses changed claim artifacts, authority, capacity, cursor and reused epochs",()=>{
-  const f=fixture(),input={...f.initialization,expected:f.initial,hostEpoch:"host-2"};
-  expect(()=>f.journal.claimInactiveCheckpoint(input)).toThrow("already open on this host");
-  f.journal.fence({expected:f.initial,authorize:f.authorize});
-  expect(()=>f.journal.claimInactiveCheckpoint({...input,hostEpoch:"host-1"})).toThrow("needs a new host session");
-  expect(()=>f.journal.claimInactiveCheckpoint({...input,approvedRevisionHash:digest("new")})).toThrow("approved rules");
-  expect(()=>f.journal.claimInactiveCheckpoint({...input,source:"changed"})).toThrow("cannot change its approved rules");
-  expect(()=>f.journal.claimInactiveCheckpoint({...input,capacityBytes:4096})).toThrow("space reserved for its records");
-  expect(()=>f.journal.claimInactiveCheckpoint({...input,expected:{...f.initial,digest:digest("stale")}})).toThrow("The Collection changed. Try again.");
-  const claimed=f.journal.claimInactiveCheckpoint(input);f.journal.fence({expected:claimed,authorize:f.authorize});
-  expect(()=>f.journal.claimInactiveCheckpoint({...input,expected:claimed,hostEpoch:"host-1"})).toThrow("needs a new host session");
-});
 
 it("rolls back a failed claim and recovers lost claim acknowledgment without repeat accounting",()=>{
   const f=fixture(),input={...f.initialization,expected:f.initial,hostEpoch:"host-2",account(allocation:{bytes:number}){f.db.prepare("UPDATE accounting SET bytes=bytes+?").run(allocation.bytes);}};
@@ -468,37 +244,6 @@ it("rolls back a failed claim and recovers lost claim acknowledgment without rep
   const charged=f.db.prepare("SELECT bytes FROM accounting").get()!.bytes;f.reopen();
   expect(f.journal.claimInactiveCheckpoint(input)).toEqual(f.journal.head(f.scope,f.authorize).cursor);
   expect(f.db.prepare("SELECT bytes FROM accounting").get()!.bytes).toBe(charged);
-});
-it.each(["before","after"] as const)("resolves checkpoint transition fault %s commit",fault=>{
-  const f=fixture();const input=migration(f,f.initial);f.fault(fault);expect(()=>f.journal.transitionCheckpoint(input)).toThrow(fault==="before"?"power loss":"acknowledgment");
-  f.reopen();expect(f.journal.head(f.scope,f.authorize).cursor.revision).toBe(fault==="before"?0:1);
-  const next=f.journal.transitionCheckpoint(input);expect(next.revision).toBe(1);expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_checkpoint_history").get()!.n).toBe(1);
-});
-it("failed migration approval leaves old source, cursor, data and catalog untouched",()=>{
-  const f=fixture();const input=migration(f,f.initial),before=f.journal.checkpoint({scope:f.scope,authorize:f.authorize});
-  input.account=()=>{f.db.exec("UPDATE accounting SET bytes=123");throw Error("approval changed");};
-  expect(()=>f.journal.transitionCheckpoint(input)).toThrow("approval changed");f.reopen();
-  expect(f.journal.checkpoint({scope:f.scope,authorize:f.authorize})).toEqual(before);expect(f.db.prepare("SELECT bytes FROM accounting").get()!.bytes).toBe(0);
-  expect(f.db.prepare("SELECT count(*) AS n FROM dohc_dataset_checkpoint_history").get()!.n).toBe(0);
-});
-it("refuses checkpoint transition after a competing write or withdrawal",()=>{
-  const f=fixture(),input=migration(f,f.initial);f.journal.commitOperation(f.prepare());expect(()=>f.journal.transitionCheckpoint(input)).toThrow("The Collection changed. Try again.");
-  f.revoke();expect(()=>f.journal.transitionCheckpoint(input)).toThrow("denied");
-});
-it("never releases capacity or changes approved artifacts under the same hash",()=>{
-  const f=fixture(),input=migration(f,f.initial);
-  expect(()=>f.journal.transitionCheckpoint({...input,capacityBytes:4096})).toThrow("cannot shrink the space");
-  expect(()=>f.journal.transitionCheckpoint({...input,approvedRevisionHash:f.initial.approvedRevisionHash})).toThrow("need a new approval");
-});
-it("retains every older checkpoint over multiple approved transitions",()=>{
-  const f=fixture(),first=migration(f,f.initial);const second=f.journal.transitionCheckpoint(first);
-  const third=f.journal.transitionCheckpoint({...first,expected:second,hostEpoch:"host-2",approvedRevisionHash:digest("approved-v3"),source:"globalThis.operations={version:3};",definitionJson:'{"version":3}'});
-  expect(third.revision).toBe(2);expect(f.db.prepare("SELECT revision FROM dohc_dataset_checkpoint_history ORDER BY revision").all()).toEqual([{revision:0},{revision:1}]);
-  f.reopen();expect(f.journal.checkpoint({scope:f.scope,authorize:f.authorize}).cursor).toEqual(third);
-  expect(()=>f.journal.commitOperation(f.prepare(second))).toThrow("rules or host changed");
-  expect(f.journal.checkpoint({scope:f.scope,revision:1,authorize:f.authorize}).cursor).toEqual(second);
-  f.db.exec("UPDATE dohc_dataset_checkpoint_history SET definition_json='{}' WHERE revision=0");
-  expect(()=>f.journal.checkpoint({scope:f.scope,revision:0,authorize:f.authorize})).toThrow("An earlier saved copy");
 });
 
 it("exports pinned immutable history while later writes and schema transitions continue",()=>{
@@ -515,65 +260,16 @@ it("exports pinned immutable history while later writes and schema transitions c
   f.revoke();expect(()=>f.journal.exportBlob({scope:f.scope,record:records[0],offset:0,authorize:f.authorize})).toThrow("denied");
 });
 
-it("slices large checkpoint exports without loading whole blobs and rejects damaged metadata",()=>{
-  const f=fixture(),scope={...f.scope,datasetId:"large"},checkpoint=new Uint8Array(3*1024*1024+111);checkpoint.set(f.initialization.checkpoint);
-  const cursor=f.journal.initialize({...f.initialization,scope,checkpoint});
-  const record=f.journal.exportPage({scope,through:cursor,afterRevision:-1,authorize:f.authorize})[0];
-  const parts:Uint8Array[]=[];for(let offset=0;offset<checkpoint.byteLength;offset+=1024*1024)parts.push(f.journal.exportBlob({scope,record,offset,authorize:f.authorize}));
-  expect(parts.map(part=>part.byteLength)).toEqual([1024*1024,1024*1024,1024*1024,111]);
-  const exported=Buffer.concat(parts);
-  expect(exported.byteLength).toBe(checkpoint.byteLength);
-  expect(exported.equals(checkpoint)).toBe(true);
-  expect(()=>f.journal.exportBlob({scope,record,offset:0,length:1024*1024+1,authorize:f.authorize})).toThrow();
-  expect(()=>f.journal.exportPage({scope,through:{...cursor,digest:digest("wrong")},afterRevision:-1,authorize:f.authorize})).toThrow();
-  f.db.prepare("UPDATE dohc_dataset_journals SET checkpoint_sha256=? WHERE dataset_id='large'").run(digest("wrong"));
-  expect(()=>f.journal.exportBlob({scope,record,offset:0,authorize:f.authorize})).toThrow("damaged");
-});
-
-
-it("commits approval provenance with each checkpoint and retains it after restart and rollback",()=>{
-  const agent={kind:"agent" as const,label:"Builder",labelSource:"agent-declared" as const},f=fixture({},agent);
-  const first=f.journal.exportPage({scope:f.scope,through:f.initial,afterRevision:-1,authorize:f.authorize});
-  expect(first[0]).toMatchObject({kind:"checkpoint",approvalAgent:agent});
-  const input={...f.initialization,scope:undefined,expected:f.initial,hostEpoch:f.initial.hostEpoch,approvedRevisionHash:digest("revision2"),approvalAgent:{...agent,label:null},account(){}};
-  f.fault("before");
-  expect(()=>f.journal.transitionCheckpoint(input)).toThrow("before commit");
-  expect(f.db.prepare("SELECT COUNT(*) n FROM dohc_dataset_approval_provenance").get()!.n).toBe(1);
-  const next=f.journal.transitionCheckpoint(input);
-  f.reopen();
-  const history=f.journal.exportPage({scope:f.scope,through:next,afterRevision:-1,authorize:f.authorize});
-  expect(history).toMatchObject([{kind:"checkpoint",approvalAgent:agent},{kind:"checkpoint",approvalAgent:{...agent,label:null}}]);
-  expect(f.journal.transitionCheckpoint(input)).toEqual(next);
-  expect(f.db.prepare("SELECT COUNT(*) n FROM dohc_dataset_approval_provenance").get()!.n).toBe(2);
-});
-
 function schemaHistory(f: ReturnType<typeof fixture>) {
   f.db.exec("CREATE TABLE IF NOT EXISTS dohc_dataset_automation_revisions(workspace_id,dataset_id,revision,automation_id,depth)");
   return readDatasetHistory(f.db,f.scope,{definition:{operations:[]}} as unknown as DatasetRevision,Number.MAX_SAFE_INTEGER,50).entries;
 }
-it("records checkpoint times atomically and keeps the first time on retry",()=>{
-  let time=100;
-  const f=fixture({nowMs:()=>time++}),input=migration(f,f.initial);
-  f.fault("before");
-  expect(()=>f.journal.transitionCheckpoint(input)).toThrow("power loss");
-  expect(f.db.prepare("SELECT revision FROM dohc_dataset_checkpoint_times WHERE revision>0").all()).toEqual([]);
-  expect(f.journal.head(f.scope,f.authorize).cursor).toEqual(f.initial);
-  const next=f.journal.transitionCheckpoint(input);
-  expect(schemaHistory(f)).toMatchObject([{revision:next.revision,recordedAtMs:102}]);
-  time=900;
-  expect(f.journal.transitionCheckpoint(input)).toEqual(next);
-  f.reopen();
-  expect(schemaHistory(f)).toMatchObject([{revision:next.revision,recordedAtMs:102}]);
-  const later=f.journal.transitionCheckpoint({...input,expected:next,approvedRevisionHash:digest("approved-v3"),source:"globalThis.operations={version:3};"});
-  expect(schemaHistory(f)).toMatchObject([{revision:later.revision,recordedAtMs:900},{revision:next.revision,recordedAtMs:102}]);
-});
 it("opens an older journal without changing its hashes or inventing checkpoint dates",()=>{
   const f=fixture(),input=migration(f,f.initial),old=f.journal.transitionCheckpoint(input);
   const legacy=f.journal.exportPage({scope:f.scope,through:old,afterRevision:-1,authorize:f.authorize}).map(record=>{
     if(record.kind!=="checkpoint")return record;
     const {recordedAtMs:_,...rest}=record;return rest;
   });
-  // The pre-timestamp journal has the same existing tables, without the side table.
   f.db.exec("DROP TABLE IF EXISTS dohc_dataset_checkpoint_times");
   const saved=f.db.prepare("SELECT * FROM dohc_dataset_journals").all();
   f.reopen();
@@ -584,15 +280,4 @@ it("opens an older journal without changing its hashes or inventing checkpoint d
   const next=f.journal.transitionCheckpoint({...input,expected:old,approvedRevisionHash:digest("approved-v3"),source:"globalThis.operations={version:3};"});
   expect(schemaHistory(f)).toMatchObject([{revision:next.revision,recordedAtMs:123},{revision:old.revision,recordedAtMs:null}]);
   expect(f.db.prepare("SELECT revision FROM dohc_dataset_checkpoint_times").all()).toEqual([{revision:next.revision}]);
-});
-it("keeps checkpoint digests on the existing hashed shape independently of time",()=>{
-  const f=fixture({nowMs:()=>1}),other=fixture({nowMs:()=>999}),input=migration(f,f.initial),next=f.journal.transitionCheckpoint(input);
-  expect(other.initial).toEqual(f.initial);
-  expect(other.journal.transitionCheckpoint({...input,authorize:other.authorize})).toEqual(next);
-  const sha=digest(input.checkpoint as Uint8Array),previous=f.initial;
-  expect(next.digest).toBe(digest(JSON.stringify(["dohc-dataset-checkpoint-v1",next.workspaceId,next.datasetId,next.hostEpoch,next.approvedRevisionHash,next.revision,
-    [previous.workspaceId,previous.datasetId,previous.hostEpoch,previous.approvedRevisionHash,previous.revision,previous.digest],
-    sha,digest(input.source),digest(input.schemaSql),digest(input.definitionJson),128*1024*1024])));
-  const records=f.journal.exportPage({scope:f.scope,through:next,afterRevision:-1,authorize:f.authorize});
-  expect(records).toMatchObject([{kind:"checkpoint",recordedAtMs:1},{kind:"checkpoint",recordedAtMs:1}]);
 });

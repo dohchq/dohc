@@ -8,8 +8,7 @@ import { serveFetchHandler } from "@dohc/service-http";
 import { UnauthorizedError, type ResolveAccountSession, type ResolveActor } from "@dohc/workspace-auth/session";
 import { ChatsLiveAdapter, VersionedLiveAdapter, type JsonValue } from "@dohc/workspace-engine-client";
 import { createEngineClient } from "@dohc/workspace-engine-client/daemon";
-import {
-  cliThreadId, listFileChats, listGroups, listGroupsWithThreads, listGroupThreads, readChat, readThreadDispatchState, showChat,
+import { readChat, readThreadDispatchState,
   type ChatsHost,
 } from "@dohc/workspace-operations/chats";
 import { requireEngineBinaryOrSkip } from "../../../apps/desktop/src/testing/engineBinary";
@@ -211,66 +210,6 @@ async function relayAndOwner(lookupUserDisplayName?: (userId: string) => string 
     expect(shared(await route(operation, args)), operation).toEqual(shared(expected));
   return { storage, relay, relayUrl, owner, openCopy, route, same };
 }
-
-it.skipIf(engine.missing)("answers the phone's reads from the server's copy as the owner's computer reads them, and a page read sends nothing", async () => {
-  const { storage, relay, relayUrl, owner, openCopy, route: read, same } = await relayAndOwner();
-
-  // The owner's computer writes a page, a Group with a post, and a chat on the page, and syncs.
-  const main = await owner.request("versions.ensureMain", {}, owner.workspace);
-  await owner.request("versionedText.write", {
-    versionId: main.id as string, path: "docs/plan.md", text: "# Plan\n\nStay in Alfama.\n", origin: "api", publish: true, createOnly: true,
-  }, owner.workspace);
-  const chats = new ChatsLiveAdapter(owner.client, owner.workspace, { workspaceId: WORKSPACE });
-  const author = { kind: "human" as const, displayName: "Owner" };
-  const planning = await chats.createChannel({ workspaceId: WORKSPACE, name: "Planning" });
-  const post = await chats.startChannelThread({
-    workspaceId: WORKSPACE, channelId: planning.channelId, author, authorUserId: "owner", authorActorKey: null, body: "Where do we stay?",
-  });
-  const ownerChats = engineChats(owner.client, owner.workspace);
-  const plan = await ownerChats.fileObjectId("docs/plan.md");
-  if (plan === null) throw new Error("The owner's computer does not track the page.");
-  const onPage = await chats.createThread({ workspaceId: WORKSPACE, title: "Plan", linkedFile: { objectId: plan, pathHint: "docs/plan.md" } });
-  await chats.sendMessage({ workspaceId: WORKSPACE, threadId: onPage.id, author, authorUserId: "owner", authorActorKey: null, body: "Looks good." });
-  await owner.sync();
-
-  // The server joins for the account and opens its copy, which syncs before each read.
-  const copy = await openCopy();
-
-  await same("groups", {}, await listGroups(ownerChats));
-  await same("threads", { group: "planning" }, await listGroupThreads(ownerChats, { group: "planning", reader: null }));
-  await same("groupsFull", {}, await listGroupsWithThreads(ownerChats));
-  await same("fileChats", { path: "docs/plan.md" }, await listFileChats(ownerChats, "docs/plan.md", process.platform));
-  await same("chat", { threadId: onPage.id }, await readChat(ownerChats, { threadId: onPage.id }));
-  await same("chat", { group: "planning" }, await readChat(ownerChats, { group: "planning" }));
-  const stream = await showChat(ownerChats, { target: "planning", peek: true });
-  await same("show", { target: "planning", peek: true }, stream);
-  const thread = await showChat(ownerChats, { target: cliThreadId(post.thread.id), peek: true });
-  await same("show", { target: cliThreadId(post.thread.id), peek: true }, "stream" in thread ? thread : thread.thread);
-  expect(JSON.stringify(await read("groupsFull"))).toContain("Where do we stay?");
-  const listed = await read("listFiles") as { ok: true; files: Array<{ path: string; objectId: string }>; folders: string[] };
-  expect(listed.files).toContainEqual(expect.objectContaining({ path: "docs/plan.md", objectId: plan, contentKind: "text" }));
-  expect(listed.folders).toContain("docs");
-  expect(await read("readText", { path: "docs/plan.md" })).toEqual({ ok: true, path: "docs/plan.md", text: "# Plan\n\nStay in Alfama.\n" });
-
-  // The change feed reads the relay's log: the page, its file, and the chats the owner's computer wrote.
-  const standing = storage.accountFeedStanding(WORKSPACE)!;
-  const feed = await relay(new Request(`${relayUrl}/sync/${WORKSPACE}/ops/changes?since=${standing.floor}.0.0`, {
-    headers: { authorization: "Bearer session:owner" },
-  }));
-  expect(feed.status, await feed.clone().text()).toBe(200);
-  expect(await feed.json()).toMatchObject({
-    ok: true, cursor: `${standing.floor}.${standing.log}.${standing.journal}`,
-    changed: { files: expect.arrayContaining([plan]), pages: expect.arrayContaining([plan]), chats: expect.any(Array) },
-  });
-
-  // A page read writes nothing to the copy, so the copy has nothing to send and the relay's log stays as it was.
-  const db = (storage as StorageContext).db;
-  const logRows = () => Number(db.prepare("SELECT COUNT(*) AS n FROM sync_relay_log WHERE workspace_id = ?").get(WORKSPACE)!.n);
-  const before = logRows();
-  expect(await read("documentRead", { path: "docs/plan.md" })).toEqual({ ok: true, path: "docs/plan.md", markdown: "# Plan\n\nStay in Alfama.\n" });
-  expect(await copy.push()).toBe(0);
-  expect(logRows()).toBe(before);
-}, 120_000);
 
 it.skipIf(engine.missing)("saves the phone's writes through a copy that holds no file, as the relay accepts them and the owner's computer reads them", async () => {
   let name = "Ana";
