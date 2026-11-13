@@ -375,7 +375,10 @@ export async function startSelfHostedLiveHost(options: {
       });
     },
     ready(document: LiveDocumentKey) {return current?.isDocumentReady(document) ?? false;},
-    /** Why the running daemon cannot continue the document until its owner tries again, if it cannot. */
+    /**
+     * Why the running daemon cannot continue the document, if it cannot. Each waits for its owner, except a history past the
+     * read budget, which tries again after its wait.
+     */
     blocked(document: {workspaceId: string; objectId: string}) {return current?.blocked(document);},
     /** Why the running daemon's hosted pass left this document held. */
     holdReason(document: {workspaceId: string; objectId: string}) {return current?.holdReason(document);},

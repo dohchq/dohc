@@ -1887,7 +1887,8 @@ export async function startServiceLiveHost(options: {
         return [...diverged].map(([root, workspaceId]) => ({workspaceId, root}));
       },
       /**
-       * Why the hosted document failed the one capture it gets while it cannot progress and waits for its owner, if it did.
+       * Why the hosted document cannot go live, if it cannot. A blocked one failed the one capture it gets and waits for its
+       * owner. One whose history is past the read budget tries again after its wait.
        * A document that is not hosted answers from the block and wait it keeps for when it is added again.
        */
       blocked(document: {workspaceId: string; objectId: string}): ServiceActivationBlock | undefined {
