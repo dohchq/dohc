@@ -127,6 +127,8 @@ export interface ServerOwnerDelivery {
   } | null>;
 }
 type ServerOwnerSession = NonNullable<Awaited<ReturnType<ServerOwnerDelivery["connect"]>>>;
+/** How often each live note opens its connection even when the server's list says nothing changed. */
+export const OWNER_FULL_PASS_MS = 5 * 60_000;
 /**
  * Whether this workspace has no ordinary sync configured: Stop sync saved a
  * pause, or the folder was attached again as local work. Sign-out, a lost
@@ -287,6 +289,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   let activeOwnerWorkspace: string | undefined;
   const failedOwnerDocuments = new Map<string, Set<string>>();
   const frozenOwnerDocuments = new Map<string, Set<string>>();
+  // When each listed note last ran a pass that opened its connection, by workspace and object.
+  const fullOwnerPasses = new Map<string, Map<string, number>>();
   // Notes that take no edits because too many wait to reach the server. The engine lifts it once a pass delivers them.
   const pausedOwnerDocuments = new Map<string, Set<string>>();
   const ownerDeliveryReason = new Map<string, OwnerLiveDeliveryReason>();
@@ -568,6 +572,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     for (const id of ownerDeliveryStatus.keys()) setOwnerDeliveryStatus(id, undefined);
     failedOwnerDocuments.clear();
     frozenOwnerDocuments.clear();
+    fullOwnerPasses.clear();
     pausedOwnerDocuments.clear();
     ownerStopFailures.clear();
     liveDocumentPaths.clear();
@@ -831,6 +836,20 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                       return { documentCount: 0, acknowledged: false };
                     }
                     const document = documents[index % documents.length]!;
+                    const fullPasses =
+                      fullOwnerPasses.get(workspaceId) ?? new Map<string, number>();
+                    for (const objectId of fullPasses.keys())
+                      if (!documents.some((listed) => listed.binding.objectId === objectId))
+                        fullPasses.delete(objectId);
+                    fullOwnerPasses.set(workspaceId, fullPasses);
+                    // A head the list got wrong costs at most OWNER_FULL_PASS_MS: each note still
+                    // opens its connection that often, and after any failed pass.
+                    const passStartedMs = Date.now(),
+                      sinceFullMs =
+                        passStartedMs - (fullPasses.get(document.binding.objectId) ?? -Infinity);
+                    const fullPass =
+                      failures.has(document.binding.currentPath) ||
+                      !(sinceFullMs >= 0 && sinceFullMs < OWNER_FULL_PASS_MS);
                     nativeOwnerDeliveryModule ??= await import("./nativeOwnerDelivery");
                     check();
                     const native = nativeOwnerDeliveryModule;
@@ -861,6 +880,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                         onEnrolled: async () => {
                           await readQuarantinesAfterPass(workspaceId, client, binding.workspace);
                         },
+                        ...(fullPass || document.head === undefined
+                          ? {}
+                          : { serverHead: document.head }),
                       });
                       if (quarantinesMayChange(workspaceId, document.binding.objectId, outcome))
                         await readQuarantinesAfterPass(workspaceId, client, binding.workspace);
@@ -870,6 +892,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                     // A document the server refused names itself in its own notice. It
                     // is not retrying, and the rest of the workspace keeps delivering.
                     const path = document.binding.currentPath;
+                    if (fullPass && result !== "retry")
+                      fullPasses.set(document.binding.objectId, passStartedMs);
                     const blocked = result === "frozen" && !refusedPaths(workspaceId).has(path);
                     if (result === "retry" || blocked) failures.add(path);
                     else failures.delete(path);
