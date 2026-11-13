@@ -1,11 +1,8 @@
-
 export interface EngineYDocSessionSender {
   readonly id: number;
 }
 
-export interface EngineYDocSessionIdentity<
-  TSender extends EngineYDocSessionSender,
-> {
+export interface EngineYDocSessionIdentity<TSender extends EngineYDocSessionSender> {
   sender: TSender;
   generation: number;
 }
@@ -177,14 +174,7 @@ export interface EngineYDocSessionOwnerOptions<
   TUpdate,
   TReplacement,
 > {
-  onOutbound: (
-    outbound: EngineYDocSessionOutbound<
-      TSender,
-      TEvent,
-      TUpdate,
-      TReplacement
-    >,
-  ) => void;
+  onOutbound: (outbound: EngineYDocSessionOutbound<TSender, TEvent, TUpdate, TReplacement>) => void;
   onReleaseFailed?: (
     failure: EngineYDocSessionCaller<TSender> & {
       workspaceId: string;
@@ -209,31 +199,14 @@ export class EngineYDocSessionOwner<
     TReplacement
   >["onOutbound"];
   readonly #onReleaseFailed: NonNullable<
-    EngineYDocSessionOwnerOptions<
-      TSender,
-      TEvent,
-      TUpdate,
-      TReplacement
-    >["onReleaseFailed"]
+    EngineYDocSessionOwnerOptions<TSender, TEvent, TUpdate, TReplacement>["onReleaseFailed"]
   >;
-  readonly #slots = new Map<
-    string,
-    SessionRecord<TSender, TSession, TUpdate, TReplacement>
-  >();
-  readonly #records = new Set<
-    SessionRecord<TSender, TSession, TUpdate, TReplacement>
-  >();
+  readonly #slots = new Map<string, SessionRecord<TSender, TSession, TUpdate, TReplacement>>();
+  readonly #records = new Set<SessionRecord<TSender, TSession, TUpdate, TReplacement>>();
   readonly #senderGenerations = new Map<number, SenderGeneration<TSender>>();
   #shuttingDown = false;
 
-  constructor(
-    options: EngineYDocSessionOwnerOptions<
-      TSender,
-      TEvent,
-      TUpdate,
-      TReplacement
-    >,
-  ) {
+  constructor(options: EngineYDocSessionOwnerOptions<TSender, TEvent, TUpdate, TReplacement>) {
     this.#onOutbound = options.onOutbound;
     this.#onReleaseFailed = options.onReleaseFailed ?? (() => undefined);
   }
@@ -324,10 +297,7 @@ export class EngineYDocSessionOwner<
     if (!record || record.state !== "open" || record.session === null) {
       return { kind: "refused", reason: "session-unavailable" };
     }
-    if (
-      record.handoff !== null ||
-      input.lineageGeneration !== record.lineageGeneration
-    ) {
+    if (record.handoff !== null || input.lineageGeneration !== record.lineageGeneration) {
       return { kind: "refused", reason: "lineage-transition" };
     }
     return { kind: "applied", value: apply(record.session) };
@@ -367,9 +337,7 @@ export class EngineYDocSessionOwner<
   accessSession<TValue>(
     input: EngineYDocSessionCaller<TSender>,
     access: (session: TSession) => TValue,
-  ):
-    | { kind: "available"; value: TValue }
-    | { kind: "refused"; reason: "session-unavailable" } {
+  ): { kind: "available"; value: TValue } | { kind: "refused"; reason: "session-unavailable" } {
     const record = this.#current(input);
     if (!record || record.session === null) {
       return { kind: "refused", reason: "session-unavailable" };
@@ -379,22 +347,36 @@ export class EngineYDocSessionOwner<
 
   ownsDocument(authorityId: symbol, path: string): boolean {
     return [...this.#records].some(
-      (record) =>
-        record.authorityId === authorityId &&
-        record.path === path,
+      (record) => record.authorityId === authorityId && record.path === path,
     );
   }
 
   // `of` narrows the lookup to the session one window opened.
   documentSession(authorityId: symbol, path: string, of?: { sender: TSender; generation: number }) {
-    const record = [...this.#records].find(row => row.authorityId === authorityId && row.path === path && row.state === "open" && row.session !== null && row.handoff === null &&
-      (!of || (row.sender === of.sender && row.generation === of.generation)));
+    const record = [...this.#records].find(
+      (row) =>
+        row.authorityId === authorityId &&
+        row.path === path &&
+        row.state === "open" &&
+        row.session !== null &&
+        row.handoff === null &&
+        (!of || (row.sender === of.sender && row.generation === of.generation)),
+    );
     if (!record) return undefined;
-    const caller = { sender: record.sender, generation: record.generation, sessionId: record.sessionId, lineageGeneration: record.lineageGeneration };
-    return { caller, session: record.session!, assertCurrent: () => {
-      const result = this.applyUpdate(caller, session => session === record.session);
-      if (result.kind !== "applied" || !result.value) throw new Error("Owner session changed.");
-    } };
+    const caller = {
+      sender: record.sender,
+      generation: record.generation,
+      sessionId: record.sessionId,
+      lineageGeneration: record.lineageGeneration,
+    };
+    return {
+      caller,
+      session: record.session!,
+      assertCurrent: () => {
+        const result = this.applyUpdate(caller, (session) => session === record.session);
+        if (result.kind !== "applied" || !result.value) throw new Error("Owner session changed.");
+      },
+    };
   }
 
   forEachSessionUnderPath(
@@ -417,25 +399,24 @@ export class EngineYDocSessionOwner<
   // The session one window closed for this document whose release failed,
   // with the way to retry that release, as the next open of its path would.
   failedRelease(authorityId: symbol, path: string, of: { sender: TSender; generation: number }) {
-    const record = [...this.#records].find((row) => row.authorityId === authorityId && row.path === path &&
-      row.state === "releasing" && row.releaseFailure !== null && row.sender === of.sender && row.generation === of.generation);
+    const record = [...this.#records].find(
+      (row) =>
+        row.authorityId === authorityId &&
+        row.path === path &&
+        row.state === "releasing" &&
+        row.releaseFailure !== null &&
+        row.sender === of.sender &&
+        row.generation === of.generation,
+    );
     return record ? { retry: () => this.#close(record) } : undefined;
   }
 
-  retireAuthority(
-    authorityId: symbol,
-  ): Promise<EngineYDocSessionReleaseOutcome[]> {
-    const records = [...this.#records].filter(
-      (record) => record.authorityId === authorityId,
-    );
-    return Promise.all(
-      records.map((record) => this.#retire(record, "released", true)),
-    );
+  retireAuthority(authorityId: symbol): Promise<EngineYDocSessionReleaseOutcome[]> {
+    const records = [...this.#records].filter((record) => record.authorityId === authorityId);
+    return Promise.all(records.map((record) => this.#retire(record, "released", true)));
   }
 
-  release(
-    input: EngineYDocSessionCaller<TSender>,
-  ): Promise<EngineYDocSessionReleaseResult> {
+  release(input: EngineYDocSessionCaller<TSender>): Promise<EngineYDocSessionReleaseResult> {
     const record = this.#current(input);
     if (!record) {
       return Promise.resolve({
@@ -456,17 +437,13 @@ export class EngineYDocSessionOwner<
         record.senderId === input.sender.id &&
         record.generation === input.generation,
     );
-    return Promise.all(
-      records.map((record) => this.#retire(record, "sender-retired", true)),
-    );
+    return Promise.all(records.map((record) => this.#retire(record, "sender-retired", true)));
   }
 
   shutdown(): Promise<EngineYDocSessionReleaseOutcome[]> {
     this.#shuttingDown = true;
     return Promise.all(
-      [...this.#records].map((record) =>
-        this.#retire(record, "shutting-down", true, true),
-      ),
+      [...this.#records].map((record) => this.#retire(record, "shutting-down", true, true)),
     );
   }
 
@@ -536,11 +513,7 @@ export class EngineYDocSessionOwner<
         record.path === opening.path,
     );
     for (const blocker of blockers) {
-      const release = await this.#retire(
-        blocker,
-        blocker.cancellation ?? "superseded",
-        false,
-      );
+      const release = await this.#retire(blocker, blocker.cancellation ?? "superseded", false);
       if (release.kind === "failed") return release.error;
       if (opening.state === "releasing") return null;
     }
@@ -555,9 +528,15 @@ export class EngineYDocSessionOwner<
       // settle can fail after the editor has gone, and the shell still owes
       // that failure a notice.
       emit: (event) => {
-        this.#send(record, {
-          kind: "session-event", event, ...(record.state === "releasing" ? { closing: true as const } : {}),
-        }, true);
+        this.#send(
+          record,
+          {
+            kind: "session-event",
+            event,
+            ...(record.state === "releasing" ? { closing: true as const } : {}),
+          },
+          true,
+        );
       },
       remoteUpdate: (update) => {
         if (!this.#maySend(record)) return;
@@ -613,7 +592,11 @@ export class EngineYDocSessionOwner<
     message: EngineYDocSessionOutboundMessage<TEvent, TUpdate, TReplacement>,
     whileClosing = false,
   ): boolean {
-    const closing = whileClosing && record.state === "releasing" && this.#records.has(record) && this.#ownsActiveGeneration(record);
+    const closing =
+      whileClosing &&
+      record.state === "releasing" &&
+      this.#records.has(record) &&
+      this.#ownsActiveGeneration(record);
     if (!(this.#maySend(record) || closing)) return false;
     try {
       this.#onOutbound({
@@ -630,15 +613,11 @@ export class EngineYDocSessionOwner<
     }
   }
 
-  #maySend(
-    record: SessionRecord<TSender, TSession, TUpdate, TReplacement>,
-  ): boolean {
+  #maySend(record: SessionRecord<TSender, TSession, TUpdate, TReplacement>): boolean {
     return this.#isCurrentAndActive(record);
   }
 
-  #isCurrentAndActive(
-    record: SessionRecord<TSender, TSession, TUpdate, TReplacement>,
-  ): boolean {
+  #isCurrentAndActive(record: SessionRecord<TSender, TSession, TUpdate, TReplacement>): boolean {
     return (
       this.#ownsActiveGeneration(record) &&
       this.#slots.get(record.key) === record &&
@@ -650,11 +629,7 @@ export class EngineYDocSessionOwner<
     input: EngineYDocSessionCaller<TSender>,
   ): SessionRecord<TSender, TSession, TUpdate, TReplacement> | null {
     const record = this.#slots.get(sessionKey(input.sender.id, input.sessionId));
-    if (
-      !record ||
-      !this.#sameIdentity(record, input) ||
-      !this.#ownsActiveGeneration(record)
-    ) {
+    if (!record || !this.#sameIdentity(record, input) || !this.#ownsActiveGeneration(record)) {
       return null;
     }
     return record;
@@ -684,18 +659,13 @@ export class EngineYDocSessionOwner<
       this.#retireOlderGenerations(input.sender.id, input.generation);
       return null;
     }
-    if (
-      input.generation < current.generation ||
-      input.sender !== current.sender
-    ) {
+    if (input.generation < current.generation || input.sender !== current.sender) {
       return "superseded";
     }
     return current.retired ? "sender-retired" : null;
   }
 
-  #ownsActiveGeneration(
-    record: SessionRecord<TSender, TSession, TUpdate, TReplacement>,
-  ): boolean {
+  #ownsActiveGeneration(record: SessionRecord<TSender, TSession, TUpdate, TReplacement>): boolean {
     const current = this.#senderGenerations.get(record.senderId);
     return (
       current !== undefined &&
@@ -725,10 +695,7 @@ export class EngineYDocSessionOwner<
       this.#retireOlderGenerations(input.sender.id, input.generation);
       return;
     }
-    if (
-      input.generation === current.generation &&
-      input.sender === current.sender
-    ) {
+    if (input.generation === current.generation && input.sender === current.sender) {
       current.retired = true;
       this.#retireOlderGenerations(input.sender.id, input.generation);
     }
@@ -769,9 +736,7 @@ export class EngineYDocSessionOwner<
     record.releaseFailure = null;
     const close = (async (): Promise<EngineYDocSessionReleaseOutcome> => {
       try {
-        await session.close(
-          record.shuttingDown ? { shuttingDown: true } : undefined,
-        );
+        await session.close(record.shuttingDown ? { shuttingDown: true } : undefined);
       } catch (error) {
         record.releaseFailure = { error };
         try {
@@ -808,9 +773,7 @@ export class EngineYDocSessionOwner<
     return { kind: "cancelled", reason, release };
   }
 
-  #forget(
-    record: SessionRecord<TSender, TSession, TUpdate, TReplacement>,
-  ): void {
+  #forget(record: SessionRecord<TSender, TSession, TUpdate, TReplacement>): void {
     if (this.#slots.get(record.key) === record) this.#slots.delete(record.key);
     this.#records.delete(record);
   }

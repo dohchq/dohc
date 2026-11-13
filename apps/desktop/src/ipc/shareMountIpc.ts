@@ -11,7 +11,9 @@ type ShareMountOperation<Workspace> = {
   assertCurrent(): void;
 };
 
-export function createShareMountIpcHandlers<Workspace extends ShareMountCommandWorkspace>(dependencies: {
+export function createShareMountIpcHandlers<
+  Workspace extends ShareMountCommandWorkspace,
+>(dependencies: {
   assertWritableWorkspace(workspace: Workspace): void;
   commands: Pick<ShareMountCommands<WorkspaceSummary>, "mount" | "refresh" | "unmount">;
 }): OperationHandlers<typeof shareMountOperations, unknown, ShareMountOperation<Workspace>> {

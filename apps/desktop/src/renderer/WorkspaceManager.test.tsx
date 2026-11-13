@@ -2,7 +2,12 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { KeptTyping, MenuCommand, ReadCrashReportResult, UpdateCheckResult } from "../ipc/bridgeContract";
+import type {
+  KeptTyping,
+  MenuCommand,
+  ReadCrashReportResult,
+  UpdateCheckResult,
+} from "../ipc/bridgeContract";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { deferred } from "../testing/deferred";
 import { WorkspaceManager } from "./WorkspaceManager";
@@ -12,7 +17,9 @@ let menuListener: ((command: MenuCommand) => void) | null = null;
 const bridge = {
   getDefaultWorkspaceRoot: vi.fn(async () => "/home/sam/dohc"),
   pickWorkspaceRoot: vi.fn(async (): Promise<string | null> => "/home/sam/projects/research"),
-  suggestWorkspaceFolderName: vi.fn(async (payload: { rootPath: string; name: string }) => payload.name),
+  suggestWorkspaceFolderName: vi.fn(
+    async (payload: { rootPath: string; name: string }) => payload.name,
+  ),
   createLocalWorkspace: vi.fn(async () => ({
     workspaceId: "ws-1",
     rootPath: "/home/sam/dohc/personal",
@@ -42,15 +49,21 @@ const bridge = {
   closeThisWindow: vi.fn(async () => undefined),
   onMenuCommand: vi.fn((listener: (command: MenuCommand) => void) => {
     menuListener = listener;
-    return () => { if (menuListener === listener) menuListener = null; };
+    return () => {
+      if (menuListener === listener) menuListener = null;
+    };
   }),
   checkForUpdates: vi.fn(async (): Promise<UpdateCheckResult> => ({
-    checked: true, state: { status: "checking", message: "Checking for updates" },
+    checked: true,
+    state: { status: "checking", message: "Checking for updates" },
   })),
   // The notice dock the connection surfaces raise their failures into.
   getUpdateState: vi.fn(async () => ({ status: "idle" as const, message: "Up to date" })),
   onUpdateState: vi.fn(() => () => undefined),
-  readCrashReport: vi.fn(async (): Promise<ReadCrashReportResult> => ({ report: null, sendTo: null })),
+  readCrashReport: vi.fn(async (): Promise<ReadCrashReportResult> => ({
+    report: null,
+    sendTo: null,
+  })),
   sendCrashReport: vi.fn(async () => ({ sent: true })),
   dismissCrashReport: vi.fn(async () => undefined),
   markCrashReportRead: vi.fn(async () => undefined),
@@ -68,8 +81,18 @@ const locationReads = (path: string) => waitFor(() => expect(location()).toBe(pa
 const nameField = () => screen.getByRole<HTMLInputElement>("textbox", { name: "Workspace name" });
 
 const KNOWN = [
-  { workspaceId: "ws-a", rootPath: "/home/sam/dohc/personal", kind: "personal" as const, mode: "local-first" as const },
-  { workspaceId: "ws-b", rootPath: "/home/sam/dohc/team", kind: "personal" as const, mode: "local-first" as const },
+  {
+    workspaceId: "ws-a",
+    rootPath: "/home/sam/dohc/personal",
+    kind: "personal" as const,
+    mode: "local-first" as const,
+  },
+  {
+    workspaceId: "ws-b",
+    rootPath: "/home/sam/dohc/team",
+    kind: "personal" as const,
+    mode: "local-first" as const,
+  },
 ];
 
 beforeEach(() => {
@@ -89,25 +112,48 @@ afterEach(() => {
 });
 
 describe("workspace manager", () => {
-
   // A first join that fails leaves no workspace, so the manager is the only
   // place its kept typing can show.
   it("offers typing kept from a workspace no longer listed, with no workspace open", async () => {
-    const kept = { workspaceId: "joined-then-failed", recordId: "b".repeat(64), path: "plan.md", text: "typed while joining" };
+    const kept = {
+      workspaceId: "joined-then-failed",
+      recordId: "b".repeat(64),
+      path: "plan.md",
+      text: "typed while joining",
+    };
     bridge.listKeptTyping.mockResolvedValueOnce([kept]);
-    render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
+    render(
+      <WorkspaceManager
+        workspaces={[]}
+        current={null}
+        onForgot={async () => []}
+        onOpenWorkspace={() => {}}
+      />,
+    );
     fireEvent.click(await screen.findByTestId("notice-center-toggle"));
     const row = screen.getByTestId("notice-kept-typing");
     expect(row.textContent).toContain("plan.md");
     fireEvent.click(within(row).getByTestId("recovery-dismiss"));
     fireEvent.click(within(row).getByTestId("recovery-dismiss-confirm"));
-    await waitFor(() => expect(bridge.dismissKeptTyping).toHaveBeenCalledWith({ workspaceId: kept.workspaceId, recordId: kept.recordId }));
+    await waitFor(() =>
+      expect(bridge.dismissKeptTyping).toHaveBeenCalledWith({
+        workspaceId: kept.workspaceId,
+        recordId: kept.recordId,
+      }),
+    );
     await waitFor(() => expect(screen.queryByTestId("notice-kept-typing")).toBeNull());
   });
 
   it("opens with the name in the folder tab selected, so typing replaces it and Enter creates", async () => {
     const user = userEvent.setup();
-    render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
+    render(
+      <WorkspaceManager
+        workspaces={[]}
+        current={null}
+        onForgot={async () => []}
+        onOpenWorkspace={() => {}}
+      />,
+    );
     const name = nameField();
     expect(document.activeElement).toBe(name);
     expect([name.selectionStart, name.selectionEnd]).toEqual([0, "Personal".length]);
@@ -124,15 +170,29 @@ describe("workspace manager", () => {
 
   it("shows a refused create beside the location and keeps the typed name", async () => {
     const user = userEvent.setup();
-    bridge.createLocalWorkspace.mockRejectedValueOnce(new Error("That folder name is not allowed."));
-    render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
+    bridge.createLocalWorkspace.mockRejectedValueOnce(
+      new Error("That folder name is not allowed."),
+    );
+    render(
+      <WorkspaceManager
+        workspaces={[]}
+        current={null}
+        onForgot={async () => []}
+        onOpenWorkspace={() => {}}
+      />,
+    );
     await locationReads("/home/sam/dohc/Personal");
     await user.keyboard("Trip? Lisbon{Enter}");
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toBe("That folder name is not allowed.");
-    expect(alert.previousElementSibling?.contains(screen.getByTestId("new-workspace-location"))).toBe(true);
+    expect(
+      alert.previousElementSibling?.contains(screen.getByTestId("new-workspace-location")),
+    ).toBe(true);
     expect(nameField().value).toBe("Trip? Lisbon");
-    expect(screen.getByRole("button", { name: /create workspace/i })).toHaveProperty("disabled", false);
+    expect(screen.getByRole("button", { name: /create workspace/i })).toHaveProperty(
+      "disabled",
+      false,
+    );
   });
 
   // The name's error, under the folder tab and above the location line.
@@ -140,8 +200,12 @@ describe("workspace manager", () => {
     const alert = screen.getByRole("alert");
     expect(alert.textContent).toBe(message);
     expect(alert.id).toBe("new-workspace-name-error");
-    expect(alert.querySelector("svg")?.closest("[aria-hidden]")?.getAttribute("aria-hidden")).toBe("true");
-    expect(alert.nextElementSibling?.contains(screen.getByTestId("new-workspace-location"))).toBe(true);
+    expect(alert.querySelector("svg")?.closest("[aria-hidden]")?.getAttribute("aria-hidden")).toBe(
+      "true",
+    );
+    expect(alert.nextElementSibling?.contains(screen.getByTestId("new-workspace-location"))).toBe(
+      true,
+    );
     expect(nameField().getAttribute("aria-invalid")).toBe("true");
     expect(nameField().getAttribute("aria-describedby")).toBe(alert.id);
     expect(nameField().className).toContain("shadow-[inset_0_-1px_0_var(--dohc-danger)]");
@@ -155,7 +219,14 @@ describe("workspace manager", () => {
 
   it("checks the name when focus leaves it, and clears the error once the person types", async () => {
     const user = userEvent.setup();
-    render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
+    render(
+      <WorkspaceManager
+        workspaces={[]}
+        current={null}
+        onForgot={async () => []}
+        onOpenWorkspace={() => {}}
+      />,
+    );
     await locationReads("/home/sam/dohc/Personal");
     await user.clear(nameField());
     await user.keyboard("a/");
@@ -168,39 +239,58 @@ describe("workspace manager", () => {
     await user.keyboard("{Backspace}");
     expectNoNameError();
     await user.keyboard("{Enter}");
-    expect(bridge.createLocalWorkspace).toHaveBeenCalledWith(expect.objectContaining({ rootPath: "/home/sam/dohc/a" }));
+    expect(bridge.createLocalWorkspace).toHaveBeenCalledWith(
+      expect.objectContaining({ rootPath: "/home/sam/dohc/a" }),
+    );
   });
 
-  it.each([
-    ["CON", 'Windows keeps "CON" for itself. Choose another name.'],
-  ])("says on Enter why Windows refuses %s, and creates nothing", async (typed, message) => {
-    bridge.platform = "win32";
-    try {
-      const user = userEvent.setup();
-      render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
-      await locationReads("\\home\\sam\\dohc\\Personal");
-      const create = screen.getByRole("button", { name: /create workspace/i });
-      await user.keyboard(typed);
-      expectNoNameError();
-      await user.keyboard("{Enter}");
-      expectNameError(message);
-      expect(document.activeElement).toBe(nameField());
-      expect(create).toHaveProperty("disabled", false);
-      expect(bridge.createLocalWorkspace).not.toHaveBeenCalled();
+  it.each([["CON", 'Windows keeps "CON" for itself. Choose another name.']])(
+    "says on Enter why Windows refuses %s, and creates nothing",
+    async (typed, message) => {
+      bridge.platform = "win32";
+      try {
+        const user = userEvent.setup();
+        render(
+          <WorkspaceManager
+            workspaces={[]}
+            current={null}
+            onForgot={async () => []}
+            onOpenWorkspace={() => {}}
+          />,
+        );
+        await locationReads("\\home\\sam\\dohc\\Personal");
+        const create = screen.getByRole("button", { name: /create workspace/i });
+        await user.keyboard(typed);
+        expectNoNameError();
+        await user.keyboard("{Enter}");
+        expectNameError(message);
+        expect(document.activeElement).toBe(nameField());
+        expect(create).toHaveProperty("disabled", false);
+        expect(bridge.createLocalWorkspace).not.toHaveBeenCalled();
 
-      await user.clear(nameField());
-      await user.keyboard("Trip");
-      expectNoNameError();
-      await user.keyboard("{Enter}");
-      expect(bridge.createLocalWorkspace).toHaveBeenCalledWith(expect.objectContaining({ rootPath: "/home/sam/dohc/Trip" }));
-    } finally {
-      bridge.platform = "linux";
-    }
-  });
+        await user.clear(nameField());
+        await user.keyboard("Trip");
+        expectNoNameError();
+        await user.keyboard("{Enter}");
+        expect(bridge.createLocalWorkspace).toHaveBeenCalledWith(
+          expect.objectContaining({ rootPath: "/home/sam/dohc/Trip" }),
+        );
+      } finally {
+        bridge.platform = "linux";
+      }
+    },
+  );
 
   it("creates nothing in the old location while the picked one is still loading", async () => {
     const user = userEvent.setup();
-    render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
+    render(
+      <WorkspaceManager
+        workspaces={[]}
+        current={null}
+        onForgot={async () => []}
+        onOpenWorkspace={() => {}}
+      />,
+    );
     await locationReads("/home/sam/dohc/Personal");
     const slowCheck = deferred<string>();
     bridge.suggestWorkspaceFolderName.mockReturnValueOnce(slowCheck.promise);
@@ -225,7 +315,14 @@ describe("workspace manager", () => {
     bridge.getDefaultWorkspaceRoot.mockReturnValueOnce(slowDefault.promise);
     bridge.pickWorkspaceRoot.mockRejectedValueOnce(new Error("Dialog unavailable"));
 
-    render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
+    render(
+      <WorkspaceManager
+        workspaces={[]}
+        current={null}
+        onForgot={async () => []}
+        onOpenWorkspace={() => {}}
+      />,
+    );
     const change = await screen.findByRole("button", { name: "Change location" });
     await user.click(change);
     expect(await screen.findByText("Dialog unavailable")).toBeTruthy();
@@ -245,40 +342,67 @@ describe("workspace manager", () => {
   // A folder that can never be a workspace: the toast leads with why and
   // offers another folder, not Try again. The folder is in Details.
   it.each([
-    ["reserved id link", "ReservedWorkspaceIdError", "This folder's workspace ID, link, is reserved. Change workspaceId in .dohc/manifest.json, then open the folder again."],
-  ])("shows the attach refusal for %s in a toast and Notices, with Choose another folder", async (_case, name, body) => {
-    bridge.attachWorkspaceFolder.mockRejectedValueOnce(new Error(
-      `Error invoking remote method 'attachWorkspaceFolder': ${name}: ${body}`,
-    ));
-    const user = userEvent.setup();
-    const onReady = vi.fn();
-    render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={onReady} />);
-    await user.click(await screen.findByRole("button", { name: "Open folder" }));
-    const toast = await screen.findByTestId("workspace-shell-error");
-    expect(toast.textContent?.startsWith(body)).toBe(true);
-    expect(toast.textContent).not.toContain("/home/sam/projects/research");
-    expect(within(toast).queryByRole("button", { name: "Try again" })).toBeNull();
-    expect(within(toast).queryByTestId("workspace-shell-error-copy")).toBeNull();
-    await user.click(within(toast).getByRole("button", { name: "Details" }));
-    await user.click(within(toast).getByRole("button", { name: "Copy details" }));
-    expect((await navigator.clipboard.readText()).split("\n")).toContain("Chosen folder: /home/sam/projects/research");
-    expect(onReady).not.toHaveBeenCalled();
-    await user.click(screen.getByTestId("notice-center-toggle"));
-    const notices = screen.getByTestId("notice-center");
-    const row = within(notices).getByText(body).closest("li")!;
-    expect(within(row).queryByRole("button", { name: "Try again" })).toBeNull();
+    [
+      "reserved id link",
+      "ReservedWorkspaceIdError",
+      "This folder's workspace ID, link, is reserved. Change workspaceId in .dohc/manifest.json, then open the folder again.",
+    ],
+  ])(
+    "shows the attach refusal for %s in a toast and Notices, with Choose another folder",
+    async (_case, name, body) => {
+      bridge.attachWorkspaceFolder.mockRejectedValueOnce(
+        new Error(`Error invoking remote method 'attachWorkspaceFolder': ${name}: ${body}`),
+      );
+      const user = userEvent.setup();
+      const onReady = vi.fn();
+      render(
+        <WorkspaceManager
+          workspaces={[]}
+          current={null}
+          onForgot={async () => []}
+          onOpenWorkspace={onReady}
+        />,
+      );
+      await user.click(await screen.findByRole("button", { name: "Open folder" }));
+      const toast = await screen.findByTestId("workspace-shell-error");
+      expect(toast.textContent?.startsWith(body)).toBe(true);
+      expect(toast.textContent).not.toContain("/home/sam/projects/research");
+      expect(within(toast).queryByRole("button", { name: "Try again" })).toBeNull();
+      expect(within(toast).queryByTestId("workspace-shell-error-copy")).toBeNull();
+      await user.click(within(toast).getByRole("button", { name: "Details" }));
+      await user.click(within(toast).getByRole("button", { name: "Copy details" }));
+      expect((await navigator.clipboard.readText()).split("\n")).toContain(
+        "Chosen folder: /home/sam/projects/research",
+      );
+      expect(onReady).not.toHaveBeenCalled();
+      await user.click(screen.getByTestId("notice-center-toggle"));
+      const notices = screen.getByTestId("notice-center");
+      const row = within(notices).getByText(body).closest("li")!;
+      expect(within(row).queryByRole("button", { name: "Try again" })).toBeNull();
 
-    await user.click(within(row).getByRole("button", { name: "Choose another folder" }));
-    await waitFor(() => expect(onReady).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-attached" })));
-    expect(bridge.pickWorkspaceRoot).toHaveBeenCalledTimes(2);
-  });
+      await user.click(within(row).getByRole("button", { name: "Choose another folder" }));
+      await waitFor(() =>
+        expect(onReady).toHaveBeenCalledWith(
+          expect.objectContaining({ workspaceId: "ws-attached" }),
+        ),
+      );
+      expect(bridge.pickWorkspaceRoot).toHaveBeenCalledTimes(2);
+    },
+  );
 
   it("keeps a connection failure after the route that raised it closes", async () => {
     const user = userEvent.setup();
     bridge.cloudLoginStart.mockRejectedValueOnce(
       new Error("dohc found no dohc server at https://dohc.example.test."),
     );
-    render(<WorkspaceManager workspaces={[]} current={null} onForgot={async () => []} onOpenWorkspace={() => {}} />);
+    render(
+      <WorkspaceManager
+        workspaces={[]}
+        current={null}
+        onForgot={async () => []}
+        onOpenWorkspace={() => {}}
+      />,
+    );
     await locationReads("/home/sam/dohc/Personal");
     await user.click(screen.getByTestId("first-run-join-synced"));
 
@@ -310,10 +434,14 @@ describe("workspace manager", () => {
 });
 
 describe("workspace manager with registered workspaces", () => {
-
   it("resizes the list by drag and keyboard and remembers the width", () => {
     render(
-      <WorkspaceManager workspaces={KNOWN} current={null} onForgot={async () => KNOWN} onOpenWorkspace={() => {}} />,
+      <WorkspaceManager
+        workspaces={KNOWN}
+        current={null}
+        onForgot={async () => KNOWN}
+        onOpenWorkspace={() => {}}
+      />,
     );
     const list = screen.getByTestId("workspace-manager-list");
     const handle = screen.getByTestId("workspace-manager-list-resize");
@@ -335,7 +463,11 @@ describe("workspace manager with registered workspaces", () => {
 
   it.each([
     { order: "an older refresh that works leaves a newer failure", newer: "fails", older: "works" },
-    { order: "an older refresh that fails stays quiet after a newer one worked", newer: "works", older: "fails" },
+    {
+      order: "an older refresh that fails stays quiet after a newer one worked",
+      newer: "works",
+      older: "fails",
+    },
   ] as const)("only the newest list refresh reports: $order", async ({ newer, older }) => {
     const user = userEvent.setup();
     const first = deferred<Workspace[]>();
@@ -346,7 +478,14 @@ describe("workspace manager with registered workspaces", () => {
         if (newer === "fails") throw new Error("The workspace list could not be read.");
         return [];
       });
-    render(<WorkspaceManager workspaces={KNOWN} current={null} onForgot={onForgot} onOpenWorkspace={() => {}} />);
+    render(
+      <WorkspaceManager
+        workspaces={KNOWN}
+        current={null}
+        onForgot={onForgot}
+        onOpenWorkspace={() => {}}
+      />,
+    );
     const remove = async (name: string) => {
       await user.click(await screen.findByRole("button", { name: `More for ${name}` }));
       await user.click(screen.getByRole("menuitem", { name: "Remove from list" }));
@@ -362,7 +501,9 @@ describe("workspace manager with registered workspaces", () => {
       await first.promise.catch(() => {});
     });
     if (newer === "fails") {
-      expect(screen.getByTestId("workspace-shell-error").textContent).toContain("dohc could not refresh the workspace list.");
+      expect(screen.getByTestId("workspace-shell-error").textContent).toContain(
+        "dohc could not refresh the workspace list.",
+      );
     } else {
       expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
       expect(screen.queryByTestId("connection-notices")).toBeNull();
@@ -372,13 +513,22 @@ describe("workspace manager with registered workspaces", () => {
   it("asks first when the row holds more than its place, and Cancel keeps it", async () => {
     const user = userEvent.setup();
     const synced = [KNOWN[0], { ...KNOWN[1], sync: "on" as const, joinedChatCount: 2 }];
-    render(<WorkspaceManager workspaces={synced} current={null} onForgot={async () => synced} onOpenWorkspace={() => {}} />);
+    render(
+      <WorkspaceManager
+        workspaces={synced}
+        current={null}
+        onForgot={async () => synced}
+        onOpenWorkspace={() => {}}
+      />,
+    );
     await user.click(await screen.findByRole("button", { name: "More for team" }));
     await user.click(screen.getByRole("menuitem", { name: "Remove from list" }));
 
     const dialog = screen.getByTestId("workspace-remove-confirm");
     expect(within(dialog).getByRole("heading").textContent).toBe("Remove team from this list?");
-    expect(dialog.textContent).toContain("Sync turns off. Turn it on again in Settings › Sync and sharing.");
+    expect(dialog.textContent).toContain(
+      "Sync turns off. Turn it on again in Settings › Sync and sharing.",
+    );
     expect(dialog.textContent).toContain("2 shared chats leave this workspace.");
     const confirm = screen.getByTestId("workspace-remove-confirm-button");
     expect(confirm.textContent).toBe("Remove from list");
@@ -399,8 +549,17 @@ describe("workspace manager with registered workspaces", () => {
     const synced = [KNOWN[0], { ...KNOWN[1], sync: "paused" as const }];
     const onForgot = vi.fn(async () => [KNOWN[0]]);
     const removal = deferred<undefined>();
-    bridge.forgetWorkspace.mockRejectedValueOnce(new Error("disk full")).mockReturnValueOnce(removal.promise);
-    render(<WorkspaceManager workspaces={synced} current={null} onForgot={onForgot} onOpenWorkspace={() => {}} />);
+    bridge.forgetWorkspace
+      .mockRejectedValueOnce(new Error("disk full"))
+      .mockReturnValueOnce(removal.promise);
+    render(
+      <WorkspaceManager
+        workspaces={synced}
+        current={null}
+        onForgot={onForgot}
+        onOpenWorkspace={() => {}}
+      />,
+    );
     await user.click(await screen.findByRole("button", { name: "More for team" }));
     await user.click(screen.getByRole("menuitem", { name: "Remove from list" }));
     await user.click(screen.getByTestId("workspace-remove-confirm-button"));
@@ -424,11 +583,18 @@ describe("workspace manager with registered workspaces", () => {
     const onOpen = vi
       .fn<(workspace: Workspace) => Promise<void>>()
       .mockRejectedValueOnce(
-        new Error("Error invoking remote method 'desktop:open-workspace-window': Error: That folder is gone."),
+        new Error(
+          "Error invoking remote method 'desktop:open-workspace-window': Error: That folder is gone.",
+        ),
       )
       .mockResolvedValueOnce(undefined);
     render(
-      <WorkspaceManager workspaces={KNOWN} current={null} onForgot={async () => KNOWN} onOpenWorkspace={onOpen} />,
+      <WorkspaceManager
+        workspaces={KNOWN}
+        current={null}
+        onForgot={async () => KNOWN}
+        onOpenWorkspace={onOpen}
+      />,
     );
     await user.click(await screen.findByTitle("/home/sam/dohc/team"));
     const toast = await screen.findByTestId("workspace-shell-error");
@@ -444,14 +610,24 @@ describe("workspace manager with registered workspaces", () => {
     const user = userEvent.setup();
     bridge.forgetWorkspace.mockRejectedValueOnce(new Error("disk full"));
     const view = render(
-      <WorkspaceManager workspaces={KNOWN} current={null} onForgot={async () => KNOWN} onOpenWorkspace={() => {}} />,
+      <WorkspaceManager
+        workspaces={KNOWN}
+        current={null}
+        onForgot={async () => KNOWN}
+        onOpenWorkspace={() => {}}
+      />,
     );
     await user.click(await screen.findByRole("button", { name: "More for team" }));
     await user.click(screen.getByRole("menuitem", { name: "Remove from list" }));
     await screen.findByTestId("workspace-shell-error");
     const synced = KNOWN.map((row) => ({ ...row, sync: "on" as const }));
     view.rerender(
-      <WorkspaceManager workspaces={synced} current={null} onForgot={async () => synced} onOpenWorkspace={() => {}} />,
+      <WorkspaceManager
+        workspaces={synced}
+        current={null}
+        onForgot={async () => synced}
+        onOpenWorkspace={() => {}}
+      />,
     );
     await user.click(screen.getByRole("button", { name: "More for personal" }));
     const removePersonal = screen.getByRole("menuitem", { name: "Remove from list" });
@@ -462,8 +638,9 @@ describe("workspace manager with registered workspaces", () => {
       fireEvent.click(removePersonal);
       fireEvent.click(retryTeam);
     });
-    expect(within(screen.getByTestId("workspace-remove-confirm")).getByRole("heading").textContent)
-      .toBe("Remove personal from this list?");
+    expect(
+      within(screen.getByTestId("workspace-remove-confirm")).getByRole("heading").textContent,
+    ).toBe("Remove personal from this list?");
     expect(screen.getByTestId("workspace-shell-error").textContent).toContain(
       "dohc could not remove this workspace from the list.",
     );
@@ -473,7 +650,12 @@ describe("workspace manager with registered workspaces", () => {
   it("drives the row menu from the keyboard and returns focus to its trigger", async () => {
     const user = userEvent.setup();
     render(
-      <WorkspaceManager workspaces={KNOWN} current={null} onForgot={async () => KNOWN} onOpenWorkspace={() => {}} />,
+      <WorkspaceManager
+        workspaces={KNOWN}
+        current={null}
+        onForgot={async () => KNOWN}
+        onOpenWorkspace={() => {}}
+      />,
     );
     const trigger = await screen.findByRole("button", { name: "More for team" });
     trigger.focus();

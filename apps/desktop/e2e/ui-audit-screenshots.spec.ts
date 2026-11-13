@@ -177,9 +177,7 @@ async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
     // software rendering a blind timeout races the repaint and intermittently
     // yields a light-themed editor inside dark chrome.
     void getComputedStyle(document.body).backgroundColor;
-    await new Promise((resolve) =>
-      requestAnimationFrame(() => requestAnimationFrame(resolve)),
-    );
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   }, theme);
   await page.waitForTimeout(150);
 }
@@ -192,11 +190,7 @@ test("@ui-audit capture baseline screenshots", async () => {
   }
   await mkdir(SHOT_DIR, { recursive: true });
   const bundles = currentUiAuditBundles(DESKTOP_ROOT);
-  const build = readUiAuditBuildProvenance(
-    DESKTOP_ROOT,
-    captureCommit,
-    bundles,
-  );
+  const build = readUiAuditBuildProvenance(DESKTOP_ROOT, captureCommit, bundles);
   activeCapture = {
     schemaVersion: 1,
     state: "in-progress",
@@ -224,7 +218,9 @@ test("@ui-audit capture baseline screenshots", async () => {
     const page = desktop.page;
 
     // 01 — first-run surface (before opening the workspace)
-    const openFolder = page.getByTestId("workspace-manager").getByRole("button", { name: "Open folder", exact: true });
+    const openFolder = page
+      .getByTestId("workspace-manager")
+      .getByRole("button", { name: "Open folder", exact: true });
     await openFolder.waitFor({ state: "visible", timeout: 8_000 });
     await shot(page, "01-first-run-light");
     await setTheme(page, "dark");
@@ -269,9 +265,7 @@ test("@ui-audit capture baseline screenshots", async () => {
 
     // 07 — search view with results
     await page.getByTestId(activityPin("search")).click();
-    const searchInput = page
-      .locator('input[type="search"], input[placeholder*="earch"]')
-      .first();
+    const searchInput = page.locator('input[type="search"], input[placeholder*="earch"]').first();
     await searchInput.waitFor({ state: "visible", timeout: 5_000 });
     await searchInput.fill("agent");
     await page.waitForTimeout(1_200);
@@ -356,7 +350,11 @@ test("@ui-audit capture baseline screenshots", async () => {
 
     // 20 — inline properties under the title. They render in the document
     // flow now (no toggle), so just open the doc and capture.
-    if (!(await explorerRow(page, "notes").isVisible().catch(() => false))) {
+    if (
+      !(await explorerRow(page, "notes")
+        .isVisible()
+        .catch(() => false))
+    ) {
       await page.getByTestId(activityPin("explorer")).click();
     }
     await revealExplorerPath(page, "notes/product-plan.md");
@@ -364,9 +362,7 @@ test("@ui-audit capture baseline screenshots", async () => {
     await expect(page.getByTestId("markdown-editor")).toBeVisible({
       timeout: 20_000,
     });
-    await page
-      .getByTestId("properties-panel")
-      .waitFor({ state: "visible", timeout: 5_000 });
+    await page.getByTestId("properties-panel").waitFor({ state: "visible", timeout: 5_000 });
     const propertyKeys = page.getByTestId("property-key");
     await expect(propertyKeys).toHaveCount(3);
     const propertyNames = await propertyKeys.evaluateAll((inputs) =>
@@ -374,15 +370,10 @@ test("@ui-audit capture baseline screenshots", async () => {
     );
     const statusIndex = propertyNames.indexOf("status");
     expect(statusIndex).toBeGreaterThanOrEqual(0);
-    await expect(page.getByTestId("property-value").nth(statusIndex)).toHaveValue(
-      "In progress",
-    );
+    await expect(page.getByTestId("property-value").nth(statusIndex)).toHaveValue("In progress");
     await page.waitForTimeout(500);
     await shot(page, "20-properties-panel-light");
-    if (
-      git(["rev-parse", "HEAD"]) !== captureCommit ||
-      git(["status", "--porcelain"]) !== ""
-    ) {
+    if (git(["rev-parse", "HEAD"]) !== captureCommit || git(["status", "--porcelain"]) !== "") {
       throw new Error("the worktree changed during the UI audit capture");
     }
     const capturedShots = activeCapture.shots.map((entry) => entry.name).sort();

@@ -11,13 +11,7 @@ describe("useAsyncResponseEffect", () => {
     const response = deferred<string>();
     const onSuccess = vi.fn();
     const onError = vi.fn();
-    renderHook(() =>
-      useAsyncResponseEffect(
-        () => response.promise,
-        { onSuccess, onError },
-        [],
-      ),
-    );
+    renderHook(() => useAsyncResponseEffect(() => response.promise, { onSuccess, onError }, []));
 
     await act(async () => {
       response.resolve("ready");
@@ -32,13 +26,7 @@ describe("useAsyncResponseEffect", () => {
     const response = deferred<string>();
     const onSuccess = vi.fn();
     const onError = vi.fn();
-    renderHook(() =>
-      useAsyncResponseEffect(
-        () => response.promise,
-        { onSuccess, onError },
-        [],
-      ),
-    );
+    renderHook(() => useAsyncResponseEffect(() => response.promise, { onSuccess, onError }, []));
 
     const failure = new Error("unavailable");
     await act(async () => {
@@ -113,11 +101,7 @@ describe("useAsyncResponseEffect", () => {
     const response = deferred<string>();
     const onSuccess = vi.fn();
     const view = renderHook(() =>
-      useAsyncResponseEffect(
-        () => response.promise,
-        { onSuccess, onError: vi.fn() },
-        [],
-      ),
+      useAsyncResponseEffect(() => response.promise, { onSuccess, onError: vi.fn() }, []),
     );
 
     view.unmount();
@@ -132,9 +116,7 @@ describe("useAsyncResponseEffect", () => {
     const request = vi.fn(() => null);
     const onSuccess = vi.fn();
     const onError = vi.fn();
-    renderHook(() =>
-      useAsyncResponseEffect(request, { onSuccess, onError }, []),
-    );
+    renderHook(() => useAsyncResponseEffect(request, { onSuccess, onError }, []));
 
     expect(request).toHaveBeenCalledOnce();
     expect(onSuccess).not.toHaveBeenCalled();
@@ -171,15 +153,9 @@ describe("useAsyncResponseEffect", () => {
       .mockReturnValueOnce(retired.promise)
       .mockReturnValueOnce(current.promise);
     const onSuccess = vi.fn();
-    renderHook(
-      () =>
-        useAsyncResponseEffect(
-          request,
-          { onSuccess, onError: vi.fn() },
-          [],
-        ),
-      { reactStrictMode: true },
-    );
+    renderHook(() => useAsyncResponseEffect(request, { onSuccess, onError: vi.fn() }, []), {
+      reactStrictMode: true,
+    });
     expect(request).toHaveBeenCalledTimes(2);
 
     await act(async () => {

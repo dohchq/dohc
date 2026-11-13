@@ -54,9 +54,7 @@ describe("searchDemoDocuments", () => {
   });
 
   it("returns no results for an invalid regular expression", () => {
-    expect(
-      searchDemoDocuments(documents, { query: "[", regex: true }),
-    ).toEqual([]);
+    expect(searchDemoDocuments(documents, { query: "[", regex: true })).toEqual([]);
   });
 });
 

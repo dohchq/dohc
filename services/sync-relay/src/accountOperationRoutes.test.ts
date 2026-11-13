@@ -1,13 +1,29 @@
 import { streamsRequestBody } from "./server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TokenBucketLimiter } from "@dohc/service-http";
-import { UnauthorizedError, type AccountSession, type ResolveAccountSession } from "@dohc/workspace-auth/session";
-import { CHATS_METHOD, ChatsLiveAdapter, VersionedLiveAdapter, type EngineTransport, type JsonValue } from "@dohc/workspace-engine-client";
+import {
+  UnauthorizedError,
+  type AccountSession,
+  type ResolveAccountSession,
+} from "@dohc/workspace-auth/session";
+import {
+  CHATS_METHOD,
+  ChatsLiveAdapter,
+  VersionedLiveAdapter,
+  type EngineTransport,
+  type JsonValue,
+} from "@dohc/workspace-engine-client";
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
 import { cliThreadId } from "@dohc/workspace-operations/chats";
 import { asRecord } from "@dohc/workspace-core";
-import { ChatsLoopbackEngine, VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
-import { cleanupLiveDeliveryFixtures, registered } from "../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport";
+import {
+  ChatsLoopbackEngine,
+  VersionedLoopbackEngine,
+} from "@dohc/workspace-engine-client/testing";
+import {
+  cleanupLiveDeliveryFixtures,
+  registered,
+} from "../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport";
 import { phoneWriteIds, runPhoneWrite, type PhoneWrite } from "./accountChatWrites";
 import { ACCOUNT_FEED_WAITS_PER_ACCOUNT } from "./accountFeed";
 import { createAccountDeletionRoute } from "./accountDeletionRoute";
@@ -15,7 +31,12 @@ import { DiscussionActivityHub } from "./discussionActivity";
 import type { AutomationReplica } from "./automationReplicas";
 import { ACCOUNT_VISITS_PER_CALLER, startServerCopies } from "./serverCopies";
 import type { SyncRelayStorage } from "./storage";
-import { CHAT_RUNNER_LEASE_MS, CHAT_WAKE_CONFIRM_MS, CHAT_WAKE_KEEP_MS, chatWakeId } from "./storage/chatWakes";
+import {
+  CHAT_RUNNER_LEASE_MS,
+  CHAT_WAKE_CONFIRM_MS,
+  CHAT_WAKE_KEEP_MS,
+  chatWakeId,
+} from "./storage/chatWakes";
 import type { StorageContext } from "./storage/context";
 import { closeTestStorages, denialBytes, json, testHandler, testStorage } from "./testing";
 import { PhoneWriteEngine, seedPhoneChats } from "./testing/phoneWriteEngine";
@@ -34,15 +55,29 @@ afterEach(async () => {
 
 // `Bearer session:<user>:<session>` is a valid sign-in; anything else is not.
 const resolveAccountSession: ResolveAccountSession = async (request) => {
-  const match = /^Bearer session:([\w-]+):([\w-]+)$/u.exec(request.headers.get("authorization") ?? "");
+  const match = /^Bearer session:([\w-]+):([\w-]+)$/u.exec(
+    request.headers.get("authorization") ?? "",
+  );
   if (!match) throw new UnauthorizedError();
-  return { userId: match[1]!, sessionId: match[2]!, expiresAtMs: Number.MAX_SAFE_INTEGER } satisfies AccountSession;
+  return {
+    userId: match[1]!,
+    sessionId: match[2]!,
+    expiresAtMs: Number.MAX_SAFE_INTEGER,
+  } satisfies AccountSession;
 };
-const signedIn = (userId: string, sessionId = "phone") => ({ authorization: `Bearer session:${userId}:${sessionId}` });
+const signedIn = (userId: string, sessionId = "phone") => ({
+  authorization: `Bearer session:${userId}:${sessionId}`,
+});
 
-function op(workspaceId: string, operation: string, args: unknown = {}, headers: Record<string, string> = signedIn("ana")): Request {
+function op(
+  workspaceId: string,
+  operation: string,
+  args: unknown = {},
+  headers: Record<string, string> = signedIn("ana"),
+): Request {
   return new Request(`http://relay.test/sync/${encodeURIComponent(workspaceId)}/ops/${operation}`, {
-    method: "POST", headers: { ...headers, "content-type": "application/json" },
+    method: "POST",
+    headers: { ...headers, "content-type": "application/json" },
     body: typeof args === "string" ? args : JSON.stringify(args),
   });
 }
@@ -57,7 +92,9 @@ class TestEngine implements EngineTransport {
   readonly files = new VersionedLoopbackEngine();
   readonly failing = new Map<string, Error>();
   readonly listedHidden: string[] = [];
-  onEvent() { return () => undefined; }
+  onEvent() {
+    return () => undefined;
+  }
   close() {}
   async sendRequest(request: Parameters<EngineTransport["sendRequest"]>[0]) {
     const failure = this.failing.get(request.method);
@@ -66,7 +103,11 @@ class TestEngine implements EngineTransport {
     const response = await this.files.sendRequest(request);
     if (request.method !== "versionedText.list" || this.listedHidden.length === 0) return response;
     const page = response.result as { files: Array<Record<string, JsonValue>> };
-    const listed = this.listedHidden.map((path) => ({ ...page.files[0]!, path, objectId: `object-${path}` }));
+    const listed = this.listedHidden.map((path) => ({
+      ...page.files[0]!,
+      path,
+      objectId: `object-${path}`,
+    }));
     return { ...response, result: { ...page, files: [...page.files, ...listed] } };
   }
   methods(): string[] {
@@ -80,7 +121,12 @@ async function serverCopies(storage: SyncRelayStorage, engine: TestEngine) {
   let requestId = 0;
   const lifetime = new AbortController();
   const copies = await startServerCopies({
-    storage, root: "unused", engineExecutable: "unused", relayOrigin: "https://relay.example.test", key: new Uint8Array(32), namespace: "test",
+    storage,
+    root: "unused",
+    engineExecutable: "unused",
+    relayOrigin: "https://relay.example.test",
+    key: new Uint8Array(32),
+    namespace: "test",
     startReplicas: async (hooks) => {
       const open = new Map<string, AutomationReplica>();
       const pass = () => {
@@ -89,47 +135,91 @@ async function serverCopies(storage: SyncRelayStorage, engine: TestEngine) {
           const row = storage.joinAutomationWorkspace({ workspaceId, nowMs: 1, reasons });
           if (!row || open.has(workspaceId)) continue;
           open.set(workspaceId, {
-            workspaceId, ownerUserId: row.ownerUserId, incarnation: row.incarnation, reasons: row.reasons, startedAtMs: 1, pulledHead: 0,
-            root: "unused", metadataDir: "unused", client: engine as unknown as EngineClient, workspace: workspaceId, signal: lifetime.signal,
-            nextRequestId: () => ++requestId, withRecordWork: (work) => work(), step: async () => true,
-            sync: async () => { syncs.push(workspaceId); await held; },
+            workspaceId,
+            ownerUserId: row.ownerUserId,
+            incarnation: row.incarnation,
+            reasons: row.reasons,
+            startedAtMs: 1,
+            pulledHead: 0,
+            root: "unused",
+            metadataDir: "unused",
+            client: engine as unknown as EngineClient,
+            workspace: workspaceId,
+            signal: lifetime.signal,
+            nextRequestId: () => ++requestId,
+            withRecordWork: (work) => work(),
+            step: async () => true,
+            sync: async () => {
+              syncs.push(workspaceId);
+              await held;
+            },
           });
           hooks.onChanged?.(workspaceId);
         }
-        for (const workspaceId of [...open.keys()]) if (!wanted.has(workspaceId)) open.delete(workspaceId);
+        for (const workspaceId of [...open.keys()])
+          if (!wanted.has(workspaceId)) open.delete(workspaceId);
       };
-      return { unavailable: false, replica: (id) => open.get(id), reconcile: () => queueMicrotask(pass), deleteWorkspaces: async () => undefined,
-        failedSyncs: () => new Map(), settled: async () => undefined, close: async () => undefined };
+      return {
+        unavailable: false,
+        replica: (id) => open.get(id),
+        reconcile: () => queueMicrotask(pass),
+        deleteWorkspaces: async () => undefined,
+        failedSyncs: () => new Map(),
+        settled: async () => undefined,
+        close: async () => undefined,
+      };
     },
   });
-  cleanup.push(async () => { lifetime.abort(); await copies.close(); });
+  cleanup.push(async () => {
+    lifetime.abort();
+    await copies.close();
+  });
   return {
-    copies, syncs,
+    copies,
+    syncs,
     /** Holds every sync until the returned function is called. */
     holdSyncs() {
       let release!: () => void;
-      held = new Promise((resolve) => { release = resolve; });
-      return () => { held = null; release(); };
+      held = new Promise((resolve) => {
+        release = resolve;
+      });
+      return () => {
+        held = null;
+        release();
+      };
     },
   };
 }
 
-async function relay(options: {
-  resolve?: ResolveAccountSession; limiter?: TokenBucketLimiter; activity?: DiscussionActivityHub;
-  /** False for a server whose copies aren't running. */
-  copies?: boolean;
-} = {}) {
+async function relay(
+  options: {
+    resolve?: ResolveAccountSession;
+    limiter?: TokenBucketLimiter;
+    activity?: DiscussionActivityHub;
+    /** False for a server whose copies aren't running. */
+    copies?: boolean;
+  } = {},
+) {
   const storage = await testStorage();
-  for (const [workspaceId, ownerUserId] of [["trip", "ana"], ["notes", "ana"], ["budget", "ben"]] as const) {
+  for (const [workspaceId, ownerUserId] of [
+    ["trip", "ana"],
+    ["notes", "ana"],
+    ["budget", "ben"],
+  ] as const) {
     storage.claimWorkspace({ workspaceId, ownerUserId, createdAtMs: 1 });
-    if (workspaceId !== "notes") storage.claimWorkspaceIdentity({ workspaceId, replicationEpoch: "epoch", streamIdentity: "stream" });
+    if (workspaceId !== "notes")
+      storage.claimWorkspaceIdentity({
+        workspaceId,
+        replicationEpoch: "epoch",
+        streamIdentity: "stream",
+      });
   }
   const engine = new TestEngine();
   const run = await serverCopies(storage, engine);
   const activity = options.activity ?? new DiscussionActivityHub();
   const h = testHandler(storage, {
     resolveAccountSession: options.resolve ?? resolveAccountSession,
-    serverCopies: () => options.copies === false ? undefined : run.copies,
+    serverCopies: () => (options.copies === false ? undefined : run.copies),
     ...(options.limiter ? { accountOperationRateLimiter: options.limiter } : {}),
     discussionActivity: activity,
   });
@@ -139,16 +229,45 @@ async function relay(options: {
 /** A trip with a Group, a thread with two attachments, a page, and a thread on the page. */
 async function seedTrip(engine: TestEngine) {
   const chats = new ChatsLiveAdapter(engine, "trip", { workspaceId: "trip" });
-  engine.files.seedTextFile({ workspace: "trip", path: "docs/plan.md", text: "# Plan\n\nStay in Alfama.\n", objectId: "object-plan" });
+  engine.files.seedTextFile({
+    workspace: "trip",
+    path: "docs/plan.md",
+    text: "# Plan\n\nStay in Alfama.\n",
+    objectId: "object-plan",
+  });
   const planning = await chats.createChannel({ workspaceId: "trip", name: "Planning" });
   const author = { kind: "human" as const, displayName: "Ana" };
   const started = await chats.startChannelThread({
-    workspaceId: "trip", channelId: planning.channelId, threadId: "thread-stay", messageId: "message-stay", author, authorActorKey: null,
-    body: "Where do we stay?", attachments: [{ objectId: "object-plan", pathHint: "docs/plan.md" }, { objectId: "object-env", pathHint: ".env" }],
+    workspaceId: "trip",
+    channelId: planning.channelId,
+    threadId: "thread-stay",
+    messageId: "message-stay",
+    author,
+    authorActorKey: null,
+    body: "Where do we stay?",
+    attachments: [
+      { objectId: "object-plan", pathHint: "docs/plan.md" },
+      { objectId: "object-env", pathHint: ".env" },
+    ],
   });
-  const onPage = await chats.createThread({ workspaceId: "trip", title: "Plan", linkedFile: { objectId: "object-plan", pathHint: "docs/plan.md" } });
-  await chats.sendMessage({ workspaceId: "trip", threadId: onPage.id, messageId: "message-page", author, authorActorKey: null, body: "Looks good." });
-  const onSecret = await chats.createThread({ workspaceId: "trip", title: "Keys", linkedFile: { objectId: "object-env", pathHint: ".env" } });
+  const onPage = await chats.createThread({
+    workspaceId: "trip",
+    title: "Plan",
+    linkedFile: { objectId: "object-plan", pathHint: "docs/plan.md" },
+  });
+  await chats.sendMessage({
+    workspaceId: "trip",
+    threadId: onPage.id,
+    messageId: "message-page",
+    author,
+    authorActorKey: null,
+    body: "Looks good.",
+  });
+  const onSecret = await chats.createThread({
+    workspaceId: "trip",
+    title: "Keys",
+    linkedFile: { objectId: "object-env", pathHint: ".env" },
+  });
   return { planning, thread: started.thread, onPage, onSecret };
 }
 
@@ -163,19 +282,34 @@ async function answer(response: Response) {
  * It calls wakeLog itself, so a test that needs a route to wake the feed
  * writes through that route instead.
  */
-function logWriter(storage: SyncRelayStorage, activity: DiscussionActivityHub, workspaceId = "trip") {
+function logWriter(
+  storage: SyncRelayStorage,
+  activity: DiscussionActivityHub,
+  workspaceId = "trip",
+) {
   const context = storage as StorageContext;
   let originSeq = 0;
-  const append = (opKind: string, payload: Record<string, unknown>) => context.tx(() => {
-    const row = context.db.prepare(`INSERT INTO sync_relay_log (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms)
-      VALUES (?, 'origin-test', ?, ?, ?, 1) RETURNING relay_seq`).get(workspaceId, ++originSeq, opKind, JSON.stringify(payload))!;
-    const relaySeq = Number(row.relay_seq);
-    if (opKind === "moment.append") {
-      context.db.prepare(`INSERT INTO sync_relay_object_moments (workspace_id, object_id, relay_seq, moment_id, version_id, path, recorded_at_ms)
-        VALUES (?, ?, ?, ?, 'main', ?, 1)`).run(workspaceId, String(payload.objectId), relaySeq, `moment-${relaySeq}`, payload.path ?? null);
-    }
-    return relaySeq;
-  });
+  const append = (opKind: string, payload: Record<string, unknown>) =>
+    context.tx(() => {
+      const row = context.db
+        .prepare(`INSERT INTO sync_relay_log (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms)
+      VALUES (?, 'origin-test', ?, ?, ?, 1) RETURNING relay_seq`)
+        .get(workspaceId, ++originSeq, opKind, JSON.stringify(payload))!;
+      const relaySeq = Number(row.relay_seq);
+      if (opKind === "moment.append") {
+        context.db
+          .prepare(`INSERT INTO sync_relay_object_moments (workspace_id, object_id, relay_seq, moment_id, version_id, path, recorded_at_ms)
+        VALUES (?, ?, ?, ?, 'main', ?, 1)`)
+          .run(
+            workspaceId,
+            String(payload.objectId),
+            relaySeq,
+            `moment-${relaySeq}`,
+            payload.path ?? null,
+          );
+      }
+      return relaySeq;
+    });
   return (opKind: string, payload: Record<string, unknown>) => {
     const relaySeq = append(opKind, payload);
     activity.wakeLog(workspaceId);
@@ -183,11 +317,26 @@ function logWriter(storage: SyncRelayStorage, activity: DiscussionActivityHub, w
   };
 }
 
-function changes(since: string, options: { hold?: number; headers?: Record<string, string>; workspaceId?: string; signal?: AbortSignal } = {}): Request {
-  const query = new URLSearchParams({ since, ...(options.hold === undefined ? {} : { hold: String(options.hold) }) });
-  return new Request(`http://relay.test/sync/${options.workspaceId ?? "trip"}/ops/changes?${query}`, {
-    headers: options.headers ?? signedIn("ana"), ...(options.signal ? { signal: options.signal } : {}),
+function changes(
+  since: string,
+  options: {
+    hold?: number;
+    headers?: Record<string, string>;
+    workspaceId?: string;
+    signal?: AbortSignal;
+  } = {},
+): Request {
+  const query = new URLSearchParams({
+    since,
+    ...(options.hold === undefined ? {} : { hold: String(options.hold) }),
   });
+  return new Request(
+    `http://relay.test/sync/${options.workspaceId ?? "trip"}/ops/changes?${query}`,
+    {
+      headers: options.headers ?? signedIn("ana"),
+      ...(options.signal ? { signal: options.signal } : {}),
+    },
+  );
 }
 
 async function feed(response: Response) {
@@ -200,23 +349,48 @@ describe("an account's reads through the server's copy", () => {
     const { engine, h, syncs } = await relay();
     const { planning, thread, onPage } = await seedTrip(engine);
 
-    expect(await answer(await h(op("trip", "groups")))).toMatchObject({ groups: [{ name: "Planning", slug: "planning" }] });
+    expect(await answer(await h(op("trip", "groups")))).toMatchObject({
+      groups: [{ name: "Planning", slug: "planning" }],
+    });
     expect(syncs).toEqual(["trip"]);
-    expect(await answer(await h(op("trip", "threads", { group: "planning" })))).toMatchObject({ threads: [{ title: "Where do we stay?" }] });
-    expect(await answer(await h(op("trip", "groupsFull")))).toMatchObject({ ok: true, groups: [{ slug: "planning", threadCount: 1 }] });
-    expect(await answer(await h(op("trip", "fileChats", { path: "docs/plan.md" }))))
-      .toMatchObject({ ok: true, path: "docs/plan.md", fileObjectId: "object-plan", threads: [{ id: onPage.id }] });
+    expect(await answer(await h(op("trip", "threads", { group: "planning" })))).toMatchObject({
+      threads: [{ title: "Where do we stay?" }],
+    });
+    expect(await answer(await h(op("trip", "groupsFull")))).toMatchObject({
+      ok: true,
+      groups: [{ slug: "planning", threadCount: 1 }],
+    });
+    expect(await answer(await h(op("trip", "fileChats", { path: "docs/plan.md" })))).toMatchObject({
+      ok: true,
+      path: "docs/plan.md",
+      fileObjectId: "object-plan",
+      threads: [{ id: onPage.id }],
+    });
     const onFile = await answer(await h(op("trip", "chat", { threadId: onPage.id })));
-    expect(onFile).toMatchObject({ ok: true, thread: { id: onPage.id }, messages: [{ body: "Looks good." }] });
+    expect(onFile).toMatchObject({
+      ok: true,
+      thread: { id: onPage.id },
+      messages: [{ body: "Looks good." }],
+    });
     expect(onFile.projection).toMatchObject({ text: expect.stringContaining("docs/plan.md") });
-    expect(await answer(await h(op("trip", "chat", { group: "planning" }))))
-      .toMatchObject({ ok: true, stream: { group: { id: planning.channelId }, items: [{ threadId: thread.id }] } });
-    expect(await answer(await h(op("trip", "show", { target: "planning", peek: true }))))
-      .toMatchObject({ stream: { group: { slug: "planning" } } });
-    expect(await answer(await h(op("trip", "show", { target: "th_stay", peek: true }))))
-      .toMatchObject({ thread: { title: "Where do we stay?" }, dispatch: { paused: null, lastRun: null } });
-    expect(await answer(await h(op("trip", "documentRead", { path: "docs/plan.md" }))))
-      .toEqual({ ok: true, path: "docs/plan.md", markdown: "# Plan\n\nStay in Alfama.\n" });
+    expect(await answer(await h(op("trip", "chat", { group: "planning" })))).toMatchObject({
+      ok: true,
+      stream: { group: { id: planning.channelId }, items: [{ threadId: thread.id }] },
+    });
+    expect(
+      await answer(await h(op("trip", "show", { target: "planning", peek: true }))),
+    ).toMatchObject({ stream: { group: { slug: "planning" } } });
+    expect(
+      await answer(await h(op("trip", "show", { target: "th_stay", peek: true }))),
+    ).toMatchObject({
+      thread: { title: "Where do we stay?" },
+      dispatch: { paused: null, lastRun: null },
+    });
+    expect(await answer(await h(op("trip", "documentRead", { path: "docs/plan.md" })))).toEqual({
+      ok: true,
+      path: "docs/plan.md",
+      markdown: "# Plan\n\nStay in Alfama.\n",
+    });
 
     expect(syncs).toHaveLength(9);
     expect(engine.methods()).not.toContain("chats.channels.ensureGeneral");
@@ -225,11 +399,25 @@ describe("an account's reads through the server's copy", () => {
   it("refuses a request without a Bearer session, one with a cookie, and a fenced account, before it opens a copy", async () => {
     const { storage, h, syncs } = await relay();
     const missing = await denialBytes(await h(op("trip", "groups", {}, {})));
-    expect(await denialBytes(await h(op("trip", "groups", {}, { cookie: "session=ana" })))).toBe(missing);
-    expect(await denialBytes(await h(op("trip", "groups", {}, { ...signedIn("ana"), cookie: "session=ana" })))).toBe(missing);
-    expect((await h(op("trip", "groups", {}, { authorization: "Bearer user:ana" }))).status, "a sign-in it cannot validate").toBe(401);
-    createAccountDeletionRoute({ storage: storage as StorageContext, key: "bearer-test", fenceKey: "fence-test", invalidate() {}, deleteRuntime: async () => {} })
-      .fence("ana", "ana@example.test");
+    expect(await denialBytes(await h(op("trip", "groups", {}, { cookie: "session=ana" })))).toBe(
+      missing,
+    );
+    expect(
+      await denialBytes(
+        await h(op("trip", "groups", {}, { ...signedIn("ana"), cookie: "session=ana" })),
+      ),
+    ).toBe(missing);
+    expect(
+      (await h(op("trip", "groups", {}, { authorization: "Bearer user:ana" }))).status,
+      "a sign-in it cannot validate",
+    ).toBe(401);
+    createAccountDeletionRoute({
+      storage: storage as StorageContext,
+      key: "bearer-test",
+      fenceKey: "fence-test",
+      invalidate() {},
+      deleteRuntime: async () => {},
+    }).fence("ana", "ana@example.test");
     expect(await denialBytes(await h(op("trip", "groups")))).toBe(missing);
     expect(syncs).toEqual([]);
   });
@@ -239,9 +427,19 @@ describe("an account's reads through the server's copy", () => {
     const missing = await denialBytes(await h(op("nowhere", "groups")));
     let pulled = false;
     const unread = new Request("http://relay.test/sync/budget/ops/groups", {
-      method: "POST", headers: { ...signedIn("ana"), "content-type": "application/json" }, duplex: "half",
-      body: new ReadableStream({ pull(controller) { pulled = true; controller.enqueue(new TextEncoder().encode("{}")); controller.close(); } },
-        { highWaterMark: 0 }),
+      method: "POST",
+      headers: { ...signedIn("ana"), "content-type": "application/json" },
+      duplex: "half",
+      body: new ReadableStream(
+        {
+          pull(controller) {
+            pulled = true;
+            controller.enqueue(new TextEncoder().encode("{}"));
+            controller.close();
+          },
+        },
+        { highWaterMark: 0 },
+      ),
     } as RequestInit & { duplex: "half" });
     expect(await denialBytes(await h(unread))).toBe(missing);
     expect(pulled, "the body of a request for another account's workspace").toBe(false);
@@ -251,11 +449,17 @@ describe("an account's reads through the server's copy", () => {
     expect(syncs).toEqual([]);
   });
 
-
   it("answers an unknown operation, and the reserved `changes`, as missing", async () => {
     const { h, syncs } = await relay();
     const missing = await denialBytes(await h(op("nowhere", "groups")));
-    for (const name of ["changes", "groupCreate", "watch", "toString", "__proto__", "constructor"]) {
+    for (const name of [
+      "changes",
+      "groupCreate",
+      "watch",
+      "toString",
+      "__proto__",
+      "constructor",
+    ]) {
       expect(await denialBytes(await h(op("trip", name))), name).toBe(missing);
     }
     expect(syncs).toEqual([]);
@@ -288,22 +492,29 @@ describe("an account's reads through the server's copy", () => {
     const { h, syncs } = await relay();
     const response = await h(op("trip", "documentRead", { path: "a".repeat(256 * 1024) }));
     expect(response.status).toBe(413);
-    expect(streamsRequestBody(new URL("http://relay.test//sync/trip/%6Fps/groups"), "POST")).toBe(true);
+    expect(streamsRequestBody(new URL("http://relay.test//sync/trip/%6Fps/groups"), "POST")).toBe(
+      true,
+    );
     expect(syncs).toEqual([]);
   });
 
   it("answers only POST", async () => {
     const { h } = await relay();
-    expect((await h(new Request("http://relay.test/sync/trip/ops/groups", { headers: signedIn("ana") }))).status).toBe(405);
+    expect(
+      (await h(new Request("http://relay.test/sync/trip/ops/groups", { headers: signedIn("ana") })))
+        .status,
+    ).toBe(405);
   });
 
   it("answers as missing, with no result, when access ends once the result is ready", async () => {
     let reads = 0;
-    const { engine, h, syncs } = await relay({ resolve: async (request) => {
-      const session = await resolveAccountSession(request);
-      // Before the arguments, after them, once the copy opens, once it syncs, then once the result is ready.
-      return ++reads === 5 ? { ...session, sessionId: "another" } : session;
-    } });
+    const { engine, h, syncs } = await relay({
+      resolve: async (request) => {
+        const session = await resolveAccountSession(request);
+        // Before the arguments, after them, once the copy opens, once it syncs, then once the result is ready.
+        return ++reads === 5 ? { ...session, sessionId: "another" } : session;
+      },
+    });
     await seedTrip(engine);
     const response = await h(op("trip", "documentRead", { path: "docs/plan.md" }));
     expect(reads).toBe(5);
@@ -317,9 +528,19 @@ describe("an account's reads through the server's copy", () => {
     const { h } = await relay();
     let pulled = false;
     const unread = new Request("http://relay.test/sync/trip/ops/changes", {
-      method: "POST", headers: { ...signedIn("ana"), "content-type": "application/json" }, duplex: "half",
-      body: new ReadableStream({ pull(controller) { pulled = true; controller.enqueue(new TextEncoder().encode("{}")); controller.close(); } },
-        { highWaterMark: 0 }),
+      method: "POST",
+      headers: { ...signedIn("ana"), "content-type": "application/json" },
+      duplex: "half",
+      body: new ReadableStream(
+        {
+          pull(controller) {
+            pulled = true;
+            controller.enqueue(new TextEncoder().encode("{}"));
+            controller.close();
+          },
+        },
+        { highWaterMark: 0 },
+      ),
     } as RequestInit & { duplex: "half" });
     await denialBytes(await h(unread));
     expect(pulled).toBe(false);
@@ -351,18 +572,29 @@ describe("an account's share of the server", () => {
 });
 
 describe("secret files through the server's copy", () => {
-
   it("reads a secret file's page exactly as a missing one, without asking the engine", async () => {
     const { engine, h } = await relay();
     await seedTrip(engine);
-    const missing = (path: string) => ({ ok: false, reason: `dohc: No document at ${path}.`, refusal: "missing" });
-    expect(await answer(await h(op("trip", "documentRead", { path: "docs/missing.md" })))).toEqual(missing("docs/missing.md"));
+    const missing = (path: string) => ({
+      ok: false,
+      reason: `dohc: No document at ${path}.`,
+      refusal: "missing",
+    });
+    expect(await answer(await h(op("trip", "documentRead", { path: "docs/missing.md" })))).toEqual(
+      missing("docs/missing.md"),
+    );
     const reads = engine.files.requests.length;
     for (const [path, normalized] of [
-      [".env", ".env"], ["a/.env/b.md", "a/.env/b.md"], ["x.env", "x.env"], [".env.local", ".env.local"],
-      ["%2Eenv", ".env"], ["notes/.ENV.md", "notes/.ENV.md"],
+      [".env", ".env"],
+      ["a/.env/b.md", "a/.env/b.md"],
+      ["x.env", "x.env"],
+      [".env.local", ".env.local"],
+      ["%2Eenv", ".env"],
+      ["notes/.ENV.md", "notes/.ENV.md"],
     ] as const) {
-      expect(await answer(await h(op("trip", "documentRead", { path }))), path).toEqual(missing(normalized));
+      expect(await answer(await h(op("trip", "documentRead", { path }))), path).toEqual(
+        missing(normalized),
+      );
     }
     expect(engine.files.requests.slice(reads).map((request) => request.method)).toEqual([]);
   });
@@ -372,35 +604,64 @@ describe("secret files through the server's copy", () => {
     await seedTrip(engine);
     const bytes = async (path: string) => {
       const response = await h(op("trip", "documentRead", { path }));
-      return { status: response.status, type: response.headers.get("content-type"), body: (await response.text()).replaceAll(path, "<path>") };
+      return {
+        status: response.status,
+        type: response.headers.get("content-type"),
+        body: (await response.text()).replaceAll(path, "<path>"),
+      };
     };
     const missing = await bytes("docs/missing.md");
     expect(missing.body).toContain('"refusal":"missing"');
-    for (const path of [".env", "docs/.env.local", "a/.env/b.md"]) expect(await bytes(path), path).toEqual(missing);
+    for (const path of [".env", "docs/.env.local", "a/.env/b.md"])
+      expect(await bytes(path), path).toEqual(missing);
   });
 
   it("lists a secret file's chats exactly as a missing file's, and reads its threads and attachments as missing", async () => {
     const { engine, h } = await relay();
     const { onSecret } = await seedTrip(engine);
-    expect(await answer(await h(op("trip", "fileChats", { path: "%2Eenv" }))))
-      .toEqual({ ok: true, path: ".env", fileObjectId: null, threads: [] });
-    expect(await answer(await h(op("trip", "fileChats", { path: "docs/missing.md" }))))
-      .toEqual({ ok: true, path: "docs/missing.md", fileObjectId: null, threads: [] });
+    expect(await answer(await h(op("trip", "fileChats", { path: "%2Eenv" })))).toEqual({
+      ok: true,
+      path: ".env",
+      fileObjectId: null,
+      threads: [],
+    });
+    expect(await answer(await h(op("trip", "fileChats", { path: "docs/missing.md" })))).toEqual({
+      ok: true,
+      path: "docs/missing.md",
+      fileObjectId: null,
+      threads: [],
+    });
     // The thread's file is nowhere in the copy, as a secret file never is.
-    expect(await answer(await h(op("trip", "chat", { threadId: onSecret.id }))))
-      .toEqual({ ok: false, reason: `chat thread not found: ${onSecret.id}`, refusal: "missing" });
-    expect(await answer(await h(op("trip", "chat", { threadId: "thread-nowhere" }))))
-      .toEqual({ ok: false, reason: "chat thread not found: thread-nowhere", refusal: "missing" });
+    expect(await answer(await h(op("trip", "chat", { threadId: onSecret.id })))).toEqual({
+      ok: false,
+      reason: `chat thread not found: ${onSecret.id}`,
+      refusal: "missing",
+    });
+    expect(await answer(await h(op("trip", "chat", { threadId: "thread-nowhere" })))).toEqual({
+      ok: false,
+      reason: "chat thread not found: thread-nowhere",
+      refusal: "missing",
+    });
     for (const target of [onSecret.id, cliThreadId(onSecret.id)]) {
-      expect(await json(await h(op("trip", "show", { target, peek: true })))).toMatchObject({ code: "bad_request", error: `dohc: no such thread or message: ${target}` });
+      expect(await json(await h(op("trip", "show", { target, peek: true })))).toMatchObject({
+        code: "bad_request",
+        error: `dohc: no such thread or message: ${target}`,
+      });
     }
     const ambiguous = await json(await h(op("trip", "show", { target: "th_", peek: true })));
-    expect(ambiguous).toMatchObject({ code: "bad_request", error: expect.stringContaining("ambiguous thread or message prefix") });
+    expect(ambiguous).toMatchObject({
+      code: "bad_request",
+      error: expect.stringContaining("ambiguous thread or message prefix"),
+    });
     expect(String(ambiguous.error)).not.toContain(cliThreadId(onSecret.id));
-    expect(JSON.stringify(await answer(await h(op("trip", "groupsFull"))))).not.toContain(onSecret.id);
+    expect(JSON.stringify(await answer(await h(op("trip", "groupsFull"))))).not.toContain(
+      onSecret.id,
+    );
 
     const shown = await answer(await h(op("trip", "show", { target: "th_stay", peek: true })));
-    expect(shown.messages).toMatchObject([{ attachments: [{ objectId: "object-plan", pathHint: "docs/plan.md" }] }]);
+    expect(shown.messages).toMatchObject([
+      { attachments: [{ objectId: "object-plan", pathHint: "docs/plan.md" }] },
+    ]);
     const stream = await answer(await h(op("trip", "chat", { group: "planning" })));
     expect(JSON.stringify(stream)).not.toContain("object-env");
   });
@@ -409,9 +670,13 @@ describe("secret files through the server's copy", () => {
     const { storage, engine, h } = await relay();
     const { planning } = await seedTrip(engine);
     // The relay's log puts each object somewhere, then deletes it; none is in the copy now.
-    const moment = (objectId: string, relaySeq: number, path: string | null) => (storage as StorageContext).db.prepare(
-      `INSERT INTO sync_relay_object_moments (workspace_id, object_id, relay_seq, moment_id, version_id, path, recorded_at_ms)
-       VALUES ('trip', ?, ?, ?, 'main', ?, 1)`).run(objectId, relaySeq, `moment-${relaySeq}`, path);
+    const moment = (objectId: string, relaySeq: number, path: string | null) =>
+      (storage as StorageContext).db
+        .prepare(
+          `INSERT INTO sync_relay_object_moments (workspace_id, object_id, relay_seq, moment_id, version_id, path, recorded_at_ms)
+       VALUES ('trip', ?, ?, ?, 'main', ?, 1)`,
+        )
+        .run(objectId, relaySeq, `moment-${relaySeq}`, path);
     moment("object-old", 1, "docs/old.md");
     moment("object-old", 2, null);
     moment("object-dotenv", 3, ".env");
@@ -421,8 +686,18 @@ describe("secret files through the server's copy", () => {
     const chats = new ChatsLiveAdapter(engine, "trip", { workspaceId: "trip" });
     const author = { kind: "human" as const, displayName: "Ana" };
     const thread = async (objectId: string, pathHint: string) => {
-      const created = await chats.createThread({ workspaceId: "trip", title: objectId, linkedFile: { objectId, pathHint } });
-      await chats.sendMessage({ workspaceId: "trip", threadId: created.id, author, authorActorKey: null, body: `On ${objectId}` });
+      const created = await chats.createThread({
+        workspaceId: "trip",
+        title: objectId,
+        linkedFile: { objectId, pathHint },
+      });
+      await chats.sendMessage({
+        workspaceId: "trip",
+        threadId: created.id,
+        author,
+        authorActorKey: null,
+        body: `On ${objectId}`,
+      });
       return created;
     };
     const deleted = await thread("object-old", "docs/old.md");
@@ -431,46 +706,86 @@ describe("secret files through the server's copy", () => {
     const renamed = await thread("object-renamed", "docs/keys.md");
 
     const read = await answer(await h(op("trip", "chat", { threadId: deleted.id })));
-    expect(read).toMatchObject({ ok: true, thread: { title: "object-old" }, messages: [{ body: "On object-old" }] });
+    expect(read).toMatchObject({
+      ok: true,
+      thread: { title: "object-old" },
+      messages: [{ body: "On object-old" }],
+    });
     expect((read.projection as { text: string }).text).toContain("Linked file: unavailable");
-    expect(await answer(await h(op("trip", "show", { target: cliThreadId(deleted.id), peek: true }))))
-      .toMatchObject({ thread: { title: "object-old" }, messages: [{ body: "On object-old" }] });
+    expect(
+      await answer(await h(op("trip", "show", { target: cliThreadId(deleted.id), peek: true }))),
+    ).toMatchObject({ thread: { title: "object-old" }, messages: [{ body: "On object-old" }] });
     for (const hidden of [dotenv, renamed]) {
-      expect(await answer(await h(op("trip", "chat", { threadId: hidden.id }))), hidden.title)
-        .toEqual({ ok: false, reason: `chat thread not found: ${hidden.id}`, refusal: "missing" });
-      expect(await json(await h(op("trip", "show", { target: cliThreadId(hidden.id), peek: true }))))
-        .toMatchObject({ code: "bad_request", error: `dohc: no such thread or message: ${cliThreadId(hidden.id)}` });
+      expect(
+        await answer(await h(op("trip", "chat", { threadId: hidden.id }))),
+        hidden.title,
+      ).toEqual({ ok: false, reason: `chat thread not found: ${hidden.id}`, refusal: "missing" });
+      expect(
+        await json(await h(op("trip", "show", { target: cliThreadId(hidden.id), peek: true }))),
+      ).toMatchObject({
+        code: "bad_request",
+        error: `dohc: no such thread or message: ${cliThreadId(hidden.id)}`,
+      });
     }
 
     await chats.startChannelThread({
-      workspaceId: "trip", channelId: planning.channelId, threadId: "thread-files", messageId: "message-files", author, authorActorKey: null,
-      body: "Files", attachments: [{ objectId: "object-old", pathHint: "docs/old.md" }, { objectId: "object-dotenv", pathHint: "docs/notes.md" }],
+      workspaceId: "trip",
+      channelId: planning.channelId,
+      threadId: "thread-files",
+      messageId: "message-files",
+      author,
+      authorActorKey: null,
+      body: "Files",
+      attachments: [
+        { objectId: "object-old", pathHint: "docs/old.md" },
+        { objectId: "object-dotenv", pathHint: "docs/notes.md" },
+      ],
     });
     const shown = await answer(await h(op("trip", "show", { target: "th_files", peek: true })));
-    expect(shown.messages).toMatchObject([{ body: "Files", attachments: [{ objectId: "object-old", pathHint: "docs/old.md" }] }]);
+    expect(shown.messages).toMatchObject([
+      { body: "Files", attachments: [{ objectId: "object-old", pathHint: "docs/old.md" }] },
+    ]);
   });
-
 });
 
 describe("pages the relay hosts live", () => {
-  async function livePage(seed: (engine: TestEngine) => void = (engine) =>
-    engine.files.seedTextFile({ workspace: "workspace", path: "docs/a.md", text: "Hello\n", objectId: "object" })) {
+  async function livePage(
+    seed: (engine: TestEngine) => void = (engine) =>
+      engine.files.seedTextFile({
+        workspace: "workspace",
+        path: "docs/a.md",
+        text: "Hello\n",
+        objectId: "object",
+      }),
+  ) {
     const f = registered({ deployment: true });
     cleanup.push(async () => f.close());
-    f.storage.claimWorkspaceIdentity({ workspaceId: "workspace", replicationEpoch: "epoch", streamIdentity: "stream" });
+    f.storage.claimWorkspaceIdentity({
+      workspaceId: "workspace",
+      replicationEpoch: "epoch",
+      streamIdentity: "stream",
+    });
     const engine = new TestEngine();
     seed(engine);
     const run = await serverCopies(f.storage, engine);
     const h = testHandler(f.storage, { resolveAccountSession, serverCopies: () => run.copies });
-    const read = async () => await h(op("workspace", "documentRead", { path: "docs/a.md" }, signedIn("owner")));
-    const edit = () => expect(f.storage.commitLiveUpdateJournal(f.capture(f.update("title", "Lisbon"))).result.kind).toBe("accepted");
+    const read = async () =>
+      await h(op("workspace", "documentRead", { path: "docs/a.md" }, signedIn("owner")));
+    const edit = () =>
+      expect(
+        f.storage.commitLiveUpdateJournal(f.capture(f.update("title", "Lisbon"))).result.kind,
+      ).toBe("accepted");
     return { f, engine, read, edit };
   }
   const edited = { ok: true, path: "docs/a.md", markdown: "---\ntitle: Lisbon\n---\n\nHello\n" };
 
   it("reads an edit the relay accepted before it settles, and writes nothing", async () => {
     const { f, engine, read, edit } = await livePage();
-    expect(await answer(await read())).toEqual({ ok: true, path: "docs/a.md", markdown: "Hello\n" });
+    expect(await answer(await read())).toEqual({
+      ok: true,
+      path: "docs/a.md",
+      markdown: "Hello\n",
+    });
     edit();
     const journal = f.journalRows().journal.length;
     expect(await answer(await read())).toEqual(edited);
@@ -482,42 +797,83 @@ describe("pages the relay hosts live", () => {
     const { f, read, edit } = await livePage();
     edit();
     const document = f.input.evidence.document;
-    const plan = f.storage.readStopRestorePlan({ operationId: "restore", ownerUserId: "owner", document, shareId: "share", grantId: "grant",
-      restorePointCursor: 0, restorePointReceiptDigest: document.lineageClaimId, maxOutputBytes: MAX_PAYLOAD_JSON_BYTES });
+    const plan = f.storage.readStopRestorePlan({
+      operationId: "restore",
+      ownerUserId: "owner",
+      document,
+      shareId: "share",
+      grantId: "grant",
+      restorePointCursor: 0,
+      restorePointReceiptDigest: document.lineageClaimId,
+      maxOutputBytes: MAX_PAYLOAD_JSON_BYTES,
+    });
     f.storage.beginStopRestore(plan.intent, 100);
-    expect(f.storage.advanceStopRestoreFence({ workspaceId: "workspace", ownerUserId: "owner", operationId: "restore" }, 110).phase).toBe("fenced");
+    expect(
+      f.storage.advanceStopRestoreFence(
+        { workspaceId: "workspace", ownerUserId: "owner", operationId: "restore" },
+        110,
+      ).phase,
+    ).toBe("fenced");
     const response = await read();
     expect(response.status).toBe(409);
     // This route's own words, not the code's default, which is live editing's.
-    expect(await json(response)).toEqual({ ok: false, code: "restore-in-progress", error: "This page is being restored. Try again once it finishes." });
+    expect(await json(response)).toEqual({
+      ok: false,
+      code: "restore-in-progress",
+      error: "This page is being restored. Try again once it finishes.",
+    });
   });
-
 });
 
 describe("file reads through the server's copy", () => {
   function seedFiles(engine: TestEngine) {
-    for (const [path, text] of [["docs/plan.md", "# Plan\n"], ["docs/trips/lisbon.md", "Alfama\n"], ["Docs/old.md", "Old\n"]] as const) {
+    for (const [path, text] of [
+      ["docs/plan.md", "# Plan\n"],
+      ["docs/trips/lisbon.md", "Alfama\n"],
+      ["Docs/old.md", "Old\n"],
+    ] as const) {
       engine.files.seedTextFile({ workspace: "trip", path, text, objectId: `object-${path}` });
     }
     engine.listedHidden.push(".env", "docs/.env.local", "a/.env/b.md", "docs/.DS_Store.");
-    engine.files.seedBinaryFile({ workspace: "trip", path: "photo.png", bytes: [1, 2, 3], objectId: "object-photo" });
+    engine.files.seedBinaryFile({
+      workspace: "trip",
+      path: "photo.png",
+      bytes: [1, 2, 3],
+      objectId: "object-photo",
+    });
   }
   const paths = (result: Record<string, unknown>) => ({
-    files: (result.files as Array<{ path: string }>).map((file) => file.path), folders: result.folders,
+    files: (result.files as Array<{ path: string }>).map((file) => file.path),
+    folders: result.folders,
   });
-
 
   it("lists the copy's files in lexical order without hidden ones, and reads a text file", async () => {
     const { engine, h, syncs } = await relay();
     seedFiles(engine);
     const listed = await answer(await h(op("trip", "listFiles")));
-    expect(paths(listed)).toEqual({ files: ["Docs/old.md", "docs/plan.md", "docs/trips/lisbon.md", "photo.png"], folders: ["Docs", "docs", "docs/trips"] });
-    expect((listed.files as unknown[])[3]).toEqual({ path: "photo.png", objectId: "object-photo", contentKind: "binary", byteLength: 3 });
-    expect(paths(await answer(await h(op("trip", "listFiles", { path: "docs", recursive: false })))))
-      .toEqual({ files: ["docs/plan.md"], folders: ["docs", "docs/trips"] });
-    expect(await answer(await h(op("trip", "readText", { path: "./docs//plan.md" })))).toEqual({ ok: true, path: "docs/plan.md", text: "# Plan\n" });
-    expect(await answer(await h(op("trip", "readText", { path: "photo.png" }))))
-      .toEqual({ ok: false, reason: "dohc: photo.png is not a text file.", refusal: "binary" });
+    expect(paths(listed)).toEqual({
+      files: ["Docs/old.md", "docs/plan.md", "docs/trips/lisbon.md", "photo.png"],
+      folders: ["Docs", "docs", "docs/trips"],
+    });
+    expect((listed.files as unknown[])[3]).toEqual({
+      path: "photo.png",
+      objectId: "object-photo",
+      contentKind: "binary",
+      byteLength: 3,
+    });
+    expect(
+      paths(await answer(await h(op("trip", "listFiles", { path: "docs", recursive: false })))),
+    ).toEqual({ files: ["docs/plan.md"], folders: ["docs", "docs/trips"] });
+    expect(await answer(await h(op("trip", "readText", { path: "./docs//plan.md" })))).toEqual({
+      ok: true,
+      path: "docs/plan.md",
+      text: "# Plan\n",
+    });
+    expect(await answer(await h(op("trip", "readText", { path: "photo.png" })))).toEqual({
+      ok: false,
+      reason: "dohc: photo.png is not a text file.",
+      refusal: "binary",
+    });
     expect(syncs).toEqual(["trip", "trip", "trip", "trip"]);
   });
 
@@ -525,30 +881,51 @@ describe("file reads through the server's copy", () => {
     const { engine, h } = await relay();
     seedFiles(engine);
     const missing = (path: string) => ({ ok: false, reason: `dohc: No file at ${path}.` });
-    expect(await answer(await h(op("trip", "readText", { path: "docs/missing.md" })))).toEqual(missing("docs/missing.md"));
+    expect(await answer(await h(op("trip", "readText", { path: "docs/missing.md" })))).toEqual(
+      missing("docs/missing.md"),
+    );
     const reads = engine.files.requests.length;
-    for (const [path, normalized] of [[".env", ".env"], ["%2Eenv", ".env"], ["docs/.env.local", "docs/.env.local"], ["a/.env/b.md", "a/.env/b.md"]] as const) {
-      expect(await answer(await h(op("trip", "readText", { path }))), path).toEqual(missing(normalized));
+    for (const [path, normalized] of [
+      [".env", ".env"],
+      ["%2Eenv", ".env"],
+      ["docs/.env.local", "docs/.env.local"],
+      ["a/.env/b.md", "a/.env/b.md"],
+    ] as const) {
+      expect(await answer(await h(op("trip", "readText", { path }))), path).toEqual(
+        missing(normalized),
+      );
     }
     expect(engine.files.requests.slice(reads).map((request) => request.method)).toEqual([]);
-    expect(JSON.stringify(await answer(await h(op("trip", "listFiles", { path: "a" }))))).not.toContain(".env");
+    expect(
+      JSON.stringify(await answer(await h(op("trip", "listFiles", { path: "a" })))),
+    ).not.toContain(".env");
   });
 
   it("takes exactly the file reads' arguments, and words an engine failure without its detail", async () => {
     const { engine, h } = await relay();
     seedFiles(engine);
-    for (const [name, args] of [["listFiles", { cwd: "/" }], ["listFiles", { path: 1 }], ["listFiles", { recursive: "no" }],
-      ["readText", {}], ["readText", { path: "a.md", actor: "human" }]] as const) {
+    for (const [name, args] of [
+      ["listFiles", { cwd: "/" }],
+      ["listFiles", { path: 1 }],
+      ["listFiles", { recursive: "no" }],
+      ["readText", {}],
+      ["readText", { path: "a.md", actor: "human" }],
+    ] as const) {
       const response = await h(op("trip", name, args));
       expect(response.status, `${name} ${JSON.stringify(args)}`).toBe(400);
     }
-    engine.failing.set("versionedText.list", new Error("The engine could not open /srv/dohc/engine.db."));
-    expect(await answer(await h(op("trip", "listFiles")))).toEqual({ ok: false, reason: "failed to list files" });
+    engine.failing.set(
+      "versionedText.list",
+      new Error("The engine could not open /srv/dohc/engine.db."),
+    );
+    expect(await answer(await h(op("trip", "listFiles")))).toEqual({
+      ok: false,
+      reason: "failed to list files",
+    });
   });
 });
 
 describe("an account's change feed", () => {
-
   it("delivers a change made between a read and the feed's start, from the log alone", async () => {
     const { storage, activity, engine, h, syncs } = await relay();
     await seedTrip(engine);
@@ -558,57 +935,131 @@ describe("an account's change feed", () => {
     write("chat.message.append", { threadId: "thread-stay", messageId: "m" });
     write("chat.channel.create", { channelId: "c" });
     write("moment.append", { objectId: "object-photo", path: "photo.png", versionId: "main" });
-    const last = write("moment.append", { objectId: "object-photo", path: null, versionId: "main" });
+    const last = write("moment.append", {
+      objectId: "object-photo",
+      path: null,
+      versionId: "main",
+    });
     const delivered = await feed(await h(changes(String(cursor))));
-    expect(delivered).toEqual({ ok: true, cursor: `0.${last}.0`,
-      changed: { files: ["object-plan", "object-photo"], pages: ["object-plan"], chats: ["thread-stay"] } });
-    expect(await feed(await h(changes(String(delivered.cursor))))).toEqual({ ok: true, cursor: `0.${last}.0`, changed: {} });
+    expect(delivered).toEqual({
+      ok: true,
+      cursor: `0.${last}.0`,
+      changed: {
+        files: ["object-plan", "object-photo"],
+        pages: ["object-plan"],
+        chats: ["thread-stay"],
+      },
+    });
+    expect(await feed(await h(changes(String(delivered.cursor))))).toEqual({
+      ok: true,
+      cursor: `0.${last}.0`,
+      changed: {},
+    });
     expect(syncs).toEqual(["trip"]);
   });
 
   it("leaves out changes on secret files, and keeps waiting through them", async () => {
     let checks = 0;
-    const { storage, activity, h } = await relay({ resolve: async (request) => { checks += 1; return await resolveAccountSession(request); } });
+    const { storage, activity, h } = await relay({
+      resolve: async (request) => {
+        checks += 1;
+        return await resolveAccountSession(request);
+      },
+    });
     const write = logWriter(storage, activity);
     write("moment.append", { objectId: "object-keys", path: "docs/keys.md", versionId: "main" });
     // A thread made on .env whose object now sits at a public path stays hidden, as its reads hide it.
     write("moment.append", { objectId: "object-moved", path: "docs/moved.md", versionId: "main" });
-    const start = write("chat.thread.create", { threadId: "thread-keys", linkedObjectId: "object-moved", linkedPathHint: ".env" });
+    const start = write("chat.thread.create", {
+      threadId: "thread-keys",
+      linkedObjectId: "object-moved",
+      linkedPathHint: ".env",
+    });
     const held = h(changes(`0.${start}.0`, { hold: 30_000 }));
     await expect.poll(() => activity.stats().waiters).toBe(1);
     const parked = checks;
     write("moment.append", { objectId: "object-env", path: ".env", versionId: "main" });
-    write("moment.append", { objectId: "object-ignored", path: "docs/.DS_Store.", versionId: "main" });
+    write("moment.append", {
+      objectId: "object-ignored",
+      path: "docs/.DS_Store.",
+      versionId: "main",
+    });
     write("chat.message.append", { threadId: "thread-keys", messageId: "m" });
     // The wake checks the sign-in again, finds nothing it may answer, and waits on.
     await expect.poll(() => checks).toBeGreaterThan(parked);
     await expect.poll(() => activity.stats().waiters).toBe(1);
-    const last = write("moment.append", { objectId: "object-keys", path: ".env.local", versionId: "main" });
+    const last = write("moment.append", {
+      objectId: "object-keys",
+      path: ".env.local",
+      versionId: "main",
+    });
     // The page left for a secret path: the phone sees it go.
-    expect(await feed(await held)).toEqual({ ok: true, cursor: `0.${last}.0`, changed: { files: ["object-keys"], pages: ["object-keys"] } });
+    expect(await feed(await held)).toEqual({
+      ok: true,
+      cursor: `0.${last}.0`,
+      changed: { files: ["object-keys"], pages: ["object-keys"] },
+    });
   });
 
   it("brings a page's accepted live edit before it settles", async () => {
     const f = registered({ deployment: true });
     cleanup.push(async () => f.close());
-    f.storage.claimWorkspaceIdentity({ workspaceId: "workspace", replicationEpoch: "epoch", streamIdentity: "stream" });
+    f.storage.claimWorkspaceIdentity({
+      workspaceId: "workspace",
+      replicationEpoch: "epoch",
+      streamIdentity: "stream",
+    });
     const engine = new TestEngine();
-    engine.files.seedTextFile({ workspace: "workspace", path: "docs/a.md", text: "Hello\n", objectId: "object" });
+    engine.files.seedTextFile({
+      workspace: "workspace",
+      path: "docs/a.md",
+      text: "Hello\n",
+      objectId: "object",
+    });
     const run = await serverCopies(f.storage, engine);
     const h = testHandler(f.storage, { resolveAccountSession, serverCopies: () => run.copies });
-    const read = await json(await h(op("workspace", "documentRead", { path: "docs/a.md" }, signedIn("owner"))));
-    const edit = (title: string) => expect(f.storage.commitLiveUpdateJournal(f.capture(f.update("title", title), `edit-${title}`)).result.kind).toBe("accepted");
+    const read = await json(
+      await h(op("workspace", "documentRead", { path: "docs/a.md" }, signedIn("owner"))),
+    );
+    const edit = (title: string) =>
+      expect(
+        f.storage.commitLiveUpdateJournal(f.capture(f.update("title", title), `edit-${title}`))
+          .result.kind,
+      ).toBe("accepted");
     edit("Lisbon");
-    const delivered = await feed(await h(changes(String(read.cursor), { workspaceId: "workspace", headers: signedIn("owner") })));
+    const delivered = await feed(
+      await h(
+        changes(String(read.cursor), { workspaceId: "workspace", headers: signedIn("owner") }),
+      ),
+    );
     expect(delivered.changed).toEqual({ pages: ["object"] });
-    const held = h(changes(String(delivered.cursor), { workspaceId: "workspace", headers: signedIn("owner"), hold: 30_000 }));
+    const held = h(
+      changes(String(delivered.cursor), {
+        workspaceId: "workspace",
+        headers: signedIn("owner"),
+        hold: 30_000,
+      }),
+    );
     edit("Porto");
     expect((await feed(await held)).changed).toEqual({ pages: ["object"] });
     // The journal is read a part at a time, in cursor order.
-    const rows = f.storage.accountFeedJournalRows({ workspaceId: "workspace", after: 0, through: Number.MAX_SAFE_INTEGER, limit: 1 });
-    expect(rows).toEqual([{ journalCursor: expect.any(Number), objectId: "object", path: "docs/a.md" }]);
-    expect(f.storage.accountFeedJournalRows({ workspaceId: "workspace", after: rows[0]!.journalCursor, through: Number.MAX_SAFE_INTEGER, limit: 5 }))
-      .toHaveLength(1);
+    const rows = f.storage.accountFeedJournalRows({
+      workspaceId: "workspace",
+      after: 0,
+      through: Number.MAX_SAFE_INTEGER,
+      limit: 1,
+    });
+    expect(rows).toEqual([
+      { journalCursor: expect.any(Number), objectId: "object", path: "docs/a.md" },
+    ]);
+    expect(
+      f.storage.accountFeedJournalRows({
+        workspaceId: "workspace",
+        after: rows[0]!.journalCursor,
+        through: Number.MAX_SAFE_INTEGER,
+        limit: 5,
+      }),
+    ).toHaveLength(1);
   });
 
   it("answers replace for a cursor from before a restore, or past what the workspace holds", async () => {
@@ -616,7 +1067,11 @@ describe("an account's change feed", () => {
     const relaySeq = logWriter(storage, activity)("chat.channel.create", { channelId: "c" });
     const current = `0.${relaySeq}.0`;
     for (const since of ["1.0.0", `0.${relaySeq + 1}.0`, `0.${relaySeq}.1`]) {
-      expect(await feed(await h(changes(since))), since).toEqual({ ok: true, cursor: current, replace: true });
+      expect(await feed(await h(changes(since))), since).toEqual({
+        ok: true,
+        cursor: current,
+        replace: true,
+      });
     }
     for (const since of ["", "x", "1.2", "01.0.0", "0.0.0.0", "0.-1.0", "0.99999999999999999.0"]) {
       const response = await h(changes(since));
@@ -628,31 +1083,61 @@ describe("an account's change feed", () => {
 
     // A restore set the log floor where the log stood.
     const context = storage as StorageContext;
-    context.tx(() => context.db.prepare("UPDATE sync_relay_workspaces SET epoch_log_floor = ? WHERE workspace_id = 'trip'").run(relaySeq));
+    context.tx(() =>
+      context.db
+        .prepare("UPDATE sync_relay_workspaces SET epoch_log_floor = ? WHERE workspace_id = 'trip'")
+        .run(relaySeq),
+    );
     const restored = `${relaySeq}.${relaySeq}.0`;
     for (const since of [current, `${relaySeq}.0.0`]) {
-      expect(await feed(await h(changes(since))), since).toEqual({ ok: true, cursor: restored, replace: true });
+      expect(await feed(await h(changes(since))), since).toEqual({
+        ok: true,
+        cursor: restored,
+        replace: true,
+      });
     }
-    expect(await feed(await h(changes(restored)))).toEqual({ ok: true, cursor: restored, changed: {} });
+    expect(await feed(await h(changes(restored)))).toEqual({
+      ok: true,
+      cursor: restored,
+      changed: {},
+    });
   });
 
   it("answers server_busy past one account's waits, across its sign-ins, while another account still waits", async () => {
     const { storage, activity, h } = await relay();
     const stop = new AbortController();
     const held = Array.from({ length: ACCOUNT_FEED_WAITS_PER_ACCOUNT }, (_, index) =>
-      h(changes("0.0.0", { hold: 30_000, signal: stop.signal, headers: signedIn("ana", `phone-${index}`) })));
+      h(
+        changes("0.0.0", {
+          hold: 30_000,
+          signal: stop.signal,
+          headers: signedIn("ana", `phone-${index}`),
+        }),
+      ),
+    );
     await expect.poll(() => activity.stats().waiters).toBe(ACCOUNT_FEED_WAITS_PER_ACCOUNT);
-    const busy = await h(changes("0.0.0", { hold: 30_000, headers: signedIn("ana", "another-phone") }));
+    const busy = await h(
+      changes("0.0.0", { hold: 30_000, headers: signedIn("ana", "another-phone") }),
+    );
     expect(busy.status).toBe(503);
     expect(await json(busy)).toMatchObject({ ok: false, code: "server_busy" });
-    const other = h(changes("0.0.0", { hold: 30_000, workspaceId: "budget", headers: signedIn("ben") }));
+    const other = h(
+      changes("0.0.0", { hold: 30_000, workspaceId: "budget", headers: signedIn("ben") }),
+    );
     await expect.poll(() => activity.stats().waiters).toBe(ACCOUNT_FEED_WAITS_PER_ACCOUNT + 1);
-    const relaySeq = logWriter(storage, activity, "budget")("chat.channel.create", { channelId: "c" });
-    expect(await feed(await other)).toEqual({ ok: true, cursor: `0.${relaySeq}.0`, changed: { chats: [] } });
+    const relaySeq = logWriter(
+      storage,
+      activity,
+      "budget",
+    )("chat.channel.create", { channelId: "c" });
+    expect(await feed(await other)).toEqual({
+      ok: true,
+      cursor: `0.${relaySeq}.0`,
+      changed: { chats: [] },
+    });
     stop.abort();
     for (const response of await Promise.all(held)) expect(response.status).toBe(200);
   });
-
 });
 
 describe("an account's chat writes through the server's copy", () => {
@@ -672,11 +1157,28 @@ describe("an account's chat writes through the server's copy", () => {
     const storage = await testStorage();
     const context = storage as StorageContext;
     storage.claimWorkspace({ workspaceId: "trip", ownerUserId: "ana", createdAtMs: 1 });
-    storage.claimWorkspaceIdentity({ workspaceId: "trip", replicationEpoch: "epoch", streamIdentity: "stream" });
-    const row = storage.joinAutomationWorkspace({ workspaceId: "trip", nowMs: 1, reasons: ["account"] })!;
+    storage.claimWorkspaceIdentity({
+      workspaceId: "trip",
+      replicationEpoch: "epoch",
+      streamIdentity: "stream",
+    });
+    const row = storage.joinAutomationWorkspace({
+      workspaceId: "trip",
+      nowMs: 1,
+      reasons: ["account"],
+    })!;
     const engine = new PhoneWriteEngine("trip", "server-copy");
-    engine.files.seedTextFile({ workspace: "trip", path: "README.md", text: "# Trip\n", objectId: "object-readme" });
-    const seeded = await seedPhoneChats(new ChatsLiveAdapter(engine.chats, "trip", { workspaceId: "trip" }), "trip", "ana");
+    engine.files.seedTextFile({
+      workspace: "trip",
+      path: "README.md",
+      text: "# Trip\n",
+      objectId: "object-readme",
+    });
+    const seeded = await seedPhoneChats(
+      new ChatsLiveAdapter(engine.chats, "trip", { workspaceId: "trip" }),
+      "trip",
+      "ana",
+    );
     const syncs: string[] = [];
     let syncError: Error | null = null;
     let heldStep: { reached(): void; open: Promise<void> } | null = null;
@@ -684,9 +1186,19 @@ describe("an account's chat writes through the server's copy", () => {
     let requestId = 0;
     const lifetime = new AbortController();
     const copy: AutomationReplica = {
-      workspaceId: "trip", ownerUserId: "ana", incarnation: row.incarnation, reasons: row.reasons, startedAtMs: 1, pulledHead: 0,
-      root: "unused", metadataDir: "unused", client: engine as unknown as EngineClient, workspace: "trip", signal: lifetime.signal,
-      nextRequestId: () => ++requestId, withRecordWork: (work) => work(),
+      workspaceId: "trip",
+      ownerUserId: "ana",
+      incarnation: row.incarnation,
+      reasons: row.reasons,
+      startedAtMs: 1,
+      pulledHead: 0,
+      root: "unused",
+      metadataDir: "unused",
+      client: engine as unknown as EngineClient,
+      workspace: "trip",
+      signal: lifetime.signal,
+      nextRequestId: () => ++requestId,
+      withRecordWork: (work) => work(),
       sync: async () => {
         syncs.push("trip");
         if (syncError !== null) throw syncError;
@@ -704,9 +1216,14 @@ describe("an account's chat writes through the server's copy", () => {
           });
         }
         if (stepError !== null) throw stepError;
-        engine.push((pushed) => context.tx(() => context.db.prepare(`INSERT INTO sync_relay_log
+        engine.push((pushed) =>
+          context.tx(() =>
+            context.db
+              .prepare(`INSERT INTO sync_relay_log
           (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms) VALUES ('trip', 'server-copy', ?, ?, ?, 1)`)
-          .run(pushed.originSeq, pushed.kind, JSON.stringify(pushed.payload))));
+              .run(pushed.originSeq, pushed.kind, JSON.stringify(pushed.payload)),
+          ),
+        );
         return true;
       },
     };
@@ -715,23 +1232,42 @@ describe("an account's chat writes through the server's copy", () => {
     let closes = 0;
     let pass = () => {};
     const copies = await startServerCopies({
-      storage, root: "unused", engineExecutable: "unused", relayOrigin: ORIGIN, key: new Uint8Array(32), namespace: "test",
+      storage,
+      root: "unused",
+      engineExecutable: "unused",
+      relayOrigin: ORIGIN,
+      key: new Uint8Array(32),
+      namespace: "test",
       startReplicas: async (hooks) => {
         pass = () => {
           const reasons = hooks.wanted().get("trip");
-          const joined = reasons === undefined ? null : storage.joinAutomationWorkspace({ workspaceId: "trip", nowMs: 1, reasons });
-          const opens = joined?.incarnation === copy.incarnation && joined.ownerUserId === copy.ownerUserId;
+          const joined =
+            reasons === undefined
+              ? null
+              : storage.joinAutomationWorkspace({ workspaceId: "trip", nowMs: 1, reasons });
+          const opens =
+            joined?.incarnation === copy.incarnation && joined.ownerUserId === copy.ownerUserId;
           // The copy opens before the hook, whose recheck reads it.
           const was = open;
           open = opens;
           if (opens && !was) hooks.onChanged?.("trip");
           if (was && !opens) closes += 1;
         };
-        return { unavailable: false, replica: (id) => id === "trip" && open ? copy : undefined, reconcile: () => queueMicrotask(pass),
-          deleteWorkspaces: async () => undefined, failedSyncs: () => new Map(), settled: async () => undefined, close: async () => undefined };
+        return {
+          unavailable: false,
+          replica: (id) => (id === "trip" && open ? copy : undefined),
+          reconcile: () => queueMicrotask(pass),
+          deleteWorkspaces: async () => undefined,
+          failedSyncs: () => new Map(),
+          settled: async () => undefined,
+          close: async () => undefined,
+        };
       },
     });
-    cleanup.push(async () => { lifetime.abort(); await copies.close(); });
+    cleanup.push(async () => {
+      lifetime.abort();
+      await copies.close();
+    });
 
     let checks = 0;
     let changeAt: { check: number; kind: AccessChange } | null = null;
@@ -740,7 +1276,14 @@ describe("an account's chat writes through the server's copy", () => {
     let name: () => string | null = () => "Ana";
     const change = (kind: AccessChange) => {
       if (kind === "sign-in") signedOut = true;
-      else if (kind === "owner") context.tx(() => context.db.prepare("UPDATE sync_relay_workspaces SET owner_user_id = 'ben' WHERE workspace_id = 'trip'").run());
+      else if (kind === "owner")
+        context.tx(() =>
+          context.db
+            .prepare(
+              "UPDATE sync_relay_workspaces SET owner_user_id = 'ben' WHERE workspace_id = 'trip'",
+            )
+            .run(),
+        );
       else storage.setShowOnPhone({ ownerUserId: "ana", workspaceId: "trip", showOnPhone: false });
     };
     const h = testHandler(storage, {
@@ -763,20 +1306,45 @@ describe("an account's chat writes through the server's copy", () => {
       ...(options.nowMs ? { nowMs: options.nowMs } : {}),
     });
     return {
-      storage, engine, copy, h, syncs, seeded, change,
+      storage,
+      engine,
+      copy,
+      h,
+      syncs,
+      seeded,
+      change,
       write: (operation: string, args: unknown) => h(op("trip", operation, args)),
-      rows: () => Number(context.db.prepare("SELECT count(*) AS n FROM sync_relay_account_operations").get()?.n),
-      changeAt: (check: number, kind: AccessChange) => { changeAt = { check, kind }; },
+      rows: () =>
+        Number(
+          context.db.prepare("SELECT count(*) AS n FROM sync_relay_account_operations").get()?.n,
+        ),
+      changeAt: (check: number, kind: AccessChange) => {
+        changeAt = { check, kind };
+      },
       /** Holds the nth sign-in check from now until its release. `reached` resolves once it waits. */
       holdCheck: (nth: number) => {
         let reached!: () => void, release!: () => void;
-        const waiting = new Promise<void>((resolve) => { reached = resolve; });
-        heldCheck = { at: checks + nth, reached, open: new Promise<void>((resolve) => { release = resolve; }) };
+        const waiting = new Promise<void>((resolve) => {
+          reached = resolve;
+        });
+        heldCheck = {
+          at: checks + nth,
+          reached,
+          open: new Promise<void>((resolve) => {
+            release = resolve;
+          }),
+        };
         return { reached: waiting, release: () => release() };
       },
-      named: (next: () => string | null) => { name = next; },
-      failSync: (error: Error | null) => { syncError = error; },
-      failStep: (error: Error | null) => { stepError = error; },
+      named: (next: () => string | null) => {
+        name = next;
+      },
+      failSync: (error: Error | null) => {
+        syncError = error;
+      },
+      failStep: (error: Error | null) => {
+        stepError = error;
+      },
       /** Runs a pass of the copies now, which closes the copy unless something still needs it. */
       reconcile: () => pass(),
       copyOpen: () => open,
@@ -784,47 +1352,130 @@ describe("an account's chat writes through the server's copy", () => {
       /** Holds the copy's next step. `reached` resolves once it waits. */
       holdStep: () => {
         let reached!: () => void, release!: () => void;
-        const waiting = new Promise<void>((resolve) => { reached = resolve; });
-        heldStep = { reached, open: new Promise<void>((resolve) => { release = resolve; }) };
+        const waiting = new Promise<void>((resolve) => {
+          reached = resolve;
+        });
+        heldStep = {
+          reached,
+          open: new Promise<void>((resolve) => {
+            release = resolve;
+          }),
+        };
         return { reached: waiting, release: () => release() };
       },
       /** Runs a write on the copy as an earlier request did, which gave up waiting for its publication at once. */
       earlier: (write: PhoneWrite) => {
         let ms = 0;
         return runPhoneWrite({
-          storage, copy, write, writer: { accountId: "ana", displayName: "Ana", serverUrl: ORIGIN }, authorize: async () => undefined,
-          nowMs: () => ms, pause: async (wait) => { ms += wait; }, deadlineMs: 1_000,
+          storage,
+          copy,
+          write,
+          writer: { accountId: "ana", displayName: "Ana", serverUrl: ORIGIN },
+          authorize: async () => undefined,
+          nowMs: () => ms,
+          pause: async (wait) => {
+            ms += wait;
+          },
+          deadlineMs: 1_000,
         });
       },
     };
   }
   type WriteRelay = Awaited<ReturnType<typeof writeRelay>>;
-  const schemaRefusal = (operation: string) => ({ ok: false, code: "bad_request", error: `the arguments do not fit ${operation}` });
+  const schemaRefusal = (operation: string) => ({
+    ok: false,
+    code: "bad_request",
+    error: `the arguments do not fit ${operation}`,
+  });
 
   it("saves each write as the session's account by its name now, and answers a retry from its row with the author it first had", async () => {
     const f = await writeRelay();
     const { planning } = f.seeded;
-    const post = { operationId: "op-post", groupId: planning.channelId, title: "Dinner", body: "Where?" };
+    const post = {
+      operationId: "op-post",
+      groupId: planning.channelId,
+      title: "Dinner",
+      body: "Where?",
+    };
     const posted = await json(await f.write("post", post));
     const ids = phoneWriteIds("ana", "trip", "op-post");
-    expect(posted).toEqual({ ok: true, result: { ok: true, state: "saved", threadId: ids.threadId, messageId: ids.messageId("post") }, cursor: "0.0.0" });
-    expect(f.engine.writes).toMatchObject([{ method: CHATS_METHOD.threadStart, params: { authorDisplayName: "Ana", authorUserId: "ana" } }]);
-    expect(await answer(await f.write("send", { operationId: "op-send", streamId: planning.channelId, body: "Lunch?" })))
-      .toMatchObject({ ok: true, state: "saved", threadId: phoneWriteIds("ana", "trip", "op-send").threadId });
-    expect(await answer(await f.write("reply", { operationId: "op-reply", threadId: "thread-stay", parentMessageId: "message-stay", body: "By the river." })))
-      .toEqual({ ok: true, state: "saved", threadId: "thread-stay", messageId: phoneWriteIds("ana", "trip", "op-reply").messageId("reply") });
-    expect(await answer(await f.write("reply", {
-      operationId: "op-answer", threadId: "thread-stay", body: "Alfama", resolves: { messageId: "message-poll", chosenOption: " Alfama " },
-    }))).toMatchObject({ ok: true, state: "saved", threadId: "thread-stay" });
+    expect(posted).toEqual({
+      ok: true,
+      result: {
+        ok: true,
+        state: "saved",
+        threadId: ids.threadId,
+        messageId: ids.messageId("post"),
+      },
+      cursor: "0.0.0",
+    });
+    expect(f.engine.writes).toMatchObject([
+      {
+        method: CHATS_METHOD.threadStart,
+        params: { authorDisplayName: "Ana", authorUserId: "ana" },
+      },
+    ]);
+    expect(
+      await answer(
+        await f.write("send", {
+          operationId: "op-send",
+          streamId: planning.channelId,
+          body: "Lunch?",
+        }),
+      ),
+    ).toMatchObject({
+      ok: true,
+      state: "saved",
+      threadId: phoneWriteIds("ana", "trip", "op-send").threadId,
+    });
+    expect(
+      await answer(
+        await f.write("reply", {
+          operationId: "op-reply",
+          threadId: "thread-stay",
+          parentMessageId: "message-stay",
+          body: "By the river.",
+        }),
+      ),
+    ).toEqual({
+      ok: true,
+      state: "saved",
+      threadId: "thread-stay",
+      messageId: phoneWriteIds("ana", "trip", "op-reply").messageId("reply"),
+    });
+    expect(
+      await answer(
+        await f.write("reply", {
+          operationId: "op-answer",
+          threadId: "thread-stay",
+          body: "Alfama",
+          resolves: { messageId: "message-poll", chosenOption: " Alfama " },
+        }),
+      ),
+    ).toMatchObject({ ok: true, state: "saved", threadId: "thread-stay" });
     for (const state of ["added", "removed"]) {
-      expect(await answer(await f.write("react", { operationId: `op-${state}`, messageId: "message-stay", emoji: "👍", state })), state)
-        .toMatchObject({ ok: true, state: "saved", threadId: "thread-stay" });
+      expect(
+        await answer(
+          await f.write("react", {
+            operationId: `op-${state}`,
+            messageId: "message-stay",
+            emoji: "👍",
+            state,
+          }),
+        ),
+        state,
+      ).toMatchObject({ ok: true, state: "saved", threadId: "thread-stay" });
     }
 
     // Renamed, the account writes under its new name, and a retry answers from the row without writing.
     f.named(() => "Ana Maria");
-    await answer(await f.write("reply", { operationId: "op-renamed", threadId: "thread-stay", body: "Hi" }));
-    expect(f.engine.writes.at(-1)).toMatchObject({ method: CHATS_METHOD.messageSend, params: { authorDisplayName: "Ana Maria" } });
+    await answer(
+      await f.write("reply", { operationId: "op-renamed", threadId: "thread-stay", body: "Hi" }),
+    );
+    expect(f.engine.writes.at(-1)).toMatchObject({
+      method: CHATS_METHOD.messageSend,
+      params: { authorDisplayName: "Ana Maria" },
+    });
     const writes = f.engine.writes.length;
     expect((await json(await f.write("post", post))).result).toEqual(posted.result);
     expect(f.engine.writes).toHaveLength(writes);
@@ -832,10 +1483,20 @@ describe("an account's chat writes through the server's copy", () => {
     // A write whose send was lost replays from its row as its author was named then.
     const lost = { operationId: "op-lost", threadId: "thread-stay", body: "Baixa" };
     f.engine.failing.set(CHATS_METHOD.messageSend, new Error("the engine went away"));
-    expect(await f.earlier({ operation: "reply", args: lost })).toMatchObject({ ok: true, state: "pending" });
+    expect(await f.earlier({ operation: "reply", args: lost })).toMatchObject({
+      ok: true,
+      state: "pending",
+    });
     f.engine.failing.clear();
-    expect(await answer(await f.write("reply", lost))).toMatchObject({ ok: true, state: "saved", threadId: "thread-stay" });
-    expect(f.engine.writes.at(-1)).toMatchObject({ method: CHATS_METHOD.messageSend, params: { authorDisplayName: "Ana", body: "Baixa" } });
+    expect(await answer(await f.write("reply", lost))).toMatchObject({
+      ok: true,
+      state: "saved",
+      threadId: "thread-stay",
+    });
+    expect(f.engine.writes.at(-1)).toMatchObject({
+      method: CHATS_METHOD.messageSend,
+      params: { authorDisplayName: "Ana", body: "Baixa" },
+    });
   });
 
   it("refuses a field outside each write's schema, in an answer's resolves too, before the copy syncs", async () => {
@@ -847,20 +1508,54 @@ describe("an account's chat writes through the server's copy", () => {
       react: { operationId: "op", messageId: "message-stay", emoji: "👍", state: "added" },
     };
     const forbidden: Record<string, unknown> = {
-      runId: "run", reported: { product: "Nova" }, work: { status: "done" }, agent: "Nova", attachments: [], cwd: "/", actor: "human",
-      agentId: "nova", token: "a".repeat(64), runSecret: "a".repeat(64), door: "cli",
-      author: { kind: "human", displayName: "Ben" }, authorKind: "human", authorDisplayName: "Ben", authorUserId: "ben", authorActorKey: "key",
-      idempotencyKey: "key", stageKey: "key", stageReceipt: true,
+      runId: "run",
+      reported: { product: "Nova" },
+      work: { status: "done" },
+      agent: "Nova",
+      attachments: [],
+      cwd: "/",
+      actor: "human",
+      agentId: "nova",
+      token: "a".repeat(64),
+      runSecret: "a".repeat(64),
+      door: "cli",
+      author: { kind: "human", displayName: "Ben" },
+      authorKind: "human",
+      authorDisplayName: "Ben",
+      authorUserId: "ben",
+      authorActorKey: "key",
+      idempotencyKey: "key",
+      stageKey: "key",
+      stageReceipt: true,
     };
     const requests: Array<[label: string, operation: string, args: Record<string, unknown>]> = [];
     for (const [operation, args] of Object.entries(valid)) {
-      for (const [field, value] of Object.entries(forbidden)) requests.push([`${operation} ${field}`, operation, { ...args, [field]: value }]);
+      for (const [field, value] of Object.entries(forbidden))
+        requests.push([`${operation} ${field}`, operation, { ...args, [field]: value }]);
     }
     // IDs the server derives, where the write names no such target.
-    for (const operation of ["post", "send", "reply"]) requests.push([`${operation} messageId`, operation, { ...valid[operation], messageId: "message-mine" }]);
-    for (const operation of ["post", "send"]) requests.push([`${operation} threadId`, operation, { ...valid[operation], threadId: "thread-mine" }]);
-    for (const [field, value] of Object.entries({ ...forbidden, resolvedByMessageId: "message-mine", threadId: "thread-stay" })) {
-      requests.push([`resolves ${field}`, "reply", { ...valid.reply, resolves: { messageId: "message-poll", [field]: value } }]);
+    for (const operation of ["post", "send", "reply"])
+      requests.push([
+        `${operation} messageId`,
+        operation,
+        { ...valid[operation], messageId: "message-mine" },
+      ]);
+    for (const operation of ["post", "send"])
+      requests.push([
+        `${operation} threadId`,
+        operation,
+        { ...valid[operation], threadId: "thread-mine" },
+      ]);
+    for (const [field, value] of Object.entries({
+      ...forbidden,
+      resolvedByMessageId: "message-mine",
+      threadId: "thread-stay",
+    })) {
+      requests.push([
+        `resolves ${field}`,
+        "reply",
+        { ...valid.reply, resolves: { messageId: "message-poll", [field]: value } },
+      ]);
     }
     for (const [label, operation, args] of requests) {
       const response = await f.write(operation, args);
@@ -873,19 +1568,31 @@ describe("an account's chat writes through the server's copy", () => {
 
     // Without them, each write fits its schema.
     for (const [operation, args] of Object.entries(valid)) {
-      expect((await f.write(operation, { ...args, operationId: `op-${operation}` })).status, operation).toBe(200);
+      expect(
+        (await f.write(operation, { ...args, operationId: `op-${operation}` })).status,
+        operation,
+      ).toBe(200);
     }
   });
-
 
   it("reads a write's arguments, and answers an unknown or reserved name as missing without reading them", async () => {
     const f = await writeRelay();
     const streamed = (operation: string) => {
       const read = { pulled: false };
       const request = new Request(`http://relay.test/sync/trip/ops/${operation}`, {
-        method: "POST", headers: { ...signedIn("ana"), "content-type": "application/json" }, duplex: "half",
-        body: new ReadableStream({ pull(controller) { read.pulled = true; controller.enqueue(new TextEncoder().encode("{}")); controller.close(); } },
-          { highWaterMark: 0 }),
+        method: "POST",
+        headers: { ...signedIn("ana"), "content-type": "application/json" },
+        duplex: "half",
+        body: new ReadableStream(
+          {
+            pull(controller) {
+              read.pulled = true;
+              controller.enqueue(new TextEncoder().encode("{}"));
+              controller.close();
+            },
+          },
+          { highWaterMark: 0 },
+        ),
       } as RequestInit & { duplex: "half" });
       return { request, read };
     };
@@ -906,8 +1613,20 @@ describe("an account's chat writes through the server's copy", () => {
 
   it("keeps the body limit and the sign-in's rate on writes", async () => {
     const f = await writeRelay({ limiter: new TokenBucketLimiter(1, 0.001, 16) });
-    expect((await f.write("reply", { operationId: "op", threadId: "thread-stay", body: "a".repeat(256 * 1024) })).status).toBe(413);
-    const limited = await f.write("reply", { operationId: "op", threadId: "thread-stay", body: "Hi" });
+    expect(
+      (
+        await f.write("reply", {
+          operationId: "op",
+          threadId: "thread-stay",
+          body: "a".repeat(256 * 1024),
+        })
+      ).status,
+    ).toBe(413);
+    const limited = await f.write("reply", {
+      operationId: "op",
+      threadId: "thread-stay",
+      body: "Hi",
+    });
     expect(limited.status).toBe(503);
     expect(await json(limited)).toMatchObject({ ok: false, code: "server_busy" });
     expect(f.rows()).toBe(0);
@@ -919,31 +1638,77 @@ describe("an account's chat writes through the server's copy", () => {
     const { onSecret } = f.seeded;
     const bytes = async (operation: string, args: Record<string, unknown>, id: string) => {
       const response = await f.write(operation, args);
-      return { status: response.status, type: response.headers.get("content-type"), body: (await response.text()).replaceAll(id, "<id>") };
+      return {
+        status: response.status,
+        type: response.headers.get("content-type"),
+        body: (await response.text()).replaceAll(id, "<id>"),
+      };
     };
-    const cases: Array<[label: string, hidden: Record<string, unknown>, hiddenId: string, absent: Record<string, unknown>, absentId: string]> = [
-      ["a reply", { threadId: onSecret.id }, onSecret.id, { threadId: "thread-nowhere" }, "thread-nowhere"],
-      ["a reply under a parent", { threadId: "thread-stay", parentMessageId: "message-secret" }, "message-secret",
-        { threadId: "thread-stay", parentMessageId: "message-nowhere" }, "message-nowhere"],
-      ["an answer", { threadId: onSecret.id, resolves: { messageId: "message-secret" } }, onSecret.id,
-        { threadId: "thread-nowhere", resolves: { messageId: "message-secret" } }, "thread-nowhere"],
+    const cases: Array<
+      [
+        label: string,
+        hidden: Record<string, unknown>,
+        hiddenId: string,
+        absent: Record<string, unknown>,
+        absentId: string,
+      ]
+    > = [
+      [
+        "a reply",
+        { threadId: onSecret.id },
+        onSecret.id,
+        { threadId: "thread-nowhere" },
+        "thread-nowhere",
+      ],
+      [
+        "a reply under a parent",
+        { threadId: "thread-stay", parentMessageId: "message-secret" },
+        "message-secret",
+        { threadId: "thread-stay", parentMessageId: "message-nowhere" },
+        "message-nowhere",
+      ],
+      [
+        "an answer",
+        { threadId: onSecret.id, resolves: { messageId: "message-secret" } },
+        onSecret.id,
+        { threadId: "thread-nowhere", resolves: { messageId: "message-secret" } },
+        "thread-nowhere",
+      ],
     ];
     let next = 0;
     for (const [label, hidden, hiddenId, absent, absentId] of cases) {
-      const answered = await bytes("reply", { operationId: `op-${++next}`, body: "Hi", ...hidden }, hiddenId);
+      const answered = await bytes(
+        "reply",
+        { operationId: `op-${++next}`, body: "Hi", ...hidden },
+        hiddenId,
+      );
       expect(answered.status, label).toBe(200);
       expect(answered.body, label).toContain('"refusal":"missing"');
-      expect(await bytes("reply", { operationId: `op-${++next}`, body: "Hi", ...absent }, absentId), label).toEqual(answered);
+      expect(
+        await bytes("reply", { operationId: `op-${++next}`, body: "Hi", ...absent }, absentId),
+        label,
+      ).toEqual(answered);
     }
-    const reaction = (messageId: string) => ({ operationId: `op-${++next}`, messageId, emoji: "👍", state: "added" });
+    const reaction = (messageId: string) => ({
+      operationId: `op-${++next}`,
+      messageId,
+      emoji: "👍",
+      state: "added",
+    });
     const reacted = await bytes("react", reaction("message-secret"), "message-secret");
     expect(reacted.body).toContain('"refusal":"missing"');
     expect(await bytes("react", reaction("message-nowhere"), "message-nowhere")).toEqual(reacted);
     // A Group no ID names answers as missing too, and not as a route that isn't there.
-    expect(await answer(await f.write("post", { operationId: "op-post", groupId: "channel-nowhere", body: "Hi" })))
-      .toEqual({ ok: false, reason: "dohc: no such group: channel-nowhere", refusal: "missing" });
-    expect(await answer(await f.write("send", { operationId: "op-send", streamId: "channel-nowhere", body: "Hi" })))
-      .toEqual({ ok: false, reason: "dohc: no such group: channel-nowhere", refusal: "missing" });
+    expect(
+      await answer(
+        await f.write("post", { operationId: "op-post", groupId: "channel-nowhere", body: "Hi" }),
+      ),
+    ).toEqual({ ok: false, reason: "dohc: no such group: channel-nowhere", refusal: "missing" });
+    expect(
+      await answer(
+        await f.write("send", { operationId: "op-send", streamId: "channel-nowhere", body: "Hi" }),
+      ),
+    ).toEqual({ ok: false, reason: "dohc: no such group: channel-nowhere", refusal: "missing" });
     expect(f.rows()).toBe(0);
     expect(f.engine.writes).toEqual([]);
   });
@@ -952,51 +1717,133 @@ describe("an account's chat writes through the server's copy", () => {
     const f = await writeRelay();
     const { planning, onSecret } = f.seeded;
     const chats = new ChatsLiveAdapter(f.engine.chats, "trip", { workspaceId: "trip" });
-    const declare = async (installId: string, computerLabel: string, runners: Array<{ agentId: string; displayName: string }>) => {
-      const response = await f.h(new Request("http://relay.test/sync/workspaces/trip/runners", {
-        method: "PUT", headers: { ...signedIn("ana", "mac"), "content-type": "application/json" },
-        body: JSON.stringify({ installId, computerLabel, runners: runners.map((runner) => ({ ...runner, enabled: true })) }),
-      }));
+    const declare = async (
+      installId: string,
+      computerLabel: string,
+      runners: Array<{ agentId: string; displayName: string }>,
+    ) => {
+      const response = await f.h(
+        new Request("http://relay.test/sync/workspaces/trip/runners", {
+          method: "PUT",
+          headers: { ...signedIn("ana", "mac"), "content-type": "application/json" },
+          body: JSON.stringify({
+            installId,
+            computerLabel,
+            runners: runners.map((runner) => ({ ...runner, enabled: true })),
+          }),
+        }),
+      );
       expect(response.status, await response.clone().text()).toBe(200);
     };
     // Two computers whose first agents are both `default` under different names. Claude runs on both.
     await declare("mac", "Ana's Mac", [{ agentId: "default", displayName: "Claude" }]);
-    await declare("laptop", "Ana's Laptop", [{ agentId: "default", displayName: "Codex" }, { agentId: "helper", displayName: "Claude" }]);
+    await declare("laptop", "Ana's Laptop", [
+      { agentId: "default", displayName: "Codex" },
+      { agentId: "helper", displayName: "Claude" },
+    ]);
     // Posts opened by the account's Claude, by a participant's agent with the same ID and name, and by an agent no computer runs.
-    for (const [threadId, authorUserId, displayName] of [["thread-claude", "ana", "Claude"], ["thread-ben", "ben", "Claude"], ["thread-nova", "ana", "Nova"]] as const) {
+    for (const [threadId, authorUserId, displayName] of [
+      ["thread-claude", "ana", "Claude"],
+      ["thread-ben", "ben", "Claude"],
+      ["thread-nova", "ana", "Nova"],
+    ] as const) {
       await chats.startChannelThread({
-        workspaceId: "trip", channelId: planning.channelId, threadId, messageId: `${threadId}-opening`, lane: "posts",
-        author: { kind: "agent", displayName }, authorOwnerDisplayName: "Ana", authorUserId, authorAgentId: "default", authorActorKey: null, body: "Done.",
+        workspaceId: "trip",
+        channelId: planning.channelId,
+        threadId,
+        messageId: `${threadId}-opening`,
+        lane: "posts",
+        author: { kind: "agent", displayName },
+        authorOwnerDisplayName: "Ana",
+        authorUserId,
+        authorAgentId: "default",
+        authorActorKey: null,
+        body: "Done.",
       });
     }
     const db = (f.storage as StorageContext).db;
     type Frozen = { targets: Array<{ target: string; candidates: unknown[] }>; unmatched: boolean };
-    const frozen = (operationId: string) => (JSON.parse(String(db.prepare(
-      "SELECT command_json FROM sync_relay_account_operations WHERE account_id = 'ana' AND operation_id = ?").get(operationId)?.command_json)) as { wakes: Frozen }).wakes;
-    const candidate = (installId: string, agentId: string, label: string, matched: Record<string, string>) => ({ installId, agentId, label, matched });
-    const mac = (matched: Record<string, string>) => candidate("mac", "default", "Ana's Mac", matched);
+    const frozen = (operationId: string) =>
+      (
+        JSON.parse(
+          String(
+            db
+              .prepare(
+                "SELECT command_json FROM sync_relay_account_operations WHERE account_id = 'ana' AND operation_id = ?",
+              )
+              .get(operationId)?.command_json,
+          ),
+        ) as { wakes: Frozen }
+      ).wakes;
+    const candidate = (
+      installId: string,
+      agentId: string,
+      label: string,
+      matched: Record<string, string>,
+    ) => ({ installId, agentId, label, matched });
+    const mac = (matched: Record<string, string>) =>
+      candidate("mac", "default", "Ana's Mac", matched);
     const saved = async (operation: string, args: Record<string, unknown>) =>
-      expect(await answer(await f.write(operation, args))).toMatchObject({ ok: true, state: "saved" });
+      expect(await answer(await f.write(operation, args))).toMatchObject({
+        ok: true,
+        state: "saved",
+      });
 
     await saved("reply", { operationId: "op-answered", threadId: "thread-claude", body: "Thanks" });
-    expect(frozen("op-answered")).toEqual({ targets: [{ target: "implicit:mac:default", candidates: [mac({ displayName: "Claude" })] }], unmatched: false });
+    expect(frozen("op-answered")).toEqual({
+      targets: [{ target: "implicit:mac:default", candidates: [mac({ displayName: "Claude" })] }],
+      unmatched: false,
+    });
     await saved("reply", { operationId: "op-participant", threadId: "thread-ben", body: "Thanks" });
-    expect(frozen("op-participant"), "a participant's agent is no one's to wake").toEqual({ targets: [], unmatched: false });
+    expect(frozen("op-participant"), "a participant's agent is no one's to wake").toEqual({
+      targets: [],
+      unmatched: false,
+    });
     await saved("reply", { operationId: "op-nobody", threadId: "thread-nova", body: "Thanks" });
     expect(frozen("op-nobody"), "no computer runs Nova").toEqual({ targets: [], unmatched: true });
-    await saved("post", { operationId: "op-codex", groupId: planning.channelId, body: "@codex look" });
-    expect(frozen("op-codex").targets).toEqual([{ target: "mention:codex", candidates: [candidate("laptop", "default", "Ana's Laptop", { handle: "codex" })] }]);
-    await saved("reply", { operationId: "op-both", threadId: "thread-claude", body: "@claude yes, secret-phrase-xyz" });
-    expect(frozen("op-both"), "the answered Claude is already a candidate of the mention").toEqual({ targets: [{ target: "mention:claude", candidates: [
-      candidate("laptop", "helper", "Ana's Laptop", { handle: "claude" }), mac({ handle: "claude" }),
-    ] }], unmatched: false });
-    await saved("react", { operationId: "op-react", messageId: "thread-claude-opening", emoji: "👍", state: "added" });
+    await saved("post", {
+      operationId: "op-codex",
+      groupId: planning.channelId,
+      body: "@codex look",
+    });
+    expect(frozen("op-codex").targets).toEqual([
+      {
+        target: "mention:codex",
+        candidates: [candidate("laptop", "default", "Ana's Laptop", { handle: "codex" })],
+      },
+    ]);
+    await saved("reply", {
+      operationId: "op-both",
+      threadId: "thread-claude",
+      body: "@claude yes, secret-phrase-xyz",
+    });
+    expect(frozen("op-both"), "the answered Claude is already a candidate of the mention").toEqual({
+      targets: [
+        {
+          target: "mention:claude",
+          candidates: [
+            candidate("laptop", "helper", "Ana's Laptop", { handle: "claude" }),
+            mac({ handle: "claude" }),
+          ],
+        },
+      ],
+      unmatched: false,
+    });
+    await saved("react", {
+      operationId: "op-react",
+      messageId: "thread-claude-opening",
+      emoji: "👍",
+      state: "added",
+    });
     expect(frozen("op-react")).toEqual({ targets: [], unmatched: false });
 
     // A write recorded before the computers changed publishes the targets it froze.
     const lost = { operationId: "op-lost", threadId: "thread-claude", body: "Again" };
     f.engine.failing.set(CHATS_METHOD.messageSend, new Error("the engine went away"));
-    expect(await f.earlier({ operation: "reply", args: lost })).toMatchObject({ ok: true, state: "pending" });
+    expect(await f.earlier({ operation: "reply", args: lost })).toMatchObject({
+      ok: true,
+      state: "pending",
+    });
     f.engine.failing.clear();
     await declare("mac", "Ana's Mac", []);
     await declare("desktop", "Ana's Desktop", [{ agentId: "default", displayName: "Claude" }]);
@@ -1004,37 +1851,117 @@ describe("an account's chat writes through the server's copy", () => {
 
     const rows = db.prepare("SELECT * FROM sync_relay_chat_wakes ORDER BY operation_id").all();
     const ids = (operationId: string) => phoneWriteIds("ana", "trip", operationId);
-    expect(rows.map((row) => [row.operation_id, row.message_id, row.thread_id, row.target, row.state, JSON.parse(String(row.candidates_json))])).toEqual([
-      ["op-answered", ids("op-answered").messageId("reply"), "thread-claude", "implicit:mac:default", "waiting", [mac({ displayName: "Claude" })]],
-      ["op-both", ids("op-both").messageId("reply"), "thread-claude", "mention:claude", "waiting", frozen("op-both").targets[0]!.candidates],
-      ["op-codex", ids("op-codex").messageId("post"), ids("op-codex").threadId, "mention:codex", "waiting", frozen("op-codex").targets[0]!.candidates],
-      ["op-lost", ids("op-lost").messageId("reply"), "thread-claude", "implicit:mac:default", "waiting", [mac({ displayName: "Claude" })]],
+    expect(
+      rows.map((row) => [
+        row.operation_id,
+        row.message_id,
+        row.thread_id,
+        row.target,
+        row.state,
+        JSON.parse(String(row.candidates_json)),
+      ]),
+    ).toEqual([
+      [
+        "op-answered",
+        ids("op-answered").messageId("reply"),
+        "thread-claude",
+        "implicit:mac:default",
+        "waiting",
+        [mac({ displayName: "Claude" })],
+      ],
+      [
+        "op-both",
+        ids("op-both").messageId("reply"),
+        "thread-claude",
+        "mention:claude",
+        "waiting",
+        frozen("op-both").targets[0]!.candidates,
+      ],
+      [
+        "op-codex",
+        ids("op-codex").messageId("post"),
+        ids("op-codex").threadId,
+        "mention:codex",
+        "waiting",
+        frozen("op-codex").targets[0]!.candidates,
+      ],
+      [
+        "op-lost",
+        ids("op-lost").messageId("reply"),
+        "thread-claude",
+        "implicit:mac:default",
+        "waiting",
+        [mac({ displayName: "Claude" })],
+      ],
     ]);
     expect(JSON.stringify(rows), "a wake keeps no message text").not.toContain("secret-phrase-xyz");
 
     // With computers declared, a hidden thread still answers exactly as a missing one.
     const bytes = async (operationId: string, threadId: string) =>
-      (await (await f.write("reply", { operationId, threadId, body: "@claude hi" })).text()).replaceAll(threadId, "<id>");
+      (
+        await (await f.write("reply", { operationId, threadId, body: "@claude hi" })).text()
+      ).replaceAll(threadId, "<id>");
     expect(await bytes("op-hidden", onSecret.id)).toBe(await bytes("op-missing", "thread-nowhere"));
   });
 
   // Declares one of Ana's computers and the agents it runs in "trip".
-  const declare = async (f: WriteRelay, installId: string, runners: Array<{ agentId: string; displayName: string }>) => {
-    const response = await f.h(new Request("http://relay.test/sync/workspaces/trip/runners", {
-      method: "PUT", headers: { ...signedIn("ana", "mac"), "content-type": "application/json" },
-      body: JSON.stringify({ installId, computerLabel: `${installId} label`, runners: runners.map((runner) => ({ ...runner, enabled: true })) }),
-    }));
+  const declare = async (
+    f: WriteRelay,
+    installId: string,
+    runners: Array<{ agentId: string; displayName: string }>,
+  ) => {
+    const response = await f.h(
+      new Request("http://relay.test/sync/workspaces/trip/runners", {
+        method: "PUT",
+        headers: { ...signedIn("ana", "mac"), "content-type": "application/json" },
+        body: JSON.stringify({
+          installId,
+          computerLabel: `${installId} label`,
+          runners: runners.map((runner) => ({ ...runner, enabled: true })),
+        }),
+      }),
+    );
     expect(response.status, await response.clone().text()).toBe(200);
   };
-  const frozenTargets = (f: WriteRelay, operationId: string) => (JSON.parse(String((f.storage as StorageContext).db.prepare(
-    "SELECT command_json FROM sync_relay_account_operations WHERE account_id = 'ana' AND operation_id = ?").get(operationId)?.command_json)) as
-    { wakes: { targets: Array<{ target: string; candidates: Array<{ installId: string; agentId: string }> }> } }).wakes.targets;
+  const frozenTargets = (f: WriteRelay, operationId: string) =>
+    (
+      JSON.parse(
+        String(
+          (f.storage as StorageContext).db
+            .prepare(
+              "SELECT command_json FROM sync_relay_account_operations WHERE account_id = 'ana' AND operation_id = ?",
+            )
+            .get(operationId)?.command_json,
+        ),
+      ) as {
+        wakes: {
+          targets: Array<{
+            target: string;
+            candidates: Array<{ installId: string; agentId: string }>;
+          }>;
+        };
+      }
+    ).wakes.targets;
 
-  const wakesOf = (f: WriteRelay, operationId: string) => (JSON.parse(String((f.storage as StorageContext).db.prepare(
-    "SELECT command_json FROM sync_relay_account_operations WHERE account_id = 'ana' AND operation_id = ?").get(operationId)?.command_json)) as
-    { wakes: { targets: unknown[]; unmatched: boolean } }).wakes;
-  const agentAuthor = (displayName: string) =>
-    ({ author: { kind: "agent" as const, displayName }, authorOwnerDisplayName: "Ana", authorUserId: "ana", authorAgentId: "default", authorActorKey: null });
+  const wakesOf = (f: WriteRelay, operationId: string) =>
+    (
+      JSON.parse(
+        String(
+          (f.storage as StorageContext).db
+            .prepare(
+              "SELECT command_json FROM sync_relay_account_operations WHERE account_id = 'ana' AND operation_id = ?",
+            )
+            .get(operationId)?.command_json,
+        ),
+      ) as { wakes: { targets: unknown[]; unmatched: boolean } }
+    ).wakes;
+  const agentAuthor = (displayName: string) => ({
+    author: { kind: "agent" as const, displayName },
+    authorOwnerDisplayName: "Ana",
+    authorUserId: "ana",
+    authorAgentId: "default",
+    authorActorKey: null,
+  });
 
   it("takes a DM's newest agent message across both of its lanes", async () => {
     const f = await writeRelay();
@@ -1042,57 +1969,130 @@ describe("an account's chat writes through the server's copy", () => {
     // Two computers each run an agent `default`, under different names.
     await declare(f, "mac", [{ agentId: "default", displayName: "Claude" }]);
     await declare(f, "laptop", [{ agentId: "default", displayName: "Nova" }]);
-    const dm = await chats.ensureAgentChannel({ workspaceId: "trip", agentId: "default", name: "Claude" });
-    await chats.startChannelThread({ workspaceId: "trip", channelId: dm.channelId, threadId: "thread-dm", messageId: "dm-hello", lane: "chat",
-      author: { kind: "human", displayName: "Ana" }, authorUserId: "ana", authorActorKey: null, body: "Hello" });
-    await chats.sendMessage({ workspaceId: "trip", threadId: "thread-dm", messageId: "dm-claude", ...agentAuthor("Claude"), body: "Here." });
+    const dm = await chats.ensureAgentChannel({
+      workspaceId: "trip",
+      agentId: "default",
+      name: "Claude",
+    });
+    await chats.startChannelThread({
+      workspaceId: "trip",
+      channelId: dm.channelId,
+      threadId: "thread-dm",
+      messageId: "dm-hello",
+      lane: "chat",
+      author: { kind: "human", displayName: "Ana" },
+      authorUserId: "ana",
+      authorActorKey: null,
+      body: "Hello",
+    });
+    await chats.sendMessage({
+      workspaceId: "trip",
+      threadId: "thread-dm",
+      messageId: "dm-claude",
+      ...agentAuthor("Claude"),
+      body: "Here.",
+    });
     // A newer message in a thread of its own, in the posts lane.
-    await chats.startChannelThread({ workspaceId: "trip", channelId: dm.channelId, threadId: "thread-own", messageId: "own-nova", lane: "posts",
-      ownThread: true, ...agentAuthor("Nova"), body: "Done." });
-    const send = async (operationId: string) => expect(await answer(await f.write("send", { operationId, streamId: dm.channelId, body: "And?" })))
-      .toMatchObject({ ok: true, state: "saved" });
+    await chats.startChannelThread({
+      workspaceId: "trip",
+      channelId: dm.channelId,
+      threadId: "thread-own",
+      messageId: "own-nova",
+      lane: "posts",
+      ownThread: true,
+      ...agentAuthor("Nova"),
+      body: "Done.",
+    });
+    const send = async (operationId: string) =>
+      expect(
+        await answer(await f.write("send", { operationId, streamId: dm.channelId, body: "And?" })),
+      ).toMatchObject({ ok: true, state: "saved" });
     await send("op-nova");
-    expect(frozenTargets(f, "op-nova").map((target) => target.target)).toEqual(["implicit:laptop:default"]);
+    expect(frozenTargets(f, "op-nova").map((target) => target.target)).toEqual([
+      "implicit:laptop:default",
+    ]);
     // Then the conversation's agent speaks again, newest of all.
-    await chats.sendMessage({ workspaceId: "trip", threadId: "thread-dm", messageId: "dm-claude-again", ...agentAuthor("Claude"), body: "Still here." });
+    await chats.sendMessage({
+      workspaceId: "trip",
+      threadId: "thread-dm",
+      messageId: "dm-claude-again",
+      ...agentAuthor("Claude"),
+      body: "Still here.",
+    });
     await send("op-claude");
-    expect(frozenTargets(f, "op-claude").map((target) => target.target)).toEqual(["implicit:mac:default"]);
+    expect(frozenTargets(f, "op-claude").map((target) => target.target)).toEqual([
+      "implicit:mac:default",
+    ]);
   });
 
   // A DM with `posts` threads of their own after its conversation, each opened by Ana unless `agentIn` names it.
   async function dmWithThreads(f: WriteRelay, posts: number, agentIn: number) {
     const chats = new ChatsLiveAdapter(f.engine.chats, "trip", { workspaceId: "trip" });
     await declare(f, "mac", [{ agentId: "default", displayName: "Claude" }]);
-    const dm = await chats.ensureAgentChannel({ workspaceId: "trip", agentId: "default", name: "Claude" });
-    const human = { author: { kind: "human" as const, displayName: "Ana" }, authorUserId: "ana", authorActorKey: null };
-    await chats.startChannelThread({ workspaceId: "trip", channelId: dm.channelId, threadId: "thread-dm", messageId: "dm-hello", lane: "chat",
-      ...human, body: "Hello" });
+    const dm = await chats.ensureAgentChannel({
+      workspaceId: "trip",
+      agentId: "default",
+      name: "Claude",
+    });
+    const human = {
+      author: { kind: "human" as const, displayName: "Ana" },
+      authorUserId: "ana",
+      authorActorKey: null,
+    };
+    await chats.startChannelThread({
+      workspaceId: "trip",
+      channelId: dm.channelId,
+      threadId: "thread-dm",
+      messageId: "dm-hello",
+      lane: "chat",
+      ...human,
+      body: "Hello",
+    });
     for (let index = 0; index < posts; index += 1) {
-      await chats.startChannelThread({ workspaceId: "trip", channelId: dm.channelId, threadId: `thread-own-${index}`, messageId: `own-${index}`,
-        lane: "posts", ownThread: true, ...(index === agentIn ? agentAuthor("Claude") : human), body: `Note ${index}` });
+      await chats.startChannelThread({
+        workspaceId: "trip",
+        channelId: dm.channelId,
+        threadId: `thread-own-${index}`,
+        messageId: `own-${index}`,
+        lane: "posts",
+        ownThread: true,
+        ...(index === agentIn ? agentAuthor("Claude") : human),
+        body: `Note ${index}`,
+      });
     }
     return dm.channelId;
   }
   // Sends to the DM, and answers the frozen wakes and how many thread listings and message pages the send read.
   async function sendCounting(f: WriteRelay, operationId: string, streamId: string) {
     const asked = f.engine.asked.length;
-    expect(await answer(await f.write("send", { operationId, streamId, body: "Still there?" }))).toMatchObject({ ok: true, state: "saved" });
+    expect(
+      await answer(await f.write("send", { operationId, streamId, body: "Still there?" })),
+    ).toMatchObject({ ok: true, state: "saved" });
     const reads = f.engine.asked.slice(asked);
     const counted = (method: string) => reads.filter((each) => each === method).length;
-    return { wakes: wakesOf(f, operationId), reads: [counted(CHATS_METHOD.threadsListForChannel), counted(CHATS_METHOD.messagesList)] };
+    return {
+      wakes: wakesOf(f, operationId),
+      reads: [counted(CHATS_METHOD.threadsListForChannel), counted(CHATS_METHOD.messagesList)],
+    };
   }
 
   it("wakes no one from a DM its budget can't cover, though it saw the agent's message, and still sends with the hint", async () => {
     const f = await writeRelay();
     // Six threads of one page each: the newest, read first, is the agent's; the budget ends after four.
     const streamId = await dmWithThreads(f, 5, 4);
-    expect(await sendCounting(f, "op-long", streamId)).toEqual({ wakes: { targets: [], unmatched: true }, reads: [2, 4] });
+    expect(await sendCounting(f, "op-long", streamId)).toEqual({
+      wakes: { targets: [], unmatched: true },
+      reads: [2, 4],
+    });
   });
 
   it("wakes no one from a DM with more threads than one listing returns, without reading their messages", async () => {
     const f = await writeRelay();
     const streamId = await dmWithThreads(f, 9, 8);
-    expect(await sendCounting(f, "op-wide", streamId)).toEqual({ wakes: { targets: [], unmatched: true }, reads: [2, 0] });
+    expect(await sendCounting(f, "op-wide", streamId)).toEqual({
+      wakes: { targets: [], unmatched: true },
+      reads: [2, 0],
+    });
   });
 
   it("wakes no computer whose declaration's lease ended, by mention or by DM, until it declares again", async () => {
@@ -1100,12 +2100,33 @@ describe("an account's chat writes through the server's copy", () => {
     const f = await writeRelay({ nowMs: () => now });
     const chats = new ChatsLiveAdapter(f.engine.chats, "trip", { workspaceId: "trip" });
     await declare(f, "mac", [{ agentId: "default", displayName: "Claude" }]);
-    const dm = await chats.ensureAgentChannel({ workspaceId: "trip", agentId: "default", name: "Claude" });
-    await chats.startChannelThread({ workspaceId: "trip", channelId: dm.channelId, threadId: "thread-dm", messageId: "dm-hello", lane: "chat",
-      author: { kind: "human", displayName: "Ana" }, authorUserId: "ana", authorActorKey: null, body: "Hello" });
-    await chats.sendMessage({ workspaceId: "trip", threadId: "thread-dm", messageId: "dm-claude", ...agentAuthor("Claude"), body: "Here." });
+    const dm = await chats.ensureAgentChannel({
+      workspaceId: "trip",
+      agentId: "default",
+      name: "Claude",
+    });
+    await chats.startChannelThread({
+      workspaceId: "trip",
+      channelId: dm.channelId,
+      threadId: "thread-dm",
+      messageId: "dm-hello",
+      lane: "chat",
+      author: { kind: "human", displayName: "Ana" },
+      authorUserId: "ana",
+      authorActorKey: null,
+      body: "Hello",
+    });
+    await chats.sendMessage({
+      workspaceId: "trip",
+      threadId: "thread-dm",
+      messageId: "dm-claude",
+      ...agentAuthor("Claude"),
+      body: "Here.",
+    });
     const send = async (operationId: string, body: string) => {
-      expect(await answer(await f.write("send", { operationId, streamId: dm.channelId, body }))).toMatchObject({ ok: true, state: "saved" });
+      expect(
+        await answer(await f.write("send", { operationId, streamId: dm.channelId, body })),
+      ).toMatchObject({ ok: true, state: "saved" });
       return frozenTargets(f, operationId).map((target) => target.target);
     };
     expect(await send("op-fresh", "@claude And?")).toEqual(["mention:claude"]);
@@ -1124,37 +2145,100 @@ describe("an account's chat writes through the server's copy", () => {
     const chats = new ChatsLiveAdapter(f.engine.chats, "trip", { workspaceId: "trip" });
     await declare(f, "mac", [{ agentId: "default", displayName: "Claude" }]);
     await declare(f, "laptop", [{ agentId: "default", displayName: "Nova" }]);
-    const dm = await chats.ensureAgentChannel({ workspaceId: "trip", agentId: "default", name: "Claude" });
-    const human = { author: { kind: "human" as const, displayName: "Ana" }, authorUserId: "ana", authorActorKey: null };
-    await chats.startChannelThread({ workspaceId: "trip", channelId: dm.channelId, threadId: "thread-dm", messageId: "dm-hello", lane: "chat",
-      ...human, body: "Hello" });
-    await chats.sendMessage({ workspaceId: "trip", threadId: "thread-dm", messageId: "dm-claude", ...agentAuthor("Claude"), body: "Here." });
+    const dm = await chats.ensureAgentChannel({
+      workspaceId: "trip",
+      agentId: "default",
+      name: "Claude",
+    });
+    const human = {
+      author: { kind: "human" as const, displayName: "Ana" },
+      authorUserId: "ana",
+      authorActorKey: null,
+    };
+    await chats.startChannelThread({
+      workspaceId: "trip",
+      channelId: dm.channelId,
+      threadId: "thread-dm",
+      messageId: "dm-hello",
+      lane: "chat",
+      ...human,
+      body: "Hello",
+    });
+    await chats.sendMessage({
+      workspaceId: "trip",
+      threadId: "thread-dm",
+      messageId: "dm-claude",
+      ...agentAuthor("Claude"),
+      body: "Here.",
+    });
     for (let index = 0; index < 500; index += 1) {
-      await chats.sendMessage({ workspaceId: "trip", threadId: "thread-dm", messageId: `dm-${index}`, ...human, body: `Note ${index}` });
+      await chats.sendMessage({
+        workspaceId: "trip",
+        threadId: "thread-dm",
+        messageId: `dm-${index}`,
+        ...human,
+        body: `Note ${index}`,
+      });
     }
-    await chats.sendMessage({ workspaceId: "trip", threadId: "thread-dm", messageId: "dm-import", ...agentAuthor("Nova"), body: "Earlier." });
+    await chats.sendMessage({
+      workspaceId: "trip",
+      threadId: "thread-dm",
+      messageId: "dm-import",
+      ...agentAuthor("Nova"),
+      body: "Earlier.",
+    });
     // As a copy that synced Nova's message late holds it: last by arrival, on the first page read, with its sender's earlier time.
     const original = f.engine.chats.sendRequest.bind(f.engine.chats);
     vi.spyOn(f.engine.chats, "sendRequest").mockImplementation(async (request) => {
       const params = asRecord(request.params);
-      if (request.method !== CHATS_METHOD.messagesList || params === null || params.threadId !== "thread-dm") return await original(request);
+      if (
+        request.method !== CHATS_METHOD.messagesList ||
+        params === null ||
+        params.threadId !== "thread-dm"
+      )
+        return await original(request);
       const all: Array<Record<string, JsonValue>> = [];
       let after: number | null = null;
       do {
-        const page = (await original({ ...request, params: { threadId: "thread-dm", limit: 500, ...(after === null ? {} : { afterMessageOrder: after }) } }))
-          .result as unknown as { messages: Array<Record<string, JsonValue>>; nextAfterMessageOrder: number | null };
+        const page = (
+          await original({
+            ...request,
+            params: {
+              threadId: "thread-dm",
+              limit: 500,
+              ...(after === null ? {} : { afterMessageOrder: after }),
+            },
+          })
+        ).result as unknown as {
+          messages: Array<Record<string, JsonValue>>;
+          nextAfterMessageOrder: number | null;
+        };
         all.push(...page.messages);
         after = page.nextAfterMessageOrder;
       } while (after !== null);
-      const arrived = [...all.filter((message) => message.id !== "dm-import"), ...all.filter((message) => message.id === "dm-import")
-        .map((message): Record<string, JsonValue> => ({ ...message, createdAtMs: 0 }))];
-      const start = (typeof params.afterMessageOrder === "number" ? params.afterMessageOrder : -1) + 1;
+      const arrived = [
+        ...all.filter((message) => message.id !== "dm-import"),
+        ...all
+          .filter((message) => message.id === "dm-import")
+          .map((message): Record<string, JsonValue> => ({ ...message, createdAtMs: 0 })),
+      ];
+      const start =
+        (typeof params.afterMessageOrder === "number" ? params.afterMessageOrder : -1) + 1;
       const rows = arrived.slice(start, start + Number(params.limit));
-      return { id: request.id, result: { messages: rows, nextAfterMessageOrder: start + rows.length < arrived.length ? start + rows.length - 1 : null } };
+      return {
+        id: request.id,
+        result: {
+          messages: rows,
+          nextAfterMessageOrder:
+            start + rows.length < arrived.length ? start + rows.length - 1 : null,
+        },
+      };
     });
     const sent = await sendCounting(f, "op-time", dm.channelId);
     expect(sent.reads).toEqual([2, 2]);
-    expect(frozenTargets(f, "op-time").map((target) => target.target)).toEqual(["implicit:mac:default"]);
+    expect(frozenTargets(f, "op-time").map((target) => target.target)).toEqual([
+      "implicit:mac:default",
+    ]);
   });
 
   it("finds the agent of a DM from its newest messages, past a full page of them and in a reply", async () => {
@@ -1163,81 +2247,189 @@ describe("an account's chat writes through the server's copy", () => {
     await declare(f, "mac", [{ agentId: "default", displayName: "Claude" }]);
     await declare(f, "laptop", [{ agentId: "helper", displayName: "Claude" }]);
     const human = { kind: "human" as const, displayName: "Ana" };
-    const agent = { author: { kind: "agent" as const, displayName: "Claude" }, authorOwnerDisplayName: "Ana", authorUserId: "ana", authorActorKey: null };
+    const agent = {
+      author: { kind: "agent" as const, displayName: "Claude" },
+      authorOwnerDisplayName: "Ana",
+      authorUserId: "ana",
+      authorActorKey: null,
+    };
     // The default agent last spoke in a reply, then Ana wrote 600 messages; the helper in its DM's conversation, then 55.
     const dms: Record<string, string> = {};
     for (const agentId of ["default", "helper"]) {
       const dm = await chats.ensureAgentChannel({ workspaceId: "trip", agentId, name: "Claude" });
       dms[agentId] = dm.channelId;
       const threadId = `thread-dm-${agentId}`;
-      await chats.startChannelThread({ workspaceId: "trip", channelId: dm.channelId, threadId, messageId: `${threadId}-hello`, lane: "chat",
-        author: human, authorUserId: "ana", authorActorKey: null, body: "Hello" });
-      await chats.sendMessage({ workspaceId: "trip", threadId, messageId: `${threadId}-agent`, authorAgentId: agentId, ...agent, body: "Here.",
-        ...(agentId === "default" ? { parentMessageId: `${threadId}-hello` } : {}) });
+      await chats.startChannelThread({
+        workspaceId: "trip",
+        channelId: dm.channelId,
+        threadId,
+        messageId: `${threadId}-hello`,
+        lane: "chat",
+        author: human,
+        authorUserId: "ana",
+        authorActorKey: null,
+        body: "Hello",
+      });
+      await chats.sendMessage({
+        workspaceId: "trip",
+        threadId,
+        messageId: `${threadId}-agent`,
+        authorAgentId: agentId,
+        ...agent,
+        body: "Here.",
+        ...(agentId === "default" ? { parentMessageId: `${threadId}-hello` } : {}),
+      });
       for (let index = 0; index < (agentId === "default" ? 600 : 55); index += 1) {
-        await chats.sendMessage({ workspaceId: "trip", threadId, messageId: `${threadId}-${index}`, author: human, authorUserId: "ana",
-          authorActorKey: null, body: `Note ${index}` });
+        await chats.sendMessage({
+          workspaceId: "trip",
+          threadId,
+          messageId: `${threadId}-${index}`,
+          author: human,
+          authorUserId: "ana",
+          authorActorKey: null,
+          body: `Note ${index}`,
+        });
       }
     }
-    for (const [agentId, installId] of [["default", "mac"], ["helper", "laptop"]] as const) {
-      expect(await answer(await f.write("send", { operationId: `op-${agentId}`, streamId: dms[agentId], body: "Still there?" })))
-        .toMatchObject({ ok: true, state: "saved" });
-      expect(frozenTargets(f, `op-${agentId}`), agentId).toEqual([{ target: `implicit:${installId}:${agentId}`, candidates: [
-        { installId, agentId, label: `${installId} label`, matched: { displayName: "Claude" } },
-      ] }]);
+    for (const [agentId, installId] of [
+      ["default", "mac"],
+      ["helper", "laptop"],
+    ] as const) {
+      expect(
+        await answer(
+          await f.write("send", {
+            operationId: `op-${agentId}`,
+            streamId: dms[agentId],
+            body: "Still there?",
+          }),
+        ),
+      ).toMatchObject({ ok: true, state: "saved" });
+      expect(frozenTargets(f, `op-${agentId}`), agentId).toEqual([
+        {
+          target: `implicit:${installId}:${agentId}`,
+          candidates: [
+            { installId, agentId, label: `${installId} label`, matched: { displayName: "Claude" } },
+          ],
+        },
+      ]);
     }
   });
 
   it("keeps every target of a message, and refuses one that would wake more than 64 computers' agents before any change", async () => {
     const f = await writeRelay();
-    const helpers = Array.from({ length: 33 }, (_, index) => ({ agentId: `helper-${index}`, displayName: `Helper ${index}` }));
-    const body = helpers.map((helper) => `@helper${helper.agentId.slice("helper-".length)}`).join(" ");
+    const helpers = Array.from({ length: 33 }, (_, index) => ({
+      agentId: `helper-${index}`,
+      displayName: `Helper ${index}`,
+    }));
+    const body = helpers
+      .map((helper) => `@helper${helper.agentId.slice("helper-".length)}`)
+      .join(" ");
     await declare(f, "mac", helpers);
-    expect(await answer(await f.write("reply", { operationId: "op-33", threadId: "thread-stay", body }))).toMatchObject({ ok: true, state: "saved" });
+    expect(
+      await answer(await f.write("reply", { operationId: "op-33", threadId: "thread-stay", body })),
+    ).toMatchObject({ ok: true, state: "saved" });
     expect(frozenTargets(f, "op-33")).toHaveLength(33);
 
     await declare(f, "laptop", helpers);
     const [rows, writes] = [f.rows(), f.engine.writes.length];
-    expect(await answer(await f.write("reply", { operationId: "op-66", threadId: "thread-stay", body })))
-      .toEqual({ ok: false, refusal: "refused", reason: "Couldn't send" });
+    expect(
+      await answer(await f.write("reply", { operationId: "op-66", threadId: "thread-stay", body })),
+    ).toEqual({ ok: false, refusal: "refused", reason: "Couldn't send" });
     expect([f.rows(), f.engine.writes.length]).toEqual([rows, writes]);
   });
 
   const RETRY_NOW = 50_000_000;
   // A saved message's wake, claimed by one computer a day before the route's clock and never confirmed.
-  const unconfirmedWake = (f: WriteRelay, operationId: string, messageId: string, threadId: string) => {
-    const claude = { target: "mention:claude", candidates: ["mac", "laptop"].map((installId) =>
-      ({ installId, agentId: "default", label: installId, matched: { handle: "claude" } })) };
-    f.storage.recordAccountOperation({ accountId: "ana", operationId, binding: { workspaceId: "trip", operation: "send", args: { operationId } },
-      incarnation: 1, replicationEpoch: "epoch", streamIdentity: "stream", command: {}, writesMessage: true, nowMs: RETRY_NOW });
-    f.storage.advanceAccountOperation({ accountId: "ana", operationId, stage: "saved", message: "published", result: { threadId }, nowMs: RETRY_NOW,
-      wakes: { publish: { messageId, threadId, held: false, targets: [claude] } } });
+  const unconfirmedWake = (
+    f: WriteRelay,
+    operationId: string,
+    messageId: string,
+    threadId: string,
+  ) => {
+    const claude = {
+      target: "mention:claude",
+      candidates: ["mac", "laptop"].map((installId) => ({
+        installId,
+        agentId: "default",
+        label: installId,
+        matched: { handle: "claude" },
+      })),
+    };
+    f.storage.recordAccountOperation({
+      accountId: "ana",
+      operationId,
+      binding: { workspaceId: "trip", operation: "send", args: { operationId } },
+      incarnation: 1,
+      replicationEpoch: "epoch",
+      streamIdentity: "stream",
+      command: {},
+      writesMessage: true,
+      nowMs: RETRY_NOW,
+    });
+    f.storage.advanceAccountOperation({
+      accountId: "ana",
+      operationId,
+      stage: "saved",
+      message: "published",
+      result: { threadId },
+      nowMs: RETRY_NOW,
+      wakes: { publish: { messageId, threadId, held: false, targets: [claude] } },
+    });
     const wakeId = chatWakeId("ana", "trip", messageId, "mention:claude", 1);
     f.storage.claimChatWake({ accountId: "ana", wakeId, installId: "mac", nowMs: RETRY_NOW });
     // The laptop, where a retry goes, declared its agent then, so its lease holds a day later.
-    f.storage.replaceChatRunners({ accountId: "ana", workspaceId: "trip", installId: "laptop", computerLabel: "laptop",
-      runners: [{ agentId: "default", handle: "claude", displayName: "Claude", enabled: true }], nowMs: RETRY_NOW });
+    f.storage.replaceChatRunners({
+      accountId: "ana",
+      workspaceId: "trip",
+      installId: "laptop",
+      computerLabel: "laptop",
+      runners: [{ agentId: "default", handle: "claude", displayName: "Claude", enabled: true }],
+      nowMs: RETRY_NOW,
+    });
     return wakeId;
   };
-  const count = (f: WriteRelay, sql: string) => Number((f.storage as StorageContext).db.prepare(sql).get()?.n);
+  const count = (f: WriteRelay, sql: string) =>
+    Number((f.storage as StorageContext).db.prepare(sql).get()?.n);
 
   it("tries a wake again with strict arguments, once per operation ID, and answers one in a thread now hidden as missing", async () => {
     const f = await writeRelay({ nowMs: () => RETRY_NOW + CHAT_WAKE_CONFIRM_MS });
     const { onSecret } = f.seeded;
-    const unconfirmed = (operationId: string, messageId: string, threadId: string) => unconfirmedWake(f, operationId, messageId, threadId);
+    const unconfirmed = (operationId: string, messageId: string, threadId: string) =>
+      unconfirmedWake(f, operationId, messageId, threadId);
     const visible = unconfirmed("op-visible", "message-visible", "thread-stay");
     const hidden = unconfirmed("op-hidden", "message-hidden", onSecret.id);
     const retry = (args: unknown) => f.write("retryWake", args);
-    const next = { ok: true, wake: expect.objectContaining({ wakeId: chatWakeId("ana", "trip", "message-visible", "mention:claude", 2), generation: 2 }) };
+    const next = {
+      ok: true,
+      wake: expect.objectContaining({
+        wakeId: chatWakeId("ana", "trip", "message-visible", "mention:claude", 2),
+        generation: 2,
+      }),
+    };
     expect(await answer(await retry({ operationId: "retry-1", wakeId: visible }))).toEqual(next);
     expect(await answer(await retry({ operationId: "retry-1", wakeId: visible }))).toEqual(next);
-    expect(await answer(await retry({ operationId: "op-visible", wakeId: visible }))).toEqual({ ok: false, refusal: "refused", reason: "Couldn't send" });
+    expect(await answer(await retry({ operationId: "op-visible", wakeId: visible }))).toEqual({
+      ok: false,
+      refusal: "refused",
+      reason: "Couldn't send",
+    });
 
     // A wake in a thread now on a secret file answers exactly as one that isn't there, and gets no generation.
-    const bytes = async (wakeId: string) => (await (await retry({ operationId: `retry-${wakeId}`, wakeId })).text()).replaceAll(wakeId, "<id>");
-    expect(await bytes(hidden)).toBe(await bytes(chatWakeId("ana", "trip", "message-nowhere", "mention:claude", 1)));
+    const bytes = async (wakeId: string) =>
+      (await (await retry({ operationId: `retry-${wakeId}`, wakeId })).text()).replaceAll(
+        wakeId,
+        "<id>",
+      );
+    expect(await bytes(hidden)).toBe(
+      await bytes(chatWakeId("ana", "trip", "message-nowhere", "mention:claude", 1)),
+    );
     expect(await bytes(hidden)).toContain('"refusal":"missing"');
-    expect(count(f, "SELECT count(*) AS n FROM sync_relay_chat_wakes WHERE message_id = 'message-hidden'")).toBe(1);
+    expect(
+      count(
+        f,
+        "SELECT count(*) AS n FROM sync_relay_chat_wakes WHERE message_id = 'message-hidden'",
+      ),
+    ).toBe(1);
 
     for (const args of [
       { operationId: "retry-2", wakeId: visible, installId: "mac" },
@@ -1247,19 +2439,40 @@ describe("an account's chat writes through the server's copy", () => {
       { wakeId: visible },
     ]) {
       const response = await retry(args);
-      expect({ status: response.status, body: await json(response) }, JSON.stringify(args)).toEqual({ status: 400, body: schemaRefusal("retryWake") });
+      expect({ status: response.status, body: await json(response) }, JSON.stringify(args)).toEqual(
+        { status: 400, body: schemaRefusal("retryWake") },
+      );
     }
-    const missing = await denialBytes(await f.h(op("nowhere", "retryWake", { operationId: "retry-3", wakeId: visible })));
-    expect(await denialBytes(await f.h(op("trip", "retryWake", { operationId: "retry-3", wakeId: visible }, signedIn("ben"))))).toBe(missing);
+    const missing = await denialBytes(
+      await f.h(op("nowhere", "retryWake", { operationId: "retry-3", wakeId: visible })),
+    );
+    expect(
+      await denialBytes(
+        await f.h(
+          op("trip", "retryWake", { operationId: "retry-3", wakeId: visible }, signedIn("ben")),
+        ),
+      ),
+    ).toBe(missing);
     f.change("show on phone");
-    expect(await denialBytes(await retry({ operationId: "retry-3", wakeId: visible }))).toBe(missing);
+    expect(await denialBytes(await retry({ operationId: "retry-3", wakeId: visible }))).toBe(
+      missing,
+    );
   });
 
   it("judges a retry's thread by everything the relay accepted before the retry commits", async () => {
     const f = await writeRelay({ nowMs: () => RETRY_NOW + CHAT_WAKE_CONFIRM_MS });
     const chats = new ChatsLiveAdapter(f.engine.chats, "trip", { workspaceId: "trip" });
-    f.engine.files.seedTextFile({ workspace: "trip", path: "notes.md", text: "# Notes\n", objectId: "object-notes" });
-    const onNotes = await chats.createThread({ workspaceId: "trip", title: "Notes", linkedFile: { objectId: "object-notes", pathHint: "notes.md" } });
+    f.engine.files.seedTextFile({
+      workspace: "trip",
+      path: "notes.md",
+      text: "# Notes\n",
+      objectId: "object-notes",
+    });
+    const onNotes = await chats.createThread({
+      workspaceId: "trip",
+      title: "Notes",
+      linkedFile: { objectId: "object-notes", pathHint: "notes.md" },
+    });
     const wakeId = unconfirmedWake(f, "op-notes", "message-notes", onNotes.id);
     // The request's own check, the check after its body, and the copy's open come first; the fourth follows the thread read.
     const held = f.holdCheck(4);
@@ -1267,80 +2480,156 @@ describe("an account's chat writes through the server's copy", () => {
     await held.reached;
     // Meanwhile the file moves to .env: the relay accepts the move, and a sync of the copy applies it.
     const db = (f.storage as StorageContext).db;
-    const relaySeq = Number(db.prepare(`INSERT INTO sync_relay_log (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms)
-      VALUES ('trip', 'another-device', 1, 'moment.append', '{}', 1) RETURNING relay_seq`).get()!.relay_seq);
+    const relaySeq = Number(
+      db
+        .prepare(`INSERT INTO sync_relay_log (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms)
+      VALUES ('trip', 'another-device', 1, 'moment.append', '{}', 1) RETURNING relay_seq`)
+        .get()!.relay_seq,
+    );
     db.prepare(`INSERT INTO sync_relay_object_moments (workspace_id, object_id, relay_seq, moment_id, version_id, path, recorded_at_ms)
       VALUES ('trip', 'object-notes', ?, 'moment-env', 'main', '.env', 1)`).run(relaySeq);
-    await new VersionedLiveAdapter(f.engine, "trip", { workspaceId: "trip" })
-      .deleteTextFile({ workspaceId: "trip", versionId: "main", path: "notes.md", metadata: { origin: "api" } });
+    await new VersionedLiveAdapter(f.engine, "trip", { workspaceId: "trip" }).deleteTextFile({
+      workspaceId: "trip",
+      versionId: "main",
+      path: "notes.md",
+      metadata: { origin: "api" },
+    });
     held.release();
-    expect(await answer(await retrying)).toEqual({ ok: false, reason: `no such wake: ${wakeId}`, refusal: "missing" });
-    expect(count(f, "SELECT count(*) AS n FROM sync_relay_chat_wakes WHERE message_id = 'message-notes'")).toBe(1);
+    expect(await answer(await retrying)).toEqual({
+      ok: false,
+      reason: `no such wake: ${wakeId}`,
+      refusal: "missing",
+    });
+    expect(
+      count(
+        f,
+        "SELECT count(*) AS n FROM sync_relay_chat_wakes WHERE message_id = 'message-notes'",
+      ),
+    ).toBe(1);
     expect(count(f, "SELECT count(*) AS n FROM sync_relay_chat_wake_retries")).toBe(0);
   });
 
   it("answers a repeated retry whose named wake went only while the generation it answered is in a thread the account may see", async () => {
     const f = await writeRelay({ nowMs: () => RETRY_NOW + CHAT_WAKE_CONFIRM_MS });
     const chats = new ChatsLiveAdapter(f.engine.chats, "trip", { workspaceId: "trip" });
-    f.engine.files.seedTextFile({ workspace: "trip", path: "notes.md", text: "# Notes\n", objectId: "object-notes" });
-    const onNotes = await chats.createThread({ workspaceId: "trip", title: "Notes", linkedFile: { objectId: "object-notes", pathHint: "notes.md" } });
+    f.engine.files.seedTextFile({
+      workspace: "trip",
+      path: "notes.md",
+      text: "# Notes\n",
+      objectId: "object-notes",
+    });
+    const onNotes = await chats.createThread({
+      workspaceId: "trip",
+      title: "Notes",
+      linkedFile: { objectId: "object-notes", pathHint: "notes.md" },
+    });
     const wakeId = unconfirmedWake(f, "op-notes", "message-notes", onNotes.id);
     const next = chatWakeId("ana", "trip", "message-notes", "mention:claude", 2);
     const retry = { operationId: "retry-1", wakeId };
-    expect(await answer(await f.write("retryWake", retry))).toMatchObject({ ok: true, wake: { wakeId: next, generation: 2 } });
+    expect(await answer(await f.write("retryWake", retry))).toMatchObject({
+      ok: true,
+      wake: { wakeId: next, generation: 2 },
+    });
 
     // The named wake ended at the retry; 30 days on it is swept, and the generation it led to, which ended later, stays.
-    expect(f.storage.sweepChatWakes(RETRY_NOW + CHAT_WAKE_CONFIRM_MS + CHAT_WAKE_KEEP_MS + 1)).toBeGreaterThan(0);
-    const left = () => (f.storage as StorageContext).db.prepare("SELECT wake_id FROM sync_relay_chat_wakes WHERE message_id = 'message-notes'").all()
-      .map((row) => row.wake_id);
+    expect(
+      f.storage.sweepChatWakes(RETRY_NOW + CHAT_WAKE_CONFIRM_MS + CHAT_WAKE_KEEP_MS + 1),
+    ).toBeGreaterThan(0);
+    const left = () =>
+      (f.storage as StorageContext).db
+        .prepare("SELECT wake_id FROM sync_relay_chat_wakes WHERE message_id = 'message-notes'")
+        .all()
+        .map((row) => row.wake_id);
     expect(left()).toEqual([next]);
-    expect(await answer(await f.write("retryWake", retry)), "a repeat in a thread still shown answers its generation")
-      .toMatchObject({ ok: true, wake: { wakeId: next, generation: 2 } });
+    expect(
+      await answer(await f.write("retryWake", retry)),
+      "a repeat in a thread still shown answers its generation",
+    ).toMatchObject({ ok: true, wake: { wakeId: next, generation: 2 } });
 
     // The file moves to .env: the relay accepts the move, and the copy's engine applies it.
     const db = (f.storage as StorageContext).db;
-    const relaySeq = Number(db.prepare(`INSERT INTO sync_relay_log (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms)
-      VALUES ('trip', 'another-device', 1, 'moment.append', '{}', 1) RETURNING relay_seq`).get()!.relay_seq);
+    const relaySeq = Number(
+      db
+        .prepare(`INSERT INTO sync_relay_log (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms)
+      VALUES ('trip', 'another-device', 1, 'moment.append', '{}', 1) RETURNING relay_seq`)
+        .get()!.relay_seq,
+    );
     db.prepare(`INSERT INTO sync_relay_object_moments (workspace_id, object_id, relay_seq, moment_id, version_id, path, recorded_at_ms)
       VALUES ('trip', 'object-notes', ?, 'moment-env', 'main', '.env', 1)`).run(relaySeq);
-    await new VersionedLiveAdapter(f.engine, "trip", { workspaceId: "trip" })
-      .deleteTextFile({ workspaceId: "trip", versionId: "main", path: "notes.md", metadata: { origin: "api" } });
+    await new VersionedLiveAdapter(f.engine, "trip", { workspaceId: "trip" }).deleteTextFile({
+      workspaceId: "trip",
+      versionId: "main",
+      path: "notes.md",
+      metadata: { origin: "api" },
+    });
     const bytes = async (args: { operationId: string; wakeId: string }) =>
       (await (await f.write("retryWake", args)).text()).replaceAll(args.wakeId, "<id>");
     const hidden = await bytes(retry);
-    expect(hidden).toBe(await bytes({ operationId: "retry-unknown", wakeId: chatWakeId("ana", "trip", "message-nowhere", "mention:claude", 1) }));
+    expect(hidden).toBe(
+      await bytes({
+        operationId: "retry-unknown",
+        wakeId: chatWakeId("ana", "trip", "message-nowhere", "mention:claude", 1),
+      }),
+    );
     expect(hidden).toContain('"refusal":"missing"');
     for (const id of [next, onNotes.id, "message-notes"]) expect(hidden).not.toContain(id);
     expect(left()).toEqual([next]);
   });
-
 
   it("answers as missing, with no result and no further change, when access ends at any check of a write", async () => {
     const { h } = await relay();
     const missing = await denialBytes(await h(op("nowhere", "groups")));
     const write = { operationId: "op-gone", threadId: "thread-stay", body: "Hi" };
     // Each starts the write, ends access at its point, and answers the response, the rows, and the engine writes it expects.
-    const points: Array<[label: string, run: (f: WriteRelay, kind: AccessChange) => Promise<Response>, rows: number, writes: number]> = [
-      ["after the arguments arrive", async (f, kind) => { f.changeAt(2, kind); return await f.write("reply", write); }, 0, 0],
-      ["while publication waits for the copy's step", async (f, kind) => {
-        const held = f.holdStep();
-        const writing = f.write("reply", write);
-        await held.reached;
-        f.change(kind);
-        held.release();
-        return await writing;
-      }, 1, 1],
-      ["while a retry's replay reads its thread", async (f, kind) => {
-        f.engine.failing.set(CHATS_METHOD.messageSend, new Error("the engine went away"));
-        expect(await f.earlier({ operation: "reply", args: write })).toMatchObject({ ok: true, state: "pending" });
-        f.engine.failing.clear();
-        const held = f.engine.hold(CHATS_METHOD.threadsList);
-        const writing = f.write("reply", write);
-        await held.reached;
-        f.change(kind);
-        held.release();
-        return await writing;
-      }, 1, 0],
+    const points: Array<
+      [
+        label: string,
+        run: (f: WriteRelay, kind: AccessChange) => Promise<Response>,
+        rows: number,
+        writes: number,
+      ]
+    > = [
+      [
+        "after the arguments arrive",
+        async (f, kind) => {
+          f.changeAt(2, kind);
+          return await f.write("reply", write);
+        },
+        0,
+        0,
+      ],
+      [
+        "while publication waits for the copy's step",
+        async (f, kind) => {
+          const held = f.holdStep();
+          const writing = f.write("reply", write);
+          await held.reached;
+          f.change(kind);
+          held.release();
+          return await writing;
+        },
+        1,
+        1,
+      ],
+      [
+        "while a retry's replay reads its thread",
+        async (f, kind) => {
+          f.engine.failing.set(CHATS_METHOD.messageSend, new Error("the engine went away"));
+          expect(await f.earlier({ operation: "reply", args: write })).toMatchObject({
+            ok: true,
+            state: "pending",
+          });
+          f.engine.failing.clear();
+          const held = f.engine.hold(CHATS_METHOD.threadsList);
+          const writing = f.write("reply", write);
+          await held.reached;
+          f.change(kind);
+          held.release();
+          return await writing;
+        },
+        1,
+        0,
+      ],
     ];
     for (const [label, run, rows, writes] of points) {
       for (const kind of ACCESS_CHANGES) {
@@ -1353,22 +2642,39 @@ describe("an account's chat writes through the server's copy", () => {
     }
   });
 
-
   // The read mark rows the relay holds, as the copy pushed them.
-  const markRows = (f: WriteRelay) => (f.storage as StorageContext).db.prepare(
-    "SELECT payload_json FROM sync_relay_log WHERE workspace_id = 'trip' AND op_kind = 'chat.thread.read.set' ORDER BY relay_seq",
-  ).all().map((row) => JSON.parse(String(row.payload_json)) as Record<string, unknown>);
+  const markRows = (f: WriteRelay) =>
+    (f.storage as StorageContext).db
+      .prepare(
+        "SELECT payload_json FROM sync_relay_log WHERE workspace_id = 'trip' AND op_kind = 'chat.thread.read.set' ORDER BY relay_seq",
+      )
+      .all()
+      .map((row) => JSON.parse(String(row.payload_json)) as Record<string, unknown>);
 
   it("marks a shown message read for the session's account, with no row, and its copy publishes the mark", async () => {
     const f = await writeRelay();
-    const response = await f.write("markRead", { threadId: "thread-stay", messageId: "message-poll" });
+    const response = await f.write("markRead", {
+      threadId: "thread-stay",
+      messageId: "message-poll",
+    });
     expect(response.status).toBe(200);
-    expect(await json(response)).toEqual({ ok: true, result: { ok: true }, cursor: expect.any(String) });
-    expect(f.engine.marks.map((request) => request.params))
-      .toEqual([{ threadId: "thread-stay", messageId: "message-poll", replicationOwnerUserId: "ana" }]);
-    expect(markRows(f)).toMatchObject([{ accountUserId: "ana", threadId: "thread-stay", lastReadMessageId: "message-poll" }]);
+    expect(await json(response)).toEqual({
+      ok: true,
+      result: { ok: true },
+      cursor: expect.any(String),
+    });
+    expect(f.engine.marks.map((request) => request.params)).toEqual([
+      { threadId: "thread-stay", messageId: "message-poll", replicationOwnerUserId: "ana" },
+    ]);
+    expect(markRows(f)).toMatchObject([
+      { accountUserId: "ana", threadId: "thread-stay", lastReadMessageId: "message-poll" },
+    ]);
     // An older mark answers alike: a mark has no row, and the engine moves nothing back.
-    expect(await answer(await f.write("markRead", { threadId: "thread-stay", messageId: "message-stay" }))).toEqual({ ok: true });
+    expect(
+      await answer(
+        await f.write("markRead", { threadId: "thread-stay", messageId: "message-stay" }),
+      ),
+    ).toEqual({ ok: true });
     expect(f.rows()).toBe(0);
     expect(f.engine.writes).toEqual([]);
   });
@@ -1378,12 +2684,31 @@ describe("an account's chat writes through the server's copy", () => {
     const valid = { threadId: "thread-stay", messageId: "message-stay" };
     const units = (count: number) => "x".repeat(count);
     const forbidden: Record<string, unknown> = {
-      operationId: "op", createdAtMs: 1, upToSequence: 1, lastReadSequence: 1, accountUserId: "ben", ownerUserId: "ben", account: "ben",
-      replicationOwnerUserId: "ben", runId: "run", reported: { product: "Nova" }, work: { status: "done" }, agent: "Nova", attachments: [],
-      cwd: "/", actor: "human", agentId: "nova", token: "a".repeat(64), runSecret: "a".repeat(64), door: "cli",
+      operationId: "op",
+      createdAtMs: 1,
+      upToSequence: 1,
+      lastReadSequence: 1,
+      accountUserId: "ben",
+      ownerUserId: "ben",
+      account: "ben",
+      replicationOwnerUserId: "ben",
+      runId: "run",
+      reported: { product: "Nova" },
+      work: { status: "done" },
+      agent: "Nova",
+      attachments: [],
+      cwd: "/",
+      actor: "human",
+      agentId: "nova",
+      token: "a".repeat(64),
+      runSecret: "a".repeat(64),
+      door: "cli",
     };
     const refused: Array<[label: string, args: unknown]> = [
-      ...Object.entries(forbidden).map(([field, value]): [string, unknown] => [field, { ...valid, [field]: value }]),
+      ...Object.entries(forbidden).map(([field, value]): [string, unknown] => [
+        field,
+        { ...valid, [field]: value },
+      ]),
       ["no thread", { messageId: "message-stay" }],
       ["no message", { threadId: "thread-stay" }],
       ["an empty thread ID", { ...valid, threadId: "" }],
@@ -1395,19 +2720,34 @@ describe("an account's chat writes through the server's copy", () => {
     ];
     for (const [label, args] of refused) {
       const response = await f.write("markRead", args);
-      expect({ status: response.status, body: await json(response) }, label).toEqual({ status: 400, body: schemaRefusal("markRead") });
+      expect({ status: response.status, body: await json(response) }, label).toEqual({
+        status: 400,
+        body: schemaRefusal("markRead"),
+      });
     }
     expect(f.syncs).toEqual([]);
     expect(f.engine.marks).toEqual([]);
-    expect(await answer(await f.write("markRead", { ...valid, threadId: units(256) })), "a 256-unit thread ID").toMatchObject({ refusal: "missing" });
-    expect(await answer(await f.write("markRead", { ...valid, messageId: units(256) })), "a 256-unit message ID").toMatchObject({ refusal: "missing" });
+    expect(
+      await answer(await f.write("markRead", { ...valid, threadId: units(256) })),
+      "a 256-unit thread ID",
+    ).toMatchObject({ refusal: "missing" });
+    expect(
+      await answer(await f.write("markRead", { ...valid, messageId: units(256) })),
+      "a 256-unit message ID",
+    ).toMatchObject({ refusal: "missing" });
     expect(await answer(await f.write("markRead", valid))).toEqual({ ok: true });
   });
 
   it("keeps the body limit and the sign-in's rate on read marks", async () => {
     const f = await writeRelay({ limiter: new TokenBucketLimiter(1, 0.001, 16) });
-    expect((await f.write("markRead", { threadId: "thread-stay", messageId: "a".repeat(256 * 1024) })).status).toBe(413);
-    const limited = await f.write("markRead", { threadId: "thread-stay", messageId: "message-stay" });
+    expect(
+      (await f.write("markRead", { threadId: "thread-stay", messageId: "a".repeat(256 * 1024) }))
+        .status,
+    ).toBe(413);
+    const limited = await f.write("markRead", {
+      threadId: "thread-stay",
+      messageId: "message-stay",
+    });
     expect(limited.status).toBe(503);
     expect(await json(limited)).toMatchObject({ ok: false, code: "server_busy" });
     expect(f.syncs).toEqual([]);
@@ -1418,24 +2758,52 @@ describe("an account's chat writes through the server's copy", () => {
     const f = await writeRelay();
     const { planning, onSecret } = f.seeded;
     await new ChatsLiveAdapter(f.engine.chats, "trip", { workspaceId: "trip" }).startChannelThread({
-      workspaceId: "trip", channelId: planning.channelId, threadId: "thread-other", messageId: "message-other", lane: "posts",
-      author: { kind: "human", displayName: "Ana" }, authorUserId: "ana", authorActorKey: null, body: "And dinner?",
+      workspaceId: "trip",
+      channelId: planning.channelId,
+      threadId: "thread-other",
+      messageId: "message-other",
+      lane: "posts",
+      author: { kind: "human", displayName: "Ana" },
+      authorUserId: "ana",
+      authorActorKey: null,
+      body: "And dinner?",
     });
     const bytes = async (args: Record<string, string>, id: string) => {
       const response = await f.write("markRead", args);
-      return { status: response.status, type: response.headers.get("content-type"), body: (await response.text()).replaceAll(id, "<id>") };
+      return {
+        status: response.status,
+        type: response.headers.get("content-type"),
+        body: (await response.text()).replaceAll(id, "<id>"),
+      };
     };
-    const hiddenThread = await bytes({ threadId: onSecret.id, messageId: "message-secret" }, onSecret.id);
+    const hiddenThread = await bytes(
+      { threadId: onSecret.id, messageId: "message-secret" },
+      onSecret.id,
+    );
     expect(hiddenThread.status).toBe(200);
     expect(hiddenThread.body).toContain('"refusal":"missing"');
-    expect(await bytes({ threadId: "thread-nowhere", messageId: "message-secret" }, "thread-nowhere")).toEqual(hiddenThread);
+    expect(
+      await bytes({ threadId: "thread-nowhere", messageId: "message-secret" }, "thread-nowhere"),
+    ).toEqual(hiddenThread);
     // Word for word what a read of the thread answers.
-    expect(await answer(await f.write("markRead", { threadId: onSecret.id, messageId: "message-secret" })))
-      .toEqual(await answer(await f.h(op("trip", "chat", { threadId: onSecret.id }))));
-    const absentMessage = await bytes({ threadId: "thread-stay", messageId: "message-nowhere" }, "message-nowhere");
+    expect(
+      await answer(
+        await f.write("markRead", { threadId: onSecret.id, messageId: "message-secret" }),
+      ),
+    ).toEqual(await answer(await f.h(op("trip", "chat", { threadId: onSecret.id }))));
+    const absentMessage = await bytes(
+      { threadId: "thread-stay", messageId: "message-nowhere" },
+      "message-nowhere",
+    );
     expect(absentMessage.body).toContain('"refusal":"missing"');
-    expect(await bytes({ threadId: "thread-stay", messageId: "message-secret" }, "message-secret"), "a message in a hidden thread").toEqual(absentMessage);
-    expect(await bytes({ threadId: "thread-stay", messageId: "message-other" }, "message-other"), "another thread's message").toEqual(absentMessage);
+    expect(
+      await bytes({ threadId: "thread-stay", messageId: "message-secret" }, "message-secret"),
+      "a message in a hidden thread",
+    ).toEqual(absentMessage);
+    expect(
+      await bytes({ threadId: "thread-stay", messageId: "message-other" }, "message-other"),
+      "another thread's message",
+    ).toEqual(absentMessage);
     expect(f.engine.marks).toEqual([]);
     expect(markRows(f)).toEqual([]);
   });
@@ -1459,20 +2827,26 @@ describe("an account's chat writes through the server's copy", () => {
       f.changeAt(check, kind);
       return await f.write("markRead", mark);
     };
-    const points: Array<[label: string, run: (f: WriteRelay, kind: AccessChange) => Promise<Response>, marks: number]> = [
+    const points: Array<
+      [label: string, run: (f: WriteRelay, kind: AccessChange) => Promise<Response>, marks: number]
+    > = [
       ["after the arguments arrive", (f, kind) => at(f, kind, 2), 0],
       ["once the copy is open", (f, kind) => at(f, kind, 3), 0],
       ["once the copy has synced", (f, kind) => at(f, kind, 4), 0],
       ["while the thread is read", (f, kind) => during(f, kind, CHATS_METHOD.threadsList), 0],
       ["while the message is read", (f, kind) => during(f, kind, CHATS_METHOD.messageGet), 0],
-      ["while the copy's step sends the mark", async (f, kind) => {
-        const held = f.holdStep();
-        const marking = f.write("markRead", mark);
-        await held.reached;
-        f.change(kind);
-        held.release();
-        return await marking;
-      }, 1],
+      [
+        "while the copy's step sends the mark",
+        async (f, kind) => {
+          const held = f.holdStep();
+          const marking = f.write("markRead", mark);
+          await held.reached;
+          f.change(kind);
+          held.release();
+          return await marking;
+        },
+        1,
+      ],
       ["once the answer is ready", (f, kind) => at(f, kind, 7), 1],
     ];
     for (const [label, run, marks] of points) {
@@ -1488,10 +2862,12 @@ describe("an account's chat writes through the server's copy", () => {
     const f = await writeRelay();
     const held = f.holdStep();
     let answered = false;
-    const marking = f.write("markRead", { threadId: "thread-stay", messageId: "message-poll" }).then((response) => {
-      answered = true;
-      return response;
-    });
+    const marking = f
+      .write("markRead", { threadId: "thread-stay", messageId: "message-poll" })
+      .then((response) => {
+        answered = true;
+        return response;
+      });
     await held.reached;
     // A pass meanwhile, as when another visit ends, keeps the copy: this visit still holds it.
     f.reconcile();
@@ -1501,7 +2877,9 @@ describe("an account's chat writes through the server's copy", () => {
     expect(markRows(f)).toEqual([]);
     held.release();
     expect(await answer(await marking)).toEqual({ ok: true });
-    expect(markRows(f)).toMatchObject([{ accountUserId: "ana", threadId: "thread-stay", lastReadMessageId: "message-poll" }]);
+    expect(markRows(f)).toMatchObject([
+      { accountUserId: "ana", threadId: "thread-stay", lastReadMessageId: "message-poll" },
+    ]);
     // Once the visit ends, nothing keeps the copy.
     await expect.poll(() => f.closes()).toBe(1);
   });
@@ -1510,7 +2888,10 @@ describe("an account's chat writes through the server's copy", () => {
     const couldNotSend = { ok: false, reason: "Couldn't send" };
     const failed = await writeRelay();
     failed.failStep(new Error("The relay at https://relay.internal refused the push."));
-    const response = await failed.write("markRead", { threadId: "thread-stay", messageId: "message-poll" });
+    const response = await failed.write("markRead", {
+      threadId: "thread-stay",
+      messageId: "message-poll",
+    });
     const text = await response.text();
     expect(response.status).toBe(200);
     expect(JSON.parse(text).result).toEqual(couldNotSend);
@@ -1522,7 +2903,10 @@ describe("an account's chat writes through the server's copy", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
       const held = slow.holdStep();
-      const marking = slow.write("markRead", { threadId: "thread-stay", messageId: "message-poll" });
+      const marking = slow.write("markRead", {
+        threadId: "thread-stay",
+        messageId: "message-poll",
+      });
       await held.reached;
       await vi.advanceTimersByTimeAsync(PUBLICATION_DEADLINE_MS);
       expect(await answer(await marking)).toEqual(couldNotSend);
@@ -1536,16 +2920,27 @@ describe("an account's chat writes through the server's copy", () => {
   it("sends a read mark and a later write in the order the copy journaled them", async () => {
     const f = await writeRelay();
     f.failStep(new Error("The relay is unreachable."));
-    expect(await answer(await f.write("markRead", { threadId: "thread-stay", messageId: "message-poll" })))
-      .toEqual({ ok: false, reason: "Couldn't send" });
+    expect(
+      await answer(
+        await f.write("markRead", { threadId: "thread-stay", messageId: "message-poll" }),
+      ),
+    ).toEqual({ ok: false, reason: "Couldn't send" });
     f.failStep(null);
-    expect(await answer(await f.write("reply", { operationId: "op-after", threadId: "thread-stay", body: "Hi" })))
-      .toMatchObject({ ok: true, state: "saved" });
-    const pushed = (f.storage as StorageContext).db.prepare(
-      "SELECT origin_seq, op_kind FROM sync_relay_log WHERE workspace_id = 'trip' AND origin_id = 'server-copy' ORDER BY relay_seq",
-    ).all().map((row) => ({ seq: Number(row.origin_seq), kind: String(row.op_kind) }));
+    expect(
+      await answer(
+        await f.write("reply", { operationId: "op-after", threadId: "thread-stay", body: "Hi" }),
+      ),
+    ).toMatchObject({ ok: true, state: "saved" });
+    const pushed = (f.storage as StorageContext).db
+      .prepare(
+        "SELECT origin_seq, op_kind FROM sync_relay_log WHERE workspace_id = 'trip' AND origin_id = 'server-copy' ORDER BY relay_seq",
+      )
+      .all()
+      .map((row) => ({ seq: Number(row.origin_seq), kind: String(row.op_kind) }));
     expect(pushed[0]?.kind).toBe("chat.thread.read.set");
-    expect(pushed.map((row) => row.seq)).toEqual(pushed.map((row) => row.seq).sort((left, right) => left - right));
+    expect(pushed.map((row) => row.seq)).toEqual(
+      pushed.map((row) => row.seq).sort((left, right) => left - right),
+    );
     expect(pushed.length).toBeGreaterThan(1);
   });
 });

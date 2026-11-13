@@ -1,8 +1,5 @@
 import type { GraphNode } from "../workbench/graphData";
-import type {
-  ChatFileMentionRecord,
-  ChatThreadRecord,
-} from "../../ipc/bridgeContract";
+import type { ChatFileMentionRecord, ChatThreadRecord } from "../../ipc/bridgeContract";
 import type { ChatsNav } from "../workbench/ChatsView";
 
 export interface DmChatLocator {
@@ -66,9 +63,7 @@ export function chatMentionOpenTarget(mention: ChatFileMentionRecord): ChatOpenT
   };
 }
 
-export function graphChatOpenTarget(
-  node: GraphNode,
-): ChatOpenTarget {
+export function graphChatOpenTarget(node: GraphNode): ChatOpenTarget {
   if (node.kind !== "chat-thread" || !node.threadId) return { surface: "overview" };
   const thread = {
     id: node.threadId,

@@ -293,8 +293,8 @@ describe("the proposal route's level gate", () => {
     const edit = await createShare(h, "edit");
 
     const refusals = await Promise.all(
-      [view, comment, version].map(async (shareId) =>
-        await denialBytes(await submit(h, shareId, [change()])),
+      [view, comment, version].map(
+        async (shareId) => await denialBytes(await submit(h, shareId, [change()])),
       ),
     );
     expect(
@@ -339,10 +339,7 @@ describe("the proposal route's level gate", () => {
         }),
       ),
     );
-    expect(
-      appended.status,
-      "the append route must never gain moment acceptance",
-    ).toBe(403);
+    expect(appended.status, "the append route must never gain moment acceptance").toBe(403);
     expect(
       (await granter.sharedMoments(shareId)).length,
       "a refused append must leave the granter's log untouched",
@@ -364,10 +361,7 @@ describe("what a proposal may name", () => {
     for (const [label, op] of [
       ["base outside", change({ basedOnPath: "notes/out.md" })],
       ["destination outside", change({ afterPath: "notes/out.md" })],
-      [
-        "escaping destination",
-        change({ afterPath: "docs/../notes/out.md" }),
-      ],
+      ["escaping destination", change({ afterPath: "docs/../notes/out.md" })],
     ] as const) {
       const refused = await submit(h, shareId, [op], { submitId: `s-${label}` });
       expect(refused.status, `${label} must be refused`).toBe(403);
@@ -385,16 +379,12 @@ describe("what a proposal may name", () => {
     const shareId = await createShare(h, "edit");
 
     const refused = await submit(h, shareId, [change()]);
-    expect(
-      refused.status,
-      "a change whose blob is absent must be refused at submit",
-    ).toBe(422);
+    expect(refused.status, "a change whose blob is absent must be refused at submit").toBe(422);
     expect(await refused.text()).toContain("blob_missing");
   });
 });
 
 describe("the base rewrite", () => {
-
   it("gives a DRIFTED change the granter's own earlier moment as its base", async () => {
     // The second correct outcome. The granter wrote again after the recipient
     // read the file, so the rewritten base is a real, older granter moment —
@@ -510,7 +500,6 @@ describe("the base rewrite", () => {
     ).toMatch(/^id-/u);
     expect(created.objectId).not.toBe("object-in");
   });
-
 });
 
 describe("the origin an accept writes", () => {
@@ -553,7 +542,6 @@ describe("the origin an accept writes", () => {
       "accepted moments must not ride the recipient's own origin",
     ).toBe(0);
   });
-
 });
 
 describe("what the granter does under an open proposal", () => {
@@ -643,7 +631,6 @@ describe("what the granter does under an open proposal", () => {
     // conflict instead of fast-forwarding the file back into existence.
     expect(moment.beforePresent).toBe("present");
   });
-
 });
 
 describe("the version a share exposes", () => {
@@ -689,11 +676,9 @@ describe("the version a share exposes", () => {
     ).toBe(main.momentId);
     expect(moment.versionId).toBe("main");
   });
-
 });
 
 describe("accept, decline, and withdraw", () => {
-
   it("settles exactly once, whichever mover arrives second", async () => {
     const storage = await testStorage();
     const h = handler(storage);
@@ -754,7 +739,6 @@ describe("accept, decline, and withdraw", () => {
     ).toBe(200);
     expect((await reviewRows(h)).length).toBe(0);
   });
-
 });
 
 describe("what an open proposal survives", () => {
@@ -778,10 +762,9 @@ describe("what an open proposal survives", () => {
     const swept = await storage.collectUnreferencedBlobs(WORKSPACE, {
       nowMs: 4242 + 365 * 24 * 60 * 60 * 1000,
     });
-    expect(
-      swept.removedSha256s,
-      "an open proposal's content must survive the sweep",
-    ).not.toContain(sha256("recipient two"));
+    expect(swept.removedSha256s, "an open proposal's content must survive the sweep").not.toContain(
+      sha256("recipient two"),
+    );
 
     // And the proof that it still works: the accept lands the content.
     expect((await settle(h, proposalId, "accept")).status).toBe(200);
@@ -831,15 +814,16 @@ describe("what an open proposal survives", () => {
 
     // The recipient, meanwhile, can do nothing more.
     expect(
-      (await submit(h, shareId, [change({ basedOnBlobSha256: head.blobSha256 })], {
-        submitId: "after-revoke",
-      })).status,
+      (
+        await submit(h, shareId, [change({ basedOnBlobSha256: head.blobSha256 })], {
+          submitId: "after-revoke",
+        })
+      ).status,
     ).toBe(404);
   });
 });
 
 describe("who may do what", () => {
-
   it("keeps one recipient's changes invisible to another recipient", async () => {
     const storage = await testStorage();
     const h = handler(storage);
@@ -907,9 +891,7 @@ describe("who may do what", () => {
 // There is no downgrade route yet, so the grant is narrowed directly. The
 // gates must read the current access rather than the request's starting value.
 function narrowToComment(storage: SyncRelayStorage, shareId: string): void {
-  (
-    storage as unknown as { db: { prepare(sql: string): { run(...args: unknown[]): unknown } } }
-  ).db
+  (storage as unknown as { db: { prepare(sql: string): { run(...args: unknown[]): unknown } } }).db
     .prepare(
       `UPDATE sync_relay_share_grants
        SET access = 'comment', generation = generation + 1
@@ -919,7 +901,6 @@ function narrowToComment(storage: SyncRelayStorage, shareId: string): void {
 }
 
 describe("the recipient's blob route", () => {
-
   // A per-op route is a new surface on the granter's workspace, so it owes the
   // same gate the listing owes and the same generic 404 — one answer for every
   // way a lookup can fail, so nothing on it can be used to probe what exists.
@@ -934,8 +915,7 @@ describe("the recipient's blob route", () => {
     expect((await uploadShareBlob(h, shareId, "recipient two")).status).toBe(200);
     const sent = await submit(h, shareId, [change()]);
     const proposalId = (await json(sent)).proposalId as string;
-    const one = (id: string, as: string) =>
-      h(request(as, `/sync/${WORKSPACE}/proposals/${id}`));
+    const one = (id: string, as: string) => h(request(as, `/sync/${WORKSPACE}/proposals/${id}`));
 
     // The owner reads it, and it carries the file rows the listing does not.
     const mine = await one(proposalId, GRANTER);
@@ -1016,5 +996,4 @@ describe("the recipient's blob route", () => {
       "serving a settled proposal's ops keeps a closed review readable",
     ).toBe(denied[0]);
   });
-
 });

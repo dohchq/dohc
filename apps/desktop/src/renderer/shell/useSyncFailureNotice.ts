@@ -27,7 +27,9 @@ export function syncFailureNotice(failure: SyncFailure): { title?: string; messa
     };
   }
   if (failure.detail.startsWith(COPY_FAILURE)) {
-    const [title = "", next = "", left = ""] = failure.detail.slice(COPY_FAILURE.length).split("\n");
+    const [title = "", next = "", left = ""] = failure.detail
+      .slice(COPY_FAILURE.length)
+      .split("\n");
     return { title, message: `${next}\n${left.replace(/\.$/, "")} and sync waits.` };
   }
   if (failure.detail.startsWith(PATH_OCCUPIED)) {
@@ -57,10 +59,7 @@ function failedPassKey(failure: SyncFailure): string {
 // What one failure has already shown, per workspace. Module state, because
 // the shell remounts on every workspace switch and a dismissed failure must
 // not come back when the person returns.
-const shownFailures = new Map<
-  string,
-  { sinceMs: number; toasted: boolean; dismissed: boolean }
->();
+const shownFailures = new Map<string, { sinceMs: number; toasted: boolean; dismissed: boolean }>();
 
 export function forgetSyncFailureNoticesForTests(): void {
   shownFailures.clear();
@@ -174,7 +173,10 @@ export function useSyncFailureNotice(input: {
     const key = failedPassKey(current);
     if (filedRef.current?.key === key) return;
     // A failure that already shows its row changes it to the busy words now.
-    if (current.cause === "server-busy" && shownFailures.get(workspaceId)?.sinceMs !== current.sinceMs) {
+    if (
+      current.cause === "server-busy" &&
+      shownFailures.get(workspaceId)?.sinceMs !== current.sinceMs
+    ) {
       const waitMs = current.sinceMs + BUSY_SERVER_NOTICE_MS - Date.now();
       if (waitMs > 0) {
         const timer = setTimeout(() => setBusyWaitsEnded((ended) => ended + 1), waitMs);

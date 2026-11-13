@@ -12,7 +12,10 @@ export type WorkspaceSession = { readonly [brand]: true };
 
 const WorkspaceSessionContext = createContext<WorkspaceSession | null>(null);
 
-const newSession = (workspaceId: string) => ({ workspaceId, session: Object.freeze({}) as WorkspaceSession });
+const newSession = (workspaceId: string) => ({
+  workspaceId,
+  session: Object.freeze({}) as WorkspaceSession,
+});
 
 export function WorkspaceSessionProvider(props: { workspaceId: string; children?: ReactNode }) {
   const [held, hold] = useState(() => newSession(props.workspaceId));
@@ -26,6 +29,9 @@ export function WorkspaceSessionProvider(props: { workspaceId: string; children?
 
 export function useWorkspaceSession(): WorkspaceSession {
   const session = useContext(WorkspaceSessionContext);
-  if (!session) throw new Error("useWorkspaceSession must be used inside the workspace shell's WorkspaceSessionProvider.");
+  if (!session)
+    throw new Error(
+      "useWorkspaceSession must be used inside the workspace shell's WorkspaceSessionProvider.",
+    );
   return session;
 }

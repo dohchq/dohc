@@ -37,7 +37,10 @@ async function withDesktop(
 // The palette's New file… makes the file before its editor opens.
 async function createDocument(page: Page, name: string): Promise<void> {
   await page.keyboard.press("ControlOrMeta+k");
-  await page.getByTestId("command-palette").getByRole("option", { name: "New file…", exact: true }).click();
+  await page
+    .getByTestId("command-palette")
+    .getByRole("option", { name: "New file…", exact: true })
+    .click();
   const fileName = page.getByRole("textbox", { name: "File name" });
   await expect(fileName).toBeFocused();
   await fileName.fill(name);

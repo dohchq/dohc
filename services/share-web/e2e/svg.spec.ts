@@ -1,9 +1,5 @@
 import { type Page } from "@playwright/test";
-import {
-  expect,
-  seedShare,
-  test,
-} from "./harness";
+import { expect, seedShare, test } from "./harness";
 
 const SVG_ATTACK_SENTINEL = "__dohcIso3SvgAttackSentinel_8f91cbe2";
 const SENTINEL_BASELINE = "iso3svg-unmodified-8f91cbe2";
@@ -41,9 +37,7 @@ test("keeps a shared SVG inert and downloads it as an attachment", async ({
   const seeded = await seedShare({
     relayUrl: stack.relayUrl,
     paths: ["docs"],
-    files: [
-      { path: "docs/attack.svg", content: svgBytes, contentKind: "binary" },
-    ],
+    files: [{ path: "docs/attack.svg", content: svgBytes, contentKind: "binary" }],
   });
   const svgFile = seeded.files.find((file) => file.path === "docs/attack.svg");
   if (!svgFile) throw new Error("SVG fixture was not seeded");
@@ -74,9 +68,10 @@ test("keeps a shared SVG inert and downloads it as an attachment", async ({
     expect(probe.requests).toEqual([]);
 
     const [downloadResponse, startedDownload] = await Promise.all([
-      page.waitForResponse((response) =>
-        response.request().method() === "GET" &&
-        new URL(response.url()).pathname === `/api/view/blob/${svgFile.blobSha256}`
+      page.waitForResponse(
+        (response) =>
+          response.request().method() === "GET" &&
+          new URL(response.url()).pathname === `/api/view/blob/${svgFile.blobSha256}`,
       ),
       page.waitForEvent("download"),
       downloadLink.click(),

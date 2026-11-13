@@ -22,43 +22,71 @@ export function useVersionMergeNotices(options: {
   openHistory: () => void;
   openConflictReview: () => void;
 }) {
-  const { workspaceId, captureOn, reportShellFailure, clearIdentity, openHistory, openConflictReview } = options;
+  const {
+    workspaceId,
+    captureOn,
+    reportShellFailure,
+    clearIdentity,
+    openHistory,
+    openConflictReview,
+  } = options;
   const [mergeOpen, setMergeOpen] = useState(false);
   const toDecide = useRef(new Map<string, string>());
 
-  const report = useCallback(({ decideFrom, offersHistory, ...notice }: VersionMergeNotice) => {
-    if (decideFrom === undefined) toDecide.current.delete(notice.identity);
-    else toDecide.current.set(notice.identity, decideFrom);
-    reportShellFailure({
-      ...notice,
-      ...(decideFrom === undefined
-        ? {}
-        : { noDismiss: true, action: { label: "Decide what to keep", run: openConflictReview, reads: true }, target: { to: "conflicts" } as const }),
-      ...(offersHistory ? { action: { label: "Open History", run: openHistory, reads: true, afterRetry: true }, target: { to: "history" } as const } : {}),
-    });
-  }, [openConflictReview, openHistory, reportShellFailure]);
+  const report = useCallback(
+    ({ decideFrom, offersHistory, ...notice }: VersionMergeNotice) => {
+      if (decideFrom === undefined) toDecide.current.delete(notice.identity);
+      else toDecide.current.set(notice.identity, decideFrom);
+      reportShellFailure({
+        ...notice,
+        ...(decideFrom === undefined
+          ? {}
+          : {
+              noDismiss: true,
+              action: { label: "Decide what to keep", run: openConflictReview, reads: true },
+              target: { to: "conflicts" } as const,
+            }),
+        ...(offersHistory
+          ? {
+              action: { label: "Open History", run: openHistory, reads: true, afterRetry: true },
+              target: { to: "history" } as const,
+            }
+          : {}),
+      });
+    },
+    [openConflictReview, openHistory, reportShellFailure],
+  );
 
   const settle = useCallback(() => {
     for (const [identity, sourceVersionId] of toDecide.current) {
       // A read that fails keeps the row, and the next close asks again.
-      void mergeFilesWait(workspaceId, sourceVersionId).then((waiting) => {
-        if (waiting || toDecide.current.get(identity) !== sourceVersionId) return;
-        toDecide.current.delete(identity);
-        clearIdentity(identity);
-      }, () => undefined);
+      void mergeFilesWait(workspaceId, sourceVersionId).then(
+        (waiting) => {
+          if (waiting || toDecide.current.get(identity) !== sourceVersionId) return;
+          toDecide.current.delete(identity);
+          clearIdentity(identity);
+        },
+        () => undefined,
+      );
     }
   }, [clearIdentity, workspaceId]);
 
   // A later merge takes back an earlier failure's row. A row that waits on
   // decisions leaves only once none of its files wait.
-  const clear = useCallback((identity: string) => {
-    if (!toDecide.current.has(identity)) clearIdentity(identity);
-  }, [clearIdentity]);
+  const clear = useCallback(
+    (identity: string) => {
+      if (!toDecide.current.has(identity)) clearIdentity(identity);
+    },
+    [clearIdentity],
+  );
 
-  const onMergeOpenChange = useCallback((open: boolean) => {
-    setMergeOpen(open);
-    if (!open) settle();
-  }, [settle]);
+  const onMergeOpenChange = useCallback(
+    (open: boolean) => {
+      setMergeOpen(open);
+      if (!open) settle();
+    },
+    [settle],
+  );
 
   return {
     report,
@@ -66,6 +94,10 @@ export function useVersionMergeNotices(options: {
     settle,
     onMergeOpenChange,
     // Why a merge row's Try again can't run now.
-    retryBlocked: !captureOn ? MERGE_RETRY_AFTER_STORE : mergeOpen ? MERGE_RETRY_AFTER_CLOSE : undefined,
+    retryBlocked: !captureOn
+      ? MERGE_RETRY_AFTER_STORE
+      : mergeOpen
+        ? MERGE_RETRY_AFTER_CLOSE
+        : undefined,
   };
 }

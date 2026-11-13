@@ -20,13 +20,22 @@ export const demoScroll: number = (() => {
   const pulled = typeof pull === "number" ? pull : typeof pull === "string" ? Number(pull) : NaN;
   if (Number.isFinite(pulled)) return -pulled;
   const value: unknown = Settings.get("dohcBandScroll");
-  const points = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  const points =
+    typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
   return Number.isFinite(points) ? points : 30;
 })();
 
-export const syncProblem: SyncProblem | null = (demoMode === "band" || demoMode === "band-empty" || demoMode === "band-half-fold" || demoMode === "band-problem-change" || demoMode === "band-scrolled") ? "serverUnreachable"
-  // The longest body, for the capped band's long-body frames.
-  : demoMode === "band-sync-failed" ? "syncFailed" : null;
+export const syncProblem: SyncProblem | null =
+  demoMode === "band" ||
+  demoMode === "band-empty" ||
+  demoMode === "band-half-fold" ||
+  demoMode === "band-problem-change" ||
+  demoMode === "band-scrolled"
+    ? "serverUnreachable"
+    : // The longest body, for the capped band's long-body frames.
+      demoMode === "band-sync-failed"
+      ? "syncFailed"
+      : null;
 
 /** The workspace's sync problem as state, so the band can arrive and leave while a screen is open. Design review
  * only: "band-toggle" shows it 8 s after the screen mounts and clears it 16 s after; "band-problem-change" shows
@@ -38,21 +47,33 @@ export function useSyncProblem(): SyncProblem | null {
     if (demoMode === "band-late") {
       const show = setTimeout(() => setProblem("serverUnreachable"), 60000);
       const clear = setTimeout(() => setProblem(null), 140000);
-      return () => { clearTimeout(show); clearTimeout(clear); };
+      return () => {
+        clearTimeout(show);
+        clearTimeout(clear);
+      };
     }
     // Long enough to leave Notices and come back while it shows, then leave again while it clears.
     if (demoMode === "band-long" || demoMode === "band-return-scroll") {
       const show = setTimeout(() => setProblem("serverUnreachable"), 8000);
       const clear = setTimeout(() => setProblem(null), 40000);
-      return () => { clearTimeout(show); clearTimeout(clear); };
+      return () => {
+        clearTimeout(show);
+        clearTimeout(clear);
+      };
     }
     // For the return trace: the band shows 2 s in, then turns off and on every 15 s, so one launch holds many returns.
     // A trial needs up to about 10 s to put the list in place before it leaves, so 6 s was too short.
     if (demoMode === "band-cycle" || demoMode === "band-cycle-scroll") {
       let shown = false;
       const start = setTimeout(() => setProblem("serverUnreachable"), 2000);
-      const cycle = setInterval(() => { shown = !shown; setProblem(shown ? null : "serverUnreachable"); }, 15000);
-      return () => { clearTimeout(start); clearInterval(cycle); };
+      const cycle = setInterval(() => {
+        shown = !shown;
+        setProblem(shown ? null : "serverUnreachable");
+      }, 15000);
+      return () => {
+        clearTimeout(start);
+        clearInterval(cycle);
+      };
     }
     if (demoMode === "band-problem-change") {
       const change = setTimeout(() => setProblem("updateToSync"), 12000);
@@ -61,7 +82,10 @@ export function useSyncProblem(): SyncProblem | null {
     if (demoMode !== "band-toggle") return;
     const show = setTimeout(() => setProblem("serverUnreachable"), 8000);
     const clear = setTimeout(() => setProblem(null), 16000);
-    return () => { clearTimeout(show); clearTimeout(clear); };
+    return () => {
+      clearTimeout(show);
+      clearTimeout(clear);
+    };
   }, []);
   return problem;
 }

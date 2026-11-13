@@ -64,11 +64,22 @@ export type DispatchFacts = CliShowThreadResult["dispatch"];
 
 // The two dispatch store reads a thread's dispatch facts come from.
 export interface ThreadDispatchReads {
-  getThreadDispatchPauseState(workspaceId: string, threadId: string):
-    Pick<ThreadDispatchPauseState, "paused"> | null | Promise<Pick<ThreadDispatchPauseState, "paused"> | null>;
-  latestRunForThread(workspaceId: string, threadId: string): ThreadRun | null | Promise<ThreadRun | null>;
+  getThreadDispatchPauseState(
+    workspaceId: string,
+    threadId: string,
+  ):
+    | Pick<ThreadDispatchPauseState, "paused">
+    | null
+    | Promise<Pick<ThreadDispatchPauseState, "paused"> | null>;
+  latestRunForThread(
+    workspaceId: string,
+    threadId: string,
+  ): ThreadRun | null | Promise<ThreadRun | null>;
 }
-type ThreadRun = Pick<AgentRunRecord, "endedAtMs" | "exitCode" | "failureReason" | "failureHandled">;
+type ThreadRun = Pick<
+  AgentRunRecord,
+  "endedAtMs" | "exitCode" | "failureReason" | "failureHandled"
+>;
 
 export async function readThreadDispatchState(
   store: ThreadDispatchReads,
@@ -79,18 +90,23 @@ export async function readThreadDispatchState(
     store.getThreadDispatchPauseState(workspaceId, threadId),
     store.latestRunForThread(workspaceId, threadId),
   ]);
-  const failureReason = run?.failureReason ?? (
-    run?.endedAtMs !== undefined && run.exitCode === 0 && run.failureHandled
-      ? "no-reply"
-      : null
-  );
+  const failureReason =
+    run?.failureReason ??
+    (run?.endedAtMs !== undefined && run.exitCode === 0 && run.failureHandled ? "no-reply" : null);
   return {
     paused: pause?.paused ? "budget" : null,
-    lastRun: run ? {
-      state: run.endedAtMs === undefined ? "running" : failureReason || run.exitCode !== 0 ? "failed" : "completed",
-      failureReason,
-      exitCode: run.exitCode ?? null,
-    } : null,
+    lastRun: run
+      ? {
+          state:
+            run.endedAtMs === undefined
+              ? "running"
+              : failureReason || run.exitCode !== 0
+                ? "failed"
+                : "completed",
+          failureReason,
+          exitCode: run.exitCode ?? null,
+        }
+      : null,
   };
 }
 
@@ -128,8 +144,13 @@ export interface LoadedThread {
 }
 
 // An operation's arguments, less who is calling: the caller acts on that.
-type Args<Verb extends CliRequest["verb"]> = Extract<CliRequest, { verb: Verb }>["args"] extends infer Each
-  ? Each extends unknown ? Omit<Each, "cwd" | "actor" | "agentId"> : never
+type Args<Verb extends CliRequest["verb"]> = Extract<
+  CliRequest,
+  { verb: Verb }
+>["args"] extends infer Each
+  ? Each extends unknown
+    ? Omit<Each, "cwd" | "actor" | "agentId">
+    : never
   : never;
 type ShowStream = Extract<CliResultByVerb["show"], { stream: unknown }>;
 
@@ -166,9 +187,15 @@ export async function loadChannels(host: ChatsHost): Promise<ChannelEntry[]> {
 
 export async function listChannelThreads(host: ChatsHost, channel: ChatChannelSummary) {
   // Any group can hold both lanes: an agent DM keeps its old posts beside its conversation.
-  const pages = await Promise.all((["posts", "chat"] as const).map(lane => host.store.listChannelThreads({
-    workspaceId: host.workspaceId, channelId: channel.id, lane,
-  })));
+  const pages = await Promise.all(
+    (["posts", "chat"] as const).map((lane) =>
+      host.store.listChannelThreads({
+        workspaceId: host.workspaceId,
+        channelId: channel.id,
+        lane,
+      }),
+    ),
+  );
   return pages.flat();
 }
 
@@ -177,9 +204,7 @@ function withoutChannelMarker(value: string): string {
 }
 
 function ambiguous(label: string, input: string, ids: readonly string[]): never {
-  throw new OperationError(
-    `ambiguous ${label} prefix '${input}': ${ids.join(", ")}`,
-  );
+  throw new OperationError(`ambiguous ${label} prefix '${input}': ${ids.join(", ")}`);
 }
 
 function resolveIdPrefix<T>(
@@ -194,7 +219,8 @@ function resolveIdPrefix<T>(
   if (exact.length === 1) return exact[0]!;
   if (exact.length > 1) ambiguous(label, input, exact.map(idFor));
   const matches = values.filter((value) =>
-    handlesFor(value).some((handle) => handle.startsWith(input)));
+    handlesFor(value).some((handle) => handle.startsWith(input)),
+  );
   if (matches.length === 1) return matches[0]!;
   if (matches.length > 1) ambiguous(label, input, matches.map(idFor));
   throw new OperationError(`no such ${label}: ${input}`);
@@ -203,11 +229,16 @@ function resolveIdPrefix<T>(
 export function resolveChannel(input: string, channels: readonly ChannelEntry[]): ChannelEntry {
   const normalized = withoutChannelMarker(input);
   const slugMatches = channels.filter(
-    ({ engine, cli }) => cli.slug === normalized || cli.name === normalized || engine.name === normalized,
+    ({ engine, cli }) =>
+      cli.slug === normalized || cli.name === normalized || engine.name === normalized,
   );
   if (slugMatches.length === 1) return slugMatches[0]!;
   if (slugMatches.length > 1) {
-    ambiguous("group", input, slugMatches.map(({ cli }) => cli.id));
+    ambiguous(
+      "group",
+      input,
+      slugMatches.map(({ cli }) => cli.id),
+    );
   }
   return resolveIdPrefix(
     normalized,
@@ -220,16 +251,23 @@ export function resolveChannel(input: string, channels: readonly ChannelEntry[])
 
 // A group named exactly, by name, #slug or id. A prefix names a thread or
 // message instead.
-export function exactChannel(input: string, channels: readonly ChannelEntry[]): ChannelEntry | undefined {
+export function exactChannel(
+  input: string,
+  channels: readonly ChannelEntry[],
+): ChannelEntry | undefined {
   const normalized = withoutChannelMarker(input);
   const matches = channels.filter(({ engine, cli }) =>
-    [cli.slug, cli.name, cli.id, engine.name, engine.id].includes(normalized));
+    [cli.slug, cli.name, cli.id, engine.name, engine.id].includes(normalized),
+  );
   return matches.length === 1 ? matches[0] : undefined;
 }
 
 // Every thread in the workspace. A thread no channel lists is linked to a
 // file and goes to the files group.
-export async function loadThreads(host: ChatsHost, channels: readonly ChannelEntry[]): Promise<LoadedThread[]> {
+export async function loadThreads(
+  host: ChatsHost,
+  channels: readonly ChannelEntry[],
+): Promise<LoadedThread[]> {
   const summaries = await Promise.all(
     channels.map(async ({ engine, cli }) => ({
       cli,
@@ -260,13 +298,16 @@ export async function loadMessagesByThread(
   threads: readonly LoadedThread[],
 ): Promise<Map<string, ChatMessage[]>> {
   const entries = await Promise.all(
-    threads.map(async (thread) => [
-      thread.thread.id,
-      await host.store.listMessages({
-        workspaceId: host.workspaceId,
-        threadId: thread.thread.id,
-      }),
-    ] as const),
+    threads.map(
+      async (thread) =>
+        [
+          thread.thread.id,
+          await host.store.listMessages({
+            workspaceId: host.workspaceId,
+            threadId: thread.thread.id,
+          }),
+        ] as const,
+    ),
   );
   return new Map(entries);
 }
@@ -359,10 +400,7 @@ export async function threadCounts(
       openDecisionCount: loaded.summary.openDecisionCount,
     };
   }
-  const decisions = await host.store.listThreadDecisions(
-    host.workspaceId,
-    loaded.thread.id,
-  );
+  const decisions = await host.store.listThreadDecisions(host.workspaceId, loaded.thread.id);
   return {
     commentCount: Math.max(0, messages.length - 1),
     openDecisionCount: decisions.filter((decision) => decision.state === "open").length,
@@ -377,18 +415,13 @@ export async function buildThreadContent(
   allMessages: readonly ChatMessage[],
   rootMessage?: ChatMessage,
 ): Promise<Omit<CliShowThreadResult, "dispatch">> {
-  const decisions = await host.store.listThreadDecisions(
-    host.workspaceId,
-    loaded.thread.id,
-  );
-  const decisionByMessage = new Map(
-    decisions.map((decision) => [decision.messageId, decision]),
-  );
+  const decisions = await host.store.listThreadDecisions(host.workspaceId, loaded.thread.id);
+  const decisionByMessage = new Map(decisions.map((decision) => [decision.messageId, decision]));
   const counts = await threadCounts(host, loaded, allMessages);
-  const selected = rootMessage
-    ? branchFromMessage(allMessages, rootMessage)
-    : [...allMessages];
-  const messages = selected.map((message) => cliShowMessage(message, decisionByMessage.get(message.id)));
+  const selected = rootMessage ? branchFromMessage(allMessages, rootMessage) : [...allMessages];
+  const messages = selected.map((message) =>
+    cliShowMessage(message, decisionByMessage.get(message.id)),
+  );
   return {
     thread: {
       id: cliThreadId(loaded.thread.id),
@@ -410,9 +443,10 @@ async function readGroupStream(
 ) {
   const before = page.before && {
     ...page.before,
-    id: page.before.lane === "posts"
-      ? engineIdForHandle(page.before.id, "th_", "thread-")
-      : engineIdForHandle(page.before.id, "msg_", "message-"),
+    id:
+      page.before.lane === "posts"
+        ? engineIdForHandle(page.before.id, "th_", "thread-")
+        : engineIdForHandle(page.before.id, "msg_", "message-"),
   };
   const stream = await host.store.listGroupStream({
     workspaceId: host.workspaceId,
@@ -420,8 +454,8 @@ async function readGroupStream(
     ...(before ? { before } : {}),
     ...(page.limit ? { limit: page.limit } : {}),
   });
-  const threadId = (id: string) => ids === "cli" ? cliThreadId(id) : id;
-  const messageId = (id: string) => ids === "cli" ? cliMessageId(id) : id;
+  const threadId = (id: string) => (ids === "cli" ? cliThreadId(id) : id);
+  const messageId = (id: string) => (ids === "cli" ? cliMessageId(id) : id);
   const position = (value: ChatStreamItem["position"]): CliStreamPosition => ({
     ...value,
     id: value.lane === "posts" ? threadId(value.id) : messageId(value.id),
@@ -433,37 +467,48 @@ async function readGroupStream(
       message: item.message,
       decision: item.decision,
       reactions: item.reactions,
-      ...(item.post ? {
-        post: {
-          replyCount: item.post.replyCount,
-          repliers: item.post.repliers.map((replier) => ({
-            author: { kind: replier.author.kind, displayName: replier.author.displayName },
-            lastReplyAtMs: replier.lastReplyAtMs,
-          })),
-          ...(item.post.lastReplyAtMs === undefined ? {} : { lastReplyAtMs: item.post.lastReplyAtMs }),
-          ...(item.post.latestAgentReply ? {
-            latestAgentReply: {
-              id: messageId(item.post.latestAgentReply.id),
-              author: {
-                kind: item.post.latestAgentReply.author.kind,
-                displayName: item.post.latestAgentReply.author.displayName,
-              },
-              createdAtMs: item.post.latestAgentReply.createdAtMs,
-              bodyExcerpt: item.post.latestAgentReply.bodyExcerpt,
+      ...(item.post
+        ? {
+            post: {
+              replyCount: item.post.replyCount,
+              repliers: item.post.repliers.map((replier) => ({
+                author: { kind: replier.author.kind, displayName: replier.author.displayName },
+                lastReplyAtMs: replier.lastReplyAtMs,
+              })),
+              ...(item.post.lastReplyAtMs === undefined
+                ? {}
+                : { lastReplyAtMs: item.post.lastReplyAtMs }),
+              ...(item.post.latestAgentReply
+                ? {
+                    latestAgentReply: {
+                      id: messageId(item.post.latestAgentReply.id),
+                      author: {
+                        kind: item.post.latestAgentReply.author.kind,
+                        displayName: item.post.latestAgentReply.author.displayName,
+                      },
+                      createdAtMs: item.post.latestAgentReply.createdAtMs,
+                      bodyExcerpt: item.post.latestAgentReply.bodyExcerpt,
+                    },
+                  }
+                : {}),
+              openDecisionCount: item.post.openDecisionCount,
+              ...(item.post.work
+                ? {
+                    work: {
+                      status: item.post.work.status,
+                      ...(item.post.work.url === undefined ? {} : { url: item.post.work.url }),
+                      messageId: messageId(item.post.work.messageId),
+                      author: {
+                        kind: item.post.work.author.kind,
+                        displayName: item.post.work.author.displayName,
+                      },
+                      reportedAtMs: item.post.work.reportedAtMs,
+                    },
+                  }
+                : {}),
             },
-          } : {}),
-          openDecisionCount: item.post.openDecisionCount,
-          ...(item.post.work ? {
-            work: {
-              status: item.post.work.status,
-              ...(item.post.work.url === undefined ? {} : { url: item.post.work.url }),
-              messageId: messageId(item.post.work.messageId),
-              author: { kind: item.post.work.author.kind, displayName: item.post.work.author.displayName },
-              reportedAtMs: item.post.work.reportedAtMs,
-            },
-          } : {}),
-        },
-      } : {}),
+          }
+        : {}),
     })),
     nextBefore: stream.nextBefore && position(stream.nextBefore),
     readPosition: stream.readPosition && position(stream.readPosition),
@@ -472,10 +517,16 @@ async function readGroupStream(
 
 export async function listGroups(host: ChatsHost): Promise<CliResultByVerb["groups"]> {
   const channels = await loadChannels(host);
-  return { groups: await Promise.all(channels.map(async ({ cli, engine }) => ({
-    ...cli,
-    channelWireId: await host.store.getChannelWireId({ workspaceId: host.workspaceId, channelId: engine.id }).catch(() => null),
-  }))) };
+  return {
+    groups: await Promise.all(
+      channels.map(async ({ cli, engine }) => ({
+        ...cli,
+        channelWireId: await host.store
+          .getChannelWireId({ workspaceId: host.workspaceId, channelId: engine.id })
+          .catch(() => null),
+      })),
+    ),
+  };
 }
 
 // A person's unread comes from each thread's read cursor. An agent's comes
@@ -501,19 +552,24 @@ export async function listGroupThreads(
       title: summary.thread.title,
       commentCount: Math.max(0, summary.messageCount - 1),
       openDecisionCount: summary.openDecisionCount,
-      unread: agentUnread
-        ? agentUnread.has(summary.thread.id)
-        : summary.unreadCount > 0,
+      unread: agentUnread ? agentUnread.has(summary.thread.id) : summary.unreadCount > 0,
       updatedAtMs: summary.thread.updatedAtMs,
     })),
   };
 }
 
-export async function listGroupsWithThreads(host: ChatsHost): Promise<CliResultByVerb["groupsFull"]> {
+export async function listGroupsWithThreads(
+  host: ChatsHost,
+): Promise<CliResultByVerb["groupsFull"]> {
   try {
     const channels = await provisionedChannels(host);
-    const wireIds = await Promise.all(channels.map(channel =>
-      host.store.getChannelWireId({ workspaceId: host.workspaceId, channelId: channel.id }).catch(() => null)));
+    const wireIds = await Promise.all(
+      channels.map((channel) =>
+        host.store
+          .getChannelWireId({ workspaceId: host.workspaceId, channelId: channel.id })
+          .catch(() => null),
+      ),
+    );
     const withThreads = [];
     for (const [index, channel] of channels.entries()) {
       const threads = await listChannelThreads(host, channel);
@@ -569,20 +625,36 @@ export async function listFileChats(
 }
 
 // A thread or a group's stream under engine ids. It never creates General.
-export async function readChat(host: ChatsHost, args: Args<"chat">): Promise<CliResultByVerb["chat"]> {
+export async function readChat(
+  host: ChatsHost,
+  args: Args<"chat">,
+): Promise<CliResultByVerb["chat"]> {
   if ("group" in args) {
     const { group, before, limit } = args;
     try {
-      const channels = (await host.store.listChannels({ workspaceId: host.workspaceId }))
-        .map((engine) => ({ engine, cli: groupForCli(engine) }));
+      const channels = (await host.store.listChannels({ workspaceId: host.workspaceId })).map(
+        (engine) => ({ engine, cli: groupForCli(engine) }),
+      );
       const channel = resolveChannel(group, channels).engine;
-      const page = await readGroupStream(host, channel, { ...(before ? { before } : {}), ...(limit ? { limit } : {}) }, "engine");
+      const page = await readGroupStream(
+        host,
+        channel,
+        { ...(before ? { before } : {}), ...(limit ? { limit } : {}) },
+        "engine",
+      );
       return {
         ok: true as const,
         stream: {
-          group: { id: channel.id, name: groupForCli(channel).name, kind: cliGroupKind(channel.kind) },
+          group: {
+            id: channel.id,
+            name: groupForCli(channel).name,
+            kind: cliGroupKind(channel.kind),
+          },
           ...page,
-          items: page.items.map(({ message, decision, reactions, ...item }) => ({ ...item, message: rawChatMessage(message, decision, reactions) })),
+          items: page.items.map(({ message, decision, reactions, ...item }) => ({
+            ...item,
+            message: rawChatMessage(message, decision, reactions),
+          })),
         },
       };
     } catch (error) {
@@ -595,9 +667,7 @@ export async function readChat(host: ChatsHost, args: Args<"chat">): Promise<Cli
     const threads = await host.store.listThreads({
       workspaceId: host.workspaceId,
     });
-    const thread = threads.find(
-      (candidate) => candidate.id === threadId,
-    );
+    const thread = threads.find((candidate) => candidate.id === threadId);
     if (!thread) {
       return {
         ok: false as const,
@@ -608,21 +678,20 @@ export async function readChat(host: ChatsHost, args: Args<"chat">): Promise<Cli
       workspaceId: host.workspaceId,
       threadId,
     });
-    const currentPath = thread.linkedFile
-      ? await host.filePath(thread.linkedFile.objectId)
-      : null;
+    const currentPath = thread.linkedFile ? await host.filePath(thread.linkedFile.objectId) : null;
     const projection = await host.store.getThreadProjection({
       workspaceId: host.workspaceId,
       threadId: thread.id,
-      linkedFileAccess: currentPath
-        ? { kind: "allowed", path: currentPath }
-        : { kind: "unknown" },
+      linkedFileAccess: currentPath ? { kind: "allowed", path: currentPath } : { kind: "unknown" },
     });
     const decisions = await host.store.listThreadDecisions(host.workspaceId, thread.id);
     const decisionByMessage = new Map(decisions.map((decision) => [decision.messageId, decision]));
     // One read for the whole thread, never one per message.
     const reactionsByMessage = new Map<string, ChatReaction[]>();
-    for (const reaction of await host.store.listReactions({ workspaceId: host.workspaceId, threadId: thread.id })) {
+    for (const reaction of await host.store.listReactions({
+      workspaceId: host.workspaceId,
+      threadId: thread.id,
+    })) {
       const cells = reactionsByMessage.get(reaction.messageId);
       if (cells) cells.push(reaction);
       else reactionsByMessage.set(reaction.messageId, [reaction]);
@@ -632,7 +701,12 @@ export async function readChat(host: ChatsHost, args: Args<"chat">): Promise<Cli
       thread: rawChatThread(thread),
       dispatch: await host.dispatch(thread.id),
       messages: messages.map((message) =>
-        rawChatMessage(message, decisionByMessage.get(message.id), reactionsByMessage.get(message.id) ?? [])),
+        rawChatMessage(
+          message,
+          decisionByMessage.get(message.id),
+          reactionsByMessage.get(message.id) ?? [],
+        ),
+      ),
       projection: {
         path: projection.path,
         readOnly: projection.readOnly,
@@ -672,16 +746,18 @@ export async function showChat(host: ChatsHost, args: Args<"show">): Promise<Sho
   const threadId = target.thread.thread.id;
   const messages = messagesByThread.get(threadId) ?? [];
   const thread = {
-    ...await buildThreadContent(host, target.thread, messages, target.rootMessage),
+    ...(await buildThreadContent(host, target.thread, messages, target.rootMessage)),
     dispatch: await host.dispatch(threadId),
   };
-  const latest = messages.length === 0
-    ? null
-    : messages.reduce((current, candidate) =>
-        candidate.createdAtMs > current.createdAtMs ||
-        (candidate.createdAtMs === current.createdAtMs && candidate.id > current.id)
-          ? candidate
-          : current);
+  const latest =
+    messages.length === 0
+      ? null
+      : messages.reduce((current, candidate) =>
+          candidate.createdAtMs > current.createdAtMs ||
+          (candidate.createdAtMs === current.createdAtMs && candidate.id > current.id)
+            ? candidate
+            : current,
+        );
   return {
     thread,
     read: {

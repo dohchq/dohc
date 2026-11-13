@@ -44,10 +44,14 @@ interface TrustRecord extends TrustedFolder {
 function isRecord(value: unknown): value is TrustRecord {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const { workspaceId, rootPath, folder, trustedAtMs } = value as Record<string, unknown>;
-  return typeof workspaceId === "string" && workspaceId.length > 0 &&
-    typeof rootPath === "string" && rootPath.length > 0 &&
+  return (
+    typeof workspaceId === "string" &&
+    workspaceId.length > 0 &&
+    typeof rootPath === "string" &&
+    rootPath.length > 0 &&
     (folder === null || typeof folder === "string") &&
-    typeof trustedAtMs === "number";
+    typeof trustedAtMs === "number"
+  );
 }
 
 // A folder's identity: null when the file system gives folders no number, so
@@ -81,10 +85,12 @@ export function createWorkspaceTrust(dependencies: {
   const identify = dependencies.identify ?? folderIdentity;
   const now = dependencies.now ?? Date.now;
   const readText = dependencies.readText ?? ((file: string) => readFile(file, "utf8"));
-  const writeText = dependencies.writeText ?? (async (file: string, text: string) => {
-    await mkdir(dirname(file), { recursive: true });
-    await atomicReplaceFile(file, (temporary) => writeFile(temporary, text));
-  });
+  const writeText =
+    dependencies.writeText ??
+    (async (file: string, text: string) => {
+      await mkdir(dirname(file), { recursive: true });
+      await atomicReplaceFile(file, (temporary) => writeFile(temporary, text));
+    });
   // The records as last read or written. Null until a read succeeds.
   let current: TrustRecord[] | null = null;
   // The read in flight, shared by every caller.
@@ -122,31 +128,39 @@ export function createWorkspaceTrust(dependencies: {
     } catch {
       return [];
     }
-    const trusted = parsed && typeof parsed === "object" && "trusted" in parsed ? parsed.trusted : null;
+    const trusted =
+      parsed && typeof parsed === "object" && "trusted" in parsed ? parsed.trusted : null;
     return Array.isArray(trusted) ? trusted.filter(isRecord) : [];
   }
 
   async function load(): Promise<TrustRecord[]> {
     if (current) return current;
-    reading ??= read().finally(() => { reading = null; });
+    reading ??= read().finally(() => {
+      reading = null;
+    });
     const loaded = await reading;
     // A write that finished meanwhile is newer than this read.
     return (current ??= loaded);
   }
 
   async function save(next: TrustRecord[]): Promise<void> {
-    await writeText(dependencies.file, `${JSON.stringify({ version: 1, trusted: next }, null, 2)}\n`);
+    await writeText(
+      dependencies.file,
+      `${JSON.stringify({ version: 1, trusted: next }, null, 2)}\n`,
+    );
     current = next;
   }
 
   // Whether a grant still holds now. Synchronous, for the spawn boundary.
-  const holds = (record: TrustRecord) => !restricted.has(record.workspaceId) && current?.includes(record) === true;
+  const holds = (record: TrustRecord) =>
+    !restricted.has(record.workspaceId) && current?.includes(record) === true;
 
   async function grantFor(workspace: TrustedFolder): Promise<TrustRecord | null> {
     if (restricted.has(workspace.workspaceId)) return null;
     const rootPath = spelling(workspace.rootPath);
-    const record = (await load()).find((each) =>
-      each.workspaceId === workspace.workspaceId && each.rootPath === rootPath);
+    const record = (await load()).find(
+      (each) => each.workspaceId === workspace.workspaceId && each.rootPath === rootPath,
+    );
     if (!record) return null;
     let folder: string | null;
     try {
@@ -178,7 +192,8 @@ export function createWorkspaceTrust(dependencies: {
 
   return {
     // Throws when the file cannot be read, so the caller can say so.
-    isTrusted: async (workspace: TrustedFolder): Promise<boolean> => (await grantFor(workspace)) !== null,
+    isTrusted: async (workspace: TrustedFolder): Promise<boolean> =>
+      (await grantFor(workspace)) !== null,
     /**
      * Main's check before it runs any app command. The answer is a
      * synchronous check that the grant still holds, for the spawn itself.
@@ -197,13 +212,22 @@ export function createWorkspaceTrust(dependencies: {
      */
     trust(workspace: TrustedFolder, known?: { folder: string | null }): Promise<boolean> {
       const revocationsAtStart = revocations.get(workspace.workspaceId) ?? 0;
-      const revokedMeanwhile = () => (revocations.get(workspace.workspaceId) ?? 0) !== revocationsAtStart;
+      const revokedMeanwhile = () =>
+        (revocations.get(workspace.workspaceId) ?? 0) !== revocationsAtStart;
       return serial(async () => {
         const folder = known ? known.folder : await identify(workspace.rootPath);
         const records = await load();
         if (revokedMeanwhile()) return false;
         const kept = records.filter((each) => each.workspaceId !== workspace.workspaceId);
-        await save([...kept, { workspaceId: workspace.workspaceId, rootPath: spelling(workspace.rootPath), folder, trustedAtMs: now() }]);
+        await save([
+          ...kept,
+          {
+            workspaceId: workspace.workspaceId,
+            rootPath: spelling(workspace.rootPath),
+            folder,
+            trustedAtMs: now(),
+          },
+        ]);
         // A revoke during the write wins. It stays restricted here, and its
         // persistRevocation, queued behind this write, takes the grant out
         // of the file.
@@ -233,9 +257,17 @@ const STAY = 1;
 // Code points a folder name can hide in: controls, line breaks, and the
 // marks that reorder text.
 function isHidden(code: number): boolean {
-  return code <= 0x1f || (code >= 0x7f && code <= 0x9f) || code === 0x061c ||
-    code === 0x200e || code === 0x200f || code === 0x2028 || code === 0x2029 ||
-    (code >= 0x202a && code <= 0x202e) || (code >= 0x2066 && code <= 0x2069);
+  return (
+    code <= 0x1f ||
+    (code >= 0x7f && code <= 0x9f) ||
+    code === 0x061c ||
+    code === 0x200e ||
+    code === 0x200f ||
+    code === 0x2028 ||
+    code === 0x2029 ||
+    (code >= 0x202a && code <= 0x202e) ||
+    (code >= 0x2066 && code <= 0x2069)
+  );
 }
 
 const BACKSLASH = String.fromCharCode(92);

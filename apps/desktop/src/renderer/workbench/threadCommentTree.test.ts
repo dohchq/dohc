@@ -4,7 +4,7 @@ import { buildThreadCommentTree, type ThreadCommentNode } from "./threadCommentT
 
 const comment = (id: string, parentMessageId?: string): ChatMessageRecord =>
   ({ id, parentMessageId }) as ChatMessageRecord;
-const ids = (nodes: ThreadCommentNode[]) => nodes.map(node => node.message.id);
+const ids = (nodes: ThreadCommentNode[]) => nodes.map((node) => node.message.id);
 
 describe("thread comment tree", () => {
   it("preserves chronological roots and siblings even when a parent appears later", () => {
@@ -40,8 +40,8 @@ describe("thread comment tree", () => {
       comment("self-descendant", "self"),
     ];
     const tree = buildThreadCommentTree("opening", comments);
-    expect(ids(tree)).toEqual(comments.map(message => message.id));
-    expect(tree.every(node => node.replies.length === 0)).toBe(true);
+    expect(ids(tree)).toEqual(comments.map((message) => message.id));
+    expect(tree.every((node) => node.replies.length === 0)).toBe(true);
   });
 
   it("handles long parent chains iteratively", () => {

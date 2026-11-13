@@ -1,12 +1,18 @@
-import {expect, it, vi} from "vitest";
-import {cacheLogAuthorNames} from "./logAuthorNameCache";
+import { expect, it, vi } from "vitest";
+import { cacheLogAuthorNames } from "./logAuthorNameCache";
 
 it("shares an in-flight lookup and expires names after five seconds", async () => {
   let now = 0;
   let finish!: (name: string) => void;
-  const lookup = vi.fn(() => new Promise<string>(resolve => {finish = resolve;}));
+  const lookup = vi.fn(
+    () =>
+      new Promise<string>((resolve) => {
+        finish = resolve;
+      }),
+  );
   const cached = cacheLogAuthorNames(lookup, () => now);
-  const first = cached("alice"), second = cached("alice");
+  const first = cached("alice"),
+    second = cached("alice");
   await Promise.resolve();
   expect(lookup).toHaveBeenCalledExactlyOnceWith("alice");
   finish("Alice");
@@ -35,7 +41,14 @@ it("bounds retained accounts and keeps their names separate", async () => {
 it("discards lookup failures without deleting a newer in-flight entry", async () => {
   let now = 0;
   let fail!: (error: Error) => void;
-  const lookup = vi.fn().mockImplementationOnce(() => new Promise((_resolve, reject) => {fail = reject;}))
+  const lookup = vi
+    .fn()
+    .mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          fail = reject;
+        }),
+    )
     .mockResolvedValue("Alice");
   const cached = cacheLogAuthorNames(lookup, () => now);
   const old = cached("alice");

@@ -36,8 +36,12 @@ export class ReplicaWatches {
     this.maxHoldersPerWorkspace = options.maxHoldersPerWorkspace ?? 64;
     this.maxWorkspacesPerOwner = options.maxWorkspacesPerOwner ?? 32;
     this.maxWorkspacesPerReader = options.maxWorkspacesPerReader ?? 16;
-    for (const cap of [this.maxWorkspaces, this.maxHoldersPerWorkspace,
-      this.maxWorkspacesPerOwner, this.maxWorkspacesPerReader]) {
+    for (const cap of [
+      this.maxWorkspaces,
+      this.maxHoldersPerWorkspace,
+      this.maxWorkspacesPerOwner,
+      this.maxWorkspacesPerReader,
+    ]) {
       if (!Number.isSafeInteger(cap) || cap < 1) throw new RangeError("invalid replica watch cap");
     }
   }
@@ -46,9 +50,14 @@ export class ReplicaWatches {
   // Owner devices and the replica supervisor do not call this. Revocation can
   // remain counted for up to 35 s. Capacity adds no response data or async wait.
   holdReader({ share, grant }: AuthorizedShareAction): void {
-    const principal = grant.principalKind === "user" ? grant.principalUserId
-      : grant.principalKind === "link" ? grant.grantId : null;
-    if (principal === null || (grant.principalKind === "user" && principal === share.granterUserId)) return;
+    const principal =
+      grant.principalKind === "user"
+        ? grant.principalUserId
+        : grant.principalKind === "link"
+          ? grant.grantId
+          : null;
+    if (principal === null || (grant.principalKind === "user" && principal === share.granterUserId))
+      return;
     // Stored principal IDs have no universal length bound. Keep retained keys fixed-size.
     const readerKey = createHash("sha256")
       .update(JSON.stringify([grant.principalKind, principal]))
@@ -133,10 +142,13 @@ export class ReplicaWatches {
     if (watch.timer) clearTimeout(watch.timer);
     let earliest = Infinity;
     for (const expiresAt of watch.holders.values()) earliest = Math.min(earliest, expiresAt);
-    watch.timer = setTimeout(() => {
-      this.expire(workspaceId, watch);
-      if (watch.holders.size > 0) this.schedule(workspaceId, watch);
-    }, Math.max(0, earliest - Date.now()));
+    watch.timer = setTimeout(
+      () => {
+        this.expire(workspaceId, watch);
+        if (watch.holders.size > 0) this.schedule(workspaceId, watch);
+      },
+      Math.max(0, earliest - Date.now()),
+    );
     watch.timer.unref();
   }
 }

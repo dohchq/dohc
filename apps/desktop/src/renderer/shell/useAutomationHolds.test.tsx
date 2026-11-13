@@ -9,14 +9,28 @@ afterEach(() => {
 });
 
 const hold = (workspace: string): AutomationHoldNotice => ({
-  automationId: `collection:${workspace}#spend`, automationName: "Spend", definitionHash: "0123456789abcdef",
-  step: "0", seq: 1, collection: workspace, collectionPath: workspace, target: "Budget", action: "change", stoppedFor: "bob@dohc.test", fileUnread: false, onServer: false,
+  automationId: `collection:${workspace}#spend`,
+  automationName: "Spend",
+  definitionHash: "0123456789abcdef",
+  step: "0",
+  seq: 1,
+  collection: workspace,
+  collectionPath: workspace,
+  target: "Budget",
+  action: "change",
+  stoppedFor: "bob@dohc.test",
+  fileUnread: false,
+  onServer: false,
 });
 const noServerHolds = async () => ({ holds: [] });
 
 it("never lets an Allow that finishes after a workspace switch repaint the new workspace's holds", async () => {
   const confirmed = Promise.withResolvers<{ status: "confirmed" }>();
-  const listAutomationHolds = vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ holds: [hold(workspaceId)], stops: [], unprovenPaths: [] }));
+  const listAutomationHolds = vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({
+    holds: [hold(workspaceId)],
+    stops: [],
+    unprovenPaths: [],
+  }));
   vi.stubGlobal("dohcDesktop", {
     listAutomationHolds,
     listServerAutomationHolds: noServerHolds,
@@ -37,8 +51,14 @@ it("never lets an Allow that finishes after a workspace switch repaint the new w
   expect(result.current.automationHolds).toEqual([hold("Home")]);
 
   // Trip's Allow finishes now. It must not read Trip's holds into Home.
-  await act(async () => { confirmed.resolve({ status: "confirmed" }); await confirmed.promise; });
-  expect(listAutomationHolds.mock.calls.map(([payload]) => payload.workspaceId)).toEqual(["Trip", "Home"]);
+  await act(async () => {
+    confirmed.resolve({ status: "confirmed" });
+    await confirmed.promise;
+  });
+  expect(listAutomationHolds.mock.calls.map(([payload]) => payload.workspaceId)).toEqual([
+    "Trip",
+    "Home",
+  ]);
   expect(result.current.automationHolds).toEqual([hold("Home")]);
 });
 
@@ -46,7 +66,10 @@ it("keeps the newest list when an older read in the same workspace answers last"
   const answers: Array<(holds: AutomationHoldNotice[]) => void> = [];
   const listeners: Array<(event: { workspaceId: string }) => void> = [];
   vi.stubGlobal("dohcDesktop", {
-    listAutomationHolds: () => new Promise((resolve) => answers.push((holds) => resolve({ holds, stops: [], unprovenPaths: [] }))),
+    listAutomationHolds: () =>
+      new Promise((resolve) =>
+        answers.push((holds) => resolve({ holds, stops: [], unprovenPaths: [] })),
+      ),
     listServerAutomationHolds: noServerHolds,
     onAutomationHoldsChanged: (listener: (event: { workspaceId: string }) => void) => {
       listeners.push(listener);
@@ -57,8 +80,12 @@ it("keeps the newest list when an older read in the same workspace answers last"
   const { result } = renderHook(() => useAutomationHolds("Trip", true, vi.fn(), ""));
   // A poke asks again while the first read is still out.
   act(() => listeners[0]!({ workspaceId: "Trip" }));
-  await act(async () => { answers[1]!([]); });
-  await act(async () => { answers[0]!([hold("Trip")]); });
+  await act(async () => {
+    answers[1]!([]);
+  });
+  await act(async () => {
+    answers[0]!([hold("Trip")]);
+  });
   expect(result.current.automationHolds).toEqual([]);
 });
 
@@ -75,32 +102,49 @@ it("dismisses the stopped steps by the verdicts it showed, then reads the notice
   const { result } = renderHook(() => useAutomationHolds("Trip", true, vi.fn(), ""));
   await act(async () => undefined);
   expect(result.current.automationStops).toEqual([stop]);
-  await act(async () => { result.current.dismissAutomationStops([stop]); });
+  await act(async () => {
+    result.current.dismissAutomationStops([stop]);
+  });
   expect(dismissAutomationStops).toHaveBeenCalledWith({
     workspaceId: "Trip",
-    stops: [{ automationId: stop.automationId, definitionHash: stop.definitionHash, step: "0", seq: 7 }],
+    stops: [
+      { automationId: stop.automationId, definitionHash: stop.definitionHash, step: "0", seq: 7 },
+    ],
   });
   expect(listAutomationHolds).toHaveBeenCalledTimes(2);
 });
 
-
 it("posts one retryable notice naming an unidentified file and retires its retry on a workspace switch", async () => {
   let listener: (event: { workspaceId: string }) => void = () => undefined;
-  const listAutomationHolds = vi.fn(async () => ({ holds: [], stops: [], unreadable: false, unprovenPaths: ["Unknown"] }));
+  const listAutomationHolds = vi.fn(async () => ({
+    holds: [],
+    stops: [],
+    unreadable: false,
+    unprovenPaths: ["Unknown"],
+  }));
   vi.stubGlobal("dohcDesktop", {
     listAutomationHolds,
     listServerAutomationHolds: noServerHolds,
-    onAutomationHoldsChanged: (next: typeof listener) => { listener = next; return () => undefined; },
+    onAutomationHoldsChanged: (next: typeof listener) => {
+      listener = next;
+      return () => undefined;
+    },
   });
   const report = vi.fn();
-  const { rerender } = renderHook(({ workspaceId }) => useAutomationHolds(workspaceId, true, report, ""), { initialProps: { workspaceId: "Trip" } });
+  const { rerender } = renderHook(
+    ({ workspaceId }) => useAutomationHolds(workspaceId, true, report, ""),
+    { initialProps: { workspaceId: "Trip" } },
+  );
   await act(async () => undefined);
   await act(async () => listener({ workspaceId: "Trip" }));
   expect(report).toHaveBeenCalledTimes(1);
   expect(report.mock.calls[0]?.[0]).toContain('"Unknown/automations.yaml"');
   const retry = report.mock.calls[0]![2] as () => void;
   await act(async () => retry());
-  expect(listAutomationHolds).toHaveBeenLastCalledWith({ workspaceId: "Trip", retryPath: "Unknown" });
+  expect(listAutomationHolds).toHaveBeenLastCalledWith({
+    workspaceId: "Trip",
+    retryPath: "Unknown",
+  });
   rerender({ workspaceId: "Home" });
   await act(async () => undefined);
   const calls = listAutomationHolds.mock.calls.length;
@@ -112,13 +156,17 @@ it("keeps Try again after a retry fails, and names a path again when it returns"
   let listener: (event: { workspaceId: string }) => void = () => undefined;
   const lists = [["Ops"], ["Ops"], [], ["Ops"]];
   const listAutomationHolds = vi.fn(async ({ retryPath }: { retryPath?: string }) => {
-    if (retryPath !== undefined && listAutomationHolds.mock.calls.length === 2) throw new Error("The engine stopped.");
+    if (retryPath !== undefined && listAutomationHolds.mock.calls.length === 2)
+      throw new Error("The engine stopped.");
     return { holds: [], stops: [], unreadable: false, unprovenPaths: lists.shift() ?? [] };
   });
   vi.stubGlobal("dohcDesktop", {
     listAutomationHolds,
     listServerAutomationHolds: noServerHolds,
-    onAutomationHoldsChanged: (next: typeof listener) => { listener = next; return () => undefined; },
+    onAutomationHoldsChanged: (next: typeof listener) => {
+      listener = next;
+      return () => undefined;
+    },
   });
   const report = vi.fn();
   renderHook(() => useAutomationHolds("Trip", true, report, ""));
@@ -145,7 +193,12 @@ it("lists the steps the server holds beside this computer's, reads them again wh
   const listServerAutomationHolds = vi.fn(async () => ({ holds: [held] }));
   const confirmCollectionAutomationStep = vi.fn(async () => ({ status: "confirmed" as const }));
   vi.stubGlobal("dohcDesktop", {
-    listAutomationHolds: async () => ({ holds: [], stops: [], unreadable: false, unprovenPaths: [] }),
+    listAutomationHolds: async () => ({
+      holds: [],
+      stops: [],
+      unreadable: false,
+      unprovenPaths: [],
+    }),
     listServerAutomationHolds,
     onAutomationHoldsChanged: () => () => undefined,
     confirmCollectionAutomationStep,
@@ -161,9 +214,16 @@ it("lists the steps the server holds beside this computer's, reads them again wh
   rerender({ key: "automation-held:1" });
   await act(async () => undefined);
   expect(listServerAutomationHolds).toHaveBeenCalledTimes(2);
-  await act(async () => { result.current.allowAutomationHold({ ...held, onServer: true }); });
+  await act(async () => {
+    result.current.allowAutomationHold({ ...held, onServer: true });
+  });
   expect(confirmCollectionAutomationStep).toHaveBeenCalledWith({
-    workspaceId: "Trip", automationId: held.automationId, definitionHash: held.definitionHash, step: "0", seq: 1, onServer: true,
+    workspaceId: "Trip",
+    automationId: held.automationId,
+    definitionHash: held.definitionHash,
+    step: "0",
+    seq: 1,
+    onServer: true,
   });
   expect(listServerAutomationHolds).toHaveBeenCalledTimes(3);
   expect(reportShellError).not.toHaveBeenCalled();
@@ -171,19 +231,33 @@ it("lists the steps the server holds beside this computer's, reads them again wh
 
 it("says when it cannot read the server's holds, and reads them again on Try again", async () => {
   const { onServer: _here, ...held } = hold("Trip");
-  const listServerAutomationHolds = vi.fn()
+  const listServerAutomationHolds = vi
+    .fn()
     .mockRejectedValueOnce(new Error("Your server answered with 500."))
     .mockResolvedValue({ holds: [held] });
   vi.stubGlobal("dohcDesktop", {
-    listAutomationHolds: async () => ({ holds: [], stops: [], unreadable: false, unprovenPaths: [] }),
+    listAutomationHolds: async () => ({
+      holds: [],
+      stops: [],
+      unreadable: false,
+      unprovenPaths: [],
+    }),
     listServerAutomationHolds,
     onAutomationHoldsChanged: () => () => undefined,
   });
   const reportShellError = vi.fn();
-  const { result } = renderHook(() => useAutomationHolds("Trip", true, reportShellError, "automation-held:1"));
+  const { result } = renderHook(() =>
+    useAutomationHolds("Trip", true, reportShellError, "automation-held:1"),
+  );
   await act(async () => undefined);
   expect(result.current.automationHolds).toEqual([]);
-  expect(reportShellError).toHaveBeenCalledWith("dohc could not read the automation steps your server holds.", expect.any(Error), expect.any(Function));
-  await act(async () => { reportShellError.mock.calls[0]![2](); });
+  expect(reportShellError).toHaveBeenCalledWith(
+    "dohc could not read the automation steps your server holds.",
+    expect.any(Error),
+    expect.any(Function),
+  );
+  await act(async () => {
+    reportShellError.mock.calls[0]![2]();
+  });
   expect(result.current.automationHolds).toEqual([{ ...held, onServer: true }]);
 });

@@ -7,7 +7,10 @@ describe("file kind records", () => {
     for (const [kind, record] of Object.entries(FILE_KIND_RECORDS)) {
       for (const extension of record.extensions) {
         expect(extension).toBe(extension.toLowerCase());
-        expect(owners.has(extension), `${extension} belongs to both ${owners.get(extension)} and ${kind}`).toBe(false);
+        expect(
+          owners.has(extension),
+          `${extension} belongs to both ${owners.get(extension)} and ${kind}`,
+        ).toBe(false);
         owners.set(extension, kind);
       }
     }
@@ -24,14 +27,18 @@ describe("file kind records", () => {
   });
 
   it("keeps text reads confined to the existing editors", () => {
-    expect(Object.values(FILE_KIND_RECORDS)
-      .filter((record) => record.opens.content === "text")
-      .map((record) => record.displayKind)).toEqual(["markdown", "drawing", "csv", "json", "text", "code"]);
+    expect(
+      Object.values(FILE_KIND_RECORDS)
+        .filter((record) => record.opens.content === "text")
+        .map((record) => record.displayKind),
+    ).toEqual(["markdown", "drawing", "csv", "json", "text", "code"]);
   });
 
   it("offers document serialization only for the Markdown view", () => {
     for (const record of Object.values(FILE_KIND_RECORDS)) {
-      expect((record.actions as readonly string[]).includes("export-html")).toBe(record.displayKind === "markdown");
+      expect((record.actions as readonly string[]).includes("export-html")).toBe(
+        record.displayKind === "markdown",
+      );
     }
   });
 
@@ -56,8 +63,11 @@ describe("file kind records", () => {
     for (const record of records) {
       expect(record.glyphId, record.displayKind).toBe(DRAWING_KINDS[record.name] ?? "file");
     }
-    expect(records.filter((record) => !(record.name in DRAWING_KINDS)).map((record) => record.displayKind))
-      .toEqual(["pdf", "binary"]);
+    expect(
+      records
+        .filter((record) => !(record.name in DRAWING_KINDS))
+        .map((record) => record.displayKind),
+    ).toEqual(["pdf", "binary"]);
     for (const name of Object.keys(DRAWING_KINDS)) {
       expect(records.map((record) => record.name)).toContain(name);
     }
@@ -83,25 +93,34 @@ describe("file kind records", () => {
   });
 
   it.each(["txt", "log"])(
-    "uses the text glyph for %s while retaining text loading", (extension) => {
+    "uses the text glyph for %s while retaining text loading",
+    (extension) => {
       expect(fileKindForPath(`file.${extension}`)).toMatchObject({
-        displayKind: "text", glyphId: "file-type", opens: { content: "text" },
+        displayKind: "text",
+        glyphId: "file-type",
+        opens: { content: "text" },
       });
     },
   );
 
   it.each(["json", "xml", "yaml", "yml", "toml", "ini", "env"])(
-    "uses the data glyph for %s while retaining text loading", (extension) => {
+    "uses the data glyph for %s while retaining text loading",
+    (extension) => {
       expect(fileKindForPath(`file.${extension}`)).toMatchObject({
-        displayKind: "json", glyphId: "file-braces", opens: { content: "text" },
+        displayKind: "json",
+        glyphId: "file-braces",
+        opens: { content: "text" },
       });
     },
   );
 
   it.each(["js", "tsx", "css", "py", "rs", "sh", "sql", "html", "htm"])(
-    "uses a code glyph for %s while retaining text loading", (extension) => {
+    "uses a code glyph for %s while retaining text loading",
+    (extension) => {
       expect(fileKindForPath(`file.${extension}`)).toMatchObject({
-        displayKind: "code", glyphId: "file-code", opens: { content: "text" },
+        displayKind: "code",
+        glyphId: "file-code",
+        opens: { content: "text" },
       });
     },
   );

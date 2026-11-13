@@ -65,9 +65,7 @@ export type ProposalMomentResult =
 // found it. Stating the same path on both sides is stating no opinion about
 // where the file lives.
 function recipientMoved(op: ShareProposalOpRow): boolean {
-  return (
-    op.basedOnPath !== null && op.afterPath !== null && op.basedOnPath !== op.afterPath
-  );
+  return op.basedOnPath !== null && op.afterPath !== null && op.basedOnPath !== op.afterPath;
 }
 
 // WHERE the change lands.

@@ -9,7 +9,12 @@ export function ActionPill({ label, onPress }: { label: string; onPress?(): void
   return (
     <Pressable accessibilityRole="button" onPress={onPress} style={styles.target}>
       {({ pressed }) => (
-        <View style={[styles.pill, { borderColor: theme.outline, backgroundColor: pressed ? theme.panel2 : "transparent" }]}>
+        <View
+          style={[
+            styles.pill,
+            { borderColor: theme.outline, backgroundColor: pressed ? theme.panel2 : "transparent" },
+          ]}
+        >
           <Text style={[styles.label, { color: theme.ink }]}>{label}</Text>
         </View>
       )}
@@ -19,6 +24,12 @@ export function ActionPill({ label, onPress }: { label: string; onPress?(): void
 
 const styles = StyleSheet.create({
   target: { flexShrink: 1, paddingVertical: 6, marginVertical: -6 },
-  pill: { minHeight: 32, paddingHorizontal: 12, borderRadius: 16, borderWidth: 1, justifyContent: "center" },
+  pill: {
+    minHeight: 32,
+    paddingHorizontal: 12,
+    borderRadius: 16,
+    borderWidth: 1,
+    justifyContent: "center",
+  },
   label: { fontSize: 14, fontWeight: "600", textAlign: "center" },
 });

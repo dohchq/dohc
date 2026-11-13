@@ -1,5 +1,8 @@
 import { randomBytes } from "node:crypto";
-import { createNamedLiveBrowserResolver, type NamedLiveBrowserContext } from "./namedLiveBrowserAuth";
+import {
+  createNamedLiveBrowserResolver,
+  type NamedLiveBrowserContext,
+} from "./namedLiveBrowserAuth";
 import { authorizeNamedLiveEditShareGrant } from "./shareAuthorization";
 
 interface NamedLiveBrowserSession {
@@ -10,34 +13,55 @@ interface NamedLiveBrowserSession {
 }
 
 /** Private route lookup. Callers create mappings from server-resolved context. */
-export function createNamedLiveBrowserSessions(options: Parameters<typeof createNamedLiveBrowserResolver>[0] & {
-  maxSessions: number;
-  retentionMs: number;
-  now?: () => number;
-}) {
+export function createNamedLiveBrowserSessions(
+  options: Parameters<typeof createNamedLiveBrowserResolver>[0] & {
+    maxSessions: number;
+    retentionMs: number;
+    now?: () => number;
+  },
+) {
   const { maxSessions, retentionMs, now = Date.now, storage, resolveActor } = options;
   for (const [name, value] of Object.entries({ maxSessions, retentionMs })) {
-    if (!Number.isSafeInteger(value) || value <= 0) throw new TypeError(`Invalid named session ${name}.`);
+    if (!Number.isSafeInteger(value) || value <= 0)
+      throw new TypeError(`Invalid named session ${name}.`);
   }
-  const resolveBrowser = createNamedLiveBrowserResolver({ storage, resolveActor, authentication: options.authentication });
+  const resolveBrowser = createNamedLiveBrowserResolver({
+    storage,
+    resolveActor,
+    authentication: options.authentication,
+  });
   const sessions = new Map<string, NamedLiveBrowserSession>();
 
   function currentTime(): number {
     const value = now();
-    if (!Number.isSafeInteger(value) || value < 0) throw new TypeError("Invalid named session time.");
+    if (!Number.isSafeInteger(value) || value < 0)
+      throw new TypeError("Invalid named session time.");
     return value;
   }
 
   return {
-    create(context: NamedLiveBrowserContext): { discriminator: string; expiresAtMs: number } | null {
+    create(
+      context: NamedLiveBrowserContext,
+    ): { discriminator: string; expiresAtMs: number } | null {
       const { userId, workspaceId, shareId, grantId } = context;
-      if (context.kind !== "named" || [userId, workspaceId, shareId, grantId].some(value => typeof value !== "string" || value.length === 0)) {
+      if (
+        context.kind !== "named" ||
+        [userId, workspaceId, shareId, grantId].some(
+          (value) => typeof value !== "string" || value.length === 0,
+        )
+      ) {
         throw new TypeError("Invalid named session context.");
       }
       const current = authorizeNamedLiveEditShareGrant({ storage, actorUserId: userId, grantId });
-      if (!current.ok || current.grant.grantId !== grantId || current.share.shareId !== shareId ||
-        current.share.workspaceId !== workspaceId || current.grant.access !== "edit" ||
-        !Number.isSafeInteger(current.grant.generation) || current.grant.generation <= 0) {
+      if (
+        !current.ok ||
+        current.grant.grantId !== grantId ||
+        current.share.shareId !== shareId ||
+        current.share.workspaceId !== workspaceId ||
+        current.grant.access !== "edit" ||
+        !Number.isSafeInteger(current.grant.generation) ||
+        current.grant.generation <= 0
+      ) {
         throw new TypeError("Invalid named session grant.");
       }
       const { generation: grantGeneration, access: grantAccess } = current.grant;
@@ -53,13 +77,18 @@ export function createNamedLiveBrowserSessions(options: Parameters<typeof create
       const discriminator = randomBytes(9).toString("base64url");
       if (sessions.has(discriminator)) throw new Error("Named session discriminator collision.");
       sessions.set(discriminator, {
-        context: Object.freeze({ kind: "named", userId, workspaceId, shareId, grantId }), expiresAtMs,
-        grantGeneration, grantAccess,
+        context: Object.freeze({ kind: "named", userId, workspaceId, shareId, grantId }),
+        expiresAtMs,
+        grantGeneration,
+        grantAccess,
       });
       return { discriminator, expiresAtMs };
     },
 
-    async resolve(request: Request, discriminator: string): Promise<NamedLiveBrowserContext | null> {
+    async resolve(
+      request: Request,
+      discriminator: string,
+    ): Promise<NamedLiveBrowserContext | null> {
       const session = sessions.get(discriminator);
       if (!session || request.signal.aborted) return null;
       if (session.expiresAtMs <= currentTime()) {
@@ -82,7 +111,9 @@ export function createNamedLiveBrowserSessions(options: Parameters<typeof create
     },
 
     deleteAccount(userId: string, workspaceIds: readonly string[]) {
-      for (const [key, session] of sessions) if (session.context.userId === userId || workspaceIds.includes(session.context.workspaceId)) sessions.delete(key);
+      for (const [key, session] of sessions)
+        if (session.context.userId === userId || workspaceIds.includes(session.context.workspaceId))
+          sessions.delete(key);
     },
     remove(discriminator: string): boolean {
       return sessions.delete(discriminator);

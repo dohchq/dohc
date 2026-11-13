@@ -10,6 +10,6 @@ describe("renderer base64", () => {
   });
 
   it("rejects malformed input instead of returning partial recovery bytes", () => {
-    expect(() => base64ToBytes("not base64!" )).toThrow();
+    expect(() => base64ToBytes("not base64!")).toThrow();
   });
 });

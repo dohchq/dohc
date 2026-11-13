@@ -1,10 +1,4 @@
-import {
-  app,
-  BrowserWindow,
-  nativeTheme,
-  screen,
-  type WebContents,
-} from "electron";
+import { app, BrowserWindow, nativeTheme, screen, type WebContents } from "electron";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -113,10 +107,7 @@ export function titleBarOverlayOptions(theme: "light" | "dark"): {
 }
 
 function devServerUrl(): string | null {
-  return validateDevServerUrl(
-    process.env.ELECTRON_RENDERER_URL,
-    app.isPackaged,
-  );
+  return validateDevServerUrl(process.env.ELECTRON_RENDERER_URL, app.isPackaged);
 }
 
 export function navigationPolicy(): NavigationPolicy {
@@ -151,10 +142,7 @@ function loopbackHttpOrigin(targetUrl: string): string | null {
 export function allowLoopbackFrameOrigin(frameUrl: string): () => void {
   const origin = loopbackHttpOrigin(frameUrl);
   if (!origin) return () => undefined;
-  allowedLoopbackFrameOrigins.set(
-    origin,
-    (allowedLoopbackFrameOrigins.get(origin) ?? 0) + 1,
-  );
+  allowedLoopbackFrameOrigins.set(origin, (allowedLoopbackFrameOrigins.get(origin) ?? 0) + 1);
   let disposed = false;
   return () => {
     if (disposed) return;
@@ -196,10 +184,7 @@ interface TrackedWindow {
 // Exported for the window-state test; production calls it through
 // createMainWindow. Each window writes only its own file, so two windows of
 // one role cannot overwrite each other's newer geometry on a theme flip.
-export function trackWindowState(
-  window: TrackedWindow,
-  role: WindowRole = "workspace",
-): void {
+export function trackWindowState(window: TrackedWindow, role: WindowRole = "workspace"): void {
   const persist = () => {
     if (window.isDestroyed()) return;
     const state = {
@@ -283,20 +268,28 @@ export function createMainWindow(options?: {
           titleBarStyle: "hidden" as const,
           titleBarOverlay: titleBarOverlayOptions(theme),
         }),
-    webPreferences: { ...createMainWindowWebPreferences(preloadPath, options?.preloadArguments), webviewTag: role === "workspace" },
+    webPreferences: {
+      ...createMainWindowWebPreferences(preloadPath, options?.preloadArguments),
+      webviewTag: role === "workspace",
+    },
   });
   installAppViewEmbedder(window.webContents);
 
   // CDP input bypasses OS hit testing. Keep the real pointer out of e2e
   // windows without forwarding mousemove events or changing keyboard focus.
-  if (!app.isPackaged && process.env.DOHC_DESKTOP_TEST === "1" && process.env.DOHC_TEST_IGNORE_MOUSE === "1") {
+  if (
+    !app.isPackaged &&
+    process.env.DOHC_DESKTOP_TEST === "1" &&
+    process.env.DOHC_TEST_IGNORE_MOUSE === "1"
+  ) {
     window.setIgnoreMouseEvents(true);
   }
 
   // BrowserWindow's `icon` option is ignored on macOS, where a package's Dock
   // shows its icon.icns. Unpackaged Electron shows its own icon there, so
   // development sets dohc's Mac icon instead.
-  if (process.platform === "darwin" && !app.isPackaged) app.dock?.setIcon(join(iconDirectory, "icon-mac.png"));
+  if (process.platform === "darwin" && !app.isPackaged)
+    app.dock?.setIcon(join(iconDirectory, "icon-mac.png"));
 
   if (placement.isMaximized) window.maximize();
   trackWindowState(window, role);

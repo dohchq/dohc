@@ -15,13 +15,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
 
-type Json =
-  | null
-  | boolean
-  | number
-  | string
-  | Json[]
-  | { [key: string]: Json };
+type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 
 interface AuthoredUpdate {
   id: string;
@@ -50,14 +44,8 @@ interface GoldenCorpus {
 }
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const FIXTURES_PATH = join(
-  HERE,
-  "../../../../tools/rust-engine-program/ydoc-replay-fixtures.json",
-);
-const GOLDENS_PATH = join(
-  HERE,
-  "../../../../tools/rust-engine-program/ydoc-replay-goldens.json",
-);
+const FIXTURES_PATH = join(HERE, "../../../../tools/rust-engine-program/ydoc-replay-fixtures.json");
+const GOLDENS_PATH = join(HERE, "../../../../tools/rust-engine-program/ydoc-replay-goldens.json");
 
 const SCHEMA = {
   frontmatter: "map",
@@ -77,26 +65,17 @@ function deterministicDoc(clientID: number): Y.Doc {
   return doc;
 }
 
-function capture(
-  doc: Y.Doc,
-  id: string,
-  author: string,
-  edit: () => void,
-): AuthoredUpdate {
+function capture(doc: Y.Doc, id: string, author: string, edit: () => void): AuthoredUpdate {
   const before = Y.encodeStateVector(doc);
   doc.transact(edit, `replay-parity:${author}:${id}`);
   return {
     id,
     author,
-    updateBase64: Buffer.from(Y.encodeStateAsUpdate(doc, before)).toString(
-      "base64",
-    ),
+    updateBase64: Buffer.from(Y.encodeStateAsUpdate(doc, before)).toString("base64"),
   };
 }
 
-function xmlText(
-  runs: Array<[string, Record<string, unknown>?]>,
-): Y.XmlText {
+function xmlText(runs: Array<[string, Record<string, unknown>?]>): Y.XmlText {
   const text = new Y.XmlText();
   let offset = 0;
   for (const [value, marks] of runs) {
@@ -122,14 +101,8 @@ function xmlElement(
   return element;
 }
 
-function paragraph(
-  value: string | Array<Y.XmlElement | Y.XmlText>,
-): Y.XmlElement {
-  return xmlElement(
-    "paragraph",
-    {},
-    typeof value === "string" ? [xmlText([[value]])] : value,
-  );
+function paragraph(value: string | Array<Y.XmlElement | Y.XmlText>): Y.XmlElement {
+  return xmlElement("paragraph", {}, typeof value === "string" ? [xmlText([[value]])] : value);
 }
 
 function listItem(text: string): Y.XmlElement {
@@ -137,27 +110,17 @@ function listItem(text: string): Y.XmlElement {
 }
 
 function tableCell(name: "tableHeader" | "tableCell", text: string) {
-  return xmlElement(
-    name,
-    { colspan: 1, rowspan: 1, colwidth: null },
-    [paragraph(text)],
-  );
+  return xmlElement(name, { colspan: 1, rowspan: 1, colwidth: null }, [paragraph(text)]);
 }
 
 function plaintextEditing(): ReplayScenario {
   const doc = deterministicDoc(101);
   const text = doc.getText("plainText");
   const authoredUpdates = [
-    capture(doc, "plain-1", "solo", () =>
-      text.insert(0, "alpha\nbeta\ngamma"),
-    ),
-    capture(doc, "plain-2", "solo", () =>
-      text.insert(5, " inserted"),
-    ),
+    capture(doc, "plain-1", "solo", () => text.insert(0, "alpha\nbeta\ngamma")),
+    capture(doc, "plain-2", "solo", () => text.insert(5, " inserted")),
     capture(doc, "plain-3", "solo", () => text.delete(0, 2)),
-    capture(doc, "plain-4", "solo", () =>
-      text.insert(text.length, "\nfinal"),
-    ),
+    capture(doc, "plain-4", "solo", () => text.insert(text.length, "\nfinal")),
   ];
   return {
     name: "plain-text-inserts-deletes-reversed",
@@ -187,15 +150,9 @@ function concurrentPlaintext(): ReplayScenario {
   Y.applyUpdate(peerB, baseBytes);
   const aText = peerA.getText("plainText");
   const bText = peerB.getText("plainText");
-  const a1 = capture(peerA, "concurrent-a1", "peer-a", () =>
-    aText.insert(7, "A😀 "),
-  );
-  const a2 = capture(peerA, "concurrent-a2", "peer-a", () =>
-    aText.delete(0, 1),
-  );
-  const b1 = capture(peerB, "concurrent-b1", "peer-b", () =>
-    bText.insert(7, "B́ "),
-  );
+  const a1 = capture(peerA, "concurrent-a1", "peer-a", () => aText.insert(7, "A😀 "));
+  const a2 = capture(peerA, "concurrent-a2", "peer-a", () => aText.delete(0, 1));
+  const b1 = capture(peerB, "concurrent-b1", "peer-b", () => bText.insert(7, "B́ "));
   const b2 = capture(peerB, "concurrent-b2", "peer-b", () =>
     bText.insert(bText.length, " / peer B"),
   );
@@ -220,23 +177,16 @@ function unicodePlaintext(): ReplayScenario {
   const text = doc.getText("plainText");
   const authoredUpdates = [
     capture(doc, "unicode-1", "unicode-author", () =>
-      text.insert(
-        0,
-        "astral 😀 𝔘 | combining e\u0301 a\u0308 | 日本語 | مرحبا | 👩‍👩‍👧‍👦",
-      ),
+      text.insert(0, "astral 😀 𝔘 | combining e\u0301 a\u0308 | 日本語 | مرحبا | 👩‍👩‍👧‍👦"),
     ),
-    capture(doc, "unicode-2", "unicode-author", () =>
-      text.insert(9, "🎯"),
-    ),
+    capture(doc, "unicode-2", "unicode-author", () => text.insert(9, "🎯")),
     // Delete the complete U+1D518 scalar (two UTF-16 units), never an interior
     // surrogate boundary; the live adapter rejects such ill-formed edits.
     capture(doc, "unicode-3", "unicode-author", () => {
       const start = text.toString().indexOf("𝔘");
       text.delete(start, "𝔘".length);
     }),
-    capture(doc, "unicode-4", "unicode-author", () =>
-      text.insert(text.length, "\nZ͑a͒l̓g̾ō"),
-    ),
+    capture(doc, "unicode-4", "unicode-author", () => text.insert(text.length, "\nZ͑a͒l̓g̾ō")),
   ];
   return {
     name: "unicode-astral-combining-and-multiscript",
@@ -316,26 +266,17 @@ function richdocStructureAndMarks(): ReplayScenario {
     ]);
 
     const blocks = [
-      xmlElement("heading", { level: 2 }, [
-        xmlText([["Structural replay"]]),
-      ]),
+      xmlElement("heading", { level: 2 }, [xmlText([["Structural replay"]])]),
       markedParagraph,
       xmlElement("blockquote", {}, [paragraph("quoted paragraph")]),
-      xmlElement("bulletList", {}, [
-        listItem("bullet one"),
-        listItem("bullet two"),
-      ]),
+      xmlElement("bulletList", {}, [listItem("bullet one"), listItem("bullet two")]),
       xmlElement("orderedList", { start: 3 }, [
         listItem("ordered three"),
         listItem("ordered four"),
       ]),
       xmlElement("taskList", {}, [
-        xmlElement("taskItem", { checked: false }, [
-          paragraph("open task"),
-        ]),
-        xmlElement("taskItem", { checked: true }, [
-          paragraph("completed task"),
-        ]),
+        xmlElement("taskItem", { checked: false }, [paragraph("open task")]),
+        xmlElement("taskItem", { checked: true }, [paragraph("completed task")]),
       ]),
       xmlElement("codeBlock", { language: "ts" }, [
         xmlText([["const answer = 42;\nconsole.log(answer);"]]),
@@ -346,16 +287,11 @@ function richdocStructureAndMarks(): ReplayScenario {
           tableCell("tableHeader", "Name"),
           tableCell("tableHeader", "Value"),
         ]),
-        xmlElement("tableRow", {}, [
-          tableCell("tableCell", "emoji"),
-          tableCell("tableCell", "😀"),
-        ]),
+        xmlElement("tableRow", {}, [tableCell("tableCell", "emoji"), tableCell("tableCell", "😀")]),
       ]),
-      xmlElement(
-        "callout",
-        { calloutType: "info", fold: "+", title: "Details" },
-        [paragraph("callout body")],
-      ),
+      xmlElement("callout", { calloutType: "info", fold: "+", title: "Details" }, [
+        paragraph("callout body"),
+      ]),
       xmlElement("mathBlock", { tex: "\\sum_{i=0}^n i" }),
     ];
     body.insert(0, blocks);
@@ -374,9 +310,7 @@ function richdocStructureAndMarks(): ReplayScenario {
     // Remove the horizontal rule and append a new block. This update is
     // delivered before the base so both its delete set and insertion park.
     body.delete(7, 1);
-    body.insert(body.length, [
-      paragraph("tail with astral 😀 and combining e\u0301"),
-    ]);
+    body.insert(body.length, [paragraph("tail with astral 😀 and combining e\u0301")]);
   });
 
   return {
@@ -435,16 +369,20 @@ function sceneRevisionsAndAppState(): ReplayScenario {
   const secondDoc = deterministicDoc(602);
   const stateDoc = deterministicDoc(603);
   const base = capture(baseDoc, "scene-1", "scene-author-1", () => {
-    baseDoc.getMap<string>("excalidraw:revisions").set(
-      '["box",1,1]',
-      '{"id":"box","isDeleted":false,"type":"rectangle","version":1,"versionNonce":1}',
-    );
+    baseDoc
+      .getMap<string>("excalidraw:revisions")
+      .set(
+        '["box",1,1]',
+        '{"id":"box","isDeleted":false,"type":"rectangle","version":1,"versionNonce":1}',
+      );
   });
   const secondRevision = capture(secondDoc, "scene-2", "scene-author-2", () => {
-    secondDoc.getMap<string>("excalidraw:revisions").set(
-      '["box",2,2]',
-      '{"id":"box","isDeleted":false,"type":"rectangle","version":2,"versionNonce":2,"x":40}',
-    );
+    secondDoc
+      .getMap<string>("excalidraw:revisions")
+      .set(
+        '["box",2,2]',
+        '{"id":"box","isDeleted":false,"type":"rectangle","version":2,"versionNonce":2,"x":40}',
+      );
   });
   const state = capture(stateDoc, "scene-3", "scene-author-3", () => {
     stateDoc.getMap<string>("excalidraw:app-state").set("theme", '"dark"');
@@ -464,9 +402,7 @@ function sceneRevisionsAndAppState(): ReplayScenario {
 }
 
 function replay(scenario: ReplayScenario, order: string[]): Y.Doc {
-  const byId = new Map(
-    scenario.authoredUpdates.map((update) => [update.id, update]),
-  );
+  const byId = new Map(scenario.authoredUpdates.map((update) => [update.id, update]));
   expect(new Set(order).size, `${scenario.name}: replay ids unique`).toBe(
     scenario.authoredUpdates.length,
   );
@@ -499,9 +435,7 @@ function buildCorpus(): {
       `${scenario.name}: replay order must differ from authored order`,
     ).not.toEqual(authoredOrder);
     const authored = normalize(canonicalContent(replay(scenario, authoredOrder)));
-    const delivered = normalize(
-      canonicalContent(replay(scenario, scenario.replayOrder)),
-    );
+    const delivered = normalize(canonicalContent(replay(scenario, scenario.replayOrder)));
     expect(
       delivered,
       `${scenario.name}: yjs itself must converge across authored and replay order`,
@@ -591,9 +525,7 @@ function xmlChildren(node: Y.XmlFragment | Y.XmlElement): Json[] {
   return children;
 }
 
-function xmlJson(
-  node: Y.XmlElement | Y.XmlText | Y.XmlHook | Y.XmlFragment,
-): Json {
+function xmlJson(node: Y.XmlElement | Y.XmlText | Y.XmlHook | Y.XmlFragment): Json {
   if (node instanceof Y.XmlElement) {
     return {
       type: "element",
@@ -616,11 +548,7 @@ function xmlJson(
 
 function plainJson(value: unknown): Json {
   if (value === null || value === undefined) return null;
-  if (
-    typeof value === "boolean" ||
-    typeof value === "number" ||
-    typeof value === "string"
-  ) {
+  if (typeof value === "boolean" || typeof value === "number" || typeof value === "string") {
     return value;
   }
   if (value instanceof Uint8Array) {
@@ -629,9 +557,7 @@ function plainJson(value: unknown): Json {
   if (Array.isArray(value)) return value.map(plainJson);
   if (typeof value === "object") {
     const object: Record<string, Json> = {};
-    for (const [key, entry] of Object.entries(
-      value as Record<string, unknown>,
-    )) {
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
       object[key] = plainJson(entry);
     }
     return object;
@@ -672,8 +598,7 @@ function mergeDeltaRuns(delta: Json[]): Json[] {
       isDeltaRun(item) &&
       typeof previous.insert === "string" &&
       typeof item.insert === "string" &&
-      stableStringify(previous.attrs ?? null) ===
-        stableStringify(item.attrs ?? null)
+      stableStringify(previous.attrs ?? null) === stableStringify(item.attrs ?? null)
     ) {
       previous.insert += item.insert;
     } else {
@@ -683,9 +608,7 @@ function mergeDeltaRuns(delta: Json[]): Json[] {
   return merged;
 }
 
-function isDeltaRun(
-  value: Json | undefined,
-): value is { insert: Json; attrs?: Json } {
+function isDeltaRun(value: Json | undefined): value is { insert: Json; attrs?: Json } {
   return (
     value !== undefined &&
     value !== null &&
@@ -713,14 +636,8 @@ describe("yjs replay-parity oracle", () => {
     const produced = buildCorpus();
     if (process.env.DOHC_EMIT_YDOC_REPLAY_GOLDENS === "1") {
       await Promise.all([
-        writeFile(
-          FIXTURES_PATH,
-          `${JSON.stringify(produced.fixtures, null, 2)}\n`,
-        ),
-        writeFile(
-          GOLDENS_PATH,
-          `${JSON.stringify(produced.goldens, null, 2)}\n`,
-        ),
+        writeFile(FIXTURES_PATH, `${JSON.stringify(produced.fixtures, null, 2)}\n`),
+        writeFile(GOLDENS_PATH, `${JSON.stringify(produced.goldens, null, 2)}\n`),
       ]);
       return;
     }

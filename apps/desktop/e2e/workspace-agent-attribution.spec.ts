@@ -30,7 +30,9 @@ import { replyToChat } from "../../../packages/mcp/src/tools";
 async function seedMcpAgent(homeDir: string): Promise<string> {
   const settings: DesktopUserSettings = {
     ...DEFAULT_USER_SETTINGS,
-    agents: { rover: { name: "Rover", hue: "olive", changesFiles: true, enabled: false, timeoutMinutes: 5 } },
+    agents: {
+      rover: { name: "Rover", hue: "olive", changesFiles: true, enabled: false, timeoutMinutes: 5 },
+    },
   };
   await writeFile(join(homeDir, USER_SETTINGS_FILE), `${JSON.stringify(settings, null, 2)}\n`);
   return "rover";
@@ -41,15 +43,23 @@ async function startAgentRun(
   workspaceId: string,
   agentId: string,
 ): Promise<string> {
-  return page.evaluate(async ({ id, agent }) => {
-    const api = (window as unknown as {
-      dohcDesktop: {
-        startAgentRun(payload: { workspaceId: string; agentId: string }): Promise<{ id: string }>;
-      };
-    }).dohcDesktop;
-    const run = await api.startAgentRun({ workspaceId: id, agentId: agent });
-    return run.id;
-  }, { id: workspaceId, agent: agentId });
+  return page.evaluate(
+    async ({ id, agent }) => {
+      const api = (
+        window as unknown as {
+          dohcDesktop: {
+            startAgentRun(payload: {
+              workspaceId: string;
+              agentId: string;
+            }): Promise<{ id: string }>;
+          };
+        }
+      ).dohcDesktop;
+      const run = await api.startAgentRun({ workspaceId: id, agentId: agent });
+      return run.id;
+    },
+    { id: workspaceId, agent: agentId },
+  );
 }
 
 async function endAgentRun(
@@ -57,14 +67,19 @@ async function endAgentRun(
   workspaceId: string,
   runId: string,
 ): Promise<void> {
-  await page.evaluate(async ({ id, run }) => {
-    const api = (window as unknown as {
-      dohcDesktop: {
-        endAgentRun(payload: { workspaceId: string; runId: string }): Promise<void>;
-      };
-    }).dohcDesktop;
-    await api.endAgentRun({ workspaceId: id, runId: run });
-  }, { id: workspaceId, run: runId });
+  await page.evaluate(
+    async ({ id, run }) => {
+      const api = (
+        window as unknown as {
+          dohcDesktop: {
+            endAgentRun(payload: { workspaceId: string; runId: string }): Promise<void>;
+          };
+        }
+      ).dohcDesktop;
+      await api.endAgentRun({ workspaceId: id, runId: run });
+    },
+    { id: workspaceId, run: runId },
+  );
 }
 
 test("a run's edits show under its agent's name in History; later edits are neutral", async () => {
@@ -80,9 +95,7 @@ test("a run's edits show under its agent's name in History; later edits are neut
     // Start the run as Settings' Start run does.
     const runId = await startAgentRun(page, workspace.workspaceId, agentId);
 
-    await writeWorkspaceFiles(temp, [
-      { path: "notes/plan.md", contents: "agent draft\n" },
-    ]);
+    await writeWorkspaceFiles(temp, [{ path: "notes/plan.md", contents: "agent draft\n" }]);
     await waitForWorkspaceFile(page, workspace.workspaceId, "notes/plan.md");
 
     // History lives in the left History view (the right panel is Chats now).
@@ -92,9 +105,7 @@ test("a run's edits show under its agent's name in History; later edits are neut
     );
     await expect(agentRow.first()).toBeVisible();
     // Run active: History attributes the edit to the run's agent.
-    await expect(
-      agentRow.first().getByTestId("engine-moment-source"),
-    ).toHaveText("Rover");
+    await expect(agentRow.first().getByTestId("engine-moment-source")).toHaveText("Rover");
 
     // The diff page carries the same attribution.
     await agentRow.first().click();
@@ -103,23 +114,21 @@ test("a run's edits show under its agent's name in History; later edits are neut
 
     // End the run: later edits are the local user's, actor-neutral.
     await endAgentRun(page, workspace.workspaceId, runId);
-    await writeWorkspaceFiles(temp, [
-      { path: "notes/mine.md", contents: "my own edit\n" },
-    ]);
+    await writeWorkspaceFiles(temp, [{ path: "notes/mine.md", contents: "my own edit\n" }]);
     await waitForWorkspaceFile(page, workspace.workspaceId, "notes/mine.md");
     const localRow = page.locator(
       '[data-testid="engine-moment-open"][data-moment-path="notes/mine.md"]',
     );
     await expect(localRow.first()).toBeVisible();
-    await expect(
-      localRow.first().getByTestId("engine-moment-source"),
-    ).toHaveText("Local file edit");
+    await expect(localRow.first().getByTestId("engine-moment-source")).toHaveText(
+      "Local file edit",
+    );
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }
 });
 
-test("an MCP chat reply reaches the file rail as \"Agent\"", async () => {
+test('an MCP chat reply reaches the file rail as "Agent"', async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   const workspaceId = "mcp-chat-reply";
@@ -133,20 +142,20 @@ test("an MCP chat reply reaches the file rail as \"Agent\"", async () => {
     expect(workspace.workspaceId).toBe(workspaceId);
     const page = desktop.page;
 
-    await writeWorkspaceFiles(temp, [
-      { path: "notes/topic.md", contents: "# Topic\n" },
-    ]);
+    await writeWorkspaceFiles(temp, [{ path: "notes/topic.md", contents: "# Topic\n" }]);
     await waitForWorkspaceFile(page, workspaceId, "notes/topic.md");
     // The engine must own the file (stable object id) before a chat can link.
     await page.waitForFunction(
       async ({ id, filePath }) => {
-        const api = (window as unknown as {
-          dohcDesktop?: {
-            listFileChats(payload: { workspaceId: string; path: string }): Promise<{
-              fileObjectId: string | null;
-            }>;
-          };
-        }).dohcDesktop;
+        const api = (
+          window as unknown as {
+            dohcDesktop?: {
+              listFileChats(payload: { workspaceId: string; path: string }): Promise<{
+                fileObjectId: string | null;
+              }>;
+            };
+          }
+        ).dohcDesktop;
         if (!api) return false;
         const result = await api.listFileChats({ workspaceId: id, path: filePath });
         return result.fileObjectId !== null;
@@ -170,17 +179,22 @@ test("an MCP chat reply reaches the file rail as \"Agent\"", async () => {
 
     // Resolve the thread id the same way an agent would (stable object id ->
     // linked threads).
-    const threadId = await page.evaluate(async ({ id }) => {
-      const api = (window as unknown as {
-        dohcDesktop: {
-          listFileChats(payload: { workspaceId: string; path: string }): Promise<{
-            threads: Array<{ id: string }>;
-          }>;
-        };
-      }).dohcDesktop;
-      const result = await api.listFileChats({ workspaceId: id, path: "notes/topic.md" });
-      return result.threads[0]?.id ?? null;
-    }, { id: workspaceId });
+    const threadId = await page.evaluate(
+      async ({ id }) => {
+        const api = (
+          window as unknown as {
+            dohcDesktop: {
+              listFileChats(payload: { workspaceId: string; path: string }): Promise<{
+                threads: Array<{ id: string }>;
+              }>;
+            };
+          }
+        ).dohcDesktop;
+        const result = await api.listFileChats({ workspaceId: id, path: "notes/topic.md" });
+        return result.threads[0]?.id ?? null;
+      },
+      { id: workspaceId },
+    );
     expect(threadId).not.toBeNull();
 
     // Reply through the REAL MCP tool from this (second) process while the

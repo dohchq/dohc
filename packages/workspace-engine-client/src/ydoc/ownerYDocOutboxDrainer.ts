@@ -8,7 +8,10 @@ import type {
 import { OwnerYDocOutboxReadChangedError } from "./ownerYDocOutbox";
 import type { AutomationDeclaration } from "@dohc/live-session-contract/live-authorship";
 import type { HostEpoch } from "@dohc/live-session-contract/host-control";
-import type { AgentDeclaration, LiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
+import type {
+  AgentDeclaration,
+  LiveUpdateReceipt,
+} from "@dohc/live-session-contract/live-update-admission";
 
 export interface FreshOwnerAuthority {
   /** Opaque, attempt-scoped authority. The outbox never persists it. */
@@ -55,21 +58,14 @@ export type OwnerYDocDeliveryResult =
 
 export interface OwnerYDocDelivery {
   /** Rechecks deployment mode and owner standing for this exact attempt. */
-  freshOwnerAuthority(
-    binding: LiveObjectBinding,
-  ): Promise<OwnerAuthorityResult>;
+  freshOwnerAuthority(binding: LiveObjectBinding): Promise<OwnerAuthorityResult>;
   deliver(
     authority: FreshOwnerAuthority,
     envelope: OwnerYDocDeliveryEnvelope,
   ): Promise<OwnerYDocDeliveryResult>;
 }
 
-export type OwnerYDocDrainResult =
-  | "acknowledged"
-  | "empty"
-  | "frozen"
-  | "not-accepted"
-  | "retry";
+export type OwnerYDocDrainResult = "acknowledged" | "empty" | "frozen" | "not-accepted" | "retry";
 
 /** A terminal refusal delivery received for an outbox head. */
 export interface OwnerKnownRefusal {
@@ -129,8 +125,10 @@ export function refusalOutstanding(
   head: Pick<OwnerYDocOutboxDeliveryHead, "state" | "retryDeliveryId" | "entry">,
   refusal: OwnerKnownRefusal,
 ): boolean {
-  return head.entry?.deliveryId === refusal.deliveryId &&
-    (head.state !== "quarantined" || head.retryDeliveryId === refusal.deliveryId);
+  return (
+    head.entry?.deliveryId === refusal.deliveryId &&
+    (head.state !== "quarantined" || head.retryDeliveryId === refusal.deliveryId)
+  );
 }
 
 function envelopeFor(
@@ -147,7 +145,7 @@ function envelopeFor(
     deliveryId: entry.deliveryId,
     update: entry.update,
     updateDigest: entry.updateDigest,
-    ...(entry.personEdit ? {personEdit: entry.personEdit} : {}),
+    ...(entry.personEdit ? { personEdit: entry.personEdit } : {}),
     ...(entry.agentDeclaration ? { agentDeclaration: entry.agentDeclaration } : {}),
     ...(entry.automationDeclaration ? { automationDeclaration: entry.automationDeclaration } : {}),
   };
@@ -201,7 +199,11 @@ export class OwnerYDocOutboxDrainer {
     }
     const entry = pending.entry;
     // A quarantined queue delivers only the head its owner asked to try again.
-    if (pending.state === "quarantined" && (entry === null || entry.deliveryId !== pending.retryDeliveryId)) return "frozen";
+    if (
+      pending.state === "quarantined" &&
+      (entry === null || entry.deliveryId !== pending.retryDeliveryId)
+    )
+      return "frozen";
     if (entry === null) return "empty";
 
     const authority = await this.delivery.freshOwnerAuthority(pending.binding);
@@ -218,10 +220,7 @@ export class OwnerYDocOutboxDrainer {
       return "frozen";
     }
 
-    const result = await this.delivery.deliver(
-      authority.authority,
-      envelopeFor(pending, entry),
-    );
+    const result = await this.delivery.deliver(authority.authority, envelopeFor(pending, entry));
     if (result.kind === "quarantine") {
       const known = this.refusals.receive(this.outboxId, {
         deliveryId: entry.deliveryId,
@@ -245,9 +244,7 @@ export class OwnerYDocOutboxDrainer {
     await this.outbox.quarantine({
       outboxId: this.outboxId,
       reason: known.reason,
-      ...(known.observedBinding === undefined
-        ? {}
-        : { observedBinding: known.observedBinding }),
+      ...(known.observedBinding === undefined ? {} : { observedBinding: known.observedBinding }),
       refusal: { deliveryId: known.deliveryId, key: known.key },
     });
     this.refusals.recorded(this.outboxId, known);

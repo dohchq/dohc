@@ -34,11 +34,7 @@ export interface NewShareHandoffWindow extends ShareHandoffWindow {
 }
 
 export interface ProtocolClientRegistrar {
-  setAsDefaultProtocolClient(
-    scheme: string,
-    path?: string,
-    args?: string[],
-  ): boolean;
+  setAsDefaultProtocolClient(scheme: string, path?: string, args?: string[]): boolean;
 }
 
 export interface ProtocolRuntime {
@@ -66,10 +62,7 @@ export function createShareHandoffIntentSlot(): ShareHandoffIntentSlot {
   let generation = 0;
   return {
     offer(intent) {
-      if (
-        pendingIntent?.code === intent.code &&
-        pendingIntent.relayUrl === intent.relayUrl
-      ) {
+      if (pendingIntent?.code === intent.code && pendingIntent.relayUrl === intent.relayUrl) {
         return "duplicate";
       }
       const result = pendingIntent === null ? "stored" : "replaced";
@@ -84,10 +77,7 @@ export function createShareHandoffIntentSlot(): ShareHandoffIntentSlot {
       return { intent: pendingIntent, generation };
     },
     settle(intent) {
-      if (
-        pendingIntent?.code !== intent.code ||
-        pendingIntent.relayUrl !== intent.relayUrl
-      ) {
+      if (pendingIntent?.code !== intent.code || pendingIntent.relayUrl !== intent.relayUrl) {
         return false;
       }
       pendingIntent = null;
@@ -117,9 +107,7 @@ export function focusShareHandoffWindow(window: ShareHandoffWindow): void {
   window.focus();
 }
 
-export function focusShareHandoffWindowWhenReady(
-  window: NewShareHandoffWindow,
-): void {
+export function focusShareHandoffWindowWhenReady(window: NewShareHandoffWindow): void {
   window.once("ready-to-show", () => focusShareHandoffWindow(window));
 }
 
@@ -141,11 +129,9 @@ export function registerShareHandoffProtocol(
     if (runtime.platform === "darwin") return false;
     const appEntry = runtime.argv[1];
     if (!appEntry) return false;
-    return registrar.setAsDefaultProtocolClient(
-      DOHC_DEEP_LINK_SCHEME,
-      runtime.execPath,
-      [resolve(appEntry)],
-    );
+    return registrar.setAsDefaultProtocolClient(DOHC_DEEP_LINK_SCHEME, runtime.execPath, [
+      resolve(appEntry),
+    ]);
   }
   return registrar.setAsDefaultProtocolClient(DOHC_DEEP_LINK_SCHEME);
 }

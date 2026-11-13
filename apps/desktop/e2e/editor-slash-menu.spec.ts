@@ -29,9 +29,7 @@ test("@slash-menu slash menu neither remounts nor detaches while filtering", asy
       { length: 60 },
       (_, i) => `Paragraph ${i + 1} with a fair amount of running text in it.`,
     ).join("\n\n");
-    await writeWorkspaceFiles(temp, [
-      { path: "notes/doc.md", contents: `# Doc\n\n${longBody}\n` },
-    ]);
+    await writeWorkspaceFiles(temp, [{ path: "notes/doc.md", contents: `# Doc\n\n${longBody}\n` }]);
 
     desktop = await launchDesktopApp({ workspace: temp });
     const { page } = desktop;
@@ -96,9 +94,7 @@ test("@slash-menu slash menu neither remounts nor detaches while filtering", asy
     // Click at the end of a paragraph low in the viewport so the menu must
     // open above the caret.
     const target = await page.evaluate(() => {
-      const paragraphs = Array.from(
-        document.querySelectorAll('[data-testid="markdown-editor"] p'),
-      );
+      const paragraphs = Array.from(document.querySelectorAll('[data-testid="markdown-editor"] p'));
       const viewportHeight = window.innerHeight;
       const candidate = paragraphs.find((p) => {
         const rect = p.getBoundingClientRect();

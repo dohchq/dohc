@@ -38,7 +38,12 @@ function sameMarks(left: FieldMarks, right: FieldMarks): boolean {
   if (left.size !== right.size) return false;
   for (const [field, names] of left) {
     const other = right.get(field);
-    if (!other || other.length !== names.length || other.some((name, index) => name !== names[index])) return false;
+    if (
+      !other ||
+      other.length !== names.length ||
+      other.some((name, index) => name !== names[index])
+    )
+      return false;
   }
   return true;
 }
@@ -75,7 +80,13 @@ function createFieldMarksStore(workspaceId: string) {
       return entries.get(key)?.marks ?? NO_MARKS;
     },
     subscribe(key: string, target: MarksTarget, listener: () => void): () => void {
-      const entry: Entry = entries.get(key) ?? { target, marks: NO_MARKS, revision: -1, reading: false, listeners: new Set() };
+      const entry: Entry = entries.get(key) ?? {
+        target,
+        marks: NO_MARKS,
+        revision: -1,
+        reading: false,
+        listeners: new Set(),
+      };
       entries.set(key, entry);
       entry.listeners.add(listener);
       void read(target, entry);
@@ -98,9 +109,13 @@ export function CollectionFieldMarksProvider(props: { workspaceId: string; child
   const { workspaceId } = props;
   const store = useMemo(() => createFieldMarksStore(workspaceId), [workspaceId]);
   // A layout effect, so it listens before any view's first read starts.
-  useLayoutEffect(() => bridge().onCollectionAutomationsChanged((event) => {
-    if (event.workspaceId === workspaceId) store.invalidate();
-  }), [store, workspaceId]);
+  useLayoutEffect(
+    () =>
+      bridge().onCollectionAutomationsChanged((event) => {
+        if (event.workspaceId === workspaceId) store.invalidate();
+      }),
+    [store, workspaceId],
+  );
   return <FieldMarksStore.Provider value={store}>{props.children}</FieldMarksStore.Provider>;
 }
 
@@ -109,10 +124,15 @@ function useFieldMarks(target: MarksTarget | null): FieldMarks {
   // The key names the target, so a new object for the same one subscribes nothing new.
   const key = target === null ? null : JSON.stringify(target);
   const subscribe = useCallback(
-    (listener: () => void) => (store && key !== null && target !== null ? store.subscribe(key, target, listener) : () => undefined),
+    (listener: () => void) =>
+      store && key !== null && target !== null
+        ? store.subscribe(key, target, listener)
+        : () => undefined,
     [store, key],
   );
-  return useSyncExternalStore(subscribe, () => (store && key !== null ? store.marks(key) : NO_MARKS));
+  return useSyncExternalStore(subscribe, () =>
+    store && key !== null ? store.marks(key) : NO_MARKS,
+  );
 }
 
 /**
@@ -166,10 +186,13 @@ export function AutomationFieldMark(props: { automations: readonly string[] }) {
 /** The marks as a table header shows them, built once per change of marks. */
 export function useTableFieldMarks(marks: FieldMarks) {
   return useMemo(
-    () => new Map([...marks].map(([field, automations]) => [
-      field,
-      { icon: <AutomationFieldIcon />, label: automationFieldMarkLabel(automations) },
-    ])),
+    () =>
+      new Map(
+        [...marks].map(([field, automations]) => [
+          field,
+          { icon: <AutomationFieldIcon />, label: automationFieldMarkLabel(automations) },
+        ]),
+      ),
     [marks],
   );
 }

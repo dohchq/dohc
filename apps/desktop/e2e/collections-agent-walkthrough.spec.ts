@@ -1,6 +1,11 @@
 import { expect, test, type Page } from "@playwright/test";
 import { sendCliRequest } from "@dohc/cli/client";
-import { CLI_PROTOCOL_VERSION, type CliRequestWithoutToken, type CliResultByVerb, type CliVerb } from "@dohc/cli/protocol";
+import {
+  CLI_PROTOCOL_VERSION,
+  type CliRequestWithoutToken,
+  type CliResultByVerb,
+  type CliVerb,
+} from "@dohc/cli/protocol";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { launchDesktopApp } from "./helpers/desktopApp";
@@ -69,9 +74,7 @@ async function agentCli<Verb extends CliVerb>(
 }
 
 async function waitForCliEndpoint(homeDir: string): Promise<void> {
-  const endpointFile = process.platform === "win32"
-    ? "dohc-cli-endpoint"
-    : "dohc-cli.sock";
+  const endpointFile = process.platform === "win32" ? "dohc-cli-endpoint" : "dohc-cli.sock";
   await expect
     .poll(
       async () => {
@@ -104,9 +107,7 @@ async function openCollectionFromTree(page: Page): Promise<void> {
 }
 
 function boardCard(page: Page, column: string, title: string) {
-  return page.locator(
-    `section[aria-label="${column}"] [role="listitem"][aria-label="${title}"]`,
-  );
+  return page.locator(`section[aria-label="${column}"] [role="listitem"][aria-label="${title}"]`);
 }
 
 test("an agent's file-written collection opens live and answers its MCP queries", async () => {
@@ -146,14 +147,16 @@ test("an agent's file-written collection opens live and answers its MCP queries"
     // --- The desktop offers this workspace's MCP config as the writable
     // local profile: no --share-access narrows the agent's tools here.
     const mcpArgs = await page.evaluate(async () => {
-      const api = (window as unknown as {
-        dohcDesktop: {
-          getWorkspaceRegistry(): Promise<{
-            workspaces: Array<{ workspaceId: string }>;
-          }>;
-          getMcpConfig(payload: { workspaceId: string }): Promise<{ args: string[] }>;
-        };
-      }).dohcDesktop;
+      const api = (
+        window as unknown as {
+          dohcDesktop: {
+            getWorkspaceRegistry(): Promise<{
+              workspaces: Array<{ workspaceId: string }>;
+            }>;
+            getMcpConfig(payload: { workspaceId: string }): Promise<{ args: string[] }>;
+          };
+        }
+      ).dohcDesktop;
       const registry = await api.getWorkspaceRegistry();
       const config = await api.getMcpConfig({
         workspaceId: registry.workspaces[0]!.workspaceId,
@@ -169,14 +172,10 @@ test("an agent's file-written collection opens live and answers its MCP queries"
       collectionPath: "tasks",
     });
     if (!query.ok) throw new Error(`collectionQuery failed: ${query.reason}`);
-    expect(query.records.map((entry) => entry.id).sort()).toEqual(
-      [APOLLO_ID, ZEPHYR_ID].sort(),
-    );
+    expect(query.records.map((entry) => entry.id).sort()).toEqual([APOLLO_ID, ZEPHYR_ID].sort());
     const apollo = query.records.find((entry) => entry.id === APOLLO_ID);
     expect(apollo?.path).toBe("tasks/apollo.md");
-    expect(
-      apollo?.values.find((value) => value.field === "Status")?.value,
-    ).toBe("Todo");
+    expect(apollo?.values.find((value) => value.field === "Status")?.value).toBe("Todo");
 
     // A filtered query narrows to the one Doing record.
     const filtered = await agentCli(temp, "collectionQuery", {

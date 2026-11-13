@@ -26,13 +26,17 @@ describe("workspace modes", () => {
 });
 
 describe("manifest validation", () => {
-  it.each(["link", "shares", "notices", "workspaces", "personal-agents", "account"])("refuses the reserved manifest ID %s", (workspaceId) => {
-    expect(checkManifest({ version: 1, workspaceId, kind: "personal", mode: "local-first" }))
-      .toEqual({ status: "reserved-id", workspaceId });
-    expect(() => createWorkspaceManifest({ workspaceId, kind: "personal" })).toThrow(
-      `This folder's workspace ID, ${workspaceId}, is reserved. Change workspaceId in .dohc/manifest.json, then open the folder again.`,
-    );
-  });
+  it.each(["link", "shares", "notices", "workspaces", "personal-agents", "account"])(
+    "refuses the reserved manifest ID %s",
+    (workspaceId) => {
+      expect(
+        checkManifest({ version: 1, workspaceId, kind: "personal", mode: "local-first" }),
+      ).toEqual({ status: "reserved-id", workspaceId });
+      expect(() => createWorkspaceManifest({ workspaceId, kind: "personal" })).toThrow(
+        `This folder's workspace ID, ${workspaceId}, is reserved. Change workspaceId in .dohc/manifest.json, then open the folder again.`,
+      );
+    },
+  );
 
   it("accepts a complete v1 manifest", () => {
     const result = checkManifest({

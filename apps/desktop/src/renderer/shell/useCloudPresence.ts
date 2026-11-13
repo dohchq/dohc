@@ -12,9 +12,10 @@ export function useCloudPresence(
   // MU-C5 presence: the signed-in relay session, if any. Drives whether Chats
   // gets a live presence transport (connected + relayUrl) or stays dormant.
   // Scope the first render after a workspace switch, before effects run.
-  const [scopedStatus, setScopedStatus] = useState<
-    { workspaceId: string; status: CloudStatusResult } | null
-  >(null);
+  const [scopedStatus, setScopedStatus] = useState<{
+    workspaceId: string;
+    status: CloudStatusResult;
+  } | null>(null);
   const cloudStatus =
     workspaceIsReady && scopedStatus?.workspaceId === workspaceId ? scopedStatus.status : null;
   // The workspace whose last status read failed, so "not read yet" and

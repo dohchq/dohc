@@ -56,9 +56,7 @@ export interface DeletedDiscussionMessage {
   deleted: true;
 }
 
-export type PublicDiscussionMessage =
-  | LiveDiscussionMessage
-  | DeletedDiscussionMessage;
+export type PublicDiscussionMessage = LiveDiscussionMessage | DeletedDiscussionMessage;
 
 export type DiscussionAppendResult =
   | {
@@ -98,8 +96,7 @@ export type FileAccumulator = Map<string, SharedFile>;
 function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
   const actual = Object.keys(value).sort();
   const expected = [...keys].sort();
-  return actual.length === expected.length &&
-    actual.every((key, index) => key === expected[index]);
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
 }
 
 function discussionAuthor(value: unknown): NamedDiscussionAuthor | LinkDiscussionAuthor | null {
@@ -132,10 +129,7 @@ function discussionMessage(value: unknown): PublicDiscussionMessage | null {
   ) {
     return null;
   }
-  if (
-    message.deleted === true &&
-    hasExactKeys(message, ["messageId", "createdAtMs", "deleted"])
-  ) {
+  if (message.deleted === true && hasExactKeys(message, ["messageId", "createdAtMs", "deleted"])) {
     return {
       messageId: message.messageId,
       createdAtMs: message.createdAtMs,
@@ -161,18 +155,11 @@ function discussionMessage(value: unknown): PublicDiscussionMessage | null {
   };
 }
 
-function discussionOrder(
-  left: PublicDiscussionMessage,
-  right: PublicDiscussionMessage,
-): number {
+function discussionOrder(left: PublicDiscussionMessage, right: PublicDiscussionMessage): number {
   if (left.createdAtMs !== right.createdAtMs) {
     return left.createdAtMs - right.createdAtMs;
   }
-  return left.messageId < right.messageId
-    ? -1
-    : left.messageId > right.messageId
-      ? 1
-      : 0;
+  return left.messageId < right.messageId ? -1 : left.messageId > right.messageId ? 1 : 0;
 }
 
 export function parseDiscussionPage(
@@ -182,21 +169,14 @@ export function parseDiscussionPage(
   const page = asRecord(value);
   if (
     !page ||
-    !hasExactKeys(page, [
-      "ok",
-      "messages",
-      "nextCursor",
-      "activityRevision",
-      "profileName",
-    ]) ||
+    !hasExactKeys(page, ["ok", "messages", "nextCursor", "activityRevision", "profileName"]) ||
     page.ok !== true ||
     !Array.isArray(page.messages) ||
     !isRevision(page.activityRevision) ||
     (page.profileName !== null &&
       (typeof page.profileName !== "string" || page.profileName.length === 0)) ||
     (page.nextCursor !== null &&
-      (typeof page.nextCursor !== "string" ||
-        !/^[A-Za-z0-9_-]{1,1024}$/u.test(page.nextCursor)))
+      (typeof page.nextCursor !== "string" || !/^[A-Za-z0-9_-]{1,1024}$/u.test(page.nextCursor)))
   ) {
     return null;
   }
@@ -286,15 +266,11 @@ export function parseDiscussionAppendResult(value: unknown): DiscussionAppendRes
   return { kind: "live", message: { ...message, author: message.author } };
 }
 
-export function parseDiscussionWriteState(
-  value: unknown,
-): DiscussionWriteState | null {
+export function parseDiscussionWriteState(value: unknown): DiscussionWriteState | null {
   const result = asRecord(value);
   if (!result || result.ok !== false) return null;
   if (result.state === "limit-reached") {
-    return hasExactKeys(result, ["ok", "state"])
-      ? { state: "limit-reached" }
-      : null;
+    return hasExactKeys(result, ["ok", "state"]) ? { state: "limit-reached" } : null;
   }
   if (
     (result.state === "blocked" || result.state === "paused") &&
@@ -321,11 +297,13 @@ function sameDiscussionMessage(
     return false;
   }
   if (left.deleted || right.deleted) return left.deleted && right.deleted;
-  return left.body === right.body &&
+  return (
+    left.body === right.body &&
     left.author.kind === right.author.kind &&
     left.author.displayName === right.author.displayName &&
     (left.author.kind === "named" ||
-      (right.author.kind === "link" && right.author.unverified === true));
+      (right.author.kind === "link" && right.author.unverified === true))
+  );
 }
 
 export function mergeDiscussionMessages(
@@ -344,18 +322,10 @@ export function mergeDiscussionMessages(
       continue;
     }
     if (sameDiscussionMessage(existing, message)) continue;
-    if (
-      existing.deleted &&
-      !message.deleted &&
-      existing.createdAtMs === message.createdAtMs
-    ) {
+    if (existing.deleted && !message.deleted && existing.createdAtMs === message.createdAtMs) {
       continue;
     }
-    if (
-      !existing.deleted &&
-      message.deleted &&
-      existing.createdAtMs === message.createdAtMs
-    ) {
+    if (!existing.deleted && message.deleted && existing.createdAtMs === message.createdAtMs) {
       const existingIndex = merged.indexOf(existing);
       if (existingIndex === -1) return null;
       merged[existingIndex] = message;
@@ -426,15 +396,10 @@ function path(value: unknown): string | null {
 }
 
 function blobSha256(value: unknown): string | null {
-  return typeof value === "string" && /^[a-f0-9]{64}$/u.test(value)
-    ? value
-    : null;
+  return typeof value === "string" && /^[a-f0-9]{64}$/u.test(value) ? value : null;
 }
 
-export function foldLogOps(
-  files: FileAccumulator,
-  ops: readonly RelayOp[],
-): void {
+export function foldLogOps(files: FileAccumulator, ops: readonly RelayOp[]): void {
   let objectPaths: Map<string, string> | undefined;
   for (const op of ops) {
     const payload = asRecord(op.payload);
@@ -446,8 +411,11 @@ export function foldLogOps(
         files.set(file.path, file);
         continue;
       }
-      objectPaths ??= new Map([...files.values()].flatMap(file =>
-        file.objectId ? [[file.objectId, file.path] as const] : []));
+      objectPaths ??= new Map(
+        [...files.values()].flatMap((file) =>
+          file.objectId ? [[file.objectId, file.path] as const] : [],
+        ),
+      );
       const previous = objectPaths.get(payload.objectId);
       if (previous && files.get(previous)?.objectId === payload.objectId) files.delete(previous);
       objectPaths.delete(payload.objectId);
@@ -473,9 +441,8 @@ export function foldLogOps(
       (rawBeforeBlobSha256 === null || rawBeforeBlobSha256 === undefined);
     const beforePath = path(rawBeforePath);
     const beforeBlobSha256 = blobSha256(rawBeforeBlobSha256);
-    const before = beforePath && beforeBlobSha256
-      ? { path: beforePath, blobSha256: beforeBlobSha256 }
-      : null;
+    const before =
+      beforePath && beforeBlobSha256 ? { path: beforePath, blobSha256: beforeBlobSha256 } : null;
     if (!hasNoBefore && !before) continue;
 
     if (payload.operation === "delete") {
@@ -515,9 +482,7 @@ function matchesOperation(value: unknown): value is "write" | "rename" | "delete
   return value === "write" || value === "rename" || value === "delete";
 }
 
-export function filesFromAccumulator(
-  files: ReadonlyMap<string, SharedFile>,
-): SharedFile[] {
+export function filesFromAccumulator(files: ReadonlyMap<string, SharedFile>): SharedFile[] {
   return [...files.values()].sort((left, right) => left.path.localeCompare(right.path));
 }
 
@@ -568,8 +533,9 @@ export function resolveSharedImage(
   files: ReadonlyMap<string, SharedFile>,
   session: string,
 ): string | null {
-  const blobMatch =
-    /^\/api\/view\/blob\/([a-f0-9]{64})(?:\?session=[A-Za-z0-9_-]{12})?$/u.exec(href);
+  const blobMatch = /^\/api\/view\/blob\/([a-f0-9]{64})(?:\?session=[A-Za-z0-9_-]{12})?$/u.exec(
+    href,
+  );
   if (blobMatch) return `/api/view/blob/${blobMatch[1]}?session=${session}`;
   const file = resolveSharedFile(href, currentPath, files);
   return file && isRasterImage(file.path)

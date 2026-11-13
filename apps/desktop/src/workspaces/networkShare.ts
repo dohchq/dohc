@@ -20,13 +20,17 @@ const systemProbe: NetworkShareProbe = {
   realpath: (path) => realpath(path),
   mounts: () =>
     new Promise<string>((resolve, reject) => {
-      execFile("/sbin/mount", [], { timeout: 2_000, encoding: "utf8" }, (error, out) => (error ? reject(error) : resolve(out)));
+      execFile("/sbin/mount", [], { timeout: 2_000, encoding: "utf8" }, (error, out) =>
+        error ? reject(error) : resolve(out),
+      );
     }),
   fileSystemType: async (path) => (await statfs(path)).type,
 };
 
 // Linux f_type values of NFS, SMB, CIFS, SMB2, Ceph, AFS and 9p volumes.
-const LINUX_NETWORK_TYPES = new Set([0x6969, 0x517b, 0xff534d42, 0xfe534d42, 0x00c36400, 0x5346414f, 0x01021997]);
+const LINUX_NETWORK_TYPES = new Set([
+  0x6969, 0x517b, 0xff534d42, 0xfe534d42, 0x00c36400, 0x5346414f, 0x01021997,
+]);
 
 // GNOME Files and KDE mount what a person opens through FUSE, phones and
 // cameras as well as shares, so only a network backend or protocol counts.
@@ -35,25 +39,55 @@ const LINUX_NETWORK_TYPES = new Set([0x6969, 0x517b, 0xff534d42, 0xfe534d42, 0x0
 // <runtime dir>/kio-fuse-XXXXXX/<protocol>/<host>/<path>
 // (src/kiofuseservice.cpp, src/kiofusevfs.cpp).
 const GVFS_NETWORK_BACKENDS = new Set([
-  "smb-share", "sftp", "ftp", "ftps", "ftpis", "dav", "dav+sd", "davs+sd", "nfs", "afp-volume", "google-drive", "onedrive",
+  "smb-share",
+  "sftp",
+  "ftp",
+  "ftps",
+  "ftpis",
+  "dav",
+  "dav+sd",
+  "davs+sd",
+  "nfs",
+  "afp-volume",
+  "google-drive",
+  "onedrive",
 ]);
-const KIO_NETWORK_PROTOCOLS = new Set(["smb", "sftp", "ftp", "webdav", "webdavs", "nfs", "fish", "gdrive", "onedrive"]);
+const KIO_NETWORK_PROTOCOLS = new Set([
+  "smb",
+  "sftp",
+  "ftp",
+  "webdav",
+  "webdavs",
+  "nfs",
+  "fish",
+  "gdrive",
+  "onedrive",
+]);
 
 function linuxFuseShare(root: string): boolean {
   const gvfs = /^\/run\/user\/\d+\/gvfs\/([^/:]+):/u.exec(root)?.[1];
   const kio = /^\/run\/user\/\d+\/kio-fuse-[^/]+\/([^/]+)\/[^/]/u.exec(root)?.[1];
-  return (gvfs !== undefined && GVFS_NETWORK_BACKENDS.has(gvfs)) || (kio !== undefined && KIO_NETWORK_PROTOCOLS.has(kio));
+  return (
+    (gvfs !== undefined && GVFS_NETWORK_BACKENDS.has(gvfs)) ||
+    (kio !== undefined && KIO_NETWORK_PROTOCOLS.has(kio))
+  );
 }
 
 /** True when the workspace at rootPath is on a network share. */
-export async function onNetworkShare(rootPath: string, probe: NetworkShareProbe = systemProbe): Promise<boolean> {
+export async function onNetworkShare(
+  rootPath: string,
+  probe: NetworkShareProbe = systemProbe,
+): Promise<boolean> {
   switch (probe.platform) {
     case "darwin": {
       // Without a mount listing, the root reads as on this computer.
       const [root, listing] = await Promise.all([
         probe.realpath(rootPath),
         probe.mounts().catch((error: unknown) => {
-          console.error(`[desktop] could not list volumes to check whether ${rootPath} is on a network share:`, error);
+          console.error(
+            `[desktop] could not list volumes to check whether ${rootPath} is on a network share:`,
+            error,
+          );
           return "";
         }),
       ]);
@@ -93,7 +127,8 @@ function macVolumeIsLocal(root: string, listing: string): boolean {
     const [, folder = "", flags = ""] = /^.* on (\/.*) \(([^()]*)\)$/u.exec(line) ?? [];
     const [type, ...rest] = flags.split(", ");
     if (!folder || type === "autofs" || !within(root, folder)) continue;
-    if (volume === null || folder.length >= volume.folder.length) volume = { folder, local: rest.includes("local") };
+    if (volume === null || folder.length >= volume.folder.length)
+      volume = { folder, local: rest.includes("local") };
   }
   return volume?.local ?? true;
 }

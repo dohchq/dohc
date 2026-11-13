@@ -1,60 +1,97 @@
-import {createHash} from "node:crypto";
-import {stopWithoutSessionHost} from "./sessionHostStop";
-import type {SessionHostStopRefusal} from "./errors";
-import type {OwnerOutboxAdmission} from "./ownerOutboxDelivery";
-import {mkdir, mkdtemp, open, readdir, rm, writeFile} from "node:fs/promises";
-import {realpathSync, statSync} from "node:fs";
-import {basename, isAbsolute, join, posix, resolve} from "node:path";
-import type {Event, JsonValue} from "@dohc/workspace-engine-client";
-import {tmpdir} from "node:os";
-import {setTimeout as delay} from "node:timers/promises";
+import { createHash } from "node:crypto";
+import { stopWithoutSessionHost } from "./sessionHostStop";
+import type { SessionHostStopRefusal } from "./errors";
+import type { OwnerOutboxAdmission } from "./ownerOutboxDelivery";
+import { mkdir, mkdtemp, open, readdir, rm, writeFile } from "node:fs/promises";
+import { realpathSync, statSync } from "node:fs";
+import { basename, isAbsolute, join, posix, resolve } from "node:path";
+import type { Event, JsonValue } from "@dohc/workspace-engine-client";
+import { tmpdir } from "node:os";
+import { setTimeout as delay } from "node:timers/promises";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
-import type {LiveDocumentKey} from "@dohc/live-session-contract/live-update-admission";
-import type {SyncRelayStorage} from "./storage";
-import type {LiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
-import type {ServiceHostEnrollment, ServiceHostEnrollmentCursor, ServiceHostRetirementPreparation} from "./storage/serviceHostEnrollment";
-import type {ServiceKeptEdits} from "./storage/serviceKeptEdits";
-import {deriveServiceHostBearer} from "./serviceHostCredential";
-import {observeRelayWrites, type LiveHostChanges} from "./relayWriteChanges";
-import {startServiceLiveHost, type ServiceHostedSet} from "./serviceLiveHost";
-import {selfHostLiveProfile} from "./selfHostLiveProfile";
-import {discoverServiceHostDocuments} from "./serviceHostEnrollmentRoutes";
-import {RECLAIM_RETENTION_MS, RECLAIM_SWEEP_MS} from "./liveHostingLimits";
+import type { LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
+import type { SyncRelayStorage } from "./storage";
+import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory";
+import type {
+  ServiceHostEnrollment,
+  ServiceHostEnrollmentCursor,
+  ServiceHostRetirementPreparation,
+} from "./storage/serviceHostEnrollment";
+import type { ServiceKeptEdits } from "./storage/serviceKeptEdits";
+import { deriveServiceHostBearer } from "./serviceHostCredential";
+import { observeRelayWrites, type LiveHostChanges } from "./relayWriteChanges";
+import { startServiceLiveHost, type ServiceHostedSet } from "./serviceLiveHost";
+import { selfHostLiveProfile } from "./selfHostLiveProfile";
+import { discoverServiceHostDocuments } from "./serviceHostEnrollmentRoutes";
+import { RECLAIM_RETENTION_MS, RECLAIM_SWEEP_MS } from "./liveHostingLimits";
 
-type WorkspaceIdentity = {workspaceId: string; replicationEpoch: string | null; streamIdentity: string | null};
+type WorkspaceIdentity = {
+  workspaceId: string;
+  replicationEpoch: string | null;
+  streamIdentity: string | null;
+};
 // A workspace identity's hosted replica. The label keeps a store of any other kind from opening as one.
-const hostedStoreName = (namespace: string, row: WorkspaceIdentity) => createHash("sha256")
-  .update(JSON.stringify(["hosted-v1", namespace, row.workspaceId, row.replicationEpoch, row.streamIdentity])).digest("hex");
+const hostedStoreName = (namespace: string, row: WorkspaceIdentity) =>
+  createHash("sha256")
+    .update(
+      JSON.stringify([
+        "hosted-v1",
+        namespace,
+        row.workspaceId,
+        row.replicationEpoch,
+        row.streamIdentity,
+      ]),
+    )
+    .digest("hex");
 // The marker beside a store whose hosted replica diverged from the relay.
 const divergedMarker = (root: string, name: string) => join(root, `${name}.diverged`);
 
 /** Removes each workspace identity's hosted store, with any parked documents in it, and its divergence marker. */
-export async function deleteSelfHostedWorkspaceRoots(root: string, namespace: string, workspaces: readonly WorkspaceIdentity[]): Promise<void> {
+export async function deleteSelfHostedWorkspaceRoots(
+  root: string,
+  namespace: string,
+  workspaces: readonly WorkspaceIdentity[],
+): Promise<void> {
   for (const row of workspaces) {
     const name = hostedStoreName(namespace, row);
     // The marker goes last, so a store that is only partly removed stays detached.
-    await rm(join(root, name), {recursive: true, force: true});
-    await rm(divergedMarker(root, name), {force: true});
+    await rm(join(root, name), { recursive: true, force: true });
+    await rm(divergedMarker(root, name), { force: true });
   }
 }
 
 type Host = Awaited<ReturnType<typeof startServiceLiveHost>>;
 // Background reconciliation must not keep an otherwise idle Node process alive.
-const pause = (ms: number) => Effect.promise(signal => delay(ms, undefined, {signal, ref: false}));
+const pause = (ms: number) =>
+  Effect.promise((signal) => delay(ms, undefined, { signal, ref: false }));
 function canonicalPath(value: string, directory: boolean): string {
-  if (!isAbsolute(value) || resolve(value) !== value) throw new Error("Self-host paths must be absolute and canonical.");
+  if (!isAbsolute(value) || resolve(value) !== value)
+    throw new Error("Self-host paths must be absolute and canonical.");
   const actual = realpathSync(value);
-  const same = process.platform === "win32" ? actual.toLowerCase() === value.toLowerCase() : actual === value;
-  if (!same || (directory ? !statSync(value).isDirectory() : !statSync(value).isFile())) throw new Error("Self-host path is unavailable.");
+  const same =
+    process.platform === "win32" ? actual.toLowerCase() === value.toLowerCase() : actual === value;
+  if (!same || (directory ? !statSync(value).isDirectory() : !statSync(value).isFile()))
+    throw new Error("Self-host path is unavailable.");
   return actual;
 }
 
 export const selfHostedLiveHostId = (namespace: string) => `self-host-${namespace}`;
-const movedKey = (row: ServiceHostEnrollment) => JSON.stringify([row.workspaceId, row.objectId, row.path, row.replicationEpoch, row.streamIdentity]);
+const movedKey = (row: ServiceHostEnrollment) =>
+  JSON.stringify([
+    row.workspaceId,
+    row.objectId,
+    row.path,
+    row.replicationEpoch,
+    row.streamIdentity,
+  ]);
 const atPath = (storage: SyncRelayStorage, row: ServiceHostEnrollment) =>
-  storage.objectIdAtPathInVersion({workspaceId: row.workspaceId, versionId: "main", path: row.path}) === row.objectId;
+  storage.objectIdAtPathInVersion({
+    workspaceId: row.workspaceId,
+    versionId: "main",
+    path: row.path,
+  }) === row.objectId;
 
 /**
  * A host reconciliation's selection from one page of enrollments: the
@@ -65,15 +102,27 @@ const atPath = (storage: SyncRelayStorage, row: ServiceHostEnrollment) =>
  * for it, and its owner has not paused or stopped it. `moved` holds moved
  * documents whose replica let them go.
  */
-export function selectHostedDocuments(storage: SyncRelayStorage, cursor: ServiceHostEnrollmentCursor | undefined, moved: Set<string>) {
+export function selectHostedDocuments(
+  storage: SyncRelayStorage,
+  cursor: ServiceHostEnrollmentCursor | undefined,
+  moved: Set<string>,
+) {
   // Whether the enrollment names its workspace's current owner and identity.
-  const matching = (row: ServiceHostEnrollment) => storage.workspaceIsOwnedBy(row.workspaceId, row.ownerUserId) && storage.verifyWorkspaceIdentity(row) === "matched";
+  const matching = (row: ServiceHostEnrollment) =>
+    storage.workspaceIsOwnedBy(row.workspaceId, row.ownerUserId) &&
+    storage.verifyWorkspaceIdentity(row) === "matched";
   // A release applies to the document: it was stopped, paused, or no Edit grant, recorded demand or owner's restore that kept it live covers it.
   // A Resume before its activation retires leaves it departing until a successor can follow.
-  const departs = (row: ServiceHostEnrollment, covered: boolean) => row.retired || !covered || row.ownerStop !== null ||
+  const departs = (row: ServiceHostEnrollment, covered: boolean) =>
+    row.retired ||
+    !covered ||
+    row.ownerStop !== null ||
     storage.serviceActivationRetirement(row) !== null;
   const page = storage.listUndrainedServiceHostEnrollments(cursor);
-  const targets: ServiceHostEnrollment[] = [], departing: ServiceHostEnrollment[] = [], obsolete: ServiceHostEnrollment[] = [], away: ServiceHostEnrollment[] = [];
+  const targets: ServiceHostEnrollment[] = [],
+    departing: ServiceHostEnrollment[] = [],
+    obsolete: ServiceHostEnrollment[] = [],
+    away: ServiceHostEnrollment[] = [];
   for (const row of page.documents) {
     const holds = storage.serviceHostEnrollmentCovered(row);
     // A live session the owner's restore kept has no retirement once that no longer holds. Its retirement
@@ -84,15 +133,22 @@ export function selectHostedDocuments(storage: SyncRelayStorage, cursor: Service
   }
   const still = new Set(away.map(movedKey));
   for (const key of moved) if (!still.has(key)) moved.delete(key);
-  departing.push(...away.filter(row => !moved.has(movedKey(row)) || storage.serviceRestoreInProgress(row)));
-  return {targets, departing, obsolete, nextCursor: page.nextCursor};
+  departing.push(
+    ...away.filter((row) => !moved.has(movedKey(row)) || storage.serviceRestoreInProgress(row)),
+  );
+  return { targets, departing, obsolete, nextCursor: page.nextCursor };
 }
 
 /** Owns the sole service daemon; account requests can select documents, never native paths or credentials. */
 export async function startSelfHostedLiveHost(options: {
   trustedAccount: OwnerOutboxAdmission["trustedAccount"];
-  storage: SyncRelayStorage; history: LiveJournalHistoryAuthority; root: string; engineExecutable: string;
-  relayOrigin: string; key: Uint8Array; frameChanges: LiveHostChanges;
+  storage: SyncRelayStorage;
+  history: LiveJournalHistoryAuthority;
+  root: string;
+  engineExecutable: string;
+  relayOrigin: string;
+  key: Uint8Array;
+  frameChanges: LiveHostChanges;
   startHost?: typeof startServiceLiveHost;
   /** How long reconciliation waits between periodic runs, unless a test holds them. Relay writes and host progress also run one. */
   reconcileIntervalMs?: number;
@@ -100,68 +156,143 @@ export async function startSelfHostedLiveHost(options: {
   onReconcile?: () => void;
   onError?(error: unknown): void;
 }) {
-  const {storage, history} = options, profile = selfHostLiveProfile();
-  const root = canonicalPath(options.root, true), engineExecutable = canonicalPath(options.engineExecutable, false);
+  const { storage, history } = options,
+    profile = selfHostLiveProfile();
+  const root = canonicalPath(options.root, true),
+    engineExecutable = canonicalPath(options.engineExecutable, false);
   const relay = new URL(options.relayOrigin);
-  if (relay.protocol !== "https:" || relay.origin !== options.relayOrigin || options.key.byteLength < 32) throw new Error("Self-host live editing requires its public HTTPS origin and a private key.");
-  const hostId = selfHostedLiveHostId(history.namespace), instanceId = "self-host-service";
-  const provision = storage.provisionLiveHostControl({mode: "service", hostId, updatedAtMs: Date.now(), guard: storage.captureStanding()});
-  if (!provision.ok || provision.snapshot.transition) throw new Error("Self-host live editing requires its provisioned service host. Existing device hosts must use the host transition procedure.");
+  if (
+    relay.protocol !== "https:" ||
+    relay.origin !== options.relayOrigin ||
+    options.key.byteLength < 32
+  )
+    throw new Error("Self-host live editing requires its public HTTPS origin and a private key.");
+  const hostId = selfHostedLiveHostId(history.namespace),
+    instanceId = "self-host-service";
+  const provision = storage.provisionLiveHostControl({
+    mode: "service",
+    hostId,
+    updatedAtMs: Date.now(),
+    guard: storage.captureStanding(),
+  });
+  if (!provision.ok || provision.snapshot.transition)
+    throw new Error(
+      "Self-host live editing requires its provisioned service host. Existing device hosts must use the host transition procedure.",
+    );
   let current: Host | undefined;
-  let initialReconciliationComplete = false, selectedDocuments = false;
+  let initialReconciliationComplete = false,
+    selectedDocuments = false;
   // `startFailed` holds only while the last daemon start failed; `lastError` holds any failed reconciliation.
-  let signature = "", lastError: unknown, startFailed = false;
-  let discoveryCursor: {workspaceId: string; shareId: string} | undefined;
-  let writeGeneration = 1, scanGeneration = 0, scannedGeneration = 0;
+  let signature = "",
+    lastError: unknown,
+    startFailed = false;
+  let discoveryCursor: { workspaceId: string; shareId: string } | undefined;
+  let writeGeneration = 1,
+    scanGeneration = 0,
+    scannedGeneration = 0;
   const lifetime = new AbortController();
   const eventHandlers = new Set<(event: Event) => void>();
   const signal = AbortSignal.any([lifetime.signal, storage.unavailable]);
   const changes = Effect.runSync(Queue.sliding<void>(1));
   const covered = (row: ServiceHostEnrollment) => storage.serviceHostEnrollmentCovered(row);
-  const documentKey = (row: Pick<ServiceHostEnrollment, "workspaceId" | "objectId">) => JSON.stringify([row.workspaceId, row.objectId]);
+  const documentKey = (row: Pick<ServiceHostEnrollment, "workspaceId" | "objectId">) =>
+    JSON.stringify([row.workspaceId, row.objectId]);
   // Moved documents whose replica let them go. Nothing releases one: its
   // enrollment stays, so it is hosted again once it returns to its path.
   const moved = new Set<string>();
   // Where the page of retired enrollments starts. Each page gives way to the next once all of it had its chance.
   let retiredCursor: ServiceHostEnrollmentCursor | undefined;
   const select = () => selectHostedDocuments(storage, retiredCursor, moved);
-  const selectionSignature = ({targets, departing}: ReturnType<typeof select>) => JSON.stringify([targets, departing].map(rows =>
-    rows.map(({workspaceId, objectId, path, ownerUserId, replicationEpoch, streamIdentity}) => ({workspaceId, objectId, path, ownerUserId, replicationEpoch, streamIdentity}))));
+  const selectionSignature = ({ targets, departing }: ReturnType<typeof select>) =>
+    JSON.stringify(
+      [targets, departing].map((rows) =>
+        rows.map(
+          ({ workspaceId, objectId, path, ownerUserId, replicationEpoch, streamIdentity }) => ({
+            workspaceId,
+            objectId,
+            path,
+            ownerUserId,
+            replicationEpoch,
+            streamIdentity,
+          }),
+        ),
+      ),
+    );
   // A store keeps its parked documents' activations, so only account deletion removes one.
   const storeName = (row: WorkspaceIdentity) => hostedStoreName(history.namespace, row);
   // The stores, by name, whose hosted replica diverged from the relay. Each
   // stays detached, untouched, and releases nothing. A marker beside the store
   // keeps it so after a restart, before any pull could find the divergence again.
   const marker = (name: string) => divergedMarker(root, name);
-  const recovery = (name: string) => `Recovery is not automatic yet. The store and every edit in it are kept. Keep ${marker(name)}. Without it the next relay start attaches the store again and checks it against the relay before anyone can edit.`;
-  const diverged = new Set((await readdir(root)).flatMap(name => /^([0-9a-f]{64})\.diverged$/.exec(name)?.[1] ?? []));
+  const recovery = (name: string) =>
+    `Recovery is not automatic yet. The store and every edit in it are kept. Keep ${marker(name)}. Without it the next relay start attaches the store again and checks it against the relay before anyone can edit.`;
+  const diverged = new Set(
+    (await readdir(root)).flatMap((name) => /^([0-9a-f]{64})\.diverged$/.exec(name)?.[1] ?? []),
+  );
   const storeDiverged = (row: WorkspaceIdentity) => diverged.has(storeName(row));
-  const stopRefusal = (document: {workspaceId: string; objectId: string}): SessionHostStopRefusal => {
-    const row = storage.readServiceHostEnrollmentByObjectId(document.workspaceId, document.objectId);
+  const stopRefusal = (document: {
+    workspaceId: string;
+    objectId: string;
+  }): SessionHostStopRefusal => {
+    const row = storage.readServiceHostEnrollmentByObjectId(
+      document.workspaceId,
+      document.objectId,
+    );
     if (row) {
-      if (storeDiverged(row)) return {code: "host-diverged", sessionHost: "running without this document (server copy diverged)"};
-      if (row.ownerStop === "pause") return {code: "host-paused", sessionHost: "running without this document (paused)"};
-      if (!covered(row)) return {code: "host-no-edit-grant", sessionHost: "running without this document (no Edit grant)"};
-      if (!atPath(storage, row)) return {code: "host-moved", sessionHost: `running without this document (moved from ${row.path})`, path: row.path};
+      if (storeDiverged(row))
+        return {
+          code: "host-diverged",
+          sessionHost: "running without this document (server copy diverged)",
+        };
+      if (row.ownerStop === "pause")
+        return { code: "host-paused", sessionHost: "running without this document (paused)" };
+      if (!covered(row))
+        return {
+          code: "host-no-edit-grant",
+          sessionHost: "running without this document (no Edit grant)",
+        };
+      if (!atPath(storage, row))
+        return {
+          code: "host-moved",
+          sessionHost: `running without this document (moved from ${row.path})`,
+          path: row.path,
+        };
     }
     // Another failure, such as in discovery, leaves the daemon waiting for the next pass to start it.
-    if (!current) return startFailed
-      ? {code: "host-start-failed", sessionHost: "couldn't start"}
-      : {code: "host-not-loaded", sessionHost: "starting"};
-    return {code: "host-not-loaded", sessionHost: current.invalidated.aborted ? "restarting" : "running, document not loaded yet"};
+    if (!current)
+      return startFailed
+        ? { code: "host-start-failed", sessionHost: "couldn't start" }
+        : { code: "host-not-loaded", sessionHost: "starting" };
+    return {
+      code: "host-not-loaded",
+      sessionHost: current.invalidated.aborted ? "restarting" : "running, document not loaded yet",
+    };
   };
-  for (const name of diverged) options.onError?.(new Error(`The live editing copy in store ${join(root, name)} diverged from the relay earlier. It stays detached. ${recovery(name)}`));
+  for (const name of diverged)
+    options.onError?.(
+      new Error(
+        `The live editing copy in store ${join(root, name)} diverged from the relay earlier. It stays detached. ${recovery(name)}`,
+      ),
+    );
   // Diverged stores whose marker is not yet durable, with whether its failure was reported.
   // Each reconciliation tries again; until one succeeds, a restart attaches the store again.
-  const unmarked = new Map<string, {workspaceId: string; reported: boolean}>();
+  const unmarked = new Map<string, { workspaceId: string; reported: boolean }>();
   async function writeMarker(name: string, workspaceId: string) {
     const handle = await open(marker(name), "w", 0o600);
-    try {await handle.writeFile(JSON.stringify({workspaceId})); await handle.sync();}
-    finally {await handle.close();}
+    try {
+      await handle.writeFile(JSON.stringify({ workspaceId }));
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
     // Windows cannot open directory handles for fsync through Node.
     if (process.platform === "win32") return;
     const directory = await open(root, "r");
-    try {await directory.sync();} finally {await directory.close();}
+    try {
+      await directory.sync();
+    } finally {
+      await directory.close();
+    }
   }
   // The documents this reconciliation released, or tried to.
   const left = new Set<string>();
@@ -173,35 +304,70 @@ export async function startSelfHostedLiveHost(options: {
   // Reclaims the documents idle past retention. Its writes schedule a reconciliation, which drains them. After a failure, the next sweep tries again.
   function sweep() {
     if (signal.aborted) return;
-    try {storage.reclaimIdleLiveDocuments(Date.now());}
-    catch (error) {if (!signal.aborted) options.onError?.(error);}
+    try {
+      storage.reclaimIdleLiveDocuments(Date.now());
+    } catch (error) {
+      if (!signal.aborted) options.onError?.(error);
+    }
   }
   // Set once a failed daemon stops, until its replacement starts.
   let replacing = false;
   async function stopCurrent() {
-    const previous = current; current = undefined;
+    const previous = current;
+    current = undefined;
     if (previous) await previous.close();
   }
   // Called once no hosted replica holds the document. A moved document has nothing to release.
   function leave(row: ServiceHostEnrollment) {
     left.add(documentKey(row));
-    try {if (!storage.releaseServiceHostEnrollment({workspaceId: row.workspaceId, objectId: row.objectId, nowMs: Date.now()})) moved.add(movedKey(row));}
-    catch (error) {options.onError?.(error);}
+    try {
+      if (
+        !storage.releaseServiceHostEnrollment({
+          workspaceId: row.workspaceId,
+          objectId: row.objectId,
+          nowMs: Date.now(),
+        })
+      )
+        moved.add(movedKey(row));
+    } catch (error) {
+      options.onError?.(error);
+    }
   }
-  async function hostedSet({targets, departing}: ReturnType<typeof select>): Promise<ServiceHostedSet> {
+  async function hostedSet({
+    targets,
+    departing,
+  }: ReturnType<typeof select>): Promise<ServiceHostedSet> {
     const named = new Map<string, ServiceHostEnrollment>();
-    for (const row of [...targets, ...departing]) if (!named.has(row.workspaceId)) named.set(row.workspaceId, row);
+    for (const row of [...targets, ...departing])
+      if (!named.has(row.workspaceId)) named.set(row.workspaceId, row);
     const workspaces = [];
     // Every selected document matches its workspace's current identity, so any of them names it.
     for (const [workspaceId, row] of named) {
       const directory = join(root, storeName(row));
-      await mkdir(directory, {recursive: true, mode: 0o700});
-      workspaces.push({root: canonicalPath(directory, true), workspaceId, maxRegistrations: 64,
-        hostedReplication: {relay: {baseUrl: relay.origin, bearerToken: deriveServiceHostBearer(row, {key: options.key, namespace: history.namespace})},
-          identity: {replicationEpoch: row.replicationEpoch, streamIdentity: row.streamIdentity}, maxPagesPerPull: 8}});
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      workspaces.push({
+        root: canonicalPath(directory, true),
+        workspaceId,
+        maxRegistrations: 64,
+        hostedReplication: {
+          relay: {
+            baseUrl: relay.origin,
+            bearerToken: deriveServiceHostBearer(row, {
+              key: options.key,
+              namespace: history.namespace,
+            }),
+          },
+          identity: { replicationEpoch: row.replicationEpoch, streamIdentity: row.streamIdentity },
+          maxPagesPerPull: 8,
+        },
+      });
     }
-    const document = ({workspaceId, objectId, path}: ServiceHostEnrollment) => ({workspaceId, objectId, path});
-    return {workspaces, documents: targets.map(document), departing: departing.map(document)};
+    const document = ({ workspaceId, objectId, path }: ServiceHostEnrollment) => ({
+      workspaceId,
+      objectId,
+      path,
+    });
+    return { workspaces, documents: targets.map(document), departing: departing.map(document) };
   }
   async function start(): Promise<Host> {
     // The service host refuses a configuration path that resolves elsewhere,
@@ -211,22 +377,50 @@ export async function startSelfHostedLiveHost(options: {
       const configPath = join(temporary, "service.json");
       // The daemon starts empty. Each update attaches and detaches its workspaces and documents.
       // It copies earlier stores for recovery under the store root.
-      await writeFile(configPath, JSON.stringify({version: 1, engineExecutable, hostId, instanceId, workspaces: [],
-        ...profile.service, activation: {...profile.service.activation, targets: []}, recovery: {...profile.service.recovery, root}}), {flag: "wx", mode: 0o600});
+      await writeFile(
+        configPath,
+        JSON.stringify({
+          version: 1,
+          engineExecutable,
+          hostId,
+          instanceId,
+          workspaces: [],
+          ...profile.service,
+          activation: { ...profile.service.activation, targets: [] },
+          recovery: { ...profile.service.recovery, root },
+        }),
+        { flag: "wx", mode: 0o600 },
+      );
       signal.throwIfAborted();
-      const host = await (options.startHost ?? startServiceLiveHost)({trustedAccount: options.trustedAccount,configPath, storage, history, frameChanges: options.frameChanges, signal});
-      host.onEvent((event) => { for (const handler of eventHandlers) handler(event); });
+      const host = await (options.startHost ?? startServiceLiveHost)({
+        trustedAccount: options.trustedAccount,
+        configPath,
+        storage,
+        history,
+        frameChanges: options.frameChanges,
+        signal,
+      });
+      host.onEvent((event) => {
+        for (const handler of eventHandlers) handler(event);
+      });
       // Subscribed before the first update, so a workspace that drains, or a departure that ends, schedules the
       // reconciliation that releases it.
       host.onProgress(schedule);
-      host.invalidated.addEventListener("abort", schedule, {once: true});
+      host.invalidated.addEventListener("abort", schedule, { once: true });
       return host;
-    } finally {await rm(temporary, {recursive: true, force: true});}
+    } finally {
+      await rm(temporary, { recursive: true, force: true });
+    }
   }
   // The selection, without diverged stores.
   const selection = () => {
-    const selected = select(), kept = (row: ServiceHostEnrollment) => !storeDiverged(row);
-    return {...selected, targets: selected.targets.filter(kept), departing: selected.departing.filter(kept)};
+    const selected = select(),
+      kept = (row: ServiceHostEnrollment) => !storeDiverged(row);
+    return {
+      ...selected,
+      targets: selected.targets.filter(kept),
+      departing: selected.departing.filter(kept),
+    };
   };
   async function reconcile() {
     // An owner's Pause or Stop, or the loss of the last Edit grant, takes
@@ -237,37 +431,67 @@ export async function startSelfHostedLiveHost(options: {
       signal.throwIfAborted();
       if (discoveryCursor || scannedGeneration !== writeGeneration) {
         if (!discoveryCursor) scanGeneration = writeGeneration;
-        discoveryCursor = discoverServiceHostDocuments(storage, options.onError, discoveryCursor) ?? undefined;
+        discoveryCursor =
+          discoverServiceHostDocuments(storage, options.onError, discoveryCursor) ?? undefined;
         if (!discoveryCursor) scannedGeneration = scanGeneration;
       }
       // A diverged store may hold work nobody published. It stays where it is,
       // and nothing attaches it again, even on a restarted daemon or relay.
-      for (const {workspaceId, root: store} of current?.diverged() ?? []) {
+      for (const { workspaceId, root: store } of current?.diverged() ?? []) {
         const name = basename(store);
         if (diverged.has(name)) continue;
-        diverged.add(name); unmarked.set(name, {workspaceId, reported: false});
-        options.onError?.(new Error(`The live editing copy of workspace ${workspaceId} diverged from the relay. It stays detached, and its store is kept at ${store}. ${recovery(name)}`));
+        diverged.add(name);
+        unmarked.set(name, { workspaceId, reported: false });
+        options.onError?.(
+          new Error(
+            `The live editing copy of workspace ${workspaceId} diverged from the relay. It stays detached, and its store is kept at ${store}. ${recovery(name)}`,
+          ),
+        );
       }
       for (const [name, pending] of unmarked) {
-        try {await writeMarker(name, pending.workspaceId); unmarked.delete(name);}
-        catch (error) {
-          if (!pending.reported) options.onError?.(new Error(`Could not write ${marker(name)}. It is retried while the relay runs; a relay restart before it lands attaches the store again.`, {cause: error}));
+        try {
+          await writeMarker(name, pending.workspaceId);
+          unmarked.delete(name);
+        } catch (error) {
+          if (!pending.reported)
+            options.onError?.(
+              new Error(
+                `Could not write ${marker(name)}. It is retried while the relay runs; a relay restart before it lands attaches the store again.`,
+                { cause: error },
+              ),
+            );
           pending.reported = true;
         }
       }
       // Only a failed daemon restarts. Membership changes update the running one.
-      if (current?.invalidated.aborted) {await stopCurrent(); signature = ""; replacing = true;}
+      if (current?.invalidated.aborted) {
+        await stopCurrent();
+        signature = "";
+        replacing = true;
+      }
       selected = selection();
-      const {targets, departing} = selected, next = selectionSignature(selected);
+      const { targets, departing } = selected,
+        next = selectionSignature(selected);
       selectedDocuments = targets.length > 0;
       if (next !== signature || ((targets.length || departing.length) && !current)) {
         const desired = await hostedSet(selected);
         signal.throwIfAborted();
-        if (next !== selectionSignature(selection())) {schedule(); return;}
+        if (next !== selectionSignature(selection())) {
+          schedule();
+          return;
+        }
         if (!current && (targets.length || departing.length)) {
-          try {current = await start();} catch (error) {startFailed = !signal.aborted; throw error;}
+          try {
+            current = await start();
+          } catch (error) {
+            startFailed = !signal.aborted;
+            throw error;
+          }
           startFailed = false;
-          if (replacing) {replacing = false; console.error("Live host started again after its engine ended.");}
+          if (replacing) {
+            replacing = false;
+            console.error("Live host started again after its engine ended.");
+          }
         }
         // A failed update may already have changed membership, so the next reconciliation updates again.
         signature = "";
@@ -276,48 +500,72 @@ export async function startSelfHostedLiveHost(options: {
       }
       // The owner learns only that live editing stopped. Where its work is kept is for the operator.
       for (const row of [...targets, ...departing]) {
-        const key = documentKey(row), block = current?.blocked(row);
-        if (block === undefined) {refused.delete(key); continue;}
+        const key = documentKey(row),
+          block = current?.blocked(row);
+        if (block === undefined) {
+          refused.delete(key);
+          continue;
+        }
         if (refused.has(key)) continue;
         refused.add(key);
         const store = `Its store is kept at ${join(root, storeName(row))}.`;
         // Until the session host can start a document's Y.Doc itself (#2069), a device must.
-        options.onError?.(new Error(block === "without-lineage"
-          ? `Live editing of ${row.path} in workspace ${row.workspaceId} cannot start: the document has no live-editing history. It starts once its owner opens it in dohc on a desktop. ${store}`
-          : block === "live-edit-unadmitted"
-            ? `Live editing of ${row.path} in workspace ${row.workspaceId} is held: the session host hasn't applied an edit to the document. Its owner can resume live editing in dohc to try again. ${store}`
-            : block === "history-over-budget"
-              ? `Live editing of ${row.path} in workspace ${row.workspaceId} cannot start: its edit history is past what this server reads or checks. It tries again later, or when its owner resumes live editing in dohc. ${store}`
-              : `Live editing of ${row.path} in workspace ${row.workspaceId} stopped until its owner tries again. ${store}`));
+        options.onError?.(
+          new Error(
+            block === "without-lineage"
+              ? `Live editing of ${row.path} in workspace ${row.workspaceId} cannot start: the document has no live-editing history. It starts once its owner opens it in dohc on a desktop. ${store}`
+              : block === "live-edit-unadmitted"
+                ? `Live editing of ${row.path} in workspace ${row.workspaceId} is held: the session host hasn't applied an edit to the document. Its owner can resume live editing in dohc to try again. ${store}`
+                : block === "history-over-budget"
+                  ? `Live editing of ${row.path} in workspace ${row.workspaceId} cannot start: its edit history is past what this server reads or checks. It tries again later, or when its owner resumes live editing in dohc. ${store}`
+                  : `Live editing of ${row.path} in workspace ${row.workspaceId} stopped until its owner tries again. ${store}`,
+          ),
+        );
       }
       // A workspace with no documents detaches once its replica drained, then
       // releases its enrollments. Its store stays, so a document shared again
       // resumes there. A failure between steps leaves them undrained, so the next start drains again.
-      for (const workspaceId of new Set(departing.map(row => row.workspaceId))) {
-        if (!current || targets.some(row => row.workspaceId === workspaceId) || !(await current.detachDrained(workspaceId, signal))) continue;
+      for (const workspaceId of new Set(departing.map((row) => row.workspaceId))) {
+        if (
+          !current ||
+          targets.some((row) => row.workspaceId === workspaceId) ||
+          !(await current.detachDrained(workspaceId, signal))
+        )
+          continue;
         // A release that fails keeps its row selected, so the next update attaches the workspace again.
         signature = "";
         for (const row of departing) if (row.workspaceId === workspaceId) leave(row);
       }
-      lastError = undefined; startFailed = false; initialReconciliationComplete = true;
+      lastError = undefined;
+      startFailed = false;
+      initialReconciliationComplete = true;
     } catch (error) {
-      if (!signal.aborted) {lastError = error; options.onError?.(error);}
+      if (!signal.aborted) {
+        lastError = error;
+        options.onError?.(error);
+      }
     } finally {
       // A failed update or one damaged row does not hold back the others.
       if (selected && !signal.aborted) {
         for (const row of selected.obsolete) leave(row);
         // A sibling document keeps its workspace attached, so its replica confirms each departed document gone.
         for (const row of selected.departing) {
-          if (selected.targets.some(target => target.workspaceId === row.workspaceId) && current?.retains(row) === false) leave(row);
+          if (
+            selected.targets.some((target) => target.workspaceId === row.workspaceId) &&
+            current?.retains(row) === false
+          )
+            leave(row);
         }
         // Once every retired document on the page left, or stayed through a pull
         // after it departed whose departed list reached it, the next page gets
         // its turn, so documents that stay cannot keep the ones after them from
         // leaving. A list that reached a document before it unloaded cannot
         // confirm it gone, so it waits for its page's next turn.
-        const page = [...selected.departing, ...selected.obsolete].filter(row => row.retired);
-        if ((selected.nextCursor || retiredCursor) && page.every(row =>
-          left.has(documentKey(row)) || current?.pulledAfterDeparture(row))) {
+        const page = [...selected.departing, ...selected.obsolete].filter((row) => row.retired);
+        if (
+          (selected.nextCursor || retiredCursor) &&
+          page.every((row) => left.has(documentKey(row)) || current?.pulledAfterDeparture(row))
+        ) {
           retiredCursor = selected.nextCursor ?? undefined;
           schedule();
         }
@@ -332,30 +580,53 @@ export async function startSelfHostedLiveHost(options: {
     turn = run.catch(() => {});
     return run;
   };
-  const finished = Effect.runPromiseExit(Effect.scoped(Effect.gen(function* () {
-    yield* Effect.acquireRelease(Effect.succeed(changes), Queue.shutdown);
-    yield* Effect.acquireRelease(
-      Effect.sync(() => observeRelayWrites(storage, () => {writeGeneration++; schedule();})),
-      stopWatching => Effect.gen(function* () {
-        stopWatching();
-        // After any start a recovery read began outside reconciliation.
-        yield* Effect.promise(() => exclusive(stopCurrent));
+  const finished = Effect.runPromiseExit(
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* Effect.acquireRelease(Effect.succeed(changes), Queue.shutdown);
+        yield* Effect.acquireRelease(
+          Effect.sync(() =>
+            observeRelayWrites(storage, () => {
+              writeGeneration++;
+              schedule();
+            }),
+          ),
+          (stopWatching) =>
+            Effect.gen(function* () {
+              stopWatching();
+              // After any start a recovery read began outside reconciliation.
+              yield* Effect.promise(() => exclusive(stopCurrent));
+            }),
+        );
+        yield* Effect.forkScoped(
+          Effect.forever(
+            pause(options.reconcileIntervalMs ?? profile.reconcileIntervalMs).pipe(
+              Effect.andThen(Effect.sync(schedule)),
+            ),
+          ),
+        );
+        // Once a minute, starting a retention period in: after a restart, clients reconnect before any document counts as unconnected.
+        yield* Effect.forkScoped(
+          pause(RECLAIM_RETENTION_MS).pipe(
+            Effect.andThen(
+              Effect.forever(Effect.sync(sweep).pipe(Effect.andThen(pause(RECLAIM_SWEEP_MS)))),
+            ),
+          ),
+        );
+        schedule();
+        while (true) {
+          yield* Queue.take(changes);
+          yield* pause(100);
+          yield* Queue.clear(changes);
+          // File operations and daemon starts may ignore cancellation. Drain them
+          // before finalization, so a late start cannot escape its owner's close.
+          yield* Effect.uninterruptible(Effect.promise(() => exclusive(reconcile)));
+          options.onReconcile?.();
+        }
       }),
-    );
-    yield* Effect.forkScoped(Effect.forever(pause(options.reconcileIntervalMs ?? profile.reconcileIntervalMs).pipe(Effect.andThen(Effect.sync(schedule)))));
-    // Once a minute, starting a retention period in: after a restart, clients reconnect before any document counts as unconnected.
-    yield* Effect.forkScoped(pause(RECLAIM_RETENTION_MS).pipe(Effect.andThen(Effect.forever(Effect.sync(sweep).pipe(Effect.andThen(pause(RECLAIM_SWEEP_MS)))))));
-    schedule();
-    while (true) {
-      yield* Queue.take(changes);
-      yield* pause(100);
-      yield* Queue.clear(changes);
-      // File operations and daemon starts may ignore cancellation. Drain them
-      // before finalization, so a late start cannot escape its owner's close.
-      yield* Effect.uninterruptible(Effect.promise(() => exclusive(reconcile)));
-      options.onReconcile?.();
-    }
-  })), {signal});
+    ),
+    { signal },
+  );
   return {
     current: () => current,
     /**
@@ -369,44 +640,75 @@ export async function startSelfHostedLiveHost(options: {
         // The daemon's membership changes under the last update, so the next reconciliation updates again.
         signature = "";
         try {
-          await current?.deleteWorkspaces([...new Set(workspaces.map(row => row.workspaceId))]);
-          for (const row of workspaces) {diverged.delete(storeName(row)); unmarked.delete(storeName(row));}
+          await current?.deleteWorkspaces([...new Set(workspaces.map((row) => row.workspaceId))]);
+          for (const row of workspaces) {
+            diverged.delete(storeName(row));
+            unmarked.delete(storeName(row));
+          }
           await deleteSelfHostedWorkspaceRoots(root, history.namespace, workspaces);
-        } finally {schedule();}
+        } finally {
+          schedule();
+        }
       });
     },
-    ready(document: LiveDocumentKey) {return current?.isDocumentReady(document) ?? false;},
+    ready(document: LiveDocumentKey) {
+      return current?.isDocumentReady(document) ?? false;
+    },
     /**
      * Why the running daemon cannot continue the document, if it cannot. Each waits for its owner, except a history past the
      * read budget, which tries again after its wait.
      */
-    blocked(document: {workspaceId: string; objectId: string}) {return current?.blocked(document);},
+    blocked(document: { workspaceId: string; objectId: string }) {
+      return current?.blocked(document);
+    },
     /** Why the running daemon's hosted pass left this document held. */
-    holdReason(document: {workspaceId: string; objectId: string}) {return current?.holdReason(document);},
+    holdReason(document: { workspaceId: string; objectId: string }) {
+      return current?.holdReason(document);
+    },
     /** Why the running daemon keeps failing to start the document, once its owner sees it. It keeps trying. */
-    failing(document: {workspaceId: string; objectId: string}) {return current?.failing(document);},
+    failing(document: { workspaceId: string; objectId: string }) {
+      return current?.failing(document);
+    },
     /** Whether the enrolled document's hosted replica diverged from the relay. Nothing continues it. */
-    diverged(row: Pick<ServiceHostEnrollment, "workspaceId" | "replicationEpoch" | "streamIdentity">) {return storeDiverged(row);},
+    diverged(
+      row: Pick<ServiceHostEnrollment, "workspaceId" | "replicationEpoch" | "streamIdentity">,
+    ) {
+      return storeDiverged(row);
+    },
     /** Whether this host cannot continue the document: it is blocked, or its workspace's current hosted replica diverged. */
-    stopped(document: {workspaceId: string; objectId: string}) {
+    stopped(document: { workspaceId: string; objectId: string }) {
       const identity = storage.getWorkspaceIdentity(document.workspaceId);
-      return current?.blocked(document) !== undefined || (!!identity && diverged.has(storeName({workspaceId: document.workspaceId, ...identity})));
+      return (
+        current?.blocked(document) !== undefined ||
+        (!!identity && diverged.has(storeName({ workspaceId: document.workspaceId, ...identity })))
+      );
     },
     /**
      * Lets a blocked document try once more, and a failing one try now. Returns whether it was blocked or its owner saw it
      * failing. Its next block is reported again.
      */
-    unblock(document: {workspaceId: string; objectId: string}) {
+    unblock(document: { workspaceId: string; objectId: string }) {
       const unblocked = current?.unblock(document) ?? false;
       if (unblocked) refused.delete(documentKey(document));
       return unblocked;
     },
     /** Stop through the running daemon, which delivers the document's edits first. With none running, `fence` runs unprepared. */
-    async stop<T>(document: {workspaceId: string; objectId: string}, fence: (prepared?: ServiceHostRetirementPreparation) => T,
-      callerSignal?: AbortSignal): Promise<T | "waiting"> {
+    async stop<T>(
+      document: { workspaceId: string; objectId: string },
+      fence: (prepared?: ServiceHostRetirementPreparation) => T,
+      callerSignal?: AbortSignal,
+    ): Promise<T | "waiting"> {
       const refusal = stopRefusal(document);
-      if (refusal.code !== "host-not-loaded" || !current || current.invalidated.aborted) return stopWithoutSessionHost(document, refusal, fence);
-      return current.stop(document, prepared => prepared ? fence(prepared) : stopWithoutSessionHost(document, stopRefusal(document), fence), callerSignal);
+      if (refusal.code !== "host-not-loaded" || !current || current.invalidated.aborted)
+        return stopWithoutSessionHost(document, refusal, fence);
+      return current.stop(
+        document,
+        (prepared) =>
+          prepared
+            ? fence(prepared)
+            : stopWithoutSessionHost(document, stopRefusal(document), fence),
+        callerSignal,
+      );
     },
     /**
      * The running daemon's page reads and Try again of refused queues it keeps
@@ -419,20 +721,46 @@ export async function startSelfHostedLiveHost(options: {
       // A recovery read starts the daemon if none runs, as after an identity
       // change left only earlier stores. It takes a turn, so no other start
       // runs beside it, and the next reconciliation keeps it.
-      async page(kept: ServiceKeptEdits, cursor: JsonValue | undefined, callerSignal?: AbortSignal) {
+      async page(
+        kept: ServiceKeptEdits,
+        cursor: JsonValue | undefined,
+        callerSignal?: AbortSignal,
+      ) {
         let host = current;
-        if (!host) await exclusive(async () => {signal.throwIfAborted(); host = current ??= await start(); startFailed = false;});
+        if (!host)
+          await exclusive(async () => {
+            signal.throwIfAborted();
+            host = current ??= await start();
+            startFailed = false;
+          });
         if (!host) throw new Error("This server does not hold the workspace's live documents now.");
-        return host.readKeptEditsPage(kept, cursor, join(root, storeName({workspaceId: kept.workspaceId, ...kept.identity})), callerSignal);
+        return host.readKeptEditsPage(
+          kept,
+          cursor,
+          join(root, storeName({ workspaceId: kept.workspaceId, ...kept.identity })),
+          callerSignal,
+        );
       },
-      async retry(kept: ServiceKeptEdits, guard: () => void, signal?: AbortSignal) {return current ? current.retryKeptEdits(kept, guard, signal) : "unavailable" as const;},
-      async copied(kept: ServiceKeptEdits) {await current?.releaseKeptEditsStore(kept);},
+      async retry(kept: ServiceKeptEdits, guard: () => void, signal?: AbortSignal) {
+        return current ? current.retryKeptEdits(kept, guard, signal) : ("unavailable" as const);
+      },
+      async copied(kept: ServiceKeptEdits) {
+        await current?.releaseKeptEditsStore(kept);
+      },
     },
-    get unavailable() {return signal.aborted || !initialReconciliationComplete || lastError !== undefined ||
-      (selectedDocuments && (!current || current.invalidated.aborted));},
+    get unavailable() {
+      return (
+        signal.aborted ||
+        !initialReconciliationComplete ||
+        lastError !== undefined ||
+        (selectedDocuments && (!current || current.invalidated.aborted))
+      );
+    },
     reconcile: schedule,
     /** The claim ledger of a workspace whose live-shared documents this host holds, while it runs. */
-    automationLedger(workspaceId: string) {return current?.automationLedger(workspaceId) ?? null;},
+    automationLedger(workspaceId: string) {
+      return current?.automationLedger(workspaceId) ?? null;
+    },
     /**
      * The workspaces with a live-shared document this host holds in a folder
      * that has an automations.yaml: the server runs those changes' automations.
@@ -442,19 +770,29 @@ export async function startSelfHostedLiveHost(options: {
       for (const row of selection().targets) {
         const folder = posix.dirname(row.path);
         const file = folder === "." ? "automations.yaml" : `${folder}/automations.yaml`;
-        if (storage.objectIdAtPathInVersion({workspaceId: row.workspaceId, versionId: "main", path: file}) !== undefined) found.add(row.workspaceId);
+        if (
+          storage.objectIdAtPathInVersion({
+            workspaceId: row.workspaceId,
+            versionId: "main",
+            path: file,
+          }) !== undefined
+        )
+          found.add(row.workspaceId);
       }
       return [...found];
     },
     /** The live host's engine events, across its restarts. */
     onAutomationEvent(handler: (event: Event) => void): () => void {
       eventHandlers.add(handler);
-      return () => { eventHandlers.delete(handler); };
+      return () => {
+        eventHandlers.delete(handler);
+      };
     },
     async close() {
       lifetime.abort();
       const exit = await finished;
-      if (exit._tag === "Failure" && !Cause.hasInterruptsOnly(exit.cause)) throw Cause.squash(exit.cause);
+      if (exit._tag === "Failure" && !Cause.hasInterruptsOnly(exit.cause))
+        throw Cause.squash(exit.cause);
     },
   };
 }

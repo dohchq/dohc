@@ -13,9 +13,11 @@ import { parseArgs } from "node:util";
 const desktopDir = join(dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(import.meta.url);
 const asar = require("@electron/asar");
-const CHUNK_ID = /\n\/\/# chunkId=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\s*$/;
+const CHUNK_ID =
+  /\n\/\/# chunkId=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\s*$/;
 // The snippet `posthog-cli sourcemap inject` writes names the release.
-const RELEASE_ID = /\._posthogReleaseId=\w+\._posthogReleaseId\|\|"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"/;
+const RELEASE_ID =
+  /\._posthogReleaseId=\w+\._posthogReleaseId\|\|"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"/;
 const BASE64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 // The channel and dist the check's reports carry, so nobody takes them for a person's.
 export const LABEL = "release-check";
@@ -36,7 +38,10 @@ export function probeTargets(archive, dist) {
   const page = extract(archive, "dist/renderer/index.html").toString("utf8");
   const script = /<script\b[^>]*\bsrc="\.\/(assets\/[\w.-]+\.js)"/.exec(page)?.[1];
   if (!script) throw new Error("dist/renderer/index.html in app.asar loads no script from assets.");
-  return [target("main", main, archive, dist), target("renderer", `dist/renderer/${script}`, archive, dist)];
+  return [
+    target("main", main, archive, dist),
+    target("renderer", `dist/renderer/${script}`, archive, dist),
+  ];
 }
 
 function target(part, path, archive, dist) {
@@ -46,22 +51,32 @@ function target(part, path, archive, dist) {
     try {
       return read(file);
     } catch {
-      throw new Error(`Cannot read ${file}. Use the dist folder of the build that made this package.`);
+      throw new Error(
+        `Cannot read ${file}. Use the dist folder of the build that made this package.`,
+      );
     }
   };
   if (!shipped.equals(fromBuild(built, readFileSync))) {
-    throw new Error(`${path} in app.asar differs from ${built}. Use the dist folder of the build that made this package.`);
+    throw new Error(
+      `${path} in app.asar differs from ${built}. Use the dist folder of the build that made this package.`,
+    );
   }
   const code = shipped.toString("utf8");
   const chunkId = CHUNK_ID.exec(code)?.[1];
   if (!chunkId) throw new Error(`${path} carries no chunk ID, so its source map was not uploaded.`);
   const map = fromBuild(`${built}.map`, (file) => JSON.parse(readFileSync(file, "utf8")));
   if (map.chunk_id !== chunkId) {
-    throw new Error(`${built}.map belongs to chunk ${map.chunk_id ?? "none"}, not to ${chunkId} in app.asar.`);
+    throw new Error(
+      `${built}.map belongs to chunk ${map.chunk_id ?? "none"}, not to ${chunkId} in app.asar.`,
+    );
   }
   const position = ownPosition(map);
   const entry = position && new SourceMap(map).findEntry(position.line, position.column);
-  if (!entry || entry.generatedLine !== position.line || entry.generatedColumn !== position.column) {
+  if (
+    !entry ||
+    entry.generatedLine !== position.line ||
+    entry.generatedColumn !== position.column
+  ) {
     throw new Error(`${built}.map ties no position in ${path} to dohc's own source.`);
   }
   return {
@@ -72,7 +87,11 @@ function target(part, path, archive, dist) {
     releaseId: RELEASE_ID.exec(code)?.[1] ?? null,
     // V8 counts lines and columns from 1; source maps count them from 0.
     generated: { line: position.line + 1, column: position.column + 1 },
-    original: { source: entry.originalSource, line: entry.originalLine + 1, column: entry.originalColumn + 1 },
+    original: {
+      source: entry.originalSource,
+      line: entry.originalLine + 1,
+      column: entry.originalColumn + 1,
+    },
   };
 }
 
@@ -91,7 +110,8 @@ function ownPosition(map) {
     for (const segment of text.split(",")) {
       if (!segment) continue;
       const fields = vlq(segment);
-      for (let index = 0; index < Math.min(fields.length, 4); index += 1) state[index] += fields[index];
+      for (let index = 0; index < Math.min(fields.length, 4); index += 1)
+        state[index] += fields[index];
       if (fields.length >= 4 && own[state[1]]) return { line, column: state[0] };
     }
   }
@@ -124,11 +144,19 @@ function vlq(segment) {
  * DOHC_POSTHOG_HOST name, and the check passes only when both requests got a
  * 2xx answer.
  */
-export async function runProbes({ archive, dist, send = false, env = process.env, fetch = globalThis.fetch }) {
+export async function runProbes({
+  archive,
+  dist,
+  send = false,
+  env = process.env,
+  fetch = globalThis.fetch,
+}) {
   archive = resolve(archive);
   const targets = probeTargets(archive, resolve(dist));
   const { version } = JSON.parse(extract(archive, "package.json").toString("utf8"));
-  const project = send ? { key: env.DOHC_POSTHOG_KEY ?? "", host: env.DOHC_POSTHOG_HOST ?? "" } : DRY_RUN_PROJECT;
+  const project = send
+    ? { key: env.DOHC_POSTHOG_KEY ?? "", host: env.DOHC_POSTHOG_HOST ?? "" }
+    : DRY_RUN_PROJECT;
   const { createCodeLocations, createTelemetry, resolveReporting } = await reportCode();
   const reporting = resolveReporting({
     build: { posthogKey: project.key, posthogHost: project.host, dist: LABEL },
@@ -137,27 +165,46 @@ export async function runProbes({ archive, dist, send = false, env = process.env
     argv: [],
   });
   if (!reporting?.errors) {
-    throw new Error(send
-      ? "Set DOHC_POSTHOG_KEY and DOHC_POSTHOG_HOST to a PostHog project, and unset DOHC_TELEMETRY and DO_NOT_TRACK."
-      : "DOHC_TELEMETRY or DO_NOT_TRACK turns reports off in this environment.");
+    throw new Error(
+      send
+        ? "Set DOHC_POSTHOG_KEY and DOHC_POSTHOG_HOST to a PostHog project, and unset DOHC_TELEMETRY and DO_NOT_TRACK."
+        : "DOHC_TELEMETRY or DO_NOT_TRACK turns reports off in this environment.",
+    );
   }
   // The folder the package is installed in, as main's code roots name it.
   const root = resolve(archive, "..", "..");
-  const privateText = [root, homedir(), `/${userInfo().username}/`, `\\${userInfo().username}\\`]
-    .flatMap((text) => [text, text.replaceAll("\\", "/"), JSON.stringify(text).slice(1, -1)]);
+  const privateText = [
+    root,
+    homedir(),
+    `/${userInfo().username}/`,
+    `\\${userInfo().username}\\`,
+  ].flatMap((text) => [text, text.replaceAll("\\", "/"), JSON.stringify(text).slice(1, -1)]);
   const requests = [];
 
   const guarded = async (url, init) => {
     const body = String(init?.body ?? "");
     const event = JSON.parse(body).batch?.[0];
-    const top = event?.properties?.$exception_list?.[0]?.stacktrace?.frames?.find((frame) => frame.chunk_id);
-    const request = { target: targets.find((candidate) => candidate.chunkId === top?.chunk_id), event, status: null, problem: null };
+    const top = event?.properties?.$exception_list?.[0]?.stacktrace?.frames?.find(
+      (frame) => frame.chunk_id,
+    );
+    const request = {
+      target: targets.find((candidate) => candidate.chunkId === top?.chunk_id),
+      event,
+      status: null,
+      problem: null,
+    };
     requests.push(request);
-    if (!String(url).startsWith(`${reporting.errors.host}/`)) request.problem = `The SDK asked for ${url}, outside the project.`;
-    else if (privateText.some((text) => body.includes(text))) request.problem = "The report held a path from this computer.";
+    if (!String(url).startsWith(`${reporting.errors.host}/`))
+      request.problem = `The SDK asked for ${url}, outside the project.`;
+    else if (privateText.some((text) => body.includes(text)))
+      request.problem = "The report held a path from this computer.";
     else if (!request.target) request.problem = "The report holds no frame in the checked scripts.";
-    else if (top.filename !== `app:///${request.target.path}` || top.lineno !== request.target.generated.line
-      || top.colno !== request.target.generated.column) request.problem = "The report's frame is not the checked position.";
+    else if (
+      top.filename !== `app:///${request.target.path}` ||
+      top.lineno !== request.target.generated.line ||
+      top.colno !== request.target.generated.column
+    )
+      request.problem = "The report's frame is not the checked position.";
     if (request.problem) throw new Error(request.problem);
     if (!send) throw new Error("Dry run: not sent.");
     const response = await fetch(url, init);
@@ -174,11 +221,19 @@ export async function runProbes({ archive, dist, send = false, env = process.env
       reporting,
       statePath: join(state, "reporting.json"),
       facts: () => ({
-        atMs: Date.now(), version, channel: LABEL, os: type(), osVersion: release(), arch: process.arch, electron: LABEL,
+        atMs: Date.now(),
+        version,
+        channel: LABEL,
+        os: type(),
+        osVersion: release(),
+        arch: process.arch,
+        electron: LABEL,
       }),
       locate: createCodeLocations([root], process.platform),
       readCode: async (path) => {
-        const match = targets.find((candidate) => path.replaceAll("\\", "/").endsWith(`/app.asar/${candidate.path}`));
+        const match = targets.find((candidate) =>
+          path.replaceAll("\\", "/").endsWith(`/app.asar/${candidate.path}`),
+        );
         if (!match) throw new Error(`The check reads only its two scripts, not ${path}.`);
         return match.code;
       },
@@ -187,14 +242,21 @@ export async function runProbes({ archive, dist, send = false, env = process.env
     telemetry.acknowledgeNotice({ usage: false, errors: true });
     telemetry.setPrivacy({ usageReports: false, errorReports: true });
     const [main, renderer] = targets;
-    const frame = (probe, file) => `Error: ${LABEL}\n    at releaseCheck (${file}:${probe.generated.line}:${probe.generated.column})`;
+    const frame = (probe, file) =>
+      `Error: ${LABEL}\n    at releaseCheck (${file}:${probe.generated.line}:${probe.generated.column})`;
     const mainError = new Error(LABEL);
     mainError.stack = frame(main, join(archive, ...main.path.split("/")));
-    telemetry.reportError({ kind: "crash", event: { kind: "main-exception", error: mainError, origin: "uncaughtException" } });
+    telemetry.reportError({
+      kind: "crash",
+      event: { kind: "main-exception", error: mainError, origin: "uncaughtException" },
+    });
     telemetry.reportError({
       kind: "renderer",
       origin: "uncaught",
-      error: { name: "Error", stack: frame(renderer, pathToFileURL(join(archive, ...renderer.path.split("/"))).href) },
+      error: {
+        name: "Error",
+        stack: frame(renderer, pathToFileURL(join(archive, ...renderer.path.split("/"))).href),
+      },
     });
     await telemetry.flush();
   } finally {
@@ -204,7 +266,9 @@ export async function runProbes({ archive, dist, send = false, env = process.env
 
   const events = targets.map((probe) => {
     const request = requests.find((candidate) => candidate.target === probe);
-    const ok = send ? request?.status !== null && request?.status >= 200 && request?.status < 300 : Boolean(request);
+    const ok = send
+      ? request?.status !== null && request?.status >= 200 && request?.status < 300
+      : Boolean(request);
     return {
       part: probe.part,
       file: `app:///${probe.path}`,
@@ -214,11 +278,17 @@ export async function runProbes({ archive, dist, send = false, env = process.env
       eventId: request?.event?.uuid ?? null,
       releaseId: request?.event?.properties?.$release_id ?? null,
       status: request?.status ?? null,
-      problem: request?.problem ?? (request ? (ok ? null : "PostHog did not accept the report.") : "No report left in time."),
+      problem:
+        request?.problem ??
+        (request ? (ok ? null : "PostHog did not accept the report.") : "No report left in time."),
       payload: request?.event ?? null,
     };
   });
-  return { sent: send, passed: requests.length === 2 && events.every((event) => !event.problem), events };
+  return {
+    sent: send,
+    passed: requests.length === 2 && events.every((event) => !event.problem),
+    events,
+  };
 }
 
 // dohc's report code, built from this checkout's source as main builds it.
@@ -252,10 +322,16 @@ async function reportCode() {
 
 if (import.meta.main) {
   const { values } = parseArgs({
-    options: { app: { type: "string" }, dist: { type: "string" }, send: { type: "boolean", default: false } },
+    options: {
+      app: { type: "string" },
+      dist: { type: "string" },
+      send: { type: "boolean", default: false },
+    },
   });
   if (!values.app || !values.dist) {
-    console.error("Usage: node apps/desktop/scripts/check-error-symbolication.mjs --app <resources/app.asar> --dist <apps/desktop/dist> [--send]");
+    console.error(
+      "Usage: node apps/desktop/scripts/check-error-symbolication.mjs --app <resources/app.asar> --dist <apps/desktop/dist> [--send]",
+    );
     process.exitCode = 2;
   } else {
     try {

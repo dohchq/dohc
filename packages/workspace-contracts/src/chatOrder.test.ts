@@ -4,9 +4,12 @@ import { compareCodePoints, compareMessageOrder } from "./chatOrder";
 describe("compareMessageOrder", () => {
   it("orders by time, then by ID", () => {
     const sorted = [
-      { createdAtMs: 100, id: "z" }, { createdAtMs: 100, id: "b" }, { createdAtMs: 50, id: "y" }, { createdAtMs: 100, id: "a" },
+      { createdAtMs: 100, id: "z" },
+      { createdAtMs: 100, id: "b" },
+      { createdAtMs: 50, id: "y" },
+      { createdAtMs: 100, id: "a" },
     ].sort(compareMessageOrder);
-    expect(sorted.map(message => message.id)).toEqual(["y", "a", "b", "z"]);
+    expect(sorted.map((message) => message.id)).toEqual(["y", "a", "b", "z"]);
   });
 
   it("compares IDs in code point order, as the engine's byte order does", () => {

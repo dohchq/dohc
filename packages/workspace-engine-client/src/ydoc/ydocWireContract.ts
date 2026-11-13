@@ -6,7 +6,10 @@ import * as SchemaIssue from "effect/SchemaIssue";
 import type { JsonValue } from "../protocol";
 import type { AutomationRunAttribution } from "@dohc/workspace-contracts/collection";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
-import { parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
+import {
+  parseLiveObjectBinding,
+  type LiveObjectBinding,
+} from "@dohc/live-session-contract/live-object-binding";
 
 export const YDOC_METHOD = {
   open: "ydoc.open",
@@ -111,28 +114,27 @@ function decodeYdocSchema<S extends Schema.ConstraintDecoder<unknown>>(
 ): S["Type"] {
   const decoded = Schema.decodeUnknownResult(schema)(value);
   if (Result.isFailure(decoded)) {
-    const issue = SchemaIssue.makeFormatterStandardSchemaV1()(
-      decoded.failure.issue,
-    ).issues[0];
-    const path = issue?.path?.map((part) =>
-      typeof part === "number" ? `[${part}]` : `.${String(part)}`,
-    ).join("") ?? "";
-    throw new ProtocolShapeError(
-      `${label}${path}: ${issue?.message ?? decoded.failure.message}`,
-    );
+    const issue = SchemaIssue.makeFormatterStandardSchemaV1()(decoded.failure.issue).issues[0];
+    const path =
+      issue?.path
+        ?.map((part) => (typeof part === "number" ? `[${part}]` : `.${String(part)}`))
+        .join("") ?? "";
+    throw new ProtocolShapeError(`${label}${path}: ${issue?.message ?? decoded.failure.message}`);
   }
   return decoded.success;
 }
 
 const YdocContentKindSchema = Schema.Literals(["richdoc", "plaintext", "scene"]);
-const LiveIdentifierSchema = Schema.String.check(Schema.makeFilter((value) => {
-  try {
-    parseLiveUpdateIdentifier(value);
-    return true;
-  } catch (error) {
-    return (error as TypeError).message;
-  }
-}));
+const LiveIdentifierSchema = Schema.String.check(
+  Schema.makeFilter((value) => {
+    try {
+      parseLiveUpdateIdentifier(value);
+      return true;
+    } catch (error) {
+      return (error as TypeError).message;
+    }
+  }),
+);
 const PositiveSafeIntegerSchema = Schema.Int.check(Schema.isGreaterThan(0));
 const NonnegativeSafeIntegerSchema = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
 const OwnerAppendFields = {
@@ -157,22 +159,32 @@ export function decodeOwnerYDocOutboxAppendResult(value: unknown): OwnerYDocOutb
   return decoded.success;
 }
 
-const LiveObjectBindingSchema = Schema.declareConstructor<LiveObjectBinding>()([], () => (value) => Effect.try({
-  try: () => parseLiveObjectBinding(value),
-  catch: (error) => new SchemaIssue.InvalidValue({ message: (error as TypeError).message }),
-}));
+const LiveObjectBindingSchema = Schema.declareConstructor<LiveObjectBinding>()(
+  [],
+  () => (value) =>
+    Effect.try({
+      try: () => parseLiveObjectBinding(value),
+      catch: (error) => new SchemaIssue.InvalidValue({ message: (error as TypeError).message }),
+    }),
+);
 const OwnerDraftSchema = mutableStruct({
   binding: LiveObjectBindingSchema,
-  relayDatabaseNamespace: LiveIdentifierSchema, revision: PositiveSafeIntegerSchema,
-  acceptedCursor: NonnegativeSafeIntegerSchema, nativeHeadSequence: NonnegativeSafeIntegerSchema,
+  relayDatabaseNamespace: LiveIdentifierSchema,
+  revision: PositiveSafeIntegerSchema,
+  acceptedCursor: NonnegativeSafeIntegerSchema,
+  nativeHeadSequence: NonnegativeSafeIntegerSchema,
   nativeUnsettled: Schema.Boolean,
-  outboxId: Schema.NullOr(LiveIdentifierSchema), pendingBytes: NonnegativeSafeIntegerSchema,
+  outboxId: Schema.NullOr(LiveIdentifierSchema),
+  pendingBytes: NonnegativeSafeIntegerSchema,
   state: Schema.NullOr(Schema.Literals(["active", "sealed", "quarantined"])),
-}).check(Schema.makeFilter((draft) =>
-  draft.outboxId === null
-    ? (draft.state === null && draft.pendingBytes === 0) || "An absent draft parent must have null state and zero pending bytes."
-    : draft.state !== null || "A draft parent must have a state.",
-));
+}).check(
+  Schema.makeFilter((draft) =>
+    draft.outboxId === null
+      ? (draft.state === null && draft.pendingBytes === 0) ||
+        "An absent draft parent must have null state and zero pending bytes."
+      : draft.state !== null || "A draft parent must have a state.",
+  ),
+);
 export type YdocOwnerDraft = typeof OwnerDraftSchema.Type;
 
 /** The particular locally committed write, independent of its current path. */
@@ -185,7 +197,9 @@ export interface SharedFileUpdate {
 export type SharedFileUpdateState = "pending" | "settled" | "not-accepted" | "absent";
 
 export function decodeOwnerYDocDraftDescriptor(value: unknown): YdocOwnerDraft {
-  const decoded = Schema.decodeUnknownResult(OwnerDraftSchema)(value, { onExcessProperty: "error" });
+  const decoded = Schema.decodeUnknownResult(OwnerDraftSchema)(value, {
+    onExcessProperty: "error",
+  });
   if (Result.isFailure(decoded)) {
     throw new TypeError(`Invalid draft descriptor: ${decoded.failure.message}`);
   }
@@ -227,15 +241,18 @@ const OpenResultSchema = mutableStruct({
   // Whether this device claimed the lineage from its own unclaimed history.
   lineageOriginatedHere: Schema.Boolean,
 });
-const RecordUpdateResultSchema = Schema.Union([mutableStruct({
-  seq: Schema.Int,
-  lineageClaimId: Schema.NullOr(Schema.String),
-  lineageOriginatedHere: Schema.Boolean,
-}), mutableStruct({
-  lineageClaimId: Schema.String,
-  lineageOriginatedHere: Schema.Boolean,
-  ownerDraft: mutableStruct(OwnerAppendFields),
-})]);
+const RecordUpdateResultSchema = Schema.Union([
+  mutableStruct({
+    seq: Schema.Int,
+    lineageClaimId: Schema.NullOr(Schema.String),
+    lineageOriginatedHere: Schema.Boolean,
+  }),
+  mutableStruct({
+    lineageClaimId: Schema.String,
+    lineageOriginatedHere: Schema.Boolean,
+    ownerDraft: mutableStruct(OwnerAppendFields),
+  }),
+]);
 const ResyncResultSchema = mutableStruct({
   headSha256: Schema.NullOr(Schema.String),
   ownerDraft: Schema.optionalKey(OwnerDraftSchema),
@@ -262,9 +279,9 @@ const SettleResultSchema = mutableStruct({
 const CloseResultSchema = mutableStruct({ closed: Schema.Literal(true) });
 const EvictResultSchema = mutableStruct({ evicted: Schema.Literal(true) });
 const RemoteUpdatePayloadSchema = Schema.Union([
-  mutableStruct({sessionId: Schema.String, updateBase64: Schema.String}),
-  mutableStruct({sessionId: Schema.String, resyncRequired: Schema.Literal(true)}),
-  mutableStruct({sessionId: Schema.String, settlementWanted: Schema.Literal(true)}),
+  mutableStruct({ sessionId: Schema.String, updateBase64: Schema.String }),
+  mutableStruct({ sessionId: Schema.String, resyncRequired: Schema.Literal(true) }),
+  mutableStruct({ sessionId: Schema.String, settlementWanted: Schema.Literal(true) }),
 ]);
 
 const YdocResultSchemas = {
@@ -272,7 +289,9 @@ const YdocResultSchemas = {
   [YDOC_METHOD.recordUpdate]: RecordUpdateResultSchema,
   [YDOC_METHOD.resync]: ResyncResultSchema,
   [YDOC_METHOD.settle]: SettleResultSchema,
-  [YDOC_METHOD.adoptCollectionRecord]: mutableStruct({ status: Schema.Literals(["settled", "ownerPending", "declined"]) }),
+  [YDOC_METHOD.adoptCollectionRecord]: mutableStruct({
+    status: Schema.Literals(["settled", "ownerPending", "declined"]),
+  }),
   [YDOC_METHOD.close]: CloseResultSchema,
   [YDOC_METHOD.evict]: EvictResultSchema,
 } as const;
@@ -288,10 +307,8 @@ function validateOpenAssets(assets: ArtifactAssetDescriptor[] | undefined): void
       asset.id.length === 0 ||
       asset.mimeType.length === 0 ||
       !isNonnegativeSafeInteger(asset.created) ||
-      (asset.lastRetrieved !== undefined &&
-        !isNonnegativeSafeInteger(asset.lastRetrieved)) ||
-      (asset.version !== undefined &&
-        !isNonnegativeSafeInteger(asset.version)) ||
+      (asset.lastRetrieved !== undefined && !isNonnegativeSafeInteger(asset.lastRetrieved)) ||
+      (asset.version !== undefined && !isNonnegativeSafeInteger(asset.version)) ||
       !isNormalizedWorkspaceRef(asset.ref) ||
       !/^[0-9a-f]{64}$/.test(asset.sha256)
     ) {
@@ -316,9 +333,7 @@ function isNormalizedWorkspaceRef(ref: string): boolean {
   ) {
     return false;
   }
-  return ref
-    .split("/")
-    .every((part) => part.length > 0 && part !== "." && part !== "..");
+  return ref.split("/").every((part) => part.length > 0 && part !== "." && part !== "..");
 }
 
 function hasWellFormedSurrogates(value: string): boolean {
@@ -342,12 +357,14 @@ export function decodeYdocResult<M extends YdocMethod>(
   if (method === YDOC_METHOD.open) {
     const decoded = decodeYdocSchema(OpenResultSchema, value, `${method} result`);
     validateOpenAssets(decoded.artifactAssets);
-    if (decoded.ownerDraft && (
-      decoded.contentKind !== "richdoc" || decoded.lineage !== "existing"
-      || decoded.ownerDraft.binding.objectId !== decoded.objectId
-      || decoded.ownerDraft.binding.currentPath !== decoded.path
-      || decoded.ownerDraft.binding.lineageClaimId !== decoded.lineageClaimId
-    )) {
+    if (
+      decoded.ownerDraft &&
+      (decoded.contentKind !== "richdoc" ||
+        decoded.lineage !== "existing" ||
+        decoded.ownerDraft.binding.objectId !== decoded.objectId ||
+        decoded.ownerDraft.binding.currentPath !== decoded.path ||
+        decoded.ownerDraft.binding.lineageClaimId !== decoded.lineageClaimId)
+    ) {
       throw new ProtocolShapeError("ydoc.open owner draft does not match the editor session.");
     }
     return decoded as YdocMethodResultMap[M];
@@ -359,12 +376,6 @@ export function decodeYdocResult<M extends YdocMethod>(
   ) as YdocMethodResultMap[M];
 }
 
-export function decodeYdocRemoteUpdatePayload(
-  value: JsonValue,
-): YdocRemoteUpdatePayload {
-  return decodeYdocSchema(
-    RemoteUpdatePayloadSchema,
-    value,
-    "ydoc.remoteUpdate payload",
-  );
+export function decodeYdocRemoteUpdatePayload(value: JsonValue): YdocRemoteUpdatePayload {
+  return decodeYdocSchema(RemoteUpdatePayloadSchema, value, "ydoc.remoteUpdate payload");
 }

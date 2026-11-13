@@ -15,30 +15,42 @@ const LOADING: PersonalAgentsState = { status: "loading" };
 // read still in flight. An answer belongs to the workspace it was asked in,
 // so a slow one never lands after the workspace changes.
 // `refresh` asks the relay before answering, as Settings › Agents does when it opens.
-export function usePersonalAgents(workspaceId: string, refresh: boolean): {
+export function usePersonalAgents(
+  workspaceId: string,
+  refresh: boolean,
+): {
   state: PersonalAgentsState;
   // Reads the relay again. Answers, once the read ends, with what the hook
   // then holds: the read's answer, or main's push when one came since.
   reload(): Promise<PersonalAgentsState>;
 } {
   const requests = useRequestSequence([workspaceId]);
-  const [held, setHeld] = useState<{ workspaceId: string; state: PersonalAgentsState }>({ workspaceId, state: LOADING });
+  const [held, setHeld] = useState<{ workspaceId: string; state: PersonalAgentsState }>({
+    workspaceId,
+    state: LOADING,
+  });
   // What the hook holds before React renders it, for a read's answer.
   const latest = useRef(held);
-  const hold = useCallback((state: PersonalAgentsState) => {
-    latest.current = { workspaceId, state };
-    setHeld(latest.current);
-  }, [workspaceId]);
-  const read = useCallback(async (refreshFirst: boolean): Promise<PersonalAgentsState> => {
-    const token = requests.next();
-    try {
-      const event = await bridge().readPersonalAgents({ refresh: refreshFirst });
-      if (requests.isCurrent(token)) hold({ status: "ready", accounts: event.accounts });
-    } catch {
-      if (requests.isCurrent(token)) hold({ status: "failed" });
-    }
-    return latest.current.workspaceId === workspaceId ? latest.current.state : LOADING;
-  }, [hold, requests, workspaceId]);
+  const hold = useCallback(
+    (state: PersonalAgentsState) => {
+      latest.current = { workspaceId, state };
+      setHeld(latest.current);
+    },
+    [workspaceId],
+  );
+  const read = useCallback(
+    async (refreshFirst: boolean): Promise<PersonalAgentsState> => {
+      const token = requests.next();
+      try {
+        const event = await bridge().readPersonalAgents({ refresh: refreshFirst });
+        if (requests.isCurrent(token)) hold({ status: "ready", accounts: event.accounts });
+      } catch {
+        if (requests.isCurrent(token)) hold({ status: "failed" });
+      }
+      return latest.current.workspaceId === workspaceId ? latest.current.state : LOADING;
+    },
+    [hold, requests, workspaceId],
+  );
   useEffect(() => {
     const stop = bridge().onPersonalAgents((event) => {
       requests.next();

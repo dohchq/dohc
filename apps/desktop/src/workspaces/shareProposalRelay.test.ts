@@ -1,8 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  RelayUnauthorizedError,
-  ShareUnavailableError,
-} from "@dohc/workspace-contracts/relay";
+import { RelayUnauthorizedError, ShareUnavailableError } from "@dohc/workspace-contracts/relay";
 import {
   listMyShareProposals,
   listShareProposals,
@@ -96,10 +93,7 @@ describe("listShareProposals", () => {
         authorization: "Bearer granter-token",
       },
     ]);
-    expect(proposals).toEqual([
-      SUMMARY,
-      { ...SUMMARY, proposalId: "proposal-2", ops: 4 },
-    ]);
+    expect(proposals).toEqual([SUMMARY, { ...SUMMARY, proposalId: "proposal-2", ops: 4 }]);
   });
 
   // This route serves what the granter still has to answer, so a sender it
@@ -215,10 +209,7 @@ describe("readShareProposal", () => {
 // The lazy review's content door. It names one op, and what comes back must be
 // that op.
 describe("readShareProposalOp", () => {
-  const readOp = (
-    relay: Parameters<typeof readShareProposalOp>[0]["relay"],
-    opIndex = 3,
-  ) =>
+  const readOp = (relay: Parameters<typeof readShareProposalOp>[0]["relay"], opIndex = 3) =>
     readShareProposalOp({
       relay,
       workspaceId: "workspace a",
@@ -234,9 +225,7 @@ describe("readShareProposalOp", () => {
 
     const op = await readOp(relay);
 
-    expect(calls[0]?.url).toBe(
-      "https://relay.test/sync/workspace%20a/proposals/proposal-1/ops/3",
-    );
+    expect(calls[0]?.url).toBe("https://relay.test/sync/workspace%20a/proposals/proposal-1/ops/3");
     expect(op.opIndex).toBe(3);
   });
 
@@ -337,9 +326,7 @@ describe("listMyShareProposals", () => {
       ],
     });
 
-    await expect(
-      listMyShareProposals({ relay, shareId: "share/1" }),
-    ).resolves.toEqual([
+    await expect(listMyShareProposals({ relay, shareId: "share/1" })).resolves.toEqual([
       {
         proposalId: "proposal-1",
         state: "open",
@@ -355,9 +342,7 @@ describe("listMyShareProposals", () => {
         ops: 1,
       },
     ]);
-    expect(calls[0]?.url).toBe(
-      "https://relay.test/sync/shares/share%2F1/proposals",
-    );
+    expect(calls[0]?.url).toBe("https://relay.test/sync/shares/share%2F1/proposals");
   });
 
   it("refuses a sent proposal whose op count is not a count", async () => {
@@ -373,9 +358,9 @@ describe("listMyShareProposals", () => {
       ],
     });
 
-    await expect(
-      listMyShareProposals({ relay, shareId: "share-1" }),
-    ).rejects.toThrow(/ops is not a non-negative integer/u);
+    await expect(listMyShareProposals({ relay, shareId: "share-1" })).rejects.toThrow(
+      /ops is not a non-negative integer/u,
+    );
   });
 });
 

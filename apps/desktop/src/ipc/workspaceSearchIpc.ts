@@ -1,8 +1,5 @@
 import { isWorkspaceUpdatingRefusal } from "@dohc/workspace-engine-client";
-import type {
-  WorkspaceSearchStartResult,
-  workspaceSearchOperations,
-} from "./bridgeContract";
+import type { WorkspaceSearchStartResult, workspaceSearchOperations } from "./bridgeContract";
 import type { OperationHandlers } from "./operationTable";
 import type {
   WorkspaceSearchAuthority,
@@ -36,11 +33,7 @@ export function workspaceSearchHandlers<
         event,
         input.workspaceId,
         async (authority) => {
-          const started = await dependencies.owner.start(
-            event.sender,
-            authority,
-            input,
-          );
+          const started = await dependencies.owner.start(event.sender, authority, input);
           wasAccepted = true;
           accepted.resolve({ status: "accepted" });
           await started.settled;

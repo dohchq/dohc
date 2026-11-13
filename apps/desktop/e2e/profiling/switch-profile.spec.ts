@@ -27,9 +27,7 @@ const COMPLETION_PHASES = [
 
 function switcherOption(page: Page, workspaceId: string) {
   return page
-    .locator(
-      `[data-testid="workspace-switcher-option"][data-workspace-id="${workspaceId}"]`,
-    )
+    .locator(`[data-testid="workspace-switcher-option"][data-workspace-id="${workspaceId}"]`)
     .getByRole("button");
 }
 
@@ -45,8 +43,8 @@ async function switchWorkspace(page: Page, workspaceId: string): Promise<number>
         const entry = (await readSwitchTimeline(page)).at(-1);
         return Boolean(
           entry &&
-            entry.ordinal > previousOrdinal &&
-            COMPLETION_PHASES.every((phase) => entry.phases[phase] !== undefined),
+          entry.ordinal > previousOrdinal &&
+          COMPLETION_PHASES.every((phase) => entry.phases[phase] !== undefined),
         );
       },
       { timeout: 120_000 },

@@ -1,17 +1,17 @@
-import { createHash } from 'node:crypto';
-import { open, readdir, readFile } from 'node:fs/promises';
-import { join } from 'node:path';
-import { setTimeout as delay } from 'node:timers/promises';
-import { classifyProcess, recordId } from './packaged-surfaces.mjs';
+import { createHash } from "node:crypto";
+import { open, readdir, readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+import { classifyProcess, recordId } from "./packaged-surfaces.mjs";
 
-export const DOCUMENT_FOLDER = 'automation-bench';
-export const DATASET_FOLDER = 'automation-data';
+export const DOCUMENT_FOLDER = "automation-bench";
+export const DATASET_FOLDER = "automation-data";
 const DATASET_PATH = `${DATASET_FOLDER}/dataset.json`;
-export const DATASET_NAME = 'Automation bench';
+export const DATASET_NAME = "Automation bench";
 // The trigger record sorts first in both tables: documents order by file path, datasets by primary key.
 export const TRIGGER = {
-  document: { path: `${DOCUMENT_FOLDER}/0-trigger.md`, label: 'Trigger' },
-  dataset: { id: '0-trigger', label: 'record 0-trigger' },
+  document: { path: `${DOCUMENT_FOLDER}/0-trigger.md`, label: "Trigger" },
+  dataset: { id: "0-trigger", label: "record 0-trigger" },
 };
 // A case that runs longer than the executor's five-minute attempt deadline has failed.
 export const CASE_TIMEOUT_MS = 300_000;
@@ -19,25 +19,42 @@ export const CASE_TIMEOUT_MS = 300_000;
 // refuse. Pass the candidate's limits to measure a package that raises them.
 export const DEFAULT_LIMITS = { findCap: 500, writeCap: 200 };
 // A refusal names the limit it hit; any other failure fails the case.
-export const LIMIT_REFUSAL = /matched more than \d+ records|change more than \d+ fields|more data than dohc can save/;
+export const LIMIT_REFUSAL =
+  /matched more than \d+ records|change more than \d+ fields|more data than dohc can save/;
 
-const FIELDS = [['Name', 'text'], ['Case', 'text'], ['N', 'number'], ['A', 'number'], ['B', 'number'], ['C', 'number'], ['D', 'number'],
-  ['Stage', 'text'], ['Seen', 'checkbox'], ['F1', 'checkbox'], ['F2', 'checkbox'], ['F3', 'checkbox'], ['F4', 'checkbox'], ['F5', 'checkbox'],
-  ['Hit', 'checkbox'], ['Last', 'number'], ['Notes', 'text']];
+const FIELDS = [
+  ["Name", "text"],
+  ["Case", "text"],
+  ["N", "number"],
+  ["A", "number"],
+  ["B", "number"],
+  ["C", "number"],
+  ["D", "number"],
+  ["Stage", "text"],
+  ["Seen", "checkbox"],
+  ["F1", "checkbox"],
+  ["F2", "checkbox"],
+  ["F3", "checkbox"],
+  ["F4", "checkbox"],
+  ["F5", "checkbox"],
+  ["Hit", "checkbox"],
+  ["Last", "number"],
+  ["Notes", "text"],
+];
 const FIELD_NAMES = FIELDS.map(([name]) => name);
 // 50 wide records put about 200 KB of Notes in the formula scope, under its 256 KiB bound, and the
 // literal they receive is under the 4,000-character bound on text in automations.yaml.
 const WIDE_NOTE_CHARS = 4000;
 const WIDE_SET_CHARS = 3900;
-export const wideNote = n => `Record ${n}. `.padEnd(WIDE_NOTE_CHARS, 'abcdefghij');
-export const WIDE_SET = 'Updated. '.padEnd(WIDE_SET_CHARS, '0123456789');
+export const wideNote = (n) => `Record ${n}. `.padEnd(WIDE_NOTE_CHARS, "abcdefghij");
+export const WIDE_SET = "Updated. ".padEnd(WIDE_SET_CHARS, "0123456789");
 
-const numbered = count => Array.from({ length: count }, (_, index) => index + 1);
+const numbered = (count) => Array.from({ length: count }, (_, index) => index + 1);
 const find = (as, field, value) => ({ find: { field, value }, as });
 const set = (records, values) => ({ set: values, records });
-const changed = values => seed => ({ ...seed, ...values(seed) });
+const changed = (values) => (seed) => ({ ...seed, ...values(seed) });
 // Each fifth of the 300 five-finds records moves the window by 50, so each record is in one or two Finds.
-const windows = [1, 2, 3, 4, 5].map(k => ({ k, from: (k - 1) * 50 + 1, to: (k - 1) * 50 + 100 }));
+const windows = [1, 2, 3, 4, 5].map((k) => ({ k, from: (k - 1) * 50 + 1, to: (k - 1) * 50 + 100 }));
 
 /**
  * The cases, in the order the harness presses them. `seed` lists the case's records by `N`. `expect`
@@ -47,154 +64,388 @@ const windows = [1, 2, 3, 4, 5].map(k => ({ k, from: (k - 1) * 50 + 1, to: (k - 
  * the package refuses must leave every record as seeded and add none.
  */
 export function automationCases({ findCap, writeCap }) {
-  const baseline = (name, contention = false) => ({ name, contention, matches: 50, assignments: 200,
-    seed: numbered(50).map(n => ({ N: n })),
-    steps: [find('found', 'Case', name), set('found', { A: 1, B: 2, C: '=record.N * 2', D: '=record.N + 1' })],
-    expect: records => ({ records: records.map(changed(r => ({ A: 1, B: 2, C: r.N * 2, D: r.N + 1 }))), added: [] }) });
-  const fiveHundred = (name, contention = false) => ({ name, contention, matches: 500, assignments: 1000,
-    seed: numbered(500).map(n => ({ N: n })),
-    steps: [find('found', 'Case', name), set('found', { A: 1, C: '=record.N * 2' })],
-    expect: records => ({ records: records.map(changed(r => ({ A: 1, C: r.N * 2 }))), added: [] }) });
+  const baseline = (name, contention = false) => ({
+    name,
+    contention,
+    matches: 50,
+    assignments: 200,
+    seed: numbered(50).map((n) => ({ N: n })),
+    steps: [
+      find("found", "Case", name),
+      set("found", { A: 1, B: 2, C: "=record.N * 2", D: "=record.N + 1" }),
+    ],
+    expect: (records) => ({
+      records: records.map(changed((r) => ({ A: 1, B: 2, C: r.N * 2, D: r.N + 1 }))),
+      added: [],
+    }),
+  });
+  const fiveHundred = (name, contention = false) => ({
+    name,
+    contention,
+    matches: 500,
+    assignments: 1000,
+    seed: numbered(500).map((n) => ({ N: n })),
+    steps: [find("found", "Case", name), set("found", { A: 1, C: "=record.N * 2" })],
+    expect: (records) => ({
+      records: records.map(changed((r) => ({ A: 1, C: r.N * 2 }))),
+      added: [],
+    }),
+  });
   // The Find limit is above the write limit, so a cap case changes at most its first 10 records.
-  const cap = (name, count) => ({ name, matches: count, assignments: Math.min(count, 10),
-    seed: numbered(count).map(n => ({ N: n, Stage: n <= 10 ? `${name}-mark` : name })),
-    steps: [find('found', 'Case', name), find('marked', 'Stage', `${name}-mark`), set('marked', { A: 1 })],
-    expect: records => ({ records: records.map(changed(r => r.N <= 10 ? { A: 1 } : {})), added: [] }) });
+  const cap = (name, count) => ({
+    name,
+    matches: count,
+    assignments: Math.min(count, 10),
+    seed: numbered(count).map((n) => ({ N: n, Stage: n <= 10 ? `${name}-mark` : name })),
+    steps: [
+      find("found", "Case", name),
+      find("marked", "Stage", `${name}-mark`),
+      set("marked", { A: 1 }),
+    ],
+    expect: (records) => ({
+      records: records.map(changed((r) => (r.N <= 10 ? { A: 1 } : {}))),
+      added: [],
+    }),
+  });
   const cases = [
-    baseline('baseline'),
-    fiveHundred('find-500'),
-    { name: 'five-finds', matches: 100, assignments: 1000,
-      seed: numbered(300).map(n => ({ N: n, ...Object.fromEntries(windows.filter(w => n >= w.from && n <= w.to).map(w => [`F${w.k}`, true])) })),
-      steps: windows.flatMap(({ k }) => [find(`f${k}`, `F${k}`, true), set(`f${k}`, { Hit: true, Last: k })]),
-      expect: records => ({ records: records.map(changed(r => ({ Hit: true, Last: Math.max(...windows.filter(w => r[`F${w.k}`]).map(w => w.k)) }))), added: [] }) },
+    baseline("baseline"),
+    fiveHundred("find-500"),
+    {
+      name: "five-finds",
+      matches: 100,
+      assignments: 1000,
+      seed: numbered(300).map((n) => ({
+        N: n,
+        ...Object.fromEntries(
+          windows.filter((w) => n >= w.from && n <= w.to).map((w) => [`F${w.k}`, true]),
+        ),
+      })),
+      steps: windows.flatMap(({ k }) => [
+        find(`f${k}`, `F${k}`, true),
+        set(`f${k}`, { Hit: true, Last: k }),
+      ]),
+      expect: (records) => ({
+        records: records.map(
+          changed((r) => ({
+            Hit: true,
+            Last: Math.max(...windows.filter((w) => r[`F${w.k}`]).map((w) => w.k)),
+          })),
+        ),
+        added: [],
+      }),
+    },
     // The first Find's records move into the second Find's condition. Read at run start, the second
     // Find sees only the 20 records that began there.
-    { name: 'set-then-find', matches: 40, assignments: 60, visibility: true,
-      seed: numbered(40).map(n => ({ N: n, Stage: n <= 20 ? 'stf-a' : 'stf-b' })),
-      steps: [find('moved', 'Stage', 'stf-a'), set('moved', { Stage: 'stf-b' }), find('staged', 'Stage', 'stf-b'), set('staged', { Seen: true })],
-      expect: (records, visibility) => ({ records: records.map(changed(r => ({ Stage: 'stf-b', ...(visibility === 'stepwise' || r.Stage === 'stf-b' ? { Seen: true } : {}) }))), added: [] }) },
+    {
+      name: "set-then-find",
+      matches: 40,
+      assignments: 60,
+      visibility: true,
+      seed: numbered(40).map((n) => ({ N: n, Stage: n <= 20 ? "stf-a" : "stf-b" })),
+      steps: [
+        find("moved", "Stage", "stf-a"),
+        set("moved", { Stage: "stf-b" }),
+        find("staged", "Stage", "stf-b"),
+        set("staged", { Seen: true }),
+      ],
+      expect: (records, visibility) => ({
+        records: records.map(
+          changed((r) => ({
+            Stage: "stf-b",
+            ...(visibility === "stepwise" || r.Stage === "stf-b" ? { Seen: true } : {}),
+          })),
+        ),
+        added: [],
+      }),
+    },
     // The Find after Add includes the added record only when steps read each other's changes.
-    { name: 'add-then-find', matches: 11, assignments: 15, visibility: true,
-      seed: numbered(10).map(n => ({ N: n, Stage: 'atf' })),
-      steps: [{ add: { Name: 'Added', Case: 'add-then-find', Stage: 'atf', N: 11 }, as: 'added' }, find('matched', 'Stage', 'atf'), set('matched', { Seen: true })],
-      expect: (records, visibility) => ({ records: records.map(changed(() => ({ Seen: true }))),
-        added: [{ Name: 'Added', Case: 'add-then-find', Stage: 'atf', N: 11, ...(visibility === 'stepwise' ? { Seen: true } : {}) }] }) },
-    cap('find-at-cap', findCap),
-    cap('find-over-cap', findCap + 1),
-    { name: 'wide', matches: 50, assignments: 100,
-      seed: numbered(50).map(n => ({ N: n, Notes: wideNote(n) })),
-      steps: [find('found', 'Case', 'wide'), set('found', { Notes: WIDE_SET, C: '=record.N * 2' })],
-      expect: records => ({ records: records.map(changed(r => ({ Notes: WIDE_SET, C: r.N * 2 }))), added: [] }) },
+    {
+      name: "add-then-find",
+      matches: 11,
+      assignments: 15,
+      visibility: true,
+      seed: numbered(10).map((n) => ({ N: n, Stage: "atf" })),
+      steps: [
+        { add: { Name: "Added", Case: "add-then-find", Stage: "atf", N: 11 }, as: "added" },
+        find("matched", "Stage", "atf"),
+        set("matched", { Seen: true }),
+      ],
+      expect: (records, visibility) => ({
+        records: records.map(changed(() => ({ Seen: true }))),
+        added: [
+          {
+            Name: "Added",
+            Case: "add-then-find",
+            Stage: "atf",
+            N: 11,
+            ...(visibility === "stepwise" ? { Seen: true } : {}),
+          },
+        ],
+      }),
+    },
+    cap("find-at-cap", findCap),
+    cap("find-over-cap", findCap + 1),
+    {
+      name: "wide",
+      matches: 50,
+      assignments: 100,
+      seed: numbered(50).map((n) => ({ N: n, Notes: wideNote(n) })),
+      steps: [find("found", "Case", "wide"), set("found", { Notes: WIDE_SET, C: "=record.N * 2" })],
+      expect: (records) => ({
+        records: records.map(changed((r) => ({ Notes: WIDE_SET, C: r.N * 2 }))),
+        added: [],
+      }),
+    },
     // The typing workload runs while these two run.
-    baseline('baseline-typing', true),
-    fiveHundred('find-500-typing', true),
+    baseline("baseline-typing", true),
+    fiveHundred("find-500-typing", true),
   ];
-  return cases.map(spec => {
-    const seed = spec.seed.map(values => ({ Name: `${spec.name} ${values.N}`, Case: spec.name, ...values }));
-    const expected = spec.matches > findCap || spec.assignments > writeCap ? 'refused' : 'done';
+  return cases.map((spec) => {
+    const seed = spec.seed.map((values) => ({
+      Name: `${spec.name} ${values.N}`,
+      Case: spec.name,
+      ...values,
+    }));
+    const expected = spec.matches > findCap || spec.assignments > writeCap ? "refused" : "done";
     // Two receipts measured the same case only when its records, steps, and expected outcome match.
-    const fixtureSha256 = createHash('sha256').update(JSON.stringify([spec.name, seed, spec.steps, expected])).digest('hex');
+    const fixtureSha256 = createHash("sha256")
+      .update(JSON.stringify([spec.name, seed, spec.steps, expected]))
+      .digest("hex");
     return { contention: false, visibility: false, ...spec, seed, expected, fixtureSha256 };
   });
 }
 
-const yamlText = value => JSON.stringify(value);
+const yamlText = (value) => JSON.stringify(value);
 const findCondition = ({ field, value }) => `record.${field} == ${JSON.stringify(value)}`;
-const OPERATIONS = { find: 'records.list', set: 'records.edit', add: 'records.create' };
+const OPERATIONS = { find: "records.list", set: "records.edit", add: "records.create" };
 
 /** automations.yaml for either kind: a dataset step also names the approved operation it invokes. */
 export function automationsYaml(cases, kind) {
-  const operation = step => kind === 'dataset' ? [`        operation: ${yamlText(OPERATIONS[step])}`] : [];
-  const values = entries => Object.entries(entries).map(([field, value]) => `          ${yamlText(field)}: ${yamlText(value)}`);
-  const lines = ['version: 1', 'automations:'];
+  const operation = (step) =>
+    kind === "dataset" ? [`        operation: ${yamlText(OPERATIONS[step])}`] : [];
+  const values = (entries) =>
+    Object.entries(entries).map(
+      ([field, value]) => `          ${yamlText(field)}: ${yamlText(value)}`,
+    );
+  const lines = ["version: 1", "automations:"];
   for (const spec of cases) {
-    lines.push(`  - id: ${yamlText(`bench-${spec.name}`)}`, `    name: ${yamlText(spec.name)}`, '    when:', `      button: ${yamlText(spec.name)}`, '    do:');
+    lines.push(
+      `  - id: ${yamlText(`bench-${spec.name}`)}`,
+      `    name: ${yamlText(spec.name)}`,
+      "    when:",
+      `      button: ${yamlText(spec.name)}`,
+      "    do:",
+    );
     for (const step of spec.steps) {
-      if (step.find) lines.push(`      - find: ${yamlText(findCondition(step.find))}`, `        as: ${step.as}`, ...operation('find'));
-      else if (step.set) lines.push('      - set:', ...values(step.set), `        records: ${step.records}`, ...operation('set'));
-      else lines.push('      - add-record:', ...values(step.add), `        as: ${step.as}`, ...operation('add'));
+      if (step.find)
+        lines.push(
+          `      - find: ${yamlText(findCondition(step.find))}`,
+          `        as: ${step.as}`,
+          ...operation("find"),
+        );
+      else if (step.set)
+        lines.push(
+          "      - set:",
+          ...values(step.set),
+          `        records: ${step.records}`,
+          ...operation("set"),
+        );
+      else
+        lines.push(
+          "      - add-record:",
+          ...values(step.add),
+          `        as: ${step.as}`,
+          ...operation("add"),
+        );
     }
   }
-  return `${lines.join('\n')}\n`;
+  return `${lines.join("\n")}\n`;
 }
 
 /** A case's automation: its Collection folder and its name in automations.yaml. */
 export function automationOf(kind, name) {
-  return { collectionPath: kind === 'document' ? DOCUMENT_FOLDER : DATASET_FOLDER, name: `bench-${name}` };
+  return {
+    collectionPath: kind === "document" ? DOCUMENT_FOLDER : DATASET_FOLDER,
+    name: `bench-${name}`,
+  };
 }
 
-const frontmatter = values => Object.entries(values).map(([key, value]) => `${key}: ${yamlText(value)}`).join('\n');
-const documentPath = (name, n) => `${DOCUMENT_FOLDER}/${name}-${String(n).padStart(4, '0')}.md`;
+const frontmatter = (values) =>
+  Object.entries(values)
+    .map(([key, value]) => `${key}: ${yamlText(value)}`)
+    .join("\n");
+const documentPath = (name, n) => `${DOCUMENT_FOLDER}/${name}-${String(n).padStart(4, "0")}.md`;
 
 /**
  * The document Collection: its schema and automations first, then the trigger record, then every
  * case's records with pre-minted ids. The table shows only the name and the buttons.
  */
 export function documentAutomationFiles(cases) {
-  const schema = ['name: Automation bench', 'fields:', ...FIELDS.flatMap(([name, type]) => [`  ${yamlText(name)}:`, `    type: ${type}`]),
-    ...cases.flatMap(({ name }) => [`  ${yamlText(name)}:`, '    type: button']),
-    'views:', '  - name: Table', '    kind: table', `    visibleFields: ${yamlText(['Name', ...cases.map(({ name }) => name)])}`, ''].join('\n');
-  const record = (path, values) => ({ path, content: `---\nid: ${recordId(path)}\n${frontmatter(values)}\n---\n# ${values.Name}\n` });
+  const schema = [
+    "name: Automation bench",
+    "fields:",
+    ...FIELDS.flatMap(([name, type]) => [`  ${yamlText(name)}:`, `    type: ${type}`]),
+    ...cases.flatMap(({ name }) => [`  ${yamlText(name)}:`, "    type: button"]),
+    "views:",
+    "  - name: Table",
+    "    kind: table",
+    `    visibleFields: ${yamlText(["Name", ...cases.map(({ name }) => name)])}`,
+    "",
+  ].join("\n");
+  const record = (path, values) => ({
+    path,
+    content: `---\nid: ${recordId(path)}\n${frontmatter(values)}\n---\n# ${values.Name}\n`,
+  });
   return [
     { path: `${DOCUMENT_FOLDER}/collection.yaml`, content: schema },
-    { path: `${DOCUMENT_FOLDER}/automations.yaml`, content: automationsYaml(cases, 'document') },
-    record(TRIGGER.document.path, { Name: TRIGGER.document.label, Case: 'trigger' }),
-    ...cases.flatMap(spec => spec.seed.map(values => record(documentPath(spec.name, values.N), values))),
+    { path: `${DOCUMENT_FOLDER}/automations.yaml`, content: automationsYaml(cases, "document") },
+    record(TRIGGER.document.path, { Name: TRIGGER.document.label, Case: "trigger" }),
+    ...cases.flatMap((spec) =>
+      spec.seed.map((values) => record(documentPath(spec.name, values.N), values)),
+    ),
   ];
 }
 
-const uuid = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
-const DATASET_ID = uuid(1), TABLE_ID = uuid(2), ID_FIELD = uuid(10);
+const uuid = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+const DATASET_ID = uuid(1),
+  TABLE_ID = uuid(2),
+  ID_FIELD = uuid(10);
 const fieldIdOf = new Map(FIELDS.map(([name], index) => [name, uuid(11 + index)]));
 const OPERATION_IDS = { list: uuid(200), create: uuid(201), edit: uuid(202) };
 
 /** The generated dataset: one table with the same fields, an id key, the case buttons, and generated list, create, and edit operations. */
 export function datasetAutomationDefinition(cases) {
-  const columns = FIELDS.map(([name, type]) => ({ fieldId: fieldIdOf.get(name), name, sqlColumn: name === 'Case' ? 'bench_case' : name.toLowerCase(), type, required: false, unique: false }));
-  const all = columns.map(field => field.fieldId);
+  const columns = FIELDS.map(([name, type]) => ({
+    fieldId: fieldIdOf.get(name),
+    name,
+    sqlColumn: name === "Case" ? "bench_case" : name.toLowerCase(),
+    type,
+    required: false,
+    unique: false,
+  }));
+  const all = columns.map((field) => field.fieldId);
   return {
-    formatVersion: 1, datasetId: DATASET_ID, name: DATASET_NAME, schemaPath: `${DATASET_FOLDER}/schema.sql`, operationsPath: `${DATASET_FOLDER}/operations.js`,
+    formatVersion: 1,
+    datasetId: DATASET_ID,
+    name: DATASET_NAME,
+    schemaPath: `${DATASET_FOLDER}/schema.sql`,
+    operationsPath: `${DATASET_FOLDER}/operations.js`,
     // The Explorer lists a dataset by its table's name.
-    tables: [{ tableId: TABLE_ID, name: DATASET_NAME, sqlName: 'records', primaryKey: 'id', fields: [
-      { fieldId: ID_FIELD, name: 'ID', sqlColumn: 'id', type: 'text', required: true, unique: true }, ...columns,
-      ...cases.map(({ name }, index) => ({ fieldId: uuid(100 + index), name, type: 'button' })),
-    ] }],
+    tables: [
+      {
+        tableId: TABLE_ID,
+        name: DATASET_NAME,
+        sqlName: "records",
+        primaryKey: "id",
+        fields: [
+          {
+            fieldId: ID_FIELD,
+            name: "ID",
+            sqlColumn: "id",
+            type: "text",
+            required: true,
+            unique: true,
+          },
+          ...columns,
+          ...cases.map(({ name }, index) => ({ fieldId: uuid(100 + index), name, type: "button" })),
+        ],
+      },
+    ],
     operations: [
-      { operationId: OPERATION_IDS.list, name: OPERATIONS.find, label: 'View', tableId: TABLE_ID, kind: 'read', access: 'owner', readOnly: true, fieldIds: [ID_FIELD, ...all] },
-      { operationId: OPERATION_IDS.create, name: OPERATIONS.add, label: 'Create', tableId: TABLE_ID, kind: 'create', access: 'owner', readOnly: false, fieldIds: [ID_FIELD, ...all] },
-      { operationId: OPERATION_IDS.edit, name: OPERATIONS.set, label: 'Edit', tableId: TABLE_ID, kind: 'edit', access: 'owner', readOnly: false, fieldIds: all },
+      {
+        operationId: OPERATION_IDS.list,
+        name: OPERATIONS.find,
+        label: "View",
+        tableId: TABLE_ID,
+        kind: "read",
+        access: "owner",
+        readOnly: true,
+        fieldIds: [ID_FIELD, ...all],
+      },
+      {
+        operationId: OPERATION_IDS.create,
+        name: OPERATIONS.add,
+        label: "Create",
+        tableId: TABLE_ID,
+        kind: "create",
+        access: "owner",
+        readOnly: false,
+        fieldIds: [ID_FIELD, ...all],
+      },
+      {
+        operationId: OPERATION_IDS.edit,
+        name: OPERATIONS.set,
+        label: "Edit",
+        tableId: TABLE_ID,
+        kind: "edit",
+        access: "owner",
+        readOnly: false,
+        fieldIds: all,
+      },
     ],
   };
 }
 
-const byFieldId = values => Object.fromEntries(Object.entries(values).map(([name, value]) => [fieldIdOf.get(name), value]));
+const byFieldId = (values) =>
+  Object.fromEntries(Object.entries(values).map(([name, value]) => [fieldIdOf.get(name), value]));
 
 /** What the harness asks dataset-cli.mjs to create: the definition, then the trigger and every case's records through the create operation. */
 export function datasetSetupRequest(cases, workspaceId) {
   const row = (id, values) => ({ [ID_FIELD]: id, ...byFieldId(values) });
-  return { mode: 'setup', workspaceId, datasetPath: DATASET_PATH, definition: datasetAutomationDefinition(cases), createOperationId: OPERATION_IDS.create, idFieldId: ID_FIELD,
-    records: [row(TRIGGER.dataset.id, { Name: 'Trigger', Case: 'trigger' }), ...cases.flatMap(spec => spec.seed.map(values => row(`${spec.name}-${String(values.N).padStart(4, '0')}`, values)))] };
+  return {
+    mode: "setup",
+    workspaceId,
+    datasetPath: DATASET_PATH,
+    definition: datasetAutomationDefinition(cases),
+    createOperationId: OPERATION_IDS.create,
+    idFieldId: ID_FIELD,
+    records: [
+      row(TRIGGER.dataset.id, { Name: "Trigger", Case: "trigger" }),
+      ...cases.flatMap((spec) =>
+        spec.seed.map((values) => row(`${spec.name}-${String(values.N).padStart(4, "0")}`, values)),
+      ),
+    ],
+  };
 }
 
 /** What the harness asks dataset-cli.mjs to list: one case's records, read through the approved list operation. */
 export function datasetListRequest(setup, workspaceId, name) {
-  return { mode: 'list', workspaceId, datasetPath: DATASET_PATH, datasetId: setup.datasetId, revision: setup.revision, revisionSha256: setup.revisionSha256,
-    operationId: OPERATION_IDS.list, filters: [{ fieldId: fieldIdOf.get('Case'), value: name }] };
+  return {
+    mode: "list",
+    workspaceId,
+    datasetPath: DATASET_PATH,
+    datasetId: setup.datasetId,
+    revision: setup.revision,
+    revisionSha256: setup.revisionSha256,
+    operationId: OPERATION_IDS.list,
+    filters: [{ fieldId: fieldIdOf.get("Case"), value: name }],
+  };
 }
 
 /** A listed dataset row's values by field name. */
 export function datasetRowValues(row) {
-  return Object.fromEntries(FIELD_NAMES.map(name => [name, row.values[fieldIdOf.get(name)] ?? null]));
+  return Object.fromEntries(
+    FIELD_NAMES.map((name) => [name, row.values[fieldIdOf.get(name)] ?? null]),
+  );
 }
 
 /** One digest over both Collections' fixtures and the cases' expectations, for the receipt. */
 export function automationFixtureDigest(cases) {
-  const hash = createHash('sha256');
+  const hash = createHash("sha256");
   for (const file of documentAutomationFiles(cases)) hash.update(`${file.path}\0${file.content}\0`);
-  hash.update(JSON.stringify(datasetSetupRequest(cases, '')));
-  hash.update(automationsYaml(cases, 'dataset'));
-  hash.update(JSON.stringify(cases.map(({ name, expected, matches, assignments }) => [name, expected, matches, assignments])));
-  return hash.digest('hex');
+  hash.update(JSON.stringify(datasetSetupRequest(cases, "")));
+  hash.update(automationsYaml(cases, "dataset"));
+  hash.update(
+    JSON.stringify(
+      cases.map(({ name, expected, matches, assignments }) => [
+        name,
+        expected,
+        matches,
+        assignments,
+      ]),
+    ),
+  );
+  return hash.digest("hex");
 }
 
 /** A document record's frontmatter values, parsed with js-yaml's `load`, or null for a file without frontmatter. */
@@ -202,7 +453,9 @@ export function documentValues(text, load) {
   const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text);
   if (!match) return null;
   const parsed = load(match[1]);
-  return parsed && typeof parsed === 'object' ? Object.fromEntries(FIELD_NAMES.map(name => [name, parsed[name] ?? null])) : null;
+  return parsed && typeof parsed === "object"
+    ? Object.fromEntries(FIELD_NAMES.map((name) => [name, parsed[name] ?? null]))
+    : null;
 }
 
 /**
@@ -211,15 +464,24 @@ export function documentValues(text, load) {
  */
 export async function readDocumentCase(workspaceRoot, spec, load, createdPaths = []) {
   const records = [];
-  for (const path of [...spec.seed.map(values => documentPath(spec.name, values.N)), ...createdPaths]) {
-    const text = await readFile(join(workspaceRoot, path), 'utf8').catch(error => { if (error.code === 'ENOENT') return null; throw error; });
+  for (const path of [
+    ...spec.seed.map((values) => documentPath(spec.name, values.N)),
+    ...createdPaths,
+  ]) {
+    const text = await readFile(join(workspaceRoot, path), "utf8").catch((error) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
     const values = text === null ? null : documentValues(text, load);
     if (values?.Case === spec.name) records.push(values);
   }
   return records;
 }
 
-const shown = value => { const text = JSON.stringify(value) ?? 'undefined'; return text.length > 40 ? `${text.slice(0, 37)}...` : text; };
+const shown = (value) => {
+  const text = JSON.stringify(value) ?? "undefined";
+  return text.length > 40 ? `${text.slice(0, 37)}...` : text;
+};
 function compareRecords(expected, actual) {
   const problems = [];
   const found = new Map();
@@ -230,9 +492,15 @@ function compareRecords(expected, actual) {
   for (const record of expected) {
     const current = found.get(record.N);
     found.delete(record.N);
-    if (!current) { problems.push(`N ${record.N} is missing`); continue; }
+    if (!current) {
+      problems.push(`N ${record.N} is missing`);
+      continue;
+    }
     for (const field of FIELD_NAMES) {
-      if ((current[field] ?? null) !== (record[field] ?? null)) problems.push(`N ${record.N} ${field} is ${shown(current[field] ?? null)}, expected ${shown(record[field] ?? null)}`);
+      if ((current[field] ?? null) !== (record[field] ?? null))
+        problems.push(
+          `N ${record.N} ${field} is ${shown(current[field] ?? null)}, expected ${shown(record[field] ?? null)}`,
+        );
     }
   }
   for (const n of found.keys()) problems.push(`N ${n} was not expected`);
@@ -245,22 +513,32 @@ function compareRecords(expected, actual) {
  * tell the visibilities apart reports null.
  */
 export function verifyCase(spec, outcome, actual) {
-  if (outcome !== 'done') {
+  if (outcome !== "done") {
     const problems = compareRecords(spec.seed, actual);
-    return { ok: problems.length === 0, visibility: null, problems: problems.slice(0, 10), problemCount: problems.length };
+    return {
+      ok: problems.length === 0,
+      visibility: null,
+      problems: problems.slice(0, 10),
+      problemCount: problems.length,
+    };
   }
-  const attempts = (spec.visibility ? ['run-start', 'stepwise'] : [null]).map(visibility => {
+  const attempts = (spec.visibility ? ["run-start", "stepwise"] : [null]).map((visibility) => {
     const { records, added } = spec.expect(spec.seed, visibility);
     return { visibility, problems: compareRecords([...records, ...added], actual) };
   });
-  const best = attempts.find(attempt => attempt.problems.length === 0) ?? attempts.at(-1);
-  return { ok: best.problems.length === 0, visibility: best.visibility, problems: best.problems.slice(0, 10), problemCount: best.problems.length };
+  const best = attempts.find((attempt) => attempt.problems.length === 0) ?? attempts.at(-1);
+  return {
+    ok: best.problems.length === 0,
+    visibility: best.visibility,
+    problems: best.problems.slice(0, 10),
+    problemCount: best.problems.length,
+  };
 }
 
 /** A failed press is refused when its Notice body names a limit. */
 export function classifyOutcome(observed, body) {
-  if (observed.outcome !== 'failed') return observed.outcome;
-  return LIMIT_REFUSAL.test(body ?? '') ? 'refused' : 'failed';
+  if (observed.outcome !== "failed") return observed.outcome;
+  return LIMIT_REFUSAL.test(body ?? "") ? "refused" : "failed";
 }
 
 /** Main's cached Notice list, through the same preload bridge the Notices panel uses. */
@@ -270,63 +548,103 @@ export async function readAutomationNotices(page) {
 
 /** A new failure Notice for this press's workspace and Collection, never an older same-title Notice. */
 export function noticeForPress(notices, previousNotices, workspaceId, automation) {
-  const previousIds = new Set(previousNotices.map(notice => notice.noticeId));
-  return notices.find(notice => !previousIds.has(notice.noticeId) && notice.kind === 'automation-failed'
-    && notice.workspaceId === workspaceId && notice.target?.path === `${automation.collectionPath}/automations.yaml`
-    && notice.target?.automation?.endsWith(`#${automation.name}`)) ?? null;
+  const previousIds = new Set(previousNotices.map((notice) => notice.noticeId));
+  return (
+    notices.find(
+      (notice) =>
+        !previousIds.has(notice.noticeId) &&
+        notice.kind === "automation-failed" &&
+        notice.workspaceId === workspaceId &&
+        notice.target?.path === `${automation.collectionPath}/automations.yaml` &&
+        notice.target?.automation?.endsWith(`#${automation.name}`),
+    ) ?? null
+  );
 }
 
 /** The latest run saved after this press, or null when the press saved no new run. */
 export function runForPress(runs, previousRuns) {
-  const previousClaims = new Set(previousRuns.map(run => run.claimId));
-  return runs.findLast(run => !previousClaims.has(run.claimId)) ?? null;
+  const previousClaims = new Set(previousRuns.map((run) => run.claimId));
+  return runs.findLast((run) => !previousClaims.has(run.claimId)) ?? null;
 }
 
 /** Settle words from useAutomationButtons and main's automationFailedNotice builder. */
 export function outcomeTexts(field, label) {
-  return { done: [`Ran ${field} on ${label}`], skipped: [`${field} made no changes to ${label}`], ended: [`${field} finished on ${label}`],
-    failed: [`Automation "${field}" failed`, `Automation "${field}" did not finish`, `Automation "${field}" switched off`, `${field} did not start.`] };
+  return {
+    done: [`Ran ${field} on ${label}`],
+    skipped: [`${field} made no changes to ${label}`],
+    ended: [`${field} finished on ${label}`],
+    failed: [
+      `Automation "${field}" failed`,
+      `Automation "${field}" did not finish`,
+      `Automation "${field}" switched off`,
+      `${field} did not start.`,
+    ],
+  };
 }
 
 /** A previous case's toast must go before another press can show the same title. */
 export async function dismissToasts(page) {
-  const dismiss = page.locator('[data-testid="notice-toasts"] button[aria-label^="Dismiss workspace"], [data-testid="sent-notice-toast"] button[aria-label="Close"]');
+  const dismiss = page.locator(
+    '[data-testid="notice-toasts"] button[aria-label^="Dismiss workspace"], [data-testid="sent-notice-toast"] button[aria-label="Close"]',
+  );
   while (await dismiss.count()) await dismiss.first().click();
 }
 
 // Read and stat the same open file so a replacement cannot mix their byte counts.
 async function readRunHeader(path) {
-  const file = await open(path, 'r').catch(error => { if (error.code === 'ENOENT') return null; throw error; });
+  const file = await open(path, "r").catch((error) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
   if (file === null) return null;
   try {
-    const chunk = Buffer.alloc(4096), parts = [];
+    const chunk = Buffer.alloc(4096),
+      parts = [];
     const maxHeaderBytes = 4 * 1024 * 1024;
     for (let position = 0; position < maxHeaderBytes;) {
-      const { bytesRead } = await file.read(chunk, 0, Math.min(chunk.length, maxHeaderBytes - position), position);
+      const { bytesRead } = await file.read(
+        chunk,
+        0,
+        Math.min(chunk.length, maxHeaderBytes - position),
+        position,
+      );
       if (bytesRead === 0) return null;
       const newline = chunk.subarray(0, bytesRead).indexOf(10);
       parts.push(Buffer.from(chunk.subarray(0, newline < 0 ? bytesRead : newline + 1)));
       if (newline >= 0) {
         let header;
-        try { header = JSON.parse(Buffer.concat(parts).toString('utf8')); } catch { return null; }
-        if (header?.kind !== 'header') return null;
+        try {
+          header = JSON.parse(Buffer.concat(parts).toString("utf8"));
+        } catch {
+          return null;
+        }
+        if (header?.kind !== "header") return null;
         return { header, headerBytes: position + newline + 1, size: (await file.stat()).size };
       }
       position += bytesRead;
     }
     return null;
-  } finally { await file.close(); }
+  } finally {
+    await file.close();
+  }
 }
 
 async function readRunFile(path) {
-  const text = await readFile(path, 'utf8').catch(error => { if (error.code === 'ENOENT') return null; throw error; });
+  const text = await readFile(path, "utf8").catch((error) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
   if (text === null) return null;
-  const newline = text.indexOf('\n');
+  const newline = text.indexOf("\n");
   if (newline < 0) return null;
   const headerText = text.slice(0, newline + 1);
   let header;
-  try { header = JSON.parse(headerText); } catch { return null; }
-  if (header?.kind !== 'header') return null;
+  try {
+    header = JSON.parse(headerText);
+  } catch {
+    return null;
+  }
+  if (header?.kind !== "header") return null;
   return { header, headerText, progressText: text.slice(newline + 1) };
 }
 
@@ -336,15 +654,28 @@ async function readRunFile(path) {
  * Collection's path and the automation's name.
  */
 async function runFolder(workspaceRoot, automation) {
-  const root = join(workspaceRoot, '.dohc', 'local', 'automations', 'runs');
+  const root = join(workspaceRoot, ".dohc", "local", "automations", "runs");
   let folders;
-  try { folders = await readdir(root); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  try {
+    folders = await readdir(root);
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
   for (const folder of folders) {
-    const headers = (await readdir(join(root, folder)).catch(() => [])).filter(file => file.endsWith('.json'));
+    const headers = (await readdir(join(root, folder)).catch(() => [])).filter((file) =>
+      file.endsWith(".json"),
+    );
     for (const file of headers) {
       const header = (await readRunHeader(join(root, folder, file)))?.header;
-      const collection = header?.collections?.find(entry => entry.path === automation.collectionPath);
-      if (collection && header.automationId === `collection:${collection.collectionId}#${automation.name}`) return { folder: join(root, folder), automationId: header.automationId };
+      const collection = header?.collections?.find(
+        (entry) => entry.path === automation.collectionPath,
+      );
+      if (
+        collection &&
+        header.automationId === `collection:${collection.collectionId}#${automation.name}`
+      )
+        return { folder: join(root, folder), automationId: header.automationId };
     }
   }
   return null;
@@ -357,9 +688,14 @@ export async function journalBytes(workspaceRoot, automation) {
   if (!found) return sizes;
   const { folder } = found;
   let files;
-  try { files = await readdir(folder); } catch (error) { if (error.code === 'ENOENT') return sizes; throw error; }
+  try {
+    files = await readdir(folder);
+  } catch (error) {
+    if (error.code === "ENOENT") return sizes;
+    throw error;
+  }
   for (const file of files) {
-    if (!file.endsWith('.json')) continue;
+    if (!file.endsWith(".json")) continue;
     const saved = await readRunHeader(join(folder, file));
     if (saved === null || saved.header.automationId !== found.automationId) continue;
     sizes.headerBytes += saved.headerBytes;
@@ -378,44 +714,83 @@ export async function readRunJournal(workspaceRoot, automation) {
   if (!found) return [];
   const { folder, automationId } = found;
   let files;
-  try { files = await readdir(folder); } catch (error) { if (error.code === 'ENOENT') return []; throw error; }
+  try {
+    files = await readdir(folder);
+  } catch (error) {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  }
   const runs = [];
-  for (const file of files.filter(name => name.endsWith('.json'))) {
+  for (const file of files.filter((name) => name.endsWith(".json"))) {
     const saved = await readRunFile(join(folder, file));
     if (saved === null) continue;
     const { header, headerText, progressText } = saved;
     if (header.automationId !== automationId) continue;
-    const lines = progressText.split('\n').slice(0, -1).filter(Boolean).map(line => JSON.parse(line));
-    const steps = lines.filter(line => line.kind === 'step');
-    const effects = lines.filter(line => line.kind === 'effect');
-    const writes = effects.flatMap(line => line.writes);
-    const total = (entries, field) => entries.every(line => Number.isFinite(line[field])) ? entries.reduce((sum, line) => sum + line[field], 0) : null;
-    const findMs = steps.length ? total(steps, 'findMs') : null;
-    const planMs = steps.length ? total(steps, 'planMs') : null;
+    const lines = progressText
+      .split("\n")
+      .slice(0, -1)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    const steps = lines.filter((line) => line.kind === "step");
+    const effects = lines.filter((line) => line.kind === "effect");
+    const writes = effects.flatMap((line) => line.writes);
+    const total = (entries, field) =>
+      entries.every((line) => Number.isFinite(line[field]))
+        ? entries.reduce((sum, line) => sum + line[field], 0)
+        : null;
+    const findMs = steps.length ? total(steps, "findMs") : null;
+    const planMs = steps.length ? total(steps, "planMs") : null;
     const measured = findMs !== null && planMs !== null;
-    const appendMeasured = steps.length > 0 && steps.every(step => Number.isFinite(step.appendMs)
-      && Number.isInteger(step.appendCount) && step.appendCount >= 0
-      && step.appendCount === effects.filter(effect => effect.ordinal === step.ordinal).length);
-    runs.push({ claimId: header.claimId, startedAtMs: header.startedAtMs, finishedAtMs: header.finishedAtMs, outcome: header.outcome,
-      appendMs: appendMeasured ? total(steps, 'appendMs') : null,
-      appendCount: appendMeasured ? total(steps, 'appendCount') : null,
-      findMs, planMs, writeMs: effects.length || measured ? total(effects, 'writeMs') : null,
-      writes: effects.length || measured ? total(effects, 'writeCount') : null,
-      headerBytes: Buffer.byteLength(headerText), progressBytes: Buffer.byteLength(progressText), progressLines: lines.length,
-      fieldWrites: writes.reduce((sum, write) => sum + (write.kind === 'field' ? 1 : write.kind === 'dataset-edit' ? write.fields.length : 0), 0),
-      created: lines.filter(line => line.kind === 'created').length + writes.filter(write => write.kind === 'dataset-created').length,
-      createdPaths: lines.filter(line => line.kind === 'created').map(line => line.path) });
+    const appendMeasured =
+      steps.length > 0 &&
+      steps.every(
+        (step) =>
+          Number.isFinite(step.appendMs) &&
+          Number.isInteger(step.appendCount) &&
+          step.appendCount >= 0 &&
+          step.appendCount === effects.filter((effect) => effect.ordinal === step.ordinal).length,
+      );
+    runs.push({
+      claimId: header.claimId,
+      startedAtMs: header.startedAtMs,
+      finishedAtMs: header.finishedAtMs,
+      outcome: header.outcome,
+      appendMs: appendMeasured ? total(steps, "appendMs") : null,
+      appendCount: appendMeasured ? total(steps, "appendCount") : null,
+      findMs,
+      planMs,
+      writeMs: effects.length || measured ? total(effects, "writeMs") : null,
+      writes: effects.length || measured ? total(effects, "writeCount") : null,
+      headerBytes: Buffer.byteLength(headerText),
+      progressBytes: Buffer.byteLength(progressText),
+      progressLines: lines.length,
+      fieldWrites: writes.reduce(
+        (sum, write) =>
+          sum +
+          (write.kind === "field" ? 1 : write.kind === "dataset-edit" ? write.fields.length : 0),
+        0,
+      ),
+      created:
+        lines.filter((line) => line.kind === "created").length +
+        writes.filter((write) => write.kind === "dataset-created").length,
+      createdPaths: lines.filter((line) => line.kind === "created").map((line) => line.path),
+    });
   }
   return runs.sort((a, b) => a.startedAtMs - b.startedAtMs);
 }
 
 /** CPU milliseconds each process kind spent between two snapshots. A process born between them counts from zero. */
 export function cpuByKind(before, after, appPid) {
-  const earlier = new Map(before.processes.map(process => [`${process.pid}:${process.createdAt}`, process.cpuMs]));
+  const earlier = new Map(
+    before.processes.map((process) => [`${process.pid}:${process.createdAt}`, process.cpuMs]),
+  );
   const kinds = {};
   for (const process of after.processes) {
     const kind = classifyProcess(process, appPid);
-    kinds[kind] = (kinds[kind] ?? 0) + process.cpuMs - (earlier.get(`${process.pid}:${process.createdAt}`) ?? 0);
+    kinds[kind] =
+      (kinds[kind] ?? 0) +
+      process.cpuMs -
+      (earlier.get(`${process.pid}:${process.createdAt}`) ?? 0);
   }
   return kinds;
 }
@@ -426,11 +801,15 @@ export function peakByKind(snapshots, appPid) {
   for (const snapshot of snapshots) {
     const totals = {};
     for (const process of snapshot.processes) {
-      const bucket = totals[classifyProcess(process, appPid)] ??= { workingSetBytes: 0, privateBytes: 0 };
-      bucket.workingSetBytes += process.workingSetBytes; bucket.privateBytes += process.privateBytes;
+      const bucket = (totals[classifyProcess(process, appPid)] ??= {
+        workingSetBytes: 0,
+        privateBytes: 0,
+      });
+      bucket.workingSetBytes += process.workingSetBytes;
+      bucket.privateBytes += process.privateBytes;
     }
     for (const [kind, bucket] of Object.entries(totals)) {
-      const peak = peaks[kind] ??= { workingSetBytes: 0, privateBytes: 0 };
+      const peak = (peaks[kind] ??= { workingSetBytes: 0, privateBytes: 0 });
       peak.workingSetBytes = Math.max(peak.workingSetBytes, bucket.workingSetBytes);
       peak.privateBytes = Math.max(peak.privateBytes, bucket.privateBytes);
     }
@@ -450,15 +829,31 @@ export function busyShare(before, after, appPid) {
  * intervals of at least `intervalMs`, so a case starts after earlier indexing and settlement. Returns
  * the last snapshot, which the case then measures from.
  */
-export async function waitForQuiet({ sample, appPid, share = 0.05, intervals = 3, intervalMs = 1000, timeoutMs = 120_000, signal }) {
+export async function waitForQuiet({
+  sample,
+  appPid,
+  share = 0.05,
+  intervals = 3,
+  intervalMs = 1000,
+  timeoutMs = 120_000,
+  signal,
+}) {
   const started = performance.now();
-  let previous = await sample(), quiet = 0, last = null;
+  let previous = await sample(),
+    quiet = 0,
+    last = null;
   while (quiet < intervals) {
-    if (performance.now() - started > timeoutMs) throw Error(`The app did not settle within ${timeoutMs}ms: main and engine used ${Math.round((last ?? 1) * 100)}% of a core`);
+    if (performance.now() - started > timeoutMs)
+      throw Error(
+        `The app did not settle within ${timeoutMs}ms: main and engine used ${Math.round((last ?? 1) * 100)}% of a core`,
+      );
     signal?.throwIfAborted();
     const next = await sample();
     const elapsed = next.completedAtMs - previous.completedAtMs;
-    if (elapsed < intervalMs) { await delay(intervalMs - elapsed, undefined, { signal }); continue; }
+    if (elapsed < intervalMs) {
+      await delay(intervalMs - elapsed, undefined, { signal });
+      continue;
+    }
     last = busyShare(previous, next, appPid);
     quiet = last < share ? quiet + 1 : 0;
     previous = next;
@@ -474,49 +869,81 @@ export async function waitForQuiet({ sample, appPid, share = 0.05, intervals = 3
 // Long tasks between installation and completion are returned with the result.
 export function observeAutomationRun({ button, texts, timeoutMs }) {
   const SETTLE_SCOPE = '[data-testid="notice-toasts"], [data-testid="notice-center"]';
-  const installedMs = performance.now(), installedEpochMs = Date.now();
+  const installedMs = performance.now(),
+    installedEpochMs = Date.now();
   return new Promise((resolve, reject) => {
-    let finished = false, triggerMs = null, triggerTrusted = null, matched = null, frame = null;
+    let finished = false,
+      triggerMs = null,
+      triggerTrusted = null,
+      matched = null,
+      frame = null;
     const longTasks = [];
-    const task = entry => ({ startTime: entry.startTime, duration: entry.duration });
-    const longObserver = typeof PerformanceObserver === 'function' && PerformanceObserver.supportedEntryTypes?.includes('longtask')
-      ? new PerformanceObserver(list => longTasks.push(...list.getEntries().map(task))) : null;
-    const onDown = event => {
+    const task = (entry) => ({ startTime: entry.startTime, duration: entry.duration });
+    const longObserver =
+      typeof PerformanceObserver === "function" &&
+      PerformanceObserver.supportedEntryTypes?.includes("longtask")
+        ? new PerformanceObserver((list) => longTasks.push(...list.getEntries().map(task)))
+        : null;
+    const onDown = (event) => {
       if (triggerMs !== null) return;
-      const pressed = event.target instanceof Element ? event.target.closest('button') : null;
-      if (pressed?.getAttribute('aria-label') !== button) return;
-      triggerMs = performance.now(); triggerTrusted = event.isTrusted;
+      const pressed = event.target instanceof Element ? event.target.closest("button") : null;
+      if (pressed?.getAttribute("aria-label") !== button) return;
+      triggerMs = performance.now();
+      triggerTrusted = event.isTrusted;
     };
-    const outcomeOf = text => Object.keys(texts).find(outcome => texts[outcome].some(phrase => text.includes(phrase))) ?? null;
+    const outcomeOf = (text) =>
+      Object.keys(texts).find((outcome) =>
+        texts[outcome].some((phrase) => text.includes(phrase)),
+      ) ?? null;
     const finish = (error, paintedMs = null) => {
       if (finished) return;
       finished = true;
-      clearTimeout(deadline); observer.disconnect();
+      clearTimeout(deadline);
+      observer.disconnect();
       if (frame !== null) cancelAnimationFrame(frame);
-      window.removeEventListener('mousedown', onDown, true);
-      if (longObserver) { longTasks.push(...longObserver.takeRecords().map(task)); longObserver.disconnect(); }
+      window.removeEventListener("mousedown", onDown, true);
+      if (longObserver) {
+        longTasks.push(...longObserver.takeRecords().map(task));
+        longObserver.disconnect();
+      }
       if (error) reject(error);
-      else resolve({ timeOrigin: performance.timeOrigin, installedMs, installedEpochMs, triggerMs, triggerTrusted, ...matched, paintedMs, longTasks });
+      else
+        resolve({
+          timeOrigin: performance.timeOrigin,
+          installedMs,
+          installedEpochMs,
+          triggerMs,
+          triggerTrusted,
+          ...matched,
+          paintedMs,
+          longTasks,
+        });
     };
-    const check = node => {
+    const check = (node) => {
       if (finished || matched || triggerMs === null) return;
       const element = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
       if (!element?.closest?.(SETTLE_SCOPE)) return;
-      const text = element.textContent ?? '';
+      const text = element.textContent ?? "";
       const outcome = outcomeOf(text);
       if (!outcome) return;
       matched = { outcome, matchedMs: performance.now(), text: text.trim().slice(0, 500) };
-      frame = requestAnimationFrame(() => { frame = null; finish(null, performance.now()); });
+      frame = requestAnimationFrame(() => {
+        frame = null;
+        finish(null, performance.now());
+      });
     };
-    const observer = new MutationObserver(records => {
+    const observer = new MutationObserver((records) => {
       for (const record of records) {
-        if (record.type === 'characterData') check(record.target);
+        if (record.type === "characterData") check(record.target);
         else for (const node of record.addedNodes) check(node);
       }
     });
-    const deadline = setTimeout(() => finish(Error(`${button} did not settle within ${timeoutMs}ms`)), timeoutMs);
-    longObserver?.observe({ type: 'longtask' });
-    window.addEventListener('mousedown', onDown, true);
+    const deadline = setTimeout(
+      () => finish(Error(`${button} did not settle within ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+    longObserver?.observe({ type: "longtask" });
+    window.addEventListener("mousedown", onDown, true);
     observer.observe(document.body, { childList: true, characterData: true, subtree: true });
   });
 }

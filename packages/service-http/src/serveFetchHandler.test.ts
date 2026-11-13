@@ -2,7 +2,11 @@ import { request as httpRequest, type IncomingMessage, type Server } from "node:
 import { connect } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DRAIN_TIMEOUT_HEADER } from "./pipeResponseBody";
-import { ClientClosedRequest, serveFetchHandler, type ServeFetchHandlerOptions } from "./serveFetchHandler";
+import {
+  ClientClosedRequest,
+  serveFetchHandler,
+  type ServeFetchHandlerOptions,
+} from "./serveFetchHandler";
 
 const servers: Server[] = [];
 
@@ -45,8 +49,11 @@ function firstChunk(response: IncomingMessage): Promise<Buffer> {
 
 describe("serveFetchHandler", () => {
   it("keeps Node's default receive deadline unless streaming is configured", async () => {
-    const ordinary = await serve({handler: async () => new Response(null)});
-    const streaming = await serve({streamBody: () => true, handler: async () => new Response(null)});
+    const ordinary = await serve({ handler: async () => new Response(null) });
+    const streaming = await serve({
+      streamBody: () => true,
+      handler: async () => new Response(null),
+    });
     expect(ordinary.server.requestTimeout).toBe(300_000);
     expect(ordinary.server.headersTimeout).toBe(60_000);
     expect(streaming.server.requestTimeout).toBe(0);
@@ -55,12 +62,15 @@ describe("serveFetchHandler", () => {
 
   it("bounds ordinary body receipt after headers when streaming is configured", async () => {
     const handler = vi.fn(async () => new Response("ok"));
-    const {port, server} = await serve({streamBody: url => url.pathname === "/import", handler,
-      timedOut: url => new Response(null, {status: 408, headers: {"x-path": url.pathname}})});
-    vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
-    const arrived = new Promise<void>(resolve => server.once("request", () => resolve()));
+    const { port, server } = await serve({
+      streamBody: (url) => url.pathname === "/import",
+      handler,
+      timedOut: (url) => new Response(null, { status: 408, headers: { "x-path": url.pathname } }),
+    });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const arrived = new Promise<void>((resolve) => server.once("request", () => resolve()));
     const response = new Promise<IncomingMessage>((resolve, reject) => {
-      const request = httpRequest(`http://127.0.0.1:${port}/ordinary`, {method: "POST"}, resolve);
+      const request = httpRequest(`http://127.0.0.1:${port}/ordinary`, { method: "POST" }, resolve);
       request.on("error", reject);
       request.write("unfinished");
     });
@@ -78,16 +88,26 @@ describe("serveFetchHandler", () => {
 
   it("clears the ordinary receipt timer before running the handler", async () => {
     let entered!: () => void, finish!: () => void;
-    const started = new Promise<void>(resolve => {entered = resolve;});
-    const {port} = await serve({streamBody: () => false, handler: async request => {
-      expect(await request.text()).toBe("complete");
-      await new Promise<void>(resolve => {finish = resolve; entered();});
-      expect(request.signal.aborted).toBe(false);
-      return new Response("ok");
-    }});
-    vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const { port } = await serve({
+      streamBody: () => false,
+      handler: async (request) => {
+        expect(await request.text()).toBe("complete");
+        await new Promise<void>((resolve) => {
+          finish = resolve;
+          entered();
+        });
+        expect(request.signal.aborted).toBe(false);
+        return new Response("ok");
+      },
+    });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const response = new Promise<IncomingMessage>((resolve, reject) => {
-      httpRequest(`http://127.0.0.1:${port}/ordinary`, {method: "POST"}, resolve).on("error", reject).end("complete");
+      httpRequest(`http://127.0.0.1:${port}/ordinary`, { method: "POST" }, resolve)
+        .on("error", reject)
+        .end("complete");
     });
     await started;
     expect(vi.getTimerCount()).toBe(0);
@@ -100,20 +120,31 @@ describe("serveFetchHandler", () => {
 
   it("leaves streaming receipt deadlines to the handler and aborts a disconnected upload", async () => {
     let entered!: () => void, aborted!: () => void;
-    const started = new Promise<void>(resolve => {entered = resolve;});
-    const cancelled = new Promise<void>(resolve => {aborted = resolve;});
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const cancelled = new Promise<void>((resolve) => {
+      aborted = resolve;
+    });
     let signal!: AbortSignal;
-    const {port} = await serve({streamBody: () => true, handler: async request => {
-      signal = request.signal;
-      request.signal.addEventListener("abort", aborted, {once: true});
-      const reader = request.body!.getReader();
-      expect((await reader.read()).value?.byteLength).toBe(1);
-      entered();
-      try { await reader.read(); } catch { /* Disconnect rejects the pending read. */ }
-      return new Response(null);
-    }});
-    vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
-    const request = httpRequest(`http://127.0.0.1:${port}/import`, {method: "POST"});
+    const { port } = await serve({
+      streamBody: () => true,
+      handler: async (request) => {
+        signal = request.signal;
+        request.signal.addEventListener("abort", aborted, { once: true });
+        const reader = request.body!.getReader();
+        expect((await reader.read()).value?.byteLength).toBe(1);
+        entered();
+        try {
+          await reader.read();
+        } catch {
+          /* Disconnect rejects the pending read. */
+        }
+        return new Response(null);
+      },
+    });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const request = httpRequest(`http://127.0.0.1:${port}/import`, { method: "POST" });
     request.on("error", () => {});
     request.write("x");
     await started;
@@ -145,13 +176,17 @@ describe("serveFetchHandler", () => {
     let body: ReadableStream<Uint8Array> | null | undefined;
     const { port } = await serve({
       streamBody: () => true,
-      handler: async request => {
+      handler: async (request) => {
         body = request.body;
         return new Response(null, { status: 405 });
       },
     });
     const response = await new Promise<IncomingMessage>((resolve, reject) => {
-      const request = httpRequest(`http://127.0.0.1:${port}/import`, { method: "GET", headers: { "content-length": "1048576" } }, resolve);
+      const request = httpRequest(
+        `http://127.0.0.1:${port}/import`,
+        { method: "GET", headers: { "content-length": "1048576" } },
+        resolve,
+      );
       request.on("error", reject);
       request.write(Buffer.alloc(1));
       // No end: the answer must not wait for the rest of the upload.
@@ -165,40 +200,63 @@ describe("serveFetchHandler", () => {
   it("streams uploads larger than its ordinary buffering cap with prepared headers", async () => {
     const { port } = await serve({
       streamBody: () => true,
-      prepareHeaders: headers => headers.set("x-trusted", "server"),
-      handler: async request => {
+      prepareHeaders: (headers) => headers.set("x-trusted", "server"),
+      handler: async (request) => {
         expect(request.headers.get("x-trusted")).toBe("server");
         let bytes = 0;
         for await (const chunk of request.body!) bytes += chunk.byteLength;
         return Response.json({ bytes });
       },
     });
-    const response = await fetch(`http://127.0.0.1:${port}/import`, { method: "POST", body: Buffer.alloc(2048) });
+    const response = await fetch(`http://127.0.0.1:${port}/import`, {
+      method: "POST",
+      body: Buffer.alloc(2048),
+    });
     expect(await response.json()).toEqual({ bytes: 2048 });
   });
 
   it("disposes an errored response returned after its client disconnected", async () => {
     let entered!: () => void, cancellationAwaited!: () => void;
-    const started = new Promise<void>(resolve => { entered = resolve; });
-    const completed = new Promise<void>(resolve => { cancellationAwaited = resolve; });
-    const { port } = await serve({ handler: async request => {
-      if (new URL(request.url).pathname === "/health") return Response.json({ ok: true });
-      await new Promise<void>(resolve => {
-        request.signal.addEventListener("abort", () => resolve(), { once: true });
-        entered();
-      });
-      const response = new Response(new ReadableStream({ start(controller) { controller.error(new Error("retired response")); } }));
-      const cancel = response.body!.cancel.bind(response.body!);
-      vi.spyOn(response.body!, "cancel").mockImplementation(() => ({
-        catch(onRejected: (error: Error) => void) {
-          const cancelled = cancel().catch(onRejected);
-          return { then(resolve: () => void, reject: (error: unknown) => void) {
-            cancelled.then(() => { cancellationAwaited(); resolve(); }, reject);
-          } };
-        },
-      }) as unknown as Promise<void>);
-      return response;
-    } });
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const completed = new Promise<void>((resolve) => {
+      cancellationAwaited = resolve;
+    });
+    const { port } = await serve({
+      handler: async (request) => {
+        if (new URL(request.url).pathname === "/health") return Response.json({ ok: true });
+        await new Promise<void>((resolve) => {
+          request.signal.addEventListener("abort", () => resolve(), { once: true });
+          entered();
+        });
+        const response = new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.error(new Error("retired response"));
+            },
+          }),
+        );
+        const cancel = response.body!.cancel.bind(response.body!);
+        vi.spyOn(response.body!, "cancel").mockImplementation(
+          () =>
+            ({
+              catch(onRejected: (error: Error) => void) {
+                const cancelled = cancel().catch(onRejected);
+                return {
+                  then(resolve: () => void, reject: (error: unknown) => void) {
+                    cancelled.then(() => {
+                      cancellationAwaited();
+                      resolve();
+                    }, reject);
+                  },
+                };
+              },
+            }) as unknown as Promise<void>,
+        );
+        return response;
+      },
+    });
     const request = httpRequest(`http://127.0.0.1:${port}/park`);
     request.on("error", () => {});
     request.end();
@@ -214,13 +272,18 @@ describe("serveFetchHandler", () => {
     const { port } = await serve({
       handler: async (request) => {
         received = new Uint8Array(await request.arrayBuffer());
-        return new Response(Buffer.from(received), { headers: { "x-echo": "1", [DRAIN_TIMEOUT_HEADER]: "1" } });
+        return new Response(Buffer.from(received), {
+          headers: { "x-echo": "1", [DRAIN_TIMEOUT_HEADER]: "1" },
+        });
       },
     });
     const response = await fetch(`http://127.0.0.1:${port}/blob`, { method: "PUT", body: bytes });
     expect(response.status).toBe(200);
     expect(response.headers.get("x-echo")).toBe("1");
-    expect(response.headers.has(DRAIN_TIMEOUT_HEADER), "the drain timeout stays on the server").toBe(false);
+    expect(
+      response.headers.has(DRAIN_TIMEOUT_HEADER),
+      "the drain timeout stays on the server",
+    ).toBe(false);
     expect(new Uint8Array(await response.arrayBuffer())).toEqual(bytes);
     expect(received).toEqual(bytes);
   });
@@ -295,7 +358,9 @@ describe("serveFetchHandler", () => {
         signal = request.signal;
         return new Promise<Response>((resolve) => {
           release = () => resolve(new Response("late"));
-          request.signal.addEventListener("abort", () => resolve(new Response(null, { status: 499 })));
+          request.signal.addEventListener("abort", () =>
+            resolve(new Response(null, { status: 499 })),
+          );
         });
       },
     });
@@ -321,7 +386,9 @@ describe("serveFetchHandler", () => {
       handler: (request) => {
         signal = request.signal;
         return new Promise<Response>((resolve) => {
-          request.signal.addEventListener("abort", () => resolve(new Response(null, { status: 503 })));
+          request.signal.addEventListener("abort", () =>
+            resolve(new Response(null, { status: 503 })),
+          );
         });
       },
     });
@@ -378,7 +445,8 @@ describe("serveFetchHandler", () => {
       handler: async () => {
         throw new Error("boom");
       },
-      failure: (url) => Response.json({ ok: false, error: "failed", path: url.pathname }, { status: 500 }),
+      failure: (url) =>
+        Response.json({ ok: false, error: "failed", path: url.pathname }, { status: 500 }),
     });
     const response = await fetch(`http://127.0.0.1:${port}/x`);
     expect(response.status).toBe(500);

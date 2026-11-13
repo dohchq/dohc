@@ -1,50 +1,115 @@
 import { createHash } from "node:crypto";
 import { parseAppBackendCaller, type AppBackendCaller } from "./appBackend";
-import { parseDatasetRevision, parseDatasetBindingReference, parseAppDatasetCapability, datasetColumnFields, type DatasetRevision, type AppDatasetBinding, type AppDatasetCapability, type DatasetOperation } from "./dataset";
+import {
+  parseDatasetRevision,
+  parseDatasetBindingReference,
+  parseAppDatasetCapability,
+  datasetColumnFields,
+  type DatasetRevision,
+  type AppDatasetBinding,
+  type AppDatasetCapability,
+  type DatasetOperation,
+} from "./dataset";
 import { generateDatasetOperations } from "./datasetOperations";
 
-function fail(): never { throw new Error("Invalid dataset metadata."); }
+function fail(): never {
+  throw new Error("Invalid dataset metadata.");
+}
 
 /** Only hosts reading artifact-verified catalog revisions may supply this lookup. */
 export type GeneratedDatasetVerdictLookup = (approved: DatasetRevision) => boolean;
 
 /** Untrusted revisions are checked directly unless the caller supplies its private lookup. */
-export function hasGeneratedDatasetRevision(approved: DatasetRevision, lookup?: GeneratedDatasetVerdictLookup): boolean {
+export function hasGeneratedDatasetRevision(
+  approved: DatasetRevision,
+  lookup?: GeneratedDatasetVerdictLookup,
+): boolean {
   if (lookup) return lookup(approved);
-  return createHash("sha256").update(generateDatasetOperations(approved.definition)).digest("hex") === approved.operationsSha256;
+  return (
+    createHash("sha256").update(generateDatasetOperations(approved.definition)).digest("hex") ===
+    approved.operationsSha256
+  );
 }
 
-export function parseDatasetBinding(value: unknown, approvedRevision: DatasetRevision, lookup?: GeneratedDatasetVerdictLookup): AppDatasetBinding {
+export function parseDatasetBinding(
+  value: unknown,
+  approvedRevision: DatasetRevision,
+  lookup?: GeneratedDatasetVerdictLookup,
+): AppDatasetBinding {
   const approved = parseDatasetRevision(approvedRevision);
   const result = parseDatasetBindingReference(value);
-  if (result.datasetId !== approved.datasetId || result.revision !== approved.revision || result.revisionSha256 !== approved.revisionSha256) fail();
-  const operations = new Set(approved.definition.operations.map(operation => operation.operationId));
-  if (result.operationIds.some(id => !operations.has(id))) fail();
+  if (
+    result.datasetId !== approved.datasetId ||
+    result.revision !== approved.revision ||
+    result.revisionSha256 !== approved.revisionSha256
+  )
+    fail();
+  const operations = new Set(
+    approved.definition.operations.map((operation) => operation.operationId),
+  );
+  if (result.operationIds.some((id) => !operations.has(id))) fail();
   if (result.linkReads?.length && !hasGeneratedDatasetRevision(approved, lookup)) fail();
   for (const read of result.linkReads ?? []) {
-    const operation = approved.definition.operations.find(operation => operation.operationId === read.operationId);
-    const table = approved.definition.tables.find(table => table.tableId === operation?.tableId);
-    const primary = table && datasetColumnFields(table).find(field => field.sqlColumn === table.primaryKey);
+    const operation = approved.definition.operations.find(
+      (operation) => operation.operationId === read.operationId,
+    );
+    const table = approved.definition.tables.find((table) => table.tableId === operation?.tableId);
+    const primary =
+      table && datasetColumnFields(table).find((field) => field.sqlColumn === table.primaryKey);
     if (!primary || !read.fieldIds.includes(primary.fieldId)) fail();
-    if (!operation || operation.kind !== "read" || !operation.readOnly || operation.access === "owner" ||
-        read.fieldIds.length !== operation.fieldIds.length || read.fieldIds.some(id => !operation.fieldIds.includes(id))) fail();
+    if (
+      !operation ||
+      operation.kind !== "read" ||
+      !operation.readOnly ||
+      operation.access === "owner" ||
+      read.fieldIds.length !== operation.fieldIds.length ||
+      read.fieldIds.some((id) => !operation.fieldIds.includes(id))
+    )
+      fail();
   }
   for (const restriction of result.createFields ?? []) {
-    const operation = approved.definition.operations.find(operation => operation.operationId === restriction.operationId);
-    if (!operation || operation.kind !== "create" || restriction.fieldIds.some(id => !operation.fieldIds.includes(id))) fail();
+    const operation = approved.definition.operations.find(
+      (operation) => operation.operationId === restriction.operationId,
+    );
+    if (
+      !operation ||
+      operation.kind !== "create" ||
+      restriction.fieldIds.some((id) => !operation.fieldIds.includes(id))
+    )
+      fail();
   }
   return result;
 }
 
 /** The caller supplies a revision obtained from the owner's approved host catalog. */
-export function resolveAppDatasetCapability(value: unknown, approvedRevision: DatasetRevision, lookup?: GeneratedDatasetVerdictLookup): AppDatasetCapability {
+export function resolveAppDatasetCapability(
+  value: unknown,
+  approvedRevision: DatasetRevision,
+  lookup?: GeneratedDatasetVerdictLookup,
+): AppDatasetCapability {
   const approved = parseDatasetRevision(approvedRevision);
   const binding = parseDatasetBinding(value, approved, lookup);
   const selected = new Set(binding.operationIds);
-  return parseAppDatasetCapability({ ...binding, name: approved.definition.name, operations: approved.definition.operations.filter(operation => selected.has(operation.operationId))
-    .map(({ operationId, name, access, readOnly, kind, fieldIds, tableId }) => ({ operationId, name, access, readOnly,
-      ...(kind === "read" && binding.linkReads?.some(read => read.operationId === operationId) ? { fields: approved.definition.tables.find(table => table.tableId === tableId)!.fields
-        .filter(field => fieldIds.includes(field.fieldId)).map(({ fieldId, name }) => ({ fieldId, name })) } : {}) })) });
+  return parseAppDatasetCapability({
+    ...binding,
+    name: approved.definition.name,
+    operations: approved.definition.operations
+      .filter((operation) => selected.has(operation.operationId))
+      .map(({ operationId, name, access, readOnly, kind, fieldIds, tableId }) => ({
+        operationId,
+        name,
+        access,
+        readOnly,
+        ...(kind === "read" && binding.linkReads?.some((read) => read.operationId === operationId)
+          ? {
+              fields: approved.definition.tables
+                .find((table) => table.tableId === tableId)!
+                .fields.filter((field) => fieldIds.includes(field.fieldId))
+                .map(({ fieldId, name }) => ({ fieldId, name })),
+            }
+          : {}),
+      })),
+  });
 }
 
 /**
@@ -53,25 +118,72 @@ export function resolveAppDatasetCapability(value: unknown, approvedRevision: Da
  * Only then does each operation do what its kind and fields declare. Custom code shows as an action, by its label.
  * Keep the result out of candidates and digests. verifyAppDatasetCapability refuses it.
  */
-export function displayAppDatasetCapability(capability: AppDatasetCapability, approved: DatasetRevision, generated: boolean): AppDatasetCapability {
-  if (capability.datasetId !== approved.datasetId || capability.revision !== approved.revision || capability.revisionSha256 !== approved.revisionSha256) fail();
-  const shown = { ...capability, operations: capability.operations.map(operation => {
-    const declared = approved.definition.operations.find(candidate => candidate.operationId === operation.operationId);
-    const table = approved.definition.tables.find(candidate => candidate.tableId === declared?.tableId);
-    if (!declared || !table) fail();
-    if (!generated) return { ...operation, display: { kind: "action" as const, label: declared.label, fields: [] } };
-    // A generated form may write fewer of a create's fields.
-    const fieldIds = capability.createFields?.find(entry => entry.operationId === operation.operationId)?.fieldIds ?? declared.fieldIds;
-    return { ...operation, display: { kind: declared.kind, label: declared.label, fields: table.fields.filter(field => fieldIds.includes(field.fieldId)).map(field => field.name) } };
-  }) };
+export function displayAppDatasetCapability(
+  capability: AppDatasetCapability,
+  approved: DatasetRevision,
+  generated: boolean,
+): AppDatasetCapability {
+  if (
+    capability.datasetId !== approved.datasetId ||
+    capability.revision !== approved.revision ||
+    capability.revisionSha256 !== approved.revisionSha256
+  )
+    fail();
+  const shown = {
+    ...capability,
+    operations: capability.operations.map((operation) => {
+      const declared = approved.definition.operations.find(
+        (candidate) => candidate.operationId === operation.operationId,
+      );
+      const table = approved.definition.tables.find(
+        (candidate) => candidate.tableId === declared?.tableId,
+      );
+      if (!declared || !table) fail();
+      if (!generated)
+        return {
+          ...operation,
+          display: { kind: "action" as const, label: declared.label, fields: [] },
+        };
+      // A generated form may write fewer of a create's fields.
+      const fieldIds =
+        capability.createFields?.find((entry) => entry.operationId === operation.operationId)
+          ?.fieldIds ?? declared.fieldIds;
+      return {
+        ...operation,
+        display: {
+          kind: declared.kind,
+          label: declared.label,
+          fields: table.fields
+            .filter((field) => fieldIds.includes(field.fieldId))
+            .map((field) => field.name),
+        },
+      };
+    }),
+  };
   // The words count toward the capability's size bounds. Past them, each operation keeps its kind and label without field names.
   // Past that too, Review app shows "Records" instead of failing to list or prepare.
-  try { return parseAppDatasetCapability(shown); } catch {}
-  const short = { ...shown, operations: shown.operations.map(operation => ({ ...operation, display: { ...operation.display, fields: [] } })) };
-  try { return parseAppDatasetCapability(short); } catch { return capability; }
+  try {
+    return parseAppDatasetCapability(shown);
+  } catch {}
+  const short = {
+    ...shown,
+    operations: shown.operations.map((operation) => ({
+      ...operation,
+      display: { ...operation.display, fields: [] },
+    })),
+  };
+  try {
+    return parseAppDatasetCapability(short);
+  } catch {
+    return capability;
+  }
 }
 
-export function verifyAppDatasetCapability(value: unknown, approvedRevision: DatasetRevision, lookup?: GeneratedDatasetVerdictLookup): AppDatasetCapability {
+export function verifyAppDatasetCapability(
+  value: unknown,
+  approvedRevision: DatasetRevision,
+  lookup?: GeneratedDatasetVerdictLookup,
+): AppDatasetCapability {
   const parsed = parseAppDatasetCapability(value);
   const { operations: _, name: _name, ...binding } = parsed;
   const expected = resolveAppDatasetCapability(binding, approvedRevision, lookup);
@@ -80,14 +192,33 @@ export function verifyAppDatasetCapability(value: unknown, approvedRevision: Dat
 }
 
 /** Caller must be derived from current host credentials, never request JSON. */
-export function effectiveDatasetOperations(binding: unknown, approvedRevision: DatasetRevision, caller: AppBackendCaller, lookup?: GeneratedDatasetVerdictLookup): DatasetOperation[] {
+export function effectiveDatasetOperations(
+  binding: unknown,
+  approvedRevision: DatasetRevision,
+  caller: AppBackendCaller,
+  lookup?: GeneratedDatasetVerdictLookup,
+): DatasetOperation[] {
   const approved = parseDatasetRevision(approvedRevision);
   const parsed = parseDatasetBinding(binding, approved, lookup);
   const principal = parseAppBackendCaller(caller);
   const allowed = new Set(parsed.operationIds);
-  const reads = new Set(principal.kind === "link" || principal.kind === "named" ? parsed.linkReads?.map(read => read.operationId) : []);
-  return approved.definition.operations.filter(operation => allowed.has(operation.operationId) && (
-    principal.kind === "owner" || operation.access === "link" || reads.has(operation.operationId) ||
-    (operation.access === "helper" && principal.kind === "named" && principal.helper)
-  )).map(operation => principal.kind !== "owner" && reads.has(operation.operationId) ? { ...operation, access: "link" } : operation);
+  const reads = new Set(
+    principal.kind === "link" || principal.kind === "named"
+      ? parsed.linkReads?.map((read) => read.operationId)
+      : [],
+  );
+  return approved.definition.operations
+    .filter(
+      (operation) =>
+        allowed.has(operation.operationId) &&
+        (principal.kind === "owner" ||
+          operation.access === "link" ||
+          reads.has(operation.operationId) ||
+          (operation.access === "helper" && principal.kind === "named" && principal.helper)),
+    )
+    .map((operation) =>
+      principal.kind !== "owner" && reads.has(operation.operationId)
+        ? { ...operation, access: "link" }
+        : operation,
+    );
 }

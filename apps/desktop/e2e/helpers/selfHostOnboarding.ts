@@ -2,7 +2,14 @@ import { strict as assert } from "node:assert";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
-import { createServer as createHttpServer, request as requestHttp, type IncomingMessage, type RequestListener, type Server, type ServerResponse } from "node:http";
+import {
+  createServer as createHttpServer,
+  request as requestHttp,
+  type IncomingMessage,
+  type RequestListener,
+  type Server,
+  type ServerResponse,
+} from "node:http";
 import { createServer as createHttpsServer } from "node:https";
 import { Transform, type Duplex, type Readable } from "node:stream";
 import { createRequire } from "node:module";
@@ -17,7 +24,10 @@ import {
   startAccountServer,
 } from "../../../../services/workspace-api/e2e/harness";
 import { mailLinks } from "../../../../services/workspace-api/e2e/smtpCapture";
-import { mintLocalhostCa, type LocalhostCa } from "../../../../services/share-web/src/testing/localhostCa";
+import {
+  mintLocalhostCa,
+  type LocalhostCa,
+} from "../../../../services/share-web/src/testing/localhostCa";
 import { resolveEngineBinary } from "../../src/testing/engineBinary";
 import { realDaemonReaderConfig } from "../../src/testing/realDaemonWorkspaceSessions";
 import type { LaunchedDesktopApp } from "./desktopApp";
@@ -25,7 +35,9 @@ import { momentTextsForPath, readLiveAuditRecord, type LiveAuditRecord } from ".
 import { reserveRelayPort, type SyncRelayLinkBoundary } from "./syncRelay";
 
 const relayRoot = fileURLToPath(new URL("../../../../services/sync-relay/", import.meta.url));
-const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
+const { DatabaseSync } = createRequire(import.meta.url)(
+  "node:sqlite",
+) as typeof import("node:sqlite");
 
 /**
  * `live` serves the stack over HTTPS from a fixture CA and runs the self-host
@@ -36,9 +48,15 @@ const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof
  * links at a test share-web, which reaches the relay at `relayInnerUrl` as the
  * self-host share-web does.
  */
-export async function startSelfHostOnboardingStack(directory: string, options: {
-  live?: boolean; signal: AbortSignal; refuse?: (method: string, path: string) => boolean; linkBoundary?: SyncRelayLinkBoundary;
-}) {
+export async function startSelfHostOnboardingStack(
+  directory: string,
+  options: {
+    live?: boolean;
+    signal: AbortSignal;
+    refuse?: (method: string, path: string) => boolean;
+    linkBoundary?: SyncRelayLinkBoundary;
+  },
+) {
   assert.ok(process.env.POSTGRES_URL, "Supply a disposable POSTGRES_URL.");
   assert.equal(process.env.DOHC_REQUIRE_POSTGRES, "1", "Require the real Postgres dependency.");
   const ca = options.live ? await mintLocalhostCa(directory) : undefined;
@@ -46,8 +64,12 @@ export async function startSelfHostOnboardingStack(directory: string, options: {
   // desktop turns it off, so only the test CA carries its relay traffic; the
   // engine refuses the two together.
   const trustEnv: Record<string, string> = ca
-    ? { NODE_EXTRA_CA_CERTS: ca.caPath, DOHC_ENGINE_TEST_RELAY_CA_MODE: "1", DOHC_ENGINE_TEST_RELAY_CA_FILE: ca.caPath,
-      DOHC_E2E_ALLOW_INSECURE_LOOPBACK_RELAY: "0" }
+    ? {
+        NODE_EXTRA_CA_CERTS: ca.caPath,
+        DOHC_ENGINE_TEST_RELAY_CA_MODE: "1",
+        DOHC_ENGINE_TEST_RELAY_CA_FILE: ca.caPath,
+        DOHC_E2E_ALLOW_INSECURE_LOOPBACK_RELAY: "0",
+      }
     : {};
   const proxy = await startServerProxy(ca, options.refuse ? { refuse: options.refuse } : {});
   let account: Awaited<ReturnType<typeof startAccountServer>> | undefined;
@@ -57,8 +79,16 @@ export async function startSelfHostOnboardingStack(directory: string, options: {
     account = await startAccountServer({ publicOrigin: proxy.origin, signal: options.signal });
     proxy.routeAuthTo(account.listenOrigin);
     const port = ca && options.linkBoundary ? await reserveRelayPort() : 0;
-    const link = ca && options.linkBoundary ? { ...options.linkBoundary, innerHost: `127.0.0.1:${port}` } : undefined;
-    relay = await startAuthenticatedRelay(directory, proxy.origin, ca ? { ...trustEnv, ...selfHostLiveEnv(directory, proxy.origin, link) } : {}, port);
+    const link =
+      ca && options.linkBoundary
+        ? { ...options.linkBoundary, innerHost: `127.0.0.1:${port}` }
+        : undefined;
+    relay = await startAuthenticatedRelay(
+      directory,
+      proxy.origin,
+      ca ? { ...trustEnv, ...selfHostLiveEnv(directory, proxy.origin, link) } : {},
+      port,
+    );
     proxy.routeRelayTo(relay.url);
     return {
       account,
@@ -75,7 +105,8 @@ export async function startSelfHostOnboardingStack(directory: string, options: {
       // Counts and cursors only, for a failure report: the live settlements the
       // service host made, held for export, or journaled, and those the relay holds.
       settlementEvidence: () => settlementEvidence(directory),
-      livePublication: (workspaceId: string, path: string) => livePublication(directory, workspaceId, path),
+      livePublication: (workspaceId: string, path: string) =>
+        livePublication(directory, workspaceId, path),
       // The document's accepted change just before a named account's first live
       // edit, the restore point that keeps everything the account did not write.
       acceptedCursorBefore: (workspaceId: string, path: string, principalId: string) =>
@@ -84,14 +115,21 @@ export async function startSelfHostOnboardingStack(directory: string, options: {
       // the service host's accepted history and its durable audit. Read-only.
       hostedAgentEvidence: (workspaceId: string, path: string, agentId: string) =>
         hostedAgentEvidence(directory, workspaceId, path, agentId),
-      ownerLiveBinding: (workspaceId: string, path: string) => ownerLiveBinding(directory, workspaceId, path),
+      ownerLiveBinding: (workspaceId: string, path: string) =>
+        ownerLiveBinding(directory, workspaceId, path),
       // The texts the service host settled for one path, in every store it keeps.
       liveHostTexts: (path: string) => liveHostTexts(directory, path),
       liveHosting: (workspaceId: string, path: string) => liveHosting(directory, workspaceId, path),
       async close() {
         const results = await Promise.allSettled([proxy.close(), relay!.close(), account!.close()]);
-        const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
-        if (failures.length) throw new AggregateError(failures.map(result => result.reason), "Self-host services did not close.");
+        const failures = results.filter(
+          (result): result is PromiseRejectedResult => result.status === "rejected",
+        );
+        if (failures.length)
+          throw new AggregateError(
+            failures.map((result) => result.reason),
+            "Self-host services did not close.",
+          );
       },
     };
   } catch (error) {
@@ -124,7 +162,9 @@ export interface HostedLogResponseBarrier {
 }
 
 export class HostedLogClientClosedError extends Error {
-  constructor() { super("Hosted-log client closed before the captured response was delivered."); }
+  constructor() {
+    super("Hosted-log client closed before the captured response was delivered.");
+  }
 }
 
 interface PendingHostedLogResponse extends HostedLogResponseBarrier {
@@ -141,19 +181,37 @@ function delayedStream(delayMs: number): Transform {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let flushed: (() => void) | undefined;
   const stream: Transform = new Transform({
-    transform(chunk: Buffer, _encoding, done) { queue.push({ chunk, due: performance.now() + delayMs }); schedule(); done(); },
-    flush(done) { flushed = done; schedule(); },
-    destroy(error, done) { clearTimeout(timer); queue.length = 0; done(error); },
+    transform(chunk: Buffer, _encoding, done) {
+      queue.push({ chunk, due: performance.now() + delayMs });
+      schedule();
+      done();
+    },
+    flush(done) {
+      flushed = done;
+      schedule();
+    },
+    destroy(error, done) {
+      clearTimeout(timer);
+      queue.length = 0;
+      done(error);
+    },
   });
   function schedule() {
     if (timer !== undefined) return;
-    if (!queue.length) { flushed?.(); flushed = undefined; return; }
-    timer = setTimeout(() => {
-      timer = undefined;
-      const now = performance.now();
-      while (queue.length && queue[0]!.due <= now) stream.push(queue.shift()!.chunk);
-      schedule();
-    }, Math.max(0, queue[0]!.due - performance.now()));
+    if (!queue.length) {
+      flushed?.();
+      flushed = undefined;
+      return;
+    }
+    timer = setTimeout(
+      () => {
+        timer = undefined;
+        const now = performance.now();
+        while (queue.length && queue[0]!.due <= now) stream.push(queue.shift()!.chunk);
+        schedule();
+      },
+      Math.max(0, queue[0]!.due - performance.now()),
+    );
   }
   return stream;
 }
@@ -162,12 +220,17 @@ function delayedStream(delayMs: number): Transform {
  * `delayMs` delays every request, response, upgrade and socket chunk by that much each way.
  * `answer` replies for the upstream with a JSON body when it returns one.
  */
-export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "key">, options: {
-  collectionWriteResponse?(response: ProxiedCollectionWriteResponse): "drop" | void | Promise<"drop" | void>;
-  refuse?(method: string, path: string): boolean;
-  answer?(method: string, path: string): { status: number; body: unknown } | undefined;
-  delayMs?: number;
-} = {}) {
+export async function startServerProxy(
+  tls?: Pick<LocalhostCa, "certificate" | "key">,
+  options: {
+    collectionWriteResponse?(
+      response: ProxiedCollectionWriteResponse,
+    ): "drop" | void | Promise<"drop" | void>;
+    refuse?(method: string, path: string): boolean;
+    answer?(method: string, path: string): { status: number; body: unknown } | undefined;
+    delayMs?: number;
+  } = {},
+) {
   let delayMs = options.delayMs ?? 0;
   let authInternalUrl: string | undefined;
   let relayUrl: string | undefined;
@@ -178,85 +241,149 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
   let refusedUpgrades = 0;
   const upstreams = new Set<ReturnType<typeof requestHttp>>();
   const upgraded = new Set<Duplex>();
-  const route = (path: string) => path.startsWith("/sync/") || path === "/health" ? relayUrl : authInternalUrl;
+  const route = (path: string) =>
+    path.startsWith("/sync/") || path === "/health" ? relayUrl : authInternalUrl;
   const delayed: RequestListener = (incoming, outgoing) => {
     const wait = delayMs;
-    if (wait <= 0) { forward(incoming, outgoing, incoming, 0); return; }
+    if (wait <= 0) {
+      forward(incoming, outgoing, incoming, 0);
+      return;
+    }
     // The body's delay runs from its arrival, alongside the headers', so a
     // buffered body crosses once.
     const body = incoming.pipe(delayedStream(wait));
     setTimeout(() => forward(incoming, outgoing, body, wait), wait);
   };
-  const forward = (incoming: IncomingMessage, outgoing: ServerResponse, body: Readable, wait: number) => {
-    if (paused) { refusedRequests++; outgoing.writeHead(503).end(); return; }
-    const path = incoming.url ?? "/";
-    if (options.refuse?.(incoming.method ?? "GET", path)) { outgoing.writeHead(503).end(); return; }
-    const answered = options.answer?.(incoming.method ?? "GET", path);
-    if (answered) {
-      body.resume();
-      outgoing.writeHead(answered.status, { "content-type": "application/json" }).end(JSON.stringify(answered.body));
-      return;
-    }
-    const hostedWorkspace = incoming.method === "GET"
-      ? /^\/sync\/([^/]+)\/hosted\/log$/u.exec(new URL(path, "http://proxy.test").pathname)?.[1] : undefined;
-    const holding = holdingHostedLog && encodeURIComponent(holdingHostedLog.workspaceId) === hostedWorkspace
-      ? holdingHostedLog : undefined;
-    if (holding) { holding.hold(incoming, outgoing, body); return; }
-    const barrier = nextHostedLog && encodeURIComponent(nextHostedLog.workspaceId) === hostedWorkspace
-      ? nextHostedLog : undefined;
-    if (barrier) { nextHostedLog = undefined; barrier.attach(outgoing); }
-    const target = route(path);
-    if (!target) {
-      if (barrier) { barrier.fail(new Error("Hosted-log proxy has no upstream route.")); return; }
+  const forward = (
+    incoming: IncomingMessage,
+    outgoing: ServerResponse,
+    body: Readable,
+    wait: number,
+  ) => {
+    if (paused) {
+      refusedRequests++;
       outgoing.writeHead(503).end();
       return;
     }
-    const intercept = options.collectionWriteResponse && incoming.method === "POST"
-      && /^\/sync\/shares\/[^/]+\/collection-writes$/u.test(path);
+    const path = incoming.url ?? "/";
+    if (options.refuse?.(incoming.method ?? "GET", path)) {
+      outgoing.writeHead(503).end();
+      return;
+    }
+    const answered = options.answer?.(incoming.method ?? "GET", path);
+    if (answered) {
+      body.resume();
+      outgoing
+        .writeHead(answered.status, { "content-type": "application/json" })
+        .end(JSON.stringify(answered.body));
+      return;
+    }
+    const hostedWorkspace =
+      incoming.method === "GET"
+        ? /^\/sync\/([^/]+)\/hosted\/log$/u.exec(new URL(path, "http://proxy.test").pathname)?.[1]
+        : undefined;
+    const holding =
+      holdingHostedLog && encodeURIComponent(holdingHostedLog.workspaceId) === hostedWorkspace
+        ? holdingHostedLog
+        : undefined;
+    if (holding) {
+      holding.hold(incoming, outgoing, body);
+      return;
+    }
+    const barrier =
+      nextHostedLog && encodeURIComponent(nextHostedLog.workspaceId) === hostedWorkspace
+        ? nextHostedLog
+        : undefined;
+    if (barrier) {
+      nextHostedLog = undefined;
+      barrier.attach(outgoing);
+    }
+    const target = route(path);
+    if (!target) {
+      if (barrier) {
+        barrier.fail(new Error("Hosted-log proxy has no upstream route."));
+        return;
+      }
+      outgoing.writeHead(503).end();
+      return;
+    }
+    const intercept =
+      options.collectionWriteResponse &&
+      incoming.method === "POST" &&
+      /^\/sync\/shares\/[^/]+\/collection-writes$/u.test(path);
     const requestChunks: Buffer[] = [];
-    if (intercept) body.on("data", chunk => requestChunks.push(Buffer.from(chunk)));
-    const upstream = requestHttp(new URL(path, target), { method: incoming.method, headers: incoming.headers }, (response) => {
-      if (barrier) { barrier.receive(response); return; }
-      if (intercept) {
-        const chunks: Buffer[] = [];
-        response.on("data", chunk => chunks.push(Buffer.from(chunk)));
+    if (intercept) body.on("data", (chunk) => requestChunks.push(Buffer.from(chunk)));
+    const upstream = requestHttp(
+      new URL(path, target),
+      { method: incoming.method, headers: incoming.headers },
+      (response) => {
+        if (barrier) {
+          barrier.receive(response);
+          return;
+        }
+        if (intercept) {
+          const chunks: Buffer[] = [];
+          response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+          response.on("error", () => outgoing.destroy());
+          response.once("end", () => {
+            const body = Buffer.concat(chunks);
+            void Promise.resolve(
+              options.collectionWriteResponse!({
+                requestBody: Buffer.concat(requestChunks).toString("utf8"),
+                status: response.statusCode ?? 502,
+                body: body.toString("utf8"),
+              }),
+            )
+              .then((action) => {
+                // The upstream has completed its commit before the client loses the answer.
+                if (action === "drop") {
+                  outgoing.destroy();
+                  return;
+                }
+                outgoing.writeHead(response.statusCode ?? 502, response.headers);
+                outgoing.end(body);
+              })
+              .catch(() => outgoing.destroy());
+          });
+          return;
+        }
         response.on("error", () => outgoing.destroy());
-        response.once("end", () => {
-          const body = Buffer.concat(chunks);
-          void Promise.resolve(options.collectionWriteResponse!({ requestBody: Buffer.concat(requestChunks).toString("utf8"),
-            status: response.statusCode ?? 502, body: body.toString("utf8") })).then(action => {
-            // The upstream has completed its commit before the client loses the answer.
-            if (action === "drop") { outgoing.destroy(); return; }
+        if (wait > 0) {
+          const later = delayedStream(wait);
+          setTimeout(() => {
             outgoing.writeHead(response.statusCode ?? 502, response.headers);
-            outgoing.end(body);
-          }).catch(() => outgoing.destroy());
-        });
-        return;
-      }
-      response.on("error", () => outgoing.destroy());
-      if (wait > 0) {
-        const later = delayedStream(wait);
-        setTimeout(() => { outgoing.writeHead(response.statusCode ?? 502, response.headers); later.pipe(outgoing); }, wait);
-        response.pipe(later);
-        return;
-      }
-      outgoing.writeHead(response.statusCode ?? 502, response.headers);
-      response.pipe(outgoing);
-    });
+            later.pipe(outgoing);
+          }, wait);
+          response.pipe(later);
+          return;
+        }
+        outgoing.writeHead(response.statusCode ?? 502, response.headers);
+        response.pipe(outgoing);
+      },
+    );
     upstreams.add(upstream);
     upstream.once("close", () => upstreams.delete(upstream));
-    upstream.on("error", error => {
-      if (barrier) { barrier.fail(error); outgoing.destroy(); return; }
+    upstream.on("error", (error) => {
+      if (barrier) {
+        barrier.fail(error);
+        outgoing.destroy();
+        return;
+      }
       if (!outgoing.headersSent) outgoing.writeHead(502);
       outgoing.end();
     });
     outgoing.once("close", () => {
       upstream.destroy();
     });
-    incoming.on("error", error => { barrier?.fail(error); upstream.destroy(); });
+    incoming.on("error", (error) => {
+      barrier?.fail(error);
+      upstream.destroy();
+    });
     body.pipe(upstream);
   };
-  const server: Server = tls ? createHttpsServer({ cert: tls.certificate, key: tls.key }, delayed) : createHttpServer(delayed);
+  const server: Server = tls
+    ? createHttpsServer({ cert: tls.certificate, key: tls.key }, delayed)
+    : createHttpServer(delayed);
   server.on("upgrade", (incoming, socket, head) => {
     const wait = delayMs;
     if (wait > 0) {
@@ -266,27 +393,46 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
     } else upgrade(incoming, socket, head, 0);
   });
   const upgrade = (incoming: IncomingMessage, socket: Duplex, head: Buffer, wait: number) => {
-    if (paused) { refusedUpgrades++; socket.destroy(); return; }
+    if (paused) {
+      refusedUpgrades++;
+      socket.destroy();
+      return;
+    }
     const target = route(incoming.url ?? "/");
-    if (!target) { socket.destroy(); return; }
+    if (!target) {
+      socket.destroy();
+      return;
+    }
     upgraded.add(socket);
     socket.once("close", () => upgraded.delete(socket));
-    const upstream = requestHttp(new URL(incoming.url ?? "/", target), { method: incoming.method, headers: incoming.headers });
+    const upstream = requestHttp(new URL(incoming.url ?? "/", target), {
+      method: incoming.method,
+      headers: incoming.headers,
+    });
     upstreams.add(upstream);
     upstream.once("close", () => upstreams.delete(upstream));
     const answer = (response: IncomingMessage) => {
       const lines = [`HTTP/1.1 ${response.statusCode} ${response.statusMessage}`];
-      for (let index = 0; index < response.rawHeaders.length; index += 2) lines.push(`${response.rawHeaders[index]}: ${response.rawHeaders[index + 1]}`);
+      for (let index = 0; index < response.rawHeaders.length; index += 2)
+        lines.push(`${response.rawHeaders[index]}: ${response.rawHeaders[index + 1]}`);
       return `${lines.join("\r\n")}\r\n\r\n`;
     };
     upstream.once("upgrade", (response, relaySocket, relayHead) => {
-      if (paused) { relaySocket.destroy(); socket.destroy(); return; }
+      if (paused) {
+        relaySocket.destroy();
+        socket.destroy();
+        return;
+      }
       upgraded.add(relaySocket);
-      relaySocket.once("close", () => { upgraded.delete(relaySocket); socket.destroy(); });
+      relaySocket.once("close", () => {
+        upgraded.delete(relaySocket);
+        socket.destroy();
+      });
       socket.once("close", () => relaySocket.destroy());
       relaySocket.on("error", () => relaySocket.destroy());
       if (wait > 0) {
-        const down = delayedStream(wait), up = delayedStream(wait);
+        const down = delayedStream(wait),
+          up = delayedStream(wait);
         down.write(Buffer.from(answer(response)));
         down.write(relayHead);
         up.write(head);
@@ -301,12 +447,18 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
       relaySocket.pipe(socket).pipe(relaySocket);
     });
     // A refused upgrade keeps the relay's status and body.
-    upstream.once("response", (response) => { socket.write(answer(response)); response.pipe(socket); });
+    upstream.once("response", (response) => {
+      socket.write(answer(response));
+      response.pipe(socket);
+    });
     upstream.on("error", () => socket.destroy());
     socket.on("error", () => upstream.destroy());
     upstream.end();
   };
-  await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
   const address = server.address();
   assert.ok(address && typeof address !== "string");
   return {
@@ -319,31 +471,58 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
       for (const socket of upgraded) socket.destroy();
       server.closeAllConnections();
     },
-    resume() { paused = false; },
+    resume() {
+      paused = false;
+    },
     /** Applies to requests and upgrades that start after the call. */
-    setDelayMs(value: number) { delayMs = value; },
-    outageState() { return { paused, refusedRequests, refusedUpgrades, upstreams: upstreams.size, upgraded: upgraded.size }; },
-    routeAuthTo(url: string) { authInternalUrl = url; },
-    routeRelayTo(url: string) { relayUrl = url; },
+    setDelayMs(value: number) {
+      delayMs = value;
+    },
+    outageState() {
+      return {
+        paused,
+        refusedRequests,
+        refusedUpgrades,
+        upstreams: upstreams.size,
+        upgraded: upgraded.size,
+      };
+    },
+    routeAuthTo(url: string) {
+      authInternalUrl = url;
+    },
+    routeRelayTo(url: string) {
+      relayUrl = url;
+    },
     /** Buffers the next real hosted-log response for this workspace until released. */
     holdNextHostedLogResponse(workspaceId: string): HostedLogResponseBarrier {
       assert.ok(!nextHostedLog, "A hosted-log response barrier is already waiting for a request.");
       let resolve!: (response: ProxiedHostedLogResponse) => void;
       let reject!: (error: Error) => void;
-      const captured = new Promise<ProxiedHostedLogResponse>((done, fail) => { resolve = done; reject = fail; });
+      const captured = new Promise<ProxiedHostedLogResponse>((done, fail) => {
+        resolve = done;
+        reject = fail;
+      });
       let resolveDelivered!: () => void;
       let rejectDelivered!: (error: Error) => void;
-      const delivered = new Promise<void>((done, fail) => { resolveDelivered = done; rejectDelivered = fail; });
+      const delivered = new Promise<void>((done, fail) => {
+        resolveDelivered = done;
+        rejectDelivered = fail;
+      });
       // Cleanup can destroy a barrier before its owner reaches the await.
       void captured.catch(() => undefined);
       void delivered.catch(() => undefined);
       let outgoing: ServerResponse | undefined;
       let buffered: ProxiedHostedLogResponse | undefined;
       let released = false;
-      const held: Array<{ incoming: IncomingMessage; outgoing: ServerResponse; body: Readable }> = [];
+      const held: Array<{ incoming: IncomingMessage; outgoing: ServerResponse; body: Readable }> =
+        [];
       const barrier: PendingHostedLogResponse = {
-        workspaceId, captured, delivered,
-        hold(incoming, outgoing, body) { held.push({ incoming, outgoing, body }); },
+        workspaceId,
+        captured,
+        delivered,
+        hold(incoming, outgoing, body) {
+          held.push({ incoming, outgoing, body });
+        },
         attach(destination) {
           outgoing = destination;
           if (!released) holdingHostedLog = barrier;
@@ -358,13 +537,22 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
         },
         receive(response) {
           const chunks: Buffer[] = [];
-          response.on("data", chunk => chunks.push(Buffer.from(chunk)));
-          response.once("error", error => barrier.fail(error));
-          response.once("aborted", () => barrier.fail(new Error("Hosted-log upstream response aborted.")));
+          response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+          response.once("error", (error) => barrier.fail(error));
+          response.once("aborted", () =>
+            barrier.fail(new Error("Hosted-log upstream response aborted.")),
+          );
           response.once("end", () => {
-            if (outgoing?.destroyed) { barrier.fail(new HostedLogClientClosedError()); return; }
-            buffered = { status: response.statusCode ?? 502, statusMessage: response.statusMessage ?? "",
-              headers: [...response.rawHeaders], body: Buffer.concat(chunks) };
+            if (outgoing?.destroyed) {
+              barrier.fail(new HostedLogClientClosedError());
+              return;
+            }
+            buffered = {
+              status: response.statusCode ?? 502,
+              statusMessage: response.statusMessage ?? "",
+              headers: [...response.rawHeaders],
+              body: Buffer.concat(chunks),
+            };
             resolve(buffered);
             if (released) barrier.release();
           });
@@ -382,7 +570,8 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
             outgoing = undefined;
           }
           for (const request of held.splice(0)) {
-            if (!request.outgoing.destroyed) forward(request.incoming, request.outgoing, request.body, 0);
+            if (!request.outgoing.destroyed)
+              forward(request.incoming, request.outgoing, request.body, 0);
           }
         },
         fail(error) {
@@ -394,7 +583,9 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
           for (const request of held.splice(0)) request.outgoing.destroy();
           buffered = undefined;
         },
-        destroy() { barrier.fail(new Error("Hosted-log response barrier destroyed.")); },
+        destroy() {
+          barrier.fail(new Error("Hosted-log response barrier destroyed."));
+        },
       };
       nextHostedLog = barrier;
       return barrier;
@@ -405,23 +596,37 @@ export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "
       for (const request of upstreams) request.destroy();
       for (const socket of upgraded) socket.destroy();
       server.closeAllConnections();
-      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
     },
   };
 }
 
-function acceptedCursorBefore(directory: string, workspaceId: string, path: string, principalId: string): number {
+function acceptedCursorBefore(
+  directory: string,
+  workspaceId: string,
+  path: string,
+  principalId: string,
+): number {
   const db = new DatabaseSync(join(directory, "relay-data", "relay.sqlite"), { readOnly: true });
   try {
-    const row = db.prepare(
-      `SELECT MAX(journal_cursor) AS cursor FROM sync_relay_live_update_journal WHERE workspace_id=? AND current_path=?
+    const row = db
+      .prepare(
+        `SELECT MAX(journal_cursor) AS cursor FROM sync_relay_live_update_journal WHERE workspace_id=? AND current_path=?
          AND journal_cursor < (SELECT MIN(journal_cursor) FROM sync_relay_live_update_journal
            WHERE workspace_id=? AND current_path=? AND principal_kind='named' AND principal_id=?)`,
-    ).get(workspaceId, path, workspaceId, path, principalId);
+      )
+      .get(workspaceId, path, workspaceId, path, principalId);
     const cursor = Number(row?.cursor);
-    assert.ok(Number.isSafeInteger(cursor) && cursor >= 1, "An accepted change precedes the account's first live edit.");
+    assert.ok(
+      Number.isSafeInteger(cursor) && cursor >= 1,
+      "An accepted change precedes the account's first live edit.",
+    );
     return cursor;
-  } finally { db.close(); }
+  } finally {
+    db.close();
+  }
 }
 
 /**
@@ -432,8 +637,9 @@ function acceptedCursorBefore(directory: string, workspaceId: string, path: stri
 function ownerLiveBinding(directory: string, workspaceId: string, path: string) {
   const db = new DatabaseSync(join(directory, "relay-data", "relay.sqlite"), { readOnly: true });
   try {
-    const rows = db.prepare(
-      `SELECT d.workspace_id, d.main_version_id, d.object_id, d.lineage_claim_id,
+    const rows = db
+      .prepare(
+        `SELECT d.workspace_id, d.main_version_id, d.object_id, d.lineage_claim_id,
          d.current_path, d.restore_fence_generation, a.binding_json, a.relay_database_namespace
        FROM sync_relay_service_host_enrollments e
        JOIN sync_relay_workspaces w ON w.workspace_id=e.workspace_id
@@ -458,119 +664,244 @@ function ownerLiveBinding(directory: string, workspaceId: string, path: string) 
                  AND latest.version_id=m.version_id)
          )
        LIMIT 2`,
-    ).all(workspaceId, path);
-    assert.ok(rows.length <= 1, "The fixture has more than one current owner enrollment for its document.");
+      )
+      .all(workspaceId, path);
+    assert.ok(
+      rows.length <= 1,
+      "The fixture has more than one current owner enrollment for its document.",
+    );
     const row = rows[0];
     if (!row) return null;
-    assert.equal(typeof row.binding_json, "string", "The owner activation's binding must be JSON text.");
+    assert.equal(
+      typeof row.binding_json,
+      "string",
+      "The owner activation's binding must be JSON text.",
+    );
     const recorded = parseLiveObjectBinding(JSON.parse(row.binding_json as string));
     assert.deepEqual(
-      [recorded.workspaceId, recorded.mainVersionId, recorded.objectId, recorded.lineageClaimId, recorded.currentPath],
-      [row.workspace_id, row.main_version_id, row.object_id, row.lineage_claim_id, row.current_path],
+      [
+        recorded.workspaceId,
+        recorded.mainVersionId,
+        recorded.objectId,
+        recorded.lineageClaimId,
+        recorded.currentPath,
+      ],
+      [
+        row.workspace_id,
+        row.main_version_id,
+        row.object_id,
+        row.lineage_claim_id,
+        row.current_path,
+      ],
       "The owner activation's binding names the live document.",
     );
-    const binding = parseLiveObjectBinding({ ...recorded, restoreFenceGeneration: row.restore_fence_generation });
-    const relayDatabaseNamespace = parseLiveUpdateIdentifier(row.relay_database_namespace, "relayDatabaseNamespace");
+    const binding = parseLiveObjectBinding({
+      ...recorded,
+      restoreFenceGeneration: row.restore_fence_generation,
+    });
+    const relayDatabaseNamespace = parseLiveUpdateIdentifier(
+      row.relay_database_namespace,
+      "relayDatabaseNamespace",
+    );
     return { binding, relayDatabaseNamespace };
-  } finally { db.close(); }
+  } finally {
+    db.close();
+  }
 }
 
 // The relay's accepted changes that declared this agent, and the service
 // host's copies. Accepted history can fold into a checkpoint, so its rows are
 // reported as found; the durable audit record is what must remain.
-function hostedAgentEvidence(directory: string, workspaceId: string, path: string, agentId: string) {
+function hostedAgentEvidence(
+  directory: string,
+  workspaceId: string,
+  path: string,
+  agentId: string,
+) {
   const read = <T>(file: string, query: (db: InstanceType<typeof DatabaseSync>) => T) => {
     const db = new DatabaseSync(file, { readOnly: true });
-    try { return query(db); } finally { db.close(); }
+    try {
+      return query(db);
+    } finally {
+      db.close();
+    }
   };
-  const relay = read(join(directory, "relay-data", "relay.sqlite"), (db) => db.prepare(
-    `SELECT j.journal_cursor AS cursor, j.delivery_id AS deliveryId, j.update_digest AS updateDigest,
+  const relay = read(join(directory, "relay-data", "relay.sqlite"), (db) =>
+    db
+      .prepare(
+        `SELECT j.journal_cursor AS cursor, j.delivery_id AS deliveryId, j.update_digest AS updateDigest,
        j.principal_kind AS principalKind, j.principal_id AS principalId, j.restore_fence_generation AS fence,
        j.accepted_event_count AS eventCount, j.accepted_evidence_digest AS evidenceDigest, j.author_snapshot_json AS authorSnapshot
      FROM sync_relay_live_update_journal j
      WHERE j.workspace_id=? AND j.current_path=? AND EXISTS (
        SELECT 1 FROM json_each(j.author_snapshot_json) a
        WHERE json_extract(a.value,'$.kind')='agent' AND json_extract(a.value,'$.agentId')=?) ORDER BY j.journal_cursor LIMIT 16`,
-  ).all(workspaceId, path, agentId).map((row) => ({
-    journalCursor: Number(row.cursor), deliveryId: String(row.deliveryId), updateDigest: String(row.updateDigest),
-    principalKind: String(row.principalKind), principalId: String(row.principalId), restoreFenceGeneration: Number(row.fence),
-    eventCount: Number(row.eventCount), evidenceDigest: String(row.evidenceDigest),
-    authorSnapshot: JSON.parse(String(row.authorSnapshot)) as LiveAuditRecord["authorSnapshot"],
-  })));
+      )
+      .all(workspaceId, path, agentId)
+      .map((row) => ({
+        journalCursor: Number(row.cursor),
+        deliveryId: String(row.deliveryId),
+        updateDigest: String(row.updateDigest),
+        principalKind: String(row.principalKind),
+        principalId: String(row.principalId),
+        restoreFenceGeneration: Number(row.fence),
+        eventCount: Number(row.eventCount),
+        evidenceDigest: String(row.evidenceDigest),
+        authorSnapshot: JSON.parse(String(row.authorSnapshot)) as LiveAuditRecord["authorSnapshot"],
+      })),
+  );
   // Every accepted change of the document by authenticated kind, and how many declared any agent. Counts only.
-  const journal = read(join(directory, "relay-data", "relay.sqlite"), (db) => db.prepare(
-    `SELECT j.principal_kind AS kind, COUNT(*) AS accepted, SUM(EXISTS (
+  const journal = read(join(directory, "relay-data", "relay.sqlite"), (db) =>
+    db
+      .prepare(
+        `SELECT j.principal_kind AS kind, COUNT(*) AS accepted, SUM(EXISTS (
        SELECT 1 FROM json_each(j.author_snapshot_json) a WHERE json_extract(a.value,'$.kind')='agent')) AS declared
      FROM sync_relay_live_update_journal j
      WHERE j.workspace_id=? AND j.current_path=? GROUP BY j.principal_kind ORDER BY j.principal_kind`,
-  ).all(workspaceId, path).map((row) => ({ kind: String(row.kind), accepted: Number(row.accepted), declared: Number(row.declared) })));
+      )
+      .all(workspaceId, path)
+      .map((row) => ({
+        kind: String(row.kind),
+        accepted: Number(row.accepted),
+        declared: Number(row.declared),
+      })),
+  );
   const hostRoot = join(directory, "relay-deployment", "live-host");
   // The relay makes a store's folder before the service host creates its engine database.
-  const host = readdirSync(hostRoot, { withFileTypes: true }).filter((entry) => entry.isDirectory() && entry.name !== "automations")
-    .map((entry) => join(hostRoot, entry.name, ".dohc", "engine", "engine.db")).filter((file) => existsSync(file))
-    .flatMap((file) => read(file, (db) => relay.map((change) => ({
-      deliveryId: change.deliveryId,
-      accepted: db.prepare(`SELECT journal_cursor AS cursor, event_count AS eventCount, evidence_digest AS evidenceDigest,
+  const host = readdirSync(hostRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && entry.name !== "automations")
+    .map((entry) => join(hostRoot, entry.name, ".dohc", "engine", "engine.db"))
+    .filter((file) => existsSync(file))
+    .flatMap((file) =>
+      read(file, (db) =>
+        relay.map((change) => ({
+          deliveryId: change.deliveryId,
+          accepted: db
+            .prepare(`SELECT journal_cursor AS cursor, event_count AS eventCount, evidence_digest AS evidenceDigest,
           json_extract(metadata_json,'$.accepted') AS accepted, json_extract(metadata_json,'$.authorSnapshot') AS authorSnapshot FROM live_accepted_updates
           WHERE delivery_id=? AND json_extract(metadata_json,'$.accepted.binding.workspaceId')=?`)
-        .all(change.deliveryId, workspaceId).map((row) => ({ journalCursor: Number(row.cursor), eventCount: Number(row.eventCount),
-          evidenceDigest: String(row.evidenceDigest), accepted: JSON.parse(String(row.accepted)) as LiveAuditRecord["accepted"],
-          authorSnapshot: JSON.parse(String(row.authorSnapshot)) as LiveAuditRecord["authorSnapshot"] })),
-      audit: readLiveAuditRecord(db, change.deliveryId),
-    }))));
+            .all(change.deliveryId, workspaceId)
+            .map((row) => ({
+              journalCursor: Number(row.cursor),
+              eventCount: Number(row.eventCount),
+              evidenceDigest: String(row.evidenceDigest),
+              accepted: JSON.parse(String(row.accepted)) as LiveAuditRecord["accepted"],
+              authorSnapshot: JSON.parse(
+                String(row.authorSnapshot),
+              ) as LiveAuditRecord["authorSnapshot"],
+            })),
+          audit: readLiveAuditRecord(db, change.deliveryId),
+        })),
+      ),
+    );
   return { relay, host, journal };
 }
 
 function settlementEvidence(directory: string) {
   const read = <T>(path: string, query: (db: InstanceType<typeof DatabaseSync>) => T) => {
     const db = new DatabaseSync(path, { readOnly: true });
-    try { return query(db); } finally { db.close(); }
+    try {
+      return query(db);
+    } finally {
+      db.close();
+    }
   };
-  const cursors = (db: InstanceType<typeof DatabaseSync>, sql: string) => db.prepare(sql).all().map((row) => Number(row.cursor));
+  const cursors = (db: InstanceType<typeof DatabaseSync>, sql: string) =>
+    db
+      .prepare(sql)
+      .all()
+      .map((row) => Number(row.cursor));
   const hostRoot = join(directory, "relay-deployment", "live-host");
   return {
-    host: readdirSync(hostRoot, { withFileTypes: true }).filter((entry) => entry.isDirectory() && entry.name !== "automations")
-      .map((entry) => join(hostRoot, entry.name, ".dohc", "engine", "engine.db")).filter((file) => existsSync(file))
-      .map((file) => read(file, (db) => ({
-        settled: cursors(db, "SELECT terminal_cursor AS cursor FROM live_device_settlements ORDER BY terminal_cursor"),
-        heldForExport: Number(db.prepare("SELECT COUNT(*) AS n FROM live_audit_pending_exports").get()?.n ?? 0),
-        journaled: cursors(db, `SELECT json_extract(payload_json,'$.record.terminalCursor') AS cursor FROM replication_log
-          WHERE imported=0 AND op_kind='live.audit.settlement' ORDER BY cursor`),
-        acceptedEvents: Number(db.prepare("SELECT COUNT(*) AS n FROM live_accepted_updates").get()?.n ?? 0),
-        // The registration the publication proof reads, and whether the proof
-        // rows agree on one binding.
-        registrations: db.prepare(
-          "SELECT available, restore_fence_generation AS fence, selector_paths_json AS selectors FROM live_device_application_bindings",
-        ).all().map((row) => ({ available: Number(row.available) === 1, fence: Number(row.fence), selectors: String(row.selectors) })),
-        ownerBound: Number(db.prepare("SELECT EXISTS(SELECT 1 FROM ydoc_owner_bindings) AS n").get()?.n ?? 0) === 1,
-        proofBindings: Number(db.prepare(
-          "SELECT COUNT(DISTINCT binding_json) AS n FROM (SELECT binding_json FROM live_device_settlements UNION ALL SELECT binding_json FROM live_owner_adoptions UNION ALL SELECT binding_json FROM live_device_bootstraps)",
-        ).get()?.n ?? 0),
-        // The first unpublished local operations, and which proof row holds each
-        // digest a moment references. Digests and kinds only.
-        unpublished: db.prepare(
-          `SELECT l.origin_seq AS seq, l.op_kind AS kind, ${["payloadBeforeBlobSha256", "payloadAfterBlobSha256", "beforeBlobSha256"].map((field) => `
+    host: readdirSync(hostRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && entry.name !== "automations")
+      .map((entry) => join(hostRoot, entry.name, ".dohc", "engine", "engine.db"))
+      .filter((file) => existsSync(file))
+      .map((file) =>
+        read(file, (db) => ({
+          settled: cursors(
+            db,
+            "SELECT terminal_cursor AS cursor FROM live_device_settlements ORDER BY terminal_cursor",
+          ),
+          heldForExport: Number(
+            db.prepare("SELECT COUNT(*) AS n FROM live_audit_pending_exports").get()?.n ?? 0,
+          ),
+          journaled: cursors(
+            db,
+            `SELECT json_extract(payload_json,'$.record.terminalCursor') AS cursor FROM replication_log
+          WHERE imported=0 AND op_kind='live.audit.settlement' ORDER BY cursor`,
+          ),
+          acceptedEvents: Number(
+            db.prepare("SELECT COUNT(*) AS n FROM live_accepted_updates").get()?.n ?? 0,
+          ),
+          // The registration the publication proof reads, and whether the proof
+          // rows agree on one binding.
+          registrations: db
+            .prepare(
+              "SELECT available, restore_fence_generation AS fence, selector_paths_json AS selectors FROM live_device_application_bindings",
+            )
+            .all()
+            .map((row) => ({
+              available: Number(row.available) === 1,
+              fence: Number(row.fence),
+              selectors: String(row.selectors),
+            })),
+          ownerBound:
+            Number(
+              db.prepare("SELECT EXISTS(SELECT 1 FROM ydoc_owner_bindings) AS n").get()?.n ?? 0,
+            ) === 1,
+          proofBindings: Number(
+            db
+              .prepare(
+                "SELECT COUNT(DISTINCT binding_json) AS n FROM (SELECT binding_json FROM live_device_settlements UNION ALL SELECT binding_json FROM live_owner_adoptions UNION ALL SELECT binding_json FROM live_device_bootstraps)",
+              )
+              .get()?.n ?? 0,
+          ),
+          // The first unpublished local operations, and which proof row holds each
+          // digest a moment references. Digests and kinds only.
+          unpublished: db
+            .prepare(
+              `SELECT l.origin_seq AS seq, l.op_kind AS kind, ${[
+                "payloadBeforeBlobSha256",
+                "payloadAfterBlobSha256",
+                "beforeBlobSha256",
+              ]
+                .map(
+                  (field) => `
              (SELECT CASE WHEN json_extract(l.payload_json,'$.${field}') IS NULL THEN 'none'
                WHEN EXISTS(SELECT 1 FROM live_device_settlements s WHERE s.markdown_digest=json_extract(l.payload_json,'$.${field}')) THEN 'settlement'
                WHEN EXISTS(SELECT 1 FROM live_owner_adoptions a WHERE a.source_digest=json_extract(l.payload_json,'$.${field}')) THEN 'adoption'
                WHEN EXISTS(SELECT 1 FROM live_device_bootstraps b WHERE b.projected_markdown_digest=json_extract(l.payload_json,'$.${field}')) THEN 'bootstrap'
-               ELSE 'unproved' END) AS ${field}`).join(",")}
+               ELSE 'unproved' END) AS ${field}`,
+                )
+                .join(",")}
            FROM replication_log l LEFT JOIN sync_relay_push_state p ON p.workspace_id=l.workspace_id AND p.origin_id=l.origin_id
            WHERE l.imported=0 AND l.origin_seq>COALESCE(p.pushed_seq,-1) ORDER BY l.origin_seq LIMIT 4`,
-        ).all(),
-      }))),
-    relay: read(join(directory, "relay-data", "relay.sqlite"), (db) => db.prepare(
-      `SELECT json_extract(s.payload_json,'$.record.terminalCursor') AS cursor,
+            )
+            .all(),
+        })),
+      ),
+    relay: read(join(directory, "relay-data", "relay.sqlite"), (db) =>
+      db
+        .prepare(
+          `SELECT json_extract(s.payload_json,'$.record.terminalCursor') AS cursor,
          EXISTS(SELECT 1 FROM sync_relay_log m WHERE m.workspace_id=s.workspace_id AND m.op_kind='moment.append'
            AND json_extract(m.payload_json,'$.momentId')=json_extract(s.payload_json,'$.record.momentId')) AS moment
        FROM sync_relay_log s WHERE s.op_kind='live.audit.settlement' ORDER BY s.relay_seq`,
-    ).all().map((row) => ({ terminalCursor: Number(row.cursor), momentPublished: Number(row.moment) === 1 }))),
+        )
+        .all()
+        .map((row) => ({
+          terminalCursor: Number(row.cursor),
+          momentPublished: Number(row.moment) === 1,
+        })),
+    ),
   };
 }
 
 function liveHostTexts(directory: string, path: string): string[] {
   const hostRoot = join(directory, "relay-deployment", "live-host");
-  return readdirSync(hostRoot, { withFileTypes: true }).filter((entry) => entry.isDirectory() && entry.name !== "automations")
+  return readdirSync(hostRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && entry.name !== "automations")
     .flatMap((entry) => momentTextsForPath(join(hostRoot, entry.name), path));
 }
 
@@ -579,22 +910,32 @@ function liveHostTexts(directory: string, path: string): string[] {
 function liveHosting(directory: string, workspaceId: string, path: string) {
   const db = new DatabaseSync(join(directory, "relay-data", "relay.sqlite"), { readOnly: true });
   try {
-    const enrollment = db.prepare(
-      "SELECT object_id, retired, host_drained_at_ms, owner_stop FROM sync_relay_service_host_enrollments WHERE workspace_id=? AND path=?",
-    ).get(workspaceId, path);
+    const enrollment = db
+      .prepare(
+        "SELECT object_id, retired, host_drained_at_ms, owner_stop FROM sync_relay_service_host_enrollments WHERE workspace_id=? AND path=?",
+      )
+      .get(workspaceId, path);
     if (!enrollment) return null;
-    const activations = db.prepare(
-      `SELECT activation_id, predecessor_activation_id, retired_at_ms FROM sync_relay_service_activations
+    const activations = db
+      .prepare(
+        `SELECT activation_id, predecessor_activation_id, retired_at_ms FROM sync_relay_service_activations
        WHERE workspace_id=? AND main_version_id='main' AND object_id=? LIMIT 16`,
-    ).all(workspaceId, enrollment.object_id);
+      )
+      .all(workspaceId, enrollment.object_id);
     return {
-      retired: Number(enrollment.retired) === 1, drained: enrollment.host_drained_at_ms !== null,
+      retired: Number(enrollment.retired) === 1,
+      drained: enrollment.host_drained_at_ms !== null,
       ownerStop: enrollment.owner_stop === null ? null : String(enrollment.owner_stop),
-      activations: activations.map((row) => ({ activationId: String(row.activation_id),
-        predecessorActivationId: row.predecessor_activation_id === null ? null : String(row.predecessor_activation_id),
-        retired: row.retired_at_ms !== null })),
+      activations: activations.map((row) => ({
+        activationId: String(row.activation_id),
+        predecessorActivationId:
+          row.predecessor_activation_id === null ? null : String(row.predecessor_activation_id),
+        retired: row.retired_at_ms !== null,
+      })),
     };
-  } finally { db.close(); }
+  } finally {
+    db.close();
+  }
 }
 
 // How far the server's live work on one document has gone: the relay's
@@ -604,33 +945,75 @@ function liveHosting(directory: string, workspaceId: string, path: string) {
 function livePublication(directory: string, workspaceId: string, path: string) {
   const read = <T>(file: string, query: (db: InstanceType<typeof DatabaseSync>) => T) => {
     const db = new DatabaseSync(file, { readOnly: true });
-    try { return query(db); } finally { db.close(); }
+    try {
+      return query(db);
+    } finally {
+      db.close();
+    }
   };
-  const count = (db: InstanceType<typeof DatabaseSync>, sql: string, ...params: string[]) => Number(db.prepare(sql).get(...params)?.n ?? 0);
+  const count = (db: InstanceType<typeof DatabaseSync>, sql: string, ...params: string[]) =>
+    Number(db.prepare(sql).get(...params)?.n ?? 0);
   const relay = read(join(directory, "relay-data", "relay.sqlite"), (db) => ({
-    acceptedHead: count(db, "SELECT COALESCE(MAX(journal_cursor),0) AS n FROM sync_relay_live_update_journal WHERE workspace_id=? AND current_path=?", workspaceId, path),
-    hostOrigins: Object.fromEntries(db.prepare(
-      "SELECT origin_id AS origin, MAX(origin_seq) AS seq FROM sync_relay_log WHERE workspace_id=? AND origin_id LIKE 'service-host:%' GROUP BY origin_id",
-    ).all(workspaceId).map((row) => [String(row.origin), Number(row.seq)])),
+    acceptedHead: count(
+      db,
+      "SELECT COALESCE(MAX(journal_cursor),0) AS n FROM sync_relay_live_update_journal WHERE workspace_id=? AND current_path=?",
+      workspaceId,
+      path,
+    ),
+    hostOrigins: Object.fromEntries(
+      db
+        .prepare(
+          "SELECT origin_id AS origin, MAX(origin_seq) AS seq FROM sync_relay_log WHERE workspace_id=? AND origin_id LIKE 'service-host:%' GROUP BY origin_id",
+        )
+        .all(workspaceId)
+        .map((row) => [String(row.origin), Number(row.seq)]),
+    ),
   }));
   const hostRoot = join(directory, "relay-deployment", "live-host");
-  const hosts = readdirSync(hostRoot, { withFileTypes: true }).filter((entry) => entry.isDirectory() && entry.name !== "automations")
-    .map((entry) => join(hostRoot, entry.name, ".dohc", "engine", "engine.db")).filter((file) => existsSync(file))
-    .map((file) => read(file, (db) => ({
-      settledThrough: count(db, "SELECT COALESCE(MAX(terminal_cursor),0) AS n FROM live_device_settlements"),
-      unpushed: count(db, `SELECT COUNT(*) AS n FROM replication_log l LEFT JOIN sync_relay_push_state p ON p.workspace_id=l.workspace_id AND p.origin_id=l.origin_id
-        WHERE l.imported=0 AND l.origin_seq>COALESCE(p.pushed_seq,-1)`),
-    })));
+  const hosts = readdirSync(hostRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && entry.name !== "automations")
+    .map((entry) => join(hostRoot, entry.name, ".dohc", "engine", "engine.db"))
+    .filter((file) => existsSync(file))
+    .map((file) =>
+      read(file, (db) => ({
+        settledThrough: count(
+          db,
+          "SELECT COALESCE(MAX(terminal_cursor),0) AS n FROM live_device_settlements",
+        ),
+        unpushed: count(
+          db,
+          `SELECT COUNT(*) AS n FROM replication_log l LEFT JOIN sync_relay_push_state p ON p.workspace_id=l.workspace_id AND p.origin_id=l.origin_id
+        WHERE l.imported=0 AND l.origin_seq>COALESCE(p.pushed_seq,-1)`,
+        ),
+      })),
+    );
   return { ...relay, hosts };
 }
 
 // The supported self-host profile: an initialized deployment whose service
 // host runs the native engine and replicates through the public HTTPS origin.
-function selfHostLiveEnv(directory: string, origin: string, link?: SyncRelayLinkBoundary & { innerHost: string }): NodeJS.ProcessEnv {
+function selfHostLiveEnv(
+  directory: string,
+  origin: string,
+  link?: SyncRelayLinkBoundary & { innerHost: string },
+): NodeJS.ProcessEnv {
   const deployment = join(directory, "relay-deployment");
-  execFileSync(process.execPath, ["--import", "tsx/esm", "src/relayDeploymentCommand.ts", "initialize",
-    "--config", join(deployment, "deployment.json"), "--database", join(directory, "relay-data", "relay.sqlite"), "--continuity-directory", join(deployment, "continuity")],
-  { cwd: relayRoot, stdio: "pipe", windowsHide: true });
+  execFileSync(
+    process.execPath,
+    [
+      "--import",
+      "tsx/esm",
+      "src/relayDeploymentCommand.ts",
+      "initialize",
+      "--config",
+      join(deployment, "deployment.json"),
+      "--database",
+      join(directory, "relay-data", "relay.sqlite"),
+      "--continuity-directory",
+      join(deployment, "continuity"),
+    ],
+    { cwd: relayRoot, stdio: "pipe", windowsHide: true },
+  );
   mkdirSync(join(deployment, "live-host"));
   return {
     SYNC_RELAY_DB_PATH: undefined,
@@ -647,13 +1030,20 @@ function selfHostLiveEnv(directory: string, origin: string, link?: SyncRelayLink
     DOHC_RELAY_SHARE_WEB_ORIGIN: link?.publicViewerOrigin ?? origin,
     DOHC_RELAY_SHARE_WEB_URL: link?.publicViewerOrigin ?? origin,
     // Like the self-host compose file, the relay's inner host serves share-web's live routes.
-    DOHC_RELAY_NAMED_LIVE_HOSTS: [new URL(origin).host, ...(link ? [link.innerHost] : [])].join(","),
+    DOHC_RELAY_NAMED_LIVE_HOSTS: [new URL(origin).host, ...(link ? [link.innerHost] : [])].join(
+      ",",
+    ),
     DOHC_RELAY_LINK_KEY: link?.linkKey ?? randomBytes(32).toString("hex"),
     DOHC_RELAY_EXCHANGE_KEY: link?.relayExchangeKey ?? randomBytes(32).toString("hex"),
   };
 }
 
-async function startAuthenticatedRelay(directory: string, authUrl: string, liveEnv: NodeJS.ProcessEnv, port = 0) {
+async function startAuthenticatedRelay(
+  directory: string,
+  authUrl: string,
+  liveEnv: NodeJS.ProcessEnv,
+  port = 0,
+) {
   const env = {
     ...process.env,
     NODE_ENV: "test",
@@ -679,24 +1069,44 @@ async function startAuthenticatedRelay(directory: string, authUrl: string, liveE
   };
   // This assertion runs inside the service process, before its production entry.
   // IPC requests orderly shutdown on Windows too, where SIGTERM would skip closing the live host's engine.
-  const bootstrap = 'import { strict as assert } from "node:assert"; assert.equal(process.env.SYNC_RELAY_TEST_AUTH, undefined); assert.equal(process.env.DOHC_TEST_AUTH, undefined); process.on("message", (message) => { if (message === "SIGTERM") process.emit("SIGTERM"); }); await import("./src/main.ts");';
-  const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", bootstrap], {
-    cwd: relayRoot, env, windowsHide: true, stdio: ["ignore", "pipe", "pipe", "ipc"],
-  });
+  const bootstrap =
+    'import { strict as assert } from "node:assert"; assert.equal(process.env.SYNC_RELAY_TEST_AUTH, undefined); assert.equal(process.env.DOHC_TEST_AUTH, undefined); process.on("message", (message) => { if (message === "SIGTERM") process.emit("SIGTERM"); }); await import("./src/main.ts");';
+  const child = spawn(
+    process.execPath,
+    ["--import", "tsx", "--input-type=module", "--eval", bootstrap],
+    {
+      cwd: relayRoot,
+      env,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe", "ipc"],
+    },
+  );
   const { stdout, stderr } = child;
   assert.ok(stdout && stderr, "The relay's output pipes are configured.");
   // Enough to keep a service host failure that is logged once behind later engine output.
   let output = "";
-  stdout.on("data", (chunk) => { output = (output + String(chunk)).slice(-262_144); });
-  stderr.on("data", (chunk) => { output = (output + String(chunk)).slice(-262_144); });
+  stdout.on("data", (chunk) => {
+    output = (output + String(chunk)).slice(-262_144);
+  });
+  stderr.on("data", (chunk) => {
+    output = (output + String(chunk)).slice(-262_144);
+  });
   const exited = new Promise<void>((resolve) => child.once("close", () => resolve()));
   const close = () => stopChild(child, exited);
   try {
     const url = await new Promise<string>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`Authenticated relay did not start. ${output}`)), 30_000);
-      const fail = (error: Error) => { clearTimeout(timer); reject(error); };
+      const timer = setTimeout(
+        () => reject(new Error(`Authenticated relay did not start. ${output}`)),
+        30_000,
+      );
+      const fail = (error: Error) => {
+        clearTimeout(timer);
+        reject(error);
+      };
       child.once("error", fail);
-      child.once("exit", (code) => fail(new Error(`Authenticated relay exited (${code}). ${output}`)));
+      child.once("exit", (code) =>
+        fail(new Error(`Authenticated relay exited (${code}). ${output}`)),
+      );
       stdout.on("data", () => {
         const match = /SYNC_RELAY_LISTENING host=([^\s]+) port=(\d+)/u.exec(output);
         if (!match) return;
@@ -716,21 +1126,35 @@ async function stopChild(child: ChildProcess, exited: Promise<void>) {
   // Allow the relay's HTTP drain and live host close, then bound a wedged child.
   const force = setTimeout(() => child.kill("SIGKILL"), 15_000);
   try {
-    if (child.connected) child.send("SIGTERM", (error) => { if (error) child.kill("SIGTERM"); });
+    if (child.connected)
+      child.send("SIGTERM", (error) => {
+        if (error) child.kill("SIGTERM");
+      });
     else child.kill("SIGTERM");
     await exited;
-  } finally { clearTimeout(force); }
+  } finally {
+    clearTimeout(force);
+  }
 }
 
 // The OS browser dispatcher is the only substituted boundary. Desktop discovery,
 // IPC validation, device-code polling, browser approval, and credential storage run normally.
 // Without a browser page, it only returns the approval URL.
-export async function openDesktopApproval(desktop: LaunchedDesktopApp, browserPage: Page | null, origin: string) {
+export async function openDesktopApproval(
+  desktop: LaunchedDesktopApp,
+  browserPage: Page | null,
+  origin: string,
+) {
   await desktop.app.evaluate(({ shell }) => {
-    const state = globalThis as typeof globalThis & { onboardingBrowserUrl?: string; onboardingOpenExternal?: typeof shell.openExternal };
+    const state = globalThis as typeof globalThis & {
+      onboardingBrowserUrl?: string;
+      onboardingOpenExternal?: typeof shell.openExternal;
+    };
     state.onboardingBrowserUrl = undefined;
     state.onboardingOpenExternal = shell.openExternal;
-    shell.openExternal = async (url) => { state.onboardingBrowserUrl = url; };
+    shell.openExternal = async (url) => {
+      state.onboardingBrowserUrl = url;
+    };
   });
   try {
     await desktop.page.getByTestId("cloud-server-url").fill(origin);
@@ -740,8 +1164,15 @@ export async function openDesktopApproval(desktop: LaunchedDesktopApp, browserPa
     // Opening the approval URL uses the same external-link confirmation as a
     // person sees. Accept it before observing the test OS-open seam.
     const openLink = desktop.page.getByRole("button", { name: "Open link", exact: true });
-    const captured = () => desktop.app.evaluate(() => (globalThis as typeof globalThis & { onboardingBrowserUrl?: string }).onboardingBrowserUrl);
-    await expect.poll(async () => await openLink.isVisible() || Boolean(await captured())).toBe(true);
+    const captured = () =>
+      desktop.app.evaluate(
+        () =>
+          (globalThis as typeof globalThis & { onboardingBrowserUrl?: string })
+            .onboardingBrowserUrl,
+      );
+    await expect
+      .poll(async () => (await openLink.isVisible()) || Boolean(await captured()))
+      .toBe(true);
     if (await openLink.isVisible()) await openLink.click();
     await expect.poll(captured).toBeTruthy();
     const url = (await captured())!;
@@ -750,7 +1181,10 @@ export async function openDesktopApproval(desktop: LaunchedDesktopApp, browserPa
     return url;
   } finally {
     await desktop.app.evaluate(({ shell }) => {
-      const state = globalThis as typeof globalThis & { onboardingBrowserUrl?: string; onboardingOpenExternal?: typeof shell.openExternal };
+      const state = globalThis as typeof globalThis & {
+        onboardingBrowserUrl?: string;
+        onboardingOpenExternal?: typeof shell.openExternal;
+      };
       shell.openExternal = state.onboardingOpenExternal!;
       delete state.onboardingOpenExternal;
       delete state.onboardingBrowserUrl;
@@ -759,7 +1193,12 @@ export async function openDesktopApproval(desktop: LaunchedDesktopApp, browserPa
 }
 
 /** Signs up from a desktop's approval page, or on its own when no approval is waiting. */
-export async function createVerifiedAccount(page: Page, server: Awaited<ReturnType<typeof startAccountServer>>, account: { email: string; password: string; name?: string }, approvalUrl?: string) {
+export async function createVerifiedAccount(
+  page: Page,
+  server: Awaited<ReturnType<typeof startAccountServer>>,
+  account: { email: string; password: string; name?: string },
+  approvalUrl?: string,
+) {
   const before = server.mail.messages.length;
   if (approvalUrl) await page.getByRole("link", { name: /create (an )?account|sign up/i }).click();
   else await page.goto(`${server.origin}/account/sign-up`);
@@ -769,7 +1208,9 @@ export async function createVerifiedAccount(page: Page, server: Awaited<ReturnTy
   await page.getByRole("button", { name: /create account|sign up/i }).click();
   await expect(page).toHaveURL(/\/account\/verify-email\?next=/);
   await expect.poll(() => server.mail.messages.length).toBeGreaterThan(before);
-  const verification = mailLinks(server.mail.messages[before]!).find(link => link.includes("verify-email"));
+  const verification = mailLinks(server.mail.messages[before]!).find((link) =>
+    link.includes("verify-email"),
+  );
   expect(verification).toBeTruthy();
   await page.goto(verification!);
   if (!approvalUrl) {
@@ -781,7 +1222,8 @@ export async function createVerifiedAccount(page: Page, server: Awaited<ReturnTy
 }
 
 const REDIRECTS = new Set([301, 302, 303, 307, 308]);
-const escapeHtml = (text: string) => text.replace(/[&<>"']/gu, (character) => `&#${character.charCodeAt(0)};`);
+const escapeHtml = (text: string) =>
+  text.replace(/[&<>"']/gu, (character) => `&#${character.charCodeAt(0)};`);
 
 /**
  * Approval browsers stand in for each person's own browser. This test process
@@ -800,20 +1242,33 @@ export function trustFixtureCa(ca: string) {
   const previous = getCACertificates("default");
   setDefaultCACertificates([...previous, ca]);
   return {
-    route: (context: BrowserContext, origin: string) => context.route(`${origin}/**`, async (route) => {
-      const response = await route.fetch({ maxRedirects: 0 });
-      if (!REDIRECTS.has(response.status())) return route.fulfill({ response });
-      const request = route.request();
-      const location = response.headers()["location"];
-      const target = location === undefined ? undefined : new URL(location, request.url());
-      if (!target || target.origin !== origin || request.method() !== "GET" || !request.isNavigationRequest()) {
-        return route.abort("blockedbyclient");
-      }
-      const headers: Record<string, string> = { ...response.headers(), "content-type": "text/html; charset=utf-8" };
-      for (const name of ["location", "content-length", "content-encoding", "transfer-encoding"]) delete headers[name];
-      return route.fulfill({ status: 200, headers,
-        body: `<!doctype html><meta http-equiv="refresh" content="0;url=${escapeHtml(target.href)}">` });
-    }),
+    route: (context: BrowserContext, origin: string) =>
+      context.route(`${origin}/**`, async (route) => {
+        const response = await route.fetch({ maxRedirects: 0 });
+        if (!REDIRECTS.has(response.status())) return route.fulfill({ response });
+        const request = route.request();
+        const location = response.headers()["location"];
+        const target = location === undefined ? undefined : new URL(location, request.url());
+        if (
+          !target ||
+          target.origin !== origin ||
+          request.method() !== "GET" ||
+          !request.isNavigationRequest()
+        ) {
+          return route.abort("blockedbyclient");
+        }
+        const headers: Record<string, string> = {
+          ...response.headers(),
+          "content-type": "text/html; charset=utf-8",
+        };
+        for (const name of ["location", "content-length", "content-encoding", "transfer-encoding"])
+          delete headers[name];
+        return route.fulfill({
+          status: 200,
+          headers,
+          body: `<!doctype html><meta http-equiv="refresh" content="0;url=${escapeHtml(target.href)}">`,
+        });
+      }),
     restore: () => setDefaultCACertificates(previous),
   };
 }

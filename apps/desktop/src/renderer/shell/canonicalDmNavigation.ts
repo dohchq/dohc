@@ -10,12 +10,14 @@ export function resolveCanonicalDm(
   // a DM record from its display metadata: require a canonical main-derived DM
   // with the same running thread and every available stable channel identity.
   if (!locator.channelId && !locator.channelWireId) return null;
-  return dms.find(
-    (dm) =>
-      dm.threadId === locator.threadId &&
-      (!locator.channelId || dm.channelId === locator.channelId) &&
-      (!locator.channelWireId || dm.channelWireId === locator.channelWireId),
-  ) ?? null;
+  return (
+    dms.find(
+      (dm) =>
+        dm.threadId === locator.threadId &&
+        (!locator.channelId || dm.channelId === locator.channelId) &&
+        (!locator.channelWireId || dm.channelWireId === locator.channelWireId),
+    ) ?? null
+  );
 }
 
 export async function runCanonicalDmNavigation(input: {
@@ -38,9 +40,7 @@ export async function runCanonicalDmNavigation(input: {
     input.open({
       level: "dm",
       dm,
-      ...(input.locator.focusMessageId
-        ? { focusMessageId: input.locator.focusMessageId }
-        : {}),
+      ...(input.locator.focusMessageId ? { focusMessageId: input.locator.focusMessageId } : {}),
     });
   } catch (error) {
     if (input.isCurrent()) input.onUnavailable(error);

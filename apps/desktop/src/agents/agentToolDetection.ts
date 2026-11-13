@@ -8,10 +8,19 @@ import { parseToolVersion, probeAgentTools, type ProbeOutput } from "./agentTool
 import { codexConfigFiles, codexMayRunWithoutLogin } from "./codexRunConfig";
 
 // resourcesRoot is chosen by Electron main, never by a workspace or renderer.
-export async function runProbe(executable: string, args: readonly string[], signal: AbortSignal, resourcesRoot: string): Promise<ProbeOutput> {
+export async function runProbe(
+  executable: string,
+  args: readonly string[],
+  signal: AbortSignal,
+  resourcesRoot: string,
+): Promise<ProbeOutput> {
   signal.throwIfAborted();
   const command = resolveSpawnCommand(executable, [...args], { cwd: homedir() });
-  return runProbeProcess(command, signal, process.platform === "win32" ? windowsProbeOwner(resourcesRoot) : undefined);
+  return runProbeProcess(
+    command,
+    signal,
+    process.platform === "win32" ? windowsProbeOwner(resourcesRoot) : undefined,
+  );
 }
 
 // Supported versions by resolved path, kept while the file's size and modified
@@ -21,10 +30,12 @@ type FileStamp = { path: string; size: number; mtimeMs: number };
 const reportedVersions = new Map<string, FileStamp & { version: string }>();
 
 function fileStamp(executable: string): Promise<FileStamp | null> {
-  return realpath(executable).then(async (path) => {
-    const { size, mtimeMs } = await stat(path);
-    return { path, size, mtimeMs };
-  }).catch(() => null);
+  return realpath(executable)
+    .then(async (path) => {
+      const { size, mtimeMs } = await stat(path);
+      return { path, size, mtimeMs };
+    })
+    .catch(() => null);
 }
 
 function sameFile(a: FileStamp, b: FileStamp): boolean {
@@ -32,11 +43,19 @@ function sameFile(a: FileStamp, b: FileStamp): boolean {
 }
 
 // The version Claude Code reports, or null when it reports none.
-export async function claudeCodeVersion(executable: string, resourcesRoot: string): Promise<string | null> {
+export async function claudeCodeVersion(
+  executable: string,
+  resourcesRoot: string,
+): Promise<string | null> {
   const before = await fileStamp(executable);
   const kept = before && reportedVersions.get(before.path);
   if (before && kept && sameFile(kept, before)) return kept.version;
-  const output = await runProbe(executable, ["--version"], new AbortController().signal, resourcesRoot);
+  const output = await runProbe(
+    executable,
+    ["--version"],
+    new AbortController().signal,
+    resourcesRoot,
+  );
   const version = output.exitCode === 0 ? parseToolVersion(output.stdout) : null;
   if (before && version && supportsAgentProfile("claude", version)) {
     // Keep it only when the file is still the one stamped before the check ran.
@@ -46,24 +65,41 @@ export async function claudeCodeVersion(executable: string, resourcesRoot: strin
   return version;
 }
 
-export function detectAgentTools(workspaceRoot: string, signal: AbortSignal, resourcesRoot: string) {
+export function detectAgentTools(
+  workspaceRoot: string,
+  signal: AbortSignal,
+  resourcesRoot: string,
+) {
   return probeAgentTools({
-    platform: process.platform, env: process.env, home: homedir(), workspaceRoot, signal,
+    platform: process.platform,
+    env: process.env,
+    home: homedir(),
+    workspaceRoot,
+    signal,
     stat: statSync,
     run: (executable, args, probeSignal) => runProbe(executable, args, probeSignal, resourcesRoot),
-    codexMayRunWithoutLogin: () => codexMayRunWithoutLogin(process.env, codexConfigFiles(process.env, process.platform)),
+    codexMayRunWithoutLogin: () =>
+      codexMayRunWithoutLogin(process.env, codexConfigFiles(process.env, process.platform)),
     realPath: (path) => {
       // Native realpath returns stored names on Windows and macOS. The JavaScript
       // form still resolves on drives where the native call fails.
-      try { return realpathSync.native(path); } catch {
-        try { return realpathSync(path); } catch { return null; }
+      try {
+        return realpathSync.native(path);
+      } catch {
+        try {
+          return realpathSync(path);
+        } catch {
+          return null;
+        }
       }
     },
     isExecutable: (path) => {
       try {
         accessSync(path, process.platform === "win32" ? constants.F_OK : constants.X_OK);
         return statSync(path).isFile();
-      } catch { return false; }
+      } catch {
+        return false;
+      }
     },
   });
 }

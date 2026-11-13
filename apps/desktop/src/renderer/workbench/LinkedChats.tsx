@@ -25,11 +25,7 @@ import {
   type AboutSectionId,
 } from "./About";
 import type { AccessContext } from "./accessReason";
-import {
-  ChatComposer,
-  ChatMessageList,
-  type ChatMessageListHandle,
-} from "./chatMessages";
+import { ChatComposer, ChatMessageList, type ChatMessageListHandle } from "./chatMessages";
 import { useReactions, type ReactionView } from "./reactionStore";
 import { CopyMessageLink } from "./messageLinks";
 
@@ -80,7 +76,12 @@ type ThreadsState =
   | { status: "unavailable"; key: string }
   | { status: "ready"; key: string; fileObjectId: string | null; threads: ChatThreadRecord[] };
 
-const SECTIONS_OPEN: Record<AboutSectionId, boolean> = { access: true, chats: true, history: true, links: true };
+const SECTIONS_OPEN: Record<AboutSectionId, boolean> = {
+  access: true,
+  chats: true,
+  history: true,
+  links: true,
+};
 
 // The engine answers "still updating" only while its first capture of the
 // workspace runs, and that capture ends ready or degraded. So the read asks
@@ -89,14 +90,9 @@ const THREAD_LOAD_RETRY_MS = 1_000;
 
 function isWorkspaceUpdatingResponse(
   response: ListFileChatsResponse,
-): response is Extract<
-  ListFileChatsResponse,
-  { status: "refused"; code: "workspace-updating" }
-> {
+): response is Extract<ListFileChatsResponse, { status: "refused"; code: "workspace-updating" }> {
   return (
-    "status" in response &&
-    response.status === "refused" &&
-    response.code === "workspace-updating"
+    "status" in response && response.status === "refused" && response.code === "workspace-updating"
   );
 }
 
@@ -193,7 +189,8 @@ export function LinkedChatsPanel(props: {
   const refreshThreads = useCallback(async () => {
     if (!filePath) return;
     const token = ++threadsToken.current;
-    const current = () => token === threadsToken.current && currentThreadsKey.current === threadsKey;
+    const current = () =>
+      token === threadsToken.current && currentThreadsKey.current === threadsKey;
     const identity = `about-chats:${filePath}`;
     // The words go to the shell's error hook. The row goes when this file
     // leaves About, so its Try again always reads this file.
@@ -208,7 +205,9 @@ export function LinkedChatsPanel(props: {
         if (!current()) return;
         if (isWorkspaceUpdatingResponse(result)) {
           setThreadsState((state) =>
-            state.status === "updating" && state.key === threadsKey ? state : { status: "updating", key: threadsKey },
+            state.status === "updating" && state.key === threadsKey
+              ? state
+              : { status: "updating", key: threadsKey },
           );
           await new Promise((resolveDelay) => setTimeout(resolveDelay, THREAD_LOAD_RETRY_MS));
           continue;
@@ -299,17 +298,23 @@ export function LinkedChatsPanel(props: {
   const shownThreadId = useRef<string | null>(null);
   useEffect(() => {
     shownThreadId.current = activeThread?.id ?? null;
-    return () => { shownThreadId.current = null; };
+    return () => {
+      shownThreadId.current = null;
+    };
   }, [activeThread]);
   // A message that saved while a later step failed. The notice's Try again
   // opens its chat again while About still shows that chat on this
   // workspace's file.
-  const reportUnshown = useCallback((words: string, failure: string, thread: ChatThreadRecord) => {
-    const key = threadsKey;
-    props.onError(words, failure, () => {
-      if (currentThreadsKey.current === key && shownThreadId.current === thread.id) void openThread(thread);
-    });
-  }, [openThread, props.onError, threadsKey]);
+  const reportUnshown = useCallback(
+    (words: string, failure: string, thread: ChatThreadRecord) => {
+      const key = threadsKey;
+      props.onError(words, failure, () => {
+        if (currentThreadsKey.current === key && shownThreadId.current === thread.id)
+          void openThread(thread);
+      });
+    },
+    [openThread, props.onError, threadsKey],
+  );
 
   // A loaded response is not a React commit. Wait until the message list has
   // mounted before asking it to reveal an offscreen row.
@@ -317,8 +322,10 @@ export function LinkedChatsPanel(props: {
     if (!scrollTarget || messagesLoading) return;
     const frame = requestAnimationFrame(() => {
       if (scrollTarget.token !== liveToken.current) return;
-      if (!scrollTarget.focusMessageId ||
-          !listRef.current?.scrollToMessage(scrollTarget.focusMessageId)) {
+      if (
+        !scrollTarget.focusMessageId ||
+        !listRef.current?.scrollToMessage(scrollTarget.focusMessageId)
+      ) {
         listRef.current?.scrollToEnd();
       }
     });
@@ -332,13 +339,17 @@ export function LinkedChatsPanel(props: {
   const onInitialThreadClosed = useRef(props.onInitialThreadClosed);
   onInitialThreadClosed.current = props.onInitialThreadClosed;
   useEffect(() => {
-    if (shownInitialThread.current === null || activeThread?.id === shownInitialThread.current) return;
+    if (shownInitialThread.current === null || activeThread?.id === shownInitialThread.current)
+      return;
     shownInitialThread.current = null;
     onInitialThreadClosed.current?.();
   }, [activeThread]);
-  useEffect(() => () => {
-    if (shownInitialThread.current !== null) onInitialThreadClosed.current?.();
-  }, []);
+  useEffect(
+    () => () => {
+      if (shownInitialThread.current !== null) onInitialThreadClosed.current?.();
+    },
+    [],
+  );
 
   // Consume each search-result click once. The shell creates a fresh record
   // per click, including when the user reopens the same thread.
@@ -350,12 +361,7 @@ export function LinkedChatsPanel(props: {
     shownInitialThread.current = props.initialThread.id;
     void openThread(props.initialThread, props.initialFocusMessageId);
     props.onInitialThreadConsumed?.();
-  }, [
-    openThread,
-    props.initialFocusMessageId,
-    props.initialThread,
-    props.onInitialThreadConsumed,
-  ]);
+  }, [openThread, props.initialFocusMessageId, props.initialThread, props.onInitialThreadConsumed]);
 
   // A comment on the whole file starts its chat, then posts as its first
   // message. A post that fails leaves the chat open with the words in its
@@ -368,17 +374,32 @@ export function LinkedChatsPanel(props: {
       const token = ++liveToken.current;
       setSending(true);
       try {
-        const { thread } = await bridge().createFileChat({ workspaceId, path: filePath, title: commentTitle(trimmed) });
+        const { thread } = await bridge().createFileChat({
+          workspaceId,
+          path: filePath,
+          title: commentTitle(trimmed),
+        });
         if (token !== liveToken.current) return;
         setCommenting(null);
         setThreadsState((current) =>
-          current.status === "ready" ? { ...current, threads: [...current.threads, thread] } : current,
+          current.status === "ready"
+            ? { ...current, threads: [...current.threads, thread] }
+            : current,
         );
         try {
-          const result = await bridge().sendChatMessage({ workspaceId, threadId: thread.id, body: trimmed });
+          const result = await bridge().sendChatMessage({
+            workspaceId,
+            threadId: thread.id,
+            body: trimmed,
+          });
           if (token !== liveToken.current) return;
           // The comment saved, so its words stay out of the composer. Opening the chat shows it.
-          if ("failure" in result) reportUnshown("Posted your comment. dohc could not show it yet.", result.failure, thread);
+          if ("failure" in result)
+            reportUnshown(
+              "Posted your comment. dohc could not show it yet.",
+              result.failure,
+              thread,
+            );
           else if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
         } catch (error) {
           if (token !== liveToken.current) return;
@@ -393,7 +414,15 @@ export function LinkedChatsPanel(props: {
         setSending(false);
       }
     },
-    [filePath, openThread, props.onAgentWaitsForTrust, props.onError, reportUnshown, sending, workspaceId],
+    [
+      filePath,
+      openThread,
+      props.onAgentWaitsForTrust,
+      props.onError,
+      reportUnshown,
+      sending,
+      workspaceId,
+    ],
   );
 
   // The composer that opens takes focus, as the + that opened it asked.
@@ -436,7 +465,16 @@ export function LinkedChatsPanel(props: {
       // sends, so an unconditional reset is race-free.
       setSending(false);
     }
-  }, [activeThread, composer, openThread, props.onAgentWaitsForTrust, props.onError, reportUnshown, sending, workspaceId]);
+  }, [
+    activeThread,
+    composer,
+    openThread,
+    props.onAgentWaitsForTrust,
+    props.onError,
+    reportUnshown,
+    sending,
+    workspaceId,
+  ]);
 
   // Reactions (WS-MU-C2) go through the workspace's reaction store, shared
   // with every Chats surface: this thread's rows as the store knows them.
@@ -470,10 +508,7 @@ export function LinkedChatsPanel(props: {
 
   if (activeThread) {
     return (
-      <div
-        data-testid="linked-chat-thread"
-        className="flex min-h-0 flex-1 flex-col"
-      >
+      <div data-testid="linked-chat-thread" className="flex min-h-0 flex-1 flex-col">
         <div className="flex h-8 shrink-0 items-center gap-1.5 border-b border-line px-2">
           <button
             type="button"
@@ -549,10 +584,13 @@ export function LinkedChatsPanel(props: {
   // History asks about the file's object id, which this file's chats read
   // answers. History keeps its place while that read runs, waits or fails.
   const file: AboutFile =
-    threads === null ? { status: "loading" }
-    : threads.status === "updating" ? { status: "updating" }
-    : threads.status === "unavailable" ? { status: "failed", retry: () => void refreshThreads() }
-    : { status: "ready", objectId: threads.fileObjectId };
+    threads === null
+      ? { status: "loading" }
+      : threads.status === "updating"
+        ? { status: "updating" }
+        : threads.status === "unavailable"
+          ? { status: "failed", retry: () => void refreshThreads() }
+          : { status: "ready", objectId: threads.fileObjectId };
   // A file dohc does not track has no object for a chat to follow, so it
   // takes no comments: the section says why instead of offering one.
   const ready = threads?.status === "ready" ? threads : null;
@@ -578,12 +616,25 @@ export function LinkedChatsPanel(props: {
           id="chats"
           label="Comments"
           count={ready ? String(ready.threads.length) : undefined}
-          empty={ready !== null && ready.threads.length === 0 && commenting === null && !readOnly && !untracked}
+          empty={
+            ready !== null &&
+            ready.threads.length === 0 &&
+            commenting === null &&
+            !readOnly &&
+            !untracked
+          }
           expanded={sectionsOpen.chats}
           onToggle={toggleSection("chats")}
-          actions={canComment ? (
-            <AboutSectionAction testId="linked-chat-new" label="Comment on this file" icon={Plus} onClick={startComment} />
-          ) : null}
+          actions={
+            canComment ? (
+              <AboutSectionAction
+                testId="linked-chat-new"
+                label="Comment on this file"
+                icon={Plus}
+                onClick={startComment}
+              />
+            ) : null
+          }
         >
           {threads === null || threads.status === "updating" ? (
             <SkeletonRows rows={2} className="px-2 py-1" label="Loading comments..." />
@@ -609,7 +660,9 @@ export function LinkedChatsPanel(props: {
               {readOnly ? (
                 <AboutNote testId="linked-chat-readonly-note">{READ_ONLY}</AboutNote>
               ) : untracked ? (
-                <AboutNote testId="linked-chats-untracked">dohc does not track this file, so it cannot have comments.</AboutNote>
+                <AboutNote testId="linked-chats-untracked">
+                  dohc does not track this file, so it cannot have comments.
+                </AboutNote>
               ) : null}
               {threads.threads.length > 0 ? (
                 <ul className="m-0 list-none p-0">

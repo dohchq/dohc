@@ -10,8 +10,13 @@ export function focusSurface(...targets: (HTMLElement | null | undefined)[]): vo
     document.querySelector<HTMLElement>('[data-focus-surface="editor"][data-active="true"]'),
     document.querySelector<HTMLElement>('[data-focus-surface="workspace"]'),
   ]) {
-    if (!target?.isConnected || target === document.body ||
-      target.closest('[hidden], [inert], [aria-hidden="true"]') || target.matches(":disabled")) continue;
+    if (
+      !target?.isConnected ||
+      target === document.body ||
+      target.closest('[hidden], [inert], [aria-hidden="true"]') ||
+      target.matches(":disabled")
+    )
+      continue;
     const style = getComputedStyle(target);
     if (style.display === "none" || style.visibility === "hidden") continue;
     target.focus({ preventScroll: true });
@@ -31,8 +36,10 @@ export function useFocusReturn(
   latestTarget.current = target;
   if (open && !wasOpen.current) {
     const active = document.activeElement;
-    captured.current = active instanceof HTMLElement && active !== document.body
-      ? [active, ...ancestors(active)] : [];
+    captured.current =
+      active instanceof HTMLElement && active !== document.body
+        ? [active, ...ancestors(active)]
+        : [];
   }
   wasOpen.current = open;
   const pendingReturn = useRef<(() => void) | null>(null);
@@ -64,7 +71,8 @@ export function useFocusReturn(
 function ancestors(element: HTMLElement): HTMLElement[] {
   const surfaces: HTMLElement[] = [];
   for (let parent = element.parentElement; parent; parent = parent.parentElement) {
-    if (parent.hasAttribute("data-focus-surface") && parent.dataset.focusSurface !== "workspace") surfaces.push(parent);
+    if (parent.hasAttribute("data-focus-surface") && parent.dataset.focusSurface !== "workspace")
+      surfaces.push(parent);
   }
   return surfaces;
 }
@@ -77,7 +85,7 @@ export function useFocusSurface(
   const latest = useRef(target);
   latest.current = target;
   useLayoutEffect(() => {
-    const tracker = surfaceTracker ??= createSurfaceTracker();
+    const tracker = (surfaceTracker ??= createSurfaceTracker());
     const registration = { container, target: () => latest.current() };
     tracker.registrations.add(registration);
     if (document.activeElement !== document.body) tracker.remember(document.activeElement);
@@ -123,11 +131,18 @@ function createSurfaceTracker() {
       if (remembered !== memory) return;
       forget();
       if (document.activeElement !== document.body) return;
-      const owner = memory.owners.find(({ registration, element }) =>
-        registrations.has(registration) && registration.container.current === element && element.isConnected);
+      const owner = memory.owners.find(
+        ({ registration, element }) =>
+          registrations.has(registration) &&
+          registration.container.current === element &&
+          element.isConnected,
+      );
       if (owner) {
-        focusSurface(owner.registration.target(), ...memory.surfaces,
-          owner.element.dataset.focusSurface === "workspace" ? null : owner.element);
+        focusSurface(
+          owner.registration.target(),
+          ...memory.surfaces,
+          owner.element.dataset.focusSurface === "workspace" ? null : owner.element,
+        );
       }
     });
   };
@@ -148,10 +163,16 @@ function createSurfaceTracker() {
       observer.observe(parent, { childList: true });
     }
   };
-  const onFocusIn = (event: FocusEvent) => remember(event.target instanceof Element ? event.target : null);
+  const onFocusIn = (event: FocusEvent) =>
+    remember(event.target instanceof Element ? event.target : null);
   const onFocusOut = (event: FocusEvent) => {
     const memory = remembered;
-    if (event.target !== memory?.element || !memory.element.isConnected || document.activeElement === event.target) return;
+    if (
+      event.target !== memory?.element ||
+      !memory.element.isConnected ||
+      document.activeElement === event.target
+    )
+      return;
     if (event.relatedTarget !== null) return forget();
     blurred = true;
     if (pointerDown) return;

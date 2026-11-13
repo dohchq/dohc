@@ -1,4 +1,8 @@
-import { bindOwnPresentation, bindAgentColorUpdates, clearAgentColorOverrides } from "./workbench/actorPresentation";
+import {
+  bindOwnPresentation,
+  bindAgentColorUpdates,
+  clearAgentColorOverrides,
+} from "./workbench/actorPresentation";
 import { useRequestSequence } from "./useRequestSequence";
 import { lazy, Suspense, useCallback, useContext, useEffect, useRef, useState } from "react";
 import {
@@ -16,7 +20,10 @@ import { DesktopWorkspaceShell, type Workspace } from "./DesktopWorkspaceShell";
 import { Titlebar, workspaceName } from "./Titlebar";
 import { ChevronRight } from "lucide-react";
 import { readError, refusalCode } from "../ipc/errorWords";
-import { REGISTRY_READ_FAILURE_TITLE, registryReadFailureNext } from "../workspaces/registryReadFailure";
+import {
+  REGISTRY_READ_FAILURE_TITLE,
+  registryReadFailureNext,
+} from "../workspaces/registryReadFailure";
 import { errorDetails } from "./shell/copyDetails";
 import { StandaloneNotices } from "./shell/connectionNotices";
 import { ShellErrorReporter } from "./shell/useShellError";
@@ -24,7 +31,10 @@ import { useMenuCommandsWithoutWorkspace } from "./appMenuCommands";
 import { TitlebarUpdateButton, useDesktopUpdate, useUpdateFailureNotices } from "./UpdateButton";
 import { CopyButton } from "./ui/CopyButton";
 import { useSentNotices } from "./shell/useSentNotices";
-import { useHeldWorkspacePathOpenFailures, WorkspacePathOpenFailures } from "./shell/workspacePathOpenFailures";
+import {
+  useHeldWorkspacePathOpenFailures,
+  WorkspacePathOpenFailures,
+} from "./shell/workspacePathOpenFailures";
 import type { NoticeTarget } from "../notices/noticeTarget";
 import { useStatesPageOpen } from "./dev/statesRoute";
 import { ReactionStoreProvider } from "./workbench/reactionStore";
@@ -43,17 +53,26 @@ const NOOP = () => undefined;
 function RegistryErrorTitlebar() {
   const reportFailure = useContext(ShellErrorReporter);
   const update = useDesktopUpdate(reportFailure);
-  useUpdateFailureNotices(update, "", useCallback(
-    (failure: { title?: string; message: string; retry: () => void }) => reportFailure?.({
-      message: failure.title ? `${failure.title}. ${failure.message}` : failure.message,
-      retry: failure.retry,
-    }),
-    [reportFailure],
-  ), NOOP);
-  useMenuCommandsWithoutWorkspace(useCallback(
-    (message: string, cause: unknown) => reportFailure?.({ message, cause }),
-    [reportFailure],
-  ), update.run);
+  useUpdateFailureNotices(
+    update,
+    "",
+    useCallback(
+      (failure: { title?: string; message: string; retry: () => void }) =>
+        reportFailure?.({
+          message: failure.title ? `${failure.title}. ${failure.message}` : failure.message,
+          retry: failure.retry,
+        }),
+      [reportFailure],
+    ),
+    NOOP,
+  );
+  useMenuCommandsWithoutWorkspace(
+    useCallback(
+      (message: string, cause: unknown) => reportFailure?.({ message, cause }),
+      [reportFailure],
+    ),
+    update.run,
+  );
   return (
     <div className="app-chrome absolute inset-x-0 top-0">
       <Titlebar update={<TitlebarUpdateButton update={update} />} />
@@ -65,17 +84,20 @@ export function DesktopRoot() {
   useEffect(() => bindOwnPresentation(bridge()), []);
   const [loaded, setLoaded] = useState(false);
   // What the registry read said, and the error as it arrived for the details.
-  const [loadError, setLoadError] = useState<{ message: string; cause: string | null; next: string } | null>(null);
+  const [loadError, setLoadError] = useState<{
+    message: string;
+    cause: string | null;
+    next: string;
+  } | null>(null);
   const [loadDetailsOpen, setLoadDetailsOpen] = useState(false);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const isManagerWindow = bridge().windowRole === "manager";
   const statesPageOpen = useStatesPageOpen(bridge().devTools);
-  const [userSettings, setUserSettings] = useState<DesktopUserSettingsSnapshot | null>(
-    null,
-  );
-  const [shareHandoffStatus, setShareHandoffStatus] =
-    useState<ShareHandoffStatusSnapshot>({ status: "idle" });
+  const [userSettings, setUserSettings] = useState<DesktopUserSettingsSnapshot | null>(null);
+  const [shareHandoffStatus, setShareHandoffStatus] = useState<ShareHandoffStatusSnapshot>({
+    status: "idle",
+  });
   const registryRequest = useRef(0);
   const committedRegistryRequest = useRef(0);
   const userSettingsRequests = useRequestSequence();
@@ -85,7 +107,9 @@ export function DesktopRoot() {
   // Outlives every workspace switch, so a sent deletion still reports.
   const accountDeletion = useAccountDeletion();
   // Forget can leave this window showing a workspace it can no longer edit.
-  const { oldWindow, recheck: recheckOldWindow } = useOldWindowState(isManagerWindow ? null : workspace?.workspaceId ?? null);
+  const { oldWindow, recheck: recheckOldWindow } = useOldWindowState(
+    isManagerWindow ? null : (workspace?.workspaceId ?? null),
+  );
   const [openOnSwitch, setOpenOnSwitch] = useState<{
     workspaceId: string;
     open: NoticeTarget;
@@ -93,9 +117,7 @@ export function DesktopRoot() {
 
   const refreshWorkspaceRegistry = useCallback(async (): Promise<Workspace[]> => {
     const request = ++registryRequest.current;
-    const registry = WorkspaceRegistryResult.parse(
-      await bridge().getWorkspaceRegistry(),
-    );
+    const registry = WorkspaceRegistryResult.parse(await bridge().getWorkspaceRegistry());
     if (request < committedRegistryRequest.current) return registry.workspaces;
     // Whichever response commits first is startup: it may pick the opening
     // workspace, since the mount read below loses if this one wins.
@@ -128,7 +150,8 @@ export function DesktopRoot() {
   const acceptUserSettings = useCallback((result: DesktopUserSettingsSnapshot) => {
     applyLookSettings(result.settings);
     setUserSettings((current) =>
-      current !== null && differsOnlyInLook(current, result) ? current : result);
+      current !== null && differsOnlyInLook(current, result) ? current : result,
+    );
   }, []);
 
   const refreshUserSettings = useCallback(async () => {
@@ -143,11 +166,11 @@ export function DesktopRoot() {
     const { statusId } = shareHandoffStatus;
     shareHandoffRevision.current += 1;
     setShareHandoffStatus((current) =>
-      current.status !== "idle" && current.statusId === statusId
-        ? { status: "idle" }
-        : current,
+      current.status !== "idle" && current.statusId === statusId ? { status: "idle" } : current,
     );
-    void bridge().dismissShareHandoff({ statusId }).catch(() => undefined);
+    void bridge()
+      .dismissShareHandoff({ statusId })
+      .catch(() => undefined);
   }, [shareHandoffStatus]);
 
   useEffect(() => {
@@ -164,11 +187,7 @@ export function DesktopRoot() {
       .getShareHandoffStatus()
       .then((rawStatus) => {
         const status = ShareHandoffStatus.safeParse(rawStatus);
-        if (
-          !active ||
-          !status.success ||
-          shareHandoffRevision.current !== snapshotRevision
-        ) {
+        if (!active || !status.success || shareHandoffRevision.current !== snapshotRevision) {
           return;
         }
         setShareHandoffStatus(status.data);
@@ -237,11 +256,17 @@ export function DesktopRoot() {
   useEffect(() => bindAgentColorUpdates(bridge(), () => activeWorkspaceId.current), []);
   useEffect(() => {
     const closingWorkspaceId = workspace?.workspaceId;
-    return () => { if (closingWorkspaceId !== undefined) clearAgentColorOverrides(closingWorkspaceId); };
+    return () => {
+      if (closingWorkspaceId !== undefined) clearAgentColorOverrides(closingWorkspaceId);
+    };
   }, [workspace?.workspaceId]);
   useEffect(() => {
     return bridge().onWorkspaceActivity((event) => {
-      if (event.workspaceId !== undefined && (!event.summaryChanged || event.workspaceId !== activeWorkspaceId.current)) return;
+      if (
+        event.workspaceId !== undefined &&
+        (!event.summaryChanged || event.workspaceId !== activeWorkspaceId.current)
+      )
+        return;
       const refreshed = refreshWorkspaceRegistry();
       if (event.workspaceId !== undefined) {
         void refreshed.catch(() => undefined);
@@ -259,9 +284,7 @@ export function DesktopRoot() {
   useEffect(() => {
     return bridge().onWorkspaceActivated((next) => {
       setWorkspaces((known) =>
-        known.some((entry) => entry.workspaceId === next.workspaceId)
-          ? known
-          : [...known, next],
+        known.some((entry) => entry.workspaceId === next.workspaceId) ? known : [...known, next],
       );
       setOpenOnSwitch(null);
       setWorkspace(next);
@@ -305,46 +328,40 @@ export function DesktopRoot() {
     ]);
     return (
       <StandaloneNotices>
-      <div className="relative flex h-screen flex-col items-center justify-center gap-2 bg-bg px-8 text-center">
-        <RegistryErrorTitlebar />
-        <span className="text-sm font-semibold text-ink">
-          {REGISTRY_READ_FAILURE_TITLE}
-        </span>
-        <span className="max-w-lg text-xs leading-relaxed text-muted">
-          {loadError.message}
-        </span>
-        <span className="max-w-lg text-xs text-subtle">
-          {loadError.next}
-        </span>
-        <button
-          type="button"
-          aria-expanded={loadDetailsOpen}
-          onClick={() => setLoadDetailsOpen((open) => !open)}
-          className="mt-1 flex items-center gap-1 rounded text-[12px] text-subtle transition-colors hover:text-ink"
-        >
-          <ChevronRight
-            size={12}
-            strokeWidth={1.9}
-            aria-hidden
-            className={`transition-transform duration-100 ${loadDetailsOpen ? "rotate-90" : ""}`}
-          />
-          {loadDetailsOpen ? "Hide technical details" : "Show technical details"}
-        </button>
-        {loadDetailsOpen ? (
-          <section
-            aria-label="Technical details"
-            className="w-full max-w-md rounded-lg border border-line bg-panel text-left"
+        <div className="relative flex h-screen flex-col items-center justify-center gap-2 bg-bg px-8 text-center">
+          <RegistryErrorTitlebar />
+          <span className="text-sm font-semibold text-ink">{REGISTRY_READ_FAILURE_TITLE}</span>
+          <span className="max-w-lg text-xs leading-relaxed text-muted">{loadError.message}</span>
+          <span className="max-w-lg text-xs text-subtle">{loadError.next}</span>
+          <button
+            type="button"
+            aria-expanded={loadDetailsOpen}
+            onClick={() => setLoadDetailsOpen((open) => !open)}
+            className="mt-1 flex items-center gap-1 rounded text-[12px] text-subtle transition-colors hover:text-ink"
           >
-            <div className="flex items-center justify-between gap-2 border-b border-line px-3 py-2">
-              <span className="dohc-section-label">Technical details</span>
-              <CopyButton label="Copy" pinName iconOnly getText={() => loadDetailsText} />
-            </div>
-            <pre className="m-0 select-text cursor-text whitespace-pre-wrap break-words px-3 py-2.5 font-mono text-[12px] leading-snug text-ink">
-              {loadDetailsText}
-            </pre>
-          </section>
-        ) : null}
-      </div>
+            <ChevronRight
+              size={12}
+              strokeWidth={1.9}
+              aria-hidden
+              className={`transition-transform duration-100 ${loadDetailsOpen ? "rotate-90" : ""}`}
+            />
+            {loadDetailsOpen ? "Hide technical details" : "Show technical details"}
+          </button>
+          {loadDetailsOpen ? (
+            <section
+              aria-label="Technical details"
+              className="w-full max-w-md rounded-lg border border-line bg-panel text-left"
+            >
+              <div className="flex items-center justify-between gap-2 border-b border-line px-3 py-2">
+                <span className="dohc-section-label">Technical details</span>
+                <CopyButton label="Copy" pinName iconOnly getText={() => loadDetailsText} />
+              </div>
+              <pre className="m-0 select-text cursor-text whitespace-pre-wrap break-words px-3 py-2.5 font-mono text-[12px] leading-snug text-ink">
+                {loadDetailsText}
+              </pre>
+            </section>
+          ) : null}
+        </div>
       </StandaloneNotices>
     );
   }
@@ -373,64 +390,64 @@ export function DesktopRoot() {
   // switch, so a return finds its writes still in order.
   return (
     <WorkspacePathOpenFailures.Provider value={pathOpenFailures}>
-    <ReactionStoreProvider workspaceId={workspace?.workspaceId ?? null}>
-      {!workspace ? (
-        <>
-          <WorkspaceManager
-            workspaces={workspaces}
-            current={null}
-            handoffStatus={shareHandoffStatus}
-            onDismissShareHandoff={dismissShareHandoff}
-            onShareHandoffOpened={dismissShareHandoff}
-            onForgot={refreshWorkspaceRegistry}
-            onOpenWorkspace={(next) => {
-              setWorkspaces((known) =>
-                known.some((entry) => entry.workspaceId === next.workspaceId)
-                  ? known
-                  : [...known, next],
-              );
-              setWorkspace(next);
-            }}
-          />
-          <DevPanel />
-        </>
-      ) : (
-        <>
-          <DesktopWorkspaceShell
-            // Remount on switch: file list and selection are workspace-local and
-            // must never leak from workspace A into workspace B.
-            key={workspace.workspaceId}
-            workspace={workspace}
-            workspaces={workspaces}
-            userSettings={userSettings}
-            handoffStatus={shareHandoffStatus}
-            onDismissShareHandoff={dismissShareHandoff}
-            onShareHandoffOpened={dismissShareHandoff}
-            refreshWorkspaceRegistry={refreshWorkspaceRegistry}
-            onManageWorkspaces={() => bridge().openWorkspaceManager()}
-            sentNotices={sentNotices}
-            accountDeletion={accountDeletion.deletion}
-            oldWindow={oldWindow}
-            {...(openOnSwitch?.workspaceId === workspace.workspaceId
-              ? { openOnReady: openOnSwitch.open }
-              : {})}
-            onSwitchWorkspace={(next, open) => {
-              // File ▸ Open Workspace… can hand us a workspace the registry list
-              // didn't know yet — keep the switcher list complete.
-              setWorkspaces((known) =>
-                known.some((entry) => entry.workspaceId === next.workspaceId)
-                  ? known
-                  : [...known, next],
-              );
-              setOpenOnSwitch(open ? { workspaceId: next.workspaceId, open } : null);
-              setWorkspace(next);
-            }}
-          />
-          <DevPanel workspaceId={workspace.workspaceId} />
-        </>
-      )}
-      {accountDeletion.dialog}
-    </ReactionStoreProvider>
+      <ReactionStoreProvider workspaceId={workspace?.workspaceId ?? null}>
+        {!workspace ? (
+          <>
+            <WorkspaceManager
+              workspaces={workspaces}
+              current={null}
+              handoffStatus={shareHandoffStatus}
+              onDismissShareHandoff={dismissShareHandoff}
+              onShareHandoffOpened={dismissShareHandoff}
+              onForgot={refreshWorkspaceRegistry}
+              onOpenWorkspace={(next) => {
+                setWorkspaces((known) =>
+                  known.some((entry) => entry.workspaceId === next.workspaceId)
+                    ? known
+                    : [...known, next],
+                );
+                setWorkspace(next);
+              }}
+            />
+            <DevPanel />
+          </>
+        ) : (
+          <>
+            <DesktopWorkspaceShell
+              // Remount on switch: file list and selection are workspace-local and
+              // must never leak from workspace A into workspace B.
+              key={workspace.workspaceId}
+              workspace={workspace}
+              workspaces={workspaces}
+              userSettings={userSettings}
+              handoffStatus={shareHandoffStatus}
+              onDismissShareHandoff={dismissShareHandoff}
+              onShareHandoffOpened={dismissShareHandoff}
+              refreshWorkspaceRegistry={refreshWorkspaceRegistry}
+              onManageWorkspaces={() => bridge().openWorkspaceManager()}
+              sentNotices={sentNotices}
+              accountDeletion={accountDeletion.deletion}
+              oldWindow={oldWindow}
+              {...(openOnSwitch?.workspaceId === workspace.workspaceId
+                ? { openOnReady: openOnSwitch.open }
+                : {})}
+              onSwitchWorkspace={(next, open) => {
+                // File ▸ Open Workspace… can hand us a workspace the registry list
+                // didn't know yet — keep the switcher list complete.
+                setWorkspaces((known) =>
+                  known.some((entry) => entry.workspaceId === next.workspaceId)
+                    ? known
+                    : [...known, next],
+                );
+                setOpenOnSwitch(open ? { workspaceId: next.workspaceId, open } : null);
+                setWorkspace(next);
+              }}
+            />
+            <DevPanel workspaceId={workspace.workspaceId} />
+          </>
+        )}
+        {accountDeletion.dialog}
+      </ReactionStoreProvider>
     </WorkspacePathOpenFailures.Provider>
   );
 }

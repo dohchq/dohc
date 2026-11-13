@@ -10,8 +10,7 @@ type ShareDiscussionDisplayNameNormalization =
   | { ok: true; value: string }
   | { ok: false; reason: "too-long" | "empty" };
 
-const SHARE_DISCUSSION_NAME_REMOVALS =
-  /[\p{Cc}\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu;
+const SHARE_DISCUSSION_NAME_REMOVALS = /[\p{Cc}\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu;
 
 function exceedsUtf8Bytes(value: string, limit: number): boolean {
   if (value.length > limit) return true;

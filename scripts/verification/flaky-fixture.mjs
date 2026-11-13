@@ -11,7 +11,10 @@ export const flakyFixtureFiles = [
   "apps/desktop/scripts/pinned-node.mjs",
 ];
 
-export function copyFlakyFixture(root, sourceRoot = fileURLToPath(new URL("../../", import.meta.url))) {
+export function copyFlakyFixture(
+  root,
+  sourceRoot = fileURLToPath(new URL("../../", import.meta.url)),
+) {
   for (const file of flakyFixtureFiles) {
     const target = join(root, file);
     mkdirSync(dirname(target), { recursive: true });

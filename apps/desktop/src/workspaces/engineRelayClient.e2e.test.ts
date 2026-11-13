@@ -48,10 +48,7 @@ async function bodyJson(request: IncomingMessage): Promise<Record<string, unknow
   for await (const chunk of request) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
-  return JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<
-    string,
-    unknown
-  >;
+  return JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
 }
 
 function json(response: ServerResponse, value: unknown): void {
@@ -99,15 +96,10 @@ async function startRelay(workspaceId: string): Promise<{
       expect(identity, "the workspace must be claimed before log or blob access").toBeDefined();
       expect(url.searchParams.get("replicationEpoch")).toBe(identity!.replicationEpoch);
       expect(url.searchParams.get("streamIdentity")).toBe(identity!.streamIdentity);
-      if (
-        request.method === "POST" &&
-        url.pathname === `/sync/${workspaceId}/log`
-      ) {
+      if (request.method === "POST" && url.pathname === `/sync/${workspaceId}/log`) {
         const body = await bodyJson(request);
         const originId = String(body.originId);
-        const ops = Array.isArray(body.ops)
-          ? (body.ops as Array<Record<string, unknown>>)
-          : [];
+        const ops = Array.isArray(body.ops) ? (body.ops as Array<Record<string, unknown>>) : [];
         for (const op of ops) {
           pushed.push({
             relaySeq: pushed.length + 1,
@@ -121,31 +113,21 @@ async function startRelay(workspaceId: string): Promise<{
           accepted: ops.length,
           inserted: ops.length,
           skipped: 0,
-          currentMaxOriginSeq:
-            typeof last?.originSeq === "number" ? last.originSeq : -1,
+          currentMaxOriginSeq: typeof last?.originSeq === "number" ? last.originSeq : -1,
         });
         return;
       }
-      if (
-        request.method === "GET" &&
-        url.pathname === `/sync/${workspaceId}/log`
-      ) {
+      if (request.method === "GET" && url.pathname === `/sync/${workspaceId}/log`) {
         const since = Number(url.searchParams.get("since") ?? 0);
-        const ops = pushed.filter(
-          (row) => Number(row.relaySeq ?? 0) > since,
-        );
+        const ops = pushed.filter((row) => Number(row.relaySeq ?? 0) > since);
         json(response, {
           ops,
-          nextCursor:
-            ops.length > 0 ? Number(ops.at(-1)?.relaySeq ?? since) : since,
+          nextCursor: ops.length > 0 ? Number(ops.at(-1)?.relaySeq ?? since) : since,
           hasMore: false,
         });
         return;
       }
-      if (
-        request.method === "POST" &&
-        url.pathname === `/sync/${workspaceId}/blobs/have`
-      ) {
+      if (request.method === "POST" && url.pathname === `/sync/${workspaceId}/blobs/have`) {
         json(response, { missing: [] });
         return;
       }
@@ -182,9 +164,7 @@ describe("EngineRelayClient real daemon", () => {
       const binary = engine.require();
       const workspaceId = `relay-e2e-${process.pid}-${Date.now()}`;
       const senderRoot = await createShadowRoot("dohc-relay-e2e-sender-");
-      const receiverRoot = await createShadowRoot(
-        "dohc-relay-e2e-receiver-",
-      );
+      const receiverRoot = await createShadowRoot("dohc-relay-e2e-receiver-");
       const relay = await startRelay(workspaceId);
       try {
         const senderLifecycle = createRealDaemonLifecycle({
@@ -194,23 +174,10 @@ describe("EngineRelayClient real daemon", () => {
           command: binary,
         });
         lifecycles.push(senderLifecycle, receiverLifecycle);
-        await Promise.all([
-          senderLifecycle.start(),
-          receiverLifecycle.start(),
-        ]);
+        await Promise.all([senderLifecycle.start(), receiverLifecycle.start()]);
 
-        const sender = relayHarness(
-          senderLifecycle,
-          workspaceId,
-          senderRoot,
-          relay.baseUrl,
-        );
-        const receiver = relayHarness(
-          receiverLifecycle,
-          workspaceId,
-          receiverRoot,
-          relay.baseUrl,
-        );
+        const sender = relayHarness(senderLifecycle, workspaceId, senderRoot, relay.baseUrl);
+        const receiver = relayHarness(receiverLifecycle, workspaceId, receiverRoot, relay.baseUrl);
 
         await createChannel(
           sender.sessions,
@@ -228,9 +195,10 @@ describe("EngineRelayClient real daemon", () => {
           operations: sender.client,
           // This fixture has only chats; the daemon materializes them.
           capture: {
-            runRelaySync: (task) => task(async (paths) => {
-              expect(paths).toEqual([]);
-            }),
+            runRelaySync: (task) =>
+              task(async (paths) => {
+                expect(paths).toEqual([]);
+              }),
             countOpenConflicts: async () => 0,
           } as WorkspaceEngineCapture,
           onChange: () => undefined,
@@ -270,13 +238,10 @@ describe("EngineRelayClient real daemon", () => {
         // itself terminal ("already stopping"), so that needs a second
         // lifecycle rather than a contortion of this one.
         await receiver.sessions.closeWorkspace(workspaceId);
-        expect(
-          await channelIds(receiver.sessions, workspaceId, receiverRoot),
-        ).toContain("relay-e2e-channel");
-        await Promise.all([
-          sender.sessions.closeAll(),
-          receiver.sessions.closeAll(),
-        ]);
+        expect(await channelIds(receiver.sessions, workspaceId, receiverRoot)).toContain(
+          "relay-e2e-channel",
+        );
+        await Promise.all([sender.sessions.closeAll(), receiver.sessions.closeAll()]);
       } finally {
         await relay.close();
       }
@@ -326,22 +291,19 @@ async function createChannel(
   channelId: string,
   name: string,
 ): Promise<void> {
-  await sessions.run(
-    { workspaceId, rootPath },
-    async ({ client: daemon, workspace }) => {
-      const requester = new WorkspaceDaemonRequester(daemon);
-      await requester.request(
-        "chats.channels.create",
-        {
-          channelId,
-          name,
-          kind: "channel",
-          nowMs: Date.now(),
-        },
-        { workspace },
-      );
-    },
-  );
+  await sessions.run({ workspaceId, rootPath }, async ({ client: daemon, workspace }) => {
+    const requester = new WorkspaceDaemonRequester(daemon);
+    await requester.request(
+      "chats.channels.create",
+      {
+        channelId,
+        name,
+        kind: "channel",
+        nowMs: Date.now(),
+      },
+      { workspace },
+    );
+  });
 }
 
 async function channelIds(
@@ -349,34 +311,27 @@ async function channelIds(
   workspaceId: string,
   rootPath: string,
 ): Promise<string[]> {
-  return await sessions.run(
-    { workspaceId, rootPath },
-    async ({ client: daemon, workspace }) => {
-      const requester = new WorkspaceDaemonRequester(daemon);
-      const result = await requester.request(
-        "chats.channels.list",
-        {},
-        { workspace },
-      );
+  return await sessions.run({ workspaceId, rootPath }, async ({ client: daemon, workspace }) => {
+    const requester = new WorkspaceDaemonRequester(daemon);
+    const result = await requester.request("chats.channels.list", {}, { workspace });
+    if (
+      result === null ||
+      Array.isArray(result) ||
+      typeof result !== "object" ||
+      !Array.isArray(result.channels)
+    ) {
+      throw new Error("Daemon returned an invalid channel list.");
+    }
+    return result.channels.map((channel) => {
       if (
-        result === null ||
-        Array.isArray(result) ||
-        typeof result !== "object" ||
-        !Array.isArray(result.channels)
+        channel === null ||
+        Array.isArray(channel) ||
+        typeof channel !== "object" ||
+        typeof channel.channelId !== "string"
       ) {
-        throw new Error("Daemon returned an invalid channel list.");
+        throw new Error("Daemon returned an invalid channel.");
       }
-      return result.channels.map((channel) => {
-        if (
-          channel === null ||
-          Array.isArray(channel) ||
-          typeof channel !== "object" ||
-          typeof channel.channelId !== "string"
-        ) {
-          throw new Error("Daemon returned an invalid channel.");
-        }
-        return channel.channelId;
-      });
-    },
-  );
+      return channel.channelId;
+    });
+  });
 }

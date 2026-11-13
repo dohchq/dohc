@@ -9,17 +9,31 @@ import { expect, it, vi } from "vitest";
 it("keeps nothing and sends no part of a link after its ? or #", async () => {
   // The SDK's toolbar and debug switches read the address; the rest are the
   // campaign tags and query an email link may carry.
-  const toolbar = btoa(JSON.stringify({ action: "ph_authorize", token: "phc_4EUB88JK9BzR2LEtJ24xVwMV8pczEBs95yTMpwJuvu4" }));
-  history.replaceState(null, "", `/?utm_source=news&gclid=abc123&email=a%40b.c&__posthog_debug=true#__posthog=${toolbar}`);
+  const toolbar = btoa(
+    JSON.stringify({
+      action: "ph_authorize",
+      token: "phc_4EUB88JK9BzR2LEtJ24xVwMV8pczEBs95yTMpwJuvu4",
+    }),
+  );
+  history.replaceState(
+    null,
+    "",
+    `/?utm_source=news&gclid=abc123&email=a%40b.c&__posthog_debug=true#__posthog=${toolbar}`,
+  );
   // From another page of this site, the browser sends that page's whole
   // address, and the SDK reads "google" in it as a search with the term in q.
-  Object.defineProperty(document, "referrer", { value: "http://localhost:3000/privacy?utm_source=google&q=b%40c.d#top" });
+  Object.defineProperty(document, "referrer", {
+    value: "http://localhost:3000/privacy?utm_source=google&q=b%40c.d#top",
+  });
   const bodies: string[] = [];
-  vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
-    const body = new Uint8Array(await new Response(init?.body).arrayBuffer());
-    bodies.push((body[0] === 0x1f ? gunzipSync(body) : Buffer.from(body)).toString());
-    return new Response("{}");
-  }));
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = new Uint8Array(await new Response(init?.body).arrayBuffer());
+      bodies.push((body[0] === 0x1f ? gunzipSync(body) : Buffer.from(body)).toString());
+      return new Response("{}");
+    }),
+  );
 
   const { default: posthog } = await import("posthog-js");
   await import("./analytics");
@@ -33,7 +47,19 @@ it("keeps nothing and sends no part of a link after its ? or #", async () => {
   const sent = bodies.join();
   expect(sent).toContain('"$current_url":"http://localhost:3000/"');
   expect(sent).toContain('"$referrer":"http://localhost:3000/privacy"');
-  for (const part of ["utm_source", "news", "gclid", "abc123", "a%40b.c", "__posthog", "b%40c.d", "b@c.d", "#top", "ph_keyword", "$search_engine"]) {
+  for (const part of [
+    "utm_source",
+    "news",
+    "gclid",
+    "abc123",
+    "a%40b.c",
+    "__posthog",
+    "b%40c.d",
+    "b@c.d",
+    "#top",
+    "ph_keyword",
+    "$search_engine",
+  ]) {
     expect(sent, part).not.toContain(part);
   }
 });

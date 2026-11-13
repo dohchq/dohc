@@ -7,8 +7,8 @@ type Window = { id: number; gone?: boolean; heard: VersionRoundMessage[] };
 function rounds(windows: Window[], timeoutMs?: number) {
   return createVersionRounds<Window>({
     windowsShowing: () => windows,
-    windowId: window => window.id,
-    isGone: window => window.gone === true,
+    windowId: (window) => window.id,
+    isGone: (window) => window.gone === true,
     send: (window, message) => window.heard.push(message),
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
   });
@@ -17,16 +17,20 @@ function rounds(windows: Window[], timeoutMs?: number) {
 const window = (id: number): Window => ({ id, heard: [] });
 
 // Lets the round's promise chain reach the change.
-const settled = () => new Promise(resolve => setImmediate(resolve));
+const settled = () => new Promise((resolve) => setImmediate(resolve));
 
-afterEach(() => { vi.useRealTimers(); });
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("version rounds", () => {
   it("runs the change only after every window showing the workspace is ready, then tells them where it left them", async () => {
     const [a, b] = [window(1), window(2)];
     const { run, answer } = rounds([a, b]);
     const change = vi.fn(async () => ({ activeVersionId: "draft" }));
-    const result = run("workspace", change, { done: switched => ({ activeVersionId: switched.activeVersionId }) });
+    const result = run("workspace", change, {
+      done: (switched) => ({ activeVersionId: switched.activeVersionId }),
+    });
     expect(a.heard).toEqual([{ kind: "begin", roundId: 1, workspaceId: "workspace" }]);
     answer(1, 1, { ready: true });
     await settled();
@@ -34,7 +38,13 @@ describe("version rounds", () => {
     answer(2, 1, { ready: true });
     await expect(result).resolves.toEqual({ activeVersionId: "draft" });
     expect(change).toHaveBeenCalledOnce();
-    for (const each of [a, b]) expect(each.heard.at(-1)).toEqual({ kind: "end", roundId: 1, changed: true, activeVersionId: "draft" });
+    for (const each of [a, b])
+      expect(each.heard.at(-1)).toEqual({
+        kind: "end",
+        roundId: 1,
+        changed: true,
+        activeVersionId: "draft",
+      });
   });
 
   it("changes nothing when a window refuses, and every window hears the round end unchanged", async () => {
@@ -46,7 +56,8 @@ describe("version rounds", () => {
     answer(2, 1, { ready: false, reason: "A Collection write failed." });
     await expect(result).rejects.toThrow("A Collection write failed.");
     expect(change).not.toHaveBeenCalled();
-    for (const each of [a, b]) expect(each.heard.at(-1)).toEqual({ kind: "end", roundId: 1, changed: false });
+    for (const each of [a, b])
+      expect(each.heard.at(-1)).toEqual({ kind: "end", roundId: 1, changed: false });
   });
 
   it("refuses when a window stays silent, and ignores its late answer", async () => {
@@ -83,14 +94,22 @@ describe("version rounds", () => {
   it("tells the windows what a failed change may have left, and rethrows its error", async () => {
     const [a, b] = [window(1), window(2)];
     const { run, answer } = rounds([a, b]);
-    const failing = (failed?: { activeVersionId?: string }) => run("workspace", async () => { throw new Error("Engine refused."); },
-      { done: () => ({}), ...(failed ? { failed } : {}) });
+    const failing = (failed?: { activeVersionId?: string }) =>
+      run(
+        "workspace",
+        async () => {
+          throw new Error("Engine refused.");
+        },
+        { done: () => ({}), ...(failed ? { failed } : {}) },
+      );
     const switching = failing({});
-    answer(1, 1, { ready: true }); answer(2, 1, { ready: true });
+    answer(1, 1, { ready: true });
+    answer(2, 1, { ready: true });
     await expect(switching).rejects.toThrow("Engine refused.");
     expect(a.heard.at(-1)).toEqual({ kind: "end", roundId: 1, changed: true });
     const merging = failing();
-    answer(1, 2, { ready: true }); answer(2, 2, { ready: true });
+    answer(1, 2, { ready: true });
+    answer(2, 2, { ready: true });
     await expect(merging).rejects.toThrow("Engine refused.");
     expect(b.heard.at(-1)).toEqual({ kind: "end", roundId: 2, changed: false });
   });

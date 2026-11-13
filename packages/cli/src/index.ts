@@ -50,13 +50,15 @@ async function bodyForCommand(
 ): Promise<string | undefined> {
   if (command.verb === "documentEdit" || command.verb === "documentCreate") {
     const text = command.stdin ? await readStdin() : command.text;
-    if (!documentEditTextSchema.safeParse(text).success) throw new DohcCliError("document text is at most 256 KiB as UTF-8");
+    if (!documentEditTextSchema.safeParse(text).success)
+      throw new DohcCliError("document text is at most 256 KiB as UTF-8");
     return text;
   }
   if (command.verb === "versionResolve") {
     if (command.keep !== "combined") return undefined;
     const text = command.stdin ? await readStdin() : command.text;
-    if (!versionResolutionSchema.safeParse({ keep: "combined", text }).success) throw new DohcCliError("combined text is at most 10 MiB as UTF-8");
+    if (!versionResolutionSchema.safeParse({ keep: "combined", text }).success)
+      throw new DohcCliError("combined text is at most 10 MiB as UTF-8");
     return text;
   }
   if (command.verb === "fileChatStart") {
@@ -76,7 +78,9 @@ async function bodyForCommand(
   return body;
 }
 
-function isDeclaredCommand(command: ParsedCliCommand): command is Extract<ParsedCliCommand, { verb: DeclaredVerb }> {
+function isDeclaredCommand(
+  command: ParsedCliCommand,
+): command is Extract<ParsedCliCommand, { verb: DeclaredVerb }> {
   return isDeclaredVerb(command.verb);
 }
 
@@ -96,107 +100,337 @@ function buildCliRequest(
     // A declared verb sends its parsed fields as they are. The cast pairs each
     // verb with its fields, which TypeScript does not do across a union.
     const { verb, actor: _actor, agentId: _agentId, json: _json, ...fields } = command;
-    return { protocolVersion: common.protocolVersion, verb, args: { cwd: common.cwd, actor: common.actor, ...fields } } as CliRequestWithoutToken;
+    return {
+      protocolVersion: common.protocolVersion,
+      verb,
+      args: { cwd: common.cwd, actor: common.actor, ...fields },
+    } as CliRequestWithoutToken;
   }
   switch (command.verb) {
     case "historyOperation":
-      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, operationId: command.operationId, ...(command.cursor ? { cursor: command.cursor } : {}) } };
+      return {
+        protocolVersion: common.protocolVersion,
+        verb: command.verb,
+        args: {
+          cwd: common.cwd,
+          actor: common.actor,
+          operationId: command.operationId,
+          ...(command.cursor ? { cursor: command.cursor } : {}),
+        },
+      };
     case "versionList":
-      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor } };
+      return {
+        protocolVersion: common.protocolVersion,
+        verb: command.verb,
+        args: { cwd: common.cwd, actor: common.actor },
+      };
     case "versionCompare":
-      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, version: command.version, ...(command.afterPath ? { afterPath: command.afterPath } : {}) } };
+      return {
+        protocolVersion: common.protocolVersion,
+        verb: command.verb,
+        args: {
+          cwd: common.cwd,
+          actor: common.actor,
+          version: command.version,
+          ...(command.afterPath ? { afterPath: command.afterPath } : {}),
+        },
+      };
     case "versionConflicts":
-      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, ...(command.afterConflictId ? { afterConflictId: command.afterConflictId } : {}) } };
+      return {
+        protocolVersion: common.protocolVersion,
+        verb: command.verb,
+        args: {
+          cwd: common.cwd,
+          actor: common.actor,
+          ...(command.afterConflictId ? { afterConflictId: command.afterConflictId } : {}),
+        },
+      };
     case "versionCreate":
-      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, name: command.name } };
+      return {
+        protocolVersion: common.protocolVersion,
+        verb: command.verb,
+        args: { cwd: common.cwd, actor: common.actor, name: command.name },
+      };
     case "versionSwitch":
     case "versionMerge":
-      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, version: command.version } };
+      return {
+        protocolVersion: common.protocolVersion,
+        verb: command.verb,
+        args: { cwd: common.cwd, actor: common.actor, version: command.version },
+      };
     case "versionResolve":
-      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, conflictId: command.conflictId,
-        resolution: command.keep === "combined" ? { keep: "combined", text: stdinBody ?? command.text } : { keep: command.keep } } };
+      return {
+        protocolVersion: common.protocolVersion,
+        verb: command.verb,
+        args: {
+          cwd: common.cwd,
+          actor: common.actor,
+          conflictId: command.conflictId,
+          resolution:
+            command.keep === "combined"
+              ? { keep: "combined", text: stdinBody ?? command.text }
+              : { keep: command.keep },
+        },
+      };
     case "fileDuplicate":
-      return {protocolVersion: common.protocolVersion, verb: command.verb, args: {cwd: common.cwd, actor: common.actor, path: command.path, requestId: command.requestId ?? randomUUID(), agent: command.agent}};
+      return {
+        protocolVersion: common.protocolVersion,
+        verb: command.verb,
+        args: {
+          cwd: common.cwd,
+          actor: common.actor,
+          path: command.path,
+          requestId: command.requestId ?? randomUUID(),
+          agent: command.agent,
+        },
+      };
     case "historyUndo":
-      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, operationId: command.operationId } };
+      return {
+        protocolVersion: common.protocolVersion,
+        verb: command.verb,
+        args: { cwd: common.cwd, actor: common.actor, operationId: command.operationId },
+      };
     case "chatRetry":
-      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, ...(runId ? { runId } : {}), thread: command.thread } };
+      return {
+        protocolVersion: common.protocolVersion,
+        verb: command.verb,
+        args: {
+          cwd: common.cwd,
+          actor: common.actor,
+          ...(runId ? { runId } : {}),
+          thread: command.thread,
+        },
+      };
     case "stopSync":
-      return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, ...(command.agent ? { agent: command.agent } : {}) } };
+      return {
+        verb: command.verb,
+        protocolVersion: common.protocolVersion,
+        args: {
+          cwd: common.cwd,
+          actor: common.actor,
+          ...(command.agent ? { agent: command.agent } : {}),
+        },
+      };
     case "shareCopy":
-      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, shareId: command.shareId, grantId: command.grantId } };
+      return {
+        protocolVersion: common.protocolVersion,
+        verb: command.verb,
+        args: {
+          cwd: common.cwd,
+          actor: common.actor,
+          shareId: command.shareId,
+          grantId: command.grantId,
+        },
+      };
     case "shareAgents":
-      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, shareId: command.shareId, grantId: command.grantId,
-        ...(command.cursor ? { cursor: command.cursor } : {}) } };
+      return {
+        protocolVersion: common.protocolVersion,
+        verb: command.verb,
+        args: {
+          cwd: common.cwd,
+          actor: common.actor,
+          shareId: command.shareId,
+          grantId: command.grantId,
+          ...(command.cursor ? { cursor: command.cursor } : {}),
+        },
+      };
     case "shareDisconnect":
-      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, shareId: command.shareId, grantId: command.grantId, connectionId: command.connectionId } };
+      return {
+        protocolVersion: common.protocolVersion,
+        verb: command.verb,
+        args: {
+          cwd: common.cwd,
+          actor: common.actor,
+          shareId: command.shareId,
+          grantId: command.grantId,
+          connectionId: command.connectionId,
+        },
+      };
     case "accountDeletePreview":
-      return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor } };
+      return {
+        verb: command.verb,
+        protocolVersion: common.protocolVersion,
+        args: { cwd: common.cwd, actor: common.actor },
+      };
     case "accountDelete":
-      return { verb: command.verb, protocolVersion: common.protocolVersion, args: {
-        cwd: common.cwd, actor: common.actor, server: command.server, previewToken: command.previewToken, password: password ?? "",
-      } };
+      return {
+        verb: command.verb,
+        protocolVersion: common.protocolVersion,
+        args: {
+          cwd: common.cwd,
+          actor: common.actor,
+          server: command.server,
+          previewToken: command.previewToken,
+          password: password ?? "",
+        },
+      };
     case "accessRefresh":
-      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor } };
+      return {
+        protocolVersion: common.protocolVersion,
+        verb: command.verb,
+        args: { cwd: common.cwd, actor: common.actor },
+      };
     case "accessObject":
-      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, ref: command.ref, cursor: command.cursor } };
+      return {
+        protocolVersion: common.protocolVersion,
+        verb: command.verb,
+        args: { cwd: common.cwd, actor: common.actor, ref: command.ref, cursor: command.cursor },
+      };
     case "accessSharing":
-      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, lane: command.lane, cursor: command.cursor } };
+      return {
+        protocolVersion: common.protocolVersion,
+        verb: command.verb,
+        args: { cwd: common.cwd, actor: common.actor, lane: command.lane, cursor: command.cursor },
+      };
     case "collectionSetFields":
-      return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, recordPath: command.recordPath, fields: command.fields,
-        ...(command.agent === undefined ? {} : { agent: command.agent }) } };
+      return {
+        verb: command.verb,
+        protocolVersion: common.protocolVersion,
+        args: {
+          cwd: common.cwd,
+          actor: common.actor,
+          recordPath: command.recordPath,
+          fields: command.fields,
+          ...(command.agent === undefined ? {} : { agent: command.agent }),
+        },
+      };
     case "fileChats":
     case "documentRead":
     case "documentHeld":
-      return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, path: command.path } };
+      return {
+        verb: command.verb,
+        protocolVersion: common.protocolVersion,
+        args: { cwd: common.cwd, actor: common.actor, path: command.path },
+      };
     case "saveRecoveryCopy":
-      return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, path: command.path,
-        ...(command.incident === undefined ? {} : { incident: command.incident }) } };
+      return {
+        verb: command.verb,
+        protocolVersion: common.protocolVersion,
+        args: {
+          cwd: common.cwd,
+          actor: common.actor,
+          path: command.path,
+          ...(command.incident === undefined ? {} : { incident: command.incident }),
+        },
+      };
     case "liveKeptEdits":
-      return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor } };
+      return {
+        verb: command.verb,
+        protocolVersion: common.protocolVersion,
+        args: { cwd: common.cwd, actor: common.actor },
+      };
     case "retryKeptEdits":
     case "stopAgain":
-      return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, path: command.path, incident: command.incident } };
+      return {
+        verb: command.verb,
+        protocolVersion: common.protocolVersion,
+        args: {
+          cwd: common.cwd,
+          actor: common.actor,
+          path: command.path,
+          incident: command.incident,
+        },
+      };
     case "heldNoteChange":
-      return {verb: command.verb, protocolVersion: common.protocolVersion, args: command.action === "review"
-        ? {cwd: common.cwd, actor: common.actor, path: command.path, action: command.action}
-        : {cwd: common.cwd, actor: common.actor, path: command.path, action: command.action, token: command.token!}};
+      return {
+        verb: command.verb,
+        protocolVersion: common.protocolVersion,
+        args:
+          command.action === "review"
+            ? { cwd: common.cwd, actor: common.actor, path: command.path, action: command.action }
+            : {
+                cwd: common.cwd,
+                actor: common.actor,
+                path: command.path,
+                action: command.action,
+                token: command.token!,
+              },
+      };
     case "liveDocuments":
-      return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor,
-        ...(command.cursor === undefined ? {} : { cursor: command.cursor }) } };
+      return {
+        verb: command.verb,
+        protocolVersion: common.protocolVersion,
+        args: {
+          cwd: common.cwd,
+          actor: common.actor,
+          ...(command.cursor === undefined ? {} : { cursor: command.cursor }),
+        },
+      };
     case "liveStop":
-      return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, path: command.path,
-        ...(command.objectId === undefined ? {} : { objectId: command.objectId }) } };
+      return {
+        verb: command.verb,
+        protocolVersion: common.protocolVersion,
+        args: {
+          cwd: common.cwd,
+          actor: common.actor,
+          path: command.path,
+          ...(command.objectId === undefined ? {} : { objectId: command.objectId }),
+        },
+      };
     case "liveResume":
-      return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, path: command.path } };
+      return {
+        verb: command.verb,
+        protocolVersion: common.protocolVersion,
+        args: { cwd: common.cwd, actor: common.actor, path: command.path },
+      };
     case "documentEdit":
     case "documentCreate": {
       const args = {
-        cwd: common.cwd, actor: common.actor, path: command.path,
+        cwd: common.cwd,
+        actor: common.actor,
+        path: command.path,
         ...(command.agent === undefined ? {} : { agent: command.agent }),
       };
       return command.verb === "documentCreate"
-        ? { verb: command.verb, protocolVersion: common.protocolVersion, args: { ...args, markdown: stdinBody ?? command.text } }
-        : { verb: command.verb, protocolVersion: common.protocolVersion, args: {
-            ...args, replacement: stdinBody ?? command.text,
-            ...(command.find === undefined ? {} : { find: command.find }),
-            ...(command.requestId === undefined ? {} : { requestId: command.requestId }),
-          } };
+        ? {
+            verb: command.verb,
+            protocolVersion: common.protocolVersion,
+            args: { ...args, markdown: stdinBody ?? command.text },
+          }
+        : {
+            verb: command.verb,
+            protocolVersion: common.protocolVersion,
+            args: {
+              ...args,
+              replacement: stdinBody ?? command.text,
+              ...(command.find === undefined ? {} : { find: command.find }),
+              ...(command.requestId === undefined ? {} : { requestId: command.requestId }),
+            },
+          };
     }
     case "fileChatStart":
-      return { verb: command.verb, protocolVersion: common.protocolVersion, args: {
-        cwd: common.cwd, actor: common.actor, path: command.path, title: command.title,
-        body: stdinBody ?? command.body,
-        ...(command.agent === undefined ? {} : { agent: command.agent }),
-        ...(command.requestId === undefined ? {} : { requestId: command.requestId }),
-        ...((command.runId ?? runId) ? { runId: command.runId ?? runId } : {}),
-      } };
+      return {
+        verb: command.verb,
+        protocolVersion: common.protocolVersion,
+        args: {
+          cwd: common.cwd,
+          actor: common.actor,
+          path: command.path,
+          title: command.title,
+          body: stdinBody ?? command.body,
+          ...(command.agent === undefined ? {} : { agent: command.agent }),
+          ...(command.requestId === undefined ? {} : { requestId: command.requestId }),
+          ...((command.runId ?? runId) ? { runId: command.runId ?? runId } : {}),
+        },
+      };
     case "dataset":
-      return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, request: command.request } };
+      return {
+        verb: command.verb,
+        protocolVersion: common.protocolVersion,
+        args: { cwd: common.cwd, actor: common.actor, request: command.request },
+      };
     case "appPublication":
-      return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, request: command.request } };
+      return {
+        verb: command.verb,
+        protocolVersion: common.protocolVersion,
+        args: { cwd: common.cwd, actor: common.actor, request: command.request },
+      };
     case "ownerAppResponses":
-      return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, request: command.request } };
+      return {
+        verb: command.verb,
+        protocolVersion: common.protocolVersion,
+        args: { cwd: common.cwd, actor: common.actor, request: command.request },
+      };
     case "groupCreate":
       return {
         verb: command.verb,
@@ -228,10 +462,18 @@ function buildCliRequest(
         args: { cwd: common.cwd, actor: common.actor, group: command.group },
       };
     case "watch":
-      return { verb: "watch", protocolVersion: common.protocolVersion, args: {
-        cwd: common.cwd, actor: common.actor, cursor: command.cursor,
-        group: command.group, thread: command.thread, timeoutMs: command.timeoutMs,
-      } };
+      return {
+        verb: "watch",
+        protocolVersion: common.protocolVersion,
+        args: {
+          cwd: common.cwd,
+          actor: common.actor,
+          cursor: command.cursor,
+          group: command.group,
+          thread: command.thread,
+          timeoutMs: command.timeoutMs,
+        },
+      };
     case "inbox":
     case "notices":
       return {
@@ -354,17 +596,35 @@ function buildCliRequest(
         verb: command.verb,
         protocolVersion: common.protocolVersion,
         args: {
-          cwd: common.cwd, actor: common.actor, collectionPath: command.collectionPath, automation: command.automation,
+          cwd: common.cwd,
+          actor: common.actor,
+          collectionPath: command.collectionPath,
+          automation: command.automation,
           ...(command.page === undefined ? {} : { page: command.page }),
           ...(command.server ? { server: true } : {}),
         },
       };
     case "automationList":
-      return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, collectionPath: command.collectionPath } };
+      return {
+        verb: command.verb,
+        protocolVersion: common.protocolVersion,
+        args: { cwd: common.cwd, actor: common.actor, collectionPath: command.collectionPath },
+      };
     case "automationSwitch":
-      return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor,
-        collectionPath: command.collectionPath, automation: command.automation, enabled: command.enabled,
-        expectedContentHash: command.expectedContentHash, reformat: command.reformat, submitId: command.submitId } };
+      return {
+        verb: command.verb,
+        protocolVersion: common.protocolVersion,
+        args: {
+          cwd: common.cwd,
+          actor: common.actor,
+          collectionPath: command.collectionPath,
+          automation: command.automation,
+          enabled: command.enabled,
+          expectedContentHash: command.expectedContentHash,
+          reformat: command.reformat,
+          submitId: command.submitId,
+        },
+      };
     case "automationRun":
       return {
         verb: command.verb,
@@ -392,9 +652,16 @@ function buildCliRequest(
         },
       };
     case "automationButtons":
-      return { verb: command.verb, protocolVersion: common.protocolVersion, args: {
-        cwd: common.cwd, actor: common.actor, collectionPath: command.collectionPath, ...(command.table ? { table: command.table } : {}),
-      } };
+      return {
+        verb: command.verb,
+        protocolVersion: common.protocolVersion,
+        args: {
+          cwd: common.cwd,
+          actor: common.actor,
+          collectionPath: command.collectionPath,
+          ...(command.table ? { table: command.table } : {}),
+        },
+      };
     case "automationPress":
       return {
         verb: command.verb,
@@ -419,7 +686,9 @@ function refusal(result: CliResultByVerb[keyof CliResultByVerb]): string | null 
   // A Collections list this computer can't give fails, as it did when main threw the refusal.
   if (result !== null && "kind" in result && result.kind === "collections-refused") {
     const { refusal } = result;
-    return refusal.kind === "server-unavailable" ? `${refusal.words} ${refusal.failure}` : refusal.words;
+    return refusal.kind === "server-unavailable"
+      ? `${refusal.words} ${refusal.failure}`
+      : refusal.words;
   }
   if (result === null || !("ok" in result) || result.ok !== false) return null;
   return "notice" in result && result.notice
@@ -427,7 +696,43 @@ function refusal(result: CliResultByVerb[keyof CliResultByVerb]): string | null 
     : result.reason;
 }
 
-const REFUSING_VERBS = new Set(["heldNoteChange", "dataset", "fileDuplicate","historyOperation", "historyUndo", "versionList", "versionCompare", "versionConflicts", "versionCreate", "versionSwitch", "versionMerge", "versionResolve", "accountDelete", "moments", "moment", "documentRead", "documentHeld", "documentEdit", "documentCreate", "collectionSetFields", "fileChats", "fileChatStart", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "liveDocuments", "liveStop", "liveResume", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "chatRetry"]);
+const REFUSING_VERBS = new Set([
+  "heldNoteChange",
+  "dataset",
+  "fileDuplicate",
+  "historyOperation",
+  "historyUndo",
+  "versionList",
+  "versionCompare",
+  "versionConflicts",
+  "versionCreate",
+  "versionSwitch",
+  "versionMerge",
+  "versionResolve",
+  "accountDelete",
+  "moments",
+  "moment",
+  "documentRead",
+  "documentHeld",
+  "documentEdit",
+  "documentCreate",
+  "collectionSetFields",
+  "fileChats",
+  "fileChatStart",
+  "liveKeptEdits",
+  "saveRecoveryCopy",
+  "retryKeptEdits",
+  "stopAgain",
+  "liveDocuments",
+  "liveStop",
+  "liveResume",
+  "automationRuns",
+  "automationRun",
+  "automationRetry",
+  "automationButtons",
+  "automationPress",
+  "chatRetry",
+]);
 
 function jsonOutput(result: CliResultByVerb[keyof CliResultByVerb]): string {
   return JSON.stringify({ schemaVersion: CLI_JSON_SCHEMA_VERSION, ...result }, null, 2);
@@ -438,11 +743,23 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
     const env = options.env ?? process.env;
     const command = parseCliArguments(options.argv, env);
     if ("help" in command) return { exitCode: 0, stdout: renderCliHelp(command), stderr: "" };
-    const stdinBody = await bodyForCommand(command, options.readStdin ?? (() => readStdinText(process.stdin, command.verb === "fileChatStart" ? { bytes: MAX_CHAT_MESSAGE_BODY_BYTES, message: CHAT_MESSAGE_TOO_LONG } : undefined)));
-    const password = command.verb === "accountDelete"
-      ? await (options.readPassword ?? (() => readPassword(process.stdin, process.stderr)))()
-      : undefined;
-    if (password === "") throw new DohcCliError("account delete requires the server account password");
+    const stdinBody = await bodyForCommand(
+      command,
+      options.readStdin ??
+        (() =>
+          readStdinText(
+            process.stdin,
+            command.verb === "fileChatStart"
+              ? { bytes: MAX_CHAT_MESSAGE_BODY_BYTES, message: CHAT_MESSAGE_TOO_LONG }
+              : undefined,
+          )),
+    );
+    const password =
+      command.verb === "accountDelete"
+        ? await (options.readPassword ?? (() => readPassword(process.stdin, process.stderr)))()
+        : undefined;
+    if (password === "")
+      throw new DohcCliError("account delete requires the server account password");
     const request = buildCliRequest(
       command,
       options.cwd ?? process.cwd(),
@@ -453,7 +770,8 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
     // Every verb names the agent you run, so each reads and writes as it.
     if (command.agentId !== undefined) Object.assign(request.args, { agentId: command.agentId });
     // The desktop runs the request from this workspace's folder in place of the caller's.
-    if (command.workspaceId !== undefined) Object.assign(request, { workspaceId: command.workspaceId });
+    if (command.workspaceId !== undefined)
+      Object.assign(request, { workspaceId: command.workspaceId });
     while (true) {
       if (options.signal?.aborted) return { exitCode: 0, stdout: "", stderr: "" };
       let result: CliResultByVerb[keyof CliResultByVerb];
@@ -468,11 +786,20 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
         result = await sendCliRequest<typeof command.verb>(request, {
           ...options.client,
           signal: options.signal ?? options.client?.signal,
-          timeoutMs: options.client?.timeoutMs ?? (command.verb === "accountDelete" ? 120_000
-            // The server may take 5 minutes to prepare an earlier store, and dohc waits up to 6.
-            : command.verb === "saveRecoveryCopy" ? 420_000
-            : command.verb === "historyUndo" || command.verb === "dataset" || command.verb === "appPublication" || command.verb === "ownerAppResponses"
-              || VERSION_CHANGE_VERBS.has(command.verb) ? 90_000 : DEFAULT_RESPONSE_TIMEOUT_MS),
+          timeoutMs:
+            options.client?.timeoutMs ??
+            (command.verb === "accountDelete"
+              ? 120_000
+              : // The server may take 5 minutes to prepare an earlier store, and dohc waits up to 6.
+                command.verb === "saveRecoveryCopy"
+                ? 420_000
+                : command.verb === "historyUndo" ||
+                    command.verb === "dataset" ||
+                    command.verb === "appPublication" ||
+                    command.verb === "ownerAppResponses" ||
+                    VERSION_CHANGE_VERBS.has(command.verb)
+                  ? 90_000
+                  : DEFAULT_RESPONSE_TIMEOUT_MS),
           env,
         });
       }
@@ -480,7 +807,9 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
       const refused = REFUSING_VERBS.has(command.verb) ? refusal(result) : null;
       if (refused !== null) throw new DohcCliError(refused);
       const output = command.json
-        ? result === null ? "null" : jsonOutput(result)
+        ? result === null
+          ? "null"
+          : jsonOutput(result)
         : renderCliResult(command.verb, result, {
             grepFilesWithMatches: command.verb === "grep" ? command.filesWithMatches : false,
             grepContext: command.verb === "grep" ? command.context : 0,
@@ -488,16 +817,31 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
           });
       if (command.verb === "watch" && !command.once && request.verb === "watch") {
         const batch = result as CliResultByVerb["watch"];
-        if (batch.messages.length > 0) (options.writeStdout ?? (text => { process.stdout.write(text); }))(`${output}\n`);
+        if (batch.messages.length > 0)
+          (
+            options.writeStdout ??
+            ((text) => {
+              process.stdout.write(text);
+            })
+          )(`${output}\n`);
         request.args.cursor = batch.cursor;
         continue;
       }
       return {
-        exitCode: result !== null && (("remaining" in result && result.remaining.length > 0) || ("kind" in result && result.kind === "partial") || ("disconnectError" in result && result.disconnectError !== null)) ? 1 : 0,
+        exitCode:
+          result !== null &&
+          (("remaining" in result && result.remaining.length > 0) ||
+            ("kind" in result && result.kind === "partial") ||
+            ("disconnectError" in result && result.disconnectError !== null))
+            ? 1
+            : 0,
         // Markdown prints byte for byte so redirection preserves it.
-        stdout: (command.verb === "moment" || command.verb === "documentRead") && !command.json
-          ? output
-          : output ? `${output.replace(/\n$/, "")}\n` : "",
+        stdout:
+          (command.verb === "moment" || command.verb === "documentRead") && !command.json
+            ? output
+            : output
+              ? `${output.replace(/\n$/, "")}\n`
+              : "",
         stderr: "",
       };
     }
@@ -511,7 +855,10 @@ async function runCliProcess(argv = process.argv.slice(2)): Promise<void> {
   const cancellation = new AbortController();
   const stop = () => cancellation.abort();
   const watching = argv[0] === "chat" && argv[1] === "watch";
-  if (watching) { process.once("SIGINT", stop); process.once("SIGTERM", stop); }
+  if (watching) {
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+  }
   const result = await executeCli({ argv, ...(watching ? { signal: cancellation.signal } : {}) });
   process.off("SIGINT", stop);
   process.off("SIGTERM", stop);

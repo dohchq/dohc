@@ -6,10 +6,7 @@ export type ResolveActor = (request: Request, workspaceId: string) => Actor | Pr
 
 // The caller supplies a validated session. Identity comes from its user,
 // and the downstream authorization check enforces workspace membership.
-export function actorFromSession(
-  session: { user: { id: string } },
-  workspaceId: string,
-): Actor {
+export function actorFromSession(session: { user: { id: string } }, workspaceId: string): Actor {
   return { userId: session.user.id, workspaceId };
 }
 
@@ -52,11 +49,19 @@ export function accountSessionFrom(session: {
   session: { id: string; userId: string; expiresAt: Date | string | number };
 }): AccountSession {
   const expiresAtMs = new Date(session.session.expiresAt).getTime();
-  if (session.session.userId !== session.user.id || !session.session.id || !Number.isSafeInteger(expiresAtMs)) {
+  if (
+    session.session.userId !== session.user.id ||
+    !session.session.id ||
+    !Number.isSafeInteger(expiresAtMs)
+  ) {
     throw new UnauthorizedError();
   }
-  return { userId: session.user.id, sessionId: session.session.id, expiresAtMs,
-    ...(typeof session.user.name === "string" ? {displayName: session.user.name} : {}) };
+  return {
+    userId: session.user.id,
+    sessionId: session.session.id,
+    expiresAtMs,
+    ...(typeof session.user.name === "string" ? { displayName: session.user.name } : {}),
+  };
 }
 
 export function createAccountSessionResolver(auth: WorkspaceAuth): ResolveAccountSession {
@@ -93,7 +98,11 @@ export function createPostgresAccountSessions(pool: Pool): AccountSessions {
         'select "id", "createdAt", "userAgent" from "session" where "userId" = $1 and "expiresAt" > now() order by "createdAt" desc, "id"',
         [userId],
       );
-      return result.rows.map(row => ({ sessionId: row.id, createdAtMs: row.createdAt.getTime(), userAgent: row.userAgent || null }));
+      return result.rows.map((row) => ({
+        sessionId: row.id,
+        createdAtMs: row.createdAt.getTime(),
+        userAgent: row.userAgent || null,
+      }));
     },
     async revoke({ userId, callerSessionId, sessionId }) {
       const result = await pool.query(

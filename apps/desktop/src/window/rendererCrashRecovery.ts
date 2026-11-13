@@ -24,9 +24,7 @@ export function crashLoopPolicy(
   recentCrashesMs: readonly number[],
   nowMs: number,
 ): { reload: boolean; recentCrashesMs: number[] } {
-  const pruned = recentCrashesMs.filter(
-    (at) => nowMs - at < CRASH_LOOP_WINDOW_MS,
-  );
+  const pruned = recentCrashesMs.filter((at) => nowMs - at < CRASH_LOOP_WINDOW_MS);
   pruned.push(nowMs);
   return { reload: pruned.length <= CRASH_LOOP_MAX_RELOADS, recentCrashesMs: pruned };
 }

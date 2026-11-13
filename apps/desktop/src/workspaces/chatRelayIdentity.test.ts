@@ -30,9 +30,7 @@ const credentials: CloudCredentials = {
 };
 
 function workspace(
-  overrides: Partial<
-    Pick<RegistryEntry, "workspaceId" | "remote" | "sharedChannels">
-  > = {},
+  overrides: Partial<Pick<RegistryEntry, "workspaceId" | "remote" | "sharedChannels">> = {},
 ): Pick<RegistryEntry, "workspaceId" | "remote" | "sharedChannels"> {
   return {
     workspaceId: "workspace-1",
@@ -79,17 +77,23 @@ describe("resolveWorkspaceRelayAuthorId", () => {
 it("retains the pinned chat author while paused, without accepting another account", async () => {
   const paused = { workspaceId: "workspace-1", pausedRemote: workspace().remote };
   expect(resolveWorkspaceRelayAuthorId(paused, credentials)).toBe("user-1");
-  expect(resolveWorkspaceRelayAuthorId(paused, { ...credentials, userId: "other" })).toBeUndefined();
+  expect(
+    resolveWorkspaceRelayAuthorId(paused, { ...credentials, userId: "other" }),
+  ).toBeUndefined();
   expect(resolveWorkspaceRelayAuthorId(paused, null)).toBeUndefined();
-  expect(await resolveChatRelayIdentity({ workspace: paused, credentials, store, target: { threadId: "local" } }))
-    .toMatchObject({ authorUserId: "user-1" });
+  expect(
+    await resolveChatRelayIdentity({
+      workspace: paused,
+      credentials,
+      store,
+      target: { threadId: "local" },
+    }),
+  ).toMatchObject({ authorUserId: "user-1" });
 });
 
 describe("persisted relay account pins", () => {
   it("rejects same-server account mismatches", () => {
-    expect(workspaceRemoteMatchesCredentials(workspace().remote!, credentials)).toBe(
-      true,
-    );
+    expect(workspaceRemoteMatchesCredentials(workspace().remote!, credentials)).toBe(true);
     expect(
       workspaceRemoteMatchesCredentials(
         {
@@ -151,7 +155,6 @@ describe("resolveChatRelayIdentity", () => {
         target: { channelId: "channel-shared" },
       }),
     ).resolves.toEqual({ joinedChannel });
-
   });
 
   it("uses the workspace cloud identity outside joined channels", async () => {
@@ -239,14 +242,9 @@ describe("assertSharedChannelMessageIdentity", () => {
 
 describe("assertSyncEnrollmentCredentials", () => {
   it("allows a new binding and the current account's binding", () => {
+    expect(() => assertSyncEnrollmentCredentials(workspace(), credentials)).not.toThrow();
     expect(() =>
-      assertSyncEnrollmentCredentials(workspace(), credentials),
-    ).not.toThrow();
-    expect(() =>
-      assertSyncEnrollmentCredentials(
-        workspace({ remote: undefined }),
-        credentials,
-      ),
+      assertSyncEnrollmentCredentials(workspace({ remote: undefined }), credentials),
     ).not.toThrow();
   });
 

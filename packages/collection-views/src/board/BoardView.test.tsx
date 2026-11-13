@@ -104,7 +104,10 @@ function makeGroups() {
       ]),
     ]),
     makeGroup("doing", [
-      makeRecord("rec-b", [indexedValue("title", "Ship the board"), indexedValue("status", "doing")]),
+      makeRecord("rec-b", [
+        indexedValue("title", "Ship the board"),
+        indexedValue("status", "doing"),
+      ]),
     ]),
   ];
 }
@@ -182,7 +185,11 @@ describe("BoardView", () => {
   it("renders a column per select option, including options no record uses", () => {
     render(<BoardView schema={makeSchema()} groups={makeGroups()} groupBy="status" />);
     const columns = screen.getAllByRole("list");
-    expect(columns.map((column) => column.getAttribute("aria-label"))).toEqual(["todo", "doing", "shipped"]);
+    expect(columns.map((column) => column.getAttribute("aria-label"))).toEqual([
+      "todo",
+      "doing",
+      "shipped",
+    ]);
     expect(within(columns[0]!).getAllByRole("listitem")).toHaveLength(1);
     expect(within(columns[2]!).queryAllByRole("listitem")).toHaveLength(0);
     const shipped = screen.getByRole("region", { name: "shipped" });
@@ -191,7 +198,12 @@ describe("BoardView", () => {
 
   it("shows only the given groups when the host pages them", () => {
     render(
-      <BoardView schema={makeSchema()} groups={makeGroups()} groupBy="status" groupFooter={() => <span>More</span>} />,
+      <BoardView
+        schema={makeSchema()}
+        groups={makeGroups()}
+        groupBy="status"
+        groupFooter={() => <span>More</span>}
+      />,
     );
     const columns = screen.getAllByRole("list");
     expect(columns.map((column) => column.getAttribute("aria-label"))).toEqual(["todo", "doing"]);
@@ -204,7 +216,9 @@ describe("BoardView", () => {
     ]);
     render(<BoardView schema={schema} groups={makeGroups()} groupBy="status" />);
     const doing = screen.getByRole("region", { name: "doing" });
-    expect(doing.querySelector("[data-option-color]")?.getAttribute("data-option-color")).toBe("teal");
+    expect(doing.querySelector("[data-option-color]")?.getAttribute("data-option-color")).toBe(
+      "teal",
+    );
   });
 
   it("saves a column's color from its menu", () => {
@@ -228,7 +242,14 @@ describe("BoardView", () => {
   });
 
   it("closes a column's menu when focus leaves it", () => {
-    render(<BoardView schema={makeSchema()} groups={makeGroups()} groupBy="status" onOptionColorChange={() => undefined} />);
+    render(
+      <BoardView
+        schema={makeSchema()}
+        groups={makeGroups()}
+        groupBy="status"
+        onOptionColorChange={() => undefined}
+      />,
+    );
     fireEvent.click(screen.getByRole("button", { name: "doing options" }));
     const menu = screen.getByRole("dialog", { name: "doing options" });
     // A click on the menu's own padding keeps focus inside it.
@@ -371,11 +392,19 @@ describe("BoardView", () => {
     const groups = [
       makeGroup(null, []),
       makeGroup("todo", [
-        makeRecord("rec-b", [indexedValue("title", "Ship the board"), indexedValue("status", "todo")]),
+        makeRecord("rec-b", [
+          indexedValue("title", "Ship the board"),
+          indexedValue("status", "todo"),
+        ]),
       ]),
     ];
     render(
-      <BoardView schema={makeSchema()} groups={groups} groupBy="status" onCellChange={onCellChange} />,
+      <BoardView
+        schema={makeSchema()}
+        groups={groups}
+        groupBy="status"
+        onCellChange={onCellChange}
+      />,
     );
     layOutBoard();
     const card = screen.getByRole("listitem", { name: "Ship the board" });
@@ -421,7 +450,11 @@ describe("BoardView", () => {
 
   it("shows the empty state when no group of a non-select field has records", () => {
     render(
-      <BoardView schema={makeSchema()} groups={[makeGroup("Ada", []), makeGroup(null, [])]} groupBy="owner" />,
+      <BoardView
+        schema={makeSchema()}
+        groups={[makeGroup("Ada", []), makeGroup(null, [])]}
+        groupBy="owner"
+      />,
     );
     expect(screen.getByText("No records in this collection yet.")).toBeDefined();
   });
@@ -463,7 +496,8 @@ describe("BoardView", () => {
     render(<BoardView schema={makeSchema()} groups={makeGroups()} groupBy="status" />);
     layOutBoard();
     const card = screen.getByRole("listitem", { name: "Write the spec" });
-    card.focus(); fireEvent.keyDown(card, { key: "Enter", code: "Enter" });
+    card.focus();
+    fireEvent.keyDown(card, { key: "Enter", code: "Enter" });
     expect(card.className.includes("opacity-50")).toBe(false);
   });
 
@@ -532,8 +566,12 @@ describe("BoardView", () => {
   it("marks the card of the record the host shows open, and no other", () => {
     const groups = makeGroups();
     const open = groups.flatMap((group) => group.records)[0]!;
-    render(<BoardView schema={makeSchema()} groups={groups} groupBy="status" openRecordId={open.id} />);
-    const current = screen.getAllByRole("listitem").filter((card) => card.getAttribute("aria-current") === "true");
+    render(
+      <BoardView schema={makeSchema()} groups={groups} groupBy="status" openRecordId={open.id} />,
+    );
+    const current = screen
+      .getAllByRole("listitem")
+      .filter((card) => card.getAttribute("aria-current") === "true");
     expect(current).toHaveLength(1);
     expect(current[0]!.getAttribute("aria-label")).toBe("Write the spec");
   });

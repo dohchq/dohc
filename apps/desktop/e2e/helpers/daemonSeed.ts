@@ -55,15 +55,17 @@ function attachWorkspace(workspace: {
 }): AttachedEngineWorkspace {
   return {
     ...workspace,
-    attachmentId: Symbol(
-      `test-workspace-attachment:${workspace.workspaceId}`,
-    ),
+    attachmentId: Symbol(`test-workspace-attachment:${workspace.workspaceId}`),
   };
 }
 
 export async function openLiveDaemonWorkspace(
   workspace: { workspaceId: string; rootPath: string },
-  options: { maxRestarts?: number; allowInsecureLoopbackForTests?: boolean; privateOwnerHost?: EngineDaemonLifecycleOptions["privateOwnerHost"] } = {},
+  options: {
+    maxRestarts?: number;
+    allowInsecureLoopbackForTests?: boolean;
+    privateOwnerHost?: EngineDaemonLifecycleOptions["privateOwnerHost"];
+  } = {},
 ): Promise<LiveDaemonWorkspace> {
   const lifecycle = createRealDaemonLifecycle({
     command: resolveEngineBinary(),
@@ -88,7 +90,8 @@ export async function openLiveDaemonWorkspace(
     sessions,
     nativeClient() {
       const client = lifecycle.currentClient();
-      if (!(client instanceof EngineClient)) throw new Error("Native delivery requires the daemon client.");
+      if (!(client instanceof EngineClient))
+        throw new Error("Native delivery requires the daemon client.");
       return client;
     },
     close: async (step: CloseStep = (_name, work) => work) => {

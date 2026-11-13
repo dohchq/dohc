@@ -14,8 +14,7 @@ import {
 } from "./shell/connectionNotices";
 import { FieldError, IconButton, Pill, PrimaryButton, RetryRow } from "./ui/controls";
 
-const SETUP_GUIDE_URL =
-  "https://github.com/dohchq/dohc/blob/main/docs/how-to/self-host.md";
+const SETUP_GUIDE_URL = "https://github.com/dohchq/dohc/blob/main/docs/how-to/self-host.md";
 
 type Phase =
   | { kind: "loading" }
@@ -31,9 +30,7 @@ type Phase =
   // next to the form that restarts it.
   | { kind: "refused"; reason: string };
 
-function checkServerAddress(
-  value: string,
-): { origin: string } | { problem: string } {
+function checkServerAddress(value: string): { origin: string } | { problem: string } {
   const typed = value.trim();
   if (!typed) return { problem: "Enter your server address." };
   const origin = canonicalCloudOrigin(typed, bridge().insecureLoopbackServersForTests);
@@ -57,34 +54,36 @@ function checkServerAddress(
 // Syncing a workspace is a setting, on Settings' Sync and sharing page. Hosts
 // outside a workspace have no such page, so a session found here shows its
 // account row, the same one that page shows.
-export function CloudLogin(props: {
-  // Fired when a device-flow login completes inside this panel (the join
-  // surface re-checks its own gate on it; the shell moves on to Settings).
-  onConnected?: () => void;
-  // Also fire onConnected when the first check finds a session already here.
-  // The shell's dialog uses it to hand an existing session to Settings, where
-  // its account row and sync switch live.
-  handOffSession?: boolean;
-  // Sign in again to the server of the session already here, for a session
-  // the server stopped accepting. The first check starts the same sign-in as
-  // Connect server, with no Disconnect first, and its approval replaces the
-  // session. Every retry stays at that server. Ahead of handOffSession.
-  renew?: boolean;
-  // Nested inside another elevated card (join/open-shared/handoff signed-out
-  // gates): drop this panel's own frame so cards never stack elevation, drop
-  // the dohc Drive note, and leave focus to the host.
-  embedded?: boolean;
-  // The host already titles the step (a step title, a section header): drop
-  // this panel's own heading so the name is not said twice.
-  untitled?: boolean;
-  // A dialog host passes its close for the X beside the heading.
-  onClose?: () => void;
-  // onConnectionError decides where a failed connect, poll, status check, or
-  // disconnect goes. A host that takes it owns the toast and the Notices row,
-  // so the failure outlives this panel and survives the route change that
-  // closes it. Without it the panel raises its own through the same
-  // components.
-} & ConnectionNoticeHost) {
+export function CloudLogin(
+  props: {
+    // Fired when a device-flow login completes inside this panel (the join
+    // surface re-checks its own gate on it; the shell moves on to Settings).
+    onConnected?: () => void;
+    // Also fire onConnected when the first check finds a session already here.
+    // The shell's dialog uses it to hand an existing session to Settings, where
+    // its account row and sync switch live.
+    handOffSession?: boolean;
+    // Sign in again to the server of the session already here, for a session
+    // the server stopped accepting. The first check starts the same sign-in as
+    // Connect server, with no Disconnect first, and its approval replaces the
+    // session. Every retry stays at that server. Ahead of handOffSession.
+    renew?: boolean;
+    // Nested inside another elevated card (join/open-shared/handoff signed-out
+    // gates): drop this panel's own frame so cards never stack elevation, drop
+    // the dohc Drive note, and leave focus to the host.
+    embedded?: boolean;
+    // The host already titles the step (a step title, a section header): drop
+    // this panel's own heading so the name is not said twice.
+    untitled?: boolean;
+    // A dialog host passes its close for the X beside the heading.
+    onClose?: () => void;
+    // onConnectionError decides where a failed connect, poll, status check, or
+    // disconnect goes. A host that takes it owns the toast and the Notices row,
+    // so the failure outlives this panel and survives the route change that
+    // closes it. Without it the panel raises its own through the same
+    // components.
+  } & ConnectionNoticeHost,
+) {
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
   const [statusAttempt, setStatusAttempt] = useState(0);
   // Inline only for what the user can fix in the field in front of them.
@@ -92,9 +91,7 @@ export function CloudLogin(props: {
   const [serverUrl, setServerUrl] = useState(props.initialServerUrl ?? "");
   // Reported by the server itself: whether it answers from the open internet
   // or only from a private network.
-  const [networkAccess, setNetworkAccess] = useState<"private" | "public" | null>(
-    null,
-  );
+  const [networkAccess, setNetworkAccess] = useState<"private" | "public" | null>(null);
   // The session's server while signing in again there. A failed or refused
   // attempt offers Sign in again at it, never an address to change.
   const [renewOrigin, setRenewOrigin] = useState<string | null>(null);
@@ -112,10 +109,7 @@ export function CloudLogin(props: {
   // panel rendered on its own still reaches the same toast and Notices row.
   const ownNotices = useConnectionNotices();
   const ownsNotices = props.onConnectionError === undefined;
-  const reportOwnError = useMemo(
-    () => ownNotices.reporter(),
-    [ownNotices.reporter],
-  );
+  const reportOwnError = useMemo(() => ownNotices.reporter(), [ownNotices.reporter]);
   const reportConnectionError = props.onConnectionError ?? reportOwnError;
 
   function clearPollTimer() {
@@ -358,7 +352,8 @@ export function CloudLogin(props: {
         </div>
       ) : null}
 
-      {renewOrigin !== null && (phase.kind === "disconnected" || phase.kind === "refused" || phase.kind === "connecting") ? (
+      {renewOrigin !== null &&
+      (phase.kind === "disconnected" || phase.kind === "refused" || phase.kind === "connecting") ? (
         <div data-testid="cloud-renew">
           {phase.kind === "refused" ? (
             <p
@@ -385,7 +380,9 @@ export function CloudLogin(props: {
             {connecting ? "Connecting…" : "Sign in again"}
           </PrimaryButton>
         </div>
-      ) : phase.kind === "disconnected" || phase.kind === "refused" || phase.kind === "connecting" ? (
+      ) : phase.kind === "disconnected" ||
+        phase.kind === "refused" ||
+        phase.kind === "connecting" ? (
         <>
           {/* The browser's own answer, next to the form that starts over. */}
           {phase.kind === "refused" ? (
@@ -414,9 +411,7 @@ export function CloudLogin(props: {
               readOnly={connecting}
               spellCheck={false}
               aria-invalid={addressProblem !== null ? true : undefined}
-              aria-describedby={
-                addressProblem !== null ? "cloud-connection-error" : undefined
-              }
+              aria-describedby={addressProblem !== null ? "cloud-connection-error" : undefined}
               data-testid="cloud-server-url"
               // A typed address keeps the dialog open on a click outside it.
               data-unsaved={serverUrl.trim() !== "" && !connecting ? "" : undefined}
@@ -432,13 +427,19 @@ export function CloudLogin(props: {
               }}
               placeholder="https://dohc.example.com"
               className={`w-full rounded-md border bg-bg px-2.5 py-1.5 font-mono text-[13px] text-ink placeholder:text-subtle read-only:text-muted ${
-                addressProblem !== null ? "border-danger focus:border-danger!" : "border-line focus:border-ink"
+                addressProblem !== null
+                  ? "border-danger focus:border-danger!"
+                  : "border-line focus:border-ink"
               }`}
             />
             {/* The one error that stays inline: the field in front of the user
                 is the thing to fix. */}
             {addressProblem ? (
-              <FieldError id="cloud-connection-error" testId="cloud-connection-error" className="mt-2">
+              <FieldError
+                id="cloud-connection-error"
+                testId="cloud-connection-error"
+                className="mt-2"
+              >
                 {addressProblem}
               </FieldError>
             ) : null}
@@ -458,10 +459,7 @@ export function CloudLogin(props: {
             </div>
           </form>
           {props.embedded ? null : (
-            <div
-              data-testid="cloud-drive-coming-soon"
-              className="mt-4 border-t border-line pt-3"
-            >
+            <div data-testid="cloud-drive-coming-soon" className="mt-4 border-t border-line pt-3">
               <p className="m-0 flex items-center gap-1.5 text-[11px] font-semibold text-ink">
                 dohc Drive
                 <Pill>Coming soon</Pill>

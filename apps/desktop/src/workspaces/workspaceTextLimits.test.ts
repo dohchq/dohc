@@ -31,8 +31,6 @@ describe("exceedsUtf8Bytes", () => {
   });
 
   it("settles an oversized ASCII body from its code-unit count", () => {
-    expect(exceedsUtf8Bytes("x".repeat(10 * 1024 * 1024), 128 * 1024)).toBe(
-      true,
-    );
+    expect(exceedsUtf8Bytes("x".repeat(10 * 1024 * 1024), 128 * 1024)).toBe(true);
   });
 });

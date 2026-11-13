@@ -11,7 +11,11 @@ export type ServerDescriptor = {
   networkAccess?: "private" | "public";
 };
 
-export async function discoverServer(serverUrl: string, fetchImpl: typeof fetch = fetch, allowInsecureLoopbackForTests = false): Promise<ServerDescriptor> {
+export async function discoverServer(
+  serverUrl: string,
+  fetchImpl: typeof fetch = fetch,
+  allowInsecureLoopbackForTests = false,
+): Promise<ServerDescriptor> {
   const canonical = (value: string) => canonicalCloudOrigin(value, allowInsecureLoopbackForTests);
   const origin = canonical(serverUrl);
   if (!origin) throw new Error("Enter the server's https address, like https://dohc.example.com.");
@@ -24,15 +28,25 @@ export async function discoverServer(serverUrl: string, fetchImpl: typeof fetch 
       signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
     });
   } catch {
-    throw new Error("dohc could not reach this server. Check the address and connection, then try again.");
+    throw new Error(
+      "dohc could not reach this server. Check the address and connection, then try again.",
+    );
   }
   if (!response.ok || response.redirected) {
     await response.body?.cancel();
-    throw new Error("This address does not provide a dohc server connection. Check the server setup.");
+    throw new Error(
+      "This address does not provide a dohc server connection. Check the server setup.",
+    );
   }
-  if (response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json" || !response.body) {
+  if (
+    response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !==
+      "application/json" ||
+    !response.body
+  ) {
     await response.body?.cancel();
-    throw new Error("This server returned an invalid connection description. Check the server setup.");
+    throw new Error(
+      "This server returned an invalid connection description. Check the server setup.",
+    );
   }
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -48,30 +62,55 @@ export async function discoverServer(serverUrl: string, fetchImpl: typeof fetch 
     }
     const buffer = new Uint8Array(size);
     let offset = 0;
-    for (const chunk of chunks) { buffer.set(chunk, offset); offset += chunk.byteLength; }
+    for (const chunk of chunks) {
+      buffer.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
     value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer));
   } catch {
-    throw new Error("This server returned an invalid connection description. Check the server setup.");
+    throw new Error(
+      "This server returned an invalid connection description. Check the server setup.",
+    );
   } finally {
     await reader.cancel().catch(() => undefined);
     reader.releaseLock();
   }
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("This server returned an invalid connection description. Check the server setup.");
+    throw new Error(
+      "This server returned an invalid connection description. Check the server setup.",
+    );
   }
   const descriptor = value as Record<string, unknown>;
   const authUrl = typeof descriptor.authUrl === "string" ? canonical(descriptor.authUrl) : null;
   const relayUrl = typeof descriptor.relayUrl === "string" ? canonical(descriptor.relayUrl) : null;
   const shareUrl = typeof descriptor.shareUrl === "string" ? canonical(descriptor.shareUrl) : null;
-  if (descriptor.version !== 1 || !authUrl || !relayUrl || !shareUrl ||
-      authUrl !== origin || relayUrl !== origin || shareUrl !== origin ||
-      (descriptor.name !== undefined && !isServerDisplayName(descriptor.name)) ||
-      (descriptor.networkAccess !== undefined && !["private", "public"].includes(descriptor.networkAccess as string)) ||
-      Object.keys(descriptor).some(key => !["version", "authUrl", "relayUrl", "shareUrl", "name", "networkAccess"].includes(key))) {
-    throw new Error("This server returned an unsupported connection description. Check the server setup.");
+  if (
+    descriptor.version !== 1 ||
+    !authUrl ||
+    !relayUrl ||
+    !shareUrl ||
+    authUrl !== origin ||
+    relayUrl !== origin ||
+    shareUrl !== origin ||
+    (descriptor.name !== undefined && !isServerDisplayName(descriptor.name)) ||
+    (descriptor.networkAccess !== undefined &&
+      !["private", "public"].includes(descriptor.networkAccess as string)) ||
+    Object.keys(descriptor).some(
+      (key) =>
+        !["version", "authUrl", "relayUrl", "shareUrl", "name", "networkAccess"].includes(key),
+    )
+  ) {
+    throw new Error(
+      "This server returned an unsupported connection description. Check the server setup.",
+    );
   }
   return {
-    version: 1, authUrl, relayUrl, shareUrl,
-    ...(descriptor.networkAccess === "private" || descriptor.networkAccess === "public" ? { networkAccess: descriptor.networkAccess } : {}),
+    version: 1,
+    authUrl,
+    relayUrl,
+    shareUrl,
+    ...(descriptor.networkAccess === "private" || descriptor.networkAccess === "public"
+      ? { networkAccess: descriptor.networkAccess }
+      : {}),
   };
 }

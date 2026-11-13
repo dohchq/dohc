@@ -13,16 +13,22 @@ describe("NewGroupDialog", () => {
     render(<NewGroupDialog onCreate={vi.fn()} onClose={vi.fn()} />);
     expect(document.activeElement).toBe(nameField());
     expect(screen.getByRole("radio", { name: "Chat" }).getAttribute("aria-checked")).toBe("true");
-    expect((screen.getByTestId("chats-new-channel-submit") as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByTestId("chats-new-channel-submit") as HTMLButtonElement).disabled).toBe(
+      true,
+    );
     fireEvent.change(nameField(), { target: { value: "launch" } });
-    expect((screen.getByTestId("chats-new-channel-submit") as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByTestId("chats-new-channel-submit") as HTMLButtonElement).disabled).toBe(
+      false,
+    );
   });
 
   it("says a name is missing when Enter is pressed without one, and creates nothing", () => {
     const onCreate = vi.fn();
     render(<NewGroupDialog onCreate={onCreate} onClose={vi.fn()} />);
     fireEvent.keyDown(screen.getByTestId("chats-new-channel-purpose"), { key: "Enter" });
-    expect(screen.getByTestId("chats-new-channel-name-error").textContent).toBe("Give the group a name.");
+    expect(screen.getByTestId("chats-new-channel-name-error").textContent).toBe(
+      "Give the group a name.",
+    );
     expect(nameField().getAttribute("aria-invalid")).toBe("true");
     expect(document.activeElement).toBe(nameField());
     expect(onCreate).not.toHaveBeenCalled();
@@ -34,7 +40,9 @@ describe("NewGroupDialog", () => {
     const onCreate = vi.fn(async () => null);
     render(<NewGroupDialog onCreate={onCreate} onClose={vi.fn()} />);
     fireEvent.change(nameField(), { target: { value: " launch " } });
-    fireEvent.change(screen.getByTestId("chats-new-channel-purpose"), { target: { value: " Ship it " } });
+    fireEvent.change(screen.getByTestId("chats-new-channel-purpose"), {
+      target: { value: " Ship it " },
+    });
     const chat = screen.getByRole("radio", { name: "Chat" });
     chat.focus();
     fireEvent.keyDown(chat, { key: "ArrowRight" });
@@ -42,7 +50,9 @@ describe("NewGroupDialog", () => {
     expect(posts.getAttribute("aria-checked")).toBe("true");
     expect(document.activeElement).toBe(posts);
     fireEvent.keyDown(posts, { key: "Enter" });
-    await waitFor(() => expect(onCreate).toHaveBeenCalledWith({ name: "launch", type: "posts", purpose: "Ship it" }));
+    await waitFor(() =>
+      expect(onCreate).toHaveBeenCalledWith({ name: "launch", type: "posts", purpose: "Ship it" }),
+    );
   });
 
   it("keeps what was typed and says why above Create when the group can't be made", async () => {
@@ -53,11 +63,17 @@ describe("NewGroupDialog", () => {
     fireEvent.keyDown(nameField(), { key: "Enter" });
     fireEvent.keyDown(nameField(), { key: "Enter" });
     expect(onCreate).toHaveBeenCalledOnce();
-    expect((screen.getByTestId("chats-new-channel-submit") as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByTestId("chats-new-channel-submit") as HTMLButtonElement).disabled).toBe(
+      true,
+    );
     pending.resolve("dohc couldn't create launch.");
-    expect((await screen.findByTestId("chats-new-channel-error")).textContent).toBe("dohc couldn't create launch.");
+    expect((await screen.findByTestId("chats-new-channel-error")).textContent).toBe(
+      "dohc couldn't create launch.",
+    );
     expect(nameField().value).toBe("launch");
-    expect((screen.getByTestId("chats-new-channel-submit") as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByTestId("chats-new-channel-submit") as HTMLButtonElement).disabled).toBe(
+      false,
+    );
   });
 
   it("closes from Cancel", () => {

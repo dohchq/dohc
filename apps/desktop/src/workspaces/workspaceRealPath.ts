@@ -45,7 +45,11 @@ export async function assertResolvedWorkspacePath(input: {
         `${input.spelled} leads to ${target.relative}. ${refused.explain}`,
     );
   }
-  return { relative: target.relative, resolvedAbsolute: target.resolvedAbsolute, parentPresent: target.parentPresent };
+  return {
+    relative: target.relative,
+    resolvedAbsolute: target.resolvedAbsolute,
+    parentPresent: target.parentPresent,
+  };
 }
 
 // A path the resolver could not place. Each cause gets its own next step: a

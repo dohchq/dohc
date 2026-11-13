@@ -6,7 +6,13 @@ import type { Editor, JSONContent, TiptapEditorHTMLElement } from "@tiptap/core"
 import { undoDepth } from "@tiptap/pm/history";
 import { prosemirrorJSONToYXmlFragment, yXmlFragmentToProseMirrorRootNode } from "y-prosemirror";
 import * as Y from "yjs";
-import { getDohcProseMirrorSchema, getDohcYDocBodyFragment, parseRichdocMarkdown, serializeRichdocBody, yDocToMarkdown as projectYDocToMarkdown } from "@dohc/ydoc-projection";
+import {
+  getDohcProseMirrorSchema,
+  getDohcYDocBodyFragment,
+  parseRichdocMarkdown,
+  serializeRichdocBody,
+  yDocToMarkdown as projectYDocToMarkdown,
+} from "@dohc/ydoc-projection";
 import { escapeHighlightMarkdown } from "@dohc/ydoc-projection/markdown-extensions";
 import rawHtml from "../../../../../packages/ydoc-projection/src/fixtures/raw-html.json";
 import { EDGE_FRONTMATTER, receivedYDoc } from "../markdown/frontmatter.edge-fixture";
@@ -77,8 +83,8 @@ function marksOn(node: JSONContent, text: string): string[] | undefined {
 function setFirstColumnWidth(doc: Y.Doc, width: number): void {
   const table = getDohcYDocBodyFragment(doc)
     .toArray()
-    .find((child): child is Y.XmlElement =>
-      child instanceof Y.XmlElement && child.nodeName === "table",
+    .find(
+      (child): child is Y.XmlElement => child instanceof Y.XmlElement && child.nodeName === "table",
     );
   if (!table) throw new Error("the parity document has no table");
   for (const row of table.toArray()) {
@@ -166,135 +172,142 @@ describe("raw HTML in a browser", () => {
   // A block added at the end just before the restore is a history event the
   // restore, which also replaces through the end, could join. Raw HTML in
   // either text is source the editor saves in another spelling.
-  it.each([
-    ["restored", "after an edit at the end", true, "Old.", rawHtml.markdown],
-  ])("is where one undo of a pending restore with raw HTML in its %s text lands %s, and redo returns", async (_side, _name, edited, undoText, restoredText) => {
-    const ref = createRef<MarkdownEditorHandle>();
-    const onDirty = vi.fn<(materialize?: () => string) => void>();
-    const props = {
-      ref,
-      value: "Start.",
-      onDirty,
-      workspaceId: "workspace-1",
-      path: "notes/raw.md",
-      knownFiles: [],
-    };
-    const view = render(createElement(MarkdownEditor, props));
-    await screen.findByTestId("markdown-editor");
-    const editor = mountedEditor();
-    if (edited) {
+  it.each([["restored", "after an edit at the end", true, "Old.", rawHtml.markdown]])(
+    "is where one undo of a pending restore with raw HTML in its %s text lands %s, and redo returns",
+    async (_side, _name, edited, undoText, restoredText) => {
+      const ref = createRef<MarkdownEditorHandle>();
+      const onDirty = vi.fn<(materialize?: () => string) => void>();
+      const props = {
+        ref,
+        value: "Start.",
+        onDirty,
+        workspaceId: "workspace-1",
+        path: "notes/raw.md",
+        knownFiles: [],
+      };
+      const view = render(createElement(MarkdownEditor, props));
+      await screen.findByTestId("markdown-editor");
+      const editor = mountedEditor();
+      if (edited) {
+        act(() => {
+          editor.commands.insertContentAt(editor.state.doc.content.size, "<p>More.</p>");
+        });
+        expect(onDirty).toHaveBeenCalledTimes(1);
+        onDirty.mockClear();
+      }
+      // A restore reaches the editor as a replacement, then as a pending undo.
+      act(() => ref.current?.replaceMarkdown(restoredText));
+      const depth = undoDepth(editor.state);
+      const onPendingUndoConsumed = vi.fn();
+      const pendingUndo = { token: 1, undoText, restoredText };
+      view.rerender(
+        createElement(MarkdownEditor, { ...props, pendingUndo, onPendingUndoConsumed }),
+      );
+      await waitFor(() => expect(onPendingUndoConsumed).toHaveBeenCalledWith(1));
+      const restored = canonical.nodeFromJSON(parseRichdocMarkdown(restoredText)).toJSON();
+      expect(editor.getJSON()).toEqual(restored);
+      // The same token again is already spent.
+      view.rerender(
+        createElement(MarkdownEditor, { ...props, pendingUndo, onPendingUndoConsumed }),
+      );
+      expect(onPendingUndoConsumed).toHaveBeenCalledTimes(1);
+      expect(onDirty).not.toHaveBeenCalled();
+      // The restore is one undo step of its own, not part of the edit before it.
+      expect(undoDepth(editor.state)).toBe(depth + 1);
+
       act(() => {
-        editor.commands.insertContentAt(editor.state.doc.content.size, "<p>More.</p>");
+        editor.commands.undo();
       });
-      expect(onDirty).toHaveBeenCalledTimes(1);
-      onDirty.mockClear();
-    }
-    // A restore reaches the editor as a replacement, then as a pending undo.
-    act(() => ref.current?.replaceMarkdown(restoredText));
-    const depth = undoDepth(editor.state);
-    const onPendingUndoConsumed = vi.fn();
-    const pendingUndo = { token: 1, undoText, restoredText };
-    view.rerender(createElement(MarkdownEditor, { ...props, pendingUndo, onPendingUndoConsumed }));
-    await waitFor(() => expect(onPendingUndoConsumed).toHaveBeenCalledWith(1));
-    const restored = canonical.nodeFromJSON(parseRichdocMarkdown(restoredText)).toJSON();
-    expect(editor.getJSON()).toEqual(restored);
-    // The same token again is already spent.
-    view.rerender(createElement(MarkdownEditor, { ...props, pendingUndo, onPendingUndoConsumed }));
-    expect(onPendingUndoConsumed).toHaveBeenCalledTimes(1);
-    expect(onDirty).not.toHaveBeenCalled();
-    // The restore is one undo step of its own, not part of the edit before it.
-    expect(undoDepth(editor.state)).toBe(depth + 1);
+      expect(editor.getJSON()).toEqual(
+        canonical.nodeFromJSON(parseRichdocMarkdown(undoText)).toJSON(),
+      );
+      const materialize = onDirty.mock.calls.at(-1)?.[0];
+      expect(materialize).toBeTypeOf("function");
+      expect(parseRichdocMarkdown(materialize!())).toEqual(parseRichdocMarkdown(undoText));
 
-    act(() => {
-      editor.commands.undo();
-    });
-    expect(editor.getJSON()).toEqual(
-      canonical.nodeFromJSON(parseRichdocMarkdown(undoText)).toJSON(),
-    );
-    const materialize = onDirty.mock.calls.at(-1)?.[0];
-    expect(materialize).toBeTypeOf("function");
-    expect(parseRichdocMarkdown(materialize!())).toEqual(parseRichdocMarkdown(undoText));
-
-    act(() => {
-      editor.commands.redo();
-    });
-    expect(editor.getJSON()).toEqual(restored);
-  });
+      act(() => {
+        editor.commands.redo();
+      });
+      expect(editor.getJSON()).toEqual(restored);
+    },
+  );
 
   // The collaboration extensions load after the first render. Until then no
   // editor exists to take the pending undo, whatever text the caller holds,
   // and a bound editor leaves it to the shared history through a lost and
   // recovered connection and a rebind to the recovered document.
-  it.each([
-    ["that matches the restore", "Shared."],
-  ])("keeps a pending undo out of a shared document from loading through recovery, with local text %s", async (_name, value) => {
-    const first = receivedYDoc("Shared.");
-    const recovered = receivedYDoc("Shared.");
-    const updates: Uint8Array[] = [];
-    const recordUpdate = (update: Uint8Array) => updates.push(update);
-    first.on("update", recordUpdate);
-    recovered.on("update", recordUpdate);
-    const onDirty = vi.fn();
-    const onPendingUndoConsumed = vi.fn();
-    const props = (
-      ydoc: Y.Doc,
-      status: "connecting" | "connected" | "disconnected",
-      synced: boolean,
-    ) => createElement(MarkdownEditor, {
-      value,
-      onDirty,
-      workspaceId: "workspace-1",
-      path: "notes/raw.md",
-      knownFiles: [],
-      collab: { ydoc, status, peerCount: 0, synced },
-      pendingUndo: { token: 1, undoText: rawHtml.markdown, restoredText: "Shared." },
-      onPendingUndoConsumed,
-    });
-    const shared = canonical.nodeFromJSON(parseRichdocMarkdown("Shared.")).toJSON();
-    const boundEditor = (previous?: Editor) => waitFor(() => {
-      const bound = mountedEditor();
-      expect(bound).not.toBe(previous);
-      expect(
-        bound.extensionManager.extensions.some(
-          (extension) => extension.name === "collaboration",
-        ),
-      ).toBe(true);
-      expect(bound.getJSON()).toEqual(shared);
-      return bound;
-    });
-    const expectUntouched = (editor: Editor) => {
-      expect(editor.getJSON()).toEqual(shared);
-      expect(updates).toEqual([]);
-      expect(onDirty).not.toHaveBeenCalled();
-      expect(onPendingUndoConsumed).not.toHaveBeenCalled();
-    };
-    const view = render(props(first, "connecting", false));
-    try {
-      const editor = await boundEditor();
-      expect(editor.can().undo()).toBe(false);
-      expectUntouched(editor);
+  it.each([["that matches the restore", "Shared."]])(
+    "keeps a pending undo out of a shared document from loading through recovery, with local text %s",
+    async (_name, value) => {
+      const first = receivedYDoc("Shared.");
+      const recovered = receivedYDoc("Shared.");
+      const updates: Uint8Array[] = [];
+      const recordUpdate = (update: Uint8Array) => updates.push(update);
+      first.on("update", recordUpdate);
+      recovered.on("update", recordUpdate);
+      const onDirty = vi.fn();
+      const onPendingUndoConsumed = vi.fn();
+      const props = (
+        ydoc: Y.Doc,
+        status: "connecting" | "connected" | "disconnected",
+        synced: boolean,
+      ) =>
+        createElement(MarkdownEditor, {
+          value,
+          onDirty,
+          workspaceId: "workspace-1",
+          path: "notes/raw.md",
+          knownFiles: [],
+          collab: { ydoc, status, peerCount: 0, synced },
+          pendingUndo: { token: 1, undoText: rawHtml.markdown, restoredText: "Shared." },
+          onPendingUndoConsumed,
+        });
+      const shared = canonical.nodeFromJSON(parseRichdocMarkdown("Shared.")).toJSON();
+      const boundEditor = (previous?: Editor) =>
+        waitFor(() => {
+          const bound = mountedEditor();
+          expect(bound).not.toBe(previous);
+          expect(
+            bound.extensionManager.extensions.some(
+              (extension) => extension.name === "collaboration",
+            ),
+          ).toBe(true);
+          expect(bound.getJSON()).toEqual(shared);
+          return bound;
+        });
+      const expectUntouched = (editor: Editor) => {
+        expect(editor.getJSON()).toEqual(shared);
+        expect(updates).toEqual([]);
+        expect(onDirty).not.toHaveBeenCalled();
+        expect(onPendingUndoConsumed).not.toHaveBeenCalled();
+      };
+      const view = render(props(first, "connecting", false));
+      try {
+        const editor = await boundEditor();
+        expect(editor.can().undo()).toBe(false);
+        expectUntouched(editor);
 
-      view.rerender(props(first, "disconnected", false));
-      expectUntouched(editor);
-      view.rerender(props(first, "connected", true));
-      expectUntouched(editor);
+        view.rerender(props(first, "disconnected", false));
+        expectUntouched(editor);
+        view.rerender(props(first, "connected", true));
+        expectUntouched(editor);
 
-      view.rerender(props(recovered, "connected", true));
-      const rebound = await boundEditor(editor);
-      expect(rebound.can().undo()).toBe(false);
-      expectUntouched(rebound);
-    } finally {
-      first.off("update", recordUpdate);
-      recovered.off("update", recordUpdate);
-      view.unmount();
-      first.destroy();
-      recovered.destroy();
-    }
-  });
+        view.rerender(props(recovered, "connected", true));
+        const rebound = await boundEditor(editor);
+        expect(rebound.can().undo()).toBe(false);
+        expectUntouched(rebound);
+      } finally {
+        first.off("update", recordUpdate);
+        recovered.off("update", recordUpdate);
+        view.unmount();
+        first.destroy();
+        recovered.destroy();
+      }
+    },
+  );
 });
 
 describe("desktop editor schema parity", () => {
-
   it("carries edge content and shared frontmatter exactly through the wire and both schemas", async () => {
     const doc = receivedYDoc(`${EDGE_FRONTMATTER}${PARITY_BODY}`);
     setFirstColumnWidth(doc, 120);
@@ -323,9 +336,9 @@ describe("desktop editor schema parity", () => {
     expect(marksOn(expected, "strong")?.sort()).toEqual(["bold", "link"]);
     // The lone image sits in a paragraph, where the schema allows it, so the
     // writer's document is valid as written and an editor has nothing to fix.
-    expect(
-      expected.content?.find((block) => block.content?.[0]?.type === "image")?.type,
-    ).toBe("paragraph");
+    expect(expected.content?.find((block) => block.content?.[0]?.type === "image")?.type).toBe(
+      "paragraph",
+    );
     expect(() => canonical.nodeFromJSON(expected).check()).not.toThrow();
     // Yjs reports an update for every change, deletions included, and none for
     // a transaction that changes nothing.
@@ -348,9 +361,7 @@ describe("desktop editor schema parity", () => {
       const editor = await waitFor(() => {
         const bound = mountedEditor();
         expect(
-          bound.extensionManager.extensions.some(
-            (extension) => extension.name === "collaboration",
-          ),
+          bound.extensionManager.extensions.some((extension) => extension.name === "collaboration"),
         ).toBe(true);
         expect(bound.getJSON()).toEqual(expected);
         return bound;
@@ -362,7 +373,11 @@ describe("desktop editor schema parity", () => {
       // A document the editor's schema writes reads back unchanged with the
       // projection's schema, after its own trip over the wire.
       const written = new Y.Doc();
-      prosemirrorJSONToYXmlFragment(editor.schema, editor.getJSON(), getDohcYDocBodyFragment(written));
+      prosemirrorJSONToYXmlFragment(
+        editor.schema,
+        editor.getJSON(),
+        getDohcYDocBodyFragment(written),
+      );
       const received = new Y.Doc();
       Y.applyUpdate(received, Y.encodeStateAsUpdate(written));
       expect(

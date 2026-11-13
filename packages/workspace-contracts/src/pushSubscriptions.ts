@@ -41,7 +41,9 @@ export function isPushEndpoint(value: unknown): value is string {
   if (typeof value !== "string" || value.length > PUSH_ENDPOINT_MAX_CHARS) return false;
   try {
     const url = new URL(value);
-    return url.protocol === "https:" && !url.username && !url.password && !url.hash && url.href === value;
+    return (
+      url.protocol === "https:" && !url.username && !url.password && !url.hash && url.href === value
+    );
   } catch {
     return false;
   }
@@ -85,6 +87,10 @@ export function isPushStatus(value: unknown): value is PushStatus {
   if (status.available !== true || keys !== STATUS_KEYS) return false;
   if (!isPushP256Point(status.vapidPublicKey) || !isPushKeyId(status.vapidKeyId)) return false;
   if (status.enabled === false) return status.generation === null && status.fingerprint === null;
-  return status.enabled === true && isPushKeyId(status.fingerprint) &&
-    Number.isSafeInteger(status.generation) && Number(status.generation) > 0;
+  return (
+    status.enabled === true &&
+    isPushKeyId(status.fingerprint) &&
+    Number.isSafeInteger(status.generation) &&
+    Number(status.generation) > 0
+  );
 }

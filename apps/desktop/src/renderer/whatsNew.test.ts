@@ -25,8 +25,12 @@ describe("takeUnseenWhatsNew", () => {
 
   it("stays closed when storage refuses", () => {
     const refusing = {
-      getItem: () => { throw new Error("denied"); },
-      setItem: () => { throw new Error("denied"); },
+      getItem: () => {
+        throw new Error("denied");
+      },
+      setItem: () => {
+        throw new Error("denied");
+      },
     };
     expect(takeUnseenWhatsNew(refusing)).toBe(false);
   });

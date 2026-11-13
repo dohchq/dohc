@@ -3,24 +3,26 @@ import "../../testing/legendListMock";
 import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import {
-  NOW,
-  thread,
-  message,
-  bridgeMock,
-  renderView,
-} from "./ChatsView.testHarness";
+import { NOW, thread, message, bridgeMock, renderView } from "./ChatsView.testHarness";
 
 describe("ChatsView decisions", () => {
-
   it("cancels the answer and its reply together, so the next comment is neither", async () => {
     const user = userEvent.setup();
     const opening = message({ authorDisplayName: "Nova" });
-    const openDecision = { threadId: "thread-1", messageId: opening.id, state: "open" as const, atMs: NOW };
-    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ openDecisionCount: 1 })] });
+    const openDecision = {
+      threadId: "thread-1",
+      messageId: opening.id,
+      state: "open" as const,
+      atMs: NOW,
+    };
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [thread({ openDecisionCount: 1 })],
+    });
     bridgeMock.listChatMessages.mockResolvedValue({ messages: [opening] });
     bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [openDecision] });
-    bridgeMock.sendChatMessage.mockResolvedValue({ message: message({ id: "comment-2", body: "Plain comment" }) });
+    bridgeMock.sendChatMessage.mockResolvedValue({
+      message: message({ id: "comment-2", body: "Plain comment" }),
+    });
     renderView();
 
     await user.click(await screen.findByTestId("chats-channel"));
@@ -45,17 +47,35 @@ describe("ChatsView decisions", () => {
     const user = userEvent.setup();
     const words = "Sent your reply. dohc could not mark the question answered.";
     const opening = message();
-    const openDecision = { threadId: "thread-1", messageId: opening.id, state: "open" as const, atMs: NOW };
-    const resolved = { ...openDecision, state: "resolved" as const, resolvedByMessageId: "resolution-message", atMs: NOW + 1 };
-    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ openDecisionCount: 1 })] });
+    const openDecision = {
+      threadId: "thread-1",
+      messageId: opening.id,
+      state: "open" as const,
+      atMs: NOW,
+    };
+    const resolved = {
+      ...openDecision,
+      state: "resolved" as const,
+      resolvedByMessageId: "resolution-message",
+      atMs: NOW + 1,
+    };
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [thread({ openDecisionCount: 1 })],
+    });
     bridgeMock.listChatMessages.mockResolvedValue({ messages: [opening] });
     bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [openDecision] });
     bridgeMock.sendChatMessage.mockResolvedValue({
-      message: message({ id: "resolution-message", parentMessageId: opening.id, body: "Resolved ✓" }),
+      message: message({
+        id: "resolution-message",
+        parentMessageId: opening.id,
+        body: "Resolved ✓",
+      }),
       resolveFailure: "Error: Your server session changed. Try again.",
     });
     const refusal = new Error("Your server session changed. Try again.");
-    bridgeMock.resolveChatDecision.mockRejectedValueOnce(refusal).mockResolvedValueOnce({ resolved });
+    bridgeMock.resolveChatDecision
+      .mockRejectedValueOnce(refusal)
+      .mockResolvedValueOnce({ resolved });
     const { onError } = renderView();
     const notices = () => onError.mock.calls.filter(([said]) => said === words);
 
@@ -70,7 +90,9 @@ describe("ChatsView decisions", () => {
     expect(screen.getByTestId("chats-message-decision-open")).toBeTruthy();
 
     // A try that fails says so again, with Try again again.
-    await act(async () => { notices()[0]?.[2]?.(); });
+    await act(async () => {
+      notices()[0]?.[2]?.();
+    });
     await waitFor(() => expect(notices()).toHaveLength(2));
     expect(notices()[1]?.[1]).toBe(refusal);
     expect(notices()[1]?.[2], "Try again after a failed try").toEqual(expect.any(Function));
@@ -78,11 +100,27 @@ describe("ChatsView decisions", () => {
 
     // The engine holds the answer once a try succeeds, so the reload after it reads it too.
     bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [resolved] });
-    await act(async () => { notices()[1]?.[2]?.(); });
+    await act(async () => {
+      notices()[1]?.[2]?.();
+    });
     expect(await screen.findByTestId("chats-message-decision-resolved")).toBeTruthy();
     expect(bridgeMock.resolveChatDecision.mock.calls).toEqual([
-      [{ workspaceId: "workspace-a", threadId: "thread-1", messageId: opening.id, resolvedByMessageId: "resolution-message" }],
-      [{ workspaceId: "workspace-a", threadId: "thread-1", messageId: opening.id, resolvedByMessageId: "resolution-message" }],
+      [
+        {
+          workspaceId: "workspace-a",
+          threadId: "thread-1",
+          messageId: opening.id,
+          resolvedByMessageId: "resolution-message",
+        },
+      ],
+      [
+        {
+          workspaceId: "workspace-a",
+          threadId: "thread-1",
+          messageId: opening.id,
+          resolvedByMessageId: "resolution-message",
+        },
+      ],
     ]);
     expect(bridgeMock.sendChatMessage).toHaveBeenCalledTimes(1);
     expect(notices()).toHaveLength(2);
@@ -90,7 +128,12 @@ describe("ChatsView decisions", () => {
 
   it("answers a poll by picking a choice, and the choice travels with the answer", async () => {
     const user = userEvent.setup();
-    const opening = message({ presentation: { group: "fixture", hue: null, self: false }, authorKind: "agent", authorDisplayName: "You", body: "Ship on which day?" });
+    const opening = message({
+      presentation: { group: "fixture", hue: null, self: false },
+      authorKind: "agent",
+      authorDisplayName: "You",
+      body: "Ship on which day?",
+    });
     const poll = {
       threadId: "thread-1",
       messageId: opening.id,
@@ -140,7 +183,6 @@ describe("ChatsView decisions", () => {
     expect(answered.map((node) => node.dataset.chosen)).toEqual(["false", "true"]);
     expect(answered.every((node) => (node as HTMLButtonElement).disabled)).toBe(true);
   });
-
 });
 
 describe("ChatsView work and run links", () => {
@@ -175,7 +217,8 @@ describe("ChatsView work and run links", () => {
     const user = userEvent.setup();
     const onOpenPath = vi.fn();
     const opening = message();
-    const agentComment = message({ presentation: { group: "fixture", hue: null, self: false },
+    const agentComment = message({
+      presentation: { group: "fixture", hue: null, self: false },
       id: "agent-report",
       parentMessageId: opening.id,
       authorKind: "agent",
@@ -237,18 +280,12 @@ describe("ChatsView work and run links", () => {
     const runChip = screen.getByRole("button", { name: "Details of run run-123456789" });
     expect(runChip).toBe(screen.getByTestId("chats-run-chip"));
     await user.click(runChip);
-    expect(screen.getByTestId("chats-run-command").textContent).toBe(
-      "dohc agent run review",
-    );
+    expect(screen.getByTestId("chats-run-command").textContent).toBe("dohc agent run review");
     expect(screen.getByTestId("chats-run-id").textContent).toBe("run-123456789");
     await user.click(screen.getByTestId("chats-run-copy-id"));
-    await waitFor(async () =>
-      expect(await navigator.clipboard.readText()).toBe("run-123456789"),
-    );
+    await waitFor(async () => expect(await navigator.clipboard.readText()).toBe("run-123456789"));
     expect(screen.getByTestId("chats-run-exit-code").textContent).toBe("0");
-    expect(screen.getByTestId("chats-run-log-path").textContent).toBe(
-      "logs/run-123456789.log",
-    );
+    expect(screen.getByTestId("chats-run-log-path").textContent).toBe("logs/run-123456789.log");
     await user.click(screen.getByTestId("chats-run-copy-log"));
     await waitFor(async () =>
       expect(await navigator.clipboard.readText()).toBe("logs/run-123456789.log"),
@@ -263,12 +300,18 @@ describe("ChatsView dispatch state", () => {
     bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
     bridgeMock.chatDispatchStateForThread
       .mockResolvedValueOnce({
-        liveRunId: "run-1", liveTriggerMessageId: null,
+        liveRunId: "run-1",
+        liveTriggerMessageId: null,
         pendingCount: 2,
         paused: false,
         waiting: { agentId: "nova", name: "Nova", triggerMessageIds: ["message-1"] },
       })
-      .mockResolvedValue({ liveRunId: null, liveTriggerMessageId: null, pendingCount: 0, paused: false });
+      .mockResolvedValue({
+        liveRunId: null,
+        liveTriggerMessageId: null,
+        pendingCount: 0,
+        paused: false,
+      });
     renderView();
 
     await user.click(await screen.findByTestId("chats-channel"));
@@ -278,7 +321,9 @@ describe("ChatsView dispatch state", () => {
       "agent working · 2 queued",
     );
     // The post asked Nova while it worked on another run.
-    expect((await screen.findByTestId("chats-waiting")).textContent).toBe("Nova will reply when it's free.");
+    expect((await screen.findByTestId("chats-waiting")).textContent).toBe(
+      "Nova will reply when it's free.",
+    );
     const announcement = screen.getByTestId("chats-dispatch-announcement");
     expect(announcement.getAttribute("role")).toBe("status");
     expect(announcement.textContent).toBe("Agent working, 2 queued");
@@ -287,22 +332,21 @@ describe("ChatsView dispatch state", () => {
       workspaceId: "workspace-a",
       runId: "run-1",
     });
-    await waitFor(() =>
-      expect(screen.queryByTestId("chats-dispatch-status")).toBeNull(),
-    );
+    await waitFor(() => expect(screen.queryByTestId("chats-dispatch-status")).toBeNull());
     expect(screen.queryByTestId("chats-waiting")).toBeNull();
     // The region stays mounted with no text, ready for the next run.
     expect(screen.getByTestId("chats-dispatch-announcement")).toBe(announcement);
     expect(announcement.textContent).toBe("");
   });
-
 });
 
 describe("ChatsView runs that didn't reply", () => {
   const STOPPED = { liveRunId: null, liveTriggerMessageId: null, pendingCount: 0, paused: false };
   const QUIT = "Nova didn't reply. dohc quit during its run.";
-  const failedRun = (retryable = true, words = QUIT) =>
-    ({ ...STOPPED, failedRun: { runId: "run-1", triggerMessageId: "message-1", words, retryable } });
+  const failedRun = (retryable = true, words = QUIT) => ({
+    ...STOPPED,
+    failedRun: { runId: "run-1", triggerMessageId: "message-1", words, retryable },
+  });
 
   async function openThread() {
     const user = userEvent.setup();
@@ -324,7 +368,11 @@ describe("ChatsView runs that didn't reply", () => {
     expect(line.closest("[data-message-id]")?.getAttribute("data-message-id")).toBe("message-1");
     expect(line.textContent).toBe(`${QUIT}Try again`);
     await user.click(screen.getByTestId("chats-run-try-again"));
-    expect(bridgeMock.retryStoppedRun).toHaveBeenCalledWith({ workspaceId: "workspace-a", threadId: "thread-1", runId: "run-1" });
+    expect(bridgeMock.retryStoppedRun).toHaveBeenCalledWith({
+      workspaceId: "workspace-a",
+      threadId: "thread-1",
+      runId: "run-1",
+    });
     await waitFor(() => expect(screen.queryByTestId("chats-run-failed")).toBeNull());
     expect((await screen.findByTestId("chats-dispatch-status")).textContent).toBe("agent working");
   });
@@ -339,5 +387,4 @@ describe("ChatsView runs that didn't reply", () => {
     expect((await screen.findByTestId("chats-run-failed")).textContent).toBe(QUIT);
     expect(screen.queryByTestId("chats-run-try-again")).toBeNull();
   });
-
 });

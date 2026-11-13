@@ -24,7 +24,7 @@ const objects = {
     ${identifier("object_id")}, ${digest("lineage_claim_id")}, ${hostIdentifier("host_id")},
     origin_json TEXT NOT NULL CHECK (json_valid(origin_json)),
     tip_receipt_json TEXT NOT NULL CHECK (json_valid(tip_receipt_json)),
-    ${integer("tip_cursor")}, ${integer("tip_sequence")}, ${integer("tip_application_sequence")}, ${integer("accounted_bytes",1)},
+    ${integer("tip_cursor")}, ${integer("tip_sequence")}, ${integer("tip_application_sequence")}, ${integer("accounted_bytes", 1)},
     CHECK (tip_application_sequence <= tip_sequence),
     PRIMARY KEY (relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,host_id),
     FOREIGN KEY (workspace_id,main_version_id,object_id,lineage_claim_id) REFERENCES ${LIVE_DELIVERY_DOCUMENTS}(workspace_id,main_version_id,object_id,lineage_claim_id) ON DELETE CASCADE,
@@ -95,14 +95,11 @@ const objects = {
     CHECK (predecessor_cursor < journal_cursor)
   ) STRICT`,
 };
-const normalized = (sql: string) =>
-  sql.trim().replace(/;$/, "").replace(/\s+/g, " ");
+const normalized = (sql: string) => sql.trim().replace(/;$/, "").replace(/\s+/g, " ");
 
 function assertSchema(db: SqliteDb): void {
   for (const [name, sql] of Object.entries(objects)) {
-    const row = db
-      .prepare("SELECT type,sql FROM sqlite_schema WHERE name=?")
-      .get(name);
+    const row = db.prepare("SELECT type,sql FROM sqlite_schema WHERE name=?").get(name);
     if (
       row?.type !== "table" ||
       typeof row.sql !== "string" ||
@@ -124,9 +121,7 @@ function assertSchema(db: SqliteDb): void {
       indexes.length !== expectedCount ||
       indexes.some(
         (row) =>
-          row.unique !== 1 ||
-          row.partial !== 0 ||
-          (row.origin !== "pk" && row.origin !== "u"),
+          row.unique !== 1 || row.partial !== 0 || (row.origin !== "pk" && row.origin !== "u"),
       )
     ) {
       throw new Error("Live committed delivery index is damaged.");
@@ -140,9 +135,7 @@ function assertSchema(db: SqliteDb): void {
 }
 
 export function initializeLiveCommittedDeliverySchema(db: SqliteDb): void {
-  const marked = db
-    .prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?")
-    .get(MARKER);
+  const marked = db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(MARKER);
   if (marked) {
     assertSchema(db);
     return;
@@ -157,7 +150,8 @@ export function initializeLiveCommittedDeliverySchema(db: SqliteDb): void {
   }
   for (const sql of Object.values(objects)) db.exec(sql);
   assertSchema(db);
-  db.prepare(
-    "INSERT INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES (?,?)",
-  ).run(MARKER, Date.now());
+  db.prepare("INSERT INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES (?,?)").run(
+    MARKER,
+    Date.now(),
+  );
 }

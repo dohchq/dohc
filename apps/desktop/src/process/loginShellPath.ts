@@ -19,13 +19,22 @@ export function parseShellPath(output: string, marker: string): string[] | null 
   if (start < 0) return null;
   const end = output.indexOf(marker, start + marker.length);
   if (end < 0) return null;
-  const entries = output.slice(start + marker.length, end).trim().split(":").filter((entry) => posix.isAbsolute(entry));
+  const entries = output
+    .slice(start + marker.length, end)
+    .trim()
+    .split(":")
+    .filter((entry) => posix.isAbsolute(entry));
   return entries.length > 0 ? entries : null;
 }
 
 /** The login shell's entries in its order, then the ones only the current PATH has. */
 export function mergeShellPath(current: string | undefined, fromShell: readonly string[]): string {
-  return [...new Set([...fromShell, ...(current ?? "").split(":").filter((entry) => posix.isAbsolute(entry))])].join(":");
+  return [
+    ...new Set([
+      ...fromShell,
+      ...(current ?? "").split(":").filter((entry) => posix.isAbsolute(entry)),
+    ]),
+  ].join(":");
 }
 
 // The part of a spawned shell this read uses.
@@ -81,11 +90,16 @@ export function readLoginShellPath(options: {
       if (stop && child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
         try {
           kill(-child.pid, "SIGKILL");
-        } catch { /* The group already ended. */ }
+        } catch {
+          /* The group already ended. */
+        }
       }
       resolve(entries);
     };
-    const timer = setTimeout(() => settle(parseShellPath(output, marker), true), options.timeoutMs ?? LOGIN_SHELL_PATH_TIMEOUT_MS);
+    const timer = setTimeout(
+      () => settle(parseShellPath(output, marker), true),
+      options.timeoutMs ?? LOGIN_SHELL_PATH_TIMEOUT_MS,
+    );
     child.stdout?.setEncoding("utf8");
     child.stdout?.on("data", (chunk: string) => {
       output += chunk;
@@ -130,7 +144,10 @@ export function registeredLoginShell(
   shells: string,
 ): string | null {
   if (!shell || !posix.isAbsolute(shell)) return null;
-  const listed = shells.split("\n").map((line) => line.trim()).filter((line) => line && !line.startsWith("#"));
+  const listed = shells
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"));
   return listed.includes(shell) ? shell : null;
 }
 
@@ -170,8 +187,12 @@ export async function adoptLoginShellPath(
     const { shell, homedir } = deps.account();
     const registered = registeredLoginShell(shell, deps.readShells());
     if (registered && posix.isAbsolute(homedir)) account = { shell: registered, homedir };
-  } catch { /* No account record or no /etc/shells: keep the PATH dohc has. */ }
+  } catch {
+    /* No account record or no /etc/shells: keep the PATH dohc has. */
+  }
   if (!account) return;
-  const entries = await deps.read({ shell: account.shell, env: loginShellEnvironment(env, account) }).catch(() => null);
+  const entries = await deps
+    .read({ shell: account.shell, env: loginShellEnvironment(env, account) })
+    .catch(() => null);
   if (entries) env.PATH = mergeShellPath(env.PATH, entries);
 }

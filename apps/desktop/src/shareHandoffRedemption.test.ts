@@ -1,8 +1,9 @@
-import { parseShareHandoffUrl, type ShareHandoffIntent } from "@dohc/workspace-contracts/deep-links";
-import { describe, expect, it, vi } from "vitest";
 import {
-  createShareHandoffIntentSlot,
-} from "./shareHandoffIngress";
+  parseShareHandoffUrl,
+  type ShareHandoffIntent,
+} from "@dohc/workspace-contracts/deep-links";
+import { describe, expect, it, vi } from "vitest";
+import { createShareHandoffIntentSlot } from "./shareHandoffIngress";
 
 import { deferred } from "./testing/deferred";
 const CODE_A = "A".repeat(43);
@@ -37,9 +38,7 @@ const CREDENTIALS_SAME_RELAY_B: TestCredentials = {
 };
 
 function intentFor(value: string, relayUrl = RELAY_A): ShareHandoffIntent {
-  const parsed = parseShareHandoffUrl(
-    `dohc://open/${value}?relay=${encodeURIComponent(relayUrl)}`,
-  );
+  const parsed = parseShareHandoffUrl(`dohc://open/${value}?relay=${encodeURIComponent(relayUrl)}`);
   if (!parsed) throw new Error("test handoff code is invalid");
   return parsed;
 }
@@ -51,10 +50,7 @@ function response(status: number, body: unknown): Response {
   });
 }
 
-async function harness(options?: {
-  credentials?: TestCredentials | null;
-  fetch?: typeof fetch;
-}) {
+async function harness(options?: { credentials?: TestCredentials | null; fetch?: typeof fetch }) {
   const module = await import("./shareHandoffRedemption");
   const intentSlot = createShareHandoffIntentSlot();
   const settledCodes: string[] = [];
@@ -186,13 +182,24 @@ describe("share handoff redemption coordinator", () => {
   });
 
   it("accepts server-authorized Edit handoff and settles the pending intent", async () => {
-    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(response(200, {
-      ok: true, shareId: "share-edit", grantId: "grant-edit", access: "edit",
-    }));
-    const h = await harness({credentials: CREDENTIALS_A, fetch: fetchImpl});
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      response(200, {
+        ok: true,
+        shareId: "share-edit",
+        grantId: "grant-edit",
+        access: "edit",
+      }),
+    );
+    const h = await harness({ credentials: CREDENTIALS_A, fetch: fetchImpl });
     h.offer(CODE_A);
     h.coordinator.accept("status-1");
-    await vi.waitFor(() => expect(h.coordinator.status()).toEqual({status: "done", statusId: "status-1", shareId: "share-edit"}));
+    await vi.waitFor(() =>
+      expect(h.coordinator.status()).toEqual({
+        status: "done",
+        statusId: "status-1",
+        shareId: "share-edit",
+      }),
+    );
     expect(h.intent.pending()).toBeNull();
   });
 
@@ -395,9 +402,7 @@ describe("share handoff redemption coordinator", () => {
 
     h.offer(CODE_A);
     h.coordinator.accept("status-1");
-    await vi.waitFor(() =>
-      expect(h.coordinator.status().status).not.toBe("redeeming"),
-    );
+    await vi.waitFor(() => expect(h.coordinator.status().status).not.toBe("redeeming"));
     expect(h.intent.pending()).toEqual(intentFor(CODE_A));
     expect(h.coordinator.status()).toEqual({
       status: "failed-busy",
@@ -525,9 +530,7 @@ describe("share handoff redemption coordinator", () => {
       });
     });
     expect(fetchImpl).toHaveBeenCalledTimes(2);
-    expect(fetchImpl.mock.calls[1]?.[0]).toBe(
-      "https://relay-a.example/sync/link-redeem",
-    );
+    expect(fetchImpl.mock.calls[1]?.[0]).toBe("https://relay-a.example/sync/link-redeem");
     expect(fetchImpl.mock.calls[1]?.[1]?.headers).toEqual({
       authorization: "Bearer bearer-b",
       "content-type": "application/json",
@@ -740,15 +743,15 @@ describe("share handoff redemption coordinator", () => {
   });
 
   it("publishes only the bounded status union, never relay detail or authority", async () => {
-    const fetchImpl = vi
-      .fn<typeof fetch>()
-      .mockResolvedValue(response(404, {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      response(404, {
         code: CODE_A,
         grantId: "secret-grant",
         token: "secret-token",
         relayUrl: "https://secret-relay.example",
         detail: "raw response detail",
-      }));
+      }),
+    );
     const h = await harness({ credentials: CREDENTIALS_A, fetch: fetchImpl });
 
     h.offer(CODE_A);

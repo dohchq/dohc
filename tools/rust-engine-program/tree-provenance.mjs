@@ -29,12 +29,8 @@ function changedEntries(before, after) {
   const wasThere = new Set(before);
   const stillThere = new Set(after);
   return [
-    ...after
-      .filter((entry) => !wasThere.has(entry))
-      .map((entry) => `appeared ${entry.trim()}`),
-    ...before
-      .filter((entry) => !stillThere.has(entry))
-      .map((entry) => `vanished ${entry.trim()}`),
+    ...after.filter((entry) => !wasThere.has(entry)).map((entry) => `appeared ${entry.trim()}`),
+    ...before.filter((entry) => !stillThere.has(entry)).map((entry) => `vanished ${entry.trim()}`),
   ];
 }
 
@@ -130,9 +126,7 @@ export function classifyTreeProvenance(readings) {
     );
   }
   if (readings.some((reading) => !reading?.state?.head)) {
-    return unattributable(
-      "git could not resolve HEAD; this run cannot name the tree it examined",
-    );
+    return unattributable("git could not resolve HEAD; this run cannot name the tree it examined");
   }
   if (readings.some((reading) => !reading.state.dirty)) {
     return unattributable(
@@ -273,7 +267,5 @@ function readHeadReflog(capture, hasHeadLog) {
 
 /** A command's stdout as non-blank lines, or null when it did not answer. */
 function lines(stdout) {
-  return stdout === null
-    ? null
-    : stdout.split(/\r?\n/).filter((line) => line.trim() !== "");
+  return stdout === null ? null : stdout.split(/\r?\n/).filter((line) => line.trim() !== "");
 }

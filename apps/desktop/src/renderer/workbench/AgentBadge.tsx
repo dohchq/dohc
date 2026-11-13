@@ -1,4 +1,12 @@
-import { createContext, useContext, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import {
+  createContext,
+  useContext,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { Plug, Sparkles } from "lucide-react";
 import type { ActorPresentation, ChatReportedAgentRecord } from "../../ipc/bridgeContract";
 import { listAgents, type DesktopUserSettings } from "../../settings/userSettings";
@@ -13,7 +21,11 @@ export function AgentSettingsProvider(props: {
   settings: DesktopUserSettings | null;
   children: ReactNode;
 }) {
-  return <AgentSettingsContext.Provider value={props.settings}>{props.children}</AgentSettingsContext.Provider>;
+  return (
+    <AgentSettingsContext.Provider value={props.settings}>
+      {props.children}
+    </AgentSettingsContext.Provider>
+  );
 }
 
 type AgentAuthor = {
@@ -52,20 +64,24 @@ export function AgentBadge(props: {
   const connected = plug === true;
   const label = connected ? "connected agent" : "agent";
   const Mark = plug ? Plug : Sparkles;
-  const ownAgent = !plug && props.presentation?.self && settings && author.authorAgentId
-    ? listAgents(settings).find(({ id }) => id === author.authorAgentId) ?? null
-    : null;
+  const ownAgent =
+    !plug && props.presentation?.self && settings && author.authorAgentId
+      ? (listAgents(settings).find(({ id }) => id === author.authorAgentId) ?? null)
+      : null;
   // Only your agent runs on this computer, so only its card names how: its
   // tool, or your runner command. The full command is the line's tooltip.
   const launch = ownAgent?.launch;
   const command = launch ? launchCommand(launch) : undefined;
-  const runsWith = !launch ? undefined : "tool" in launch
-    ? `${AGENT_TOOLS.find((tool) => tool.id === launch.tool)?.name ?? "Its tool"} on this computer`
-    : "Your runner command";
+  const runsWith = !launch
+    ? undefined
+    : "tool" in launch
+      ? `${AGENT_TOOLS.find((tool) => tool.id === launch.tool)?.name ?? "Its tool"} on this computer`
+      : "Your runner command";
   const reported = reportedAgentLine(author.authorReported);
   // A plug card says "(as reported)" once: on the reported line when it has
   // one, else on a name the agent gave.
-  const nameAsReported = Boolean(plug) && !reported && (props.named ?? author.authorDisplayName !== "Agent");
+  const nameAsReported =
+    Boolean(plug) && !reported && (props.named ?? author.authorDisplayName !== "Agent");
   const trigger = useRef<HTMLSpanElement>(null);
   const tooltip = useRef<HTMLSpanElement>(null);
   const [place, setPlace] = useState<ReturnType<typeof resolveFloatingMenuPosition> | null>(null);
@@ -78,15 +94,17 @@ export function AgentBadge(props: {
     card.showPopover?.();
     const position = (event?: Event) => {
       if (event?.target instanceof Node && card.contains(event.target)) return;
-      setPlace(resolveFloatingMenuPosition({
-        cursorRect: badge.getBoundingClientRect(),
-        menuWidth: card.offsetWidth,
-        menuMaxHeight: card.scrollHeight + card.offsetHeight - card.clientHeight,
-        margin: 4,
-        gap: 4,
-        // Above, so it covers neither the agent's message nor the box under it.
-        prefer: "above",
-      }));
+      setPlace(
+        resolveFloatingMenuPosition({
+          cursorRect: badge.getBoundingClientRect(),
+          menuWidth: card.offsetWidth,
+          menuMaxHeight: card.scrollHeight + card.offsetHeight - card.clientHeight,
+          margin: 4,
+          gap: 4,
+          // Above, so it covers neither the agent's message nor the box under it.
+          prefer: "above",
+        }),
+      );
     };
     position();
     document.addEventListener("scroll", position, true);
@@ -151,14 +169,29 @@ export function AgentBadge(props: {
           </span>
           {author.linkAgent || plug === "unknown" ? null : (
             <span className="text-muted">
-              {connected ? "Connected agent"
-                : author.authorOwnerDisplayName ? `Owned by ${author.authorOwnerDisplayName}` : "Owner name unavailable"}
+              {connected
+                ? "Connected agent"
+                : author.authorOwnerDisplayName
+                  ? `Owned by ${author.authorOwnerDisplayName}`
+                  : "Owner name unavailable"}
             </span>
           )}
-          {runsWith ? <span data-testid={`${props.testIdPrefix}-agent-runs-with`} title={command} className="text-muted">{runsWith}</span> : null}
+          {runsWith ? (
+            <span
+              data-testid={`${props.testIdPrefix}-agent-runs-with`}
+              title={command}
+              className="text-muted"
+            >
+              {runsWith}
+            </span>
+          ) : null}
           {reported ? (
-            <span data-testid={`${props.testIdPrefix}-agent-reported`} className="wrap-anywhere text-muted">
-              {reported.slice(0, -AS_REPORTED.length)}<span className="whitespace-nowrap">{AS_REPORTED}</span>
+            <span
+              data-testid={`${props.testIdPrefix}-agent-reported`}
+              className="wrap-anywhere text-muted"
+            >
+              {reported.slice(0, -AS_REPORTED.length)}
+              <span className="whitespace-nowrap">{AS_REPORTED}</span>
             </span>
           ) : null}
         </span>

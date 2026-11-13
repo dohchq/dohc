@@ -60,9 +60,7 @@ function flowNodeBefore($from: ResolvedPos): FlowNeighbor | null {
 
 function selectNodeAt(view: EditorView, pos: number): boolean {
   view.dispatch(
-    view.state.tr
-      .setSelection(NodeSelection.create(view.state.doc, pos))
-      .scrollIntoView(),
+    view.state.tr.setSelection(NodeSelection.create(view.state.doc, pos)).scrollIntoView(),
   );
   return true;
 }
@@ -109,9 +107,7 @@ function exitToParagraphBelowTopBlock(view: EditorView): boolean {
 }
 
 function caretAtTextblockEnd($from: ResolvedPos): boolean {
-  return (
-    $from.parent.isTextblock && $from.parentOffset >= $from.parent.content.size
-  );
+  return $from.parent.isTextblock && $from.parentOffset >= $from.parent.content.size;
 }
 
 function caretAtTextblockStart($from: ResolvedPos): boolean {
@@ -183,10 +179,7 @@ export function makeBlockExitPlugin(): Plugin {
     props: {
       handleKeyDown(view, event) {
         if (event.key === "Backspace" || event.key === "Delete") {
-          const handled =
-            event.key === "Backspace"
-              ? handleBackspace(view)
-              : handleDelete(view);
+          const handled = event.key === "Backspace" ? handleBackspace(view) : handleDelete(view);
           if (handled) event.preventDefault();
           return handled;
         }

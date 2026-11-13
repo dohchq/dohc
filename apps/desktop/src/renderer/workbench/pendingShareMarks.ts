@@ -8,13 +8,17 @@ export interface PathMarks {
   has(path: string): boolean;
 }
 
-export function createPathMarks(): PathMarks & { set(waiting: readonly string[], open: readonly string[]): void } {
+export function createPathMarks(): PathMarks & {
+  set(waiting: readonly string[], open: readonly string[]): void;
+} {
   let marked: ReadonlySet<string> = new Set();
   const listeners = new Set<() => void>();
   return {
     subscribe(onChange) {
       listeners.add(onChange);
-      return () => { listeners.delete(onChange); };
+      return () => {
+        listeners.delete(onChange);
+      };
     },
     has: (path) => marked.has(path),
     set(waiting, open) {

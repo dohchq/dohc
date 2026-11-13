@@ -21,6 +21,8 @@ export function inEngineRun<T>(work: () => T): T {
  * A daemon event handler runs where the event arrives, outside every run. One
  * registered inside a run gets the run's mark back, so it waits for no close.
  */
-export function keepEngineRunScope<A extends unknown[]>(handler: (...args: A) => void): (...args: A) => void {
+export function keepEngineRunScope<A extends unknown[]>(
+  handler: (...args: A) => void,
+): (...args: A) => void {
   return insideEngineRun() ? (...args) => runScope.run(true, handler, ...args) : handler;
 }

@@ -3,12 +3,35 @@ import { existsSync } from "node:fs";
 
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { VERSIONED_METHOD, type ConflictRecord, type JsonObject, type JsonValue, type MomentRecord, type Request, type Response } from "@dohc/workspace-engine-client";
-import { RESOLVE_REQUEST_FRAME_BYTES, jsonStringEncodedLength } from "@dohc/workspace-engine-client/limits";
-import { VersionedLoopbackEngine, conflictListRowForWire, settledConflictForWire, settledSnapshotForWire } from "@dohc/workspace-engine-client/testing";
-import { encodedEnvelopeBytes, requestEnvelope, type EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
+import {
+  VERSIONED_METHOD,
+  type ConflictRecord,
+  type JsonObject,
+  type JsonValue,
+  type MomentRecord,
+  type Request,
+  type Response,
+} from "@dohc/workspace-engine-client";
+import {
+  RESOLVE_REQUEST_FRAME_BYTES,
+  jsonStringEncodedLength,
+} from "@dohc/workspace-engine-client/limits";
+import {
+  VersionedLoopbackEngine,
+  conflictListRowForWire,
+  settledConflictForWire,
+  settledSnapshotForWire,
+} from "@dohc/workspace-engine-client/testing";
+import {
+  encodedEnvelopeBytes,
+  requestEnvelope,
+  type EngineWorkspaceSessions,
+} from "@dohc/workspace-engine-client/daemon";
 import { mockDaemonSessions } from "../testing/liveEngineSessions";
-import { createWorkspaceEngineCapture, type WorkspaceEngineCapture } from "./workspaceEngineCapture";
+import {
+  createWorkspaceEngineCapture,
+  type WorkspaceEngineCapture,
+} from "./workspaceEngineCapture";
 
 import { createTestScratch } from "./testTemp";
 
@@ -42,9 +65,7 @@ let momentQueryId = 1;
 // repeats its preimage on the after side and a binary write has no text
 // there at all, so keying on `afterText` by itself would report a removed body
 // as though a write had landed it.
-async function readDaemonMoments(
-  loopback: VersionedLoopbackEngine,
-): Promise<EngineMomentRow[]> {
+async function readDaemonMoments(loopback: VersionedLoopbackEngine): Promise<EngineMomentRow[]> {
   // Drained rather than capped. An earlier draft asked for one large page and
   // threw on a cursor, which would have rejected a valid history the day a test
   // recorded one page more — a limit with no measurement behind it. Paging costs
@@ -80,10 +101,7 @@ async function readDaemonMoments(
     }));
 }
 
-function conflictState(
-  path: string,
-  value: JsonValue | undefined,
-): ConflictRecord["base"] {
+function conflictState(path: string, value: JsonValue | undefined): ConflictRecord["base"] {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return {
       path,
@@ -192,7 +210,6 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
   private internalRequestId = -1;
 
   private dropHeadAfter: string | null = null;
-
 
   /// Model a head that vanished between the resolve write and the desktop's
   /// read-back: a concurrent delete, or an engine that acked a write it lost.
@@ -381,9 +398,7 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
         throw new Error("state-corrupt");
       }
       const text =
-        resolution === "apply-incoming"
-          ? (incomingText ?? "")
-          : String(local.mergedText);
+        resolution === "apply-incoming" ? (incomingText ?? "") : String(local.mergedText);
       // Only a combined body is bounded, and by the control frame that carried
       // it — the daemon puts no size check on a side choice, which sends no
       // text at all (lib.rs conflicts_resolve). What it measures is the whole
@@ -420,9 +435,7 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
           objectId: String(local.objectId),
           momentId: String(local.writeMomentId),
           origin: String(local.metadataOrigin),
-          ...(typeof local.metadataSummary === "string"
-            ? { summary: local.metadataSummary }
-            : {}),
+          ...(typeof local.metadataSummary === "string" ? { summary: local.metadataSummary } : {}),
           ...(typeof local.metadataCorrelationId === "string"
             ? { correlationId: local.metadataCorrelationId }
             : {}),
@@ -469,8 +482,7 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
       metadata: {
         origin: String(params.origin),
         summary: typeof params.summary === "string" ? params.summary : null,
-        correlationId:
-          typeof params.correlationId === "string" ? params.correlationId : null,
+        correlationId: typeof params.correlationId === "string" ? params.correlationId : null,
       },
       base: conflictState(path, comparison.base),
       current: conflictState(path, comparison.current),
@@ -500,11 +512,14 @@ async function readBytes(root: string, path: string): Promise<Buffer> {
   return readFile(join(root, path));
 }
 
-function desktopOwnedLoopbackCapture(root: string, options: {
-  attachmentId?: symbol;
-  onError?: (context: string, error: unknown) => void;
-  rustEngineSessions?: EngineWorkspaceSessions;
-} = {}): WorkspaceEngineCapture {
+function desktopOwnedLoopbackCapture(
+  root: string,
+  options: {
+    attachmentId?: symbol;
+    onError?: (context: string, error: unknown) => void;
+    rustEngineSessions?: EngineWorkspaceSessions;
+  } = {},
+): WorkspaceEngineCapture {
   const {
     attachmentId = Symbol("test-workspace-attachment"),
     rustEngineSessions,
@@ -542,10 +557,7 @@ function desktopOwnedVersionLoopbackCapture(
   });
 }
 
-async function versionIdByName(
-  engine: WorkspaceEngineCapture,
-  name: string,
-): Promise<string> {
+async function versionIdByName(engine: WorkspaceEngineCapture, name: string): Promise<string> {
   const { versions } = await engine.listVersions();
   const version = versions.find((entry) => entry.name === name);
   if (!version) throw new Error(`No version named ${name}`);
@@ -586,7 +598,6 @@ async function openDivergedTextConflict(incomingText: string | null = "draft\n")
 }
 
 describe("active-version capture routing", () => {
-
   it("reads the active version per task, not cached across a switch", async () => {
     const root = await createTestScratch("dohc-version-ops-");
     await write(root, "plan.md", "v1 text\n");
@@ -606,9 +617,7 @@ describe("active-version capture routing", () => {
     const draftMoments = (await readDaemonMoments(loopback)).filter(
       (moment) => moment.text === "draft text\n" && moment.operation === "write",
     );
-    expect(draftMoments.map((moment) => moment.versionId)).toEqual([
-      created.activeVersionId,
-    ]);
+    expect(draftMoments.map((moment) => moment.versionId)).toEqual([created.activeVersionId]);
   });
 });
 
@@ -645,11 +654,9 @@ describe("switchVersion", () => {
     expect(new Uint8Array(await readFile(join(root, "logo.png")))).toEqual(draftLogoBytes);
     await engine.stop();
   });
-
 });
 
 describe("mergeVersionIntoMain", () => {
-
   it("does not touch the disk when a named version is active", async () => {
     const root = await createTestScratch("dohc-version-ops-");
     await write(root, "plan.md", "v1 text\n");
@@ -719,9 +726,7 @@ describe("mergeVersionIntoMain", () => {
     expect(merge.conflictCount).toBe(3);
     const mergeConflicts = (await engine.listOpenConflictsPage()).conflicts;
     expect(mergeConflicts).toHaveLength(3);
-    const byPath = new Map(
-      mergeConflicts.map((conflict) => [conflict.path, conflict]),
-    );
+    const byPath = new Map(mergeConflicts.map((conflict) => [conflict.path, conflict]));
 
     const kept = await engine.resolveConflict(byPath.get("a.md")!.id, {
       kind: "keep-current",
@@ -821,9 +826,7 @@ describe("mergeVersionIntoMain", () => {
 
     // The message reaches the conflict panel, so it must read as user copy:
     // the file, what the folder still holds, and one instruction.
-    await expect(
-      engine.resolveConflict(conflict.id, { kind: "apply-incoming" }),
-    ).rejects.toThrow(
+    await expect(engine.resolveConflict(conflict.id, { kind: "apply-incoming" })).rejects.toThrow(
       "dohc could not keep the copy you chose for logo.png. The folder still has the other copy. Open the merge again and choose once more.",
     );
     expect(await readBytes(root, "logo.png")).toEqual(mainBytes);
@@ -831,8 +834,7 @@ describe("mergeVersionIntoMain", () => {
   });
 
   it("applies an absent incoming side as a delete", async () => {
-    const { root, loopback, engine, conflict } =
-      await openDivergedTextConflict(null);
+    const { root, loopback, engine, conflict } = await openDivergedTextConflict(null);
 
     const resolved = await engine.resolveConflict(conflict.id, {
       kind: "apply-incoming",
@@ -856,14 +858,13 @@ describe("mergeVersionIntoMain", () => {
     engine.observeFileEvents([{ path: "plan.md", operation: "update" }]);
     await engine.flush();
 
-    await expect(
-      engine.resolveConflict(conflict.id, { kind: "apply-incoming" }),
-    ).rejects.toThrow(/conflict-stale-target/);
+    await expect(engine.resolveConflict(conflict.id, { kind: "apply-incoming" })).rejects.toThrow(
+      /conflict-stale-target/,
+    );
     expect(await readText(root, "plan.md")).toBe("newer current\n");
     expect((await engine.listOpenConflictsPage()).conflicts).toHaveLength(1);
     await engine.stop();
   });
-
 });
 
 describe("restoreFileToBeforeMoment", () => {

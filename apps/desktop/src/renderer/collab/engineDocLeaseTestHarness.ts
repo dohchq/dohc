@@ -1,8 +1,4 @@
-import {
-  engineDocRequestKey,
-  retainEngineDocLease,
-  type EngineDocInput,
-} from "./engineDocLease";
+import { engineDocRequestKey, retainEngineDocLease, type EngineDocInput } from "./engineDocLease";
 
 export function retainObservedEngineDocLease(input: EngineDocInput) {
   const lease = retainEngineDocLease(input, engineDocRequestKey(input), false);

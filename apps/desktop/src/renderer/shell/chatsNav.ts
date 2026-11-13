@@ -18,10 +18,7 @@ export function chatsNavigationLeavesConversation(
   return chatsDestinationKey(current) !== chatsDestinationKey(next);
 }
 
-export function chatsNavigationRequiresRemount(
-  current: ChatsNav | null,
-  next: ChatsNav,
-): boolean {
+export function chatsNavigationRequiresRemount(current: ChatsNav | null, next: ChatsNav): boolean {
   if (chatsDestinationKey(current) !== chatsDestinationKey(next)) return true;
   // Message backlinks are commands, not durable conversation identity. Even
   // when the destination thread is already live, remount it with the new
@@ -38,7 +35,9 @@ export function chatsNavigationRequiresRemount(
 export function chatEditorTitle(nav: ChatsNav | null, agents: readonly SettingsAgent[]): string {
   if (!nav || nav.level === "feed") return "Home";
   if (nav.level === "channel" || nav.level === "thread") {
-    return nav.channel.kind === "agent" ? agentChatIdentity(nav.channel, agents).label : nav.channel.name;
+    return nav.channel.kind === "agent"
+      ? agentChatIdentity(nav.channel, agents).label
+      : nav.channel.name;
   }
   if (nav.level === "dm") return nav.dm.peerLabel;
   return nav.level === "dm-new" ? "New message" : "Chats";

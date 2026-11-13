@@ -18,21 +18,33 @@ import type { OrphanedDraftRow } from "./orphanedDrafts";
 let projectionShouldFail = false;
 
 it("reports failed dismissal through the shell with retry", async () => {
-  const error = new Error("disk full"), report = vi.fn(), dismiss = vi.fn(async () => {throw error;});
-  render(<ShellErrorReporter.Provider value={report}><DismissDraftControls onDismiss={dismiss} /></ShellErrorReporter.Provider>);
+  const error = new Error("disk full"),
+    report = vi.fn(),
+    dismiss = vi.fn(async () => {
+      throw error;
+    });
+  render(
+    <ShellErrorReporter.Provider value={report}>
+      <DismissDraftControls onDismiss={dismiss} />
+    </ShellErrorReporter.Provider>,
+  );
   fireEvent.click(screen.getByTestId("recovery-dismiss"));
   fireEvent.click(screen.getByTestId("recovery-dismiss-confirm"));
-  await waitFor(() => expect(report).toHaveBeenCalledWith({message: "dohc could not dismiss this draft. Your saved copy remains available.", cause: error, retry: expect.any(Function)}));
+  await waitFor(() =>
+    expect(report).toHaveBeenCalledWith({
+      message: "dohc could not dismiss this draft. Your saved copy remains available.",
+      cause: error,
+      retry: expect.any(Function),
+    }),
+  );
 });
 let projectionCalls = 0;
 let failProjectionCall: number | null = null;
-let projectionGate: { promise: Promise<void>; release: () => void } | null =
-  null;
+let projectionGate: { promise: Promise<void>; release: () => void } | null = null;
 vi.mock("@dohc/ydoc-projection", async (importOriginal) => {
   if (projectionGate) await projectionGate.promise;
   if (projectionShouldFail) throw new Error("projection import failed");
-  const original =
-    await importOriginal<typeof import("@dohc/ydoc-projection")>();
+  const original = await importOriginal<typeof import("@dohc/ydoc-projection")>();
   return {
     ...original,
     yDocToArtifactMarkdown: (doc: Y.Doc) => {
@@ -127,9 +139,10 @@ it("reports a failed projection instead of copying the readable half", async () 
   // it would let the user dismiss the row believing they have their document.
   await user.click(screen.getByTestId("recovery-list-copy"));
   await waitFor(() =>
-    expect(screen.getByTestId("recovery-list-copy").textContent, "fold the projection failure back into the crude fallback — the button reports Copied and the lossy text reaches the clipboard.").toBe(
-      "Could not copy",
-    ),
+    expect(
+      screen.getByTestId("recovery-list-copy").textContent,
+      "fold the projection failure back into the crude fallback — the button reports Copied and the lossy text reaches the clipboard.",
+    ).toBe("Could not copy"),
   );
   expect(writeText).not.toHaveBeenCalled();
 
@@ -144,12 +157,7 @@ it("reports a failed projection instead of copying the readable half", async () 
   // The label settles only after the lazy import, projection and clipboard
   // write have all finished. Reading first can observe the still-empty stub
   // while that chain is delayed by the full suite.
-  await waitFor(
-    () =>
-      expect(screen.getByTestId("recovery-list-copy").textContent).toBe(
-        "Copied",
-      ),
-  );
+  await waitFor(() => expect(screen.getByTestId("recovery-list-copy").textContent).toBe("Copied"));
   const copied = await navigator.clipboard.readText();
   expect(copied).toContain("# My Heading");
   expect(copied).toContain("[linked](https://example.test)");
@@ -165,7 +173,10 @@ it("copies the projected document, not the encoded recovery snapshot", async () 
   await user.click(screen.getByTestId("recovery-list-copy"));
   await waitFor(async () => {
     const copied = await navigator.clipboard.readText();
-    expect(copied, "copy `row.draft.text` straight through — the user gets the opaque blob, and the list, the table and the link stay locked in it.").not.toContain("dohc-ydoc-recovery-v1");
+    expect(
+      copied,
+      "copy `row.draft.text` straight through — the user gets the opaque blob, and the list, the table and the link stay locked in it.",
+    ).not.toContain("dohc-ydoc-recovery-v1");
     expect(copied).toContain("# My Heading");
     expect(copied).toContain("[linked](https://example.test)");
     expect(copied).toMatch(/\| Cell\s*\|/u);
@@ -186,9 +197,7 @@ it("copies the readable half when the recovery snapshot cannot be decoded", asyn
   );
   // Unrecoverable bytes are the one case where the readable half is the whole
   // answer, so this copy succeeded and the row can be dismissed.
-  await waitFor(() =>
-    expect(screen.getByTestId("recovery-list-copy").textContent).toBe("Copied"),
-  );
+  await waitFor(() => expect(screen.getByTestId("recovery-list-copy").textContent).toBe("Copied"));
 });
 
 it("reports a projection that fails over intact snapshot bytes", async () => {
@@ -202,9 +211,7 @@ it("reports a projection that fails over intact snapshot bytes", async () => {
 
   await user.click(screen.getByTestId("recovery-list-copy"));
   await waitFor(() =>
-    expect(screen.getByTestId("recovery-list-copy").textContent).toBe(
-      "Could not copy",
-    ),
+    expect(screen.getByTestId("recovery-list-copy").textContent).toBe("Could not copy"),
   );
   expect(writeText).not.toHaveBeenCalled();
 });

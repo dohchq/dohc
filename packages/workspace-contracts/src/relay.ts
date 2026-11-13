@@ -17,9 +17,7 @@ export interface RelayMaterializedPath {
 // Called once for each relay pull page. The pull commits that page's cursor
 // only after this resolves, so a failed or interrupted disk projection makes
 // the relay offer the same page again on the next pass.
-export type MaterializeRelayPullPage = (
-  paths: readonly RelayMaterializedPath[],
-) => Promise<void>;
+export type MaterializeRelayPullPage = (paths: readonly RelayMaterializedPath[]) => Promise<void>;
 
 // Apply, project, reconcile, and commit one fetched batch on the capture chain.
 export type RunRelayPullBatch = <T>(
@@ -203,9 +201,7 @@ function relayIdentityValue(value: unknown): string | null {
   return value;
 }
 
-export function decodeRelayWorkspaceBootstrap(
-  value: unknown,
-): RelayWorkspaceBootstrapResult {
+export function decodeRelayWorkspaceBootstrap(value: unknown): RelayWorkspaceBootstrapResult {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("Relay bootstrap response is invalid.");
   }
@@ -257,9 +253,7 @@ export interface PushSharedChannelResult {
 }
 
 export class ShareUnavailableError extends Error {
-  constructor(
-    message = "This share was ended, or the code does not match your account.",
-  ) {
+  constructor(message = "This share was ended, or the code does not match your account.") {
     super(message);
     this.name = "ShareUnavailableError";
   }
@@ -274,10 +268,7 @@ export class ShareUnavailableError extends Error {
 //
 // "not-required" is a `view` share, which may push nothing and so is given no
 // identity — the absence is what keeps its local writes local.
-type ShareViewEnrolment =
-  | "recorded"
-  | "already-recorded"
-  | "not-required";
+type ShareViewEnrolment = "recorded" | "already-recorded" | "not-required";
 
 export interface RecordShareViewIdentityResult {
   identity: ShareViewEnrolment;
@@ -329,11 +320,7 @@ export interface PullShareViewResult {
 // A proposal is the set of changes a recipient offered in one
 // submit. It exists only from submit — there is no draft state at the relay —
 // and it leaves `open` exactly once.
-export type ShareProposalState =
-  | "open"
-  | "accepted"
-  | "declined"
-  | "withdrawn";
+export type ShareProposalState = "open" | "accepted" | "declined" | "withdrawn";
 
 export type ShareProposalDecision = "accept" | "decline";
 
@@ -362,7 +349,13 @@ export interface SubmitShareProposalResult {
 // changes still offers it.
 export type DirectWriteReport =
   | { paths: string[]; result: "written" }
-  | { paths: string[]; result: "stale"; stalePath: string; currentBlobSha256: string | null; recoveredDraftPath: string | null }
+  | {
+      paths: string[];
+      result: "stale";
+      stalePath: string;
+      currentBlobSha256: string | null;
+      recoveredDraftPath: string | null;
+    }
   | { paths: string[]; result: "refused"; reason: string };
 
 // What one direct push wrote. Empty when nothing was eligible, or the share
@@ -462,10 +455,13 @@ export const NOTICE_KINDS = {
   // One of your personal agents signed in. The relay writes it from the
   // agent when a sign-in is redeemed.
   "personal-agent-signed-in": { senderKind: "agent", recipients: "relay" },
-} as const satisfies Record<string, {
-  senderKind: NoticeSenderKind;
-  recipients: "self" | "readers" | "relay";
-}>;
+} as const satisfies Record<
+  string,
+  {
+    senderKind: NoticeSenderKind;
+    recipients: "self" | "readers" | "relay";
+  }
+>;
 
 export type NoticeKind = keyof typeof NOTICE_KINDS;
 
@@ -521,13 +517,21 @@ const BODY_CONTROL_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f]/u;
 // A non-empty, trimmed line of at most `maxChars` code points with no
 // control characters. Titles, ids, labels, and target fields are lines.
 export function isNoticeLine(value: unknown, maxChars: number): value is string {
-  return typeof value === "string" && value.length > 0 && value === value.trim() &&
-    !CONTROL_CHARS.test(value) && [...value].length <= maxChars;
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value === value.trim() &&
+    !CONTROL_CHARS.test(value) &&
+    [...value].length <= maxChars
+  );
 }
 
 export function isNoticeBody(value: unknown): value is string {
-  return typeof value === "string" && !BODY_CONTROL_CHARS.test(value) &&
-    [...value].length <= NOTICE_BODY_MAX_CHARS;
+  return (
+    typeof value === "string" &&
+    !BODY_CONTROL_CHARS.test(value) &&
+    [...value].length <= NOTICE_BODY_MAX_CHARS
+  );
 }
 
 // What a notice points at. Every field is optional; a notice for someone
@@ -553,28 +557,48 @@ export interface AutomationControlsTarget extends NoticeTarget {
   path: string;
 }
 
-export function isAutomationControlsTarget(target: NoticeTarget): target is AutomationControlsTarget {
-  return target.recovery === "automation-controls" && typeof target.automation === "string" &&
-    typeof target.path === "string" && target.path.endsWith("/automations.yaml") && target.path.length > "/automations.yaml".length;
+export function isAutomationControlsTarget(
+  target: NoticeTarget,
+): target is AutomationControlsTarget {
+  return (
+    target.recovery === "automation-controls" &&
+    typeof target.automation === "string" &&
+    typeof target.path === "string" &&
+    target.path.endsWith("/automations.yaml") &&
+    target.path.length > "/automations.yaml".length
+  );
 }
 
 const NOTICE_TARGET_FIELDS = [
-  "path", "record", "thread", "message", "share", "automation", "run", "recovery", "settings", "agent",
+  "path",
+  "record",
+  "thread",
+  "message",
+  "share",
+  "automation",
+  "run",
+  "recovery",
+  "settings",
+  "agent",
 ] as const satisfies readonly (keyof NoticeTarget)[];
 
 export function isNoticeTarget(value: unknown): value is NoticeTarget {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const recovery = Object.getOwnPropertyDescriptor(value, "recovery")?.value as unknown;
   if (recovery !== undefined) {
-    if (recovery !== "automation-controls" || !isAutomationControlsTarget(value as NoticeTarget)) return false;
+    if (recovery !== "automation-controls" || !isAutomationControlsTarget(value as NoticeTarget))
+      return false;
   }
   const settings = Object.getOwnPropertyDescriptor(value, "settings")?.value as unknown;
   if (settings !== undefined && settings !== "agents") return false;
   if (Object.hasOwn(value, "agent") && settings !== "agents") return false;
-  return Object.entries(value).every(([field, fieldValue]) =>
-    (NOTICE_TARGET_FIELDS as readonly string[]).includes(field) &&
-    isNoticeLine(fieldValue, NOTICE_TARGET_FIELD_MAX_CHARS)) &&
-    new TextEncoder().encode(JSON.stringify(value)).byteLength <= NOTICE_TARGET_MAX_BYTES;
+  return (
+    Object.entries(value).every(
+      ([field, fieldValue]) =>
+        (NOTICE_TARGET_FIELDS as readonly string[]).includes(field) &&
+        isNoticeLine(fieldValue, NOTICE_TARGET_FIELD_MAX_CHARS),
+    ) && new TextEncoder().encode(JSON.stringify(value)).byteLength <= NOTICE_TARGET_MAX_BYTES
+  );
 }
 
 // How the sender reaches the notice's workspace: the owner names the
@@ -598,18 +622,19 @@ export type NoticeRecipient =
 // "readers" kind and a `target.path` both people can read, and only the
 // workspace owner or a person the work was shared with by name can send one.
 // `toWorkspaceOwner` needs a `shareId` reach.
-export type PostNoticeRequest = NoticeReach & NoticeRecipient & {
-  noticeId: string;
-  kind: PostableNoticeKind;
-  title: string;
-  body: string;
-  target: NoticeTarget;
-  // The computer that posted. It names where a notice started and grants
-  // nothing: an action a notice offers, such as Try again on a failed
-  // automation, must check that the notice's sender is the person acting,
-  // never this value.
-  originInstallId: string;
-};
+export type PostNoticeRequest = NoticeReach &
+  NoticeRecipient & {
+    noticeId: string;
+    kind: PostableNoticeKind;
+    title: string;
+    body: string;
+    target: NoticeTarget;
+    // The computer that posted. It names where a notice started and grants
+    // nothing: an action a notice offers, such as Try again on a failed
+    // automation, must check that the notice's sender is the person acting,
+    // never this value.
+    originInstallId: string;
+  };
 
 export const AUTOMATION_WAKE_PREFIX = "automation-wake:";
 
@@ -624,10 +649,16 @@ export interface AutomationWake {
 export function isAutomationWake(value: unknown): value is AutomationWake {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const wake = value as Record<string, unknown>;
-  return isNoticeLine(wake.automationId, 1024) && isNoticeLine(wake.name, 120) &&
-    Number.isInteger(wake.depth) && Number(wake.depth) >= 1 && Number(wake.depth) <= 4 &&
-    typeof wake.body === "string" && new TextEncoder().encode(wake.body).byteLength <= 65_536 &&
-    Object.keys(wake).every((key) => ["automationId", "name", "depth", "body"].includes(key));
+  return (
+    isNoticeLine(wake.automationId, 1024) &&
+    isNoticeLine(wake.name, 120) &&
+    Number.isInteger(wake.depth) &&
+    Number(wake.depth) >= 1 &&
+    Number(wake.depth) <= 4 &&
+    typeof wake.body === "string" &&
+    new TextEncoder().encode(wake.body).byteLength <= 65_536 &&
+    Object.keys(wake).every((key) => ["automationId", "name", "depth", "body"].includes(key))
+  );
 }
 
 // One row of GET /sync/notices?cursor=<nextCursor>. `changeSeq` rises on every
@@ -725,7 +756,8 @@ export const AUTOMATION_SERVER_MAX_WORKSPACES = 64;
 // Why the relay refuses to make the server a workspace's host. The owner's
 // settings show these words as they are.
 export const AUTOMATION_SERVER_OFF = "This server does not run automations.";
-export const AUTOMATION_SERVER_FULL = "This server is running automations for as many workspaces as it can. Choose one of your computers.";
+export const AUTOMATION_SERVER_FULL =
+  "This server is running automations for as many workspaces as it can. Choose one of your computers.";
 export const AUTOMATION_HOST_MAX_BODY_BYTES = 16 * 1024;
 // A release carries, as `groups`, what the next host needs so each Group
 // message starts its automations exactly once across the handover: the
@@ -841,11 +873,22 @@ export interface RelayAutomationPress {
 }
 
 /** Inspection names the authored id in automations.yaml. The host answers with its Collection-bound Button id. */
-export interface RelayButtonTarget { automationId: string; collectionPath: string; definitionHash: string }
+export interface RelayButtonTarget {
+  automationId: string;
+  collectionPath: string;
+  definitionHash: string;
+}
 export type RelayButtonInspection =
-  | { kind: "ready"; automationId: string; definitionHash: string; irreversible: Array<{ name: string; label: string }> }
+  | {
+      kind: "ready";
+      automationId: string;
+      definitionHash: string;
+      irreversible: Array<{ name: string; label: string }>;
+    }
   | { kind: "denied" | "unchecked"; reason: string };
-export interface RelayButtonInspectionRequest extends RelayButtonTarget { inspectionId: string }
+export interface RelayButtonInspectionRequest extends RelayButtonTarget {
+  inspectionId: string;
+}
 /** Identity and grants come from the relay's stored authority.
  * The recipient supplies the Button id. The owner's host resolves and checks it
  * against its own index and the relay-checked path. Inspection carries the

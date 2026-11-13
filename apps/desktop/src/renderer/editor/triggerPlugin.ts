@@ -20,11 +20,16 @@ export function makeTriggerPlugin<State>(
   return new Plugin({
     ...spec,
     view(view) {
-      const recompute = () => notify(detect(view.state.doc, view.state.selection.from, view.state.selection.$from));
+      const recompute = () =>
+        notify(detect(view.state.doc, view.state.selection.from, view.state.selection.$from));
       recompute();
       return {
         update: (_view, previous) => {
-          if (previous.doc !== view.state.doc || previous.selection.from !== view.state.selection.from) recompute();
+          if (
+            previous.doc !== view.state.doc ||
+            previous.selection.from !== view.state.selection.from
+          )
+            recompute();
         },
         destroy: () => notify({ active: false }),
       };

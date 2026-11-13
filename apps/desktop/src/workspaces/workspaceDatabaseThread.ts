@@ -17,10 +17,9 @@ if (!port) {
   throw new Error("The workspace database thread requires a worker parent port.");
 }
 
-function serializedError(error: unknown): Extract<
-  WorkspaceDatabaseWorkerResponse,
-  { kind: "error" }
->["error"] {
+function serializedError(
+  error: unknown,
+): Extract<WorkspaceDatabaseWorkerResponse, { kind: "error" }>["error"] {
   if (!(error instanceof Error)) {
     return { name: "Error", message: String(error) };
   }
@@ -46,15 +45,9 @@ async function run(
       return { bytes, rowCount: result.rowCount, tableName: result.tableName };
     }
     case "read-path":
-      return readDatabaseSnapshotAtPath(
-        request.absolutePath,
-        request.resultPath,
-      );
+      return readDatabaseSnapshotAtPath(request.absolutePath, request.resultPath);
     case "read-bytes":
-      return readDatabaseSnapshotFromBytesInWorker(
-        request.bytes,
-        request.resultPath,
-      );
+      return readDatabaseSnapshotFromBytesInWorker(request.bytes, request.resultPath);
     case "read-page-path":
       return readDatabasePageAtPath({
         absolutePath: request.absolutePath,

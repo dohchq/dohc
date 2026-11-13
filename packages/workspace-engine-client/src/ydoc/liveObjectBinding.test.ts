@@ -3,9 +3,7 @@ import {
   parseLiveObjectBinding as sharedParseLiveObjectBinding,
   type LiveObjectBinding,
 } from "@dohc/live-session-contract/live-object-binding";
-import {
-  parseLiveObjectBinding as workspaceEngineClientParseLiveObjectBinding,
-} from "../index.js";
+import { parseLiveObjectBinding as workspaceEngineClientParseLiveObjectBinding } from "../index.js";
 import type { DaemonRequesterClient } from "../live/daemonLiveAdapter.js";
 import type { Request } from "../protocol.js";
 import { OwnerYDocOutbox } from "./ownerYDocOutbox.js";
@@ -24,9 +22,7 @@ const appendInput = (binding: LiveObjectBinding) => ({
 
 describe("LiveObjectBinding workspace-engine adapter", () => {
   it("directly re-exports the shared parser", () => {
-    expect(workspaceEngineClientParseLiveObjectBinding).toBe(
-      sharedParseLiveObjectBinding,
-    );
+    expect(workspaceEngineClientParseLiveObjectBinding).toBe(sharedParseLiveObjectBinding);
   });
 
   it("refuses vector-invalid input before a request", async () => {
@@ -43,9 +39,7 @@ describe("LiveObjectBinding workspace-engine adapter", () => {
     const outbox = new OwnerYDocOutbox(client, "workspace-handle");
 
     await expect(
-      outbox.append(
-        appendInput(invalid.input as unknown as LiveObjectBinding),
-      ),
+      outbox.append(appendInput(invalid.input as unknown as LiveObjectBinding)),
     ).rejects.toThrow(TypeError);
     expect(requests).toHaveLength(0);
   });
@@ -58,9 +52,7 @@ describe("LiveObjectBinding workspace-engine adapter", () => {
         throw new Error("an ill-formed binding must not reach the daemon");
       },
     };
-    const canonical = vectors.accepted.find(
-      (row) => row.name === "canonical-binding",
-    )!;
+    const canonical = vectors.accepted.find((row) => row.name === "canonical-binding")!;
     const illFormedIdentifier = structuredClone(canonical.input);
     illFormedIdentifier.objectId = "object-\ud800";
     const illFormedPath = structuredClone(canonical.input);
@@ -69,9 +61,7 @@ describe("LiveObjectBinding workspace-engine adapter", () => {
 
     for (const binding of [illFormedIdentifier, illFormedPath]) {
       await expect(
-        outbox.append(
-          appendInput(binding as unknown as LiveObjectBinding),
-        ),
+        outbox.append(appendInput(binding as unknown as LiveObjectBinding)),
       ).rejects.toThrow(TypeError);
     }
     expect(requests).toHaveLength(0);
@@ -85,9 +75,7 @@ describe("LiveObjectBinding workspace-engine adapter", () => {
         throw new Error("a sparse binding must not reach the daemon");
       },
     };
-    const canonical = vectors.accepted.find(
-      (row) => row.name === "canonical-binding",
-    )!;
+    const canonical = vectors.accepted.find((row) => row.name === "canonical-binding")!;
     const sparse = structuredClone(canonical.input);
     sparse.selectorPaths = new Array<string>(1);
     const outbox = new OwnerYDocOutbox(client, "workspace-handle");
@@ -118,19 +106,15 @@ describe("LiveObjectBinding workspace-engine adapter", () => {
       },
     };
     const accepted = vectors.accepted.find(
-      (row) =>
-        row.name ===
-        "normalizes-sorts-utf8-and-deduplicates-selector-paths",
+      (row) => row.name === "normalizes-sorts-utf8-and-deduplicates-selector-paths",
     )!;
     const outbox = new OwnerYDocOutbox(client, "workspace-handle");
 
-    await outbox.append(
-      appendInput(accepted.input as unknown as LiveObjectBinding),
-    );
+    await outbox.append(appendInput(accepted.input as unknown as LiveObjectBinding));
 
     expect(requests).toHaveLength(1);
-    expect(
-      (requests[0]!.params as unknown as Record<string, unknown>).binding,
-    ).toEqual(accepted.normalized);
+    expect((requests[0]!.params as unknown as Record<string, unknown>).binding).toEqual(
+      accepted.normalized,
+    );
   });
 });

@@ -32,9 +32,13 @@ export const APP_BUNDLE_CONTENT_TYPES: Readonly<Record<string, string>> = {
 export const APP_PAGE_MAX_SCRIPTS = 256;
 
 const exact = (row: unknown, keys: readonly string[]): row is Record<string, unknown> =>
-  !!row && typeof row === "object" && !Array.isArray(row) && Object.keys(row).sort().join() === [...keys].sort().join();
+  !!row &&
+  typeof row === "object" &&
+  !Array.isArray(row) &&
+  Object.keys(row).sort().join() === [...keys].sort().join();
 /** Text that would end or re-escape a <script> element it sits in. */
-export const unsafeInlineScript = (source: string) => /<\/script/i.test(source) || (source.includes("<!--") && /<script/i.test(source));
+export const unsafeInlineScript = (source: string) =>
+  /<\/script/i.test(source) || (source.includes("<!--") && /<script/i.test(source));
 
 /**
  * The one check on a page record, run by the compiler on what it emits and by
@@ -45,13 +49,29 @@ export function appPageProblem(page: unknown): string | null {
   const malformed = "did not compile into a valid page record.";
   if (!exact(page, ["htmlAttributes", "head", "body", "scripts"])) return malformed;
   const { htmlAttributes, head, body, scripts } = page;
-  if (typeof head !== "string" || typeof body !== "string" || !/^<body[\s>]/.test(body) || !body.endsWith("</body>") ||
-      !Array.isArray(scripts) || !scripts.every(script => typeof script === "string") || !Array.isArray(htmlAttributes)) return malformed;
-  if (scripts.length > APP_PAGE_MAX_SCRIPTS) return `has more than ${APP_PAGE_MAX_SCRIPTS} scripts. Published apps can run at most ${APP_PAGE_MAX_SCRIPTS}. Combine some scripts into one file.`;
+  if (
+    typeof head !== "string" ||
+    typeof body !== "string" ||
+    !/^<body[\s>]/.test(body) ||
+    !body.endsWith("</body>") ||
+    !Array.isArray(scripts) ||
+    !scripts.every((script) => typeof script === "string") ||
+    !Array.isArray(htmlAttributes)
+  )
+    return malformed;
+  if (scripts.length > APP_PAGE_MAX_SCRIPTS)
+    return `has more than ${APP_PAGE_MAX_SCRIPTS} scripts. Published apps can run at most ${APP_PAGE_MAX_SCRIPTS}. Combine some scripts into one file.`;
   for (const row of htmlAttributes) {
-    if (!Array.isArray(row) || row.length !== 2 || typeof row[0] !== "string" || typeof row[1] !== "string") return malformed;
+    if (
+      !Array.isArray(row) ||
+      row.length !== 2 ||
+      typeof row[0] !== "string" ||
+      typeof row[1] !== "string"
+    )
+      return malformed;
     // The app document writes the <html> tag itself, so each name must stay one attribute name when parsed.
-    if (!/^[^\s"'<>/=\0]+$/.test(row[0])) return `has an attribute named ${JSON.stringify(row[0])} on <html>. A published page cannot carry that name. Rename or remove the attribute.`;
+    if (!/^[^\s"'<>/=\0]+$/.test(row[0]))
+      return `has an attribute named ${JSON.stringify(row[0])} on <html>. A published page cannot carry that name. Rename or remove the attribute.`;
   }
   return null;
 }
@@ -62,31 +82,34 @@ function parsePage(text: string): AppPage {
   return page as AppPage;
 }
 
-const attributeValue = (value: string) => value.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll(" ", "&nbsp;");
+const attributeValue = (value: string) =>
+  value.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll(" ", "&nbsp;");
 
 // A plain link to another site would take the app's own frame there, the launch page's frame-src refuses that, and
 // the frame would show the browser's error page instead of the app. For the length of the click, such a link gets
 // target="_blank", so the browser opens it in a new tab unless the app cancels the click. This listener comes before
 // any of the app's, and a target the app sets during the click stays. Links with a modifier key or download, links
 // with another target, and links to the launch page's own origin keep the browser's behavior.
-const LINK_SCRIPT = 'addEventListener("click",e=>{const a=e.target instanceof Element?e.target.closest("a[href],area[href]"):null;' +
-  'if(!(a instanceof HTMLAnchorElement||a instanceof HTMLAreaElement)||e.button!==0||e.ctrlKey||e.metaKey||e.shiftKey||e.altKey||' +
+const LINK_SCRIPT =
+  'addEventListener("click",e=>{const a=e.target instanceof Element?e.target.closest("a[href],area[href]"):null;' +
+  "if(!(a instanceof HTMLAnchorElement||a instanceof HTMLAreaElement)||e.button!==0||e.ctrlKey||e.metaKey||e.shiftKey||e.altKey||" +
   'a.hasAttribute("download")||!["","_self","_parent","_top"].includes(a.target.toLowerCase()))return;' +
-  'const u=new URL(a.href);if(!/^https?:$/.test(u.protocol)||u.origin===new URL(document.baseURI).origin)return;' +
+  "const u=new URL(a.href);if(!/^https?:$/.test(u.protocol)||u.origin===new URL(document.baseURI).origin)return;" +
   'const t=a.getAttribute("target");a.target="_blank";' +
   'setTimeout(()=>{if(a.getAttribute("target")==="_blank")t===null?a.removeAttribute("target"):a.setAttribute("target",t);});},true);';
 
 // The app's frame is transparent, so the launch page paints the page behind it. This tells the launch page whether
 // the app uses a light or dark color scheme, from its root's color-scheme or color-scheme meta and the viewer's
 // theme, each time either can change. The launch page reads only that word.
-const COLOR_SCHEME_SCRIPT = '{const dark=matchMedia("(prefers-color-scheme: dark)");let sent;const report=()=>{' +
-  'let value=getComputedStyle(document.documentElement).colorScheme;' +
+const COLOR_SCHEME_SCRIPT =
+  '{const dark=matchMedia("(prefers-color-scheme: dark)");let sent;const report=()=>{' +
+  "let value=getComputedStyle(document.documentElement).colorScheme;" +
   'if(value==="normal")value=document.querySelector("meta[name=color-scheme]")?.content??"";' +
   'const schemes=value.split(/\\s+/).filter(name=>name==="light"||name==="dark"),wanted=dark.matches?"dark":"light";' +
   'const scheme=schemes.includes(wanted)?wanted:schemes[0]??"light";' +
   'if(scheme!==sent){sent=scheme;parent.postMessage({kind:"dohc-color-scheme",scheme},"*");}};' +
   'dark.addEventListener("change",report);addEventListener("DOMContentLoaded",report);addEventListener("load",report);' +
-  'const watch=new MutationObserver(report);watch.observe(document.documentElement,{attributes:true});' +
+  "const watch=new MutationObserver(report);watch.observe(document.documentElement,{attributes:true});" +
   'watch.observe(document.head,{childList:true,subtree:true,attributeFilter:["content"]});report();}';
 const FRAME_SCRIPT = LINK_SCRIPT + COLOR_SCHEME_SCRIPT;
 
@@ -104,38 +127,52 @@ export function createAppDocument(
   for (const value of [limits.maxBundleBytes, limits.maxDocumentBytes]) {
     if (!Number.isSafeInteger(value) || value < 1) throw new Error("Invalid app document limit.");
   }
-  if (!Array.isArray(files) || files.length < 1 || files.length > 3) throw new Error("Invalid app bundle inventory.");
+  if (!Array.isArray(files) || files.length < 1 || files.length > 3)
+    throw new Error("Invalid app bundle inventory.");
   const contents = new Map<string, string>();
   let bundleBytes = 0;
   for (const file of files) {
-    const expectedType = Object.hasOwn(APP_BUNDLE_CONTENT_TYPES, file.path) ? APP_BUNDLE_CONTENT_TYPES[file.path] : null;
-    if (!expectedType || file.contentType !== expectedType || contents.has(file.path)) throw new Error("Invalid app bundle file.");
-    if (!(file.bytes instanceof Uint8Array) || file.bytes.byteLength !== file.byteLength) throw new Error("App bundle length mismatch.");
+    const expectedType = Object.hasOwn(APP_BUNDLE_CONTENT_TYPES, file.path)
+      ? APP_BUNDLE_CONTENT_TYPES[file.path]
+      : null;
+    if (!expectedType || file.contentType !== expectedType || contents.has(file.path))
+      throw new Error("Invalid app bundle file.");
+    if (!(file.bytes instanceof Uint8Array) || file.bytes.byteLength !== file.byteLength)
+      throw new Error("App bundle length mismatch.");
     bundleBytes += file.bytes.byteLength;
     if (bundleBytes > limits.maxBundleBytes) throw new Error("App bundle exceeds its byte limit.");
-    if (createHash("sha256").update(file.bytes).digest("hex") !== file.sha256) throw new Error("App bundle digest mismatch.");
+    if (createHash("sha256").update(file.bytes).digest("hex") !== file.sha256)
+      throw new Error("App bundle digest mismatch.");
     const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(file.bytes);
     contents.set(file.path, text);
   }
   const script = contents.get("bundle.js");
   if (script === undefined) throw new Error("App bundle has no script.");
   const page = contents.has("page.json") ? parsePage(contents.get("page.json")!) : null;
-  if (page && (unsafeInlineScript(script) || contents.has("bundle.css"))) throw new Error("Invalid app page.");
+  if (page && (unsafeInlineScript(script) || contents.has("bundle.css")))
+    throw new Error("Invalid app page.");
   // Script text is data in the loader, then becomes a text node. HTML never parses
   // its closing tags, comments, or line endings as document syntax.
   const inlineJson = (value: unknown) => JSON.stringify(value).replaceAll("<", "\\u003c");
-  const loader = `{const style=document.createElement("style");style.textContent=${inlineJson(contents.get("bundle.css") ?? "")};` +
+  const loader =
+    `{const style=document.createElement("style");style.textContent=${inlineJson(contents.get("bundle.css") ?? "")};` +
     `document.head.append(style);const script=document.createElement("script");script.textContent=${inlineJson(script)};document.body.append(script);}`;
   // A page is parsed by the browser as written; bundle.js runs first in <head>, inline, before any page node.
-  const texts = new Set(page ? [FRAME_SCRIPT, script, ...page.scripts] : [FRAME_SCRIPT, loader, script]);
-  const scriptSources = [...texts].map(text => `'sha256-${createHash("sha256").update(text).digest("base64")}'`);
+  const texts = new Set(
+    page ? [FRAME_SCRIPT, script, ...page.scripts] : [FRAME_SCRIPT, loader, script],
+  );
+  const scriptSources = [...texts].map(
+    (text) => `'sha256-${createHash("sha256").update(text).digest("base64")}'`,
+  );
   // Inline styles support React style properties. Script hashes limit browser
   // script loading; approved code can still interpret data it fetches.
-  const csp = `default-src 'none'; script-src ${scriptSources.join(" ")}; style-src 'unsafe-inline'; ` +
+  const csp =
+    `default-src 'none'; script-src ${scriptSources.join(" ")}; style-src 'unsafe-inline'; ` +
     "connect-src https: http: wss: ws:; img-src data: blob: https: http:; font-src data: https: http:; " +
     "media-src data: blob: https: http:; frame-src 'none'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
   // The document's own policy comes before any app markup, so the page can only narrow it.
-  const policy = '<meta charset="utf-8">' +
+  const policy =
+    '<meta charset="utf-8">' +
     '<meta name="viewport" content="width=device-width, initial-scale=1">' +
     '<meta name="referrer" content="no-referrer">' +
     `<meta http-equiv="Content-Security-Policy" content="${csp}"><script>${FRAME_SCRIPT}</script>`;
@@ -145,5 +182,10 @@ export function createAppDocument(
     : `<!doctype html><html><head>${policy}</head><body><div id="root"></div><script>${loader}</script></body></html>`;
   const byteLength = Buffer.byteLength(html);
   if (byteLength > limits.maxDocumentBytes) throw new Error("App document exceeds its byte limit.");
-  return { html, byteLength, sha256: createHash("sha256").update(html).digest("hex"), scriptSources };
+  return {
+    html,
+    byteLength,
+    sha256: createHash("sha256").update(html).digest("hex"),
+    scriptSources,
+  };
 }

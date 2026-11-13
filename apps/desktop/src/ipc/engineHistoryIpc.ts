@@ -18,7 +18,11 @@ import type {
   WorkspaceVersionConflict,
 } from "./bridgeContract";
 import { posix } from "node:path";
-import { AUTOMATION_AUTHOR_TEXT_MAX, EngineMomentAuthor, ListEngineMomentsResponse as ListEngineMomentsResponseSchema } from "./bridgeContract";
+import {
+  AUTOMATION_AUTHOR_TEXT_MAX,
+  EngineMomentAuthor,
+  ListEngineMomentsResponse as ListEngineMomentsResponseSchema,
+} from "./bridgeContract";
 import { isWorkspaceUpdatingRefusal } from "@dohc/workspace-engine-client";
 import { parseCollectionAutomationId } from "@dohc/automation-executor/automation-plan";
 import type { CollectionAutomations } from "@dohc/automation-executor/collection-automations";
@@ -33,10 +37,10 @@ type MomentAuthor = NonNullable<VersionedTextMomentSummary["authors"]>[number];
 // automation on the moment's origin label. Each author looks as chats draw them.
 export interface EngineMomentAuthorNames {
   prepare?(authors: readonly MomentAuthor[]): void;
-  agent(author: Extract<MomentAuthor, {kind: "agent"}>): string | undefined;
-  person(author: Extract<MomentAuthor, {kind: "human"}>): string | undefined;
+  agent(author: Extract<MomentAuthor, { kind: "agent" }>): string | undefined;
+  person(author: Extract<MomentAuthor, { kind: "human" }>): string | undefined;
   automation(automationId: string): { name: string; collection?: string } | null;
-  named(author: Extract<MomentAuthor, {kind: "named"}>): string;
+  named(author: Extract<MomentAuthor, { kind: "named" }>): string;
   presentations(authors: readonly MomentAuthor[]): ActorPresentation[];
 }
 
@@ -62,7 +66,10 @@ export function collectionAutomationAuthor(
 // A live author snapshot's account holder or link holder, as the relay
 // admitted them.
 function isSnapshotPerson(author: MomentAuthor): boolean {
-  return (author.kind === "human" && "humanName" in author) || (author.kind === "link" && "publicPrincipalId" in author);
+  return (
+    (author.kind === "human" && "humanName" in author) ||
+    (author.kind === "link" && "publicPrincipalId" in author)
+  );
 }
 
 // How one of several authors reads. A moment one author wrote keeps the
@@ -70,27 +77,45 @@ function isSnapshotPerson(author: MomentAuthor): boolean {
 // declared and the relay stored for its account or link holder.
 function authorLabel(author: MomentAuthor, names: EngineMomentAuthorNames): string {
   switch (author.kind) {
-    case "unattributed": return "An unrecorded author";
-    case "agent": return shownAgentName(author.agentName) ?? names.agent(author) ?? "Agent";
-    case "human": return author.humanName ?? names.person(author) ?? "Another person";
-    case "named": return names.named(author);
-    case "link": return "publicPrincipalId" in author ? `Link holder ${author.label}` : `Edit link · holder ${author.principalId.slice(0, 8)}`;
-    case "public": return `Link holder ${author.principalId.replace(/^public_/, "").slice(0, 8)}`;
+    case "unattributed":
+      return "An unrecorded author";
+    case "agent":
+      return shownAgentName(author.agentName) ?? names.agent(author) ?? "Agent";
+    case "human":
+      return author.humanName ?? names.person(author) ?? "Another person";
+    case "named":
+      return names.named(author);
+    case "link":
+      return "publicPrincipalId" in author
+        ? `Link holder ${author.label}`
+        : `Edit link · holder ${author.principalId.slice(0, 8)}`;
+    case "public":
+      return `Link holder ${author.principalId.replace(/^public_/, "").slice(0, 8)}`;
     case "automation": {
       const automation = names.automation(author.automationId);
       if (!automation) return "Automation";
-      return automation.collection === undefined ? automation.name : `${automation.name} in ${automation.collection}`;
+      return automation.collection === undefined
+        ? automation.name
+        : `${automation.name} in ${automation.collection}`;
     }
   }
 }
 
-export function heldChangeAuthorsForIpc(authors: unknown[], names: EngineMomentAuthorNames): {name: string | null}[] {
-  const parsed = authors.map(author => EngineMomentAuthor.safeParse(author));
-  names.prepare?.(parsed.flatMap(author => author.success ? [author.data] : []));
-  return parsed.map(result => {
-    if (!result.success || result.data.kind === "unattributed") return {name: null};
+export function heldChangeAuthorsForIpc(
+  authors: unknown[],
+  names: EngineMomentAuthorNames,
+): { name: string | null }[] {
+  const parsed = authors.map((author) => EngineMomentAuthor.safeParse(author));
+  names.prepare?.(parsed.flatMap((author) => (author.success ? [author.data] : [])));
+  return parsed.map((result) => {
+    if (!result.success || result.data.kind === "unattributed") return { name: null };
     const author = result.data;
-    return {name: author.kind === "human" ? ("humanName" in author ? author.humanName : names.person(author)) ?? null : authorLabel(author, names)};
+    return {
+      name:
+        author.kind === "human"
+          ? (("humanName" in author ? author.humanName : names.person(author)) ?? null)
+          : authorLabel(author, names),
+    };
   });
 }
 
@@ -111,11 +136,9 @@ export async function listEngineMomentsForIpc(
 ): Promise<ListEngineMomentsResponse> {
   try {
     const page = await read();
-    names.prepare?.(page.moments.flatMap(moment => moment.authors ?? []));
+    names.prepare?.(page.moments.flatMap((moment) => moment.authors ?? []));
     return ListEngineMomentsResponseSchema.parse({
-      moments: page.moments.map((moment) =>
-        engineMomentForIpc(moment, names),
-      ),
+      moments: page.moments.map((moment) => engineMomentForIpc(moment, names)),
       startCursor: page.startCursor,
       nextCursor: page.nextCursor,
       versionMarkers: page.versionMarkers,
@@ -141,9 +164,14 @@ function engineMomentBaseForIpc(
 ) {
   // Keep every author in IPC. Existing display fields name singleton authors.
   const author = moment.authors?.length === 1 ? moment.authors[0] : undefined;
-  const agentAuthorName = author?.kind === "agent" ? shownAgentName(author.agentName) ?? names.agent(author) : undefined;
-  const personAuthorName = author?.kind === "human" && !("humanName" in author) ? names.person(author) : undefined;
-  const liveAuthorName = author !== undefined && isSnapshotPerson(author) ? authorLabel(author, names) : undefined;
+  const agentAuthorName =
+    author?.kind === "agent"
+      ? (shownAgentName(author.agentName) ?? names.agent(author))
+      : undefined;
+  const personAuthorName =
+    author?.kind === "human" && !("humanName" in author) ? names.person(author) : undefined;
+  const liveAuthorName =
+    author !== undefined && isSnapshotPerson(author) ? authorLabel(author, names) : undefined;
   return {
     id: moment.id,
     versionId: moment.versionId,
@@ -154,9 +182,7 @@ function engineMomentBaseForIpc(
     ...(moment.authors !== undefined
       ? { authors: moment.authors, authorPresentations: names.presentations(moment.authors) }
       : {}),
-    ...(agentAuthorName !== undefined
-      ? { agentAuthorName }
-      : {}),
+    ...(agentAuthorName !== undefined ? { agentAuthorName } : {}),
     ...(personAuthorName !== undefined ? { personAuthorName } : {}),
     ...(liveAuthorName !== undefined ? { liveAuthorName } : {}),
     ...(author?.kind === "public" ? { publicAuthor: author } : {}),
@@ -182,7 +208,8 @@ function engineMomentBaseForIpc(
 }
 
 function automationAuthorOf(author: MomentAuthor | undefined, names: EngineMomentAuthorNames) {
-  const automationAuthor = author?.kind === "automation" ? names.automation(author.automationId) : null;
+  const automationAuthor =
+    author?.kind === "automation" ? names.automation(author.automationId) : null;
   return automationAuthor === null ? {} : { automationAuthor };
 }
 
@@ -244,8 +271,7 @@ export function engineMomentDetailForIpc(
     beforeText: beforeBinary !== null ? null : (before?.text ?? null),
     // A delete moment stores the removed content as its payload; the diff
     // page renders it as before -> nothing.
-    afterText:
-      afterBinary !== null || moment.operation === "delete" ? null : after.text,
+    afterText: afterBinary !== null || moment.operation === "delete" ? null : after.text,
     ...(beforeBinary !== null ? { beforeBinary: binarySideDetail(beforeBinary) } : {}),
     ...(afterBinary !== null ? { afterBinary: binarySideDetail(afterBinary) } : {}),
   };
@@ -259,9 +285,27 @@ export function versionConflictForIpc(conflict: {
   // Present on engine conflict records; origin "sync" marks a two-machine
   // divergence (the review UI labels sides as machines, not versions).
   metadata?: { origin?: string };
-  current: { exists: boolean; text?: string; contentKind?: "text" | "binary"; sha256?: string; byteLength?: number };
-  incoming: { exists: boolean; text?: string; contentKind?: "text" | "binary"; sha256?: string; byteLength?: number };
-  base: { exists: boolean; text?: string; contentKind?: "text" | "binary"; sha256?: string; byteLength?: number };
+  current: {
+    exists: boolean;
+    text?: string;
+    contentKind?: "text" | "binary";
+    sha256?: string;
+    byteLength?: number;
+  };
+  incoming: {
+    exists: boolean;
+    text?: string;
+    contentKind?: "text" | "binary";
+    sha256?: string;
+    byteLength?: number;
+  };
+  base: {
+    exists: boolean;
+    text?: string;
+    contentKind?: "text" | "binary";
+    sha256?: string;
+    byteLength?: number;
+  };
   waitingVersion?: WorkspaceVersionConflict["waitingVersion"];
 }): WorkspaceVersionConflict {
   // Record-level kind answers one question: can these two sides be combined as
@@ -276,11 +320,8 @@ export function versionConflictForIpc(conflict: {
   // Each side reports its own kind. A mixed conflict carries the readable
   // text beside its binary sibling, so the user reads the side they can read
   // instead of choosing blind between two "Binary file" notices.
-  const textSide = (side: {
-    exists: boolean;
-    text?: string;
-    contentKind?: "text" | "binary";
-  }) => (side.exists && side.contentKind !== "binary" ? (side.text ?? "") : null);
+  const textSide = (side: { exists: boolean; text?: string; contentKind?: "text" | "binary" }) =>
+    side.exists && side.contentKind !== "binary" ? (side.text ?? "") : null;
   const binarySide = (side: {
     exists: boolean;
     contentKind?: "text" | "binary";

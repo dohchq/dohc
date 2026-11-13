@@ -18,11 +18,7 @@ async function uploadReplacingCurrentEnvelope(
   envelopeJson: string,
 ): Promise<void> {
   let ifMatch: string | undefined;
-  for (
-    let attempt = 0;
-    attempt < KEY_ENVELOPE_UPLOAD_ATTEMPTS;
-    attempt += 1
-  ) {
+  for (let attempt = 0; attempt < KEY_ENVELOPE_UPLOAD_ATTEMPTS; attempt += 1) {
     try {
       await transport.uploadKeyEnvelope({
         envelopeJson,

@@ -57,7 +57,10 @@ try {
   // The taskbar draws 48px at 200% scale, so that size is small too.
   const icoImages = [];
   for (const size of ICO_SIZES) {
-    icoImages.push({ size, png: await render("icon", size, undefined, size <= 48 ? SMALL_ICON : "") });
+    icoImages.push({
+      size,
+      png: await render("icon", size, undefined, size <= 48 ? SMALL_ICON : ""),
+    });
   }
   writeFileSync(join(buildDir, "icon.ico"), ico(icoImages));
   console.log("Wrote build/icon.ico");
@@ -76,7 +79,13 @@ try {
       for (const [name, size] of ICONSET) {
         await render("icon-mac", size, join(iconset, name), size <= 32 ? SMALL_ICON : "");
       }
-      execFileSync("iconutil", ["--convert", "icns", "--output", join(buildDir, "icon.icns"), iconset]);
+      execFileSync("iconutil", [
+        "--convert",
+        "icns",
+        "--output",
+        join(buildDir, "icon.icns"),
+        iconset,
+      ]);
       console.log("Wrote build/icon.icns");
     } finally {
       rmSync(dirname(iconset), { recursive: true, force: true });

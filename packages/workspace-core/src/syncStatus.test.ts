@@ -16,15 +16,13 @@ describe("deriveSyncStatus", () => {
   });
 
   it("shows local-changes when edits are pending", () => {
-    expect(deriveSyncStatus({ ...base, pendingChangeCount: 3 }).state).toBe(
-      "local-changes",
-    );
+    expect(deriveSyncStatus({ ...base, pendingChangeCount: 3 }).state).toBe("local-changes");
   });
 
   it("shows syncing while a batch is in flight", () => {
-    expect(
-      deriveSyncStatus({ ...base, pendingChangeCount: 3, inFlight: true }).state,
-    ).toBe("syncing");
+    expect(deriveSyncStatus({ ...base, pendingChangeCount: 3, inFlight: true }).state).toBe(
+      "syncing",
+    );
   });
 
   // A retry in flight does not undo a failure: the pass that is running is
@@ -46,9 +44,12 @@ describe("deriveSyncStatus", () => {
     ).toBe("conflict");
   });
 
-  it.each(["not-connected", "account-unconfirmed", "sign-in-expired", "update-required"] as const)("reports a blocked sync as %s", (syncBlocked) => {
-    expect(deriveSyncStatus({ ...base, syncBlocked }).state).toBe(syncBlocked);
-  });
+  it.each(["not-connected", "account-unconfirmed", "sign-in-expired", "update-required"] as const)(
+    "reports a blocked sync as %s",
+    (syncBlocked) => {
+      expect(deriveSyncStatus({ ...base, syncBlocked }).state).toBe(syncBlocked);
+    },
+  );
 
   it("keeps a blocked sync ahead of local-changes when edits are pending", () => {
     const status = deriveSyncStatus({

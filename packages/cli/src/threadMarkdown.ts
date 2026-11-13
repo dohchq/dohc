@@ -4,14 +4,8 @@ import { renderAuthorDisplayName } from "./chatIdentity";
 type ThreadMarkdownInput = Omit<CliShowThreadResult, "dispatch"> &
   Partial<Pick<CliShowThreadResult, "dispatch">>;
 
-function swapEnginePrefix(
-  id: string,
-  enginePrefix: string,
-  displayPrefix: string,
-): string {
-  return id.startsWith(enginePrefix)
-    ? `${displayPrefix}${id.slice(enginePrefix.length)}`
-    : id;
+function swapEnginePrefix(id: string, enginePrefix: string, displayPrefix: string): string {
+  return id.startsWith(enginePrefix) ? `${displayPrefix}${id.slice(enginePrefix.length)}` : id;
 }
 
 export function formatMessageHandle(id: string): string {
@@ -40,7 +34,11 @@ export function formatStreamPosition(position: CliStreamPosition): string {
 // What an agent's client reported about itself, as people see it beside the
 // name: `Claude Code 2.1, Claude Opus 5.5 (as reported)`.
 function reportedAgentLabel(reported: CliShowMessage["authorReported"]): string[] {
-  const product = reported?.product ? (reported.version ? `${reported.product} ${reported.version}` : reported.product) : undefined;
+  const product = reported?.product
+    ? reported.version
+      ? `${reported.product} ${reported.version}`
+      : reported.product
+    : undefined;
   const parts = [product, reported?.model].filter((part) => part !== undefined);
   return parts.length > 0 ? [`${parts.join(", ")} (as reported)`] : [];
 }
@@ -64,7 +62,9 @@ export function messageMetadata(message: CliShowMessage, handle: string): string
     new Date(message.createdAtMs).toISOString(),
     handle,
     ...(message.agentRequests ?? []).map((request) => {
-      const failure = request.failureReason ?? (request.exitCode === undefined ? undefined : `exit ${request.exitCode}`);
+      const failure =
+        request.failureReason ??
+        (request.exitCode === undefined ? undefined : `exit ${request.exitCode}`);
       return `agent ${request.agentId} ${request.state}${failure ? ` (${failure})` : ""}`;
     }),
   ];

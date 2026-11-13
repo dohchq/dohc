@@ -40,10 +40,15 @@ describe("workspace authority lanes", () => {
       assertCurrent: () => undefined,
     };
     const finishOld = deferred();
-    const oldRun = runInWorkspaceAuthorityLane(oldAttachment, "engine-store", () => finishOld.promise);
+    const oldRun = runInWorkspaceAuthorityLane(
+      oldAttachment,
+      "engine-store",
+      () => finishOld.promise,
+    );
 
-    await expect(runInWorkspaceAuthorityLane(replacement, "engine-store", async () => "new result"))
-      .resolves.toBe("new result");
+    await expect(
+      runInWorkspaceAuthorityLane(replacement, "engine-store", async () => "new result"),
+    ).resolves.toBe("new result");
     finishOld.resolve();
     await oldRun;
   });

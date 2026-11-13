@@ -29,9 +29,7 @@ describe("bridgeAutomationClaimsToExecutors", () => {
     const stub = daemonStub();
     const woken: string[] = [];
     bridgeAutomationClaimsToExecutors(stub.daemon, (workspaceId) =>
-      workspaceId === "ws-a"
-        ? { notifyClaimed: () => woken.push(workspaceId) }
-        : undefined,
+      workspaceId === "ws-a" ? { notifyClaimed: () => woken.push(workspaceId) } : undefined,
     );
 
     stub.emit(claimed({ workspaceId: "ws-a", claimId: "claim-1" }));
@@ -57,12 +55,8 @@ describe("bridgeAutomationClaimsToExecutors", () => {
 
     // The depth cap's chain-stopped row: never drainable work, so waking
     // the executor would only spin claimNext for nothing.
-    stub.emit(
-      claimed({ workspaceId: "ws-a", claimId: "claim-1", state: "failed" }),
-    );
-    stub.emit(
-      claimed({ workspaceId: "ws-a", claimId: "claim-2", state: "pending" }),
-    );
+    stub.emit(claimed({ workspaceId: "ws-a", claimId: "claim-1", state: "failed" }));
+    stub.emit(claimed({ workspaceId: "ws-a", claimId: "claim-2", state: "pending" }));
 
     expect(failed).toEqual(["ws-a"]);
     expect(woken).toEqual(["ws-a"]);
@@ -80,9 +74,7 @@ describe("bridgeAutomationClaimsToExecutors", () => {
 
     // automations.retry announces the requeued claim as run 2: it is work
     // to drain, and one fewer failure for the owner's notice.
-    stub.emit(
-      claimed({ workspaceId: "ws-a", claimId: "claim-1", state: "pending", run: 2 }),
-    );
+    stub.emit(claimed({ workspaceId: "ws-a", claimId: "claim-1", state: "pending", run: 2 }));
 
     expect(woken).toEqual(["ws-a"]);
     expect(failed).toEqual(["ws-a"]);

@@ -74,7 +74,12 @@ export class WorkspaceManifestError extends Error {
 
 type ManifestState =
   | { kind: "absent" }
-  | { kind: "valid"; workspaceId: string; workspaceKind: WorkspaceKind; mode: CreatedWorkspace["mode"] };
+  | {
+      kind: "valid";
+      workspaceId: string;
+      workspaceKind: WorkspaceKind;
+      mode: CreatedWorkspace["mode"];
+    };
 
 async function inspectManifest(metadataDir: string): Promise<ManifestState> {
   const path = join(metadataDir, "manifest.json");
@@ -84,7 +89,10 @@ async function inspectManifest(metadataDir: string): Promise<ManifestState> {
   });
   if (entry === null) return { kind: "absent" };
   if (!entry.isFile()) {
-    throw new WorkspaceManifestError("unreadable", "dohc didn't open .dohc/manifest.json because it isn't a regular file. Replace it with this workspace's manifest file.");
+    throw new WorkspaceManifestError(
+      "unreadable",
+      "dohc didn't open .dohc/manifest.json because it isn't a regular file. Replace it with this workspace's manifest file.",
+    );
   }
   const raw = await readFile(path, "utf8");
   let parsed: unknown;
@@ -115,7 +123,10 @@ async function inspectManifest(metadataDir: string): Promise<ManifestState> {
   // be the user's data). checkManifest never returns "absent" for a file that
   // exists, but narrow defensively.
   const reason = check.status === "invalid" ? check.reason : "unrecognized manifest";
-  throw new WorkspaceManifestError("unreadable", `this folder has an invalid .dohc/manifest.json: ${reason}`);
+  throw new WorkspaceManifestError(
+    "unreadable",
+    `this folder has an invalid .dohc/manifest.json: ${reason}`,
+  );
 }
 
 export const FOLDER_CHANGED = "The folder changed while dohc was opening it. Open it again.";
@@ -155,7 +166,11 @@ async function isFilesystemRoot(folder: BigIntStats): Promise<boolean> {
 // /Volumes, which holds every disk but reports the system's device. /Volumes
 // is matched by identity: on a case-sensitive disk, /volumes is another folder.
 async function isDiskRoot(rootPath: string, folder: BigIntStats): Promise<boolean> {
-  if (process.platform === "darwin" && sameFsEntry(folder, await stat("/Volumes", { bigint: true })) === "same") return true;
+  if (
+    process.platform === "darwin" &&
+    sameFsEntry(folder, await stat("/Volumes", { bigint: true })) === "same"
+  )
+    return true;
   const parent = dirname(rootPath);
   return parent !== rootPath && (await stat(parent, { bigint: true })).dev !== folder.dev;
 }
@@ -164,11 +179,17 @@ async function isDiskRoot(rootPath: string, folder: BigIntStats): Promise<boolea
 // alias realpath keeps, as macOS's /System/Volumes/Data/Users/<name>. Only a
 // home folder that does not exist may go unresolved; any other failure stops
 // before anything is written.
-async function homeFolder(homeDir: string): Promise<{ path: string; identity: BigIntStats | null }> {
+async function homeFolder(
+  homeDir: string,
+): Promise<{ path: string; identity: BigIntStats | null }> {
   try {
-    return { path: canonicalWorkspaceRoot(homeDir), identity: await stat(homeDir, { bigint: true }) };
+    return {
+      path: canonicalWorkspaceRoot(homeDir),
+      identity: await stat(homeDir, { bigint: true }),
+    };
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { path: homeDir, identity: null };
+    if ((error as NodeJS.ErrnoException).code === "ENOENT")
+      return { path: homeDir, identity: null };
     throw error;
   }
 }
@@ -192,8 +213,13 @@ async function holdsOnlyNewMetadata(rootPath: string, metadataDir: string): Prom
   const [entries, metadata] = await Promise.all([readdir(rootPath), readdir(metadataDir)]);
   const recordOrItsAttributes = (records: string[]) => (name: string) =>
     records.includes(name.startsWith("._") ? name.slice(2) : name);
-  return entries.includes(".dohc") && entries.every(recordOrItsAttributes([".dohc"])) &&
-    metadata.every(recordOrItsAttributes(["manifest.json", "sync-history.json", "collections.json"]));
+  return (
+    entries.includes(".dohc") &&
+    entries.every(recordOrItsAttributes([".dohc"])) &&
+    metadata.every(
+      recordOrItsAttributes(["manifest.json", "sync-history.json", "collections.json"]),
+    )
+  );
 }
 
 /**
@@ -232,7 +258,8 @@ export async function createWorkspaceFolderWithFreshness(input: {
   const home = await homeFolder(input.homeDir);
   const rootCheck = validateWorkspaceRootChoice(rootPath, home.path, process.platform);
   if (!rootCheck.ok) throw new WorkspaceFolderRefusalError(rootCheck.reason);
-  if (home.identity && sameFsEntry(folder, home.identity) === "same") throw new WorkspaceFolderRefusalError(HOME_FOLDER_REFUSAL);
+  if (home.identity && sameFsEntry(folder, home.identity) === "same")
+    throw new WorkspaceFolderRefusalError(HOME_FOLDER_REFUSAL);
   assertNotStateFolder(rootPath, input.stateDir);
   if (await isFilesystemRoot(folder)) throw new WorkspaceFolderRefusalError(DISK_ROOT_REFUSAL);
   if (await isDiskRoot(rootPath, folder)) throw new WorkspaceFolderRefusalError(DISK_ROOT_REFUSAL);
@@ -242,7 +269,8 @@ export async function createWorkspaceFolderWithFreshness(input: {
   // judged above. That detects a folder or link put in its place before the
   // step; it cannot prevent one swapped in between a check and its write.
   const assertSameFolder = async () => {
-    if (sameFsEntry(folder, await folderAt(rootPath)) === "replaced") throw new Error(FOLDER_CHANGED);
+    if (sameFsEntry(folder, await folderAt(rootPath)) === "replaced")
+      throw new Error(FOLDER_CHANGED);
   };
   await assertSameFolder();
   const metadataDir = await resolveWorkspaceMetadataDir(rootPath);
@@ -272,11 +300,9 @@ export async function createWorkspaceFolderWithFreshness(input: {
 
   // inspectManifest checked the entry itself: Windows "wx" can follow a
   // dangling link. "wx" keeps a competing regular file from being replaced.
-  await writeFile(
-    join(metadataDir, "manifest.json"),
-    `${JSON.stringify(manifest, null, 2)}\n`,
-    { flag: "wx" },
-  );
+  await writeFile(join(metadataDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, {
+    flag: "wx",
+  });
   await assertSameFolder();
   // A folder that had no manifest was never a dohc workspace. A join names
   // the synced workspace's id, and its folder records that it synced.
@@ -284,7 +310,7 @@ export async function createWorkspaceFolderWithFreshness(input: {
     await recordNeverSynced(rootPath, input.computer);
     await recordNewCollectionsHolder(rootPath, manifest.workspaceId, input.computer);
   } else await recordSynced(rootPath);
-  const fresh = startedEmpty && await holdsOnlyNewMetadata(rootPath, metadataDir);
+  const fresh = startedEmpty && (await holdsOnlyNewMetadata(rootPath, metadataDir));
   await assertSameFolder();
   return {
     workspace: {

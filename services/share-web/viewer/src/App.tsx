@@ -1,5 +1,5 @@
-import {fetchShareWeb} from "./apiVersion";
-import {normalizeShareLabel} from "@dohc/security-contract/share-labels";
+import { fetchShareWeb } from "./apiVersion";
+import { normalizeShareLabel } from "@dohc/security-contract/share-labels";
 import { buildShareHandoffUrl } from "@dohc/workspace-contracts/deep-links";
 import { OpenSharedApp } from "./OpenSharedApp";
 import { PublishedApps, type AppsState } from "./PublishedApps";
@@ -24,11 +24,7 @@ import { LinkDocumentEditor } from "./LinkDocumentEditor";
 import { CollectionFileEditor, isCollectionOwnFile } from "./CollectionFileEditor";
 import { LinkAbout, LinkAgent } from "./LinkEntry";
 import { DohcMark, Icon, fileIcon } from "./icons";
-import {
-  RETRY_BUDGET_MS,
-  RETRY_INITIAL_MS,
-  RETRY_MAX_MS,
-} from "./retry";
+import { RETRY_BUDGET_MS, RETRY_INITIAL_MS, RETRY_MAX_MS } from "./retry";
 import {
   accumulatorFromCurrentFiles,
   filesFromAccumulator,
@@ -116,8 +112,13 @@ class VersionMismatchError extends Error {}
 
 async function versionMismatch(response: Response): Promise<VersionMismatchError | null> {
   if (response.status !== 409) return null;
-  const body = await response.clone().json().catch(() => null) as { api?: unknown; code?: unknown; error?: unknown } | null;
-  return body?.api === "share-web" && (body.code === "api_version_too_old" || body?.code === "api_version_too_new") && typeof body.error === "string"
+  const body = (await response
+    .clone()
+    .json()
+    .catch(() => null)) as { api?: unknown; code?: unknown; error?: unknown } | null;
+  return body?.api === "share-web" &&
+    (body.code === "api_version_too_old" || body?.code === "api_version_too_new") &&
+    typeof body.error === "string"
     ? new VersionMismatchError(body.error)
     : null;
 }
@@ -144,15 +145,13 @@ type HandoffState =
   | "rate-limited"
   | "retryable";
 
-function isCurrentHandoffResponse(
-  value: unknown,
-  nowMs: number,
-): value is HandoffResponse {
+function isCurrentHandoffResponse(value: unknown, nowMs: number): value is HandoffResponse {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return false;
   }
   const response = value as Record<string, unknown>;
-  return Object.keys(response).sort().join(",") === "code,expiresAtMs,ok,relayUrl" &&
+  return (
+    Object.keys(response).sort().join(",") === "code,expiresAtMs,ok,relayUrl" &&
     response.ok === true &&
     typeof response.code === "string" &&
     HANDOFF_CODE.test(response.code) &&
@@ -161,7 +160,8 @@ function isCurrentHandoffResponse(
     response.relayUrl.length <= 2048 &&
     typeof response.expiresAtMs === "number" &&
     Number.isSafeInteger(response.expiresAtMs) &&
-    response.expiresAtMs > nowMs;
+    response.expiresAtMs > nowMs
+  );
 }
 
 export const dohcNavigation = {
@@ -171,15 +171,9 @@ export const dohcNavigation = {
   },
 };
 
-type TextPreview =
-  | { status: "ready"; text: string }
-  | { status: "download" };
+type TextPreview = { status: "ready"; text: string } | { status: "download" };
 
-async function api(
-  session: string,
-  path: string,
-  signal?: AbortSignal,
-): Promise<Response> {
+async function api(session: string, path: string, signal?: AbortSignal): Promise<Response> {
   return fetchShareWeb(path, {
     credentials: "same-origin",
     headers: { [SESSION_HEADER]: session },
@@ -248,8 +242,16 @@ async function withBoundedRetry(
 // UTF-16; a high share of other C0 controls marks binary data too. Tab, line
 // breaks, form feed, and escape (terminal colors) are ordinary text.
 function isStrayControlByte(byte: number): boolean {
-  return (byte < 0x20 && byte !== 0x09 && byte !== 0x0a && byte !== 0x0b &&
-    byte !== 0x0c && byte !== 0x0d && byte !== 0x1b) || byte === 0x7f;
+  return (
+    (byte < 0x20 &&
+      byte !== 0x09 &&
+      byte !== 0x0a &&
+      byte !== 0x0b &&
+      byte !== 0x0c &&
+      byte !== 0x0d &&
+      byte !== 0x1b) ||
+    byte === 0x7f
+  );
 }
 const MAX_STRAY_CONTROL_SHARE = 0.01;
 
@@ -324,7 +326,8 @@ export async function loadLog(
       }`,
       signal,
     );
-    if (!response.ok) throw (await versionMismatch(response)) ?? new ViewResponseError(response.status);
+    if (!response.ok)
+      throw (await versionMismatch(response)) ?? new ViewResponseError(response.status);
     const page = (await response.json()) as {
       ops?: unknown;
       nextCursor?: unknown;
@@ -356,10 +359,7 @@ export async function loadLog(
       }
       previousRelaySeq = op.relaySeq;
     }
-    if (
-      expectedEpochLogFloor !== undefined &&
-      page.epochLogFloor !== expectedEpochLogFloor
-    ) {
+    if (expectedEpochLogFloor !== undefined && page.epochLogFloor !== expectedEpochLogFloor) {
       throw new EpochFloorChangedError();
     }
     if (foldEpochLogFloor === undefined) {
@@ -367,7 +367,8 @@ export async function loadLog(
     } else if (page.epochLogFloor !== foldEpochLogFloor) {
       throw new EpochFloorChangedError();
     }
-    if ((page.ops as RelayOp[]).some(op => op.opKind === "files.reset")) throw new EpochFloorChangedError();
+    if ((page.ops as RelayOp[]).some((op) => op.opKind === "files.reset"))
+      throw new EpochFloorChangedError();
     foldLogOps(fileAccumulator, page.ops as RelayOp[]);
     if (page.hasMore !== true) {
       return {
@@ -387,8 +388,9 @@ function relayOp(value: unknown, currentOnly = false): value is RelayOp {
   if (currentOnly) {
     if (!Number.isSafeInteger(record.relaySeq) || Number(record.relaySeq) < 0) return false;
     if (record.opKind === "files.reset") return true;
-    const payload = record.payload as {objectId?: unknown; file?: unknown} | null;
-    if (record.opKind !== "file.current" || !payload || typeof payload.objectId !== "string") return false;
+    const payload = record.payload as { objectId?: unknown; file?: unknown } | null;
+    if (record.opKind !== "file.current" || !payload || typeof payload.objectId !== "string")
+      return false;
     if (payload.file === null) return true;
     const files = accumulatorFromCurrentFiles([payload.file]);
     return files !== null && [...files.values()][0]?.objectId === payload.objectId;
@@ -420,13 +422,16 @@ function viewMeta(value: unknown): ViewMeta | null {
     (selectorRecord.versionId !== null && typeof selectorRecord.versionId !== "string") ||
     typeof record.lastSettledKnown !== "boolean" ||
     (record.lastSettledAtMs !== null &&
-      (typeof record.lastSettledAtMs !== "number" ||
-        !Number.isSafeInteger(record.lastSettledAtMs)))
+      (typeof record.lastSettledAtMs !== "number" || !Number.isSafeInteger(record.lastSettledAtMs)))
   ) {
     return null;
   }
   const channel = record.channel as Record<string, unknown> | null | undefined;
-  if (channel !== undefined && (!channel || typeof channel !== "object" || typeof channel.channelWireId !== "string")) return null;
+  if (
+    channel !== undefined &&
+    (!channel || typeof channel !== "object" || typeof channel.channelWireId !== "string")
+  )
+    return null;
   return {
     ...(channel ? { channel: { channelWireId: channel.channelWireId as string } } : {}),
     access,
@@ -446,8 +451,9 @@ async function loadCurrentProjection(
   signal?: AbortSignal,
 ): Promise<LoadedCurrentState> {
   const response = await apiWithThrottleRetry(session, "/api/view/current", signal);
-  if (!response.ok) throw (await versionMismatch(response)) ?? new ViewResponseError(response.status);
-  const body = await response.json() as Record<string, unknown>;
+  if (!response.ok)
+    throw (await versionMismatch(response)) ?? new ViewResponseError(response.status);
+  const body = (await response.json()) as Record<string, unknown>;
   const meta = viewMeta(body);
   const fileAccumulator = accumulatorFromCurrentFiles(body.files);
   if (
@@ -502,7 +508,8 @@ export async function loadCurrentState(
 
 async function loadMeta(session: string, signal?: AbortSignal): Promise<ViewMeta> {
   const response = await apiWithThrottleRetry(session, "/api/view/meta", signal);
-  if (!response.ok) throw (await versionMismatch(response)) ?? new ViewResponseError(response.status);
+  if (!response.ok)
+    throw (await versionMismatch(response)) ?? new ViewResponseError(response.status);
   const meta = viewMeta(await response.json());
   if (!meta) throw new Error("refused");
   return meta;
@@ -513,8 +520,14 @@ function accessBadge(meta: ViewMeta): { label: string; reason?: string } {
   if (meta.access === "view") return { label: "View only" };
   if (meta.access === "comment") return { label: "Can comment" };
   return meta.effectiveSelector.versionId !== null
-    ? { label: "Saved version, read-only", reason: "This link shows a saved version, which can't be edited." }
-    : { label: "Can edit", reason: "Pages can be edited here. Open another kind of file in dohc to edit it." };
+    ? {
+        label: "Saved version, read-only",
+        reason: "This link shows a saved version, which can't be edited.",
+      }
+    : {
+        label: "Can edit",
+        reason: "Pages can be edited here. Open another kind of file in dohc to edit it.",
+      };
 }
 
 /** A file's title: its name, without the folders, and without the extension when it is a page. */
@@ -534,8 +547,10 @@ function metaAtAccess(meta: ViewMeta, access: ShareAccess): ViewMeta {
 }
 
 function retainNarrowedAccess(current: ViewMeta, incoming: ViewMeta): ViewMeta {
-  const ranks = {view: 0, comment: 1, edit: 2};
-  return ranks[current.access] < ranks[incoming.access] ? metaAtAccess(incoming, current.access) : incoming;
+  const ranks = { view: 0, comment: 1, edit: 2 };
+  return ranks[current.access] < ranks[incoming.access]
+    ? metaAtAccess(incoming, current.access)
+    : incoming;
 }
 
 function scrubFragment(): void {
@@ -544,23 +559,26 @@ function scrubFragment(): void {
 
 // The link's secret leaves the address bar at once, but stays in `pending`
 // until its exchange succeeds or is refused, so Try again can repeat the exchange.
-async function establishSession(pending: { secret: string | null }, agentLink: { secret: string | null }, signal?: AbortSignal): Promise<string> {
+async function establishSession(
+  pending: { secret: string | null },
+  agentLink: { secret: string | null },
+  signal?: AbortSignal,
+): Promise<string> {
   const fragment = location.hash.slice(1);
   if (/^[A-Za-z0-9_-]{43}$/u.test(fragment)) pending.secret = fragment;
   const secret = pending.secret;
   if (secret !== null) {
     agentLink.secret = null;
     const exchange = withBoundedRetry(
-      () => fetchShareWeb("/api/exchange", {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ secret }),
-        ...(signal ? { signal } : {}),
-      }),
-      (response) =>
-        response.status === 429 ||
-        (response.status >= 500 && response.status < 600),
+      () =>
+        fetchShareWeb("/api/exchange", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ secret }),
+          ...(signal ? { signal } : {}),
+        }),
+      (response) => response.status === 429 || (response.status >= 500 && response.status < 600),
       true,
       signal,
     );
@@ -608,7 +626,9 @@ function useUpdated(lastSettledAtMs: number | null, lastSettledKnown: boolean): 
   }, [lastSettledAtMs, lastSettledKnown]);
   if (!lastSettledKnown) return "";
   if (lastSettledAtMs === null) return "No changes yet";
-  return Math.abs(now - lastSettledAtMs) < 60_000 ? "Updated just now" : `Updated ${relativeTime(lastSettledAtMs, now)}`;
+  return Math.abs(now - lastSettledAtMs) < 60_000
+    ? "Updated just now"
+    : `Updated ${relativeTime(lastSettledAtMs, now)}`;
 }
 
 interface FolderNode {
@@ -656,8 +676,7 @@ export function fileTree(files: SharedFile[]): FolderNode {
     folders: [...folder.children.values()]
       .sort((left, right) => left.name.localeCompare(right.name))
       .map(complete),
-    files: [...folder.files]
-      .sort((left, right) => left.path.localeCompare(right.path)),
+    files: [...folder.files].sort((left, right) => left.path.localeCompare(right.path)),
   });
   return complete(root);
 }
@@ -670,7 +689,12 @@ function Folder(props: {
   const [open, setOpen] = useState(true);
   return (
     <li>
-      <button aria-expanded={open} className="folder" type="button" onClick={() => setOpen((value) => !value)}>
+      <button
+        aria-expanded={open}
+        className="folder"
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+      >
         <Icon name={open ? "chevron-down" : "chevron-right"} size={14} />
         <Icon name="folder" />
         <span>{props.node.name}</span>
@@ -707,13 +731,10 @@ function FileView(props: {
 }) {
   const [previewText, setPreviewText] = useState<string | null>(null);
   const [previewIsDownload, setPreviewIsDownload] = useState(false);
-  const [fileStatus, setFileStatus] = useState<
-    "ready" | "refreshing" | "unavailable"
-  >("ready");
+  const [fileStatus, setFileStatus] = useState<"ready" | "refreshing" | "unavailable">("ready");
   const [readAttempt, setReadAttempt] = useState(0);
   const rendersMarkdown = props.file.contentKind === "text" && isMarkdown(props.file.path);
-  const rendersExcalidraw =
-    props.file.contentKind === "text" && isExcalidraw(props.file.path);
+  const rendersExcalidraw = props.file.contentKind === "text" && isExcalidraw(props.file.path);
   // Any other text file shows its source as plain text, never as markup.
   const rendersSourceText =
     props.file.contentKind === "text" &&
@@ -730,7 +751,10 @@ function FileView(props: {
     setPreviewText(null);
     setPreviewIsDownload(false);
     setFileStatus("ready");
-    if (!rendersTextPreview) return () => { current = false; };
+    if (!rendersTextPreview)
+      return () => {
+        current = false;
+      };
     const abortController = new AbortController();
     void apiWithThrottleRetry(
       props.session,
@@ -754,10 +778,7 @@ function FileView(props: {
           return;
         }
         setFileStatus("refreshing");
-        const changed = await props.onStaleBlob(
-          props.file.path,
-          props.file.blobSha256,
-        );
+        const changed = await props.onStaleBlob(props.file.path, props.file.blobSha256);
         if (current && !abortController.signal.aborted && !changed) {
           setFileStatus("unavailable");
         }
@@ -800,12 +821,8 @@ function FileView(props: {
     return (
       <MarkdownContent
         markdown={previewText}
-        resolveImage={(href) =>
-          resolveSharedImage(href, props.file.path, fileMap, props.session)
-        }
-        resolveLink={(href) =>
-          resolveSharedFile(href, props.file.path, fileMap)?.path ?? null
-        }
+        resolveImage={(href) => resolveSharedImage(href, props.file.path, fileMap, props.session)}
+        resolveLink={(href) => resolveSharedFile(href, props.file.path, fileMap)?.path ?? null}
         onNavigate={props.onSelect}
         collapseProperties
       />
@@ -843,10 +860,7 @@ function FileView(props: {
   if (isRasterImage(props.file.path)) {
     const source = `/api/view/blob/${props.file.blobSha256}?session=${props.session}`;
     return (
-      <RasterImage
-        source={source}
-        alt={props.file.path.split("/").at(-1) ?? "Shared image"}
-      />
+      <RasterImage source={source} alt={props.file.path.split("/").at(-1) ?? "Shared image"} />
     );
   }
   return <DownloadCard file={props.file} session={props.session} />;
@@ -917,7 +931,9 @@ function DownloadCard(props: { file: SharedFile; session: string }) {
   return (
     // No glyphs here: a file that opens as a download shows no SVG at all, so a shared SVG is plainly never drawn.
     <div className="download-card">
-      <p>{isSvg(props.file.path) ? "SVG files open as downloads." : "This file opens as a download."}</p>
+      <p>
+        {isSvg(props.file.path) ? "SVG files open as downloads." : "This file opens as a download."}
+      </p>
       <a
         className="handoff-button secondary"
         href={visibleDownloadPath}
@@ -930,22 +946,29 @@ function DownloadCard(props: { file: SharedFile; session: string }) {
         Download file
       </a>
       {downloadFailed ? (
-        <p className="download-error muted">
-          The download didn't finish. Try again.
-        </p>
+        <p className="download-error muted">The download didn't finish. Try again.</p>
       ) : null}
     </div>
   );
 }
 
 /** A page that stands alone: the mark, what happened, and the next step when there is one. */
-function StatePage(props: { icon: "unlink" | "alert" | "refresh"; failed?: boolean; title: string; children?: ReactNode }) {
+function StatePage(props: {
+  icon: "unlink" | "alert" | "refresh";
+  failed?: boolean;
+  title: string;
+  children?: ReactNode;
+}) {
   return (
     <div className="state-page">
-      <span className="bar-mark"><DohcMark /></span>
+      <span className="bar-mark">
+        <DohcMark />
+      </span>
       <main className="state">
         <div className="state-message" role={props.failed ? "alert" : undefined}>
-          <span className={props.failed ? "tile bad" : "tile"}><Icon name={props.icon} size={20} /></span>
+          <span className={props.failed ? "tile bad" : "tile"}>
+            <Icon name={props.icon} size={20} />
+          </span>
           <h1>{props.title}</h1>
           {props.children}
         </div>
@@ -957,7 +980,10 @@ function StatePage(props: { icon: "unlink" | "alert" | "refresh"; failed?: boole
 function Unavailable() {
   return (
     <StatePage icon="unlink" title="This link isn't available.">
-      <p>Ask the person who shared it to send the link again. The address in a browser's address bar works only in that browser.</p>
+      <p>
+        Ask the person who shared it to send the link again. The address in a browser's address bar
+        works only in that browser.
+      </p>
     </StatePage>
   );
 }
@@ -966,24 +992,46 @@ function Unavailable() {
 function Opening() {
   return (
     <div className="state-page">
-      <span className="bar-mark"><DohcMark /></span>
+      <span className="bar-mark">
+        <DohcMark />
+      </span>
       <main className="state opening" aria-busy="true">
         <p className="sr-only">Opening shared files</p>
-        <div className="skeleton" aria-hidden="true"><i /><i /><i /><i /><i /><i /><i /></div>
+        <div className="skeleton" aria-hidden="true">
+          <i />
+          <i />
+          <i />
+          <i />
+          <i />
+          <i />
+          <i />
+        </div>
       </main>
     </div>
   );
 }
 
 const EMPTY_PICTURE = (
-  <svg aria-hidden="true" width="72" height="88" viewBox="0 0 72 88" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round">
-    <rect x="1" y="1" width="70" height="86" rx="6" strokeDasharray="5 6" /><path d="M16 22h26M16 36h40M16 48h40M16 60h28" />
+  <svg
+    aria-hidden="true"
+    width="72"
+    height="88"
+    viewBox="0 0 72 88"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={2}
+    strokeLinecap="round"
+  >
+    <rect x="1" y="1" width="70" height="86" rx="6" strokeDasharray="5 6" />
+    <path d="M16 22h26M16 36h40M16 48h40M16 60h28" />
   </svg>
 );
 
 // Narrow windows show the file list and the panels over the page, not beside it.
 function useNarrow(): boolean {
-  const [narrow, setNarrow] = useState(() => window.matchMedia?.("(max-width: 720px)").matches ?? false);
+  const [narrow, setNarrow] = useState(
+    () => window.matchMedia?.("(max-width: 720px)").matches ?? false,
+  );
   useEffect(() => {
     const query = window.matchMedia?.("(max-width: 720px)");
     if (!query) return;
@@ -997,7 +1045,11 @@ function useNarrow(): boolean {
 type Surface = "comments" | "agent" | "about" | "apps" | "more";
 /** Where each surface lives in the page. Opening one moves focus there, and closing returns it to the button. */
 const SURFACE_ID: Record<Surface, string> = {
-  comments: "link-discussion", agent: "link-agent", about: "link-about", apps: "link-apps", more: "link-more",
+  comments: "link-discussion",
+  agent: "link-agent",
+  about: "link-about",
+  apps: "link-apps",
+  more: "link-more",
 };
 
 function OpenInDohc(props: { session: string }) {
@@ -1005,11 +1057,14 @@ function OpenInDohc(props: { session: string }) {
   const requestRef = useRef<AbortController | null>(null);
   const attemptRef = useRef(0);
 
-  useEffect(() => () => {
-    attemptRef.current += 1;
-    requestRef.current?.abort();
-    requestRef.current = null;
-  }, [props.session]);
+  useEffect(
+    () => () => {
+      attemptRef.current += 1;
+      requestRef.current?.abort();
+      requestRef.current = null;
+    },
+    [props.session],
+  );
 
   const mintAndOpen = useCallback(async () => {
     const attempt = attemptRef.current + 1;
@@ -1017,8 +1072,7 @@ function OpenInDohc(props: { session: string }) {
     requestRef.current?.abort();
     const controller = new AbortController();
     requestRef.current = controller;
-    const isCurrent = () =>
-      attemptRef.current === attempt && !controller.signal.aborted;
+    const isCurrent = () => attemptRef.current === attempt && !controller.signal.aborted;
     setHandoffState("opening");
 
     let response: Response;
@@ -1088,8 +1142,8 @@ function OpenInDohc(props: { session: string }) {
       <div className="handoff-panel">
         <p>This opens the share in the dohc app on this computer.</p>
         <p>
-          The person who shared it will see the email of the dohc account that
-          opens it. dohc asks that account to agree first.
+          The person who shared it will see the email of the dohc account that opens it. dohc asks
+          that account to agree first.
         </p>
         <div className="handoff-buttons">
           <button
@@ -1115,11 +1169,7 @@ function OpenInDohc(props: { session: string }) {
       <div className="handoff-panel" aria-live="polite">
         <p className="handoff-title">Opening in dohc…</p>
         <p>Your browser may ask for permission to open dohc.</p>
-        <button
-          className="handoff-button secondary"
-          type="button"
-          onClick={cancelOpening}
-        >
+        <button className="handoff-button secondary" type="button" onClick={cancelOpening}>
           Cancel
         </button>
       </div>
@@ -1128,10 +1178,7 @@ function OpenInDohc(props: { session: string }) {
   if (handoffState === "not-found") {
     return (
       <div className="handoff-panel" role="alert">
-        <p>
-          This link can't open in dohc right now. Reload the page to check the
-          share.
-        </p>
+        <p>This link can't open in dohc right now. Reload the page to check the share.</p>
       </div>
     );
   }
@@ -1150,20 +1197,13 @@ function OpenInDohc(props: { session: string }) {
     );
   }
   return (
-    <div
-      className="handoff-panel"
-      {...(handoffState === "retryable" ? { role: "alert" } : {})}
-    >
+    <div className="handoff-panel" {...(handoffState === "retryable" ? { role: "alert" } : {})}>
       <p>
         {handoffState === "opened"
           ? "If dohc didn't open, install it, then choose Try again."
           : "dohc couldn't prepare the app handoff. Check your connection, then choose Try again."}
       </p>
-      <button
-        className="handoff-button secondary"
-        type="button"
-        onClick={() => void mintAndOpen()}
-      >
+      <button className="handoff-button secondary" type="button" onClick={() => void mintAndOpen()}>
         Try again
       </button>
     </div>
@@ -1176,7 +1216,11 @@ export function App() {
   const pendingExchange = useRef<{ secret: string | null }>({ secret: null });
   const agentLink = useRef<{ secret: string | null }>({ secret: null });
   const [selectedPath, setSelectedPath] = useState("");
-  const [editing, setEditing] = useState<{discriminator: string; path: string; blobSha256: string} | null>(null);
+  const [editing, setEditing] = useState<{
+    discriminator: string;
+    path: string;
+    blobSha256: string;
+  } | null>(null);
   // The bar's place for an editor's Done, Save and saved state, and whether the live editor has the file.
   const [barSlot, setBarSlot] = useState<HTMLElement | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
@@ -1188,7 +1232,9 @@ export function App() {
   const [apps, setApps] = useState<AppsState>("none");
   const narrow = useNarrow();
   const countComments = useCallback((count: number, more: boolean) => {
-    setComments((current) => current.count === count && current.more === more ? current : { count, more });
+    setComments((current) =>
+      current.count === count && current.more === more ? current : { count, more },
+    );
   }, []);
   const closeSurface = useCallback(() => {
     setSurface(null);
@@ -1204,9 +1250,7 @@ export function App() {
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [surface, closeSurface]);
   const readyStateRef = useRef<ReadyState | null>(null);
-  const refreshReadyStateRef = useRef<
-    (() => Promise<ReadyState | null>) | null
-  >(null);
+  const refreshReadyStateRef = useRef<(() => Promise<ReadyState | null>) | null>(null);
   const refreshStaleBlob = useCallback(
     async (path: string, blobSha256: string): Promise<boolean> => {
       const refreshed = await refreshReadyStateRef.current?.();
@@ -1216,28 +1260,27 @@ export function App() {
     },
     [],
   );
-  const applyDiscussionAccess = useCallback(
-    (session: string, access: ShareAccess): void => {
-      const previous = readyStateRef.current;
-      if (!previous || previous.session !== session) return;
-      const meta = retainNarrowedAccess(previous.meta, metaAtAccess(previous.meta, access));
-      if (meta === previous.meta) return;
-      const nextState = { ...previous, meta };
-      readyStateRef.current = nextState;
-      setState((value) =>
-        value.status === "ready" && value.session === session
-          ? { ...value, meta }
-          : value
-      );
-    },
-    [],
-  );
+  const applyDiscussionAccess = useCallback((session: string, access: ShareAccess): void => {
+    const previous = readyStateRef.current;
+    if (!previous || previous.session !== session) return;
+    const meta = retainNarrowedAccess(previous.meta, metaAtAccess(previous.meta, access));
+    if (meta === previous.meta) return;
+    const nextState = { ...previous, meta };
+    readyStateRef.current = nextState;
+    setState((value) =>
+      value.status === "ready" && value.session === session ? { ...value, meta } : value,
+    );
+  }, []);
   useEffect(() => {
     let current = true;
     const controller = new AbortController();
     void (async () => {
       try {
-        const session = await establishSession(pendingExchange.current, agentLink.current, controller.signal);
+        const session = await establishSession(
+          pendingExchange.current,
+          agentLink.current,
+          controller.signal,
+        );
         const log = await loadCurrentState(session, controller.signal);
         const files = filesFromAccumulator(log.fileAccumulator);
         if (current) {
@@ -1254,13 +1297,16 @@ export function App() {
         }
       } catch (error) {
         if (current) {
-          setState(error instanceof VersionMismatchError
-            ? { status: "version-mismatch" }
-            // A lost answer, a lost connection or a server that stayed busy says nothing about the link.
-            : (error instanceof ViewResponseError && error.status >= 500) ||
-                error instanceof TypeError || error instanceof RetryExhaustedError
-              ? { status: "load-failed" }
-              : { status: "refused" });
+          setState(
+            error instanceof VersionMismatchError
+              ? { status: "version-mismatch" }
+              : // A lost answer, a lost connection or a server that stayed busy says nothing about the link.
+                (error instanceof ViewResponseError && error.status >= 500) ||
+                  error instanceof TypeError ||
+                  error instanceof RetryExhaustedError
+                ? { status: "load-failed" }
+                : { status: "refused" },
+          );
         }
       }
     })();
@@ -1281,9 +1327,9 @@ export function App() {
   }, [state]);
   useEffect(() => {
     if (readyFiles === null) return;
-    setSelectedPath((path) => readyFiles.some((file) => file.path === path)
-      ? path
-      : readyFiles[0]?.path ?? "");
+    setSelectedPath((path) =>
+      readyFiles.some((file) => file.path === path) ? path : (readyFiles[0]?.path ?? ""),
+    );
   }, [readyFiles]);
 
   useEffect(() => {
@@ -1330,9 +1376,7 @@ export function App() {
       };
       readyStateRef.current = nextState;
       setState((value) =>
-        value.status === "ready" && value.session === readySession
-          ? nextState
-          : value
+        value.status === "ready" && value.session === readySession ? nextState : value,
       );
       return nextState;
     };
@@ -1347,10 +1391,7 @@ export function App() {
       followerController?.abort();
       const refreshPromise = (async (): Promise<ReadyState | null> => {
         try {
-          const reloaded = await loadCurrentState(
-            readySession,
-            sessionController.signal,
-          );
+          const reloaded = await loadCurrentState(readySession, sessionController.signal);
           return commit(previous, reloaded, expectedVersion);
         } catch (error: unknown) {
           refuseIfTerminal(error);
@@ -1398,22 +1439,23 @@ export function App() {
           }
           retryDelayMs = RETRY_INITIAL_MS;
           const elapsedMs = Date.now() - requestStartedAtMs;
-          if (
-            log.nextCursor === previous.nextCursor &&
-            elapsedMs < VIEW_LOG_HOLD_MS
-          ) {
-            await waitForRetry(
-              VIEW_LOG_HOLD_MS - elapsedMs,
-              sessionController.signal,
-            );
+          if (log.nextCursor === previous.nextCursor && elapsedMs < VIEW_LOG_HOLD_MS) {
+            await waitForRetry(VIEW_LOG_HOLD_MS - elapsedMs, sessionController.signal);
           }
         } catch (error: unknown) {
           if (!current || operationVersion !== expectedVersion) continue;
-          if (error instanceof ViewResponseError && error.status === 404 && readingLog && previous.meta.access === "edit") {
+          if (
+            error instanceof ViewResponseError &&
+            error.status === 404 &&
+            readingLog &&
+            previous.meta.access === "edit"
+          ) {
             try {
               const meta = await loadMeta(readySession, sessionController.signal);
-              if (meta.access !== "edit" && await refresh()) continue;
-            } catch { /* The terminal response below handles removed access. */ }
+              if (meta.access !== "edit" && (await refresh())) continue;
+            } catch {
+              /* The terminal response below handles removed access. */
+            }
           }
           if (error instanceof EpochFloorChangedError) {
             const reloaded = await refresh();
@@ -1482,7 +1524,13 @@ export function App() {
         // The server serves this page, so a reload brings the version it expects, whichever side is older.
         <StatePage icon="refresh" title="This page does not match its server.">
           <p>Reload it to get the version the server expects.</p>
-          <button className="handoff-button secondary" type="button" onClick={() => location.reload()}>Reload</button>
+          <button
+            className="handoff-button secondary"
+            type="button"
+            onClick={() => location.reload()}
+          >
+            Reload
+          </button>
         </StatePage>
       );
     }
@@ -1492,7 +1540,7 @@ export function App() {
   const files = ready?.files ?? [];
   const selected = editing
     ? files.find((file) => file.path === editing.path)
-    : files.find((file) => file.path === selectedPath) ?? files[0];
+    : (files.find((file) => file.path === selectedPath) ?? files[0]);
   const tree = fileTree(files);
   const several = files.length > 1;
   const filesShown = several && !editing && (narrow ? filesToggled : !filesToggled);
@@ -1501,8 +1549,12 @@ export function App() {
     if (narrow) setFilesToggled(false);
   };
   // Markdown edits live; a Collection's own files save through the direct lane.
-  const canEditFile = !editing && meta?.access === "edit" && meta.effectiveSelector.versionId === null &&
-    selected?.contentKind === "text" && (/\.md$/i.test(selected.path) || isCollectionOwnFile(selected.path));
+  const canEditFile =
+    !editing &&
+    meta?.access === "edit" &&
+    meta.effectiveSelector.versionId === null &&
+    selected?.contentKind === "text" &&
+    (/\.md$/i.test(selected.path) || isCollectionOwnFile(selected.path));
   const badge = meta && !editing && !canEditFile ? accessBadge(meta) : null;
   const segments = selected?.path.split("/") ?? [];
   const subject = meta?.subjectName ?? null;
@@ -1510,24 +1562,47 @@ export function App() {
   const namesLink = subject !== null && subject !== segments.at(-1) && subject !== segments[0];
   const toggle = (name: Surface) => (event: MouseEvent<HTMLButtonElement>) => {
     trigger.current = event.currentTarget;
-    setSurface((current) => current === name ? null : name);
+    setSurface((current) => (current === name ? null : name));
   };
   const stopEditing = () => {
     setEditing(null);
     setEditorOpen(false);
   };
   const editingCollectionFile = editing !== null && isCollectionOwnFile(editing.path);
-  const available = editing !== null && ready !== null && ready.session === editing.discriminator && ready.meta.access === "edit" &&
-    ready.meta.effectiveSelector.versionId === null && selected !== undefined;
+  const available =
+    editing !== null &&
+    ready !== null &&
+    ready.session === editing.discriminator &&
+    ready.meta.access === "edit" &&
+    ready.meta.effectiveSelector.versionId === null &&
+    selected !== undefined;
   // The editor mounts once the bar has its place, so Done never shows anywhere else first.
-  const editor = !editing || !barSlot ? null : editingCollectionFile
-    ? <CollectionFileEditor key={`${editing.discriminator}:${editing.path}`} session={editing.discriminator} path={editing.path}
-        blobSha256={editing.blobSha256} available={available} onClose={stopEditing} barSlot={barSlot} />
-    : <LinkDocumentEditor key={`${editing.discriminator}:${editing.path}`} discriminator={editing.discriminator} path={editing.path}
-        available={available} onClose={stopEditing} barSlot={barSlot} onOpenChange={setEditorOpen}
-        otherWay={ready ? <OpenInDohc key={ready.session} session={ready.session} /> : undefined} />;
+  const editor =
+    !editing || !barSlot ? null : editingCollectionFile ? (
+      <CollectionFileEditor
+        key={`${editing.discriminator}:${editing.path}`}
+        session={editing.discriminator}
+        path={editing.path}
+        blobSha256={editing.blobSha256}
+        available={available}
+        onClose={stopEditing}
+        barSlot={barSlot}
+      />
+    ) : (
+      <LinkDocumentEditor
+        key={`${editing.discriminator}:${editing.path}`}
+        discriminator={editing.discriminator}
+        path={editing.path}
+        available={available}
+        onClose={stopEditing}
+        barSlot={barSlot}
+        onOpenChange={setEditorOpen}
+        otherWay={ready ? <OpenInDohc key={ready.session} session={ready.session} /> : undefined}
+      />
+    );
   // The read-only text stays while live editing opens or can't start. A Collection's file shows only its editor.
-  const reads = selected !== undefined && ready !== null && !(editing && (editingCollectionFile || editorOpen));
+  const reads =
+    selected !== undefined && ready !== null && !(editing && (editingCollectionFile || editorOpen));
   const appToOpen = new URLSearchParams(location.search).get("app");
   // A link that holds only apps leads with them, where its files would be.
   const appsLead = files.length === 0 && apps === "some" && !editing;
@@ -1560,7 +1635,9 @@ export function App() {
           </ul>
         </nav>
       ) : null}
-      {filesShown && narrow ? <div className="backdrop" onClick={() => setFilesToggled(false)} /> : null}
+      {filesShown && narrow ? (
+        <div className="backdrop" onClick={() => setFilesToggled(false)} />
+      ) : null}
       <div className="page">
         <header>
           <div className="bar-left">
@@ -1577,16 +1654,24 @@ export function App() {
                 <Icon name="panel-left" />
               </button>
             ) : null}
-            <span className="bar-mark"><DohcMark /></span>
+            <span className="bar-mark">
+              <DohcMark />
+            </span>
             {namesLink || selected ? (
               <div className="crumbs">
                 {namesLink ? <span>{subject}</span> : null}
-                {segments.slice(0, -1).map((folder, index) => <span key={index}>{folder}</span>)}
+                {segments.slice(0, -1).map((folder, index) => (
+                  <span key={index}>{folder}</span>
+                ))}
                 {selected && (several || editing) ? <b>{segments.at(-1)}</b> : null}
                 {/* A link to one file has no list to open, so its file list is this one name. */}
                 {selected && !several && !editing ? (
                   <nav aria-label="Shared files">
-                    <button className="file selected" type="button" onClick={() => selectFile(selected.path)}>
+                    <button
+                      className="file selected"
+                      type="button"
+                      onClick={() => selectFile(selected.path)}
+                    >
                       <Icon name={fileIcon(selected.path)} />
                       <span>{segments.at(-1)}</span>
                     </button>
@@ -1595,7 +1680,9 @@ export function App() {
               </div>
             ) : null}
           </div>
-          {editing ? <div className="header-actions" ref={setBarSlot} /> : (
+          {editing ? (
+            <div className="header-actions" ref={setBarSlot} />
+          ) : (
             <div className="header-actions">
               <span className="freshness">{updated}</span>
               <button
@@ -1608,7 +1695,12 @@ export function App() {
                 onClick={toggle("comments")}
               >
                 <Icon name="message" />
-                {!meta?.channel && comments.count > 0 ? <span>{comments.count}{comments.more ? "+" : ""}</span> : null}
+                {!meta?.channel && comments.count > 0 ? (
+                  <span>
+                    {comments.count}
+                    {comments.more ? "+" : ""}
+                  </span>
+                ) : null}
               </button>
               {apps === "some" ? (
                 <button
@@ -1619,7 +1711,14 @@ export function App() {
                   aria-expanded={surface === "apps" || appsLead}
                   aria-controls="link-apps"
                   // Leading apps are already open, so the button closes anything over them and takes the reader there.
-                  onClick={appsLead ? () => { setSurface(null); document.getElementById(SURFACE_ID.apps)?.focus(); } : toggle("apps")}
+                  onClick={
+                    appsLead
+                      ? () => {
+                          setSurface(null);
+                          document.getElementById(SURFACE_ID.apps)?.focus();
+                        }
+                      : toggle("apps")
+                  }
                 >
                   <Icon name="grid" />
                 </button>
@@ -1636,7 +1735,9 @@ export function App() {
                 <Icon name="sparkles" />
               </button>
               <button
-                className={surface === "more" || surface === "about" ? "icon-button on" : "icon-button"}
+                className={
+                  surface === "more" || surface === "about" ? "icon-button on" : "icon-button"
+                }
                 type="button"
                 aria-label="More"
                 title="More"
@@ -1646,14 +1747,22 @@ export function App() {
               >
                 <Icon name="ellipsis" />
               </button>
-              {badge ? <span className="badge" title={badge.reason}>{badge.label}</span> : null}
+              {badge ? (
+                <span className="badge" title={badge.reason}>
+                  {badge.label}
+                </span>
+              ) : null}
               {canEditFile && selected && ready ? (
                 <button
                   className="handoff-button primary"
                   type="button"
                   onClick={() => {
                     setSurface(null);
-                    setEditing({ discriminator: ready.session, path: selected.path, blobSha256: selected.blobSha256 });
+                    setEditing({
+                      discriminator: ready.session,
+                      path: selected.path,
+                      blobSha256: selected.blobSha256,
+                    });
                   }}
                 >
                   <Icon name="pencil" size={14} />
@@ -1668,7 +1777,11 @@ export function App() {
           <div className="scroller">
             <div className="column">
               {appToOpen !== null && ready && !editing ? (
-                <OpenSharedApp key={ready.session} session={ready.session} publicationId={appToOpen} />
+                <OpenSharedApp
+                  key={ready.session}
+                  session={ready.session}
+                  publicationId={appToOpen}
+                />
               ) : null}
               {selected ? <h1 className="page-title">{fileTitle(selected.path)}</h1> : null}
               <main className="content">
@@ -1694,37 +1807,66 @@ export function App() {
             </div>
           </div>
           {ready && !editing ? (
-            <div className="side-panel" id="link-discussion" tabIndex={-1} data-open={surface === "comments"} inert={surface !== "comments"}>
-              <button className="icon-button panel-close" type="button" aria-label={`Close ${discussion.toLowerCase()}`} title="Close" onClick={closeSurface}>
+            <div
+              className="side-panel"
+              id="link-discussion"
+              tabIndex={-1}
+              data-open={surface === "comments"}
+              inert={surface !== "comments"}
+            >
+              <button
+                className="icon-button panel-close"
+                type="button"
+                aria-label={`Close ${discussion.toLowerCase()}`}
+                title="Close"
+                onClick={closeSurface}
+              >
                 <Icon name="x" />
               </button>
               {/* A Group share's conversation is its channel; any other share's is its discussion. */}
               <LinkChannelPanel
                 session={ready.session}
                 channelWireId={ready.meta.channel?.channelWireId ?? null}
-                fallback={<CommentsPanel
-                  access={ready.meta.access}
-                  session={ready.session}
-                  onAccessChange={applyDiscussionAccess}
-                  onCount={countComments}
-                />}
+                fallback={
+                  <CommentsPanel
+                    access={ready.meta.access}
+                    session={ready.session}
+                    onAccessChange={applyDiscussionAccess}
+                    onCount={countComments}
+                  />
+                }
               />
             </div>
           ) : null}
         </div>
         {ready && !editing ? (
           <>
-            {surface !== null ? <div className={surface === "comments" ? "backdrop narrow-only" : "backdrop"} onClick={closeSurface} /> : null}
+            {surface !== null ? (
+              <div
+                className={surface === "comments" ? "backdrop narrow-only" : "backdrop"}
+                onClick={closeSurface}
+              />
+            ) : null}
             <div className="popover" id="link-agent" tabIndex={-1} hidden={surface !== "agent"}>
               <LinkAgent secret={agentLink.current.secret} />
             </div>
             <div className="popover" id="link-about" tabIndex={-1} hidden={surface !== "about"}>
               <LinkAbout meta={ready.meta} fileCount={files.length} updated={updated} />
             </div>
-            <div className={appsLead ? "popover apps-lead" : "popover"} id="link-apps" tabIndex={-1} hidden={surface !== "apps" && !appsLead}>
+            <div
+              className={appsLead ? "popover apps-lead" : "popover"}
+              id="link-apps"
+              tabIndex={-1}
+              hidden={surface !== "apps" && !appsLead}
+            >
               <PublishedApps session={ready.session} onState={setApps} />
             </div>
-            <div className="popover link-more" id="link-more" tabIndex={-1} hidden={surface !== "more"}>
+            <div
+              className="popover link-more"
+              id="link-more"
+              tabIndex={-1}
+              hidden={surface !== "more"}
+            >
               <button className="menu-item" type="button" onClick={() => setSurface("about")}>
                 <Icon name="info" />
                 About this link

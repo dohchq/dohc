@@ -17,7 +17,10 @@ it("writes no cookie while PostHog starts, even when storage writes fail", async
   vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
     throw new DOMException("Storage is full", "QuotaExceededError");
   });
-  vi.stubGlobal("fetch", vi.fn(async () => new Response("{}")));
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => new Response("{}")),
+  );
 
   // After the spies, because the SDK checks storage when it loads.
   const { default: posthog } = await import("posthog-js");

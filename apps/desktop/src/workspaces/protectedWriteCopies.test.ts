@@ -4,7 +4,12 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { fakeLocalStateOpens, openedLocalState } from "../testing/preparedLocalState";
 import { createTestScratch } from "./testTemp";
-import { PROTECTED_COPIES_PATH, ProtectedCopyIdError, ProtectedCopyReadError, protectedWriteCopies } from "./protectedWriteCopies";
+import {
+  PROTECTED_COPIES_PATH,
+  ProtectedCopyIdError,
+  ProtectedCopyReadError,
+  protectedWriteCopies,
+} from "./protectedWriteCopies";
 
 async function setup() {
   const rootPath = await createTestScratch("protected-copy-");
@@ -25,9 +30,14 @@ describe("protected write copies", () => {
     const rows = await restarted.list();
     expect(rows.map(([path]) => path)).toEqual([".env", ".env", ".env"]);
     const kept = await Promise.all(rows.map(async ([, id]) => (await restarted.read(id))!));
-    expect(kept.map(({ versionId, text }) => `${versionId}:${text}`).sort())
-      .toEqual(["main:TOKEN=later", "main:TOKEN=mine", "trip:TOKEN=mine"]);
-    const { id } = kept.find(({ versionId, text }) => versionId === "main" && text === "TOKEN=mine")!;
+    expect(kept.map(({ versionId, text }) => `${versionId}:${text}`).sort()).toEqual([
+      "main:TOKEN=later",
+      "main:TOKEN=mine",
+      "trip:TOKEN=mine",
+    ]);
+    const { id } = kept.find(
+      ({ versionId, text }) => versionId === "main" && text === "TOKEN=mine",
+    )!;
 
     expect(await restarted.remove(id)).toBe(true);
     expect(await restarted.remove(id)).toBe(false);
@@ -49,10 +59,18 @@ describe("protected write copies", () => {
     const { rootPath, copies } = await setup();
     await copies.list();
     const id = randomUUID();
-    await writeFile(join(rootPath, PROTECTED_COPIES_PATH, `${id}.json`), "{\"text\":\"SECRET-VALUE");
+    await writeFile(join(rootPath, PROTECTED_COPIES_PATH, `${id}.json`), '{"text":"SECRET-VALUE');
     const wrongName = randomUUID();
-    await writeFile(join(rootPath, PROTECTED_COPIES_PATH, `${wrongName}.json`),
-      JSON.stringify({ path: ".env", id: randomUUID(), versionId: "main", createdAtMs: 1, text: "SECRET-VALUE" }));
+    await writeFile(
+      join(rootPath, PROTECTED_COPIES_PATH, `${wrongName}.json`),
+      JSON.stringify({
+        path: ".env",
+        id: randomUUID(),
+        versionId: "main",
+        createdAtMs: 1,
+        text: "SECRET-VALUE",
+      }),
+    );
     const errors: unknown[] = [];
 
     expect(await copies.list((error) => errors.push(error))).toEqual([]);
@@ -61,14 +79,20 @@ describe("protected write copies", () => {
       expect(error).toBeInstanceOf(ProtectedCopyReadError);
       expect(String(error)).not.toContain("SECRET-VALUE");
     }
-    expect(errors.map((error) => (error as ProtectedCopyReadError).path).sort())
-      .toEqual([`${PROTECTED_COPIES_PATH}/${id}.json`, `${PROTECTED_COPIES_PATH}/${wrongName}.json`].sort());
-    await expect(copies.read(id)).rejects.toThrow(`dohc could not read ${PROTECTED_COPIES_PATH}/${id}.json.`);
+    expect(errors.map((error) => (error as ProtectedCopyReadError).path).sort()).toEqual(
+      [`${PROTECTED_COPIES_PATH}/${id}.json`, `${PROTECTED_COPIES_PATH}/${wrongName}.json`].sort(),
+    );
+    await expect(copies.read(id)).rejects.toThrow(
+      `dohc could not read ${PROTECTED_COPIES_PATH}/${id}.json.`,
+    );
   });
 
   it("lists kept changes while the engine opens the workspace again", async () => {
     const opens = fakeLocalStateOpens();
-    const workspace = { workspaceId: "protected-copy-reopen", rootPath: await createTestScratch("protected-copy-") };
+    const workspace = {
+      workspaceId: "protected-copy-reopen",
+      rootPath: await createTestScratch("protected-copy-"),
+    };
     await opens.open(workspace);
     const copies = protectedWriteCopies(workspace);
     expect(await copies.keep(".env", "TOKEN=mine", "main")).toBe(true);
@@ -92,7 +116,7 @@ describe("protected write copies", () => {
     await copies.list();
     const dir = join(rootPath, PROTECTED_COPIES_PATH);
     const leftover = `${randomUUID()}.json.tmp-123-${randomUUID()}`;
-    await writeFile(join(dir, leftover), "{\"text\":\"TOKEN=half");
+    await writeFile(join(dir, leftover), '{"text":"TOKEN=half');
 
     expect(await copies.list()).toEqual([]);
     expect(await readdir(dir)).toEqual([]);

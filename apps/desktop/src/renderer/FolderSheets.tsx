@@ -10,7 +10,12 @@ import { START_TILE_ART } from "./workbench/StartTileArt";
 // scaled about (82, 90). `left` and `top` place that box in the folder; the
 // card's front starts 31px below the folder's top, and each paper's top lands
 // 46 to 56px above it.
-const SHEETS: readonly { kind: keyof typeof START_TILE_ART; left: number; top: number; turn: number }[] = [
+const SHEETS: readonly {
+  kind: keyof typeof START_TILE_ART;
+  left: number;
+  top: number;
+  turn: number;
+}[] = [
   { kind: "markdown", left: 94, top: -64, turn: -6 },
   { kind: "collection", left: 158, top: -70, turn: -2 },
   { kind: "drawing", left: 222, top: -66, turn: 2.5 },
@@ -25,9 +30,17 @@ const placement = (sheet: (typeof SHEETS)[number]): CSSProperties => ({
 
 export function FolderSheets() {
   return (
-    <div data-testid="folder-sheets" aria-hidden className="pointer-events-none absolute inset-x-0 top-0 z-1 h-0">
+    <div
+      data-testid="folder-sheets"
+      aria-hidden
+      className="pointer-events-none absolute inset-x-0 top-0 z-1 h-0"
+    >
       {SHEETS.map((sheet) => (
-        <div key={sheet.kind} className="absolute h-28 w-41 origin-[82px_90px]" style={placement(sheet)}>
+        <div
+          key={sheet.kind}
+          className="absolute h-28 w-41 origin-[82px_90px]"
+          style={placement(sheet)}
+        >
           {/* The drawing sits on its tile, so its sheet adds the paper the
               other pictures bring. */}
           {sheet.kind === "drawing" ? (

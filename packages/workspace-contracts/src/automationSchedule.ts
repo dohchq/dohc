@@ -132,7 +132,9 @@ function runsOn(trigger: AutomationScheduleTrigger, date: Date): boolean {
     case "week":
       return trigger.days.includes(WEEKDAYS[date.getUTCDay()]!);
     case "month": {
-      const lastDay = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0)).getUTCDate();
+      const lastDay = new Date(
+        Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0),
+      ).getUTCDate();
       return trigger.days.some((day) => Math.min(day, lastDay) === date.getUTCDate());
     }
   }
@@ -143,7 +145,9 @@ function runsOn(trigger: AutomationScheduleTrigger, date: Date): boolean {
 function timeOfDay(trigger: AutomationScheduleTrigger): number {
   const match = (trigger.every === "hour" ? HOUR_TIME : DAY_TIME).exec(trigger.at);
   if (match === null) {
-    throw new RangeError(`"${trigger.at}" is not a time for a schedule that runs every ${trigger.every}.`);
+    throw new RangeError(
+      `"${trigger.at}" is not a time for a schedule that runs every ${trigger.every}.`,
+    );
   }
   const [hour, minute] = trigger.every === "hour" ? ["0", match[1]] : [match[1], match[2]];
   return Number(hour) * HOUR_MS + Number(minute) * MINUTE_MS;
@@ -179,7 +183,8 @@ export function dueTimes(
   }
   const time = timeOfDay(trigger);
   const offsetAt = zoneOffset(trigger.timezone);
-  if ((trigger.every === "week" || trigger.every === "month") && trigger.days.length === 0) return [];
+  if ((trigger.every === "week" || trigger.every === "month") && trigger.days.length === 0)
+    return [];
   const everyOccurrence = trigger.every === "hour";
   const due: number[] = [];
   let pending: number[] = [];

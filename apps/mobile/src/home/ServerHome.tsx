@@ -20,11 +20,17 @@ export function ServerHome() {
   const theme = useTheme();
   const { current } = useWorkspaces();
   return (
-    <ScrollView contentInsetAdjustmentBehavior="automatic" alwaysBounceVertical={false} style={{ backgroundColor: theme.bg }}
-      contentContainerStyle={styles.content}>
+    <ScrollView
+      contentInsetAdjustmentBehavior="automatic"
+      alwaysBounceVertical={false}
+      style={{ backgroundColor: theme.bg }}
+      contentContainerStyle={styles.content}
+    >
       <Stack.Screen options={{ title: "Home", headerLeft: () => <WorkspaceButton /> }} />
       <NoWorkspace />
-      {current ? <Files key={current.id} workspaceId={current.id} workspace={current.name} /> : null}
+      {current ? (
+        <Files key={current.id} workspaceId={current.id} workspace={current.name} />
+      ) : null}
     </ScrollView>
   );
 }
@@ -36,34 +42,66 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
   useFailureNotice(`read:${workspaceId}:files`, failed, state, retry);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
-  const rows = useMemo(() => state.value ? homeRows(state.value, expanded) : null, [state.value, expanded]);
+  const rows = useMemo(
+    () => (state.value ? homeRows(state.value, expanded) : null),
+    [state.value, expanded],
+  );
   const toggle = useCallback((set: typeof setExpanded, key: string) => {
     void Haptics.selectionAsync();
-    set(previous => {
+    set((previous) => {
       const next = new Set(previous);
       if (!next.delete(key)) next.add(key);
       return next;
     });
   }, []);
-  const press = useCallback((row: HomeRow) => {
-    if (row.kind === "folder") toggle(setExpanded, row.path);
-    else if (row.kind === "page") router.push({ pathname: "/page", params: { path: row.path } });
-  }, [router, toggle]);
+  const press = useCallback(
+    (row: HomeRow) => {
+      if (row.kind === "folder") toggle(setExpanded, row.path);
+      else if (row.kind === "page") router.push({ pathname: "/page", params: { path: row.path } });
+    },
+    [router, toggle],
+  );
 
   const pending = state.problem ? <RetryRow label={failed} onRetry={retry} /> : <HoldRow />;
   return (
     <>
-      <SectionHeader title={workspaceWords.pages} collapsed={collapsed.has("pages")} unread={false} first onToggle={() => toggle(setCollapsed, "pages")} />
-      {collapsed.has("pages") ? null : !rows ? pending
-        : rows.pages.length === 0 ? <EmptyLine text={workspaceWords.noPages} />
-        : rows.pages.map(row => <Row key={row.key} row={row} onPress={press} />)}
-      {rows ? ([["sketches", workspaceWords.sketches, rows.sketches], ["other", workspaceWords.otherFiles, rows.others]] as const)
-        .map(([id, title, list]) => list.count > 0 ? (
-          <Fragment key={id}>
-            <SectionHeader title={title} collapsed={collapsed.has(id)} unread={false} first={false} onToggle={() => toggle(setCollapsed, id)} />
-            {collapsed.has(id) ? null : list.shown.map(row => <Row key={row.key} row={row} onPress={press} />)}
-          </Fragment>
-        ) : null) : null}
+      <SectionHeader
+        title={workspaceWords.pages}
+        collapsed={collapsed.has("pages")}
+        unread={false}
+        first
+        onToggle={() => toggle(setCollapsed, "pages")}
+      />
+      {collapsed.has("pages") ? null : !rows ? (
+        pending
+      ) : rows.pages.length === 0 ? (
+        <EmptyLine text={workspaceWords.noPages} />
+      ) : (
+        rows.pages.map((row) => <Row key={row.key} row={row} onPress={press} />)
+      )}
+      {rows
+        ? (
+            [
+              ["sketches", workspaceWords.sketches, rows.sketches],
+              ["other", workspaceWords.otherFiles, rows.others],
+            ] as const
+          ).map(([id, title, list]) =>
+            list.count > 0 ? (
+              <Fragment key={id}>
+                <SectionHeader
+                  title={title}
+                  collapsed={collapsed.has(id)}
+                  unread={false}
+                  first={false}
+                  onToggle={() => toggle(setCollapsed, id)}
+                />
+                {collapsed.has(id)
+                  ? null
+                  : list.shown.map((row) => <Row key={row.key} row={row} onPress={press} />)}
+              </Fragment>
+            ) : null,
+          )
+        : null}
     </>
   );
 }
@@ -72,25 +110,59 @@ const Row = memo(function Row({ row, onPress }: { row: HomeRow; onPress(row: Hom
   const theme = useTheme();
   const listed = row.kind === "sketch" || row.kind === "other";
   const depth = row.kind === "folder" || row.kind === "page" ? row.depth : 0;
-  const Icon = row.kind === "folder" ? row.open ? FolderOpen : Folder : row.kind === "page" ? FileText : row.kind === "sketch" ? PenTool : File;
+  const Icon =
+    row.kind === "folder"
+      ? row.open
+        ? FolderOpen
+        : Folder
+      : row.kind === "page"
+        ? FileText
+        : row.kind === "sketch"
+          ? PenTool
+          : File;
   const content = (
     <>
       <View style={styles.chevron}>
-        {row.kind === "folder" ? <ChevronRight size={14} color={theme.muted} strokeWidth={2}
-          style={{ transform: [{ rotate: row.open ? "90deg" : "0deg" }] }} /> : null}
+        {row.kind === "folder" ? (
+          <ChevronRight
+            size={14}
+            color={theme.muted}
+            strokeWidth={2}
+            style={{ transform: [{ rotate: row.open ? "90deg" : "0deg" }] }}
+          />
+        ) : null}
       </View>
       <Icon size={18} color={listed ? theme.subtle : theme.ink} strokeWidth={1.9} />
-      <Text style={[styles.name, { color: listed ? theme.muted : theme.ink }]} numberOfLines={1}>{row.name}</Text>
-      {listed && row.folder ? <Text style={[styles.detail, { color: theme.subtle }]} numberOfLines={1}>{row.folder}</Text> : null}
+      <Text style={[styles.name, { color: listed ? theme.muted : theme.ink }]} numberOfLines={1}>
+        {row.name}
+      </Text>
+      {listed && row.folder ? (
+        <Text style={[styles.detail, { color: theme.subtle }]} numberOfLines={1}>
+          {row.folder}
+        </Text>
+      ) : null}
     </>
   );
   const style = [styles.row, { paddingLeft: 8 + depth * 20 }];
   // A file the phone can't open is no button: it only says the file is there.
-  if (listed) return <View style={style} accessible accessibilityLabel={row.folder ? `${row.name}, ${row.folder}` : row.name}>{content}</View>;
+  if (listed)
+    return (
+      <View
+        style={style}
+        accessible
+        accessibilityLabel={row.folder ? `${row.name}, ${row.folder}` : row.name}
+      >
+        {content}
+      </View>
+    );
   return (
-    <Pressable onPress={() => onPress(row)} style={({ pressed }) => [style, pressed ? { backgroundColor: theme.panel2 } : null]}
-      accessibilityRole="button" accessibilityLabel={row.name}
-      accessibilityState={row.kind === "folder" ? { expanded: row.open } : undefined}>
+    <Pressable
+      onPress={() => onPress(row)}
+      style={({ pressed }) => [style, pressed ? { backgroundColor: theme.panel2 } : null]}
+      accessibilityRole="button"
+      accessibilityLabel={row.name}
+      accessibilityState={row.kind === "folder" ? { expanded: row.open } : undefined}
+    >
       {content}
     </Pressable>
   );

@@ -101,7 +101,14 @@ describe("Explorer render cost", () => {
     let listing!: ReturnType<typeof useWorkspaceListing>;
     function Host() {
       listing = useWorkspaceListing(props.workspaceId);
-      return <Explorer {...props} files={listing.files} folders={listing.folders} listingRequest={listing.fileListingCommit?.request ?? 0} />;
+      return (
+        <Explorer
+          {...props}
+          files={listing.files}
+          folders={listing.folders}
+          listingRequest={listing.fileListingCommit?.request ?? 0}
+        />
+      );
     }
     try {
       render(<Host />);
@@ -115,7 +122,9 @@ describe("Explorer render cost", () => {
         });
         const indexes = vi.mocked(indexFileListing).mock.calls.length;
         const trees = vi.mocked(buildTree).mock.calls.length;
-        await act(async () => { await listing.refreshFiles(cached ? { allowCached: true } : {}); });
+        await act(async () => {
+          await listing.refreshFiles(cached ? { allowCached: true } : {});
+        });
         costs.push({
           indexes: vi.mocked(indexFileListing).mock.calls.length - indexes,
           trees: vi.mocked(buildTree).mock.calls.length - trees,
@@ -196,7 +205,11 @@ describe("Explorer render cost", () => {
     const marks = createPathMarks();
     render(
       <PendingShareMarks.Provider value={marks}>
-        <Explorer {...explorerProps({ files: LARGE_FILE_PATHS.map((path) => ({ path, kind: "file" as const })) })} />
+        <Explorer
+          {...explorerProps({
+            files: LARGE_FILE_PATHS.map((path) => ({ path, kind: "file" as const })),
+          })}
+        />
       </PendingShareMarks.Provider>,
     );
     const baseline = basenameOfCalls();
@@ -223,9 +236,7 @@ describe("Explorer render cost", () => {
     expect(mounted.every((row) => row.style.height === "28px")).toBe(true);
     expect(rowButton("file-0000.md").getAttribute("aria-posinset")).toBe("1");
     expect(rowButton("file-0000.md").getAttribute("aria-setsize")).toBe("500");
-    expect(
-      mounted.some((row) => row.dataset.path === "file-0499.md"),
-    ).toBe(false);
+    expect(mounted.some((row) => row.dataset.path === "file-0499.md")).toBe(false);
   });
 
   it("windows scrolled rows while retaining the focused tree item", () => {
@@ -341,9 +352,7 @@ describe("Explorer render cost", () => {
 
       expect(document.body.contains(rowButton("file-0100.md"))).toBe(true);
       expect(
-        screen
-          .queryAllByTestId("tree-row")
-          .some((row) => row.dataset.path === "file-0080.md"),
+        screen.queryAllByTestId("tree-row").some((row) => row.dataset.path === "file-0080.md"),
       ).toBe(false);
 
       const handle = screen.getByTestId("open-editors-resize");
@@ -420,9 +429,7 @@ describe("Explorer render cost", () => {
     fireEvent.dragEnd(origin);
     await waitFor(() => {
       expect(
-        screen
-          .queryAllByTestId("tree-row")
-          .some((row) => row.dataset.path === "file-0001.md"),
+        screen.queryAllByTestId("tree-row").some((row) => row.dataset.path === "file-0001.md"),
       ).toBe(false);
     });
   });

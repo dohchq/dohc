@@ -14,7 +14,12 @@ beforeEach(() => {
   Element.prototype.scrollIntoView = vi.fn();
   moveWorkspacePath.mockResolvedValue({ path: "" });
   readExplorerMenu.mockResolvedValue([]);
-  window.dohcDesktop = { moveWorkspacePath, readExplorerMenu, createWorkspaceFile, createWorkspaceFolder } as unknown as DohcDesktopBridge;
+  window.dohcDesktop = {
+    moveWorkspacePath,
+    readExplorerMenu,
+    createWorkspaceFile,
+    createWorkspaceFolder,
+  } as unknown as DohcDesktopBridge;
 });
 
 afterEach(() => {
@@ -87,29 +92,32 @@ async function renameTo(path: string, name: string): Promise<void> {
 }
 
 describe("Explorer rename", () => {
-  it.each(["a?b", "CON", "NUL.md", "tail.", "tail ", "a".repeat(253)])("keeps the refused Windows name %s beside its error", async name => {
-    window.dohcDesktop!.platform = "win32";
-    const props = { ...explorerProps(), onBeginChanges: vi.fn() };
-    render(<Explorer {...props} />);
-    const input = await beginRename("notes.md");
-    fireEvent.change(input, { target: { value: name } });
-    fireEvent.keyDown(input, { key: "Enter" });
-    fireEvent.blur(input);
-    expect(screen.getByRole("alert").textContent).toBeTruthy();
-    expect((screen.getByTestId("tree-edit-input") as HTMLInputElement).value).toBe(name);
-    expect(input.getAttribute("aria-invalid")).toBe("true");
-    expect(input.getAttribute("aria-describedby")).toBe(screen.getByRole("alert").id);
-    expect(input.classList.contains("border-danger")).toBe(true);
-    expect(moveWorkspacePath).not.toHaveBeenCalled();
-    expect(props.onBeginChanges).not.toHaveBeenCalled();
-    expect(props.onError).not.toHaveBeenCalled();
-    fireEvent.change(input, { target: { value: "valid" } });
-    expect(screen.queryByRole("alert")).toBeNull();
-    expect(input.hasAttribute("aria-invalid")).toBe(false);
-    expect(input.classList.contains("border-danger")).toBe(false);
-    fireEvent.keyDown(input, { key: "Enter" });
-    await waitFor(() => expect(moveWorkspacePath).toHaveBeenCalledOnce());
-  });
+  it.each(["a?b", "CON", "NUL.md", "tail.", "tail ", "a".repeat(253)])(
+    "keeps the refused Windows name %s beside its error",
+    async (name) => {
+      window.dohcDesktop!.platform = "win32";
+      const props = { ...explorerProps(), onBeginChanges: vi.fn() };
+      render(<Explorer {...props} />);
+      const input = await beginRename("notes.md");
+      fireEvent.change(input, { target: { value: name } });
+      fireEvent.keyDown(input, { key: "Enter" });
+      fireEvent.blur(input);
+      expect(screen.getByRole("alert").textContent).toBeTruthy();
+      expect((screen.getByTestId("tree-edit-input") as HTMLInputElement).value).toBe(name);
+      expect(input.getAttribute("aria-invalid")).toBe("true");
+      expect(input.getAttribute("aria-describedby")).toBe(screen.getByRole("alert").id);
+      expect(input.classList.contains("border-danger")).toBe(true);
+      expect(moveWorkspacePath).not.toHaveBeenCalled();
+      expect(props.onBeginChanges).not.toHaveBeenCalled();
+      expect(props.onError).not.toHaveBeenCalled();
+      fireEvent.change(input, { target: { value: "valid" } });
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(input.hasAttribute("aria-invalid")).toBe(false);
+      expect(input.classList.contains("border-danger")).toBe(false);
+      fireEvent.keyDown(input, { key: "Enter" });
+      await waitFor(() => expect(moveWorkspacePath).toHaveBeenCalledOnce());
+    },
+  );
 
   it("validates a Windows new folder inline before mutation", async () => {
     window.dohcDesktop!.platform = "win32";
@@ -117,7 +125,9 @@ describe("Explorer rename", () => {
     const input = await screen.findByTestId("tree-edit-input");
     fireEvent.change(input, { target: { value: "a?b" } });
     fireEvent.keyDown(input, { key: "Enter" });
-    expect(screen.getByRole("alert").textContent).toBe("A name cannot contain a question mark (?). Remove it.");
+    expect(screen.getByRole("alert").textContent).toBe(
+      "A name cannot contain a question mark (?). Remove it.",
+    );
     expect(input.getAttribute("aria-invalid")).toBe("true");
     expect(input.classList.contains("border-danger")).toBe(true);
     expect((input as HTMLInputElement).value).toBe("a?b");
@@ -127,18 +137,25 @@ describe("Explorer rename", () => {
     expect(screen.queryByTestId("tree-edit-input")).toBeNull();
   });
 
-  it.each([".env", "旅.md", "NOTES.md", "folder/moved.md"])("allows Windows rename to %s", async name => {
-    window.dohcDesktop!.platform = "win32";
-    render(<Explorer {...explorerProps()} />);
-    await renameTo("notes.md", name);
-    await waitFor(() => expect(moveWorkspacePath).toHaveBeenCalledWith(expect.objectContaining({ toPath: name })));
-  });
+  it.each([".env", "旅.md", "NOTES.md", "folder/moved.md"])(
+    "allows Windows rename to %s",
+    async (name) => {
+      window.dohcDesktop!.platform = "win32";
+      render(<Explorer {...explorerProps()} />);
+      await renameTo("notes.md", name);
+      await waitFor(() =>
+        expect(moveWorkspacePath).toHaveBeenCalledWith(expect.objectContaining({ toPath: name })),
+      );
+    },
+  );
 
-  it.each(["darwin", "linux"] as const)("keeps %s punctuation behavior", async platform => {
+  it.each(["darwin", "linux"] as const)("keeps %s punctuation behavior", async (platform) => {
     window.dohcDesktop!.platform = platform;
     render(<Explorer {...explorerProps()} />);
     await renameTo("notes.md", "a?b");
-    await waitFor(() => expect(moveWorkspacePath).toHaveBeenCalledWith(expect.objectContaining({ toPath: "a?b.md" })));
+    await waitFor(() =>
+      expect(moveWorkspacePath).toHaveBeenCalledWith(expect.objectContaining({ toPath: "a?b.md" })),
+    );
   });
 
   it("keeps renaming through an Enter or Escape that an input method owns", async () => {
@@ -152,7 +169,9 @@ describe("Explorer rename", () => {
     expect(moveWorkspacePath).not.toHaveBeenCalled();
     fireEvent.keyDown(input, { key: "Enter" });
     await waitFor(() =>
-      expect(moveWorkspacePath).toHaveBeenCalledWith(expect.objectContaining({ fromPath: "report.csv", toPath: "旅.csv" })),
+      expect(moveWorkspacePath).toHaveBeenCalledWith(
+        expect.objectContaining({ fromPath: "report.csv", toPath: "旅.csv" }),
+      ),
     );
   });
 
@@ -179,7 +198,9 @@ describe("Explorer rename", () => {
         toPath: "summary.csv",
       }),
     );
-    await waitFor(() => expect((document.activeElement as HTMLElement).dataset.path).toBe("summary.csv"));
+    await waitFor(() =>
+      expect((document.activeElement as HTMLElement).dataset.path).toBe("summary.csv"),
+    );
   });
 
   it.each([
@@ -223,7 +244,9 @@ describe("Explorer rename", () => {
         toPath: "NOTICE",
       }),
     );
-    await waitFor(() => expect((document.activeElement as HTMLElement).dataset.path).toBe("NOTICE"));
+    await waitFor(() =>
+      expect((document.activeElement as HTMLElement).dataset.path).toBe("NOTICE"),
+    );
   });
 
   it("keeps an explicit extension", async () => {
@@ -256,7 +279,11 @@ it.each(["Enter", "Escape"])("returns to the tree row after rename %s", async (k
   const input = await screen.findByTestId("tree-edit-input");
   expect(document.activeElement).toBe(input);
   fireEvent.keyDown(input, { key });
-  await waitFor(() => expect(document.activeElement).toBe(screen.getAllByTestId("tree-row").find((node) => node.dataset.path === "notes.md")));
+  await waitFor(() =>
+    expect(document.activeElement).toBe(
+      screen.getAllByTestId("tree-row").find((node) => node.dataset.path === "notes.md"),
+    ),
+  );
 });
 // Focus returns to the renamed row during the same keydown. A browser presses
 // that row with the key's default action, which opened the new path before
@@ -273,10 +300,17 @@ it("keeps the key that ends a rename from pressing the row focus returns to", as
 it("follows the renamed row through its optimistic path change", async () => {
   render(<Explorer {...explorerProps()} />);
   await renameTo("hello.m", "renamed.md");
-  await waitFor(() => expect((document.activeElement as HTMLElement).dataset.path).toBe("renamed.md"));
+  await waitFor(() =>
+    expect((document.activeElement as HTMLElement).dataset.path).toBe("renamed.md"),
+  );
 });
 it("keeps the clicked destination when rename ends by blur", async () => {
-  render(<><button>Elsewhere</button><Explorer {...explorerProps()} /></>);
+  render(
+    <>
+      <button>Elsewhere</button>
+      <Explorer {...explorerProps()} />
+    </>,
+  );
   const row = screen.getAllByTestId("tree-row").find((node) => node.dataset.path === "notes.md")!;
   fireEvent.click(row);
   fireEvent.keyDown(row, { key: "F2" });
@@ -299,10 +333,18 @@ it("does not reuse a rename destination after another focused row is deleted", a
   const props = explorerProps();
   const view = render(<Explorer {...props} />);
   await renameTo("hello.m", "renamed.md");
-  await waitFor(() => expect((document.activeElement as HTMLElement).dataset.path).toBe("renamed.md"));
-  const renamedFiles = [{ path: "renamed.md", kind: "file" as const }, { path: "notes.md", kind: "file" as const }];
+  await waitFor(() =>
+    expect((document.activeElement as HTMLElement).dataset.path).toBe("renamed.md"),
+  );
+  const renamedFiles = [
+    { path: "renamed.md", kind: "file" as const },
+    { path: "notes.md", kind: "file" as const },
+  ];
   view.rerender(<Explorer {...props} files={renamedFiles} />);
-  screen.getAllByTestId("tree-row").find(node => node.dataset.path === "notes.md")!.focus();
+  screen
+    .getAllByTestId("tree-row")
+    .find((node) => node.dataset.path === "notes.md")!
+    .focus();
   view.rerender(<Explorer {...props} files={renamedFiles.slice(0, 1)} />);
   await act(async () => {});
   expect(document.activeElement).toBe(screen.getByTestId("file-tree"));
@@ -310,16 +352,29 @@ it("does not reuse a rename destination after another focused row is deleted", a
 
 it("does not remember a rename completed by deliberately moving focus away", async () => {
   const props = explorerProps();
-  const view = render(<><button>Elsewhere</button><Explorer {...props} /></>);
-  const row = screen.getAllByTestId("tree-row").find(node => node.dataset.path === "hello.m")!;
+  const view = render(
+    <>
+      <button>Elsewhere</button>
+      <Explorer {...props} />
+    </>,
+  );
+  const row = screen.getAllByTestId("tree-row").find((node) => node.dataset.path === "hello.m")!;
   fireEvent.click(row);
   fireEvent.keyDown(row, { key: "F2" });
   const input = await screen.findByTestId("tree-edit-input");
   fireEvent.change(input, { target: { value: "renamed.md" } });
   screen.getByText("Elsewhere").focus();
   await waitFor(() => expect(screen.queryByTestId("tree-edit-input")).toBeNull());
-  screen.getAllByTestId("tree-row").find(node => node.dataset.path === "notes.md")!.focus();
-  view.rerender(<><button>Elsewhere</button><Explorer {...props} files={[{ path: "renamed.md", kind: "file" }]} /></>);
+  screen
+    .getAllByTestId("tree-row")
+    .find((node) => node.dataset.path === "notes.md")!
+    .focus();
+  view.rerender(
+    <>
+      <button>Elsewhere</button>
+      <Explorer {...props} files={[{ path: "renamed.md", kind: "file" }]} />
+    </>,
+  );
   await act(async () => {});
   expect(document.activeElement).toBe(screen.getByTestId("file-tree"));
 });
@@ -330,8 +385,12 @@ it("returns to the original row after an optimistic rename rolls back", async ()
   const props = explorerProps();
   render(<Explorer {...props} />);
   await renameTo("hello.m", "renamed.md");
-  await waitFor(() => expect((document.activeElement as HTMLElement).dataset.path).toBe("renamed.md"));
-  await act(async () => { move.reject(new Error("Rename failed")); });
+  await waitFor(() =>
+    expect((document.activeElement as HTMLElement).dataset.path).toBe("renamed.md"),
+  );
+  await act(async () => {
+    move.reject(new Error("Rename failed"));
+  });
   expect((document.activeElement as HTMLElement).dataset.path).toBe("hello.m");
 });
 
@@ -344,7 +403,9 @@ it("does not close a new folder input while a rename waits to begin", async () =
   view.rerender(<Explorer {...props} newFolderRequest={1} />);
   const nextInput = screen.getByTestId("tree-edit-input");
   expect((nextInput as HTMLInputElement).readOnly).toBe(false);
-  await act(async () => { begin.resolve(null); });
+  await act(async () => {
+    begin.resolve(null);
+  });
   expect(screen.getByTestId("tree-edit-input")).toBe(nextInput);
   expect(document.activeElement).toBe(nextInput);
 });

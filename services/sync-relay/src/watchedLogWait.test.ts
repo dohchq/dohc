@@ -2,7 +2,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { DiscussionActivityHub, ownerLogWaitGroup } from "./discussionActivity";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
 import { ReplicaWatches } from "./replicaWatches";
-import { appendLog, claimWorkspace, closeTestStorages, jsonBody, request, resolveTestActor, testHandler, testStorage } from "./testing";
+import {
+  appendLog,
+  claimWorkspace,
+  closeTestStorages,
+  jsonBody,
+  request,
+  resolveTestActor,
+  testHandler,
+  testStorage,
+} from "./testing";
 
 const registries: ReplicaWatches[] = [];
 afterEach(async () => {
@@ -17,7 +26,8 @@ async function fixture() {
   const state = new Set<string>();
   const watches = { watched: vi.fn((workspaceId: string) => state.has(workspaceId)) };
   const setWatched = (workspaceId: string, watched: boolean) => {
-    if (watched) state.add(workspaceId); else state.delete(workspaceId);
+    if (watched) state.add(workspaceId);
+    else state.delete(workspaceId);
     activity.wake(ownerLogWaitGroup(workspaceId));
   };
   let revoked = false;
@@ -31,7 +41,16 @@ async function fixture() {
   });
   await claimWorkspace(h, "owner", "a");
   await claimWorkspace(h, "owner", "b");
-  return { h, activity, watches, state, setWatched, revoke: () => { revoked = true; } };
+  return {
+    h,
+    activity,
+    watches,
+    state,
+    setWatched,
+    revoke: () => {
+      revoked = true;
+    },
+  };
 }
 
 describe("owner watched held read", () => {
@@ -44,14 +63,34 @@ describe("owner watched held read", () => {
     await claimWorkspace(h, "owner", "a");
     vi.useFakeTimers();
     let started: Response | undefined;
-    const start = h(request("owner", "/sync/a/log?since=0&hold=30000")).then(r => { started = r; return r; });
+    const start = h(request("owner", "/sync/a/log?since=0&hold=30000")).then((r) => {
+      started = r;
+      return r;
+    });
     await vi.advanceTimersByTimeAsync(0);
     expect(activity.stats().waiters).toBe(1);
     watches.holdReader({
       ok: true,
-      share: { shareId: "share", workspaceId: "a", granterUserId: "owner", selectorJson: '{"paths":["/"]}', createdAtMs: 1 },
-      grant: { grantId: "grant", shareId: "share", principalKind: "user", principalUserId: "reader", principalEmail: null,
-        access: "view", generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null },
+      share: {
+        shareId: "share",
+        workspaceId: "a",
+        granterUserId: "owner",
+        selectorJson: '{"paths":["/"]}',
+        createdAtMs: 1,
+      },
+      grant: {
+        grantId: "grant",
+        shareId: "share",
+        principalKind: "user",
+        principalUserId: "reader",
+        principalEmail: null,
+        access: "view",
+        generation: 1,
+        status: "active",
+        createdAtMs: 1,
+        revokedAtMs: null,
+        parentGrantId: null,
+      },
       effectiveSelector: { versionId: "main", paths: ["/"], access: "view" },
     });
     await vi.advanceTimersByTimeAsync(0);
@@ -59,7 +98,10 @@ describe("owner watched held read", () => {
     expect(await (await start).json()).toMatchObject({ watched: true });
     await vi.advanceTimersByTimeAsync(10_000);
     let response: Response | undefined;
-    const end = h(request("owner", "/sync/a/log?since=0&hold=30000&watched=1")).then(r => { response = r; return r; });
+    const end = h(request("owner", "/sync/a/log?since=0&hold=30000&watched=1")).then((r) => {
+      response = r;
+      return r;
+    });
     await vi.advanceTimersByTimeAsync(24_000);
     expect(response).toBeUndefined();
     await vi.advanceTimersByTimeAsync(1_000);
@@ -74,7 +116,10 @@ describe("owner watched held read", () => {
     vi.useFakeTimers();
     f.watches.watched.mockImplementationOnce(() => false).mockImplementation(() => true);
     let response: Response | undefined;
-    const held = f.h(request("owner", "/sync/a/log?since=0&hold=30000")).then(r => { response = r; return r; });
+    const held = f.h(request("owner", "/sync/a/log?since=0&hold=30000")).then((r) => {
+      response = r;
+      return r;
+    });
     await vi.advanceTimersByTimeAsync(0);
     expect(response).toBeDefined();
     expect(await (await held).json()).toMatchObject({ watched: true });
@@ -85,13 +130,18 @@ describe("owner watched held read", () => {
     const f = await fixture();
     vi.useFakeTimers();
     let response: Response | undefined;
-    const held = f.h(request("owner", "/sync/a/log?since=0&hold=30000")).then(r => { response = r; return r; });
+    const held = f.h(request("owner", "/sync/a/log?since=0&hold=30000")).then((r) => {
+      response = r;
+      return r;
+    });
     await vi.advanceTimersByTimeAsync(0);
     expect(f.activity.stats().waiters).toBe(1);
     f.setWatched("a", true);
     await vi.advanceTimersByTimeAsync(100);
     expect(response).toBeDefined();
-    expect(await (await held).text()).toBe('{"ok":true,"ops":[],"nextCursor":0,"hasMore":false,"watched":true}');
+    expect(await (await held).text()).toBe(
+      '{"ok":true,"ops":[],"nextCursor":0,"hasMore":false,"watched":true}',
+    );
   });
 
   it("answers when the reported watch expires", async () => {
@@ -99,7 +149,10 @@ describe("owner watched held read", () => {
     vi.useFakeTimers();
     f.setWatched("a", true);
     let response: Response | undefined;
-    const held = f.h(request("owner", "/sync/a/log?since=0&hold=30000&watched=1")).then(r => { response = r; return r; });
+    const held = f.h(request("owner", "/sync/a/log?since=0&hold=30000&watched=1")).then((r) => {
+      response = r;
+      return r;
+    });
     await vi.advanceTimersByTimeAsync(0);
     expect(f.activity.stats().waiters).toBe(1);
     f.setWatched("a", false);
@@ -113,7 +166,10 @@ describe("owner watched held read", () => {
     vi.useFakeTimers();
     f.setWatched("a", true);
     let response: Response | undefined;
-    const held = f.h(request("owner", "/sync/a/log?since=0&hold=30000")).then(r => { response = r; return r; });
+    const held = f.h(request("owner", "/sync/a/log?since=0&hold=30000")).then((r) => {
+      response = r;
+      return r;
+    });
     await vi.advanceTimersByTimeAsync(0);
     expect(response).toBeDefined();
     expect(await (await held).json()).toMatchObject({ watched: true });
@@ -122,10 +178,18 @@ describe("owner watched held read", () => {
 
   it("returns rows available and watched together without serving rows", async () => {
     const f = await fixture();
-    await appendLog(f.h, "owner", "a", [{ originSeq: 0, opKind: "workspace.init", payload: {}, recordedAtMs: 1000 }]);
+    await appendLog(f.h, "owner", "a", [
+      { originSeq: 0, opKind: "workspace.init", payload: {}, recordedAtMs: 1000 },
+    ]);
     f.setWatched("a", true);
     const held = await f.h(request("owner", "/sync/a/log?since=0&hold=30000&watched=1"));
-    expect(await held.json()).toEqual({ ok: true, ops: [], nextCursor: 0, hasMore: true, watched: true });
+    expect(await held.json()).toEqual({
+      ok: true,
+      ops: [],
+      nextCursor: 0,
+      hasMore: true,
+      watched: true,
+    });
     const page = await f.h(request("owner", "/sync/a/log?since=0"));
     expect(await page.json()).not.toHaveProperty("watched");
     expect(f.activity.stats().waiters).toBe(0);
@@ -135,7 +199,10 @@ describe("owner watched held read", () => {
     const f = await fixture();
     vi.useFakeTimers();
     let response: Response | undefined;
-    const held = f.h(request("owner", "/sync/a/log?since=0&hold=30000&watched=1")).then(r => { response = r; return r; });
+    const held = f.h(request("owner", "/sync/a/log?since=0&hold=30000&watched=1")).then((r) => {
+      response = r;
+      return r;
+    });
     await vi.advanceTimersByTimeAsync(0);
     expect(response).toBeDefined();
     expect(await (await held).text()).toBe('{"ok":true,"ops":[],"nextCursor":0,"hasMore":false}');
@@ -145,7 +212,10 @@ describe("owner watched held read", () => {
     const f = await fixture();
     vi.useFakeTimers();
     let answered = false;
-    const held = f.h(request("owner", "/sync/b/log?since=7&hold=30000")).then(r => { answered = true; return r; });
+    const held = f.h(request("owner", "/sync/b/log?since=7&hold=30000")).then((r) => {
+      answered = true;
+      return r;
+    });
     await vi.advanceTimersByTimeAsync(0);
     f.setWatched("a", true);
     await vi.advanceTimersByTimeAsync(29_999);
@@ -162,12 +232,17 @@ describe("owner watched held read", () => {
     vi.useFakeTimers();
     f.setWatched("a", true);
     let answered = false;
-    const held = f.h(request("owner", "/sync/a/log?since=0&hold=30000&watched=1")).then(r => { answered = true; return r; });
+    const held = f.h(request("owner", "/sync/a/log?since=0&hold=30000&watched=1")).then((r) => {
+      answered = true;
+      return r;
+    });
     await vi.advanceTimersByTimeAsync(29_999);
     expect(answered).toBe(false);
     expect(f.activity.stats().waiters).toBe(1);
     await vi.advanceTimersByTimeAsync(1);
-    expect(await (await held).text()).toBe('{"ok":true,"ops":[],"nextCursor":0,"hasMore":false,"watched":true}');
+    expect(await (await held).text()).toBe(
+      '{"ok":true,"ops":[],"nextCursor":0,"hasMore":false,"watched":true}',
+    );
   });
 
   it("a non-owner gets 404 without inspecting or creating watch state", async () => {
@@ -181,52 +256,113 @@ describe("owner watched held read", () => {
 
   it("counts the rows the caller says it appended, and wakes for any row past them", async () => {
     const f = await fixture();
-    await appendLog(f.h, "owner", "a", [0, 1].map(originSeq => ({ originSeq, opKind: "workspace.init", payload: {}, recordedAtMs: 1000 })));
+    await appendLog(
+      f.h,
+      "owner",
+      "a",
+      [0, 1].map((originSeq) => ({
+        originSeq,
+        opKind: "workspace.init",
+        payload: {},
+        recordedAtMs: 1000,
+      })),
+    );
     const settled = await f.h(request("owner", "/sync/a/log?since=0&hold=0&known=2"));
-    expect(await settled.text()).toBe('{"ok":true,"ops":[],"nextCursor":0,"hasMore":false,"known":2}');
+    expect(await settled.text()).toBe(
+      '{"ok":true,"ops":[],"nextCursor":0,"hasMore":false,"known":2}',
+    );
     vi.useFakeTimers();
     let response: Response | undefined;
-    const held = f.h(request("owner", "/sync/a/log?since=0&hold=30000&known=2")).then(r => { response = r; return r; });
+    const held = f.h(request("owner", "/sync/a/log?since=0&hold=30000&known=2")).then((r) => {
+      response = r;
+      return r;
+    });
     await vi.advanceTimersByTimeAsync(0);
     expect(response).toBeUndefined();
     expect(f.activity.stats().waiters).toBe(1);
-    await appendLog(f.h, "owner", "a", [{ originSeq: 0, opKind: "workspace.init", payload: {}, recordedAtMs: 1000 }], { originId: "origin-b" });
+    await appendLog(
+      f.h,
+      "owner",
+      "a",
+      [{ originSeq: 0, opKind: "workspace.init", payload: {}, recordedAtMs: 1000 }],
+      { originId: "origin-b" },
+    );
     await vi.advanceTimersByTimeAsync(0);
-    expect(await (await held).text()).toBe('{"ok":true,"ops":[],"nextCursor":0,"hasMore":true,"known":2}');
+    expect(await (await held).text()).toBe(
+      '{"ok":true,"ops":[],"nextCursor":0,"hasMore":true,"known":2}',
+    );
   });
 
   it("answers a counted read the way a pull of that many rows reports more", async () => {
     const f = await fixture();
-    await appendLog(f.h, "owner", "a", [0, 1, 2].map(originSeq => ({ originSeq, opKind: "workspace.init", payload: {}, recordedAtMs: 1000 })));
+    await appendLog(
+      f.h,
+      "owner",
+      "a",
+      [0, 1, 2].map((originSeq) => ({
+        originSeq,
+        opKind: "workspace.init",
+        payload: {},
+        recordedAtMs: 1000,
+      })),
+    );
     for (const since of [0, 1, 3]) {
       for (const known of [1, 2, 3, 4]) {
-        const held = await (await f.h(request("owner", `/sync/a/log?since=${since}&hold=0&known=${known}`))).json();
-        const page = await (await f.h(request("owner", `/sync/a/log?since=${since}&limit=${known}`))).json();
-        expect(held, `since ${since}, known ${known}`).toMatchObject({ hasMore: page.hasMore, known });
+        const held = await (
+          await f.h(request("owner", `/sync/a/log?since=${since}&hold=0&known=${known}`))
+        ).json();
+        const page = await (
+          await f.h(request("owner", `/sync/a/log?since=${since}&limit=${known}`))
+        ).json();
+        expect(held, `since ${since}, known ${known}`).toMatchObject({
+          hasMore: page.hasMore,
+          known,
+        });
       }
     }
   });
 
   it("wakes as before for a claim above its limit, or rows an epoch hides", async () => {
     const f = await fixture();
-    await appendLog(f.h, "owner", "a", [{ originSeq: 0, opKind: "workspace.init", payload: {}, recordedAtMs: 1000 }]);
+    await appendLog(f.h, "owner", "a", [
+      { originSeq: 0, opKind: "workspace.init", payload: {}, recordedAtMs: 1000 },
+    ]);
     const above = await f.h(request("owner", "/sync/a/log?since=0&hold=0&known=1025"));
     expect(await above.text()).toBe('{"ok":true,"ops":[],"nextCursor":0,"hasMore":true}');
     const at = await f.h(request("owner", "/sync/a/log?since=0&hold=0&known=1024"));
     expect(await at.json()).toMatchObject({ hasMore: false, known: 1024 });
-    const rotated = await f.h(request("owner", "/sync/a/epoch", jsonBody({ replicationEpoch: "epoch-2", streamIdentity: "stream-2" })));
+    const rotated = await f.h(
+      request(
+        "owner",
+        "/sync/a/epoch",
+        jsonBody({ replicationEpoch: "epoch-2", streamIdentity: "stream-2" }),
+      ),
+    );
     expect(rotated.status, await rotated.clone().text()).toBe(200);
-    await appendLog(f.h, "owner", "a", [{ originSeq: 1, opKind: "workspace.init", payload: {}, recordedAtMs: 1000 }],
-      { replicationEpoch: "epoch-2", streamIdentity: "stream-2" });
-    const floored = await f.h(request("owner", "/sync/a/log?since=0&hold=0&known=1&replicationEpoch=epoch-2&streamIdentity=stream-2"));
+    await appendLog(
+      f.h,
+      "owner",
+      "a",
+      [{ originSeq: 1, opKind: "workspace.init", payload: {}, recordedAtMs: 1000 }],
+      { replicationEpoch: "epoch-2", streamIdentity: "stream-2" },
+    );
+    const floored = await f.h(
+      request(
+        "owner",
+        "/sync/a/log?since=0&hold=0&known=1&replicationEpoch=epoch-2&streamIdentity=stream-2",
+      ),
+    );
     expect(await floored.json()).toMatchObject({ hasMore: true, known: 0 });
   });
 
-  it.each(["-1", "1.5", "", "01", "x"])("refuses a held read whose known count is %j", async known => {
-    const f = await fixture();
-    const response = await f.h(request("owner", `/sync/a/log?since=0&hold=0&known=${known}`));
-    expect(response.status).toBe(400);
-  });
+  it.each(["-1", "1.5", "", "01", "x"])(
+    "refuses a held read whose known count is %j",
+    async (known) => {
+      const f = await fixture();
+      const response = await f.h(request("owner", `/sync/a/log?since=0&hold=0&known=${known}`));
+      expect(response.status).toBe(400);
+    },
+  );
 
   it("a watch wake rechecks the session before disclosing its state", async () => {
     const f = await fixture();

@@ -14,10 +14,7 @@ import {
   waitForWorkspaceFile,
   writeWorkspaceFiles,
 } from "./helpers/workspace";
-import {
-  cleanupTestScratch,
-  createTestScratch,
-} from "../src/workspaces/testTemp";
+import { cleanupTestScratch, createTestScratch } from "../src/workspaces/testTemp";
 
 // A real 2x2 PNG (green/blue pixels). Bytes must decode to a paintable image so
 // the assertions below (naturalWidth > 0) exercise the whole serve→decode path,
@@ -30,10 +27,7 @@ test.afterEach(async () => {
   await cleanupTestScratch();
 });
 
-async function openMarkdownDoc(
-  page: import("@playwright/test").Page,
-  path: string,
-): Promise<void> {
+async function openMarkdownDoc(page: import("@playwright/test").Page, path: string): Promise<void> {
   await revealExplorerPath(page, path);
   await explorerRow(page, path).click();
   // A plain (non-engine) markdown file opens straight into the WYSIWYG editor.
@@ -44,16 +38,13 @@ async function openMarkdownDoc(
 // privileged dohc-file:// scheme at render time. Assert the <img> actually
 // decoded (naturalWidth > 0) — an attribute-only check would pass even if CSP
 // or the protocol silently blocked the load.
-async function expectEditorImagePainted(
-  page: import("@playwright/test").Page,
-): Promise<void> {
+async function expectEditorImagePainted(page: import("@playwright/test").Page): Promise<void> {
   const img = page.locator(".dohc-editor-image");
   await expect(img).toBeVisible({ timeout: 15_000 });
   await expect
-    .poll(
-      async () => await img.first().evaluate((el) => (el as HTMLImageElement).naturalWidth),
-      { timeout: 15_000 },
-    )
+    .poll(async () => await img.first().evaluate((el) => (el as HTMLImageElement).naturalWidth), {
+      timeout: 15_000,
+    })
     .toBeGreaterThan(0);
 }
 
@@ -241,9 +232,7 @@ test("dragging an image file onto the editor embeds it into the configured attac
       .poll(async () => await readdir(join(temp.rootPath, "attachments")).catch(() => []))
       .toEqual([expect.stringMatching(/^dragged-shot-[0-9a-z]+\.png$/)]);
     const [written] = await readdir(join(temp.rootPath, "attachments"));
-    expect(await readFile(join(temp.rootPath, "attachments", written!))).toEqual(
-      PNG_BYTES,
-    );
+    expect(await readFile(join(temp.rootPath, "attachments", written!))).toEqual(PNG_BYTES);
 
     // The node's src is the document-relative form that climbs to the root.
     await expect(page.locator(".dohc-editor-image").first()).toHaveAttribute(
@@ -340,9 +329,7 @@ test("opening an image file directly in the media viewer does not crash", async 
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
-    await writeWorkspaceFiles(temp, [
-      { path: "assets/pic.png", contents: PNG_BYTES },
-    ]);
+    await writeWorkspaceFiles(temp, [{ path: "assets/pic.png", contents: PNG_BYTES }]);
     desktop = await launchDesktopApp({ workspace: temp });
     const { page } = desktop;
     const workspace = await openWorkspaceFromFirstRun(page, temp);
@@ -354,10 +341,9 @@ test("opening an image file directly in the media viewer does not crash", async 
     await expect(view).toBeVisible({ timeout: 15_000 });
     const img = view.locator("img");
     await expect
-      .poll(
-        async () => await img.evaluate((el) => (el as HTMLImageElement).naturalWidth),
-        { timeout: 15_000 },
-      )
+      .poll(async () => await img.evaluate((el) => (el as HTMLImageElement).naturalWidth), {
+        timeout: 15_000,
+      })
       .toBeGreaterThan(0);
 
     // The window must still be alive (a crash would tear down the renderer).

@@ -9,8 +9,7 @@ import { ORPHANED_DRAFT_STORAGE_PREFIX } from "../orphanedDraftStorage";
 import { harnessBridge } from "./engineDocChunkingTestHarness";
 
 let projectionShouldFail = false;
-let projectionGate: { promise: Promise<void>; release: () => void } | null =
-  null;
+let projectionGate: { promise: Promise<void>; release: () => void } | null = null;
 vi.mock("@dohc/ydoc-projection", async (importOriginal) => {
   if (projectionGate) await projectionGate.promise;
   if (projectionShouldFail) throw new Error("projection import failed");
@@ -113,14 +112,10 @@ it("persists a lossless rich snapshot when delivery and projection fail", async 
   harness = harnessBridge(richTextInitialUpdate());
   harness.rejectUpdates();
   vi.stubGlobal("dohcDesktop", harness.api);
-  const consoleError = vi
-    .spyOn(console, "error")
-    .mockImplementation(() => undefined);
+  const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
   const retained = retainDocument();
-  await waitFor(() =>
-    expect(retained.snapshot.outcome?.kind).toBe("bound"),
-  );
+  await waitFor(() => expect(retained.snapshot.outcome?.kind).toBe("bound"));
   act(() => {
     editRichDocument(retained.boundDoc());
   });
@@ -134,7 +129,9 @@ it("persists a lossless rich snapshot when delivery and projection fail", async 
   // renderer process would, instead of consulting this run's in-memory store.
   let storedText = "";
   await waitFor(() => {
-    const keys = Object.keys(localStorage).filter(key => key.startsWith(ORPHANED_DRAFT_STORAGE_PREFIX));
+    const keys = Object.keys(localStorage).filter((key) =>
+      key.startsWith(ORPHANED_DRAFT_STORAGE_PREFIX),
+    );
     expect(keys).toHaveLength(1);
     const raw = localStorage.getItem(keys[0]!);
     expect(raw).not.toBeNull();
@@ -142,13 +139,9 @@ it("persists a lossless rich snapshot when delivery and projection fail", async 
     expect(storedText).toMatch(/<!-- dohc-ydoc-recovery-v1:[A-Za-z0-9+/=]+ -->/u);
   });
 
-  const encoded = storedText.match(
-    /<!-- dohc-ydoc-recovery-v1:([A-Za-z0-9+/=]+) -->/u,
-  )![1]!;
+  const encoded = storedText.match(/<!-- dohc-ydoc-recovery-v1:([A-Za-z0-9+/=]+) -->/u)![1]!;
   const binary = atob(encoded);
-  const snapshot = Uint8Array.from(binary, (character) =>
-    character.charCodeAt(0),
-  );
+  const snapshot = Uint8Array.from(binary, (character) => character.charCodeAt(0));
   const recovered = new Y.Doc();
   Y.applyUpdate(recovered, snapshot);
   const body = recovered.getXmlFragment("body").toString();
@@ -171,22 +164,16 @@ it("persists a lossless rich snapshot when a deletion's projection fails", async
   projectionShouldFail = true;
   harness = harnessBridge(richTextInitialUpdate());
   vi.stubGlobal("dohcDesktop", harness.api);
-  const consoleError = vi
-    .spyOn(console, "error")
-    .mockImplementation(() => undefined);
+  const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
   const drafts = renderHook(() => useOrphanedDrafts("ws-1", "notes/rich.md"));
   const retained = retainDocument();
-  await waitFor(() =>
-    expect(retained.snapshot.outcome?.kind).toBe("bound"),
-  );
+  await waitFor(() => expect(retained.snapshot.outcome?.kind).toBe("bound"));
   act(() => {
     editRichDocument(retained.boundDoc());
   });
   harness.emitNow("deleted", 0);
-  await waitFor(() =>
-    expect(drafts.result.current.length).toBe(1),
-  );
+  await waitFor(() => expect(drafts.result.current.length).toBe(1));
   drafts.unmount();
   const doc = retained.boundDoc();
   retained.release();
@@ -197,7 +184,9 @@ it("persists a lossless rich snapshot when a deletion's projection fails", async
   // row, as the next renderer process would.
   let storedText = "";
   await waitFor(() => {
-    const keys = Object.keys(localStorage).filter(key => key.startsWith(ORPHANED_DRAFT_STORAGE_PREFIX));
+    const keys = Object.keys(localStorage).filter((key) =>
+      key.startsWith(ORPHANED_DRAFT_STORAGE_PREFIX),
+    );
     expect(keys).toHaveLength(1);
     const raw = localStorage.getItem(keys[0]!);
     expect(raw).not.toBeNull();
@@ -205,12 +194,8 @@ it("persists a lossless rich snapshot when a deletion's projection fails", async
     expect(storedText).toMatch(/<!-- dohc-ydoc-recovery-v1:[A-Za-z0-9+/=]+ -->/u);
   });
 
-  const encoded = storedText.match(
-    /<!-- dohc-ydoc-recovery-v1:([A-Za-z0-9+/=]+) -->/u,
-  )![1]!;
-  const snapshot = Uint8Array.from(atob(encoded), (character) =>
-    character.charCodeAt(0),
-  );
+  const encoded = storedText.match(/<!-- dohc-ydoc-recovery-v1:([A-Za-z0-9+/=]+) -->/u)![1]!;
+  const snapshot = Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0));
   const recovered = new Y.Doc();
   Y.applyUpdate(recovered, snapshot);
   const body = recovered.getXmlFragment("body").toString();
@@ -245,17 +230,18 @@ it("persists a crude-text draft synchronously, before the held projection import
   harness.emitNow("deleted", 0);
 
   await waitFor(() =>
-    expect(drafts.result.current.length, "skip the synchronous captureOrphanedDraft call in captureDeletion -> this reads 'none' because nothing is durable yet; the only route to a draft would be the still-held projection import.").toBe(1),
+    expect(
+      drafts.result.current.length,
+      "skip the synchronous captureOrphanedDraft call in captureDeletion -> this reads 'none' because nothing is durable yet; the only route to a draft would be the still-held projection import.",
+    ).toBe(1),
   );
   expect(drafts.result.current.at(-1)?.text).toContain("My Heading");
 
   release();
-  await waitFor(
-    () => {
-      expect(drafts.result.current.length).toBe(1);
-      expect(drafts.result.current.at(-1)?.text).toBe("# My Heading\n");
-    },
-  );
+  await waitFor(() => {
+    expect(drafts.result.current.length).toBe(1);
+    expect(drafts.result.current.at(-1)?.text).toBe("# My Heading\n");
+  });
   // Upgraded in place, not appended: still exactly one row for this path.
   expect(drafts.result.current.length).toBe(1);
 });

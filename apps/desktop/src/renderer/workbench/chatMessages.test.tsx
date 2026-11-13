@@ -114,24 +114,46 @@ describe("ChatComposer Enter-to-send", () => {
 
 describe("chat authorship display", () => {
   it("does not infer self or colours from a settings display name", () => {
-    setChosenColors({ ...DEFAULT_USER_SETTINGS, appearance: { ...DEFAULT_USER_SETTINGS.appearance, yourColor: "plum" } });
-    const messages: ChatMessageRecord[] = [{ presentation: { group: "fixture", hue: null, self: false },
-      id: "m1", threadId: "thread", authorKind: "human", authorDisplayName: "Ada",
-      body: "Hello", createdAtMs: new Date(2026, 8, 17, 12).getTime(),
-    }];
+    setChosenColors({
+      ...DEFAULT_USER_SETTINGS,
+      appearance: { ...DEFAULT_USER_SETTINGS.appearance, yourColor: "plum" },
+    });
+    const messages: ChatMessageRecord[] = [
+      {
+        presentation: { group: "fixture", hue: null, self: false },
+        id: "m1",
+        threadId: "thread",
+        authorKind: "human",
+        authorDisplayName: "Ada",
+        body: "Hello",
+        createdAtMs: new Date(2026, 8, 17, 12).getTime(),
+      },
+    ];
     const listRef = createRef<ChatMessageListHandle>();
     // The same list element throughout, so only the settings change.
     const list = (
-      <ChatMessageList testIdPrefix="test-chat" messages={messages} loading={false} emptyLabel="No messages" listRef={listRef} />
+      <ChatMessageList
+        testIdPrefix="test-chat"
+        messages={messages}
+        loading={false}
+        emptyLabel="No messages"
+        listRef={listRef}
+      />
     );
-    const save = (settings: typeof DEFAULT_USER_SETTINGS) =>
-      <AgentSettingsProvider settings={settings}>{list}</AgentSettingsProvider>;
+    const save = (settings: typeof DEFAULT_USER_SETTINGS) => (
+      <AgentSettingsProvider settings={settings}>{list}</AgentSettingsProvider>
+    );
     const { rerender } = render(save(DEFAULT_USER_SETTINGS));
     expect(screen.getByTitle("Ada").className).toContain("text-muted");
     const scans = vi.mocked(scanChatLinks).mock.calls.length;
 
     // A save that hides a sidebar view is a new settings object.
-    rerender(save({ ...DEFAULT_USER_SETTINGS, sidebar: { ...DEFAULT_USER_SETTINGS.sidebar, hidden: ["graph"] } }));
+    rerender(
+      save({
+        ...DEFAULT_USER_SETTINGS,
+        sidebar: { ...DEFAULT_USER_SETTINGS.sidebar, hidden: ["graph"] },
+      }),
+    );
     expect(vi.mocked(scanChatLinks).mock.calls.length).toBe(scans);
 
     rerender(save({ ...DEFAULT_USER_SETTINGS, profile: { preferredName: "Ada" } }));
@@ -140,68 +162,132 @@ describe("chat authorship display", () => {
   });
 
   it.each([
-    { name: "same identity after a rename", firstId: "a", secondId: "a", secondName: "Renamed", continues: true },
-    { name: "different identities with the same name", firstId: "a", secondId: "b", continues: false },
+    {
+      name: "same identity after a rename",
+      firstId: "a",
+      secondId: "a",
+      secondName: "Renamed",
+      continues: true,
+    },
+    {
+      name: "different identities with the same name",
+      firstId: "a",
+      secondId: "b",
+      continues: false,
+    },
     { name: "only the earlier identity known", firstId: "a", continues: false },
     { name: "only the later identity known", secondId: "a", continues: false },
     { name: "neither identity known", continues: true },
     { name: "different unknown authors", secondName: "Other", continues: false },
-    { name: "different author kinds", firstId: "a", secondId: "a", secondKind: "agent" as const, continues: false },
+    {
+      name: "different author kinds",
+      firstId: "a",
+      secondId: "a",
+      secondKind: "agent" as const,
+      continues: false,
+    },
     { name: "five minutes apart", firstId: "a", secondId: "a", gap: 300_000, continues: false },
-    { name: "different days", gap: 120_000, start: new Date(2026, 8, 17, 23, 59).getTime(), continues: false },
+    {
+      name: "different days",
+      gap: 120_000,
+      start: new Date(2026, 8, 17, 23, 59).getTime(),
+      continues: false,
+    },
   ])("groups messages by identity: $name", (test) => {
-    const first: ChatMessageRecord = { presentation: { group: test.firstId ?? "unknown-Sam", hue: null, self: false },
-      id: "first", threadId: "thread", authorKind: "human", authorDisplayName: "Sam",
-      authorUserId: test.firstId, body: "First", createdAtMs: test.start ?? new Date(2026, 8, 17, 12).getTime(),
+    const first: ChatMessageRecord = {
+      presentation: { group: test.firstId ?? "unknown-Sam", hue: null, self: false },
+      id: "first",
+      threadId: "thread",
+      authorKind: "human",
+      authorDisplayName: "Sam",
+      authorUserId: test.firstId,
+      body: "First",
+      createdAtMs: test.start ?? new Date(2026, 8, 17, 12).getTime(),
     };
     render(
       <ChatMessageList
         testIdPrefix="test-chat"
-        messages={[first, {
-          ...first, id: "second", authorUserId: test.secondId,
-          presentation: { ...first.presentation, group: test.secondId ?? "unknown-" + (test.secondName ?? "Sam") },
-          authorDisplayName: test.secondName ?? first.authorDisplayName,
-          authorKind: test.secondKind ?? first.authorKind,
-          createdAtMs: first.createdAtMs + (test.gap ?? 60_000),
-        }]}
+        messages={[
+          first,
+          {
+            ...first,
+            id: "second",
+            authorUserId: test.secondId,
+            presentation: {
+              ...first.presentation,
+              group: test.secondId ?? "unknown-" + (test.secondName ?? "Sam"),
+            },
+            authorDisplayName: test.secondName ?? first.authorDisplayName,
+            authorKind: test.secondKind ?? first.authorKind,
+            createdAtMs: first.createdAtMs + (test.gap ?? 60_000),
+          },
+        ]}
         loading={false}
         emptyLabel="No messages"
         listRef={createRef<ChatMessageListHandle>()}
       />,
     );
-    expect(screen.getAllByTestId("test-chat-message")[1]?.dataset.continues).toBe(String(test.continues));
+    expect(screen.getAllByTestId("test-chat-message")[1]?.dataset.continues).toBe(
+      String(test.continues),
+    );
   });
 
   // Every connected agent of one account shares that account's unnamed agent group, so only its name tells two apart.
   it.each([
     ["your", "Claude", "Codex", { group: "unnamed-agent", hue: null, self: true, connected: true }],
-    ["another person's", "Scout", "Helper", { group: "7", hue: null, self: false, connected: true }],
-  ] as const)("starts a new run when %s connected agent with another name posts next", (_owner, first, second, presentation) => {
-    const at = new Date(2026, 8, 17, 12).getTime();
-    const post = (id: string, authorDisplayName: string, minute: number): ChatMessageRecord => ({
-      id, threadId: "thread", presentation,
-      authorKind: "agent", authorDisplayName, body: "Done.", createdAtMs: at + minute * 60_000,
-    });
-    render(
-      <ChatMessageList
-        testIdPrefix="test-chat"
-        messages={[post("a", first, 0), post("b", second, 1), post("c", second, 2)]}
-        loading={false}
-        emptyLabel="No messages"
-        listRef={createRef<ChatMessageListHandle>()}
-      />,
-    );
-    expect(screen.getAllByTestId("test-chat-message").map((row) => row.dataset.continues)).toEqual(["false", "false", "true"]);
-    expect(screen.getAllByTestId("test-chat-message-author").map((author) => author.textContent)).toEqual([first, second]);
-  });
+    [
+      "another person's",
+      "Scout",
+      "Helper",
+      { group: "7", hue: null, self: false, connected: true },
+    ],
+  ] as const)(
+    "starts a new run when %s connected agent with another name posts next",
+    (_owner, first, second, presentation) => {
+      const at = new Date(2026, 8, 17, 12).getTime();
+      const post = (id: string, authorDisplayName: string, minute: number): ChatMessageRecord => ({
+        id,
+        threadId: "thread",
+        presentation,
+        authorKind: "agent",
+        authorDisplayName,
+        body: "Done.",
+        createdAtMs: at + minute * 60_000,
+      });
+      render(
+        <ChatMessageList
+          testIdPrefix="test-chat"
+          messages={[post("a", first, 0), post("b", second, 1), post("c", second, 2)]}
+          loading={false}
+          emptyLabel="No messages"
+          listRef={createRef<ChatMessageListHandle>()}
+        />,
+      );
+      expect(
+        screen.getAllByTestId("test-chat-message").map((row) => row.dataset.continues),
+      ).toEqual(["false", "false", "true"]);
+      expect(
+        screen.getAllByTestId("test-chat-message-author").map((author) => author.textContent),
+      ).toEqual([first, second]);
+    },
+  );
 
   it("fits a continued message's time in the avatar's column, without AM or PM", () => {
     // Two runs: "11:05 AM" and "12:45 PM", a two-digit hour in each.
-    const runs = [["Ana", 11, 3], ["Ana", 11, 5], ["Sam", 12, 43], ["Sam", 12, 45]] as const;
+    const runs = [
+      ["Ana", 11, 3],
+      ["Ana", 11, 5],
+      ["Sam", 12, 43],
+      ["Sam", 12, 45],
+    ] as const;
     const messages = runs.map(([name, hour, minute], index): ChatMessageRecord => ({
-      id: `m${index}`, threadId: "thread", presentation: { group: name, hue: null, self: false },
-      authorKind: "human", authorDisplayName: name,
-      body: "Hello", createdAtMs: new Date(2026, 8, 17, hour, minute).getTime(),
+      id: `m${index}`,
+      threadId: "thread",
+      presentation: { group: name, hue: null, self: false },
+      authorKind: "human",
+      authorDisplayName: name,
+      body: "Hello",
+      createdAtMs: new Date(2026, 8, 17, hour, minute).getTime(),
     }));
     render(
       <ChatMessageList
@@ -220,29 +306,32 @@ describe("chat authorship display", () => {
     for (const at of [1, 3]) {
       const { createdAtMs } = messages[at]!;
       expect(slot(items[at]!).className).toBe(slot(items[at - 1]!).className);
-      expect(slot(items[at]!).className.split(/\s+/)).toEqual(expect.arrayContaining(["justify-end"]));
-      expect(items[at]!.querySelector(".group")!.className).toContain("grid-cols-[36px_minmax(0,1fr)]");
+      expect(slot(items[at]!).className.split(/\s+/)).toEqual(
+        expect.arrayContaining(["justify-end"]),
+      );
+      expect(items[at]!.querySelector(".group")!.className).toContain(
+        "grid-cols-[36px_minmax(0,1fr)]",
+      );
       const time = slot(items[at]!).querySelector("time")!;
       expect(time.textContent).toBe(formatClockDigits(createdAtMs));
       expect(time.textContent).not.toMatch(/AM|PM/i);
       expect(time.getAttribute("title")).toBe(formatChatTime(createdAtMs).label);
       expect(time.getAttribute("aria-hidden")).toBe("true");
-      expect(slot(items[at]!).querySelector(".sr-only")?.textContent).toBe(formatClock(createdAtMs));
+      expect(slot(items[at]!).querySelector(".sr-only")?.textContent).toBe(
+        formatClock(createdAtMs),
+      );
     }
   });
 
-  it("renders agent messages as \"their stored name\" and humans by name", () => {
-    expect(
-      chatAuthorLabel({ authorKind: "agent", authorDisplayName: "Sam" }),
-    ).toBe("Sam");
-    expect(
-      chatAuthorLabel({ authorKind: "human", authorDisplayName: "Sam" }),
-    ).toBe("Sam");
+  it('renders agent messages as "their stored name" and humans by name', () => {
+    expect(chatAuthorLabel({ authorKind: "agent", authorDisplayName: "Sam" })).toBe("Sam");
+    expect(chatAuthorLabel({ authorKind: "human", authorDisplayName: "Sam" })).toBe("Sam");
     render(
       <ChatMessageList
         testIdPrefix="test-chat"
         messages={[
-          { presentation: { group: "fixture", hue: null, self: false },
+          {
+            presentation: { group: "fixture", hue: null, self: false },
             id: "message-1",
             threadId: "thread-1",
             authorKind: "agent",
@@ -256,9 +345,7 @@ describe("chat authorship display", () => {
         listRef={createRef<ChatMessageListHandle>()}
       />,
     );
-    expect(screen.getByTestId("test-chat-message-author").textContent).toBe(
-      "Sam",
-    );
+    expect(screen.getByTestId("test-chat-message-author").textContent).toBe("Sam");
   });
 
   it("marks an automation message with its lightning mark and badge, and opens the automation", () => {
@@ -267,7 +354,8 @@ describe("chat authorship display", () => {
       <ChatMessageList
         testIdPrefix="test-chat"
         messages={[
-          { presentation: { group: "fixture", hue: null, self: false },
+          {
+            presentation: { group: "fixture", hue: null, self: false },
             id: "message-auto",
             threadId: "thread-1",
             authorKind: "automation",
@@ -275,7 +363,10 @@ describe("chat authorship display", () => {
             authorOwnerDisplayName: "Ice",
             body: "Finished Book hotel",
             createdAtMs: 1_700_000_000_000,
-            automation: { automationId: "collection:Trip/Tasks#stamp", collectionPath: "Trip/Tasks" },
+            automation: {
+              automationId: "collection:Trip/Tasks#stamp",
+              collectionPath: "Trip/Tasks",
+            },
           },
         ]}
         loading={false}
@@ -288,7 +379,9 @@ describe("chat authorship display", () => {
     expect(author.textContent).toBe("Stamp the finish date");
     expect(author.dataset.authorKind).toBe("automation");
     expect(screen.queryByTestId("test-chat-agent-badge")).toBeNull();
-    expect(screen.getByTitle("Stamp the finish date").querySelector("svg.lucide-zap")).not.toBeNull();
+    expect(
+      screen.getByTitle("Stamp the finish date").querySelector("svg.lucide-zap"),
+    ).not.toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Open automation" }));
     expect(onOpenPath).toHaveBeenCalledWith("Trip/Tasks/automations.yaml");
   });
@@ -299,7 +392,8 @@ describe("chat authorship display", () => {
         <ChatMessageList
           testIdPrefix="test-chat"
           messages={[
-            { presentation: { group: "7", hue: null, self: false },
+            {
+              presentation: { group: "7", hue: null, self: false },
               id: "message-link",
               threadId: "thread-1",
               authorKind: "link",
@@ -332,7 +426,8 @@ describe("chat authorship display", () => {
         <ChatMessageList
           testIdPrefix="test-chat"
           messages={[
-            { presentation: { group: "7", hue: null, self: false },
+            {
+              presentation: { group: "7", hue: null, self: false },
               id: "message-link-agent",
               threadId: "thread-1",
               authorKind: "link",
@@ -372,7 +467,8 @@ describe("chat authorship display", () => {
       <ChatMessageList
         testIdPrefix="test-chat"
         messages={[
-          { presentation: { group: "fixture", hue: null, self: false },
+          {
+            presentation: { group: "fixture", hue: null, self: false },
             id: "message-file",
             threadId: "thread-1",
             authorKind: "human",
@@ -393,8 +489,7 @@ describe("chat authorship display", () => {
     expect(fileChip.textContent).toContain("plan.md#scope");
     expect(fileChip.tagName).toBe("SPAN");
     expect(fileChip.getAttribute("role")).toBeNull();
-    expect(screen.getByTestId("test-chat-message-body").textContent)
-      .toContain("@[docs/code.md]");
+    expect(screen.getByTestId("test-chat-message-body").textContent).toContain("@[docs/code.md]");
   });
 
   it("opens a file mention at its heading through the shared message list", () => {
@@ -403,7 +498,8 @@ describe("chat authorship display", () => {
       <ChatMessageList
         testIdPrefix="test-chat"
         messages={[
-          { presentation: { group: "fixture", hue: null, self: false },
+          {
+            presentation: { group: "fixture", hue: null, self: false },
             id: "message-file",
             threadId: "thread-1",
             authorKind: "human",
@@ -434,7 +530,8 @@ describe("chat authorship display", () => {
       <ChatMessageList
         testIdPrefix="test-chat"
         messages={[
-          { presentation: { group: "fixture", hue: null, self: false },
+          {
+            presentation: { group: "fixture", hue: null, self: false },
             id: "message-file",
             threadId: "thread-1",
             authorKind: "human",
@@ -472,7 +569,8 @@ describe("chat authorship display", () => {
       <ChatMessageList
         testIdPrefix="test-chat"
         messages={[
-          { presentation: { group: "fixture", hue: null, self: false },
+          {
+            presentation: { group: "fixture", hue: null, self: false },
             id: "message-file",
             threadId: "thread-1",
             authorKind: "human",
@@ -521,7 +619,8 @@ describe("chat authorship display", () => {
       <ChatMessageList
         testIdPrefix="test-chat"
         messages={[
-          { presentation: { group: "fixture", hue: null, self: false },
+          {
+            presentation: { group: "fixture", hue: null, self: false },
             id: "message-file",
             threadId: "thread-1",
             authorKind: "agent",
@@ -594,15 +693,29 @@ describe("chat authorship display", () => {
 
 describe("an empty chat", () => {
   it("shows the picture its caller gives over the label, centered in the list", () => {
-    render(<ChatMessageList testIdPrefix="lane" messages={[]} loading={false} emptyLabel="No messages yet."
-      emptyPicture={<svg data-testid="empty-picture" />} />);
+    render(
+      <ChatMessageList
+        testIdPrefix="lane"
+        messages={[]}
+        loading={false}
+        emptyLabel="No messages yet."
+        emptyPicture={<svg data-testid="empty-picture" />}
+      />,
+    );
     const label = screen.getByText("No messages yet.");
     expect(screen.getByTestId("empty-picture")).toBeTruthy();
     expect(label.tagName).toBe("SPAN");
   });
 
   it("says it in one muted line, with no picture or glyph, when the caller gives none", () => {
-    const { container } = render(<ChatMessageList testIdPrefix="linked-chat" messages={[]} loading={false} emptyLabel="No messages yet about notes.md." />);
+    const { container } = render(
+      <ChatMessageList
+        testIdPrefix="linked-chat"
+        messages={[]}
+        loading={false}
+        emptyLabel="No messages yet about notes.md."
+      />,
+    );
     const label = screen.getByText("No messages yet about notes.md.");
     expect(label.tagName).toBe("P");
     expect(label.className).toContain("text-muted");
@@ -615,10 +728,14 @@ describe("formatChatTime", () => {
     const now = new Date(2026, 8, 17).getTime();
     for (const year of [2025, 2026, 2027]) {
       const day = new Date(year, 2, 4);
-      expect(formatChatDay(day.getTime(), now)).toBe(day.toLocaleDateString(undefined, {
-        weekday: "long", month: "long", day: "numeric",
-        ...(year !== 2026 ? { year: "numeric" as const } : {}),
-      }));
+      expect(formatChatDay(day.getTime(), now)).toBe(
+        day.toLocaleDateString(undefined, {
+          weekday: "long",
+          month: "long",
+          day: "numeric",
+          ...(year !== 2026 ? { year: "numeric" as const } : {}),
+        }),
+      );
     }
     expect(formatChatDay(now, now)).toBe("Today");
     expect(formatChatDay(new Date(2026, 8, 16).getTime(), now)).toBe("Yesterday");
@@ -642,15 +759,21 @@ describe("formatChatTime", () => {
 
 describe("pinnedChatDay", () => {
   it("hides the label while the top row's day divider is fully visible", () => {
-    expect(pinnedChatDay({ day: "Yesterday", startsDay: true, dividerFullyVisible: true })).toBeNull();
+    expect(
+      pinnedChatDay({ day: "Yesterday", startsDay: true, dividerFullyVisible: true }),
+    ).toBeNull();
   });
 
   it("shows the day while the top row's divider crosses or sits above the top edge", () => {
-    expect(pinnedChatDay({ day: "Today", startsDay: true, dividerFullyVisible: false })).toBe("Today");
+    expect(pinnedChatDay({ day: "Today", startsDay: true, dividerFullyVisible: false })).toBe(
+      "Today",
+    );
   });
 
   it("shows the day for a top row whose divider is further up", () => {
-    expect(pinnedChatDay({ day: "Today", startsDay: false, dividerFullyVisible: true })).toBe("Today");
+    expect(pinnedChatDay({ day: "Today", startsDay: false, dividerFullyVisible: true })).toBe(
+      "Today",
+    );
   });
 
   it("hides the label when the conversation fits without scrolling", () => {
@@ -660,8 +783,12 @@ describe("pinnedChatDay", () => {
   });
 
   it("pins nothing while another day's divider passes under the pinned copy", () => {
-    expect(pinnedChatDay({ day: "Yesterday", startsDay: true, dividerFullyVisible: false }, true)).toBeNull();
-    expect(pinnedChatDay({ day: "Yesterday", startsDay: false, dividerFullyVisible: true }, true)).toBeNull();
+    expect(
+      pinnedChatDay({ day: "Yesterday", startsDay: true, dividerFullyVisible: false }, true),
+    ).toBeNull();
+    expect(
+      pinnedChatDay({ day: "Yesterday", startsDay: false, dividerFullyVisible: true }, true),
+    ).toBeNull();
   });
 });
 
@@ -671,7 +798,8 @@ describe("ChatMessageList memo boundary", () => {
   // every message body) when its own props are unchanged.
   it("skips re-rendering when the host re-renders with unchanged props", () => {
     const messages: ChatMessageRecord[] = [
-      { presentation: { group: "fixture", hue: null, self: false },
+      {
+        presentation: { group: "fixture", hue: null, self: false },
         id: "message-1",
         threadId: "thread-1",
         authorKind: "human",
@@ -705,7 +833,8 @@ describe("ChatMessageList memo boundary", () => {
 });
 
 describe("message reactions (WS-MU-C2)", () => {
-  const message: ChatMessageRecord = { presentation: { group: "fixture", hue: null, self: false },
+  const message: ChatMessageRecord = {
+    presentation: { group: "fixture", hue: null, self: false },
     id: "message-1",
     threadId: "thread-1",
     authorKind: "agent",
@@ -786,7 +915,10 @@ describe("message reactions (WS-MU-C2)", () => {
   });
 
   it("marks the viewer's own reaction and removes it on click (toggle off)", () => {
-    const { onToggle } = renderList([reaction({ authorId: "you@x", authorDisplayName: "You" })], "you@x");
+    const { onToggle } = renderList(
+      [reaction({ authorId: "you@x", authorDisplayName: "You" })],
+      "you@x",
+    );
     const pill = screen.getByTestId("test-chat-reaction-pill");
     expect(pill.getAttribute("data-mine")).toBe("true");
     expect(pill.getAttribute("aria-pressed")).toBe("true");
@@ -876,7 +1008,10 @@ describe("message reactions (WS-MU-C2)", () => {
   });
 
   it("toggles a quick reaction from the row toolbar and marks the viewer's own", () => {
-    const { onToggle } = renderList([reaction({ emoji: "🙌", authorId: "you@x", authorDisplayName: "You" })], "you@x");
+    const { onToggle } = renderList(
+      [reaction({ emoji: "🙌", authorId: "you@x", authorDisplayName: "You" })],
+      "you@x",
+    );
     const toolbar = screen.getByTestId("test-chat-message-toolbar");
     const quick = within(toolbar).getAllByTestId("test-chat-quick-reaction");
     expect(quick.map((button) => button.dataset.emoji)).toEqual(["👍", "🙌"]);
@@ -886,9 +1021,17 @@ describe("message reactions (WS-MU-C2)", () => {
     expect(within(toolbar).getByTestId("test-chat-add-reaction")).toBeTruthy();
     expect(screen.getAllByTestId("test-chat-add-reaction")).toHaveLength(1);
     fireEvent.click(quick[0]!);
-    expect(onToggle).toHaveBeenCalledWith({ messageId: "message-1", emoji: "👍", nextState: "added" });
+    expect(onToggle).toHaveBeenCalledWith({
+      messageId: "message-1",
+      emoji: "👍",
+      nextState: "added",
+    });
     fireEvent.click(quick[1]!);
-    expect(onToggle).toHaveBeenCalledWith({ messageId: "message-1", emoji: "🙌", nextState: "removed" });
+    expect(onToggle).toHaveBeenCalledWith({
+      messageId: "message-1",
+      emoji: "🙌",
+      nextState: "removed",
+    });
   });
 
   it("keeps the add-reaction trigger visible but disabled when read-only", () => {

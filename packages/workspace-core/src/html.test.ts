@@ -9,9 +9,7 @@ describe("escapeHtml", () => {
   });
 
   it("double-escapes existing entities", () => {
-    expect(escapeHtml("&amp; &lt;script&gt;")).toBe(
-      "&amp;amp; &amp;lt;script&amp;gt;",
-    );
+    expect(escapeHtml("&amp; &lt;script&gt;")).toBe("&amp;amp; &amp;lt;script&amp;gt;");
   });
 
   it("passes Unicode and line breaks through unchanged", () => {

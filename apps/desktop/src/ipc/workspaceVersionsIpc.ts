@@ -1,8 +1,9 @@
-import type {
-  WorkspaceVersionRecord,
-  workspaceVersionOperations,
-} from "./bridgeContract";
-import { heldChangeAuthorsForIpc, versionConflictForIpc, type EngineMomentAuthorNames } from "./engineHistoryIpc";
+import type { WorkspaceVersionRecord, workspaceVersionOperations } from "./bridgeContract";
+import {
+  heldChangeAuthorsForIpc,
+  versionConflictForIpc,
+  type EngineMomentAuthorNames,
+} from "./engineHistoryIpc";
 import type { WriteAuthor } from "@dohc/workspace-engine-client";
 import type { OperationHandlers } from "./operationTable";
 import type { WorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
@@ -11,7 +12,8 @@ import type { WorkspaceEngineCapture } from "../workspaces/workspaceEngineCaptur
 // stops here and shows "N+" past it.
 const CONFLICT_COUNT_PAGES_MAX = 5;
 
-type VersionOperations = Pick<WorkspaceEngineCapture,
+type VersionOperations = Pick<
+  WorkspaceEngineCapture,
   | "listVersions"
   | "createVersion"
   | "switchVersion"
@@ -44,8 +46,7 @@ export function workspaceVersionForIpc(version: {
     name: version.name,
     kind: version.kind,
     createdAtMs: version.createdAtMs,
-    canMergeIntoMain:
-      version.kind === "named" && version.forkPoint?.versionId === "main",
+    canMergeIntoMain: version.kind === "named" && version.forkPoint?.versionId === "main",
     ...(version.forkPoint ? { madeFromVersionId: version.forkPoint.versionId } : {}),
   };
 }
@@ -54,7 +55,10 @@ export function workspaceVersionHandlers<Event = unknown>(dependencies: {
   localPerson(): Promise<WriteAuthor>;
   authorNames(workspaceId: string, event: Event): EngineMomentAuthorNames;
   onRefusalsChanged?(): void;
-  requireEngineCapture(workspaceId: string, feature: "Versions"): Promise<{ capture: VersionOperations }>;
+  requireEngineCapture(
+    workspaceId: string,
+    feature: "Versions",
+  ): Promise<{ capture: VersionOperations }>;
   // Every file on the workspace's disk, by workspace-relative path.
   listDiskFiles(workspaceId: string): Promise<string[]>;
   notifyRenderer(target: { workspaceId: string }): void;
@@ -63,25 +67,31 @@ export function workspaceVersionHandlers<Event = unknown>(dependencies: {
   const { requireEngineCapture, notifyRenderer, activity } = dependencies;
 
   async function requireVersionOperations(workspaceId: string) {
-    const { capture } = await requireEngineCapture(
-      workspaceId,
-      "Versions",
-    );
+    const { capture } = await requireEngineCapture(workspaceId, "Versions");
     return capture;
   }
 
   return {
-    async heldNoteChange(input, {event}) {
-      const {workspaceId, ...params} = input;
-      const request = params.action === "review" ? params : {...params, author: await dependencies.localPerson()};
+    async heldNoteChange(input, { event }) {
+      const { workspaceId, ...params } = input;
+      const request =
+        params.action === "review"
+          ? params
+          : { ...params, author: await dependencies.localPerson() };
       const capture = await requireVersionOperations(workspaceId);
       const result = await capture.heldNoteChange(request);
       if (input.action !== "review") {
-        notifyRenderer({workspaceId: input.workspaceId});
+        notifyRenderer({ workspaceId: input.workspaceId });
         dependencies.onRefusalsChanged?.();
         activity.queueCloudSync(input.workspaceId);
       }
-      return {...result, authors: heldChangeAuthorsForIpc(result.authors, dependencies.authorNames(workspaceId, event))};
+      return {
+        ...result,
+        authors: heldChangeAuthorsForIpc(
+          result.authors,
+          dependencies.authorNames(workspaceId, event),
+        ),
+      };
     },
     async listWorkspaceVersions(input) {
       const capture = await requireVersionOperations(input.workspaceId);
@@ -94,7 +104,9 @@ export function workspaceVersionHandlers<Event = unknown>(dependencies: {
 
     async listNotVersionedFiles(input) {
       const capture = await requireVersionOperations(input.workspaceId);
-      return { paths: await capture.notVersioned(() => dependencies.listDiskFiles(input.workspaceId)) };
+      return {
+        paths: await capture.notVersioned(() => dependencies.listDiskFiles(input.workspaceId)),
+      };
     },
 
     async createWorkspaceVersion(input) {

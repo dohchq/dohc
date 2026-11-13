@@ -27,37 +27,21 @@ async function statHandle(handle: BoundedFileHandle) {
 }
 
 function assertLimit(maxBytes: number): void {
-  if (
-    !Number.isSafeInteger(maxBytes) ||
-    maxBytes < 0 ||
-    maxBytes >= Number.MAX_SAFE_INTEGER
-  ) {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || maxBytes >= Number.MAX_SAFE_INTEGER) {
     throw new RangeError("Bounded file read limit must be a safe integer.");
   }
 }
 
-async function fillFromStart(
-  handle: BoundedFileHandle,
-  buffer: Buffer,
-): Promise<number> {
+async function fillFromStart(handle: BoundedFileHandle, buffer: Buffer): Promise<number> {
   let total = 0;
   while (total < buffer.length) {
     let bytesRead: number;
     try {
-      ({ bytesRead } = await handle.read(
-        buffer,
-        total,
-        buffer.length - total,
-        total,
-      ));
+      ({ bytesRead } = await handle.read(buffer, total, buffer.length - total, total));
     } catch {
       throw new BoundedFileReadUnverifiableError();
     }
-    if (
-      !Number.isSafeInteger(bytesRead) ||
-      bytesRead < 0 ||
-      bytesRead > buffer.length - total
-    ) {
+    if (!Number.isSafeInteger(bytesRead) || bytesRead < 0 || bytesRead > buffer.length - total) {
       throw new BoundedFileReadUnverifiableError();
     }
     if (bytesRead === 0) break;
@@ -82,9 +66,7 @@ async function readStableFileHandle(
   }
 
   const expectedBytes = truncated ? maxBytes + 1 : Number(before.size);
-  const buffer = Buffer.allocUnsafe(
-    Number(before.size < limit ? before.size : limit) + 1,
-  );
+  const buffer = Buffer.allocUnsafe(Number(before.size < limit ? before.size : limit) + 1);
   const bytesRead = await fillFromStart(handle, buffer);
   const after = await statHandle(handle);
   if (after.size !== before.size || bytesRead !== expectedBytes) {

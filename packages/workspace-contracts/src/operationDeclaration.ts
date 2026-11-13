@@ -6,7 +6,16 @@ export type McpAccessLevel = "owner" | "view" | "comment" | "edit";
 // (requestBase and argsBase in packages/cli/src/protocol.ts), and the IPC row's
 // workspace. An input that named one could let a caller replace the value the
 // server sets.
-export const ENVELOPE_FIELDS = ["token", "protocolVersion", "door", "runSecret", "cwd", "actor", "agentId", "workspaceId"] as const;
+export const ENVELOPE_FIELDS = [
+  "token",
+  "protocolVersion",
+  "door",
+  "runSecret",
+  "cwd",
+  "actor",
+  "agentId",
+  "workspaceId",
+] as const;
 export type EnvelopeField = (typeof ENVELOPE_FIELDS)[number];
 
 // One read as each door offers it: the window's IPC row, the public CLI
@@ -25,7 +34,9 @@ export interface OperationDeclaration {
   readonly access: "read";
   // What every caller sends. The IPC row adds the workspace. The type refuses a
   // shape that names an envelope field, and allDeclarations.ts refuses one at load.
-  readonly input: z.ZodObject<Readonly<Record<string, z.core.$ZodType>> & { readonly [Field in EnvelopeField]?: never }>;
+  readonly input: z.ZodObject<
+    Readonly<Record<string, z.core.$ZodType>> & { readonly [Field in EnvelopeField]?: never }
+  >;
   readonly result: z.ZodType;
   readonly ipc: {
     readonly channel: `desktop:${string}`;
@@ -38,7 +49,11 @@ export interface OperationDeclaration {
     readonly command: readonly [group: string, name: string];
     readonly summary: string;
     readonly operands: string;
-    readonly flags?: readonly { readonly name: string; readonly value?: string; readonly text: string }[];
+    readonly flags?: readonly {
+      readonly name: string;
+      readonly value?: string;
+      readonly text: string;
+    }[];
     // The socket's refusal when the app offers no reader for the verb.
     readonly unavailable: string;
     // Arguments after the command that reach the socket; the CLI inventory parses them.
@@ -54,7 +69,11 @@ export interface OperationDeclaration {
 export type OperationFamily = Readonly<Record<string, OperationDeclaration>>;
 
 export const EVERY_MCP_LEVEL = ["owner", "view", "comment", "edit"] as const;
-export const CURSOR_FLAG = { name: "--cursor", value: "cursor", text: "Continue the previous page." } as const;
+export const CURSOR_FLAG = {
+  name: "--cursor",
+  value: "cursor",
+  text: "Continue the previous page.",
+} as const;
 
 // Names each declaration by a name its door must not repeat, such as a socket
 // verb or a tool, and fails at load on a repeat.

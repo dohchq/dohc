@@ -11,14 +11,31 @@ import { interopArtifact } from "./yrs-interop.mjs";
 
 test("interop preparation selects Cargo's exact production executable", () => {
   const root = join(tmpdir(), "interop-artifact");
-  const artifact = { reason: "compiler-artifact", target: { name: "dohc-yrs-interop", kind: ["bin"] },
-    profile: { test: false }, manifest_path: join(root, "crates/yrs-interop/Cargo.toml"), executable: join(root, "target/debug/exact-peer") };
-  assert.equal(interopArtifact([{ ...artifact, profile: { test: true } }, artifact], root), artifact.executable);
-  const alternateCase = { ...artifact, manifest_path: artifact.manifest_path.toUpperCase(), executable: artifact.executable.toUpperCase() };
-  if (process.platform === "win32") assert.equal(interopArtifact([alternateCase], root), alternateCase.executable);
+  const artifact = {
+    reason: "compiler-artifact",
+    target: { name: "dohc-yrs-interop", kind: ["bin"] },
+    profile: { test: false },
+    manifest_path: join(root, "crates/yrs-interop/Cargo.toml"),
+    executable: join(root, "target/debug/exact-peer"),
+  };
+  assert.equal(
+    interopArtifact([{ ...artifact, profile: { test: true } }, artifact], root),
+    artifact.executable,
+  );
+  const alternateCase = {
+    ...artifact,
+    manifest_path: artifact.manifest_path.toUpperCase(),
+    executable: artifact.executable.toUpperCase(),
+  };
+  if (process.platform === "win32")
+    assert.equal(interopArtifact([alternateCase], root), alternateCase.executable);
   else assert.throws(() => interopArtifact([alternateCase], root), /did not report/);
-  for (const mutation of [{ profile: { test: true } }, { target: { name: "other", kind: ["bin"] } },
-    { manifest_path: join(root, "other/Cargo.toml") }, { executable: join(root, "target-other/debug/peer") }]) {
+  for (const mutation of [
+    { profile: { test: true } },
+    { target: { name: "other", kind: ["bin"] } },
+    { manifest_path: join(root, "other/Cargo.toml") },
+    { executable: join(root, "target-other/debug/peer") },
+  ]) {
     assert.throws(() => interopArtifact([{ ...artifact, ...mutation }], root), /did not report/);
   }
 });
@@ -31,11 +48,22 @@ test("interop preparation owns targets, refuses stale provenance, and drivers ne
   };
   try {
     createPrepareFixture(root, new URL("./build.mjs", import.meta.url));
-    put("scripts/verification/yrs-interop.mjs", readFileSync(new URL("./yrs-interop.mjs", import.meta.url)));
-    put("crates/yrs-interop/scripts/rustPeer.ts", readFileSync(new URL("../../crates/yrs-interop/scripts/rustPeer.ts", import.meta.url)));
+    put(
+      "scripts/verification/yrs-interop.mjs",
+      readFileSync(new URL("./yrs-interop.mjs", import.meta.url)),
+    );
+    put(
+      "crates/yrs-interop/scripts/rustPeer.ts",
+      readFileSync(new URL("../../crates/yrs-interop/scripts/rustPeer.ts", import.meta.url)),
+    );
     put("vendor/fixture/lib.rs", "original vendor input");
-    put("scripts/verification/process.mjs", readFileSync(join(root, "scripts/verification/process.mjs"), "utf8")
-      .replace("export async function run(", "async function originalRun(") + `
+    put(
+      "scripts/verification/process.mjs",
+      readFileSync(join(root, "scripts/verification/process.mjs"), "utf8").replace(
+        "export async function run(",
+        "async function originalRun(",
+      ) +
+        `
       export let builds = 0;
       export async function run(command,args,{env}) {
         assert.equal(command,'cargo');
@@ -50,7 +78,8 @@ test("interop preparation owns targets, refuses stale provenance, and drivers ne
         return {stdout:JSON.stringify({reason:'compiler-artifact',target:{name:'dohc-yrs-interop',kind:['bin']},
           profile:{test:false},manifest_path:join(repoRoot,'crates/yrs-interop/Cargo.toml'),executable})};
       }
-    `);
+    `,
+    );
     const script = `
       import assert from 'node:assert/strict';
       import cp from 'node:child_process';
@@ -147,12 +176,17 @@ test("interop preparation owns targets, refuses stale provenance, and drivers ne
       delete env.CARGO_TARGET_DIR;
       if (target) env.CARGO_TARGET_DIR = target;
       const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
-        cwd: root, encoding: "utf8", timeout: 30_000, env,
+        cwd: root,
+        encoding: "utf8",
+        timeout: 30_000,
+        env,
       });
       assert.equal(result.error, undefined, result.stderr);
       assert.equal(result.status, 0, result.stderr);
     }
-  } finally { rmSync(root, { recursive: true, force: true }); }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("harvest extracts current engine blobs and keeps the previous corpus on failure", () => {
@@ -160,37 +194,59 @@ test("harvest extracts current engine blobs and keeps the previous corpus on fai
   const script = join(root, "crates/yrs-interop/scripts/harvest.mjs");
   const fixtures = join(root, "crates/yrs-interop/fixtures");
   const source = join(root, "copy/engine.db");
-  const harvest = path => spawnSync(process.execPath, [script, path], { cwd: root, encoding: "utf8", timeout: 30_000 });
+  const harvest = (path) =>
+    spawnSync(process.execPath, [script, path], { cwd: root, encoding: "utf8", timeout: 30_000 });
   const put = (path, contents) => {
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, contents);
   };
   // The engine's own table definitions, so a renamed column fails here.
-  const migration = readFileSync(new URL("../../crates/dohc-engine-storage/src/migration.rs", import.meta.url), "utf8");
-  const write = change => {
+  const migration = readFileSync(
+    new URL("../../crates/dohc-engine-storage/src/migration.rs", import.meta.url),
+    "utf8",
+  );
+  const write = (change) => {
     const db = new DatabaseSync(source, { enableForeignKeyConstraints: false });
-    try { change(db); } finally { db.close(); }
+    try {
+      change(db);
+    } finally {
+      db.close();
+    }
   };
   const blob = (db, ...bytes) => {
     const value = Uint8Array.from(bytes);
     const sha = createHash("sha256").update(value).digest("hex");
-    db.prepare("INSERT OR IGNORE INTO binary_blobs (sha256, byte_length, bytes) VALUES (?, ?, ?)").run(sha, value.length, value);
+    db.prepare(
+      "INSERT OR IGNORE INTO binary_blobs (sha256, byte_length, bytes) VALUES (?, ?, ?)",
+    ).run(sha, value.length, value);
     return sha;
   };
-  const doc = (db, object, kind) => db.prepare(`INSERT INTO ydoc_docs (workspace_id, version_id, object_id, content_kind, updated_at_ms)
-    VALUES ('ws', 'main', ?, ?, 0)`).run(object, kind);
-  const update = (db, object, seq, sha) => db.prepare(`INSERT INTO ydoc_updates (workspace_id, version_id, object_id, seq, update_blob_sha256, recorded_at_ms)
-    VALUES ('ws', 'main', ?, ?, ?, 0)`).run(object, seq, sha);
-  const snapshot = (db, object, seq, sha) => db.prepare(`INSERT INTO ydoc_snapshots
+  const doc = (db, object, kind) =>
+    db
+      .prepare(`INSERT INTO ydoc_docs (workspace_id, version_id, object_id, content_kind, updated_at_ms)
+    VALUES ('ws', 'main', ?, ?, 0)`)
+      .run(object, kind);
+  const update = (db, object, seq, sha) =>
+    db
+      .prepare(`INSERT INTO ydoc_updates (workspace_id, version_id, object_id, seq, update_blob_sha256, recorded_at_ms)
+    VALUES ('ws', 'main', ?, ?, ?, 0)`)
+      .run(object, seq, sha);
+  const snapshot = (db, object, seq, sha) =>
+    db
+      .prepare(`INSERT INTO ydoc_snapshots
     (workspace_id, version_id, object_id, up_to_seq, snapshot_blob_sha256, state_vector_blob_sha256, recorded_at_ms)
-    VALUES ('ws', 'main', ?, ?, ?, ?, 0)`).run(object, seq, sha, sha);
+    VALUES ('ws', 'main', ?, ?, ?, ?, 0)`)
+      .run(object, seq, sha, sha);
   try {
-    put(script, readFileSync(new URL("../../crates/yrs-interop/scripts/harvest.mjs", import.meta.url)));
+    put(
+      script,
+      readFileSync(new URL("../../crates/yrs-interop/scripts/harvest.mjs", import.meta.url)),
+    );
     put(join(fixtures, "harvested/previous.bin"), "previous corpus");
     put(join(root, "workspace/.dohc/engine/engine.db"), "");
     put(join(root, "copy/garbage.db"), "not a database");
     mkdirSync(dirname(source), { recursive: true });
-    write(db => {
+    write((db) => {
       for (const table of ["binary_blobs", "ydoc_docs", "ydoc_updates", "ydoc_snapshots"]) {
         db.exec(migration.match(new RegExp(`CREATE TABLE ${table} \\([\\s\\S]*?\\) STRICT;`))[0]);
       }
@@ -204,18 +260,26 @@ test("harvest extracts current engine blobs and keeps the previous corpus on fai
       update(db, "c", 1, "0".repeat(64));
     });
 
-    for (const [path, error] of [[join(root, "workspace/.dohc/engine/engine.db"), /refusing/],
-      [join(root, "copy/garbage.db"), /harvest failed/], [source, /missing blob 0{64}/]]) {
+    for (const [path, error] of [
+      [join(root, "workspace/.dohc/engine/engine.db"), /refusing/],
+      [join(root, "copy/garbage.db"), /harvest failed/],
+      [source, /missing blob 0{64}/],
+    ]) {
       const result = harvest(path);
       assert.equal(result.status, 1, result.stderr);
       assert.match(result.stderr, error);
       assert.deepEqual(readdirSync(fixtures), ["harvested"]);
       assert.deepEqual(readdirSync(join(fixtures, "harvested")), ["previous.bin"]);
-      assert.equal(readFileSync(join(fixtures, "harvested/previous.bin"), "utf8"), "previous corpus");
+      assert.equal(
+        readFileSync(join(fixtures, "harvested/previous.bin"), "utf8"),
+        "previous corpus",
+      );
     }
 
-    write(db => {
-      db.exec("DELETE FROM ydoc_updates WHERE object_id = 'c'; DELETE FROM ydoc_docs WHERE object_id = 'c'");
+    write((db) => {
+      db.exec(
+        "DELETE FROM ydoc_updates WHERE object_id = 'c'; DELETE FROM ydoc_docs WHERE object_id = 'c'",
+      );
     });
     const result = harvest(source);
     assert.equal(result.status, 0, result.stderr);
@@ -223,12 +287,23 @@ test("harvest extracts current engine blobs and keeps the previous corpus on fai
     const harvested = join(fixtures, "harvested");
     assert.deepEqual(readdirSync(harvested), ["doc-01", "doc-02", "manifest.json"]);
     assert.deepEqual(JSON.parse(readFileSync(join(harvested, "manifest.json"), "utf8")), [
-      { name: "doc-01", contentKind: "richdoc", files: ["snapshot.bin", "update-0004.bin", "update-0005.bin"] },
+      {
+        name: "doc-01",
+        contentKind: "richdoc",
+        files: ["snapshot.bin", "update-0004.bin", "update-0005.bin"],
+      },
       { name: "doc-02", contentKind: "plaintext", files: ["update-0001.bin", "update-0002.bin"] },
     ]);
-    for (const [file, bytes] of [["doc-01/snapshot.bin", [0xa3, 0x00, 0xff]], ["doc-01/update-0004.bin", [4, 0x00, 0xff]],
-      ["doc-01/update-0005.bin", [5, 0x00, 0xff]], ["doc-02/update-0001.bin", [0xb1]], ["doc-02/update-0002.bin", [0xb2]]]) {
+    for (const [file, bytes] of [
+      ["doc-01/snapshot.bin", [0xa3, 0x00, 0xff]],
+      ["doc-01/update-0004.bin", [4, 0x00, 0xff]],
+      ["doc-01/update-0005.bin", [5, 0x00, 0xff]],
+      ["doc-02/update-0001.bin", [0xb1]],
+      ["doc-02/update-0002.bin", [0xb2]],
+    ]) {
       assert.deepEqual([...readFileSync(join(harvested, file))], bytes, file);
     }
-  } finally { rmSync(root, { recursive: true, force: true }); }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

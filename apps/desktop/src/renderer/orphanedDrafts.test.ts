@@ -4,7 +4,11 @@ import { renderHook } from "@testing-library/react";
 import { createHash, webcrypto } from "node:crypto";
 import * as Y from "yjs";
 import { createTestScratch } from "../workspaces/testTemp";
-import { hasRetainedLiveDraft, preserveUnsentLiveDraft, removeLiveDraftCopies } from "../workspaces/liveDraftRecovery";
+import {
+  hasRetainedLiveDraft,
+  preserveUnsentLiveDraft,
+  removeLiveDraftCopies,
+} from "../workspaces/liveDraftRecovery";
 import {
   atRiskOrphanedDraftIds,
   captureOrphanedDraft,
@@ -24,10 +28,7 @@ import {
 } from "./orphanedDraftStorage";
 
 type DraftStore = typeof import("./orphanedDrafts");
-type UseDrafts = (
-  workspaceId: string,
-  path: string,
-) => readonly OrphanedDraft[];
+type UseDrafts = (workspaceId: string, path: string) => readonly OrphanedDraft[];
 
 function draftsFor(
   useDrafts: UseDrafts,
@@ -75,81 +76,152 @@ it("reports workspace-scoped set-aside paths from memory and storage across rest
 });
 
 it("dismisses only the original object snapshot after restart and rename", async () => {
-  resetOrphanedDrafts(); localStorage.clear();
+  resetOrphanedDrafts();
+  localStorage.clear();
   vi.stubGlobal("crypto", webcrypto);
   const discardLiveDraftRecovery = vi.fn(async () => []);
-  vi.stubGlobal("dohcDesktop", {platform: "linux", discardLiveDraftRecovery});
-  const id = captureOrphanedDraft("workspace", "old.md", "Owner text KEEP", {objectId: "object", updateBase64: "AAA="});
-  remapOrphanedDraftPaths("workspace", path => path === "old.md" ? "new.md" : path);
+  vi.stubGlobal("dohcDesktop", { platform: "linux", discardLiveDraftRecovery });
+  const id = captureOrphanedDraft("workspace", "old.md", "Owner text KEEP", {
+    objectId: "object",
+    updateBase64: "AAA=",
+  });
+  remapOrphanedDraftPaths("workspace", (path) => (path === "old.md" ? "new.md" : path));
   const next = await relaunch();
   await next.dismissOrphanedDraft("workspace", "new.md", id);
-  expect(discardLiveDraftRecovery).toHaveBeenCalledWith(expect.objectContaining({workspaceId: "workspace", path: "new.md", objectId: "object", snapshotSha256: createHash("sha256").update(new Uint8Array([0, 0])).digest("hex")}));
+  expect(discardLiveDraftRecovery).toHaveBeenCalledWith(
+    expect.objectContaining({
+      workspaceId: "workspace",
+      path: "new.md",
+      objectId: "object",
+      snapshotSha256: createHash("sha256")
+        .update(new Uint8Array([0, 0]))
+        .digest("hex"),
+    }),
+  );
   expect(next.retainedOrphanedDraftPaths("workspace")).toEqual([]);
-  next.resetOrphanedDrafts(); resetOrphanedDrafts(); localStorage.clear();
+  next.resetOrphanedDrafts();
+  resetOrphanedDrafts();
+  localStorage.clear();
 });
 
 it("retains the visible and stored draft when main cannot discard its matching copy", async () => {
-  resetOrphanedDrafts(); localStorage.clear();
+  resetOrphanedDrafts();
+  localStorage.clear();
   vi.stubGlobal("crypto", webcrypto);
-  vi.stubGlobal("dohcDesktop", {platform: "linux", discardLiveDraftRecovery: vi.fn(async () => {throw new Error("disk full");})});
-  const id = captureOrphanedDraft("workspace", "a.md", "Owner text KEEP", {objectId: "object", updateBase64: "AAA="});
+  vi.stubGlobal("dohcDesktop", {
+    platform: "linux",
+    discardLiveDraftRecovery: vi.fn(async () => {
+      throw new Error("disk full");
+    }),
+  });
+  const id = captureOrphanedDraft("workspace", "a.md", "Owner text KEEP", {
+    objectId: "object",
+    updateBase64: "AAA=",
+  });
   await expect(dismissOrphanedDraft("workspace", "a.md", id)).rejects.toThrow("disk full");
   expect(retainedOrphanedDraftPaths("workspace")).toEqual(["a.md"]);
   const next = await relaunch();
   expect(next.retainedOrphanedDraftPaths("workspace")).toEqual(["a.md"]);
-  next.resetOrphanedDrafts(); resetOrphanedDrafts(); localStorage.clear();
+  next.resetOrphanedDrafts();
+  resetOrphanedDrafts();
+  localStorage.clear();
 });
 
 it("shows the unseen main snapshot after dismiss and releases the object and path after reviewing it", async () => {
-  resetOrphanedDrafts(); localStorage.clear();
+  resetOrphanedDrafts();
+  localStorage.clear();
   vi.stubGlobal("crypto", webcrypto);
   const directory = await createTestScratch("dohc-leftover-drafts-");
-  const seen = new Y.Doc(), unseen = new Y.Doc();
+  const seen = new Y.Doc(),
+    unseen = new Y.Doc();
   try {
     seen.getText("plainText").insert(0, "renderer copy");
     unseen.getText("plainText").insert(0, "unseen main copy");
     for (const doc of [seen, unseen]) {
-      await preserveUnsentLiveDraft(directory, "workspace", {path: "a.txt", objectId: "object", contentKind: "plaintext", doc});
+      await preserveUnsentLiveDraft(directory, "workspace", {
+        path: "a.txt",
+        objectId: "object",
+        contentKind: "plaintext",
+        doc,
+      });
     }
-    vi.stubGlobal("dohcDesktop", {platform: "linux", discardLiveDraftRecovery: async (input: {path: string; objectId: string; snapshotSha256: string; discardedAtMs: number; recordId?: string}) =>
-      removeLiveDraftCopies(directory, "workspace", input.objectId, input.snapshotSha256, input.discardedAtMs, input.path, input.recordId)});
-    const id = captureOrphanedDraft("workspace", "a.txt", "renderer copy", {objectId: "object", updateBase64: Buffer.from(Y.encodeStateAsUpdate(seen)).toString("base64")});
+    vi.stubGlobal("dohcDesktop", {
+      platform: "linux",
+      discardLiveDraftRecovery: async (input: {
+        path: string;
+        objectId: string;
+        snapshotSha256: string;
+        discardedAtMs: number;
+        recordId?: string;
+      }) =>
+        removeLiveDraftCopies(
+          directory,
+          "workspace",
+          input.objectId,
+          input.snapshotSha256,
+          input.discardedAtMs,
+          input.path,
+          input.recordId,
+        ),
+    });
+    const id = captureOrphanedDraft("workspace", "a.txt", "renderer copy", {
+      objectId: "object",
+      updateBase64: Buffer.from(Y.encodeStateAsUpdate(seen)).toString("base64"),
+    });
     await dismissOrphanedDraft("workspace", "a.txt", id);
     expect(await hasRetainedLiveDraft(directory, "workspace", "renamed.txt", "object")).toBe(true);
     expect(await hasRetainedLiveDraft(directory, "workspace", "a.txt", "new-object")).toBe(true);
     const remaining = draftsFor(useOrphanedDrafts, "workspace", "a.txt");
-    expect(remaining.map(draft => draft.text)).toEqual(["unseen main copy"]);
+    expect(remaining.map((draft) => draft.text)).toEqual(["unseen main copy"]);
     await dismissOrphanedDraft("workspace", "a.txt", remaining[0]!.id);
     expect(await hasRetainedLiveDraft(directory, "workspace", "renamed.txt", "object")).toBe(false);
     expect(await hasRetainedLiveDraft(directory, "workspace", "a.txt", "new-object")).toBe(false);
     expect(draftsFor(useOrphanedDrafts, "workspace", "a.txt")).toEqual([]);
   } finally {
-    seen.destroy(); unseen.destroy(); resetOrphanedDrafts(); localStorage.clear();
+    seen.destroy();
+    unseen.destroy();
+    resetOrphanedDrafts();
+    localStorage.clear();
   }
 });
 
-const returnedDraft = {recordId: "a".repeat(64), path: "a.txt", objectId: "object", text: "main-only copy", updateBase64: "AAA="};
+const returnedDraft = {
+  recordId: "a".repeat(64),
+  path: "a.txt",
+  objectId: "object",
+  text: "main-only copy",
+  updateBase64: "AAA=",
+};
 
 it("discovers main-only drafts on open without duplicating their stored copies after restart", async () => {
-  resetOrphanedDrafts(); localStorage.clear();
+  resetOrphanedDrafts();
+  localStorage.clear();
   const list = vi.fn(async () => [returnedDraft]);
-  vi.stubGlobal("dohcDesktop", {platform: "linux", listLiveDraftRecovery: list});
+  vi.stubGlobal("dohcDesktop", { platform: "linux", listLiveDraftRecovery: list });
   await loadLiveDraftRecovery("workspace", () => true);
   const next = await relaunch();
   await next.loadLiveDraftRecovery("workspace", () => true);
   const rows = draftsFor(next.useOrphanedDrafts, "workspace", "a.txt");
   expect(rows).toHaveLength(1);
-  expect(rows[0]).toMatchObject({text: "main-only copy", recovery: {recordId: returnedDraft.recordId}});
+  expect(rows[0]).toMatchObject({
+    text: "main-only copy",
+    recovery: { recordId: returnedDraft.recordId },
+  });
   expect(next.atRiskOrphanedDraftIds()).toEqual([]);
-  next.resetOrphanedDrafts(); resetOrphanedDrafts(); localStorage.clear();
+  next.resetOrphanedDrafts();
+  resetOrphanedDrafts();
+  localStorage.clear();
 });
 
 it("ignores an open's late recovery reply after its workspace is superseded", async () => {
-  resetOrphanedDrafts(); localStorage.clear();
-  let resolve!: (records: typeof returnedDraft[]) => void;
-  const reply = new Promise<typeof returnedDraft[]>(done => { resolve = done; });
+  resetOrphanedDrafts();
+  localStorage.clear();
+  let resolve!: (records: (typeof returnedDraft)[]) => void;
+  const reply = new Promise<(typeof returnedDraft)[]>((done) => {
+    resolve = done;
+  });
   const list = vi.fn(() => reply);
-  vi.stubGlobal("dohcDesktop", {platform: "linux", listLiveDraftRecovery: list});
+  vi.stubGlobal("dohcDesktop", { platform: "linux", listLiveDraftRecovery: list });
   let current = true;
   const loading = loadLiveDraftRecovery("workspace", () => current);
   await vi.waitFor(() => expect(list).toHaveBeenCalledOnce());
@@ -158,177 +230,335 @@ it("ignores an open's late recovery reply after its workspace is superseded", as
   resolve([returnedDraft]);
   await loading;
   expect(retainedOrphanedDraftPaths("workspace")).toEqual([]);
-  expect(draftsFor(useOrphanedDrafts, "other-workspace", "a.txt").map(row => row.text)).toEqual(["other workspace copy"]);
-  resetOrphanedDrafts(); localStorage.clear();
+  expect(draftsFor(useOrphanedDrafts, "other-workspace", "a.txt").map((row) => row.text)).toEqual([
+    "other workspace copy",
+  ]);
+  resetOrphanedDrafts();
+  localStorage.clear();
 });
 
 it("keeps a dismiss reply's survivors visible if the captured draft changed while main was responding", async () => {
-  resetOrphanedDrafts(); localStorage.clear(); vi.stubGlobal("crypto", webcrypto);
-  let resolve!: (records: typeof returnedDraft[]) => void;
-  const reply = new Promise<typeof returnedDraft[]>(done => { resolve = done; });
+  resetOrphanedDrafts();
+  localStorage.clear();
+  vi.stubGlobal("crypto", webcrypto);
+  let resolve!: (records: (typeof returnedDraft)[]) => void;
+  const reply = new Promise<(typeof returnedDraft)[]>((done) => {
+    resolve = done;
+  });
   const discard = vi.fn(() => reply);
-  vi.stubGlobal("dohcDesktop", {platform: "linux", discardLiveDraftRecovery: discard});
-  const id = captureOrphanedDraft("workspace", "a.txt", "seen", {objectId: "object", updateBase64: "AAA="});
+  vi.stubGlobal("dohcDesktop", { platform: "linux", discardLiveDraftRecovery: discard });
+  const id = captureOrphanedDraft("workspace", "a.txt", "seen", {
+    objectId: "object",
+    updateBase64: "AAA=",
+  });
   const dismissing = dismissOrphanedDraft("workspace", "a.txt", id);
   const result = expect(dismissing).rejects.toThrow("This draft changed");
   await vi.waitFor(() => expect(discard).toHaveBeenCalledOnce());
-  replaceOrphanedDraft("workspace", "a.txt", id, "new snapshot", {objectId: "object", updateBase64: "AAE="});
+  replaceOrphanedDraft("workspace", "a.txt", id, "new snapshot", {
+    objectId: "object",
+    updateBase64: "AAE=",
+  });
   resolve([returnedDraft]);
   await result;
-  expect(draftsFor(useOrphanedDrafts, "workspace", "a.txt").map(row => row.text)).toEqual(["new snapshot", "main-only copy"]);
-  resetOrphanedDrafts(); localStorage.clear();
+  expect(draftsFor(useOrphanedDrafts, "workspace", "a.txt").map((row) => row.text)).toEqual([
+    "new snapshot",
+    "main-only copy",
+  ]);
+  resetOrphanedDrafts();
+  localStorage.clear();
 });
 
 it("does not duplicate a renamed recovery when main lists its original path on the next open", async () => {
-  resetOrphanedDrafts(); localStorage.clear();
-  vi.stubGlobal("dohcDesktop", {platform: "linux", listLiveDraftRecovery: vi.fn(async () => [returnedDraft])});
+  resetOrphanedDrafts();
+  localStorage.clear();
+  vi.stubGlobal("dohcDesktop", {
+    platform: "linux",
+    listLiveDraftRecovery: vi.fn(async () => [returnedDraft]),
+  });
   await loadLiveDraftRecovery("workspace", () => true);
-  remapOrphanedDraftPaths("workspace", path => path === "a.txt" ? "renamed.txt" : path);
+  remapOrphanedDraftPaths("workspace", (path) => (path === "a.txt" ? "renamed.txt" : path));
   const next = await relaunch();
   await next.loadLiveDraftRecovery("workspace", () => true);
   expect(next.retainedOrphanedDraftPaths("workspace")).toEqual(["renamed.txt"]);
   expect(draftsFor(next.useOrphanedDrafts, "workspace", "renamed.txt")).toHaveLength(1);
-  next.resetOrphanedDrafts(); resetOrphanedDrafts(); localStorage.clear();
+  next.resetOrphanedDrafts();
+  resetOrphanedDrafts();
+  localStorage.clear();
 });
 
 it("dismisses after a queued list attaches a record ID without reporting a false change", async () => {
-  resetOrphanedDrafts(); localStorage.clear(); vi.stubGlobal("crypto", webcrypto);
-  let resolve!: (records: typeof returnedDraft[]) => void;
-  const reply = new Promise<typeof returnedDraft[]>(done => { resolve = done; });
-  const list = vi.fn(() => reply), discard = vi.fn(async () => []);
-  vi.stubGlobal("dohcDesktop", {platform: "linux", listLiveDraftRecovery: list, discardLiveDraftRecovery: discard});
-  const id = captureOrphanedDraft("workspace", "a.txt", returnedDraft.text, {objectId: returnedDraft.objectId, updateBase64: returnedDraft.updateBase64});
+  resetOrphanedDrafts();
+  localStorage.clear();
+  vi.stubGlobal("crypto", webcrypto);
+  let resolve!: (records: (typeof returnedDraft)[]) => void;
+  const reply = new Promise<(typeof returnedDraft)[]>((done) => {
+    resolve = done;
+  });
+  const list = vi.fn(() => reply),
+    discard = vi.fn(async () => []);
+  vi.stubGlobal("dohcDesktop", {
+    platform: "linux",
+    listLiveDraftRecovery: list,
+    discardLiveDraftRecovery: discard,
+  });
+  const id = captureOrphanedDraft("workspace", "a.txt", returnedDraft.text, {
+    objectId: returnedDraft.objectId,
+    updateBase64: returnedDraft.updateBase64,
+  });
   const loading = loadLiveDraftRecovery("workspace", () => true);
   await vi.waitFor(() => expect(list).toHaveBeenCalledOnce());
   const dismissing = dismissOrphanedDraft("workspace", "a.txt", id);
   const dismissed = expect(dismissing).resolves.toBeUndefined();
   resolve([returnedDraft]);
-  await loading; await dismissed;
-  expect(discard).toHaveBeenCalledWith(expect.objectContaining({recordId: returnedDraft.recordId}));
+  await loading;
+  await dismissed;
+  expect(discard).toHaveBeenCalledWith(
+    expect.objectContaining({ recordId: returnedDraft.recordId }),
+  );
   expect(retainedOrphanedDraftPaths("workspace")).toEqual([]);
-  resetOrphanedDrafts(); localStorage.clear();
+  resetOrphanedDrafts();
+  localStorage.clear();
 });
 
-it.each([false, true])("keeps separate saved copies but shows one record when two windows discover it (existing renderer copy: %s)", async existing => {
-  resetOrphanedDrafts(); localStorage.clear();
-  vi.stubGlobal("dohcDesktop", {platform: "linux", listLiveDraftRecovery: vi.fn(async () => [returnedDraft])});
-  const first = await relaunch(), second = await relaunch();
-  if (existing) first.captureOrphanedDraft("workspace", "a.txt", returnedDraft.text, {objectId: returnedDraft.objectId, updateBase64: returnedDraft.updateBase64});
-  await first.loadLiveDraftRecovery("workspace", () => true);
-  await second.loadLiveDraftRecovery("workspace", () => true);
-  expect(Object.keys(localStorage).filter(key => key.startsWith(ORPHANED_DRAFT_STORAGE_PREFIX))).toHaveLength(2);
-  expect(draftsFor(first.useOrphanedDrafts, "workspace", "a.txt")).toHaveLength(1);
-  expect(draftsFor(second.useOrphanedDrafts, "workspace", "a.txt")).toHaveLength(1);
-  expect(first.atRiskOrphanedDraftIds()).toEqual([]);
-  expect(second.atRiskOrphanedDraftIds()).toEqual([]);
-  const restarted = await relaunch();
-  expect(draftsFor(restarted.useOrphanedDrafts, "workspace", "a.txt")).toHaveLength(1);
-  vi.stubGlobal("crypto", webcrypto);
-  vi.stubGlobal("dohcDesktop", {platform: "linux", discardLiveDraftRecovery: vi.fn(async () => [])});
-  await restarted.dismissOrphanedDraft("workspace", "a.txt", draftsFor(restarted.useOrphanedDrafts, "workspace", "a.txt")[0]!.id);
-  const dismissed = await relaunch();
-  expect(draftsFor(dismissed.useOrphanedDrafts, "workspace", "a.txt")).toEqual([]);
-  restarted.resetOrphanedDrafts(); resetOrphanedDrafts(); localStorage.clear();
-});
+it.each([false, true])(
+  "keeps separate saved copies but shows one record when two windows discover it (existing renderer copy: %s)",
+  async (existing) => {
+    resetOrphanedDrafts();
+    localStorage.clear();
+    vi.stubGlobal("dohcDesktop", {
+      platform: "linux",
+      listLiveDraftRecovery: vi.fn(async () => [returnedDraft]),
+    });
+    const first = await relaunch(),
+      second = await relaunch();
+    if (existing)
+      first.captureOrphanedDraft("workspace", "a.txt", returnedDraft.text, {
+        objectId: returnedDraft.objectId,
+        updateBase64: returnedDraft.updateBase64,
+      });
+    await first.loadLiveDraftRecovery("workspace", () => true);
+    await second.loadLiveDraftRecovery("workspace", () => true);
+    expect(
+      Object.keys(localStorage).filter((key) => key.startsWith(ORPHANED_DRAFT_STORAGE_PREFIX)),
+    ).toHaveLength(2);
+    expect(draftsFor(first.useOrphanedDrafts, "workspace", "a.txt")).toHaveLength(1);
+    expect(draftsFor(second.useOrphanedDrafts, "workspace", "a.txt")).toHaveLength(1);
+    expect(first.atRiskOrphanedDraftIds()).toEqual([]);
+    expect(second.atRiskOrphanedDraftIds()).toEqual([]);
+    const restarted = await relaunch();
+    expect(draftsFor(restarted.useOrphanedDrafts, "workspace", "a.txt")).toHaveLength(1);
+    vi.stubGlobal("crypto", webcrypto);
+    vi.stubGlobal("dohcDesktop", {
+      platform: "linux",
+      discardLiveDraftRecovery: vi.fn(async () => []),
+    });
+    await restarted.dismissOrphanedDraft(
+      "workspace",
+      "a.txt",
+      draftsFor(restarted.useOrphanedDrafts, "workspace", "a.txt")[0]!.id,
+    );
+    const dismissed = await relaunch();
+    expect(draftsFor(dismissed.useOrphanedDrafts, "workspace", "a.txt")).toEqual([]);
+    restarted.resetOrphanedDrafts();
+    resetOrphanedDrafts();
+    localStorage.clear();
+  },
+);
 
-it.each([true, false])("keeps newer typing after attach, refine, restart, list, and dismissal of the older record (new identity: %s)", async newIdentity => {
-  resetOrphanedDrafts(); localStorage.clear(); vi.stubGlobal("crypto", webcrypto);
-  vi.stubGlobal("dohcDesktop", {platform: "linux", listLiveDraftRecovery: vi.fn(async () => [returnedDraft]), discardLiveDraftRecovery: vi.fn(async () => [])});
-  const id = captureOrphanedDraft("workspace", "a.txt", returnedDraft.text, {objectId: returnedDraft.objectId, updateBase64: returnedDraft.updateBase64});
-  await loadLiveDraftRecovery("workspace", () => true);
-  replaceOrphanedDraft("workspace", "a.txt", id, "newer typing", newIdentity ? {objectId: returnedDraft.objectId, updateBase64: "AAE="} : undefined);
-  const next = await relaunch();
-  await next.loadLiveDraftRecovery("workspace", () => true);
-  expect(next.atRiskOrphanedDraftIds()).toEqual([]);
-  const crashed = await relaunch();
-  const rows = draftsFor(crashed.useOrphanedDrafts, "workspace", "a.txt");
-  expect(rows.map(row => row.text).sort()).toEqual([returnedDraft.text, "newer typing"].sort());
-  await crashed.dismissOrphanedDraft("workspace", "a.txt", rows.find(row => row.recovery?.recordId === returnedDraft.recordId)!.id);
-  const restarted = await relaunch();
-  expect(draftsFor(restarted.useOrphanedDrafts, "workspace", "a.txt").map(row => row.text)).toEqual(["newer typing"]);
-  restarted.resetOrphanedDrafts(); resetOrphanedDrafts(); localStorage.clear();
-});
+it.each([true, false])(
+  "keeps newer typing after attach, refine, restart, list, and dismissal of the older record (new identity: %s)",
+  async (newIdentity) => {
+    resetOrphanedDrafts();
+    localStorage.clear();
+    vi.stubGlobal("crypto", webcrypto);
+    vi.stubGlobal("dohcDesktop", {
+      platform: "linux",
+      listLiveDraftRecovery: vi.fn(async () => [returnedDraft]),
+      discardLiveDraftRecovery: vi.fn(async () => []),
+    });
+    const id = captureOrphanedDraft("workspace", "a.txt", returnedDraft.text, {
+      objectId: returnedDraft.objectId,
+      updateBase64: returnedDraft.updateBase64,
+    });
+    await loadLiveDraftRecovery("workspace", () => true);
+    replaceOrphanedDraft(
+      "workspace",
+      "a.txt",
+      id,
+      "newer typing",
+      newIdentity ? { objectId: returnedDraft.objectId, updateBase64: "AAE=" } : undefined,
+    );
+    const next = await relaunch();
+    await next.loadLiveDraftRecovery("workspace", () => true);
+    expect(next.atRiskOrphanedDraftIds()).toEqual([]);
+    const crashed = await relaunch();
+    const rows = draftsFor(crashed.useOrphanedDrafts, "workspace", "a.txt");
+    expect(rows.map((row) => row.text).sort()).toEqual([returnedDraft.text, "newer typing"].sort());
+    await crashed.dismissOrphanedDraft(
+      "workspace",
+      "a.txt",
+      rows.find((row) => row.recovery?.recordId === returnedDraft.recordId)!.id,
+    );
+    const restarted = await relaunch();
+    expect(
+      draftsFor(restarted.useOrphanedDrafts, "workspace", "a.txt").map((row) => row.text),
+    ).toEqual(["newer typing"]);
+    restarted.resetOrphanedDrafts();
+    resetOrphanedDrafts();
+    localStorage.clear();
+  },
+);
 
 it("keeps both windows' refinements of a loaded record in separate saved copies", async () => {
-  resetOrphanedDrafts(); localStorage.clear();
-  vi.stubGlobal("dohcDesktop", {platform: "linux", listLiveDraftRecovery: vi.fn(async () => [returnedDraft])});
+  resetOrphanedDrafts();
+  localStorage.clear();
+  vi.stubGlobal("dohcDesktop", {
+    platform: "linux",
+    listLiveDraftRecovery: vi.fn(async () => [returnedDraft]),
+  });
   await loadLiveDraftRecovery("workspace", () => true);
-  const first = await relaunch(), second = await relaunch();
+  const first = await relaunch(),
+    second = await relaunch();
   const a = draftsFor(first.useOrphanedDrafts, "workspace", "a.txt")[0]!;
   const b = draftsFor(second.useOrphanedDrafts, "workspace", "a.txt")[0]!;
-  first.replaceOrphanedDraft("workspace", "a.txt", a.id, "first newer typing", {objectId: returnedDraft.objectId, updateBase64: "AAE="});
+  first.replaceOrphanedDraft("workspace", "a.txt", a.id, "first newer typing", {
+    objectId: returnedDraft.objectId,
+    updateBase64: "AAE=",
+  });
   expect(second.atRiskOrphanedDraftIds()).toEqual([b.id]);
-  second.replaceOrphanedDraft("workspace", "a.txt", b.id, "second newer typing", {objectId: returnedDraft.objectId, updateBase64: "AAI="});
+  second.replaceOrphanedDraft("workspace", "a.txt", b.id, "second newer typing", {
+    objectId: returnedDraft.objectId,
+    updateBase64: "AAI=",
+  });
   expect(first.atRiskOrphanedDraftIds()).toEqual([]);
   expect(second.atRiskOrphanedDraftIds()).toEqual([]);
   const restarted = await relaunch();
-  expect(draftsFor(restarted.useOrphanedDrafts, "workspace", "a.txt").map(row => row.text).sort()).toEqual(["first newer typing", "second newer typing"].sort());
-  restarted.resetOrphanedDrafts(); resetOrphanedDrafts(); localStorage.clear();
+  expect(
+    draftsFor(restarted.useOrphanedDrafts, "workspace", "a.txt")
+      .map((row) => row.text)
+      .sort(),
+  ).toEqual(["first newer typing", "second newer typing"].sort());
+  restarted.resetOrphanedDrafts();
+  resetOrphanedDrafts();
+  localStorage.clear();
 });
 
 it("keeps one row after a restored copy adopts its record ID and restarts", async () => {
-  resetOrphanedDrafts(); localStorage.clear();
-  vi.stubGlobal("dohcDesktop", {platform: "linux", listLiveDraftRecovery: vi.fn(async () => [returnedDraft])});
-  captureOrphanedDraft("workspace", "a.txt", returnedDraft.text, {objectId: returnedDraft.objectId, updateBase64: returnedDraft.updateBase64});
+  resetOrphanedDrafts();
+  localStorage.clear();
+  vi.stubGlobal("dohcDesktop", {
+    platform: "linux",
+    listLiveDraftRecovery: vi.fn(async () => [returnedDraft]),
+  });
+  captureOrphanedDraft("workspace", "a.txt", returnedDraft.text, {
+    objectId: returnedDraft.objectId,
+    updateBase64: returnedDraft.updateBase64,
+  });
   const next = await relaunch();
   await next.loadLiveDraftRecovery("workspace", () => true);
   const restarted = await relaunch();
   const rows = draftsFor(restarted.useOrphanedDrafts, "workspace", "a.txt");
   expect(rows).toHaveLength(1);
   expect(rows[0]!.recovery?.recordId).toBe(returnedDraft.recordId);
-  restarted.resetOrphanedDrafts(); resetOrphanedDrafts(); localStorage.clear();
+  restarted.resetOrphanedDrafts();
+  resetOrphanedDrafts();
+  localStorage.clear();
 });
 
 it("keeps only newer text after a restored row without a record ID is refined", async () => {
-  resetOrphanedDrafts(); localStorage.clear();
+  resetOrphanedDrafts();
+  localStorage.clear();
   captureOrphanedDraft("workspace", "a.txt", "older typing");
   const next = await relaunch();
   const id = draftsFor(next.useOrphanedDrafts, "workspace", "a.txt")[0]!.id;
   next.replaceOrphanedDraft("workspace", "a.txt", id, "newer typing");
   const restarted = await relaunch();
-  expect(draftsFor(restarted.useOrphanedDrafts, "workspace", "a.txt").map(row => row.text)).toEqual(["newer typing"]);
-  restarted.resetOrphanedDrafts(); resetOrphanedDrafts(); localStorage.clear();
+  expect(
+    draftsFor(restarted.useOrphanedDrafts, "workspace", "a.txt").map((row) => row.text),
+  ).toEqual(["newer typing"]);
+  restarted.resetOrphanedDrafts();
+  resetOrphanedDrafts();
+  localStorage.clear();
 });
 
 it("dismisses the right saved copy after Stop and restore reads paths with another window's colliding ID", async () => {
-  resetOrphanedDrafts(); localStorage.clear();
+  resetOrphanedDrafts();
+  localStorage.clear();
   captureOrphanedDraft("workspace", "a.txt", "older typing");
   const next = await relaunch();
   const id = draftsFor(next.useOrphanedDrafts, "workspace", "a.txt")[0]!.id;
   // Another renderer can allocate the same numeric handle after this one restored.
-  localStorage.setItem(`${ORPHANED_DRAFT_STORAGE_PREFIX}other-window`, JSON.stringify({version: 1, id, workspaceId: "other", path: "b.txt", text: "other window typing", capturedAtMs: Date.now()}));
+  localStorage.setItem(
+    `${ORPHANED_DRAFT_STORAGE_PREFIX}other-window`,
+    JSON.stringify({
+      version: 1,
+      id,
+      workspaceId: "other",
+      path: "b.txt",
+      text: "other window typing",
+      capturedAtMs: Date.now(),
+    }),
+  );
   next.replaceOrphanedDraft("workspace", "a.txt", id, "newer typing");
   expect(next.retainedOrphanedDraftPaths("workspace")).toEqual(["a.txt"]);
   await next.dismissOrphanedDraft("workspace", "a.txt", id);
   const restarted = await relaunch();
   expect(draftsFor(restarted.useOrphanedDrafts, "workspace", "a.txt")).toEqual([]);
-  expect(draftsFor(restarted.useOrphanedDrafts, "other", "b.txt").map(row => row.text)).toEqual(["other window typing"]);
-  restarted.resetOrphanedDrafts(); resetOrphanedDrafts(); localStorage.clear();
+  expect(draftsFor(restarted.useOrphanedDrafts, "other", "b.txt").map((row) => row.text)).toEqual([
+    "other window typing",
+  ]);
+  restarted.resetOrphanedDrafts();
+  resetOrphanedDrafts();
+  localStorage.clear();
 });
 
 it("keeps every distinct returned record visible and sends its exact identity on dismiss", async () => {
-  resetOrphanedDrafts(); localStorage.clear(); vi.stubGlobal("crypto", webcrypto);
-  const second = {...returnedDraft, recordId: "b".repeat(64), objectId: "replacement", text: "same-path replacement"};
+  resetOrphanedDrafts();
+  localStorage.clear();
+  vi.stubGlobal("crypto", webcrypto);
+  const second = {
+    ...returnedDraft,
+    recordId: "b".repeat(64),
+    objectId: "replacement",
+    text: "same-path replacement",
+  };
   const list = vi.fn(async () => [returnedDraft, second]);
   const discard = vi.fn(async () => [second]);
-  vi.stubGlobal("dohcDesktop", {platform: "linux", listLiveDraftRecovery: list, discardLiveDraftRecovery: discard});
+  vi.stubGlobal("dohcDesktop", {
+    platform: "linux",
+    listLiveDraftRecovery: list,
+    discardLiveDraftRecovery: discard,
+  });
   await loadLiveDraftRecovery("workspace", () => true);
   const rows = draftsFor(useOrphanedDrafts, "workspace", "a.txt");
-  expect(rows.map(row => row.text)).toEqual(["main-only copy", "same-path replacement"]);
+  expect(rows.map((row) => row.text)).toEqual(["main-only copy", "same-path replacement"]);
   await dismissOrphanedDraft("workspace", "a.txt", rows[0]!.id);
-  expect(discard).toHaveBeenCalledWith(expect.objectContaining({recordId: returnedDraft.recordId}));
-  expect(draftsFor(useOrphanedDrafts, "workspace", "a.txt").map(row => row.text)).toEqual(["same-path replacement"]);
-  resetOrphanedDrafts(); localStorage.clear();
+  expect(discard).toHaveBeenCalledWith(
+    expect.objectContaining({ recordId: returnedDraft.recordId }),
+  );
+  expect(draftsFor(useOrphanedDrafts, "workspace", "a.txt").map((row) => row.text)).toEqual([
+    "same-path replacement",
+  ]);
+  resetOrphanedDrafts();
+  localStorage.clear();
 });
 
 function seedStoredDrafts(raw: string): void {
   let values: unknown;
-  try { values = JSON.parse(raw); } catch {
+  try {
+    values = JSON.parse(raw);
+  } catch {
     localStorage.setItem(`${ORPHANED_DRAFT_STORAGE_PREFIX}fixture`, raw);
     return;
   }
   for (const [index, value] of (Array.isArray(values) ? values : [values]).entries()) {
-    localStorage.setItem(`${ORPHANED_DRAFT_STORAGE_PREFIX}fixture:${index}`, JSON.stringify(value, (_key, item) => item === Infinity ? "__overflow__" : item).replace('"__overflow__"', "1e999"));
+    localStorage.setItem(
+      `${ORPHANED_DRAFT_STORAGE_PREFIX}fixture:${index}`,
+      JSON.stringify(value, (_key, item) => (item === Infinity ? "__overflow__" : item)).replace(
+        '"__overflow__"',
+        "1e999",
+      ),
+    );
   }
 }
 function storedText(): string {
@@ -348,7 +578,9 @@ it("keeps another window's recovery when local handles collide", async () => {
   second.captureOrphanedDraft("b", "b.txt", "second window");
   first.dismissOrphanedDraft("a", "a.txt", a);
   const restarted = await relaunch();
-  expect(draftsFor(restarted.useOrphanedDrafts, "b", "b.txt").map(row => row.text)).toEqual(["second window"]);
+  expect(draftsFor(restarted.useOrphanedDrafts, "b", "b.txt").map((row) => row.text)).toEqual([
+    "second window",
+  ]);
   localStorage.clear();
 });
 
@@ -363,31 +595,41 @@ it("reports a recovery removed by another window as at risk", async () => {
   localStorage.clear();
 });
 
-it.each(["renamed.txt", ".env"])("remaps a recovery captured after another window booted to %s", async (destination) => {
-  localStorage.clear();
-  const first = await relaunch();
-  const second = await relaunch();
-  const id = first.captureOrphanedDraft("a", "draft.txt", "late recovery");
-  second.remapOrphanedDraftPaths("a", path => path === "draft.txt" ? destination : path);
-  expect(first.atRiskOrphanedDraftIds()).toEqual([id]);
-  const restarted = await relaunch();
-  expect(draftsFor(restarted.useOrphanedDrafts, "a", "draft.txt")).toEqual([]);
-  if (destination === ".env") {
-    expect(storedText()).not.toContain("late recovery");
-    expect(draftsFor(restarted.useOrphanedDrafts, "a", destination)).toEqual([]);
-  } else {
-    expect(draftsFor(restarted.useOrphanedDrafts, "a", destination).map(row => row.text)).toEqual(["late recovery"]);
-    expect(restarted.atRiskOrphanedDraftIds()).toEqual([]);
-  }
-  localStorage.clear();
-});
+it.each(["renamed.txt", ".env"])(
+  "remaps a recovery captured after another window booted to %s",
+  async (destination) => {
+    localStorage.clear();
+    const first = await relaunch();
+    const second = await relaunch();
+    const id = first.captureOrphanedDraft("a", "draft.txt", "late recovery");
+    second.remapOrphanedDraftPaths("a", (path) => (path === "draft.txt" ? destination : path));
+    expect(first.atRiskOrphanedDraftIds()).toEqual([id]);
+    const restarted = await relaunch();
+    expect(draftsFor(restarted.useOrphanedDrafts, "a", "draft.txt")).toEqual([]);
+    if (destination === ".env") {
+      expect(storedText()).not.toContain("late recovery");
+      expect(draftsFor(restarted.useOrphanedDrafts, "a", destination)).toEqual([]);
+    } else {
+      expect(
+        draftsFor(restarted.useOrphanedDrafts, "a", destination).map((row) => row.text),
+      ).toEqual(["late recovery"]);
+      expect(restarted.atRiskOrphanedDraftIds()).toEqual([]);
+    }
+    localStorage.clear();
+  },
+);
 
 it("keeps captures interleaved at the storage write boundary", async () => {
   localStorage.clear();
-  const first = await relaunch(), second = await relaunch();
+  const first = await relaunch(),
+    second = await relaunch();
   const write = Storage.prototype.setItem;
   let interleave = true;
-  const intercepted = vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (this: Storage, key, value) {
+  const intercepted = vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (
+    this: Storage,
+    key,
+    value,
+  ) {
     if (interleave) {
       interleave = false;
       second.captureOrphanedDraft("b", "b.txt", "concurrent recovery");
@@ -397,8 +639,12 @@ it("keeps captures interleaved at the storage write boundary", async () => {
   first.captureOrphanedDraft("a", "a.txt", "first recovery");
   intercepted.mockRestore();
   const after = await relaunch();
-  expect(draftsFor(after.useOrphanedDrafts, "a", "a.txt").map(row => row.text)).toEqual(["first recovery"]);
-  expect(draftsFor(after.useOrphanedDrafts, "b", "b.txt").map(row => row.text)).toEqual(["concurrent recovery"]);
+  expect(draftsFor(after.useOrphanedDrafts, "a", "a.txt").map((row) => row.text)).toEqual([
+    "first recovery",
+  ]);
+  expect(draftsFor(after.useOrphanedDrafts, "b", "b.txt").map((row) => row.text)).toEqual([
+    "concurrent recovery",
+  ]);
   localStorage.clear();
 });
 
@@ -410,28 +656,23 @@ describe("orphanedDrafts remap", () => {
   it("follows a file rename, keyed to the workspace", () => {
     captureOrphanedDraft("ws-1", "a.md", "kept");
     captureOrphanedDraft("ws-2", "a.md", "other workspace");
-    remapOrphanedDraftPaths("ws-1", (path) =>
-      path === "a.md" ? "renamed.md" : path,
-    );
+    remapOrphanedDraftPaths("ws-1", (path) => (path === "a.md" ? "renamed.md" : path));
     expect(draftsFor(useOrphanedDrafts, "ws-1", "a.md")).toHaveLength(0);
-    expect(
-      draftsFor(useOrphanedDrafts, "ws-1", "renamed.md").map((d) => d.text),
-    ).toEqual(["kept"]);
+    expect(draftsFor(useOrphanedDrafts, "ws-1", "renamed.md").map((d) => d.text)).toEqual(["kept"]);
     // The other workspace's identical path is untouched.
-    expect(
-      draftsFor(useOrphanedDrafts, "ws-2", "a.md").map((d) => d.text),
-    ).toEqual(["other workspace"]);
+    expect(draftsFor(useOrphanedDrafts, "ws-2", "a.md").map((d) => d.text)).toEqual([
+      "other workspace",
+    ]);
   });
 
   it("merges into the target's existing drafts instead of overwriting", () => {
     captureOrphanedDraft("ws-1", "target.md", "already there");
     captureOrphanedDraft("ws-1", "a.md", "moving in");
-    remapOrphanedDraftPaths("ws-1", (path) =>
-      path === "a.md" ? "target.md" : path,
-    );
-    expect(
-      draftsFor(useOrphanedDrafts, "ws-1", "target.md").map((d) => d.text),
-    ).toEqual(["already there", "moving in"]);
+    remapOrphanedDraftPaths("ws-1", (path) => (path === "a.md" ? "target.md" : path));
+    expect(draftsFor(useOrphanedDrafts, "ws-1", "target.md").map((d) => d.text)).toEqual([
+      "already there",
+      "moving in",
+    ]);
   });
 
   it("keeps drafts whose path a delete projects to null", () => {
@@ -441,9 +682,9 @@ describe("orphanedDrafts remap", () => {
     // restored file shows the notice again. A move dohc did not perform lands
     // on this same rule — the renderer cannot tell one from a delete, so it
     // treats it as one rather than guess away the user's only copy.
-    expect(
-      draftsFor(useOrphanedDrafts, "ws-1", "notes/a.md").map((d) => d.text),
-    ).toEqual(["survives"]);
+    expect(draftsFor(useOrphanedDrafts, "ws-1", "notes/a.md").map((d) => d.text)).toEqual([
+      "survives",
+    ]);
   });
 
   it("dismisses by id after a remap", () => {
@@ -470,9 +711,7 @@ describe("orphanedDrafts persistence", () => {
     captureOrphanedDraft("ws-1", "notes/plan.md", "# Plan\n\nTyped again.");
     const next = await relaunch();
     expect(
-      draftsFor(next.useOrphanedDrafts, "ws-1", "notes/plan.md").map(
-        (draft) => draft.text,
-      ),
+      draftsFor(next.useOrphanedDrafts, "ws-1", "notes/plan.md").map((draft) => draft.text),
       "capture: stop calling storeDraft. Nothing reaches storage and the relaunched app has no notice at all.",
     ).toEqual(["# Plan\n\nTyped, unsaved.", "# Plan\n\nTyped again."]);
     // A restored draft is durable, so nothing stays behind the close warning.
@@ -484,15 +723,11 @@ describe("orphanedDrafts persistence", () => {
     replaceOrphanedDraft("ws-1", "notes/plan.md", id, "After");
 
     expect(
-      draftsFor(useOrphanedDrafts, "ws-1", "notes/plan.md").map(
-        (draft) => draft.text,
-      ),
+      draftsFor(useOrphanedDrafts, "ws-1", "notes/plan.md").map((draft) => draft.text),
     ).toEqual(["After"]);
     const next = await relaunch();
     expect(
-      draftsFor(next.useOrphanedDrafts, "ws-1", "notes/plan.md").map(
-        (draft) => draft.text,
-      ),
+      draftsFor(next.useOrphanedDrafts, "ws-1", "notes/plan.md").map((draft) => draft.text),
     ).toEqual(["After"]);
   });
 
@@ -504,9 +739,7 @@ describe("orphanedDrafts persistence", () => {
     replaceOrphanedDraft("ws-1", "notes/plan.md", 9_999, "Ghost");
 
     expect(
-      draftsFor(useOrphanedDrafts, "ws-1", "notes/plan.md").map(
-        (draft) => draft.text,
-      ),
+      draftsFor(useOrphanedDrafts, "ws-1", "notes/plan.md").map((draft) => draft.text),
     ).toEqual(["Before"]);
   });
 
@@ -517,9 +750,9 @@ describe("orphanedDrafts persistence", () => {
     // otherwise a secret path would read as durably saved when it never was.
     replaceOrphanedDraft("ws-1", ".env", id, "API_KEY=shh2");
 
-    expect(
-      draftsFor(useOrphanedDrafts, "ws-1", ".env").map((draft) => draft.text),
-    ).toEqual(["API_KEY=shh2"]);
+    expect(draftsFor(useOrphanedDrafts, "ws-1", ".env").map((draft) => draft.text)).toEqual([
+      "API_KEY=shh2",
+    ]);
     const next = await relaunch();
     expect(draftsFor(next.useOrphanedDrafts, "ws-1", ".env")).toEqual([]);
   });
@@ -529,14 +762,17 @@ describe("orphanedDrafts persistence", () => {
     captureOrphanedDraft("ws-1", "config/.env", "DB_URL=shh");
     captureOrphanedDraft("ws-1", ".env.local", "TOKEN=shh");
     captureOrphanedDraft("ws-1", "Shared with me/Team/.env", "SHARED=shh");
-    expect(storedText(), "secret floor: route these through the plaintext path — make isPersistableDraftPath return true, or classify with something that answers 'tracked' for `.env`. Every assertion below fails.").not.toContain("shh");
+    expect(
+      storedText(),
+      "secret floor: route these through the plaintext path — make isPersistableDraftPath return true, or classify with something that answers 'tracked' for `.env`. Every assertion below fails.",
+    ).not.toContain("shh");
     expect(storedText()).not.toContain(".env");
 
     // The text is still recoverable in this run, and the close warning is
     // what stands behind it.
-    expect(
-      draftsFor(useOrphanedDrafts, "ws-1", ".env").map((d) => d.text),
-    ).toEqual(["API_KEY=shh"]);
+    expect(draftsFor(useOrphanedDrafts, "ws-1", ".env").map((d) => d.text)).toEqual([
+      "API_KEY=shh",
+    ]);
     expect(atRiskOrphanedDraftIds()).toHaveLength(4);
 
     // And it is gone after the restart, rather than restored from plaintext.
@@ -549,24 +785,26 @@ describe("orphanedDrafts persistence", () => {
     captureOrphanedDraft("ws-1", "b.md", "Kept");
     const [draft] = draftsFor(useOrphanedDrafts, "ws-1", "a.md");
     dismissOrphanedDraft("ws-1", "a.md", draft.id);
-    expect(storedText(), "dismiss: drop forgetStoredDraft. The dismissed edit comes back on the next launch, with a Dismiss the user already answered.").not.toContain("Dismissed");
+    expect(
+      storedText(),
+      "dismiss: drop forgetStoredDraft. The dismissed edit comes back on the next launch, with a Dismiss the user already answered.",
+    ).not.toContain("Dismissed");
     const next = await relaunch();
     expect(draftsFor(next.useOrphanedDrafts, "ws-1", "a.md")).toHaveLength(0);
-    expect(
-      draftsFor(next.useOrphanedDrafts, "ws-1", "b.md").map((d) => d.text),
-    ).toEqual(["Kept"]);
+    expect(draftsFor(next.useOrphanedDrafts, "ws-1", "b.md").map((d) => d.text)).toEqual(["Kept"]);
   });
 
   it("moves the stored copy with a rename", async () => {
     captureOrphanedDraft("ws-1", "a.md", "renamed with the file");
-    remapOrphanedDraftPaths("ws-1", (path) =>
-      path === "a.md" ? "notes/b.md" : path,
-    );
+    remapOrphanedDraftPaths("ws-1", (path) => (path === "a.md" ? "notes/b.md" : path));
     const next = await relaunch();
-    expect(draftsFor(next.useOrphanedDrafts, "ws-1", "a.md"), "remap: drop remapStoredDraftPaths. The notice comes back on a path the workspace no longer has.").toHaveLength(0);
     expect(
-      draftsFor(next.useOrphanedDrafts, "ws-1", "notes/b.md").map((d) => d.text),
-    ).toEqual(["renamed with the file"]);
+      draftsFor(next.useOrphanedDrafts, "ws-1", "a.md"),
+      "remap: drop remapStoredDraftPaths. The notice comes back on a path the workspace no longer has.",
+    ).toHaveLength(0);
+    expect(draftsFor(next.useOrphanedDrafts, "ws-1", "notes/b.md").map((d) => d.text)).toEqual([
+      "renamed with the file",
+    ]);
   });
 
   it("drops the stored copy when a rename lands on a secret path", () => {
@@ -608,12 +846,13 @@ describe("orphanedDrafts persistence", () => {
       ]),
     );
     const next = await relaunch();
-    expect(draftsFor(next.useOrphanedDrafts, "ws-1", ".env"), "load floor: drop isPersistableDraftPath from loadStoredDrafts. The secret row is restored into the notice and left in plaintext storage, and both assertions below fail.").toHaveLength(0);
+    expect(
+      draftsFor(next.useOrphanedDrafts, "ws-1", ".env"),
+      "load floor: drop isPersistableDraftPath from loadStoredDrafts. The secret row is restored into the notice and left in plaintext storage, and both assertions below fail.",
+    ).toHaveLength(0);
     expect(storedText()).not.toContain("shh");
     // ...and the row beside it is untouched.
-    expect(
-      draftsFor(next.useOrphanedDrafts, "ws-1", "a.md").map((d) => d.text),
-    ).toEqual(["kept"]);
+    expect(draftsFor(next.useOrphanedDrafts, "ws-1", "a.md").map((d) => d.text)).toEqual(["kept"]);
   });
 
   // An id is the handle Dismiss uses, and `forgetStoredDraft` matches on it
@@ -650,23 +889,19 @@ describe("orphanedDrafts persistence", () => {
     expect([...restored.map((d) => d.text)].sort()).toEqual(["FIRST", "SECOND"]);
     expect(new Set(restored.map((d) => d.id)).size).toBe(2);
 
-    next.dismissOrphanedDraft(
-      "ws-1",
-      "a.md",
-      restored.find((d) => d.text === "FIRST")!.id,
-    );
-    expect(
-      draftsFor(next.useOrphanedDrafts, "ws-1", "a.md").map((d) => d.text),
-    ).toEqual(["SECOND"]);
+    next.dismissOrphanedDraft("ws-1", "a.md", restored.find((d) => d.text === "FIRST")!.id);
+    expect(draftsFor(next.useOrphanedDrafts, "ws-1", "a.md").map((d) => d.text)).toEqual([
+      "SECOND",
+    ]);
     expect(storedText()).toContain("SECOND");
     expect(storedText()).not.toContain("FIRST");
 
     // The repaired ids are the stored ones now, so the next launch reads the
     // same store without repairing anything again.
     const after = await relaunch();
-    expect(
-      draftsFor(after.useOrphanedDrafts, "ws-1", "a.md").map((d) => d.text),
-    ).toEqual(["SECOND"]);
+    expect(draftsFor(after.useOrphanedDrafts, "ws-1", "a.md").map((d) => d.text)).toEqual([
+      "SECOND",
+    ]);
   });
 
   // `typeof x === "number"` is not an identity. `1e400` parses to Infinity,
@@ -688,11 +923,10 @@ describe("orphanedDrafts persistence", () => {
     const next = await relaunch();
     const restored = draftsFor(next.useOrphanedDrafts, "ws-1", "a.md");
     // No text is dropped for carrying a broken id...
-    expect([...restored.map((d) => d.text)].sort(), "usable id: let the watermark and the keep-it test read `typeof row.id === 'number'`. Infinity survives, every re-key draws the same Infinity, the rewrite writes nulls, and the second relaunch below comes back empty.").toEqual([
-      "FRACTION",
-      "OVERFLOW",
-      "VALID",
-    ]);
+    expect(
+      [...restored.map((d) => d.text)].sort(),
+      "usable id: let the watermark and the keep-it test read `typeof row.id === 'number'`. Infinity survives, every re-key draws the same Infinity, the rewrite writes nulls, and the second relaunch below comes back empty.",
+    ).toEqual(["FRACTION", "OVERFLOW", "VALID"]);
     // ...every row can be counted from and told apart...
     expect(restored.every((d) => Number.isSafeInteger(d.id))).toBe(true);
     expect(new Set(restored.map((d) => d.id)).size).toBe(3);
@@ -703,17 +937,13 @@ describe("orphanedDrafts persistence", () => {
     const dismissed = restored.find((d) => d.text === "OVERFLOW")!;
     next.dismissOrphanedDraft("ws-1", "a.md", dismissed.id);
     expect(
-      [
-        ...draftsFor(next.useOrphanedDrafts, "ws-1", "a.md").map((d) => d.text),
-      ].sort(),
+      [...draftsFor(next.useOrphanedDrafts, "ws-1", "a.md").map((d) => d.text)].sort(),
     ).toEqual(["FRACTION", "VALID"]);
 
     // The round trip: the launch after the repair still has both texts.
     const after = await relaunch();
     expect(
-      [
-        ...draftsFor(after.useOrphanedDrafts, "ws-1", "a.md").map((d) => d.text),
-      ].sort(),
+      [...draftsFor(after.useOrphanedDrafts, "ws-1", "a.md").map((d) => d.text)].sort(),
     ).toEqual(["FRACTION", "VALID"]);
   });
 
@@ -732,9 +962,7 @@ describe("orphanedDrafts persistence", () => {
     const repairedAt = Date.now();
     const next = await relaunch(repairedAt);
     expect(
-      [
-        ...draftsFor(next.useOrphanedDrafts, "ws-1", "a.md").map((d) => d.text),
-      ].sort(),
+      [...draftsFor(next.useOrphanedDrafts, "ws-1", "a.md").map((d) => d.text)].sort(),
       "capture-time repair: take `row.capturedAtMs` as given. The overflowed row survives this launch reported durable and is gone from the next one, and the negative row never reaches the store at all.",
     ).toEqual(["EPOCH", "NEGATIVE", "OVERFLOWED"]);
     expect(storedText()).not.toContain("null");
@@ -768,21 +996,15 @@ describe("orphanedDrafts persistence", () => {
     );
     const next = await relaunch();
     const restored = draftsFor(next.useOrphanedDrafts, "ws-1", "a.md");
-    expect(restored.map((d) => d.text).sort(), "allocation: draw replacements from `highest + 1` again. Two of the four land on the same id and the distinct-id count below fails.").toEqual([
-      "DUP1",
-      "DUP2",
-      "DUP3",
-      "TOP",
-    ]);
+    expect(
+      restored.map((d) => d.text).sort(),
+      "allocation: draw replacements from `highest + 1` again. Two of the four land on the same id and the distinct-id count below fails.",
+    ).toEqual(["DUP1", "DUP2", "DUP3", "TOP"]);
     expect(restored.every((d) => Number.isSafeInteger(d.id))).toBe(true);
     expect(new Set(restored.map((d) => d.id)).size).toBe(4);
 
     // One confirmation retires one edit.
-    next.dismissOrphanedDraft(
-      "ws-1",
-      "a.md",
-      restored.find((d) => d.text === "DUP2")!.id,
-    );
+    next.dismissOrphanedDraft("ws-1", "a.md", restored.find((d) => d.text === "DUP2")!.id);
     const left = ["DUP1", "DUP3", "TOP"];
     expect(
       draftsFor(next.useOrphanedDrafts, "ws-1", "a.md")
@@ -819,24 +1041,22 @@ describe("orphanedDrafts persistence", () => {
     next.captureOrphanedDraft("ws-1", "a.md", "SECOND");
 
     const live = draftsFor(next.useOrphanedDrafts, "ws-1", "a.md");
-    expect(live.map((d) => d.text), "live allocation: count up from the highest restored id again. The two captures below collide and the distinct-id count fails.").toEqual(["RESTORED", "FIRST", "SECOND"]);
+    expect(
+      live.map((d) => d.text),
+      "live allocation: count up from the highest restored id again. The two captures below collide and the distinct-id count fails.",
+    ).toEqual(["RESTORED", "FIRST", "SECOND"]);
     expect(live.every((d) => Number.isSafeInteger(d.id))).toBe(true);
     expect(new Set(live.map((d) => d.id)).size).toBe(3);
 
     // One confirmation retires one edit, here and after the restart.
-    next.dismissOrphanedDraft(
-      "ws-1",
-      "a.md",
-      live.find((d) => d.text === "FIRST")!.id,
-    );
-    expect(
-      draftsFor(next.useOrphanedDrafts, "ws-1", "a.md").map((d) => d.text),
-    ).toEqual(["RESTORED", "SECOND"]);
+    next.dismissOrphanedDraft("ws-1", "a.md", live.find((d) => d.text === "FIRST")!.id);
+    expect(draftsFor(next.useOrphanedDrafts, "ws-1", "a.md").map((d) => d.text)).toEqual([
+      "RESTORED",
+      "SECOND",
+    ]);
     const after = await relaunch();
     expect(
-      [
-        ...draftsFor(after.useOrphanedDrafts, "ws-1", "a.md").map((d) => d.text),
-      ].sort(),
+      [...draftsFor(after.useOrphanedDrafts, "ws-1", "a.md").map((d) => d.text)].sort(),
     ).toEqual(["RESTORED", "SECOND"]);
   });
 
@@ -858,18 +1078,17 @@ describe("orphanedDrafts persistence", () => {
     const next = await relaunch(base + 2);
     clock.mockReturnValue(base + 2);
     next.captureOrphanedDraft("ws-1", "a.md", "captured last");
-    next.remapOrphanedDraftPaths("ws-1", (path) =>
-      path === "a.md" ? "target.md" : path,
-    );
+    next.remapOrphanedDraftPaths("ws-1", (path) => (path === "a.md" ? "target.md" : path));
     expect(
       draftsFor(next.useOrphanedDrafts, "ws-1", "target.md").map((d) => d.text),
       "order key: sort the merge by id again. 'captured last' holds the freed low id, so it sorts first here and second after the relaunch below — the two Copy buttons swap places across a restart.",
     ).toEqual(["the survivor", "captured last"]);
 
     const after = await relaunch(base + 3);
-    expect(
-      draftsFor(after.useOrphanedDrafts, "ws-1", "target.md").map((d) => d.text),
-    ).toEqual(["the survivor", "captured last"]);
+    expect(draftsFor(after.useOrphanedDrafts, "ws-1", "target.md").map((d) => d.text)).toEqual([
+      "the survivor",
+      "captured last",
+    ]);
   });
 
   // One order, whichever surface asks. The store sorts oldest first, and a
@@ -878,18 +1097,17 @@ describe("orphanedDrafts persistence", () => {
   it("keeps one order for a merged rename, this run and the next", async () => {
     captureOrphanedDraft("ws-1", "a.md", "captured first");
     captureOrphanedDraft("ws-1", "target.md", "captured second");
-    remapOrphanedDraftPaths("ws-1", (path) =>
-      path === "a.md" ? "target.md" : path,
-    );
+    remapOrphanedDraftPaths("ws-1", (path) => (path === "a.md" ? "target.md" : path));
     expect(
       draftsFor(useOrphanedDrafts, "ws-1", "target.md").map((d) => d.text),
       "merge order: append the moved drafts after the target's own. This run reads newest-first while the next launch reads oldest-first, and the two Copy buttons swap places across a restart.",
     ).toEqual(["captured first", "captured second"]);
 
     const next = await relaunch();
-    expect(
-      draftsFor(next.useOrphanedDrafts, "ws-1", "target.md").map((d) => d.text),
-    ).toEqual(["captured first", "captured second"]);
+    expect(draftsFor(next.useOrphanedDrafts, "ws-1", "target.md").map((d) => d.text)).toEqual([
+      "captured first",
+      "captured second",
+    ]);
   });
 
   // The floor decides once, when the draft is captured. A rename can take a
@@ -899,9 +1117,7 @@ describe("orphanedDrafts persistence", () => {
   it("keeps a secret-path draft window-only after a rename onto a tracked path", () => {
     captureOrphanedDraft("ws-1", ".env", "API_KEY=shh");
     expect(atRiskOrphanedDraftIds()).toHaveLength(1);
-    remapOrphanedDraftPaths("ws-1", (path) =>
-      path === ".env" ? "notes.md" : path,
-    );
+    remapOrphanedDraftPaths("ws-1", (path) => (path === ".env" ? "notes.md" : path));
     expect(
       draftsFor(useOrphanedDrafts, "ws-1", "notes.md").map((d) => d.text),
       "promote on rename: store eligible drafts at the remap. The text the floor refused at capture reaches plaintext storage because a file was renamed.",
@@ -915,7 +1131,10 @@ describe("orphanedDrafts persistence", () => {
     vi.spyOn(Date, "now").mockReturnValue(capturedAt);
     captureOrphanedDraft("ws-1", "a.md", "abandoned");
     const next = await relaunch(capturedAt + ORPHANED_DRAFT_RETENTION_MS);
-    expect(draftsFor(next.useOrphanedDrafts, "ws-1", "a.md"), "expiry: drop the retention filter. Abandoned recoveries accumulate for the life of the install.").toHaveLength(0);
+    expect(
+      draftsFor(next.useOrphanedDrafts, "ws-1", "a.md"),
+      "expiry: drop the retention filter. Abandoned recoveries accumulate for the life of the install.",
+    ).toHaveLength(0);
     // Cleaned out of storage, not just hidden from the restore.
     expect(storedText()).not.toContain("abandoned");
   });
@@ -933,20 +1152,24 @@ describe("orphanedDrafts persistence", () => {
       throw new Error("QuotaExceededError");
     });
     captureOrphanedDraft("ws-1", "a.md", "Nowhere to put it");
-    expect(atRiskOrphanedDraftIds(), "refusal: ignore storeDraft's answer and record it as stored. The close warning goes quiet about text nothing can bring back.").toHaveLength(1);
     expect(
-      draftsFor(useOrphanedDrafts, "ws-1", "a.md").map((d) => d.text),
-    ).toEqual(["Nowhere to put it"]);
+      atRiskOrphanedDraftIds(),
+      "refusal: ignore storeDraft's answer and record it as stored. The close warning goes quiet about text nothing can bring back.",
+    ).toHaveLength(1);
+    expect(draftsFor(useOrphanedDrafts, "ws-1", "a.md").map((d) => d.text)).toEqual([
+      "Nowhere to put it",
+    ]);
   });
 
   it("removes malformed current-format recovery records", async () => {
     // A half-written value still holds whatever draft text reached it.
-    seedStoredDrafts(
-      '[{"text":"UNPARSEABLE_BODY',
-    );
+    seedStoredDrafts('[{"text":"UNPARSEABLE_BODY');
     const broken = await relaunch();
     expect(draftsFor(broken.useOrphanedDrafts, "ws-1", "a.md")).toHaveLength(0);
-    expect(storedText(), "blob scrub: report no discard when the value does not parse. The bytes stay in plaintext with no row to expire and no notice to dismiss, so nothing can ever remove them.").not.toContain("UNPARSEABLE_BODY");
+    expect(
+      storedText(),
+      "blob scrub: report no discard when the value does not parse. The bytes stay in plaintext with no row to expire and no notice to dismiss, so nothing can ever remove them.",
+    ).not.toContain("UNPARSEABLE_BODY");
 
     seedStoredDrafts(
       JSON.stringify([
@@ -964,7 +1187,10 @@ describe("orphanedDrafts persistence", () => {
     const partial = await relaunch();
     expect(draftsFor(partial.useOrphanedDrafts, "ws-1", "a.md")).toHaveLength(0);
     expect(storedText()).not.toContain("SHAPE_BODY");
-    expect(localStorage.getItem(ORPHANED_DRAFT_STORAGE_KEY), "empty write: write `[]` instead of removing the key. A scrub that drops every row then has to ask the store for space rather than hand space back, which is the one way it could be refused.").toBeNull();
+    expect(
+      localStorage.getItem(ORPHANED_DRAFT_STORAGE_KEY),
+      "empty write: write `[]` instead of removing the key. A scrub that drops every row then has to ask the store for space rather than hand space back, which is the one way it could be refused.",
+    ).toBeNull();
   });
 
   // The scrub is not a promise the store can always keep, and the honest
@@ -992,11 +1218,9 @@ describe("orphanedDrafts persistence", () => {
         },
       ]),
     );
-    const refused = vi
-      .spyOn(Storage.prototype, "removeItem")
-      .mockImplementation(() => {
-        throw new Error("QuotaExceededError");
-      });
+    const refused = vi.spyOn(Storage.prototype, "removeItem").mockImplementation(() => {
+      throw new Error("QuotaExceededError");
+    });
 
     const blocked = await relaunch();
     // The floor still refuses to restore it, so no surface lists or copies it.
@@ -1007,11 +1231,12 @@ describe("orphanedDrafts persistence", () => {
 
     refused.mockRestore();
     const next = await relaunch();
-    expect(storedText(), "retry: scrub once per install behind a flag, or treat the refused write as handled because the row was left out of the restore. The relaunch below then leaves the plaintext exactly where it is.").not.toContain("shh");
-    // ...and the valid row it was sharing the key with came through both runs.
     expect(
-      draftsFor(next.useOrphanedDrafts, "ws-1", "b.md").map((d) => d.text),
-    ).toEqual(["kept"]);
+      storedText(),
+      "retry: scrub once per install behind a flag, or treat the refused write as handled because the row was left out of the restore. The relaunch below then leaves the plaintext exactly where it is.",
+    ).not.toContain("shh");
+    // ...and the valid row it was sharing the key with came through both runs.
+    expect(draftsFor(next.useOrphanedDrafts, "ws-1", "b.md").map((d) => d.text)).toEqual(["kept"]);
   });
 
   // The read drops a row that is not a draft before the load can compare what
@@ -1038,11 +1263,12 @@ describe("orphanedDrafts persistence", () => {
       ]),
     );
     const next = await relaunch();
-    expect(storedText(), "discard trigger: compare only kept.length with rows.length. The counts agree, no rewrite runs, and MALFORMED_BODY stays in plaintext for the life of the install.").not.toContain("MALFORMED_BODY");
-    // ...and the row beside it restores and stays durable.
     expect(
-      draftsFor(next.useOrphanedDrafts, "ws-1", "b.md").map((d) => d.text),
-    ).toEqual(["kept"]);
+      storedText(),
+      "discard trigger: compare only kept.length with rows.length. The counts agree, no rewrite runs, and MALFORMED_BODY stays in plaintext for the life of the install.",
+    ).not.toContain("MALFORMED_BODY");
+    // ...and the row beside it restores and stays durable.
+    expect(draftsFor(next.useOrphanedDrafts, "ws-1", "b.md").map((d) => d.text)).toEqual(["kept"]);
     expect(next.atRiskOrphanedDraftIds()).toEqual([]);
     expect(storedText()).toContain("kept");
   });
@@ -1055,7 +1281,10 @@ describe("orphanedDrafts persistence", () => {
     const setItem = vi.spyOn(Storage.prototype, "setItem");
     const next = await relaunch();
     expect(draftsFor(next.useOrphanedDrafts, "ws-1", "a.md")).toHaveLength(1);
-    expect(setItem, "always rewrite: drop the discard condition and write on every load. Restoring becomes a write, and the launch after an empty store creates the key for a user who never set an edit aside.").not.toHaveBeenCalled();
+    expect(
+      setItem,
+      "always rewrite: drop the discard condition and write on every load. Restoring becomes a write, and the launch after an empty store creates the key for a user who never set an edit aside.",
+    ).not.toHaveBeenCalled();
     expect(storedText()).toBe(written);
 
     for (const key of Object.keys(localStorage)) {
@@ -1072,38 +1301,60 @@ describe("orphanedDrafts persistence", () => {
     next.captureOrphanedDraft("ws-1", "b.md", "from this run");
     const [restored] = draftsFor(next.useOrphanedDrafts, "ws-1", "a.md");
     const [fresh] = draftsFor(next.useOrphanedDrafts, "ws-1", "b.md");
-    expect(fresh.id, "id watermark: drop the nextId bump in restoreOrphanedDrafts. The new draft reuses the restored one's id, and dismissing either one deletes the other's stored copy.").not.toBe(restored.id);
+    expect(
+      fresh.id,
+      "id watermark: drop the nextId bump in restoreOrphanedDrafts. The new draft reuses the restored one's id, and dismissing either one deletes the other's stored copy.",
+    ).not.toBe(restored.id);
   });
 });
 
-it.each([0, -1])("persists repaired timestamp %s so retention survives restarts", async capturedAtMs => {
-  localStorage.clear();
-  const key = `${ORPHANED_DRAFT_STORAGE_PREFIX}timestamp`;
-  const now = 1_800_000_000_000;
-  localStorage.setItem(key, JSON.stringify({ id: 1, workspaceId: "ws", path: "a.md", text: "keep", capturedAtMs }));
-  const first = await relaunch(now);
-  expect(first.atRiskOrphanedDraftIds()).toEqual([]);
-  expect(JSON.parse(localStorage.getItem(key)!).capturedAtMs).toBe(now);
-  const second = await relaunch(now + ORPHANED_DRAFT_RETENTION_MS - 1);
-  expect(draftsFor(second.useOrphanedDrafts, "ws", "a.md")[0]?.capturedAtMs).toBe(now);
-  const expired = await relaunch(now + ORPHANED_DRAFT_RETENTION_MS);
-  expect(draftsFor(expired.useOrphanedDrafts, "ws", "a.md")).toEqual([]);
-  expect(localStorage.getItem(key)).toBeNull();
-  localStorage.clear();
-});
+it.each([0, -1])(
+  "persists repaired timestamp %s so retention survives restarts",
+  async (capturedAtMs) => {
+    localStorage.clear();
+    const key = `${ORPHANED_DRAFT_STORAGE_PREFIX}timestamp`;
+    const now = 1_800_000_000_000;
+    localStorage.setItem(
+      key,
+      JSON.stringify({ id: 1, workspaceId: "ws", path: "a.md", text: "keep", capturedAtMs }),
+    );
+    const first = await relaunch(now);
+    expect(first.atRiskOrphanedDraftIds()).toEqual([]);
+    expect(JSON.parse(localStorage.getItem(key)!).capturedAtMs).toBe(now);
+    const second = await relaunch(now + ORPHANED_DRAFT_RETENTION_MS - 1);
+    expect(draftsFor(second.useOrphanedDrafts, "ws", "a.md")[0]?.capturedAtMs).toBe(now);
+    const expired = await relaunch(now + ORPHANED_DRAFT_RETENTION_MS);
+    expect(draftsFor(expired.useOrphanedDrafts, "ws", "a.md")).toEqual([]);
+    expect(localStorage.getItem(key)).toBeNull();
+    localStorage.clear();
+  },
+);
 
 it("keeps a refused timestamp repair visible and at risk", async () => {
   localStorage.clear();
   const key = `${ORPHANED_DRAFT_STORAGE_PREFIX}timestamp`;
-  const raw = JSON.stringify({ id: 1, workspaceId: "ws", path: "a.md", text: "keep", capturedAtMs: 0 });
+  const raw = JSON.stringify({
+    id: 1,
+    workspaceId: "ws",
+    path: "a.md",
+    text: "keep",
+    capturedAtMs: 0,
+  });
   localStorage.setItem(key, raw);
-  const refused = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw Error("full"); });
+  const refused = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+    throw Error("full");
+  });
   try {
     const restarted = await relaunch(1_800_000_000_000);
-    expect(draftsFor(restarted.useOrphanedDrafts, "ws", "a.md").map(row => row.text)).toEqual(["keep"]);
+    expect(draftsFor(restarted.useOrphanedDrafts, "ws", "a.md").map((row) => row.text)).toEqual([
+      "keep",
+    ]);
     expect(restarted.atRiskOrphanedDraftIds()).toEqual([1]);
     expect(localStorage.getItem(key)).toBe(raw);
-  } finally { refused.mockRestore(); localStorage.clear(); }
+  } finally {
+    refused.mockRestore();
+    localStorage.clear();
+  }
 });
 
 it("does not overwrite a replacement observed before timestamp repair", async () => {
@@ -1114,7 +1365,10 @@ it("does not overwrite a replacement observed before timestamp repair", async ()
   const replacement = JSON.stringify({ ...row, text: "new", capturedAtMs: 1_800_000_000_000 });
   const get = Storage.prototype.getItem;
   let reads = 0;
-  const intercepted = vi.spyOn(Storage.prototype, "getItem").mockImplementation(function (this: Storage, name) {
+  const intercepted = vi.spyOn(Storage.prototype, "getItem").mockImplementation(function (
+    this: Storage,
+    name,
+  ) {
     if (name === key && ++reads === 2) this.setItem(key, replacement);
     return get.call(this, name);
   });
@@ -1122,30 +1376,41 @@ it("does not overwrite a replacement observed before timestamp repair", async ()
     const restarted = await relaunch(1_800_000_000_001);
     expect(localStorage.getItem(key)).toBe(replacement);
     expect(restarted.atRiskOrphanedDraftIds()).toEqual([1]);
-  } finally { intercepted.mockRestore(); localStorage.clear(); }
+  } finally {
+    intercepted.mockRestore();
+    localStorage.clear();
+  }
 });
 
-
-
-it.each(['[{"text":"old recovery"}]', 'arbitrary old bytes'])("leaves obsolete array-key bytes untouched: %s", async raw => {
-  localStorage.clear();
-  localStorage.setItem(ORPHANED_DRAFT_STORAGE_KEY, raw);
-  const restarted = await relaunch();
-  expect(draftsFor(restarted.useOrphanedDrafts, "ws", "a.md")).toEqual([]);
-  expect(localStorage.getItem(ORPHANED_DRAFT_STORAGE_KEY)).toBe(raw);
-  expect(localStorage.length).toBe(1);
-  localStorage.clear();
-});
+it.each(['[{"text":"old recovery"}]', "arbitrary old bytes"])(
+  "leaves obsolete array-key bytes untouched: %s",
+  async (raw) => {
+    localStorage.clear();
+    localStorage.setItem(ORPHANED_DRAFT_STORAGE_KEY, raw);
+    const restarted = await relaunch();
+    expect(draftsFor(restarted.useOrphanedDrafts, "ws", "a.md")).toEqual([]);
+    expect(localStorage.getItem(ORPHANED_DRAFT_STORAGE_KEY)).toBe(raw);
+    expect(localStorage.length).toBe(1);
+    localStorage.clear();
+  },
+);
 
 it("preserves text across restarts when both the stored id and timestamp need repair", async () => {
   localStorage.clear();
   const key = `${ORPHANED_DRAFT_STORAGE_PREFIX}both-invalid`;
-  localStorage.setItem(key, '{"id":1e999,"workspaceId":"ws","path":"a.md","text":"keep both repairs","capturedAtMs":0}');
+  localStorage.setItem(
+    key,
+    '{"id":1e999,"workspaceId":"ws","path":"a.md","text":"keep both repairs","capturedAtMs":0}',
+  );
   const first = await relaunch(1_800_000_000_000);
-  expect(draftsFor(first.useOrphanedDrafts, "ws", "a.md").map(row => row.text)).toEqual(["keep both repairs"]);
+  expect(draftsFor(first.useOrphanedDrafts, "ws", "a.md").map((row) => row.text)).toEqual([
+    "keep both repairs",
+  ]);
   expect(first.atRiskOrphanedDraftIds()).toEqual([]);
   const second = await relaunch(1_800_000_000_001);
-  expect(draftsFor(second.useOrphanedDrafts, "ws", "a.md").map(row => row.text)).toEqual(["keep both repairs"]);
+  expect(draftsFor(second.useOrphanedDrafts, "ws", "a.md").map((row) => row.text)).toEqual([
+    "keep both repairs",
+  ]);
   expect(second.atRiskOrphanedDraftIds()).toEqual([]);
   localStorage.clear();
 });

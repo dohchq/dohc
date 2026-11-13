@@ -18,18 +18,32 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { arch, platform, availableParallelism } from "node:os";
 import { RUST_ARCH, RUST_OS } from "../tools/rust-engine-program/native-target.mjs";
 import { requireCiPassVerdict } from "../tools/rust-engine-program/require-ci-pass-verdict.mjs";
-import { readerTestNode, stagesReaderNode } from "../tools/rust-engine-program/reader-test-node.mjs";
+import {
+  readerTestNode,
+  stagesReaderNode,
+} from "../tools/rust-engine-program/reader-test-node.mjs";
 
 const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const sourceHeadLog = () => execFileSync("git", ["rev-list", "--walk-reflogs", "--count", "HEAD"], { cwd: sourceRoot, encoding: "utf8" });
+const sourceHeadLog = () =>
+  execFileSync("git", ["rev-list", "--walk-reflogs", "--count", "HEAD"], {
+    cwd: sourceRoot,
+    encoding: "utf8",
+  });
 const originalHeadLog = sourceHeadLog();
 const repoRoot = mkdtempSync(join(tmpdir(), "dohc-gate-repo-"));
 try {
-  cpSync(join(sourceRoot, "tools/rust-engine-program"), join(repoRoot, "tools/rust-engine-program"), { recursive: true });
+  cpSync(
+    join(sourceRoot, "tools/rust-engine-program"),
+    join(repoRoot, "tools/rust-engine-program"),
+    { recursive: true },
+  );
   cpSync(join(sourceRoot, ".gitignore"), join(repoRoot, ".gitignore"));
   // The gate names the macOS reader test Node from the shared Node pin table.
   mkdirSync(join(repoRoot, "apps/desktop/scripts"), { recursive: true });
-  cpSync(join(sourceRoot, "apps/desktop/scripts/pinned-node.mjs"), join(repoRoot, "apps/desktop/scripts/pinned-node.mjs"));
+  cpSync(
+    join(sourceRoot, "apps/desktop/scripts/pinned-node.mjs"),
+    join(repoRoot, "apps/desktop/scripts/pinned-node.mjs"),
+  );
   mkdirSync(join(repoRoot, ".hooks"));
   const git = (...args) => execFileSync("git", args, { cwd: repoRoot, stdio: "ignore" });
   git("init", "-b", "main");
@@ -46,8 +60,15 @@ try {
   throw error;
 }
 after(() => {
-  try { assert.equal(sourceHeadLog(), originalHeadLog, "gate tests must not move the source checkout's HEAD"); }
-  finally { rmSync(repoRoot, { recursive: true, force: true }); }
+  try {
+    assert.equal(
+      sourceHeadLog(),
+      originalHeadLog,
+      "gate tests must not move the source checkout's HEAD",
+    );
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
 });
 const gate = "tools/rust-engine-program/run-rust-checks.mjs";
 
@@ -172,15 +193,9 @@ function claim(path) {
 /** A PATH whose `<name>` prints `stdout` and exits `code`. */
 function stubCommand(name, stdout, code) {
   const dir = mkdtempSync(join(tmpdir(), "dohc-cmd-stub-"));
-  writeFileSync(
-    join(dir, name),
-    `#!/bin/sh\nprintf '%s\\n' "${stdout}"\nexit ${code}\n`,
-  );
+  writeFileSync(join(dir, name), `#!/bin/sh\nprintf '%s\\n' "${stdout}"\nexit ${code}\n`);
   chmodSync(join(dir, name), 0o755);
-  writeFileSync(
-    join(dir, `${name}.cmd`),
-    `@echo off\r\necho ${stdout}\r\nexit /b ${code}\r\n`,
-  );
+  writeFileSync(join(dir, `${name}.cmd`), `@echo off\r\necho ${stdout}\r\nexit /b ${code}\r\n`);
   return dir;
 }
 
@@ -228,10 +243,7 @@ test("the gate stamps the tree it read, at every step boundary", () => {
     // The evidence line carries the same stamp in its platform field, which
     // is where `require-ci-pass-verdict.mjs` reads it, and the row in its
     // summary field.
-    assert.match(
-      run.evidence,
-      / head [0-9a-f]{8} (?:clean|dirty\(\d+\)), \d+ reads\)/,
-    );
+    assert.match(run.evidence, / head [0-9a-f]{8} (?:clean|dirty\(\d+\)), \d+ reads\)/);
     assert.match(run.evidence, /tree provenance=PASS/);
 
     // One reading before the first step and one after each: 1 + native target
@@ -242,15 +254,23 @@ test("the gate stamps the tree it read, at every step boundary", () => {
     const commands = readFileSync(join(stub, "commands.txt"), "utf8").trim().split(/\r?\n/);
     assert.ok(commands.includes("tools/rust-engine-program/check-fixture-drift.mjs"));
     assert.ok(commands.includes("packages/app-backend-runtime/scripts/build.mjs"));
-    assert.deepEqual(commands.filter((cmd) => /^(?:nextest|test|build) /u.test(cmd)).map(command => command.replaceAll('"', "")), [
-      'nextest run --locked --workspace --run-ignored only --no-tests=fail -E binary_id(=dohc-engine-testkit::empty_store_image) & test(=prepare_empty_store_image)',
-      "nextest run --locked --workspace --no-fail-fast",
-      "test --locked --workspace --doc",
-      "build --locked -p dohc-workspace-engine --bin dohc-workspace-engine",
-    ]);
+    assert.deepEqual(
+      commands
+        .filter((cmd) => /^(?:nextest|test|build) /u.test(cmd))
+        .map((command) => command.replaceAll('"', "")),
+      [
+        "nextest run --locked --workspace --run-ignored only --no-tests=fail -E binary_id(=dohc-engine-testkit::empty_store_image) & test(=prepare_empty_store_image)",
+        "nextest run --locked --workspace --no-fail-fast",
+        "test --locked --workspace --doc",
+        "build --locked -p dohc-workspace-engine --bin dohc-workspace-engine",
+      ],
+    );
     // The reader phase follows the workspace build it reuses.
     const reader = commands.indexOf("tools/rust-engine-program/reader-tests.mjs");
-    assert.ok(reader > commands.indexOf("nextest run --locked --workspace --no-fail-fast"), commands.join("\n"));
+    assert.ok(
+      reader > commands.indexOf("nextest run --locked --workspace --no-fail-fast"),
+      commands.join("\n"),
+    );
     assert.ok(reader < commands.indexOf("test --locked --workspace --doc"), commands.join("\n"));
     assert.match(run.evidence, /reader tests=PASS/);
     assert.match(run.evidence, /scratch leak=PASS/);
@@ -276,8 +296,13 @@ test("a prepared runtime skips the rebuild and retains fixture drift", () => {
     assert.equal(run.code, 0, run.summary);
     const commands = readFileSync(join(stub, "commands.txt"), "utf8").trim().split(/\r?\n/);
     assert.ok(commands.includes("tools/rust-engine-program/check-fixture-drift.mjs"));
-    assert.equal(commands.some(cmd => cmd.includes("packages/app-backend-runtime/scripts/build.mjs")), false);
-  } finally { rmSync(stub, { recursive: true, force: true }); }
+    assert.equal(
+      commands.some((cmd) => cmd.includes("packages/app-backend-runtime/scripts/build.mjs")),
+      false,
+    );
+  } finally {
+    rmSync(stub, { recursive: true, force: true });
+  }
 });
 
 test("the caps and the scratch root reach every cargo child", () => {
@@ -314,7 +339,10 @@ test("reader tests use a staged Node on targets with a desktop pin", () => {
     const posix = stagesReaderNode();
     const nextestRun = commands.indexOf("nextest run --locked --workspace --no-fail-fast");
     assert.ok(nextestRun > 0);
-    assert.equal(commands[nextestRun - 1] === "tools/rust-engine-program/reader-test-node.mjs", posix);
+    assert.equal(
+      commands[nextestRun - 1] === "tools/rust-engine-program/reader-test-node.mjs",
+      posix,
+    );
     assert.equal(commands.includes("tools/rust-engine-program/reader-test-node.mjs"), posix);
     if (posix) assert.ok(child.includes(`DOHC_READER_TEST_NODE=${readerTestNode()}`), child);
     assert.equal(child.includes("DOHC_READER_TEST_NODE="), posix);
@@ -328,11 +356,19 @@ test("split thread caps are both exported and both reported", () => {
   try {
     const jobs = Math.max(1, Math.floor(availableParallelism() / 4));
     const libtest = Math.max(1, jobs - 1);
-    const run = runGate(stub, { RUST_TEST_THREADS: String(libtest), NEXTEST_TEST_THREADS: String(jobs) });
+    const run = runGate(stub, {
+      RUST_TEST_THREADS: String(libtest),
+      NEXTEST_TEST_THREADS: String(jobs),
+    });
     const child = readFileSync(join(stub, "envdump.txt"), "utf8");
     assert.match(child, new RegExp(`RUST_TEST_THREADS=${libtest}`));
     assert.match(child, new RegExp(`NEXTEST_TEST_THREADS=${jobs}`));
-    assert.match(run.evidence, new RegExp(`, test-threads ${jobs}${jobs === libtest ? "" : ` \\(doctests ${libtest}\\)`}, head `));
+    assert.match(
+      run.evidence,
+      new RegExp(
+        `, test-threads ${jobs}${jobs === libtest ? "" : ` \\(doctests ${libtest}\\)`}, head `,
+      ),
+    );
   } finally {
     rmSync(stub, { recursive: true, force: true });
   }
@@ -341,12 +377,19 @@ test("split thread caps are both exported and both reported", () => {
 test("oversized inherited caps are clamped in every cargo child and the evidence", () => {
   const stub = stubToolchain();
   try {
-    const run = runGate(stub, { CARGO_BUILD_JOBS: "999", RUST_TEST_THREADS: "999", NEXTEST_TEST_THREADS: "999" });
+    const run = runGate(stub, {
+      CARGO_BUILD_JOBS: "999",
+      RUST_TEST_THREADS: "999",
+      NEXTEST_TEST_THREADS: "999",
+    });
     const jobs = Math.max(1, Math.floor(availableParallelism() / 4));
     const child = readFileSync(join(stub, "envdump.txt"), "utf8");
-    for (const name of ["CARGO_BUILD_JOBS", "RUST_TEST_THREADS", "NEXTEST_TEST_THREADS"]) assert.match(child, new RegExp(`${name}=${jobs}`));
+    for (const name of ["CARGO_BUILD_JOBS", "RUST_TEST_THREADS", "NEXTEST_TEST_THREADS"])
+      assert.match(child, new RegExp(`${name}=${jobs}`));
     assert.match(run.evidence, new RegExp(`, jobs ${jobs}, test-threads ${jobs}, head `));
-  } finally { rmSync(stub, {recursive: true, force: true}); }
+  } finally {
+    rmSync(stub, { recursive: true, force: true });
+  }
 });
 
 test("the gate refuses to start under the disk floor, naming it", () => {
@@ -390,7 +433,9 @@ test("the verifier asks git which commit this checkout is, and refuses when it c
     writeFileSync(log, `${runGate(stub).evidence}\n`);
 
     const adapter = join(dirname(log), "git-stub.mjs");
-    writeFileSync(adapter, `
+    writeFileSync(
+      adapter,
+      `
       import cp from 'node:child_process';
       import {syncBuiltinESMExports} from 'node:module';
       const spawn = cp.spawnSync;
@@ -399,12 +444,17 @@ test("the verifier asks git which commit this checkout is, and refuses when it c
         return spawn('git ' + args.join(' '), {...options, shell:true});
       };
       syncBuiltinESMExports();
-    `);
+    `,
+    );
 
     const verify = (pathDir) =>
       spawnSync(
         process.execPath,
-        [...(pathDir && platform() === "win32" ? ["--import", pathToFileURL(adapter).href] : []), "tools/rust-engine-program/require-ci-pass-verdict.mjs", log],
+        [
+          ...(pathDir && platform() === "win32" ? ["--import", pathToFileURL(adapter).href] : []),
+          "tools/rust-engine-program/require-ci-pass-verdict.mjs",
+          log,
+        ],
         { cwd: repoRoot, encoding: "utf8", env: withPath(pathDir) },
       );
 
@@ -426,10 +476,7 @@ test("the verifier asks git which commit this checkout is, and refuses when it c
     const elsewhere = join(dirname(log), "elsewhere.log");
     writeFileSync(
       elsewhere,
-      readFileSync(log, "utf8").replace(
-        ` head ${head.slice(0, 8)} `,
-        " head deadbeef ",
-      ),
+      readFileSync(log, "utf8").replace(` head ${head.slice(0, 8)} `, " head deadbeef "),
     );
     const wrong = spawnSync(
       process.execPath,
@@ -459,7 +506,12 @@ test("the verifier asks git which commit this checkout is, and refuses when it c
       for (const dir of [junk, broken, stale]) {
         const refused = verify(dir);
         assert.notEqual(refused.status, 0);
-        assert.match(refused.stderr, dir === junk ? /could not answer `git rev-parse HEAD`/ : /git rev-parse HEAD failed after 4 attempts/);
+        assert.match(
+          refused.stderr,
+          dir === junk
+            ? /could not answer `git rev-parse HEAD`/
+            : /git rev-parse HEAD failed after 4 attempts/,
+        );
       }
     } finally {
       for (const dir of [junk, broken, stale]) {
@@ -478,7 +530,9 @@ test("Rust tree reads retry transient errors and retain persistent stderr in the
   try {
     const adapter = join(root, "git-failure.mjs");
     for (const persistent of [false, true]) {
-      writeFileSync(adapter, `
+      writeFileSync(
+        adapter,
+        `
         import cp from 'node:child_process';
         import {syncBuiltinESMExports} from 'node:module';
         const spawn = cp.spawnSync;
@@ -491,8 +545,9 @@ test("Rust tree reads retry transient errors and retain persistent stderr in the
           return spawn(command, args, options);
         };
         syncBuiltinESMExports();
-      `);
-      const result = runGate(stub, {NODE_OPTIONS: `--import=${pathToFileURL(adapter).href}`});
+      `,
+      );
+      const result = runGate(stub, { NODE_OPTIONS: `--import=${pathToFileURL(adapter).href}` });
       if (persistent) {
         assert.notEqual(result.code, 0);
         assert.match(result.summary, /tree provenance.*git could not read the worktree status/);
@@ -505,8 +560,8 @@ test("Rust tree reads retry transient errors and retain persistent stderr in the
       }
     }
   } finally {
-    rmSync(stub, {recursive:true,force:true});
-    rmSync(root, {recursive:true,force:true});
+    rmSync(stub, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
@@ -569,10 +624,7 @@ test("a HEAD moved and returned inside one step is refused", () => {
     // Git can expose one or both ref updates in HEAD's worktree reflog. The
     // contract is that any recorded update makes the run unattributable, not
     // that every Git host records the same count.
-    assert.match(
-      run.summary,
-      /HEAD was updated [1-9]\d* time(?:s)? during `native target`/,
-    );
+    assert.match(run.summary, /HEAD was updated [1-9]\d* time(?:s)? during `native target`/);
 
     // The stamp is the judgement's, and the verdict is the run's.
     assert.match(run.summary, /^== summary ==\r?\n {2}tree UNATTRIBUTABLE\r?\n/);

@@ -2,10 +2,7 @@ import { join } from "node:path";
 import type { MenuItemConstructorOptions } from "electron";
 import { runnableAgents, type DesktopUserSettingsResult } from "../settings/userSettings";
 import type { ChatDispatchService } from "../agents/chatDispatchService";
-import {
-  resolveDesktopIconDirectory,
-  resolveSystemThemeIconPath,
-} from "../systemThemeIcon";
+import { resolveDesktopIconDirectory, resolveSystemThemeIconPath } from "../systemThemeIcon";
 
 interface DesktopTrayImage {
   isEmpty(): boolean;
@@ -48,8 +45,16 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
   hasWindow(): boolean;
 }) {
   const {
-    app, process, Menu, nativeImage, nativeTheme, Tray,
-    readCachedUserSettingsFile, stateDir, chatDispatchService, showOrCreateMainWindow,
+    app,
+    process,
+    Menu,
+    nativeImage,
+    nativeTheme,
+    Tray,
+    readCachedUserSettingsFile,
+    stateDir,
+    chatDispatchService,
+    showOrCreateMainWindow,
   } = dependencies;
 
   let dispatchTray: DesktopTrayInstance<Image, Menu> | null = null;
@@ -60,9 +65,7 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
   }
 
   function desktopIconDirectory(): string {
-    const resourcesPath = (
-      process as NodeJS.Process & { resourcesPath?: string }
-    ).resourcesPath;
+    const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath;
     return resolveDesktopIconDirectory({
       isPackaged: app.isPackaged,
       resourcesPath,
@@ -71,10 +74,7 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
   }
 
   function currentDesktopIconPath(): string | null {
-    return resolveSystemThemeIconPath(
-      desktopIconDirectory(),
-      nativeTheme.shouldUseDarkColors,
-    );
+    return resolveSystemThemeIconPath(desktopIconDirectory(), nativeTheme.shouldUseDarkColors);
   }
 
   function dispatchTrayIcon() {
@@ -85,13 +85,9 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
       template.setTemplateImage(true);
       return template;
     }
-    const resourcesPath = (
-      process as NodeJS.Process & { resourcesPath?: string }
-    ).resourcesPath;
+    const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath;
     const themedPath = currentDesktopIconPath();
-    const packagedFallback = resourcesPath
-      ? join(resourcesPath, "tray-icon.png")
-      : "";
+    const packagedFallback = resourcesPath ? join(resourcesPath, "tray-icon.png") : "";
     let icon = nativeImage.createFromPath(themedPath ?? packagedFallback);
     if (icon.isEmpty()) {
       icon = nativeImage.createFromPath(join(app.getAppPath(), "build/icon.png"));
@@ -111,18 +107,25 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
           },
         },
         ...(schedules > 0
-          ? [{ label: schedules === 1 ? "Running 1 schedule" : `Running ${schedules} schedules`, enabled: false }]
+          ? [
+              {
+                label: schedules === 1 ? "Running 1 schedule" : `Running ${schedules} schedules`,
+                enabled: false,
+              },
+            ]
           : []),
         ...(dispatchEnabled
-          ? [{
-            label: "Pause agent replies",
-            type: "checkbox" as const,
-            checked: chatDispatchService.isPaused(),
-            click: (item: { checked: boolean }) => {
-              chatDispatchService.setPaused(item.checked);
-              rebuildDispatchTrayMenu();
-            },
-          }]
+          ? [
+              {
+                label: "Pause agent replies",
+                type: "checkbox" as const,
+                checked: chatDispatchService.isPaused(),
+                click: (item: { checked: boolean }) => {
+                  chatDispatchService.setPaused(item.checked);
+                  rebuildDispatchTrayMenu();
+                },
+              },
+            ]
           : []),
         { type: "separator" },
         {
@@ -163,7 +166,6 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
     return enabled;
   }
 
-
   // Without a tray, as on stock GNOME, nothing shows that dohc keeps running
   // after its last window closes. Say so once a run, and how to quit. The
   // notice is kept: Electron drops its click listener once it is collected.
@@ -173,13 +175,23 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
     const trayShown = await dependencies.linuxTrayShown();
     // A quit, a reopened window, or another close's notice may have come
     // during the check, which can take seconds on a slow session bus.
-    if (trayShown || backgroundNotice || dependencies.hasWindow() || dependencies.appLifecycle.isQuitting()) return;
+    if (
+      trayShown ||
+      backgroundNotice ||
+      dependencies.hasWindow() ||
+      dependencies.appLifecycle.isQuitting()
+    )
+      return;
     const schedules = dependencies.runningSchedules();
     const notice = new dependencies.Notification({
       title: "dohc is still running",
       body: [
-        ...(dispatchEnabled ? [chatDispatchService.isPaused() ? "Agent replies are paused." : "Agent replies are on."] : []),
-        ...(schedules > 0 ? [schedules === 1 ? "Running 1 schedule." : `Running ${schedules} schedules.`] : []),
+        ...(dispatchEnabled
+          ? [chatDispatchService.isPaused() ? "Agent replies are paused." : "Agent replies are on."]
+          : []),
+        ...(schedules > 0
+          ? [schedules === 1 ? "Running 1 schedule." : `Running ${schedules} schedules.`]
+          : []),
         "To quit, open dohc and press Ctrl+Q.",
       ].join(" "),
     });

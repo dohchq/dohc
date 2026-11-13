@@ -27,14 +27,18 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 /** The ignore reason of every regression this phase runs. */
 export const READER_PHASE = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG";
-const PHASE_TEST = new RegExp(String.raw`#\[ignore = "${READER_PHASE}"\](?:\s*#\[[^\]]*\])*\s*(?:async\s+)?fn\s+(\w+)`, "gu");
+const PHASE_TEST = new RegExp(
+  String.raw`#\[ignore = "${READER_PHASE}"\](?:\s*#\[[^\]]*\])*\s*(?:async\s+)?fn\s+(\w+)`,
+  "gu",
+);
 
 /** The function names of the regressions this phase runs, sorted, from the sources under `crates`. */
 export function readerTests(crates = join(repoRoot, "crates")) {
   const names = [];
   for (const path of readdirSync(crates, { recursive: true })) {
     if (!path.endsWith(".rs")) continue;
-    for (const [, name] of readFileSync(join(crates, path), "utf8").matchAll(PHASE_TEST)) names.push(name);
+    for (const [, name] of readFileSync(join(crates, path), "utf8").matchAll(PHASE_TEST))
+      names.push(name);
   }
   return names.sort();
 }
@@ -42,7 +46,7 @@ export function readerTests(crates = join(repoRoot, "crates")) {
 /** The cargo arguments that `list` or `run` the ignored tests named `names`, in any module, and nothing else. */
 export function readerTestArgs(command, names, buildArgs = nextest.slice(2)) {
   if (!names.length) throw new Error("No test has the reader phase's ignore reason.");
-  const filter = [...new Set(names)].map(name => `test(/(^|::)${name}$/)`).join(" | ");
+  const filter = [...new Set(names)].map((name) => `test(/(^|::)${name}$/)`).join(" | ");
   return ["nextest", command, ...buildArgs, "--run-ignored", "ignored-only", "-E", filter];
 }
 
@@ -62,8 +66,8 @@ export function readerTestMismatches(names, list) {
   const declared = new Map();
   for (const name of names) declared.set(name, (declared.get(name) ?? 0) + 1);
   return [...new Set([...declared.keys(), ...found.keys()])]
-    .filter(name => declared.get(name) !== found.get(name))
-    .map(name => `${name} (declared ${declared.get(name) ?? 0}, found ${found.get(name) ?? 0})`);
+    .filter((name) => declared.get(name) !== found.get(name))
+    .map((name) => `${name} (declared ${declared.get(name) ?? 0}, found ${found.get(name) ?? 0})`);
 }
 
 async function readerNode() {
@@ -75,26 +79,55 @@ async function readerNode() {
 
 export async function runReaderTests(buildArgs = nextest.slice(2)) {
   const names = readerTests();
-  const listed = spawnSync("cargo", [...readerTestArgs("list", names, buildArgs), "--message-format", "json"],
-    { cwd: repoRoot, encoding: "utf8", maxBuffer: 1 << 28, stdio: ["ignore", "pipe", "inherit"] });
-  if (listed.status !== 0) throw new Error(`The reader regressions did not list: ${listed.error?.message ?? `exit ${listed.status}`}.`);
+  const listed = spawnSync(
+    "cargo",
+    [...readerTestArgs("list", names, buildArgs), "--message-format", "json"],
+    { cwd: repoRoot, encoding: "utf8", maxBuffer: 1 << 28, stdio: ["ignore", "pipe", "inherit"] },
+  );
+  if (listed.status !== 0)
+    throw new Error(
+      `The reader regressions did not list: ${listed.error?.message ?? `exit ${listed.status}`}.`,
+    );
   const mismatches = readerTestMismatches(names, JSON.parse(listed.stdout));
-  if (mismatches.length) throw new Error(`The reader phase's filter does not select exactly its regressions: ${mismatches.join(", ")}.`);
+  if (mismatches.length)
+    throw new Error(
+      `The reader phase's filter does not select exactly its regressions: ${mismatches.join(", ")}.`,
+    );
   const node = await readerNode();
   const parent = testScratchParent();
   await mkdir(parent, { recursive: true });
   const bundle = await mkdtemp(join(parent, "reader-test-bundle-"));
   try {
     // The manifest names the runtime that built it, so the reader's Node builds it.
-    const built = spawnSync(node, [join(repoRoot, "packages/ydoc-projection/scripts/build-engine-reader.mjs"), bundle],
-      { cwd: repoRoot, stdio: "inherit" });
-    if (built.status !== 0) throw new Error(`The reader bundle did not build: ${built.error?.message ?? `exit ${built.status}`}.`);
-    const env = { ...process.env, DOHC_ENGINE_READER_CONFIG: JSON.stringify({
-      node, bundle: join(bundle, "reader.cjs"), manifest: join(bundle, "manifest.json"),
-    }) };
-    const run = spawnSync("cargo", [...readerTestArgs("run", names, buildArgs), "--no-tests=fail", "--no-fail-fast", "--retries=0"],
-      { cwd: repoRoot, env, stdio: "inherit" });
-    if (run.status !== 0) throw new Error(`Reader regressions failed: ${run.error?.message ?? `exit ${run.status}`}.`);
+    const built = spawnSync(
+      node,
+      [join(repoRoot, "packages/ydoc-projection/scripts/build-engine-reader.mjs"), bundle],
+      { cwd: repoRoot, stdio: "inherit" },
+    );
+    if (built.status !== 0)
+      throw new Error(
+        `The reader bundle did not build: ${built.error?.message ?? `exit ${built.status}`}.`,
+      );
+    const env = {
+      ...process.env,
+      DOHC_ENGINE_READER_CONFIG: JSON.stringify({
+        node,
+        bundle: join(bundle, "reader.cjs"),
+        manifest: join(bundle, "manifest.json"),
+      }),
+    };
+    const run = spawnSync(
+      "cargo",
+      [
+        ...readerTestArgs("run", names, buildArgs),
+        "--no-tests=fail",
+        "--no-fail-fast",
+        "--retries=0",
+      ],
+      { cwd: repoRoot, env, stdio: "inherit" },
+    );
+    if (run.status !== 0)
+      throw new Error(`Reader regressions failed: ${run.error?.message ?? `exit ${run.status}`}.`);
   } finally {
     // Windows can hold the bundle a moment after the last reader exits.
     await rm(bundle, { recursive: true, force: true, maxRetries: 5 });
@@ -102,8 +135,10 @@ export async function runReaderTests(buildArgs = nextest.slice(2)) {
 }
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
-  await runReaderTests(process.argv.length > 2 ? process.argv.slice(2) : undefined).catch(error => {
-    console.error(error.message);
-    process.exitCode = 1;
-  });
+  await runReaderTests(process.argv.length > 2 ? process.argv.slice(2) : undefined).catch(
+    (error) => {
+      console.error(error.message);
+      process.exitCode = 1;
+    },
+  );
 }

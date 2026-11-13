@@ -83,11 +83,15 @@ export function historyPathAdmission(
   if (policy.errors.length > 0) return () => false;
   return (path) => {
     const validated = validateUserReadPath(path, { platform: process.platform });
-    return validated.ok && validated.normalized === path && resolveEffectivePolicy({
-      path,
-      filesPolicy: policy.filesPolicy,
-      visibilityPolicy: policy.visibilityPolicy,
-    }).tracked;
+    return (
+      validated.ok &&
+      validated.normalized === path &&
+      resolveEffectivePolicy({
+        path,
+        filesPolicy: policy.filesPolicy,
+        visibilityPolicy: policy.visibilityPolicy,
+      }).tracked
+    );
   };
 }
 
@@ -95,8 +99,11 @@ export function historyMomentPathsAdmitted(
   admitted: (path: string) => boolean,
   moment: Pick<VersionedTextMoment, "path" | "payload">,
 ): boolean {
-  return [moment.path, moment.payload.after.path, ...(moment.payload.before ? [moment.payload.before.path] : [])]
-    .every(admitted);
+  return [
+    moment.path,
+    moment.payload.after.path,
+    ...(moment.payload.before ? [moment.payload.before.path] : []),
+  ].every(admitted);
 }
 
 // Whether files.toml leaves every file under `directory` out of History, so
@@ -114,7 +121,11 @@ export function historyExcludesSubtree(
   const coversAll = (pattern: string) => {
     if (pattern === "**") return true;
     const segments = pattern.split("/");
-    return segments.at(-1) === "**" && segments.length - 1 <= folder.length && leads(segments.slice(0, -1));
+    return (
+      segments.at(-1) === "**" &&
+      segments.length - 1 <= folder.length &&
+      leads(segments.slice(0, -1))
+    );
   };
   // `**` is only ever a final segment, so a pattern reaches inside the
   // folder when its leading segments match the folder's.
@@ -168,9 +179,7 @@ export async function readWorkspaceEnginePolicy(
     return {
       filesPolicy: null,
       visibilityPolicy: null,
-      errors: [
-        `workspace policy directory could not be resolved: ${errorMessage(error)}`,
-      ],
+      errors: [`workspace policy directory could not be resolved: ${errorMessage(error)}`],
       unreadable: [".dohc"],
     };
   }
@@ -190,7 +199,9 @@ export async function readWorkspaceEnginePolicy(
 }
 
 /** Read the same visibility policy as search without applying files.toml admission. */
-export async function readWorkspaceVisibilityPolicy(rootPath: string): Promise<PolicyReadResult<VisibilityPolicyRule>> {
+export async function readWorkspaceVisibilityPolicy(
+  rootPath: string,
+): Promise<PolicyReadResult<VisibilityPolicyRule>> {
   try {
     const dir = await resolveWorkspaceMetadataDir(rootPath, { create: false });
     if (dir !== null) return readPolicyFile(dir, "visibility.toml", parseVisibilityPolicy);
@@ -222,10 +233,13 @@ export async function workspacePolicyFilePath(
 ): Promise<string> {
   const dir = await resolveWorkspaceMetadataDir(rootPath, { create: false });
   const path = join(dir ?? join(rootPath, ".dohc"), POLICY_FILE_NAMES[file]);
-  const stats = dir === null ? null : await lstat(path).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") return null;
-    throw error;
-  });
+  const stats =
+    dir === null
+      ? null
+      : await lstat(path).catch((error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return null;
+          throw error;
+        });
   if (stats === null) throw new Error(`dohc could not open ${path}. The file doesn't exist.`);
   if (!stats.isFile()) throw new Error(`dohc could not open ${path}. It isn't a regular file.`);
   return path;

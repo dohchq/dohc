@@ -1,23 +1,23 @@
-import { exceedsLiveMarkdownLimit } from '@dohc/live-session-contract/limits'
-import { digest } from 'lib0/hash/sha256'
-import { Marked } from 'marked'
-import * as Y from 'yjs'
-import { markdownToYDoc, yDocToMarkdown } from './import-export.js'
+import { exceedsLiveMarkdownLimit } from "@dohc/live-session-contract/limits";
+import { digest } from "lib0/hash/sha256";
+import { Marked } from "marked";
+import * as Y from "yjs";
+import { markdownToYDoc, yDocToMarkdown } from "./import-export.js";
 
-const reader = new Marked()
+const reader = new Marked();
 
 // CommonMark strips a paragraph's and a heading's final whitespace, but marked
 // keeps it at the end of a note, where dohc's save trims it.
 function rendered(markdown: string): string {
   return (reader.parse(markdown, { async: false }) as string)
-    .replace(/\s+/gu, ' ')
-    .replace(/ (<\/(?:p|h[1-6])>)/gu, '$1')
-    .trim()
+    .replace(/\s+/gu, " ")
+    .replace(/ (<\/(?:p|h[1-6])>)/gu, "$1")
+    .trim();
 }
 
 /** Whether marked, the desktop's reader, renders the two the same. */
 export function sameMarkdownMeaning(left: string, right: string): boolean {
-  return rendered(left) === rendered(right)
+  return rendered(left) === rendered(right);
 }
 
 /**
@@ -29,61 +29,64 @@ export function sameMarkdownMeaning(left: string, right: string): boolean {
  * than the engine checks.
  */
 export function isLossyMarkdown(markdown: string): boolean {
-  if (exceedsLiveMarkdownLimit(markdown)) return true
-  let canonical: string
+  if (exceedsLiveMarkdownLimit(markdown)) return true;
+  let canonical: string;
   try {
-    const doc = markdownToYDoc(markdown)
+    const doc = markdownToYDoc(markdown);
     try {
-      canonical = yDocToMarkdown(doc)
+      canonical = yDocToMarkdown(doc);
     } finally {
-      doc.destroy()
+      doc.destroy();
     }
   } catch {
-    return true
+    return true;
   }
-  if (canonical === markdown) return false
-  return !sameMarkdownMeaning(markdown, canonical)
+  if (canonical === markdown) return false;
+  return !sameMarkdownMeaning(markdown, canonical);
 }
 
-const VERDICT_LIMIT = 256
-const verdicts = new Map<string, boolean>()
+const VERDICT_LIMIT = 256;
+const verdicts = new Map<string, boolean>();
 
 /**
  * isLossyMarkdown, remembered in this thread by the caller's digest of the
  * same bytes, so checking unchanged text again is free.
  */
 export function isLossyMarkdownCached(digest: string, markdown: string): boolean {
-  let lossy = verdicts.get(digest)
+  let lossy = verdicts.get(digest);
   if (lossy === undefined) {
-    lossy = isLossyMarkdown(markdown)
-    if (verdicts.size >= VERDICT_LIMIT) verdicts.delete(verdicts.keys().next().value!)
-    verdicts.set(digest, lossy)
+    lossy = isLossyMarkdown(markdown);
+    if (verdicts.size >= VERDICT_LIMIT) verdicts.delete(verdicts.keys().next().value!);
+    verdicts.set(digest, lossy);
   }
-  return lossy
+  return lossy;
 }
 
 /** What an agent, the CLI or an automation is told when it changes a lossy note. */
 export function lossyNoteRefusal(path: string): string {
-  return `dohc can't change ${path} without also changing parts it can't show, such as raw HTML or reference links. Edit the file directly instead.`
+  return `dohc can't change ${path} without also changing parts it can't show, such as raw HTML or reference links. Edit the file directly instead.`;
 }
 
-const utf8 = new TextEncoder()
-const sha256 = (text: string) => Array.from(digest(utf8.encode(text)), byte => byte.toString(16).padStart(2, '0')).join('')
+const utf8 = new TextEncoder();
+const sha256 = (text: string) =>
+  Array.from(digest(utf8.encode(text)), (byte) => byte.toString(16).padStart(2, "0")).join("");
 
 /** Whether saving needs consent for the source the current head still holds. */
 export function isLossyDocument(doc: Y.Doc, headSha256: string | null): boolean {
-  return !witnessKeepsMeaning(doc) && (headSha256 === null
-    || headSha256 === doc.getMap('meta').get('dohcMarkdownSourceSha256'))
+  return (
+    !witnessKeepsMeaning(doc) &&
+    (headSha256 === null || headSha256 === doc.getMap("meta").get("dohcMarkdownSourceSha256"))
+  );
 }
 
 /** isLossyDocument for a document's encoded state, as a session holds it. */
 export function isLossyDocumentState(state: Uint8Array, headSha256: string | null): boolean {
-  const doc = new Y.Doc()
+  const doc = new Y.Doc();
   try {
-    Y.applyUpdate(doc, state)
-    return isLossyDocument(doc, headSha256)
+    Y.applyUpdate(doc, state);
+    return isLossyDocument(doc, headSha256);
   } finally {
-    doc.destroy()
+    doc.destroy();
   }
 }
 
@@ -96,33 +99,42 @@ export function isLossyDocumentState(state: Uint8Array, headSha256: string | nul
  * gives.
  */
 export function witnessKeepsMeaning(doc: Y.Doc): boolean {
-  const meta = doc.getMap('meta')
-  const source = meta.get('dohcMarkdownSource')
-  const sourceSha = meta.get('dohcMarkdownSourceSha256')
-  const projectionSha = meta.get('dohcMarkdownSourceProjectionSha256')
-  if (source === undefined && sourceSha === undefined && projectionSha === undefined) return true
-  return checkMarkdownWitness(source, sourceSha, projectionSha)
+  const meta = doc.getMap("meta");
+  const source = meta.get("dohcMarkdownSource");
+  const sourceSha = meta.get("dohcMarkdownSourceSha256");
+  const projectionSha = meta.get("dohcMarkdownSourceProjectionSha256");
+  if (source === undefined && sourceSha === undefined && projectionSha === undefined) return true;
+  return checkMarkdownWitness(source, sourceSha, projectionSha);
 }
 
 /** Check the saved source, independently of the document's later edits. */
-export function checkMarkdownWitness(source: unknown, sourceSha: unknown, projectionSha: unknown): boolean {
-  if (typeof source !== 'string' || exceedsLiveMarkdownLimit(source) || sourceSha !== sha256(source)
-    || typeof projectionSha !== 'string') return false
-  let canonical: string
+export function checkMarkdownWitness(
+  source: unknown,
+  sourceSha: unknown,
+  projectionSha: unknown,
+): boolean {
+  if (
+    typeof source !== "string" ||
+    exceedsLiveMarkdownLimit(source) ||
+    sourceSha !== sha256(source) ||
+    typeof projectionSha !== "string"
+  )
+    return false;
+  let canonical: string;
   try {
-    const imported = markdownToYDoc(source)
+    const imported = markdownToYDoc(source);
     try {
-      canonical = yDocToMarkdown(imported)
+      canonical = yDocToMarkdown(imported);
     } finally {
-      imported.destroy()
+      imported.destroy();
     }
   } catch {
-    return false
+    return false;
   }
-  return projectionSha === sha256(canonical) && sameMarkdownMeaning(source, canonical)
+  return projectionSha === sha256(canonical) && sameMarkdownMeaning(source, canonical);
 }
 
 /** What an agent, the CLI or an automation is told when dohc can't read a note to check it. */
 export function unreadNoteRefusal(path: string): string {
-  return `dohc couldn't read ${path} to check it, so nothing changed. Try again.`
+  return `dohc couldn't read ${path} to check it, so nothing changed. Try again.`;
 }

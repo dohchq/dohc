@@ -4,7 +4,10 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ComponentProps } from "react";
 import type { SitePackageInfo } from "../ipc/bridgeContract";
-import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "../ipc/ownerAppPublicationContract";
+import type {
+  OwnerAppPublicationRequest,
+  OwnerAppPublicationResult,
+} from "../ipc/ownerAppPublicationContract";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { deferred } from "../testing/deferred";
 import { APP_CRASHED, APP_OPEN_FAILED } from "./AppView";
@@ -13,8 +16,15 @@ import { SitePreviewPage } from "./SitePreviewPage";
 configure({ asyncUtilTimeout: 10_000 });
 vi.setConfig({ testTimeout: 20_000 });
 
-type OpenRequest = { action: "open"; workspaceId: string; appRoot: string; viewId: string; colorScheme: "light" | "dark" };
-type AppViewRequest = OpenRequest
+type OpenRequest = {
+  action: "open";
+  workspaceId: string;
+  appRoot: string;
+  viewId: string;
+  colorScheme: "light" | "dark";
+};
+type AppViewRequest =
+  | OpenRequest
   | { action: "close"; workspaceId: string; viewId: string }
   | { action: "colorScheme"; workspaceId: string; colorScheme: "light" | "dark" };
 type AppViewResult =
@@ -27,92 +37,177 @@ type AppViewEvent =
   | { viewId: string; kind: "session-ended" }
   | { viewId: string; kind: "download-blocked"; filename: string }
   | { viewId: string; kind: "external-link"; url: string }
-  | { viewId: string; kind: "shortcut"; key: string; code: string; ctrlKey: boolean; shiftKey: boolean; altKey: boolean; metaKey: boolean };
+  | {
+      viewId: string;
+      kind: "shortcut";
+      key: string;
+      code: string;
+      ctrlKey: boolean;
+      shiftKey: boolean;
+      altKey: boolean;
+      metaKey: boolean;
+    };
 
 // An owner app with no standalone preview: it opens through approval.
 const ownerApp: SitePackageInfo = {
-  root: "preorders", title: "Preorders", kind: "static", confidence: "high", entryPath: null, configPath: null,
-  packagePath: null, packageManager: null, scripts: {}, configuredScripts: {}, configuredPreviewMode: null,
-  configuredBuildOutput: null, buildOutputs: [], sourceFiles: ["preorders/dohc.json", "preorders/app.publish.json", "preorders/frontend.js"],
-  shareManifest: { ok: false, reason: "no-runnable-artifact" }, diagnostics: [], authority: { kind: "workspace" },
+  root: "preorders",
+  title: "Preorders",
+  kind: "static",
+  confidence: "high",
+  entryPath: null,
+  configPath: null,
+  packagePath: null,
+  packageManager: null,
+  scripts: {},
+  configuredScripts: {},
+  configuredPreviewMode: null,
+  configuredBuildOutput: null,
+  buildOutputs: [],
+  sourceFiles: ["preorders/dohc.json", "preorders/app.publish.json", "preorders/frontend.js"],
+  shareManifest: { ok: false, reason: "no-runnable-artifact" },
+  diagnostics: [],
+  authority: { kind: "workspace" },
 };
 const staticApp: SitePackageInfo = {
-  ...ownerApp, root: "report", title: "Report", entryPath: "report/index.html", sourceFiles: ["report/index.html"],
+  ...ownerApp,
+  root: "report",
+  title: "Report",
+  entryPath: "report/index.html",
+  sourceFiles: ["report/index.html"],
   shareManifest: { ok: true, manifest: { entryPath: "report/index.html", assets: [] } },
 };
 const publicationId = "d".repeat(64);
 const prepared: Extract<OwnerAppPublicationResult, { kind: "prepared" }> = {
-  kind: "prepared", approvalId: "af28e679-fb6e-4b69-b852-c6f643e5d7ac", candidateDigest: "a".repeat(64), appRoot: "preorders",
-  versionId: "main", sourceRevision: "b".repeat(64), sourcePaths: ["preorders/frontend.js"], capabilities: [], externalNetwork: true, local: true,
+  kind: "prepared",
+  approvalId: "af28e679-fb6e-4b69-b852-c6f643e5d7ac",
+  candidateDigest: "a".repeat(64),
+  appRoot: "preorders",
+  versionId: "main",
+  sourceRevision: "b".repeat(64),
+  sourcePaths: ["preorders/frontend.js"],
+  capabilities: [],
+  externalNetwork: true,
+  local: true,
 };
 
 let approved = true;
 let launches = 0;
 const opened = (request: OpenRequest): AppViewResult => ({
-  kind: "opened", viewId: request.viewId, publicationId, url: `http://127.0.0.1:4310${++launches}/`, partition: `dohc-app-view-${request.viewId}`,
+  kind: "opened",
+  viewId: request.viewId,
+  publicationId,
+  url: `http://127.0.0.1:4310${++launches}/`,
+  partition: `dohc-app-view-${request.viewId}`,
 });
 const appView = vi.fn(async (request: AppViewRequest): Promise<AppViewResult> => {
-  if (request.action === "open") return approved ? opened(request) : { kind: "unapproved", viewId: request.viewId };
+  if (request.action === "open")
+    return approved ? opened(request) : { kind: "unapproved", viewId: request.viewId };
   if (request.action === "close") return { kind: "closed", viewId: request.viewId };
   return { kind: "colorScheme" };
 });
 const eventListeners = new Set<(event: AppViewEvent) => void>();
 function emit(event: AppViewEvent) {
-  act(() => { for (const listener of eventListeners) listener(event); });
+  act(() => {
+    for (const listener of eventListeners) listener(event);
+  });
 }
-async function publication(request: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult> {
+async function publication(
+  request: OwnerAppPublicationRequest,
+): Promise<OwnerAppPublicationResult> {
   if (request.action === "listLocal") return { kind: "localListed", publications: [] };
   if (request.action === "list") return { kind: "listed", publications: [], nextCursor: null };
   if (request.action === "prepareLocal") return prepared;
-  if (request.action === "approve") { approved = true; return { kind: "published", publicationId, authorityRevision: 1, local: true }; }
-  if (request.action === "launchLocal") return { kind: "localLaunched", publicationId, url: "http://127.0.0.1:43123/" };
+  if (request.action === "approve") {
+    approved = true;
+    return { kind: "published", publicationId, authorityRevision: 1, local: true };
+  }
+  if (request.action === "launchLocal")
+    return { kind: "localLaunched", publicationId, url: "http://127.0.0.1:43123/" };
   return { kind: "cancelled" };
 }
 const publishOwnerApp = vi.fn(publication);
 const api = {
-  getSitePackage: vi.fn(async ({ path }: { path: string }) => (path === "report" ? staticApp : { ...ownerApp, root: path })),
-  getWorkspaceSettings: vi.fn(async () => ({ settings: DEFAULT_WORKSPACE_SETTINGS, source: "default" as const })),
-  startSitePreview: vi.fn(async () => ({ siteRoot: "report", mode: "static" as const, url: "http://127.0.0.1:49152/", logs: [], exited: false, generation: 1 })),
+  getSitePackage: vi.fn(async ({ path }: { path: string }) =>
+    path === "report" ? staticApp : { ...ownerApp, root: path },
+  ),
+  getWorkspaceSettings: vi.fn(async () => ({
+    settings: DEFAULT_WORKSPACE_SETTINGS,
+    source: "default" as const,
+  })),
+  startSitePreview: vi.fn(async () => ({
+    siteRoot: "report",
+    mode: "static" as const,
+    url: "http://127.0.0.1:49152/",
+    logs: [],
+    exited: false,
+    generation: 1,
+  })),
   getSitePreviewLogs: vi.fn(async () => ({ logs: [], exited: false })),
   stopSitePreview: vi.fn(async () => undefined),
   onSitePreviewReplaced: vi.fn(() => () => undefined),
-  readWorkspaceTrust: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, trusted: true })),
+  readWorkspaceTrust: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({
+    workspaceId,
+    trusted: true,
+  })),
   onWorkspaceTrustChanged: vi.fn(() => () => undefined),
   openExternalUrl: vi.fn(async () => undefined),
   appView,
   onAppViewEvent: vi.fn((listener: (event: AppViewEvent) => void) => {
     eventListeners.add(listener);
-    return () => { eventListeners.delete(listener); };
+    return () => {
+      eventListeners.delete(listener);
+    };
   }),
   publishOwnerApp,
-  listRelayShareLinks: vi.fn(async () => ({ supportedLinkAccess: ["view"], links: [], independentGrants: [] })),
+  listRelayShareLinks: vi.fn(async () => ({
+    supportedLinkAccess: ["view"],
+    links: [],
+    independentGrants: [],
+  })),
   cloudStatus: vi.fn(async () => ({ connected: false, workspaceSynced: false })),
 };
 
 // jsdom has no <webview>: it renders as an unknown element, so these stand in for Electron's methods.
 const guest = {
-  reload: vi.fn(), stop: vi.fn(), goBack: vi.fn(), goForward: vi.fn(),
-  canGoBack: vi.fn(() => true), canGoForward: vi.fn(() => true), focus: vi.fn(),
+  reload: vi.fn(),
+  stop: vi.fn(),
+  goBack: vi.fn(),
+  goForward: vi.fn(),
+  canGoBack: vi.fn(() => true),
+  canGoForward: vi.fn(() => true),
+  focus: vi.fn(),
 };
 const prototype = HTMLUnknownElement.prototype as unknown as Record<string, unknown>;
 function webview() {
   return screen.getByTestId("app-view-webview");
 }
 function fire(type: string, fields: Record<string, unknown> = {}) {
-  act(() => { webview().dispatchEvent(Object.assign(new Event(type), fields)); });
+  act(() => {
+    webview().dispatchEvent(Object.assign(new Event(type), fields));
+  });
 }
 async function openedView() {
   await screen.findByTestId("app-view-webview");
   fire("did-stop-loading");
 }
-const viewIdOf = () => (appView.mock.calls.find(([request]) => request.action === "open")![0] as OpenRequest).viewId;
+const viewIdOf = () =>
+  (appView.mock.calls.find(([request]) => request.action === "open")![0] as OpenRequest).viewId;
 const opens = () => appView.mock.calls.filter(([request]) => request.action === "open").length;
 const toolbar = () => within(screen.getByTestId("site-preview-page").querySelector("header")!);
 
 const notices = { report: vi.fn(), clear: vi.fn() };
 function Page(props: Partial<ComponentProps<typeof SitePreviewPage>>) {
-  return <SitePreviewPage workspaceId="ws-shop" siteRoot="preorders" notices={notices} focused onShowSource={() => undefined}
-    onShareSite={() => undefined} {...props} />;
+  return (
+    <SitePreviewPage
+      workspaceId="ws-shop"
+      siteRoot="preorders"
+      notices={notices}
+      focused
+      onShowSource={() => undefined}
+      onShareSite={() => undefined}
+      {...props}
+    />
+  );
 }
 
 describe("an owner app in its tab", () => {
@@ -140,9 +235,17 @@ describe("an owner app in its tab", () => {
     expect(await screen.findByTestId("app-view-checking")).toBeTruthy();
     expect((screen.getByTestId("app-view-reload") as HTMLButtonElement).disabled).toBe(true);
     // The paper renders before the effect that asks to open the app.
-    await waitFor(() => expect(appView).toHaveBeenCalledWith(expect.objectContaining({ action: "open" })));
+    await waitFor(() =>
+      expect(appView).toHaveBeenCalledWith(expect.objectContaining({ action: "open" })),
+    );
     const request = appView.mock.calls[0]![0] as OpenRequest;
-    expect(request).toEqual({ action: "open", workspaceId: "ws-shop", appRoot: "preorders", viewId: expect.stringMatching(/^[A-Za-z0-9_-]{1,64}$/), colorScheme: "light" });
+    expect(request).toEqual({
+      action: "open",
+      workspaceId: "ws-shop",
+      appRoot: "preorders",
+      viewId: expect.stringMatching(/^[A-Za-z0-9_-]{1,64}$/),
+      colorScheme: "light",
+    });
     await act(async () => answer.resolve(opened(request)));
     const view = webview();
     expect(view.getAttribute("src")).toBe("http://127.0.0.1:43101/");
@@ -158,7 +261,9 @@ describe("an owner app in its tab", () => {
     await userEvent.setup().click(screen.getByRole("button", { name: "Reload app" }));
     expect(guest.reload).toHaveBeenCalledOnce();
     fire("did-start-loading");
-    expect(screen.getByRole("button", { name: "Stop loading" })).toBe(screen.getByTestId("app-view-reload"));
+    expect(screen.getByRole("button", { name: "Stop loading" })).toBe(
+      screen.getByTestId("app-view-reload"),
+    );
   });
 
   it("opens the app here once it is approved, and moves focus into it as the review closes", async () => {
@@ -166,7 +271,9 @@ describe("an owner app in its tab", () => {
     const user = userEvent.setup();
     render(<Page />);
     await user.click(await screen.findByRole("button", { name: "Review and open app" }));
-    const approve = await screen.findByRole("button", { name: "Approve and open" }) as HTMLButtonElement;
+    const approve = (await screen.findByRole("button", {
+      name: "Approve and open",
+    })) as HTMLButtonElement;
     await waitFor(() => expect(approve.disabled).toBe(false));
     await user.click(approve);
     await screen.findByTestId("app-view-webview");
@@ -180,18 +287,30 @@ describe("an owner app in its tab", () => {
     render(<Page />);
     await openedView();
     fire("did-fail-load", { isMainFrame: true, errorCode: -3, errorDescription: "ERR_ABORTED" });
-    fire("did-fail-load", { isMainFrame: false, errorCode: -105, errorDescription: "ERR_NAME_NOT_RESOLVED" });
+    fire("did-fail-load", {
+      isMainFrame: false,
+      errorCode: -105,
+      errorDescription: "ERR_NAME_NOT_RESOLVED",
+    });
     expect(notices.report).not.toHaveBeenCalled();
-    fire("did-fail-load", { isMainFrame: true, errorCode: -102, errorDescription: "ERR_CONNECTION_REFUSED" });
+    fire("did-fail-load", {
+      isMainFrame: true,
+      errorCode: -102,
+      errorDescription: "ERR_CONNECTION_REFUSED",
+    });
     expect(screen.getByTestId("app-view-retry")).toBeTruthy();
     expect(screen.queryByTestId("app-view-webview")).toBeNull();
-    expect(notices.report).toHaveBeenLastCalledWith(expect.objectContaining({ message: APP_OPEN_FAILED }));
+    expect(notices.report).toHaveBeenLastCalledWith(
+      expect.objectContaining({ message: APP_OPEN_FAILED }),
+    );
     // Reload in the toolbar relaunches a failed app.
     await userEvent.setup().click(screen.getByTestId("app-view-reload"));
     await openedView();
     expect(opens()).toBe(2);
     fire("render-process-gone", { details: { reason: "crashed", exitCode: 1 } });
-    expect(notices.report).toHaveBeenLastCalledWith(expect.objectContaining({ message: APP_CRASHED }));
+    expect(notices.report).toHaveBeenLastCalledWith(
+      expect.objectContaining({ message: APP_CRASHED }),
+    );
     expect(screen.getByTestId("app-view-retry")).toBeTruthy();
   });
 
@@ -212,8 +331,14 @@ describe("an owner app in its tab", () => {
     await openedView();
     fire("render-process-gone", { details: { reason: "crashed", exitCode: 1 } });
     approved = false;
-    await userEvent.setup().click(within(screen.getByTestId("app-view-retry")).getByRole("button", { name: "Try again" }));
-    expect(await screen.findByText("This app's approval ended. Review it to open it again.")).toBeTruthy();
+    await userEvent
+      .setup()
+      .click(
+        within(screen.getByTestId("app-view-retry")).getByRole("button", { name: "Try again" }),
+      );
+    expect(
+      await screen.findByText("This app's approval ended. Review it to open it again."),
+    ).toBeTruthy();
   });
 
   it("leaves focus where it went if the tab lost focus before the app opened", async () => {
@@ -232,29 +357,51 @@ describe("an owner app in its tab", () => {
     render(<Page reportError={reportError} />);
     await openedView();
     await userEvent.setup().click(screen.getByTestId("app-view-open-browser"));
-    expect(publishOwnerApp).toHaveBeenCalledWith({ action: "launchLocal", workspaceId: "ws-shop", publicationId });
+    expect(publishOwnerApp).toHaveBeenCalledWith({
+      action: "launchLocal",
+      workspaceId: "ws-shop",
+      publicationId,
+    });
     expect(api.openExternalUrl).toHaveBeenCalledExactlyOnceWith({ url: "http://127.0.0.1:43123/" });
-    publishOwnerApp.mockResolvedValueOnce({ kind: "localLaunched", publicationId, url: "http://localhost:43123/" });
+    publishOwnerApp.mockResolvedValueOnce({
+      kind: "localLaunched",
+      publicationId,
+      url: "http://localhost:43123/",
+    });
     await userEvent.setup().click(screen.getByTestId("app-view-open-browser"));
-    await waitFor(() => expect(reportError).toHaveBeenCalledWith("dohc could not open this app in your browser.", expect.any(Error), expect.any(Function)));
+    await waitFor(() =>
+      expect(reportError).toHaveBeenCalledWith(
+        "dohc could not open this app in your browser.",
+        expect.any(Error),
+        expect.any(Function),
+      ),
+    );
     expect(api.openExternalUrl).toHaveBeenCalledOnce();
   });
 
   it("drops a browser open that answers after its tab closed or moved to another workspace", async () => {
     const reportError = vi.fn();
     let launch = deferred<OwnerAppPublicationResult>();
-    publishOwnerApp.mockImplementation((request) => (request.action === "launchLocal" ? launch.promise : publication(request)));
+    publishOwnerApp.mockImplementation((request) =>
+      request.action === "launchLocal" ? launch.promise : publication(request),
+    );
     const view = render(<Page workspaceId="ws-old" reportError={reportError} />);
     await openedView();
     await userEvent.setup().click(screen.getByTestId("app-view-open-browser"));
     view.rerender(<Page workspaceId="ws-shop" reportError={reportError} />);
-    await waitFor(() => expect(appView).toHaveBeenCalledWith(expect.objectContaining({ action: "open", workspaceId: "ws-shop" })));
+    await waitFor(() =>
+      expect(appView).toHaveBeenCalledWith(
+        expect.objectContaining({ action: "open", workspaceId: "ws-shop" }),
+      ),
+    );
     await act(async () => launch.reject(new Error("engine stopped")));
     await openedView();
     launch = deferred<OwnerAppPublicationResult>();
     await userEvent.setup().click(screen.getByTestId("app-view-open-browser"));
     view.unmount();
-    await act(async () => launch.resolve({ kind: "localLaunched", publicationId, url: "http://127.0.0.1:43123/" }));
+    await act(async () =>
+      launch.resolve({ kind: "localLaunched", publicationId, url: "http://127.0.0.1:43123/" }),
+    );
     expect(reportError).not.toHaveBeenCalled();
     expect(api.openExternalUrl).not.toHaveBeenCalled();
   });
@@ -266,11 +413,27 @@ describe("an owner app in its tab", () => {
     await waitFor(() => expect(opens()).toBe(1));
     const stale = appView.mock.calls[0]![0] as OpenRequest;
     view.rerender(<Page workspaceId="ws-shop" />);
-    await waitFor(() => expect(appView).toHaveBeenCalledWith(expect.objectContaining({ action: "open", workspaceId: "ws-shop" })));
+    await waitFor(() =>
+      expect(appView).toHaveBeenCalledWith(
+        expect.objectContaining({ action: "open", workspaceId: "ws-shop" }),
+      ),
+    );
     await screen.findByTestId("app-view-webview");
     const fresh = webview().getAttribute("src");
-    expect(appView).toHaveBeenCalledWith({ action: "close", workspaceId: "ws-old", viewId: stale.viewId });
-    await act(async () => slow.resolve({ kind: "opened", viewId: stale.viewId, publicationId, url: "http://127.0.0.1:49999/", partition: "stale" }));
+    expect(appView).toHaveBeenCalledWith({
+      action: "close",
+      workspaceId: "ws-old",
+      viewId: stale.viewId,
+    });
+    await act(async () =>
+      slow.resolve({
+        kind: "opened",
+        viewId: stale.viewId,
+        publicationId,
+        url: "http://127.0.0.1:49999/",
+        partition: "stale",
+      }),
+    );
     expect(webview().getAttribute("src")).toBe(fresh);
     expect(toolbar().getByText("Preorders")).toBeTruthy();
   });

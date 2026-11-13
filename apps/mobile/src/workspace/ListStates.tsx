@@ -21,8 +21,13 @@ import { useTheme } from "../theme";
 export function RetryRow({ label, onRetry }: { label: string; onRetry(): void }) {
   const theme = useTheme();
   return (
-    <View style={styles.retry} accessible accessibilityLabel={label} accessibilityActions={[{ name: "activate", label: noticesWords.tryAgain }]}
-      onAccessibilityAction={onRetry}>
+    <View
+      style={styles.retry}
+      accessible
+      accessibilityLabel={label}
+      accessibilityActions={[{ name: "activate", label: noticesWords.tryAgain }]}
+      onAccessibilityAction={onRetry}
+    >
       <AlertTriangle size={16} color={theme.danger} strokeWidth={2} />
       <ActionPill label={noticesWords.tryAgain} onPress={onRetry} />
     </View>
@@ -39,7 +44,13 @@ export function HoldRow() {
     const timer = setTimeout(() => setShown(true), 150);
     return () => clearTimeout(timer);
   }, []);
-  return <View style={styles.hold} accessible={shown} accessibilityLabel={shown ? documentWords.loading : undefined} />;
+  return (
+    <View
+      style={styles.hold}
+      accessible={shown}
+      accessibilityLabel={shown ? documentWords.loading : undefined}
+    />
+  );
 }
 
 /** One muted line where a list has nothing: `No pages yet.` */
@@ -64,9 +75,23 @@ export function NoWorkspace() {
   const gap = useWorkspaceGap();
   const server = serverName(useSignIn().origin);
   if (!gap) return null;
-  if (gap.kind === "failed") return <View style={styles.message}><ProblemLine text={accountWords.problem(gap.problem, server)} onRetry={reloadWorkspaces} /></View>;
-  const text = gap.kind === "no-workspaces" ? accountWords.noWorkspaces(server) : gap.kind === "none-synced" ? accountWords.noneSynced : accountWords.noneShown;
-  return <View style={styles.message}><Text style={[styles.text, { color: theme.muted }]}>{text}</Text></View>;
+  if (gap.kind === "failed")
+    return (
+      <View style={styles.message}>
+        <ProblemLine text={accountWords.problem(gap.problem, server)} onRetry={reloadWorkspaces} />
+      </View>
+    );
+  const text =
+    gap.kind === "no-workspaces"
+      ? accountWords.noWorkspaces(server)
+      : gap.kind === "none-synced"
+        ? accountWords.noneSynced
+        : accountWords.noneShown;
+  return (
+    <View style={styles.message}>
+      <Text style={[styles.text, { color: theme.muted }]}>{text}</Text>
+    </View>
+  );
 }
 
 /**
@@ -74,12 +99,29 @@ export function NoWorkspace() {
  * danger and offers Try again; something that's gone draws the dohc mark and offers nothing. A screen outside the tabs
  * shows its failure here, since toasts show only on the tabs (dohc-interface, "The phone app").
  */
-export function ScreenFailure({ text, cause, onRetry }: { text: string; cause?: string; onRetry?(): void }) {
+export function ScreenFailure({
+  text,
+  cause,
+  onRetry,
+}: {
+  text: string;
+  cause?: string;
+  onRetry?(): void;
+}) {
   const theme = useTheme();
   return (
     <View style={styles.failure}>
-      {onRetry ? <AlertTriangle size={22} color={theme.danger} strokeWidth={1.9} /> : <DohcMark size={30} color={theme.line} />}
-      <Text style={[styles.failureText, { color: theme.muted }]} accessibilityRole={onRetry ? "alert" : undefined}>{text}</Text>
+      {onRetry ? (
+        <AlertTriangle size={22} color={theme.danger} strokeWidth={1.9} />
+      ) : (
+        <DohcMark size={30} color={theme.line} />
+      )}
+      <Text
+        style={[styles.failureText, { color: theme.muted }]}
+        accessibilityRole={onRetry ? "alert" : undefined}
+      >
+        {text}
+      </Text>
       {cause ? <Text style={[styles.failureText, { color: theme.muted }]}>{cause}</Text> : null}
       {onRetry ? <ActionPill label={noticesWords.tryAgain} onPress={onRetry} /> : null}
     </View>
@@ -87,9 +129,22 @@ export function ScreenFailure({ text, cause, onRetry }: { text: string; cause?: 
 }
 
 const styles = StyleSheet.create({
-  failure: { flex: 1, alignItems: "center", justifyContent: "center", gap: 12, paddingHorizontal: 32, paddingBottom: 80 },
+  failure: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 12,
+    paddingHorizontal: 32,
+    paddingBottom: 80,
+  },
   failureText: { fontSize: 15, lineHeight: 20, textAlign: "center" },
-  retry: { flexDirection: "row", alignItems: "center", gap: 10, minHeight: 44, paddingHorizontal: 16 },
+  retry: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    minHeight: 44,
+    paddingHorizontal: 16,
+  },
   hold: { height: 44 },
   empty: { fontSize: 15, lineHeight: 20, paddingHorizontal: 16, paddingVertical: 12 },
   message: { paddingHorizontal: 16, paddingTop: 24 },

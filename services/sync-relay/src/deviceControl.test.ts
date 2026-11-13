@@ -1,4 +1,4 @@
-import {readRelayDeviceDeliveryConfig} from "./deviceLiveHostConfig.js";
+import { readRelayDeviceDeliveryConfig } from "./deviceLiveHostConfig.js";
 import { DatabaseSync } from "node:sqlite";
 import { initializeRelayDeployment, openRelayDeployment } from "./relayDeployment.js";
 import { createServer } from "node:http";
@@ -9,7 +9,10 @@ import { tmpdir } from "node:os";
 import { WebSocket } from "ws";
 import { afterEach, describe, expect, it } from "vitest";
 import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
-import { DEVICE_CONTROL_PROTOCOL, type DeviceControlLimits } from "@dohc/live-session-contract/device-control";
+import {
+  DEVICE_CONTROL_PROTOCOL,
+  type DeviceControlLimits,
+} from "@dohc/live-session-contract/device-control";
 import { createDeviceHostCredential } from "./deviceHostCredential.js";
 import { createDeviceControl } from "./deviceControl.js";
 import { openSyncRelayStorage } from "./storage.js";
@@ -17,26 +20,76 @@ import { openSyncRelayStorage } from "./storage.js";
 // Pongs cross real sockets that a loaded gate host can stall past 500 ms, which
 // would close a host these tests expect to stay open. Only the silent-peer test
 // waits for the heartbeat to expire, so only it shortens the bound.
-const limits: DeviceControlLimits = { maxConnections: 4, maxHeaderBytes: 8192, maxCredentialBytes: 4096,
-  maxPayloadBytes: 4096, maxPendingBytes: 8192, maxFragments: 8, maxBufferedChunks: 8,
-  handshakeTimeoutMs: 1000, heartbeatIntervalMs: 50, heartbeatTimeoutMs: 10_000, closeTimeoutMs: 100 };
+const limits: DeviceControlLimits = {
+  maxConnections: 4,
+  maxHeaderBytes: 8192,
+  maxCredentialBytes: 4096,
+  maxPayloadBytes: 4096,
+  maxPendingBytes: 8192,
+  maxFragments: 8,
+  maxBufferedChunks: 8,
+  handshakeTimeoutMs: 1000,
+  heartbeatIntervalMs: 50,
+  heartbeatTimeoutMs: 10_000,
+  closeTimeoutMs: 100,
+};
 const exchangeKey = "device-control-test-exchange-key-32";
 const cleanups: (() => Promise<unknown>)[] = [];
-afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
+afterEach(async () => {
+  for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+});
 
-async function setup(overrides: Partial<DeviceControlLimits> = {}, deployment = false, delivery = false) {
+async function setup(
+  overrides: Partial<DeviceControlLimits> = {},
+  deployment = false,
+  delivery = false,
+) {
   const directory = await mkdtemp(join(tmpdir(), "dohc-device-control-"));
   const configPath = join(directory, "deployment.json");
-  if (deployment) initializeRelayDeployment({ configPath, relayPath: join(directory, "volume", "relay.sqlite"), continuityDirectory: join(directory, "continuity") });
+  if (deployment)
+    initializeRelayDeployment({
+      configPath,
+      relayPath: join(directory, "volume", "relay.sqlite"),
+      continuityDirectory: join(directory, "continuity"),
+    });
   const owner = deployment ? openRelayDeployment(configPath) : undefined;
   const storage = owner?.storage ?? openSyncRelayStorage(join(directory, "relay.sqlite"));
   const deliveryConfig = join(directory, "delivery.json");
-  if (delivery) await writeFile(deliveryConfig, JSON.stringify({ version: 1, workspaceIds: ["workspace"], maxQueuedBytes: 4_000_000, maxActiveDrains: 1,
-    client: { aggregateBytes: 200_000_000, maxUploads: 1, connectTimeoutMs: 10_000, requestDeadlineMs: 1000, maxFrameBytes: 1_048_576 } }));
+  if (delivery)
+    await writeFile(
+      deliveryConfig,
+      JSON.stringify({
+        version: 1,
+        workspaceIds: ["workspace"],
+        maxQueuedBytes: 4_000_000,
+        maxActiveDrains: 1,
+        client: {
+          aggregateBytes: 200_000_000,
+          maxUploads: 1,
+          connectTimeoutMs: 10_000,
+          requestDeadlineMs: 1000,
+          maxFrameBytes: 1_048_576,
+        },
+      }),
+    );
   const credential = createDeviceHostCredential("device-test", parseHostEpoch(1));
-  expect(storage.provisionDeviceHostCredential({ credential, updatedAtMs: Date.now() }).ok).toBe(true);
-  const control = createDeviceControl({ storage, hosts: new Set(["relay.test"]), relayExchangeKey: exchangeKey,
-    limits: { ...limits, ...overrides }, ...(delivery && owner ? { delivery: { config: readRelayDeviceDeliveryConfig(deliveryConfig,{...limits,...overrides}), history: owner.history } } : {}) });
+  expect(storage.provisionDeviceHostCredential({ credential, updatedAtMs: Date.now() }).ok).toBe(
+    true,
+  );
+  const control = createDeviceControl({
+    storage,
+    hosts: new Set(["relay.test"]),
+    relayExchangeKey: exchangeKey,
+    limits: { ...limits, ...overrides },
+    ...(delivery && owner
+      ? {
+          delivery: {
+            config: readRelayDeviceDeliveryConfig(deliveryConfig, { ...limits, ...overrides }),
+            history: owner.history,
+          },
+        }
+      : {}),
+  });
   const server = createServer();
   server.on("upgrade", control.handleUpgrade);
   server.listen(0, "127.0.0.1");
@@ -46,17 +99,23 @@ async function setup(overrides: Partial<DeviceControlLimits> = {}, deployment = 
   const port = address.port;
   cleanups.push(async () => {
     control.close();
-    await new Promise<void>(resolve => server.close(() => resolve()));
+    await new Promise<void>((resolve) => server.close(() => resolve()));
     storage.close();
     await rm(directory, { recursive: true, force: true });
   });
   function connect(input = credential, headers: Record<string, string> = {}, autoPong = true) {
     const ws = new WebSocket(`ws://127.0.0.1:${port}/api/device-control`, DEVICE_CONTROL_PROTOCOL, {
-      perMessageDeflate: false, autoPong, headers: { host: "relay.test", "x-dohc-relay-exchange-key": exchangeKey,
-        authorization: `Bearer ${Buffer.from(JSON.stringify(input)).toString("base64url")}`, ...headers },
+      perMessageDeflate: false,
+      autoPong,
+      headers: {
+        host: "relay.test",
+        "x-dohc-relay-exchange-key": exchangeKey,
+        authorization: `Bearer ${Buffer.from(JSON.stringify(input)).toString("base64url")}`,
+        ...headers,
+      },
     });
     ws.on("error", () => {});
-    const closed = new Promise<void>(resolve => ws.once("close", () => resolve()));
+    const closed = new Promise<void>((resolve) => ws.once("close", () => resolve()));
     return { ws, closed };
   }
   async function registered() {
@@ -68,17 +127,35 @@ async function setup(overrides: Partial<DeviceControlLimits> = {}, deployment = 
 }
 
 describe("outbound device control authority", () => {
-  it.each(["malformed-native"])("refuses invalid private delivery bytes: %s", async mode => {
+  it.each(["malformed-native"])("refuses invalid private delivery bytes: %s", async (mode) => {
     const fixture = await setup({}, true, true);
     const connection = fixture.connect();
     const notices: Record<string, unknown>[] = [];
-    connection.ws.on("message", (bytes, binary) => { if (!binary) notices.push(JSON.parse(bytes.toString())); });
+    connection.ws.on("message", (bytes, binary) => {
+      if (!binary) notices.push(JSON.parse(bytes.toString()));
+    });
     await expect.poll(() => notices.length).toBe(2);
-    expect(notices[1]).toMatchObject({ type: "liveHost.start", version: 1,
-      host: { hostId: fixture.credential.hostId, instanceId: fixture.credential.instanceId } });
-    await expect(fixture.control.drain({ workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64) })).rejects.toThrow("not ready");
+    expect(notices[1]).toMatchObject({
+      type: "liveHost.start",
+      version: 1,
+      host: { hostId: fixture.credential.hostId, instanceId: fixture.credential.instanceId },
+    });
+    await expect(
+      fixture.control.drain({
+        workspaceId: "workspace",
+        mainVersionId: "main",
+        objectId: "object",
+        lineageClaimId: "a".repeat(64),
+      }),
+    ).rejects.toThrow("not ready");
     if (mode === "malformed-native") {
-      connection.ws.send(JSON.stringify({ type: "liveHost.transport", version: 1, receive: { maxPayloadBytes: 4096, maxPendingBytes: 8192 } }));
+      connection.ws.send(
+        JSON.stringify({
+          type: "liveHost.transport",
+          version: 1,
+          receive: { maxPayloadBytes: 4096, maxPendingBytes: 8192 },
+        }),
+      );
       connection.ws.send(Buffer.alloc(12));
     }
     await connection.closed;
@@ -89,11 +166,22 @@ describe("outbound device control authority", () => {
     const first = await fixture.registered();
     const second = await fixture.registered();
     await first.closed;
-    expect(second.notice).toMatchObject({ type: "registered", mode: "device", hostId: fixture.credential.hostId,
-      instanceId: fixture.credential.instanceId, hostEpoch: 1 });
+    expect(second.notice).toMatchObject({
+      type: "registered",
+      mode: "device",
+      hostId: fixture.credential.hostId,
+      instanceId: fixture.credential.instanceId,
+      hostEpoch: 1,
+    });
     expect(second.notice.connectionId).not.toBe(first.notice.connectionId);
-    fixture.storage.disconnectDeviceHost({ credential: fixture.credential, connectionId: first.notice.connectionId, updatedAtMs: Date.now() });
-    expect(fixture.storage.getLiveHostControl()?.registeredConnectionId).toBe(second.notice.connectionId);
+    fixture.storage.disconnectDeviceHost({
+      credential: fixture.credential,
+      connectionId: first.notice.connectionId,
+      updatedAtMs: Date.now(),
+    });
+    expect(fixture.storage.getLiveHostControl()?.registeredConnectionId).toBe(
+      second.notice.connectionId,
+    );
     second.ws.terminate();
     await second.closed;
     await expect.poll(() => fixture.storage.getLiveHostControl()?.admissionState).toBe("closed");
@@ -107,10 +195,14 @@ describe("outbound device control authority", () => {
       fixture.connect({ ...fixture.credential, hostId: "other-device" }),
       fixture.connect(fixture.credential, { authorization: "Bearer invalid" }),
       fixture.connect(fixture.credential, { "x-dohc-relay-exchange-key": "wrong" }),
-      fixture.connect(fixture.credential, { authorization: `Bearer ${Buffer.from(JSON.stringify(fixture.credential).replace('"version":1', '"version":1,"version":1')).toString("base64url")}` }),
+      fixture.connect(fixture.credential, {
+        authorization: `Bearer ${Buffer.from(JSON.stringify(fixture.credential).replace('"version":1', '"version":1,"version":1')).toString("base64url")}`,
+      }),
     ];
-    await Promise.all(candidates.map(candidate => candidate.closed));
-    expect(fixture.storage.getLiveHostControl()?.registeredConnectionId).toBe(current.notice.connectionId);
+    await Promise.all(candidates.map((candidate) => candidate.closed));
+    expect(fixture.storage.getLiveHostControl()?.registeredConnectionId).toBe(
+      current.notice.connectionId,
+    );
     expect(current.ws.readyState).toBe(WebSocket.OPEN);
   });
 
@@ -119,38 +211,53 @@ describe("outbound device control authority", () => {
     const current = await fixture.registered();
     const external = openSyncRelayStorage(join(fixture.directory, "relay.sqlite"));
     try {
-      expect(external.revokeDeviceHostCredential({ hostId: fixture.credential.hostId,
-        instanceId: fixture.credential.instanceId, updatedAtMs: Date.now() }).ok).toBe(true);
-    } finally { external.close(); }
+      expect(
+        external.revokeDeviceHostCredential({
+          hostId: fixture.credential.hostId,
+          instanceId: fixture.credential.instanceId,
+          updatedAtMs: Date.now(),
+        }).ok,
+      ).toBe(true);
+    } finally {
+      external.close();
+    }
     await current.closed;
     await fixture.connect().closed;
     expect(fixture.storage.getLiveHostControl()?.admissionState).toBe("closed");
   });
 
-  it.each(["silent"])("closes %s peers and their durable admission", async mode => {
+  it.each(["silent"])("closes %s peers and their durable admission", async (mode) => {
     const fixture = await setup(mode === "silent" ? { heartbeatTimeoutMs: 500 } : {});
     const connection = fixture.connect(fixture.credential, {}, mode !== "silent");
     await once(connection.ws, "message");
     await connection.closed;
     await expect.poll(() => fixture.storage.getLiveHostControl()?.admissionState).toBe("closed");
   });
-
 });
 
 it("closes a live deployment socket immediately after an uncertain durable commit", async () => {
   const fixture = await setup({ heartbeatIntervalMs: 60_000 }, true);
   const current = await fixture.registered();
   const exec = DatabaseSync.prototype.exec;
-  DatabaseSync.prototype.exec = function(sql: string) {
-    const relayCommit = sql === "COMMIT" && this.prepare("SELECT 1 FROM sqlite_schema WHERE name='sync_relay_continuity'").get();
+  DatabaseSync.prototype.exec = function (sql: string) {
+    const relayCommit =
+      sql === "COMMIT" &&
+      this.prepare("SELECT 1 FROM sqlite_schema WHERE name='sync_relay_continuity'").get();
     const result = exec.call(this, sql);
     if (relayCommit) throw new Error("lost COMMIT result");
     return result;
   };
   try {
-    expect(() => fixture.storage.revokeDeviceHostCredential({ hostId: fixture.credential.hostId,
-      instanceId: fixture.credential.instanceId, updatedAtMs: Date.now() })).toThrow("lost COMMIT result");
-  } finally { DatabaseSync.prototype.exec = exec; }
+    expect(() =>
+      fixture.storage.revokeDeviceHostCredential({
+        hostId: fixture.credential.hostId,
+        instanceId: fixture.credential.instanceId,
+        updatedAtMs: Date.now(),
+      }),
+    ).toThrow("lost COMMIT result");
+  } finally {
+    DatabaseSync.prototype.exec = exec;
+  }
   expect(fixture.storage.unavailable.aborted).toBe(true);
   await current.closed;
   await fixture.connect().closed;

@@ -34,7 +34,10 @@ describe("buildRunnerThreadContext", () => {
       },
     };
     const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
-    dispatchStore = createLiveAgentDispatchStore({ workspaceId: WORKSPACE_ID, rootPath: root }, sessions);
+    dispatchStore = createLiveAgentDispatchStore(
+      { workspaceId: WORKSPACE_ID, rootPath: root },
+      sessions,
+    );
     store = createLiveLinkedChatStore({ workspaceId: WORKSPACE_ID, rootPath: root }, sessions);
   });
 
@@ -45,22 +48,47 @@ describe("buildRunnerThreadContext", () => {
   async function seedThread(bodies: readonly string[]): Promise<void> {
     let id = 1;
     await loopback.sendRequest({
-      id: id++, method: CHATS_METHOD.threadCreate, workspace: WORKSPACE_ID, idempotencyKey: "th_long",
-      params: { threadId: "th_long", nowMs: FIRST_MESSAGE_AT_MS - 1_000, title: "Long thread", linkedFile: { objectId: "object_long", pathHint: "long.md" } },
+      id: id++,
+      method: CHATS_METHOD.threadCreate,
+      workspace: WORKSPACE_ID,
+      idempotencyKey: "th_long",
+      params: {
+        threadId: "th_long",
+        nowMs: FIRST_MESSAGE_AT_MS - 1_000,
+        title: "Long thread",
+        linkedFile: { objectId: "object_long", pathHint: "long.md" },
+      },
     });
     for (const [index, body] of bodies.entries()) {
       await loopback.sendRequest({
-        id: id++, method: CHATS_METHOD.messageSend, workspace: WORKSPACE_ID, idempotencyKey: `m_${index}`,
-        params: { threadId: "th_long", messageId: `m_${index}`, nowMs: FIRST_MESSAGE_AT_MS + index, authorKind: "human", authorDisplayName: "Sam", body, attachments: [] },
+        id: id++,
+        method: CHATS_METHOD.messageSend,
+        workspace: WORKSPACE_ID,
+        idempotencyKey: `m_${index}`,
+        params: {
+          threadId: "th_long",
+          messageId: `m_${index}`,
+          nowMs: FIRST_MESSAGE_AT_MS + index,
+          authorKind: "human",
+          authorDisplayName: "Sam",
+          body,
+          attachments: [],
+        },
       });
     }
   }
 
-  const shownIds = (markdown: string) => [...markdown.matchAll(/· (m_\d+)$/gm)].map((match) => match[1]);
-  const context = (askingMessageId: string, readEarlier?: string) => buildRunnerThreadContext({
-    store, dispatchStore: dispatchStore.store, workspaceId: WORKSPACE_ID, threadId: "th_long", askingMessageId,
-    ...(readEarlier ? { readEarlier } : {}),
-  });
+  const shownIds = (markdown: string) =>
+    [...markdown.matchAll(/· (m_\d+)$/gm)].map((match) => match[1]);
+  const context = (askingMessageId: string, readEarlier?: string) =>
+    buildRunnerThreadContext({
+      store,
+      dispatchStore: dispatchStore.store,
+      workspaceId: WORKSPACE_ID,
+      threadId: "th_long",
+      askingMessageId,
+      ...(readEarlier ? { readEarlier } : {}),
+    });
 
   it("reads the newest 40 when the engine cuts each page short", async () => {
     await seedThread(Array.from({ length: 45 }, (_, index) => `message ${index}`));
@@ -71,7 +99,11 @@ describe("buildRunnerThreadContext", () => {
         await store.listMessagesPage({ ...page, limit: Math.min(page.limit, 15) }),
     };
     const markdown = await buildRunnerThreadContext({
-      store: shortPages, dispatchStore: dispatchStore.store, workspaceId: WORKSPACE_ID, threadId: "th_long", askingMessageId: "m_44",
+      store: shortPages,
+      dispatchStore: dispatchStore.store,
+      workspaceId: WORKSPACE_ID,
+      threadId: "th_long",
+      askingMessageId: "m_44",
     });
     expect(shownIds(markdown)).toEqual(Array.from({ length: 40 }, (_, index) => `m_${index + 5}`));
   });
@@ -87,11 +119,27 @@ describe("buildRunnerThreadContext", () => {
   describe("a request asked in a thread of a conversation", () => {
     const sam = { kind: "human" as const, displayName: "Sam" };
     async function seedConversation(replyBody = (index: number) => `reply ${index}`) {
-      const nova = await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "default", name: "Nova" });
-      const send = async (body: string, parentMessageId?: string) => await store.sendMessage({
-        authorActorKey: null, workspaceId: WORKSPACE_ID, threadId: chat.thread.id, author: sam, body, ...(parentMessageId ? { parentMessageId } : {}),
+      const nova = await store.ensureAgentChannel({
+        workspaceId: WORKSPACE_ID,
+        agentId: "default",
+        name: "Nova",
       });
-      const chat = await store.startChannelThread({ authorActorKey: null, workspaceId: WORKSPACE_ID, channelId: nova.id, author: sam, body: "stream 0" });
+      const send = async (body: string, parentMessageId?: string) =>
+        await store.sendMessage({
+          authorActorKey: null,
+          workspaceId: WORKSPACE_ID,
+          threadId: chat.thread.id,
+          author: sam,
+          body,
+          ...(parentMessageId ? { parentMessageId } : {}),
+        });
+      const chat = await store.startChannelThread({
+        authorActorKey: null,
+        workspaceId: WORKSPACE_ID,
+        channelId: nova.id,
+        author: sam,
+        body: "stream 0",
+      });
       const parent = await send("Draft the agenda");
       const replies = [];
       for (let index = 0; index < 3; index += 1) {
@@ -100,19 +148,39 @@ describe("buildRunnerThreadContext", () => {
       }
       return { threadId: chat.thread.id, parent, replies };
     }
-    const bodies = (markdown: string) => ["stream 0", "Draft the agenda", "stream 1", "reply 0", "stream 2", "reply 1", "stream 3", "reply 2"]
-      .filter((body) => new RegExp(`^${body}`, "m").test(markdown));
+    const bodies = (markdown: string) =>
+      [
+        "stream 0",
+        "Draft the agenda",
+        "stream 1",
+        "reply 0",
+        "stream 2",
+        "reply 1",
+        "stream 3",
+        "reply 2",
+      ].filter((body) => new RegExp(`^${body}`, "m").test(markdown));
 
     it("reads the message it hangs from and every reply, not the stream around them", async () => {
       const { threadId, replies } = await seedConversation();
       const markdown = await buildRunnerThreadContext({
-        store, dispatchStore: dispatchStore.store, workspaceId: WORKSPACE_ID, threadId, askingMessageId: replies[1]!.id, readEarlier: "dohc chat show",
+        store,
+        dispatchStore: dispatchStore.store,
+        workspaceId: WORKSPACE_ID,
+        threadId,
+        askingMessageId: replies[1]!.id,
+        readEarlier: "dohc chat show",
       });
       expect(bodies(markdown)).toEqual(["Draft the agenda", "reply 0", "reply 1", "reply 2"]);
-      expect(markdown).toContain("This request was asked in a thread of this conversation, so only that thread is shown. 4 other messages aren't shown. Read them with `dohc chat show`.");
+      expect(markdown).toContain(
+        "This request was asked in a thread of this conversation, so only that thread is shown. 4 other messages aren't shown. Read them with `dohc chat show`.",
+      );
 
       const stream = await buildRunnerThreadContext({
-        store, dispatchStore: dispatchStore.store, workspaceId: WORKSPACE_ID, threadId, askingMessageId: "message-7",
+        store,
+        dispatchStore: dispatchStore.store,
+        workspaceId: WORKSPACE_ID,
+        threadId,
+        askingMessageId: "message-7",
       });
       expect(bodies(stream)).toHaveLength(8);
     });

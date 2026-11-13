@@ -1,5 +1,10 @@
 import { nameSlug } from "@dohc/workspace-contracts/names";
-import type { ChatChannel, ChatChannelType, LinkedChatStore, WorkspaceId } from "@dohc/workspace-contracts/engine";
+import type {
+  ChatChannel,
+  ChatChannelType,
+  LinkedChatStore,
+  WorkspaceId,
+} from "@dohc/workspace-contracts/engine";
 import { GROUP_NAME_TAKEN_ERROR } from "../ipc/errorWords";
 
 export interface GroupCreateInput {
@@ -21,7 +26,8 @@ function groupCreateRefusal(error: unknown): unknown {
   const copy = error instanceof Error ? GROUP_CREATE_REFUSALS.get(error.message) : undefined;
   if (copy === undefined) return error;
   const refusal = new Error(copy);
-  if (error instanceof Error && error.message === "channel-exists") refusal.name = GROUP_NAME_TAKEN_ERROR;
+  if (error instanceof Error && error.message === "channel-exists")
+    refusal.name = GROUP_NAME_TAKEN_ERROR;
   return refusal;
 }
 
@@ -39,14 +45,16 @@ export async function createGroup(
     throw new Error("Give the group a name with a letter or a number, or name its folder.");
   }
   await ensureFolder(folderPath);
-  return await store.createChannel({
-    workspaceId: input.workspaceId,
-    name: input.name,
-    kind: "channel",
-    ...(input.type ? { type: input.type } : {}),
-    ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
-    folderPath,
-  }).catch((error: unknown) => {
-    throw groupCreateRefusal(error);
-  });
+  return await store
+    .createChannel({
+      workspaceId: input.workspaceId,
+      name: input.name,
+      kind: "channel",
+      ...(input.type ? { type: input.type } : {}),
+      ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
+      folderPath,
+    })
+    .catch((error: unknown) => {
+      throw groupCreateRefusal(error);
+    });
 }

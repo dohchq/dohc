@@ -34,7 +34,9 @@ export async function rewriteCollectionSchema(options: {
     if (parsed.status !== "valid") {
       return {
         status: "error",
-        detail: collectionVersionError(parsed.reasons, relativePath) ?? `The ${COLLECTION_SCHEMA_FILENAME} file has entries dohc cannot read. Fix the file, then try again.`,
+        detail:
+          collectionVersionError(parsed.reasons, relativePath) ??
+          `The ${COLLECTION_SCHEMA_FILENAME} file has entries dohc cannot read. Fix the file, then try again.`,
       };
     }
     const text = serializeCollectionSchema(mutate(parsed.schema));
@@ -46,9 +48,7 @@ export async function rewriteCollectionSchema(options: {
       text,
       expectedContentHash: read.contentHash,
     });
-    return result.status === "written"
-      ? { status: "written" }
-      : { status: "conflict" };
+    return result.status === "written" ? { status: "written" } : { status: "conflict" };
   } catch (error) {
     return {
       status: "error",

@@ -1,8 +1,15 @@
 import { isAbsolute, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { createSmtpSender, smtpSettingsFromEnv } from "@dohc/workspace-auth/smtp";
-import { openRelaySnapshot, relayRelease, relaySnapshotKey, saveRelaySnapshot, snapshotStorageFromEnv,
-  uploadRelaySnapshot, withRelaySnapshot } from "./relaySnapshot";
+import {
+  openRelaySnapshot,
+  relayRelease,
+  relaySnapshotKey,
+  saveRelaySnapshot,
+  snapshotStorageFromEnv,
+  uploadRelaySnapshot,
+  withRelaySnapshot,
+} from "./relaySnapshot";
 import { createSnapshotJob, pingHeartbeat, saveSnapshotJobState } from "./relaySnapshotJob";
 
 const usage = `run --database PATH --state-directory PATH
@@ -25,8 +32,10 @@ const hour = 60 * 60 * 1000;
 function fields(rest: string[], expected: string[]): Map<string, string> {
   const values = new Map<string, string>();
   for (let index = 0; index < rest.length; index += 2) {
-    const key = rest[index]!, value = rest[index + 1];
-    if (!expected.includes(key) || values.has(key) || !value || !isAbsolute(value)) throw new Error();
+    const key = rest[index]!,
+      value = rest[index + 1];
+    if (!expected.includes(key) || values.has(key) || !value || !isAbsolute(value))
+      throw new Error();
     values.set(key, value);
   }
   if (values.size !== expected.length) throw new Error();
@@ -43,49 +52,84 @@ async function main(args: string[]): Promise<void> {
   if (action === "verify") {
     const values = fields(rest, ["--file", "--output"]);
     const manifest = await openRelaySnapshot(values.get("--file")!, key, values.get("--output")!);
-    console.log(`Relay snapshot verified: namespace ${manifest.namespace}, generation ${manifest.generation}, stamp ${manifest.stamp}, taken ${manifest.createdAt} by release ${manifest.release}.`);
-    console.log("The output contains unencrypted workspace data. Protect it like the relay volume.");
+    console.log(
+      `Relay snapshot verified: namespace ${manifest.namespace}, generation ${manifest.generation}, stamp ${manifest.stamp}, taken ${manifest.createdAt} by release ${manifest.release}.`,
+    );
+    console.log(
+      "The output contains unencrypted workspace data. Protect it like the relay volume.",
+    );
     return;
   }
   if (action === "snapshot") {
     const values = fields(rest, ["--database", "--state-directory", "--directory"]);
-    const saved = await withRelaySnapshot({ relayPath: values.get("--database")!, stateDirectory: values.get("--state-directory")!, key, release: relayRelease() },
-      snapshot => saveRelaySnapshot(snapshot, values.get("--directory")!));
+    const saved = await withRelaySnapshot(
+      {
+        relayPath: values.get("--database")!,
+        stateDirectory: values.get("--state-directory")!,
+        key,
+        release: relayRelease(),
+      },
+      (snapshot) => saveRelaySnapshot(snapshot, values.get("--directory")!),
+    );
     console.log(`Relay snapshot saved: ${saved}`);
-    console.log("Keep DOHC_SNAPSHOT_KEY in escrow away from this host. Without it, the snapshot cannot be opened.");
+    console.log(
+      "Keep DOHC_SNAPSHOT_KEY in escrow away from this host. Without it, the snapshot cannot be opened.",
+    );
     return;
   }
   if (action !== "run") throw new Error();
   const values = fields(rest, ["--database", "--state-directory"]);
   const storage = snapshotStorageFromEnv(process.env);
-  if (!storage) throw new Error("Snapshot storage is not configured. Set DOHC_SNAPSHOT_S3_* to turn on hourly snapshots.");
+  if (!storage)
+    throw new Error(
+      "Snapshot storage is not configured. Set DOHC_SNAPSHOT_S3_* to turn on hourly snapshots.",
+    );
   const alertEmail = process.env.DOHC_SNAPSHOT_ALERT_EMAIL?.trim();
-  if (!alertEmail) throw new Error("Set DOHC_SNAPSHOT_ALERT_EMAIL to the operator address for snapshot failure email.");
+  if (!alertEmail)
+    throw new Error(
+      "Set DOHC_SNAPSHOT_ALERT_EMAIL to the operator address for snapshot failure email.",
+    );
   const smtp = smtpSettingsFromEnv(process.env);
   if (!smtp) throw new Error("Configure DOHC_SMTP_* so snapshot failures can reach the operator.");
   const heartbeatUrl = process.env.DOHC_SNAPSHOT_HEARTBEAT_URL?.trim() || undefined;
-  if (heartbeatUrl && new URL(heartbeatUrl).protocol !== "https:") throw new Error("Set DOHC_SNAPSHOT_HEARTBEAT_URL to an HTTPS URL.");
+  if (heartbeatUrl && new URL(heartbeatUrl).protocol !== "https:")
+    throw new Error("Set DOHC_SNAPSHOT_HEARTBEAT_URL to an HTTPS URL.");
   const stateDirectory = values.get("--state-directory")!;
-  const pass = createSnapshotJob({ statePath: join(stateDirectory, "notifications.json"), alertEmail, heartbeatUrl,
-    serverName: process.env.DOHC_SERVER_NAME?.trim() || "your dohc server" }, {
-    snapshot: () => withRelaySnapshot({ relayPath: values.get("--database")!, stateDirectory, key, release: relayRelease() },
-      snapshot => uploadRelaySnapshot(snapshot, storage)),
-    sendEmail: createSmtpSender(smtp),
-    ping: pingHeartbeat,
-    saveState: saveSnapshotJobState,
-    now: () => new Date(),
-    log: (message: string) => console.log(message),
-  });
+  const pass = createSnapshotJob(
+    {
+      statePath: join(stateDirectory, "notifications.json"),
+      alertEmail,
+      heartbeatUrl,
+      serverName: process.env.DOHC_SERVER_NAME?.trim() || "your dohc server",
+    },
+    {
+      snapshot: () =>
+        withRelaySnapshot(
+          { relayPath: values.get("--database")!, stateDirectory, key, release: relayRelease() },
+          (snapshot) => uploadRelaySnapshot(snapshot, storage),
+        ),
+      sendEmail: createSmtpSender(smtp),
+      ping: pingHeartbeat,
+      saveState: saveSnapshotJobState,
+      now: () => new Date(),
+      log: (message: string) => console.log(message),
+    },
+  );
   // A restart takes a snapshot at once and can repeat an email, so a failed pass waits for the next hour instead.
   for (;;) {
     const started = Date.now();
-    try { await pass(); }
-    catch (error) { console.error(`The snapshot pass failed. The next pass runs in an hour. ${error instanceof Error ? error.message : String(error)}`); }
+    try {
+      await pass();
+    } catch (error) {
+      console.error(
+        `The snapshot pass failed. The next pass runs in an hour. ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
     await delay(Math.max(0, started + hour - Date.now()));
   }
 }
 
-main(process.argv.slice(2)).catch(error => {
+main(process.argv.slice(2)).catch((error) => {
   console.error("Relay snapshot command refused. Use --help for the required arguments.");
   if (error instanceof Error && error.message) console.error(error.message);
   process.exitCode = 1;

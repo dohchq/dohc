@@ -44,7 +44,12 @@ function fileText(temp: TempWorkspace, path: string): Promise<string> {
   return readFile(join(temp.rootPath, path), "utf8").catch(() => "");
 }
 
-async function expectSettledFile(page: Page, temp: TempWorkspace, path: string, contents: RegExp): Promise<void> {
+async function expectSettledFile(
+  page: Page,
+  temp: TempWorkspace,
+  path: string,
+  contents: RegExp,
+): Promise<void> {
   await expect.poll(() => fileText(temp, path), { timeout: 20_000 }).toMatch(contents);
   await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved");
 }
@@ -78,9 +83,17 @@ test("text, Enter, Backspace and a paste typed right after the title's Enter lan
     await expect(page.getByTestId("markdown-editor")).toBeFocused();
     await expect(page.getByLabel("Page title")).toHaveValue("Lisbon");
     await expect(explorerRow(page, "Lisbon.md")).toBeVisible();
-    await expect(page.getByTestId(editorTabTestId("Lisbon.md"))).toHaveAttribute("data-active", "true");
+    await expect(page.getByTestId(editorTabTestId("Lisbon.md"))).toHaveAttribute(
+      "data-active",
+      "true",
+    );
     await expect(page.getByTestId("open-editor-row")).toHaveText("Lisbon.md");
-    await expectSettledFile(page, temp, "Lisbon.md", /^---\r?\ntitle: Lisbon\r?\n---\r?\n\r?\nDay one\r?\n\r?\nTram 28 and pastéis\.\s*$/);
+    await expectSettledFile(
+      page,
+      temp,
+      "Lisbon.md",
+      /^---\r?\ntitle: Lisbon\r?\n---\r?\n\r?\nDay one\r?\n\r?\nTram 28 and pastéis\.\s*$/,
+    );
   });
 });
 
@@ -109,8 +122,16 @@ test("Tab and a click into the body leave the title, and keys follow at once", a
     await page.keyboard.type("Charger");
     await page.keyboard.press("Enter");
     await page.keyboard.type("Passport");
-    await expect(page.getByTestId("markdown-editor").locator("p")).toHaveText(["Charger", "Passport"]);
-    await expectSettledFile(page, temp, "Packing.md", /^---\r?\ntitle: Packing\r?\n---\r?\n\r?\nCharger\r?\n\r?\nPassport\s*$/);
+    await expect(page.getByTestId("markdown-editor").locator("p")).toHaveText([
+      "Charger",
+      "Passport",
+    ]);
+    await expectSettledFile(
+      page,
+      temp,
+      "Packing.md",
+      /^---\r?\ntitle: Packing\r?\n---\r?\n\r?\nCharger\r?\n\r?\nPassport\s*$/,
+    );
     await page.keyboard.press("ControlOrMeta+w");
     await expect(page.getByTestId("markdown-editor")).toHaveCount(0);
 
@@ -119,7 +140,12 @@ test("Tab and a click into the body leave the title, and keys follow at once", a
     await page.getByTestId("new-page").getByLabel("Page body").click();
     await page.keyboard.type("Post office");
     await expect(page.getByTestId("markdown-editor").locator("p")).toHaveText(["Post office"]);
-    await expectSettledFile(page, temp, "Errands.md", /^---\r?\ntitle: Errands\r?\n---\r?\n\r?\nPost office\s*$/);
+    await expectSettledFile(
+      page,
+      temp,
+      "Errands.md",
+      /^---\r?\ntitle: Errands\r?\n---\r?\n\r?\nPost office\s*$/,
+    );
   });
 });
 
@@ -130,7 +156,10 @@ test("an empty title makes Untitled, then Untitled 2 when that name is taken", a
     await page.keyboard.press("Enter");
     await page.keyboard.type("A second page");
     await expect(explorerRow(page, "Untitled 2.md")).toBeVisible();
-    await expect(page.getByTestId(editorTabTestId("Untitled 2.md"))).toHaveAttribute("data-active", "true");
+    await expect(page.getByTestId(editorTabTestId("Untitled 2.md"))).toHaveAttribute(
+      "data-active",
+      "true",
+    );
     await expect(page.getByTestId("new-page")).toHaveCount(0);
     await expect(page.getByLabel("Page title")).toHaveAttribute("placeholder", "Untitled 2");
     await expectSettledFile(page, temp, "Untitled 2.md", /^A second page\s*$/);
@@ -149,7 +178,9 @@ test("closing a new page writes a typed title and leaves nothing for an untouche
     await page.keyboard.press("ControlOrMeta+w");
     await expect(page.getByTestId("new-page")).toHaveCount(0);
     await expect(explorerRow(page, "Groceries.md")).toBeVisible();
-    await expect.poll(() => fileText(temp, "Groceries.md")).toMatch(/^---\r?\ntitle: Groceries\r?\n---\r?\n/);
+    await expect
+      .poll(() => fileText(temp, "Groceries.md"))
+      .toMatch(/^---\r?\ntitle: Groceries\r?\n---\r?\n/);
     expect(await markdownFiles(temp)).toEqual(["Groceries.md"]);
   });
 });
@@ -178,7 +209,9 @@ test("quitting writes a typed title that was never left", async () => {
     await openNewPage(page);
     await page.keyboard.type("Itinerary");
     const quit = desktop.app.waitForEvent("close");
-    await desktop.app.evaluate(({ app }) => { app.quit(); });
+    await desktop.app.evaluate(({ app }) => {
+      app.quit();
+    });
     await quit;
     expect(await fileText(temp, "Itinerary.md")).toMatch(/^---\r?\ntitle: Itinerary\r?\n---\r?\n/);
   });
@@ -188,7 +221,10 @@ test("New file in a folder makes the page there, in the tree only once its file 
   await withDesktop([{ path: "Trip/plan.md", contents: "# Plan\n" }], async (page, temp) => {
     await explorerRow(page, "Trip").click();
     await expect(explorerRow(page, "Trip/plan.md")).toBeVisible();
-    await page.getByTestId("explorer-files-header").getByRole("button", { name: "New file" }).click();
+    await page
+      .getByTestId("explorer-files-header")
+      .getByRole("button", { name: "New file" })
+      .click();
     await expect(page.getByLabel("Page title")).toBeFocused();
     await expect(page.getByTestId("tree-edit-input")).toHaveCount(0);
 
@@ -198,6 +234,11 @@ test("New file in a folder makes the page there, in the tree only once its file 
     await page.keyboard.press("Enter");
     await page.keyboard.type("Flights first");
     await expect(explorerRow(page, "Trip/Budget.md")).toBeVisible();
-    await expectSettledFile(page, temp, "Trip/Budget.md", /^---\r?\ntitle: Budget\r?\n---\r?\n\r?\nFlights first\s*$/);
+    await expectSettledFile(
+      page,
+      temp,
+      "Trip/Budget.md",
+      /^---\r?\ntitle: Budget\r?\n---\r?\n\r?\nFlights first\s*$/,
+    );
   });
 });

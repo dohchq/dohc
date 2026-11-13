@@ -1,10 +1,7 @@
 // Compile-only contract, enforced by `pnpm typecheck`: session policy methods
 // take one physical attachment, never a bare workspace. Vitest does not run
 // this file; tsc fails when an `@ts-expect-error` line stops erroring.
-import type {
-  EngineWorkspace,
-  EngineWorkspaceSessions,
-} from "./engineWorkspaceSessions";
+import type { EngineWorkspace, EngineWorkspaceSessions } from "./engineWorkspaceSessions";
 
 declare const sessions: EngineWorkspaceSessions;
 declare const bare: EngineWorkspace;

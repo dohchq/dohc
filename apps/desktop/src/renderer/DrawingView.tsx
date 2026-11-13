@@ -20,10 +20,7 @@ import {
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 import { binaryFileDataFromArtifact } from "./excalidrawAssets";
 import { pointExcalidrawAtAppFonts } from "./excalidrawFonts";
-import {
-  EMPTY_EXCALIDRAW_DOCUMENT,
-  parseExcalidrawDocument,
-} from "./excalidrawDocument";
+import { EMPTY_EXCALIDRAW_DOCUMENT, parseExcalidrawDocument } from "./excalidrawDocument";
 import {
   EngineArtifactAssetsInvalidNotice,
   EngineMayHoldDocumentNotice,
@@ -40,8 +37,7 @@ import { useAutosavedTextDraft, type DraftFlush } from "./useAutosavedTextDraft"
 const LazyExcalidrawCanvas = lazy(() => {
   pointExcalidrawAtAppFonts();
   return import("./ExcalidrawCanvas");
-}) as
-  LazyExoticComponent<(props: ExcalidrawCanvasProps) => React.ReactElement>;
+}) as LazyExoticComponent<(props: ExcalidrawCanvasProps) => React.ReactElement>;
 
 export function DrawingView({
   body,
@@ -146,9 +142,7 @@ export function DrawingView({
     }
     try {
       return {
-        value: parseExcalidrawDocument(
-          blankFile ? EMPTY_EXCALIDRAW_DOCUMENT : editor.getDraft(),
-        ),
+        value: parseExcalidrawDocument(blankFile ? EMPTY_EXCALIDRAW_DOCUMENT : editor.getDraft()),
         error: null,
       };
     } catch (cause) {
@@ -173,12 +167,7 @@ export function DrawingView({
   // pane derives its own client id; peers merge the awareness states.
   const presencePaneId = useId();
   const presence = useMemo(() => {
-    if (
-      !engineMode ||
-      !engine.objectId ||
-      !engine.versionId ||
-      !presenceFactory
-    ) {
+    if (!engineMode || !engine.objectId || !engine.versionId || !presenceFactory) {
       return undefined;
     }
     try {
@@ -199,14 +188,7 @@ export function DrawingView({
       // Presence is optional. A transport failure cannot affect the drawing.
       return undefined;
     }
-  }, [
-    engine.objectId,
-    engine.versionId,
-    engineMode,
-    presenceFactory,
-    presencePaneId,
-    workspaceId,
-  ]);
+  }, [engine.objectId, engine.versionId, engineMode, presenceFactory, presencePaneId, workspaceId]);
   const hydrationSession = useMemo(() => {
     if (!engineMode || !engine.doc || engine.artifactAssets.length === 0) {
       return null;
@@ -218,14 +200,7 @@ export function DrawingView({
       descriptors: engine.artifactAssets,
       read: engine.readArtifactAsset,
     };
-  }, [
-    engine.artifactAssets,
-    engine.doc,
-    engine.readArtifactAsset,
-    engineMode,
-    path,
-    workspaceId,
-  ]);
+  }, [engine.artifactAssets, engine.doc, engine.readArtifactAsset, engineMode, path, workspaceId]);
   const activeHydrationSession = useRef(hydrationSession);
   useLayoutEffect(() => {
     activeHydrationSession.current = hydrationSession;
@@ -265,8 +240,7 @@ export function DrawingView({
     };
   }, [assetHydrationAttempt, hydrationSession]);
   const drawingChipState =
-    engineMode &&
-    (engine.deletedWhileEditing)
+    engineMode && engine.deletedWhileEditing
       ? engine.goneCause!
       : readOnly || (truncated && !engineMode) || engineReadOnly
         ? "read-only"
@@ -302,8 +276,18 @@ export function DrawingView({
             shown={drawingShown}
             // A failed history replacement freezes the drawing read-only; its
             // save error says why, as the Markdown chip does.
-            title={engine.saveError && (engine.retryReplacement || (typeof drawingChipState !== "string" && drawingChipState.kind === "error")) ? engine.saveError : undefined}
-            action={engine.retryReplacement ? { label: "Try again", run: engine.retryReplacement } : undefined}
+            title={
+              engine.saveError &&
+              (engine.retryReplacement ||
+                (typeof drawingChipState !== "string" && drawingChipState.kind === "error"))
+                ? engine.saveError
+                : undefined
+            }
+            action={
+              engine.retryReplacement
+                ? { label: "Try again", run: engine.retryReplacement }
+                : undefined
+            }
           />
         }
       />
@@ -316,15 +300,18 @@ export function DrawingView({
         />
       ) : null}
       {engine.artifactAssetsInvalid ? (
-        <EngineArtifactAssetsInvalidNotice workspaceId={workspaceId} path={path} onError={onButtonError} />
+        <EngineArtifactAssetsInvalidNotice
+          workspaceId={workspaceId}
+          path={path}
+          onError={onButtonError}
+        />
       ) : null}
       {assetRefused ? (
         <div
           className="border-b border-line bg-panel-2 px-4 py-2 text-xs text-warning"
           data-testid="drawing-assets-refused"
         >
-          This image was not added. Collaborative drawings cannot add images
-          yet.
+          This image was not added. Collaborative drawings cannot add images yet.
         </div>
       ) : null}
       {assetHydrationFailures > 0 ? (
@@ -353,16 +340,13 @@ export function DrawingView({
           title="This drawing is too large for dohc to open."
         />
       ) : drawingReady ? (
-        <div
-          className="relative min-h-0 flex-1 overflow-hidden"
-          data-testid="view-drawing"
-        >
-          <Suspense fallback={<SkeletonRows layout="panel" label="Loading drawing…" className="h-full" />}>
+        <div className="relative min-h-0 flex-1 overflow-hidden" data-testid="view-drawing">
+          <Suspense
+            fallback={<SkeletonRows layout="panel" label="Loading drawing…" className="h-full" />}
+          >
             <LazyExcalidrawCanvas
               key={engineMode ? "engine-scene" : editor.valueRevision}
-              document={
-                document.value ?? parseExcalidrawDocument(EMPTY_EXCALIDRAW_DOCUMENT)
-              }
+              document={document.value ?? parseExcalidrawDocument(EMPTY_EXCALIDRAW_DOCUMENT)}
               sceneDoc={engine.doc ?? undefined}
               hydrateAssets={hydrateAssets}
               presence={presence}

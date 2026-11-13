@@ -4,7 +4,10 @@ import { expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { YDOC_METHOD } from "@dohc/workspace-engine-client";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
-import { createRealDaemonLifecycle, createRealDaemonWorkspaceSessions } from "../testing/realDaemonWorkspaceSessions";
+import {
+  createRealDaemonLifecycle,
+  createRealDaemonWorkspaceSessions,
+} from "../testing/realDaemonWorkspaceSessions";
 import { createTestScratch } from "./testTemp";
 import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { waitForPathMoments } from "./waitForPathMoments";
@@ -12,7 +15,8 @@ import { waitForPathMoments } from "./waitForPathMoments";
 const engine = requireEngineBinaryOrSkip();
 
 it.skipIf(engine.missing).each(["quit"] as const)(
-  "%s drains unacknowledged typing after a refused settle and recovers it once", async mode => {
+  "%s drains unacknowledged typing after a refused settle and recovers it once",
+  async (mode) => {
     const rootPath = await createTestScratch("dohc-quit-refused-settle-");
     const workspaceId = "quit-refused-settle";
     const path = "note.md";
@@ -23,8 +27,14 @@ it.skipIf(engine.missing).each(["quit"] as const)(
       const daemon = createRealDaemonLifecycle({ command: engine.require(), maxRestarts: 0 });
       await daemon.start();
       const sessions = createRealDaemonWorkspaceSessions(daemon);
-      const capture = createWorkspaceEngineCapture({ workspaceId, rootPath, attachmentId: Symbol("quit"),
-        rustEngineSessions: sessions, settleDebounceMs: 600_000, onError: () => undefined });
+      const capture = createWorkspaceEngineCapture({
+        workspaceId,
+        rootPath,
+        attachmentId: Symbol("quit"),
+        rustEngineSessions: sessions,
+        settleDebounceMs: 600_000,
+        onError: () => undefined,
+      });
       return { daemon, sessions, capture };
     };
     let running = await start();
@@ -34,7 +44,11 @@ it.skipIf(engine.missing).each(["quit"] as const)(
     let journaled = false;
     try {
       await waitForPathMoments(running.capture, path, 1);
-      const session = await running.capture.openYDocSession({ path, contentKind: "richdoc", onRemoteUpdate() {} });
+      const session = await running.capture.openYDocSession({
+        path,
+        contentKind: "richdoc",
+        onRemoteUpdate() {},
+      });
       Y.applyUpdate(editor, session.initialUpdate);
       await writeFile(join(rootPath, path), outside);
       const client = running.daemon.currentClient();
@@ -59,8 +73,10 @@ it.skipIf(engine.missing).each(["quit"] as const)(
         running.sessions.beginShutdown();
       }
       const closing = session.close(mode === "quit" ? { shuttingDown: true } : undefined);
-      const outcome = mode === "quit" ? expect(closing).resolves.toBeUndefined()
-        : expect(closing).rejects.toThrow("conflict-stale-target");
+      const outcome =
+        mode === "quit"
+          ? expect(closing).resolves.toBeUndefined()
+          : expect(closing).rejects.toThrow("conflict-stale-target");
       acknowledge.resolve();
       await outcome;
       expect(journaled).toBe(true);
@@ -70,8 +86,12 @@ it.skipIf(engine.missing).each(["quit"] as const)(
       await running.daemon.stop();
       running = await start();
       await running.capture.flush();
-      const siblings = (await readdir(rootPath)).filter(name => name.startsWith("note (recovered ") && name.endsWith(".md"));
-      const recovered = await Promise.all(siblings.map(name => readFile(join(rootPath, name), "utf8")));
+      const siblings = (await readdir(rootPath)).filter(
+        (name) => name.startsWith("note (recovered ") && name.endsWith(".md"),
+      );
+      const recovered = await Promise.all(
+        siblings.map((name) => readFile(join(rootPath, name), "utf8")),
+      );
       expect(await readFile(join(rootPath, path), "utf8")).toBe(outside);
       expect(recovered).toEqual([`# Note\n\nBase paragraph.${human}\n`]);
     } finally {
@@ -82,5 +102,6 @@ it.skipIf(engine.missing).each(["quit"] as const)(
       await running.sessions.closeAll();
       await running.daemon.stop();
     }
-  }, 60_000,
+  },
+  60_000,
 );

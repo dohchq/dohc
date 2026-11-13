@@ -15,7 +15,6 @@ test("captures live edits and reconciles closed-period edits into the engine", a
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-
     // Session 1: edit a file on disk while the app is running — the daemon
     // watcher must land the batch in the engine store.
     desktop = await launchDesktopApp({ workspace: temp });
@@ -27,18 +26,13 @@ test("captures live edits and reconciles closed-period edits into the engine", a
         contents: "# Engine live\n\nCaptured while running.\n",
       },
     ]);
-    await waitForWorkspaceFile(
-      desktop.page,
-      workspace.workspaceId,
-      "notes/engine-live.md",
-    );
+    await waitForWorkspaceFile(desktop.page, workspace.workspaceId, "notes/engine-live.md");
 
     await expect
       .poll(
         () =>
           engineMomentsOrEmpty(temp.rootPath).filter(
-            (moment) =>
-              moment.path === "notes/engine-live.md" && moment.operation === "write",
+            (moment) => moment.path === "notes/engine-live.md" && moment.operation === "write",
           ).length,
         { timeout: 30_000 },
       )
@@ -74,8 +68,7 @@ test("captures live edits and reconciles closed-period edits into the engine", a
       .poll(
         () =>
           engineMomentsOrEmpty(temp.rootPath).filter(
-            (moment) =>
-              moment.path === "notes/engine-offline.md" && moment.operation === "write",
+            (moment) => moment.path === "notes/engine-offline.md" && moment.operation === "write",
           ).length,
         { timeout: 30_000 },
       )
@@ -83,9 +76,7 @@ test("captures live edits and reconciles closed-period edits into the engine", a
     const offlineMoment = engineMomentsOrEmpty(temp.rootPath).find(
       (moment) => moment.path === "notes/engine-offline.md",
     );
-    expect(offlineMoment?.text).toBe(
-      "# Engine offline\n\nEdited while dohc was closed.\n",
-    );
+    expect(offlineMoment?.text).toBe("# Engine offline\n\nEdited while dohc was closed.\n");
     expect(offlineMoment?.summary).toBe("Changed while dohc was closed");
 
     // Reconciliation is idempotent: the live file from session 1 must not
@@ -134,8 +125,7 @@ test("cold adoption: a workspace with existing files and legacy history reconcil
         () =>
           engineMomentsOrEmpty(temp.rootPath).filter(
             (moment) =>
-              (moment.path === "notes/adopted.md" ||
-                moment.path === "docs/deep/nested.md") &&
+              (moment.path === "notes/adopted.md" || moment.path === "docs/deep/nested.md") &&
               moment.operation === "write",
           ).length,
         { timeout: 30_000 },

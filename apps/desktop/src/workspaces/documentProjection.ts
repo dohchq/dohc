@@ -8,7 +8,11 @@ import {
   yDocToMarkdown,
   type DocumentEdit,
 } from "@dohc/ydoc-projection";
-import { isLossyDocumentState, isLossyMarkdownCached, lossyNoteRefusal } from "@dohc/ydoc-projection/lossy-markdown";
+import {
+  isLossyDocumentState,
+  isLossyMarkdownCached,
+  lossyNoteRefusal,
+} from "@dohc/ydoc-projection/lossy-markdown";
 
 // Reading a live document as Markdown and computing an edit to it take time
 // in proportion to the document: about 250 ms for 700 KB. Main runs them in a
@@ -19,17 +23,29 @@ export type DocumentProjectionRequest =
   | { kind: "read-settled"; markdown: string }
   // `refuseLossy` names the note, which refuses here if it is a lossy note
   // (CONTEXT.md): this is the turn that would change it.
-  | { kind: "edit"; state: Uint8Array; edit: DocumentEdit; keepBlocks: boolean; refuseLossy?: string; headSha256?: string | null }
+  | {
+      kind: "edit";
+      state: Uint8Array;
+      edit: DocumentEdit;
+      keepBlocks: boolean;
+      refuseLossy?: string;
+      headSha256?: string | null;
+    }
   | { kind: "create"; state: Uint8Array; markdown: string; keepBlocks: boolean }
   // Whether a file's text is a lossy note (CONTEXT.md). The worker remembers
   // the verdict by `digest`, the SHA-256 of the text.
   | { kind: "lossy"; markdown: string; digest: string }
   | { kind: "recover"; updates: readonly Uint8Array[] };
 
-type DocumentProjectionResult<Request extends DocumentProjectionRequest> =
-  Request extends { kind: "recover" } ? string | null
-    : Request extends { kind: "edit" | "create" } ? Uint8Array | null
-      : Request extends { kind: "lossy" } ? boolean : string;
+type DocumentProjectionResult<Request extends DocumentProjectionRequest> = Request extends {
+  kind: "recover";
+}
+  ? string | null
+  : Request extends { kind: "edit" | "create" }
+    ? Uint8Array | null
+    : Request extends { kind: "lossy" }
+      ? boolean
+      : string;
 
 /** The document a recovery package's updates rebuild, or null when one still waits on what it depends on. */
 export function recoveredDocumentMarkdown(updates: readonly Uint8Array[]): string | null {
@@ -53,13 +69,19 @@ export interface DocumentProjection {
 // A request's encoded state moves to the worker instead of being copied, so
 // main does not clone the document. The caller must not use it afterwards.
 export function transferList(value: unknown): ArrayBuffer[] {
-  const bytes = value instanceof Uint8Array
-    ? value
-    : typeof value === "object" && value !== null && "state" in value && value.state instanceof Uint8Array
-      ? value.state
-      : null;
+  const bytes =
+    value instanceof Uint8Array
+      ? value
+      : typeof value === "object" &&
+          value !== null &&
+          "state" in value &&
+          value.state instanceof Uint8Array
+        ? value.state
+        : null;
   if (!bytes || !(bytes.buffer instanceof ArrayBuffer)) return [];
-  return bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? [bytes.buffer] : [];
+  return bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
+    ? [bytes.buffer]
+    : [];
 }
 
 type WorkerMessage =
@@ -78,10 +100,15 @@ export function runDocumentProjection(
       // While the head is unknown, only a source the note records that keeps
       // its meaning shows the edit is safe. Otherwise the head decides, so
       // the caller tries again once it arrives.
-      if (request.refuseLossy !== undefined && isLossyDocumentState(request.state, request.headSha256 ?? null)) {
-        throw new Error(request.headSha256 === undefined
-          ? `dohc is still checking ${request.refuseLossy} for parts it can't show, so nothing changed. Try again in a moment.`
-          : lossyNoteRefusal(request.refuseLossy));
+      if (
+        request.refuseLossy !== undefined &&
+        isLossyDocumentState(request.state, request.headSha256 ?? null)
+      ) {
+        throw new Error(
+          request.headSha256 === undefined
+            ? `dohc is still checking ${request.refuseLossy} for parts it can't show, so nothing changed. Try again in a moment.`
+            : lossyNoteRefusal(request.refuseLossy),
+        );
       }
       return documentEditUpdate(request.state, request.edit, {
         keepBlocks: request.keepBlocks,
@@ -116,10 +143,14 @@ const DOCUMENT_PROJECTION_DEADLINE_MS = 12_000;
 export function createDocumentProjectionWorker(
   options: { workerUrl?: URL; deadlineMs?: number } = {},
 ): DocumentProjection {
-  const workerUrl = options.workerUrl ?? new URL(
-    import.meta.url.endsWith(".ts") ? "documentProjectionThread.ts" : "document-projection-worker.js",
-    import.meta.url,
-  );
+  const workerUrl =
+    options.workerUrl ??
+    new URL(
+      import.meta.url.endsWith(".ts")
+        ? "documentProjectionThread.ts"
+        : "document-projection-worker.js",
+      import.meta.url,
+    );
   const deadlineMs = options.deadlineMs ?? DOCUMENT_PROJECTION_DEADLINE_MS;
   let worker: Worker | null = null;
   let nextId = 1;
@@ -159,13 +190,21 @@ export function createDocumentProjectionWorker(
       };
       const onExit = (code: number): void => {
         stop(current);
-        finish(() => reject(new Error(`dohc could not prepare the document (its worker exited with ${code}).`)));
+        finish(() =>
+          reject(
+            new Error(`dohc could not prepare the document (its worker exited with ${code}).`),
+          ),
+        );
       };
       const timer = setTimeout(() => {
         stop(current);
-        finish(() => reject(new Error(
-          `dohc stopped preparing the document after ${deadlineMs / 1000} s, and nothing changed. Try a smaller edit, or try again.`,
-        )));
+        finish(() =>
+          reject(
+            new Error(
+              `dohc stopped preparing the document after ${deadlineMs / 1000} s, and nothing changed. Try a smaller edit, or try again.`,
+            ),
+          ),
+        );
       }, deadlineMs);
       current.on("message", onMessage);
       current.on("error", onError);

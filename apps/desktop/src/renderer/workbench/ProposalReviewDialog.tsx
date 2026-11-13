@@ -8,17 +8,11 @@ import { bridge } from "../bridge";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { Overlay } from "../Overlay";
 import { ipcErrorMessage } from "../ipcError";
-import {
-  UnifiedDiffLines,
-  buildUnifiedDiffLines,
-  computeTextDiff,
-} from "./unifiedDiff";
+import { UnifiedDiffLines, buildUnifiedDiffLines, computeTextDiff } from "./unifiedDiff";
 
 // The name the granter reads. A submitter whose email the relay could not
 // state reads the same way the share banner names an unknown account.
-export function proposerName(
-  sent: { proposedByEmail: string | null } | null,
-): string {
+export function proposerName(sent: { proposedByEmail: string | null } | null): string {
   return sent?.proposedByEmail ?? "another dohc user";
 }
 
@@ -29,18 +23,11 @@ function operationLabel(operation: ShareProposalOperation): string {
 
 // One submitted file's diff, built once per pair of bodies instead of on
 // every render of the dialog — the bound the compare page relies on.
-function ProposalFileDiff(props: {
-  currentText: string | null;
-  incomingText: string | null;
-}) {
+function ProposalFileDiff(props: { currentText: string | null; incomingText: string | null }) {
   const lines = useMemo(
     () =>
       buildUnifiedDiffLines(
-        computeTextDiff(
-          props.currentText ?? undefined,
-          props.incomingText ?? undefined,
-          800,
-        ),
+        computeTextDiff(props.currentText ?? undefined, props.incomingText ?? undefined, 800),
       ),
     [props.currentText, props.incomingText],
   );
@@ -124,15 +111,9 @@ function ProposalFileSection(props: {
         onClick={toggle}
         className="dohc-focus-row flex min-h-9 w-full cursor-pointer items-center gap-2 border-b border-line bg-panel-2 px-3 py-2 text-left hover:bg-hover"
       >
-        <span className="min-w-0 flex-1 truncate text-[12px] text-ink">
-          {file.path}
-        </span>
-        {size ? (
-          <span className="shrink-0 text-[11px] text-subtle">{size}</span>
-        ) : null}
-        <span className="shrink-0 text-[11px] text-subtle">
-          {operationLabel(file.operation)}
-        </span>
+        <span className="min-w-0 flex-1 truncate text-[12px] text-ink">{file.path}</span>
+        {size ? <span className="shrink-0 text-[11px] text-subtle">{size}</span> : null}
+        <span className="shrink-0 text-[11px] text-subtle">{operationLabel(file.operation)}</span>
       </button>
       {file.drifted ? (
         <p
@@ -155,10 +136,7 @@ function ProposalFileSection(props: {
         </p>
       ) : null}
       {open && content?.status === "ready" ? (
-        <ProposalFileDiff
-          currentText={content.currentText}
-          incomingText={content.incomingText}
-        />
+        <ProposalFileDiff currentText={content.currentText} incomingText={content.incomingText} />
       ) : null}
     </section>
   );
@@ -222,9 +200,7 @@ export function ProposalReviewDialog(props: {
         props.onClose();
       } catch (error) {
         if (!liveToken.isCurrent(token)) return;
-        setSettleError(
-          ipcErrorMessage(error, "dohc couldn't record your decision."),
-        );
+        setSettleError(ipcErrorMessage(error, "dohc couldn't record your decision."));
         setSettling(false);
       }
     },
@@ -250,9 +226,7 @@ export function ProposalReviewDialog(props: {
         </header>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
-          {load.status === "loading" ? (
-            <SkeletonRows label="Loading these changes…" />
-          ) : null}
+          {load.status === "loading" ? <SkeletonRows label="Loading these changes…" /> : null}
           {load.status === "error" ? (
             <p className="m-0 text-xs leading-5 text-danger" role="alert">
               {load.message}

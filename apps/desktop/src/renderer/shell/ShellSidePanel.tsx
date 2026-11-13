@@ -104,33 +104,33 @@ export function ShellSidePanel(props: ShellSidePanelProps) {
           the editor, tabs, and rail keep working. Switching views
           clears it. */}
       <ErrorBoundary scope="side-panel" resetKeys={[wb.activeView]}>
-      {view ? (
-        view.render(props)
-      ) : wb.activeView === SHARING_VIEW_ID ? (
-        <Suspense fallback={<SkeletonRows layout="panel" label="Loading sharing..." />}>
-          <LazySharingView {...sharing} />
-        </Suspense>
-      ) : selectedAppRoot !== null ? (
-        // The same sealed preview an app's tab runs: a sandboxed frame
-        // on a dohc loopback server, with no dohc bridge.
-        <Suspense fallback={<SkeletonRows layout="panel" label="Loading app..." />}>
-          <LazySitePreviewPage
-            key={selectedAppRoot}
-            variant="panel"
-            onOpenApp={openAppTab}
-            onUnpin={() => void setAppPinned(selectedAppRoot, false)}
-            workspaceId={workspaceId}
-            reportError={reportShellError}
-            notices={appNotices}
-            siteRoot={selectedAppRoot}
-            sharedView={!!shareView}
-            onShareSite={(target) =>
-              setShareTarget({ kind: "paths", paths: target.paths, label: target.label })
-            }
-            access={appAccess}
-          />
-        </Suspense>
-      ) : null}
+        {view ? (
+          view.render(props)
+        ) : wb.activeView === SHARING_VIEW_ID ? (
+          <Suspense fallback={<SkeletonRows layout="panel" label="Loading sharing..." />}>
+            <LazySharingView {...sharing} />
+          </Suspense>
+        ) : selectedAppRoot !== null ? (
+          // The same sealed preview an app's tab runs: a sandboxed frame
+          // on a dohc loopback server, with no dohc bridge.
+          <Suspense fallback={<SkeletonRows layout="panel" label="Loading app..." />}>
+            <LazySitePreviewPage
+              key={selectedAppRoot}
+              variant="panel"
+              onOpenApp={openAppTab}
+              onUnpin={() => void setAppPinned(selectedAppRoot, false)}
+              workspaceId={workspaceId}
+              reportError={reportShellError}
+              notices={appNotices}
+              siteRoot={selectedAppRoot}
+              sharedView={!!shareView}
+              onShareSite={(target) =>
+                setShareTarget({ kind: "paths", paths: target.paths, label: target.label })
+              }
+              access={appAccess}
+            />
+          </Suspense>
+        ) : null}
       </ErrorBoundary>
     </SidePanel>
   );

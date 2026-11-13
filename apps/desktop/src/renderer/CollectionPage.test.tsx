@@ -3,16 +3,46 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import { parseCollectionSchema, type CollectionRecord, type CollectionRecordGroup, type CollectionSchema } from "@dohc/workspace-contracts";
+import {
+  parseCollectionSchema,
+  type CollectionRecord,
+  type CollectionRecordGroup,
+  type CollectionSchema,
+} from "@dohc/workspace-contracts";
 import { serializeCollectionSchema } from "./collections/schemaAuthoring";
-import type { AutomationRunSettledEvent, AutomationRunWaitingEvent, GetCollectionResult, ListAutomationPeopleResult, PressAutomationButtonPayload, PressAutomationButtonResult, QueryCollectionRecordsResult, WorkspaceActivityEvent } from "../ipc/bridgeContract";
+import type {
+  AutomationRunSettledEvent,
+  AutomationRunWaitingEvent,
+  GetCollectionResult,
+  ListAutomationPeopleResult,
+  PressAutomationButtonPayload,
+  PressAutomationButtonResult,
+  QueryCollectionRecordsResult,
+  WorkspaceActivityEvent,
+} from "../ipc/bridgeContract";
 import type { AutomationButtonState } from "@dohc/automation-executor/automation-buttons";
 import { CollectionPage, type CollectionPageProps } from "./CollectionPage";
-import { disposeAutomationButtons, resetAutomationButtonsForTests } from "./collections/useAutomationButtons";
+import {
+  disposeAutomationButtons,
+  resetAutomationButtonsForTests,
+} from "./collections/useAutomationButtons";
 import { deferred } from "../testing/deferred";
 import { TextNotSavedError } from "./shell/copyDetails";
-import { closeCollectionChangeShellsForTests, openCollectionChangeShell } from "./collectionChangeShells";
-import { advanceCollectionWriteLineage, beginCollectionWriteOperation, CollectionFieldWriteHost, collectionWriteFailures, hasPendingCollectionFieldWrites, resetCollectionFieldWritesForTests, retainedCollectionFieldWritePaths, retryCollectionFieldWrite, setCollectionFieldWriteAccess } from "./collections/recordFieldWrites";
+import {
+  closeCollectionChangeShellsForTests,
+  openCollectionChangeShell,
+} from "./collectionChangeShells";
+import {
+  advanceCollectionWriteLineage,
+  beginCollectionWriteOperation,
+  CollectionFieldWriteHost,
+  collectionWriteFailures,
+  hasPendingCollectionFieldWrites,
+  resetCollectionFieldWritesForTests,
+  retainedCollectionFieldWritePaths,
+  retryCollectionFieldWrite,
+  setCollectionFieldWriteAccess,
+} from "./collections/recordFieldWrites";
 import { beginCollectionLineageOperation } from "./collections/collectionLineageGate";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 function localToday(): string {
@@ -45,10 +75,7 @@ vi.hoisted(() => {
 // with a mocked session whose mirror doc is a real Y.Doc, so "the change
 // reached the frontmatter map" is asserted on actual CRDT state.
 const docMock = vi.hoisted(() => ({
-  current: null as
-    | UseEngineDoc
-    | ((input: unknown) => UseEngineDoc)
-    | null,
+  current: null as UseEngineDoc | ((input: unknown) => UseEngineDoc) | null,
   inputs: [] as unknown[],
 }));
 vi.mock("./collab/useEngineDoc", () => ({
@@ -66,7 +93,18 @@ vi.mock("./collections/recordSourceCheck", () => ({
 }));
 
 function engineDocState(
-  partial: Partial<Pick<UseEngineDoc, "available" | "opening" | "doc" | "saveState" | "saveError" | "readOnlyWhileEditing" | "deletedWhileEditing">>,
+  partial: Partial<
+    Pick<
+      UseEngineDoc,
+      | "available"
+      | "opening"
+      | "doc"
+      | "saveState"
+      | "saveError"
+      | "readOnlyWhileEditing"
+      | "deletedWhileEditing"
+    >
+  >,
 ): UseEngineDoc {
   return {
     available: false,
@@ -170,7 +208,9 @@ function makeBridge(
     },
     onCollectionAutomationsChanged: (callback: (event: { workspaceId: string }) => void) => {
       automationsCallbacks.add(callback);
-      return () => { automationsCallbacks.delete(callback); };
+      return () => {
+        automationsCallbacks.delete(callback);
+      };
     },
     emitWorkspaceActivity: (event: WorkspaceActivityEvent) => {
       for (const callback of [...activityCallbacks]) callback(event);
@@ -183,7 +223,12 @@ function makeBridge(
     },
     listAutomationButtons: vi.fn(async () => ({ buttons: extra?.buttons ?? [] })),
     pressAutomationButton: vi.fn(
-      extra?.press ?? (async (): Promise<PressAutomationButtonResult> => ({ busy: false, claimId: "atc_press", settled: null })),
+      extra?.press ??
+        (async (): Promise<PressAutomationButtonResult> => ({
+          busy: false,
+          claimId: "atc_press",
+          settled: null,
+        })),
     ),
     retryCollectionAutomation: vi.fn(async () => ({ status: "queued" as const, press: true })),
     onAutomationRunSettled: vi.fn((callback: (event: AutomationRunSettledEvent) => void) => {
@@ -198,16 +243,14 @@ function makeBridge(
         waitingCallbacks.delete(callback);
       };
     }),
-    getCollection: vi.fn(
-      async (): Promise<GetCollectionResult> => ({
-        path: "tasks",
-        objectId: "object-test",
-        status: "valid",
-        reasons: [],
-        schema: currentSchema,
-        recordCount: records.length,
-      }),
-    ),
+    getCollection: vi.fn(async (): Promise<GetCollectionResult> => ({
+      path: "tasks",
+      objectId: "object-test",
+      status: "valid",
+      reasons: [],
+      schema: currentSchema,
+      recordCount: records.length,
+    })),
     listCollections: vi.fn(async () => ({
       collections: [{ path: "tasks", objectId: "object-test", status: "valid", reasons: [] }],
     })),
@@ -216,25 +259,26 @@ function makeBridge(
       truncated: false as const,
       contentHash,
     })),
-    writeWorkspaceText: vi.fn(
-      async (payload: { text: string; expectedContentHash: string }) => {
-        if (payload.expectedContentHash !== contentHash) {
-          return { status: "conflict" as const, currentContentHash: contentHash };
-        }
-        currentSchema = parseCollectionSchema(payload.text).schema;
-        writes += 1;
-        contentHash = hashFor(writes);
-        return { status: "written" as const, contentHash };
-      },
-    ),
+    writeWorkspaceText: vi.fn(async (payload: { text: string; expectedContentHash: string }) => {
+      if (payload.expectedContentHash !== contentHash) {
+        return { status: "conflict" as const, currentContentHash: contentHash };
+      }
+      currentSchema = parseCollectionSchema(payload.text).schema;
+      writes += 1;
+      contentHash = hashFor(writes);
+      return { status: "written" as const, contentHash };
+    }),
     queryCollectionRecords: vi.fn(
-      async (params: {
-        collectionPath: string;
-      }): Promise<QueryCollectionRecordsResult> => {
+      async (params: { collectionPath: string }): Promise<QueryCollectionRecordsResult> => {
         const related = extra?.related?.[params.collectionPath];
         if (related) {
           return {
-            collection: { path: params.collectionPath, objectId: "object-test", status: "valid", reasons: [] },
+            collection: {
+              path: params.collectionPath,
+              objectId: "object-test",
+              status: "valid",
+              reasons: [],
+            },
             records: related,
             groups: null,
             nextCursor: null,
@@ -248,18 +292,21 @@ function makeBridge(
         };
       },
     ),
-    onWorkspaceActivity: vi.fn(
-      (callback: (event: WorkspaceActivityEvent) => void) => {
-        activityCallbacks.add(callback);
-        return () => {
-          activityCallbacks.delete(callback);
-        };
-      },
-    ),
+    onWorkspaceActivity: vi.fn((callback: (event: WorkspaceActivityEvent) => void) => {
+      activityCallbacks.add(callback);
+      return () => {
+        activityCallbacks.delete(callback);
+      };
+    }),
     // The header's ⚡ count reads the Collection's automations.
     listCollectionAutomations: vi.fn(async () => ({ status: "missing" as const })),
     // The people a person field can name. A Collection main cannot list them for keeps the typed id.
-    listAutomationPeople: vi.fn(async (_payload: { workspaceId: string; collectionPath: string }): Promise<ListAutomationPeopleResult> => ({ status: "unavailable" })),
+    listAutomationPeople: vi.fn(
+      async (_payload: {
+        workspaceId: string;
+        collectionPath: string;
+      }): Promise<ListAutomationPeopleResult> => ({ status: "unavailable" }),
+    ),
     openExternalUrl: vi.fn(async (_payload: { url: string }) => undefined),
     listAutomationHolds: vi.fn(async () => ({ holds: [], unreadable: false })),
   };
@@ -339,11 +386,16 @@ function runAction(testId: string) {
   openActions();
   fireEvent.click(screen.getByTestId(testId));
 }
-const viewTab = (name: string) => within(screen.getByTestId("collection-view-switcher")).getByRole("button", { name });
+const viewTab = (name: string) =>
+  within(screen.getByTestId("collection-view-switcher")).getByRole("button", { name });
 
 // The first record's cell in the table: the Open gutter is cell 0, then one cell per field.
 function fieldCell(fieldIndex: number): HTMLElement {
-  const cell = screen.getByRole("grid").querySelectorAll<HTMLElement>('[role="row"][data-index="0"] [role="gridcell"]')[fieldIndex + 1];
+  const cell = screen
+    .getByRole("grid")
+    .querySelectorAll<HTMLElement>('[role="row"][data-index="0"] [role="gridcell"]')[
+    fieldIndex + 1
+  ];
   if (!cell) throw new Error(`no cell for field ${fieldIndex}`);
   return cell;
 }
@@ -358,14 +410,27 @@ function editTags(...tags: string[]) {
   fireEvent.pointerDown(document.body);
 }
 
-const tagPicked = (name: string) => screen.getByRole("option", { name }).getAttribute("aria-selected") === "true";
+const tagPicked = (name: string) =>
+  screen.getByRole("option", { name }).getAttribute("aria-selected") === "true";
 
 describe("CollectionPage", () => {
   it("keeps draft delivery separate from owner application, retries, and reverses local discard", async () => {
-    const draft = { ...record("rec_aaaaaaaaaaaaaaaaaaaaaaaaaa", "Socks"), creationDelivery: "pending" as const, creationCanDiscard: true };
+    const draft = {
+      ...record("rec_aaaaaaaaaaaaaaaaaaaaaaaaaa", "Socks"),
+      creationDelivery: "pending" as const,
+      creationCanDiscard: true,
+    };
     const records = [draft];
-    const api = { ...makeBridge(records), pushShareDirectWrites: vi.fn(async () => undefined),
-      deleteWorkspacePath: vi.fn(async () => { records.splice(0); }), createWorkspaceFile: vi.fn(async () => { records.push(draft); }) };
+    const api = {
+      ...makeBridge(records),
+      pushShareDirectWrites: vi.fn(async () => undefined),
+      deleteWorkspacePath: vi.fn(async () => {
+        records.splice(0);
+      }),
+      createWorkspaceFile: vi.fn(async () => {
+        records.push(draft);
+      }),
+    };
     const text = `---\nid: ${draft.id}\nTitle: Socks\n---\nKeep the entire draft.\n`;
     api.readWorkspaceText.mockResolvedValue({ text, truncated: false, contentHash: hashFor(0) });
     const onNotice = vi.fn();
@@ -373,22 +438,43 @@ describe("CollectionPage", () => {
     render(pageWithHost(undefined, undefined, { onNotice }));
     await screen.findByText("Saved on this computer. Waiting to send");
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
-    await waitFor(() => expect(api.pushShareDirectWrites).toHaveBeenCalledWith({ workspaceId: "ws-1" }));
+    await waitFor(() =>
+      expect(api.pushShareDirectWrites).toHaveBeenCalledWith({ workspaceId: "ws-1" }),
+    );
     fireEvent.click(screen.getByRole("button", { name: "Discard draft" }));
     await waitFor(() => expect(onNotice).toHaveBeenCalled());
-    expect(api.deleteWorkspacePath).toHaveBeenCalledWith({ workspaceId: "ws-1", relativePath: draft.path });
+    expect(api.deleteWorkspacePath).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      relativePath: draft.path,
+    });
     act(() => onNotice.mock.calls[0]![1]());
-    await waitFor(() => expect(api.createWorkspaceFile).toHaveBeenCalledWith({ workspaceId: "ws-1", relativePath: draft.path, initialText: text }));
+    await waitFor(() =>
+      expect(api.createWorkspaceFile).toHaveBeenCalledWith({
+        workspaceId: "ws-1",
+        relativePath: draft.path,
+        initialText: text,
+      }),
+    );
   });
 
   it("does not offer Discard while the submission outcome is unknown", async () => {
-    renderPage(makeBridge([{ ...record("rec-1", "Socks"), creationDelivery: "pending", creationCanDiscard: false }]));
+    renderPage(
+      makeBridge([
+        { ...record("rec-1", "Socks"), creationDelivery: "pending", creationCanDiscard: false },
+      ]),
+    );
     await screen.findByText("Saved on this computer. Waiting to send");
     expect(screen.queryByRole("button", { name: "Discard draft" })).toBeNull();
   });
 
   it("shows the race winner without a creation strip when creation status clears", async () => {
-    const records: CollectionRecord[] = [{ ...record("loser", "Socks"), creationDelivery: "refused", creationRefusal: "This record name is taken." }];
+    const records: CollectionRecord[] = [
+      {
+        ...record("loser", "Socks"),
+        creationDelivery: "refused",
+        creationRefusal: "This record name is taken.",
+      },
+    ];
     const api = makeBridge(records);
     const onOpenRecord = vi.fn();
     renderPage(api, undefined, onOpenRecord);
@@ -397,14 +483,20 @@ describe("CollectionPage", () => {
     act(() => api.emitWorkspaceActivity({ workspaceId: "ws-1", paths: ["tasks/Socks.md"] }));
     await waitFor(() => expect(screen.queryByTestId("collection-record-drafts")).toBeNull());
     fireEvent.click(screen.getByRole("button", { name: "Open Socks" }));
-    fireEvent.click(within(screen.getByRole("complementary", { name: "Socks" })).getByRole("button", { name: "Open as page" }));
+    fireEvent.click(
+      within(screen.getByRole("complementary", { name: "Socks" })).getByRole("button", {
+        name: "Open as page",
+      }),
+    );
     expect(onOpenRecord).toHaveBeenCalledWith("tasks/Socks.md");
     expect(screen.queryByTestId("collection-record-drafts")).toBeNull();
   });
 
   it("keeps ended drafts visible and discards a retry response after unmount", async () => {
-    const api = { ...makeBridge([{ ...record("rec-1", "Socks"), creationDelivery: "pending" as const }]),
-      pushShareDirectWrites: vi.fn() };
+    const api = {
+      ...makeBridge([{ ...record("rec-1", "Socks"), creationDelivery: "pending" as const }]),
+      pushShareDirectWrites: vi.fn(),
+    };
     const pending = deferred<void>();
     api.pushShareDirectWrites.mockReturnValue(pending.promise);
     const onError = vi.fn();
@@ -414,27 +506,39 @@ describe("CollectionPage", () => {
     await act(async () => pending.reject(new Error("old workspace")));
     expect(onError).not.toHaveBeenCalled();
     renderPage(api, undefined, undefined, { readOnly: true, accessEnded: true });
-    expect(await screen.findByText("Access ended. This draft cannot be sent. It is kept on this computer.")).toBeTruthy();
+    expect(
+      await screen.findByText(
+        "Access ended. This draft cannot be sent. It is kept on this computer.",
+      ),
+    ).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
   });
 
-  it.each([
-    { accessEnded: true, writeRefusal: undefined },
-  ])("refuses an old draft retry after read-only access: $accessEnded, $writeRefusal", async ({ accessEnded, writeRefusal }) => {
-    const api = { ...makeBridge([{ ...record("rec-1", "Socks"), creationDelivery: "pending" as const }]),
-      pushShareDirectWrites: vi.fn().mockRejectedValueOnce(new Error("offline")) };
-    const onError = vi.fn();
-    const view = renderPage(api, undefined, undefined, { onError });
-    fireEvent.click(await screen.findByRole("button", { name: "Try again" }));
-    await waitFor(() => expect(onError).toHaveBeenCalledOnce());
-    const retry = onError.mock.calls[0]![2];
-    view.rerender(pageWithHost(undefined, undefined, { onError, readOnly: true, accessEnded, writeRefusal }));
-    await act(async () => retry());
-    expect(api.pushShareDirectWrites).toHaveBeenCalledOnce();
-    const message = writeRefusal ?? (accessEnded ? "Your access to this share ended."
-      : "Your access to this share changed. Ask for Edit access, then reopen the share.");
-    expect(onError).toHaveBeenLastCalledWith(message, expect.any(Error));
-  });
+  it.each([{ accessEnded: true, writeRefusal: undefined }])(
+    "refuses an old draft retry after read-only access: $accessEnded, $writeRefusal",
+    async ({ accessEnded, writeRefusal }) => {
+      const api = {
+        ...makeBridge([{ ...record("rec-1", "Socks"), creationDelivery: "pending" as const }]),
+        pushShareDirectWrites: vi.fn().mockRejectedValueOnce(new Error("offline")),
+      };
+      const onError = vi.fn();
+      const view = renderPage(api, undefined, undefined, { onError });
+      fireEvent.click(await screen.findByRole("button", { name: "Try again" }));
+      await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+      const retry = onError.mock.calls[0]![2];
+      view.rerender(
+        pageWithHost(undefined, undefined, { onError, readOnly: true, accessEnded, writeRefusal }),
+      );
+      await act(async () => retry());
+      expect(api.pushShareDirectWrites).toHaveBeenCalledOnce();
+      const message =
+        writeRefusal ??
+        (accessEnded
+          ? "Your access to this share ended."
+          : "Your access to this share changed. Ask for Edit access, then reopen the share.");
+      expect(onError).toHaveBeenLastCalledWith(message, expect.any(Error));
+    },
+  );
 
   it("keeps View tables readable without record or definition writes", async () => {
     const bridge = makeBridge([record("rec-1", "Shared task")]);
@@ -448,13 +552,21 @@ describe("CollectionPage", () => {
     openActions();
     expect(screen.queryByTestId("collection-fields-button")).toBeNull();
     expect(screen.queryByTestId("collection-views-button")).toBeNull();
-    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Automations", "Customize…"]);
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+      "Automations",
+      "Customize…",
+    ]);
     expect(bridge.listAutomationButtons).not.toHaveBeenCalled();
     expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
   });
   it("shows an ended share's saved views as tabs that switch, with no + and no tab menu", async () => {
     const onActiveViewChange = vi.fn();
-    renderPage(makeBridge([record("rec-1", "Shared task")], TWO_VIEW_SCHEMA), undefined, undefined, { readOnly: true, accessEnded: true, activeViewName: "Sorted", onActiveViewChange });
+    renderPage(
+      makeBridge([record("rec-1", "Shared task")], TWO_VIEW_SCHEMA),
+      undefined,
+      undefined,
+      { readOnly: true, accessEnded: true, activeViewName: "Sorted", onActiveViewChange },
+    );
     await screen.findByText("Shared task");
     expect(viewTab("Sorted").getAttribute("aria-pressed")).toBe("true");
     expect(screen.queryByRole("button", { name: "Add a view" })).toBeNull();
@@ -476,9 +588,18 @@ describe("CollectionPage", () => {
     expect(screen.queryByText("No records in this collection yet.")).toBeNull();
     // Fields and Views set up a Collection, so its menu has them before it has records.
     openActions();
-    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Fields", "Views", "Automations", "Customize…"]);
-    expect(screen.getByTestId("collection-fields-button")).toBe(screen.getByRole("menuitem", { name: "Fields" }));
-    expect(screen.getByTestId("collection-views-button")).toBe(screen.getByRole("menuitem", { name: "Views" }));
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+      "Fields",
+      "Views",
+      "Automations",
+      "Customize…",
+    ]);
+    expect(screen.getByTestId("collection-fields-button")).toBe(
+      screen.getByRole("menuitem", { name: "Fields" }),
+    );
+    expect(screen.getByTestId("collection-views-button")).toBe(
+      screen.getByRole("menuitem", { name: "Views" }),
+    );
     openActions();
     expect(screen.queryByRole("menu")).toBeNull();
     expect(screen.getByTestId("collection-record-count").textContent).toBe("0 records");
@@ -492,12 +613,24 @@ describe("CollectionPage", () => {
   it("keeps a remote selection after a coalesced refresh acknowledges a local round trip", async () => {
     const schema: CollectionSchema = {
       ...SCHEMA,
-      fields: [...SCHEMA.fields, { name: "tags", type: "multi-select", options: ["alpha", "beta", "gamma"] }],
+      fields: [
+        ...SCHEMA.fields,
+        { name: "tags", type: "multi-select", options: ["alpha", "beta", "gamma"] },
+      ],
     };
-    const records: CollectionRecord[] = [{
-      ...record("rec-1", "Plan"),
-      values: [{ field: "tags", value: ["alpha"], validation: { status: "valid" }, resolvedRelations: [] }],
-    }];
+    const records: CollectionRecord[] = [
+      {
+        ...record("rec-1", "Plan"),
+        values: [
+          {
+            field: "tags",
+            value: ["alpha"],
+            validation: { status: "valid" },
+            resolvedRelations: [],
+          },
+        ],
+      },
+    ];
     const doc = new Y.Doc();
     doc.getMap("frontmatter").set("id", "rec-1");
     doc.getMap("frontmatter").set("tags", ["alpha"]);
@@ -522,7 +655,14 @@ describe("CollectionPage", () => {
     doc.getMap("frontmatter").set("tags", ["alpha", "beta"]);
     records[0] = {
       ...records[0]!,
-      values: [{ field: "tags", value: ["alpha", "beta"], validation: { status: "valid" }, resolvedRelations: [] }],
+      values: [
+        {
+          field: "tags",
+          value: ["alpha", "beta"],
+          validation: { status: "valid" },
+          resolvedRelations: [],
+        },
+      ],
     };
     bridge.emitWorkspaceActivity({ workspaceId: "ws-1", paths: ["tasks/Plan.md"] });
     await act(() => vi.advanceTimersByTimeAsync(250));
@@ -550,101 +690,158 @@ describe("CollectionPage", () => {
     expect(screen.queryByTestId("collection-automations-button")).toBeNull();
   });
 
-  it.each([2, 3])("retries the latest of %i rapid tags edits after earlier progress without an index refresh", async (count) => {
-    const schema: CollectionSchema = {
-      ...SCHEMA,
-      fields: [...SCHEMA.fields, { name: "tags", type: "multi-select", options: ["alpha", "beta", "gamma", "delta"] }],
-    };
-    const records: CollectionRecord[] = [{
-      ...record("rec-1", "Plan"),
-      values: [{ field: "tags", value: ["alpha"], validation: { status: "valid" }, resolvedRelations: [] }],
-    }];
-    const doc = new Y.Doc();
-    doc.getMap("frontmatter").set("id", "rec-1");
-    doc.getMap("frontmatter").set("tags", ["alpha"]);
-    docMock.current = engineDocState({ available: true, doc });
-    const bridge = makeBridge(records, schema);
-    const page = renderPage(bridge);
-    await screen.findByRole("button", { name: "alpha" });
-    vi.useFakeTimers();
-    editTags("beta");
-    editTags("gamma");
-    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saving" } });
-    page.rerender(pageWithHost());
-    // The first write settles; the second writer cannot open its session.
-    docMock.current = engineDocState({ available: false, doc, saveState: { kind: "saved-here" } });
-    page.rerender(pageWithHost());
-    expect(doc.getMap("frontmatter").get("tags")).toEqual(["alpha", "beta"]);
-    expect(collectionWriteFailures()).toHaveLength(1);
-    if (count === 3) editTags("delta");
-    const latest = collectionWriteFailures().at(-1)!;
-    const desired = count === 3 ? ["alpha", "beta", "gamma", "delta"] : ["alpha", "beta", "gamma"];
-    expect(latest.change.value).toEqual(desired);
-    docMock.current = engineDocState({ available: true, doc });
-    act(() => retryCollectionFieldWrite(latest.id));
-    expect(doc.getMap("frontmatter").get("tags")).toEqual(desired);
-    expect(collectionWriteFailures()).toHaveLength(count === 3 ? 1 : 0);
-    expect(collectionWriteFailures().every((failure) => failure.superseded)).toBe(true);
-    expect(bridge.queryCollectionRecords).toHaveBeenCalledTimes(1);
-  });
+  it.each([2, 3])(
+    "retries the latest of %i rapid tags edits after earlier progress without an index refresh",
+    async (count) => {
+      const schema: CollectionSchema = {
+        ...SCHEMA,
+        fields: [
+          ...SCHEMA.fields,
+          { name: "tags", type: "multi-select", options: ["alpha", "beta", "gamma", "delta"] },
+        ],
+      };
+      const records: CollectionRecord[] = [
+        {
+          ...record("rec-1", "Plan"),
+          values: [
+            {
+              field: "tags",
+              value: ["alpha"],
+              validation: { status: "valid" },
+              resolvedRelations: [],
+            },
+          ],
+        },
+      ];
+      const doc = new Y.Doc();
+      doc.getMap("frontmatter").set("id", "rec-1");
+      doc.getMap("frontmatter").set("tags", ["alpha"]);
+      docMock.current = engineDocState({ available: true, doc });
+      const bridge = makeBridge(records, schema);
+      const page = renderPage(bridge);
+      await screen.findByRole("button", { name: "alpha" });
+      vi.useFakeTimers();
+      editTags("beta");
+      editTags("gamma");
+      docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saving" } });
+      page.rerender(pageWithHost());
+      // The first write settles; the second writer cannot open its session.
+      docMock.current = engineDocState({
+        available: false,
+        doc,
+        saveState: { kind: "saved-here" },
+      });
+      page.rerender(pageWithHost());
+      expect(doc.getMap("frontmatter").get("tags")).toEqual(["alpha", "beta"]);
+      expect(collectionWriteFailures()).toHaveLength(1);
+      if (count === 3) editTags("delta");
+      const latest = collectionWriteFailures().at(-1)!;
+      const desired =
+        count === 3 ? ["alpha", "beta", "gamma", "delta"] : ["alpha", "beta", "gamma"];
+      expect(latest.change.value).toEqual(desired);
+      docMock.current = engineDocState({ available: true, doc });
+      act(() => retryCollectionFieldWrite(latest.id));
+      expect(doc.getMap("frontmatter").get("tags")).toEqual(desired);
+      expect(collectionWriteFailures()).toHaveLength(count === 3 ? 1 : 0);
+      expect(collectionWriteFailures().every((failure) => failure.superseded)).toBe(true);
+      expect(bridge.queryCollectionRecords).toHaveBeenCalledTimes(1);
+    },
+  );
 
-  it.each(["retry", "discard"] as const)("keeps a reopened tags picker consistent after %s of retained input", async (action) => {
-    const schema: CollectionSchema = {
-      ...SCHEMA,
-      fields: [...SCHEMA.fields, { name: "tags", type: "multi-select", options: ["alpha", "beta", "gamma"] }],
-    };
-    const records: CollectionRecord[] = [{
-      ...record("rec-1", "Plan"),
-      values: [{ field: "tags", value: ["alpha"], validation: { status: "valid" }, resolvedRelations: [] }],
-    }];
-    docMock.current = engineDocState({ available: false });
-    const bridge = makeBridge(records, schema);
-    renderPage(bridge);
-    await screen.findByRole("button", { name: "alpha" });
-    vi.useFakeTimers();
-    editTags("gamma");
-    expect(collectionWriteFailures()[0]?.change.value).toEqual(["alpha", "gamma"]);
+  it.each(["retry", "discard"] as const)(
+    "keeps a reopened tags picker consistent after %s of retained input",
+    async (action) => {
+      const schema: CollectionSchema = {
+        ...SCHEMA,
+        fields: [
+          ...SCHEMA.fields,
+          { name: "tags", type: "multi-select", options: ["alpha", "beta", "gamma"] },
+        ],
+      };
+      const records: CollectionRecord[] = [
+        {
+          ...record("rec-1", "Plan"),
+          values: [
+            {
+              field: "tags",
+              value: ["alpha"],
+              validation: { status: "valid" },
+              resolvedRelations: [],
+            },
+          ],
+        },
+      ];
+      docMock.current = engineDocState({ available: false });
+      const bridge = makeBridge(records, schema);
+      renderPage(bridge);
+      await screen.findByRole("button", { name: "alpha" });
+      vi.useFakeTimers();
+      editTags("gamma");
+      expect(collectionWriteFailures()[0]?.change.value).toEqual(["alpha", "gamma"]);
 
-    const doc = new Y.Doc();
-    doc.getMap("frontmatter").set("id", "rec-1");
-    doc.getMap("frontmatter").set("tags", ["alpha", "beta"]);
-    docMock.current = engineDocState({ available: true, doc });
-    records[0] = {
-      ...records[0]!,
-      values: [{ field: "tags", value: ["alpha", "beta"], validation: { status: "valid" }, resolvedRelations: [] }],
-    };
-    bridge.emitWorkspaceActivity({ workspaceId: "ws-1", paths: ["tasks/Plan.md"] });
-    await act(() => vi.advanceTimersByTimeAsync(250));
-    // The reopened picker shows the other person's beta and the retained gamma.
-    fireEvent.click(fieldCell(1));
-    expect([tagPicked("beta"), tagPicked("gamma")]).toEqual([true, true]);
-    fireEvent.keyDown(screen.getByRole("combobox"), { key: "Escape" });
-
-    fireEvent.click(screen.getByTestId(`collection-write-${action}`));
-    expect(doc.getMap("frontmatter").get("tags")).toEqual(["alpha", "beta"]);
-    if (action === "retry") {
-      expect(collectionWriteFailures()[0]).toMatchObject({ recoveryOnly: true, change: { value: ["alpha", "gamma"] } });
-      expect(screen.getByTestId("collection-write-retry")).toHaveProperty("disabled", true);
-    } else {
-      expect(collectionWriteFailures()).toEqual([]);
-      // The discard reached the closed cell: its next edit starts without gamma.
+      const doc = new Y.Doc();
+      doc.getMap("frontmatter").set("id", "rec-1");
+      doc.getMap("frontmatter").set("tags", ["alpha", "beta"]);
+      docMock.current = engineDocState({ available: true, doc });
+      records[0] = {
+        ...records[0]!,
+        values: [
+          {
+            field: "tags",
+            value: ["alpha", "beta"],
+            validation: { status: "valid" },
+            resolvedRelations: [],
+          },
+        ],
+      };
+      bridge.emitWorkspaceActivity({ workspaceId: "ws-1", paths: ["tasks/Plan.md"] });
+      await act(() => vi.advanceTimersByTimeAsync(250));
+      // The reopened picker shows the other person's beta and the retained gamma.
       fireEvent.click(fieldCell(1));
-      expect(tagPicked("gamma")).toBe(false);
-      fireEvent.click(screen.getByRole("option", { name: "alpha" }));
-      fireEvent.pointerDown(document.body);
-      expect(doc.getMap("frontmatter").get("tags")).toEqual(["beta"]);
-    }
-  });
+      expect([tagPicked("beta"), tagPicked("gamma")]).toEqual([true, true]);
+      fireEvent.keyDown(screen.getByRole("combobox"), { key: "Escape" });
+
+      fireEvent.click(screen.getByTestId(`collection-write-${action}`));
+      expect(doc.getMap("frontmatter").get("tags")).toEqual(["alpha", "beta"]);
+      if (action === "retry") {
+        expect(collectionWriteFailures()[0]).toMatchObject({
+          recoveryOnly: true,
+          change: { value: ["alpha", "gamma"] },
+        });
+        expect(screen.getByTestId("collection-write-retry")).toHaveProperty("disabled", true);
+      } else {
+        expect(collectionWriteFailures()).toEqual([]);
+        // The discard reached the closed cell: its next edit starts without gamma.
+        fireEvent.click(fieldCell(1));
+        expect(tagPicked("gamma")).toBe(false);
+        fireEvent.click(screen.getByRole("option", { name: "alpha" }));
+        fireEvent.pointerDown(document.body);
+        expect(doc.getMap("frontmatter").get("tags")).toEqual(["beta"]);
+      }
+    },
+  );
 
   it("does not acknowledge a save through an index query that started before it", async () => {
     const schema: CollectionSchema = {
       ...SCHEMA,
-      fields: [...SCHEMA.fields, { name: "tags", type: "multi-select", options: ["alpha", "beta", "gamma"] }],
+      fields: [
+        ...SCHEMA.fields,
+        { name: "tags", type: "multi-select", options: ["alpha", "beta", "gamma"] },
+      ],
     };
-    const records: CollectionRecord[] = [{
-      ...record("rec-1", "Plan"),
-      values: [{ field: "tags", value: ["alpha"], validation: { status: "valid" }, resolvedRelations: [] }],
-    }];
+    const records: CollectionRecord[] = [
+      {
+        ...record("rec-1", "Plan"),
+        values: [
+          {
+            field: "tags",
+            value: ["alpha"],
+            validation: { status: "valid" },
+            resolvedRelations: [],
+          },
+        ],
+      },
+    ];
     const doc = new Y.Doc();
     doc.getMap("frontmatter").set("id", "rec-1");
     doc.getMap("frontmatter").set("tags", ["alpha"]);
@@ -656,7 +853,11 @@ describe("CollectionPage", () => {
     editTags("beta");
 
     let resolveQuery!: (result: QueryCollectionRecordsResult) => void;
-    bridge.queryCollectionRecords.mockReturnValueOnce(new Promise((resolve) => { resolveQuery = resolve; }));
+    bridge.queryCollectionRecords.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveQuery = resolve;
+      }),
+    );
     bridge.emitWorkspaceActivity({ workspaceId: "ws-1", paths: ["tasks/Plan.md"] });
     await act(() => vi.advanceTimersByTimeAsync(250));
     expect(bridge.queryCollectionRecords).toHaveBeenCalledTimes(2);
@@ -666,12 +867,14 @@ describe("CollectionPage", () => {
     docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saved-here" } });
     page.rerender(pageWithHost());
     expect(hasPendingCollectionFieldWrites()).toBe(false);
-    await act(async () => resolveQuery({
-      collection: { path: "tasks", objectId: "object-test", status: "valid", reasons: [] },
-      records,
-      groups: null,
-      nextCursor: null,
-    }));
+    await act(async () =>
+      resolveQuery({
+        collection: { path: "tasks", objectId: "object-test", status: "valid", reasons: [] },
+        records,
+        groups: null,
+        nextCursor: null,
+      }),
+    );
 
     // That query read the index before the save, so the reopened picker still replays beta.
     fireEvent.click(fieldCell(1));
@@ -683,15 +886,11 @@ describe("CollectionPage", () => {
 
   it("retries a failed record query", async () => {
     const bridge = makeBridge([record("rec-1", "Plan")]);
-    bridge.queryCollectionRecords.mockRejectedValueOnce(
-      new Error("temporary failure"),
-    );
+    bridge.queryCollectionRecords.mockRejectedValueOnce(new Error("temporary failure"));
     renderPage(bridge);
 
     expect(
-      await screen.findByText(
-        "dohc could not read this collection's records. temporary failure",
-      ),
+      await screen.findByText("dohc could not read this collection's records. temporary failure"),
     ).toBeDefined();
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
 
@@ -733,8 +932,15 @@ describe("view persistence", () => {
     renderPage(bridge, undefined, undefined, { activeViewName: "Sorted" });
     await screen.findByText("Plan");
     // The open tab also holds its menu's button, which is not a tab.
-    expect(within(screen.getByTestId("collection-view-switcher")).getAllByRole("button").filter((tab) => tab.hasAttribute("aria-pressed")).map((tab) => [tab.textContent, tab.getAttribute("aria-pressed")]))
-      .toEqual([["All", "false"], ["Sorted", "true"]]);
+    expect(
+      within(screen.getByTestId("collection-view-switcher"))
+        .getAllByRole("button")
+        .filter((tab) => tab.hasAttribute("aria-pressed"))
+        .map((tab) => [tab.textContent, tab.getAttribute("aria-pressed")]),
+    ).toEqual([
+      ["All", "false"],
+      ["Sorted", "true"],
+    ]);
     expect(screen.getByRole("heading", { level: 1, name: "Tasks" })).toBeTruthy();
     expect(screen.getByTestId("collection-record-count").textContent).toBe("1 record");
   });
@@ -744,13 +950,14 @@ describe("view persistence", () => {
     renderPage(makeBridge([record("rec-1", "Plan")]), undefined, undefined, { onActiveViewChange });
     await screen.findByText("Plan");
     const tabs = within(screen.getByTestId("collection-view-switcher")).getAllByRole("button");
-    expect(tabs.map((tab) => [tab.textContent, tab.getAttribute("aria-pressed")])).toEqual([["Table", "true"]]);
+    expect(tabs.map((tab) => [tab.textContent, tab.getAttribute("aria-pressed")])).toEqual([
+      ["Table", "true"],
+    ]);
     // The default table is not a saved view: it has no menu, and pressing it stores no choice.
     expect(screen.queryByRole("button", { name: "View actions" })).toBeNull();
     fireEvent.click(tabs[0]!);
     expect(onActiveViewChange).not.toHaveBeenCalled();
   });
-
 });
 
 const SELECT_SCHEMA: CollectionSchema = {
@@ -809,9 +1016,7 @@ describe("collection authoring", () => {
     });
     fireEvent.click(screen.getByTestId("collection-add-field"));
 
-    await waitFor(() =>
-      expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce(),
-    );
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce());
     const payload = bridge.writeWorkspaceText.mock.calls[0]?.[0] as {
       workspaceId: string;
       relativePath: string;
@@ -849,9 +1054,7 @@ describe("collection authoring", () => {
     });
     fireEvent.click(screen.getByText("Save field"));
 
-    await waitFor(() =>
-      expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce(),
-    );
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce());
     expect(lastWrittenSchema(bridge).schema.fields).toEqual([
       { name: "title", type: "text" },
       { name: "status", type: "select", options: ["Todo", "Done", "Later"] },
@@ -881,16 +1084,12 @@ describe("collection authoring", () => {
     fireEvent.change(search, { target: { value: "Later" } });
     fireEvent.keyDown(search, { key: "Enter" });
 
-    await waitFor(() =>
-      expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce(),
-    );
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce());
     // The schema write has not settled: the cell write must not have run.
     expect(doc.getMap("frontmatter").get("status")).toBeUndefined();
 
     releaseWrite();
-    await waitFor(() =>
-      expect(doc.getMap("frontmatter").get("status")).toBe("Later"),
-    );
+    await waitFor(() => expect(doc.getMap("frontmatter").get("status")).toBe("Later"));
     const written = lastWrittenSchema(bridge).schema;
     expect(written.fields[1]).toEqual({
       name: "status",
@@ -929,9 +1128,7 @@ describe("collection authoring", () => {
     let release: (() => void) | null = null;
     let operation!: Promise<unknown>;
     act(() => {
-      operation = beginCollectionLineageOperation("ws-1").then(
-        (r) => (release = r),
-      );
+      operation = beginCollectionLineageOperation("ws-1").then((r) => (release = r));
     });
     // Navigation unmounts the page (the host stays, as in the shell); the
     // gate must keep waiting while the schema write is in flight, so the
@@ -949,9 +1146,7 @@ describe("collection authoring", () => {
     await act(async () => {
       releaseWrite();
     });
-    await waitFor(() =>
-      expect(doc.getMap("frontmatter").get("status")).toBe("Later"),
-    );
+    await waitFor(() => expect(doc.getMap("frontmatter").get("status")).toBe("Later"));
     docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saving" } });
     page.rerender(
       <>
@@ -1008,9 +1203,7 @@ describe("collection authoring", () => {
     // option is recreated first, then the value reaches the record.
     docMock.current = engineDocState({ available: true, doc });
     act(() => retryCollectionFieldWrite(failure.id));
-    await waitFor(() =>
-      expect(doc.getMap("frontmatter").get("status")).toBe("Later"),
-    );
+    await waitFor(() => expect(doc.getMap("frontmatter").get("status")).toBe("Later"));
     expect(lastWrittenSchema(bridge).schema.fields[1]).toEqual({
       name: "status",
       type: "select",
@@ -1035,9 +1228,7 @@ describe("collection authoring", () => {
       target: { value: "status" },
     });
     fireEvent.click(screen.getByTestId("collection-add-view"));
-    await waitFor(() =>
-      expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce(),
-    );
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce());
     expect(lastWrittenSchema(bridge).schema.views).toEqual([
       {
         name: "Board",
@@ -1057,12 +1248,8 @@ describe("collection authoring", () => {
       target: { value: "My board" },
     });
     fireEvent.click(screen.getByText("Save view"));
-    await waitFor(() =>
-      expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2),
-    );
-    expect(
-      lastWrittenSchema(bridge).schema.views.map((view) => view.name),
-    ).toEqual(["My board"]);
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2));
+    expect(lastWrittenSchema(bridge).schema.views.map((view) => view.name)).toEqual(["My board"]);
 
     // Deleting a view drops its configuration, so one click only arms the
     // button; the confirming click runs the rewrite.
@@ -1072,9 +1259,7 @@ describe("collection authoring", () => {
     expect(confirmButton.textContent).toBe("Confirm delete");
     expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2);
     fireEvent.click(confirmButton);
-    await waitFor(() =>
-      expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(3),
-    );
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(3));
     expect(lastWrittenSchema(bridge).schema.views).toEqual([]);
   });
 
@@ -1087,23 +1272,42 @@ describe("collection authoring", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add a view" }));
     const popover = within(screen.getByRole("dialog", { name: "Add a view" }));
     fireEvent.click(popover.getByRole("radio", { name: "Board" }));
-    expect(within(popover.getByLabelText("Group by")).getAllByRole("option").map((option) => option.textContent)).toEqual(["title", "status"]);
+    expect(
+      within(popover.getByLabelText("Group by"))
+        .getAllByRole("option")
+        .map((option) => option.textContent),
+    ).toEqual(["title", "status"]);
     fireEvent.change(popover.getByLabelText("Group by"), { target: { value: "status" } });
     fireEvent.change(popover.getByLabelText("Name"), { target: { value: "By status" } });
     fireEvent.click(popover.getByRole("button", { name: "Create view" }));
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce());
-    expect(bridge.writeWorkspaceText.mock.calls[0]![0]).toMatchObject({ relativePath: "tasks/collection.yaml", expectedContentHash: hashFor(0) });
+    expect(bridge.writeWorkspaceText.mock.calls[0]![0]).toMatchObject({
+      relativePath: "tasks/collection.yaml",
+      expectedContentHash: hashFor(0),
+    });
     expect(lastWrittenSchema(bridge).schema.views).toEqual([
-      { name: "By status", kind: "board", groupBy: "status", sort: [], visibleFields: null, dateField: null },
+      {
+        name: "By status",
+        kind: "board",
+        groupBy: "status",
+        sort: [],
+        visibleFields: null,
+        dateField: null,
+      },
     ]);
     await waitFor(() => expect(onActiveViewChange).toHaveBeenCalledExactlyOnceWith("By status"));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Add a view" })).toBeNull());
     // The tab shows once the page reads the schema again.
-    expect((await screen.findByRole("button", { name: "By status" })).getAttribute("aria-pressed")).toBe("true");
+    expect(
+      (await screen.findByRole("button", { name: "By status" })).getAttribute("aria-pressed"),
+    ).toBe("true");
   });
 
   it("adds a calendar on the Collection's date field, and opens Fields on a new Date field when it has none", async () => {
-    const dated: CollectionSchema = { ...SELECT_SCHEMA, fields: [...SELECT_SCHEMA.fields, { name: "due", type: "date" }] };
+    const dated: CollectionSchema = {
+      ...SELECT_SCHEMA,
+      fields: [...SELECT_SCHEMA.fields, { name: "due", type: "date" }],
+    };
     const bridge = makeBridge([selectRecord()], dated);
     const first = renderPage(bridge);
     await screen.findByText("Plan");
@@ -1113,7 +1317,14 @@ describe("collection authoring", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create view" }));
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce());
     expect(lastWrittenSchema(bridge).schema.views).toEqual([
-      { name: "Calendar", kind: "calendar", groupBy: null, sort: [], visibleFields: null, dateField: "due" },
+      {
+        name: "Calendar",
+        kind: "calendar",
+        groupBy: null,
+        sort: [],
+        visibleFields: null,
+        dateField: "due",
+      },
     ]);
     first.unmount();
 
@@ -1124,7 +1335,9 @@ describe("collection authoring", () => {
     fireEvent.click(screen.getByRole("radio", { name: "Calendar" }));
     expect(screen.getByText("This Collection has no date field.")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Create view" }));
-    expect(screen.getByRole("alert").textContent).toBe("A calendar needs a date field. Add one first.");
+    expect(screen.getByRole("alert").textContent).toBe(
+      "A calendar needs a date field. Add one first.",
+    );
     expect(undated.writeWorkspaceText).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Add a date field" }));
     const fields = await screen.findByTestId("collection-fields-dialog");
@@ -1134,7 +1347,10 @@ describe("collection authoring", () => {
   it("renames and deletes a view from its tab's menu through schema rewrites, and follows the open view", async () => {
     const bridge = makeBridge([record("rec-1", "Plan")], TWO_VIEW_SCHEMA);
     const onActiveViewChange = vi.fn();
-    const page = renderPage(bridge, undefined, undefined, { activeViewName: "Sorted", onActiveViewChange });
+    const page = renderPage(bridge, undefined, undefined, {
+      activeViewName: "Sorted",
+      onActiveViewChange,
+    });
     await screen.findByText("Plan");
 
     fireEvent.click(screen.getByRole("button", { name: "View actions" }));
@@ -1143,12 +1359,21 @@ describe("collection authoring", () => {
     fireEvent.change(rename.getByLabelText("Name"), { target: { value: "Newest" } });
     fireEvent.click(rename.getByRole("button", { name: "Rename" }));
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce());
-    expect(lastWrittenSchema(bridge).schema.views.map((view) => view.name)).toEqual(["All", "Newest"]);
+    expect(lastWrittenSchema(bridge).schema.views.map((view) => view.name)).toEqual([
+      "All",
+      "Newest",
+    ]);
     // The open view keeps its sort, and the shell keeps it open under its new name.
-    expect(lastWrittenSchema(bridge).schema.views[1]!.sort).toEqual([{ field: "title", direction: "desc" }]);
+    expect(lastWrittenSchema(bridge).schema.views[1]!.sort).toEqual([
+      { field: "title", direction: "desc" },
+    ]);
     await waitFor(() => expect(onActiveViewChange).toHaveBeenCalledExactlyOnceWith("Newest"));
-    page.rerender(pageWithHost(undefined, undefined, { activeViewName: "Newest", onActiveViewChange }));
-    expect((await screen.findByRole("button", { name: "Newest" })).getAttribute("aria-pressed")).toBe("true");
+    page.rerender(
+      pageWithHost(undefined, undefined, { activeViewName: "Newest", onActiveViewChange }),
+    );
+    expect(
+      (await screen.findByRole("button", { name: "Newest" })).getAttribute("aria-pressed"),
+    ).toBe("true");
 
     // Deleting drops the view's configuration, so the menu asks a second time.
     fireEvent.click(screen.getByRole("button", { name: "View actions" }));
@@ -1168,58 +1393,74 @@ describe("collection authoring", () => {
     { change: "a rename", result: { status: "written" as const, contentHash: hashFor(1) } },
     { change: "a deletion", result: { status: "conflict" as const } },
     { change: "a deletion", result: { status: "written" as const, contentHash: hashFor(1) } },
-  ])("changes nothing in the shell when the write of $change ends after the page closed ($result.status)", async ({ change, result }) => {
-    const bridge = makeBridge([record("rec-1", "Plan")], TWO_VIEW_SCHEMA);
-    const onActiveViewChange = vi.fn(), onError = vi.fn();
-    const page = renderPage(bridge, undefined, undefined, { activeViewName: "Sorted", onActiveViewChange, onError });
-    await screen.findByText("Plan");
-    const write = deferred<typeof result>();
-    bridge.writeWorkspaceText.mockReturnValue(write.promise as never);
-    if (change === "a new view") {
-      fireEvent.click(screen.getByRole("button", { name: "Add a view" }));
-      fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Late view" } });
-      fireEvent.click(screen.getByRole("button", { name: "Create view" }));
-    } else {
-      fireEvent.click(screen.getByRole("button", { name: "View actions" }));
-      if (change === "a rename") {
-        fireEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
+  ])(
+    "changes nothing in the shell when the write of $change ends after the page closed ($result.status)",
+    async ({ change, result }) => {
+      const bridge = makeBridge([record("rec-1", "Plan")], TWO_VIEW_SCHEMA);
+      const onActiveViewChange = vi.fn(),
+        onError = vi.fn();
+      const page = renderPage(bridge, undefined, undefined, {
+        activeViewName: "Sorted",
+        onActiveViewChange,
+        onError,
+      });
+      await screen.findByText("Plan");
+      const write = deferred<typeof result>();
+      bridge.writeWorkspaceText.mockReturnValue(write.promise as never);
+      if (change === "a new view") {
+        fireEvent.click(screen.getByRole("button", { name: "Add a view" }));
         fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Late view" } });
-        fireEvent.click(screen.getByRole("button", { name: "Rename" }));
+        fireEvent.click(screen.getByRole("button", { name: "Create view" }));
       } else {
-        fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
-        fireEvent.click(screen.getByRole("menuitem", { name: "Confirm delete" }));
+        fireEvent.click(screen.getByRole("button", { name: "View actions" }));
+        if (change === "a rename") {
+          fireEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
+          fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Late view" } });
+          fireEvent.click(screen.getByRole("button", { name: "Rename" }));
+        } else {
+          fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+          fireEvent.click(screen.getByRole("menuitem", { name: "Confirm delete" }));
+        }
       }
-    }
-    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce());
-    page.unmount();
-    await act(async () => write.resolve(result));
-    expect(onActiveViewChange).not.toHaveBeenCalled();
-    expect(onError).not.toHaveBeenCalled();
-  });
+      await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce());
+      page.unmount();
+      await act(async () => write.resolve(result));
+      expect(onActiveViewChange).not.toHaveBeenCalled();
+      expect(onError).not.toHaveBeenCalled();
+    },
+  );
 
-  it.each(["a rename", "a deletion"])("changes nothing in the shell when the Views dialog's write of %s ends after the page closed", async (change) => {
-    const bridge = makeBridge([record("rec-1", "Plan")], TWO_VIEW_SCHEMA);
-    const onActiveViewChange = vi.fn();
-    const page = renderPage(bridge, undefined, undefined, { activeViewName: "Sorted", onActiveViewChange });
-    await screen.findByText("Plan");
-    const write = deferred<{ status: "written"; contentHash: string }>();
-    bridge.writeWorkspaceText.mockReturnValue(write.promise as never);
-    fireEvent.click(screen.getByRole("button", { name: "Collection actions" }));
-    fireEvent.click(screen.getByRole("menuitem", { name: "Views" }));
-    const dialog = within(screen.getByTestId("collection-views-dialog"));
-    if (change === "a rename") {
-      fireEvent.click(dialog.getByRole("button", { name: "Rename view Sorted" }));
-      fireEvent.change(dialog.getByLabelText("New view name"), { target: { value: "Late view" } });
-      fireEvent.click(dialog.getByRole("button", { name: "Save view" }));
-    } else {
-      fireEvent.click(dialog.getByRole("button", { name: "Delete view Sorted" }));
-      fireEvent.click(dialog.getByRole("button", { name: "Delete view Sorted" }));
-    }
-    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce());
-    page.unmount();
-    await act(async () => write.resolve({ status: "written", contentHash: hashFor(1) }));
-    expect(onActiveViewChange).not.toHaveBeenCalled();
-  });
+  it.each(["a rename", "a deletion"])(
+    "changes nothing in the shell when the Views dialog's write of %s ends after the page closed",
+    async (change) => {
+      const bridge = makeBridge([record("rec-1", "Plan")], TWO_VIEW_SCHEMA);
+      const onActiveViewChange = vi.fn();
+      const page = renderPage(bridge, undefined, undefined, {
+        activeViewName: "Sorted",
+        onActiveViewChange,
+      });
+      await screen.findByText("Plan");
+      const write = deferred<{ status: "written"; contentHash: string }>();
+      bridge.writeWorkspaceText.mockReturnValue(write.promise as never);
+      fireEvent.click(screen.getByRole("button", { name: "Collection actions" }));
+      fireEvent.click(screen.getByRole("menuitem", { name: "Views" }));
+      const dialog = within(screen.getByTestId("collection-views-dialog"));
+      if (change === "a rename") {
+        fireEvent.click(dialog.getByRole("button", { name: "Rename view Sorted" }));
+        fireEvent.change(dialog.getByLabelText("New view name"), {
+          target: { value: "Late view" },
+        });
+        fireEvent.click(dialog.getByRole("button", { name: "Save view" }));
+      } else {
+        fireEvent.click(dialog.getByRole("button", { name: "Delete view Sorted" }));
+        fireEvent.click(dialog.getByRole("button", { name: "Delete view Sorted" }));
+      }
+      await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce());
+      page.unmount();
+      await act(async () => write.resolve({ status: "written", contentHash: hashFor(1) }));
+      expect(onActiveViewChange).not.toHaveBeenCalled();
+    },
+  );
 
   it("says in the popover why a view could not be added, and reports a delete that failed", async () => {
     const bridge = makeBridge([record("rec-1", "Plan")], TWO_VIEW_SCHEMA);
@@ -1230,7 +1471,9 @@ describe("collection authoring", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Add a view" }));
     fireEvent.click(screen.getByRole("button", { name: "Create view" }));
-    expect((await screen.findByRole("alert")).textContent).toBe("This collection changed while you were editing. Try again.");
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "This collection changed while you were editing. Try again.",
+    );
     expect(screen.getByRole("dialog", { name: "Add a view" })).toBeTruthy();
     expect(onError).not.toHaveBeenCalled();
     fireEvent.keyDown(screen.getByRole("dialog", { name: "Add a view" }), { key: "Escape" });
@@ -1239,7 +1482,9 @@ describe("collection authoring", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "Confirm delete" }));
     await waitFor(() => expect(onError).toHaveBeenCalledOnce());
-    expect(onError.mock.calls[0]![0]).toBe("This collection changed while you were editing. Try again.");
+    expect(onError.mock.calls[0]![0]).toBe(
+      "This collection changed while you were editing. Try again.",
+    );
     expect(onError.mock.calls[0]![2]).toBeTypeOf("function");
   });
 
@@ -1255,7 +1500,9 @@ describe("collection authoring", () => {
     const fields = screen.getByTestId("collection-fields-dialog");
     expect(within(fields).getByText("Mark paid")).toBeDefined();
     expect(within(fields).getAllByText("Button").length).toBeGreaterThan(0);
-    const types = within(screen.getByLabelText<HTMLSelectElement>("Field type")).getAllByRole("option");
+    const types = within(screen.getByLabelText<HTMLSelectElement>("Field type")).getAllByRole(
+      "option",
+    );
     expect(types.map((option) => option.getAttribute("value"))).toContain("button");
     fireEvent.keyDown(document, { key: "Escape" });
 
@@ -1279,7 +1526,6 @@ const CHECKBOX_SCHEMA: CollectionSchema = {
 };
 
 describe("cell write queue", () => {
-
   it("keeps a queued edit and finishes it after the page unmounts", async () => {
     // The queue lives outside the page and the shell hosts the writer:
     // unmounting the page (a tab switch) with the head save pending must not
@@ -1345,9 +1591,7 @@ describe("cell write queue", () => {
     docMock.current = docFor({ kind: "saved-here" });
     host.rerender(<CollectionFieldWriteHost />);
 
-    await waitFor(() =>
-      expect(nextDoc.getMap("frontmatter").get("done")).toBe(true),
-    );
+    await waitFor(() => expect(nextDoc.getMap("frontmatter").get("done")).toBe(true));
   });
 
   it("disables cell editing and says so while a write operation is in progress", async () => {
@@ -1377,14 +1621,10 @@ describe("cell write queue", () => {
     });
     // The header says why, and the cell no longer accepts an edit.
     await screen.findByTestId("collection-writes-paused");
-    expect(
-      (screen.getByRole("checkbox") as HTMLInputElement).disabled,
-    ).toBe(true);
+    expect((screen.getByRole("checkbox") as HTMLInputElement).disabled).toBe(true);
 
     act(() => guard.release());
-    await waitFor(() =>
-      expect(screen.queryByTestId("collection-writes-paused")).toBeNull(),
-    );
+    await waitFor(() => expect(screen.queryByTestId("collection-writes-paused")).toBeNull());
     fireEvent.click(screen.getByRole("checkbox"));
     expect(doc.getMap("frontmatter").get("done")).toBe(true);
   });
@@ -1432,7 +1672,11 @@ describe("record click-through", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Open Plan" }));
     expect(onOpenRecord).not.toHaveBeenCalled();
-    fireEvent.click(within(screen.getByRole("complementary", { name: "Plan" })).getByRole("button", { name: "Open as page" }));
+    fireEvent.click(
+      within(screen.getByRole("complementary", { name: "Plan" })).getByRole("button", {
+        name: "Open as page",
+      }),
+    );
     expect(onOpenRecord).toHaveBeenCalledExactlyOnceWith("tasks/Plan.md");
   });
 
@@ -1445,14 +1689,21 @@ describe("record click-through", () => {
 
     fireEvent.click(await screen.findByRole("listitem", { name: "Plan" }));
     expect(onOpenRecord).not.toHaveBeenCalled();
-    fireEvent.click(within(screen.getByRole("complementary", { name: "Plan" })).getByRole("button", { name: "Open as page" }));
+    fireEvent.click(
+      within(screen.getByRole("complementary", { name: "Plan" })).getByRole("button", {
+        name: "Open as page",
+      }),
+    );
     expect(onOpenRecord).toHaveBeenCalledExactlyOnceWith("tasks/Plan.md");
   });
 
   it("starts a record from a board column with the column's value", async () => {
     const schema: CollectionSchema = {
       ...BOARD_SCHEMA,
-      fields: [{ name: "title", type: "text" }, { name: "status", type: "select", options: ["Todo", "Doing"] }],
+      fields: [
+        { name: "title", type: "text" },
+        { name: "status", type: "select", options: ["Todo", "Doing"] },
+      ],
     };
     const bridge = makeBridge([selectRecord()], schema, {
       groups: [{ value: "Todo", records: [selectRecord()] }],
@@ -1471,13 +1722,23 @@ describe("record click-through", () => {
     // The record's file opens in no tab.
     expect(options).toEqual({ open: false });
     // The board reads the new record, in the column it was made in.
-    const made: CollectionRecord = { id: "rec-new", path: "tasks/Untitled.md", conflicted: false, values: [
-      { field: "title", value: null, validation: { status: "valid" }, resolvedRelations: [] },
-      { field: "status", value: "Doing", validation: { status: "valid" }, resolvedRelations: [] },
-    ] };
+    const made: CollectionRecord = {
+      id: "rec-new",
+      path: "tasks/Untitled.md",
+      conflicted: false,
+      values: [
+        { field: "title", value: null, validation: { status: "valid" }, resolvedRelations: [] },
+        { field: "status", value: "Doing", validation: { status: "valid" }, resolvedRelations: [] },
+      ],
+    };
     bridge.queryCollectionRecords.mockResolvedValue({
       collection: { path: "tasks", objectId: "object-test", status: "valid", reasons: [] },
-      records: [selectRecord(), made], groups: [{ value: "Todo", records: [selectRecord()] }, { value: "Doing", records: [made] }], nextCursor: null,
+      records: [selectRecord(), made],
+      groups: [
+        { value: "Todo", records: [selectRecord()] },
+        { value: "Doing", records: [made] },
+      ],
+      nextCursor: null,
     });
     act(() => created!({ path: "tasks/Untitled.md", recordId: "rec-new" }));
     await waitFor(() => expect(doc.getMap("frontmatter").get("status")).toBe("Doing"));
@@ -1493,22 +1754,38 @@ describe("record click-through", () => {
   it("leaves the panel on a record the person opened while a board's new record was being made, and opens the new record's name for typing only once", async () => {
     const schema: CollectionSchema = {
       ...BOARD_SCHEMA,
-      fields: [{ name: "title", type: "text" }, { name: "status", type: "select", options: ["Todo", "Doing"] }],
+      fields: [
+        { name: "title", type: "text" },
+        { name: "status", type: "select", options: ["Todo", "Doing"] },
+      ],
     };
-    const bridge = makeBridge([selectRecord()], schema, { groups: [{ value: "Todo", records: [selectRecord()] }] });
+    const bridge = makeBridge([selectRecord()], schema, {
+      groups: [{ value: "Todo", records: [selectRecord()] }],
+    });
     const doc = new Y.Doc();
     doc.getMap("frontmatter").set("id", "rec-new");
     docMock.current = engineDocState({ available: true, doc });
     const onNewRecord = vi.fn<CollectionPageProps["onNewRecord"]>();
     renderPage(bridge, onNewRecord);
-    const made: CollectionRecord = { id: "rec-new", path: "tasks/Untitled.md", conflicted: false, values: [
-      { field: "title", value: null, validation: { status: "valid" }, resolvedRelations: [] },
-      { field: "status", value: "Doing", validation: { status: "valid" }, resolvedRelations: [] },
-    ] };
-    const withMade = () => bridge.queryCollectionRecords.mockResolvedValue({
-      collection: { path: "tasks", objectId: "object-test", status: "valid", reasons: [] },
-      records: [selectRecord(), made], groups: [{ value: "Todo", records: [selectRecord()] }, { value: "Doing", records: [made] }], nextCursor: null,
-    });
+    const made: CollectionRecord = {
+      id: "rec-new",
+      path: "tasks/Untitled.md",
+      conflicted: false,
+      values: [
+        { field: "title", value: null, validation: { status: "valid" }, resolvedRelations: [] },
+        { field: "status", value: "Doing", validation: { status: "valid" }, resolvedRelations: [] },
+      ],
+    };
+    const withMade = () =>
+      bridge.queryCollectionRecords.mockResolvedValue({
+        collection: { path: "tasks", objectId: "object-test", status: "valid", reasons: [] },
+        records: [selectRecord(), made],
+        groups: [
+          { value: "Todo", records: [selectRecord()] },
+          { value: "Doing", records: [made] },
+        ],
+        nextCursor: null,
+      });
 
     // The person opens Plan while the new record is being made: the panel stays on Plan.
     fireEvent.click(await screen.findByRole("button", { name: "New record in Doing" }));
@@ -1542,9 +1819,14 @@ describe("record click-through", () => {
   it("makes a record with no value filled in from New record beside a board, and opens it in the panel", async () => {
     const schema: CollectionSchema = {
       ...BOARD_SCHEMA,
-      fields: [{ name: "title", type: "text" }, { name: "status", type: "select", options: ["Todo", "Doing"] }],
+      fields: [
+        { name: "title", type: "text" },
+        { name: "status", type: "select", options: ["Todo", "Doing"] },
+      ],
     };
-    const bridge = makeBridge([selectRecord()], schema, { groups: [{ value: "Todo", records: [selectRecord()] }] });
+    const bridge = makeBridge([selectRecord()], schema, {
+      groups: [{ value: "Todo", records: [selectRecord()] }],
+    });
     const onNewRecord = vi.fn<CollectionPageProps["onNewRecord"]>();
     const onOpenRecord = vi.fn();
     renderPage(bridge, onNewRecord, onOpenRecord);
@@ -1552,14 +1834,28 @@ describe("record click-through", () => {
     fireEvent.click(screen.getByTestId("collection-new-record"));
     expect(onNewRecord).toHaveBeenCalledOnce();
     expect(onNewRecord.mock.calls[0]![2]).toEqual({ open: false });
-    const made: CollectionRecord = { id: "rec-new", path: "tasks/Untitled.md", conflicted: false, values: [{ field: "title", value: null, validation: { status: "valid" }, resolvedRelations: [] }] };
+    const made: CollectionRecord = {
+      id: "rec-new",
+      path: "tasks/Untitled.md",
+      conflicted: false,
+      values: [
+        { field: "title", value: null, validation: { status: "valid" }, resolvedRelations: [] },
+      ],
+    };
     bridge.queryCollectionRecords.mockResolvedValue({
       collection: { path: "tasks", objectId: "object-test", status: "valid", reasons: [] },
-      records: [selectRecord(), made], groups: [{ value: "Todo", records: [selectRecord()] }, { value: null, records: [made] }], nextCursor: null,
+      records: [selectRecord(), made],
+      groups: [
+        { value: "Todo", records: [selectRecord()] },
+        { value: null, records: [made] },
+      ],
+      nextCursor: null,
     });
     act(() => onNewRecord.mock.calls[0]![1]!({ path: "tasks/Untitled.md", recordId: "rec-new" }));
     const record = await screen.findByRole("complementary", { name: "Untitled" });
-    expect(document.activeElement).toBe(await within(record).findByRole("textbox", { name: "title" }));
+    expect(document.activeElement).toBe(
+      await within(record).findByRole("textbox", { name: "title" }),
+    );
     expect(onOpenRecord).not.toHaveBeenCalled();
     // No field is written: the record has no column's value.
     expect(hasPendingCollectionFieldWrites()).toBe(false);
@@ -1568,9 +1864,14 @@ describe("record click-through", () => {
   it("opens no panel for a record made after the page closed, and still writes its column's value", async () => {
     const schema: CollectionSchema = {
       ...BOARD_SCHEMA,
-      fields: [{ name: "title", type: "text" }, { name: "status", type: "select", options: ["Todo", "Doing"] }],
+      fields: [
+        { name: "title", type: "text" },
+        { name: "status", type: "select", options: ["Todo", "Doing"] },
+      ],
     };
-    const bridge = makeBridge([selectRecord()], schema, { groups: [{ value: "Todo", records: [selectRecord()] }] });
+    const bridge = makeBridge([selectRecord()], schema, {
+      groups: [{ value: "Todo", records: [selectRecord()] }],
+    });
     const onNewRecord = vi.fn<CollectionPageProps["onNewRecord"]>();
     const view = renderPage(bridge, onNewRecord);
     fireEvent.click(await screen.findByRole("button", { name: "New record in Doing" }));
@@ -1587,10 +1888,15 @@ describe("record click-through", () => {
   it("starts a record on a calendar day with the day in the calendar's date field, and opens it in the panel", async () => {
     const today = new Date();
     const iso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-15`;
-    const dated: CollectionRecord = { id: "rec-1", path: "tasks/Plan.md", conflicted: false, values: [
-      { field: "title", value: "Plan", validation: { status: "valid" }, resolvedRelations: [] },
-      { field: "due", value: iso, validation: { status: "valid" }, resolvedRelations: [] },
-    ] };
+    const dated: CollectionRecord = {
+      id: "rec-1",
+      path: "tasks/Plan.md",
+      conflicted: false,
+      values: [
+        { field: "title", value: "Plan", validation: { status: "valid" }, resolvedRelations: [] },
+        { field: "due", value: iso, validation: { status: "valid" }, resolvedRelations: [] },
+      ],
+    };
     const bridge = makeBridge([dated], CALENDAR_SCHEMA);
     const doc = new Y.Doc();
     doc.getMap("frontmatter").set("id", "rec-new");
@@ -1600,31 +1906,52 @@ describe("record click-through", () => {
     renderPage(bridge, onNewRecord, onOpenRecord);
     await screen.findByText("Plan");
     const month = today.toLocaleString("en-US", { month: "long" });
-    fireEvent.click(screen.getByRole("button", { name: `New record on ${month} 20, ${today.getFullYear()}` }));
+    fireEvent.click(
+      screen.getByRole("button", { name: `New record on ${month} 20, ${today.getFullYear()}` }),
+    );
     expect(onNewRecord).toHaveBeenCalledOnce();
     expect(onNewRecord.mock.calls[0]![2]).toEqual({ open: false });
     const day = iso.replace(/-15$/, "-20");
-    const made: CollectionRecord = { id: "rec-new", path: "tasks/Untitled.md", conflicted: false, values: [
-      { field: "title", value: null, validation: { status: "valid" }, resolvedRelations: [] },
-      { field: "due", value: day, validation: { status: "valid" }, resolvedRelations: [] },
-    ] };
+    const made: CollectionRecord = {
+      id: "rec-new",
+      path: "tasks/Untitled.md",
+      conflicted: false,
+      values: [
+        { field: "title", value: null, validation: { status: "valid" }, resolvedRelations: [] },
+        { field: "due", value: day, validation: { status: "valid" }, resolvedRelations: [] },
+      ],
+    };
     bridge.queryCollectionRecords.mockResolvedValue({
       collection: { path: "tasks", objectId: "object-test", status: "valid", reasons: [] },
-      records: [dated, made], groups: null, nextCursor: null,
+      records: [dated, made],
+      groups: null,
+      nextCursor: null,
     });
     act(() => onNewRecord.mock.calls[0]![1]!({ path: "tasks/Untitled.md", recordId: "rec-new" }));
     await waitFor(() => expect(doc.getMap("frontmatter").get("due")).toBe(day));
     const record = await screen.findByRole("complementary", { name: "Untitled" });
-    expect(document.activeElement).toBe(await within(record).findByRole("textbox", { name: "title" }));
+    expect(document.activeElement).toBe(
+      await within(record).findByRole("textbox", { name: "title" }),
+    );
     expect(onOpenRecord).not.toHaveBeenCalled();
   });
 
   it("offers no New record on a calendar's days to someone who cannot change the Collection", async () => {
     const today = new Date();
-    const dated: CollectionRecord = { id: "rec-1", path: "tasks/Plan.md", conflicted: false, values: [
-      { field: "title", value: "Plan", validation: { status: "valid" }, resolvedRelations: [] },
-      { field: "due", value: `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-15`, validation: { status: "valid" }, resolvedRelations: [] },
-    ] };
+    const dated: CollectionRecord = {
+      id: "rec-1",
+      path: "tasks/Plan.md",
+      conflicted: false,
+      values: [
+        { field: "title", value: "Plan", validation: { status: "valid" }, resolvedRelations: [] },
+        {
+          field: "due",
+          value: `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-15`,
+          validation: { status: "valid" },
+          resolvedRelations: [],
+        },
+      ],
+    };
     renderPage(makeBridge([dated], CALENDAR_SCHEMA), undefined, undefined, { readOnly: true });
     await screen.findByText("Plan");
     expect(screen.queryAllByRole("button", { name: /^New record on / })).toEqual([]);
@@ -1674,7 +2001,11 @@ describe("record click-through", () => {
 
     fireEvent.click(await screen.findByText("Plan"));
     expect(onOpenRecord).not.toHaveBeenCalled();
-    fireEvent.click(within(screen.getByRole("complementary", { name: "Plan" })).getByRole("button", { name: "Open as page" }));
+    fireEvent.click(
+      within(screen.getByRole("complementary", { name: "Plan" })).getByRole("button", {
+        name: "Open as page",
+      }),
+    );
     expect(onOpenRecord).toHaveBeenCalledExactlyOnceWith("tasks/Plan.md");
   });
 });
@@ -1685,11 +2016,17 @@ describe("pagination", () => {
     const firstRecords = Array.from({ length: 100 }, (_, n) => record(`rec-${n}`, `Task ${n}`));
     const cursor = { sortValues: [], recordPath: "tasks/99.md", recordId: "rec-99" };
     const second = deferred<QueryCollectionRecordsResult>();
-    const result = (records: CollectionRecord[], nextCursor: typeof cursor | null): QueryCollectionRecordsResult => ({
-      collection: { path: "tasks", objectId: "object-test", status: "valid", reasons: [] }, records, groups: null, nextCursor,
+    const result = (
+      records: CollectionRecord[],
+      nextCursor: typeof cursor | null,
+    ): QueryCollectionRecordsResult => ({
+      collection: { path: "tasks", objectId: "object-test", status: "valid", reasons: [] },
+      records,
+      groups: null,
+      nextCursor,
     });
     let pages = 0;
-    bridge.queryCollectionRecords.mockImplementation(async params => {
+    bridge.queryCollectionRecords.mockImplementation(async (params) => {
       if (!("cursor" in params)) return result(firstRecords, cursor);
       if (++pages === 1) return second.promise;
       return result([record("last", "Last record")], null);
@@ -1700,9 +2037,16 @@ describe("pagination", () => {
     scroller.scrollTop = 2800;
     fireEvent.scroll(scroller);
     await waitFor(() => expect(pages).toBe(1));
-    bridge.emitWorkspaceActivity({ workspaceId: "ws-1", paths: ["tasks/changed.md"], pathSetChanged: false });
+    bridge.emitWorkspaceActivity({
+      workspaceId: "ws-1",
+      paths: ["tasks/changed.md"],
+      pathSetChanged: false,
+    });
     await waitFor(() => expect(pages).toBe(2));
-    await act(async () => { second.resolve(result([record("stale", "Stale record")], null)); await second.promise; });
+    await act(async () => {
+      second.resolve(result([record("stale", "Stale record")], null));
+      await second.promise;
+    });
     await waitFor(() => expect(screen.getByRole("grid").getAttribute("aria-rowcount")).toBe("103"));
     expect(screen.queryByText("Stale record")).toBeNull();
   });
@@ -1720,9 +2064,7 @@ describe("pagination", () => {
     });
     bridge.queryCollectionRecords.mockImplementation(async (params) => {
       const { cursor } = params as { cursor?: { recordId: string } };
-      const index = cursor
-        ? Number(cursor.recordId.slice("page-".length)) + 1
-        : 0;
+      const index = cursor ? Number(cursor.recordId.slice("page-".length)) + 1 : 0;
       const page = pages[index];
       if (!page) throw new Error(`no page ${index}`);
       return {
@@ -1768,7 +2110,6 @@ describe("pagination", () => {
       }),
     );
   });
-
 });
 
 const RELATION_SCHEMA: CollectionSchema = {
@@ -1835,23 +2176,28 @@ describe("relation picking", () => {
       collectionPath: "people",
       limit: 100,
     });
-    await waitFor(() =>
-      expect(doc.getMap("frontmatter").get("owner")).toBe("rec-p2"),
-    );
+    await waitFor(() => expect(doc.getMap("frontmatter").get("owner")).toBe("rec-p2"));
   });
 });
 
 describe("Button fields", () => {
   const BUTTON_SCHEMA: CollectionSchema = {
     ...SCHEMA,
-    fields: [...SCHEMA.fields, { name: "Mark paid", type: "button" }, { name: "Archive", type: "button" }],
+    fields: [
+      ...SCHEMA.fields,
+      { name: "Mark paid", type: "button" },
+      { name: "Archive", type: "button" },
+    ],
   };
   const READY: AutomationButtonState = { kind: "ready", automationId: "collection:tasks#paid" };
   const buttonsWith = (extra: Parameters<typeof makeBridge>[2] = {}) =>
     makeBridge([record("rec-1", "Invoice 12")], BUTTON_SCHEMA, {
       buttons: [
         { field: "Mark paid", state: READY },
-        { field: "Archive", state: { kind: "no-automation", reason: "No automation uses this button." } },
+        {
+          field: "Archive",
+          state: { kind: "no-automation", reason: "No automation uses this button." },
+        },
       ],
       ...extra,
     });
@@ -1869,12 +2215,29 @@ describe("Button fields", () => {
     expect(button.getAttribute("aria-busy")).toBe("true");
     await waitFor(() => expect(bridge.pressAutomationButton).toHaveBeenCalledTimes(1));
     const pressed = bridge.pressAutomationButton.mock.calls[0]![0];
-    expect(pressed).toEqual({ workspaceId: "ws-1", collectionPath: "tasks", field: "Mark paid", recordId: "rec-1", pressId: expect.any(String), confirmed: [] });
+    expect(pressed).toEqual({
+      workspaceId: "ws-1",
+      collectionPath: "tasks",
+      field: "Mark paid",
+      recordId: "rec-1",
+      pressId: expect.any(String),
+      confirmed: [],
+    });
     expect(pressed.pressId).toMatch(/^[0-9a-f-]{36}$/);
-    act(() => bridge.emitRunWaiting({ workspaceId: "ws-1", claimId: "atc_press", reason: "roster" }));
-    expect(document.getElementById(button.getAttribute("aria-describedby")!)?.textContent)
-      .toBe("Waiting to check who can edit this Collection.");
-    act(() => bridge.emitRunSettled({ workspaceId: "ws-1", claimId: "atc_press", outcome: "done", error: null }));
+    act(() =>
+      bridge.emitRunWaiting({ workspaceId: "ws-1", claimId: "atc_press", reason: "roster" }),
+    );
+    expect(document.getElementById(button.getAttribute("aria-describedby")!)?.textContent).toBe(
+      "Waiting to check who can edit this Collection.",
+    );
+    act(() =>
+      bridge.emitRunSettled({
+        workspaceId: "ws-1",
+        claimId: "atc_press",
+        outcome: "done",
+        error: null,
+      }),
+    );
     expect(onNotice).toHaveBeenCalledWith("Ran Mark paid on Invoice 12");
     expect(button.getAttribute("aria-busy")).toBeNull();
   });
@@ -1900,7 +2263,8 @@ describe("Button fields", () => {
   it("drops a closed workspace's runs, so their end does not report", async () => {
     const bridge = buttonsWith();
     vi.stubGlobal("dohcDesktop", bridge);
-    const onNotice = vi.fn(), onError = vi.fn();
+    const onNotice = vi.fn(),
+      onError = vi.fn();
     const page = render(pageWithHost(undefined, undefined, { onNotice, onError }));
     const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
     await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
@@ -1909,7 +2273,14 @@ describe("Button fields", () => {
     await act(async () => undefined);
     page.unmount();
     disposeAutomationButtons("ws-1");
-    act(() => bridge.emitRunSettled({ workspaceId: "ws-1", claimId: "atc_press", outcome: "done", error: null }));
+    act(() =>
+      bridge.emitRunSettled({
+        workspaceId: "ws-1",
+        claimId: "atc_press",
+        outcome: "done",
+        error: null,
+      }),
+    );
     expect(onNotice).not.toHaveBeenCalled();
     expect(onError).not.toHaveBeenCalled();
   });
@@ -1919,7 +2290,13 @@ describe("Button fields", () => {
       onAutomationRunsChanged: () => () => undefined,
       onAutomationHoldsChanged: () => () => undefined,
       listAutomationTargets: async () => ({ collections: [] }),
-      checkCollectionAutomation: async () => ({ diagnostics: [], formulaProblems: [], findProblems: [], cannotRun: null, missingFiles: [] }),
+      checkCollectionAutomation: async () => ({
+        diagnostics: [],
+        formulaProblems: [],
+        findProblems: [],
+        cannotRun: null,
+        missingFiles: [],
+      }),
       listAutomationGroups: async () => ({ groups: [] }),
       listAutomationPeople: async () => ({ status: "listed", people: [] }),
       readScheduleHost: async () => ({ kind: "this-computer" }),
@@ -1932,20 +2309,33 @@ describe("Button fields", () => {
     runAction("collection-fields-button");
     const dialog = await screen.findByTestId("collection-fields-dialog");
     expect(within(dialog).getByRole("option", { name: "Button" })).toBeTruthy();
-    expect(within(dialog).queryByRole("button", { name: "Choose what it does: Mark paid" })).toBeNull();
-    fireEvent.click(await within(dialog).findByRole("button", { name: "Choose what it does: Archive" }));
+    expect(
+      within(dialog).queryByRole("button", { name: "Choose what it does: Mark paid" }),
+    ).toBeNull();
+    fireEvent.click(
+      await within(dialog).findByRole("button", { name: "Choose what it does: Archive" }),
+    );
     // The Fields dialog closes, and the ⚡ panel opens its builder with the button as the trigger.
     await waitFor(() => expect(screen.queryByTestId("collection-fields-dialog")).toBeNull());
     const panel = await screen.findByTestId("collection-automations-panel");
-    expect((within(panel).getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe("Archive");
-    expect((within(panel).getByRole("combobox", { name: "Trigger" }) as HTMLSelectElement).value).toBe("button");
-    expect((within(panel).getByRole("combobox", { name: "Button" }) as HTMLSelectElement).value).toBe("Archive");
+    expect((within(panel).getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe(
+      "Archive",
+    );
+    expect(
+      (within(panel).getByRole("combobox", { name: "Trigger" }) as HTMLSelectElement).value,
+    ).toBe("button");
+    expect(
+      (within(panel).getByRole("combobox", { name: "Button" }) as HTMLSelectElement).value,
+    ).toBe("Archive");
   });
 });
 
 describe("a calendar view without a date field", () => {
-  const schema: CollectionSchema = { ...CALENDAR_SCHEMA, fields: [{ name: "title", type: "text" }],
-    views: [{ ...CALENDAR_SCHEMA.views[0]!, dateField: null }] };
+  const schema: CollectionSchema = {
+    ...CALENDAR_SCHEMA,
+    fields: [{ name: "title", type: "text" }],
+    views: [{ ...CALENDAR_SCHEMA.views[0]!, dateField: null }],
+  };
 
   it("asks for one and opens Fields on a new Date field", async () => {
     renderPage(makeBridge([record("rec-1", "Plan")], schema));
@@ -1959,7 +2349,9 @@ describe("a calendar view without a date field", () => {
   });
 
   it("leaves the button out for someone who cannot change fields", async () => {
-    renderPage(makeBridge([record("rec-1", "Plan")], schema), undefined, undefined, { readOnly: true });
+    renderPage(makeBridge([record("rec-1", "Plan")], schema), undefined, undefined, {
+      readOnly: true,
+    });
 
     expect(await screen.findByText("A calendar needs a date field.")).toBeDefined();
     expect(screen.queryByRole("button", { name: "Add a date field" })).toBeNull();
@@ -1984,8 +2376,20 @@ describe("table pickers", () => {
   const LISTED: ListAutomationPeopleResult = {
     status: "listed",
     people: [
-      { userId: "user-7", name: "Ada", you: true, dmStopped: "A direct message goes to another person.", noticeStopped: null },
-      { userId: "user-9", name: "Grace", you: false, dmStopped: "Grace has no chat here.", noticeStopped: "Grace cannot open Tasks." },
+      {
+        userId: "user-7",
+        name: "Ada",
+        you: true,
+        dmStopped: "A direct message goes to another person.",
+        noticeStopped: null,
+      },
+      {
+        userId: "user-9",
+        name: "Grace",
+        you: false,
+        dmStopped: "Grace has no chat here.",
+        noticeStopped: "Grace cannot open Tasks.",
+      },
     ],
   };
   const page = (collectionPath: string) => (
@@ -2014,7 +2418,10 @@ describe("table pickers", () => {
     // The cell stores user-7 and shows the name.
     expect(await screen.findByText("Ada")).toBeDefined();
     expect(screen.queryByText("user-7")).toBeNull();
-    expect(bridge.listAutomationPeople).toHaveBeenCalledExactlyOnceWith({ workspaceId: "ws-1", collectionPath: "tasks" });
+    expect(bridge.listAutomationPeople).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: "ws-1",
+      collectionPath: "tasks",
+    });
 
     fireEvent.click(fieldCell(1));
     expect(screen.getByRole("combobox", { name: "Search people" })).toBeDefined();
@@ -2023,10 +2430,27 @@ describe("table pickers", () => {
   });
 
   it.each([
-    ["main cannot list people here", async (): Promise<ListAutomationPeopleResult> => ({ status: "unavailable" })],
-    ["main cannot check who has access yet", async (): Promise<ListAutomationPeopleResult> => ({ status: "waiting", reason: "dohc cannot check who can edit Tasks yet." })],
-    ["the list is empty", async (): Promise<ListAutomationPeopleResult> => ({ status: "listed", people: [] })],
-    ["the read fails", async (): Promise<ListAutomationPeopleResult> => { throw new Error("offline"); }],
+    [
+      "main cannot list people here",
+      async (): Promise<ListAutomationPeopleResult> => ({ status: "unavailable" }),
+    ],
+    [
+      "main cannot check who has access yet",
+      async (): Promise<ListAutomationPeopleResult> => ({
+        status: "waiting",
+        reason: "dohc cannot check who can edit Tasks yet.",
+      }),
+    ],
+    [
+      "the list is empty",
+      async (): Promise<ListAutomationPeopleResult> => ({ status: "listed", people: [] }),
+    ],
+    [
+      "the read fails",
+      async (): Promise<ListAutomationPeopleResult> => {
+        throw new Error("offline");
+      },
+    ],
   ])("keeps the typed id for a person when %s", async (_why, answer) => {
     const bridge = makeBridge([ownedRecord()], PEOPLE_SCHEMA);
     bridge.listAutomationPeople.mockImplementation(answer);
@@ -2060,10 +2484,20 @@ describe("table pickers", () => {
     vi.stubGlobal("dohcDesktop", bridge);
     const view = render(page("tasks"));
     await screen.findByText("user-7");
-    await waitFor(() => expect(bridge.listAutomationPeople).toHaveBeenCalledWith({ workspaceId: "ws-1", collectionPath: "tasks" }));
+    await waitFor(() =>
+      expect(bridge.listAutomationPeople).toHaveBeenCalledWith({
+        workspaceId: "ws-1",
+        collectionPath: "tasks",
+      }),
+    );
 
     view.rerender(page("projects"));
-    await waitFor(() => expect(bridge.listAutomationPeople).toHaveBeenCalledWith({ workspaceId: "ws-1", collectionPath: "projects" }));
+    await waitFor(() =>
+      expect(bridge.listAutomationPeople).toHaveBeenCalledWith({
+        workspaceId: "ws-1",
+        collectionPath: "projects",
+      }),
+    );
     await act(async () => late.resolve(LISTED));
 
     // The other Collection's people never name this one's cells or fill its picker.
@@ -2076,27 +2510,53 @@ describe("table pickers", () => {
   it.each([
     ["select", "Todo"],
     ["multi-select", ["Todo"]],
-  ] as const)("saves a %s option's color from the table's picker to the schema", async (type, value) => {
-    const schema: CollectionSchema = { ...SCHEMA, fields: [...SCHEMA.fields, { name: "status", type, options: ["Todo", "Doing"] }] };
-    const bridge = makeBridge([{ ...record("rec-1", "Plan"), values: [...record("rec-1", "Plan").values, { field: "status", value: typeof value === "string" ? value : [...value], ...valid }] }], schema);
-    renderPage(bridge);
-    await screen.findByText("Plan");
+  ] as const)(
+    "saves a %s option's color from the table's picker to the schema",
+    async (type, value) => {
+      const schema: CollectionSchema = {
+        ...SCHEMA,
+        fields: [...SCHEMA.fields, { name: "status", type, options: ["Todo", "Doing"] }],
+      };
+      const bridge = makeBridge(
+        [
+          {
+            ...record("rec-1", "Plan"),
+            values: [
+              ...record("rec-1", "Plan").values,
+              { field: "status", value: typeof value === "string" ? value : [...value], ...valid },
+            ],
+          },
+        ],
+        schema,
+      );
+      renderPage(bridge);
+      await screen.findByText("Plan");
 
-    fireEvent.click(fieldCell(1));
-    fireEvent.click(screen.getByRole("button", { name: "Doing options" }));
-    fireEvent.click(within(screen.getByRole("radiogroup", { name: "Color for Doing" })).getByRole("radio", { name: "Plum" }));
-    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce());
-    expect(lastWrittenSchema(bridge).schema.fields[1]).toEqual({
-      name: "status",
-      type,
-      options: ["Todo", "Doing"],
-      colors: { Doing: "plum" },
-    });
-    // The picker stays open, and shows the color once the schema reads back.
-    await waitFor(() =>
-      expect(screen.getByRole("option", { name: "Doing" }).querySelector("[data-option-color]")?.getAttribute("data-option-color")).toBe("plum"),
-    );
-  });
+      fireEvent.click(fieldCell(1));
+      fireEvent.click(screen.getByRole("button", { name: "Doing options" }));
+      fireEvent.click(
+        within(screen.getByRole("radiogroup", { name: "Color for Doing" })).getByRole("radio", {
+          name: "Plum",
+        }),
+      );
+      await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce());
+      expect(lastWrittenSchema(bridge).schema.fields[1]).toEqual({
+        name: "status",
+        type,
+        options: ["Todo", "Doing"],
+        colors: { Doing: "plum" },
+      });
+      // The picker stays open, and shows the color once the schema reads back.
+      await waitFor(() =>
+        expect(
+          screen
+            .getByRole("option", { name: "Doing" })
+            .querySelector("[data-option-color]")
+            ?.getAttribute("data-option-color"),
+        ).toBe("plum"),
+      );
+    },
+  );
 
   it("reports an option color the table's picker could not save, with a retry", async () => {
     const bridge = makeBridge([selectRecord()], SELECT_SCHEMA);
@@ -2120,7 +2580,11 @@ describe("table pickers", () => {
     const bridge = makeBridge([ownedRecord()], PEOPLE_SCHEMA);
     renderPage(bridge);
     fireEvent.click(await screen.findByRole("link", { name: "website.example" }));
-    await waitFor(() => expect(bridge.openExternalUrl).toHaveBeenCalledExactlyOnceWith({ url: "https://website.example/" }));
+    await waitFor(() =>
+      expect(bridge.openExternalUrl).toHaveBeenCalledExactlyOnceWith({
+        url: "https://website.example/",
+      }),
+    );
     expect(document.querySelector("[data-cell-editor]")).toBeNull();
 
     // A click beside the link text edits the url.
@@ -2135,7 +2599,10 @@ describe("a new record in the table", () => {
   afterEach(() => closeCollectionChangeShellsForTests());
   const TWO_FIELDS: CollectionSchema = {
     ...SCHEMA,
-    fields: [{ name: "title", type: "text" }, { name: "status", type: "select", options: ["Todo", "Doing"] }],
+    fields: [
+      { name: "title", type: "text" },
+      { name: "status", type: "select", options: ["Todo", "Doing"] },
+    ],
   };
   const grid = () => screen.getByRole("grid");
   const newRow = () => document.querySelector<HTMLElement>("[data-new-record]");
@@ -2160,32 +2627,58 @@ describe("a new record in the table", () => {
     expect(document.querySelector("[data-new-record-status]")).toBeNull();
   }
   /** The field writes this workspace did not take, which the list of unsaved changes keeps: each with its record's file. */
-  const keptWrites = () => collectionWriteFailures().map((failure) => [failure.change.recordId, failure.change.recordPath, failure.change.field, failure.change.value]);
+  const keptWrites = () =>
+    collectionWriteFailures().map((failure) => [
+      failure.change.recordId,
+      failure.change.recordPath,
+      failure.change.field,
+      failure.change.value,
+    ]);
 
   it.each([
     ["in the order typed", [0, 1, 2]],
     ["out of order", [2, 0, 1]],
-  ] as const)("takes three records typed with no pause, and writes each one's values to its own file when the creations answer %s", async (_order, order) => {
-    const bridge = makeBridge([], TWO_FIELDS);
-    const onNewRecord = vi.fn<CollectionPageProps["onNewRecord"]>();
-    const onError = vi.fn();
-    renderPage(bridge, onNewRecord, undefined, { onError });
-    await startRow("One", "Enter");
-    typeNext("Two");
-    typeNext("Three");
-    // Each row left the table as it was saved, and the next key was typed in the row after it. Three creations are out.
-    expectFreshRow();
-    expect(onNewRecord.mock.calls.map((call) => call[2])).toMatchObject([{ title: "One", open: false }, { title: "Two", open: false }, { title: "Three", open: false }]);
-    // This workspace takes no field write, so each typed value is kept by the file it was for.
-    setCollectionFieldWriteAccess("ws-1", "Your access to this share ended.");
-    const names = ["One", "Two", "Three"];
-    for (const index of order) act(() => onNewRecord.mock.calls[index]![1]!({ path: `tasks/${names[index]}.md`, recordId: `rec-${names[index]}` }));
-    // Each creation's values went to its own record: none lost, none twice, none to another's file.
-    expect(keptWrites()).toEqual(order.map((index) => [`rec-${names[index]}`, `tasks/${names[index]}.md`, "title", names[index]]));
-    expect(onNewRecord).toHaveBeenCalledTimes(3);
-    expect(onError).not.toHaveBeenCalled();
-    expectFreshRow();
-  });
+  ] as const)(
+    "takes three records typed with no pause, and writes each one's values to its own file when the creations answer %s",
+    async (_order, order) => {
+      const bridge = makeBridge([], TWO_FIELDS);
+      const onNewRecord = vi.fn<CollectionPageProps["onNewRecord"]>();
+      const onError = vi.fn();
+      renderPage(bridge, onNewRecord, undefined, { onError });
+      await startRow("One", "Enter");
+      typeNext("Two");
+      typeNext("Three");
+      // Each row left the table as it was saved, and the next key was typed in the row after it. Three creations are out.
+      expectFreshRow();
+      expect(onNewRecord.mock.calls.map((call) => call[2])).toMatchObject([
+        { title: "One", open: false },
+        { title: "Two", open: false },
+        { title: "Three", open: false },
+      ]);
+      // This workspace takes no field write, so each typed value is kept by the file it was for.
+      setCollectionFieldWriteAccess("ws-1", "Your access to this share ended.");
+      const names = ["One", "Two", "Three"];
+      for (const index of order)
+        act(() =>
+          onNewRecord.mock.calls[index]![1]!({
+            path: `tasks/${names[index]}.md`,
+            recordId: `rec-${names[index]}`,
+          }),
+        );
+      // Each creation's values went to its own record: none lost, none twice, none to another's file.
+      expect(keptWrites()).toEqual(
+        order.map((index) => [
+          `rec-${names[index]}`,
+          `tasks/${names[index]}.md`,
+          "title",
+          names[index],
+        ]),
+      );
+      expect(onNewRecord).toHaveBeenCalledTimes(3);
+      expect(onError).not.toHaveBeenCalled();
+      expectFreshRow();
+    },
+  );
 
   it("makes the other two when one of three records is not made, and reports that one in a notice with what was typed", async () => {
     const bridge = makeBridge([], TWO_FIELDS);
@@ -2199,17 +2692,25 @@ describe("a new record in the table", () => {
     act(() => onNewRecord.mock.calls[0]![1]!({ path: "tasks/One.md", recordId: "rec-One" }));
     let taken = false;
     act(() => {
-      taken = onNewRecord.mock.calls[1]![2]!.onFailure!({ reason: "The sync relay did not accept this record.", retry: null });
+      taken = onNewRecord.mock.calls[1]![2]!.onFailure!({
+        reason: "The sync relay did not accept this record.",
+        retry: null,
+      });
     });
     act(() => onNewRecord.mock.calls[2]![1]!({ path: "tasks/Three.md", recordId: "rec-Three" }));
     // The page keeps what the failed row held, so the shell reports nothing more of it.
     expect(taken).toBe(true);
     expect(onError).toHaveBeenCalledOnce();
     const [message, error] = onError.mock.calls[0]!;
-    expect(message).toBe("dohc did not create a record in Tasks. The sync relay did not accept this record. You typed: title: Two");
+    expect(message).toBe(
+      "dohc did not create a record in Tasks. The sync relay did not accept this record. You typed: title: Two",
+    );
     expect((error as TextNotSavedError).typed).toBe("title: Two");
     // The other two were made, each with its own value, and no row came back for the one that failed.
-    expect(keptWrites()).toEqual([["rec-One", "tasks/One.md", "title", "One"], ["rec-Three", "tasks/Three.md", "title", "Three"]]);
+    expect(keptWrites()).toEqual([
+      ["rec-One", "tasks/One.md", "title", "One"],
+      ["rec-Three", "tasks/Three.md", "title", "Three"],
+    ]);
     expect(onNewRecord).toHaveBeenCalledTimes(3);
     expectFreshRow();
   });
@@ -2228,7 +2729,9 @@ describe("a new record in the table", () => {
     // Nothing is made while the row is typed in.
     expect(onNewRecord).not.toHaveBeenCalled();
     fireEvent.keyDown(grid(), { key: "F2" });
-    fireEvent.click(within(document.querySelector<HTMLElement>("[data-cell-editor]")!).getByText("Doing"));
+    fireEvent.click(
+      within(document.querySelector<HTMLElement>("[data-cell-editor]")!).getByText("Doing"),
+    );
     // Tab past the last cell leaves the row, which saves it.
     fireEvent.keyDown(grid(), { key: "Tab" });
 
@@ -2273,36 +2776,61 @@ describe("a new record in the table", () => {
     act(() => onNewRecord.mock.calls[0]![1]!({ path: "tasks/Milk.md", recordId: "rec-new" }));
     // Enter saved the row and started the next, which is empty.
     expectFreshRow();
-    expect(collectionWriteFailures().map((failure) => [failure.change.recordPath, failure.change.field, failure.change.value])).toEqual([["tasks/Milk.md", "title", "Milk"]]);
+    expect(
+      collectionWriteFailures().map((failure) => [
+        failure.change.recordPath,
+        failure.change.field,
+        failure.change.value,
+      ]),
+    ).toEqual([["tasks/Milk.md", "title", "Milk"]]);
     expect(onNewRecord).toHaveBeenCalledOnce();
   });
 
   it.each([
     ["with a typed title", "Milk", { title: "Milk", estimate: "abc" }],
     ["alone", null, { estimate: "abc" }],
-  ] as const)("keeps text its field cannot take in the kept row, under its field, %s", async (_with, title, kept) => {
-    const schema: CollectionSchema = { ...SCHEMA, fields: [{ name: "title", type: "text" }, { name: "estimate", type: "number" }] };
-    const bridge = makeBridge([], schema);
-    const onNewRecord = vi.fn<CollectionPageProps["onNewRecord"]>();
-    const onError = vi.fn();
-    const view = renderPage(bridge, onNewRecord, undefined, { onError });
-    await screen.findByRole("grid");
-    fireEvent.click(screen.getByTestId("collection-new-record"));
-    if (title !== null) fireEvent.change(editorInput(), { target: { value: title } });
-    fireEvent.keyDown(editorInput(), { key: "Tab" });
-    // A word in the number field, still in its open editor when the window shows another workspace.
-    fireEvent.keyDown(grid(), { key: "a" });
-    fireEvent.change(editorInput(), { target: { value: "abc" } });
-    closeCollectionChangeShellsForTests();
-    view.unmount();
-    await Promise.resolve();
-    expect(onNewRecord).not.toHaveBeenCalled();
-    expect(onError).not.toHaveBeenCalled();
-    // The kept row holds everything typed, the word included.
-    expect(collectionWriteFailures().map((failure) => [failure.change.field, failure.change.value, failure.message])).toEqual([
-      ["New record", kept, "dohc did not create this record. Enter a value estimate can take. Copy what you typed before discarding it."],
-    ]);
-  });
+  ] as const)(
+    "keeps text its field cannot take in the kept row, under its field, %s",
+    async (_with, title, kept) => {
+      const schema: CollectionSchema = {
+        ...SCHEMA,
+        fields: [
+          { name: "title", type: "text" },
+          { name: "estimate", type: "number" },
+        ],
+      };
+      const bridge = makeBridge([], schema);
+      const onNewRecord = vi.fn<CollectionPageProps["onNewRecord"]>();
+      const onError = vi.fn();
+      const view = renderPage(bridge, onNewRecord, undefined, { onError });
+      await screen.findByRole("grid");
+      fireEvent.click(screen.getByTestId("collection-new-record"));
+      if (title !== null) fireEvent.change(editorInput(), { target: { value: title } });
+      fireEvent.keyDown(editorInput(), { key: "Tab" });
+      // A word in the number field, still in its open editor when the window shows another workspace.
+      fireEvent.keyDown(grid(), { key: "a" });
+      fireEvent.change(editorInput(), { target: { value: "abc" } });
+      closeCollectionChangeShellsForTests();
+      view.unmount();
+      await Promise.resolve();
+      expect(onNewRecord).not.toHaveBeenCalled();
+      expect(onError).not.toHaveBeenCalled();
+      // The kept row holds everything typed, the word included.
+      expect(
+        collectionWriteFailures().map((failure) => [
+          failure.change.field,
+          failure.change.value,
+          failure.message,
+        ]),
+      ).toEqual([
+        [
+          "New record",
+          kept,
+          "dohc did not create this record. Enter a value estimate can take. Copy what you typed before discarding it.",
+        ],
+      ]);
+    },
+  );
 
   it("names the file Untitled when the row has no title or name", async () => {
     const bridge = makeBridge([], TWO_FIELDS);
@@ -2312,7 +2840,9 @@ describe("a new record in the table", () => {
     fireEvent.click(within(grid()).getByRole("button", { name: "New record" }));
     fireEvent.keyDown(editorInput(), { key: "Tab" });
     fireEvent.keyDown(grid(), { key: "F2" });
-    fireEvent.click(within(document.querySelector<HTMLElement>("[data-cell-editor]")!).getByText("Todo"));
+    fireEvent.click(
+      within(document.querySelector<HTMLElement>("[data-cell-editor]")!).getByText("Todo"),
+    );
     fireEvent.keyDown(grid(), { key: "Enter" });
     expect(onNewRecord).toHaveBeenCalledOnce();
     expect(onNewRecord.mock.calls[0]![2]).not.toHaveProperty("title");
@@ -2326,7 +2856,10 @@ describe("a new record in the table", () => {
     await startRow("Milk", "Enter");
     let taken = false;
     act(() => {
-      taken = onNewRecord.mock.calls[0]![2]!.onFailure!({ reason: "The sync relay did not accept this record.", retry: null });
+      taken = onNewRecord.mock.calls[0]![2]!.onFailure!({
+        reason: "The sync relay did not accept this record.",
+        retry: null,
+      });
     });
 
     // The page keeps what the row held, so the shell reports nothing more. No row comes back for it.
@@ -2335,7 +2868,9 @@ describe("a new record in the table", () => {
     expectFreshRow();
     expect(onError).toHaveBeenCalledOnce();
     const [message, error, retry] = onError.mock.calls[0]!;
-    expect(message).toBe("dohc did not create a record in Tasks. The sync relay did not accept this record. You typed: title: Milk");
+    expect(message).toBe(
+      "dohc did not create a record in Tasks. The sync relay did not accept this record. You typed: title: Milk",
+    );
     expect(error).toBeInstanceOf(TextNotSavedError);
     expect((error as TextNotSavedError).typed).toBe("title: Milk");
     // The notice's Try again makes the record with what was typed, once.
@@ -2351,13 +2886,22 @@ describe("a new record in the table", () => {
     renderPage(bridge, onNewRecord, undefined, { onError });
     await startRow("Milk", "Enter");
     const resume = vi.fn();
-    act(() => void onNewRecord.mock.calls[0]![2]!.onFailure!({ reason: "dohc created the record file but could not finish the record.", retry: resume, partial: true }));
+    act(
+      () =>
+        void onNewRecord.mock.calls[0]![2]!.onFailure!({
+          reason: "dohc created the record file but could not finish the record.",
+          retry: resume,
+          partial: true,
+        }),
+    );
     // The file exists, so nothing is typed for it again: no row came back, and the one notice has what was typed
     // and the shell's own resume, which finishes the same creation.
     expectFreshRow();
     expect(onError).toHaveBeenCalledOnce();
     const [message, error, retry] = onError.mock.calls[0]!;
-    expect(message).toBe("dohc created the record file but could not finish the record. You typed: title: Milk");
+    expect(message).toBe(
+      "dohc created the record file but could not finish the record. You typed: title: Milk",
+    );
     expect(error).toBeInstanceOf(TextNotSavedError);
     expect(retry).toBe(resume);
     expect(resume).not.toHaveBeenCalled();
@@ -2378,39 +2922,63 @@ describe("a new record in the table", () => {
     const resume = vi.fn();
     view.unmount();
     await Promise.resolve();
-    act(() => void onNewRecord.mock.calls[0]![2]!.onFailure!({ reason: "dohc created the record file but could not finish the record.", retry: resume, partial: true }));
+    act(
+      () =>
+        void onNewRecord.mock.calls[0]![2]!.onFailure!({
+          reason: "dohc created the record file but could not finish the record.",
+          retry: resume,
+          partial: true,
+        }),
+    );
     expect(resume).not.toHaveBeenCalled();
     expect(onNewRecord).toHaveBeenCalledOnce();
     // A notice has the typed values, and its Try again is the same resume.
     expect(onError).toHaveBeenCalledOnce();
     const [message, error, retry] = onError.mock.calls[0]!;
-    expect(message).toBe("dohc created the record file but could not finish the record. You typed: title: Milk");
+    expect(message).toBe(
+      "dohc created the record file but could not finish the record. You typed: title: Milk",
+    );
     expect(error).toBeInstanceOf(TextNotSavedError);
     expect(retry).toBe(resume);
   });
 
   it.each([
-    ["editing is paused", () => void beginCollectionWriteOperation("ws-1"), "Editing was paused while dohc changed files in this workspace."],
-    ["the workspace changed versions", () => advanceCollectionWriteLineage("ws-1"), "This workspace changed versions or restored earlier work."],
-  ])("creates nothing when the table closes while %s, and reports all the row held once", async (_when, change, why) => {
-    const bridge = makeBridge([], TWO_FIELDS);
-    const onNewRecord = vi.fn<CollectionPageProps["onNewRecord"]>();
-    const onError = vi.fn();
-    const view = renderPage(bridge, onNewRecord, undefined, { onError });
-    await startRow("Milk", "Tab");
-    fireEvent.keyDown(grid(), { key: "F2" });
-    fireEvent.click(within(document.querySelector<HTMLElement>("[data-cell-editor]")!).getByText("Doing"));
-    act(() => change());
-    view.unmount();
-    await Promise.resolve();
-    // A file made now would be a named record with empty fields: its values would be refused.
-    expect(onNewRecord).not.toHaveBeenCalled();
-    expect(onError).toHaveBeenCalledOnce();
-    const [message, error] = onError.mock.calls[0]!;
-    expect(message).toBe(`dohc did not create a record in Tasks. ${why} You typed: title: Milk, status: Doing`);
-    expect(error).toBeInstanceOf(TextNotSavedError);
-    expect((error as TextNotSavedError).typed).toBe("title: Milk, status: Doing");
-  });
+    [
+      "editing is paused",
+      () => void beginCollectionWriteOperation("ws-1"),
+      "Editing was paused while dohc changed files in this workspace.",
+    ],
+    [
+      "the workspace changed versions",
+      () => advanceCollectionWriteLineage("ws-1"),
+      "This workspace changed versions or restored earlier work.",
+    ],
+  ])(
+    "creates nothing when the table closes while %s, and reports all the row held once",
+    async (_when, change, why) => {
+      const bridge = makeBridge([], TWO_FIELDS);
+      const onNewRecord = vi.fn<CollectionPageProps["onNewRecord"]>();
+      const onError = vi.fn();
+      const view = renderPage(bridge, onNewRecord, undefined, { onError });
+      await startRow("Milk", "Tab");
+      fireEvent.keyDown(grid(), { key: "F2" });
+      fireEvent.click(
+        within(document.querySelector<HTMLElement>("[data-cell-editor]")!).getByText("Doing"),
+      );
+      act(() => change());
+      view.unmount();
+      await Promise.resolve();
+      // A file made now would be a named record with empty fields: its values would be refused.
+      expect(onNewRecord).not.toHaveBeenCalled();
+      expect(onError).toHaveBeenCalledOnce();
+      const [message, error] = onError.mock.calls[0]!;
+      expect(message).toBe(
+        `dohc did not create a record in Tasks. ${why} You typed: title: Milk, status: Doing`,
+      );
+      expect(error).toBeInstanceOf(TextNotSavedError);
+      expect((error as TextNotSavedError).typed).toBe("title: Milk, status: Doing");
+    },
+  );
 
   it("keeps a row dohc could not create in the list of unsaved changes once the window shows another workspace", async () => {
     const bridge = makeBridge([], TWO_FIELDS);
@@ -2421,19 +2989,43 @@ describe("a new record in the table", () => {
     // The window switches workspaces while the creation is out. This workspace's shell closes, and main refuses the creation.
     closeCollectionChangeShellsForTests();
     view.unmount();
-    expect(onNewRecord.mock.calls[0]![2]!.onFailure!({ reason: "This window changed workspaces before dohc created the record.", retry: null })).toBe(true);
+    expect(
+      onNewRecord.mock.calls[0]![2]!.onFailure!({
+        reason: "This window changed workspaces before dohc created the record.",
+        retry: null,
+      }),
+    ).toBe(true);
     // The closed shell takes no notice. The list that outlives it keeps the row for its own workspace, with what was typed.
     expect(onError).not.toHaveBeenCalled();
-    expect(collectionWriteFailures().map((failure) => ({ workspaceId: failure.workspaceId, collectionPath: failure.collectionPath, field: failure.change.field, value: failure.change.value, message: failure.message })))
-      .toEqual([{ workspaceId: "ws-1", collectionPath: "tasks", field: "New record", value: { title: "Milk" },
-        message: "dohc did not create this record. This window changed workspaces before dohc created the record. Copy what you typed before discarding it." }]);
+    expect(
+      collectionWriteFailures().map((failure) => ({
+        workspaceId: failure.workspaceId,
+        collectionPath: failure.collectionPath,
+        field: failure.change.field,
+        value: failure.change.value,
+        message: failure.message,
+      })),
+    ).toEqual([
+      {
+        workspaceId: "ws-1",
+        collectionPath: "tasks",
+        field: "New record",
+        value: { title: "Milk" },
+        message:
+          "dohc did not create this record. This window changed workspaces before dohc created the record. Copy what you typed before discarding it.",
+      },
+    ]);
     // It is no field write of a record's file.
     expect(retainedCollectionFieldWritePaths("ws-1")).toEqual([]);
     render(<CollectionFieldWriteHost />);
     const kept = screen.getByTestId("collection-write-failure");
     expect(kept.textContent).toContain("New record in tasks");
-    expect(within(kept).getByLabelText<HTMLTextAreaElement>("Unsaved collection value").value).toContain('"title": "Milk"');
-    expect(within(kept).getByTestId<HTMLButtonElement>("collection-write-retry").disabled).toBe(true);
+    expect(
+      within(kept).getByLabelText<HTMLTextAreaElement>("Unsaved collection value").value,
+    ).toContain('"title": "Milk"');
+    expect(within(kept).getByTestId<HTMLButtonElement>("collection-write-retry").disabled).toBe(
+      true,
+    );
   });
 
   it("reports what was typed in a notice when the page closed before the record could not be made", async () => {
@@ -2443,11 +3035,18 @@ describe("a new record in the table", () => {
     const view = renderPage(bridge, onNewRecord, undefined, { onError });
     await startRow("Milk", "Enter");
     view.unmount();
-    expect(onNewRecord.mock.calls[0]![2]!.onFailure!({ reason: "The sync relay did not accept this record.", retry: null })).toBe(true);
+    expect(
+      onNewRecord.mock.calls[0]![2]!.onFailure!({
+        reason: "The sync relay did not accept this record.",
+        retry: null,
+      }),
+    ).toBe(true);
 
     expect(onError).toHaveBeenCalledOnce();
     const [message, error, retry] = onError.mock.calls[0]!;
-    expect(message).toBe("dohc did not create a record in Tasks. The sync relay did not accept this record. You typed: title: Milk");
+    expect(message).toBe(
+      "dohc did not create a record in Tasks. The sync relay did not accept this record. You typed: title: Milk",
+    );
     expect(error).toBeInstanceOf(TextNotSavedError);
     expect((error as TextNotSavedError).typed).toBe("title: Milk");
     // The notice's Try again makes the record with what was typed.
@@ -2498,7 +3097,11 @@ describe("a new record in the table", () => {
     expect(bridge.queryCollectionRecords.mock.calls.length).toBe(queries);
     expect(onNotice).not.toHaveBeenCalled();
     act(() => onNewRecord.mock.calls[1]![1]!({ path: "tasks/Zebra.md", recordId: "rec-zebra" }));
-    await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Created 2 records. They are not among the records on screen."));
+    await waitFor(() =>
+      expect(onNotice).toHaveBeenCalledWith(
+        "Created 2 records. They are not among the records on screen.",
+      ),
+    );
     expect(onNotice).toHaveBeenCalledOnce();
     expect(bridge.queryCollectionRecords.mock.calls.length).toBeGreaterThan(queries);
     // Enter saved each row, so the next one is open with the cursor in its first field.
@@ -2524,14 +3127,20 @@ describe("a new record in the table", () => {
     await startRow("Zebra", "Enter");
     act(() => onNewRecord.mock.calls[0]![1]!({ path: "tasks/Zebra.md", recordId: "rec-zebra" }));
     // The title is still being written. A read now finds a record with no name yet.
-    await act(async () => { for (let turn = 0; turn < 20; turn += 1) await Promise.resolve(); });
+    await act(async () => {
+      for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
+    });
     expect(onNotice).not.toHaveBeenCalled();
     // The write lands, and the read after it decides what to say.
     docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saving" } });
     page.rerender(pageWithHost(onNewRecord, undefined, { onNotice }));
     docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saved-here" } });
     page.rerender(pageWithHost(onNewRecord, undefined, { onNotice }));
-    await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Created a record. It is not among the records on screen."));
+    await waitFor(() =>
+      expect(onNotice).toHaveBeenCalledWith(
+        "Created a record. It is not among the records on screen.",
+      ),
+    );
     expect(onNotice).toHaveBeenCalledOnce();
   });
 
@@ -2557,7 +3166,11 @@ describe("a new record in the table", () => {
     // The next record is not among the records that read returns.
     typeNext("Zebra");
     act(() => onNewRecord.mock.calls[1]![1]!({ path: "tasks/Zebra.md", recordId: "rec-zebra" }));
-    await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Created a record. It is not among the records on screen."));
+    await waitFor(() =>
+      expect(onNotice).toHaveBeenCalledWith(
+        "Created a record. It is not among the records on screen.",
+      ),
+    );
     expect(onNotice).toHaveBeenCalledOnce();
   });
 

@@ -69,10 +69,7 @@ export const NO_OPTIONS_PROBLEM = "Give the field at least one option.";
  * draft maps onto a valid FieldDefinition. `takenNames` holds every other
  * field name on the surface.
  */
-export function fieldDraftError(
-  draft: FieldDraft,
-  takenNames: readonly string[],
-): string | null {
+export function fieldDraftError(draft: FieldDraft, takenNames: readonly string[]): string | null {
   const name = draft.name.trim();
   if (name === "") return "Give the field a name.";
   if (name === RECORD_ID_FRONTMATTER_KEY) {
@@ -165,9 +162,7 @@ export function FieldDraftRow({
           placeholder="Todo, Doing, Done"
           disabled={disabled}
           value={draft.optionsText}
-          onChange={(event) =>
-            onChange({ ...draft, optionsText: event.target.value })
-          }
+          onChange={(event) => onChange({ ...draft, optionsText: event.target.value })}
           className={inputClass}
         />
       ) : null}
@@ -177,9 +172,7 @@ export function FieldDraftRow({
             aria-label="Related collection"
             disabled={disabled}
             value={draft.relationTarget}
-            onChange={(event) =>
-              onChange({ ...draft, relationTarget: event.target.value })
-            }
+            onChange={(event) => onChange({ ...draft, relationTarget: event.target.value })}
             className={selectClass}
           >
             <option value="">Choose a collection</option>
@@ -194,9 +187,7 @@ export function FieldDraftRow({
               type="checkbox"
               disabled={disabled}
               checked={draft.relationMany}
-              onChange={(event) =>
-                onChange({ ...draft, relationMany: event.target.checked })
-              }
+              onChange={(event) => onChange({ ...draft, relationMany: event.target.checked })}
             />
             Link many records
           </label>

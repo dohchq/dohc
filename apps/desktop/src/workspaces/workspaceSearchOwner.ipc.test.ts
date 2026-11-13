@@ -5,10 +5,7 @@ import { afterEach, describe, expect, it, vi, type Mock } from "vitest";
 import type { WorkspaceSearchPayload } from "../ipc/bridgeContract";
 import { CHANNELS } from "../ipc/channels";
 import { workspaceSearchHandlers } from "../ipc/workspaceSearchIpc";
-import {
-  createSearchRegistry,
-  type SearchBatch,
-} from "./workspaceSearch";
+import { createSearchRegistry, type SearchBatch } from "./workspaceSearch";
 import { WorkspaceSearchOwner } from "./workspaceSearchOwner";
 
 const roots: string[] = [];
@@ -69,14 +66,14 @@ function harness(input: { capture: boolean; rootPath: string }) {
     prepareOwnedSearch: async () => ({
       allowPath: (path) => path === "shared-with-me/alex/owned.md",
     }),
-    engineCaptureFor: () =>
-      input.capture ? { flush: vi.fn(async () => undefined) } : null,
+    engineCaptureFor: () => (input.capture ? { flush: vi.fn(async () => undefined) } : null),
     queryEngine: vi.fn(async () => []),
     logError: vi.fn(),
   });
   const search = workspaceSearchHandlers<TestEvent, typeof workspace>({
     withWorkspaceOperation: async (_event, workspaceId, work) => {
-      if (workspaceId !== workspace.workspaceId) throw new Error("This workspace is not open. Open it again.");
+      if (workspaceId !== workspace.workspaceId)
+        throw new Error("This workspace is not open. Open it again.");
       return work({
         workspace,
         attachmentId: Symbol.for("workspace-1"),
@@ -200,15 +197,9 @@ describe("workspace search IPC handlers", () => {
     });
 
     expect(engine.starts).toHaveLength(1);
-    expect(engine.starts[0]?.request.includeGlob).toBe(
-      "shared-with-me/**/*.md",
-    );
-    expect(engine.starts[0]?.allowPath("shared-with-me/alex/owned.md")).toBe(
-      true,
-    );
-    expect(engine.starts[0]?.allowPath("shared-with-me/alex/leaked.md")).toBe(
-      false,
-    );
+    expect(engine.starts[0]?.request.includeGlob).toBe("shared-with-me/**/*.md");
+    expect(engine.starts[0]?.allowPath("shared-with-me/alex/owned.md")).toBe(true);
+    expect(engine.starts[0]?.allowPath("shared-with-me/alex/leaked.md")).toBe(false);
 
     const ripgrep = harness({ capture: false, rootPath });
     await ripgrep.invoke({
@@ -220,9 +211,7 @@ describe("workspace search IPC handlers", () => {
 
     expect(ripgrep.starts).toHaveLength(1);
     expect(ripgrep.starts[0]?.request.includeGlob).toBe("*.md");
-    expect(ripgrep.starts[0]?.allowPath("shared-with-me/alex/owned.md")).toBe(
-      true,
-    );
+    expect(ripgrep.starts[0]?.allowPath("shared-with-me/alex/owned.md")).toBe(true);
     expect(ripgrep.starts[0]?.allowPath("notes/leaked.md")).toBe(false);
   });
 });

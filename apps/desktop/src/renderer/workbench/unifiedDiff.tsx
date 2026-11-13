@@ -105,17 +105,9 @@ function pushBounded(
 // never drops any of that — it only drops context lines — so building more
 // than the display shows is pure waste. A 10 MiB body of short lines used to
 // build two million objects to render eight hundred.
-function buildContiguousDiff(
-  before: string[],
-  after: string[],
-  maxLines: number,
-): LineDiff {
+function buildContiguousDiff(before: string[], after: string[], maxLines: number): LineDiff {
   let prefix = 0;
-  while (
-    prefix < before.length &&
-    prefix < after.length &&
-    before[prefix] === after[prefix]
-  ) {
+  while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) {
     prefix += 1;
   }
 
@@ -169,12 +161,7 @@ function buildLineDiff(before: string[], after: string[], maxLines: number): Lin
     const created = before.length === 0;
     const source = created ? after : before;
     const lines: DiffLine[] = [];
-    const hiddenLines = pushBounded(
-      lines,
-      source,
-      created ? "added" : "removed",
-      maxLines,
-    );
+    const hiddenLines = pushBounded(lines, source, created ? "added" : "removed", maxLines);
     return {
       lines,
       hiddenLines,
@@ -196,14 +183,12 @@ function buildLineDiff(before: string[], after: string[], maxLines: number): Lin
 
   const columnCount = after.length + 1;
   const table = new Uint32Array(cellCount);
-  const at = (beforeIndex: number, afterIndex: number) =>
-    beforeIndex * columnCount + afterIndex;
+  const at = (beforeIndex: number, afterIndex: number) => beforeIndex * columnCount + afterIndex;
 
   for (let beforeIndex = before.length - 1; beforeIndex >= 0; beforeIndex -= 1) {
     for (let afterIndex = after.length - 1; afterIndex >= 0; afterIndex -= 1) {
       if (before[beforeIndex] === after[afterIndex]) {
-        table[at(beforeIndex, afterIndex)] =
-          table[at(beforeIndex + 1, afterIndex + 1)] + 1;
+        table[at(beforeIndex, afterIndex)] = table[at(beforeIndex + 1, afterIndex + 1)] + 1;
       } else {
         table[at(beforeIndex, afterIndex)] = Math.max(
           table[at(beforeIndex + 1, afterIndex)],
@@ -221,10 +206,7 @@ function buildLineDiff(before: string[], after: string[], maxLines: number): Lin
       lines.push({ kind: "context", text: before[beforeIndex] });
       beforeIndex += 1;
       afterIndex += 1;
-    } else if (
-      table[at(beforeIndex + 1, afterIndex)] >=
-      table[at(beforeIndex, afterIndex + 1)]
-    ) {
+    } else if (table[at(beforeIndex + 1, afterIndex)] >= table[at(beforeIndex, afterIndex + 1)]) {
       lines.push({ kind: "removed", text: before[beforeIndex] });
       beforeIndex += 1;
     } else {
@@ -493,7 +475,10 @@ function markChangedWords(lines: UnifiedDiffLine[]): UnifiedDiffLine[] {
   while (index < lines.length) {
     const removed: number[] = [];
     const added: number[] = [];
-    while (index < lines.length && (lines[index].kind === "removed" || lines[index].kind === "added")) {
+    while (
+      index < lines.length &&
+      (lines[index].kind === "removed" || lines[index].kind === "added")
+    ) {
       (lines[index].kind === "removed" ? removed : added).push(index);
       index += 1;
     }
@@ -569,10 +554,7 @@ function LineText({ line }: { line: UnifiedDiffLine }) {
 // proposal review): old/new gutters, a quiet +/− mark, then the text. A
 // changed line is tinted with a bar at its edge; the mark says which way it
 // changed without color. Screen readers hear the line's prefix instead.
-export function UnifiedDiffLines(props: {
-  lines: UnifiedDiffLine[];
-  testId?: string;
-}) {
+export function UnifiedDiffLines(props: { lines: UnifiedDiffLine[]; testId?: string }) {
   return (
     <div
       data-testid={props.testId}
@@ -647,18 +629,23 @@ export function diffStatCells(added: number, removed: number): ("added" | "remov
 
 /// A diff's size in lines: `+2 −2` and the bar. Screen readers hear the
 /// counts in words instead.
-export function DiffCounts(props: {
-  counts: { added: number; removed: number };
-  testId?: string;
-}) {
+export function DiffCounts(props: { counts: { added: number; removed: number }; testId?: string }) {
   const { added, removed } = props.counts;
   return (
-    <span data-testid={props.testId} className="inline-flex shrink-0 items-center gap-1.5 font-mono text-[11px]">
+    <span
+      data-testid={props.testId}
+      className="inline-flex shrink-0 items-center gap-1.5 font-mono text-[11px]"
+    >
       <span className="sr-only">
-        {added} {added === 1 ? "line" : "lines"} added, {removed} {removed === 1 ? "line" : "lines"} removed
+        {added} {added === 1 ? "line" : "lines"} added, {removed} {removed === 1 ? "line" : "lines"}{" "}
+        removed
       </span>
-      <span aria-hidden className="text-success">+{added}</span>
-      <span aria-hidden className="text-danger">−{removed}</span>
+      <span aria-hidden className="text-success">
+        +{added}
+      </span>
+      <span aria-hidden className="text-danger">
+        −{removed}
+      </span>
       <span aria-hidden className="flex gap-0.5">
         {diffStatCells(added, removed).map((cell, index) => (
           <span

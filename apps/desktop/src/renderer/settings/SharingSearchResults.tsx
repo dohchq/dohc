@@ -47,18 +47,32 @@ async function readLane(
 }
 
 // Both lists, read once per workspace on the first search.
-export function useSharingSearch(workspaceId: string, sharedView: boolean, query: string): SharingResult[] {
+export function useSharingSearch(
+  workspaceId: string,
+  sharedView: boolean,
+  query: string,
+): SharingResult[] {
   const read = useWorkspaceQuery(useWorkspaceSession(), {
     key: workspaceId,
     manual: true,
     load: async (signal) => {
       // Someone else's shared workspace grants nothing from here.
       const lanes: SharingLane[] = sharedView ? ["received"] : ["granted", "received"];
-      await bridge().requestAccessRefresh({ workspaceId, reason: "sharing-open" }).catch(() => undefined);
-      const answers = await Promise.all(lanes.map((lane) => readLane(lane, (cursor) => (
-        bridge().listSharingAccess({ workspaceId, lane, ...(cursor ? { cursor } : {}) })
-      ), signal)));
-      if (answers.every((answer) => answer === null)) throw new Error("No sharing list could be read.");
+      await bridge()
+        .requestAccessRefresh({ workspaceId, reason: "sharing-open" })
+        .catch(() => undefined);
+      const answers = await Promise.all(
+        lanes.map((lane) =>
+          readLane(
+            lane,
+            (cursor) =>
+              bridge().listSharingAccess({ workspaceId, lane, ...(cursor ? { cursor } : {}) }),
+            signal,
+          ),
+        ),
+      );
+      if (answers.every((answer) => answer === null))
+        throw new Error("No sharing list could be read.");
       return answers.flatMap((answer) => answer ?? []);
     },
   });
@@ -73,15 +87,25 @@ export function useSharingSearch(workspaceId: string, sharedView: boolean, query
 
   return useMemo(() => {
     if (!q) return [];
-    const lanes = LANES.filter(({ lane, label }) => (lane === "received" || !sharedView) && `${label} sharing`.toLowerCase().includes(q))
-      .map(({ lane, label }) => ({ lane, shareId: null, label, row: null }));
+    const lanes = LANES.filter(
+      ({ lane, label }) =>
+        (lane === "received" || !sharedView) && `${label} sharing`.toLowerCase().includes(q),
+    ).map(({ lane, label }) => ({ lane, shareId: null, label, row: null }));
     const seen = new Set<string>();
     const shares: SharingResult[] = [];
     for (const { lane, row } of found ?? []) {
       const key = `${lane}\0${row.shareId}`;
       if (seen.has(key) || shares.length === MAX_SHARES) continue;
       const subject = shareSubject(row);
-      const text = [subject.name, subject.title, row.recipientEmail, row.granterEmail, row.sharerName].join(" ").toLowerCase();
+      const text = [
+        subject.name,
+        subject.title,
+        row.recipientEmail,
+        row.granterEmail,
+        row.sharerName,
+      ]
+        .join(" ")
+        .toLowerCase();
       if (!text.includes(q)) continue;
       seen.add(key);
       shares.push({ lane, shareId: row.shareId, label: subject.name, row });
@@ -93,16 +117,35 @@ export function useSharingSearch(workspaceId: string, sharedView: boolean, query
 function ResultGlyph(props: { row: AccessShareRow | null }) {
   if (!props.row) return <Share2 size={15} aria-hidden className="shrink-0 text-subtle" />;
   const subject = shareSubject(props.row);
-  if (subject.path) return <KindGlyph kind={fileKindForPath(subject.path)} size={15} className="text-subtle" />;
-  const Icon = subject.kind === "chat" ? MessageSquare : subject.kind === "version" ? Layers : subject.kind === "damaged" ? TriangleAlert : File;
-  return <Icon size={15} aria-hidden className={`shrink-0 ${subject.kind === "damaged" ? "text-danger" : "text-subtle"}`} />;
+  if (subject.path)
+    return <KindGlyph kind={fileKindForPath(subject.path)} size={15} className="text-subtle" />;
+  const Icon =
+    subject.kind === "chat"
+      ? MessageSquare
+      : subject.kind === "version"
+        ? Layers
+        : subject.kind === "damaged"
+          ? TriangleAlert
+          : File;
+  return (
+    <Icon
+      size={15}
+      aria-hidden
+      className={`shrink-0 ${subject.kind === "damaged" ? "text-danger" : "text-subtle"}`}
+    />
+  );
 }
 
-export function SharingSearchResults(props: { results: readonly SharingResult[]; onOpen: (target: SharingFocus) => void }) {
+export function SharingSearchResults(props: {
+  results: readonly SharingResult[];
+  onOpen: (target: SharingFocus) => void;
+}) {
   if (props.results.length === 0) return null;
   return (
     <div data-testid="settings-sharing-results" className="mb-5">
-      <SectionLabel as="h3" className="m-0 mb-1.5">Sharing</SectionLabel>
+      <SectionLabel as="h3" className="m-0 mb-1.5">
+        Sharing
+      </SectionLabel>
       <ul className="m-0 flex list-none flex-col gap-0.5 p-0">
         {props.results.map((result) => (
           <li key={`${result.lane}\0${result.shareId ?? ""}`}>
@@ -117,7 +160,9 @@ export function SharingSearchResults(props: { results: readonly SharingResult[];
               <ResultGlyph row={result.row} />
               <span className="min-w-0 flex-1 truncate text-ink">{result.label}</span>
               {result.row ? (
-                <span className="shrink-0 text-[12px] text-subtle">{LANES.find((lane) => lane.lane === result.lane)!.label}</span>
+                <span className="shrink-0 text-[12px] text-subtle">
+                  {LANES.find((lane) => lane.lane === result.lane)!.label}
+                </span>
               ) : null}
             </button>
           </li>

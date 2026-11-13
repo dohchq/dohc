@@ -1,83 +1,175 @@
-import {LINK_REFUSALS} from "@dohc/security-contract/link-refusal";
-import {normalizeShareLabel, shareAccessLabel} from "@dohc/security-contract/share-labels";
-import {useEffect, useRef, useState} from "react";
-import {accountUser, namedRequest} from "./namedRecipient";
-import {NamedSignIn, signInErrorMessage} from "./NamedSignIn";
-import {AppLaunchError, LaunchFailure, launchSharedApp} from "./OpenSharedApp";
-import type {NamedAppTarget} from "./namedAppRoute";
+import { LINK_REFUSALS } from "@dohc/security-contract/link-refusal";
+import { normalizeShareLabel, shareAccessLabel } from "@dohc/security-contract/share-labels";
+import { useEffect, useRef, useState } from "react";
+import { accountUser, namedRequest } from "./namedRecipient";
+import { NamedSignIn, signInErrorMessage } from "./NamedSignIn";
+import { AppLaunchError, LaunchFailure, launchSharedApp } from "./OpenSharedApp";
+import type { NamedAppTarget } from "./namedAppRoute";
 import "./namedRecipient.css";
 
-type Account = {id: string; name: string};
+type Account = { id: string; name: string };
 type Pending = "account" | "sign-in" | "sign-out" | "open" | null;
 const CHECK_FAILED = "dohc could not check your account. Try again.";
 const SIGN_OUT_FAILED = "dohc could not sign you out. Retry sign-out.";
-const LAUNCH_REFUSED = "dohc could not open this app with this account. Ask the owner to share it with you.";
+const LAUNCH_REFUSED =
+  "dohc could not open this app with this account. Ask the owner to share it with you.";
 const LAUNCH_UNAVAILABLE = "dohc could not reach the app. Check your connection, then try again.";
 
-export default function NamedApp({target}: {target: NamedAppTarget | null}) {
-  const [summary, setSummary] = useState<{subjectName: string | null; sharerName: string | null; access: string} | null>(null);
+export default function NamedApp({ target }: { target: NamedAppTarget | null }) {
+  const [summary, setSummary] = useState<{
+    subjectName: string | null;
+    sharerName: string | null;
+    access: string;
+  } | null>(null);
   const [account, setAccount] = useState<Account | null>(null);
-  const [pending, setPending] = useState<Pending>(target ? "account" : null), [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState<Pending>(target ? "account" : null),
+    [error, setError] = useState<string | null>(null);
   const request = useRef<AbortController | null>(null);
   const start = (work: Exclude<Pending, null>) => {
-    request.current?.abort(); const controller = new AbortController(); request.current = controller;
-    setPending(work); setError(null); return controller;
+    request.current?.abort();
+    const controller = new AbortController();
+    request.current = controller;
+    setPending(work);
+    setError(null);
+    return controller;
   };
   const finish = (controller: AbortController, message: string | null) => {
     if (controller.signal.aborted || request.current !== controller) return;
-    setPending(null); if (message) setError(message);
+    setPending(null);
+    if (message) setError(message);
   };
   const load = async (controller: AbortController) => {
     const user = accountUser(await namedRequest("/api/account/session", controller.signal));
     if (controller.signal.aborted || request.current !== controller) return;
-    setAccount(user); setSummary(null);
+    setAccount(user);
+    setSummary(null);
     if (user && target) {
-      const data = await namedRequest("/api/apps/summary", controller.signal, target).catch(() => null);
+      const data = await namedRequest("/api/apps/summary", controller.signal, target).catch(
+        () => null,
+      );
       if (controller.signal.aborted || request.current !== controller) return;
-      if (data && typeof data === "object" && "access" in data && typeof data.access === "string" && "subjectName" in data && "sharerName" in data) {
-        setSummary({subjectName: normalizeShareLabel(data.subjectName), sharerName: normalizeShareLabel(data.sharerName, 320), access: data.access});
+      if (
+        data &&
+        typeof data === "object" &&
+        "access" in data &&
+        typeof data.access === "string" &&
+        "subjectName" in data &&
+        "sharerName" in data
+      ) {
+        setSummary({
+          subjectName: normalizeShareLabel(data.subjectName),
+          sharerName: normalizeShareLabel(data.sharerName, 320),
+          access: data.access,
+        });
       }
     }
   };
-  const check = () => {const controller = start("account"); void load(controller).then(() => finish(controller, null), () => finish(controller, CHECK_FAILED));};
+  const check = () => {
+    const controller = start("account");
+    void load(controller).then(
+      () => finish(controller, null),
+      () => finish(controller, CHECK_FAILED),
+    );
+  };
   useEffect(() => {
     if (!target) return;
-    setSummary(null); check();
+    setSummary(null);
+    check();
     return () => request.current?.abort();
   }, [target?.workspaceId, target?.publicationId]);
-  const signIn = (credentials: {email: string; password: string}) => {
+  const signIn = (credentials: { email: string; password: string }) => {
     const controller = start("sign-in");
     void namedRequest("/api/account/sign-in", controller.signal, credentials).then(
-      () => load(controller).then(() => finish(controller, null), () => finish(controller, CHECK_FAILED)),
-      (reason: unknown) => finish(controller, signInErrorMessage(reason)));
+      () =>
+        load(controller).then(
+          () => finish(controller, null),
+          () => finish(controller, CHECK_FAILED),
+        ),
+      (reason: unknown) => finish(controller, signInErrorMessage(reason)),
+    );
   };
   const signOut = () => {
     const controller = start("sign-out");
     void namedRequest("/api/account/sign-out", controller.signal, {}).then(
-      () => {if (!controller.signal.aborted && request.current === controller) {setAccount(null); setSummary(null);} finish(controller, null);},
-      () => finish(controller, SIGN_OUT_FAILED));
+      () => {
+        if (!controller.signal.aborted && request.current === controller) {
+          setAccount(null);
+          setSummary(null);
+        }
+        finish(controller, null);
+      },
+      () => finish(controller, SIGN_OUT_FAILED),
+    );
   };
   const open = () => {
     if (!target) return;
     const controller = start("open");
     // A successful launch leaves the page through the submitted form, so only a failure settles.
-    void launchSharedApp({workspaceId: target.workspaceId, publicationId: target.publicationId}, controller.signal)
-      .catch((reason: unknown) => finish(controller, !(reason instanceof AppLaunchError) || reason.status === 503 ? LAUNCH_UNAVAILABLE
-        : reason.status === 410 ? LINK_REFUSALS.app_collection_missing.error : LAUNCH_REFUSED));
+    void launchSharedApp(
+      { workspaceId: target.workspaceId, publicationId: target.publicationId },
+      controller.signal,
+    ).catch((reason: unknown) =>
+      finish(
+        controller,
+        !(reason instanceof AppLaunchError) || reason.status === 503
+          ? LAUNCH_UNAVAILABLE
+          : reason.status === 410
+            ? LINK_REFUSALS.app_collection_missing.error
+            : LAUNCH_REFUSED,
+      ),
+    );
   };
   const busy = pending !== null;
-  return <div className="viewer named-recipient">
-    <header><div><p className="eyebrow">dohc</p><h1>{summary?.subjectName ?? "Shared app"}</h1>{summary && <p>{summary.sharerName ? `Shared by ${summary.sharerName}` : "Shared with you"} · {shareAccessLabel(summary.access)} access</p>}</div>
-      {account && <div className="header-actions"><span>{account.name}</span><button disabled={pending === "sign-out"} className="handoff-button secondary" onClick={signOut}>Sign out</button></div>}
-    </header>
-    {!target ? <main className="download-card"><p>This app link is unavailable. Open the link the owner shared with you.</p></main> :
-      !account ? <NamedSignIn title="Sign in to open this app" busy={busy} error={error} onSignIn={signIn}>
-        {error === CHECK_FAILED && <button className="handoff-button secondary" onClick={check}>Try again</button>}
-      </NamedSignIn> : <main className="download-card" aria-label="Shared app"><h2>Open this app</h2>
-        <p>This app can use external services. Its author decides where it sends data.</p>
-        <p>It opens with the access the owner gave your account.</p>
-        <button className="handoff-button primary" disabled={busy} onClick={open}>{pending === "open" ? "Opening app" : "Open app"}</button>
-        {pending === "sign-out" && <p role="status">Signing out…</p>}{error && <LaunchFailure role="alert" message={error}/>}
-      </main>}
-  </div>;
+  return (
+    <div className="viewer named-recipient">
+      <header>
+        <div>
+          <p className="eyebrow">dohc</p>
+          <h1>{summary?.subjectName ?? "Shared app"}</h1>
+          {summary && (
+            <p>
+              {summary.sharerName ? `Shared by ${summary.sharerName}` : "Shared with you"} ·{" "}
+              {shareAccessLabel(summary.access)} access
+            </p>
+          )}
+        </div>
+        {account && (
+          <div className="header-actions">
+            <span>{account.name}</span>
+            <button
+              disabled={pending === "sign-out"}
+              className="handoff-button secondary"
+              onClick={signOut}
+            >
+              Sign out
+            </button>
+          </div>
+        )}
+      </header>
+      {!target ? (
+        <main className="download-card">
+          <p>This app link is unavailable. Open the link the owner shared with you.</p>
+        </main>
+      ) : !account ? (
+        <NamedSignIn title="Sign in to open this app" busy={busy} error={error} onSignIn={signIn}>
+          {error === CHECK_FAILED && (
+            <button className="handoff-button secondary" onClick={check}>
+              Try again
+            </button>
+          )}
+        </NamedSignIn>
+      ) : (
+        <main className="download-card" aria-label="Shared app">
+          <h2>Open this app</h2>
+          <p>This app can use external services. Its author decides where it sends data.</p>
+          <p>It opens with the access the owner gave your account.</p>
+          <button className="handoff-button primary" disabled={busy} onClick={open}>
+            {pending === "open" ? "Opening app" : "Open app"}
+          </button>
+          {pending === "sign-out" && <p role="status">Signing out…</p>}
+          {error && <LaunchFailure role="alert" message={error} />}
+        </main>
+      )}
+    </div>
+  );
 }

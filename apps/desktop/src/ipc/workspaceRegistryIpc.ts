@@ -72,10 +72,7 @@ export function createWorkspaceRootApproval(effectiveHome: () => string) {
 }
 
 export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
-  registerHandler(
-    channel: string,
-    handler: (event: Event, payload: unknown) => unknown,
-  ): void;
+  registerHandler(channel: string, handler: (event: Event, payload: unknown) => unknown): void;
   assertTrustedSender(event: Event): void;
   app: { readonly isPackaged: boolean };
   dialog: {
@@ -242,9 +239,7 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
   registerHandler(CHANNELS.openWorkspaceWindow, async (event, payload) => {
     assertTrustedSender(event);
     const input = WorkspaceIdPayload.parse(payload);
-    const workspace = workspaceSummaries().find(
-      (entry) => entry.workspaceId === input.workspaceId,
-    );
+    const workspace = workspaceSummaries().find((entry) => entry.workspaceId === input.workspaceId);
     if (!workspace) throw new Error("That workspace is not in the registry.");
     await openWorkspaceWindow(workspace);
   });
@@ -262,13 +257,13 @@ export function registerWorkspaceRegistryIpcHandlers<Event>(dependencies: {
   registerHandler(CHANNELS.revealWorkspaceFolder, (event, payload) => {
     assertTrustedSender(event);
     const input = RevealWorkspaceFolderPayload.parse(payload);
-    const workspace = workspaceSummaries().find(
-      (entry) => entry.workspaceId === input.workspaceId,
-    );
+    const workspace = workspaceSummaries().find((entry) => entry.workspaceId === input.workspaceId);
     if (!workspace) throw new Error("That workspace is not in the registry.");
-    showItemInFolder(input.recoveryCopies
-      ? join(workspace.rootPath, ".dohc", "engine", "displaced")
-      : workspace.rootPath);
+    showItemInFolder(
+      input.recoveryCopies
+        ? join(workspace.rootPath, ".dohc", "engine", "displaced")
+        : workspace.rootPath,
+    );
   });
 }
 
@@ -281,10 +276,7 @@ export function registerOpenWorkspaceIpcHandler<
     assertCurrent(): void;
   },
 >(dependencies: {
-  registerHandler(
-    channel: string,
-    handler: (event: Event, payload: unknown) => unknown,
-  ): void;
+  registerHandler(channel: string, handler: (event: Event, payload: unknown) => unknown): void;
   assertTrustedSender(event: Event): void;
   withPhysicalWorkspaceOperation<Result>(
     workspaceId: string,
@@ -330,16 +322,11 @@ export function registerOpenWorkspaceIpcHandler<
       );
       setPreferredWorkspaceId(workspace.workspaceId, event.sender);
       const status = SyncStatusResult.parse(
-        await syncStatusWithOwnedProjection(
-          workspace,
-          await openWorkspaceActivity(operation),
-        ),
+        await syncStatusWithOwnedProjection(workspace, await openWorkspaceActivity(operation)),
       );
       operation.assertCurrent();
       if (!rendererSession.isCurrent()) {
-        throw new Error(
-          "Workspace open stopped because this window changed workspaces.",
-        );
+        throw new Error("Workspace open stopped because this window changed workspaces.");
       }
       // The recency stamp is a manager convenience: only a finished open
       // earns it, and a registry write refusal must not fail the open.

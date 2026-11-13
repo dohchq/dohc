@@ -23,11 +23,8 @@ import {
   type ValidatedLinkCapability,
 } from "./linkSecurity";
 import { readJsonObject } from "./requestInputs";
-import {
-  authorizeLinkShareAction,
-  type AuthorizedShareAction,
-} from "./shareAuthorization";
-import type {ShareSelector} from "./shareFilter";
+import { authorizeLinkShareAction, type AuthorizedShareAction } from "./shareAuthorization";
+import type { ShareSelector } from "./shareFilter";
 import type { SyncRelayStorage } from "./storage";
 
 export function createLinkCredentialRoutes(
@@ -90,9 +87,7 @@ export function createLinkCredentialRoutes(
     capabilityToken: string,
     capabilityExpiresAtMs: number,
   ): LinkExchangeResult => {
-    const presentation = createAccountlessPathProjection(
-      authorized.effectiveSelector,
-    );
+    const presentation = createAccountlessPathProjection(authorized.effectiveSelector);
     return {
       shareId: authorized.share.shareId,
       grantId: authorized.grant.grantId,
@@ -113,17 +108,31 @@ export function createLinkCredentialRoutes(
     if (!hasValidRelayExchangeKey(request)) return refused();
     const ip = request.headers.get("x-dohc-relay-client-ip") ?? "unknown";
     const addressPending = exchangeAddressInFlight.get(ip) ?? 0;
-    if (addressPending >= 16 || exchangesInFlight >= 64 || !exchangeAddressProbes.allow(ip, nowMs()) ||
-        !linkExchangeGlobalRateLimiter.allow("global", nowMs())) throw relayError("link_read_rate_limited");
+    if (
+      addressPending >= 16 ||
+      exchangesInFlight >= 64 ||
+      !exchangeAddressProbes.allow(ip, nowMs()) ||
+      !linkExchangeGlobalRateLimiter.allow("global", nowMs())
+    )
+      throw relayError("link_read_rate_limited");
     exchangeAddressInFlight.set(ip, addressPending + 1);
     exchangesInFlight++;
     try {
-
       let secret = "";
       let wellFormed = false;
       try {
-        const input = await readBoundedJson(request, 4096, AbortSignal.any([request.signal, AbortSignal.timeout(10_000)]));
-        if (input && typeof input === "object" && !Array.isArray(input) && "secret" in input && typeof input.secret === "string") {
+        const input = await readBoundedJson(
+          request,
+          4096,
+          AbortSignal.any([request.signal, AbortSignal.timeout(10_000)]),
+        );
+        if (
+          input &&
+          typeof input === "object" &&
+          !Array.isArray(input) &&
+          "secret" in input &&
+          typeof input.secret === "string"
+        ) {
           secret = input.secret;
           wellFormed = LINK_SECRET_PATTERN.test(secret);
         }
@@ -142,7 +151,8 @@ export function createLinkCredentialRoutes(
           found?.credential.secretHash ?? dummyHash,
         );
         if (!wellFormed || !found || !hashMatches) {
-          if (!linkExchangeRateLimiter.allow(ip, nowMs())) throw relayError("link_read_rate_limited");
+          if (!linkExchangeRateLimiter.allow(ip, nowMs()))
+            throw relayError("link_read_rate_limited");
           return refused();
         }
 
@@ -156,10 +166,12 @@ export function createLinkCredentialRoutes(
           authorized.grant.generation !== found.credential.generation ||
           !servableFiles(authorized.effectiveSelector, publicEditRelease)
         ) {
-          if (!linkExchangeRateLimiter.allow(ip, nowMs())) throw relayError("link_read_rate_limited");
+          if (!linkExchangeRateLimiter.allow(ip, nowMs()))
+            throw relayError("link_read_rate_limited");
           return refused();
         }
-        if (!linkExchangeGrantRateLimiter.allow(found.grant.grantId, nowMs())) throw relayError("link_read_rate_limited");
+        if (!linkExchangeGrantRateLimiter.allow(found.grant.grantId, nowMs()))
+          throw relayError("link_read_rate_limited");
 
         const capabilityToken = newLinkBearer();
         const mintedAtMs = nowMs();
@@ -205,20 +217,18 @@ export function createLinkCredentialRoutes(
         });
         if (!minted) return refused();
 
-        const exchange = linkExchangeResult(
-          authorized,
-          capabilityToken,
-          capabilityExpiresAtMs,
-        );
+        const exchange = linkExchangeResult(authorized, capabilityToken, capabilityExpiresAtMs);
         return jsonResponse({ ok: true, ...exchange });
       } catch (error) {
-        if (error instanceof RelayError && error.code !== RELAY_ERRORS.link_read_rate_limited.code) return refused();
+        if (error instanceof RelayError && error.code !== RELAY_ERRORS.link_read_rate_limited.code)
+          return refused();
         throw error;
       }
     } finally {
       exchangesInFlight--;
       const remaining = exchangeAddressInFlight.get(ip)! - 1;
-      if (remaining) exchangeAddressInFlight.set(ip, remaining); else exchangeAddressInFlight.delete(ip);
+      if (remaining) exchangeAddressInFlight.set(ip, remaining);
+      else exchangeAddressInFlight.delete(ip);
     }
   };
 
@@ -243,8 +253,10 @@ export function createLinkCredentialRoutes(
       throw invalidLinkCapability();
     }
 
-    if (!linkReadRateLimiter.allow(current.capabilityHash, refreshedAtMs) ||
-        !linkGrantReadRateLimiter.allow(current.session.grantId, refreshedAtMs)) {
+    if (
+      !linkReadRateLimiter.allow(current.capabilityHash, refreshedAtMs) ||
+      !linkGrantReadRateLimiter.allow(current.session.grantId, refreshedAtMs)
+    ) {
       if (current.session.expiresAtMs > refreshedAtMs) throw relayError("link_read_rate_limited");
       return refused();
     }
@@ -280,11 +292,7 @@ export function createLinkCredentialRoutes(
     });
     if (!replaced) throw invalidLinkCapability();
 
-    const refresh = linkExchangeResult(
-      authorized,
-      capabilityToken,
-      capabilityExpiresAtMs,
-    );
+    const refresh = linkExchangeResult(authorized, capabilityToken, capabilityExpiresAtMs);
     return jsonResponse({ ok: true, ...refresh });
   };
 
@@ -336,10 +344,7 @@ export function createLinkCredentialRoutes(
       if (!minted) return refused();
       return jsonResponse({ ok: true, code, expiresAtMs });
     } catch (error) {
-      if (
-        error instanceof RelayError &&
-        error.code !== RELAY_ERRORS.link_read_rate_limited.code
-      ) {
+      if (error instanceof RelayError && error.code !== RELAY_ERRORS.link_read_rate_limited.code) {
         return refused();
       }
       throw error;

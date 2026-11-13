@@ -23,25 +23,14 @@ function fakeHandle(input: {
         statIndex += 1;
         return { size, isFile: () => true };
       }),
-      read: vi.fn(
-        async (
-          buffer: Buffer,
-          offset: number,
-          length: number,
-          position: number,
-        ) => {
-          bufferLengths.push(buffer.length);
-          const stop = input.stopAfterBytes ?? input.content.length;
-          const available = Math.max(0, Math.min(stop, input.content.length) - position);
-          const bytesRead = Math.min(
-            available,
-            length,
-            input.maxReadBytes ?? length,
-          );
-          input.content.copy(buffer, offset, position, position + bytesRead);
-          return { bytesRead, buffer };
-        },
-      ),
+      read: vi.fn(async (buffer: Buffer, offset: number, length: number, position: number) => {
+        bufferLengths.push(buffer.length);
+        const stop = input.stopAfterBytes ?? input.content.length;
+        const available = Math.max(0, Math.min(stop, input.content.length) - position);
+        const bytesRead = Math.min(available, length, input.maxReadBytes ?? length);
+        input.content.copy(buffer, offset, position, position + bytesRead);
+        return { bytesRead, buffer };
+      }),
     },
   };
 }
@@ -54,9 +43,7 @@ describe("bounded file reads", () => {
       maxReadBytes: 2,
     });
 
-    await expect(
-      readFileHandleExact(fake.handle as never, 64 * 1024 * 1024),
-    ).resolves.toEqual({
+    await expect(readFileHandleExact(fake.handle as never, 64 * 1024 * 1024)).resolves.toEqual({
       bytes: Buffer.from("small"),
       totalByteLength: 5,
     });
@@ -116,23 +103,23 @@ describe("bounded file reads", () => {
       totalByteLength: 5,
     });
     expect(new Set(stable.bufferLengths)).toEqual(new Set([5]));
-    await expect(
-      readFileHandleTruncated(changed.handle as never, 4),
-    ).rejects.toBeInstanceOf(BoundedFileReadChangedError);
-    await expect(
-      readFileHandleTruncated(shrunk.handle as never, 4),
-    ).rejects.toBeInstanceOf(BoundedFileReadChangedError);
-    await expect(
-      readFileHandleTruncated(short.handle as never, 4),
-    ).rejects.toBeInstanceOf(BoundedFileReadChangedError);
+    await expect(readFileHandleTruncated(changed.handle as never, 4)).rejects.toBeInstanceOf(
+      BoundedFileReadChangedError,
+    );
+    await expect(readFileHandleTruncated(shrunk.handle as never, 4)).rejects.toBeInstanceOf(
+      BoundedFileReadChangedError,
+    );
+    await expect(readFileHandleTruncated(short.handle as never, 4)).rejects.toBeInstanceOf(
+      BoundedFileReadChangedError,
+    );
   });
 
   it("maps a raw handle read failure to an unverifiable read", async () => {
     const fake = fakeHandle({ content: Buffer.from("small"), sizes: [5n] });
     fake.handle.read.mockRejectedValueOnce(new Error("raw I/O failure"));
 
-    await expect(
-      readFileHandleExact(fake.handle as never, 64),
-    ).rejects.toBeInstanceOf(BoundedFileReadUnverifiableError);
+    await expect(readFileHandleExact(fake.handle as never, 64)).rejects.toBeInstanceOf(
+      BoundedFileReadUnverifiableError,
+    );
   });
 });

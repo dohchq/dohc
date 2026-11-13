@@ -13,7 +13,17 @@ import {
 import { createColumnHelper, tableFeatures, useTable } from "@tanstack/react-table";
 import { defaultRangeExtractor, useVirtualizer } from "@tanstack/react-virtual";
 import type { Range } from "@tanstack/react-virtual";
-import { ArrowDown, ArrowUp, CircleAlert, Clock, Maximize2, Plus, RotateCw, TriangleAlert, X } from "lucide-react";
+import {
+  ArrowDown,
+  ArrowUp,
+  CircleAlert,
+  Clock,
+  Maximize2,
+  Plus,
+  RotateCw,
+  TriangleAlert,
+  X,
+} from "lucide-react";
 import type {
   CollectionIndexedValue,
   CollectionQuerySort,
@@ -296,7 +306,8 @@ const helper = createColumnHelper<typeof TABLE_FEATURES, CollectionRecord>();
 
 const columnWidth = (index: number) => (index === 0 ? TITLE_COLUMN_WIDTH : COLUMN_WIDTH);
 /** A field column's left edge, measured from the first field's. */
-const columnLeft = (index: number) => (index === 0 ? 0 : TITLE_COLUMN_WIDTH + (index - 1) * COLUMN_WIDTH);
+const columnLeft = (index: number) =>
+  index === 0 ? 0 : TITLE_COLUMN_WIDTH + (index - 1) * COLUMN_WIDTH;
 
 // Relation editing needs query access to the related collection; without an
 // executor the cell stays read-only. Checkboxes commit through onChange and
@@ -319,15 +330,26 @@ export function opensEditor(
  * The fields whose edit a typed character starts: it replaces a text,
  * number, url, or typed person value, and starts the search in a picker.
  */
-export const TYPED_INTO: ReadonlySet<FieldDefinition["type"]> = new Set(["text", "number", "url", "person", "select", "multi-select"]);
+export const TYPED_INTO: ReadonlySet<FieldDefinition["type"]> = new Set([
+  "text",
+  "number",
+  "url",
+  "person",
+  "select",
+  "multi-select",
+]);
 /** The room a picker keeps between it and the table's right edge. */
 const PICKER_EDGE = 8;
 /** A host's editor holds a search or a file input, so it gets a popover's room. */
 export const HOST_EDITOR_WIDTH = 320;
-export const NO_STATUSES: TableCellStatuses = { subscribe: () => () => undefined, get: () => undefined };
+export const NO_STATUSES: TableCellStatuses = {
+  subscribe: () => () => undefined,
+  get: () => undefined,
+};
 const MARK_ICON = { size: 12, strokeWidth: 1.9, "aria-hidden": true } as const;
 /** A 16px control inside a cell's line. */
-const MARK_BUTTON = "grid size-4 shrink-0 place-items-center rounded text-muted transition-colors duration-75 hover:bg-hover hover:text-ink";
+const MARK_BUTTON =
+  "grid size-4 shrink-0 place-items-center rounded text-muted transition-colors duration-75 hover:bg-hover hover:text-ink";
 /** What Discard does, since nothing brings the change back. A host that lists the change elsewhere says the same there. */
 export const DISCARD_HINT = "Stop trying to save this change. It may already be saved.";
 
@@ -341,10 +363,17 @@ const ARROWS: Readonly<Record<string, readonly [number, number]>> = {
 
 const clamp = (index: number, count: number) => Math.max(0, Math.min(index, count - 1));
 
-function NewRecordRow(props: { disabled: boolean; openColumn: boolean; width: number; onClick: () => void }) {
+function NewRecordRow(props: {
+  disabled: boolean;
+  openColumn: boolean;
+  width: number;
+  onClick: () => void;
+}) {
   return (
     <div role="row" className="flex shrink-0">
-      {props.openColumn ? <div role="gridcell" className="shrink-0" style={{ width: OPEN_COLUMN_WIDTH }} /> : null}
+      {props.openColumn ? (
+        <div role="gridcell" className="shrink-0" style={{ width: OPEN_COLUMN_WIDTH }} />
+      ) : null}
       <div role="gridcell" className="shrink-0 border-b border-line" style={{ width: props.width }}>
         <button
           type="button"
@@ -366,7 +395,10 @@ function NewRecordRow(props: { disabled: boolean; openColumn: boolean; width: nu
 const NEW_RECORD_ROW = "\u0000new-record";
 
 const blank = (value: CollectionValue | undefined) =>
-  value === undefined || value === null || value === "" || (Array.isArray(value) && value.length === 0);
+  value === undefined ||
+  value === null ||
+  value === "" ||
+  (Array.isArray(value) && value.length === 0);
 
 /**
  * A value in the new row, with the kind of field it was given under.
@@ -404,12 +436,16 @@ function createNewRow() {
   };
   const typedIn = (name: string) => cells.get(name)?.touched === true;
   /** The cells that hold no typing start from the defaults, in the fields that still take one. */
-  const start = (next: Readonly<Record<string, CollectionValue>>, fields: readonly FieldDefinition[]) => {
+  const start = (
+    next: Readonly<Record<string, CollectionValue>>,
+    fields: readonly FieldDefinition[],
+  ) => {
     for (const [name, cell] of [...cells]) if (!cell.touched) cells.delete(name);
     defaults = next;
     for (const field of fields) {
       const value = next[field.name];
-      if (value !== undefined && !cells.has(field.name)) cells.set(field.name, { value, type: field.type, touched: false });
+      if (value !== undefined && !cells.has(field.name))
+        cells.set(field.name, { value, type: field.type, touched: false });
     }
   };
   return {
@@ -429,7 +465,8 @@ function createNewRow() {
     /** Whether the person touched any field. A row of defaults left as they are is nothing typed. */
     typed: () => [...cells.keys()].some(typedIn),
     /** What the cells show, by field: typed values, defaults, and an explicit empty value where a default was cleared. */
-    values: (): Record<string, CollectionValue> => Object.fromEntries([...cells].map(([field, cell]) => [field, cell.value])),
+    values: (): Record<string, CollectionValue> =>
+      Object.fromEntries([...cells].map(([field, cell]) => [field, cell.value])),
     open(next: Readonly<Record<string, CollectionValue>>, fields: readonly FieldDefinition[]) {
       cells.clear();
       row = { id: ++made, note: null };
@@ -462,10 +499,15 @@ function createNewRow() {
       if (!typed && same) return;
       // A cleared default stays in the row as an explicit empty value. A field with no default that holds nothing
       // again, as an emptied cell or an unticked box, is a field left alone.
-      if ((next === null || next === false) && defaults[field.name] === undefined) cells.delete(field.name);
+      if ((next === null || next === false) && defaults[field.name] === undefined)
+        cells.delete(field.name);
       else cells.set(field.name, { value: next, type: field.type, touched: true });
       // The cell no longer holds what stopped the save, and the row has said what it had to.
-      if ((row.note?.state === "invalid" && row.note.field === field.name) || row.note?.state === "said") row = { ...row, note: null };
+      if (
+        (row.note?.state === "invalid" && row.note.field === field.name) ||
+        row.note?.state === "said"
+      )
+        row = { ...row, note: null };
       tell();
     },
     drop(field: string) {
@@ -509,7 +551,11 @@ function NewRowValue(props: {
     <FieldCell
       field={field}
       label={props.label}
-      indexed={value === undefined ? undefined : { field: field.name, value, validation: { status: "valid" }, resolvedRelations: [] }}
+      indexed={
+        value === undefined
+          ? undefined
+          : { field: field.name, value, validation: { status: "valid" }, resolvedRelations: [] }
+      }
       personLabel={props.personLabel}
       onChange={props.edits ? (next) => row.set(field, next) : undefined}
       editable={props.edits && field.type !== "checkbox"}
@@ -565,11 +611,26 @@ export function StatusMark({ status }: { status: TableCellStatus }) {
       </span>
     );
   }
-  const Icon = status.state === "waiting" ? Clock : status.state === "unconfirmed" ? TriangleAlert : CircleAlert;
-  const tone = status.state === "waiting" ? "text-muted" : status.state === "unconfirmed" ? "text-warning" : "text-danger";
-  const action = status.state === "unconfirmed" ? "Try again" : status.state === "refused" ? "Dismiss" : null;
+  const Icon =
+    status.state === "waiting"
+      ? Clock
+      : status.state === "unconfirmed"
+        ? TriangleAlert
+        : CircleAlert;
+  const tone =
+    status.state === "waiting"
+      ? "text-muted"
+      : status.state === "unconfirmed"
+        ? "text-warning"
+        : "text-danger";
+  const action =
+    status.state === "unconfirmed" ? "Try again" : status.state === "refused" ? "Dismiss" : null;
   return (
-    <span data-cell-status={status.state} title={status.reason} className="ml-1 inline-flex shrink-0 items-center gap-1">
+    <span
+      data-cell-status={status.state}
+      title={status.reason}
+      className="ml-1 inline-flex shrink-0 items-center gap-1"
+    >
       <Icon {...MARK_ICON} className={tone} />
       <span className="sr-only">{status.reason}</span>
       {action ? (
@@ -616,7 +677,12 @@ export function shownValue(
   status: TableCellStatus | undefined,
 ): CollectionIndexedValue | undefined {
   if (!status) return indexed;
-  return { field, value: status.value, validation: { status: "valid" }, resolvedRelations: indexed?.resolvedRelations ?? [] };
+  return {
+    field,
+    value: status.value,
+    validation: { status: "valid" },
+    resolvedRelations: indexed?.resolvedRelations ?? [],
+  };
 }
 
 /**
@@ -638,8 +704,12 @@ function CellContent(props: {
   onOpenLink: ((url: string) => void) | undefined;
 }) {
   const { field, record, statuses, host, onToggle } = props;
-  const status = useSyncExternalStore(statuses.subscribe, () => statuses.get(record.id, field.name));
-  const content = host ? host.cell(record) : (
+  const status = useSyncExternalStore(statuses.subscribe, () =>
+    statuses.get(record.id, field.name),
+  );
+  const content = host ? (
+    host.cell(record)
+  ) : (
     <FieldCell
       field={field}
       label={props.label}
@@ -647,7 +717,8 @@ function CellContent(props: {
       personLabel={props.personLabel}
       onChange={
         onToggle
-          ? (value) => onToggle({ recordId: record.id, recordPath: record.path, field: field.name, value })
+          ? (value) =>
+              onToggle({ recordId: record.id, recordPath: record.path, field: field.name, value })
           : undefined
       }
       editable={props.editable}
@@ -742,7 +813,11 @@ function FieldHeader(props: {
         ) : null}
         {sorted ? (
           <span aria-hidden="true" className="ml-auto inline-flex shrink-0 text-accent">
-            {sorted === "asc" ? <ArrowUp size={13} strokeWidth={2} /> : <ArrowDown size={13} strokeWidth={2} />}
+            {sorted === "asc" ? (
+              <ArrowUp size={13} strokeWidth={2} />
+            ) : (
+              <ArrowDown size={13} strokeWidth={2} />
+            )}
           </span>
         ) : null}
       </button>
@@ -783,10 +858,7 @@ export function TableView({
   onNewRecord,
   newRecord,
 }: TableViewProps) {
-  const fields = useMemo(
-    () => deriveColumns(schema, visibleFields),
-    [schema, visibleFields],
-  );
+  const fields = useMemo(() => deriveColumns(schema, visibleFields), [schema, visibleFields]);
   const rowWidth = fields.reduce((total, _field, index) => total + columnWidth(index), 0);
 
   const [selected, setSelected] = useState<TableCell | null>(null);
@@ -806,55 +878,73 @@ export function TableView({
     () =>
       helper.columns(
         fields.map((field) =>
-          helper.accessor(
-            (record) => record.values.find((entry) => entry.field === field.name),
-            {
-              id: field.name,
-              cell: (context) => {
-                const record = context.row.original;
-                if (field.type === "button" && renderButton) return renderButton(field, record);
-                const host = hostCells?.get(field.name);
-                const edits = onCellChange !== undefined && !editingDisabled && (canEditCell?.(record, field) ?? true);
-                const editable = edits && opensEditor(field, relationExecutor, host);
-                const label = fieldLabel?.(field.name) ?? field.name;
-                // A host with no unconfirmed changes and no cells of its own gets the plain cell, which reads no store.
-                if (!cellStatuses && !host) {
-                  return (
-                    <FieldCell
-                      field={field}
-                      label={label}
-                      indexed={context.getValue()}
-                      personLabel={personLabel}
-                      onChange={
-                        edits
-                          ? (value) => onCellChange({ recordId: record.id, recordPath: record.path, field: field.name, value })
-                          : undefined
-                      }
-                      editable={editable}
-                      onOpenLink={onOpenLink}
-                    />
-                  );
-                }
+          helper.accessor((record) => record.values.find((entry) => entry.field === field.name), {
+            id: field.name,
+            cell: (context) => {
+              const record = context.row.original;
+              if (field.type === "button" && renderButton) return renderButton(field, record);
+              const host = hostCells?.get(field.name);
+              const edits =
+                onCellChange !== undefined &&
+                !editingDisabled &&
+                (canEditCell?.(record, field) ?? true);
+              const editable = edits && opensEditor(field, relationExecutor, host);
+              const label = fieldLabel?.(field.name) ?? field.name;
+              // A host with no unconfirmed changes and no cells of its own gets the plain cell, which reads no store.
+              if (!cellStatuses && !host) {
                 return (
-                  <CellContent
+                  <FieldCell
                     field={field}
                     label={label}
-                    record={record}
                     indexed={context.getValue()}
-                    statuses={cellStatuses ?? NO_STATUSES}
-                    host={host}
-                    editable={editable}
-                    onToggle={edits ? onCellChange : undefined}
                     personLabel={personLabel}
+                    onChange={
+                      edits
+                        ? (value) =>
+                            onCellChange({
+                              recordId: record.id,
+                              recordPath: record.path,
+                              field: field.name,
+                              value,
+                            })
+                        : undefined
+                    }
+                    editable={editable}
                     onOpenLink={onOpenLink}
                   />
                 );
-              },
+              }
+              return (
+                <CellContent
+                  field={field}
+                  label={label}
+                  record={record}
+                  indexed={context.getValue()}
+                  statuses={cellStatuses ?? NO_STATUSES}
+                  host={host}
+                  editable={editable}
+                  onToggle={edits ? onCellChange : undefined}
+                  personLabel={personLabel}
+                  onOpenLink={onOpenLink}
+                />
+              );
             },
-          ),
+          }),
         ),
       ),
-    [fields, onCellChange, editingDisabled, canEditCell, cellStatuses, hostCells, personLabel, fieldLabel, relationExecutor, renderButton, onOpenLink],
+    [
+      fields,
+      onCellChange,
+      editingDisabled,
+      canEditCell,
+      cellStatuses,
+      hostCells,
+      personLabel,
+      fieldLabel,
+      relationExecutor,
+      renderButton,
+      onOpenLink,
+    ],
   );
 
   const table = useTable({
@@ -867,7 +957,8 @@ export function TableView({
   // The new row is the last row. It is no record, so the records' rows never hold it.
   const newRowIndex = hasDraft ? rows.length : -1;
   const rowCount = rows.length + (hasDraft ? 1 : 0);
-  const rowIndexOf = (recordId: string) => (recordId === NEW_RECORD_ROW ? newRowIndex : rows.findIndex((row) => row.id === recordId));
+  const rowIndexOf = (recordId: string) =>
+    recordId === NEW_RECORD_ROW ? newRowIndex : rows.findIndex((row) => row.id === recordId);
 
   const selectedRowIndex = useMemo(
     () => (selected === null ? -1 : rowIndexOf(selected.recordId)),
@@ -887,7 +978,9 @@ export function TableView({
   const editingNew = editing !== null && hasDraft && editingRowIndex === newRowIndex;
   const editingField =
     editing === null ? undefined : fields.find((field) => field.name === editing.field);
-  const editingValue = editingRow?.original.values.find((entry) => entry.field === editingField?.name);
+  const editingValue = editingRow?.original.values.find(
+    (entry) => entry.field === editingField?.name,
+  );
   const editingColumn = editingField ? fields.indexOf(editingField) : -1;
   const editingHost = editingField ? hostCells?.get(editingField.name) : undefined;
   // A picker or a host's editor is a popover on its cell, as wide as it needs. Other editors fill the cell.
@@ -902,13 +995,15 @@ export function TableView({
   );
   const noteId = useId();
   const noteRef = useRef<HTMLDivElement>(null);
-  const hasEditor = (field: FieldDefinition) => opensEditor(field, relationExecutor, hostCells?.get(field.name));
+  const hasEditor = (field: FieldDefinition) =>
+    opensEditor(field, relationExecutor, hostCells?.get(field.name));
   /** Whether the cell takes an edit now. Every edit path asks, by click or by key. */
   const editsAt = (record: CollectionRecord, field: FieldDefinition) =>
     onCellChange !== undefined && !editingDisabled && (canEditCell?.(record, field) ?? true);
 
   const carriedSelections = useCarriedSelections(subscribeToDiscardedWrites);
-  const carriedSelection = (cell: TableCell) => carriedSelections(JSON.stringify([cell.recordId, cell.field]));
+  const carriedSelection = (cell: TableCell) =>
+    carriedSelections(JSON.stringify([cell.recordId, cell.field]));
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<HTMLFieldSetElement>(null);
@@ -918,7 +1013,10 @@ export function TableView({
 
   /** Whether the new row takes a value in this field. A relation, a button and a host's cell are set once the record exists. */
   const typesNew = (field: FieldDefinition) =>
-    field.type !== "button" && field.type !== "relation" && !hostCells?.has(field.name) && (newRecord?.canEdit?.(field) ?? true);
+    field.type !== "button" &&
+    field.type !== "relation" &&
+    !hostCells?.has(field.name) &&
+    (newRecord?.canEdit?.(field) ?? true);
   const newRowElement = useRef<HTMLDivElement>(null);
   const newRowNote = useRef<HTMLDivElement>(null);
   const discardControl = useRef<HTMLButtonElement | null>(null);
@@ -952,7 +1050,8 @@ export function TableView({
     const top = at.row * ROW_HEIGHT;
     const bottom = top + ROW_HEIGHT + HEADER_HEIGHT;
     if (top < grid.scrollTop) grid.scrollTop = top;
-    else if (bottom > grid.scrollTop + grid.clientHeight) grid.scrollTop = bottom - grid.clientHeight;
+    else if (bottom > grid.scrollTop + grid.clientHeight)
+      grid.scrollTop = bottom - grid.clientHeight;
     // The first field brings the Open gutter back with it.
     const left = at.column === 0 ? 0 : gutter + columnLeft(at.column);
     const right = gutter + columnLeft(at.column + 1);
@@ -1000,7 +1099,14 @@ export function TableView({
   // The host's own control starts the row as the table is then.
   const startNow = useRef(startNewRow);
   startNow.current = startNewRow;
-  useEffect(() => newRecord?.bind?.({ start: () => startNow.current(), shows: (recordId) => shows.current(recordId) }), [newRecord]);
+  useEffect(
+    () =>
+      newRecord?.bind?.({
+        start: () => startNow.current(),
+        shows: (recordId) => shows.current(recordId),
+      }),
+    [newRecord],
+  );
 
   /**
    * Saves the new row: with Enter, or because the cursor left it. A row with
@@ -1081,7 +1187,8 @@ export function TableView({
     if (!to || !editingField) return;
     const column = fields.indexOf(editingField);
     if (to === "down") select(clamp(editingRowIndex + 1, rows.length), column);
-    else select(...(beside(editingRowIndex, column, to === "previous") ?? [editingRowIndex, column]));
+    else
+      select(...(beside(editingRowIndex, column, to === "previous") ?? [editingRowIndex, column]));
   };
 
   const startEdit = (recordId: string, column: number, typed?: string) => {
@@ -1092,7 +1199,8 @@ export function TableView({
     let left = gutter + columnLeft(column);
     // A picker is wider than most cells. Near the right edge it moves left to stay in view.
     if (width !== null && grid) {
-      const room = grid.scrollLeft + grid.clientWidth - Math.max(width, columnWidth(column)) - PICKER_EDGE;
+      const room =
+        grid.scrollLeft + grid.clientWidth - Math.max(width, columnWidth(column)) - PICKER_EDGE;
       left = Math.min(left, Math.max(grid.scrollLeft, room));
     }
     cancelled.current = false;
@@ -1102,7 +1210,8 @@ export function TableView({
   };
 
   // A picker that opens low in the table scrolls into view, down to its last row.
-  const editingKey = editing && editingPickerWidth !== null ? `${editing.recordId}:${editing.field}` : null;
+  const editingKey =
+    editing && editingPickerWidth !== null ? `${editing.recordId}:${editing.field}` : null;
   useLayoutEffect(() => {
     const grid = scrollRef.current;
     const editor = editorRef.current;
@@ -1120,7 +1229,13 @@ export function TableView({
     const target = event.target;
     if (!(target instanceof Element)) return;
     if (target.closest("[data-starts-new-record]")) press.current = "starts";
-    else if (newRowElement.current?.contains(target) || newRowNote.current?.contains(target) || noteRef.current?.contains(target) || (editingNew && editorRef.current?.contains(target))) press.current = "row";
+    else if (
+      newRowElement.current?.contains(target) ||
+      newRowNote.current?.contains(target) ||
+      noteRef.current?.contains(target) ||
+      (editingNew && editorRef.current?.contains(target))
+    )
+      press.current = "row";
     // An open editor of the row saves what it holds, then closes, and the row is left then.
     else if (!editingNew && !leaveNewRow()) pressHeld.current = true;
   };
@@ -1145,8 +1260,14 @@ export function TableView({
     newRow.rebase(newRecord.defaults ?? {}, fields.filter(typesNew));
     for (const [name, cell] of [...newRow.cells]) {
       const field = fields.find((entry) => entry.name === name);
-      const options = field && (field.type === "select" || field.type === "multi-select") ? field.options : null;
-      const fits = field?.type === cell.type && (options === null || (Array.isArray(cell.value) ? cell.value : [cell.value]).every((option) => option === null || options.includes(asText(option))));
+      const options =
+        field && (field.type === "select" || field.type === "multi-select") ? field.options : null;
+      const fits =
+        field?.type === cell.type &&
+        (options === null ||
+          (Array.isArray(cell.value) ? cell.value : [cell.value]).every(
+            (option) => option === null || options.includes(asText(option)),
+          ));
       if (field && fits && typesNew(field)) continue;
       const typed = newRow.typedIn(name);
       newRow.drop(name);
@@ -1161,7 +1282,8 @@ export function TableView({
     const held = newRow.release();
     const host = contract.current;
     if (!held || !host) return;
-    if (held.unparsed) return void host.onUnsaved({ values: held.values, text: held.unparsed, why: "closed" });
+    if (held.unparsed)
+      return void host.onUnsaved({ values: held.values, text: held.unparsed, why: "closed" });
     const stopped = held.typed ? host.save(held.values) : undefined;
     if (stopped) host.onUnsaved({ values: held.values, stopped, why: "closed" });
   }).current;
@@ -1186,7 +1308,8 @@ export function TableView({
       const field = fields[column];
       if (!field) return;
       setSelected({ recordId: NEW_RECORD_ROW, field: field.name });
-      if (draftOpen && typesNew(field) && field.type !== "checkbox") startEdit(NEW_RECORD_ROW, column);
+      if (draftOpen && typesNew(field) && field.type !== "checkbox")
+        startEdit(NEW_RECORD_ROW, column);
       else scrollRef.current?.focus({ preventScroll: true });
       return;
     }
@@ -1329,7 +1452,9 @@ export function TableView({
     const cell = { recordId: record.id, recordPath: record.path, field: field.name };
     // The keys act on what the cell shows.
     const status = statuses.get(record.id, field.name);
-    const value = status ? status.value : record.values.find((entry) => entry.field === field.name)?.value ?? null;
+    const value = status
+      ? status.value
+      : (record.values.find((entry) => entry.field === field.name)?.value ?? null);
     if (field.type === "checkbox" && (key === "Enter" || key === " ")) {
       event.preventDefault();
       return onCellChange({ ...cell, value: value !== true });
@@ -1350,7 +1475,8 @@ export function TableView({
         const carried = carriedSelection({ recordId: record.id, field: field.name });
         const acknowledged = acknowledgedWriteId?.(record, field.name) ?? 0;
         const pending = carried.pending.filter((change) => change.writeId > acknowledged);
-        const observed = value === null ? [] : Array.isArray(value) ? value.map(asText) : [asText(value)];
+        const observed =
+          value === null ? [] : Array.isArray(value) ? value.map(asText) : [asText(value)];
         const { selected, previousValues } = replayedSelection(value, observed, pending);
         if (selected.length === 0) return;
         const writeId = onCellChange({ ...cell, value: [], previousValues });
@@ -1412,16 +1538,23 @@ export function TableView({
   };
 
   // The words of the selected cell's status, while no editor covers them.
-  const note = at && editing === null && selectedStatus && selectedStatus.state !== "pending" ? selectedStatus : null;
+  const note =
+    at && editing === null && selectedStatus && selectedStatus.state !== "pending"
+      ? selectedStatus
+      : null;
   const leaveNote = () => scrollRef.current?.focus({ preventScroll: true });
   // The value that stops the new row's save, in words under its cell while that cell is selected.
   const invalid =
-    draftNote?.state === "invalid" && at?.row === newRowIndex && editing === null && fields[at.column]?.name === draftNote.field
+    draftNote?.state === "invalid" &&
+    at?.row === newRowIndex &&
+    editing === null &&
+    fields[at.column]?.name === draftNote.field
       ? draftNote
       : null;
   // What the new row says under it: a value the row gave back, and a value that stops the save in a field the table does not show.
   const rowNote =
-    draftNote !== null && (draftNote.state !== "invalid" || !fields.some((field) => field.name === draftNote.field))
+    draftNote !== null &&
+    (draftNote.state !== "invalid" || !fields.some((field) => field.name === draftNote.field))
       ? draftNote
       : null;
   const newRowNoteId = useId();
@@ -1429,7 +1562,12 @@ export function TableView({
 
   const openColumn = Boolean(onOpenRecord);
   const newRowLead = hasDraft ? (
-    <NewRowLead row={newRow} discardRef={discardControl} onDiscard={discardNewRow} onKeyDown={onDiscardKeyDown} />
+    <NewRowLead
+      row={newRow}
+      discardRef={discardControl}
+      onDiscard={discardNewRow}
+      onKeyDown={onDiscardKeyDown}
+    />
   ) : null;
   return (
     <div
@@ -1448,7 +1586,13 @@ export function TableView({
       onBlur={(event) => {
         // Focus that a key moved out of the table, as F6 does, leaves the new row. A press is taken as it lands.
         const to = event.relatedTarget;
-        if (!hasDraft || !(to instanceof Element) || event.currentTarget.contains(to) || to.closest("[data-starts-new-record]")) return;
+        if (
+          !hasDraft ||
+          !(to instanceof Element) ||
+          event.currentTarget.contains(to) ||
+          to.closest("[data-starts-new-record]")
+        )
+          return;
         leaveNewRow();
       }}
     >
@@ -1475,7 +1619,10 @@ export function TableView({
           })}
         </div>
         {records.length === 0 && (emptyText !== undefined || !adds) ? (
-          <div className="py-4 pr-2 text-sm text-muted" style={{ paddingLeft: (openColumn ? OPEN_COLUMN_WIDTH : 0) + 8 }}>
+          <div
+            className="py-4 pr-2 text-sm text-muted"
+            style={{ paddingLeft: (openColumn ? OPEN_COLUMN_WIDTH : 0) + 8 }}
+          >
             {emptyText ?? "No records in this collection yet."}
           </div>
         ) : null}
@@ -1483,66 +1630,70 @@ export function TableView({
           // The records' rows, then the new row. The editor and a cell's words lie over both.
           <div className="relative">
             {records.length > 0 ? (
-            <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
-            {virtualItems.map((item) => {
-              const row = rows[item.index];
-              if (!row) return null;
-              return (
-                <div
-                  key={row.id}
-                  role="row"
-                  data-index={item.index}
-                  aria-current={row.id === openRecordId ? "true" : undefined}
-                  className="group absolute left-0 top-0 flex aria-[current=true]:bg-selected"
-                  style={{ height: ROW_HEIGHT, transform: `translateY(${item.start - HEADER_HEIGHT}px)` }}
-                >
-                  {onOpenRecord ? (
+              <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
+                {virtualItems.map((item) => {
+                  const row = rows[item.index];
+                  if (!row) return null;
+                  return (
                     <div
-                      role="gridcell"
-                      className="flex shrink-0 items-center justify-center"
-                      style={{ width: OPEN_COLUMN_WIDTH }}
+                      key={row.id}
+                      role="row"
+                      data-index={item.index}
+                      aria-current={row.id === openRecordId ? "true" : undefined}
+                      className="group absolute left-0 top-0 flex aria-[current=true]:bg-selected"
+                      style={{
+                        height: ROW_HEIGHT,
+                        transform: `translateY(${item.start - HEADER_HEIGHT}px)`,
+                      }}
                     >
-                      <button
-                        type="button"
-                        // Space on a selected cell opens its record, so the
-                        // rows add no Tab stops.
-                        tabIndex={-1}
-                        aria-label={`Open ${recordName?.(row.original) ?? recordLabel(row.original)}`}
-                        title="Open"
-                        className="grid size-6 place-items-center rounded-md text-subtle opacity-0 transition-opacity duration-75 hover:bg-hover hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
-                        onClick={() => onOpenRecord(row.original)}
-                      >
-                        <Maximize2 size={13} strokeWidth={1.9} aria-hidden />
-                      </button>
+                      {onOpenRecord ? (
+                        <div
+                          role="gridcell"
+                          className="flex shrink-0 items-center justify-center"
+                          style={{ width: OPEN_COLUMN_WIDTH }}
+                        >
+                          <button
+                            type="button"
+                            // Space on a selected cell opens its record, so the
+                            // rows add no Tab stops.
+                            tabIndex={-1}
+                            aria-label={`Open ${recordName?.(row.original) ?? recordLabel(row.original)}`}
+                            title="Open"
+                            className="grid size-6 place-items-center rounded-md text-subtle opacity-0 transition-opacity duration-75 hover:bg-hover hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
+                            onClick={() => onOpenRecord(row.original)}
+                          >
+                            <Maximize2 size={13} strokeWidth={1.9} aria-hidden />
+                          </button>
+                        </div>
+                      ) : null}
+                      {row.getAllCells().map((cell, index) => {
+                        const isSelected = at?.row === item.index && at.column === index;
+                        return (
+                          <div
+                            key={cell.id}
+                            role="gridcell"
+                            id={isSelected ? selectedCellId : undefined}
+                            aria-selected={isSelected || undefined}
+                            aria-describedby={isSelected && note ? noteId : undefined}
+                            className={`flex shrink-0 items-center overflow-hidden border-b border-r border-line px-2 text-ink transition-colors duration-75 last:border-r-0 ${
+                              index === 0 ? "font-medium" : ""
+                            } ${isSelected ? "ring-2 ring-inset ring-accent" : ""}`}
+                            style={{ width: columnWidth(index) }}
+                            onClick={(event) => {
+                              // A dialog the host's button opens is the cell's
+                              // child in React, not on the page.
+                              if (event.currentTarget.contains(event.target as Node))
+                                clickCell(item.index, index);
+                            }}
+                          >
+                            <table.FlexRender cell={cell} />
+                          </div>
+                        );
+                      })}
                     </div>
-                  ) : null}
-                  {row.getAllCells().map((cell, index) => {
-                    const isSelected = at?.row === item.index && at.column === index;
-                    return (
-                      <div
-                        key={cell.id}
-                        role="gridcell"
-                        id={isSelected ? selectedCellId : undefined}
-                        aria-selected={isSelected || undefined}
-                        aria-describedby={isSelected && note ? noteId : undefined}
-                        className={`flex shrink-0 items-center overflow-hidden border-b border-r border-line px-2 text-ink transition-colors duration-75 last:border-r-0 ${
-                          index === 0 ? "font-medium" : ""
-                        } ${isSelected ? "ring-2 ring-inset ring-accent" : ""}`}
-                        style={{ width: columnWidth(index) }}
-                        onClick={(event) => {
-                          // A dialog the host's button opens is the cell's
-                          // child in React, not on the page.
-                          if (event.currentTarget.contains(event.target as Node)) clickCell(item.index, index);
-                        }}
-                      >
-                        <table.FlexRender cell={cell} />
-                      </div>
-                    );
-                  })}
-                </div>
-              );
-            })}
-            </div>
+                  );
+                })}
+              </div>
             ) : null}
             {hasDraft ? (
               <div
@@ -1554,7 +1705,11 @@ export function TableView({
                 style={{ height: ROW_HEIGHT }}
               >
                 {openColumn ? (
-                  <div role="gridcell" className="flex shrink-0 items-center justify-center" style={{ width: OPEN_COLUMN_WIDTH }}>
+                  <div
+                    role="gridcell"
+                    className="flex shrink-0 items-center justify-center"
+                    style={{ width: OPEN_COLUMN_WIDTH }}
+                  >
                     {newRowLead}
                   </div>
                 ) : null}
@@ -1566,14 +1721,18 @@ export function TableView({
                       role="gridcell"
                       id={isSelected ? selectedCellId : undefined}
                       aria-selected={isSelected || undefined}
-                      aria-invalid={(draftNote?.state === "invalid" && draftNote.field === field.name) || undefined}
+                      aria-invalid={
+                        (draftNote?.state === "invalid" && draftNote.field === field.name) ||
+                        undefined
+                      }
                       aria-describedby={isSelected && invalid ? noteId : undefined}
                       className={`flex shrink-0 items-center overflow-hidden border-b border-r border-line px-2 text-ink transition-colors duration-75 last:border-r-0 ${
                         index === 0 ? "font-medium" : ""
                       } ${isSelected ? "ring-2 ring-inset ring-accent" : ""}`}
                       style={{ width: columnWidth(index) }}
                       onClick={(event) => {
-                        if (event.currentTarget.contains(event.target as Node)) clickCell(newRowIndex, index);
+                        if (event.currentTarget.contains(event.target as Node))
+                          clickCell(newRowIndex, index);
                       }}
                     >
                       {index === 0 && !openColumn ? newRowLead : null}
@@ -1641,7 +1800,13 @@ export function TableView({
                   label={fieldLabel?.(editingField.name) ?? editingField.name}
                   typed={editing.typed}
                   acknowledgedWriteId={newRowEdits.current}
-                  indexed={shownValue(editingField.name, undefined, blank(newRow.value(editingField.name)) ? undefined : { state: "pending", value: newRow.value(editingField.name)! })}
+                  indexed={shownValue(
+                    editingField.name,
+                    undefined,
+                    blank(newRow.value(editingField.name))
+                      ? undefined
+                      : { state: "pending", value: newRow.value(editingField.name)! },
+                  )}
                   emit={(value) => {
                     newRow.set(editingField, value, typedInEditor.current);
                     return ++newRowEdits.current;
@@ -1669,7 +1834,11 @@ export function TableView({
                 role="note"
                 data-cell-note="invalid"
                 className="dohc-popover absolute z-10 flex max-w-80 items-start gap-1 rounded-md border border-line bg-bg px-2 py-1 text-[12px] font-normal text-danger"
-                style={{ top: (at.row + 1) * ROW_HEIGHT, left: gutter + columnLeft(at.column), minWidth: columnWidth(at.column) }}
+                style={{
+                  top: (at.row + 1) * ROW_HEIGHT,
+                  left: gutter + columnLeft(at.column),
+                  minWidth: columnWidth(at.column),
+                }}
               >
                 <span aria-hidden className="flex h-lh shrink-0 items-center">
                   <CircleAlert {...MARK_ICON} />
@@ -1710,53 +1879,71 @@ export function TableView({
                   minHeight: ROW_HEIGHT,
                 }}
               >
-                {editingHost ? editingHost.editor?.(editingRow.original, () => closeEditor()) : <CellEditor
-                  field={editingField}
-                  label={fieldLabel?.(editingField.name) ?? editingField.name}
-                  typed={editing.typed}
-                  acknowledgedWriteId={acknowledgedWriteId?.(editingRow.original, editingField.name) ?? 0}
-                  subscribeToDiscardedWrites={subscribeToDiscardedWrites}
-                  carried={editingField.type === "multi-select" ? carriedSelection(editing) : undefined}
-                  // The edit starts from what the cell shows, so a refused value is not typed twice.
-                  indexed={shownValue(editingField.name, editingValue, statuses.get(editing.recordId, editing.field))}
-                  emit={(value, previousValues) =>
-                    onCellChange({
-                      recordId: editingRow.original.id,
-                      recordPath: editingRow.original.path,
-                      field: editingField.name,
-                      value,
-                      ...(previousValues === undefined ? {} : { previousValues }),
-                    })
-                  }
-                  close={closeEditor}
-                  abandon={
-                    onDraftAbandoned
-                      ? (text, value) => {
-                          if (!cancelled.current) onDraftAbandoned({ recordId: editing.recordId, field: editing.field, text, ...(value === undefined ? {} : { value }) });
-                        }
-                      : undefined
-                  }
-                  onCreateOption={
-                    onCreateOption
-                      ? (option, value, previousValues) =>
-                          onCreateOption({
-                            recordId: editingRow.original.id,
-                            recordPath: editingRow.original.path,
-                            field: editingField.name,
-                            option,
-                            value,
-                            ...(previousValues === undefined ? {} : { previousValues }),
-                          })
-                      : undefined
-                  }
-                  onOptionColorChange={
-                    onOptionColorChange
-                      ? (option, color) => onOptionColorChange(editingField.name, option, color)
-                      : undefined
-                  }
-                  people={people}
-                  relationExecutor={relationExecutor}
-                />}
+                {editingHost ? (
+                  editingHost.editor?.(editingRow.original, () => closeEditor())
+                ) : (
+                  <CellEditor
+                    field={editingField}
+                    label={fieldLabel?.(editingField.name) ?? editingField.name}
+                    typed={editing.typed}
+                    acknowledgedWriteId={
+                      acknowledgedWriteId?.(editingRow.original, editingField.name) ?? 0
+                    }
+                    subscribeToDiscardedWrites={subscribeToDiscardedWrites}
+                    carried={
+                      editingField.type === "multi-select" ? carriedSelection(editing) : undefined
+                    }
+                    // The edit starts from what the cell shows, so a refused value is not typed twice.
+                    indexed={shownValue(
+                      editingField.name,
+                      editingValue,
+                      statuses.get(editing.recordId, editing.field),
+                    )}
+                    emit={(value, previousValues) =>
+                      onCellChange({
+                        recordId: editingRow.original.id,
+                        recordPath: editingRow.original.path,
+                        field: editingField.name,
+                        value,
+                        ...(previousValues === undefined ? {} : { previousValues }),
+                      })
+                    }
+                    close={closeEditor}
+                    abandon={
+                      onDraftAbandoned
+                        ? (text, value) => {
+                            if (!cancelled.current)
+                              onDraftAbandoned({
+                                recordId: editing.recordId,
+                                field: editing.field,
+                                text,
+                                ...(value === undefined ? {} : { value }),
+                              });
+                          }
+                        : undefined
+                    }
+                    onCreateOption={
+                      onCreateOption
+                        ? (option, value, previousValues) =>
+                            onCreateOption({
+                              recordId: editingRow.original.id,
+                              recordPath: editingRow.original.path,
+                              field: editingField.name,
+                              option,
+                              value,
+                              ...(previousValues === undefined ? {} : { previousValues }),
+                            })
+                        : undefined
+                    }
+                    onOptionColorChange={
+                      onOptionColorChange
+                        ? (option, color) => onOptionColorChange(editingField.name, option, color)
+                        : undefined
+                    }
+                    people={people}
+                    relationExecutor={relationExecutor}
+                  />
+                )}
               </fieldset>
             ) : null}
             {note && at ? (
@@ -1766,7 +1953,11 @@ export function TableView({
                 role="note"
                 data-cell-note={note.state}
                 className="dohc-popover absolute z-10 flex max-w-80 flex-col items-start gap-1 rounded-md border border-line bg-bg px-2 py-1 text-[12px] font-normal"
-                style={{ top: (at.row + 1) * ROW_HEIGHT, left: gutter + columnLeft(at.column), minWidth: columnWidth(at.column) }}
+                style={{
+                  top: (at.row + 1) * ROW_HEIGHT,
+                  left: gutter + columnLeft(at.column),
+                  minWidth: columnWidth(at.column),
+                }}
                 onKeyDown={(event) => {
                   if (event.key !== "Escape" && event.key !== "Tab") return;
                   // Tab goes on to the next cell. Shift+Tab and Escape go back to this one.
@@ -1774,54 +1965,69 @@ export function TableView({
                   event.stopPropagation();
                   // Tab goes through the note's actions before it leaves.
                   const actions = [...event.currentTarget.querySelectorAll<HTMLElement>("button")];
-                  const action = event.key === "Tab" ? actions[actions.indexOf(event.target as HTMLElement) + (event.shiftKey ? -1 : 1)] : undefined;
+                  const action =
+                    event.key === "Tab"
+                      ? actions[
+                          actions.indexOf(event.target as HTMLElement) + (event.shiftKey ? -1 : 1)
+                        ]
+                      : undefined;
                   if (action) return action.focus();
-                  const to = event.key === "Tab" && !event.shiftKey ? beside(at.row, at.column, false) : null;
+                  const to =
+                    event.key === "Tab" && !event.shiftKey
+                      ? beside(at.row, at.column, false)
+                      : null;
                   if (to) select(...to);
                   else leaveNote();
                 }}
               >
-                <p className={`m-0 ${note.state === "waiting" ? "text-muted" : note.state === "unconfirmed" ? "text-warning" : "text-danger"}`}>
+                <p
+                  className={`m-0 ${note.state === "waiting" ? "text-muted" : note.state === "unconfirmed" ? "text-warning" : "text-danger"}`}
+                >
                   {note.reason}
                 </p>
                 <div className="flex gap-1 empty:hidden">
-                {note.state === "unconfirmed" || note.state === "refused" ? (
-                  <button
-                    type="button"
-                    // Tab on the selected cell reaches it.
-                    tabIndex={-1}
-                    className="h-6 rounded-md border border-line px-2 text-[12px] text-ink transition-colors duration-75 hover:bg-hover"
-                    onClick={() => {
-                      // The words go once the action runs, so the grid takes the keys back first.
-                      leaveNote();
-                      if (note.state === "unconfirmed") note.retry();
-                      else note.dismiss();
-                    }}
-                  >
-                    {note.state === "unconfirmed" ? "Try again" : "Dismiss"}
-                  </button>
-                ) : null}
-                {note.state === "unconfirmed" && note.discard ? (
-                  <button
-                    type="button"
-                    tabIndex={-1}
-                    title={DISCARD_HINT}
-                    className="h-6 rounded-md border border-line px-2 text-[12px] text-ink transition-colors duration-75 hover:bg-hover"
-                    onClick={() => {
-                      leaveNote();
-                      note.discard?.();
-                    }}
-                  >
-                    Discard
-                  </button>
-                ) : null}
+                  {note.state === "unconfirmed" || note.state === "refused" ? (
+                    <button
+                      type="button"
+                      // Tab on the selected cell reaches it.
+                      tabIndex={-1}
+                      className="h-6 rounded-md border border-line px-2 text-[12px] text-ink transition-colors duration-75 hover:bg-hover"
+                      onClick={() => {
+                        // The words go once the action runs, so the grid takes the keys back first.
+                        leaveNote();
+                        if (note.state === "unconfirmed") note.retry();
+                        else note.dismiss();
+                      }}
+                    >
+                      {note.state === "unconfirmed" ? "Try again" : "Dismiss"}
+                    </button>
+                  ) : null}
+                  {note.state === "unconfirmed" && note.discard ? (
+                    <button
+                      type="button"
+                      tabIndex={-1}
+                      title={DISCARD_HINT}
+                      className="h-6 rounded-md border border-line px-2 text-[12px] text-ink transition-colors duration-75 hover:bg-hover"
+                      onClick={() => {
+                        leaveNote();
+                        note.discard?.();
+                      }}
+                    >
+                      Discard
+                    </button>
+                  ) : null}
                 </div>
               </div>
             ) : null}
           </div>
         ) : null}
         {adds ? (
-          <NewRecordRow disabled={editingDisabled} openColumn={openColumn} width={rowWidth} onClick={newRecord ? startNewRow : () => onNewRecord?.()} />
+          <NewRecordRow
+            disabled={editingDisabled}
+            openColumn={openColumn}
+            width={rowWidth}
+            onClick={newRecord ? startNewRow : () => onNewRecord?.()}
+          />
         ) : null}
       </div>
     </div>

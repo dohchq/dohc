@@ -55,7 +55,11 @@ describe("createWorkspaceFileOpens", () => {
 
   it("holds a message from a work link the same way", () => {
     const send = vi.fn();
-    const opens = createWorkspaceFileOpens<object, typeof notes, { threadId: string; messageId: string }>({
+    const opens = createWorkspaceFileOpens<
+      object,
+      typeof notes,
+      { threadId: string; messageId: string }
+    >({
       shownWorkspaceId: () => undefined,
       send,
     });

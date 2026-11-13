@@ -49,10 +49,13 @@ function read(fs: MarkerFileSystem, path: string, version: string): MarkerState 
   try {
     const parsed: unknown = JSON.parse(fs.readFileSync(path, "utf8"));
     if (typeof parsed !== "object" || parsed === null) return { unfinished: 0 };
-    if (!("version" in parsed) || parsed.version !== version || !("unfinished" in parsed)) return { unfinished: 0 };
+    if (!("version" in parsed) || parsed.version !== version || !("unfinished" in parsed))
+      return { unfinished: 0 };
     const count = parsed.unfinished;
-    const unfinished = typeof count === "number" && Number.isSafeInteger(count) && count > 0 ? count : 0;
-    const checked = "checked" in parsed && typeof parsed.checked === "string" ? parsed.checked : undefined;
+    const unfinished =
+      typeof count === "number" && Number.isSafeInteger(count) && count > 0 ? count : 0;
+    const checked =
+      "checked" in parsed && typeof parsed.checked === "string" ? parsed.checked : undefined;
     return checked ? { unfinished, checked } : { unfinished };
   } catch {
     return { unfinished: 0 };
@@ -61,7 +64,8 @@ function read(fs: MarkerFileSystem, path: string, version: string): MarkerState 
 
 function write(fs: MarkerFileSystem, path: string, version: string, state: MarkerState): void {
   try {
-    if (state.unfinished > 0 || state.checked) fs.writeFileSync(path, JSON.stringify({ version, ...state }));
+    if (state.unfinished > 0 || state.checked)
+      fs.writeFileSync(path, JSON.stringify({ version, ...state }));
     else fs.rmSync(path, { force: true });
   } catch (error) {
     console.error("[desktop] launch marker:", error);

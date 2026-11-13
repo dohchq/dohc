@@ -61,9 +61,7 @@ describe("getDocText", () => {
   });
 
   it("separates blocks and non-text leaves with newlines", () => {
-    expect(getDocText(doc(heading(1, "Title"), paragraph("Body text")))).toBe(
-      "Title\nBody text",
-    );
+    expect(getDocText(doc(heading(1, "Title"), paragraph("Body text")))).toBe("Title\nBody text");
     expect(getDocText(doc(paragraph("Hello", hardBreak(), "World")))).toBe("Hello\nWorld");
   });
 

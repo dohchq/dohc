@@ -43,7 +43,10 @@ it("writes the native value only when it changes", async () => {
   const { getSystemReducedMotion } = environment(false);
   const records: MutationRecord[] = [];
   const observer = new MutationObserver((batch) => records.push(...batch));
-  observer.observe(document.documentElement, { attributeFilter: ["data-system-reduced-motion"], attributeOldValue: true });
+  observer.observe(document.documentElement, {
+    attributeFilter: ["data-system-reduced-motion"],
+    attributeOldValue: true,
+  });
   const stop = initReducedMotion();
   await vi.advanceTimersByTimeAsync(3000);
   getSystemReducedMotion.mockResolvedValue(true);
@@ -75,7 +78,12 @@ it("stops polling while hidden, refreshes on return, and releases its timer", as
 it("does not overlap reads or apply an answer after disposal", async () => {
   const { getSystemReducedMotion } = environment(false);
   let resolve!: (value: boolean) => void;
-  getSystemReducedMotion.mockImplementation(() => new Promise((answer) => { resolve = answer; }));
+  getSystemReducedMotion.mockImplementation(
+    () =>
+      new Promise((answer) => {
+        resolve = answer;
+      }),
+  );
   const stop = initReducedMotion();
   document.dispatchEvent(new Event("visibilitychange"));
   await vi.advanceTimersByTimeAsync(10000);
@@ -111,8 +119,13 @@ it("ends transitions at once and keeps a tiny animation in both reduced-motion r
     const start = css.indexOf(`${selector} {
 `);
     expect(start, selector).toBeGreaterThan(-1);
-    const body = css.slice(css.indexOf("{", css.indexOf("&, &::before", start)) + 1, css.indexOf("}", start));
-    return Object.fromEntries([...body.matchAll(/([a-z-]+): ([^;]+);/g)].map(([, name, value]) => [name, value]));
+    const body = css.slice(
+      css.indexOf("{", css.indexOf("&, &::before", start)) + 1,
+      css.indexOf("}", start),
+    );
+    return Object.fromEntries(
+      [...body.matchAll(/([a-z-]+): ([^;]+);/g)].map(([, name, value]) => [name, value]),
+    );
   };
   const media = ":where(:root:not([data-system-reduced-motion='false']))";
   expect(css).toContain(`@media (prefers-reduced-motion: reduce) {
@@ -120,6 +133,8 @@ it("ends transitions at once and keeps a tiny animation in both reduced-motion r
   for (const selector of [media, ":where(:root[data-system-reduced-motion='true'])"]) {
     const declarations = rule(selector);
     expect(declarations["transition-duration"], "reduced-motion transition").toBe("0s !important");
-    expect(declarations["animation-duration"], "reduced-motion animation").toBe("0.001ms !important");
+    expect(declarations["animation-duration"], "reduced-motion animation").toBe(
+      "0.001ms !important",
+    );
   }
 });

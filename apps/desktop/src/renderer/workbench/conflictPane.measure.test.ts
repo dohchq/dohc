@@ -15,16 +15,15 @@ import { createTestScratchSync } from "../../workspaces/testTemp";
 
 const repoRoot = fileURLToPath(new URL("../../../../../", import.meta.url));
 
-
 // The repository's own tracked text, as the stand-in for the documents a
 // workspace holds. dohc has no user corpus yet; this is the closest honest
 // sample of hand-written and generated text files we own.
 function trackedTextFiles(): string[] {
-  const listed = execFileSync(
-    "git",
-    ["ls-files", "--", "*.md", "*.ts", "*.tsx", "*.rs"],
-    { cwd: repoRoot, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
-  );
+  const listed = execFileSync("git", ["ls-files", "--", "*.md", "*.ts", "*.tsx", "*.rs"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  });
   return listed
     .split("\n")
     .map((line) => line.trim())
@@ -121,7 +120,6 @@ describe.skipIf(!measuring)("conflict preview window measurement", () => {
   }, 600_000);
 });
 
-
 // The benchmark behind CONFLICT_COMBINED_EDIT_MAX_BYTES.
 //
 // That limit rejects otherwise valid combined text, so AGENTS.md wants its
@@ -154,7 +152,7 @@ describe.skipIf(!measuring)("conflict preview window measurement", () => {
 describe.skipIf(!measuring)("combine textarea keystroke latency", () => {
   // Rolldown resolves module specifiers with forward slashes; repoRoot carries
   // native separators on Windows.
-  const posixRoot = repoRoot.split(String.fromCharCode(92)).join('/');
+  const posixRoot = repoRoot.split(String.fromCharCode(92)).join("/");
   const bundleRequire = createRequire(`${posixRoot}apps/desktop/`);
   const resolveFrom = (specifier: string) =>
     bundleRequire.resolve(specifier, { paths: [`${posixRoot}apps/desktop`] });
@@ -307,8 +305,7 @@ createRoot(document.getElementById("root")).render(createElement(Bench));
           );
           await page.waitForFunction(
             (length) =>
-              (document.getElementById("draft") as HTMLTextAreaElement).value.length ===
-              length,
+              (document.getElementById("draft") as HTMLTextAreaElement).value.length === length,
             size,
           );
           await page.focus("#draft");

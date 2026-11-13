@@ -1,10 +1,11 @@
-import type {
-  CliGrepContextMessage,
-  CliGrepMatch,
-  CliResultByVerb,
-} from "./protocol";
+import type { CliGrepContextMessage, CliGrepMatch, CliResultByVerb } from "./protocol";
 import { renderAuthorDisplayName } from "./chatIdentity";
-import { formatStreamPosition, messageMetadata, renderDecisionOptions, renderThreadMarkdown } from "./threadMarkdown";
+import {
+  formatStreamPosition,
+  messageMetadata,
+  renderDecisionOptions,
+  renderThreadMarkdown,
+} from "./threadMarkdown";
 import { DohcCliError } from "./errors";
 import { formatStoredBytes } from "./account";
 
@@ -26,12 +27,25 @@ function counted(count: number, one: string, many: string): string {
   return `${count} ${count === 1 ? one : many}`;
 }
 
-function conflictLines(page: Pick<Extract<CliResultByVerb["versionConflicts"], { ok: true }>, "conflicts" | "nextAfterConflictId">): string[] {
-  return [...page.conflicts.flatMap(conflict => [
-    `${conflict.conflictId} · ${conflict.origin} · ${lineSafe(conflict.path)}${conflict.contentKind === "binary" ? " · binary" : ""}`,
-    ...(conflict.waiting ? ["  A newer version from another computer is waiting. It comes in after you resolve this conflict."] : []),
-  ]),
-    ...(page.nextAfterConflictId ? [`More conflicts; use --after ${page.nextAfterConflictId}`] : [])];
+function conflictLines(
+  page: Pick<
+    Extract<CliResultByVerb["versionConflicts"], { ok: true }>,
+    "conflicts" | "nextAfterConflictId"
+  >,
+): string[] {
+  return [
+    ...page.conflicts.flatMap((conflict) => [
+      `${conflict.conflictId} · ${conflict.origin} · ${lineSafe(conflict.path)}${conflict.contentKind === "binary" ? " · binary" : ""}`,
+      ...(conflict.waiting
+        ? [
+            "  A newer version from another computer is waiting. It comes in after you resolve this conflict.",
+          ]
+        : []),
+    ]),
+    ...(page.nextAfterConflictId
+      ? [`More conflicts; use --after ${page.nextAfterConflictId}`]
+      : []),
+  ];
 }
 
 function renderAccountDeletionPreview(preview: CliResultByVerb["accountDeletePreview"]): string {
@@ -87,16 +101,21 @@ function renderStream(stream: StreamResult): string {
     if (post) {
       metadata.push(countLabel(post.replyCount, "reply", "replies"));
       if (post.repliers.length > 0) {
-        metadata.push(`from ${post.repliers.map((replier) => renderAuthorDisplayName(replier.author)).join(", ")}`);
+        metadata.push(
+          `from ${post.repliers.map((replier) => renderAuthorDisplayName(replier.author)).join(", ")}`,
+        );
       }
-      if (post.lastReplyAtMs !== undefined) metadata.push(`last reply ${dateTime(post.lastReplyAtMs)}`);
+      if (post.lastReplyAtMs !== undefined)
+        metadata.push(`last reply ${dateTime(post.lastReplyAtMs)}`);
       if (post.openDecisionCount > 0) metadata.push(`open decisions: ${post.openDecisionCount}`);
     }
     lines.push("", metadata.join(" · "), item.message.body);
     lines.push(...renderDecisionOptions(item.message));
     if (post?.latestAgentReply) {
       const reply = post.latestAgentReply;
-      lines.push(`> **${renderAuthorDisplayName(reply.author)}** · ${dateTime(reply.createdAtMs)} · ${reply.id}: ${lineSafe(reply.bodyExcerpt)}`);
+      lines.push(
+        `> **${renderAuthorDisplayName(reply.author)}** · ${dateTime(reply.createdAtMs)} · ${reply.id}: ${lineSafe(reply.bodyExcerpt)}`,
+      );
     }
     if (read === formatStreamPosition(item.position)) lines.push("", "--- read up to here ---");
   }
@@ -125,14 +144,18 @@ export function renderThreads(result: ThreadsResult): string {
 // One row per notice, then its text and where it opens: a path, the message
 // or thread to show, or an automation. A row with nowhere to go says why.
 export function renderNotices(result: NoticesResult): string {
-  return result.notices.map((notice) => {
-    const sender = notice.sender?.label ? ` · ${lineSafe(notice.sender.label)}` : "";
-    const lines = [`${notice.read ? "[read]" : "[unread]"} · ${dateOnly(notice.createdAtMs)}${sender} · ${lineSafe(notice.title)}`];
-    if (notice.body) lines.push(`  ${lineSafe(notice.body)}`);
-    if (notice.opens) lines.push(`  opens: ${noticeOpensLabel(notice.opens)}`);
-    else if (notice.note) lines.push(`  ${lineSafe(notice.note)}`);
-    return lines.join("\n");
-  }).join("\n");
+  return result.notices
+    .map((notice) => {
+      const sender = notice.sender?.label ? ` · ${lineSafe(notice.sender.label)}` : "";
+      const lines = [
+        `${notice.read ? "[read]" : "[unread]"} · ${dateOnly(notice.createdAtMs)}${sender} · ${lineSafe(notice.title)}`,
+      ];
+      if (notice.body) lines.push(`  ${lineSafe(notice.body)}`);
+      if (notice.opens) lines.push(`  opens: ${noticeOpensLabel(notice.opens)}`);
+      else if (notice.note) lines.push(`  ${lineSafe(notice.note)}`);
+      return lines.join("\n");
+    })
+    .join("\n");
 }
 
 function noticeOpensLabel(opens: NonNullable<NoticesResult["notices"][number]["opens"]>): string {
@@ -182,7 +205,9 @@ function renderReact(result: ReactResult): string {
 
 function renderGrepLine(
   match: Pick<CliGrepMatch, "group" | "threadId">,
-  message: CliGrepContextMessage | Pick<CliGrepMatch, "messageId" | "author" | "createdAtMs" | "text">,
+  message:
+    | CliGrepContextMessage
+    | Pick<CliGrepMatch, "messageId" | "author" | "createdAtMs" | "text">,
   context: boolean,
 ): string {
   const contextMarker = context ? "- " : "";
@@ -221,7 +246,8 @@ function renderMoments(result: CliResultByVerb["moments"]): string {
       .join("");
     return `${change.id} · ${dateTime(change.recordedAtMs)} · ${change.operation} · ${change.path}${agents}${change.operationId ? ` · operation ${change.operationId}` : ""}`;
   });
-  if (result.hasMore) lines.push(`${result.totalAvailable - result.count} more; raise --limit to list them`);
+  if (result.hasMore)
+    lines.push(`${result.totalAvailable - result.count} more; raise --limit to list them`);
   return lines.join("\n");
 }
 
@@ -236,7 +262,9 @@ function renderMoment(result: CliResultByVerb["moment"], side: "before" | "after
     throw new DohcCliError(`${change.id} deleted ${change.path}; use --before for its last text`);
   }
   if (!snapshot || snapshot.contentKind === "binary") {
-    throw new DohcCliError(`${change.path} is binary at ${change.id}; history show prints text only`);
+    throw new DohcCliError(
+      `${change.path} is binary at ${change.id}; history show prints text only`,
+    );
   }
   return snapshot.text;
 }
@@ -278,15 +306,20 @@ function runStateText(run: Omit<AutomationRunLine, "changes">): string {
 }
 
 function renderAutomationRuns(result: AutomationRunsResult): string {
-  const lines = result.runs.map((run) => [
-    run.run,
-    dateTime(run.createdAtMs),
-    runStateText(run),
-    triggerText(run.trigger),
-    countLabel(run.changes, "change"),
-    ...(run.error === null ? [] : [lineSafe(run.error)]),
-  ].join(" · "));
-  return [...lines, ...(result.next === null ? [] : [`Older runs: --page ${lineSafe(result.next)}`])].join("\n");
+  const lines = result.runs.map((run) =>
+    [
+      run.run,
+      dateTime(run.createdAtMs),
+      runStateText(run),
+      triggerText(run.trigger),
+      countLabel(run.changes, "change"),
+      ...(run.error === null ? [] : [lineSafe(run.error)]),
+    ].join(" · "),
+  );
+  return [
+    ...lines,
+    ...(result.next === null ? [] : [`Older runs: --page ${lineSafe(result.next)}`]),
+  ].join("\n");
 }
 
 function json(value: unknown): string {
@@ -332,14 +365,22 @@ function renderAutomationRun({ run }: AutomationRunResult): string {
     ...(run.failedStep === null ? [] : [`step ${run.failedStep} failed`]),
     ...(run.startsOver
       ? ["Try again starts over from step 1 and needs --start-over."]
-      : run.failedStep === null ? [] : [`Try again resumes at step ${run.failedStep}.`]),
-    ...run.steps.flatMap((step) => [`step ${step.step}:`, ...step.changes.map((change) => `  ${changeText(change)}`)]),
+      : run.failedStep === null
+        ? []
+        : [`Try again resumes at step ${run.failedStep}.`]),
+    ...run.steps.flatMap((step) => [
+      `step ${step.step}:`,
+      ...step.changes.map((change) => `  ${changeText(change)}`),
+    ]),
   ].join("\n");
 }
 
-function renderAutomationPress(result: Extract<CliResultByVerb["automationPress"], { ok: true }>): string {
+function renderAutomationPress(
+  result: Extract<CliResultByVerb["automationPress"], { ok: true }>,
+): string {
   if ("relayed" in result) return "sent to the owner's computer, which runs it";
-  const ran = result.outcome === null ? `started run ${result.run}` : `run ${result.run} ${result.outcome}`;
+  const ran =
+    result.outcome === null ? `started run ${result.run}` : `run ${result.run} ${result.outcome}`;
   return [
     result.error === null ? ran : `${ran}: ${lineSafe(result.error)}`,
     ...(result.waiting === null ? [] : [result.waiting]),
@@ -350,50 +391,84 @@ function renderAutomationPress(result: Extract<CliResultByVerb["automationPress"
 // character that could move, recolor, or reorder the terminal as its code point.
 function reportedText(name: string): string {
   return `"${name.replace(/[\\"\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/gu, (char) =>
-    char === "\\" || char === "\"" ? `\\${char}` : `\\u{${char.codePointAt(0)!.toString(16)}}`)}"`;
+    char === "\\" || char === '"' ? `\\${char}` : `\\u{${char.codePointAt(0)!.toString(16)}}`,
+  )}"`;
 }
 
 function renderLinkAgents(page: CliResultByVerb["shareAgents"]): string {
-  if (page.agents.length === 0 && page.nextCursor === null) return "No agent is connected through this link.";
+  if (page.agents.length === 0 && page.nextCursor === null)
+    return "No agent is connected through this link.";
   return [
-    ...page.agents.map((agent) => [
-      agent.connectionId,
-      agent.reportedName === null ? "no reported name" : `reported name ${reportedText(agent.reportedName)}`,
-      `signed in ${dateTime(agent.connectedAtMs)}`,
-      agent.lastActionAtMs === null ? "no action yet" : `last action ${dateTime(agent.lastActionAtMs)}`,
-    ].join(" · ")),
+    ...page.agents.map((agent) =>
+      [
+        agent.connectionId,
+        agent.reportedName === null
+          ? "no reported name"
+          : `reported name ${reportedText(agent.reportedName)}`,
+        `signed in ${dateTime(agent.connectedAtMs)}`,
+        agent.lastActionAtMs === null
+          ? "no action yet"
+          : `last action ${dateTime(agent.lastActionAtMs)}`,
+      ].join(" · "),
+    ),
     ...(page.nextCursor === null ? [] : [`More agents; use --cursor ${page.nextCursor}`]),
   ].join("\n");
 }
 
 // The words Live documents shows for each row's state.
 const LIVE_REASON_WORDS = {
-  "document-unavailable": "file moved or removed", "workspace-changed": "workspace changed", "session-host-refused": "stopped by the server",
-  "session-host-diverged": "server copy doesn't match", "live-document-without-lineage": "not started",
-  "live-edit-unadmitted": "server copy is missing an edit", "conflict-parent-withheld": "can't resume", "live-history-over-budget": "history too long",
+  "document-unavailable": "file moved or removed",
+  "workspace-changed": "workspace changed",
+  "session-host-refused": "stopped by the server",
+  "session-host-diverged": "server copy doesn't match",
+  "live-document-without-lineage": "not started",
+  "live-edit-unadmitted": "server copy is missing an edit",
+  "conflict-parent-withheld": "can't resume",
+  "live-history-over-budget": "history too long",
   "live-start-failing": "can't start",
 } as const;
-const LIVE_STATUS_WORDS = { ready: "live", preparing: "preparing", paused: "paused", unavailable: "unavailable", retired: "stopped" } as const;
+const LIVE_STATUS_WORDS = {
+  ready: "live",
+  preparing: "preparing",
+  paused: "paused",
+  unavailable: "unavailable",
+  retired: "stopped",
+} as const;
 
-function renderLiveDocuments(page: Extract<CliResultByVerb["liveDocuments"], { ok: true }>): string {
-  if (page.documents.length === 0 && page.nextCursor === null) return "No document has live editing.";
+function renderLiveDocuments(
+  page: Extract<CliResultByVerb["liveDocuments"], { ok: true }>,
+): string {
+  if (page.documents.length === 0 && page.nextCursor === null)
+    return "No document has live editing.";
   return [
-    ...page.documents.map(row => [
-      lineSafe(row.path),
-      row.reason ? LIVE_REASON_WORDS[row.reason] : LIVE_STATUS_WORDS[row.status],
-      ...(row.failure ? [`server's reason ${row.failure.word} since ${row.failure.since}`] : []),
-      ...(row.canResume && !row.saveOnly ? ["can resume"] : []),
-      ...(row.deferredStop ? [`Stop waits for ${row.deferredStop.unsentEdits} unsent ${row.deferredStop.unsentEdits === 1 ? "edit" : "edits"}`] : []),
-      ...(row.quarantine ? [`kept edits ${row.quarantine}`] : []),
-    ].join(" · ")),
-    ...(page.nextCursor === null ? [] : [`More documents; use --cursor ${lineSafe(page.nextCursor)}`]),
+    ...page.documents.map((row) =>
+      [
+        lineSafe(row.path),
+        row.reason ? LIVE_REASON_WORDS[row.reason] : LIVE_STATUS_WORDS[row.status],
+        ...(row.failure ? [`server's reason ${row.failure.word} since ${row.failure.since}`] : []),
+        ...(row.canResume && !row.saveOnly ? ["can resume"] : []),
+        ...(row.deferredStop
+          ? [
+              `Stop waits for ${row.deferredStop.unsentEdits} unsent ${row.deferredStop.unsentEdits === 1 ? "edit" : "edits"}`,
+            ]
+          : []),
+        ...(row.quarantine ? [`kept edits ${row.quarantine}`] : []),
+      ].join(" · "),
+    ),
+    ...(page.nextCursor === null
+      ? []
+      : [`More documents; use --cursor ${lineSafe(page.nextCursor)}`]),
   ].join("\n");
 }
 
 export function renderCliResult<Verb extends keyof CliResultByVerb>(
   verb: Verb,
   result: CliResultByVerb[Verb],
-  options: { grepFilesWithMatches?: boolean; grepContext?: number; momentSide?: "before" | "after" } = {},
+  options: {
+    grepFilesWithMatches?: boolean;
+    grepContext?: number;
+    momentSide?: "before" | "after";
+  } = {},
 ): string {
   switch (verb) {
     case "accountDeletePreview":
@@ -443,7 +518,8 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
     case "documentCreate": {
       const document = result as CliResultByVerb["documentEdit" | "documentCreate"];
       if (!document.ok) throw new DohcCliError(document.reason);
-      const action = "changed" in document ? document.changed ? "Updated" : "Unchanged" : "Created";
+      const action =
+        "changed" in document ? (document.changed ? "Updated" : "Unchanged") : "Created";
       return `${action} ${document.path}${"warning" in document && document.warning ? `\n${document.warning}` : ""}`;
     }
     case "fileChatStart": {
@@ -453,11 +529,27 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       return comment.warning ? `${commented}\nwarning: ${lineSafe(comment.warning)}` : commented;
     }
     case "liveKeptEdits": {
-      const { keptEdits, pendingShare } = result as Extract<CliResultByVerb["liveKeptEdits"], { ok: true }>;
-      const pending = pendingShare.map(path => `${lineSafe(path)} · pending share: the file holds older text`);
+      const { keptEdits, pendingShare } = result as Extract<
+        CliResultByVerb["liveKeptEdits"],
+        { ok: true }
+      >;
+      const pending = pendingShare.map(
+        (path) => `${lineSafe(path)} · pending share: the file holds older text`,
+      );
       if (keptEdits.length === 0 && pending.length === 0) return "No document has kept edits.";
-      return [...keptEdits.map(row => [lineSafe(row.path), row.storedOn, row.recovery,
-        ...(row.saveOnly ? ["saveOnly"] : []), ...(row.earlier ? ["earlier"] : []), lineSafe(row.incident)].join(" · ")), ...pending].join("\n");
+      return [
+        ...keptEdits.map((row) =>
+          [
+            lineSafe(row.path),
+            row.storedOn,
+            row.recovery,
+            ...(row.saveOnly ? ["saveOnly"] : []),
+            ...(row.earlier ? ["earlier"] : []),
+            lineSafe(row.incident),
+          ].join(" · "),
+        ),
+        ...pending,
+      ].join("\n");
     }
     case "saveRecoveryCopy": {
       const saved = result as Extract<CliResultByVerb["saveRecoveryCopy"], { ok: true }>;
@@ -473,21 +565,28 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       return renderLiveDocuments(result as Extract<CliResultByVerb["liveDocuments"], { ok: true }>);
     case "liveResume": {
       const resumed = result as Extract<CliResultByVerb["liveResume"], { ok: true }>;
-      return resumed.already ? `${lineSafe(resumed.path)} was already live.` : `Resuming live editing for ${lineSafe(resumed.path)}`;
+      return resumed.already
+        ? `${lineSafe(resumed.path)} was already live.`
+        : `Resuming live editing for ${lineSafe(resumed.path)}`;
     }
     case "liveStop": {
       const stopped = result as Extract<CliResultByVerb["liveStop"], { ok: true }>;
       const path = lineSafe(stopped.path);
-      if (stopped.already) return `Live editing for ${path} was already stopped.${stopped.keptEdits === "kept" ? " dohc still keeps edits the server refused. Run kept-edits to check them." : ""}`;
-      return stopped.keptEdits === "recovered" ? `Stopped live editing for ${path}. dohc wrote your kept edits into the file.`
-        : stopped.keptEdits === "kept" ? `Stopped live editing for ${path}. dohc still keeps edits the server refused. Run kept-edits to check them.`
-        : `Stopped live editing for ${path}`;
+      if (stopped.already)
+        return `Live editing for ${path} was already stopped.${stopped.keptEdits === "kept" ? " dohc still keeps edits the server refused. Run kept-edits to check them." : ""}`;
+      return stopped.keptEdits === "recovered"
+        ? `Stopped live editing for ${path}. dohc wrote your kept edits into the file.`
+        : stopped.keptEdits === "kept"
+          ? `Stopped live editing for ${path}. dohc still keeps edits the server refused. Run kept-edits to check them.`
+          : `Stopped live editing for ${path}`;
     }
     case "stopAgain": {
       const stopped = result as Extract<CliResultByVerb["stopAgain"], { ok: true }>;
-      return stopped.keptEdits === "recovered" ? `Stopped live editing for ${lineSafe(stopped.path)}. dohc wrote your kept edits into the file.`
-        : stopped.keptEdits === "kept" ? `dohc still keeps the edits for ${lineSafe(stopped.path)}. Run kept-edits to check them.`
-        : `Stopped live editing for ${lineSafe(stopped.path)}`;
+      return stopped.keptEdits === "recovered"
+        ? `Stopped live editing for ${lineSafe(stopped.path)}. dohc wrote your kept edits into the file.`
+        : stopped.keptEdits === "kept"
+          ? `dohc still keeps the edits for ${lineSafe(stopped.path)}. Run kept-edits to check them.`
+          : `Stopped live editing for ${lineSafe(stopped.path)}`;
     }
     case "link":
       return (result as CliResultByVerb["link"]).link;
@@ -499,7 +598,13 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       return renderThreads(result as CliResultByVerb["threads"]);
     case "watch": {
       const batch = result as CliResultByVerb["watch"];
-      return [...batch.messages.map(message => `${message.threadId}/${message.messageId} ${lineSafe(message.author.displayName)}: ${lineSafe(message.text)}`), `cursor: ${batch.cursor}`].join("\n");
+      return [
+        ...batch.messages.map(
+          (message) =>
+            `${message.threadId}/${message.messageId} ${lineSafe(message.author.displayName)}: ${lineSafe(message.text)}`,
+        ),
+        `cursor: ${batch.cursor}`,
+      ].join("\n");
     }
     case "inbox":
       return renderInbox(result as CliResultByVerb["inbox"]);
@@ -524,35 +629,63 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       const operation = result as CliResultByVerb["historyOperation"];
       if (!operation.ok) return operation.reason;
       const links = operation.links;
-      return [...(links ? links.state === "updating" ? ["Updating links…"]
-        : [`Link updates committed in History: ${links.documents} documents. Disk writes follow.`,
-          ...(links.uncheckedCount ? [`${links.uncheckedCount} linking documents not checked.`, ...links.unchecked.map(path => `Not checked: ${lineSafe(path)}`)] : [])] : []),
-        ...operation.members.map(member => `${member.momentId} · ${member.operation} · ${member.beforePath ? `${member.beforePath} → ` : ""}${member.path}`),
-        ...(operation.withoutHistory ?? []).map(path => `${path} · without History`),
-        ...(operation.nextCursor ? [`More paths; use --cursor ${operation.nextCursor}`] : [])].join("\n");
+      return [
+        ...(links
+          ? links.state === "updating"
+            ? ["Updating links…"]
+            : [
+                `Link updates committed in History: ${links.documents} documents. Disk writes follow.`,
+                ...(links.uncheckedCount
+                  ? [
+                      `${links.uncheckedCount} linking documents not checked.`,
+                      ...links.unchecked.map((path) => `Not checked: ${lineSafe(path)}`),
+                    ]
+                  : []),
+              ]
+          : []),
+        ...operation.members.map(
+          (member) =>
+            `${member.momentId} · ${member.operation} · ${member.beforePath ? `${member.beforePath} → ` : ""}${member.path}`,
+        ),
+        ...(operation.withoutHistory ?? []).map((path) => `${path} · without History`),
+        ...(operation.nextCursor ? [`More paths; use --cursor ${operation.nextCursor}`] : []),
+      ].join("\n");
     }
     case "historyUndo": {
       const undo = result as CliResultByVerb["historyUndo"];
       if (!undo.ok) return undo.reason;
-      return [`History: ${undo.tracked.state}`, ...undo.restored.map(path => `Restored ${path}`),
-        ...undo.remaining.map(item => `${item.reason}${item.retry && !item.reason.includes("Undo again to retry") ? " Undo again to retry." : ""}`)].join("\n");
+      return [
+        `History: ${undo.tracked.state}`,
+        ...undo.restored.map((path) => `Restored ${path}`),
+        ...undo.remaining.map(
+          (item) =>
+            `${item.reason}${item.retry && !item.reason.includes("Undo again to retry") ? " Undo again to retry." : ""}`,
+        ),
+      ].join("\n");
     }
     case "versionList": {
       const list = result as CliResultByVerb["versionList"];
       if (!list.ok) return list.reason;
       // A parent that isn't in the list shows by its id.
-      const names = new Map(list.versions.map(version => [version.id, version.name]));
-      return list.versions.map(version => {
-        const parent = version.madeFromVersionId;
-        const madeFrom = parent === undefined ? "" : ` · made from ${lineSafe(names.get(parent) ?? parent)}`;
-        return `${version.id === list.activeVersionId ? "* " : "  "}${lineSafe(version.name)} · ${version.id}${madeFrom}`;
-      }).join("\n");
+      const names = new Map(list.versions.map((version) => [version.id, version.name]));
+      return list.versions
+        .map((version) => {
+          const parent = version.madeFromVersionId;
+          const madeFrom =
+            parent === undefined ? "" : ` · made from ${lineSafe(names.get(parent) ?? parent)}`;
+          return `${version.id === list.activeVersionId ? "* " : "  "}${lineSafe(version.name)} · ${version.id}${madeFrom}`;
+        })
+        .join("\n");
     }
     case "versionCompare": {
       const compare = result as CliResultByVerb["versionCompare"];
       if (!compare.ok) return compare.reason;
-      return [...compare.files.map(file => `${file.status} · ${lineSafe(file.path)}${file.binary ? " · binary" : ""}`),
-        ...(compare.nextAfterPath ? [`More files; use --after ${compare.nextAfterPath}`] : [])].join("\n");
+      return [
+        ...compare.files.map(
+          (file) => `${file.status} · ${lineSafe(file.path)}${file.binary ? " · binary" : ""}`,
+        ),
+        ...(compare.nextAfterPath ? [`More files; use --after ${compare.nextAfterPath}`] : []),
+      ].join("\n");
     }
     case "versionConflicts":
     case "versionResolve": {
@@ -562,17 +695,23 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
     }
     case "versionCreate": {
       const created = result as CliResultByVerb["versionCreate"];
-      return created.ok ? `Created and switched to ${lineSafe(created.version.name)} · ${created.version.id}` : created.reason;
+      return created.ok
+        ? `Created and switched to ${lineSafe(created.version.name)} · ${created.version.id}`
+        : created.reason;
     }
     case "versionSwitch": {
       const switched = result as CliResultByVerb["versionSwitch"];
-      return switched.ok ? `Switched to ${lineSafe(switched.version.name)} · ${counted(switched.changedFileCount, "file", "files")} changed` : switched.reason;
+      return switched.ok
+        ? `Switched to ${lineSafe(switched.version.name)} · ${counted(switched.changedFileCount, "file", "files")} changed`
+        : switched.reason;
     }
     case "versionMerge": {
       const merge = result as CliResultByVerb["versionMerge"];
       if (!merge.ok) return merge.reason;
-      return [`Merged ${lineSafe(merge.version.name)} into Main · ${counted(merge.mergedFileCount, "file", "files")} merged · ${counted(merge.conflictCount, "conflict", "conflicts")}`,
-        ...conflictLines(merge)].join("\n");
+      return [
+        `Merged ${lineSafe(merge.version.name)} into Main · ${counted(merge.mergedFileCount, "file", "files")} merged · ${counted(merge.conflictCount, "conflict", "conflicts")}`,
+        ...conflictLines(merge),
+      ].join("\n");
     }
     case "moments":
       return renderMoments(result as CliResultByVerb["moments"]);
@@ -586,7 +725,9 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
     case "chatRetry":
       return "queued";
     case "automationPress":
-      return renderAutomationPress(result as Extract<CliResultByVerb["automationPress"], { ok: true }>);
+      return renderAutomationPress(
+        result as Extract<CliResultByVerb["automationPress"], { ok: true }>,
+      );
     default:
       return JSON.stringify(result, null, 2);
   }

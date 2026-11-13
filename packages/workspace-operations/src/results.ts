@@ -14,7 +14,10 @@ export class OperationError extends Error {
 export type ErrorDetail = "full" | "operation-only";
 
 export function failure(error: unknown, fallback: string, detail: ErrorDetail) {
-  const reason = error instanceof Error && (detail === "full" || error instanceof OperationError) ? error.message : fallback;
+  const reason =
+    error instanceof Error && (detail === "full" || error instanceof OperationError)
+      ? error.message
+      : fallback;
   return { ok: false as const, reason };
 }
 

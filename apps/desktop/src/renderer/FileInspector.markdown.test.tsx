@@ -1,19 +1,6 @@
 // @vitest-environment jsdom
-import {
-  cleanup,
-  fireEvent,
-  render,
-  screen,
-  waitFor,
-} from "@testing-library/react";
-import {
-  afterEach,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 import { FileInspector } from "./FileInspector";
 import { captureOrphanedDraft, resetOrphanedDrafts } from "./orphanedDrafts";
@@ -44,7 +31,7 @@ const engineDocState: UseEngineDoc = {
   versionId: null,
   saveState: { kind: "saved-here" },
   saveError: null,
-    authorCapacity: false,
+  authorCapacity: false,
   notInVersion: false,
   documentUnavailable: false,
   liveHostUnavailable: false,
@@ -135,9 +122,14 @@ describe("FileInspector renders markdown through the shared component map", () =
     // Each sentence is 10 characters and 30 bytes.
     const japanese = `# 長いメモ\n\n${"長いメモの段落です。".repeat(Math.floor(WYSIWYG_MARKDOWN_THRESHOLD_BYTES / 20))}\n`;
     expect(japanese.length).toBeLessThan(WYSIWYG_MARKDOWN_THRESHOLD_BYTES);
-    expect(new TextEncoder().encode(japanese).byteLength).toBeGreaterThan(WYSIWYG_MARKDOWN_THRESHOLD_BYTES);
+    expect(new TextEncoder().encode(japanese).byteLength).toBeGreaterThan(
+      WYSIWYG_MARKDOWN_THRESHOLD_BYTES,
+    );
     const read = bridgeMock.readWorkspaceText.getMockImplementation();
-    bridgeMock.readWorkspaceText.mockImplementation(async () => ({ text: japanese, truncated: false }));
+    bridgeMock.readWorkspaceText.mockImplementation(async () => ({
+      text: japanese,
+      truncated: false,
+    }));
     try {
       render(<FileInspector workspaceId="ws-1" path="a.md" />);
       expect((await screen.findByTestId("markdown-edit-toggle")).textContent).toContain("Edit");
@@ -147,10 +139,15 @@ describe("FileInspector renders markdown through the shared component map", () =
   });
 
   it.each(["truncated with engine available", "access ended on a writable share"] as const)(
-    "gives enabled Edit no reason title: %s", async (cause) => {
-      const previous = { available: engineDocState.available, readOnlyCause: engineDocState.readOnlyCause };
+    "gives enabled Edit no reason title: %s",
+    async (cause) => {
+      const previous = {
+        available: engineDocState.available,
+        readOnlyCause: engineDocState.readOnlyCause,
+      };
       engineDocState.available = cause === "truncated with engine available";
-      engineDocState.readOnlyCause = cause === "access ended on a writable share" ? "access-ended" : null;
+      engineDocState.readOnlyCause =
+        cause === "access ended on a writable share" ? "access-ended" : null;
       bridgeMock.readWorkspaceText.mockResolvedValueOnce({
         text: TABLE_DOCUMENT,
         truncated: cause === "truncated with engine available",
@@ -179,13 +176,18 @@ describe("FileInspector renders markdown through the shared component map", () =
       return found as HTMLTableElement;
     });
 
-    expect(Array.from(pane.querySelectorAll("th")).map((cell) => cell.textContent))
-      .toEqual(["Field", "Limit"]);
-    expect(Array.from(pane.querySelectorAll("td")).map((cell) => cell.textContent))
-      .toEqual(["name", "214", "entry", "1024"]);
+    expect(Array.from(pane.querySelectorAll("th")).map((cell) => cell.textContent)).toEqual([
+      "Field",
+      "Limit",
+    ]);
+    expect(Array.from(pane.querySelectorAll("td")).map((cell) => cell.textContent)).toEqual([
+      "name",
+      "214",
+      "entry",
+      "1024",
+    ]);
     // The reader sees a document, never its source.
-    expect(view.container.querySelector(".dohc-readable-text")?.textContent)
-      .not.toContain("|");
+    expect(view.container.querySelector(".dohc-readable-text")?.textContent).not.toContain("|");
     // The shared map's own table wrapper, the editor's: a wide table scrolls
     // inside itself so the page never scrolls sideways. react-markdown's bare
     // table has no wrapper at all, which is what makes this the probe for the
@@ -210,7 +212,9 @@ describe("FileInspector renders markdown through the shared component map", () =
     expect(chip.dataset.state).toBe("recovery");
     expect(chip.getAttribute("title")).toBe("");
     // Edit names the size limit, not the set-aside edit, which doesn't stop editing.
-    expect(screen.getByRole("button", { name: "Edit" }).getAttribute("title")).toBe("This file is too large to edit in dohc.");
+    expect(screen.getByRole("button", { name: "Edit" }).getAttribute("title")).toBe(
+      "This file is too large to edit in dohc.",
+    );
   });
 
   it("shows truncated markdown in the bounded read-only source viewer", async () => {
@@ -235,9 +239,7 @@ describe("FileInspector renders markdown through the shared component map", () =
     // About lists the links into a document, so the document asks for none.
     expect(bridgeMock.linksIn).not.toHaveBeenCalled();
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "Open the full file externally" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Open the full file externally" }));
     await waitFor(() =>
       expect(bridgeMock.openFileExternally).toHaveBeenCalledWith({
         workspaceId: "ws-1",
@@ -249,24 +251,36 @@ describe("FileInspector renders markdown through the shared component map", () =
 
   it.each([
     { surface: "the editor", text: "---\ntitle: Plan\nstatus: draft\n---\n\nBase paragraph.\n" },
-    { surface: "the read preview", text: `---\ntitle: Plan\nstatus: draft\n---\n\n${TABLE_DOCUMENT}` },
-  ])("draws a record's body without the title and the properties in $surface, and a file tab with both", async ({ text }) => {
-    const read = bridgeMock.readWorkspaceText.getMockImplementation();
-    bridgeMock.readWorkspaceText.mockImplementation(async () => ({ text, truncated: false }));
-    try {
-      const view = render(<FileInspector workspaceId="ws-1" path="a.md" recordBody />);
-      const document = await screen.findByTestId("view-markdown");
-      await waitFor(() => expect(document.textContent).toContain(text.includes("Base paragraph.") ? "Base paragraph." : "Limits"));
-      expect(screen.queryByTestId("page-identity")).toBeNull();
-      expect(screen.queryByTestId("properties-panel")).toBeNull();
-      // The document keeps its own controls.
-      expect(screen.getByTestId("markdown-edit-toggle")).toBeTruthy();
+    {
+      surface: "the read preview",
+      text: `---\ntitle: Plan\nstatus: draft\n---\n\n${TABLE_DOCUMENT}`,
+    },
+  ])(
+    "draws a record's body without the title and the properties in $surface, and a file tab with both",
+    async ({ text }) => {
+      const read = bridgeMock.readWorkspaceText.getMockImplementation();
+      bridgeMock.readWorkspaceText.mockImplementation(async () => ({ text, truncated: false }));
+      try {
+        const view = render(<FileInspector workspaceId="ws-1" path="a.md" recordBody />);
+        const document = await screen.findByTestId("view-markdown");
+        await waitFor(() =>
+          expect(document.textContent).toContain(
+            text.includes("Base paragraph.") ? "Base paragraph." : "Limits",
+          ),
+        );
+        expect(screen.queryByTestId("page-identity")).toBeNull();
+        expect(screen.queryByTestId("properties-panel")).toBeNull();
+        // The document keeps its own controls.
+        expect(screen.getByTestId("markdown-edit-toggle")).toBeTruthy();
 
-      view.rerender(<FileInspector workspaceId="ws-1" path="a.md" />);
-      expect((await screen.findByTestId("page-title") as HTMLTextAreaElement).value).toBe("Plan");
-      expect(await screen.findByTestId("properties-panel")).toBeTruthy();
-    } finally {
-      bridgeMock.readWorkspaceText.mockImplementation(read!);
-    }
-  });
+        view.rerender(<FileInspector workspaceId="ws-1" path="a.md" />);
+        expect(((await screen.findByTestId("page-title")) as HTMLTextAreaElement).value).toBe(
+          "Plan",
+        );
+        expect(await screen.findByTestId("properties-panel")).toBeTruthy();
+      } finally {
+        bridgeMock.readWorkspaceText.mockImplementation(read!);
+      }
+    },
+  );
 });

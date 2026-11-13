@@ -1,5 +1,11 @@
 import { createHash } from "node:crypto";
-import { CHAT_WAKE_PAGE_MAX, type ChatWakeCandidate, type ChatWakeState, type ChatWakeView, type WaitingChatWake } from "@dohc/workspace-contracts/chat-wakes";
+import {
+  CHAT_WAKE_PAGE_MAX,
+  type ChatWakeCandidate,
+  type ChatWakeState,
+  type ChatWakeView,
+  type WaitingChatWake,
+} from "@dohc/workspace-contracts/chat-wakes";
 import { notifyChatWakeChange } from "../relayWriteChanges";
 import type { StorageContext } from "./context";
 import type { SqliteDb } from "./types";
@@ -107,14 +113,21 @@ const SCHEMA = {
 const normalize = (sql: string) => sql.trim().replace(/;$/u, "").replace(/\s+/gu, " ");
 
 function assertSchema(db: SqliteDb): void {
-  const objects = db.prepare("SELECT name, sql FROM sqlite_schema WHERE tbl_name IN (?, ?, ?, ?) AND sql IS NOT NULL ORDER BY name")
+  const objects = db
+    .prepare(
+      "SELECT name, sql FROM sqlite_schema WHERE tbl_name IN (?, ?, ?, ?) AND sql IS NOT NULL ORDER BY name",
+    )
     .all(RUNNERS, WAKES, HEADS, CHAT_WAKE_RETRIES);
   const expected = Object.keys(SCHEMA).sort();
   const schema: Record<string, string> = SCHEMA;
   if (
     objects.length !== expected.length ||
-    objects.some((row, index) => row.name !== expected[index] || typeof row.sql !== "string" ||
-      normalize(row.sql) !== normalize(schema[row.name as string]!))
+    objects.some(
+      (row, index) =>
+        row.name !== expected[index] ||
+        typeof row.sql !== "string" ||
+        normalize(row.sql) !== normalize(schema[row.name as string]!),
+    )
   ) {
     throw new Error("chat wake schema is missing or damaged");
   }
@@ -126,12 +139,19 @@ export function initializeChatWakeSchema(db: SqliteDb): void {
     return;
   }
   const names = Object.keys(SCHEMA);
-  if (db.prepare(`SELECT 1 FROM sqlite_schema WHERE name IN (${names.map(() => "?").join(", ")})`).get(...names)) {
+  if (
+    db
+      .prepare(`SELECT 1 FROM sqlite_schema WHERE name IN (${names.map(() => "?").join(", ")})`)
+      .get(...names)
+  ) {
     throw new Error("unmarked chat wake schema already exists");
   }
   for (const sql of Object.values(SCHEMA)) db.exec(sql);
   assertSchema(db);
-  db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(MARKER, Date.now());
+  db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(
+    MARKER,
+    Date.now(),
+  );
 }
 
 /** How long a wake waits for a claim before it is unclaimed. */
@@ -170,7 +190,12 @@ export type ChatWakeTarget = { target: string; candidates: ChatWakeCandidate[] }
 /** What a recorded verdict does to its operation's wakes. Applied in the verdict's own transaction. */
 export interface OperationWakeChange {
   /** Each target becomes a row once the message is published, held for an answer until its decision has an outcome. */
-  publish?: { messageId: string; threadId: string; held: boolean; targets: readonly ChatWakeTarget[] };
+  publish?: {
+    messageId: string;
+    threadId: string;
+    held: boolean;
+    targets: readonly ChatWakeTarget[];
+  };
   /** The decision has an outcome: held rows wait for a computer, syncing through the question's decision when it was accepted. */
   release?: { prerequisite: string | null };
 }
@@ -189,31 +214,53 @@ export type ChatWakeRetry =
 type Row = Record<string, unknown>;
 
 /** A wake's ID: its account, workspace, message, target, and generation. */
-export function chatWakeId(accountId: string, workspaceId: string, messageId: string, target: string, generation: number): string {
-  return `wake-${createHash("sha256").update(JSON.stringify([accountId, workspaceId, messageId, target, generation])).digest("hex").slice(0, 32)}`;
+export function chatWakeId(
+  accountId: string,
+  workspaceId: string,
+  messageId: string,
+  target: string,
+  generation: number,
+): string {
+  return `wake-${createHash("sha256")
+    .update(JSON.stringify([accountId, workspaceId, messageId, target, generation]))
+    .digest("hex")
+    .slice(0, 32)}`;
 }
 
 const candidatesOf = (row: Row) => JSON.parse(String(row.candidates_json)) as ChatWakeCandidate[];
-const nullableString = (value: unknown) => value === null ? null : String(value);
+const nullableString = (value: unknown) => (value === null ? null : String(value));
 
 function viewOf(row: Row): ChatWakeView {
   return {
-    wakeId: String(row.wake_id), workspaceId: String(row.workspace_id), messageId: String(row.message_id),
-    threadId: String(row.thread_id), generation: Number(row.generation), state: String(row.state) as ChatWakeState,
-    prerequisiteMessageId: nullableString(row.prerequisite_message_id), winnerLabel: nullableString(row.winner_label),
+    wakeId: String(row.wake_id),
+    workspaceId: String(row.workspace_id),
+    messageId: String(row.message_id),
+    threadId: String(row.thread_id),
+    generation: Number(row.generation),
+    state: String(row.state) as ChatWakeState,
+    prerequisiteMessageId: nullableString(row.prerequisite_message_id),
+    winnerLabel: nullableString(row.winner_label),
   };
 }
 
 // The account's next change sequence, which the caller's row takes. Inside the caller's write transaction.
 function bump(storage: StorageContext, accountId: string): number {
-  return Number(storage.db.prepare(
-    `INSERT INTO sync_relay_chat_wake_heads (account_id, head) VALUES (?, 1)
+  return Number(
+    storage.db
+      .prepare(
+        `INSERT INTO sync_relay_chat_wake_heads (account_id, head) VALUES (?, 1)
      ON CONFLICT (account_id) DO UPDATE SET head = head + 1 RETURNING head`,
-  ).get(accountId)!.head);
+      )
+      .get(accountId)!.head,
+  );
 }
 
 const headOf = (storage: StorageContext, accountId: string) =>
-  Number(storage.db.prepare("SELECT head FROM sync_relay_chat_wake_heads WHERE account_id = ?").get(accountId)?.head ?? 0);
+  Number(
+    storage.db
+      .prepare("SELECT head FROM sync_relay_chat_wake_heads WHERE account_id = ?")
+      .get(accountId)?.head ?? 0,
+  );
 
 // A wake of the account in a workspace it owns now. Another account's, or one in a workspace it no longer owns, is absent.
 const OWNED = `SELECT c.* FROM sync_relay_chat_wakes c
@@ -221,14 +268,22 @@ const OWNED = `SELECT c.* FROM sync_relay_chat_wakes c
 
 // Ends a row whose wait ran out: no claim in 7 days, or no queued 24 hours after its claim. Inside a write transaction.
 function expire(storage: StorageContext, row: Row, nowMs: number): Row {
-  const state = row.state === "waiting" && Number(row.waiting_since_ms) + CHAT_WAKE_CLAIM_MS <= nowMs ? "unclaimed"
-    : row.state === "claimed" && Number(row.claimed_at_ms) + CHAT_WAKE_CONFIRM_MS <= nowMs ? "unconfirmed"
-    : null;
+  const state =
+    row.state === "waiting" && Number(row.waiting_since_ms) + CHAT_WAKE_CLAIM_MS <= nowMs
+      ? "unclaimed"
+      : row.state === "claimed" && Number(row.claimed_at_ms) + CHAT_WAKE_CONFIRM_MS <= nowMs
+        ? "unconfirmed"
+        : null;
   if (state === null) return row;
-  storage.db.prepare("UPDATE sync_relay_chat_wakes SET state = ?, ended_at_ms = ?, change_seq = ? WHERE wake_id = ?")
+  storage.db
+    .prepare(
+      "UPDATE sync_relay_chat_wakes SET state = ?, ended_at_ms = ?, change_seq = ? WHERE wake_id = ?",
+    )
     .run(state, nowMs, bump(storage, String(row.account_id)), row.wake_id);
   notifyChatWakeChange(storage, String(row.account_id));
-  return storage.db.prepare("SELECT * FROM sync_relay_chat_wakes WHERE wake_id = ?").get(row.wake_id)!;
+  return storage.db
+    .prepare("SELECT * FROM sync_relay_chat_wakes WHERE wake_id = ?")
+    .get(row.wake_id)!;
 }
 
 /**
@@ -238,29 +293,60 @@ function expire(storage: StorageContext, row: Row, nowMs: number): Row {
  * workspace past CHAT_RUNNER_COMPUTERS replaces the one heard from longest
  * ago.
  */
-export function replaceChatRunners(storage: StorageContext, input: {
-  accountId: string; workspaceId: string; installId: string; computerLabel: string; runners: readonly Omit<ChatRunner, "installId" | "computerLabel">[];
-  nowMs: number;
-}): boolean {
+export function replaceChatRunners(
+  storage: StorageContext,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    installId: string;
+    computerLabel: string;
+    runners: readonly Omit<ChatRunner, "installId" | "computerLabel">[];
+    nowMs: number;
+  },
+): boolean {
   return storage.tx(() => {
-    if (!storage.db.prepare("SELECT 1 FROM sync_relay_workspaces WHERE workspace_id = ? AND owner_user_id = ?").get(input.workspaceId, input.accountId)) {
+    if (
+      !storage.db
+        .prepare("SELECT 1 FROM sync_relay_workspaces WHERE workspace_id = ? AND owner_user_id = ?")
+        .get(input.workspaceId, input.accountId)
+    ) {
       return false;
     }
-    storage.db.prepare("DELETE FROM sync_relay_chat_runners WHERE workspace_id = ? AND account_id = ? AND install_id = ?")
+    storage.db
+      .prepare(
+        "DELETE FROM sync_relay_chat_runners WHERE workspace_id = ? AND account_id = ? AND install_id = ?",
+      )
       .run(input.workspaceId, input.accountId, input.installId);
     const insert = storage.db.prepare(
       `INSERT INTO sync_relay_chat_runners (account_id, workspace_id, install_id, computer_label, agent_id, handle, display_name, enabled, updated_at_ms)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     for (const runner of input.runners) {
-      insert.run(input.accountId, input.workspaceId, input.installId, input.computerLabel, runner.agentId, runner.handle,
-        runner.displayName, runner.enabled ? 1 : 0, input.nowMs);
+      insert.run(
+        input.accountId,
+        input.workspaceId,
+        input.installId,
+        input.computerLabel,
+        runner.agentId,
+        runner.handle,
+        runner.displayName,
+        runner.enabled ? 1 : 0,
+        input.nowMs,
+      );
     }
-    storage.db.prepare(
-      `DELETE FROM sync_relay_chat_runners WHERE workspace_id = ? AND account_id = ? AND install_id IN (
+    storage.db
+      .prepare(
+        `DELETE FROM sync_relay_chat_runners WHERE workspace_id = ? AND account_id = ? AND install_id IN (
          SELECT install_id FROM sync_relay_chat_runners WHERE workspace_id = ? AND account_id = ?
          GROUP BY install_id ORDER BY MAX(updated_at_ms) DESC, install_id LIMIT -1 OFFSET ?)`,
-    ).run(input.workspaceId, input.accountId, input.workspaceId, input.accountId, CHAT_RUNNER_COMPUTERS);
+      )
+      .run(
+        input.workspaceId,
+        input.accountId,
+        input.workspaceId,
+        input.accountId,
+        CHAT_RUNNER_COMPUTERS,
+      );
     return true;
   });
 }
@@ -270,14 +356,26 @@ export function replaceChatRunners(storage: StorageContext, input: {
  * Every new wake target and its candidates come from here. A retry starts from the frozen candidates of the
  * generation it answers, and keeps only those whose declaration is enabled and still leased (retryChatWake).
  */
-export function enabledChatRunners(storage: StorageContext, input: { accountId: string; workspaceId: string; nowMs: number }): ChatRunner[] {
-  return storage.readTx(() => storage.db.prepare(
-    `SELECT install_id, computer_label, agent_id, handle, display_name FROM sync_relay_chat_runners
+export function enabledChatRunners(
+  storage: StorageContext,
+  input: { accountId: string; workspaceId: string; nowMs: number },
+): ChatRunner[] {
+  return storage.readTx(() =>
+    storage.db
+      .prepare(
+        `SELECT install_id, computer_label, agent_id, handle, display_name FROM sync_relay_chat_runners
      WHERE workspace_id = ? AND account_id = ? AND enabled = 1 AND updated_at_ms > ? ORDER BY install_id, agent_id`,
-  ).all(input.workspaceId, input.accountId, input.nowMs - CHAT_RUNNER_LEASE_MS).map((row) => ({
-    installId: String(row.install_id), computerLabel: String(row.computer_label), agentId: String(row.agent_id),
-    handle: String(row.handle), displayName: String(row.display_name), enabled: true,
-  })));
+      )
+      .all(input.workspaceId, input.accountId, input.nowMs - CHAT_RUNNER_LEASE_MS)
+      .map((row) => ({
+        installId: String(row.install_id),
+        computerLabel: String(row.computer_label),
+        agentId: String(row.agent_id),
+        handle: String(row.handle),
+        displayName: String(row.display_name),
+        enabled: true,
+      })),
+  );
 }
 
 /**
@@ -285,9 +383,17 @@ export function enabledChatRunners(storage: StorageContext, input: { accountId: 
  * that records the verdict: a published message's targets become rows, and
  * an answer's held rows are released.
  */
-export function applyOperationWakesInTransaction(storage: StorageContext, operation: {
-  accountId: string; operationId: string; workspaceId: string; messagePublished: boolean;
-}, change: OperationWakeChange, nowMs: number): void {
+export function applyOperationWakesInTransaction(
+  storage: StorageContext,
+  operation: {
+    accountId: string;
+    operationId: string;
+    workspaceId: string;
+    messagePublished: boolean;
+  },
+  change: OperationWakeChange,
+  nowMs: number,
+): void {
   const { accountId, operationId, workspaceId } = operation;
   let changed = false;
   if (change.publish !== undefined && operation.messagePublished) {
@@ -302,8 +408,20 @@ export function applyOperationWakesInTransaction(storage: StorageContext, operat
     );
     for (const { target, candidates } of change.publish.targets) {
       if (exists.get(accountId, workspaceId, messageId, target)) continue;
-      insert.run(chatWakeId(accountId, workspaceId, messageId, target, 1), accountId, workspaceId, operationId, messageId, threadId, target,
-        JSON.stringify(candidates), held ? "held" : "waiting", bump(storage, accountId), nowMs, held ? null : nowMs);
+      insert.run(
+        chatWakeId(accountId, workspaceId, messageId, target, 1),
+        accountId,
+        workspaceId,
+        operationId,
+        messageId,
+        threadId,
+        target,
+        JSON.stringify(candidates),
+        held ? "held" : "waiting",
+        bump(storage, accountId),
+        nowMs,
+        held ? null : nowMs,
+      );
       changed = true;
     }
   }
@@ -312,7 +430,10 @@ export function applyOperationWakesInTransaction(storage: StorageContext, operat
       `UPDATE sync_relay_chat_wakes SET state = 'waiting', waiting_since_ms = ?, prerequisite_message_id = ?, change_seq = ?
        WHERE wake_id = ?`,
     );
-    for (const row of storage.db.prepare("SELECT wake_id FROM sync_relay_chat_wakes WHERE account_id = ? AND operation_id = ? AND state = 'held'")
+    for (const row of storage.db
+      .prepare(
+        "SELECT wake_id FROM sync_relay_chat_wakes WHERE account_id = ? AND operation_id = ? AND state = 'held'",
+      )
       .all(accountId, operationId)) {
       update.run(nowMs, change.release.prerequisite, bump(storage, accountId), row.wake_id);
       changed = true;
@@ -322,8 +443,18 @@ export function applyOperationWakesInTransaction(storage: StorageContext, operat
 }
 
 /** Whether a retry used this operation ID. Inside the caller's transaction. */
-export function retryUsesOperationIdInTransaction(storage: StorageContext, accountId: string, operationId: string): boolean {
-  return Boolean(storage.db.prepare("SELECT 1 FROM sync_relay_chat_wake_retries WHERE account_id = ? AND operation_id = ?").get(accountId, operationId));
+export function retryUsesOperationIdInTransaction(
+  storage: StorageContext,
+  accountId: string,
+  operationId: string,
+): boolean {
+  return Boolean(
+    storage.db
+      .prepare(
+        "SELECT 1 FROM sync_relay_chat_wake_retries WHERE account_id = ? AND operation_id = ?",
+      )
+      .get(accountId, operationId),
+  );
 }
 
 /**
@@ -332,19 +463,31 @@ export function retryUsesOperationIdInTransaction(storage: StorageContext, accou
  * operation ID answered, which can outlive the named wake. Only wakes the
  * account has in a workspace it owns count.
  */
-export function retryWakeThreads(storage: StorageContext, input: {
-  accountId: string; workspaceId: string; operationId: string; wakeId: string;
-}): string[] {
+export function retryWakeThreads(
+  storage: StorageContext,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    operationId: string;
+    wakeId: string;
+  },
+): string[] {
   return storage.readTx(() => {
-    const bound = storage.db.prepare(
-      "SELECT next_wake_id FROM sync_relay_chat_wake_retries WHERE account_id = ? AND operation_id = ? AND workspace_id = ? AND wake_id = ?",
-    ).get(input.accountId, input.operationId, input.workspaceId, input.wakeId);
-    const thread = storage.db.prepare(`${OWNED} WHERE c.wake_id = ? AND c.account_id = ? AND c.workspace_id = ?`);
-    const threads = [input.wakeId, ...(bound === undefined ? [] : [String(bound.next_wake_id)])]
-      .flatMap((wakeId) => {
-        const row = thread.get(wakeId, input.accountId, input.workspaceId);
-        return row === undefined ? [] : [String(row.thread_id)];
-      });
+    const bound = storage.db
+      .prepare(
+        "SELECT next_wake_id FROM sync_relay_chat_wake_retries WHERE account_id = ? AND operation_id = ? AND workspace_id = ? AND wake_id = ?",
+      )
+      .get(input.accountId, input.operationId, input.workspaceId, input.wakeId);
+    const thread = storage.db.prepare(
+      `${OWNED} WHERE c.wake_id = ? AND c.account_id = ? AND c.workspace_id = ?`,
+    );
+    const threads = [
+      input.wakeId,
+      ...(bound === undefined ? [] : [String(bound.next_wake_id)]),
+    ].flatMap((wakeId) => {
+      const row = thread.get(wakeId, input.accountId, input.workspaceId);
+      return row === undefined ? [] : [String(row.thread_id)];
+    });
     return [...new Set(threads)];
   });
 }
@@ -360,20 +503,38 @@ export function chatWakeHead(storage: StorageContext, accountId: string): number
  * first. The cursor is the head, or the last row's change when the page is
  * full. A `since` past the head starts again from nothing.
  */
-export function listWaitingChatWakes(storage: StorageContext, input: {
-  accountId: string; installId: string; since: number; nowMs: number;
-}): { cursor: number; wakes: WaitingChatWake[] } {
+export function listWaitingChatWakes(
+  storage: StorageContext,
+  input: {
+    accountId: string;
+    installId: string;
+    since: number;
+    nowMs: number;
+  },
+): { cursor: number; wakes: WaitingChatWake[] } {
   return storage.readTx(() => {
     const head = headOf(storage, input.accountId);
     const since = input.since > head ? 0 : input.since;
-    const rows = storage.db.prepare(
-      `${OWNED} WHERE c.account_id = ? AND c.change_seq > ? AND c.state = 'waiting' AND c.waiting_since_ms > ?
+    const rows = storage.db
+      .prepare(
+        `${OWNED} WHERE c.account_id = ? AND c.change_seq > ? AND c.state = 'waiting' AND c.waiting_since_ms > ?
          AND EXISTS (SELECT 1 FROM json_each(c.candidates_json) e WHERE json_extract(e.value, '$.installId') = ?)
        ORDER BY c.change_seq LIMIT ?`,
-    ).all(input.accountId, since, input.nowMs - CHAT_WAKE_CLAIM_MS, input.installId, CHAT_WAKE_PAGE_MAX);
+      )
+      .all(
+        input.accountId,
+        since,
+        input.nowMs - CHAT_WAKE_CLAIM_MS,
+        input.installId,
+        CHAT_WAKE_PAGE_MAX,
+      );
     return {
       cursor: rows.length === CHAT_WAKE_PAGE_MAX ? Number(rows.at(-1)!.change_seq) : head,
-      wakes: rows.map((row) => ({ ...viewOf(row), state: "waiting" as const, candidate: candidatesOf(row).find((each) => each.installId === input.installId)! })),
+      wakes: rows.map((row) => ({
+        ...viewOf(row),
+        state: "waiting" as const,
+        candidate: candidatesOf(row).find((each) => each.installId === input.installId)!,
+      })),
     };
   });
 }
@@ -384,21 +545,43 @@ export function listWaitingChatWakes(storage: StorageContext, input: {
  * claimed. Null when the account has no such wake in a workspace it owns, or
  * the computer isn't a candidate.
  */
-export function claimChatWake(storage: StorageContext, input: {
-  accountId: string; wakeId: string; installId: string; nowMs: number;
-}): { won: boolean; wake: ChatWakeView } | null {
+export function claimChatWake(
+  storage: StorageContext,
+  input: {
+    accountId: string;
+    wakeId: string;
+    installId: string;
+    nowMs: number;
+  },
+): { won: boolean; wake: ChatWakeView } | null {
   return storage.tx(() => {
-    const found = storage.db.prepare(`${OWNED} WHERE c.wake_id = ? AND c.account_id = ?`).get(input.wakeId, input.accountId);
-    const candidate = found === undefined ? undefined : candidatesOf(found).find((each) => each.installId === input.installId);
+    const found = storage.db
+      .prepare(`${OWNED} WHERE c.wake_id = ? AND c.account_id = ?`)
+      .get(input.wakeId, input.accountId);
+    const candidate =
+      found === undefined
+        ? undefined
+        : candidatesOf(found).find((each) => each.installId === input.installId);
     if (found === undefined || candidate === undefined) return null;
     let row = expire(storage, found, input.nowMs);
     if (row.state === "waiting") {
-      storage.db.prepare(
-        `UPDATE sync_relay_chat_wakes SET state = 'claimed', winner_install_id = ?, winner_agent_id = ?, winner_label = ?, claimed_at_ms = ?,
+      storage.db
+        .prepare(
+          `UPDATE sync_relay_chat_wakes SET state = 'claimed', winner_install_id = ?, winner_agent_id = ?, winner_label = ?, claimed_at_ms = ?,
            change_seq = ? WHERE wake_id = ?`,
-      ).run(candidate.installId, candidate.agentId, candidate.label, input.nowMs, bump(storage, input.accountId), input.wakeId);
+        )
+        .run(
+          candidate.installId,
+          candidate.agentId,
+          candidate.label,
+          input.nowMs,
+          bump(storage, input.accountId),
+          input.wakeId,
+        );
       notifyChatWakeChange(storage, input.accountId);
-      row = storage.db.prepare("SELECT * FROM sync_relay_chat_wakes WHERE wake_id = ?").get(input.wakeId)!;
+      row = storage.db
+        .prepare("SELECT * FROM sync_relay_chat_wakes WHERE wake_id = ?")
+        .get(input.wakeId)!;
     }
     return { won: row.winner_install_id === input.installId, wake: viewOf(row) };
   });
@@ -409,18 +592,33 @@ export function claimChatWake(storage: StorageContext, input: {
  * unconfirmed. Null when the account has no such wake in a workspace it owns,
  * or this computer didn't win it.
  */
-export function confirmChatWakeQueued(storage: StorageContext, input: {
-  accountId: string; wakeId: string; installId: string; nowMs: number;
-}): ChatWakeView | null {
+export function confirmChatWakeQueued(
+  storage: StorageContext,
+  input: {
+    accountId: string;
+    wakeId: string;
+    installId: string;
+    nowMs: number;
+  },
+): ChatWakeView | null {
   return storage.tx(() => {
-    const row = storage.db.prepare(`${OWNED} WHERE c.wake_id = ? AND c.account_id = ?`).get(input.wakeId, input.accountId);
+    const row = storage.db
+      .prepare(`${OWNED} WHERE c.wake_id = ? AND c.account_id = ?`)
+      .get(input.wakeId, input.accountId);
     if (row === undefined || row.winner_install_id !== input.installId) return null;
     if (row.state === "claimed" || row.state === "unconfirmed") {
-      storage.db.prepare("UPDATE sync_relay_chat_wakes SET state = 'queued', ended_at_ms = ?, change_seq = ? WHERE wake_id = ?")
+      storage.db
+        .prepare(
+          "UPDATE sync_relay_chat_wakes SET state = 'queued', ended_at_ms = ?, change_seq = ? WHERE wake_id = ?",
+        )
         .run(input.nowMs, bump(storage, input.accountId), input.wakeId);
       notifyChatWakeChange(storage, input.accountId);
     }
-    return viewOf(storage.db.prepare("SELECT * FROM sync_relay_chat_wakes WHERE wake_id = ?").get(input.wakeId)!);
+    return viewOf(
+      storage.db
+        .prepare("SELECT * FROM sync_relay_chat_wakes WHERE wake_id = ?")
+        .get(input.wakeId)!,
+    );
   });
 }
 
@@ -433,31 +631,63 @@ export function confirmChatWakeQueued(storage: StorageContext, input: {
  * generation keeps the candidates, less an unconfirmed winner, and is never
  * made with none. The old row stays as it is.
  */
-export function retryChatWake(storage: StorageContext, input: {
-  accountId: string; workspaceId: string; operationId: string; wakeId: string; nowMs: number;
-}): ChatWakeRetry {
+export function retryChatWake(
+  storage: StorageContext,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    operationId: string;
+    wakeId: string;
+    nowMs: number;
+  },
+): ChatWakeRetry {
   const { accountId, workspaceId, operationId, nowMs } = input;
   return storage.tx(() => {
-    const owned = (wakeId: string) => storage.db.prepare(`${OWNED} WHERE c.wake_id = ? AND c.account_id = ?`).get(wakeId, accountId);
-    const bound = storage.db.prepare("SELECT * FROM sync_relay_chat_wake_retries WHERE account_id = ? AND operation_id = ?").get(accountId, operationId);
+    const owned = (wakeId: string) =>
+      storage.db
+        .prepare(`${OWNED} WHERE c.wake_id = ? AND c.account_id = ?`)
+        .get(wakeId, accountId);
+    const bound = storage.db
+      .prepare(
+        "SELECT * FROM sync_relay_chat_wake_retries WHERE account_id = ? AND operation_id = ?",
+      )
+      .get(accountId, operationId);
     if (bound !== undefined) {
-      if (bound.workspace_id !== workspaceId || bound.wake_id !== input.wakeId) return { kind: "mismatch" };
+      if (bound.workspace_id !== workspaceId || bound.wake_id !== input.wakeId)
+        return { kind: "mismatch" };
       const answered = owned(String(bound.next_wake_id));
-      return answered === undefined ? { kind: "too-old" } : { kind: "retried", wake: viewOf(answered) };
+      return answered === undefined
+        ? { kind: "too-old" }
+        : { kind: "retried", wake: viewOf(answered) };
     }
-    if (storage.db.prepare("SELECT 1 FROM sync_relay_account_operations WHERE account_id = ? AND operation_id = ?").get(accountId, operationId)) {
+    if (
+      storage.db
+        .prepare(
+          "SELECT 1 FROM sync_relay_account_operations WHERE account_id = ? AND operation_id = ?",
+        )
+        .get(accountId, operationId)
+    ) {
       return { kind: "mismatch" };
     }
-    const found = storage.db.prepare(`${OWNED} WHERE c.wake_id = ? AND c.account_id = ? AND c.workspace_id = ?`)
+    const found = storage.db
+      .prepare(`${OWNED} WHERE c.wake_id = ? AND c.account_id = ? AND c.workspace_id = ?`)
       .get(input.wakeId, accountId, workspaceId);
     if (found === undefined) return { kind: "missing" };
     const generation = Number(found.generation) + 1;
-    const nextId = chatWakeId(accountId, workspaceId, String(found.message_id), String(found.target), generation);
+    const nextId = chatWakeId(
+      accountId,
+      workspaceId,
+      String(found.message_id),
+      String(found.target),
+      generation,
+    );
     const answer = (): ChatWakeRetry => {
-      storage.db.prepare(
-        `INSERT INTO sync_relay_chat_wake_retries (account_id, operation_id, workspace_id, wake_id, next_wake_id, created_at_ms)
+      storage.db
+        .prepare(
+          `INSERT INTO sync_relay_chat_wake_retries (account_id, operation_id, workspace_id, wake_id, next_wake_id, created_at_ms)
          VALUES (?, ?, ?, ?, ?, ?)`,
-      ).run(accountId, operationId, workspaceId, input.wakeId, nextId, nowMs);
+        )
+        .run(accountId, operationId, workspaceId, input.wakeId, nextId, nowMs);
       return { kind: "retried", wake: viewOf(owned(nextId)!) };
     };
     if (owned(nextId) !== undefined) return answer();
@@ -469,16 +699,39 @@ export function retryChatWake(storage: StorageContext, input: {
       `SELECT 1 FROM sync_relay_chat_runners WHERE workspace_id = ? AND account_id = ? AND install_id = ? AND agent_id = ?
          AND enabled = 1 AND updated_at_ms > ?`,
     );
-    const candidates = candidatesOf(source).filter((each) =>
-      (source.state !== "unconfirmed" || each.installId !== source.winner_install_id) &&
-      leased.get(workspaceId, accountId, each.installId, each.agentId, nowMs - CHAT_RUNNER_LEASE_MS) !== undefined);
+    const candidates = candidatesOf(source).filter(
+      (each) =>
+        (source.state !== "unconfirmed" || each.installId !== source.winner_install_id) &&
+        leased.get(
+          workspaceId,
+          accountId,
+          each.installId,
+          each.agentId,
+          nowMs - CHAT_RUNNER_LEASE_MS,
+        ) !== undefined,
+    );
     if (candidates.length === 0) return { kind: "refused" };
-    storage.db.prepare(
-      `INSERT INTO sync_relay_chat_wakes (wake_id, account_id, workspace_id, operation_id, message_id, thread_id, target, generation,
+    storage.db
+      .prepare(
+        `INSERT INTO sync_relay_chat_wakes (wake_id, account_id, workspace_id, operation_id, message_id, thread_id, target, generation,
          candidates_json, state, prerequisite_message_id, change_seq, created_at_ms, waiting_since_ms)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'waiting', ?, ?, ?, ?)`,
-    ).run(nextId, accountId, workspaceId, source.operation_id, source.message_id, source.thread_id, source.target, generation,
-      JSON.stringify(candidates), source.prerequisite_message_id, bump(storage, accountId), nowMs, nowMs);
+      )
+      .run(
+        nextId,
+        accountId,
+        workspaceId,
+        source.operation_id,
+        source.message_id,
+        source.thread_id,
+        source.target,
+        generation,
+        JSON.stringify(candidates),
+        source.prerequisite_message_id,
+        bump(storage, accountId),
+        nowMs,
+        nowMs,
+      );
     notifyChatWakeChange(storage, accountId);
     return answer();
   });
@@ -491,15 +744,26 @@ export function retryChatWake(storage: StorageContext, input: {
  */
 export function sweepChatWakes(storage: StorageContext, nowMs: number): number {
   return storage.tx(() => {
-    const due = storage.db.prepare(
-      `SELECT * FROM (SELECT * FROM sync_relay_chat_wakes WHERE state = 'waiting' AND waiting_since_ms <= ? LIMIT ?)
+    const due = storage.db
+      .prepare(
+        `SELECT * FROM (SELECT * FROM sync_relay_chat_wakes WHERE state = 'waiting' AND waiting_since_ms <= ? LIMIT ?)
        UNION ALL SELECT * FROM (SELECT * FROM sync_relay_chat_wakes WHERE state = 'claimed' AND claimed_at_ms <= ? LIMIT ?)`,
-    ).all(nowMs - CHAT_WAKE_CLAIM_MS, CHAT_WAKE_SWEEP_BATCH, nowMs - CHAT_WAKE_CONFIRM_MS, CHAT_WAKE_SWEEP_BATCH);
+      )
+      .all(
+        nowMs - CHAT_WAKE_CLAIM_MS,
+        CHAT_WAKE_SWEEP_BATCH,
+        nowMs - CHAT_WAKE_CONFIRM_MS,
+        CHAT_WAKE_SWEEP_BATCH,
+      );
     for (const row of due) expire(storage, row, nowMs);
-    const deleted = Number(storage.db.prepare(
-      `DELETE FROM sync_relay_chat_wakes WHERE rowid IN (SELECT rowid FROM sync_relay_chat_wakes
+    const deleted = Number(
+      storage.db
+        .prepare(
+          `DELETE FROM sync_relay_chat_wakes WHERE rowid IN (SELECT rowid FROM sync_relay_chat_wakes
          WHERE ended_at_ms IS NOT NULL AND ended_at_ms < ? LIMIT ?)`,
-    ).run(nowMs - CHAT_WAKE_KEEP_MS, CHAT_WAKE_SWEEP_BATCH).changes);
+        )
+        .run(nowMs - CHAT_WAKE_KEEP_MS, CHAT_WAKE_SWEEP_BATCH).changes,
+    );
     return due.length + deleted;
   });
 }

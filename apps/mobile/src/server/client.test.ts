@@ -3,14 +3,29 @@ import { listWorkspaces } from "./api";
 import { createServerClient, requestGenerations, ServerError } from "./client";
 import { deferred, testServer, type Answer } from "./testServer";
 
-const WORKSPACES = { ok: true, workspaces: [{ workspaceId: "ws-1", name: "Trip", canOpen: true, showOnPhone: true }] };
+const WORKSPACES = {
+  ok: true,
+  workspaces: [{ workspaceId: "ws-1", name: "Trip", canOpen: true, showOnPhone: true }],
+};
 
-function client(server: ReturnType<typeof testServer>, options: { signal?: AbortSignal; onSignedOut?: () => void; timeoutMs?: number } = {}) {
-  return createServerClient({ origin: server.origin, token: "tok", fetch: server.fetch, signal: options.signal ?? new AbortController().signal, ...options });
+function client(
+  server: ReturnType<typeof testServer>,
+  options: { signal?: AbortSignal; onSignedOut?: () => void; timeoutMs?: number } = {},
+) {
+  return createServerClient({
+    origin: server.origin,
+    token: "tok",
+    fetch: server.fetch,
+    signal: options.signal ?? new AbortController().signal,
+    ...options,
+  });
 }
 
 async function problemOf(promise: Promise<unknown>): Promise<string> {
-  const error = await promise.then(() => null, (cause: unknown) => cause);
+  const error = await promise.then(
+    () => null,
+    (cause: unknown) => cause,
+  );
   expect(error).toBeInstanceOf(ServerError);
   return (error as ServerError).problem;
 }
@@ -19,7 +34,9 @@ describe("the server client", () => {
   it("sends the Bearer token without cookies, and reads a checked answer", async () => {
     const server = testServer();
     server.on("GET", "/sync/account/workspaces", { status: 200, body: WORKSPACES });
-    expect(await listWorkspaces(client(server))).toEqual([{ workspaceId: "ws-1", name: "Trip", canOpen: true, showOnPhone: true }]);
+    expect(await listWorkspaces(client(server))).toEqual([
+      { workspaceId: "ws-1", name: "Trip", canOpen: true, showOnPhone: true },
+    ]);
     expect(server.calls[0]!.headers.authorization).toBe("Bearer tok");
   });
 
@@ -72,7 +89,9 @@ describe("the server client", () => {
     const server = testServer();
     const signIn = new AbortController();
     signIn.abort();
-    expect(await problemOf(listWorkspaces(client(server, { signal: signIn.signal })))).toBe("cancelled");
+    expect(await problemOf(listWorkspaces(client(server, { signal: signIn.signal })))).toBe(
+      "cancelled",
+    );
     expect(server.calls).toHaveLength(0);
   });
 });

@@ -1,9 +1,13 @@
-import { liveAuthorIdentity, parseLiveAuthorContext, parseLiveAuthorSnapshot, type LiveAuthorContext, type LiveAuthorSnapshot, type LiveAuthorEntry } from "./liveAuthorship.js";
-import { parseHostEpoch, type HostEpoch } from "./hostControl.js";
 import {
-  parseLiveObjectBinding,
-  type LiveObjectBinding,
-} from "./liveObjectBinding.js";
+  liveAuthorIdentity,
+  parseLiveAuthorContext,
+  parseLiveAuthorSnapshot,
+  type LiveAuthorContext,
+  type LiveAuthorSnapshot,
+  type LiveAuthorEntry,
+} from "./liveAuthorship.js";
+import { parseHostEpoch, type HostEpoch } from "./hostControl.js";
+import { parseLiveObjectBinding, type LiveObjectBinding } from "./liveObjectBinding.js";
 
 export const LIVE_UPDATE_IDENTIFIER_MAX_BYTES = 512;
 export const LIVE_UPDATE_SHA256_HEX_LENGTH = 64;
@@ -108,21 +112,39 @@ export interface LiveCheckpointAuthorCoverage {
   readonly deletionRanges: readonly LiveUpdateStructRange[];
 }
 /** Retained coverage must already be canonical; a damaged row is refused, not repaired. */
-export function parseLiveCheckpointCoverage(value: unknown): readonly LiveCheckpointAuthorCoverage[] {
+export function parseLiveCheckpointCoverage(
+  value: unknown,
+): readonly LiveCheckpointAuthorCoverage[] {
   return checkpointCoverage(value, canonicalRanges);
 }
-function checkpointCoverage(value: unknown, parseRanges: typeof parseLiveUpdateStructRanges): readonly LiveCheckpointAuthorCoverage[] {
-  if (!Array.isArray(value) || value.length > 1024) throw new TypeError("Invalid checkpoint coverage.");
+function checkpointCoverage(
+  value: unknown,
+  parseRanges: typeof parseLiveUpdateStructRanges,
+): readonly LiveCheckpointAuthorCoverage[] {
+  if (!Array.isArray(value) || value.length > 1024)
+    throw new TypeError("Invalid checkpoint coverage.");
   const identities = new Set<string>();
-  const coverage = Array.from(value, item => {
-    const entry = exactRecord(item, "Checkpoint author coverage", ["author", "structRanges", "deletionRanges"]);
+  const coverage = Array.from(value, (item) => {
+    const entry = exactRecord(item, "Checkpoint author coverage", [
+      "author",
+      "structRanges",
+      "deletionRanges",
+    ]);
     const author = parseLiveAuthorSnapshot([entry.author])[0]!;
     const identity = liveAuthorIdentity(author);
     if (identities.has(identity)) throw new TypeError("Duplicate checkpoint author.");
     identities.add(identity);
-    return { author, structRanges: parseRanges(entry.structRanges), deletionRanges: parseRanges(entry.deletionRanges) };
+    return {
+      author,
+      structRanges: parseRanges(entry.structRanges),
+      deletionRanges: parseRanges(entry.deletionRanges),
+    };
   });
-  if (new TextEncoder().encode(JSON.stringify(coverage.map(entry => entry.author))).byteLength > 128 * 1024) throw new TypeError("Checkpoint authors exceed byte bound.");
+  if (
+    new TextEncoder().encode(JSON.stringify(coverage.map((entry) => entry.author))).byteLength >
+    128 * 1024
+  )
+    throw new TypeError("Checkpoint authors exceed byte bound.");
   return coverage;
 }
 export interface AdmittedLiveUpdateMetadata {
@@ -156,35 +178,16 @@ export type LiveUpdateAcceptResult =
   | { readonly kind: "refused"; readonly reason: LiveUpdateRefusal }
   | { readonly kind: "retry"; readonly reason: LiveUpdateRetry };
 
-const DOCUMENT_KEY_FIELDS = [
-  "workspaceId",
-  "mainVersionId",
-  "objectId",
-  "lineageClaimId",
-] as const;
-const AUTHORITY_FIELDS = [
-  "principalKind",
-  "principalId",
-  "grantId",
-  "grantGeneration",
-] as const;
-const SUBMISSION_METADATA_FIELDS = [
-  "deliveryId",
-  "updateDigest",
-  "binding",
-] as const;
+const DOCUMENT_KEY_FIELDS = ["workspaceId", "mainVersionId", "objectId", "lineageClaimId"] as const;
+const AUTHORITY_FIELDS = ["principalKind", "principalId", "grantId", "grantGeneration"] as const;
+const SUBMISSION_METADATA_FIELDS = ["deliveryId", "updateDigest", "binding"] as const;
 const RECEIPT_FIELDS = [
   "deliveryId",
   "updateDigest",
   "journalCursor",
   "acceptingHostEpoch",
 ] as const;
-const ACCEPTED_FIELDS = [
-  "receipt",
-  "binding",
-  "authority",
-  "receivedAtMs",
-] as const;
+const ACCEPTED_FIELDS = ["receipt", "binding", "authority", "receivedAtMs"] as const;
 const STRUCT_RANGE_FIELDS = ["clientId", "startClock", "endClock"] as const;
 const AGENT_DECLARATION_FIELDS = ["agentId", "onBehalfOf", "depth"] as const;
 const ADMITTED_METADATA_FIELDS = ["accepted", "firstSeen"] as const;
@@ -204,10 +207,7 @@ function exactRecord(
   }
   const record = value as Record<string, unknown>;
   const keys = Object.keys(record);
-  if (
-    keys.length !== fields.length ||
-    keys.some((key) => !fields.includes(key))
-  ) {
+  if (keys.length !== fields.length || keys.some((key) => !fields.includes(key))) {
     throw new TypeError(`${name} must contain exactly its defined fields.`);
   }
   return record;
@@ -241,17 +241,8 @@ function nonNegativeSafeInteger(value: unknown, name: string): number {
   return value as number;
 }
 
-function boundedInteger(
-  value: unknown,
-  name: string,
-  minimum: number,
-  maximum: number,
-): number {
-  if (
-    !Number.isSafeInteger(value) ||
-    (value as number) < minimum ||
-    (value as number) > maximum
-  ) {
+function boundedInteger(value: unknown, name: string, minimum: number, maximum: number): number {
+  if (!Number.isSafeInteger(value) || (value as number) < minimum || (value as number) > maximum) {
     throw new TypeError(`${name} must be an integer from ${minimum} through ${maximum}.`);
   }
   return value as number;
@@ -264,10 +255,7 @@ function nonEmptyUpdateBytes(value: unknown, name: string): Uint8Array {
   return value;
 }
 
-export function parseLiveUpdateIdentifier(
-  value: unknown,
-  name = "live-update identifier",
-): string {
+export function parseLiveUpdateIdentifier(value: unknown, name = "live-update identifier"): string {
   if (typeof value !== "string" || value.length === 0) {
     throw new TypeError(`${name} must be a non-empty string.`);
   }
@@ -307,11 +295,7 @@ export function parseLiveDocumentKey(value: unknown): LiveDocumentKey {
 export function parseServerDerivedLiveUpdateAuthority(
   value: unknown,
 ): ServerDerivedLiveUpdateAuthority {
-  const record = exactRecord(
-    value,
-    "ServerDerivedLiveUpdateAuthority",
-    AUTHORITY_FIELDS,
-  );
+  const record = exactRecord(value, "ServerDerivedLiveUpdateAuthority", AUTHORITY_FIELDS);
   const principalKind = record.principalKind;
   const principalId = parseLiveUpdateIdentifier(record.principalId, "principalId");
   if (principalKind === "owner" || principalKind === "personal") {
@@ -346,10 +330,19 @@ export function parseServerDerivedLiveUpdateAuthority(
  * check, because the relay stored updates naming a personal agent before it
  * refused them.
  */
-export function admitsLiveAuthorship(authority: ServerDerivedLiveUpdateAuthority, authors: LiveAuthorSnapshot): boolean {
-  if (authority.principalKind !== "personal") return !authors.some(author => author.kind === "agent" && author.agentId.startsWith("p-"));
+export function admitsLiveAuthorship(
+  authority: ServerDerivedLiveUpdateAuthority,
+  authors: LiveAuthorSnapshot,
+): boolean {
+  if (authority.principalKind !== "personal")
+    return !authors.some((author) => author.kind === "agent" && author.agentId.startsWith("p-"));
   const [author, ...others] = authors;
-  return others.length === 0 && author?.kind === "agent" && author.agentId === authority.principalId && author.onBehalfOf !== undefined;
+  return (
+    others.length === 0 &&
+    author?.kind === "agent" &&
+    author.agentId === authority.principalId &&
+    author.onBehalfOf !== undefined
+  );
 }
 
 /** The engine's bounds: an identifier with no Unicode control character. */
@@ -371,19 +364,20 @@ export function parseAgentDeclaration(value: unknown): AgentDeclaration {
   };
 }
 
-export function parseLiveUpdateSubmissionMetadata(
-  value: unknown,
-): LiveUpdateSubmissionMetadata {
-  const record = exactRecord(
-    value,
-    "LiveUpdateSubmissionMetadata",
-    [...SUBMISSION_METADATA_FIELDS, ...(typeof value === "object" && value !== null && Object.hasOwn(value, "authorContext") ? ["authorContext"] : [])],
-  );
+export function parseLiveUpdateSubmissionMetadata(value: unknown): LiveUpdateSubmissionMetadata {
+  const record = exactRecord(value, "LiveUpdateSubmissionMetadata", [
+    ...SUBMISSION_METADATA_FIELDS,
+    ...(typeof value === "object" && value !== null && Object.hasOwn(value, "authorContext")
+      ? ["authorContext"]
+      : []),
+  ]);
   return {
     deliveryId: parseLiveUpdateIdentifier(record.deliveryId, "deliveryId"),
     updateDigest: parseLiveUpdateDigest(record.updateDigest),
     binding: parseLiveObjectBinding(record.binding),
-    ...(Object.hasOwn(record, "authorContext") ? {authorContext: parseLiveAuthorContext(record.authorContext)} : {}),
+    ...(Object.hasOwn(record, "authorContext")
+      ? { authorContext: parseLiveAuthorContext(record.authorContext) }
+      : {}),
   };
 }
 
@@ -416,9 +410,7 @@ export function parseLiveUpdateReceipt(value: unknown): LiveUpdateReceipt {
   return parseReceiptFields(exactRecord(value, "LiveUpdateReceipt", RECEIPT_FIELDS));
 }
 
-export function parseRelayAcceptedLiveUpdate(
-  value: unknown,
-): RelayAcceptedLiveUpdate {
+export function parseRelayAcceptedLiveUpdate(value: unknown): RelayAcceptedLiveUpdate {
   const record = exactRecord(value, "RelayAcceptedLiveUpdate", ACCEPTED_FIELDS);
   const authority = parseServerDerivedLiveUpdateAuthority(record.authority);
   return {
@@ -431,33 +423,21 @@ export function parseRelayAcceptedLiveUpdate(
 
 export function parseLiveUpdateStructRange(value: unknown): LiveUpdateStructRange {
   const record = exactRecord(value, "LiveUpdateStructRange", STRUCT_RANGE_FIELDS);
-  const clientId = boundedInteger(
-    record.clientId,
-    "clientId",
-    0,
-    LIVE_UPDATE_YJS_CLIENT_ID_MAX,
-  );
+  const clientId = boundedInteger(record.clientId, "clientId", 0, LIVE_UPDATE_YJS_CLIENT_ID_MAX);
   const startClock = boundedInteger(
     record.startClock,
     "startClock",
     0,
     LIVE_UPDATE_YJS_START_CLOCK_MAX,
   );
-  const endClock = boundedInteger(
-    record.endClock,
-    "endClock",
-    1,
-    LIVE_UPDATE_YJS_END_CLOCK_MAX,
-  );
+  const endClock = boundedInteger(record.endClock, "endClock", 1, LIVE_UPDATE_YJS_END_CLOCK_MAX);
   if (startClock >= endClock) {
     throw new TypeError("startClock must be smaller than endClock.");
   }
   return { clientId, startClock, endClock };
 }
 
-export function parseLiveUpdateStructRanges(
-  value: unknown,
-): readonly LiveUpdateStructRange[] {
+export function parseLiveUpdateStructRanges(value: unknown): readonly LiveUpdateStructRange[] {
   if (!Array.isArray(value)) {
     throw new TypeError("firstSeen must be an array.");
   }
@@ -467,8 +447,7 @@ export function parseLiveUpdateStructRanges(
     }
   }
   const sorted = Array.from(value, parseLiveUpdateStructRange).sort(
-    (left, right) =>
-      left.clientId - right.clientId || left.startClock - right.startClock,
+    (left, right) => left.clientId - right.clientId || left.startClock - right.startClock,
   );
   const merged: LiveUpdateStructRange[] = [];
   for (const range of sorted) {
@@ -490,14 +469,14 @@ export function parseLiveUpdateStructRanges(
   return merged;
 }
 
-export function parseAdmittedLiveUpdateMetadata(
-  value: unknown,
-): AdmittedLiveUpdateMetadata {
+export function parseAdmittedLiveUpdateMetadata(value: unknown): AdmittedLiveUpdateMetadata {
   return admittedMetadata(value, parseLiveUpdateStructRanges);
 }
 
 /** Admitted wire and retained evidence must already have sorted, disjoint, non-adjacent ranges. */
-export function parseCanonicalAdmittedLiveUpdateMetadata(value: unknown): AdmittedLiveUpdateMetadata {
+export function parseCanonicalAdmittedLiveUpdateMetadata(
+  value: unknown,
+): AdmittedLiveUpdateMetadata {
   return admittedMetadata(value, canonicalRanges);
 }
 
@@ -509,25 +488,50 @@ function canonicalRanges(value: unknown): readonly LiveUpdateStructRange[] {
       if (!Object.hasOwn(value, index)) throw new TypeError();
       const range = parseLiveUpdateStructRange(value[index]);
       const prior = ranges.at(-1);
-      if (prior && (range.clientId < prior.clientId ||
-        (range.clientId === prior.clientId && range.startClock <= prior.endClock))) throw new TypeError();
+      if (
+        prior &&
+        (range.clientId < prior.clientId ||
+          (range.clientId === prior.clientId && range.startClock <= prior.endClock))
+      )
+        throw new TypeError();
       ranges.push(range);
     }
     return ranges;
-  } catch { throw new TypeError("Invalid live application range."); }
+  } catch {
+    throw new TypeError("Invalid live application range.");
+  }
 }
 
-function admittedMetadata(value: unknown, parseRanges: typeof parseLiveUpdateStructRanges): AdmittedLiveUpdateMetadata {
-  const record = exactRecord(
-    value,
-    "AdmittedLiveUpdateMetadata",
-    [...ADMITTED_METADATA_FIELDS, ...(typeof value === "object" && value !== null && Object.hasOwn(value, "canonicalVersion") ? ["canonicalVersion", "authorSnapshot", "firstSeenDeletes", ...(Object.hasOwn(value, "checkpointCoverage") ? ["checkpointCoverage"] : [])] : [])],
-  );
-  if (Object.hasOwn(record, "canonicalVersion") && record.canonicalVersion !== 2) throw new TypeError("Unknown canonical version.");
+function admittedMetadata(
+  value: unknown,
+  parseRanges: typeof parseLiveUpdateStructRanges,
+): AdmittedLiveUpdateMetadata {
+  const record = exactRecord(value, "AdmittedLiveUpdateMetadata", [
+    ...ADMITTED_METADATA_FIELDS,
+    ...(typeof value === "object" && value !== null && Object.hasOwn(value, "canonicalVersion")
+      ? [
+          "canonicalVersion",
+          "authorSnapshot",
+          "firstSeenDeletes",
+          ...(Object.hasOwn(value, "checkpointCoverage") ? ["checkpointCoverage"] : []),
+        ]
+      : []),
+  ]);
+  if (Object.hasOwn(record, "canonicalVersion") && record.canonicalVersion !== 2)
+    throw new TypeError("Unknown canonical version.");
   return {
     accepted: parseRelayAcceptedLiveUpdate(record.accepted),
     firstSeen: parseRanges(record.firstSeen),
-    ...(record.canonicalVersion === 2 ? {canonicalVersion: 2 as const, authorSnapshot: parseLiveAuthorSnapshot(record.authorSnapshot), firstSeenDeletes: parseRanges(record.firstSeenDeletes), ...(Object.hasOwn(record, "checkpointCoverage") ? {checkpointCoverage: checkpointCoverage(record.checkpointCoverage, parseRanges)} : {})} : {}),
+    ...(record.canonicalVersion === 2
+      ? {
+          canonicalVersion: 2 as const,
+          authorSnapshot: parseLiveAuthorSnapshot(record.authorSnapshot),
+          firstSeenDeletes: parseRanges(record.firstSeenDeletes),
+          ...(Object.hasOwn(record, "checkpointCoverage")
+            ? { checkpointCoverage: checkpointCoverage(record.checkpointCoverage, parseRanges) }
+            : {}),
+        }
+      : {}),
   };
 }
 
@@ -541,24 +545,15 @@ export function parseAdmittedLiveUpdate(
   };
 }
 
-export function parseLiveUpdateHostApplicationAck(
-  value: unknown,
-): LiveUpdateHostApplicationAck {
-  const record = exactRecord(
-    value,
-    "LiveUpdateHostApplicationAck",
-    APPLICATION_ACK_FIELDS,
-  );
+export function parseLiveUpdateHostApplicationAck(value: unknown): LiveUpdateHostApplicationAck {
+  const record = exactRecord(value, "LiveUpdateHostApplicationAck", APPLICATION_ACK_FIELDS);
   const applicationReplayed = record.applicationReplayed;
   if (typeof applicationReplayed !== "boolean") {
     throw new TypeError("applicationReplayed must be a boolean.");
   }
   return {
     ...parseReceiptFields(record),
-    localYDocSequence: positiveSafeInteger(
-      record.localYDocSequence,
-      "localYDocSequence",
-    ),
+    localYDocSequence: positiveSafeInteger(record.localYDocSequence, "localYDocSequence"),
     applicationReplayed,
   };
 }
@@ -583,11 +578,7 @@ export function parseLiveUpdateAcceptResult(value: unknown): LiveUpdateAcceptRes
   }
   const candidate = value as Record<string, unknown>;
   if (candidate.kind === "accepted") {
-    const record = exactRecord(
-      value,
-      "LiveUpdateAcceptResult",
-      ["kind", "receipt", "replayed"],
-    );
+    const record = exactRecord(value, "LiveUpdateAcceptResult", ["kind", "receipt", "replayed"]);
     const replayed = record.replayed;
     if (typeof replayed !== "boolean") {
       throw new TypeError("replayed must be a boolean.");

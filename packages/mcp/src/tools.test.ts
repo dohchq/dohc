@@ -38,11 +38,7 @@ import {
   workspaceStatus,
   type ToolContext,
 } from "./tools";
-import {
-  DOHC_METADATA_GUARD,
-  discoverSites,
-  notARealFolderRefusal,
-} from "@dohc/workspace-core";
+import { DOHC_METADATA_GUARD, discoverSites, notARealFolderRefusal } from "@dohc/workspace-core";
 import { DEFAULT_WORKSPACE_SETTINGS } from "@dohc/workspace-contracts/workspace-settings";
 
 // A path check must be able to fail on demand, on a host where a real
@@ -98,8 +94,16 @@ const emptyDesktopHistoryRequest: NonNullable<ToolContext["request"]> = async (r
     for (const file of request.args.files) {
       const target = join(request.args.cwd, file.path);
       const previous = await readFile(target).catch(() => null);
-      const currentSha256 = createHash("sha256").update(previous ?? Buffer.alloc(0)).digest("hex");
-      if (file.expectedSha256 !== undefined && file.expectedSha256 !== currentSha256) return { ok: false, reason: "expectedSha256 does not match current file", written, currentSha256 };
+      const currentSha256 = createHash("sha256")
+        .update(previous ?? Buffer.alloc(0))
+        .digest("hex");
+      if (file.expectedSha256 !== undefined && file.expectedSha256 !== currentSha256)
+        return {
+          ok: false,
+          reason: "expectedSha256 does not match current file",
+          written,
+          currentSha256,
+        };
       if (file.createOnly && previous) return { ok: false, reason: "File already exists", written };
       await mkdir(dirname(target), { recursive: true });
       await writeFile(target, Buffer.from(file.contentBase64, "base64"));
@@ -110,12 +114,27 @@ const emptyDesktopHistoryRequest: NonNullable<ToolContext["request"]> = async (r
   // The desktop records the move or delete in History; here only the disk changes.
   if (request.verb === "fileMove") {
     await mkdir(dirname(join(request.args.cwd, request.args.toPath)), { recursive: true });
-    await rename(join(request.args.cwd, request.args.fromPath), join(request.args.cwd, request.args.toPath));
-    return { ok: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", undo: { available: true }, fromPath: request.args.fromPath, toPath: request.args.toPath };
+    await rename(
+      join(request.args.cwd, request.args.fromPath),
+      join(request.args.cwd, request.args.toPath),
+    );
+    return {
+      ok: true,
+      operationId: "dohc-operation:11111111-1111-4111-8111-111111111111",
+      undo: { available: true },
+      fromPath: request.args.fromPath,
+      toPath: request.args.toPath,
+    };
   }
   if (request.verb === "fileDelete") {
     await rm(join(request.args.cwd, request.args.path), { recursive: true });
-    return { ok: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", undo: { available: true }, path: request.args.path, trashed: true };
+    return {
+      ok: true,
+      operationId: "dohc-operation:11111111-1111-4111-8111-111111111111",
+      undo: { available: true },
+      path: request.args.path,
+      trashed: true,
+    };
   }
   if (request.verb === "moments") {
     return {
@@ -274,15 +293,17 @@ describe("mcp tool path containment", () => {
       for (const evil of TRAVERSALS) {
         await expect(listWorkspaceFiles(ctx, { path: evil })).resolves.toMatchObject({ ok: false });
         await expect(readWorkspaceFile(ctx, { path: evil })).resolves.toMatchObject({ ok: false });
-        await expect(searchWorkspaceFiles(ctx, { path: evil, query: "ok" })).resolves.toMatchObject({
-          ok: false,
-        });
+        await expect(searchWorkspaceFiles(ctx, { path: evil, query: "ok" })).resolves.toMatchObject(
+          {
+            ok: false,
+          },
+        );
         await expect(
           writeWorkspaceFile(ctx, { path: evil, content: "nope" }),
         ).resolves.toMatchObject({ ok: false });
-        await expect(
-          createWorkspaceDirectory(ctx, { path: evil }),
-        ).resolves.toMatchObject({ ok: false });
+        await expect(createWorkspaceDirectory(ctx, { path: evil })).resolves.toMatchObject({
+          ok: false,
+        });
         await expect(
           moveWorkspacePath(ctx, { fromPath: "ok.txt", toPath: evil }),
         ).resolves.toMatchObject({ ok: false });
@@ -386,9 +407,7 @@ describe("mcp tool path containment", () => {
       // filesystems — the guard must hold for them too, not just the
       // canonical casing.
       for (const appRoot of ["shared-with-me/alex/site", "Shared-With-Me/alex/site"]) {
-        for (const run of [
-          () => testApp(ctx, { appRoot }),
-        ]) {
+        for (const run of [() => testApp(ctx, { appRoot })]) {
           await expect(run()).resolves.toMatchObject({
             ok: false,
             reason: expect.stringContaining("mounted share"),
@@ -407,9 +426,10 @@ describe("mcp tool path containment", () => {
       // user: what is at the path, what it must be, and the way out.
       const refusal =
         "dohc could not open this workspace's .dohc folder. A link is at .dohc, which must be a real folder. Remove or rename that link. Then retry.";
-      await expect(
-        createWorkspaceDirectory(ctx, { path: "notes" }),
-      ).resolves.toMatchObject({ ok: false, reason: refusal });
+      await expect(createWorkspaceDirectory(ctx, { path: "notes" })).resolves.toMatchObject({
+        ok: false,
+        reason: refusal,
+      });
       await expect(stat(join(ctx.root, "notes"))).rejects.toThrow();
 
       await rm(outside, { recursive: true, force: true });
@@ -424,9 +444,7 @@ describe("mcp tools operate on allowed paths", () => {
         join(ctx.home, "dohc-workspaces.json"),
         JSON.stringify({
           version: 1,
-          workspaces: [
-            { workspaceId: "ws-a", rootPath: "/x/a", kind: "personal", mode: "local" },
-          ],
+          workspaces: [{ workspaceId: "ws-a", rootPath: "/x/a", kind: "personal", mode: "local" }],
         }),
       );
       const result = await listWorkspaces(ctx);
@@ -449,27 +467,64 @@ describe("mcp tools operate on allowed paths", () => {
   });
 
   it("workspace_status shows who paused without treating the retained binding as active sync", async () => {
-    await withWorkspace(async ctx => {
-      const syncPause = { atMs: 42, author: { kind: "agent", agentId: "Claude", onBehalfOf: "person-local", depth: 0 } };
-      await writeFile(join(ctx.home, "dohc-workspaces.json"), JSON.stringify({ version: 1, workspaces: [{
-        workspaceId: "ws-1", rootPath: ctx.root, kind: "personal", pausedRemote: { serverUrl: "https://server.test", ownerUserId: "owner" }, syncPause,
-      }] }));
-      expect(await workspaceStatus(ctx)).toMatchObject({ synced: false, scope: "local", syncPause });
+    await withWorkspace(async (ctx) => {
+      const syncPause = {
+        atMs: 42,
+        author: { kind: "agent", agentId: "Claude", onBehalfOf: "person-local", depth: 0 },
+      };
+      await writeFile(
+        join(ctx.home, "dohc-workspaces.json"),
+        JSON.stringify({
+          version: 1,
+          workspaces: [
+            {
+              workspaceId: "ws-1",
+              rootPath: ctx.root,
+              kind: "personal",
+              pausedRemote: { serverUrl: "https://server.test", ownerUserId: "owner" },
+              syncPause,
+            },
+          ],
+        }),
+      );
+      expect(await workspaceStatus(ctx)).toMatchObject({
+        synced: false,
+        scope: "local",
+        syncPause,
+      });
     });
   });
 
   it("workspace_status identifies this computer's person without an account", async () => {
-    await withWorkspace(async ctx => {
+    await withWorkspace(async (ctx) => {
       const syncPause = { atMs: 42, author: { kind: "person", personId: "local:person" } };
       await writeFile(join(ctx.home, "dohc-local-id.json"), JSON.stringify({ id: "local:person" }));
-      await writeFile(join(ctx.home, "dohc-workspaces.json"), JSON.stringify({ version: 1, workspaces: [{
-        workspaceId: "ws-1", rootPath: ctx.root, kind: "personal", pausedRemote: { serverUrl: "https://server.test", ownerUserId: "owner" }, syncPause,
-      }] }));
-      expect(await workspaceStatus(ctx)).toMatchObject({ synced: false, syncPause: { atMs: 42,
-        author: { kind: "person", personId: "local:person", self: true } } });
+      await writeFile(
+        join(ctx.home, "dohc-workspaces.json"),
+        JSON.stringify({
+          version: 1,
+          workspaces: [
+            {
+              workspaceId: "ws-1",
+              rootPath: ctx.root,
+              kind: "personal",
+              pausedRemote: { serverUrl: "https://server.test", ownerUserId: "owner" },
+              syncPause,
+            },
+          ],
+        }),
+      );
+      expect(await workspaceStatus(ctx)).toMatchObject({
+        synced: false,
+        syncPause: { atMs: 42, author: { kind: "person", personId: "local:person", self: true } },
+      });
       await writeFile(join(ctx.home, "dohc-local-id.json"), JSON.stringify({ id: "local:other" }));
       const other = await workspaceStatus(ctx);
-      expect(other.syncPause?.author).toEqual({ kind: "person", personId: "local:person", self: false });
+      expect(other.syncPause?.author).toEqual({
+        kind: "person",
+        personId: "local:person",
+        self: false,
+      });
     });
   });
   it("workspace_status reports a matching cloud credential as connected", async () => {
@@ -512,29 +567,64 @@ describe("mcp tools operate on allowed paths", () => {
   it("workspace_status reports whether Collection updates wait, which documents have kept edits and which notes wait for the server, as the desktop answers", async () => {
     await withWorkspace(async (ctx) => {
       await bindCloudWorkspace(ctx);
-      const keptEdits = [{ path: "plan.md", reason: "invalid-update", storedOn: "this-computer", incident: "outbox:delivery:0", recovery: "paused" },
-        ...["old-1:delivery:0", "old-2:delivery:0"].map(incident => ({path: "plan.md", reason: "restore-fenced",
-          storedOn: "this-computer", incident, recovery: "paused", saveOnly: true}))];
+      const keptEdits = [
+        {
+          path: "plan.md",
+          reason: "invalid-update",
+          storedOn: "this-computer",
+          incident: "outbox:delivery:0",
+          recovery: "paused",
+        },
+        ...["old-1:delivery:0", "old-2:delivery:0"].map((incident) => ({
+          path: "plan.md",
+          reason: "restore-fenced",
+          storedOn: "this-computer",
+          incident,
+          recovery: "paused",
+          saveOnly: true,
+        })),
+      ];
       const pendingShare = ["notes/waiting.md"];
       // The desktop answers from the engine's pull token: set while a pull is
       // unfinished, cleared by its terminal commit or by abandoning it.
-      for (const [pull, waiting] of [["unfinished", true], ["finished", false], ["abandoned", false]] as const) {
+      for (const [pull, waiting] of [
+        ["unfinished", true],
+        ["finished", false],
+        ["abandoned", false],
+      ] as const) {
         const asked: string[] = [];
-        const status = await workspaceStatus({ ...ctx, request: async (request) => {
-          asked.push(request.verb);
-          expect(request.args).toEqual({ cwd: ctx.root, actor: "agent" });
-          if (request.verb === "liveKeptEdits") return { ok: true, keptEdits, pendingShare };
-          if (request.verb === "sharedFilesHeld") return { ok: true, heldFiles: null };
-          if (request.verb === "syncFailure") return { ok: true, syncFailure: null };
-          if (request.verb !== "collectionsWaiting") throw new Error(`unexpected CLI verb: ${request.verb}`);
-          return { ok: true, waiting };
-        } });
-        expect(status, pull).toMatchObject({ synced: true, collectionsWaiting: waiting, keptEdits, pendingShare });
+        const status = await workspaceStatus({
+          ...ctx,
+          request: async (request) => {
+            asked.push(request.verb);
+            expect(request.args).toEqual({ cwd: ctx.root, actor: "agent" });
+            if (request.verb === "liveKeptEdits") return { ok: true, keptEdits, pendingShare };
+            if (request.verb === "sharedFilesHeld") return { ok: true, heldFiles: null };
+            if (request.verb === "syncFailure") return { ok: true, syncFailure: null };
+            if (request.verb !== "collectionsWaiting")
+              throw new Error(`unexpected CLI verb: ${request.verb}`);
+            return { ok: true, waiting };
+          },
+        });
+        expect(status, pull).toMatchObject({
+          synced: true,
+          collectionsWaiting: waiting,
+          keptEdits,
+          pendingShare,
+        });
         expect(status).not.toHaveProperty("heldFiles");
         expect(status).not.toHaveProperty("syncFailure");
-        expect(asked).toEqual(["collectionsWaiting", "liveKeptEdits", "sharedFilesHeld", "syncFailure"]);
+        expect(asked).toEqual([
+          "collectionsWaiting",
+          "liveKeptEdits",
+          "sharedFilesHeld",
+          "syncFailure",
+        ]);
       }
-      const unanswered = await workspaceStatus({ ...ctx, request: async () => ({ ok: false, reason: "engine stopped" }) });
+      const unanswered = await workspaceStatus({
+        ...ctx,
+        request: async () => ({ ok: false, reason: "engine stopped" }),
+      });
       expect(unanswered).toMatchObject({ synced: true });
       expect(unanswered).not.toHaveProperty("collectionsWaiting");
       expect(unanswered).not.toHaveProperty("keptEdits");
@@ -542,10 +632,16 @@ describe("mcp tools operate on allowed paths", () => {
       expect(unanswered).not.toHaveProperty("pendingShare");
       // A share profile holds no kept edits of its own, so it does not ask.
       const asked: string[] = [];
-      const shared = await workspaceStatus({ ...ctx, shareAccess: "edit", request: async (request) => {
-        asked.push(request.verb);
-        return request.verb === "sharedFilesHeld" ? { ok: true, heldFiles: null } : { ok: true, waiting: false };
-      } });
+      const shared = await workspaceStatus({
+        ...ctx,
+        shareAccess: "edit",
+        request: async (request) => {
+          asked.push(request.verb);
+          return request.verb === "sharedFilesHeld"
+            ? { ok: true, heldFiles: null }
+            : { ok: true, waiting: false };
+        },
+      });
       expect(shared).not.toHaveProperty("keptEdits");
       expect(asked).toEqual(["collectionsWaiting", "sharedFilesHeld"]);
     });
@@ -556,13 +652,26 @@ describe("mcp tools operate on allowed paths", () => {
       const heldFiles = {
         count: 1,
         files: [{ path: "mine.md", reason: "local-collision" }],
-        message: "mine.md already has a file from this machine. Move or rename this file to receive the shared file.",
+        message:
+          "mine.md already has a file from this machine. Move or rename this file to receive the shared file.",
       };
-      const status = await workspaceStatus({ ...ctx, shareAccess: "view", request: async (request) =>
-        request.verb === "sharedFilesHeld" ? { ok: true, heldFiles } : { ok: false, reason: "not asked" } });
+      const status = await workspaceStatus({
+        ...ctx,
+        shareAccess: "view",
+        request: async (request) =>
+          request.verb === "sharedFilesHeld"
+            ? { ok: true, heldFiles }
+            : { ok: false, reason: "not asked" },
+      });
       expect(status).toMatchObject({ heldFiles });
-      const none = await workspaceStatus({ ...ctx, shareAccess: "view", request: async (request) =>
-        request.verb === "sharedFilesHeld" ? { ok: true, heldFiles: null } : { ok: false, reason: "not asked" } });
+      const none = await workspaceStatus({
+        ...ctx,
+        shareAccess: "view",
+        request: async (request) =>
+          request.verb === "sharedFilesHeld"
+            ? { ok: true, heldFiles: null }
+            : { ok: false, reason: "not asked" },
+      });
       expect(none).not.toHaveProperty("heldFiles");
     });
   });
@@ -572,19 +681,32 @@ describe("mcp tools operate on allowed paths", () => {
       await bindCloudWorkspace(ctx);
       const syncFailure = {
         code: "conflict-wait-limit",
-        message: "Changes from another computer are waiting on the conflict in plan.md. They reached a limit, so dohc stopped receiving changes. Resolve the conflict to receive changes again.",
-        detail: "DaemonRefusalError: conflict-wait-limit: … (path plan.md, origin device-d seq 7, retained ops 1, retained bytes 536870912)",
+        message:
+          "Changes from another computer are waiting on the conflict in plan.md. They reached a limit, so dohc stopped receiving changes. Resolve the conflict to receive changes again.",
+        detail:
+          "DaemonRefusalError: conflict-wait-limit: … (path plan.md, origin device-d seq 7, retained ops 1, retained bytes 536870912)",
       };
-      const status = await workspaceStatus({ ...ctx, request: async (request) =>
-        request.verb === "syncFailure" ? { ok: true, syncFailure } : { ok: false, reason: "not asked" } });
+      const status = await workspaceStatus({
+        ...ctx,
+        request: async (request) =>
+          request.verb === "syncFailure"
+            ? { ok: true, syncFailure }
+            : { ok: false, reason: "not asked" },
+      });
       expect(status).toMatchObject({ synced: true, syncFailure });
       // A shared view's profile never asks, so it can't read the owner's paths.
       for (const shareAccess of ["view", "comment", "edit"] as const) {
         const asked: string[] = [];
-        const shared = await workspaceStatus({ ...ctx, shareAccess, request: async (request) => {
-          asked.push(request.verb);
-          return request.verb === "syncFailure" ? { ok: true, syncFailure } : { ok: false, reason: "not asked" };
-        } });
+        const shared = await workspaceStatus({
+          ...ctx,
+          shareAccess,
+          request: async (request) => {
+            asked.push(request.verb);
+            return request.verb === "syncFailure"
+              ? { ok: true, syncFailure }
+              : { ok: false, reason: "not asked" };
+          },
+        });
         expect(shared, shareAccess).not.toHaveProperty("syncFailure");
         expect(asked, shareAccess).not.toContain("syncFailure");
       }
@@ -731,8 +853,14 @@ describe("mcp tools operate on allowed paths", () => {
       if (skipped.ok) {
         expect(skipped.skipped).toEqual(
           expect.arrayContaining([
-            expect.objectContaining({ path: "big.txt", reason: expect.stringContaining("maxFileBytes") }),
-            expect.objectContaining({ path: "image.png", reason: expect.stringContaining("binary") }),
+            expect.objectContaining({
+              path: "big.txt",
+              reason: expect.stringContaining("maxFileBytes"),
+            }),
+            expect.objectContaining({
+              path: "image.png",
+              reason: expect.stringContaining("binary"),
+            }),
           ]),
         );
       }
@@ -863,47 +991,50 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
-  itDurableHistory("preserves file modes and refuses symlink targets on workspace writes", async () => {
-    await withWorkspace(async (ctx) => {
-      const modePath = join(ctx.root, "scripts/run.sh");
-      await mkdir(dirname(modePath), { recursive: true });
-      await writeFile(modePath, "old\n");
-      await chmod(modePath, 0o744);
-      // Windows has no POSIX modes (chmod only toggles the read-only bit), so
-      // pin what the platform can express: whatever stat reported before the
-      // write must survive the engine overwrite. On POSIX that value is the
-      // full 0o744 asserted below.
-      const modeBefore = (await stat(modePath)).mode & 0o777;
-      if (process.platform !== "win32") {
-        expect(modeBefore).toBe(0o744);
-      }
+  itDurableHistory(
+    "preserves file modes and refuses symlink targets on workspace writes",
+    async () => {
+      await withWorkspace(async (ctx) => {
+        const modePath = join(ctx.root, "scripts/run.sh");
+        await mkdir(dirname(modePath), { recursive: true });
+        await writeFile(modePath, "old\n");
+        await chmod(modePath, 0o744);
+        // Windows has no POSIX modes (chmod only toggles the read-only bit), so
+        // pin what the platform can express: whatever stat reported before the
+        // write must survive the engine overwrite. On POSIX that value is the
+        // full 0o744 asserted below.
+        const modeBefore = (await stat(modePath)).mode & 0o777;
+        if (process.platform !== "win32") {
+          expect(modeBefore).toBe(0o744);
+        }
 
-      const overwritten = await writeWorkspaceFile(ctx, {
-        path: "scripts/run.sh",
-        content: "new\n",
-      });
-
-      expect(overwritten).toMatchObject({ ok: true });
-      expect((await stat(modePath)).mode & 0o777).toBe(modeBefore);
-
-      const outside = await mkdtemp(join(tmpdir(), "dohc-mcp-symlink-target-"));
-      try {
-        await writeFile(join(outside, "target.txt"), "outside\n");
-        await symlink(join(outside, "target.txt"), join(ctx.root, "linked.txt"));
-
-        const linked = await writeWorkspaceFile(ctx, {
-          path: "linked.txt",
-          content: "nope\n",
+        const overwritten = await writeWorkspaceFile(ctx, {
+          path: "scripts/run.sh",
+          content: "new\n",
         });
 
-        expect(linked).toMatchObject({ ok: false });
-        if (!linked.ok) expect(linked.reason).toContain("symlink");
-        await expect(readFile(join(outside, "target.txt"), "utf8")).resolves.toBe("outside\n");
-      } finally {
-        await rm(outside, { recursive: true, force: true });
-      }
-    });
-  });
+        expect(overwritten).toMatchObject({ ok: true });
+        expect((await stat(modePath)).mode & 0o777).toBe(modeBefore);
+
+        const outside = await mkdtemp(join(tmpdir(), "dohc-mcp-symlink-target-"));
+        try {
+          await writeFile(join(outside, "target.txt"), "outside\n");
+          await symlink(join(outside, "target.txt"), join(ctx.root, "linked.txt"));
+
+          const linked = await writeWorkspaceFile(ctx, {
+            path: "linked.txt",
+            content: "nope\n",
+          });
+
+          expect(linked).toMatchObject({ ok: false });
+          if (!linked.ok) expect(linked.reason).toContain("symlink");
+          await expect(readFile(join(outside, "target.txt"), "utf8")).resolves.toBe("outside\n");
+        } finally {
+          await rm(outside, { recursive: true, force: true });
+        }
+      });
+    },
+  );
 
   it("moves paths and deletes recoverably (engine-recorded, trash-backed)", async () => {
     await withWorkspace(async (ctx) => {
@@ -949,29 +1080,43 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
-  it.each([undefined, 1, 2, "1", 0, null])("dohc_detect_apps checks dohc.json version %s", async (version) => {
-    await withWorkspace(async (ctx) => {
-      await mkdir(join(ctx.root, "versioned"));
-      await writeFile(join(ctx.root, "versioned/index.html"), "<p>App</p>");
-      await writeFile(join(ctx.root, "versioned/dohc.json"), JSON.stringify({ version, type: "app", title: "Declared title" }));
-      const result = await detectApps(ctx);
-      expect(result.ok).toBe(true);
-      if (!result.ok) return;
-      const app = result.apps.find(app => app.root === "versioned")!;
-      if (version === 2) {
-        expect(app.diagnostics).toContainEqual({ severity: "error", code: "unsupported-version", path: "versioned/dohc.json",
-          message: "versioned/dohc.json uses a newer version. Update dohc to read this file." });
-        expect(app.title).not.toBe("Declared title");
-      } else if (version !== undefined && version !== 1) {
-        expect(app.diagnostics).toContainEqual({ severity: "error", code: "invalid-version", path: "versioned/dohc.json",
-          message: "versioned/dohc.json has an invalid version. Set version to 1." });
-        expect(app.title).not.toBe("Declared title");
-      } else {
-        expect(app.title).toBe("Declared title");
-        expect(app.diagnostics).toEqual([]);
-      }
-    });
-  });
+  it.each([undefined, 1, 2, "1", 0, null])(
+    "dohc_detect_apps checks dohc.json version %s",
+    async (version) => {
+      await withWorkspace(async (ctx) => {
+        await mkdir(join(ctx.root, "versioned"));
+        await writeFile(join(ctx.root, "versioned/index.html"), "<p>App</p>");
+        await writeFile(
+          join(ctx.root, "versioned/dohc.json"),
+          JSON.stringify({ version, type: "app", title: "Declared title" }),
+        );
+        const result = await detectApps(ctx);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const app = result.apps.find((app) => app.root === "versioned")!;
+        if (version === 2) {
+          expect(app.diagnostics).toContainEqual({
+            severity: "error",
+            code: "unsupported-version",
+            path: "versioned/dohc.json",
+            message: "versioned/dohc.json uses a newer version. Update dohc to read this file.",
+          });
+          expect(app.title).not.toBe("Declared title");
+        } else if (version !== undefined && version !== 1) {
+          expect(app.diagnostics).toContainEqual({
+            severity: "error",
+            code: "invalid-version",
+            path: "versioned/dohc.json",
+            message: "versioned/dohc.json has an invalid version. Set version to 1.",
+          });
+          expect(app.title).not.toBe("Declared title");
+        } else {
+          expect(app.title).toBe("Declared title");
+          expect(app.diagnostics).toEqual([]);
+        }
+      });
+    },
+  );
 
   it("dohc_create_app scaffolds a normal website (engine-recorded)", async () => {
     await withWorkspace(async (ctx) => {
@@ -989,7 +1134,9 @@ describe("mcp tools operate on allowed paths", () => {
         ]),
       );
       const html = await readFile(join(ctx.root, "finance/ledger/index.html"), "utf8");
-      const packageJson = JSON.parse(await readFile(join(ctx.root, "finance/ledger/package.json"), "utf8"));
+      const packageJson = JSON.parse(
+        await readFile(join(ctx.root, "finance/ledger/package.json"), "utf8"),
+      );
       const config = JSON.parse(await readFile(join(ctx.root, "finance/ledger/dohc.json"), "utf8"));
       expect(html).toContain("<title>Ledger</title>");
       expect(packageJson).toMatchObject({
@@ -1007,7 +1154,12 @@ describe("mcp tools operate on allowed paths", () => {
           serve: "14.2.6",
         },
       });
-      expect(config).toMatchObject({ version: 1, type: "app", title: "Ledger", build: { output: "dist" } });
+      expect(config).toMatchObject({
+        version: 1,
+        type: "app",
+        title: "Ledger",
+        build: { output: "dist" },
+      });
       // The scaffold reports the engine as recorder; no change set.
       await expect(listChanges(ctx, { includeFiles: true })).resolves.toMatchObject({
         count: 0,
@@ -1036,21 +1188,31 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
-  it.each([undefined, "", "  ", "  Ledger  ", '<Ledger & "quoted">'])("dohc_create_app resolves and escapes title %s", async (title) => {
-    await withWorkspace(async (ctx) => {
-      const result = await createApp(ctx, { appRoot: "finance/my_ledger", title });
-      expect(result).toMatchObject({ ok: true });
-      const resolvedTitle = title?.trim() || "My Ledger";
-      const html = await readFile(join(ctx.root, "finance/my_ledger/index.html"), "utf8");
-      const escaped = resolvedTitle === '<Ledger & "quoted">' ? "&lt;Ledger &amp; &quot;quoted&quot;&gt;" : resolvedTitle;
-      expect(html).toContain(`<title>${escaped}</title>`);
-      expect(html).toContain(`<h1>${escaped}</h1>`);
-      const manifest = JSON.parse(await readFile(join(ctx.root, "finance/my_ledger/dohc.json"), "utf8"));
-      expect(manifest).toMatchObject({ type: "app", title: resolvedTitle });
-      const pkg = JSON.parse(await readFile(join(ctx.root, "finance/my_ledger/package.json"), "utf8"));
-      expect(pkg.name).toBe("my_ledger");
-    });
-  });
+  it.each([undefined, "", "  ", "  Ledger  ", '<Ledger & "quoted">'])(
+    "dohc_create_app resolves and escapes title %s",
+    async (title) => {
+      await withWorkspace(async (ctx) => {
+        const result = await createApp(ctx, { appRoot: "finance/my_ledger", title });
+        expect(result).toMatchObject({ ok: true });
+        const resolvedTitle = title?.trim() || "My Ledger";
+        const html = await readFile(join(ctx.root, "finance/my_ledger/index.html"), "utf8");
+        const escaped =
+          resolvedTitle === '<Ledger & "quoted">'
+            ? "&lt;Ledger &amp; &quot;quoted&quot;&gt;"
+            : resolvedTitle;
+        expect(html).toContain(`<title>${escaped}</title>`);
+        expect(html).toContain(`<h1>${escaped}</h1>`);
+        const manifest = JSON.parse(
+          await readFile(join(ctx.root, "finance/my_ledger/dohc.json"), "utf8"),
+        );
+        expect(manifest).toMatchObject({ type: "app", title: resolvedTitle });
+        const pkg = JSON.parse(
+          await readFile(join(ctx.root, "finance/my_ledger/package.json"), "utf8"),
+        );
+        expect(pkg.name).toBe("my_ledger");
+      });
+    },
+  );
 
   it("dohc_create_app reuses an empty folder but refuses an existing file", async () => {
     await withWorkspace(async (ctx) => {
@@ -1058,72 +1220,90 @@ describe("mcp tools operate on allowed paths", () => {
       await expect(createApp(ctx, { appRoot: "empty" })).resolves.toMatchObject({ ok: true });
       await writeFile(join(ctx.root, "occupied"), "keep this file");
       await expect(createApp(ctx, { appRoot: "occupied" })).resolves.toMatchObject({
-        ok: false, reason: "appRoot is not a directory: occupied",
+        ok: false,
+        reason: "appRoot is not a directory: occupied",
       });
       expect(await readFile(join(ctx.root, "occupied"), "utf8")).toBe("keep this file");
     });
   });
 
-  it.each([...TRAVERSALS, ".git/app", "shared-with-me/app", "Shared-With-Me/app"])("dohc_create_app preserves path refusal for %s", async (appRoot) => {
-    await withWorkspace(async (ctx) => {
-      const request = vi.fn<NonNullable<ToolContext["request"]>>();
-      ctx.request = request;
-      await expect(createApp(ctx, { appRoot })).resolves.toMatchObject({ ok: false });
-      expect(request).not.toHaveBeenCalled();
-      expect(await readdir(ctx.root)).toEqual([]);
-    });
-  });
+  it.each([...TRAVERSALS, ".git/app", "shared-with-me/app", "Shared-With-Me/app"])(
+    "dohc_create_app preserves path refusal for %s",
+    async (appRoot) => {
+      await withWorkspace(async (ctx) => {
+        const request = vi.fn<NonNullable<ToolContext["request"]>>();
+        ctx.request = request;
+        await expect(createApp(ctx, { appRoot })).resolves.toMatchObject({ ok: false });
+        expect(request).not.toHaveBeenCalled();
+        expect(await readdir(ctx.root)).toEqual([]);
+      });
+    },
+  );
 
   it.each([
     { appRoot: ".env/app", path: ".env/app/index.html" },
     { appRoot: "app", path: "app/styles.css" },
-  ])("dohc_create_app preserves authored path-policy refusal for $path", async ({ appRoot, path }) => {
-    await withWorkspace(async (ctx) => {
-      const refusal = { ok: false, written: [], path,
-        reason: `History cannot record ${path}. Choose a non-secret path included by files.toml.`,
-      };
-      const request = vi.fn<NonNullable<ToolContext["request"]>>(async () => refusal);
-      ctx.request = request;
-      expect(await createApp(ctx, { appRoot }, "Client")).toEqual(refusal);
-      expect(request).toHaveBeenCalledOnce();
-      const sent = request.mock.calls[0]![0];
-      expect(sent.verb).toBe("fileWrite");
-      if (sent.verb !== "fileWrite") throw new Error("expected authored file write");
-      expect(sent.args.actor).toBe("agent");
-      expect(sent.args.agent).toBe("Client");
-      expect(sent.args.files.every((file) => file.createOnly)).toBe(true);
-      expect(await readdir(ctx.root)).toEqual([]);
-    });
-  });
+  ])(
+    "dohc_create_app preserves authored path-policy refusal for $path",
+    async ({ appRoot, path }) => {
+      await withWorkspace(async (ctx) => {
+        const refusal = {
+          ok: false,
+          written: [],
+          path,
+          reason: `History cannot record ${path}. Choose a non-secret path included by files.toml.`,
+        };
+        const request = vi.fn<NonNullable<ToolContext["request"]>>(async () => refusal);
+        ctx.request = request;
+        expect(await createApp(ctx, { appRoot }, "Client")).toEqual(refusal);
+        expect(request).toHaveBeenCalledOnce();
+        const sent = request.mock.calls[0]![0];
+        expect(sent.verb).toBe("fileWrite");
+        if (sent.verb !== "fileWrite") throw new Error("expected authored file write");
+        expect(sent.args.actor).toBe("agent");
+        expect(sent.args.agent).toBe("Client");
+        expect(sent.args.files.every((file) => file.createOnly)).toBe(true);
+        expect(await readdir(ctx.root)).toEqual([]);
+      });
+    },
+  );
 
-  it.each([".dohc", "shared-with-me"])("dohc_create_app refuses an alias into %s", async (reserved) => {
-    await withWorkspace(async (ctx) => {
-      await mkdir(join(ctx.root, reserved));
-      await symlink(join(ctx.root, reserved), join(ctx.root, "alias"), "junction");
-      const request = vi.fn<NonNullable<ToolContext["request"]>>();
-      ctx.request = request;
-      await expect(createApp(ctx, { appRoot: "alias/new-app" })).resolves.toMatchObject({ ok: false });
-      expect(request).not.toHaveBeenCalled();
-      expect(await readdir(join(ctx.root, reserved))).toEqual([]);
-    });
-  });
+  it.each([".dohc", "shared-with-me"])(
+    "dohc_create_app refuses an alias into %s",
+    async (reserved) => {
+      await withWorkspace(async (ctx) => {
+        await mkdir(join(ctx.root, reserved));
+        await symlink(join(ctx.root, reserved), join(ctx.root, "alias"), "junction");
+        const request = vi.fn<NonNullable<ToolContext["request"]>>();
+        ctx.request = request;
+        await expect(createApp(ctx, { appRoot: "alias/new-app" })).resolves.toMatchObject({
+          ok: false,
+        });
+        expect(request).not.toHaveBeenCalled();
+        expect(await readdir(join(ctx.root, reserved))).toEqual([]);
+      });
+    },
+  );
 
   it("dohc_detect_apps agrees with core on app manifests, other types, and build confidence", async () => {
-    await withWorkspace(async ctx => {
+    await withWorkspace(async (ctx) => {
       const sources = [
         { path: "declared/dohc.json", body: '{"version":1,"type":"app"}' },
-        { path: "publication/app.publish.json", body: '{"version":1,"entryPath":"main.ts","inputs":["main.ts"]}' },
+        {
+          path: "publication/app.publish.json",
+          body: '{"version":1,"entryPath":"main.ts","inputs":["main.ts"]}',
+        },
         { path: "workflow/dohc.json", body: '{"type":"workflow","build":{"output":"dist"}}' },
         { path: "retired/dohc.json", body: '{"type":"site","build":{"output":"dist"}}' },
         { path: "claimed/dohc.json", body: '{"type":"app","build":{"output":"dist"}}' },
-        { path: "empty/dohc.json", body: '{}' },
-        { path: "build-only/dist/index.html", body: '<h1>Built</h1>' },
+        { path: "empty/dohc.json", body: "{}" },
+        { path: "build-only/dist/index.html", body: "<h1>Built</h1>" },
         { path: "other-build/dohc.json", body: '{"type":"workflow"}' },
-        { path: "other-build/dist/index.html", body: '<h1>Built</h1>' },
+        { path: "other-build/dist/index.html", body: "<h1>Built</h1>" },
         { path: "conflict/dohc.json", body: '{"type":"workflow"}' },
-        { path: "conflict/index.html", body: '<h1>Independent</h1>' },
+        { path: "conflict/index.html", body: "<h1>Independent</h1>" },
         { path: "published-other/dohc.json", body: '{"type":"workflow"}' },
-        { path: "published-other/app.publish.json", body: '{}' },
+        { path: "published-other/app.publish.json", body: "{}" },
         { path: "malformed/dohc.json", body: '{"type":"app",' },
         { path: "newer/dohc.json", body: '{"version":2,"type":"app"}' },
         { path: "invalid-version/dohc.json", body: '{"version":"1","type":"app"}' },
@@ -1136,21 +1316,37 @@ describe("mcp tools operate on allowed paths", () => {
       const result = await detectApps(ctx);
       expect(result.ok).toBe(true);
       if (!result.ok) return;
-      const facts = (apps: ReadonlyArray<Pick<ReturnType<typeof discoverSites>[number], "root" | "kind" | "confidence">>) => apps.map(app => ({
-        root: app.root, kind: app.kind, confidence: app.confidence,
-      })).sort((a, b) => a.root.localeCompare(b.root));
+      const facts = (
+        apps: ReadonlyArray<
+          Pick<ReturnType<typeof discoverSites>[number], "root" | "kind" | "confidence">
+        >,
+      ) =>
+        apps
+          .map((app) => ({
+            root: app.root,
+            kind: app.kind,
+            confidence: app.confidence,
+          }))
+          .sort((a, b) => a.root.localeCompare(b.root));
       expect(facts(result.apps)).toEqual(facts(discoverSites(sources)));
-      for (const root of ["workflow", "retired"]) expect(result.apps.map(app => app.root)).not.toContain(root);
+      for (const root of ["workflow", "retired"])
+        expect(result.apps.map((app) => app.root)).not.toContain(root);
       for (const root of ["declared", "publication", "claimed", "published-other"]) {
-        expect(result.apps.find(app => app.root === root)?.confidence).toBe("high");
+        expect(result.apps.find((app) => app.root === root)?.confidence).toBe("high");
       }
-      expect(result.apps.find(app => app.root === "build-only")?.confidence).toBe("medium");
-      expect(result.apps.find(app => app.root === "empty")?.confidence).toBe("low");
-      expect(result.apps.find(app => app.root === "conflict")?.diagnostics).toContainEqual(
-        expect.objectContaining({ code: "unexpected_dohc_type", message: 'dohc.json has website signals but its type is not "app".' }),
+      expect(result.apps.find((app) => app.root === "build-only")?.confidence).toBe("medium");
+      expect(result.apps.find((app) => app.root === "empty")?.confidence).toBe("low");
+      expect(result.apps.find((app) => app.root === "conflict")?.diagnostics).toContainEqual(
+        expect.objectContaining({
+          code: "unexpected_dohc_type",
+          message: 'dohc.json has website signals but its type is not "app".',
+        }),
       );
-      expect(result.apps.find(app => app.root === "invalid-type")?.diagnostics).toContainEqual(
-        expect.objectContaining({ code: "invalid-type", message: 'dohc.json type should be "app".' }),
+      expect(result.apps.find((app) => app.root === "invalid-type")?.diagnostics).toContainEqual(
+        expect.objectContaining({
+          code: "invalid-type",
+          message: 'dohc.json type should be "app".',
+        }),
       );
     });
   });
@@ -1163,7 +1359,10 @@ describe("mcp tools operate on allowed paths", () => {
       await mkdir(join(ctx.root, "vitey"), { recursive: true });
       await writeFile(
         join(ctx.root, "vitey/package.json"),
-        JSON.stringify({ scripts: { dev: "vite", build: "vite build" }, devDependencies: { vite: "^7.0.0" } }),
+        JSON.stringify({
+          scripts: { dev: "vite", build: "vite build" },
+          devDependencies: { vite: "^7.0.0" },
+        }),
       );
       await writeFile(join(ctx.root, "vitey/vite.config.ts"), "export default {};");
 
@@ -1188,14 +1387,26 @@ describe("mcp tools operate on allowed paths", () => {
   it("dohc_detect_apps finds an app declared only by app.publish.json, as workspace-core does", async () => {
     await withWorkspace(async (ctx) => {
       await mkdir(join(ctx.root, "trip/trip-poll"), { recursive: true });
-      await writeFile(join(ctx.root, "trip/trip-poll/app.publish.json"), JSON.stringify({ entryPath: "main.tsx", inputs: ["main.tsx"], packageMap: {} }));
-      await writeFile(join(ctx.root, "trip/trip-poll/main.tsx"), "document.body.textContent = 'Poll';");
+      await writeFile(
+        join(ctx.root, "trip/trip-poll/app.publish.json"),
+        JSON.stringify({ entryPath: "main.tsx", inputs: ["main.tsx"], packageMap: {} }),
+      );
+      await writeFile(
+        join(ctx.root, "trip/trip-poll/main.tsx"),
+        "document.body.textContent = 'Poll';",
+      );
 
       const result = await detectApps(ctx);
       expect(result).toMatchObject({ ok: true, count: 1 });
       if (!result.ok) return;
-      expect(result.apps[0]).toMatchObject({ root: "trip/trip-poll", kind: "configured", confidence: "high" });
-      expect(result.apps[0]).toMatchObject(discoverSites(["trip/trip-poll/app.publish.json", "trip/trip-poll/main.tsx"])[0]!);
+      expect(result.apps[0]).toMatchObject({
+        root: "trip/trip-poll",
+        kind: "configured",
+        confidence: "high",
+      });
+      expect(result.apps[0]).toMatchObject(
+        discoverSites(["trip/trip-poll/app.publish.json", "trip/trip-poll/main.tsx"])[0]!,
+      );
     });
   });
 
@@ -1217,10 +1428,7 @@ describe("mcp tools operate on allowed paths", () => {
   it("dohc_detect_apps sets entry for a real build at a nested configured output, not just the conventional names", async () => {
     await withWorkspace(async (ctx) => {
       await mkdir(join(ctx.root, "nested-output/public/dist"), { recursive: true });
-      await writeFile(
-        join(ctx.root, "nested-output/public/dist/index.html"),
-        "<h1>Built</h1>",
-      );
+      await writeFile(join(ctx.root, "nested-output/public/dist/index.html"), "<h1>Built</h1>");
       await writeFile(
         join(ctx.root, "nested-output/dohc.json"),
         JSON.stringify({ type: "app", build: { output: "public/dist" } }),
@@ -1239,10 +1447,7 @@ describe("mcp tools operate on allowed paths", () => {
       await mkdir(join(ctx.root, "dual-output/dist"), { recursive: true });
       await writeFile(join(ctx.root, "dual-output/dist/index.html"), "<h1>Stale</h1>");
       await mkdir(join(ctx.root, "dual-output/public/dist"), { recursive: true });
-      await writeFile(
-        join(ctx.root, "dual-output/public/dist/index.html"),
-        "<h1>Configured</h1>",
-      );
+      await writeFile(join(ctx.root, "dual-output/public/dist/index.html"), "<h1>Configured</h1>");
       await writeFile(
         join(ctx.root, "dual-output/dohc.json"),
         JSON.stringify({ type: "app", build: { output: "public/dist" } }),
@@ -1561,19 +1766,14 @@ describe("mcp tools operate on allowed paths", () => {
   it("dohc_detect_apps keeps a malformed dohc.json type visible with a diagnostic instead of silently dropping it", async () => {
     await withWorkspace(async (ctx) => {
       await mkdir(join(ctx.root, "malformed-type"), { recursive: true });
-      await writeFile(
-        join(ctx.root, "malformed-type/dohc.json"),
-        JSON.stringify({ type: 42 }),
-      );
+      await writeFile(join(ctx.root, "malformed-type/dohc.json"), JSON.stringify({ type: 42 }));
 
       const result = await detectApps(ctx);
       expect(result).toMatchObject({ ok: true });
       if (!result.ok) return;
       const site = result.apps.find((candidate) => candidate.root === "malformed-type");
       expect(site).toBeDefined();
-      expect(site?.diagnostics).toContainEqual(
-        expect.objectContaining({ code: "invalid-type" }),
-      );
+      expect(site?.diagnostics).toContainEqual(expect.objectContaining({ code: "invalid-type" }));
     });
   });
 
@@ -1603,7 +1803,6 @@ describe("mcp tools operate on allowed paths", () => {
           expect.objectContaining({ name: "entry-file", ok: true, path: "docs/public/index.html" }),
         ]),
       });
-
     });
   });
 
@@ -1631,54 +1830,98 @@ describe("mcp tools operate on allowed paths", () => {
   });
 
   it.each([
-    { name: 'data.csv', body: 'id,zip,x,x,x_2\na,02134,first,second,third',
-      rows: [{ id: 'a', zip: '02134', x: 'first', x_3: 'second', x_2: 'third' }] },
-    { name: 'data.json', body: '[{"id":"a","zip":"02134","flag":"true"}]',
-      rows: [{ id: 'a', zip: '02134', flag: 'true' }] },
-    { name: 'data.jsonl', body: '{"id":"a","zip":"02134","flag":"true"}',
-      rows: [{ id: 'a', zip: '02134', flag: 'true' }] },
-    { name: 'data.md', body: '| id | zip |\n| --- | --- |\n| a | 02134 |\n\n| id | zip |\n| --- | --- |\n| b | 99999 |',
-      rows: [{ id: 'a', zip: '02134' }] },
-  ])("import_data preserves source bytes and every value from $name", async ({ name, body, rows }) => {
-    await withWorkspace(async ctx => {
-      const source = Buffer.from(body);
-      await writeFile(join(ctx.root, name), source);
-      const request = vi.fn(emptyDesktopHistoryRequest);
-      const result = await importData({ ...ctx, request }, { sourcePath: name, databasePath: 'data.sqlite', tableName: 'rows' }, 'Import agent');
-      expect(result).toMatchObject({ ok: true, rowCount: rows.length });
-      expect(await queryDatabase(ctx, { databasePath: 'data.sqlite', sql: 'SELECT * FROM rows ORDER BY id' })).toMatchObject({ ok: true, rows });
-      expect(await readFile(join(ctx.root, name))).toEqual(source);
-      expect(request).toHaveBeenCalledTimes(1);
-      expect(request).toHaveBeenCalledWith(expect.objectContaining({ verb: 'fileWrite', args: expect.objectContaining({
-        agent: 'Import agent', files: [expect.objectContaining({ path: 'data.sqlite', createOnly: true })],
-      }) }));
-    });
-  });
+    {
+      name: "data.csv",
+      body: "id,zip,x,x,x_2\na,02134,first,second,third",
+      rows: [{ id: "a", zip: "02134", x: "first", x_3: "second", x_2: "third" }],
+    },
+    {
+      name: "data.json",
+      body: '[{"id":"a","zip":"02134","flag":"true"}]',
+      rows: [{ id: "a", zip: "02134", flag: "true" }],
+    },
+    {
+      name: "data.jsonl",
+      body: '{"id":"a","zip":"02134","flag":"true"}',
+      rows: [{ id: "a", zip: "02134", flag: "true" }],
+    },
+    {
+      name: "data.md",
+      body: "| id | zip |\n| --- | --- |\n| a | 02134 |\n\n| id | zip |\n| --- | --- |\n| b | 99999 |",
+      rows: [{ id: "a", zip: "02134" }],
+    },
+  ])(
+    "import_data preserves source bytes and every value from $name",
+    async ({ name, body, rows }) => {
+      await withWorkspace(async (ctx) => {
+        const source = Buffer.from(body);
+        await writeFile(join(ctx.root, name), source);
+        const request = vi.fn(emptyDesktopHistoryRequest);
+        const result = await importData(
+          { ...ctx, request },
+          { sourcePath: name, databasePath: "data.sqlite", tableName: "rows" },
+          "Import agent",
+        );
+        expect(result).toMatchObject({ ok: true, rowCount: rows.length });
+        expect(
+          await queryDatabase(ctx, {
+            databasePath: "data.sqlite",
+            sql: "SELECT * FROM rows ORDER BY id",
+          }),
+        ).toMatchObject({ ok: true, rows });
+        expect(await readFile(join(ctx.root, name))).toEqual(source);
+        expect(request).toHaveBeenCalledTimes(1);
+        expect(request).toHaveBeenCalledWith(
+          expect.objectContaining({
+            verb: "fileWrite",
+            args: expect.objectContaining({
+              agent: "Import agent",
+              files: [expect.objectContaining({ path: "data.sqlite", createOnly: true })],
+            }),
+          }),
+        );
+      });
+    },
+  );
 
   it.each([
-    { name: 'extra.csv', body: 'id,note\na,first,discarded' },
-    { name: 'unfinished.csv', body: 'id,note\na,"unfinished' },
-    { name: 'invalid.json', body: '[{"id":' },
-    { name: 'receipt.pdf', body: '%PDF-1.7\n| id | value |\n| --- | --- |\n| a | 1 |\n%%EOF' },
-  ])("import_data refuses $name without creating a destination or changing the source", async ({ name, body }) => {
-    await withWorkspace(async ctx => {
-      const source = Buffer.from(body);
-      await writeFile(join(ctx.root, name), source);
-      const request = vi.fn(emptyDesktopHistoryRequest);
-      expect(await importData({ ...ctx, request }, { sourcePath: name, databasePath: 'data.sqlite', tableName: 'rows' })).toMatchObject({ ok: false });
-      expect(request).not.toHaveBeenCalled();
-      await expect(stat(join(ctx.root, 'data.sqlite'))).rejects.toMatchObject({ code: 'ENOENT' });
-      expect(await readFile(join(ctx.root, name))).toEqual(source);
-    });
-  });
+    { name: "extra.csv", body: "id,note\na,first,discarded" },
+    { name: "unfinished.csv", body: 'id,note\na,"unfinished' },
+    { name: "invalid.json", body: '[{"id":' },
+    { name: "receipt.pdf", body: "%PDF-1.7\n| id | value |\n| --- | --- |\n| a | 1 |\n%%EOF" },
+  ])(
+    "import_data refuses $name without creating a destination or changing the source",
+    async ({ name, body }) => {
+      await withWorkspace(async (ctx) => {
+        const source = Buffer.from(body);
+        await writeFile(join(ctx.root, name), source);
+        const request = vi.fn(emptyDesktopHistoryRequest);
+        expect(
+          await importData(
+            { ...ctx, request },
+            { sourcePath: name, databasePath: "data.sqlite", tableName: "rows" },
+          ),
+        ).toMatchObject({ ok: false });
+        expect(request).not.toHaveBeenCalled();
+        await expect(stat(join(ctx.root, "data.sqlite"))).rejects.toMatchObject({ code: "ENOENT" });
+        expect(await readFile(join(ctx.root, name))).toEqual(source);
+      });
+    },
+  );
 
   it("import_data keeps existing destination bytes", async () => {
-    await withWorkspace(async ctx => {
-      await writeFile(join(ctx.root, 'data.csv'), 'id,note\na,first');
-      const original = Buffer.from('existing database bytes');
-      await writeFile(join(ctx.root, 'data.sqlite'), original);
-      expect(await importData(ctx, { sourcePath: 'data.csv', databasePath: 'data.sqlite', tableName: 'rows' })).toMatchObject({ ok: false });
-      expect(await readFile(join(ctx.root, 'data.sqlite'))).toEqual(original);
+    await withWorkspace(async (ctx) => {
+      await writeFile(join(ctx.root, "data.csv"), "id,note\na,first");
+      const original = Buffer.from("existing database bytes");
+      await writeFile(join(ctx.root, "data.sqlite"), original);
+      expect(
+        await importData(ctx, {
+          sourcePath: "data.csv",
+          databasePath: "data.sqlite",
+          tableName: "rows",
+        }),
+      ).toMatchObject({ ok: false });
+      expect(await readFile(join(ctx.root, "data.sqlite"))).toEqual(original);
     });
   });
 
@@ -1700,34 +1943,43 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
-  itDurableHistory("import_data returns a structured failure without replacing an existing database", async () => {
-    await withWorkspace(async (ctx) => {
-      await writeFile(join(ctx.root, "people.csv"), "id,name\n1,Ada\n");
-      await writeFile(join(ctx.root, "people.sqlite"), "already here\n");
+  itDurableHistory(
+    "import_data returns a structured failure without replacing an existing database",
+    async () => {
+      await withWorkspace(async (ctx) => {
+        await writeFile(join(ctx.root, "people.csv"), "id,name\n1,Ada\n");
+        await writeFile(join(ctx.root, "people.sqlite"), "already here\n");
 
-      const imported = await importData(ctx, {
-        sourcePath: "people.csv",
-        databasePath: "people.sqlite",
-        tableName: "people",
-      });
+        const imported = await importData(ctx, {
+          sourcePath: "people.csv",
+          databasePath: "people.sqlite",
+          tableName: "people",
+        });
 
-      expect(imported).toMatchObject({
-        ok: false,
-        reason: "File already exists",
+        expect(imported).toMatchObject({
+          ok: false,
+          reason: "File already exists",
+        });
+        await expect(readFile(join(ctx.root, "people.sqlite"), "utf8")).resolves.toBe(
+          "already here\n",
+        );
+        await expect(listChanges(ctx, { limit: 10 })).resolves.toMatchObject({
+          changes: [],
+        });
       });
-      await expect(readFile(join(ctx.root, "people.sqlite"), "utf8")).resolves.toBe("already here\n");
-      await expect(listChanges(ctx, { limit: 10 })).resolves.toMatchObject({
-        changes: [],
-      });
-    });
-  });
+    },
+  );
 
   it("import_data refuses a hidden-internal (.dohc) database target", async () => {
     await withWorkspace(async (ctx) => {
       await writeFile(join(ctx.root, "people.csv"), "id\n1\n");
       // .dohc is reserved, so the path validator rejects it outright.
       await expect(
-        importData(ctx, { sourcePath: "people.csv", databasePath: ".dohc/x.sqlite", tableName: "t" }),
+        importData(ctx, {
+          sourcePath: "people.csv",
+          databasePath: ".dohc/x.sqlite",
+          tableName: "t",
+        }),
       ).resolves.toMatchObject({ ok: false });
     });
   });
@@ -1737,9 +1989,9 @@ describe("mcp tools operate on allowed paths", () => {
       await writeFile(join(ctx.root, "people.csv"), "id,name\n1,Ada\n");
       await importData(ctx, { sourcePath: "people.csv", databasePath: "p.sqlite", tableName: "p" });
       for (const sql of ["DELETE FROM p", "DROP TABLE p", "SELECT 1; DROP TABLE p"]) {
-        await expect(
-          queryDatabase(ctx, { databasePath: "p.sqlite", sql }),
-        ).resolves.toMatchObject({ ok: false });
+        await expect(queryDatabase(ctx, { databasePath: "p.sqlite", sql })).resolves.toMatchObject({
+          ok: false,
+        });
       }
     });
   });
@@ -1758,7 +2010,11 @@ describe("mcp tools operate on allowed paths", () => {
       // but the wrapper LIMITs to the cap so SQLite never materializes them all.
       const rows = Array.from({ length: 40 }, (_, i) => `${i},n${i}`).join("\n");
       await writeFile(join(ctx.root, "big.csv"), `id,name\n${rows}\n`);
-      await importData(ctx, { sourcePath: "big.csv", databasePath: "big.sqlite", tableName: "big" });
+      await importData(ctx, {
+        sourcePath: "big.csv",
+        databasePath: "big.sqlite",
+        tableName: "big",
+      });
       const queried = await queryDatabase(ctx, {
         databasePath: "big.sqlite",
         sql: "SELECT a.id FROM big a, big b",
@@ -1858,9 +2114,7 @@ describe("a metadata-folder failure reaches the agent translated", () => {
 
 // Direct filesystem mutations check the metadata folder before writing.
 describe("a refused recordability boundary leaves the filesystem alone", () => {
-  async function withBlockedMetadataDir<T>(
-    fn: (ctx: ToolContext) => Promise<T>,
-  ): Promise<T> {
+  async function withBlockedMetadataDir<T>(fn: (ctx: ToolContext) => Promise<T>): Promise<T> {
     return withWorkspace(async (ctx) => {
       await writeFile(join(ctx.root, ".dohc"), "not a directory");
       return fn(ctx);
@@ -1874,11 +2128,13 @@ describe("a refused recordability boundary leaves the filesystem alone", () => {
 
   it("refuses the directory, and no directory appears", async () => {
     await withBlockedMetadataDir(async (ctx) => {
-      expect(await createWorkspaceDirectory(ctx, { path: "notes/2026" })).toMatchObject({ ok: false, reason: BLOCKED });
+      expect(await createWorkspaceDirectory(ctx, { path: "notes/2026" })).toMatchObject({
+        ok: false,
+        reason: BLOCKED,
+      });
       await expect(stat(join(ctx.root, "notes", "2026"))).rejects.toThrow();
     });
   });
-
 });
 
 describe("a symlink cannot alias a reserved area", () => {
@@ -2058,9 +2314,10 @@ describe("a symlink cannot alias a reserved area", () => {
         "theirs",
       );
 
-      await expect(
-        readWorkspaceFile(ctx, { path: "inbox/acme/plan.md" }),
-      ).resolves.toMatchObject({ ok: true, content: "theirs" });
+      await expect(readWorkspaceFile(ctx, { path: "inbox/acme/plan.md" })).resolves.toMatchObject({
+        ok: true,
+        content: "theirs",
+      });
     });
   });
 
@@ -2081,9 +2338,7 @@ describe("a symlink cannot alias a reserved area", () => {
 
       // These tools return wide unions, so the refusal is read positionally:
       // a result without `reason` did not refuse, which is the failure.
-      for (const result of [
-        await testApp(ctx, { appRoot: "mine/landing" }),
-      ]) {
+      for (const result of [await testApp(ctx, { appRoot: "mine/landing" })]) {
         expect(result.ok).toBe(false);
         expect("reason" in result ? result.reason : "no refusal").toMatch(/mounted share/i);
       }
@@ -2130,7 +2385,9 @@ describe("a symlink cannot alias a reserved area", () => {
           content: SETTINGS,
         });
         expect(refusalReason(written)).toMatch(/no target|reserved/i);
-        await expect(stat(join(ctx.root, ".dohc", "local", "settings.local.json"))).rejects.toThrow();
+        await expect(
+          stat(join(ctx.root, ".dohc", "local", "settings.local.json")),
+        ).rejects.toThrow();
       });
     });
 
@@ -2209,13 +2466,14 @@ describe("a symlink cannot alias a reserved area", () => {
       ).resolves.toMatchObject({ ok: true });
       expect(await readFile(join(ctx.root, "notes", "day.txt"), "utf8")).toBe("hello\n");
 
-      await expect(
-        readWorkspaceFile(ctx, { path: "shortcut/day.txt" }),
-      ).resolves.toMatchObject({ ok: true, content: "hello\n" });
+      await expect(readWorkspaceFile(ctx, { path: "shortcut/day.txt" })).resolves.toMatchObject({
+        ok: true,
+        content: "hello\n",
+      });
 
-      await expect(
-        deleteWorkspacePath(ctx, { path: "shortcut/day.txt" }),
-      ).resolves.toMatchObject({ ok: true });
+      await expect(deleteWorkspacePath(ctx, { path: "shortcut/day.txt" })).resolves.toMatchObject({
+        ok: true,
+      });
       await expect(stat(join(ctx.root, "notes", "day.txt"))).rejects.toThrow();
     });
   });
@@ -2257,52 +2515,44 @@ describe("a guard that decides authority reads the resolved path", () => {
     });
   });
 
-  it(
-    "refuses a query whose database really is a secret file",
-    async () => {
-      await withWorkspace(async (ctx) => {
-        const bytes = await importedDatabase(ctx, "people.sqlite");
-        await writeFile(join(ctx.root, ".env.sqlite"), bytes);
-        await symlink(join(ctx.root, ".env.sqlite"), join(ctx.root, "records.sqlite"));
+  it("refuses a query whose database really is a secret file", async () => {
+    await withWorkspace(async (ctx) => {
+      const bytes = await importedDatabase(ctx, "people.sqlite");
+      await writeFile(join(ctx.root, ".env.sqlite"), bytes);
+      await symlink(join(ctx.root, ".env.sqlite"), join(ctx.root, "records.sqlite"));
 
-        const queried = await queryDatabase(ctx, {
-          databasePath: "records.sqlite",
-          sql: "SELECT name FROM people",
-        });
-        expect(queried).toMatchObject({
-          ok: false,
-          reason: expect.stringContaining("protected"),
-        });
-        expect(JSON.stringify(queried)).not.toContain(marker);
+      const queried = await queryDatabase(ctx, {
+        databasePath: "records.sqlite",
+        sql: "SELECT name FROM people",
       });
-    },
-    10_000,
-  );
+      expect(queried).toMatchObject({
+        ok: false,
+        reason: expect.stringContaining("protected"),
+      });
+      expect(JSON.stringify(queried)).not.toContain(marker);
+    });
+  }, 10_000);
 
   // The visible-database rule is read off the NAME, so an alias carries its
   // own: a sidecar is transient and never a standalone file, and an alias that
   // spells `.sqlite` must not turn one into a queryable database.
-  it(
-    "refuses a query whose database really is a sidecar",
-    async () => {
-      await withWorkspace(async (ctx) => {
-        const bytes = await importedDatabase(ctx, "people.sqlite");
-        await writeFile(join(ctx.root, "people.sqlite-wal"), bytes);
-        await symlink(join(ctx.root, "people.sqlite-wal"), join(ctx.root, "records.sqlite"));
+  it("refuses a query whose database really is a sidecar", async () => {
+    await withWorkspace(async (ctx) => {
+      const bytes = await importedDatabase(ctx, "people.sqlite");
+      await writeFile(join(ctx.root, "people.sqlite-wal"), bytes);
+      await symlink(join(ctx.root, "people.sqlite-wal"), join(ctx.root, "records.sqlite"));
 
-        const queried = await queryDatabase(ctx, {
-          databasePath: "records.sqlite",
-          sql: "SELECT name FROM people",
-        });
-        expect(queried).toMatchObject({
-          ok: false,
-          reason: expect.stringContaining("not a visible database"),
-        });
-        expect(JSON.stringify(queried)).not.toContain(marker);
+      const queried = await queryDatabase(ctx, {
+        databasePath: "records.sqlite",
+        sql: "SELECT name FROM people",
       });
-    },
-    10_000,
-  );
+      expect(queried).toMatchObject({
+        ok: false,
+        reason: expect.stringContaining("not a visible database"),
+      });
+      expect(JSON.stringify(queried)).not.toContain(marker);
+    });
+  }, 10_000);
 
   // Climbing past a component realpath cannot resolve is safe only when
   // nothing is there. A permission error answers neither question, and reading
@@ -2431,9 +2681,14 @@ describe("raw file writes preserve live documents", () => {
         await writeFile(join(ctx.root, path), "original");
         for (const encoding of ["utf8", "base64"] as const) {
           const result = await writeWorkspaceFile(ctx, {
-            path, content: encoding === "base64" ? "bmV3" : "new", encoding,
+            path,
+            content: encoding === "base64" ? "bmV3" : "new",
+            encoding,
           });
-          expect(result).toMatchObject({ ok: false, reason: expect.stringContaining("live document") });
+          expect(result).toMatchObject({
+            ok: false,
+            reason: expect.stringContaining("live document"),
+          });
           expect(await readFile(join(ctx.root, path), "utf8")).toBe("original");
           expect(await readdir(ctx.root)).toEqual([path]);
         }
@@ -2443,17 +2698,21 @@ describe("raw file writes preserve live documents", () => {
 
   it("names the tool that edits a Markdown document, and dohc for a scene", async () => {
     await withWorkspace(async (ctx) => {
-      expect(await writeWorkspaceFile(ctx, { path: "note.md", content: "new" }))
-        .toMatchObject({ ok: false, reason: expect.stringContaining("dohc_edit_document") });
-      expect(await writeWorkspaceFile(ctx, { path: "scene.excalidraw", content: "{}" }))
-        .toMatchObject({ ok: false, reason: expect.stringContaining("Edit it in dohc") });
+      expect(await writeWorkspaceFile(ctx, { path: "note.md", content: "new" })).toMatchObject({
+        ok: false,
+        reason: expect.stringContaining("dohc_edit_document"),
+      });
+      expect(
+        await writeWorkspaceFile(ctx, { path: "scene.excalidraw", content: "{}" }),
+      ).toMatchObject({ ok: false, reason: expect.stringContaining("Edit it in dohc") });
     });
   });
 
   it("refuses creating a live document before making parent directories", async () => {
     await withWorkspace(async (ctx) => {
-      expect(await writeWorkspaceFile(ctx, { path: "draft/note.md", content: "new" }))
-        .toMatchObject({ ok: false, reason: expect.stringContaining("live document") });
+      expect(
+        await writeWorkspaceFile(ctx, { path: "draft/note.md", content: "new" }),
+      ).toMatchObject({ ok: false, reason: expect.stringContaining("live document") });
       expect(await readdir(ctx.root)).toEqual([]);
     });
   });
@@ -2462,8 +2721,10 @@ describe("raw file writes preserve live documents", () => {
     await withWorkspace(async (ctx) => {
       await writeFile(join(ctx.root, "note.md"), "original");
       await symlink(join(ctx.root, "note.md"), join(ctx.root, "alias.txt"));
-      expect(await writeWorkspaceFile(ctx, { path: "alias.txt", content: "new" }))
-        .toMatchObject({ ok: false, reason: expect.stringContaining("live document") });
+      expect(await writeWorkspaceFile(ctx, { path: "alias.txt", content: "new" })).toMatchObject({
+        ok: false,
+        reason: expect.stringContaining("live document"),
+      });
       expect(await readFile(join(ctx.root, "note.md"), "utf8")).toBe("original");
       expect((await lstat(join(ctx.root, "alias.txt"))).isSymbolicLink()).toBe(true);
     });
@@ -2472,85 +2733,189 @@ describe("raw file writes preserve live documents", () => {
 
 it.each([null, "budget"] as const)("returns structured chat dispatch state: %s", async (paused) => {
   const response = {
-    ok: true, thread: { id: "thread-1", title: "Audit", createdAtMs: 1, updatedAtMs: 1 },
-    messages: [], projection: { path: ".dohc/chats/thread-1.md", readOnly: true, text: "" },
-    dispatch: { paused, lastRun: { state: "failed", failureReason: "runner failed to start", exitCode: 7 } },
+    ok: true,
+    thread: { id: "thread-1", title: "Audit", createdAtMs: 1, updatedAtMs: 1 },
+    messages: [],
+    projection: { path: ".dohc/chats/thread-1.md", readOnly: true, text: "" },
+    dispatch: {
+      paused,
+      lastRun: { state: "failed", failureReason: "runner failed to start", exitCode: 7 },
+    },
   };
   const request = vi.fn(async () => response);
-  expect(await readChat({ root: "/workspace", home: "/home", request }, { threadId: "thread-1" })).toEqual(response);
-  expect(request).toHaveBeenCalledWith(expect.objectContaining({ verb: "chat", args: { cwd: "/workspace", actor: "agent", threadId: "thread-1" } }));
+  expect(
+    await readChat({ root: "/workspace", home: "/home", request }, { threadId: "thread-1" }),
+  ).toEqual(response);
+  expect(request).toHaveBeenCalledWith(
+    expect.objectContaining({
+      verb: "chat",
+      args: { cwd: "/workspace", actor: "agent", threadId: "thread-1" },
+    }),
+  );
 });
 
 it("workspace status names a received share without using its labels as authority", async () => {
-  await withWorkspace(async ctx => {
-    await writeFile(join(ctx.home, "dohc-workspaces.json"), JSON.stringify({workspaces: [{workspaceId: "received", rootPath: ctx.root, kind: "personal", shareView: {subjectName: "Trip", sharerName: "Ana", granterEmail: "ana@example.test"}}]}));
-    expect(await workspaceStatus({...ctx, shareAccess: "view"})).toMatchObject({receivedShare: {subjectName: "Trip", sharerName: "Ana (ana@example.test)", access: "view"}});
-    expect(await workspaceStatus(ctx)).toMatchObject({receivedShare: {access: null}});
+  await withWorkspace(async (ctx) => {
+    await writeFile(
+      join(ctx.home, "dohc-workspaces.json"),
+      JSON.stringify({
+        workspaces: [
+          {
+            workspaceId: "received",
+            rootPath: ctx.root,
+            kind: "personal",
+            shareView: { subjectName: "Trip", sharerName: "Ana", granterEmail: "ana@example.test" },
+          },
+        ],
+      }),
+    );
+    expect(await workspaceStatus({ ...ctx, shareAccess: "view" })).toMatchObject({
+      receivedShare: { subjectName: "Trip", sharerName: "Ana (ana@example.test)", access: "view" },
+    });
+    expect(await workspaceStatus(ctx)).toMatchObject({ receivedShare: { access: null } });
   });
 });
 
 it("uses the received selector for a legacy MCP subject fallback", async () => {
-  await withWorkspace(async ctx => {
-    await writeFile(join(ctx.home, "dohc-workspaces.json"), JSON.stringify({workspaces: [{workspaceId: "received", rootPath: ctx.root, kind: "personal", shareView: {grantedSelector: {paths: ["docs"], access: "view"}}}]}));
-    expect(await workspaceStatus({...ctx, shareAccess: "view"})).toMatchObject({receivedShare: {subjectName: "a folder or file", access: "view"}});
+  await withWorkspace(async (ctx) => {
+    await writeFile(
+      join(ctx.home, "dohc-workspaces.json"),
+      JSON.stringify({
+        workspaces: [
+          {
+            workspaceId: "received",
+            rootPath: ctx.root,
+            kind: "personal",
+            shareView: { grantedSelector: { paths: ["docs"], access: "view" } },
+          },
+        ],
+      }),
+    );
+    expect(await workspaceStatus({ ...ctx, shareAccess: "view" })).toMatchObject({
+      receivedShare: { subjectName: "a folder or file", access: "view" },
+    });
   });
 });
 
 it("tells agents when the owner removed access to a shared view or mounted share", async () => {
-  await withWorkspace(async ctx => {
-    await writeFile(join(ctx.home, "dohc-workspaces.json"), JSON.stringify({version: 1, workspaces: [
-      {workspaceId: "ws-a", rootPath: ctx.root, kind: "personal", shareView: {shareId: "view", ended: true},
-        shareMounts: [{shareId: "mounted", ended: true}, {shareId: "live", ended: false}],
-        confirmedRemovedShares: [{shareId: "view", removedAtMs: 100}, {shareId: "mounted", removedAtMs: 100}]}
-    ]}));
-    const expected = ["view", "mounted"].map(shareId => ({shareId, message: "The owner removed your access. Your local copy stays readable."}));
-    expect(await workspaceStatus(ctx)).toMatchObject({removedShares: expected});
-    expect((await listWorkspaces(ctx)).workspaces[0]).toMatchObject({removedShares: expected});
+  await withWorkspace(async (ctx) => {
+    await writeFile(
+      join(ctx.home, "dohc-workspaces.json"),
+      JSON.stringify({
+        version: 1,
+        workspaces: [
+          {
+            workspaceId: "ws-a",
+            rootPath: ctx.root,
+            kind: "personal",
+            shareView: { shareId: "view", ended: true },
+            shareMounts: [
+              { shareId: "mounted", ended: true },
+              { shareId: "live", ended: false },
+            ],
+            confirmedRemovedShares: [
+              { shareId: "view", removedAtMs: 100 },
+              { shareId: "mounted", removedAtMs: 100 },
+            ],
+          },
+        ],
+      }),
+    );
+    const expected = ["view", "mounted"].map((shareId) => ({
+      shareId,
+      message: "The owner removed your access. Your local copy stays readable.",
+    }));
+    expect(await workspaceStatus(ctx)).toMatchObject({ removedShares: expected });
+    expect((await listWorkspaces(ctx)).workspaces[0]).toMatchObject({ removedShares: expected });
   });
 });
 
 it("does not blame the owner for an unconfirmed ended share or a group the recipient left", async () => {
-  await withWorkspace(async ctx => {
-    await writeFile(join(ctx.home, "dohc-workspaces.json"), JSON.stringify({version: 1, workspaces: [
-      {workspaceId: "ws-a", rootPath: ctx.root, kind: "personal",
-        shareView: {shareId: "unknown", ended: true},
-        sharedChannels: [{shareId: "left", ended: true, left: true}]}
-    ]}));
+  await withWorkspace(async (ctx) => {
+    await writeFile(
+      join(ctx.home, "dohc-workspaces.json"),
+      JSON.stringify({
+        version: 1,
+        workspaces: [
+          {
+            workspaceId: "ws-a",
+            rootPath: ctx.root,
+            kind: "personal",
+            shareView: { shareId: "unknown", ended: true },
+            sharedChannels: [{ shareId: "left", ended: true, left: true }],
+          },
+        ],
+      }),
+    );
     expect(await workspaceStatus(ctx)).not.toHaveProperty("removedShares");
     expect((await listWorkspaces(ctx)).workspaces[0]).not.toHaveProperty("removedShares");
   });
 });
 
 it("routes Duplicate to the owning socket and refuses secret and escaping paths", async () => {
-  await withWorkspace(async ctx => {
-    const request = vi.fn(async () => ({ok: true, path: "copy.md", materialized: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", undo: {available: true}}));
+  await withWorkspace(async (ctx) => {
+    const request = vi.fn(async () => ({
+      ok: true,
+      path: "copy.md",
+      materialized: true,
+      operationId: "dohc-operation:11111111-1111-4111-8111-111111111111",
+      undo: { available: true },
+    }));
     ctx.request = request;
     await writeFile(join(ctx.root, "source.md"), "Source");
-    expect(await duplicateWorkspaceFile(ctx, {path: "source.md"}, "agent-name")).toMatchObject({ok: true, path: "copy.md"});
-    expect(request).toHaveBeenCalledWith(expect.objectContaining({verb: "fileDuplicate", args: expect.objectContaining({actor: "agent", path: "source.md", agent: "agent-name", requestId: expect.any(String)})}));
+    expect(await duplicateWorkspaceFile(ctx, { path: "source.md" }, "agent-name")).toMatchObject({
+      ok: true,
+      path: "copy.md",
+    });
+    expect(request).toHaveBeenCalledWith(
+      expect.objectContaining({
+        verb: "fileDuplicate",
+        args: expect.objectContaining({
+          actor: "agent",
+          path: "source.md",
+          agent: "agent-name",
+          requestId: expect.any(String),
+        }),
+      }),
+    );
     request.mockClear();
-    for (const path of ["../escape.md", ".env", ".dohc/private.md"]) expect(await duplicateWorkspaceFile(ctx, {path})).toMatchObject({ok: false});
+    for (const path of ["../escape.md", ".env", ".dohc/private.md"])
+      expect(await duplicateWorkspaceFile(ctx, { path })).toMatchObject({ ok: false });
     expect(request).not.toHaveBeenCalled();
   });
 });
 
 describe("what an agent reports about itself", () => {
   it("takes the client's title, else its name, and caps each part", () => {
-    expect(reportedAgent({ name: "claude-code", title: "Claude Code", version: "2.1" }, "Claude Opus 5.5"))
-      .toEqual({ product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" });
-    expect(reportedAgent({ name: "claude-code", title: "\u0007", version: " 2.1 " }, undefined))
-      .toEqual({ product: "claude-code", version: "2.1" });
+    expect(
+      reportedAgent(
+        { name: "claude-code", title: "Claude Code", version: "2.1" },
+        "Claude Opus 5.5",
+      ),
+    ).toEqual({ product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" });
+    expect(
+      reportedAgent({ name: "claude-code", title: "\u0007", version: " 2.1 " }, undefined),
+    ).toEqual({ product: "claude-code", version: "2.1" });
     const long = "x".repeat(80);
-    expect(reportedAgent({ name: long, version: "1" }, undefined)).toEqual({ product: "x".repeat(64), version: "1" });
+    expect(reportedAgent({ name: long, version: "1" }, undefined)).toEqual({
+      product: "x".repeat(64),
+      version: "1",
+    });
     // An emoji is two UTF-16 units, so 64 units hold 32 of them, never half of one.
-    expect(reportedAgent({ name: "\u{1F600}".repeat(40) }, undefined)).toEqual({ product: "\u{1F600}".repeat(32) });
-    expect(reportedAgent({ name: "claude-code", title: "﻿Claude Code" }, undefined)).toEqual({ product: "Claude Code" });
+    expect(reportedAgent({ name: "\u{1F600}".repeat(40) }, undefined)).toEqual({
+      product: "\u{1F600}".repeat(32),
+    });
+    expect(reportedAgent({ name: "claude-code", title: "﻿Claude Code" }, undefined)).toEqual({
+      product: "Claude Code",
+    });
   });
 
   it("leaves out what it can't read and never guesses", () => {
     expect(reportedAgent(undefined, undefined)).toBeUndefined();
     expect(reportedAgent({ name: "  ", version: "2.1" }, undefined)).toBeUndefined();
     expect(reportedAgent({ name: 42, version: "2.1" }, "Opus")).toEqual({ model: "Opus" });
-    expect(reportedAgent({ name: "Codex", version: "1.0\n" }, undefined)).toEqual({ product: "Codex" });
+    expect(reportedAgent({ name: "Codex", version: "1.0\n" }, undefined)).toEqual({
+      product: "Codex",
+    });
   });
 });

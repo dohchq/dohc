@@ -19,9 +19,7 @@ let katexPromise: Promise<KatexModule> | null = null;
 
 function loadKatex(): Promise<KatexModule> {
   if (!katexPromise) {
-    katexPromise = import("katex").then(
-      (mod) => (mod.default ?? mod) as unknown as KatexModule,
-    );
+    katexPromise = import("katex").then((mod) => (mod.default ?? mod) as unknown as KatexModule);
   }
   return katexPromise;
 }
@@ -31,11 +29,7 @@ function loadKatex(): Promise<KatexModule> {
 // visible warning style. A stale async result (the node changed while KaTeX was
 // loading) is discarded via the `data-math-token` guard so a slow first import
 // can never repaint newer content.
-export function renderMathInto(
-  target: HTMLElement,
-  tex: string,
-  displayMode: boolean,
-): void {
+export function renderMathInto(target: HTMLElement, tex: string, displayMode: boolean): void {
   const token = String(Date.now()) + ":" + tex;
   target.dataset.mathToken = token;
 
@@ -75,22 +69,13 @@ export function renderMathInto(
 // toggle). Commit on Enter (inline) / Cmd+Enter (block) / blur; Escape cancels.
 export function makeMathNodeView(
   displayMode: boolean,
-): (
-  node: ProseMirrorNode,
-  view: EditorView,
-  getPos: () => number | undefined,
-) => NodeView {
+): (node: ProseMirrorNode, view: EditorView, getPos: () => number | undefined) => NodeView {
   const nodeName = displayMode ? "mathBlock" : "mathInline";
 
   return (initialNode, view, getPos) => {
     const dom = document.createElement(displayMode ? "div" : "span");
-    dom.className = displayMode
-      ? "dohc-math dohc-math-block"
-      : "dohc-math dohc-math-inline";
-    dom.setAttribute(
-      displayMode ? "data-dohc-math-block" : "data-dohc-math-inline",
-      "",
-    );
+    dom.className = displayMode ? "dohc-math dohc-math-block" : "dohc-math dohc-math-inline";
+    dom.setAttribute(displayMode ? "data-dohc-math-block" : "data-dohc-math-inline", "");
 
     const preview = document.createElement(displayMode ? "div" : "span");
     preview.className = "dohc-math__preview";
@@ -132,9 +117,7 @@ export function makeMathNodeView(
       if (editing || !view.editable) return;
       editing = true;
       dom.classList.add("dohc-math--editing");
-      const el = displayMode
-        ? document.createElement("textarea")
-        : document.createElement("input");
+      const el = displayMode ? document.createElement("textarea") : document.createElement("input");
       if (el instanceof HTMLInputElement) el.type = "text";
       el.className = "dohc-math__source";
       el.value = currentTex;

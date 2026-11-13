@@ -6,9 +6,16 @@ const chatTimeFormat = new Intl.DateTimeFormat(undefined, {
 });
 
 const clockFormat = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
-const dayFormat = new Intl.DateTimeFormat(undefined, { weekday: "long", month: "long", day: "numeric" });
+const dayFormat = new Intl.DateTimeFormat(undefined, {
+  weekday: "long",
+  month: "long",
+  day: "numeric",
+});
 const dayWithYearFormat = new Intl.DateTimeFormat(undefined, {
-  weekday: "long", month: "long", day: "numeric", year: "numeric",
+  weekday: "long",
+  month: "long",
+  day: "numeric",
+  year: "numeric",
 });
 
 // Time of day only, for a message under a divider that already names the day.
@@ -31,7 +38,8 @@ export function formatClockDigits(createdAtMs: number): string {
 export function formatChatDay(createdAtMs: number, now = Date.now()): string {
   const day = new Date(createdAtMs);
   const today = new Date(now);
-  const startOf = (date: Date) => new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  const startOf = (date: Date) =>
+    new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
   const days = Math.round((startOf(today) - startOf(day)) / 86_400_000);
   if (days === 0) return "Today";
   if (days === 1) return "Yesterday";
@@ -41,7 +49,11 @@ export function formatChatDay(createdAtMs: number, now = Date.now()): string {
 export function sameChatDay(a: number, b: number): boolean {
   const x = new Date(a);
   const y = new Date(b);
-  return x.getFullYear() === y.getFullYear() && x.getMonth() === y.getMonth() && x.getDate() === y.getDate();
+  return (
+    x.getFullYear() === y.getFullYear() &&
+    x.getMonth() === y.getMonth() &&
+    x.getDate() === y.getDate()
+  );
 }
 
 const shortDayFormat = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
@@ -55,7 +67,9 @@ export function formatShortTime(atMs: number, now = Date.now()): string {
 // "Yesterday, 4:30 PM", else "Oct 27, 2:12 PM".
 export function formatDayClock(atMs: number, now = Date.now()): string {
   const day = formatChatDay(atMs, now);
-  return day === "Today" || day === "Yesterday" ? `${day}, ${formatClock(atMs)}` : chatTimeFormat.format(new Date(atMs));
+  return day === "Today" || day === "Yesterday"
+    ? `${day}, ${formatClock(atMs)}`
+    : chatTimeFormat.format(new Date(atMs));
 }
 
 export function formatChatTime(createdAtMs: number): { label: string; iso: string } {

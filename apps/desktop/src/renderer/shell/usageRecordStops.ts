@@ -5,10 +5,14 @@ import { bridge } from "../bridge";
 
 // The shell and Privacy both report a usage record dohc cannot read.
 export const unreadableWords = (code: string) => `dohc could not read the usage record (${code}).`;
-export const unreadableNotice = (code: string) => `${unreadableWords(code)} ${code === INVALID_USAGE_RECORD
-  ? "Start a new record in Privacy, or fix the file and try again."
-  : "Fix the file or its permissions, then try again."}`;
-export const USAGE_RECORD_STOPPED = "dohc stopped counting, because the usage record changed outside dohc.";
+export const unreadableNotice = (code: string) =>
+  `${unreadableWords(code)} ${
+    code === INVALID_USAGE_RECORD
+      ? "Start a new record in Privacy, or fix the file and try again."
+      : "Fix the file or its permissions, then try again."
+  }`;
+export const USAGE_RECORD_STOPPED =
+  "dohc stopped counting, because the usage record changed outside dohc.";
 
 type ReportFailure = (message: string, cause?: unknown, retry?: () => Promise<void>) => void;
 
@@ -23,9 +27,15 @@ export function useUsageRecordStops(report: ReportFailure): void {
     const readAgain = async (): Promise<void> => {
       try {
         const result = await bridge().readUsageRecord({});
-        if (live && result.status === "unreadable") reportRef.current(unreadableNotice(result.code), undefined, readAgain);
+        if (live && result.status === "unreadable")
+          reportRef.current(unreadableNotice(result.code), undefined, readAgain);
       } catch (cause) {
-        if (live) reportRef.current(withErrorWords("dohc could not open the usage record.", cause), cause, readAgain);
+        if (live)
+          reportRef.current(
+            withErrorWords("dohc could not open the usage record.", cause),
+            cause,
+            readAgain,
+          );
       }
     };
     const unsubscribe = bridge().onUsageRecordStopped(() => {

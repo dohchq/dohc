@@ -14,23 +14,52 @@ interface Entry {
 
 // The engine leaves a file's conversation without a chat; a Group's or DM's
 // thread carries its channel.
-function found(messageId: string, state: "live" | "deleted" | "unchecked" = "live", channelId?: string | null) {
+function found(
+  messageId: string,
+  state: "live" | "deleted" | "unchecked" = "live",
+  channelId?: string | null,
+) {
   return {
-    status: "found" as const, reference, state, createdAtMs: 1, registration: "registered" as const,
-    target: { kind: "message" as const, messageId, threadId: `thread-${messageId}`, ...(channelId === undefined ? {} : { channelId }) },
+    status: "found" as const,
+    reference,
+    state,
+    createdAtMs: 1,
+    registration: "registered" as const,
+    target: {
+      kind: "message" as const,
+      messageId,
+      threadId: `thread-${messageId}`,
+      ...(channelId === undefined ? {} : { channelId }),
+    },
   };
 }
 
-function links(entries: Entry[], resolveReference: (entry: Entry, reference: string) => Promise<ReturnType<typeof found> | { status: "unknown" } | null>) {
-  return createWorkLinks<Entry>({ workspaces: () => entries, summaryOf: (entry) => entry, resolveReference });
+function links(
+  entries: Entry[],
+  resolveReference: (
+    entry: Entry,
+    reference: string,
+  ) => Promise<ReturnType<typeof found> | { status: "unknown" } | null>,
+) {
+  return createWorkLinks<Entry>({
+    workspaces: () => entries,
+    summaryOf: (entry) => entry,
+    resolveReference,
+  });
 }
 
 describe("message links", () => {
-  const synced: Entry = { workspaceId: "synced", sync: "on", remote: { serverUrl: "https://Dohc.Example/api/" } };
+  const synced: Entry = {
+    workspaceId: "synced",
+    sync: "on",
+    remote: { serverUrl: "https://Dohc.Example/api/" },
+  };
 
   it("links to the message on the origin of the workspace's server", async () => {
     const mint = vi.fn(async () => reference);
-    await expect(links([synced], vi.fn()).messageLink(synced, mint)).resolves.toBe(`https://dohc.example/l/${reference}`);
+    await expect(links([synced], vi.fn()).messageLink(synced, mint)).resolves.toBe(
+      `https://dohc.example/l/${reference}`,
+    );
     expect(mint).toHaveBeenCalledOnce();
   });
 
@@ -44,7 +73,9 @@ describe("message links", () => {
   });
 
   it("says so when the engine cannot make the reference", async () => {
-    await expect(links([synced], vi.fn()).messageLink(synced, async () => null)).rejects.toThrow("The workspace engine is not running.");
+    await expect(links([synced], vi.fn()).messageLink(synced, async () => null)).rejects.toThrow(
+      "The workspace engine is not running.",
+    );
   });
 });
 
@@ -52,25 +83,42 @@ describe("opening a work link", () => {
   const link = { server: "https://dohc.example", reference };
   const a: Entry = { workspaceId: "a", sync: "on", remote: { serverUrl: "https://dohc.example" } };
   const b: Entry = { workspaceId: "b", sync: "on", remote: { serverUrl: "https://dohc.example/" } };
-  const elsewhere: Entry = { workspaceId: "elsewhere", sync: "on", remote: { serverUrl: "https://other.example" } };
+  const elsewhere: Entry = {
+    workspaceId: "elsewhere",
+    sync: "on",
+    remote: { serverUrl: "https://other.example" },
+  };
   const local: Entry = { workspaceId: "local" };
 
   it("asks the window's own workspace first and stops at the first that holds the message", async () => {
     const asked: string[] = [];
     const resolve = vi.fn(async (entry: Entry) => {
       asked.push(entry.workspaceId);
-      return entry.workspaceId === "b" ? found("m1", "live", "group-1") : { status: "unknown" as const };
+      return entry.workspaceId === "b"
+        ? found("m1", "live", "group-1")
+        : { status: "unknown" as const };
     });
-    await expect(links([a, b, elsewhere, local], resolve).resolve(link, "b"))
-      .resolves.toEqual({ workspaceId: "b", channelId: "group-1", threadId: "thread-m1", messageId: "m1" });
+    await expect(links([a, b, elsewhere, local], resolve).resolve(link, "b")).resolves.toEqual({
+      workspaceId: "b",
+      channelId: "group-1",
+      threadId: "thread-m1",
+      messageId: "m1",
+    });
     expect(asked).toEqual(["b"]);
   });
 
-  it.each([null, undefined])("names no chat for a message in a file's conversation (engine channel %s)", async (channelId) => {
-    const resolve = vi.fn(async () => found("m4", "live", channelId));
-    await expect(links([a], resolve).resolve(link, "a"))
-      .resolves.toEqual({ workspaceId: "a", channelId: null, threadId: "thread-m4", messageId: "m4" });
-  });
+  it.each([null, undefined])(
+    "names no chat for a message in a file's conversation (engine channel %s)",
+    async (channelId) => {
+      const resolve = vi.fn(async () => found("m4", "live", channelId));
+      await expect(links([a], resolve).resolve(link, "a")).resolves.toEqual({
+        workspaceId: "a",
+        channelId: null,
+        threadId: "thread-m4",
+        messageId: "m4",
+      });
+    },
+  );
 
   it("asks only workspaces that sync with the link's server", async () => {
     const asked: string[] = [];
@@ -78,8 +126,12 @@ describe("opening a work link", () => {
       asked.push(entry.workspaceId);
       return entry.workspaceId === "b" ? found("m2") : { status: "unknown" as const };
     });
-    await expect(links([local, elsewhere, a, b], resolve).resolve(link, "local"))
-      .resolves.toEqual({ workspaceId: "b", channelId: null, threadId: "thread-m2", messageId: "m2" });
+    await expect(links([local, elsewhere, a, b], resolve).resolve(link, "local")).resolves.toEqual({
+      workspaceId: "b",
+      channelId: null,
+      threadId: "thread-m2",
+      messageId: "m2",
+    });
     expect(asked).toEqual(["a", "b"]);
   });
 
@@ -101,25 +153,36 @@ describe("opening a work link", () => {
 
 describe("links the OS hands dohc", () => {
   const handed = (name: string): WorkLink => ({ server: "https://dohc.example", reference: name });
-  const placeIn = (workspaceId: string): WorkLinkPlace =>
-    ({ workspaceId, channelId: "group-1", threadId: "thread-1", messageId: `message-${workspaceId}` });
+  const placeIn = (workspaceId: string): WorkLinkPlace => ({
+    workspaceId,
+    channelId: "group-1",
+    threadId: "thread-1",
+    messageId: `message-${workspaceId}`,
+  });
 
   // The window shows the workspace it was switched to.
   function activations(deps: {
     resolve: (link: WorkLink) => Promise<WorkLinkPlace | null>;
     activate?: (place: WorkLinkPlace) => Promise<string | null>;
   }) {
-    const activate = vi.fn<(place: WorkLinkPlace) => Promise<string | null>>(deps.activate ?? (async (place) => place.workspaceId));
+    const activate = vi.fn<(place: WorkLinkPlace) => Promise<string | null>>(
+      deps.activate ?? (async (place) => place.workspaceId),
+    );
     const deliver = vi.fn((_shown: string, _place: WorkLinkPlace) => {});
     const showDohc = vi.fn(async () => {});
-    const { open } = createWorkLinkActivations<string>({ resolve: deps.resolve, activate, deliver, showDohc });
+    const { open } = createWorkLinkActivations<string>({
+      resolve: deps.resolve,
+      activate,
+      deliver,
+      showDohc,
+    });
     return { open, activate, deliver, showDohc };
   }
 
   it("opens the newer link when an older link's lookup finishes after it", async () => {
     const slow = deferred<WorkLinkPlace | null>();
     const { open, activate, deliver, showDohc } = activations({
-      resolve: async (link) => link.reference === "older" ? await slow.promise : placeIn("b"),
+      resolve: async (link) => (link.reference === "older" ? await slow.promise : placeIn("b")),
     });
     const older = open(handed("older"));
     await open(handed("newer"));
@@ -136,7 +199,8 @@ describe("links the OS hands dohc", () => {
     const switching = deferred<string | null>();
     const { open, activate, deliver } = activations({
       resolve: async (link) => placeIn(link.reference === "older" ? "a" : "b"),
-      activate: async (place) => place.workspaceId === "a" ? await switching.promise : place.workspaceId,
+      activate: async (place) =>
+        place.workspaceId === "a" ? await switching.promise : place.workspaceId,
     });
     const older = open(handed("older"));
     await vi.waitFor(() => expect(activate).toHaveBeenCalledWith(placeIn("a")));

@@ -57,11 +57,21 @@ function mainProcess() {
       });
     },
   });
-  const built = { ...app, shareManifest: { ok: true as const, manifest: { entryPath: "report/dist/index.html", assets: [] } } };
+  const built = {
+    ...app,
+    shareManifest: {
+      ok: true as const,
+      manifest: { entryPath: "report/dist/index.html", assets: [] },
+    },
+  };
   const bridge = {
     getSitePackage: vi.fn(async (payload: SitePackagePayload) =>
-      payload.effectivePreviewMode === "build" ? built : app),
-    getWorkspaceSettings: vi.fn(async () => ({ settings: DEFAULT_WORKSPACE_SETTINGS, source: "default" as const })),
+      payload.effectivePreviewMode === "build" ? built : app,
+    ),
+    getWorkspaceSettings: vi.fn(async () => ({
+      settings: DEFAULT_WORKSPACE_SETTINGS,
+      source: "default" as const,
+    })),
     startSitePreview: vi.fn((payload: StartSitePreviewPayload) =>
       lifecycle.acquire({
         ...payload,
@@ -76,16 +86,23 @@ function mainProcess() {
           handles.push(handle);
           return { handle, result: { siteRoot: payload.siteRoot, mode: payload.mode, logs: [] } };
         },
-      })),
+      }),
+    ),
     stopSitePreview: vi.fn((payload: StopSitePreviewPayload) =>
-      lifecycle.release({ ...payload, getActiveWorkspaceId: () => "ws-sites" })),
+      lifecycle.release({ ...payload, getActiveWorkspaceId: () => "ws-sites" }),
+    ),
     getSitePreviewLogs: vi.fn(async () => ({ logs: [], exited: false })),
     onSitePreviewReplaced: vi.fn((listener: (event: SitePreviewReplacedEvent) => void) => {
       listeners.add(listener);
-      return () => { listeners.delete(listener); };
+      return () => {
+        listeners.delete(listener);
+      };
     }),
     openExternalUrl: vi.fn(async () => undefined),
-    readWorkspaceTrust: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, trusted: true })),
+    readWorkspaceTrust: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({
+      workspaceId,
+      trusted: true,
+    })),
     onWorkspaceTrustChanged: vi.fn(() => () => undefined),
   };
   return { lifecycle, handles, bridge };
@@ -105,7 +122,12 @@ async function renderSurfaces() {
         <SitePreviewPage workspaceId="ws-sites" siteRoot="report" onShareSite={onShareSite} />
       </div>
       <div data-testid="pin">
-        <SitePreviewPage workspaceId="ws-sites" siteRoot="report" variant="panel" onShareSite={onShareSite} />
+        <SitePreviewPage
+          workspaceId="ws-sites"
+          siteRoot="report"
+          variant="panel"
+          onShareSite={onShareSite}
+        />
       </div>
     </>,
   );

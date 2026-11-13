@@ -17,7 +17,9 @@ beforeEach(() => {
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(new Date(AT));
   lines = [];
-  vi.spyOn(console, "log").mockImplementation((line: unknown) => { lines.push(String(line)); });
+  vi.spyOn(console, "log").mockImplementation((line: unknown) => {
+    lines.push(String(line));
+  });
 });
 
 afterEach(async () => {
@@ -49,8 +51,14 @@ async function read(response: Promise<Response>): Promise<Response> {
 
 it("logs a matched route as its pattern, never the ids in its path or its query", async () => {
   const base = await listen();
-  const log = await read(fetch(`${base}/sync/workspace-a/log?since=0&limit=10`, { headers: { authorization: "Bearer user:a" } }));
-  const link = await read(fetch(`${base}/sync/link/share`, { headers: { authorization: `LinkCapability ${SECRET}` } }));
+  const log = await read(
+    fetch(`${base}/sync/workspace-a/log?since=0&limit=10`, {
+      headers: { authorization: "Bearer user:a" },
+    }),
+  );
+  const link = await read(
+    fetch(`${base}/sync/link/share`, { headers: { authorization: `LinkCapability ${SECRET}` } }),
+  );
   expect(lines).toEqual([
     `[sync-relay] request ${AT} GET /sync/:workspaceId/log ${log.status}`,
     `[sync-relay] request ${AT} GET /sync/link/share ${link.status}`,

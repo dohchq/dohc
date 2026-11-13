@@ -42,13 +42,25 @@ const deliverEmail: SendEmail = config.smtp
     : refuseEmail;
 
 const email = accountEmailDelivery(deliverEmail);
-const pool = new Pool({ connectionString: config.postgresUrl, connectionTimeoutMillis: 3000, query_timeout: 5000, statement_timeout: 5000 });
+const pool = new Pool({
+  connectionString: config.postgresUrl,
+  connectionTimeoutMillis: 3000,
+  query_timeout: 5000,
+  statement_timeout: 5000,
+});
 // Each connection logs its own failure, idle or in use. A query on a failed
 // connection still fails in its caller. The pool also reports an idle
 // connection's failure, which the connection's own listener logs.
-pool.on("connect", (client) => client.on("error", () => console.error("[workspace-api] A database connection failed.")));
+pool.on("connect", (client) =>
+  client.on("error", () => console.error("[workspace-api] A database connection failed.")),
+);
 pool.on("error", () => undefined);
-const accountDeletion = createAccountDeletion({pool, secret: config.secret, serverOrigin: config.baseURL, relayUrl: config.internalRelayUrl});
+const accountDeletion = createAccountDeletion({
+  pool,
+  secret: config.secret,
+  serverOrigin: config.baseURL,
+  relayUrl: config.internalRelayUrl,
+});
 const auth = createWorkspaceAuth({
   accountDeletion,
   pool,
@@ -56,7 +68,14 @@ const auth = createWorkspaceAuth({
   secret: config.secret,
   sendEmail: email.sendEmail,
   ...(config.trustedOrigins.length > 0 ? { trustedOrigins: config.trustedOrigins } : {}),
-  ...(config.signUp ? { admitAccount: createSignUpAdmission({ ...config.signUp, key: signUpInviteKey(config.secret) }) } : {}),
+  ...(config.signUp
+    ? {
+        admitAccount: createSignUpAdmission({
+          ...config.signUp,
+          key: signUpInviteKey(config.secret),
+        }),
+      }
+    : {}),
 });
 
 // On a closed server, someone may have signed up with another person's
@@ -71,9 +90,13 @@ if (config.signUp) {
   }
 }
 
-
 const gateway: AuthGateway = {
-  handler: (request) => email.handle(request, (forwarded) => auth.handler(forwarded), async () => (await auth.api.getSession({ headers: request.headers }))?.user.email ?? null),
+  handler: (request) =>
+    email.handle(
+      request,
+      (forwarded) => auth.handler(forwarded),
+      async () => (await auth.api.getSession({ headers: request.headers }))?.user.email ?? null,
+    ),
   api: {
     getSession: ({ headers }) => auth.api.getSession({ headers }),
     deviceVerify: ({ query, headers }) => auth.api.deviceVerify({ query, headers }),
@@ -127,7 +150,9 @@ const router = createRouter({
   emailTransport: config.emailTransport,
   allowedOrigins: config.allowedOrigins,
   closedSignUp: config.signUp !== null,
-  ...(config.crashReports ? { crashReports: createCrashReportIntake({ store: crashReportStore }) } : {}),
+  ...(config.crashReports
+    ? { crashReports: createCrashReportIntake({ store: crashReportStore }) }
+    : {}),
   seams: {
     ...(config.testAuthSeam ? { deviceApprove: handleTestDeviceApprove } : {}),
     ...(config.emailTransport === "capture" ? { sentEmails: () => captured } : {}),
@@ -136,14 +161,22 @@ const router = createRouter({
 
 const server = createWorkspaceServer(router, config.trustedProxies);
 server.listen(config.port, config.bindHost, () => {
-  const resume = () => {void accountDeletion.resume().catch(() => console.error("[workspace-api] Resuming account deletion failed."));};
+  const resume = () => {
+    void accountDeletion
+      .resume()
+      .catch(() => console.error("[workspace-api] Resuming account deletion failed."));
+  };
   resume();
   setInterval(resume, 60_000).unref();
   console.log(`[workspace-api] listening on ${config.bindHost}:${config.port} (auth at /api/auth)`);
   console.log(`[workspace-api] email transport: ${config.emailTransport}`);
-  if (config.testAuthSeam) console.log("[workspace-api] DOHC_TEST_AUTH seam ENABLED (dev/test only)");
+  if (config.testAuthSeam)
+    console.log("[workspace-api] DOHC_TEST_AUTH seam ENABLED (dev/test only)");
   if (config.crashReports) console.log("[workspace-api] crash reports: on");
-  if (config.signUp) console.log(`[workspace-api] sign-up: closed, ${config.signUp.emails.size} approved addresses and pending invites`);
+  if (config.signUp)
+    console.log(
+      `[workspace-api] sign-up: closed, ${config.signUp.emails.size} approved addresses and pending invites`,
+    );
 });
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {

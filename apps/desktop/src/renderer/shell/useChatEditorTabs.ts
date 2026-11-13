@@ -3,7 +3,12 @@ import { bridge } from "../bridge";
 import { parseTab } from "../workbench/workbenchState";
 import type { ChatsDrafts, ChatsNav } from "../workbench/ChatsView";
 import type { SettingsAgent } from "../workbench/agentChat";
-import { chatEditorPath, chatEditorTitle, chatsNavigationLeavesConversation, chatsNavigationRequiresRemount } from "./chatsNav";
+import {
+  chatEditorPath,
+  chatEditorTitle,
+  chatsNavigationLeavesConversation,
+  chatsNavigationRequiresRemount,
+} from "./chatsNav";
 
 function isAgentNav(nav: ChatsNav | undefined): boolean {
   return (nav?.level === "channel" || nav?.level === "thread") && nav.channel.kind === "agent";
@@ -36,17 +41,27 @@ export function useChatEditorTabs(input: {
 }) {
   const callbacks = useRef(input);
   callbacks.current = input;
-  const store = useRef({ workspaceId: input.workspaceId, active: true, entries: new Map<string, ChatEditor>() });
+  const store = useRef({
+    workspaceId: input.workspaceId,
+    active: true,
+    entries: new Map<string, ChatEditor>(),
+  });
   if (store.current.workspaceId !== input.workspaceId) {
     store.current = { workspaceId: input.workspaceId, active: true, entries: new Map() };
   }
   useEffect(() => {
     const owner = store.current;
     owner.active = true;
-    return () => { owner.active = false; };
+    return () => {
+      owner.active = false;
+    };
   }, [input.workspaceId]);
   const [revision, render] = useState(0);
-  const session = useRef({ key: undefined as string | null | undefined, generation: 0, ready: true });
+  const session = useRef({
+    key: undefined as string | null | undefined,
+    generation: 0,
+    ready: true,
+  });
   const [sessionRevision, refreshSession] = useState(0);
   useEffect(() => {
     return bridge().onCloudSessionChanged(({ sessionKey, phase }) => {
@@ -81,7 +96,8 @@ export function useChatEditorTabs(input: {
       generation: session.current.generation,
       restoreAttempted: false,
       onNavChange(nav) {
-        if (store.current !== owner || owner.entries.get(path) !== entry || entry.nav === nav) return;
+        if (store.current !== owner || owner.entries.get(path) !== entry || entry.nav === nav)
+          return;
         entry.nav = nav;
         render((value) => value + 1);
       },
@@ -98,28 +114,39 @@ export function useChatEditorTabs(input: {
     owner.entries.set(path, entry);
     return entry;
   }, []);
-  const open = useCallback((nav: ChatsNav): void => {
-    callbacks.current.onNavigate();
-    const path = chatEditorPath(nav);
-    const entry = get(path);
-    // A sidebar channel click focuses its tab, including its current thread.
-    // A message link still commands a jump inside that tab.
-    const focusOnly = entry.nav && entry.nav.level !== "channels" && chatEditorPath(entry.nav) === path &&
-      (nav.level === "feed" || (nav.level === "dm" && !nav.focusMessageId) ||
-        (nav.level === "channel" && !nav.focusMessageId && !nav.lane));
-    if (focusOnly && nav.level === "dm" && entry.nav?.level === "dm" &&
-      JSON.stringify(entry.nav.dm) !== JSON.stringify(nav.dm)) {
-      entry.nav = { ...entry.nav, dm: nav.dm };
-      entry.revision += 1;
-      render((value) => value + 1);
-    } else if (!focusOnly) {
-      if (chatsNavigationLeavesConversation(entry.nav ?? null, nav)) entry.drafts = undefined;
-      if (chatsNavigationRequiresRemount(entry.nav ?? null, nav)) entry.revision += 1;
-      entry.nav = nav;
-      render((value) => value + 1);
-    }
-    callbacks.current.onOpen(path);
-  }, [get]);
+  const open = useCallback(
+    (nav: ChatsNav): void => {
+      callbacks.current.onNavigate();
+      const path = chatEditorPath(nav);
+      const entry = get(path);
+      // A sidebar channel click focuses its tab, including its current thread.
+      // A message link still commands a jump inside that tab.
+      const focusOnly =
+        entry.nav &&
+        entry.nav.level !== "channels" &&
+        chatEditorPath(entry.nav) === path &&
+        (nav.level === "feed" ||
+          (nav.level === "dm" && !nav.focusMessageId) ||
+          (nav.level === "channel" && !nav.focusMessageId && !nav.lane));
+      if (
+        focusOnly &&
+        nav.level === "dm" &&
+        entry.nav?.level === "dm" &&
+        JSON.stringify(entry.nav.dm) !== JSON.stringify(nav.dm)
+      ) {
+        entry.nav = { ...entry.nav, dm: nav.dm };
+        entry.revision += 1;
+        render((value) => value + 1);
+      } else if (!focusOnly) {
+        if (chatsNavigationLeavesConversation(entry.nav ?? null, nav)) entry.drafts = undefined;
+        if (chatsNavigationRequiresRemount(entry.nav ?? null, nav)) entry.revision += 1;
+        entry.nav = nav;
+        render((value) => value + 1);
+      }
+      callbacks.current.onOpen(path);
+    },
+    [get],
+  );
   // Mounted pages resolve their own destinations. Hydrate only hidden tabs.
   const pathsKey = JSON.stringify(input.paths.filter((path) => !input.activePaths?.includes(path)));
   useEffect(() => {
@@ -136,36 +163,53 @@ export function useChatEditorTabs(input: {
         return { path, entry, target: tab.kind === "chat" ? tab.target : null };
       });
     const remember = (path: string, entry: ChatEditor, nav?: ChatsNav) => {
-      if (!owner.active || store.current !== owner || !session.current.ready ||
-        session.current.generation !== generation || owner.entries.get(path) !== entry || entry.nav) return;
+      if (
+        !owner.active ||
+        store.current !== owner ||
+        !session.current.ready ||
+        session.current.generation !== generation ||
+        owner.entries.get(path) !== entry ||
+        entry.nav
+      )
+        return;
       if (!nav) return;
       entry.nav = nav;
       render((value) => value + 1);
     };
     if (targets.some(({ target }) => target?.kind === "channel")) {
-      void bridge().listChatChannels({ workspaceId: input.workspaceId }).then(({ channels }) => {
-        for (const { path, entry, target } of targets) {
-          if (target?.kind !== "channel") continue;
-          const channel = channels.find((entry) => entry.id === target.id);
-          remember(path, entry, channel ? { level: "channel", channel } : undefined);
-        }
-      }).catch(() => undefined);
+      void bridge()
+        .listChatChannels({ workspaceId: input.workspaceId })
+        .then(({ channels }) => {
+          for (const { path, entry, target } of targets) {
+            if (target?.kind !== "channel") continue;
+            const channel = channels.find((entry) => entry.id === target.id);
+            remember(path, entry, channel ? { level: "channel", channel } : undefined);
+          }
+        })
+        .catch(() => undefined);
     }
     if (targets.some(({ target }) => target?.kind === "dm")) {
-      void bridge().syncDms({ workspaceId: input.workspaceId }).then(({ dms }) => {
-        for (const { path, entry, target } of targets) {
-          if (target?.kind !== "dm") continue;
-          const dm = dms.find((entry) => entry.channelId === target.id);
-          remember(path, entry, dm ? { level: "dm", dm } : undefined);
-        }
-      }).catch(() => undefined);
+      void bridge()
+        .syncDms({ workspaceId: input.workspaceId })
+        .then(({ dms }) => {
+          for (const { path, entry, target } of targets) {
+            if (target?.kind !== "dm") continue;
+            const dm = dms.find((entry) => entry.channelId === target.id);
+            remember(path, entry, dm ? { level: "dm", dm } : undefined);
+          }
+        })
+        .catch(() => undefined);
     }
   }, [get, input.enabled, pathsKey, input.workspaceId, sessionRevision]);
   // A hidden conversation's tab counts its unread messages, as Chats does.
   // One local read per workspace change, and none without a hidden one.
   const [unreadRead, setUnread] = useState({ workspaceId: input.workspaceId, counts: NO_UNREAD });
   // One read in flight across tab switches too; the latest tabs take the next.
-  const unreadReads = useRef({ reading: false, again: false, read: null as (() => Promise<void>) | null });
+  const unreadReads = useRef({
+    reading: false,
+    again: false,
+    read: null as (() => Promise<void>) | null,
+  });
   useEffect(() => {
     const byChannel = new Map<string, string>();
     for (const path of JSON.parse(pathsKey) as string[]) {
@@ -175,25 +219,38 @@ export function useChatEditorTabs(input: {
       }
     }
     if (!input.enabled || byChannel.size === 0) {
-      setUnread((current) => current.counts === NO_UNREAD ? current : { workspaceId: input.workspaceId, counts: NO_UNREAD });
+      setUnread((current) =>
+        current.counts === NO_UNREAD
+          ? current
+          : { workspaceId: input.workspaceId, counts: NO_UNREAD },
+      );
       return;
     }
     const workspaceId = input.workspaceId;
     const reads = unreadReads.current;
     const read = async () => {
-      const result = await bridge().listChatUnread({ workspaceId }).catch(() => null);
+      const result = await bridge()
+        .listChatUnread({ workspaceId })
+        .catch(() => null);
       if (reads.read !== read || !result) return;
-      const counts = new Map(result.chats.flatMap(({ channelId, unreadCount }) => {
-        const path = byChannel.get(channelId);
-        return path && unreadCount > 0 ? [[path, unreadCount] as const] : [];
-      }));
+      const counts = new Map(
+        result.chats.flatMap(({ channelId, unreadCount }) => {
+          const path = byChannel.get(channelId);
+          return path && unreadCount > 0 ? [[path, unreadCount] as const] : [];
+        }),
+      );
       // Most workspace changes are not messages: keep the shell's render.
-      setUnread((current) => current.workspaceId === workspaceId && sameCounts(current.counts, counts)
-        ? current
-        : { workspaceId, counts: counts.size === 0 ? NO_UNREAD : counts });
+      setUnread((current) =>
+        current.workspaceId === workspaceId && sameCounts(current.counts, counts)
+          ? current
+          : { workspaceId, counts: counts.size === 0 ? NO_UNREAD : counts },
+      );
     };
     const request = async () => {
-      if (reads.reading) { reads.again = true; return; }
+      if (reads.reading) {
+        reads.again = true;
+        return;
+      }
       reads.reading = true;
       try {
         do {
@@ -215,14 +272,25 @@ export function useChatEditorTabs(input: {
     };
   }, [input.enabled, input.workspaceId, input.readRevision, pathsKey]);
   const unread = unreadRead.workspaceId === input.workspaceId ? unreadRead.counts : NO_UNREAD;
-  const titles = useMemo(() => new Map(
-    [...store.current.entries].filter(([, entry]) => entry.nav).map(([path, entry]) =>
-      [path, chatEditorTitle(entry.nav!, input.agents)] as const),
-  ), [revision, input.agents, input.workspaceId]);
+  const titles = useMemo(
+    () =>
+      new Map(
+        [...store.current.entries]
+          .filter(([, entry]) => entry.nav)
+          .map(([path, entry]) => [path, chatEditorTitle(entry.nav!, input.agents)] as const),
+      ),
+    [revision, input.agents, input.workspaceId],
+  );
   // An agent's chat tab draws the agent's sparkle, as the sidebar does.
-  const glyphs = useMemo(() => new Map(
-    [...store.current.entries].filter(([, entry]) => isAgentNav(entry.nav)).map(([path]) => [path, "agent" as const]),
-  ), [revision, input.workspaceId]);
+  const glyphs = useMemo(
+    () =>
+      new Map(
+        [...store.current.entries]
+          .filter(([, entry]) => isAgentNav(entry.nav))
+          .map(([path]) => [path, "agent" as const]),
+      ),
+    [revision, input.workspaceId],
+  );
   return { get, open, titles, glyphs, unread };
 }
 

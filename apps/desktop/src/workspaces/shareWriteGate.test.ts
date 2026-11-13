@@ -15,9 +15,7 @@ function marker(access: ShareAccess | "unreadable", ended = false) {
     relayUrl: "https://relay.test",
     ended,
     grantedSelector:
-      access === "unreadable"
-        ? { paths: ["docs"] }
-        : { paths: ["docs"], versionId: null, access },
+      access === "unreadable" ? { paths: ["docs"] } : { paths: ["docs"], versionId: null, access },
   };
 }
 
@@ -26,16 +24,14 @@ function marker(access: ShareAccess | "unreadable", ended = false) {
 describe("shareViewTakesLocalWrites", () => {
   it("takes writes at edit, and only at edit", () => {
     const levels: ShareAccess[] = ["view", "comment", "edit"];
-    const takes = levels.filter((access) =>
-      shareViewTakesLocalWrites({ access, ended: false }),
-    );
+    const takes = levels.filter((access) => shareViewTakesLocalWrites({ access, ended: false }));
     expect(takes).toEqual(["edit"]);
   });
 
   it("refuses a damaged grant, which names no level at all", () => {
     expect(
       shareViewTakesLocalWrites({ access: null, ended: false }),
-      "an `!== \"view\"` test reads a damaged grant as writable",
+      'an `!== "view"` test reads a damaged grant as writable',
     ).toBe(false);
   });
 

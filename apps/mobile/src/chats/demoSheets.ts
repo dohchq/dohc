@@ -24,14 +24,18 @@ export function useDemoSheet() {
         const chosen = demoMode === "sheet-delete-file" ? paths.slice(0, 1) : paths;
         const body = confirmWords.deleteFilesBody(chosen.length, lisbon.name);
         void confirm({
-          title: confirmWords.deleteFilesTitle(chosen), confirm: confirmWords.delete, destructive: true,
+          title: confirmWords.deleteFilesTitle(chosen),
+          confirm: confirmWords.delete,
+          destructive: true,
           message: chosen.length === 1 ? body : `${body}\n\n${chosen.join("\n")}`,
         });
       }
       if (demoMode === "sheet-leave") {
         void confirm({
-          title: confirmWords.leaveConversationTitle("Sam Ortiz"), message: confirmWords.leaveConversationBody(lisbon.name),
-          confirm: confirmWords.leaveConversation, destructive: true,
+          title: confirmWords.leaveConversationTitle("Sam Ortiz"),
+          message: confirmWords.leaveConversationBody(lisbon.name),
+          confirm: confirmWords.leaveConversation,
+          destructive: true,
         });
       }
     }, 600);

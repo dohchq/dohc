@@ -15,11 +15,16 @@ export function useChatDispatchPaused(onReadError: (error: unknown) => void): bo
       heard = true;
       if (live) setPaused(event.paused);
     });
-    void bridge().readChatDispatchPaused({}).then((event) => {
-      if (live && !heard) setPaused(event.paused);
-    }, (error: unknown) => {
-      if (live) onReadErrorRef.current(error);
-    });
+    void bridge()
+      .readChatDispatchPaused({})
+      .then(
+        (event) => {
+          if (live && !heard) setPaused(event.paused);
+        },
+        (error: unknown) => {
+          if (live) onReadErrorRef.current(error);
+        },
+      );
     return () => {
       live = false;
       stopListening();

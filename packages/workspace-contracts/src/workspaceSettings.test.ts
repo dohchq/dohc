@@ -21,10 +21,7 @@ describe("WorkspaceSettings", () => {
   });
 
   it("rejects excess properties at every strict object level", () => {
-    expectFailureMessage(
-      { ...DEFAULT_WORKSPACE_SETTINGS, token: "secret" },
-      "unrecognized_keys",
-    );
+    expectFailureMessage({ ...DEFAULT_WORKSPACE_SETTINGS, token: "secret" }, "unrecognized_keys");
     for (const section of ["sites", "privacy", "files"] as const) {
       expectFailureMessage(
         {
@@ -76,5 +73,4 @@ describe("WorkspaceSettings", () => {
       `Attachment folder names must contain ${ATTACHMENT_FOLDER_NAME_MAX_LENGTH} characters or fewer.`,
     );
   });
-
 });

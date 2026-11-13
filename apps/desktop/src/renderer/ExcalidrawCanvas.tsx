@@ -1,19 +1,7 @@
-import {
-  CaptureUpdateAction,
-  Excalidraw,
-  restore,
-  serializeAsJSON,
-} from "@excalidraw/excalidraw";
+import { CaptureUpdateAction, Excalidraw, restore, serializeAsJSON } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import "./excalidrawTheme.css";
-import {
-  useCallback,
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type {
   BinaryFileData,
   ExcalidrawImperativeAPI,
@@ -65,23 +53,15 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
         serialized: "",
       };
     }
-    const restored = restore(
-      props.document as ExcalidrawInitialDataState,
-      null,
-      null,
-      { repairBindings: true },
-    );
+    const restored = restore(props.document as ExcalidrawInitialDataState, null, null, {
+      repairBindings: true,
+    });
     return {
       scene: {
         ...restored,
         scrollToContent: true,
       },
-      serialized: serializeAsJSON(
-        restored.elements,
-        restored.appState,
-        restored.files,
-        "local",
-      ),
+      serialized: serializeAsJSON(restored.elements, restored.appState, restored.files, "local"),
     };
   }, [props.document, sceneBinding]);
   const lastSerialized = useRef(initial.serialized);
@@ -197,12 +177,7 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
         props.onAssetRefusedChange?.(true);
       },
     },
-    [
-      props.hydrateAssets,
-      props.onAssetRefusedChange,
-      props.sceneDoc,
-      readyApi,
-    ],
+    [props.hydrateAssets, props.onAssetRefusedChange, props.sceneDoc, readyApi],
   );
 
   useEffect(() => {
@@ -255,9 +230,7 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
           presenceBound
             ? (update) => {
                 if (readOnlyRef.current) return;
-                presenceBinding.current?.updatePointer(
-                  update as ExcalidrawPointerUpdate,
-                );
+                presenceBinding.current?.updatePointer(update as ExcalidrawPointerUpdate);
               }
             : undefined
         }
@@ -275,10 +248,7 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
         onLinkOpen={(element, event) => {
           // The audited bridge allowlists exactly http(s) and mailto; other
           // schemes stay refused by the shell's window handler.
-          if (
-            !element.link ||
-            !/^(?:https?:\/\/|mailto:)/iu.test(element.link)
-          ) {
+          if (!element.link || !/^(?:https?:\/\/|mailto:)/iu.test(element.link)) {
             return;
           }
           // Excalidraw otherwise calls window.open, which the desktop shell
@@ -299,9 +269,7 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
             ? undefined
             : (elements, appState, files) => {
                 if (readOnlyRef.current) return;
-                presenceBinding.current?.updateSelection(
-                  appState.selectedElementIds,
-                );
+                presenceBinding.current?.updateSelection(appState.selectedElementIds);
                 if (sceneBinding) {
                   pendingSceneChange.current = {
                     binding: sceneBinding,
@@ -338,12 +306,7 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
                   }
                   return;
                 }
-                const serialized = serializeAsJSON(
-                  elements,
-                  appState,
-                  files,
-                  "local",
-                );
+                const serialized = serializeAsJSON(elements, appState, files, "local");
                 if (serialized === lastSerialized.current) return;
                 lastSerialized.current = serialized;
                 props.onChange?.(serialized);

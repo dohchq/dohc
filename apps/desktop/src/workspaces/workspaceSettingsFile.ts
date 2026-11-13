@@ -67,10 +67,7 @@ function settingsFromObject(raw: Record<string, unknown>): WorkspaceSettingsResu
 // A settings file that EXISTS but cannot be read runs on defaults and carries
 // a warning Settings shows, so the user knows their choices are not in
 // effect. An ABSENT file is the ordinary new-workspace case and warns nothing.
-function unreadableSettings(
-  reason: string,
-  path: string,
-): WorkspaceSettingsResult {
+function unreadableSettings(reason: string, path: string): WorkspaceSettingsResult {
   return {
     settings: DEFAULT_WORKSPACE_SETTINGS,
     source: "recovered",
@@ -124,7 +121,9 @@ async function loadWorkspaceSettings(
         settings: DEFAULT_WORKSPACE_SETTINGS,
         source: "recovered",
         warning: `dohc is using default settings. ${refused}`,
-        ...(error instanceof LocalStateUnavailableError && error.refusal === "not-opened" ? { notOpened: true } : {}),
+        ...(error instanceof LocalStateUnavailableError && error.refusal === "not-opened"
+          ? { notOpened: true }
+          : {}),
       },
       folderRefusal: `dohc did not save workspace settings. ${refused}`,
     };
@@ -180,10 +179,7 @@ const FILE_REFUSALS: Record<Exclude<OwnedFileRead["status"], "read" | "missing">
 // asked for while the dialog says the reset landed.
 const settingsWriteQueues = new Map<string, Promise<unknown>>();
 
-function queueWorkspaceSettingsWrite<T>(
-  rootPath: string,
-  run: () => Promise<T>,
-): Promise<T> {
+function queueWorkspaceSettingsWrite<T>(rootPath: string, run: () => Promise<T>): Promise<T> {
   const queue = settingsWriteQueues.get(rootPath) ?? Promise.resolve();
   // A failed write must not block the next one, so both settlements continue.
   const result = queue.then(run, run);
@@ -308,11 +304,12 @@ async function writeSettingsContent(
     // reaches here after the file read as a regular file, so it never takes
     // this branch.
     const target = await lstat(path).catch(() => null);
-    squatter = target && !target.isFile()
-      ? target.isSymbolicLink()
-        ? ("link" as const)
-        : ("folder" as const)
-      : null;
+    squatter =
+      target && !target.isFile()
+        ? target.isSymbolicLink()
+          ? ("link" as const)
+          : ("folder" as const)
+        : null;
     if (squatter) await moveIntoWorkspaceTrash(workspace, path);
   });
   return squatter;

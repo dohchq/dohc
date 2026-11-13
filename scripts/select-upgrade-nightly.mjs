@@ -14,9 +14,15 @@ export const LEGACY_NIGHTLIES = ["v0.1.1-nightly.20260622.15.1"];
  * @returns {{ tag: string | null, notice?: string }} a null tag skips the check.
  */
 export function selectUpgradeNightly(releases) {
-  if (!Array.isArray(releases)) throw new Error("Release history must be an array of GitHub releases.");
+  if (!Array.isArray(releases))
+    throw new Error("Release history must be an array of GitHub releases.");
   const nightlies = releases.filter((release) => {
-    if (!release || typeof release.draft !== "boolean" || typeof release.tag_name !== "string" || !Array.isArray(release.assets)) {
+    if (
+      !release ||
+      typeof release.draft !== "boolean" ||
+      typeof release.tag_name !== "string" ||
+      !Array.isArray(release.assets)
+    ) {
       throw new Error("Release history contains an invalid GitHub release.");
     }
     return !release.draft && release.tag_name.includes("-nightly.");
@@ -26,12 +32,25 @@ export function selectUpgradeNightly(releases) {
   }
   // ISO 8601 UTC times sort as strings.
   const newest = nightlies.sort((a, b) => b.published_at.localeCompare(a.published_at))[0];
-  if (!newest) return { tag: null, notice: "No nightly is published yet, so the engine upgrade check has nothing to open." };
+  if (!newest)
+    return {
+      tag: null,
+      notice: "No nightly is published yet, so the engine upgrade check has nothing to open.",
+    };
   if (LEGACY_NIGHTLIES.includes(newest.tag_name)) {
-    return { tag: null, notice: `${newest.tag_name} predates the packaged engine, so the engine upgrade check has nothing to open.` };
+    return {
+      tag: null,
+      notice: `${newest.tag_name} predates the packaged engine, so the engine upgrade check has nothing to open.`,
+    };
   }
-  if (!newest.assets.some((asset) => typeof asset?.name === "string" && asset.name.endsWith(".AppImage"))) {
-    throw new Error(`${newest.tag_name}, the newest published nightly, has no Linux AppImage to check an engine upgrade from.`);
+  if (
+    !newest.assets.some(
+      (asset) => typeof asset?.name === "string" && asset.name.endsWith(".AppImage"),
+    )
+  ) {
+    throw new Error(
+      `${newest.tag_name}, the newest published nightly, has no Linux AppImage to check an engine upgrade from.`,
+    );
   }
   return { tag: newest.tag_name };
 }
@@ -39,11 +58,16 @@ export function selectUpgradeNightly(releases) {
 async function main() {
   const args = process.argv.slice(2);
   if (args.length !== 3 || args[0] !== "--releases" || args[2] !== "--github-output") {
-    throw new Error("Usage: select-upgrade-nightly.mjs --releases <GitHub release history JSONL> --github-output");
+    throw new Error(
+      "Usage: select-upgrade-nightly.mjs --releases <GitHub release history JSONL> --github-output",
+    );
   }
   const outputPath = process.env.GITHUB_OUTPUT;
   if (!outputPath) throw new Error("GITHUB_OUTPUT is required with --github-output.");
-  const releases = (await readFile(args[1], "utf8")).split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+  const releases = (await readFile(args[1], "utf8"))
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
   const { tag, notice } = selectUpgradeNightly(releases);
   if (notice) console.log(`::notice::${notice}`);
   else console.log(`Checking an engine upgrade from ${tag}.`);

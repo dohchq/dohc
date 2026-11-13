@@ -107,8 +107,11 @@ test("@restart-durability-person-agent a document remains editable by its person
   let desktop: Desktop | null = null;
   const step = async <Result>(name: string, action: () => Promise<Result>): Promise<Result> => {
     const started = performance.now();
-    try { return await test.step(name, action); }
-    finally { timings.push({ step: name, seconds: (performance.now() - started) / 1000 }); }
+    try {
+      return await test.step(name, action);
+    } finally {
+      timings.push({ step: name, seconds: (performance.now() - started) / 1000 });
+    }
   };
 
   try {
@@ -122,30 +125,48 @@ test("@restart-durability-person-agent a document remains editable by its person
       return opened;
     });
     await step("agent creates document", async () => {
-      expect(await agentCli(temp, "documentCreate", {
-        agent: "e2e-lifecycle-agent",
-        path,
-        markdown: "# Lifecycle\n\nAgent draft before restart.\n\nThe person continues here.\n",
-      })).toEqual({ ok: true, path });
+      expect(
+        await agentCli(temp, "documentCreate", {
+          agent: "e2e-lifecycle-agent",
+          path,
+          markdown: "# Lifecycle\n\nAgent draft before restart.\n\nThe person continues here.\n",
+        }),
+      ).toEqual({ ok: true, path });
     });
     const first = launches[0]!;
     await step("created document opens for the person", async () => {
       await waitForWorkspaceFile(first.page, workspace.workspaceId, path);
       await openDocument(first.page, path);
-      await expect(first.page.getByTestId("markdown-editor")).toContainText("Agent draft before restart.");
+      await expect(first.page.getByTestId("markdown-editor")).toContainText(
+        "Agent draft before restart.",
+      );
     });
     await step("agent reads and edits open document", async () => {
       const read = await agentCli(temp, "documentRead", { path });
-      expect(read).toMatchObject({ ok: true, markdown: expect.stringContaining("Agent draft before restart.") });
-      expect(await agentCli(temp, "documentEdit", {
-        agent: "e2e-lifecycle-agent", path,
-        find: "Agent draft before restart.", replacement: "Agent saved before restart.",
-      })).toMatchObject({ ok: true, path, changed: true });
+      expect(read).toMatchObject({
+        ok: true,
+        markdown: expect.stringContaining("Agent draft before restart."),
+      });
+      expect(
+        await agentCli(temp, "documentEdit", {
+          agent: "e2e-lifecycle-agent",
+          path,
+          find: "Agent draft before restart.",
+          replacement: "Agent saved before restart.",
+        }),
+      ).toMatchObject({ ok: true, path, changed: true });
     });
     await step("first agent edit appears and settles", async () => {
-      await expect(first.page.getByTestId("markdown-editor")).toContainText("Agent saved before restart.");
-      await expect(first.page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved");
-      await expect.poll(() => fileText(temp, path), { timeout: 30_000 }).toContain("Agent saved before restart.");
+      await expect(first.page.getByTestId("markdown-editor")).toContainText(
+        "Agent saved before restart.",
+      );
+      await expect(first.page.getByTestId("markdown-save-state")).toHaveAttribute(
+        "data-state",
+        "saved",
+      );
+      await expect
+        .poll(() => fileText(temp, path), { timeout: 30_000 })
+        .toContain("Agent saved before restart.");
     });
     await step("restart opens the same workspace and document", async () => {
       await first.close();
@@ -157,34 +178,63 @@ test("@restart-durability-person-agent a document remains editable by its person
       await waitForWorkspaceFile(desktop.page, workspace.workspaceId, path);
       await waitForCliEndpoint(temp.homeDir);
       await openDocument(desktop.page, path);
-      await expect(desktop.page.getByTestId("markdown-editor")).toContainText("Agent saved before restart.");
+      await expect(desktop.page.getByTestId("markdown-editor")).toContainText(
+        "Agent saved before restart.",
+      );
     });
     const second = launches[1]!;
     await step("agent reads and edits after restart", async () => {
       const read = await agentCli(temp, "documentRead", { path });
-      expect(read).toMatchObject({ ok: true, markdown: expect.stringContaining("Agent saved before restart.") });
-      expect(await agentCli(temp, "documentEdit", {
-        agent: "e2e-lifecycle-agent", path,
-        find: "Agent saved before restart.", replacement: "Agent continued after restart.",
-      })).toMatchObject({ ok: true, path, changed: true });
-      await expect(second.page.getByTestId("markdown-editor")).toContainText("Agent continued after restart.");
+      expect(read).toMatchObject({
+        ok: true,
+        markdown: expect.stringContaining("Agent saved before restart."),
+      });
+      expect(
+        await agentCli(temp, "documentEdit", {
+          agent: "e2e-lifecycle-agent",
+          path,
+          find: "Agent saved before restart.",
+          replacement: "Agent continued after restart.",
+        }),
+      ).toMatchObject({ ok: true, path, changed: true });
+      await expect(second.page.getByTestId("markdown-editor")).toContainText(
+        "Agent continued after restart.",
+      );
     });
     await step("person continues typing in the reopened document", async () => {
-      await second.page.getByTestId("markdown-editor").getByText("The person continues here.").click();
+      await second.page
+        .getByTestId("markdown-editor")
+        .getByText("The person continues here.")
+        .click();
       await second.page.keyboard.press("End");
       await second.page.keyboard.type(" Human continued after restart.");
-      await expect(second.page.getByTestId("markdown-editor")).toContainText("The person continues here. Human continued after restart.");
+      await expect(second.page.getByTestId("markdown-editor")).toContainText(
+        "The person continues here. Human continued after restart.",
+      );
     });
     await step("editor, agent read, and saved file agree", async () => {
-      await expect(second.page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved");
-      await expect.poll(async () => {
-        const read = await agentCli(temp, "documentRead", { path });
-        const disk = await fileText(temp, path);
-        return read.ok && read.markdown === disk &&
-          disk.includes("Agent continued after restart.") &&
-          disk.includes("The person continues here. Human continued after restart.");
-      }, { timeout: 30_000 }).toBe(true);
-      await expect(second.page.getByTestId("markdown-editor")).toContainText("Agent continued after restart.");
+      await expect(second.page.getByTestId("markdown-save-state")).toHaveAttribute(
+        "data-state",
+        "saved",
+      );
+      await expect
+        .poll(
+          async () => {
+            const read = await agentCli(temp, "documentRead", { path });
+            const disk = await fileText(temp, path);
+            return (
+              read.ok &&
+              read.markdown === disk &&
+              disk.includes("Agent continued after restart.") &&
+              disk.includes("The person continues here. Human continued after restart.")
+            );
+          },
+          { timeout: 30_000 },
+        )
+        .toBe(true);
+      await expect(second.page.getByTestId("markdown-editor")).toContainText(
+        "Agent continued after restart.",
+      );
       await second.page.screenshot({ path: testInfo.outputPath("document-after-restart.png") });
       for (const launch of launches) {
         expect(launch.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
@@ -192,8 +242,9 @@ test("@restart-durability-person-agent a document remains editable by its person
       }
     });
   } finally {
-    try { await cleanupDesktopWorkspace(desktop, temp); }
-    finally {
+    try {
+      await cleanupDesktopWorkspace(desktop, temp);
+    } finally {
       await testInfo.attach("document lifecycle timings", {
         body: JSON.stringify({ platform: process.platform, steps: timings }, null, 2),
         contentType: "application/json",
@@ -228,10 +279,13 @@ test("an agent's edit merges into a document the person is typing in", async ({}
     await page.keyboard.press("End");
     await page.keyboard.type(" Typed before.");
     await expect
-      .poll(async () => {
-        const read = await agentCli(temp, "documentRead", { path: "notes/plan.md" });
-        return read.ok && read.markdown.includes("Typed before.");
-      }, { timeout: 30_000 })
+      .poll(
+        async () => {
+          const read = await agentCli(temp, "documentRead", { path: "notes/plan.md" });
+          return read.ok && read.markdown.includes("Typed before.");
+        },
+        { timeout: 30_000 },
+      )
       .toBe(true);
 
     // Main now holds the editor's updates until the test lets them through,
@@ -247,35 +301,49 @@ test("an agent's edit merges into a document the person is typing in", async ({}
     if (!during.ok) throw new Error(`documentRead failed: ${during.reason}`);
     expect(during.markdown).toContain("The person writes here. Typed before.");
     expect(during.markdown).not.toContain("Queued.");
-    await expect(agentCli(temp, "documentEdit", {
-      agent: "e2e-agent",
+    await expect(
+      agentCli(temp, "documentEdit", {
+        agent: "e2e-agent",
+        path: "notes/plan.md",
+        find: "person writes here",
+        replacement: "person wrote here",
+      }),
+    ).resolves.toEqual({
+      ok: true,
       path: "notes/plan.md",
-      find: "person writes here",
-      replacement: "person wrote here",
-    })).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true, warning: expect.stringContaining("Someone may be changing this document") });
-    await expect(agentCli(temp, "documentEdit", {
-      agent: "e2e-agent",
+      changed: true,
+      warning: expect.stringContaining("Someone may be changing this document"),
+    });
+    await expect(
+      agentCli(temp, "documentEdit", {
+        agent: "e2e-agent",
+        path: "notes/plan.md",
+        find: "The agent edits this line.",
+        replacement: "The agent edited this line.\n\n## Added by the agent\n\nA new section.",
+      }),
+    ).resolves.toEqual({
+      ok: true,
       path: "notes/plan.md",
-      find: "The agent edits this line.",
-      replacement: "The agent edited this line.\n\n## Added by the agent\n\nA new section.",
-    })).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true, warning: expect.stringContaining("Someone may be changing this document") });
+      changed: true,
+      warning: expect.stringContaining("Someone may be changing this document"),
+    });
     // Turning the paragraph the person is typing in into a heading would
     // lose their typing, so the edit is refused with what to do instead.
-    await expect(agentCli(temp, "documentEdit", {
-      agent: "e2e-agent",
-      path: "notes/plan.md",
-      find: "The person wrote here.",
-      replacement: "# The person wrote here.",
-    })).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("ask the person") });
+    await expect(
+      agentCli(temp, "documentEdit", {
+        agent: "e2e-agent",
+        path: "notes/plan.md",
+        find: "The person wrote here.",
+        replacement: "# The person wrote here.",
+      }),
+    ).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("ask the person") });
 
     // Main takes the held typing, and the person keeps typing where the
     // cursor was.
     await releaseEditorUpdates(desktop);
     await page.keyboard.type(" Typed after.");
 
-    await expect(editor).toContainText(
-      "The person wrote here. Typed before. Queued. Typed after.",
-    );
+    await expect(editor).toContainText("The person wrote here. Typed before. Queued. Typed after.");
     await expect(editor).toContainText("The agent edited this line.");
     await expect(editor.getByRole("heading", { name: "Added by the agent" })).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath("agent-edit-merged.png") });
@@ -286,16 +354,22 @@ test("an agent's edit merges into a document the person is typing in", async ({}
       "The agent edited this line.\n\n## Added by the agent\n\nA new section.",
     ];
     await expect
-      .poll(async () => {
-        const next = await agentCli(temp, "documentRead", { path: "notes/plan.md" });
-        return next.ok && merged.every((part) => next.markdown.includes(part));
-      }, { timeout: 30_000 })
+      .poll(
+        async () => {
+          const next = await agentCli(temp, "documentRead", { path: "notes/plan.md" });
+          return next.ok && merged.every((part) => next.markdown.includes(part));
+        },
+        { timeout: 30_000 },
+      )
       .toBe(true);
     await expect
-      .poll(async () => {
-        const text = await fileText(temp, "notes/plan.md");
-        return merged.every((part) => text.includes(part));
-      }, { timeout: 30_000 })
+      .poll(
+        async () => {
+          const text = await fileText(temp, "notes/plan.md");
+          return merged.every((part) => text.includes(part));
+        },
+        { timeout: 30_000 },
+      )
       .toBe(true);
 
     // The engine records the agent's update as the unnamed agent's, since no
@@ -341,10 +415,12 @@ test("an agent creates a document and comments on it where the person reads comm
     });
     expect(created).toEqual({ ok: true, path: "notes/itinerary.md" });
     expect(await fileText(temp, "notes/itinerary.md")).toContain("## Friday 14");
-    await expect(agentCli(temp, "documentCreate", {
-      path: "notes/itinerary.md",
-      markdown: "Again",
-    })).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("already exists") });
+    await expect(
+      agentCli(temp, "documentCreate", {
+        path: "notes/itinerary.md",
+        markdown: "Again",
+      }),
+    ).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("already exists") });
 
     // The person sees the new document and opens it.
     await waitForWorkspaceFile(page, workspace.workspaceId, "notes/itinerary.md");
@@ -364,14 +440,16 @@ test("an agent creates a document and comments on it where the person reads comm
     });
     if (!comment.ok) throw new Error(`fileChatStart failed: ${comment.reason}`);
     const threadId = comment.threadId;
-    await expect(agentCli(temp, "fileChats", { path: "notes/itinerary.md" }))
-      .resolves.toMatchObject({ ok: true, threads: [{ id: threadId, title: "Friday plan" }] });
+    await expect(
+      agentCli(temp, "fileChats", { path: "notes/itinerary.md" }),
+    ).resolves.toMatchObject({ ok: true, threads: [{ id: threadId, title: "Friday plan" }] });
 
     await openAboutPanel(page);
     await page.getByTestId("linked-chat-open").click();
     await expect(page.getByTestId("linked-chat-title")).toContainText("Friday plan");
-    await expect(page.getByTestId("linked-chat-message-body"))
-      .toContainText("Dawn is 5:40. Should we leave the hotel at 5?");
+    await expect(page.getByTestId("linked-chat-message-body")).toContainText(
+      "Dawn is 5:40. Should we leave the hotel at 5?",
+    );
     await expect(
       page.locator('[data-testid="linked-chat-message-author"][data-author-kind="agent"]'),
     ).toHaveCount(1);
@@ -381,10 +459,15 @@ test("an agent creates a document and comments on it where the person reads comm
     await composer.fill("Yes, 5 is fine.");
     await composer.press("Enter");
     await expect
-      .poll(async () => {
-        const chat = await agentCli(temp, "chat", { threadId });
-        return chat.ok && "messages" in chat ? chat.messages.map((message) => [message.authorKind, message.body]) : [];
-      }, { timeout: 30_000 })
+      .poll(
+        async () => {
+          const chat = await agentCli(temp, "chat", { threadId });
+          return chat.ok && "messages" in chat
+            ? chat.messages.map((message) => [message.authorKind, message.body])
+            : [];
+        },
+        { timeout: 30_000 },
+      )
       .toEqual([
         ["agent", "Dawn is 5:40. Should we leave the hotel at 5?"],
         ["human", "Yes, 5 is fine."],
@@ -404,7 +487,9 @@ test("an agent's version change keeps what the person typed but main had not see
   let desktop: Desktop | null = null;
 
   try {
-    await writeWorkspaceFiles(temp, [{ path: "notes/plan.md", contents: "# Plan\n\nThe person writes here.\n" }]);
+    await writeWorkspaceFiles(temp, [
+      { path: "notes/plan.md", contents: "# Plan\n\nThe person writes here.\n" },
+    ]);
     desktop = await launchDesktopApp({ workspace: temp });
     const { page } = desktop;
     const workspace = await openWorkspaceFromFirstRun(page, temp);
@@ -425,15 +510,28 @@ test("an agent's version change keeps what the person typed but main had not see
     await expect(editor).toContainText("The person writes here. Queued.");
 
     const creating = agentCli(temp, "versionCreate", { name: "Ideas" });
-    await expect.poll(() => page.evaluate(() => (globalThis as { __dohcRounds?: string[] }).__dohcRounds), { timeout: 30_000 })
+    await expect
+      .poll(() => page.evaluate(() => (globalThis as { __dohcRounds?: string[] }).__dohcRounds), {
+        timeout: 30_000,
+      })
       .toEqual(["begin"]);
     await releaseEditorUpdates(desktop);
-    await expect(creating).resolves.toEqual({ ok: true, version: { id: expect.any(String), name: "Ideas" } });
-    await expect.poll(() => fileText(temp, "notes/plan.md"), { timeout: 30_000 }).toContain("The person writes here. Queued.");
+    await expect(creating).resolves.toEqual({
+      ok: true,
+      version: { id: expect.any(String), name: "Ideas" },
+    });
+    await expect
+      .poll(() => fileText(temp, "notes/plan.md"), { timeout: 30_000 })
+      .toContain("The person writes here. Queued.");
     await expect(editor).toContainText("The person writes here. Queued.");
 
-    await expect(agentCli(temp, "versionSwitch", { version: "Main" })).resolves.toMatchObject({ ok: true, version: { name: "Main" } });
-    await expect.poll(() => fileText(temp, "notes/plan.md"), { timeout: 30_000 }).toContain("The person writes here. Queued.");
+    await expect(agentCli(temp, "versionSwitch", { version: "Main" })).resolves.toMatchObject({
+      ok: true,
+      version: { name: "Main" },
+    });
+    await expect
+      .poll(() => fileText(temp, "notes/plan.md"), { timeout: 30_000 })
+      .toContain("The person writes here. Queued.");
     await expect(editor).toContainText("The person writes here. Queued.");
     assertDesktopEngineHealthy(desktop.logs);
   } finally {

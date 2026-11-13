@@ -1,9 +1,6 @@
 import { isWorkspaceVisibilityPolicyPath } from "../ipc/bridgeContract";
 import { workspaceRootsMatch } from "./workspaceRootsMatch";
-import {
-  deriveSyncStatus,
-  type WatcherEvent,
-} from "@dohc/workspace-core";
+import { deriveSyncStatus, type WatcherEvent } from "@dohc/workspace-core";
 import type { EngineStoreRefusal } from "@dohc/workspace-engine-client";
 import type { AgentRunStateEvent, SyncStatusResult } from "../ipc/bridgeContract";
 import type { CloudSyncEngine } from "./relaySyncEngine";
@@ -13,7 +10,10 @@ import type {
   WorkspaceEngineCaptureFailure,
 } from "./workspaceEngineCapture";
 import type { ActiveAgentRun } from "../agents/activeAgentRun";
-import type { WorkspaceObservationCallbacks, WorkspaceObservationHandle } from "./workspaceFileObservation";
+import type {
+  WorkspaceObservationCallbacks,
+  WorkspaceObservationHandle,
+} from "./workspaceFileObservation";
 import type { WorkspaceActivityScope } from "../ipc/workspaceActivityBroadcast";
 
 // The legacy.dohc/history read/write surface is
@@ -99,7 +99,10 @@ export class WorkspaceActivityState {
 
 export interface WorkspaceActivityOptions {
   onHeldFiles?: (workspaceId: string, files: NonNullable<SyncStatusResult["heldFiles"]>) => void;
-  observationFor: (workspace: ActivityWorkspace, callbacks: WorkspaceObservationCallbacks) => WorkspaceObservationHandle;
+  observationFor: (
+    workspace: ActivityWorkspace,
+    callbacks: WorkspaceObservationCallbacks,
+  ) => WorkspaceObservationHandle;
   onObservationResync?: (workspace: ActivityWorkspace) => Promise<void>;
   // Live facts main owns: why a synced workspace can't sync on this
   // computer's session (absent when it can, or when the workspace doesn't
@@ -138,10 +141,7 @@ export interface WorkspaceActivityOptions {
   ) => Promise<WorkspaceCaptureDecision> | WorkspaceCaptureDecision;
   // Receives the watcher's already-settled path-rich batch. The callback is
   // internal to main and runs before the path-free renderer notification.
-  onWatcherBatch?: (
-    workspace: ActivityWorkspace,
-    events: readonly WatcherEvent[],
-  ) => void;
+  onWatcherBatch?: (workspace: ActivityWorkspace, events: readonly WatcherEvent[]) => void;
   // Whether this computer's agent is running changed in one workspace.
   onAgentRunState?: (event: AgentRunStateEvent) => void;
 }
@@ -166,15 +166,18 @@ export interface WorkspaceCaptureDecision {
 }
 
 export interface WorkspaceCaptureHooks {
-  onCaptureOutcome: (
-    failure: WorkspaceEngineCaptureFailure,
-    detail?: string | null,
-  ) => void;
+  onCaptureOutcome: (failure: WorkspaceEngineCaptureFailure, detail?: string | null) => void;
   onAtomicPlacementUnavailable: () => void;
   onRecoveryUnavailable: (unavailable: boolean) => void;
   onSecretKeyUnavailable?: (reason: string | null) => void;
-  onOutsideWriteCopies?: (paths: readonly (readonly [string, string, string])[] | null, readError: string | null) => void;
-  onProtectedCopies?: (copies: readonly (readonly [string, string, number])[] | null, readError: string | null) => void;
+  onOutsideWriteCopies?: (
+    paths: readonly (readonly [string, string, string])[] | null,
+    readError: string | null,
+  ) => void;
+  onProtectedCopies?: (
+    copies: readonly (readonly [string, string, number])[] | null,
+    readError: string | null,
+  ) => void;
   onKeptFiles: (paths: readonly (readonly [string, string])[]) => void;
   onRetainedCopies: (summary: NonNullable<SyncStatusResult["retainedCopies"]>) => void;
   onHeldFiles: (files: NonNullable<SyncStatusResult["heldFiles"]>) => void;
@@ -250,7 +253,8 @@ export function createWorkspaceActivity(
     const send = options.sendWorkspaceName;
     if (!send) return;
     void (async () => send(workspace))().catch((error: unknown) =>
-      console.warn("[desktop] could not send the workspace name to the server:", error));
+      console.warn("[desktop] could not send the workspace name to the server:", error),
+    );
   }
 
   function publishAgentRunState(workspaceId: string, active: boolean): void {
@@ -309,7 +313,7 @@ export function createWorkspaceActivity(
       // pause, so sync runs again once a new sign-in rebuilds the engine.
       syncBlocked: snap?.updateRequired
         ? "update-required"
-        : cloud.syncBlocked ?? (snap?.authExpired ? "sign-in-expired" : null),
+        : (cloud.syncBlocked ?? (snap?.authExpired ? "sign-in-expired" : null)),
       lastSyncedAtMs: snap?.lastSyncedAtMs ?? w?.lastSyncedAtMs ?? null,
     });
     // Additive surface: the status bar shows how many files conflict, and
@@ -331,14 +335,26 @@ export function createWorkspaceActivity(
       ...(w?.onNetworkShare ? { onNetworkShare: true } : {}),
       recoveryUnavailable: w?.recoveryUnavailable ?? false,
       ...(w?.secretKeyUnavailable ? { secretKeyUnavailable: w.secretKeyUnavailable } : {}),
-      ...(w && w.outsideWriteCopies !== null ? {
-        outsideWriteCopies: w.outsideWriteCopies.map(([original, copy, id]): [string, string, string] => [original, copy, id]),
-      } : {}),
-      ...(w?.outsideWriteCopyReadError !== undefined ? { outsideWriteCopyReadError: w.outsideWriteCopyReadError } : {}),
-      ...(w && w.protectedCopies !== null ? {
-        protectedCopies: w.protectedCopies.map(([path, id, keptAtMs]): [string, string, number] => [path, id, keptAtMs]),
-      } : {}),
-      ...(w?.protectedCopyReadError !== undefined ? { protectedCopyReadError: w.protectedCopyReadError } : {}),
+      ...(w && w.outsideWriteCopies !== null
+        ? {
+            outsideWriteCopies: w.outsideWriteCopies.map(
+              ([original, copy, id]): [string, string, string] => [original, copy, id],
+            ),
+          }
+        : {}),
+      ...(w?.outsideWriteCopyReadError !== undefined
+        ? { outsideWriteCopyReadError: w.outsideWriteCopyReadError }
+        : {}),
+      ...(w && w.protectedCopies !== null
+        ? {
+            protectedCopies: w.protectedCopies.map(
+              ([path, id, keptAtMs]): [string, string, number] => [path, id, keptAtMs],
+            ),
+          }
+        : {}),
+      ...(w?.protectedCopyReadError !== undefined
+        ? { protectedCopyReadError: w.protectedCopyReadError }
+        : {}),
       keptFiles: (w?.keptFiles ?? []).map(([original, copy]): [string, string] => [original, copy]),
       ...(w?.retainedCopies ? { retainedCopies: { ...w.retainedCopies } } : {}),
       heldFiles: w?.heldFiles ?? [],
@@ -352,8 +368,7 @@ export function createWorkspaceActivity(
       return {
         ...baseStatus,
         historyCaptureFailed: true,
-        engineStoreRefused:
-          historyCaptureFailure === "other" ? null : historyCaptureFailure,
+        engineStoreRefused: historyCaptureFailure === "other" ? null : historyCaptureFailure,
         ...(historyCaptureFailure !== "other" && historyCaptureDetail
           ? { engineStoreRefusedDetail: historyCaptureDetail }
           : {}),
@@ -372,10 +387,7 @@ export function createWorkspaceActivity(
     failure: "other" | EngineStoreRefusal | null,
     detail: string | null,
   ): void {
-    if (
-      entry.historyCaptureFailure === failure &&
-      entry.historyCaptureDetail === detail
-    ) {
+    if (entry.historyCaptureFailure === failure && entry.historyCaptureDetail === detail) {
       return;
     }
     entry.historyCaptureFailure = failure;
@@ -416,17 +428,23 @@ export function createWorkspaceActivity(
     const current = state.entry;
     const rootPath = current?.workspace.rootPath ?? state.agentRun?.workspace.rootPath;
     if (rootPath !== undefined && !workspaceRootsMatch(rootPath, requestedWorkspace.rootPath)) {
-      throw new Error(
-        "Workspace activity was replaced by another physical root.",
-      );
+      throw new Error("Workspace activity was replaced by another physical root.");
     }
-    const workspace = rootPath === undefined ? requestedWorkspace : { ...requestedWorkspace, rootPath };
+    const workspace =
+      rootPath === undefined ? requestedWorkspace : { ...requestedWorkspace, rootPath };
     if (!current) {
       const entry: WatchedWorkspace = {
         workspace,
         inFlight: false,
         lastSyncedAtMs: null,
-        handle: { stop: async () => {}, ready: Promise.resolve(), pulledPaths: async () => {}, pullStarting: () => {}, pullFinished: () => {}, retry: async () => {} },
+        handle: {
+          stop: async () => {},
+          ready: Promise.resolve(),
+          pulledPaths: async () => {},
+          pullStarting: () => {},
+          pullFinished: () => {},
+          retry: async () => {},
+        },
         engine: null,
         capture: null,
         historyRecordingUnavailable: false,
@@ -450,60 +468,74 @@ export function createWorkspaceActivity(
         collectionsWaitingAnswered: 0,
       };
       state.entry = entry;
-      void options.onNetworkShare?.(workspace.rootPath).then((shared) => {
-        if (!shared || state.entry !== entry) return;
-        entry.onNetworkShare = true;
-        notify({ workspaceId: workspace.workspaceId });
-      }, (error) => console.error(`[desktop] could not check whether ${workspace.rootPath} is on a network share:`, error));
+      void options.onNetworkShare?.(workspace.rootPath).then(
+        (shared) => {
+          if (!shared || state.entry !== entry) return;
+          entry.onNetworkShare = true;
+          notify({ workspaceId: workspace.workspaceId });
+        },
+        (error) =>
+          console.error(
+            `[desktop] could not check whether ${workspace.rootPath} is on a network share:`,
+            error,
+          ),
+      );
       // Resolve the engine capture before the watcher starts, so the mode is
       // known from the first batch. A capture failure leaves the workspace
       // with no recorder, surfaced via the history-off notice, never a
       // failed open.
       if (options.captureFor) {
         try {
-          const decision =
-            await options.captureFor(workspace, {
-              onCaptureOutcome: (failure, detail = null) =>
-                recordCaptureOutcome(entry, failure, detail),
-              onAtomicPlacementUnavailable: () => markAtomicPlacementUnavailable(entry),
-              onRecoveryUnavailable: (unavailable) => {
-                if (state.entry !== entry || entry.recoveryUnavailable === unavailable) return;
-                entry.recoveryUnavailable = unavailable;
-                notify({ workspaceId: workspace.workspaceId });
-              },
-              onSecretKeyUnavailable: (reason) => {
-                if (state.entry !== entry || entry.secretKeyUnavailable === reason) return;
-                entry.secretKeyUnavailable = reason;
-                notify({ workspaceId: workspace.workspaceId });
-              },
-              onOutsideWriteCopies: (paths, readError) => {
-                if (state.entry !== entry) return;
-                entry.outsideWriteCopies = paths === null ? null : [...paths];
-                entry.outsideWriteCopyReadError = readError;
-                notify({ workspaceId: workspace.workspaceId });
-              },
-              onProtectedCopies: (copies, readError) => {
-                if (state.entry !== entry) return;
-                entry.protectedCopies = copies === null ? null : [...copies];
-                entry.protectedCopyReadError = readError;
-                notify({ workspaceId: workspace.workspaceId });
-              },
-              onKeptFiles: (paths) => {
-                if (state.entry !== entry || JSON.stringify(paths) === JSON.stringify(entry.keptFiles)) return;
-                entry.keptFiles = [...paths];
-                notify({ workspaceId: workspace.workspaceId });
-              },
-              onRetainedCopies: (summary) => {
-                const previous = entry.retainedCopies;
-                if (state.entry !== entry || (previous?.count === summary.count && previous.bytes === summary.bytes)) return;
-                entry.retainedCopies = { count: summary.count, bytes: summary.bytes };
-                notify({ workspaceId: workspace.workspaceId });
-              },
-              onHeldFiles: (files) => {
-                if (state.entry !== entry) return;
-                recordHeldFiles(workspace, state, files);
-              },
-            });
+          const decision = await options.captureFor(workspace, {
+            onCaptureOutcome: (failure, detail = null) =>
+              recordCaptureOutcome(entry, failure, detail),
+            onAtomicPlacementUnavailable: () => markAtomicPlacementUnavailable(entry),
+            onRecoveryUnavailable: (unavailable) => {
+              if (state.entry !== entry || entry.recoveryUnavailable === unavailable) return;
+              entry.recoveryUnavailable = unavailable;
+              notify({ workspaceId: workspace.workspaceId });
+            },
+            onSecretKeyUnavailable: (reason) => {
+              if (state.entry !== entry || entry.secretKeyUnavailable === reason) return;
+              entry.secretKeyUnavailable = reason;
+              notify({ workspaceId: workspace.workspaceId });
+            },
+            onOutsideWriteCopies: (paths, readError) => {
+              if (state.entry !== entry) return;
+              entry.outsideWriteCopies = paths === null ? null : [...paths];
+              entry.outsideWriteCopyReadError = readError;
+              notify({ workspaceId: workspace.workspaceId });
+            },
+            onProtectedCopies: (copies, readError) => {
+              if (state.entry !== entry) return;
+              entry.protectedCopies = copies === null ? null : [...copies];
+              entry.protectedCopyReadError = readError;
+              notify({ workspaceId: workspace.workspaceId });
+            },
+            onKeptFiles: (paths) => {
+              if (
+                state.entry !== entry ||
+                JSON.stringify(paths) === JSON.stringify(entry.keptFiles)
+              )
+                return;
+              entry.keptFiles = [...paths];
+              notify({ workspaceId: workspace.workspaceId });
+            },
+            onRetainedCopies: (summary) => {
+              const previous = entry.retainedCopies;
+              if (
+                state.entry !== entry ||
+                (previous?.count === summary.count && previous.bytes === summary.bytes)
+              )
+                return;
+              entry.retainedCopies = { count: summary.count, bytes: summary.bytes };
+              notify({ workspaceId: workspace.workspaceId });
+            },
+            onHeldFiles: (files) => {
+              if (state.entry !== entry) return;
+              recordHeldFiles(workspace, state, files);
+            },
+          });
           // stopAll may have raced the capture build; stop the capture no
           // one will ever own instead of leaking its chain/store handle.
           if (state.entry !== entry) {
@@ -525,7 +557,7 @@ export function createWorkspaceActivity(
           entry.historyRecordingUnavailable = true;
           const capture = entry.capture;
           entry.capture = null;
-          await capture?.stop().catch(error => {
+          await capture?.stop().catch((error) => {
             console.error("[desktop] failed to stop unavailable workspace capture:", error);
           });
         }
@@ -539,21 +571,31 @@ export function createWorkspaceActivity(
         facts(facts) {
           if (state.entry !== entry && state.entry !== null) return;
           // Policy metadata refreshes names, not capture, automations or app discovery.
-          const events: WatcherEvent[] = facts.filter(fact => !isWorkspaceVisibilityPolicyPath(fact.path, process.platform)).map(fact => ({ path: fact.path,
-            operation: fact.kind === "disappeared" ? "delete" : "update" }));
+          const events: WatcherEvent[] = facts
+            .filter((fact) => !isWorkspaceVisibilityPolicyPath(fact.path, process.platform))
+            .map((fact) => ({
+              path: fact.path,
+              operation: fact.kind === "disappeared" ? "delete" : "update",
+            }));
           // Deletion suppression happens before any queued work or close.
           if (events.length) entry.capture?.observeFileEvents(events);
           if (state.entry !== entry) return;
           if (events.length) options.onWatcherBatch?.(workspace, events);
-          notify({ workspaceId: workspace.workspaceId, paths: facts.map(fact => fact.path),
-            pathSetChanged: facts.some(fact => fact.kind !== "changed") });
+          notify({
+            workspaceId: workspace.workspaceId,
+            paths: facts.map((fact) => fact.path),
+            pathSetChanged: facts.some((fact) => fact.kind !== "changed"),
+          });
         },
         async resync() {
           if (state.entry !== entry && state.entry !== null) return;
           await entry.capture?.resyncFileObservation();
           if (state.entry !== entry) return;
-          void options.onObservationResync?.(workspace).catch(error =>
-            console.error(`[desktop] reload file consumers for ${workspace.workspaceId}:`, error));
+          void options
+            .onObservationResync?.(workspace)
+            .catch((error) =>
+              console.error(`[desktop] reload file consumers for ${workspace.workspaceId}:`, error),
+            );
           notify({ workspaceId: workspace.workspaceId });
         },
         captured(paths) {
@@ -566,7 +608,10 @@ export function createWorkspaceActivity(
         },
         pulled(paths) {
           if (state.entry !== entry) return;
-          options.onWatcherBatch?.(workspace, paths.map(path => ({ path, operation: "update" })));
+          options.onWatcherBatch?.(
+            workspace,
+            paths.map((path) => ({ path, operation: "update" })),
+          );
         },
         degraded(reason) {
           if (state.entry !== entry || entry.fileObservationFailure === reason) return;
@@ -586,7 +631,7 @@ export function createWorkspaceActivity(
       try {
         await Promise.race([
           entry.handle.ready,
-          new Promise<void>(resolve => {
+          new Promise<void>((resolve) => {
             readyTimer = setTimeout(() => {
               resolve();
             }, 5_000);
@@ -606,8 +651,12 @@ export function createWorkspaceActivity(
       }
       // A shared view pulls through its share and has no ordinary pull.
       if (options.collectionsWaitingFor && !entry.historyShareView) {
-        void readCollectionsWaiting(workspace, state).catch(error =>
-          console.error(`[desktop] Collections wait check failed for ${workspace.workspaceId}:`, error));
+        void readCollectionsWaiting(workspace, state).catch((error) =>
+          console.error(
+            `[desktop] Collections wait check failed for ${workspace.workspaceId}:`,
+            error,
+          ),
+        );
       }
     }
     state.preservedStatus = null;
@@ -631,7 +680,8 @@ export function createWorkspaceActivity(
       entry.collectionsWaitingAnswered = asked;
     }
     const reopened = !waiting && state.syncPauseReopenFailed;
-    if (entry && entry.collectionsWaiting === waiting && !reopened) return { waiting, changed: false };
+    if (entry && entry.collectionsWaiting === waiting && !reopened)
+      return { waiting, changed: false };
     if (entry) entry.collectionsWaiting = waiting;
     if (reopened) state.syncPauseReopenFailed = false;
     return { waiting, changed: true };
@@ -642,8 +692,11 @@ export function createWorkspaceActivity(
     state: WorkspaceActivityState,
   ): Promise<boolean> {
     const collectionsWaitingFor = options.collectionsWaitingFor;
-    if (!collectionsWaitingFor) throw new Error("dohc cannot ask the engine about Collection updates.");
-    const { waiting, changed } = await askCollectionsWaiting(state, () => collectionsWaitingFor(workspace));
+    if (!collectionsWaitingFor)
+      throw new Error("dohc cannot ask the engine about Collection updates.");
+    const { waiting, changed } = await askCollectionsWaiting(state, () =>
+      collectionsWaitingFor(workspace),
+    );
     if (changed) notify({ workspaceId: workspace.workspaceId });
     return waiting;
   }
@@ -737,15 +790,22 @@ export function createWorkspaceActivity(
   async function close(
     workspace: ActivityWorkspace,
     state: WorkspaceActivityState,
-    closeOptions: { preserveStatus?: boolean; preserveAgentRun?: boolean; notify?: boolean;
+    closeOptions: {
+      preserveStatus?: boolean;
+      preserveAgentRun?: boolean;
+      notify?: boolean;
       expectedRootPath?: string;
     } = {},
   ): Promise<boolean> {
     const { workspaceId } = workspace;
     const entry = state.entry;
     if (!entry) {
-      if (!closeOptions.preserveAgentRun && state.agentRun &&
-        (closeOptions.expectedRootPath === undefined || workspaceRootsMatch(state.agentRun.workspace.rootPath, closeOptions.expectedRootPath))) {
+      if (
+        !closeOptions.preserveAgentRun &&
+        state.agentRun &&
+        (closeOptions.expectedRootPath === undefined ||
+          workspaceRootsMatch(state.agentRun.workspace.rootPath, closeOptions.expectedRootPath))
+      ) {
         assignAgentRun(state, workspace, null);
       }
       return false;
@@ -764,17 +824,17 @@ export function createWorkspaceActivity(
     state.entry = null;
     if (!closeOptions.preserveAgentRun) assignAgentRun(state, workspace, null);
     const stopped = await Promise.allSettled([
-      Promise.resolve().then(() => entry.handle.stop()).catch(async error => {
-        entry.capture?.observationDrainFailed();
-        await entry.capture?.resyncFileObservation();
-        throw error;
-      }),
+      Promise.resolve()
+        .then(() => entry.handle.stop())
+        .catch(async (error) => {
+          entry.capture?.observationDrainFailed();
+          await entry.capture?.resyncFileObservation();
+          throw error;
+        }),
       Promise.resolve().then(() => entry.engine?.stop()),
     ]);
     const liveSessionsRetired = await Promise.allSettled([
-      Promise.resolve().then(() =>
-        entry.capture?.settleAndCloseAllLiveSessions(),
-      ),
+      Promise.resolve().then(() => entry.capture?.settleAndCloseAllLiveSessions()),
     ]);
     if (entry.capture) {
       state.liveSessionsGeneration += 1;
@@ -819,10 +879,7 @@ export function createWorkspaceActivity(
   // Logout path: stop and detach every cloud engine so edits after Disconnect
   // never push with the now-cleared session. The watchers keep running (local
   // history is unaffected).
-  async function stopEngine(
-    state: WorkspaceActivityState,
-    notifyChange = true,
-  ): Promise<void> {
+  async function stopEngine(state: WorkspaceActivityState, notifyChange = true): Promise<void> {
     const engine = state.entry?.engine;
     if (state.entry) state.entry.engine = null;
     await engine?.stop().catch(() => undefined);
@@ -837,9 +894,18 @@ export function createWorkspaceActivity(
     return statusFor(workspace, state);
   }
 
-  function recordHeldFiles(workspace: ActivityWorkspace, state: WorkspaceActivityState, files: NonNullable<SyncStatusResult["heldFiles"]>): void {
+  function recordHeldFiles(
+    workspace: ActivityWorkspace,
+    state: WorkspaceActivityState,
+    files: NonNullable<SyncStatusResult["heldFiles"]>,
+  ): void {
     const entry = state.entry;
-    if (!entry || entry.workspace.attachmentId !== workspace.attachmentId || JSON.stringify(files) === JSON.stringify(entry.heldFiles)) return;
+    if (
+      !entry ||
+      entry.workspace.attachmentId !== workspace.attachmentId ||
+      JSON.stringify(files) === JSON.stringify(entry.heldFiles)
+    )
+      return;
     entry.heldFiles = files;
     options.onHeldFiles?.(workspace.workspaceId, files);
   }
@@ -865,8 +931,7 @@ export function createWorkspaceActivity(
     reason: "person" | "reconnect",
   ): Promise<void> {
     return (
-      state.entry?.engine?.retryNow({ countsAsAttempt: reason === "person" }) ??
-      Promise.resolve()
+      state.entry?.engine?.retryNow({ countsAsAttempt: reason === "person" }) ?? Promise.resolve()
     );
   }
 
@@ -877,7 +942,8 @@ export function createWorkspaceActivity(
   // SYNC_NOW_BUSY_WAIT_MS.
   async function syncNow(state: WorkspaceActivityState): Promise<void> {
     const engine = state.entry?.engine;
-    const unsynced = "dohc could not sync this workspace with your server, so it stopped undoing runs part way. Try again.";
+    const unsynced =
+      "dohc could not sync this workspace with your server, so it stopped undoing runs part way. Try again.";
     if (!engine) throw new Error(unsynced);
     const deadlineMs = Date.now() + SYNC_NOW_BUSY_WAIT_MS;
     for (let pauseMs = 1_000; ; pauseMs *= 2) {
@@ -885,9 +951,12 @@ export function createWorkspaceActivity(
       const snapshot = engine.snapshot();
       if (snapshot.authExpired || snapshot.updateRequired) throw new Error(unsynced);
       if (!snapshot.syncFailure) return;
-      if (snapshot.syncFailure.cause !== "server-busy" || state.entry?.engine !== engine) throw new Error(unsynced);
+      if (snapshot.syncFailure.cause !== "server-busy" || state.entry?.engine !== engine)
+        throw new Error(unsynced);
       if (Date.now() + pauseMs > deadlineMs) {
-        throw new Error("The server is busy, so dohc stopped undoing runs part way. Try again in a moment.");
+        throw new Error(
+          "The server is busy, so dohc stopped undoing runs part way. Try again in a moment.",
+        );
       }
       await new Promise((resolve) => setTimeout(resolve, pauseMs));
     }
@@ -911,24 +980,35 @@ export function createWorkspaceActivity(
     const snapshot = state.entry?.engine?.snapshot();
     return !snapshot || snapshot.syncFailure !== null;
   }
-  async function catchUpCloudSync(state: WorkspaceActivityState, signal: AbortSignal): Promise<void> {
+  async function catchUpCloudSync(
+    state: WorkspaceActivityState,
+    signal: AbortSignal,
+  ): Promise<void> {
     await state.entry?.engine?.catchUp({ signal });
   }
 
-  function pullStarting(state: WorkspaceActivityState): void { state.entry?.handle.pullStarting(); }
+  function pullStarting(state: WorkspaceActivityState): void {
+    state.entry?.handle.pullStarting();
+  }
   function retryFileObservation(state: WorkspaceActivityState): Promise<void> {
     if (!state.entry) return Promise.reject(new Error("This workspace is not open."));
     return state.entry.handle.retry();
   }
-  function pullFinished(state: WorkspaceActivityState): void { state.entry?.handle.pullFinished(); }
-  function handlePulledPaths(state: WorkspaceActivityState, paths: readonly string[]): Promise<void> {
+  function pullFinished(state: WorkspaceActivityState): void {
+    state.entry?.handle.pullFinished();
+  }
+  function handlePulledPaths(
+    state: WorkspaceActivityState,
+    paths: readonly string[],
+  ): Promise<void> {
     return state.entry?.handle.pulledPaths(paths) ?? Promise.resolve();
   }
   async function drainObservations(state: WorkspaceActivityState): Promise<void> {
     const entry = state.entry;
     if (!entry) return;
-    try { await entry.handle.stop(); }
-    catch (error) {
+    try {
+      await entry.handle.stop();
+    } catch (error) {
       entry.capture?.observationDrainFailed();
       await entry.capture?.resyncFileObservation();
       throw error;
@@ -965,9 +1045,7 @@ export function createWorkspaceActivity(
       expectedRootPath !== undefined &&
       !workspaceRootsMatch(entry.workspace.rootPath, expectedRootPath)
     ) {
-      throw new Error(
-        "Workspace activity was replaced by another physical root.",
-      );
+      throw new Error("Workspace activity was replaced by another physical root.");
     }
     if (state.agentRun !== null) return false;
     assignAgentRun(state, workspace, run, secret);
@@ -1000,9 +1078,7 @@ export function createWorkspaceActivity(
     if (state.agentRun === slot) releaseAgentRun(state, slot.workspace, agentRunId);
   }
 
-  function hasAgentRun(state: WorkspaceActivityState,
-    expectedRootPath?: string,
-  ): boolean {
+  function hasAgentRun(state: WorkspaceActivityState, expectedRootPath?: string): boolean {
     const slot = state.agentRun;
     return (
       slot !== null &&
@@ -1030,7 +1106,7 @@ export function createWorkspaceActivity(
   // holds the slot, or null. Only a request that carries it is the run's.
   function dispatchedRunSecret(state: WorkspaceActivityState): string | null {
     const slot = state.agentRun;
-    return slot?.run.dispatch !== undefined ? slot.secret ?? null : null;
+    return slot?.run.dispatch !== undefined ? (slot.secret ?? null) : null;
   }
 
   // The engine's id for the run dohc dispatched while it holds the slot, or
@@ -1074,7 +1150,8 @@ export function createWorkspaceActivity(
   // The per-workspace engine capture instance (null when the workspace has
   // no capture or is not open). Version-operation IPC handlers gate on this: no
   // capture, no versions surface.
-  function engineCaptureFor(state: WorkspaceActivityState,
+  function engineCaptureFor(
+    state: WorkspaceActivityState,
     expectedRootPath?: string,
   ): WorkspaceEngineCapture | null {
     const entry = state.entry;

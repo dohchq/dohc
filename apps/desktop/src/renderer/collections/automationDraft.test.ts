@@ -28,7 +28,7 @@ describe("Only if as rows", () => {
   });
 
   it("keeps any other expression a formula", () => {
-    expect(conditionRows('record.Points > 3')).toBeNull();
+    expect(conditionRows("record.Points > 3")).toBeNull();
     // A JavaScript escape JSON cannot read stays a formula rather than failing.
     expect(conditionRows(String.raw`record.Title == "\x41"`)).toBeNull();
     expect(conditionRows('record.Status == "Done" || record.Status == "Shipped"')).toBeNull();
@@ -42,7 +42,9 @@ describe("values in the builder", () => {
     expect(valueKindsFor("date", false)).toEqual(["today", "now", "value", "empty", "formula"]);
     expect(valueKindsFor("select", true)).toEqual(["any", "value", "empty", "formula"]);
     expect(valueKindOf({ kind: "formula", expression: " today() " })).toBe("today");
-    expect(valueKindOf({ kind: "formula", expression: "dateAdd(today(), 3, \"days\")" })).toBe("formula");
+    expect(valueKindOf({ kind: "formula", expression: 'dateAdd(today(), 3, "days")' })).toBe(
+      "formula",
+    );
     expect(valueKindOf({ kind: "literal", value: null })).toBe("empty");
     expect(valueKindOf(null)).toBe("any");
   });
@@ -61,21 +63,32 @@ describe("values in the builder", () => {
 
 describe("a new automation", () => {
   it("starts a few choices away from the finish-date example", () => {
-    const automation = newAutomation([
-      { name: "Title", type: "text" },
-      { name: "Status", type: "select", options: ["Doing", "Done"] },
-      { name: "Finished on", type: "date" },
-    ], null);
-    expect(sentenceText(automationSentence(automation))).toBe("When Status changes, set Finished on to today");
+    const automation = newAutomation(
+      [
+        { name: "Title", type: "text" },
+        { name: "Status", type: "select", options: ["Doing", "Done"] },
+        { name: "Finished on", type: "date" },
+      ],
+      null,
+    );
+    expect(sentenceText(automationSentence(automation))).toBe(
+      "When Status changes, set Finished on to today",
+    );
   });
 
   it("watches the dataset table it starts in", () => {
-    expect(newAutomation([{ name: "Paid", type: "checkbox" }], "Invoices").when).toMatchObject({ kind: "field-changed", field: "Paid", table: "Invoices" });
+    expect(newAutomation([{ name: "Paid", type: "checkbox" }], "Invoices").when).toMatchObject({
+      kind: "field-changed",
+      field: "Paid",
+      table: "Invoices",
+    });
   });
 
   it("takes an id from its name that no other automation has", () => {
     expect(idFor("Stamp the finish date!", new Set())).toBe("stamp-the-finish-date");
-    expect(idFor("Stamp the finish date", new Set(["stamp-the-finish-date"]))).toBe("stamp-the-finish-date-2");
+    expect(idFor("Stamp the finish date", new Set(["stamp-the-finish-date"]))).toBe(
+      "stamp-the-finish-date-2",
+    );
     expect(idFor("✨", new Set())).toBe("automation");
     expect(idFor("x".repeat(80), new Set()).length).toBe(64);
   });
@@ -84,53 +97,99 @@ describe("a new automation", () => {
 describe("each step's reach verdicts", () => {
   it("counts the steps that change or find records, an If's steps inside it", () => {
     const set = { kind: "set" as const, values: [], records: null, operation: null };
-    const find = { kind: "find" as const, condition: "true", collection: null, as: "all", operation: null };
-    expect(reachPlaces([
-      set,
-      { kind: "if", if: "true", do: [find, set], otherwise: [set] },
-      { kind: "notify", text: "Hi", to: [] },
-      find,
-    ])).toEqual([[0], [1, 2, 3], [], [4]]);
+    const find = {
+      kind: "find" as const,
+      condition: "true",
+      collection: null,
+      as: "all",
+      operation: null,
+    };
+    expect(
+      reachPlaces([
+        set,
+        { kind: "if", if: "true", do: [find, set], otherwise: [set] },
+        { kind: "notify", text: "Hi", to: [] },
+        find,
+      ]),
+    ).toEqual([[0], [1, 2, 3], [], [4]]);
   });
 });
 
 it("keeps chat recipients and nested record steps at their runtime reach indices", () => {
   const set = { kind: "set" as const, values: [], records: null, operation: null };
-  expect(reachPlaces([
-    { kind: "post", text: "Hi", group: "Trip" },
-    { kind: "if", if: "true", do: [{ kind: "direct-message", text: "Hi", to: [
-      { kind: "literal", value: "ana" }, { kind: "formula", expression: "Owner" },
-      { kind: "literal", value: "ana" },
-    ] }, set], otherwise: [set] },
-    set,
-  ])).toEqual([[0], [1, 2, 3, 4], [5]]);
+  expect(
+    reachPlaces([
+      { kind: "post", text: "Hi", group: "Trip" },
+      {
+        kind: "if",
+        if: "true",
+        do: [
+          {
+            kind: "direct-message",
+            text: "Hi",
+            to: [
+              { kind: "literal", value: "ana" },
+              { kind: "formula", expression: "Owner" },
+              { kind: "literal", value: "ana" },
+            ],
+          },
+          set,
+        ],
+        otherwise: [set],
+      },
+      set,
+    ]),
+  ).toEqual([[0], [1, 2, 3, 4], [5]]);
 });
 
 it("counts named notice recipients before a record edit", () => {
-  expect(reachPlaces([
-    { kind: "notify", text: "Hi", to: [{ kind: "literal", value: "ana" }, { kind: "formula", expression: "Owner" }] },
-    { kind: "set", values: [], records: null, operation: null },
-  ])).toEqual([[0], [1]]);
+  expect(
+    reachPlaces([
+      {
+        kind: "notify",
+        text: "Hi",
+        to: [
+          { kind: "literal", value: "ana" },
+          { kind: "formula", expression: "Owner" },
+        ],
+      },
+      { kind: "set", values: [], records: null, operation: null },
+    ]),
+  ).toEqual([[0], [1]]);
 });
 
 it("counts an agent wake before a record edit", () => {
-  expect(reachPlaces([
-    { kind: "wake-agent", text: "Hi", person: "owner" },
-    { kind: "set", values: [], records: null, operation: null },
-  ])).toEqual([[0], [1]]);
+  expect(
+    reachPlaces([
+      { kind: "wake-agent", text: "Hi", person: "owner" },
+      { kind: "set", values: [], records: null, operation: null },
+    ]),
+  ).toEqual([[0], [1]]);
 });
 
 it("counts a code step's view of its Collection before a record edit", () => {
-  expect(reachPlaces([
-    { kind: "run", code: "return {}", as: null },
-    { kind: "if", if: "true", do: [{ kind: "run-file", file: "scripts/a.js", as: null }], otherwise: [] },
-    { kind: "set", values: [], records: null, operation: null },
-  ])).toEqual([[0], [1], [2]]);
+  expect(
+    reachPlaces([
+      { kind: "run", code: "return {}", as: null },
+      {
+        kind: "if",
+        if: "true",
+        do: [{ kind: "run-file", file: "scripts/a.js", as: null }],
+        otherwise: [],
+      },
+      { kind: "set", values: [], records: null, operation: null },
+    ]),
+  ).toEqual([[0], [1], [2]]);
 });
 
 it("leaves the Group trigger verdict before its step verdicts", () => {
-  expect(reachPlaces([
-    { kind: "post", text: "Hi", group: "Trip" },
-    { kind: "set", values: [], records: null, operation: null },
-  ], 1)).toEqual([[1], [2]]);
+  expect(
+    reachPlaces(
+      [
+        { kind: "post", text: "Hi", group: "Trip" },
+        { kind: "set", values: [], records: null, operation: null },
+      ],
+      1,
+    ),
+  ).toEqual([[1], [2]]);
 });

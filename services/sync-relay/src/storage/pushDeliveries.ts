@@ -1,5 +1,9 @@
 import { randomBytes } from "node:crypto";
-import { chatMessageInterest, readPushMessage, type ChatMessageReason } from "../chatMessageInterest";
+import {
+  chatMessageInterest,
+  readPushMessage,
+  type ChatMessageReason,
+} from "../chatMessageInterest";
 import type { StorageContext } from "./context";
 import type { SqliteDb } from "./types";
 
@@ -48,7 +52,8 @@ export function initializePushDeliveries(db: SqliteDb): void {
   const assert = () => {
     for (const [name, sql] of Object.entries(schema)) {
       const row = db.prepare("SELECT sql FROM sqlite_schema WHERE name = ?").get(name);
-      if (typeof row?.sql !== "string" || normalize(row.sql) !== normalize(sql)) throw Error("push delivery schema is missing or damaged");
+      if (typeof row?.sql !== "string" || normalize(row.sql) !== normalize(sql))
+        throw Error("push delivery schema is missing or damaged");
     }
   };
   if (db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(MARKER)) {
@@ -56,24 +61,35 @@ export function initializePushDeliveries(db: SqliteDb): void {
     return;
   }
   for (const name of Object.keys(schema)) {
-    if (db.prepare("SELECT 1 FROM sqlite_schema WHERE name = ?").get(name)) throw Error("unmarked push delivery schema already exists");
+    if (db.prepare("SELECT 1 FROM sqlite_schema WHERE name = ?").get(name))
+      throw Error("unmarked push delivery schema already exists");
   }
   for (const sql of Object.values(schema)) db.exec(sql);
   assert();
-  db.prepare("INSERT INTO sync_relay_migrations(migration_id, completed_at_ms) VALUES (?, ?)").run(MARKER, Date.now());
+  db.prepare("INSERT INTO sync_relay_migrations(migration_id, completed_at_ms) VALUES (?, ?)").run(
+    MARKER,
+    Date.now(),
+  );
 }
 
 /** Runs inside the message append transaction. No network work may enter here. */
-export function recordPushDeliveries(storage: StorageContext, relaySeq: number, nowMs = Date.now()): void {
+export function recordPushDeliveries(
+  storage: StorageContext,
+  relaySeq: number,
+  nowMs = Date.now(),
+): void {
   if (!storage.options.pushConfigured) return;
   const message = readPushMessage(storage, relaySeq);
   if (!message) return;
-  const first = storage.db.prepare(`SELECT relay_seq FROM sync_relay_log WHERE workspace_id = ?
+  const first = storage.db
+    .prepare(`SELECT relay_seq FROM sync_relay_log WHERE workspace_id = ?
     AND op_kind = 'chat.message.append' AND json_valid(payload_json)
     AND json_extract(payload_json, '$.threadId') = ? AND json_extract(payload_json, '$.messageId') = ?
-    AND relay_admission IS NULL ORDER BY relay_seq LIMIT 1`).get(message.workspaceId, message.threadId, message.messageId);
+    AND relay_admission IS NULL ORDER BY relay_seq LIMIT 1`)
+    .get(message.workspaceId, message.threadId, message.messageId);
   if (Number(first?.relay_seq) !== relaySeq) return;
-  const recipients = storage.db.prepare(`SELECT p.installation_id, p.account_user_id, p.generation, n.account_name
+  const recipients = storage.db
+    .prepare(`SELECT p.installation_id, p.account_user_id, p.generation, n.account_name
     FROM sync_relay_push_subscriptions p LEFT JOIN sync_relay_push_installation_names n USING(installation_id)
     WHERE p.expires_at_ms > ? AND p.account_user_id IN (
       SELECT owner_user_id FROM sync_relay_workspaces WHERE workspace_id = ? UNION
@@ -83,18 +99,44 @@ export function recordPushDeliveries(storage: StorageContext, relaySeq: number, 
   const interests = new Map<string, ChatMessageReason | null>();
   for (const recipient of recipients) {
     const userId = String(recipient.account_user_id);
-    if (!interests.has(userId)) interests.set(userId, chatMessageInterest(storage, message, {userId, accountName: String(recipient.account_name ?? "")}));
+    if (!interests.has(userId))
+      interests.set(
+        userId,
+        chatMessageInterest(storage, message, {
+          userId,
+          accountName: String(recipient.account_name ?? ""),
+        }),
+      );
     const reason = interests.get(userId);
     if (!reason) continue;
-    storage.db.prepare(`DELETE FROM ${TABLE} WHERE account_user_id = ? AND expires_at_ms <= ?
-      AND (lease_until_ms IS NULL OR lease_until_ms <= ?)`).run(userId, nowMs - PUSH_DELIVERY_EXPIRY_MS, nowMs);
-    const count = storage.db.prepare(`SELECT count(*) AS n FROM ${TABLE} WHERE account_user_id = ? AND state = 'pending' AND expires_at_ms > ?`).get(userId, nowMs);
+    storage.db
+      .prepare(`DELETE FROM ${TABLE} WHERE account_user_id = ? AND expires_at_ms <= ?
+      AND (lease_until_ms IS NULL OR lease_until_ms <= ?)`)
+      .run(userId, nowMs - PUSH_DELIVERY_EXPIRY_MS, nowMs);
+    const count = storage.db
+      .prepare(
+        `SELECT count(*) AS n FROM ${TABLE} WHERE account_user_id = ? AND state = 'pending' AND expires_at_ms > ?`,
+      )
+      .get(userId, nowMs);
     if (Number(count?.n) >= PUSH_RECIPIENT_PENDING_LIMIT) continue;
-    storage.db.prepare(`INSERT OR IGNORE INTO ${TABLE} (delivery_id, workspace_id, thread_id, message_id, relay_seq,
+    storage.db
+      .prepare(`INSERT OR IGNORE INTO ${TABLE} (delivery_id, workspace_id, thread_id, message_id, relay_seq,
       account_user_id, installation_id, generation, reason, state, attempts, created_at_ms, expires_at_ms, available_at_ms)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)`)
-      .run(randomBytes(16).toString("base64url"), message.workspaceId, message.threadId, message.messageId, relaySeq,
-        userId, String(recipient.installation_id), Number(recipient.generation), reason, nowMs, nowMs + PUSH_DELIVERY_EXPIRY_MS, nowMs);
+      .run(
+        randomBytes(16).toString("base64url"),
+        message.workspaceId,
+        message.threadId,
+        message.messageId,
+        relaySeq,
+        userId,
+        String(recipient.installation_id),
+        Number(recipient.generation),
+        reason,
+        nowMs,
+        nowMs + PUSH_DELIVERY_EXPIRY_MS,
+        nowMs,
+      );
   }
 }
 
@@ -114,19 +156,31 @@ export function claimPushDelivery(storage: StorageContext, nowMs: number): PushD
   return storage.replicaViewTx(() => {
     const minute = Math.floor(nowMs / 60_000);
     storage.db.prepare("DELETE FROM sync_relay_push_rate WHERE minute < ?").run(minute - 1);
-    storage.db.prepare(`DELETE FROM ${TABLE} WHERE expires_at_ms <= ? AND (lease_until_ms IS NULL OR lease_until_ms <= ?)`).run(nowMs - PUSH_DELIVERY_EXPIRY_MS, nowMs);
-    storage.db.prepare(`UPDATE ${TABLE} SET state = 'dropped', lease_token = NULL, lease_until_ms = NULL
+    storage.db
+      .prepare(
+        `DELETE FROM ${TABLE} WHERE expires_at_ms <= ? AND (lease_until_ms IS NULL OR lease_until_ms <= ?)`,
+      )
+      .run(nowMs - PUSH_DELIVERY_EXPIRY_MS, nowMs);
+    storage.db
+      .prepare(`UPDATE ${TABLE} SET state = 'dropped', lease_token = NULL, lease_until_ms = NULL
       WHERE state = 'pending' AND (expires_at_ms <= ? OR attempts >= ?) AND (lease_until_ms IS NULL OR lease_until_ms <= ?)`)
       .run(nowMs, PUSH_DELIVERY_ATTEMPTS, nowMs);
-    const row = storage.db.prepare(`SELECT d.* FROM ${TABLE} d WHERE state = 'pending' AND available_at_ms <= ?
+    const row = storage.db
+      .prepare(`SELECT d.* FROM ${TABLE} d WHERE state = 'pending' AND available_at_ms <= ?
       AND expires_at_ms > ? AND attempts < ? AND (lease_until_ms IS NULL OR lease_until_ms <= ?)
       AND coalesce((SELECT attempts FROM sync_relay_push_rate r WHERE r.account_user_id = d.account_user_id AND r.minute = ?), 0) < ?
-      ORDER BY created_at_ms, rowid LIMIT 1`).get(nowMs, nowMs, PUSH_DELIVERY_ATTEMPTS, nowMs, minute, PUSH_RECIPIENT_ATTEMPTS_PER_MINUTE);
+      ORDER BY created_at_ms, rowid LIMIT 1`)
+      .get(nowMs, nowMs, PUSH_DELIVERY_ATTEMPTS, nowMs, minute, PUSH_RECIPIENT_ATTEMPTS_PER_MINUTE);
     if (!row) return null;
-    storage.db.prepare(`INSERT INTO sync_relay_push_rate (account_user_id, minute, attempts) VALUES (?, ?, 1)
-      ON CONFLICT(account_user_id, minute) DO UPDATE SET attempts = attempts + 1`).run(String(row.account_user_id), minute);
+    storage.db
+      .prepare(`INSERT INTO sync_relay_push_rate (account_user_id, minute, attempts) VALUES (?, ?, 1)
+      ON CONFLICT(account_user_id, minute) DO UPDATE SET attempts = attempts + 1`)
+      .run(String(row.account_user_id), minute);
     const leaseToken = randomBytes(16).toString("base64url");
-    storage.db.prepare(`UPDATE ${TABLE} SET lease_token = ?, lease_until_ms = ?, attempts = attempts + 1, last_attempt_at_ms = ? WHERE delivery_id = ?`)
+    storage.db
+      .prepare(
+        `UPDATE ${TABLE} SET lease_token = ?, lease_until_ms = ?, attempts = attempts + 1, last_attempt_at_ms = ? WHERE delivery_id = ?`,
+      )
       .run(leaseToken, nowMs + PUSH_DELIVERY_LEASE_MS, nowMs, String(row.delivery_id));
     return {
       deliveryId: String(row.delivery_id),
@@ -142,27 +196,58 @@ export function claimPushDelivery(storage: StorageContext, nowMs: number): PushD
   });
 }
 
-export function finishPushDelivery(storage: StorageContext, delivery: PushDelivery, outcome: "sent" | "dropped" | "retry", nowMs: number): void {
-  storage.replicaViewTx(() => storage.db.prepare(`UPDATE ${TABLE} SET state = ?, available_at_ms = ?, lease_token = NULL, lease_until_ms = NULL
-    WHERE delivery_id = ? AND lease_token = ? AND state = 'pending'`).run(
-      outcome === "retry" ? (delivery.attempts >= PUSH_DELIVERY_ATTEMPTS || delivery.expiresAtMs <= nowMs ? "dropped" : "pending") : outcome,
-      nowMs + Math.min(120_000, 1000 * 2 ** delivery.attempts), delivery.deliveryId, delivery.leaseToken));
+export function finishPushDelivery(
+  storage: StorageContext,
+  delivery: PushDelivery,
+  outcome: "sent" | "dropped" | "retry",
+  nowMs: number,
+): void {
+  storage.replicaViewTx(() =>
+    storage.db
+      .prepare(`UPDATE ${TABLE} SET state = ?, available_at_ms = ?, lease_token = NULL, lease_until_ms = NULL
+    WHERE delivery_id = ? AND lease_token = ? AND state = 'pending'`)
+      .run(
+        outcome === "retry"
+          ? delivery.attempts >= PUSH_DELIVERY_ATTEMPTS || delivery.expiresAtMs <= nowMs
+            ? "dropped"
+            : "pending"
+          : outcome,
+        nowMs + Math.min(120_000, 1000 * 2 ** delivery.attempts),
+        delivery.deliveryId,
+        delivery.leaseToken,
+      ),
+  );
 }
 
 /** Includes leases and rate limits so an unavailable row cannot cause a busy loop. */
 export function nextPushDeliveryAt(storage: StorageContext, nowMs: number): number | null {
   const minute = Math.floor(nowMs / 60_000);
-  const row = storage.db.prepare(`SELECT min(
+  const row = storage.db
+    .prepare(`SELECT min(
     CASE WHEN state <> 'pending' THEN expires_at_ms + ?
     ELSE max(coalesce(lease_until_ms, 0), min(expires_at_ms, max(available_at_ms,
       CASE WHEN coalesce((SELECT attempts FROM sync_relay_push_rate r
         WHERE r.account_user_id = d.account_user_id AND r.minute = ?), 0) >= ?
         THEN ? ELSE 0 END))) END) AS next_at
-    FROM ${TABLE} d`).get(PUSH_DELIVERY_EXPIRY_MS, minute, PUSH_RECIPIENT_ATTEMPTS_PER_MINUTE, (minute + 1) * 60_000);
+    FROM ${TABLE} d`)
+    .get(
+      PUSH_DELIVERY_EXPIRY_MS,
+      minute,
+      PUSH_RECIPIENT_ATTEMPTS_PER_MINUTE,
+      (minute + 1) * 60_000,
+    );
   return row?.next_at == null ? null : Math.max(nowMs, Number(row.next_at));
 }
 
-export function ownsPushLease(storage: StorageContext, delivery: PushDelivery, nowMs: number): boolean {
-  return Boolean(storage.db.prepare(`SELECT 1 FROM ${TABLE} WHERE delivery_id = ? AND lease_token = ?
-    AND state = 'pending' AND lease_until_ms > ? AND expires_at_ms > ?`).get(delivery.deliveryId, delivery.leaseToken, nowMs, nowMs));
+export function ownsPushLease(
+  storage: StorageContext,
+  delivery: PushDelivery,
+  nowMs: number,
+): boolean {
+  return Boolean(
+    storage.db
+      .prepare(`SELECT 1 FROM ${TABLE} WHERE delivery_id = ? AND lease_token = ?
+    AND state = 'pending' AND lease_until_ms > ? AND expires_at_ms > ?`)
+      .get(delivery.deliveryId, delivery.leaseToken, nowMs, nowMs),
+  );
 }

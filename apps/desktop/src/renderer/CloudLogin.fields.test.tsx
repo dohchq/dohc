@@ -94,7 +94,10 @@ describe("CloudLogin fields", () => {
   it("asks for browser approval in few words", async () => {
     const user = userEvent.setup();
     render(<CloudLogin onConnectionError={() => undefined} />);
-    await user.type(await screen.findByTestId("cloud-server-url"), "https://dohc.example.test{Enter}");
+    await user.type(
+      await screen.findByTestId("cloud-server-url"),
+      "https://dohc.example.test{Enter}",
+    );
     const pending = await screen.findByTestId("cloud-login-pending");
     expect(pending.textContent).toContain("Approve this device in your browser.");
     expect(screen.getByTestId("cloud-user-code").textContent).toBe("ABCD");

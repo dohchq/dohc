@@ -3,33 +3,70 @@ import { createHash } from "node:crypto";
 import * as Y from "yjs";
 import { getDohcYDocBodyFragment } from "@dohc/ydoc-projection/body-fragment";
 import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
-import { createLiveFrameSession, encodeLiveFrame, encodeLiveFrameSync,
-  type LiveFrame, type LiveFrameBegin } from "@dohc/live-session-contract/live-frame";
+import {
+  createLiveFrameSession,
+  encodeLiveFrame,
+  encodeLiveFrameSync,
+  type LiveFrame,
+  type LiveFrameBegin,
+} from "@dohc/live-session-contract/live-frame";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
-import { createNamedLiveProvider, type NamedLiveProviderLimits } from "@dohc/ydoc-projection/named-live-provider";
+import {
+  createNamedLiveProvider,
+  type NamedLiveProviderLimits,
+} from "@dohc/ydoc-projection/named-live-provider";
 import type { LiveAuthorContext } from "@dohc/live-session-contract";
 
 const limits = (): NamedLiveProviderLimits => ({
-  frames: { receive: { maxFrameBytes: 1024, maxStateVectorBytes: 4096, maxUpdateBytes: 8192, maxSyncBytes: 16384 },
-    maxQueuedBytes: 16384, maxQueuedFrames: 64, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 16384 },
-  maxPendingUpdateBytes: 16384, maxPendingUpdates: 8, maxDeliveryAttempts: 4,
+  frames: {
+    receive: {
+      maxFrameBytes: 1024,
+      maxStateVectorBytes: 4096,
+      maxUpdateBytes: 8192,
+      maxSyncBytes: 16384,
+    },
+    maxQueuedBytes: 16384,
+    maxQueuedFrames: 64,
+    maxControlBytes: 4096,
+    maxControlFrames: 8,
+    maxAssemblyBytes: 16384,
+  },
+  maxPendingUpdateBytes: 16384,
+  maxPendingUpdates: 8,
+  maxDeliveryAttempts: 4,
 });
-const binding: LiveObjectBinding = { workspaceId: "workspace", mainVersionId: "main", objectId: "document",
-  lineageClaimId: "lineage", currentPath: "document.md", selectorPaths: ["document.md"], restoreFenceGeneration: 0 };
+const binding: LiveObjectBinding = {
+  workspaceId: "workspace",
+  mainVersionId: "main",
+  objectId: "document",
+  lineageClaimId: "lineage",
+  currentPath: "document.md",
+  selectorPaths: ["document.md"],
+  restoreFenceGeneration: 0,
+};
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 type Provider = ReturnType<typeof createNamedLiveProvider>;
 type Received = { begin: LiveFrameBegin; bytes: Uint8Array };
 const cleanup: (() => void)[] = [];
-afterEach(() => { for (const stop of cleanup.splice(0)) stop(); vi.useRealTimers(); });
+afterEach(() => {
+  for (const stop of cleanup.splice(0)) stop();
+  vi.useRealTimers();
+});
 function provider(options = limits(), context?: LiveAuthorContext) {
   const value = createNamedLiveProvider(options, undefined, context);
-  cleanup.push(() => { value.close(); value.doc.destroy(); });
+  cleanup.push(() => {
+    value.close();
+    value.doc.destroy();
+  });
   return value;
 }
 function document(text: string) {
   const doc = new Y.Doc();
-  const paragraph = new Y.XmlElement("paragraph"), content = new Y.XmlText();
-  content.insert(0, text); paragraph.insert(0, [content]); getDohcYDocBodyFragment(doc).insert(0, [paragraph]);
+  const paragraph = new Y.XmlElement("paragraph"),
+    content = new Y.XmlText();
+  content.insert(0, text);
+  paragraph.insert(0, [content]);
+  getDohcYDocBodyFragment(doc).insert(0, [paragraph]);
   cleanup.push(() => doc.destroy());
   return doc;
 }
@@ -38,17 +75,26 @@ function edit(value: Provider, text: string) {
   const content = paragraph.get(0) as Y.XmlText;
   content.insert(content.length, text);
 }
-function peer(value: Provider, epoch = 1, options: { policy?: NamedLiveProviderLimits["frames"]; replenish?: boolean } = {}) {
+function peer(
+  value: Provider,
+  epoch = 1,
+  options: { policy?: NamedLiveProviderLimits["frames"]; replenish?: boolean } = {},
+) {
   const policy = options.policy ?? limits().frames;
   const server = createLiveFrameSession("server", policy);
   cleanup.push(() => server.close());
-  const frames: LiveFrame[] = [], transfers: Received[] = [];
+  const frames: LiveFrame[] = [],
+    transfers: Received[] = [];
   const frameBytes: number[] = [];
   const watchers = new Set<() => void>();
-  let closed = false, nextTransfer = 1, vector: Uint8Array | undefined;
-  let creditBytes = policy.maxQueuedBytes, creditFrames = policy.maxQueuedFrames;
+  let closed = false,
+    nextTransfer = 1,
+    vector: Uint8Array | undefined;
+  let creditBytes = policy.maxQueuedBytes,
+    creditFrames = policy.maxQueuedFrames;
   let stalled: (() => void) | undefined;
-  let stall: false | "all" | "chunks" = false, sendsInFlight = 0;
+  let stall: false | "all" | "chunks" = false,
+    sendsInFlight = 0;
   const route = value.connect({
     async send(bytes) {
       sendsInFlight++;
@@ -62,91 +108,220 @@ function peer(value: Provider, epoch = 1, options: { policy?: NamedLiveProviderL
             transfers.push({ begin: transfer.begin, bytes: transfer.bytes.slice() });
             if (transfer.begin.purpose === "client-vector") vector = transfer.bytes.slice();
           }
-        } finally { received.value.transfer?.release(); received.release(); }
-        if (options.replenish && (received.value.frame.kind === "begin" || received.value.frame.kind === "chunk")) {
-          creditBytes += bytes.length; creditFrames++;
+        } finally {
+          received.value.transfer?.release();
+          received.release();
+        }
+        if (
+          options.replenish &&
+          (received.value.frame.kind === "begin" || received.value.frame.kind === "chunk")
+        ) {
+          creditBytes += bytes.length;
+          creditFrames++;
           await send({ kind: "credit", grantedBytes: creditBytes, grantedFrames: creditFrames });
         }
         for (const notify of watchers) notify();
         if (stall === "all" || (stall === "chunks" && received.value.frame.kind === "chunk")) {
-          await new Promise<void>(resolve => { stalled = resolve; });
+          await new Promise<void>((resolve) => {
+            stalled = resolve;
+          });
         }
-      } finally { sendsInFlight--; for (const notify of watchers) notify(); }
+      } finally {
+        sendsInFlight--;
+        for (const notify of watchers) notify();
+      }
     },
-    close() { closed = true; server.close(); stalled?.(); stalled = undefined; },
+    close() {
+      closed = true;
+      server.close();
+      stalled?.();
+      stalled = undefined;
+    },
   });
   function until(check: () => boolean) {
     if (check()) return Promise.resolve();
-    return new Promise<void>(resolve => { const watch = () => { if (check()) { watchers.delete(watch); resolve(); } }; watchers.add(watch); });
+    return new Promise<void>((resolve) => {
+      const watch = () => {
+        if (check()) {
+          watchers.delete(watch);
+          resolve();
+        }
+      };
+      watchers.add(watch);
+    });
   }
   async function send(frame: LiveFrame) {
     const lease = server.send(frame);
-    try { await route.receive(lease.value); } finally { lease.release(); }
+    try {
+      await route.receive(lease.value);
+    } finally {
+      lease.release();
+    }
   }
-  async function transfer(purpose: "initial-sync" | "applied-update", bytes: Uint8Array, cursor: number, digest = hash(bytes)) {
+  async function transfer(
+    purpose: "initial-sync" | "applied-update",
+    bytes: Uint8Array,
+    cursor: number,
+    digest = hash(bytes),
+  ) {
     const id = nextTransfer++;
-    await send({ kind: "begin", purpose, transferId: id, totalBytes: bytes.length, digest,
-      ...(purpose === "initial-sync" ? { appliedThroughJournalCursor: cursor } : { journalCursor: cursor }) } as LiveFrameBegin);
+    await send({
+      kind: "begin",
+      purpose,
+      transferId: id,
+      totalBytes: bytes.length,
+      digest,
+      ...(purpose === "initial-sync"
+        ? { appliedThroughJournalCursor: cursor }
+        : { journalCursor: cursor }),
+    } as LiveFrameBegin);
     for (let offset = 0; offset < bytes.length; offset += 900) {
-      await send({ kind: "chunk", transferId: id, offset, bytes: bytes.subarray(offset, offset + 900) });
+      await send({
+        kind: "chunk",
+        transferId: id,
+        offset,
+        bytes: bytes.subarray(offset, offset + 900),
+      });
     }
   }
   async function initial(doc: Y.Doc, selected = binding, cursor = 0, digest?: string) {
     await until(() => vector !== undefined);
-    await transfer("initial-sync", encodeLiveFrameSync({ binding: selected, hostVector: Y.encodeStateVector(doc),
-      missingStateUpdate: Y.encodeStateAsUpdate(doc, vector) }, policy.receive), cursor, digest);
-    if (value.state().status === "live") await until(() => frames.some(frame => frame.kind === "sync-applied"));
+    await transfer(
+      "initial-sync",
+      encodeLiveFrameSync(
+        {
+          binding: selected,
+          hostVector: Y.encodeStateVector(doc),
+          missingStateUpdate: Y.encodeStateAsUpdate(doc, vector),
+        },
+        policy.receive,
+      ),
+      cursor,
+      digest,
+    );
+    if (value.state().status === "live")
+      await until(() => frames.some((frame) => frame.kind === "sync-applied"));
   }
-  const submissions = () => transfers.filter(item => item.begin.purpose === "submit-update");
-  async function submitted(count = 1) { await until(() => submissions().length >= count); return submissions()[count - 1]!; }
+  const submissions = () => transfers.filter((item) => item.begin.purpose === "submit-update");
+  async function submitted(count = 1) {
+    await until(() => submissions().length >= count);
+    return submissions()[count - 1]!;
+  }
   async function ack(item: Received, acceptingHostEpoch = epoch, cursor = 1) {
     if (item.begin.purpose !== "submit-update") throw new Error("Expected submit update.");
-    await send({ kind: "result", result: "success", ack: { deliveryId: item.begin.deliveryId, updateDigest: item.begin.digest,
-      journalCursor: cursor, acceptingHostEpoch: parseHostEpoch(acceptingHostEpoch), localYDocSequence: 1, applicationReplayed: false } });
+    await send({
+      kind: "result",
+      result: "success",
+      ack: {
+        deliveryId: item.begin.deliveryId,
+        updateDigest: item.begin.digest,
+        journalCursor: cursor,
+        acceptingHostEpoch: parseHostEpoch(acceptingHostEpoch),
+        localYDocSequence: 1,
+        applicationReplayed: false,
+      },
+    });
   }
-  return { route, server, frames, frameBytes, transfers, send, initial, transfer, submitted, submissions, ack,
+  return {
+    route,
+    server,
+    frames,
+    frameBytes,
+    transfers,
+    send,
+    initial,
+    transfer,
+    submitted,
+    submissions,
+    ack,
     until,
     sendsInFlight: () => sendsInFlight,
     isClosed: () => closed,
     async greet(grant = true) {
-      await send({ kind: "welcome", hostEpoch: parseHostEpoch(epoch), receivePolicy: policy.receive });
-      if (grant) await send({ kind: "credit", grantedBytes: creditBytes, grantedFrames: creditFrames });
+      await send({
+        kind: "welcome",
+        hostEpoch: parseHostEpoch(epoch),
+        receivePolicy: policy.receive,
+      });
+      if (grant)
+        await send({ kind: "credit", grantedBytes: creditBytes, grantedFrames: creditFrames });
     },
-    async credit(bytes = 16384, count = 64) { creditBytes += bytes; creditFrames += count; await send({ kind: "credit", grantedBytes: creditBytes, grantedFrames: creditFrames }); },
-    stall() { stall = "all"; }, stallChunks() { stall = "chunks"; }, release() { stall = false; stalled?.(); stalled = undefined; },
+    async credit(bytes = 16384, count = 64) {
+      creditBytes += bytes;
+      creditFrames += count;
+      await send({ kind: "credit", grantedBytes: creditBytes, grantedFrames: creditFrames });
+    },
+    stall() {
+      stall = "all";
+    },
+    stallChunks() {
+      stall = "chunks";
+    },
+    release() {
+      stall = false;
+      stalled?.();
+      stalled = undefined;
+    },
   };
 }
 async function live(value = provider(), doc = document("base")) {
-  const host = peer(value); await host.greet(); await host.initial(doc); return { value, host, doc };
+  const host = peer(value);
+  await host.greet();
+  await host.initial(doc);
+  return { value, host, doc };
 }
 
 describe("named live browser provider", () => {
   it.each([
-    {kind: "account", accountId: "ana"},
-    {kind: "link", publicPrincipalId: "public-ana"},
-  ] satisfies LiveAuthorContext[])("retains the $kind recording context on an ambiguous retry", async context => {
-    let current: LiveAuthorContext = context;
-    const value = createNamedLiveProvider(limits(), undefined, () => current);
-    cleanup.push(() => {value.close(); value.doc.destroy();});
-    const { host, doc } = await live(value);
-    edit(value, " draft");
-    const first = await host.submitted();
-    expect(first.begin).toMatchObject({authorContext: context});
-    current = {kind: "signed-out"};
-    Y.applyUpdate(doc, first.bytes); host.route.disconnect(); await host.route.settled();
-    const second = peer(value, 2); await second.greet(); await second.initial(doc, binding, 1);
-    const retry = await second.submitted();
-    expect(retry.begin).toMatchObject({authorContext: context, deliveryId: (first.begin as {deliveryId: string}).deliveryId});
-    await second.ack(retry, 1);
-    expect(value.state().pendingUpdates).toBe(0);
-  });
+    { kind: "account", accountId: "ana" },
+    { kind: "link", publicPrincipalId: "public-ana" },
+  ] satisfies LiveAuthorContext[])(
+    "retains the $kind recording context on an ambiguous retry",
+    async (context) => {
+      let current: LiveAuthorContext = context;
+      const value = createNamedLiveProvider(limits(), undefined, () => current);
+      cleanup.push(() => {
+        value.close();
+        value.doc.destroy();
+      });
+      const { host, doc } = await live(value);
+      edit(value, " draft");
+      const first = await host.submitted();
+      expect(first.begin).toMatchObject({ authorContext: context });
+      current = { kind: "signed-out" };
+      Y.applyUpdate(doc, first.bytes);
+      host.route.disconnect();
+      await host.route.settled();
+      const second = peer(value, 2);
+      await second.greet();
+      await second.initial(doc, binding, 1);
+      const retry = await second.submitted();
+      expect(retry.begin).toMatchObject({
+        authorContext: context,
+        deliveryId: (first.begin as { deliveryId: string }).deliveryId,
+      });
+      await second.ack(retry, 1);
+      expect(value.state().pendingUpdates).toBe(0);
+    },
+  );
   it("retains the membership overflow marker without inventing departures", async () => {
     const { value, host } = await live();
-    const first = "ab".repeat(16), second = "cd".repeat(16);
+    const first = "ab".repeat(16),
+      second = "cd".repeat(16);
     await host.send({ kind: "membership", revision: 1, members: [first, second], overflow: false });
-    expect(value.state().membership).toEqual({ kind: "membership", revision: 1, members: [first, second], overflow: false });
+    expect(value.state().membership).toEqual({
+      kind: "membership",
+      revision: 1,
+      members: [first, second],
+      overflow: false,
+    });
     await host.send({ kind: "membership", revision: 2, members: [first], overflow: true });
-    expect(value.state().membership).toEqual({ kind: "membership", revision: 2, members: [first], overflow: true });
+    expect(value.state().membership).toEqual({
+      kind: "membership",
+      revision: 2,
+      members: [first],
+      overflow: true,
+    });
     (value.state().membership!.members as string[]).push("ef".repeat(16));
     expect(value.state().membership!.members).toEqual([first]);
     host.route.disconnect();
@@ -154,215 +329,445 @@ describe("named live browser provider", () => {
   });
   it("ignores membership arriving from a replaced route", async () => {
     const { value, host, doc } = await live();
-    await host.send({ kind: "membership", revision: 1, members: ["ab".repeat(16)], overflow: false });
-    host.route.disconnect(); await host.route.settled();
-    const next = peer(value, 2); await next.greet(); await next.initial(doc);
-    await next.send({ kind: "membership", revision: 1, members: ["cd".repeat(16)], overflow: false });
-    await host.route.receive(encodeLiveFrame({ kind: "membership", revision: 2, members: ["ef".repeat(16)], overflow: false }, 586));
+    await host.send({
+      kind: "membership",
+      revision: 1,
+      members: ["ab".repeat(16)],
+      overflow: false,
+    });
+    host.route.disconnect();
+    await host.route.settled();
+    const next = peer(value, 2);
+    await next.greet();
+    await next.initial(doc);
+    await next.send({
+      kind: "membership",
+      revision: 1,
+      members: ["cd".repeat(16)],
+      overflow: false,
+    });
+    await host.route.receive(
+      encodeLiveFrame(
+        { kind: "membership", revision: 2, members: ["ef".repeat(16)], overflow: false },
+        586,
+      ),
+    );
     expect(value.state().membership!.members).toEqual(["cd".repeat(16)]);
   });
   it("waits for the initial sync, uses the canonical body, and ignores remote echoes", async () => {
-    const value = provider(), doc = document("initial"), host = peer(value);
+    const value = provider(),
+      doc = document("initial"),
+      host = peer(value);
     expect(value.state().status).toBe("connecting");
-    await host.greet(); expect(value.state().status).toBe("syncing");
+    await host.greet();
+    expect(value.state().status).toBe("syncing");
     await host.initial(doc);
     expect(value.body.toString()).toBe(getDohcYDocBodyFragment(doc).toString());
     expect(value.state()).toMatchObject({ status: "live", binding, pendingUpdates: 0 });
     expect(host.submissions()).toHaveLength(0);
   });
   it("holds exact local update bytes until a matched host application ACK", async () => {
-    const { value, host } = await live(); edit(value, " local");
+    const { value, host } = await live();
+    edit(value, " local");
     const item = await host.submitted();
     expect(hash(item.bytes)).toBe(item.begin.digest);
-    expect(value.state()).toMatchObject({ pendingUpdates: 1, pendingBytes: item.bytes.length, lastApplied: null });
+    expect(value.state()).toMatchObject({
+      pendingUpdates: 1,
+      pendingBytes: item.bytes.length,
+      lastApplied: null,
+    });
     await host.ack(item);
-    expect(value.state()).toMatchObject({ pendingUpdates: 0, pendingBytes: 0, lastApplied: { journalCursor: 1 } });
+    expect(value.state()).toMatchObject({
+      pendingUpdates: 0,
+      pendingBytes: 0,
+      lastApplied: { journalCursor: 1 },
+    });
   });
-  it.each([[586, 16384], [16384, 586], [586, 586]])("delivers and ACKs an update with local queue %i and peer queue %i below the frame limit", async (localBytes, peerBytes) => {
-    const options = limits();
-    const value = provider({ ...options, frames: { ...options.frames, maxQueuedBytes: localBytes } });
-    const host = peer(value, 1, { policy: { ...options.frames, maxQueuedBytes: peerBytes }, replenish: true });
-    const doc = document("base"); await host.greet(); await host.initial(doc);
-    edit(value, "x".repeat(2048));
-    const item = await host.submitted();
-    expect(item.bytes.length).toBeGreaterThan(1024);
-    expect(host.frames.filter(frame => frame.kind === "chunk").length).toBeGreaterThan(3);
-    expect(Math.max(...host.frameBytes)).toBeLessThanOrEqual(Math.min(1024, localBytes, peerBytes));
-    expect(value.state()).toMatchObject({ status: "live", pendingUpdates: 1, pendingBytes: item.bytes.length, lastApplied: null });
-    Y.applyUpdate(doc, item.bytes);
-    expect(value.body.toString()).toBe(getDohcYDocBodyFragment(doc).toString());
-    await host.ack(item);
-    expect(value.state()).toMatchObject({ status: "live", pendingUpdates: 0, pendingBytes: 0, lastApplied: { journalCursor: 1 } });
-  });
+  it.each([
+    [586, 16384],
+    [16384, 586],
+    [586, 586],
+  ])(
+    "delivers and ACKs an update with local queue %i and peer queue %i below the frame limit",
+    async (localBytes, peerBytes) => {
+      const options = limits();
+      const value = provider({
+        ...options,
+        frames: { ...options.frames, maxQueuedBytes: localBytes },
+      });
+      const host = peer(value, 1, {
+        policy: { ...options.frames, maxQueuedBytes: peerBytes },
+        replenish: true,
+      });
+      const doc = document("base");
+      await host.greet();
+      await host.initial(doc);
+      edit(value, "x".repeat(2048));
+      const item = await host.submitted();
+      expect(item.bytes.length).toBeGreaterThan(1024);
+      expect(host.frames.filter((frame) => frame.kind === "chunk").length).toBeGreaterThan(3);
+      expect(Math.max(...host.frameBytes)).toBeLessThanOrEqual(
+        Math.min(1024, localBytes, peerBytes),
+      );
+      expect(value.state()).toMatchObject({
+        status: "live",
+        pendingUpdates: 1,
+        pendingBytes: item.bytes.length,
+        lastApplied: null,
+      });
+      Y.applyUpdate(doc, item.bytes);
+      expect(value.body.toString()).toBe(getDohcYDocBodyFragment(doc).toString());
+      await host.ack(item);
+      expect(value.state()).toMatchObject({
+        status: "live",
+        pendingUpdates: 0,
+        pendingBytes: 0,
+        lastApplied: { journalCursor: 1 },
+      });
+    },
+  );
   it("uses remaining byte credit and waits for another frame before continuing a submission", async () => {
-    const options = { policy: { ...limits().frames, maxQueuedBytes: 586, maxQueuedFrames: 2 }, replenish: false };
-    const value = provider(), host = peer(value, 1, options);
-    await host.greet(); await host.initial(document("base"));
-    await host.credit(0, 1); edit(value, "x".repeat(2048));
-    await host.until(() => host.frames.some(frame => frame.kind === "begin" && frame.purpose === "submit-update"));
-    expect(host.frames.filter(frame => frame.kind === "chunk" && frame.transferId === 2)).toHaveLength(0);
+    const options = {
+      policy: { ...limits().frames, maxQueuedBytes: 586, maxQueuedFrames: 2 },
+      replenish: false,
+    };
+    const value = provider(),
+      host = peer(value, 1, options);
+    await host.greet();
+    await host.initial(document("base"));
+    await host.credit(0, 1);
+    edit(value, "x".repeat(2048));
+    await host.until(() =>
+      host.frames.some((frame) => frame.kind === "begin" && frame.purpose === "submit-update"),
+    );
+    expect(
+      host.frames.filter((frame) => frame.kind === "chunk" && frame.transferId === 2),
+    ).toHaveLength(0);
     expect(host.server.usage().incoming.promisedFrames).toBe(0);
     await host.credit(0, 1);
-    await host.until(() => host.frames.some(frame => frame.kind === "chunk" && frame.transferId === 2));
-    const firstChunk = host.frames.findIndex(frame => frame.kind === "chunk" && frame.transferId === 2);
+    await host.until(() =>
+      host.frames.some((frame) => frame.kind === "chunk" && frame.transferId === 2),
+    );
+    const firstChunk = host.frames.findIndex(
+      (frame) => frame.kind === "chunk" && frame.transferId === 2,
+    );
     expect(host.frameBytes[firstChunk]).toBeLessThan(586);
     expect(host.server.usage().incoming).toMatchObject({ promisedBytes: 0, promisedFrames: 0 });
     expect(host.submissions()).toHaveLength(0);
     expect(value.state()).toMatchObject({ status: "live", pendingUpdates: 1, lastApplied: null });
-    options.replenish = true; await host.credit(586, 2);
+    options.replenish = true;
+    await host.credit(586, 2);
     await host.ack(await host.submitted());
     expect(value.state()).toMatchObject({ status: "live", pendingUpdates: 0, pendingBytes: 0 });
   });
   it("releases a partially sent small-queue update on cancellation and retries the same draft", async () => {
-    const options = limits(), policy = { ...options.frames, maxQueuedBytes: 586 }, peerPolicy = { ...policy, maxQueuedFrames: 1 };
-    const value = provider({ ...options, frames: policy }), doc = document("base");
-    const host = peer(value, 1, { policy: peerPolicy, replenish: true }); await host.greet(); await host.initial(doc);
-    host.stallChunks(); edit(value, "x".repeat(2048));
-    await host.until(() => host.frames.some(frame => frame.kind === "chunk" && frame.transferId === 2));
+    const options = limits(),
+      policy = { ...options.frames, maxQueuedBytes: 586 },
+      peerPolicy = { ...policy, maxQueuedFrames: 1 };
+    const value = provider({ ...options, frames: policy }),
+      doc = document("base");
+    const host = peer(value, 1, { policy: peerPolicy, replenish: true });
+    await host.greet();
+    await host.initial(doc);
+    host.stallChunks();
+    edit(value, "x".repeat(2048));
+    await host.until(() =>
+      host.frames.some((frame) => frame.kind === "chunk" && frame.transferId === 2),
+    );
     expect(host.submissions()).toHaveLength(0);
     const pendingBytes = value.state().pendingBytes;
     expect(host.server.usage().assemblyBytes).toBe(pendingBytes);
-    host.route.disconnect(); await host.until(() => host.sendsInFlight() === 0); await host.route.settled();
+    host.route.disconnect();
+    await host.until(() => host.sendsInFlight() === 0);
+    await host.route.settled();
     expect(host.isClosed()).toBe(true);
-    expect(host.server.usage()).toMatchObject({ closed: true, assemblyBytes: 0, incoming: { queuedBytes: 0, queuedFrames: 0 } });
-    expect(value.state()).toMatchObject({ status: "disconnected", pendingUpdates: 1, pendingBytes });
-    const next = peer(value, 2, { policy: peerPolicy, replenish: true }); await next.greet(); await next.initial(doc);
+    expect(host.server.usage()).toMatchObject({
+      closed: true,
+      assemblyBytes: 0,
+      incoming: { queuedBytes: 0, queuedFrames: 0 },
+    });
+    expect(value.state()).toMatchObject({
+      status: "disconnected",
+      pendingUpdates: 1,
+      pendingBytes,
+    });
+    const next = peer(value, 2, { policy: peerPolicy, replenish: true });
+    await next.greet();
+    await next.initial(doc);
     const retry = await next.submitted();
-    expect(retry.begin).toMatchObject(host.frames.find(frame => frame.kind === "begin" && frame.purpose === "submit-update")!);
+    expect(retry.begin).toMatchObject(
+      host.frames.find((frame) => frame.kind === "begin" && frame.purpose === "submit-update")!,
+    );
     await next.ack(retry);
     expect(value.state()).toMatchObject({ status: "live", pendingUpdates: 0, pendingBytes: 0 });
   });
   it("retries ambiguous delivery with its original identity and accepts historical host application", async () => {
-    const { value, host, doc } = await live(); edit(value, " draft"); const first = await host.submitted();
+    const { value, host, doc } = await live();
+    edit(value, " draft");
+    const first = await host.submitted();
     // The old host may have applied it before the connection vanished.
-    Y.applyUpdate(doc, first.bytes); host.route.disconnect(); await host.route.settled();
-    const second = peer(value, 2); await second.greet(); await second.initial(doc, binding, 1);
+    Y.applyUpdate(doc, first.bytes);
+    host.route.disconnect();
+    await host.route.settled();
+    const second = peer(value, 2);
+    await second.greet();
+    await second.initial(doc, binding, 1);
     const retry = await second.submitted();
     expect(retry.bytes).toEqual(first.bytes);
-    expect(retry.begin).toMatchObject({ deliveryId: (first.begin as { deliveryId: string }).deliveryId, digest: first.begin.digest });
+    expect(retry.begin).toMatchObject({
+      deliveryId: (first.begin as { deliveryId: string }).deliveryId,
+      digest: first.begin.digest,
+    });
     expect(value.state().pendingUpdates).toBe(1);
-    await second.ack(retry, 1); expect(value.state().pendingUpdates).toBe(0);
+    await second.ack(retry, 1);
+    expect(value.state().pendingUpdates).toBe(0);
   });
   it("quarantines a changed restore binding before applying the fresh baseline", async () => {
-    const { value, host } = await live(); edit(value, " unsent"); await host.submitted();
-    host.route.disconnect(); await host.route.settled(); const before = value.body.toString();
-    const second = peer(value, 2); await second.greet();
+    const { value, host } = await live();
+    edit(value, " unsent");
+    await host.submitted();
+    host.route.disconnect();
+    await host.route.settled();
+    const before = value.body.toString();
+    const second = peer(value, 2);
+    await second.greet();
     await second.initial(document("RESTORED"), { ...binding, restoreFenceGeneration: 1 });
-    expect(value.state()).toMatchObject({ status: "quarantined", reason: "binding-changed", pendingUpdates: 1 });
+    expect(value.state()).toMatchObject({
+      status: "quarantined",
+      reason: "binding-changed",
+      pendingUpdates: 1,
+    });
     expect(value.body.toString()).toBe(before);
     expect(() => peer(value, 3)).toThrow("cannot reconnect");
   });
-  it.each(["route-fenced", "protocol-invalid"] as const)("retains a draft on %s", async reason => {
-    const { value, host } = await live(); edit(value, " draft"); await host.submitted();
-    const before = value.body.toString(); await host.send({ kind: "close", reason });
-    expect(value.state()).toMatchObject({ status: "quarantined", reason, pendingUpdates: 1 });
-    expect(value.body.toString()).toBe(before); expect(host.isClosed()).toBe(true);
-  });
-  it.each(["retry", "refused"] as const)("preserves ownership after a %s result", async result => {
-    const { value, host } = await live(); edit(value, " draft"); const item = await host.submitted();
-    if (item.begin.purpose !== "submit-update") throw new Error("Expected submit.");
-    await host.send(result === "retry"
-      ? { kind: "result", result, deliveryId: item.begin.deliveryId, updateDigest: item.begin.digest, reason: "application-pending" }
-      : { kind: "result", result, deliveryId: item.begin.deliveryId, updateDigest: item.begin.digest, reason: "restore-fenced" });
-    expect(value.state()).toMatchObject({ status: result === "retry" ? "live" : "quarantined", pendingUpdates: 1 });
-  });
+  it.each(["route-fenced", "protocol-invalid"] as const)(
+    "retains a draft on %s",
+    async (reason) => {
+      const { value, host } = await live();
+      edit(value, " draft");
+      await host.submitted();
+      const before = value.body.toString();
+      await host.send({ kind: "close", reason });
+      expect(value.state()).toMatchObject({ status: "quarantined", reason, pendingUpdates: 1 });
+      expect(value.body.toString()).toBe(before);
+      expect(host.isClosed()).toBe(true);
+    },
+  );
+  it.each(["retry", "refused"] as const)(
+    "preserves ownership after a %s result",
+    async (result) => {
+      const { value, host } = await live();
+      edit(value, " draft");
+      const item = await host.submitted();
+      if (item.begin.purpose !== "submit-update") throw new Error("Expected submit.");
+      await host.send(
+        result === "retry"
+          ? {
+              kind: "result",
+              result,
+              deliveryId: item.begin.deliveryId,
+              updateDigest: item.begin.digest,
+              reason: "application-pending",
+            }
+          : {
+              kind: "result",
+              result,
+              deliveryId: item.begin.deliveryId,
+              updateDigest: item.begin.digest,
+              reason: "restore-fenced",
+            },
+      );
+      expect(value.state()).toMatchObject({
+        status: result === "retry" ? "live" : "quarantined",
+        pendingUpdates: 1,
+      });
+    },
+  );
   it("does not skip peer updates when its own ACK has a later cursor", async () => {
-    const { value, host, doc } = await live(); edit(value, " mine"); await host.ack(await host.submitted(), 1, 4);
+    const { value, host, doc } = await live();
+    edit(value, " mine");
+    await host.ack(await host.submitted(), 1, 4);
     const before = Y.encodeStateVector(doc);
     const content = (getDohcYDocBodyFragment(doc).get(0) as Y.XmlElement).get(0) as Y.XmlText;
     content.insert(content.length, " peer");
     await host.transfer("applied-update", Y.encodeStateAsUpdate(doc, before), 3);
-    expect(value.body.toString()).toContain("peer"); expect(value.state().pendingUpdates).toBe(0);
+    expect(value.body.toString()).toContain("peer");
+    expect(value.state().pendingUpdates).toBe(0);
   });
   it("refuses an ACK from an unattempted host epoch", async () => {
-    const { value, host } = await live(); edit(value, " draft"); await host.ack(await host.submitted(), 2);
-    expect(value.state()).toMatchObject({ status: "quarantined", reason: "foreign-ack-epoch", pendingUpdates: 1 });
+    const { value, host } = await live();
+    edit(value, " draft");
+    await host.ack(await host.submitted(), 2);
+    expect(value.state()).toMatchObject({
+      status: "quarantined",
+      reason: "foreign-ack-epoch",
+      pendingUpdates: 1,
+    });
   });
   it("keeps local edits when bounded pending count is exhausted", async () => {
     const options = { ...limits(), maxPendingUpdates: 1 };
-    const { value, host } = await live(provider(options)); edit(value, " first"); await host.submitted(); edit(value, " second");
-    expect(value.state()).toMatchObject({ status: "quarantined", reason: "pending-update-limit", pendingUpdates: 1 });
+    const { value, host } = await live(provider(options));
+    edit(value, " first");
+    await host.submitted();
+    edit(value, " second");
+    expect(value.state()).toMatchObject({
+      status: "quarantined",
+      reason: "pending-update-limit",
+      pendingUpdates: 1,
+    });
     expect(value.body.toString()).toContain("second");
   });
   it("rejects a tampered initial sync without mutating the draft", async () => {
-    const value = provider(), host = peer(value); await host.greet();
+    const value = provider(),
+      host = peer(value);
+    await host.greet();
     await host.initial(document("untrusted"), binding, 0, "00".repeat(32));
     expect(value.state()).toMatchObject({ status: "quarantined", reason: "digest-mismatch" });
     expect(value.body.length).toBe(0);
   });
   it("quarantines edits before initial sync", () => {
-    const value = provider(); value.body.insert(0, [new Y.XmlElement("paragraph")]);
-    expect(value.state()).toMatchObject({ status: "quarantined", reason: "edit-while-unavailable" });
+    const value = provider();
+    value.body.insert(0, [new Y.XmlElement("paragraph")]);
+    expect(value.state()).toMatchObject({
+      status: "quarantined",
+      reason: "edit-while-unavailable",
+    });
     expect(value.body.length).toBe(1);
   });
   it("ignores late frames from a retired route", async () => {
-    const { value, host, doc } = await live(); host.route.disconnect(); await host.route.settled();
-    const second = peer(value, 2); await second.greet(); await second.initial(doc);
+    const { value, host, doc } = await live();
+    host.route.disconnect();
+    await host.route.settled();
+    const second = peer(value, 2);
+    await second.greet();
+    await second.initial(doc);
     await host.route.receive(encodeLiveFrame({ kind: "close", reason: "route-fenced" }, 1024));
     expect(value.state()).toMatchObject({ status: "live", hostEpoch: 2 });
   });
   it("snapshots caller budgets and returned binding state", async () => {
     const original = limits();
-    const options = { ...original, frames: { ...original.frames, receive: { ...original.frames.receive } } };
-    const value = provider(options); options.maxPendingUpdates = 0; options.frames.receive.maxUpdateBytes = 1;
-    const { host } = await live(value); const snapshot = value.state();
+    const options = {
+      ...original,
+      frames: { ...original.frames, receive: { ...original.frames.receive } },
+    };
+    const value = provider(options);
+    options.maxPendingUpdates = 0;
+    options.frames.receive.maxUpdateBytes = 1;
+    const { host } = await live(value);
+    const snapshot = value.state();
     (snapshot.binding!.selectorPaths as string[])[0] = "evil.md";
     expect(value.state().binding).toEqual(binding);
-    edit(value, " permitted"); await host.submitted(); expect(value.state().status).toBe("live");
+    edit(value, " permitted");
+    await host.submitted();
+    expect(value.state().status).toBe("live");
   });
   it("bounds admitted inbound frame copies even before asynchronous work drains", async () => {
-    const original = limits(); const options = { ...original, frames: { ...original.frames, maxQueuedFrames: 1 } };
-    const value = provider(options), host = peer(value);
-    const welcome = encodeLiveFrame({ kind: "welcome", hostEpoch: parseHostEpoch(1), receivePolicy: limits().frames.receive }, 1024);
-    const first = host.route.receive(welcome), second = host.route.receive(welcome);
+    const original = limits();
+    const options = { ...original, frames: { ...original.frames, maxQueuedFrames: 1 } };
+    const value = provider(options),
+      host = peer(value);
+    const welcome = encodeLiveFrame(
+      { kind: "welcome", hostEpoch: parseHostEpoch(1), receivePolicy: limits().frames.receive },
+      1024,
+    );
+    const first = host.route.receive(welcome),
+      second = host.route.receive(welcome);
     await Promise.all([first, second]);
     expect(value.state()).toMatchObject({ status: "quarantined", reason: "inbound-limit" });
   });
   it("stops at route credit and resumes the same queued update after credit arrives", async () => {
-    const value = provider(), host = peer(value); await host.greet(false);
+    const value = provider(),
+      host = peer(value);
+    await host.greet(false);
     await host.send({ kind: "credit", grantedBytes: 120, grantedFrames: 2 });
-    await host.initial(document("base")); edit(value, " waiting");
-    expect(value.state().pendingUpdates).toBe(1); expect(host.submissions()).toHaveLength(0);
-    await host.send({ kind: "credit", grantedBytes: 16384, grantedFrames: 64 }); await host.ack(await host.submitted());
+    await host.initial(document("base"));
+    edit(value, " waiting");
+    expect(value.state().pendingUpdates).toBe(1);
+    expect(host.submissions()).toHaveLength(0);
+    await host.send({ kind: "credit", grantedBytes: 16384, grantedFrames: 64 });
+    await host.ack(await host.submitted());
     expect(value.state()).toMatchObject({ status: "live", pendingUpdates: 0 });
   });
   it("keeps a stalled send owned and refuses reconnect until the adapter releases it", async () => {
-    const { value, host } = await live(); host.stall(); edit(value, " stalled");
-    await host.until(() => host.frames.some(frame => frame.kind === "begin" && frame.purpose === "submit-update"));
-    expect(host.submissions()).toHaveLength(0); expect(value.state().pendingUpdates).toBe(1);
+    const { value, host } = await live();
+    host.stall();
+    edit(value, " stalled");
+    await host.until(() =>
+      host.frames.some((frame) => frame.kind === "begin" && frame.purpose === "submit-update"),
+    );
+    expect(host.submissions()).toHaveLength(0);
+    expect(value.state().pendingUpdates).toBe(1);
     expect(() => peer(value, 2)).toThrow("still owns work");
-    host.release(); await host.ack(await host.submitted());
+    host.release();
+    await host.ack(await host.submitted());
     expect(value.state().pendingUpdates).toBe(0);
   });
-  it.each(["deliveryId", "updateDigest"] as const)("refuses an ACK with the wrong %s", async field => {
-    const { value, host } = await live(); edit(value, " draft"); const item = await host.submitted();
-    if (item.begin.purpose !== "submit-update") throw new Error("Expected submit.");
-    // Bypass server validation to model a corrupt or malicious peer.
-    await host.route.receive(encodeLiveFrame({ kind: "result", result: "success", ack: {
-      deliveryId: item.begin.deliveryId, updateDigest: item.begin.digest, journalCursor: 1,
-      acceptingHostEpoch: parseHostEpoch(1), localYDocSequence: 1, applicationReplayed: false,
-      [field]: field === "deliveryId" ? "different" : "00".repeat(32),
-    } }, 1024));
-    expect(value.state()).toMatchObject({ status: "quarantined", reason: "invalid-frame", pendingUpdates: 1 });
-  });
+  it.each(["deliveryId", "updateDigest"] as const)(
+    "refuses an ACK with the wrong %s",
+    async (field) => {
+      const { value, host } = await live();
+      edit(value, " draft");
+      const item = await host.submitted();
+      if (item.begin.purpose !== "submit-update") throw new Error("Expected submit.");
+      // Bypass server validation to model a corrupt or malicious peer.
+      await host.route.receive(
+        encodeLiveFrame(
+          {
+            kind: "result",
+            result: "success",
+            ack: {
+              deliveryId: item.begin.deliveryId,
+              updateDigest: item.begin.digest,
+              journalCursor: 1,
+              acceptingHostEpoch: parseHostEpoch(1),
+              localYDocSequence: 1,
+              applicationReplayed: false,
+              [field]: field === "deliveryId" ? "different" : "00".repeat(32),
+            },
+          },
+          1024,
+        ),
+      );
+      expect(value.state()).toMatchObject({
+        status: "quarantined",
+        reason: "invalid-frame",
+        pendingUpdates: 1,
+      });
+    },
+  );
   it("bounds ambiguous delivery attempts across reconnects", async () => {
     const { value, host, doc } = await live(provider({ ...limits(), maxDeliveryAttempts: 1 }));
-    edit(value, " draft"); await host.submitted(); host.route.disconnect(); await host.route.settled();
-    const second = peer(value, 2); await second.greet(); await second.initial(doc);
-    expect(value.state()).toMatchObject({ status: "quarantined", reason: "delivery-attempt-limit", pendingUpdates: 1 });
+    edit(value, " draft");
+    await host.submitted();
+    host.route.disconnect();
+    await host.route.settled();
+    const second = peer(value, 2);
+    await second.greet();
+    await second.initial(doc);
+    expect(value.state()).toMatchObject({
+      status: "quarantined",
+      reason: "delivery-attempt-limit",
+      pendingUpdates: 1,
+    });
     expect(second.submissions()).toHaveLength(0);
   });
   it("resubmits unavailable admission without spending delivery attempts", async () => {
     const reason = "admission-unavailable";
-    const {value, host} = await live(provider({...limits(), maxDeliveryAttempts: 1}));
+    const { value, host } = await live(provider({ ...limits(), maxDeliveryAttempts: 1 }));
     vi.useFakeTimers();
     edit(value, " draft");
     const first = await host.submitted();
     for (let attempt = 1; attempt <= 3; attempt++) {
       const item = await host.submitted(attempt);
       if (item.begin.purpose !== "submit-update") throw new Error("Expected submit.");
-      await host.send({kind: "result", result: "retry", deliveryId: item.begin.deliveryId, updateDigest: item.begin.digest, reason});
-      expect(value.state()).toMatchObject({status: "live", pendingUpdates: 1, reason});
+      await host.send({
+        kind: "result",
+        result: "retry",
+        deliveryId: item.begin.deliveryId,
+        updateDigest: item.begin.digest,
+        reason,
+      });
+      expect(value.state()).toMatchObject({ status: "live", pendingUpdates: 1, reason });
       expect(host.isClosed()).toBe(false);
       await vi.advanceTimersByTimeAsync(249);
       expect(host.submissions()).toHaveLength(attempt);
@@ -370,84 +775,157 @@ describe("named live browser provider", () => {
       expect(host.submissions()).toHaveLength(attempt + 1);
       const retry = await host.submitted(attempt + 1);
       expect(retry.bytes).toEqual(first.bytes);
-      expect(retry.begin).toMatchObject({deliveryId: item.begin.deliveryId, digest: item.begin.digest});
+      expect(retry.begin).toMatchObject({
+        deliveryId: item.begin.deliveryId,
+        digest: item.begin.digest,
+      });
     }
     edit(value, " more");
-    expect(value.state()).toMatchObject({status: "live", pendingUpdates: 2});
+    expect(value.state()).toMatchObject({ status: "live", pendingUpdates: 2 });
     await host.ack(await host.submitted(4));
     await host.ack(await host.submitted(5), 1, 2);
-    expect(value.state()).toMatchObject({status: "live", pendingUpdates: 0, reason: null});
+    expect(value.state()).toMatchObject({ status: "live", pendingUpdates: 0, reason: null });
   });
   it("quarantines a sync cut that predates observed host application", async () => {
-    const { value, host, doc } = await live(); edit(value, " applied"); const item = await host.submitted();
-    Y.applyUpdate(doc, item.bytes); await host.ack(item, 1, 8); host.route.disconnect(); await host.route.settled();
-    const second = peer(value, 2); await second.greet(); await second.initial(doc, binding, 7);
+    const { value, host, doc } = await live();
+    edit(value, " applied");
+    const item = await host.submitted();
+    Y.applyUpdate(doc, item.bytes);
+    await host.ack(item, 1, 8);
+    host.route.disconnect();
+    await host.route.settled();
+    const second = peer(value, 2);
+    await second.greet();
+    await second.initial(doc, binding, 7);
     expect(value.state()).toMatchObject({ status: "quarantined", reason: "stale-sync-cut" });
   });
   it("refuses an older host epoch", async () => {
-    const value = provider(), host = peer(value, 2), doc = document("base");
-    await host.greet(); await host.initial(doc); host.route.disconnect(); await host.route.settled();
-    const old = peer(value, 1); await old.greet(false);
-    expect(value.state()).toMatchObject({ status: "quarantined", reason: "stale-host", hostEpoch: 2 });
+    const value = provider(),
+      host = peer(value, 2),
+      doc = document("base");
+    await host.greet();
+    await host.initial(doc);
+    host.route.disconnect();
+    await host.route.settled();
+    const old = peer(value, 1);
+    await old.greet(false);
+    expect(value.state()).toMatchObject({
+      status: "quarantined",
+      reason: "stale-host",
+      hostEpoch: 2,
+    });
   });
-  it.each(["selectorPaths", "lineageClaimId", "currentPath"] as const)("fences changed %s before any merge", async field => {
-    const { value, host } = await live(); host.route.disconnect(); await host.route.settled();
-    const old = value.body.toString(), second = peer(value, 2); await second.greet();
-    const selected = field === "selectorPaths" ? { ...binding, selectorPaths: ["document.md", "other.md"] }
-      : field === "lineageClaimId" ? { ...binding, lineageClaimId: "other" }
-      : { ...binding, currentPath: "other.md", selectorPaths: ["other.md"] };
-    await second.initial(document("new document"), selected);
-    expect(value.state()).toMatchObject({ status: "quarantined", reason: "binding-changed" });
-    expect(value.body.toString()).toBe(old);
-  });
+  it.each(["selectorPaths", "lineageClaimId", "currentPath"] as const)(
+    "fences changed %s before any merge",
+    async (field) => {
+      const { value, host } = await live();
+      host.route.disconnect();
+      await host.route.settled();
+      const old = value.body.toString(),
+        second = peer(value, 2);
+      await second.greet();
+      const selected =
+        field === "selectorPaths"
+          ? { ...binding, selectorPaths: ["document.md", "other.md"] }
+          : field === "lineageClaimId"
+            ? { ...binding, lineageClaimId: "other" }
+            : { ...binding, currentPath: "other.md", selectorPaths: ["other.md"] };
+      await second.initial(document("new document"), selected);
+      expect(value.state()).toMatchObject({ status: "quarantined", reason: "binding-changed" });
+      expect(value.body.toString()).toBe(old);
+    },
+  );
   it("refuses a sync payload that does not cover its claimed host vector", async () => {
-    const value = provider(), host = peer(value), doc = document("missing"); await host.greet();
-    await host.until(() => host.transfers.some(item => item.begin.purpose === "client-vector"));
-    await host.transfer("initial-sync", encodeLiveFrameSync({ binding, hostVector: Y.encodeStateVector(doc),
-      missingStateUpdate: Y.encodeStateAsUpdate(provider().doc) }, limits().frames.receive), 0);
+    const value = provider(),
+      host = peer(value),
+      doc = document("missing");
+    await host.greet();
+    await host.until(() => host.transfers.some((item) => item.begin.purpose === "client-vector"));
+    await host.transfer(
+      "initial-sync",
+      encodeLiveFrameSync(
+        {
+          binding,
+          hostVector: Y.encodeStateVector(doc),
+          missingStateUpdate: Y.encodeStateAsUpdate(provider().doc),
+        },
+        limits().frames.receive,
+      ),
+      0,
+    );
     expect(value.state()).toMatchObject({ status: "quarantined", reason: "incomplete-sync" });
   });
   it("attributes a baseline before synchronous retirement and fences a changed reconnect", async () => {
-    const value = provider(), host = peer(value); await host.greet();
+    const value = provider(),
+      host = peer(value);
+    await host.greet();
     value.doc.on("update", () => host.route.disconnect());
     await host.initial(document("base"), binding, 7);
     expect(value.state()).toMatchObject({ status: "disconnected", binding });
-    expect(host.frames.some(frame => frame.kind === "sync-applied")).toBe(false);
+    expect(host.frames.some((frame) => frame.kind === "sync-applied")).toBe(false);
     const before = value.body.toString();
-    const second = peer(value, 2); await second.greet();
+    const second = peer(value, 2);
+    await second.greet();
     await second.initial(document("restored"), { ...binding, restoreFenceGeneration: 1 }, 8);
-    expect(value.state()).toMatchObject({ status: "quarantined", reason: "binding-changed", binding });
+    expect(value.state()).toMatchObject({
+      status: "quarantined",
+      reason: "binding-changed",
+      binding,
+    });
     expect(value.body.toString()).toBe(before);
   });
   it("retains the sync cursor when a document observer retires the route", async () => {
-    const value = provider(), host = peer(value), doc = document("base"); await host.greet();
+    const value = provider(),
+      host = peer(value),
+      doc = document("base");
+    await host.greet();
     value.doc.once("update", () => host.route.disconnect());
     await host.initial(doc, binding, 7);
-    const second = peer(value, 2); await second.greet(); await second.initial(doc, binding, 6);
-    expect(value.state()).toMatchObject({ status: "quarantined", reason: "stale-sync-cut", binding });
+    const second = peer(value, 2);
+    await second.greet();
+    await second.initial(doc, binding, 6);
+    expect(value.state()).toMatchObject({
+      status: "quarantined",
+      reason: "stale-sync-cut",
+      binding,
+    });
   });
   it("gives observers independent state snapshots and contains listener failures", async () => {
-    const { value } = await live(); const received: string[] = [];
-    const stop = value.subscribe(state => { (state.binding!.selectorPaths as string[])[0] = "changed.md"; throw new Error("view failed"); });
-    value.subscribe(state => { received.push(state.binding!.selectorPaths[0]!); });
-    edit(value, "one"); stop(); edit(value, "two");
+    const { value } = await live();
+    const received: string[] = [];
+    const stop = value.subscribe((state) => {
+      (state.binding!.selectorPaths as string[])[0] = "changed.md";
+      throw new Error("view failed");
+    });
+    value.subscribe((state) => {
+      received.push(state.binding!.selectorPaths[0]!);
+    });
+    edit(value, "one");
+    stop();
+    edit(value, "two");
     expect(received).toEqual(["document.md", "document.md"]);
     expect(value.state().binding).toEqual(binding);
   });
   it("sends the edits made while one update is in flight as one update, around peer updates", async () => {
     const { value, host, doc } = await live();
-    edit(value, " first"); const first = await host.submitted();
+    edit(value, " first");
+    const first = await host.submitted();
     edit(value, " second");
     const before = Y.encodeStateVector(doc);
     const content = (getDohcYDocBodyFragment(doc).get(0) as Y.XmlElement).get(0) as Y.XmlText;
     content.insert(content.length, " peer");
     await host.transfer("applied-update", Y.encodeStateAsUpdate(doc, before), 1);
     expect(value.body.toString()).toContain("peer");
-    edit(value, " third"); edit(value, " fourth");
-    expect(value.state().pendingUpdates).toBe(2); expect(host.submissions()).toHaveLength(1);
-    await host.ack(first, 1, 2); const merged = await host.submitted(2);
+    edit(value, " third");
+    edit(value, " fourth");
+    expect(value.state().pendingUpdates).toBe(2);
+    expect(host.submissions()).toHaveLength(1);
+    await host.ack(first, 1, 2);
+    const merged = await host.submitted(2);
     expect(hash(merged.bytes)).toBe(merged.begin.digest);
-    expect(merged.begin).not.toMatchObject({ deliveryId: (first.begin as { deliveryId: string }).deliveryId });
+    expect(merged.begin).not.toMatchObject({
+      deliveryId: (first.begin as { deliveryId: string }).deliveryId,
+    });
     expect(value.state()).toMatchObject({ pendingUpdates: 1, pendingBytes: merged.bytes.length });
     await host.ack(merged, 1, 3);
     expect(value.state()).toMatchObject({ status: "live", pendingUpdates: 0, pendingBytes: 0 });
@@ -458,50 +936,81 @@ describe("named live browser provider", () => {
     expect(value.body.toString()).toContain("third fourth");
   });
   it("resends a retried update unchanged while later edits merge behind it", async () => {
-    const { value, host, doc } = await live(); vi.useFakeTimers();
-    edit(value, " draft"); const first = await host.submitted();
+    const { value, host, doc } = await live();
+    vi.useFakeTimers();
+    edit(value, " draft");
+    const first = await host.submitted();
     if (first.begin.purpose !== "submit-update") throw new Error("Expected submit.");
-    edit(value, " a"); edit(value, " b");
-    await host.send({ kind: "result", result: "retry", deliveryId: first.begin.deliveryId, updateDigest: first.begin.digest, reason: "application-pending" });
+    edit(value, " a");
+    edit(value, " b");
+    await host.send({
+      kind: "result",
+      result: "retry",
+      deliveryId: first.begin.deliveryId,
+      updateDigest: first.begin.digest,
+      reason: "application-pending",
+    });
     edit(value, " c");
     await vi.advanceTimersByTimeAsync(250);
     const retry = await host.submitted(2);
     expect(retry.bytes).toEqual(first.bytes);
-    expect(retry.begin).toMatchObject({ deliveryId: first.begin.deliveryId, digest: first.begin.digest });
+    expect(retry.begin).toMatchObject({
+      deliveryId: first.begin.deliveryId,
+      digest: first.begin.digest,
+    });
     expect(value.state().pendingUpdates).toBe(2);
     await host.ack(retry);
     const merged = await host.submitted(3);
-    Y.applyUpdate(doc, first.bytes); Y.applyUpdate(doc, merged.bytes);
+    Y.applyUpdate(doc, first.bytes);
+    Y.applyUpdate(doc, merged.bytes);
     expect(getDohcYDocBodyFragment(doc).toString()).toBe(value.body.toString());
     expect(value.body.toString()).toContain("base draft a b c");
   });
   it("keeps a lone sent update unchanged when admission was unavailable and edits follow", async () => {
-    const { value, host, doc } = await live(); vi.useFakeTimers();
-    edit(value, " draft"); const first = await host.submitted();
+    const { value, host, doc } = await live();
+    vi.useFakeTimers();
+    edit(value, " draft");
+    const first = await host.submitted();
     if (first.begin.purpose !== "submit-update") throw new Error("Expected submit.");
-    await host.send({ kind: "result", result: "retry", deliveryId: first.begin.deliveryId, updateDigest: first.begin.digest, reason: "admission-unavailable" });
-    edit(value, " a"); edit(value, " b");
+    await host.send({
+      kind: "result",
+      result: "retry",
+      deliveryId: first.begin.deliveryId,
+      updateDigest: first.begin.digest,
+      reason: "admission-unavailable",
+    });
+    edit(value, " a");
+    edit(value, " b");
     expect(value.state().pendingUpdates).toBe(2);
     await vi.advanceTimersByTimeAsync(250);
     const retry = await host.submitted(2);
     expect(retry.bytes).toEqual(first.bytes);
-    expect(retry.begin).toMatchObject({ deliveryId: first.begin.deliveryId, digest: first.begin.digest });
+    expect(retry.begin).toMatchObject({
+      deliveryId: first.begin.deliveryId,
+      digest: first.begin.digest,
+    });
     await host.ack(retry);
     const merged = await host.submitted(3);
     await host.ack(merged, 1, 2);
     expect(value.state()).toMatchObject({ status: "live", pendingUpdates: 0, pendingBytes: 0 });
-    Y.applyUpdate(doc, first.bytes); Y.applyUpdate(doc, merged.bytes);
+    Y.applyUpdate(doc, first.bytes);
+    Y.applyUpdate(doc, merged.bytes);
     expect(getDohcYDocBodyFragment(doc).toString()).toBe(value.body.toString());
     expect(value.body.toString()).toContain("base draft a b");
   });
   it("starts another update when merging would pass the update byte limit", async () => {
     const { value, host, doc } = await live();
-    edit(value, " first"); const first = await host.submitted();
-    edit(value, "x".repeat(5000)); edit(value, "y".repeat(5000)); edit(value, "z");
+    edit(value, " first");
+    const first = await host.submitted();
+    edit(value, "x".repeat(5000));
+    edit(value, "y".repeat(5000));
+    edit(value, "z");
     expect(value.state().pendingUpdates).toBe(3);
-    await host.ack(first, 1, 1); const second = await host.submitted(2);
+    await host.ack(first, 1, 1);
+    const second = await host.submitted(2);
     expect(second.bytes.length).toBeLessThanOrEqual(limits().frames.receive.maxUpdateBytes);
-    await host.ack(second, 1, 2); const third = await host.submitted(3);
+    await host.ack(second, 1, 2);
+    const third = await host.submitted(3);
     expect(third.bytes.length).toBeLessThanOrEqual(limits().frames.receive.maxUpdateBytes);
     await host.ack(third, 1, 3);
     expect(value.state()).toMatchObject({ status: "live", pendingUpdates: 0, pendingBytes: 0 });
@@ -509,18 +1018,26 @@ describe("named live browser provider", () => {
     expect(getDohcYDocBodyFragment(doc).toString()).toBe(value.body.toString());
   });
   it("splits a burst at the host's smaller update limit and delivers all of it", async () => {
-    const options = limits(), value = provider();
-    const policy = { ...options.frames, receive: { ...options.frames.receive, maxUpdateBytes: 4096 } };
-    const host = peer(value, 1, { policy, replenish: true }), doc = document("base");
-    await host.greet(); await host.initial(doc);
-    edit(value, " first"); const first = await host.submitted();
+    const options = limits(),
+      value = provider();
+    const policy = {
+      ...options.frames,
+      receive: { ...options.frames.receive, maxUpdateBytes: 4096 },
+    };
+    const host = peer(value, 1, { policy, replenish: true }),
+      doc = document("base");
+    await host.greet();
+    await host.initial(doc);
+    edit(value, " first");
+    const first = await host.submitted();
     for (let key = 0; key < 6; key++) edit(value, String(key).repeat(1500));
     await host.ack(first, 1, 1);
     const sent = [first];
     for (let cursor = 2; value.state().pendingUpdates > 0; cursor++) {
       const item = await host.submitted(cursor);
       expect(item.bytes.length).toBeLessThanOrEqual(4096);
-      sent.push(item); await host.ack(item, 1, cursor);
+      sent.push(item);
+      await host.ack(item, 1, cursor);
     }
     expect(sent.length).toBeGreaterThan(2);
     expect(value.state()).toMatchObject({ status: "live", pendingBytes: 0 });
@@ -529,36 +1046,59 @@ describe("named live browser provider", () => {
   });
   it("keeps every merged edit in the draft when the merged update is refused", async () => {
     const { value, host } = await live();
-    edit(value, " first"); const first = await host.submitted();
-    edit(value, " second"); edit(value, " third");
-    await host.ack(first, 1, 1); const merged = await host.submitted(2);
+    edit(value, " first");
+    const first = await host.submitted();
+    edit(value, " second");
+    edit(value, " third");
+    await host.ack(first, 1, 1);
+    const merged = await host.submitted(2);
     if (merged.begin.purpose !== "submit-update") throw new Error("Expected submit.");
-    await host.send({ kind: "result", result: "refused", deliveryId: merged.begin.deliveryId, updateDigest: merged.begin.digest, reason: "provenance-refused" });
-    expect(value.state()).toMatchObject({ status: "quarantined", reason: "provenance-refused", pendingUpdates: 1 });
+    await host.send({
+      kind: "result",
+      result: "refused",
+      deliveryId: merged.begin.deliveryId,
+      updateDigest: merged.begin.digest,
+      reason: "provenance-refused",
+    });
+    expect(value.state()).toMatchObject({
+      status: "quarantined",
+      reason: "provenance-refused",
+      pendingUpdates: 1,
+    });
     expect(value.body.toString()).toContain("base first second third");
   });
   it("merges only edits recorded under the same context", async () => {
     let current: LiveAuthorContext = { kind: "link", publicPrincipalId: "public-ana" };
     const value = createNamedLiveProvider(limits(), undefined, () => current);
-    cleanup.push(() => { value.close(); value.doc.destroy(); });
+    cleanup.push(() => {
+      value.close();
+      value.doc.destroy();
+    });
     const { host } = await live(value);
-    edit(value, " first"); const first = await host.submitted();
+    edit(value, " first");
+    const first = await host.submitted();
     edit(value, " second");
     current = { kind: "link", publicPrincipalId: "public-ben" };
-    edit(value, " third"); edit(value, " fourth");
+    edit(value, " third");
+    edit(value, " fourth");
     expect(value.state().pendingUpdates).toBe(3);
-    await host.ack(first, 1, 1); const second = await host.submitted(2);
+    await host.ack(first, 1, 1);
+    const second = await host.submitted(2);
     expect(second.begin).toMatchObject({ authorContext: { publicPrincipalId: "public-ana" } });
-    await host.ack(second, 1, 2); const third = await host.submitted(3);
+    await host.ack(second, 1, 2);
+    const third = await host.submitted(3);
     expect(third.begin).toMatchObject({ authorContext: { publicPrincipalId: "public-ben" } });
   });
   it("keeps the queue within its count however fast edits arrive", async () => {
     const { value, host, doc } = await live(provider({ ...limits(), maxPendingUpdates: 2 }));
-    edit(value, " first"); const first = await host.submitted();
+    edit(value, " first");
+    const first = await host.submitted();
     for (let key = 0; key < 200; key++) edit(value, "k");
     expect(value.state()).toMatchObject({ status: "live", pendingUpdates: 2 });
-    await host.ack(first, 1, 1); const merged = await host.submitted(2);
-    Y.applyUpdate(doc, first.bytes); Y.applyUpdate(doc, merged.bytes);
+    await host.ack(first, 1, 1);
+    const merged = await host.submitted(2);
+    Y.applyUpdate(doc, first.bytes);
+    Y.applyUpdate(doc, merged.bytes);
     expect(getDohcYDocBodyFragment(doc).toString()).toBe(value.body.toString());
   });
   it("records a peer update cursor before a synchronous observer disconnects", async () => {
@@ -569,24 +1109,32 @@ describe("named live browser provider", () => {
     value.doc.once("update", () => host.route.disconnect());
     await host.transfer("applied-update", Y.encodeStateAsUpdate(doc, before), 7);
     expect(value.state().status).toBe("disconnected");
-    const second = peer(value, 2); await second.greet(); await second.initial(doc, binding, 6);
+    const second = peer(value, 2);
+    await second.greet();
+    await second.initial(doc, binding, 6);
     expect(value.state()).toMatchObject({ status: "quarantined", reason: "stale-sync-cut" });
   });
-  it.each(["bytes", "frame"] as const)("retains the draft on an over-budget %s", async kind => {
+  it.each(["bytes", "frame"] as const)("retains the draft on an over-budget %s", async (kind) => {
     if (kind === "bytes") {
       const { value, host } = await live(provider({ ...limits(), maxPendingUpdateBytes: 1 }));
       edit(value, " larger than one byte");
-      expect(value.state()).toMatchObject({ status: "quarantined", reason: "pending-update-limit" });
-      expect(value.body.toString()).toContain("larger than one byte"); expect(host.submissions()).toHaveLength(0);
+      expect(value.state()).toMatchObject({
+        status: "quarantined",
+        reason: "pending-update-limit",
+      });
+      expect(value.body.toString()).toContain("larger than one byte");
+      expect(host.submissions()).toHaveLength(0);
     } else {
-      const { value, host } = await live(); const before = value.body.toString();
+      const { value, host } = await live();
+      const before = value.body.toString();
       await host.route.receive(new Uint8Array(1025));
       expect(value.state()).toMatchObject({ status: "quarantined", reason: "inbound-limit" });
       expect(value.body.toString()).toBe(before);
     }
   });
   it("refuses a malformed Yjs update before applying it", async () => {
-    const { value, host } = await live(); const before = value.body.toString();
+    const { value, host } = await live();
+    const before = value.body.toString();
     await host.transfer("applied-update", new Uint8Array([255]), 1);
     expect(value.state()).toMatchObject({ status: "quarantined", reason: "invalid-frame" });
     expect(value.body.toString()).toBe(before);
@@ -594,41 +1142,75 @@ describe("named live browser provider", () => {
 });
 
 it("cancels a pending retry when its route retires", async () => {
-  const {value, host} = await live(); vi.useFakeTimers(); edit(value, " draft");
+  const { value, host } = await live();
+  vi.useFakeTimers();
+  edit(value, " draft");
   const item = await host.submitted();
   if (item.begin.purpose !== "submit-update") throw new Error("Expected submit");
-  await host.send({kind: "result", result: "retry", deliveryId: item.begin.deliveryId, updateDigest: item.begin.digest, reason: "admission-unavailable"});
+  await host.send({
+    kind: "result",
+    result: "retry",
+    deliveryId: item.begin.deliveryId,
+    updateDigest: item.begin.digest,
+    reason: "admission-unavailable",
+  });
   expect(vi.getTimerCount()).toBe(1);
-  host.route.disconnect(); await host.route.settled();
+  host.route.disconnect();
+  await host.route.settled();
   expect(vi.getTimerCount()).toBe(0);
   await vi.advanceTimersByTimeAsync(10_000);
   expect(host.submissions()).toHaveLength(1);
 });
 
 it("retains earlier application evidence when a later admission retry precedes reconnect", async () => {
-  const {value, host, doc} = await live(provider({...limits(), maxDeliveryAttempts: 2}));
-  vi.useFakeTimers(); edit(value, " draft");
+  const { value, host, doc } = await live(provider({ ...limits(), maxDeliveryAttempts: 2 }));
+  vi.useFakeTimers();
+  edit(value, " draft");
   const first = await host.submitted();
   if (first.begin.purpose !== "submit-update") throw new Error("Expected submit");
   Y.applyUpdate(doc, first.bytes);
-  await host.send({kind: "result", result: "retry", deliveryId: first.begin.deliveryId, updateDigest: first.begin.digest, reason: "application-pending"});
+  await host.send({
+    kind: "result",
+    result: "retry",
+    deliveryId: first.begin.deliveryId,
+    updateDigest: first.begin.digest,
+    reason: "application-pending",
+  });
   await vi.advanceTimersByTimeAsync(250);
   await host.submitted(2);
-  await host.send({kind: "result", result: "retry", deliveryId: first.begin.deliveryId, updateDigest: first.begin.digest, reason: "admission-unavailable"});
-  host.route.disconnect(); await host.route.settled();
-  const second = peer(value, 2); await second.greet(); await second.initial(doc, binding, 1);
+  await host.send({
+    kind: "result",
+    result: "retry",
+    deliveryId: first.begin.deliveryId,
+    updateDigest: first.begin.digest,
+    reason: "admission-unavailable",
+  });
+  host.route.disconnect();
+  await host.route.settled();
+  const second = peer(value, 2);
+  await second.greet();
+  await second.initial(doc, binding, 1);
   const retry = await second.submitted();
   expect(retry.bytes).toEqual(first.bytes);
   await second.ack(retry, 1);
-  expect(value.state()).toMatchObject({status: "live", pendingUpdates: 0});
+  expect(value.state()).toMatchObject({ status: "live", pendingUpdates: 0 });
 });
 it("counts application retries while retaining evidence across mixed retry reasons", async () => {
-  const {value, host} = await live(provider({...limits(), maxDeliveryAttempts: 3}));
-  vi.useFakeTimers(); edit(value, " draft");
-  for (const [index, reason] of (["application-pending", "admission-unavailable", "application-pending"] as const).entries()) {
+  const { value, host } = await live(provider({ ...limits(), maxDeliveryAttempts: 3 }));
+  vi.useFakeTimers();
+  edit(value, " draft");
+  for (const [index, reason] of (
+    ["application-pending", "admission-unavailable", "application-pending"] as const
+  ).entries()) {
     const item = await host.submitted(index + 1);
     if (item.begin.purpose !== "submit-update") throw new Error("Expected submit");
-    await host.send({kind: "result", result: "retry", deliveryId: item.begin.deliveryId, updateDigest: item.begin.digest, reason});
+    await host.send({
+      kind: "result",
+      result: "retry",
+      deliveryId: item.begin.deliveryId,
+      updateDigest: item.begin.digest,
+      reason,
+    });
     const delay = [250, 250, 500][index]!;
     await vi.advanceTimersByTimeAsync(delay - 1);
     expect(host.submissions()).toHaveLength(index + 1);
@@ -636,19 +1218,28 @@ it("counts application retries while retaining evidence across mixed retry reaso
     expect(host.submissions()).toHaveLength(index + 2);
   }
   await host.ack(await host.submitted(4));
-  expect(value.state()).toMatchObject({status: "live", pendingUpdates: 0});
+  expect(value.state()).toMatchObject({ status: "live", pendingUpdates: 0 });
 });
 
 it("backs off pending application retries to ten seconds and resets after success", async () => {
-  const value = provider({...limits(), maxDeliveryAttempts: 12});
-  const doc = document("base"), host = peer(value, 1, {replenish: true});
-  await host.greet(); await host.initial(doc);
+  const value = provider({ ...limits(), maxDeliveryAttempts: 12 });
+  const doc = document("base"),
+    host = peer(value, 1, { replenish: true });
+  await host.greet();
+  await host.initial(doc);
   vi.useFakeTimers();
   edit(value, " draft");
-  let item = await host.submitted(), count = 1;
+  let item = await host.submitted(),
+    count = 1;
   async function retry() {
     if (item.begin.purpose !== "submit-update") throw new Error("Expected submit");
-    await host.send({kind: "result", result: "retry", deliveryId: item.begin.deliveryId, updateDigest: item.begin.digest, reason: "application-pending"});
+    await host.send({
+      kind: "result",
+      result: "retry",
+      deliveryId: item.begin.deliveryId,
+      updateDigest: item.begin.digest,
+      reason: "application-pending",
+    });
   }
   for (const delay of [250, 500, 1_000, 2_000, 4_000, 8_000, 10_000, 10_000]) {
     await retry();
@@ -671,22 +1262,35 @@ it("backs off pending application retries to ten seconds and resets after succes
   expect(value.state().status).toBe("live");
 });
 it("bounds pending application resubmissions and retains the draft at the attempt limit", async () => {
-  const {value, host} = await live(provider({...limits(), maxDeliveryAttempts: 2}));
+  const { value, host } = await live(provider({ ...limits(), maxDeliveryAttempts: 2 }));
   vi.useFakeTimers();
   edit(value, " draft");
   const first = await host.submitted();
   async function retry(item: Received) {
     if (item.begin.purpose !== "submit-update") throw new Error("Expected submit");
-    await host.send({kind: "result", result: "retry", deliveryId: item.begin.deliveryId, updateDigest: item.begin.digest, reason: "application-pending"});
+    await host.send({
+      kind: "result",
+      result: "retry",
+      deliveryId: item.begin.deliveryId,
+      updateDigest: item.begin.digest,
+      reason: "application-pending",
+    });
   }
   await retry(first);
   await vi.advanceTimersByTimeAsync(250);
   const second = await host.submitted(2);
   expect(second.bytes).toEqual(first.bytes);
-  expect(second.begin).toMatchObject({deliveryId: (first.begin as {deliveryId: string}).deliveryId, digest: first.begin.digest});
+  expect(second.begin).toMatchObject({
+    deliveryId: (first.begin as { deliveryId: string }).deliveryId,
+    digest: first.begin.digest,
+  });
   await retry(second);
   await vi.advanceTimersByTimeAsync(500);
-  expect(value.state()).toMatchObject({status: "quarantined", reason: "delivery-attempt-limit", pendingUpdates: 1});
+  expect(value.state()).toMatchObject({
+    status: "quarantined",
+    reason: "delivery-attempt-limit",
+    pendingUpdates: 1,
+  });
   expect(value.body.toString()).toContain("draft");
   await vi.advanceTimersByTimeAsync(20_000);
   expect(host.submissions()).toHaveLength(2);

@@ -22,8 +22,11 @@ export function pathCollisionKey(path: string): string {
   return path
     .split("/")
     .map((segment) =>
-      foldPathSegment(segment.normalize("NFKC").toLowerCase().toUpperCase().toLowerCase())
-        .replace(/[. ]+$/, ""))
+      foldPathSegment(segment.normalize("NFKC").toLowerCase().toUpperCase().toLowerCase()).replace(
+        /[. ]+$/,
+        "",
+      ),
+    )
     .join("/");
 }
 
@@ -49,19 +52,24 @@ const osMetadataSegments = [
 export function isReserved83Alias(segment: string, reserved: string): boolean {
   const match = /^([a-z0-9_-]+)~([0-9]+)$/.exec(segment);
   const stem = reserved.replace(/^\.+/, "");
-  return segment.length <= 8 && match !== null
-    && match[1].length === Math.min(stem.length, 7 - match[2].length)
-    && stem.startsWith(match[1]);
+  return (
+    segment.length <= 8 &&
+    match !== null &&
+    match[1].length === Math.min(stem.length, 7 - match[2].length) &&
+    stem.startsWith(match[1])
+  );
 }
 
 export function isIgnoredPathSegment(segment: string, stripAliases = true): boolean {
   const folded = foldPathSegment(segment);
   const name = stripAliases ? folded.replace(/[. ]+$/, "") : folded;
-  return reservedSegments.includes(name)
-    || reservedSegments.some((reserved) => isReserved83Alias(name, reserved))
-    || name.startsWith(".dohc-write-")
-    || isReserved83Alias(name, ".dohc-write-")
-    || isOsMetadataName(name);
+  return (
+    reservedSegments.includes(name) ||
+    reservedSegments.some((reserved) => isReserved83Alias(name, reserved)) ||
+    name.startsWith(".dohc-write-") ||
+    isReserved83Alias(name, ".dohc-write-") ||
+    isOsMetadataName(name)
+  );
 }
 
 /** A name the OS writes beside user files, such as .DS_Store or Thumbs.db. */

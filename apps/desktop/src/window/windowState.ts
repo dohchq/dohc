@@ -97,12 +97,9 @@ const MIN_GRAB_HEIGHT_PX = 20;
 // be dragged back by the user.
 function visibleOn(bounds: WindowBounds, display: WindowBounds): boolean {
   const band = { ...bounds, height: TITLEBAR_HEIGHT_PX };
-  const w =
-    Math.min(band.x + band.width, display.x + display.width) -
-    Math.max(band.x, display.x);
+  const w = Math.min(band.x + band.width, display.x + display.width) - Math.max(band.x, display.x);
   const h =
-    Math.min(band.y + band.height, display.y + display.height) -
-    Math.max(band.y, display.y);
+    Math.min(band.y + band.height, display.y + display.height) - Math.max(band.y, display.y);
   return w >= MIN_VISIBLE_PX && h >= MIN_GRAB_HEIGHT_PX;
 }
 

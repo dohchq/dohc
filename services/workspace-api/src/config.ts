@@ -1,5 +1,10 @@
 import { normalizeEmail } from "@dohc/workspace-auth/signUp";
-import { smtpSettingsFromEnv, SmtpConfigError, isLoopback, type SmtpSettings } from "@dohc/workspace-auth/smtp";
+import {
+  smtpSettingsFromEnv,
+  SmtpConfigError,
+  isLoopback,
+  type SmtpSettings,
+} from "@dohc/workspace-auth/smtp";
 import { trustedAuthProxies } from "./clientAddress";
 
 // Every environment variable this service reads, validated in one place. A
@@ -91,13 +96,19 @@ export function readConfig(env: NodeJS.ProcessEnv): WorkspaceApiConfig {
     ? readOrigin(env.DOHC_SERVER_RELAY_URL, "DOHC_SERVER_RELAY_URL")
     : null;
   if ((relayUrl !== null && relayUrl !== baseURL) || (shareUrl !== null && shareUrl !== baseURL)) {
-    throw new ConfigError("WORKSPACE_API_BASE_URL, DOHC_SERVER_RELAY_URL, and DOHC_WEB_ORIGIN must use one public origin.");
+    throw new ConfigError(
+      "WORKSPACE_API_BASE_URL, DOHC_SERVER_RELAY_URL, and DOHC_WEB_ORIGIN must use one public origin.",
+    );
   }
 
   const name = env.DOHC_SERVER_NAME?.trim();
-  if (name && (name.length > 100 || /[\u0000-\u001f\u007f]/.test(name))) throw new ConfigError("DOHC_SERVER_NAME must be at most 100 characters without control characters.");
+  if (name && (name.length > 100 || /[\u0000-\u001f\u007f]/.test(name)))
+    throw new ConfigError(
+      "DOHC_SERVER_NAME must be at most 100 characters without control characters.",
+    );
   const networkAccess = env.DOHC_SERVER_NETWORK_ACCESS;
-  if (networkAccess && networkAccess !== "private" && networkAccess !== "public") throw new ConfigError("DOHC_SERVER_NETWORK_ACCESS must be private or public.");
+  if (networkAccess && networkAccess !== "private" && networkAccess !== "public")
+    throw new ConfigError("DOHC_SERVER_NETWORK_ACCESS must be private or public.");
 
   let smtp: SmtpSettings | null;
   try {
@@ -112,7 +123,9 @@ export function readConfig(env: NodeJS.ProcessEnv): WorkspaceApiConfig {
   const seamActive = testAuthSeam || emailTransport === "capture";
 
   return {
-    internalRelayUrl: env.WORKSPACE_API_RELAY_URL ? readInternalRelayOrigin(env.WORKSPACE_API_RELAY_URL) : null,
+    internalRelayUrl: env.WORKSPACE_API_RELAY_URL
+      ? readInternalRelayOrigin(env.WORKSPACE_API_RELAY_URL)
+      : null,
     port,
     bindHost: seamActive ? "127.0.0.1" : "0.0.0.0",
     baseURL,
@@ -120,7 +133,13 @@ export function readConfig(env: NodeJS.ProcessEnv): WorkspaceApiConfig {
     postgresUrl: env.POSTGRES_URL ?? DEFAULT_POSTGRES_URL,
     trustedOrigins: shareUrl ? [shareUrl] : [],
     allowedOrigins: [...new Set([baseURL, ...(shareUrl ? [shareUrl] : [])])],
-    descriptor: { authUrl: baseURL, relayUrl, shareUrl, ...(name ? { name } : {}), ...(networkAccess === "private" || networkAccess === "public" ? { networkAccess } : {}) },
+    descriptor: {
+      authUrl: baseURL,
+      relayUrl,
+      shareUrl,
+      ...(name ? { name } : {}),
+      ...(networkAccess === "private" || networkAccess === "public" ? { networkAccess } : {}),
+    },
     smtp,
     emailTransport,
     trustedProxies: readTrustedProxies(env.DOHC_AUTH_TRUSTED_PROXIES),
@@ -131,16 +150,23 @@ export function readConfig(env: NodeJS.ProcessEnv): WorkspaceApiConfig {
 }
 
 function readSignUp(emails: string | undefined, relayUrl: string | undefined): ClosedSignUp | null {
-  const listed = (emails ?? "").split(",").map(normalizeEmail).filter((email) => email.length > 0);
+  const listed = (emails ?? "")
+    .split(",")
+    .map(normalizeEmail)
+    .filter((email) => email.length > 0);
   if (listed.length === 0) return null;
   const invalid = listed.find((email) => !/^[^\s@]+@[^\s@]+$/.test(email));
   if (invalid !== undefined) {
-    throw new ConfigError(`DOHC_SIGN_UP_EMAILS must list email addresses separated by commas, got "${invalid}".`);
+    throw new ConfigError(
+      `DOHC_SIGN_UP_EMAILS must list email addresses separated by commas, got "${invalid}".`,
+    );
   }
   if (!relayUrl?.trim()) {
-    throw new ConfigError("DOHC_SIGN_UP_EMAILS requires WORKSPACE_API_RELAY_URL, so people with a pending invite can sign up.");
+    throw new ConfigError(
+      "DOHC_SIGN_UP_EMAILS requires WORKSPACE_API_RELAY_URL, so people with a pending invite can sign up.",
+    );
   }
-  return {emails: new Set(listed), relayUrl: readInternalRelayOrigin(relayUrl)};
+  return { emails: new Set(listed), relayUrl: readInternalRelayOrigin(relayUrl) };
 }
 
 function readInternalRelayOrigin(relayUrl: string): string {
@@ -148,10 +174,21 @@ function readInternalRelayOrigin(relayUrl: string): string {
   try {
     url = new URL(relayUrl);
   } catch {
-    throw new ConfigError(`WORKSPACE_API_RELAY_URL must be an absolute http(s) origin, got "${relayUrl}".`);
+    throw new ConfigError(
+      `WORKSPACE_API_RELAY_URL must be an absolute http(s) origin, got "${relayUrl}".`,
+    );
   }
-  if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password || url.search || url.hash || url.pathname !== "/") {
-    throw new ConfigError(`WORKSPACE_API_RELAY_URL must be an http(s) origin with no path or credentials, got "${relayUrl}".`);
+  if (
+    (url.protocol !== "http:" && url.protocol !== "https:") ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash ||
+    url.pathname !== "/"
+  ) {
+    throw new ConfigError(
+      `WORKSPACE_API_RELAY_URL must be an http(s) origin with no path or credentials, got "${relayUrl}".`,
+    );
   }
   return url.origin;
 }
@@ -175,7 +212,9 @@ function readPort(value: string | undefined): number {
   if (value === undefined || value.trim().length === 0) return DEFAULT_PORT;
   const port = Number(value);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    throw new ConfigError(`WORKSPACE_API_PORT must be a port number from 1 to 65535, got "${value}".`);
+    throw new ConfigError(
+      `WORKSPACE_API_PORT must be a port number from 1 to 65535, got "${value}".`,
+    );
   }
   return port;
 }
@@ -194,6 +233,7 @@ function readOrigin(value: string, name: string): string {
   if (url.username || url.password || url.search || url.hash || !["", "/"].includes(url.pathname)) {
     throw new ConfigError(`${name} must be an origin with no path or credentials, got "${value}".`);
   }
-  if (url.protocol === "http:" && !isLoopback(url.hostname)) throw new ConfigError(`${name} must use HTTPS unless it is loopback.`);
+  if (url.protocol === "http:" && !isLoopback(url.hostname))
+    throw new ConfigError(`${name} must use HTTPS unless it is loopback.`);
   return url.origin;
 }

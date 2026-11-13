@@ -31,11 +31,7 @@ function snapshotOp(file: SharedFile): RelayOp {
   };
 }
 
-function writeOp(
-  relaySeq: number,
-  beforeBlobSha256: string,
-  afterBlobSha256: string,
-): RelayOp {
+function writeOp(relaySeq: number, beforeBlobSha256: string, afterBlobSha256: string): RelayOp {
   return {
     relaySeq,
     opKind: "moment.append",
@@ -74,10 +70,16 @@ it("preserves received tokens in current, snapshots and renamed log files, witho
   const file: SharedFile = { path: PATH, objectId, blobSha256: ORIGINAL_SHA, contentKind: "text" };
   expect(filesFromAccumulator(accumulatorFromCurrentFiles([file])!)).toEqual([file]);
   const rename = writeOp(2, ORIGINAL_SHA, ORIGINAL_SHA);
-  Object.assign(rename.payload as Record<string, unknown>, { operation: "rename", objectId, payloadAfterPath: "renamed.txt" });
+  Object.assign(rename.payload as Record<string, unknown>, {
+    operation: "rename",
+    objectId,
+    payloadAfterPath: "renamed.txt",
+  });
   expect(filesFromLog([snapshotOp(file), rename])).toEqual([{ ...file, path: "renamed.txt" }]);
   const raw = { ...file, objectId: "real-source-object" };
-  expect(filesFromAccumulator(accumulatorFromCurrentFiles([raw])!)[0]).not.toHaveProperty("objectId");
+  expect(filesFromAccumulator(accumulatorFromCurrentFiles([raw])!)[0]).not.toHaveProperty(
+    "objectId",
+  );
 });
 
 describe("filesFromLog", () => {
@@ -88,15 +90,19 @@ describe("filesFromLog", () => {
       contentKind: "text",
     };
 
-    expect(filesFromLog([
-      snapshotOp(original),
-      writeOp(2, ORIGINAL_SHA, FAST_FORWARD_SHA),
-      writeOp(3, ORIGINAL_SHA, DIVERGENT_SHA),
-    ])).toEqual([{
-      path: PATH,
-      blobSha256: FAST_FORWARD_SHA,
-      contentKind: "text",
-    }]);
+    expect(
+      filesFromLog([
+        snapshotOp(original),
+        writeOp(2, ORIGINAL_SHA, FAST_FORWARD_SHA),
+        writeOp(3, ORIGINAL_SHA, DIVERGENT_SHA),
+      ]),
+    ).toEqual([
+      {
+        path: PATH,
+        blobSha256: FAST_FORWARD_SHA,
+        contentKind: "text",
+      },
+    ]);
   });
 
   it("continues the surviving branch and ignores a divergent delete", () => {
@@ -106,17 +112,21 @@ describe("filesFromLog", () => {
       contentKind: "text",
     };
 
-    expect(filesFromLog([
-      snapshotOp(original),
-      writeOp(2, ORIGINAL_SHA, FAST_FORWARD_SHA),
-      writeOp(3, ORIGINAL_SHA, DIVERGENT_SHA),
-      writeOp(4, FAST_FORWARD_SHA, LATER_FAST_FORWARD_SHA),
-      deleteOp(5, ORIGINAL_SHA),
-    ])).toEqual([{
-      path: PATH,
-      blobSha256: LATER_FAST_FORWARD_SHA,
-      contentKind: "text",
-    }]);
+    expect(
+      filesFromLog([
+        snapshotOp(original),
+        writeOp(2, ORIGINAL_SHA, FAST_FORWARD_SHA),
+        writeOp(3, ORIGINAL_SHA, DIVERGENT_SHA),
+        writeOp(4, FAST_FORWARD_SHA, LATER_FAST_FORWARD_SHA),
+        deleteOp(5, ORIGINAL_SHA),
+      ]),
+    ).toEqual([
+      {
+        path: PATH,
+        blobSha256: LATER_FAST_FORWARD_SHA,
+        contentKind: "text",
+      },
+    ]);
   });
 
   it("treats null-before writes as creates only when the path is absent", () => {
@@ -138,7 +148,7 @@ describe("filesFromLog", () => {
       ...create,
       relaySeq: 2,
       payload: {
-        ...create.payload as Record<string, unknown>,
+        ...(create.payload as Record<string, unknown>),
         payloadAfterBlobSha256: DIVERGENT_SHA,
       },
       recordedAtMs: 2,
@@ -148,11 +158,13 @@ describe("filesFromLog", () => {
     foldLogOps(files, [create]);
     foldLogOps(files, [overwriteWithoutLineage]);
 
-    expect(filesFromAccumulator(files)).toEqual([{
-      path: PATH,
-      blobSha256: FAST_FORWARD_SHA,
-      contentKind: "text",
-    }]);
+    expect(filesFromAccumulator(files)).toEqual([
+      {
+        path: PATH,
+        blobSha256: FAST_FORWARD_SHA,
+        contentKind: "text",
+      },
+    ]);
   });
 
   it("preserves a newer path occupant across a later fork snapshot chunk", () => {
@@ -177,11 +189,13 @@ describe("filesFromLog", () => {
       contentKind: "text",
     };
 
-    foldLogOps(files, [snapshotOp({
-      path: "first.txt",
-      blobSha256: DIVERGENT_SHA,
-      contentKind: "text",
-    })]);
+    foldLogOps(files, [
+      snapshotOp({
+        path: "first.txt",
+        blobSha256: DIVERGENT_SHA,
+        contentKind: "text",
+      }),
+    ]);
     foldLogOps(files, [create]);
     foldLogOps(files, [{ ...snapshotOp(pendingSnapshot), relaySeq: 3 }]);
 
@@ -218,11 +232,13 @@ describe("filesFromLog", () => {
 
     foldLogOps(files, [writeAfterHiddenMove]);
 
-    expect(filesFromAccumulator(files)).toEqual([{
-      path: arrivedPath,
-      blobSha256: ARRIVED_SHA,
-      contentKind: "text",
-    }]);
+    expect(filesFromAccumulator(files)).toEqual([
+      {
+        path: arrivedPath,
+        blobSha256: ARRIVED_SHA,
+        contentKind: "text",
+      },
+    ]);
   });
 
   it("treats a rename from an unseen path as an arrival", () => {
@@ -244,11 +260,13 @@ describe("filesFromLog", () => {
 
     foldLogOps(files, [renameIn]);
 
-    expect(filesFromAccumulator(files)).toEqual([{
-      path: arrivedPath,
-      blobSha256: ARRIVED_SHA,
-      contentKind: "text",
-    }]);
+    expect(filesFromAccumulator(files)).toEqual([
+      {
+        path: arrivedPath,
+        blobSha256: ARRIVED_SHA,
+        contentKind: "text",
+      },
+    ]);
   });
 });
 
@@ -278,13 +296,15 @@ describe("public discussion projection", () => {
   };
 
   it("parses only the exact public page and append unions", () => {
-    expect(parseDiscussionPage({
-      ok: true,
-      activityRevision: 7,
-      messages: [named, link, tombstone],
-      nextCursor: "cursor_1",
-      profileName: null,
-    })).toEqual({
+    expect(
+      parseDiscussionPage({
+        ok: true,
+        activityRevision: 7,
+        messages: [named, link, tombstone],
+        nextCursor: "cursor_1",
+        profileName: null,
+      }),
+    ).toEqual({
       messages: [named, link, tombstone],
       nextCursor: "cursor_1",
       activityRevision: 7,
@@ -297,47 +317,61 @@ describe("public discussion projection", () => {
   });
 
   it("validates newest-first pages and returns their loaded window chronologically", () => {
-    expect(parseDiscussionPage({
-      ok: true,
-      activityRevision: 7,
-      messages: [tombstone, link, named],
-      nextCursor: "cursor_older",
-      profileName: null,
-    }, "newest-first")).toEqual({
+    expect(
+      parseDiscussionPage(
+        {
+          ok: true,
+          activityRevision: 7,
+          messages: [tombstone, link, named],
+          nextCursor: "cursor_older",
+          profileName: null,
+        },
+        "newest-first",
+      ),
+    ).toEqual({
       messages: [named, link, tombstone],
       nextCursor: "cursor_older",
       activityRevision: 7,
       profileName: null,
     });
-    expect(parseDiscussionPage({
-      ok: true,
-      activityRevision: 7,
-      messages: [named, link],
-      nextCursor: null,
-      profileName: null,
-    }, "newest-first")).toBeNull();
+    expect(
+      parseDiscussionPage(
+        {
+          ok: true,
+          activityRevision: 7,
+          messages: [named, link],
+          nextCursor: null,
+          profileName: null,
+        },
+        "newest-first",
+      ),
+    ).toBeNull();
   });
 
   it("parses only the committed name without accepting profile identifiers", () => {
-    expect(parseDiscussionPage({
-      ok: true,
-      activityRevision: 7,
-      messages: [],
-      nextCursor: null,
-      profileName: "Stable Name",
-    })).toEqual({
+    expect(
+      parseDiscussionPage({
+        ok: true,
+        activityRevision: 7,
+        messages: [],
+        nextCursor: null,
+        profileName: "Stable Name",
+      }),
+    ).toEqual({
       messages: [],
       nextCursor: null,
       activityRevision: 7,
       profileName: "Stable Name",
     });
-    expect(parseDiscussionPage({
-      ok: true,
-      activityRevision: 7,
-      messages: [],
-      nextCursor: null,
-      profileName: null,
-    })).toEqual({
+    expect(
+      parseDiscussionPage({
+        ok: true,
+        activityRevision: 7,
+        messages: [],
+        nextCursor: null,
+        profileName: null,
+      }),
+    ).toEqual({
       messages: [],
       nextCursor: null,
       activityRevision: 7,
@@ -347,14 +381,16 @@ describe("public discussion projection", () => {
       { principalId: "principal-sentinel" },
       { profileTokenHash: "profile-sentinel" },
     ]) {
-      expect(parseDiscussionPage({
-        ok: true,
-        activityRevision: 7,
-        messages: [],
-        nextCursor: null,
-        profileName: "Stable Name",
-        ...internal,
-      })).toBeNull();
+      expect(
+        parseDiscussionPage({
+          ok: true,
+          activityRevision: 7,
+          messages: [],
+          nextCursor: null,
+          profileName: "Stable Name",
+          ...internal,
+        }),
+      ).toBeNull();
     }
   });
 
@@ -376,77 +412,106 @@ describe("public discussion projection", () => {
     ]) {
       expect(parseDiscussionAppendResult({ ok: true, message: malformed })).toBeNull();
     }
-    expect(parseDiscussionAppendResult({
-      ok: true,
-      message: tombstone,
-      principalId: "private",
-    })).toBeNull();
+    expect(
+      parseDiscussionAppendResult({
+        ok: true,
+        message: tombstone,
+        principalId: "private",
+      }),
+    ).toBeNull();
   });
 
   it.each([
-    ["a missing profile name", {
-      ok: true,
-      activityRevision: 7,
-      messages: [],
-      nextCursor: null,
-    }],
-    ["an empty profile name", {
-      ok: true,
-      activityRevision: 7,
-      messages: [],
-      nextCursor: null,
-      profileName: "",
-    }],
-    ["an internal page field", {
-      ok: true,
-      activityRevision: 7,
-      messages: [],
-      nextCursor: null,
-      profileName: null,
-      shareId: "secret",
-    }],
-    ["an internal message field", {
-      ok: true,
-      activityRevision: 7,
-      messages: [{ ...named, linkPrincipalId: "secret" }],
-      nextCursor: null,
-      profileName: null,
-    }],
-    ["a tombstone body", {
-      ok: true,
-      activityRevision: 7,
-      messages: [{ ...tombstone, body: "deleted body" }],
-      nextCursor: null,
-      profileName: null,
-    }],
-    ["a tombstone author", {
-      ok: true,
-      activityRevision: 7,
-      messages: [{ ...tombstone, author: named.author }],
-      nextCursor: null,
-      profileName: null,
-    }],
-    ["a live row without an exact author", {
-      ok: true,
-      activityRevision: 7,
-      messages: [{ ...link, author: { ...link.author, unverified: false } }],
-      nextCursor: null,
-      profileName: null,
-    }],
-    ["an out-of-order page", {
-      ok: true,
-      activityRevision: 7,
-      messages: [link, named],
-      nextCursor: null,
-      profileName: null,
-    }],
-    ["a malformed cursor", {
-      ok: true,
-      activityRevision: 7,
-      messages: [],
-      nextCursor: "cursor/value",
-      profileName: null,
-    }],
+    [
+      "a missing profile name",
+      {
+        ok: true,
+        activityRevision: 7,
+        messages: [],
+        nextCursor: null,
+      },
+    ],
+    [
+      "an empty profile name",
+      {
+        ok: true,
+        activityRevision: 7,
+        messages: [],
+        nextCursor: null,
+        profileName: "",
+      },
+    ],
+    [
+      "an internal page field",
+      {
+        ok: true,
+        activityRevision: 7,
+        messages: [],
+        nextCursor: null,
+        profileName: null,
+        shareId: "secret",
+      },
+    ],
+    [
+      "an internal message field",
+      {
+        ok: true,
+        activityRevision: 7,
+        messages: [{ ...named, linkPrincipalId: "secret" }],
+        nextCursor: null,
+        profileName: null,
+      },
+    ],
+    [
+      "a tombstone body",
+      {
+        ok: true,
+        activityRevision: 7,
+        messages: [{ ...tombstone, body: "deleted body" }],
+        nextCursor: null,
+        profileName: null,
+      },
+    ],
+    [
+      "a tombstone author",
+      {
+        ok: true,
+        activityRevision: 7,
+        messages: [{ ...tombstone, author: named.author }],
+        nextCursor: null,
+        profileName: null,
+      },
+    ],
+    [
+      "a live row without an exact author",
+      {
+        ok: true,
+        activityRevision: 7,
+        messages: [{ ...link, author: { ...link.author, unverified: false } }],
+        nextCursor: null,
+        profileName: null,
+      },
+    ],
+    [
+      "an out-of-order page",
+      {
+        ok: true,
+        activityRevision: 7,
+        messages: [link, named],
+        nextCursor: null,
+        profileName: null,
+      },
+    ],
+    [
+      "a malformed cursor",
+      {
+        ok: true,
+        activityRevision: 7,
+        messages: [],
+        nextCursor: "cursor/value",
+        profileName: null,
+      },
+    ],
   ])("refuses %s", (_case, value) => {
     expect(parseDiscussionPage(value)).toBeNull();
   });
@@ -477,10 +542,17 @@ describe("public discussion projection", () => {
     };
 
     expect(mergeDiscussionMessages([deletedLink], [link])).toEqual([deletedLink]);
-    expect(mergeDiscussionMessages([deletedLink], [{
-      ...link,
-      createdAtMs: link.createdAtMs + 1,
-    }])).toBeNull();
+    expect(
+      mergeDiscussionMessages(
+        [deletedLink],
+        [
+          {
+            ...link,
+            createdAtMs: link.createdAtMs + 1,
+          },
+        ],
+      ),
+    ).toBeNull();
   });
 
   it("inserts an unseen row with an earlier creation time into canonical order", () => {
@@ -494,10 +566,7 @@ describe("public discussion projection", () => {
       createdAtMs: tail.createdAtMs - 1,
     };
 
-    expect(mergeDiscussionMessages([tail], [earlierTime])).toEqual([
-      earlierTime,
-      tail,
-    ]);
+    expect(mergeDiscussionMessages([tail], [earlierTime])).toEqual([earlierTime, tail]);
   });
 
   it("uses relay keyset order for message ids with the same creation time", () => {
@@ -512,13 +581,15 @@ describe("public discussion projection", () => {
       createdAtMs: first.createdAtMs,
     };
 
-    expect(parseDiscussionPage({
-      ok: true,
-      activityRevision: 7,
-      messages: [first, second],
-      nextCursor: null,
-      profileName: null,
-    })).toEqual({
+    expect(
+      parseDiscussionPage({
+        ok: true,
+        activityRevision: 7,
+        messages: [first, second],
+        nextCursor: null,
+        profileName: null,
+      }),
+    ).toEqual({
       messages: [first, second],
       nextCursor: null,
       activityRevision: 7,
@@ -539,14 +610,10 @@ describe("public discussion projection", () => {
       createdAtMs: earlierId.createdAtMs,
     };
 
-    expect(mergeDiscussionMessages([laterId], [earlierId, laterId])).toEqual([
-      earlierId,
-      laterId,
-    ]);
-    expect(mergeDiscussionMessages([laterId], [
-      earlierId,
-      { ...laterId, body: "conflicting body" },
-    ])).toBeNull();
+    expect(mergeDiscussionMessages([laterId], [earlierId, laterId])).toEqual([earlierId, laterId]);
+    expect(
+      mergeDiscussionMessages([laterId], [earlierId, { ...laterId, body: "conflicting body" }]),
+    ).toBeNull();
   });
 
   it("accepts unseen live activity before a loaded window without importing tombstones", () => {
@@ -566,40 +633,43 @@ describe("public discussion projection", () => {
       deleted: true as const,
     };
 
-    expect(mergeDiscussionWindowMessages(
-      [link],
-      [unseenTombstone, olderUnseen, newerUnseen],
-    ))
-      .toEqual({
-        messages: [olderUnseen, link, newerUnseen],
-        withheldTombstones: [unseenTombstone],
-      });
-    expect(mergeDiscussionWindowMessages([link], [{ ...link, body: "conflict" }]))
-      .toBeNull();
+    expect(
+      mergeDiscussionWindowMessages([link], [unseenTombstone, olderUnseen, newerUnseen]),
+    ).toEqual({
+      messages: [olderUnseen, link, newerUnseen],
+      withheldTombstones: [unseenTombstone],
+    });
+    expect(mergeDiscussionWindowMessages([link], [{ ...link, body: "conflict" }])).toBeNull();
   });
 
   it("refuses every conflicting message-id reuse", () => {
     expect(mergeDiscussionMessages([link], [{ ...link, body: "forged" }])).toBeNull();
-    expect(mergeDiscussionMessages([tombstone], [{ ...tombstone, createdAtMs: 4_000 }]))
-      .toBeNull();
+    expect(mergeDiscussionMessages([tombstone], [{ ...tombstone, createdAtMs: 4_000 }])).toBeNull();
   });
 
   it("parses only an exact, ordered public discussion activity delta", () => {
     const editActivity = {
-      access: "edit", latestRevision: 9, cursorRevision: 9, hasMore: false,
-      messages: [], composerState: "available", profileName: null,
+      access: "edit",
+      latestRevision: 9,
+      cursorRevision: 9,
+      hasMore: false,
+      messages: [],
+      composerState: "available",
+      profileName: null,
     };
     expect(parseDiscussionActivity({ ok: true, ...editActivity })).toEqual(editActivity);
-    expect(parseDiscussionActivity({
-      ok: true,
-      access: "comment",
-      latestRevision: 9,
-      cursorRevision: 8,
-      hasMore: true,
-      messages: [named, link],
-      composerState: "blocked",
-      profileName: "Stable Name",
-    })).toEqual({
+    expect(
+      parseDiscussionActivity({
+        ok: true,
+        access: "comment",
+        latestRevision: 9,
+        cursorRevision: 8,
+        hasMore: true,
+        messages: [named, link],
+        composerState: "blocked",
+        profileName: "Stable Name",
+      }),
+    ).toEqual({
       access: "comment",
       latestRevision: 9,
       cursorRevision: 8,
@@ -696,37 +766,47 @@ describe("public discussion projection", () => {
       composerState: "available",
     };
 
-    expect(parseDiscussionActivity({ ...activity, profileName: null }))
-      .toMatchObject({ profileName: null });
-    expect(parseDiscussionActivity({ ...activity, profileName: "Stable Name" }))
-      .toMatchObject({ profileName: "Stable Name" });
+    expect(parseDiscussionActivity({ ...activity, profileName: null })).toMatchObject({
+      profileName: null,
+    });
+    expect(parseDiscussionActivity({ ...activity, profileName: "Stable Name" })).toMatchObject({
+      profileName: "Stable Name",
+    });
     expect(parseDiscussionActivity(activity)).toBeNull();
     expect(parseDiscussionActivity({ ...activity, profileName: "" })).toBeNull();
-    expect(parseDiscussionActivity({
-      ...activity,
-      profileName: "Stable Name",
-      profileTokenHash: "private",
-    })).toBeNull();
+    expect(
+      parseDiscussionActivity({
+        ...activity,
+        profileName: "Stable Name",
+        profileTokenHash: "private",
+      }),
+    ).toBeNull();
   });
 
   it("parses only exact revisioned reversible states and a revisionless durable limit", () => {
-    expect(parseDiscussionWriteState({
-      ok: false,
-      state: "blocked",
-      activityRevision: 8,
-    })).toEqual({ state: "blocked", activityRevision: 8 });
-    expect(parseDiscussionWriteState({
-      ok: false,
-      state: "paused",
-      activityRevision: Number.MAX_SAFE_INTEGER,
-    })).toEqual({
+    expect(
+      parseDiscussionWriteState({
+        ok: false,
+        state: "blocked",
+        activityRevision: 8,
+      }),
+    ).toEqual({ state: "blocked", activityRevision: 8 });
+    expect(
+      parseDiscussionWriteState({
+        ok: false,
+        state: "paused",
+        activityRevision: Number.MAX_SAFE_INTEGER,
+      }),
+    ).toEqual({
       state: "paused",
       activityRevision: Number.MAX_SAFE_INTEGER,
     });
-    expect(parseDiscussionWriteState({
-      ok: false,
-      state: "limit-reached",
-    })).toEqual({ state: "limit-reached" });
+    expect(
+      parseDiscussionWriteState({
+        ok: false,
+        state: "limit-reached",
+      }),
+    ).toEqual({ state: "limit-reached" });
 
     for (const value of [
       { ok: false, state: "blocked" },
@@ -758,10 +838,7 @@ it("folds current notifications across renames, path reuse, and deletion without
     blobSha256: ORIGINAL_SHA,
     contentKind: "text",
   });
-  const files = accumulatorFromCurrentFiles([
-    file(first, "old.md"),
-    file(second, "other.md"),
-  ])!;
+  const files = accumulatorFromCurrentFiles([file(first, "old.md"), file(second, "other.md")])!;
   foldLogOps(files, [
     {
       relaySeq: 1,

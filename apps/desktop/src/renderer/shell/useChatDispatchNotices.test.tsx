@@ -6,45 +6,102 @@ import { createChatDispatchNotices } from "../../agents/chatDispatchNotices";
 import { useChatDispatchNotices } from "./useChatDispatchNotices";
 import { useShellError } from "./useShellError";
 
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 function setup() {
   const listeners = new Set<(event: ChatDispatchNoticesEvent) => void>();
   const removed: Array<(event: ChatDispatchNoticesEvent) => void> = [];
-  const store = createChatDispatchNotices((event) => { for (const listener of listeners) listener(event); });
-  const register = vi.fn(async ({ workspaceId }: { workspaceId: string }) => store.register(workspaceId));
-  const dismiss = vi.fn(async ({ workspaceId, id }: { workspaceId: string; id: string }) => store.dismiss(workspaceId, id));
+  const store = createChatDispatchNotices((event) => {
+    for (const listener of listeners) listener(event);
+  });
+  const register = vi.fn(async ({ workspaceId }: { workspaceId: string }) =>
+    store.register(workspaceId),
+  );
+  const dismiss = vi.fn(async ({ workspaceId, id }: { workspaceId: string; id: string }) =>
+    store.dismiss(workspaceId, id),
+  );
   const retryWakes = vi.fn(async (_input: { workspaceId: string }) => {});
   vi.stubGlobal("dohcDesktop", {
     onChatDispatchNotices: (listener: (event: ChatDispatchNoticesEvent) => void) => {
       listeners.add(listener);
-      return () => { listeners.delete(listener); removed.push(listener); };
+      return () => {
+        listeners.delete(listener);
+        removed.push(listener);
+      };
     },
-    registerChatDispatchNotices: register, dismissChatDispatchNotice: dismiss, retryChatWakes: retryWakes,
+    registerChatDispatchNotices: register,
+    dismissChatDispatchNotice: dismiss,
+    retryChatWakes: retryWakes,
     listChatChannels: async () => ({ channels: [AGENT_DM, GROUP] }),
-    listChannelThreads: async ({ channelId, lane }: { channelId: string; lane: "posts" | "chat" }) =>
-      ({ threads: [WAKE_POST, GROUP_CHAT].filter((thread) => thread.channelId === channelId && thread.lane === lane) }),
+    listChannelThreads: async ({
+      channelId,
+      lane,
+    }: {
+      channelId: string;
+      lane: "posts" | "chat";
+    }) => ({
+      threads: [WAKE_POST, GROUP_CHAT].filter(
+        (thread) => thread.channelId === channelId && thread.lane === lane,
+      ),
+    }),
   });
   const trust = vi.fn();
   const openChat = vi.fn();
-  const mount = (workspaceId = "a", ready = true) => renderHook((props) => {
-    const errors = useShellError(props.workspaceId);
-    useChatDispatchNotices(props.workspaceId, props.ready, errors.reportShellFailure, errors.clearKind, errors.clearIdentity, trust, openChat);
-    return errors;
-  }, { initialProps: { workspaceId, ready } });
+  const mount = (workspaceId = "a", ready = true) =>
+    renderHook(
+      (props) => {
+        const errors = useShellError(props.workspaceId);
+        useChatDispatchNotices(
+          props.workspaceId,
+          props.ready,
+          errors.reportShellFailure,
+          errors.clearKind,
+          errors.clearIdentity,
+          trust,
+          openChat,
+        );
+        return errors;
+      },
+      { initialProps: { workspaceId, ready } },
+    );
   return { store, register, dismiss, retryWakes, mount, listeners, removed, trust, openChat };
 }
 const AGENT_DM = {
-  id: "agent-dm", name: "My agent", slug: "my-agent", kind: "agent" as const,
-  createdAtMs: 1, updatedAtMs: 1, threadCount: 1, unreadCount: 0,
+  id: "agent-dm",
+  name: "My agent",
+  slug: "my-agent",
+  kind: "agent" as const,
+  createdAtMs: 1,
+  updatedAtMs: 1,
+  threadCount: 1,
+  unreadCount: 0,
 };
 const WAKE_POST = {
-  id: "wake", channelId: AGENT_DM.id, lane: "posts" as const, title: "", createdAtMs: 2, updatedAtMs: 2,
-  messageCount: 11, lastReadSequence: 11, unreadCount: 0,
+  id: "wake",
+  channelId: AGENT_DM.id,
+  lane: "posts" as const,
+  title: "",
+  createdAtMs: 2,
+  updatedAtMs: 2,
+  messageCount: 11,
+  lastReadSequence: 11,
+  unreadCount: 0,
 };
-const GROUP = { ...AGENT_DM, id: "group", name: "Planning", slug: "planning", kind: "channel" as const };
+const GROUP = {
+  ...AGENT_DM,
+  id: "group",
+  name: "Planning",
+  slug: "planning",
+  kind: "channel" as const,
+};
 const GROUP_CHAT = { ...WAKE_POST, id: "group-chat", channelId: GROUP.id, lane: "chat" as const };
-const notice = (reason: ChatDispatchNotice["reason"], message: string = `Agent dispatch notice: ${reason}.`) => ({ reason, threadId: "thread", message });
+const notice = (
+  reason: ChatDispatchNotice["reason"],
+  message: string = `Agent dispatch notice: ${reason}.`,
+) => ({ reason, threadId: "thread", message });
 
 it("replays background notices, replaces each reason, and clears dismissed rows across windows", async () => {
   const h = setup();
@@ -54,22 +111,28 @@ it("replays background notices, replaces each reason, and clears dismissed rows 
   const second = h.mount();
   await act(async () => {});
   expect(first.result.current.shellErrors).toHaveLength(2);
-  expect(first.result.current.shellErrors.find((item) => item.kind === "chat-no-runner"))
-    .toMatchObject({ title: "No agent could take this request" });
-  expect(first.result.current.shellErrors.find((item) => item.kind === "chat-no-runner")?.tone).toBeUndefined();
+  expect(
+    first.result.current.shellErrors.find((item) => item.kind === "chat-no-runner"),
+  ).toMatchObject({ title: "No agent could take this request" });
+  expect(
+    first.result.current.shellErrors.find((item) => item.kind === "chat-no-runner")?.tone,
+  ).toBeUndefined();
   const row = first.result.current.shellErrors[0]!;
   act(() => first.result.current.hideShellError(row.id));
   expect(first.result.current.shellErrors[0]?.seen).toBe(true);
   expect(h.dismiss).not.toHaveBeenCalled();
   act(() => h.store.report("a", notice("no-runner", "Dispatch is off.")));
   expect(first.result.current.shellErrors).toHaveLength(2);
-  const replacement = first.result.current.shellErrors.find((item) => item.kind === "chat-no-runner")!;
+  const replacement = first.result.current.shellErrors.find(
+    (item) => item.kind === "chat-no-runner",
+  )!;
   expect(replacement).toMatchObject({ message: "Dispatch is off.", seen: false });
   await act(async () => first.result.current.dismissShellError(replacement.id));
   expect(h.dismiss).toHaveBeenCalledOnce();
   expect(first.result.current.shellErrors).toHaveLength(1);
   expect(second.result.current.shellErrors).toHaveLength(1);
-  first.unmount(); second.unmount();
+  first.unmount();
+  second.unmount();
   const reopened = h.mount();
   await act(async () => {});
   expect(reopened.result.current.shellErrors).toHaveLength(1);
@@ -86,8 +149,13 @@ it("waits for workspace admission and ignores late registration, events, and err
   act(() => h.store.report("a", notice("no-runner")));
   const old = h.store.register("a");
   hook.rerender({ workspaceId: "b", ready: true });
-  await act(async () => { pending.resolve(old); });
-  act(() => { h.removed[0]!(old); for (const listener of h.listeners) listener(old); });
+  await act(async () => {
+    pending.resolve(old);
+  });
+  act(() => {
+    h.removed[0]!(old);
+    for (const listener of h.listeners) listener(old);
+  });
   expect(hook.result.current.shellErrors).toEqual([]);
   act(() => h.store.report("b", notice("budget-paused")));
   expect(hook.result.current.shellErrors).toHaveLength(1);
@@ -103,7 +171,9 @@ it("does not let a late registration restore a replaced or dismissed notice", as
   h.register.mockReturnValueOnce(pending.promise);
   const hook = h.mount();
   act(() => h.store.report("a", notice("no-runner", "New notice.")));
-  await act(async () => hook.result.current.dismissShellError(hook.result.current.shellErrors[0]!.id));
+  await act(async () =>
+    hook.result.current.dismissShellError(hook.result.current.shellErrors[0]!.id),
+  );
   await act(async () => pending.resolve(stale));
   expect(hook.result.current.shellErrors).toEqual([]);
 });
@@ -131,11 +201,18 @@ it("clears forgotten workspace rows in every subscribed window", async () => {
 
 it("shows a held request as a warning that opens the trust dialog, and takes it back once trusted", async () => {
   const h = setup();
-  h.store.report("a", notice("restricted", "In Restricted Mode, dohc does not start agents in this workspace."));
+  h.store.report(
+    "a",
+    notice("restricted", "In Restricted Mode, dohc does not start agents in this workspace."),
+  );
   const hook = h.mount();
   await act(async () => {});
   const row = hook.result.current.shellErrors[0]!;
-  expect(row).toMatchObject({ tone: "warning", kind: "chat-restricted", action: { label: "Trust workspace" } });
+  expect(row).toMatchObject({
+    tone: "warning",
+    kind: "chat-restricted",
+    action: { label: "Trust workspace" },
+  });
   act(() => row.action!.run());
   expect(h.trust).toHaveBeenCalledOnce();
   // The row stays while the person may still choose Stay in Restricted Mode.
@@ -161,7 +238,9 @@ it.each([
 ])("opens %s itself, where Resume is", async (_case, channel, thread, place) => {
   const h = setup();
   h.store.report("a", {
-    reason: "budget-paused", threadId: thread.id, channelId: channel.id,
+    reason: "budget-paused",
+    threadId: thread.id,
+    channelId: channel.id,
     message: `Agents ran 10 times in 10 minutes in ${place}. Choose Resume there to continue.`,
   });
   const hook = h.mount();
@@ -175,7 +254,12 @@ it.each([
 
 it("lands Open in the paused chat, closing its toast and keeping its row, read", async () => {
   const h = setup();
-  h.store.report("a", { reason: "budget-paused", threadId: GROUP_CHAT.id, channelId: GROUP.id, message: "Paused in #Planning." });
+  h.store.report("a", {
+    reason: "budget-paused",
+    threadId: GROUP_CHAT.id,
+    channelId: GROUP.id,
+    message: "Paused in #Planning.",
+  });
   const hook = h.mount();
   await act(async () => {});
   const [paused] = hook.result.current.shellErrors;
@@ -188,49 +272,117 @@ it("lands Open in the paused chat, closing its toast and keeping its row, read",
 
 it("takes back a resumed chat's pause, and keeps another chat's", async () => {
   const h = setup();
-  h.store.report("a", { reason: "budget-paused", threadId: GROUP_CHAT.id, channelId: GROUP.id, message: "Paused in #Planning." });
-  h.store.report("a", { reason: "budget-paused", threadId: WAKE_POST.id, channelId: AGENT_DM.id, message: "Paused in \"Nova\"." });
+  h.store.report("a", {
+    reason: "budget-paused",
+    threadId: GROUP_CHAT.id,
+    channelId: GROUP.id,
+    message: "Paused in #Planning.",
+  });
+  h.store.report("a", {
+    reason: "budget-paused",
+    threadId: WAKE_POST.id,
+    channelId: AGENT_DM.id,
+    message: 'Paused in "Nova".',
+  });
   h.store.report("a", notice("no-runner"));
   const hook = h.mount();
   await act(async () => {});
-  expect(hook.result.current.shellErrors.map((row) => row.message)).toEqual(["Paused in #Planning.", "Paused in \"Nova\".", "Agent dispatch notice: no-runner."]);
+  expect(hook.result.current.shellErrors.map((row) => row.message)).toEqual([
+    "Paused in #Planning.",
+    'Paused in "Nova".',
+    "Agent dispatch notice: no-runner.",
+  ]);
   act(() => h.store.clear("a", "budget-paused", GROUP_CHAT.id));
-  expect(hook.result.current.shellErrors.map((row) => row.message)).toEqual(["Paused in \"Nova\".", "Agent dispatch notice: no-runner."]);
+  expect(hook.result.current.shellErrors.map((row) => row.message)).toEqual([
+    'Paused in "Nova".',
+    "Agent dispatch notice: no-runner.",
+  ]);
   act(() => h.store.clear("a", "budget-paused", WAKE_POST.id));
-  expect(hook.result.current.shellErrors.map((row) => row.message)).toEqual(["Agent dispatch notice: no-runner."]);
+  expect(hook.result.current.shellErrors.map((row) => row.message)).toEqual([
+    "Agent dispatch notice: no-runner.",
+  ]);
 });
 
 it("still takes back a resumed chat's newer pause after an older dismissal fails", async () => {
   const h = setup();
-  h.store.report("a", { reason: "budget-paused", threadId: GROUP_CHAT.id, channelId: GROUP.id, message: "Paused in #Planning." });
-  h.store.report("a", { reason: "budget-paused", threadId: WAKE_POST.id, channelId: AGENT_DM.id, message: "Paused in \"Nova\"." });
+  h.store.report("a", {
+    reason: "budget-paused",
+    threadId: GROUP_CHAT.id,
+    channelId: GROUP.id,
+    message: "Paused in #Planning.",
+  });
+  h.store.report("a", {
+    reason: "budget-paused",
+    threadId: WAKE_POST.id,
+    channelId: AGENT_DM.id,
+    message: 'Paused in "Nova".',
+  });
   const hook = h.mount();
   await act(async () => {});
   const failing = Promise.withResolvers<void>();
   h.dismiss.mockReturnValueOnce(failing.promise);
-  await act(async () => hook.result.current.dismissShellError(hook.result.current.shellErrors[0]!.id));
-  act(() => h.store.report("a", { reason: "budget-paused", threadId: GROUP_CHAT.id, channelId: GROUP.id, message: "Paused in #Planning again." }));
+  await act(async () =>
+    hook.result.current.dismissShellError(hook.result.current.shellErrors[0]!.id),
+  );
+  act(() =>
+    h.store.report("a", {
+      reason: "budget-paused",
+      threadId: GROUP_CHAT.id,
+      channelId: GROUP.id,
+      message: "Paused in #Planning again.",
+    }),
+  );
   await act(async () => failing.reject(new Error("Main is busy")));
   act(() => h.store.clear("a", "budget-paused", GROUP_CHAT.id));
   expect(hook.result.current.shellErrors.map((row) => row.message)).toEqual([
-    "Paused in \"Nova\".", "dohc could not dismiss this notice. Open this workspace again to try again.",
+    'Paused in "Nova".',
+    "dohc could not dismiss this notice. Open this workspace again to try again.",
   ]);
 });
 
 it("keeps a wake row that is still wrong until Try again or its end, and lets a dropped one be dismissed", async () => {
   const h = setup();
-  h.store.report("a", { reason: "wake-unreadable", message: "dohc can't read the file.", file: "/state/chat-wakes.json" });
-  h.store.report("a", { reason: "wake-parked", threadId: "t1", messageId: "m1", wakeId: "wake-1", message: "Its workspace no longer syncs here." });
-  h.store.report("a", { reason: "wake-dropped", threadId: "t2", messageId: "m2", wakeId: "wake-2", message: "Nothing ran here." });
+  h.store.report("a", {
+    reason: "wake-unreadable",
+    message: "dohc can't read the file.",
+    file: "/state/chat-wakes.json",
+  });
+  h.store.report("a", {
+    reason: "wake-parked",
+    threadId: "t1",
+    messageId: "m1",
+    wakeId: "wake-1",
+    message: "Its workspace no longer syncs here.",
+  });
+  h.store.report("a", {
+    reason: "wake-dropped",
+    threadId: "t2",
+    messageId: "m2",
+    wakeId: "wake-2",
+    message: "Nothing ran here.",
+  });
   const view = h.mount();
   await act(async () => {});
   const rows = view.result.current.shellErrors;
   const unreadable = rows.find((item) => item.kind === "chat-wake-unreadable")!;
-  expect(unreadable).toMatchObject({ title: "dohc could not read the agent requests saved here", noDismiss: true, details: [["File", "/state/chat-wakes.json"]] });
+  expect(unreadable).toMatchObject({
+    title: "dohc could not read the agent requests saved here",
+    noDismiss: true,
+    details: [["File", "/state/chat-wakes.json"]],
+  });
   const parked = rows.find((item) => item.kind === "chat-wake-parked")!;
-  expect(parked).toMatchObject({ noDismiss: true, details: [["Thread", "t1"], ["Message", "m1"], ["Wake", "wake-1"]] });
+  expect(parked).toMatchObject({
+    noDismiss: true,
+    details: [
+      ["Thread", "t1"],
+      ["Message", "m1"],
+      ["Wake", "wake-1"],
+    ],
+  });
   expect(parked.onDismiss).toBeUndefined();
-  act(() => { parked.retry?.(); });
+  act(() => {
+    parked.retry?.();
+  });
   expect(h.retryWakes).toHaveBeenCalledExactlyOnceWith({ workspaceId: "a" });
   const dropped = rows.find((item) => item.kind === "chat-wake-dropped")!;
   expect(dropped.noDismiss).toBeUndefined();
@@ -239,16 +391,29 @@ it("keeps a wake row that is still wrong until Try again or its end, and lets a 
   expect(h.dismiss).toHaveBeenCalledOnce();
   // Main takes the parked row back once its wake is recorded.
   act(() => h.store.clear("a", "wake-parked"));
-  expect(view.result.current.shellErrors.map((item) => item.kind)).toEqual(["chat-wake-unreadable"]);
+  expect(view.result.current.shellErrors.map((item) => item.kind)).toEqual([
+    "chat-wake-unreadable",
+  ]);
 });
 
 it("shows a refusal of this computer's agents with no Try again and no dismiss, until main takes it back", async () => {
   const h = setup();
-  h.store.report("a", { reason: "wake-runners-refused", message: "Rename one in Settings › Agents.", agentId: "codex" });
+  h.store.report("a", {
+    reason: "wake-runners-refused",
+    message: "Rename one in Settings › Agents.",
+    agentId: "codex",
+  });
   const view = h.mount();
   await act(async () => {});
-  const row = view.result.current.shellErrors.find((item) => item.kind === "chat-wake-runners-refused")!;
-  expect(row).toMatchObject({ title: "Your phone cannot wake agents on this computer", noDismiss: true, retry: null, details: [["Agent", "codex"]] });
+  const row = view.result.current.shellErrors.find(
+    (item) => item.kind === "chat-wake-runners-refused",
+  )!;
+  expect(row).toMatchObject({
+    title: "Your phone cannot wake agents on this computer",
+    noDismiss: true,
+    retry: null,
+    details: [["Agent", "codex"]],
+  });
   expect(row.onDismiss).toBeUndefined();
   act(() => h.store.clear("a", "wake-runners-refused"));
   expect(view.result.current.shellErrors).toEqual([]);
@@ -256,13 +421,23 @@ it("shows a refusal of this computer's agents with no Try again and no dismiss, 
 
 it("offers Try again on an unreadable declarations ledger, with its file in Details and no dismiss", async () => {
   const h = setup();
-  h.store.report("a", { reason: "wake-runners-unreadable", message: "Restore or repair the file in Details before you try again.", file: "/state/chat-runners.json" });
+  h.store.report("a", {
+    reason: "wake-runners-unreadable",
+    message: "Restore or repair the file in Details before you try again.",
+    file: "/state/chat-runners.json",
+  });
   const view = h.mount();
   await act(async () => {});
-  const row = view.result.current.shellErrors.find((item) => item.kind === "chat-wake-runners-unreadable")!;
+  const row = view.result.current.shellErrors.find(
+    (item) => item.kind === "chat-wake-runners-unreadable",
+  )!;
   expect(row).toMatchObject({
-    title: "dohc could not read where this computer's agents are offered", noDismiss: true, details: [["File", "/state/chat-runners.json"]],
+    title: "dohc could not read where this computer's agents are offered",
+    noDismiss: true,
+    details: [["File", "/state/chat-runners.json"]],
   });
-  act(() => { row.retry?.(); });
+  act(() => {
+    row.retry?.();
+  });
   expect(h.retryWakes).toHaveBeenCalledExactlyOnceWith({ workspaceId: "a" });
 });

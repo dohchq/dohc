@@ -6,7 +6,11 @@ import { useLayoutEffect, useState } from "react";
 import * as Y from "yjs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
-import { frontmatterMapValues, patchFrontmatter, setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter-map";
+import {
+  frontmatterMapValues,
+  patchFrontmatter,
+  setFrontmatterValue,
+} from "@dohc/ydoc-projection/frontmatter-map";
 import { PropertiesPanel } from "./PropertiesPanel";
 import { parseFrontmatter, PROPERTIES_READ_ONLY_REASON } from "./markdown/frontmatter";
 import { EDGE_DISPLAY, EDGE_MARKDOWN, receivedYDoc } from "./markdown/frontmatter.edge-fixture";
@@ -50,13 +54,21 @@ describe("PropertiesPanel", () => {
     const before = Y.encodeStateAsUpdate(doc);
     const onChange = vi.fn();
     try {
-      render(shared ? <PropertiesPanel ydoc={doc} /> : <PropertiesPanel body={initialBody} onChange={onChange} />);
+      render(
+        shared ? (
+          <PropertiesPanel ydoc={doc} />
+        ) : (
+          <PropertiesPanel body={initialBody} onChange={onChange} />
+        ),
+      );
       await user.click(screen.getByLabelText("Remove property a"));
       expect(screen.getByText("Properties are read-only").title).toBe(PROPERTIES_READ_ONLY_REASON);
       expect(onChange).not.toHaveBeenCalled();
       expect(Y.encodeStateAsUpdate(doc)).toEqual(before);
       expect(yDocToMarkdown(doc)).toBe(`${initialBody}\n`);
-    } finally { doc.destroy(); }
+    } finally {
+      doc.destroy();
+    }
   });
 
   it("keeps focus on the edited property when another device removes a row above it", async () => {
@@ -70,56 +82,74 @@ describe("PropertiesPanel", () => {
 
       expect(document.activeElement).toBe(screen.getByLabelText("Property status value"));
       await user.keyboard("!");
-      expect(frontmatterMapValues(doc.getMap("frontmatter"))).toEqual({ status: "draft!", priority: "low" });
-    } finally { doc.destroy(); }
-  });
-
-  it.each([true])("keeps another device's new value when a rename lands before the rows refresh (live: %s)", (live) => {
-    const markdown = "---\nstatus: draft\n---\n\nBody\n";
-    const doc = markdownToYDoc(markdown);
-    const onChange = vi.fn();
-    const panel = (body: string) => (live ? <PropertiesPanel ydoc={doc} /> : <PropertiesPanel body={body} onChange={onChange} />);
-    // Rename after the panel reads the new value, before its effect refreshes
-    // the rows, which still hold the value they read.
-    function RenamesOnCommit() {
-      useLayoutEffect(() => {
-        fireEvent.change(screen.getByLabelText("Property 1 name"), { target: { value: "phase" } });
-      }, []);
-      return null;
-    }
-    try {
-      const { rerender } = render(<>{panel(markdown)}</>);
-
-      act(() => {
-        setFrontmatterValue(doc, "status", "ready");
-        rerender(<>{panel(markdown.replace("draft", "ready"))}<RenamesOnCommit /></>);
+      expect(frontmatterMapValues(doc.getMap("frontmatter"))).toEqual({
+        status: "draft!",
+        priority: "low",
       });
-
-      const saved = live ? frontmatterMapValues(doc.getMap("frontmatter")) : parseFrontmatter(onChange.mock.lastCall?.[0] ?? "").meta;
-      expect(saved).toEqual({ phase: "ready" });
-    } finally { doc.destroy(); }
+    } finally {
+      doc.destroy();
+    }
   });
+
+  it.each([true])(
+    "keeps another device's new value when a rename lands before the rows refresh (live: %s)",
+    (live) => {
+      const markdown = "---\nstatus: draft\n---\n\nBody\n";
+      const doc = markdownToYDoc(markdown);
+      const onChange = vi.fn();
+      const panel = (body: string) =>
+        live ? <PropertiesPanel ydoc={doc} /> : <PropertiesPanel body={body} onChange={onChange} />;
+      // Rename after the panel reads the new value, before its effect refreshes
+      // the rows, which still hold the value they read.
+      function RenamesOnCommit() {
+        useLayoutEffect(() => {
+          fireEvent.change(screen.getByLabelText("Property 1 name"), {
+            target: { value: "phase" },
+          });
+        }, []);
+        return null;
+      }
+      try {
+        const { rerender } = render(<>{panel(markdown)}</>);
+
+        act(() => {
+          setFrontmatterValue(doc, "status", "ready");
+          rerender(
+            <>
+              {panel(markdown.replace("draft", "ready"))}
+              <RenamesOnCommit />
+            </>,
+          );
+        });
+
+        const saved = live
+          ? frontmatterMapValues(doc.getMap("frontmatter"))
+          : parseFrontmatter(onChange.mock.lastCall?.[0] ?? "").meta;
+        expect(saved).toEqual({ phase: "ready" });
+      } finally {
+        doc.destroy();
+      }
+    },
+  );
 
   it("preserves untouched structured YAML values while renaming a property", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
     render(
       <PropertiesPanel
-        body={
-          [
-            "---",
-            "id: note-1",
-            "title: Plan",
-            "tags:",
-            "  - a",
-            "  - b",
-            "status: draft",
-            "---",
-            "",
-            "# Plan",
-            "",
-          ].join("\n")
-        }
+        body={[
+          "---",
+          "id: note-1",
+          "title: Plan",
+          "tags:",
+          "  - a",
+          "  - b",
+          "status: draft",
+          "---",
+          "",
+          "# Plan",
+          "",
+        ].join("\n")}
         onChange={onChange}
       />,
     );
@@ -145,7 +175,6 @@ describe("PropertiesPanel", () => {
   });
 
   describe("pills", () => {
-
     it("keeps Add a property as the +'s name and tooltip, and adds then removes a pill", async () => {
       const user = userEvent.setup();
       render(<ControlledPropertiesPanel initialBody={"---\nowner: Sam\n---\n\nBody"} />);
@@ -157,11 +186,15 @@ describe("PropertiesPanel", () => {
       expect(screen.getAllByTestId("property-row")).toHaveLength(2);
       await user.type(screen.getByLabelText("Property 2 name"), "release");
       await user.type(screen.getByLabelText("Property release value"), "September");
-      expect(screen.getByTestId("current-body").textContent).toBe("---\nowner: Sam\nrelease: September\n---\n\nBody");
+      expect(screen.getByTestId("current-body").textContent).toBe(
+        "---\nowner: Sam\nrelease: September\n---\n\nBody",
+      );
 
       await user.click(screen.getByLabelText("Remove property owner"));
       expect(screen.getAllByTestId("property-row")).toHaveLength(1);
-      expect(screen.getByTestId("current-body").textContent).toBe("---\nrelease: September\n---\n\nBody");
+      expect(screen.getByTestId("current-body").textContent).toBe(
+        "---\nrelease: September\n---\n\nBody",
+      );
     });
   });
 
@@ -190,11 +223,14 @@ describe("PropertiesPanel", () => {
   });
 
   describe("renaming a shared property", () => {
-    const budget = "---\n# Monthly\nbudget: 100 # euros\n# Wi-Fi password\nwifi: hunter2\n---\n\nBody";
+    const budget =
+      "---\n# Monthly\nbudget: 100 # euros\n# Wi-Fi password\nwifi: hunter2\n---\n\nBody";
     const names = () =>
       screen.getAllByTestId("property-key").map((input) => (input as HTMLInputElement).value);
     async function rename(user: ReturnType<typeof userEvent.setup>, from: string, to: string) {
-      const name = screen.getAllByTestId("property-key").find((input) => (input as HTMLInputElement).value === from)!;
+      const name = screen
+        .getAllByTestId("property-key")
+        .find((input) => (input as HTMLInputElement).value === from)!;
       await user.clear(name);
       await user.type(name, to);
     }
@@ -215,8 +251,12 @@ describe("PropertiesPanel", () => {
         await user.clear(screen.getByLabelText("Property 1 name"));
         await user.type(screen.getByLabelText("Property 1 name"), "cost");
         expect(names()).toEqual(["cost", "wifi"]);
-        expect(yDocToMarkdown(doc)).toBe("---\n# Monthly\ncost: 100 # euros\n# Wi-Fi password\nwifi: hunter2\n---\n\nBody\n");
-      } finally { doc.destroy(); }
+        expect(yDocToMarkdown(doc)).toBe(
+          "---\n# Monthly\ncost: 100 # euros\n# Wi-Fi password\nwifi: hunter2\n---\n\nBody\n",
+        );
+      } finally {
+        doc.destroy();
+      }
     });
 
     it("keeps edits another device makes to other properties during the rename", async () => {
@@ -236,10 +276,14 @@ describe("PropertiesPanel", () => {
         Y.applyUpdate(peer, Y.encodeStateAsUpdate(doc));
 
         expect(names()).toEqual(["cost", "wifi", "owner"]);
-        const expected = "---\n# Monthly\ncost: 100 # euros\n# Wi-Fi password\nwifi: new\nowner: sam\n---\n\nBody\n";
+        const expected =
+          "---\n# Monthly\ncost: 100 # euros\n# Wi-Fi password\nwifi: new\nowner: sam\n---\n\nBody\n";
         expect(yDocToMarkdown(doc)).toBe(expected);
         expect(yDocToMarkdown(peer)).toBe(expected);
-      } finally { doc.destroy(); peer.destroy(); }
+      } finally {
+        doc.destroy();
+        peer.destroy();
+      }
     });
   });
 
@@ -247,7 +291,9 @@ describe("PropertiesPanel", () => {
   // moves its key to the end of the map.
   it("renames a shared map property without losing it", async () => {
     const user = userEvent.setup();
-    const doc = markdownToYDoc("---\nid: note-1\ntitle: Plan\ndue: friday\nsettings:\n  pinned: true\n---\n\nBody\n");
+    const doc = markdownToYDoc(
+      "---\nid: note-1\ntitle: Plan\ndue: friday\nsettings:\n  pinned: true\n---\n\nBody\n",
+    );
     const frontmatter = doc.getMap<unknown>("frontmatter");
     const changed = trackChangedProperties(frontmatter);
     const replica = new Y.Doc();
@@ -270,7 +316,9 @@ describe("PropertiesPanel", () => {
         options: { pinned: true },
         title: "Plan",
       });
-      expect(yDocToMarkdown(replica)).toBe("---\nid: note-1\ntitle: Plan\ndue: friday\noptions:\n  pinned: true\n---\n\nBody\n");
+      expect(yDocToMarkdown(replica)).toBe(
+        "---\nid: note-1\ntitle: Plan\ndue: friday\noptions:\n  pinned: true\n---\n\nBody\n",
+      );
     } finally {
       replica.destroy();
       doc.destroy();
@@ -315,7 +363,9 @@ describe("PropertiesPanel", () => {
 
       expect(changed).toEqual(new Set(["tags"]));
       expect(frontmatterMapValues(frontmatter).tags).toEqual(["kyoto", "food", "2026"]);
-      expect(yDocToMarkdown(doc)).toBe("---\ntags:\n  - kyoto\n  - food\n  - '2026'\nstatus: draft\n---\n\nBody\n");
+      expect(yDocToMarkdown(doc)).toBe(
+        "---\ntags:\n  - kyoto\n  - food\n  - '2026'\nstatus: draft\n---\n\nBody\n",
+      );
       expect(propertyValue("tags")).toBe("kyoto, food, 2026");
     } finally {
       doc.destroy();
@@ -374,12 +424,19 @@ describe("PropertiesPanel's Source button", () => {
 
   it("opens Source while a reserved name's flag hides a saved value, but not on a new pill", async () => {
     const user = userEvent.setup();
-    render(<ControlledPropertiesPanel initialBody={"---\nstatus: draft\nowner: Sam\n---\n\nBody\n"} onShowSource={vi.fn()} />);
+    render(
+      <ControlledPropertiesPanel
+        initialBody={"---\nstatus: draft\nowner: Sam\n---\n\nBody\n"}
+        onShowSource={vi.fn()}
+      />,
+    );
 
     await user.clear(screen.getByLabelText("Property 1 name"));
     await user.type(screen.getByLabelText("Property 1 name"), "title");
     expect(screen.getByTestId("property-reserved")).toBeTruthy();
-    expect(screen.getByTestId("current-body").textContent).toBe("---\nstatus: draft\nowner: Sam\n---\n\nBody\n");
+    expect(screen.getByTestId("current-body").textContent).toBe(
+      "---\nstatus: draft\nowner: Sam\n---\n\nBody\n",
+    );
     expect(screen.getByTestId("properties-source")).toBeTruthy();
 
     await user.clear(screen.getByLabelText("Property 1 name"));

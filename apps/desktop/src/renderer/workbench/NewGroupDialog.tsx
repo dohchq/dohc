@@ -55,7 +55,11 @@ export function NewGroupDialog(props: {
   }
 
   return (
-    <Overlay onClose={() => { if (!busyRef.current) props.onClose(); }}>
+    <Overlay
+      onClose={() => {
+        if (!busyRef.current) props.onClose();
+      }}
+    >
       <form
         role="dialog"
         aria-modal="true"
@@ -70,17 +74,23 @@ export function NewGroupDialog(props: {
         // swallow it, and an empty name should say what's missing.
         onKeyDown={(event) => {
           const { target } = event;
-          const field = target instanceof HTMLInputElement || (target instanceof HTMLElement && target.getAttribute("role") === "radio");
+          const field =
+            target instanceof HTMLInputElement ||
+            (target instanceof HTMLElement && target.getAttribute("role") === "radio");
           if (event.key !== "Enter" || isComposingKey(event) || !field) return;
           event.preventDefault();
           void create();
         }}
         className="dohc-elevated flex w-[480px] max-w-[calc(100vw-2rem)] flex-col gap-6 rounded-xl border border-line bg-panel p-6"
       >
-        <h2 id={`${id}-title`} className="m-0 text-base font-semibold text-ink">New group</h2>
+        <h2 id={`${id}-title`} className="m-0 text-base font-semibold text-ink">
+          New group
+        </h2>
         <div className="flex flex-col gap-4">
           <div className="flex flex-col gap-2">
-            <label htmlFor={`${id}-name`} className="dohc-section-label">Name</label>
+            <label htmlFor={`${id}-name`} className="dohc-section-label">
+              Name
+            </label>
             <input
               ref={nameRef}
               id={`${id}-name`}
@@ -98,13 +108,19 @@ export function NewGroupDialog(props: {
               className={FIELD}
             />
             {nameMissing && !named ? (
-              <p id={`${id}-name-error`} data-testid="chats-new-channel-name-error" className="m-0 text-[12px] text-danger">
+              <p
+                id={`${id}-name-error`}
+                data-testid="chats-new-channel-name-error"
+                className="m-0 text-[12px] text-danger"
+              >
                 Give the group a name.
               </p>
             ) : null}
           </div>
           <div className="flex flex-col gap-2">
-            <label htmlFor={`${id}-purpose`} className="dohc-section-label">What it&apos;s for</label>
+            <label htmlFor={`${id}-purpose`} className="dohc-section-label">
+              What it&apos;s for
+            </label>
             <input
               id={`${id}-purpose`}
               data-testid="chats-new-channel-purpose"
@@ -117,8 +133,15 @@ export function NewGroupDialog(props: {
             />
           </div>
           <div className="flex flex-col gap-2">
-            <span id={`${id}-type`} className="dohc-section-label">How people talk</span>
-            <div role="radiogroup" aria-labelledby={`${id}-type`} onKeyDown={group.onKeyDown} className="grid grid-cols-3 gap-2">
+            <span id={`${id}-type`} className="dohc-section-label">
+              How people talk
+            </span>
+            <div
+              role="radiogroup"
+              aria-labelledby={`${id}-type`}
+              onKeyDown={group.onKeyDown}
+              className="grid grid-cols-3 gap-2"
+            >
               {TYPES.map((option, index) => {
                 const checked = type === option.value;
                 const Icon = option.icon;
@@ -130,13 +153,30 @@ export function NewGroupDialog(props: {
                     aria-labelledby={`${id}-type-${option.value}-label`}
                     aria-describedby={`${id}-type-${option.value}`}
                     className={`flex flex-col items-start gap-2 rounded-lg border p-3 text-left transition-colors duration-75 disabled:opacity-60 ${
-                      checked ? "border-accent bg-selected text-ink ring-1 ring-accent" : "border-line text-muted hover:bg-hover hover:text-ink"
+                      checked
+                        ? "border-accent bg-selected text-ink ring-1 ring-accent"
+                        : "border-line text-muted hover:bg-hover hover:text-ink"
                     }`}
                   >
-                    <Icon size={16} strokeWidth={1.9} aria-hidden className={checked ? "text-accent" : ""} />
+                    <Icon
+                      size={16}
+                      strokeWidth={1.9}
+                      aria-hidden
+                      className={checked ? "text-accent" : ""}
+                    />
                     <span className="flex flex-col gap-1">
-                      <span id={`${id}-type-${option.value}-label`} className="text-[13px] font-medium text-ink">{option.label}</span>
-                      <span id={`${id}-type-${option.value}`} className="text-[12px] leading-4 text-muted">{option.line}</span>
+                      <span
+                        id={`${id}-type-${option.value}-label`}
+                        className="text-[13px] font-medium text-ink"
+                      >
+                        {option.label}
+                      </span>
+                      <span
+                        id={`${id}-type-${option.value}`}
+                        className="text-[12px] leading-4 text-muted"
+                      >
+                        {option.line}
+                      </span>
                     </span>
                   </button>
                 );
@@ -146,16 +186,28 @@ export function NewGroupDialog(props: {
         </div>
         <div className="flex flex-col gap-3">
           {failure ? (
-            <p role="alert" data-testid="chats-new-channel-error" className="m-0 flex items-start gap-2 text-[12px] text-danger">
+            <p
+              role="alert"
+              data-testid="chats-new-channel-error"
+              className="m-0 flex items-start gap-2 text-[12px] text-danger"
+            >
               <TriangleAlert size={14} aria-hidden className="mt-px shrink-0" />
               {failure}
             </p>
           ) : null}
           <div className="flex justify-end gap-2">
-            <SecondaryButton data-testid="chats-new-channel-cancel" disabled={busy} onClick={props.onClose}>
+            <SecondaryButton
+              data-testid="chats-new-channel-cancel"
+              disabled={busy}
+              onClick={props.onClose}
+            >
               Cancel
             </SecondaryButton>
-            <PrimaryButton type="submit" data-testid="chats-new-channel-submit" disabled={!named || busy}>
+            <PrimaryButton
+              type="submit"
+              data-testid="chats-new-channel-submit"
+              disabled={!named || busy}
+            >
               Create group
             </PrimaryButton>
           </div>

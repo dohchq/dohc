@@ -85,15 +85,24 @@ export function RelationPicker({
     };
   }, [executor, field.collection]);
 
-  const ids = typeof value === "string" ? [value] : Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
-  const { selected, select } = useAcknowledgedSelection({ value, ids, acknowledgedWriteId, subscribeToDiscardedWrites, emit });
+  const ids =
+    typeof value === "string"
+      ? [value]
+      : Array.isArray(value)
+        ? value.filter((entry): entry is string => typeof entry === "string")
+        : [];
+  const { selected, select } = useAcknowledgedSelection({
+    value,
+    ids,
+    acknowledgedWriteId,
+    subscribeToDiscardedWrites,
+    emit,
+  });
   const shown = useMemo(() => {
     if (records === null) return [];
     const needle = search.trim().toLowerCase();
     if (needle === "") return records;
-    return records.filter((record) =>
-      recordLabel(record).toLowerCase().includes(needle),
-    );
+    return records.filter((record) => recordLabel(record).toLowerCase().includes(needle));
   }, [records, search]);
 
   return (
@@ -101,7 +110,8 @@ export function RelationPicker({
       className="flex w-full flex-col gap-0.5"
       onKeyDown={(event) => {
         // Escape during IME composition cancels the composition only.
-        if (event.key === "Escape" && !event.nativeEvent.isComposing && event.keyCode !== 229) close();
+        if (event.key === "Escape" && !event.nativeEvent.isComposing && event.keyCode !== 229)
+          close();
       }}
       onBlur={(event) => {
         if (!event.currentTarget.contains(event.relatedTarget)) close();
@@ -136,10 +146,7 @@ export function RelationPicker({
           className="flex max-h-48 flex-col gap-0.5 overflow-y-auto"
         >
           {shown.map((record) => (
-            <label
-              key={record.id}
-              className="flex items-center gap-1.5 text-[13px]"
-            >
+            <label key={record.id} className="flex items-center gap-1.5 text-[13px]">
               <input
                 type="checkbox"
                 checked={selected.includes(record.id)}

@@ -1,10 +1,17 @@
-import type { createWorkspaceAuthorityOwner, WorkspaceAuthorityBinding } from "./workspaceAuthorityOwner";
+import type {
+  createWorkspaceAuthorityOwner,
+  WorkspaceAuthorityBinding,
+} from "./workspaceAuthorityOwner";
 import type { ForgottenShareViews } from "./forgottenShareViews";
 import type { ShareViewIdentity } from "./registryStore";
 import type { WorkspaceTrust } from "./workspaceTrust";
 
-export function createPhysicalWorkspaceRemoval<Workspace extends {workspaceId: string; rootPath: string}>(dependencies: {
-  retireBinding: ReturnType<typeof createWorkspaceAuthorityOwner<Workspace, unknown>>["retireBinding"];
+export function createPhysicalWorkspaceRemoval<
+  Workspace extends { workspaceId: string; rootPath: string },
+>(dependencies: {
+  retireBinding: ReturnType<
+    typeof createWorkspaceAuthorityOwner<Workspace, unknown>
+  >["retireBinding"];
   findWorkspace(workspaceId: string): Workspace | null;
   removeWorkspace(workspaceId: string): void;
   removeDrafts(workspaceId: string): Promise<void>;
@@ -20,7 +27,12 @@ export function createPhysicalWorkspaceRemoval<Workspace extends {workspaceId: s
     // asking, because its typing waiting to recover stays on disk.
     { keepDrafts = false } = {},
   ): Promise<boolean> {
-    if (!keepDrafts && dependencies.confirmDraftRemoval && !(await dependencies.confirmDraftRemoval(binding.workspaceId))) return false;
+    if (
+      !keepDrafts &&
+      dependencies.confirmDraftRemoval &&
+      !(await dependencies.confirmDraftRemoval(binding.workspaceId))
+    )
+      return false;
     await confirmed();
     await dependencies.retireBinding(binding, {
       finalize: beforeRegistryRemoval,
@@ -42,7 +54,9 @@ export function createPhysicalWorkspaceRemoval<Workspace extends {workspaceId: s
   };
 }
 
-export function createWorkspaceForget<Workspace extends {workspaceId: string; rootPath: string; shareView?: ShareViewIdentity}>(dependencies: {
+export function createWorkspaceForget<
+  Workspace extends { workspaceId: string; rootPath: string; shareView?: ShareViewIdentity },
+>(dependencies: {
   currentBinding(workspaceId: string): WorkspaceAuthorityBinding<Workspace>;
   findWorkspace(workspaceId: string): Workspace | null;
   removePhysicalWorkspace: ReturnType<typeof createPhysicalWorkspaceRemoval<Workspace>>;
@@ -61,7 +75,10 @@ export function createWorkspaceForget<Workspace extends {workspaceId: string; ro
     const rememberShareView = async () => {
       const shareView = dependencies.findWorkspace(workspaceId)?.shareView;
       if (!shareView) return;
-      await dependencies.forgottenShareViews.remember({ workspaceId, rootPath: binding.canonicalRootPath }, shareView);
+      await dependencies.forgottenShareViews.remember(
+        { workspaceId, rootPath: binding.canonicalRootPath },
+        shareView,
+      );
     };
     // A forgotten workspace opened again is an existing folder: it starts in
     // Restricted Mode. The grant goes once the person agrees and before the

@@ -9,8 +9,7 @@ const REFUSED_COPY =
   "dohc could not open this share link. It may have expired or already been used. Go back to the share page in your browser and choose Open in dohc again.";
 const NETWORK_COPY =
   "dohc could not reach the server. Check your connection, then choose Try again.";
-const BUSY_COPY =
-  "The server is busy right now. Wait a moment, then choose Try again.";
+const BUSY_COPY = "The server is busy right now. Wait a moment, then choose Try again.";
 const MISSING_COPY =
   "dohc could not find this share in your account. The person who shared it may have ended it.";
 const WRONG_SERVER_COPY =
@@ -42,11 +41,7 @@ vi.mock("./bridge", () => ({
 
 vi.mock("./CloudLogin", () => ({
   CloudLogin: (props: { onConnected?: () => void }) => (
-    <button
-      type="button"
-      data-testid="existing-cloud-login"
-      onClick={props.onConnected}
-    >
+    <button type="button" data-testid="existing-cloud-login" onClick={props.onConnected}>
       Complete existing login
     </button>
   ),
@@ -64,7 +59,8 @@ function receivedShare(shareId: string, shareCode: string, grantId = `grant-${sh
   return {
     shareId,
     granterEmail: "granter@dohc.test",
-    subjectName: "Trip plans", sharerName: "Ana",
+    subjectName: "Trip plans",
+    sharerName: "Ana",
     grantId,
     generation: 1,
     createdAtMs: 1,
@@ -75,19 +71,34 @@ function receivedShare(shareId: string, shareCode: string, grantId = `grant-${sh
 }
 
 it("opens an Edit handoff as a standalone live view while mounts remain read-only", async () => {
-  bridgeMock.getRelayReceivedShare.mockResolvedValue({found: true,
-    share: {...receivedShare("share-edit", "edit-code"), access: "edit"}});
+  bridgeMock.getRelayReceivedShare.mockResolvedValue({
+    found: true,
+    share: { ...receivedShare("share-edit", "edit-code"), access: "edit" },
+  });
   const onWorkspaceReady = vi.fn();
-  render(<ShareHandoffSurface status={{status: "done", statusId: "edit-status", shareId: "share-edit"}}
-    onWorkspaceReady={onWorkspaceReady} onBack={() => {}} onOpened={() => {}}
-    mountInto={{workspaceId: "host", onMounted: vi.fn()}} />);
+  render(
+    <ShareHandoffSurface
+      status={{ status: "done", statusId: "edit-status", shareId: "share-edit" }}
+      onWorkspaceReady={onWorkspaceReady}
+      onBack={() => {}}
+      onOpened={() => {}}
+      mountInto={{ workspaceId: "host", onMounted: vi.fn() }}
+    />,
+  );
   const user = userEvent.setup();
   expect(await screen.findByTestId("open-share-choose-folder")).toBeTruthy();
-  expect(screen.getByTestId("open-share-summary").textContent).toContain("Trip plans · Ana (granter@dohc.test) · Edit access");
+  expect(screen.getByTestId("open-share-summary").textContent).toContain(
+    "Trip plans · Ana (granter@dohc.test) · Edit access",
+  );
   expect(screen.getByTestId("open-share-mode-separate").getAttribute("aria-checked")).toBe("true");
   await user.click(screen.getByTestId("open-share-choose-folder"));
   await user.click(screen.getByTestId("open-share-start"));
-  await waitFor(() => expect(bridgeMock.openSharedView).toHaveBeenCalledWith({shareCode: "edit-code", rootPath: "/home/sam/dohc/shared"}));
+  await waitFor(() =>
+    expect(bridgeMock.openSharedView).toHaveBeenCalledWith({
+      shareCode: "edit-code",
+      rootPath: "/home/sam/dohc/shared",
+    }),
+  );
   expect(bridgeMock.mountShare).not.toHaveBeenCalled();
   expect(onWorkspaceReady).toHaveBeenCalled();
 });
@@ -157,17 +168,14 @@ describe("ShareHandoffSurface", () => {
       );
 
       expect(screen.getByRole("heading", { name: "Open a share" })).toBeTruthy();
+      expect(screen.getByText("You're signed in as current-account@dohc.test.")).toBeTruthy();
       expect(
-        screen.getByText("You're signed in as current-account@dohc.test."),
+        screen.getByText("If you open this share, the person who shared it will see that email."),
       ).toBeTruthy();
-      expect(
-        screen.getByText(
-          "If you open this share, the person who shared it will see that email.",
-        ),
-      ).toBeTruthy();
-      expect(
-        screen.getAllByRole("button").map((button) => button.textContent),
-      ).toEqual(["Agree and open", "Cancel"]);
+      expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual([
+        "Agree and open",
+        "Cancel",
+      ]);
 
       await user.click(screen.getByRole("button", { name: "Agree and open" }));
       expect(bridgeMock.acceptShareHandoff).toHaveBeenCalledOnce();
@@ -195,9 +203,10 @@ describe("ShareHandoffSurface", () => {
       />,
     );
 
-    expect(
-      screen.getAllByRole("button").map((button) => button.textContent),
-    ).toEqual(["Agree and open", "Cancel"]);
+    expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual([
+      "Agree and open",
+      "Cancel",
+    ]);
 
     fireEvent.mouseUp(window, { button: 0 });
     expect(onBack).not.toHaveBeenCalled();
@@ -456,11 +465,9 @@ describe("ShareHandoffSurface", () => {
       />,
     );
 
-    expect(
-      (await screen.findByTestId("open-share-mode-mount")).getAttribute(
-        "aria-checked",
-      ),
-    ).toBe("true");
+    expect((await screen.findByTestId("open-share-mode-mount")).getAttribute("aria-checked")).toBe(
+      "true",
+    );
     expect(screen.getByTestId("open-share-mode-separate")).toBeTruthy();
     expect(screen.queryByTestId("open-share-code")).toBeNull();
     expect(bridgeMock.mountShare).not.toHaveBeenCalled();
@@ -481,12 +488,10 @@ describe("ShareHandoffSurface", () => {
 
   it("checks the exact share again without retrying redemption when it is missing", async () => {
     const user = userEvent.setup();
-    bridgeMock.getRelayReceivedShare
-      .mockResolvedValueOnce({ found: false })
-      .mockResolvedValueOnce({
-        found: true,
-        share: receivedShare("share-exact", "ordinary-exact-share-code"),
-      });
+    bridgeMock.getRelayReceivedShare.mockResolvedValueOnce({ found: false }).mockResolvedValueOnce({
+      found: true,
+      share: receivedShare("share-exact", "ordinary-exact-share-code"),
+    });
 
     render(
       <ShareHandoffSurface
@@ -558,30 +563,36 @@ describe("ShareHandoffSurface", () => {
 
   it.each([
     [true, "Find it in Chats, in a workspace of your own."],
-    [false, "Find it in Chats, in a workspace of your own. Create one from Manage workspaces first."],
-  ])("says where a Group invitation or message request waits, with a workspace of their own: %s, and opens nothing", async (ownWorkspace, copy) => {
-    bridgeMock.getRelayReceivedShare.mockResolvedValueOnce({ found: true, chats: true });
+    [
+      false,
+      "Find it in Chats, in a workspace of your own. Create one from Manage workspaces first.",
+    ],
+  ])(
+    "says where a Group invitation or message request waits, with a workspace of their own: %s, and opens nothing",
+    async (ownWorkspace, copy) => {
+      bridgeMock.getRelayReceivedShare.mockResolvedValueOnce({ found: true, chats: true });
 
-    render(
-      <ShareHandoffSurface
-        status={{
-          status: "done",
-          statusId: "status-test",
-          shareId: "share-group",
-        }}
-        onWorkspaceReady={() => {}}
-        onBack={() => {}}
-        onOpened={() => {}}
-        ownWorkspace={ownWorkspace}
-      />,
-    );
+      render(
+        <ShareHandoffSurface
+          status={{
+            status: "done",
+            statusId: "status-test",
+            shareId: "share-group",
+          }}
+          onWorkspaceReady={() => {}}
+          onBack={() => {}}
+          onOpened={() => {}}
+          ownWorkspace={ownWorkspace}
+        />,
+      );
 
-    expect((await screen.findByTestId("handoff-opens-in-chats")).textContent).toBe(copy);
-    expect(screen.queryByTestId("open-shared-view")).toBeNull();
-    expect(screen.queryByText(MISSING_COPY)).toBeNull();
-    expect(bridgeMock.openSharedView).not.toHaveBeenCalled();
-    expect(bridgeMock.mountShare).not.toHaveBeenCalled();
-  });
+      expect((await screen.findByTestId("handoff-opens-in-chats")).textContent).toBe(copy);
+      expect(screen.queryByTestId("open-shared-view")).toBeNull();
+      expect(screen.queryByText(MISSING_COPY)).toBeNull();
+      expect(bridgeMock.openSharedView).not.toHaveBeenCalled();
+      expect(bridgeMock.mountShare).not.toHaveBeenCalled();
+    },
+  );
 
   it("does not let a stale exact lookup repaint a newer share id or a settled failure", async () => {
     const first = deferred<ExactReceivedShareResult>();
@@ -721,12 +732,8 @@ describe("ShareHandoffSurface", () => {
 
   it("does not expose the received share code before an explicit open", async () => {
     const receivedShareCode = "received-row-share-code-secret";
-    const consoleError = vi
-      .spyOn(console, "error")
-      .mockImplementation(() => undefined);
-    const consoleLog = vi
-      .spyOn(console, "log")
-      .mockImplementation(() => undefined);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const consoleLog = vi.spyOn(console, "log").mockImplementation(() => undefined);
     try {
       bridgeMock.getRelayReceivedShare.mockResolvedValue({
         found: true,
@@ -752,10 +759,7 @@ describe("ShareHandoffSurface", () => {
       const unrelatedBridgeCalls = JSON.stringify(
         Object.values(bridgeMock).flatMap((mock) => mock.mock.calls),
       );
-      const consoleCalls = JSON.stringify([
-        ...consoleError.mock.calls,
-        ...consoleLog.mock.calls,
-      ]);
+      const consoleCalls = JSON.stringify([...consoleError.mock.calls, ...consoleLog.mock.calls]);
       expect(rendered).not.toContain(receivedShareCode);
       expect(unrelatedBridgeCalls).not.toContain(receivedShareCode);
       expect(consoleCalls).not.toContain(receivedShareCode);

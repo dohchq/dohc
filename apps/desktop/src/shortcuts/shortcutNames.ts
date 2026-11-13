@@ -1,4 +1,8 @@
-import { COMMAND_ROWS, isStaticCommandId, type StaticCommandId } from "../renderer/commands/commandRows";
+import {
+  COMMAND_ROWS,
+  isStaticCommandId,
+  type StaticCommandId,
+} from "../renderer/commands/commandRows";
 import { SHORTCUTS, type ShortcutId, type ShortcutOwner } from "./shortcutRegistry";
 
 // A shortcut that runs a command row takes the row's label; these name the
@@ -8,7 +12,7 @@ import { SHORTCUTS, type ShortcutId, type ShortcutOwner } from "./shortcutRegist
 const NAMES = {
   "command-palette": "Command palette",
   "close-window": "Close window",
-  "quit": "Quit",
+  quit: "Quit",
   "history-restore-undo": "Undo restore",
   "dev-panel": "Dev tools",
   "editor-undo": "Undo",
@@ -58,13 +62,22 @@ export function shortcutName(id: ShortcutId): string {
 
 // Whether Settings > Keyboard lists the shortcut: only on its platforms, and
 // Dev tools' key only where the dev tools show.
-export function shortcutShown(id: ShortcutId, platform: string | undefined, devTools: boolean): boolean {
+export function shortcutShown(
+  id: ShortcutId,
+  platform: string | undefined,
+  devTools: boolean,
+): boolean {
   const shortcut: { owner: ShortcutOwner; platforms?: readonly string[] } = SHORTCUTS[id];
-  return (!shortcut.platforms || shortcut.platforms.includes(platform ?? "")) && (shortcut.owner !== "dev" || devTools);
+  return (
+    (!shortcut.platforms || shortcut.platforms.includes(platform ?? "")) &&
+    (shortcut.owner !== "dev" || devTools)
+  );
 }
 
 // The names Settings > Keyboard lists, once each, for Settings search.
 export function shownShortcutNames(platform: string | undefined, devTools: boolean): string[] {
-  const ids = (Object.keys(SHORTCUTS) as ShortcutId[]).filter((id) => shortcutShown(id, platform, devTools));
+  const ids = (Object.keys(SHORTCUTS) as ShortcutId[]).filter((id) =>
+    shortcutShown(id, platform, devTools),
+  );
   return [...new Set(ids.map(shortcutName))];
 }

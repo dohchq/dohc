@@ -11,66 +11,123 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   return { ...actual, open: vi.fn(actual.open), lstat: vi.fn(actual.lstat) };
 });
 
-const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
-afterEach(() => { vi.restoreAllMocks(); vi.mocked(fs.lstat).mockReset(); vi.mocked(fs.open).mockReset(); });
+const { DatabaseSync } = createRequire(import.meta.url)(
+  "node:sqlite",
+) as typeof import("node:sqlite");
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.mocked(fs.lstat).mockReset();
+  vi.mocked(fs.open).mockReset();
+});
 
-it.each(["before open", "after open"])("refuses a log replaced %s before appending any edit", async (when) => {
-  const root = await createTestScratch("dohc-database-log-identity-");
-  const absolutePath = join(root, "data.sqlite");
-  const db = new DatabaseSync(absolutePath);
-  try {
-    db.exec("CREATE TABLE items (id INTEGER PRIMARY KEY, value TEXT); INSERT INTO items VALUES (1, 'before')");
-  } finally { db.close(); }
-  const logPath = join(root, "operations.jsonl");
-  const replacement = join(root, "replacement.jsonl");
-  const parked = join(root, "original.jsonl");
-  await fs.writeFile(logPath, "");
-  await fs.writeFile(replacement, "replacement\n");
-  const open = fs.open;
-  vi.mocked(fs.open).mockImplementationOnce(async (...args: Parameters<typeof fs.open>) => {
-    const swap = async () => {
-      await fs.rename(logPath, parked);
-      await fs.rename(replacement, logPath);
-    };
-    if (when === "before open") await swap();
-    const handle = await open(...args);
-    if (when === "after open") await swap();
-    return handle;
-  });
-  const edit = { table: "items", op: "update", pkColumn: "id", rowId: 1, payload: { value: "changed" } } as const;
-  await expect(editDatabaseAtPath({
-    absolutePath, resultPath: "data.sqlite", logPath, statePath: join(root, "state.sqlite"), edit, pageOffset: 0,
-    storageIdentity: await fs.lstat(root, { bigint: true }),
-    operation: {
-      operationId: "swap", databasePath: "data.sqlite", table: "items", op: "update", rowId: "1",
-      payload: edit.payload, appliedAt: 1, author: { kind: "user", userId: "local" },
-    },
-  })).rejects.toThrow(/changed while dohc opened it.*Stop other programs.*Then retry\./);
-  expect(await fs.readFile(logPath, "utf8")).toBe("replacement\n");
-  expect(await fs.readFile(parked, "utf8")).toBe("");
-  expect(readDatabaseSnapshotAtPath(absolutePath, "data.sqlite").tables[0]?.rows[0]?.value).toBe("before");
-}, 30_000);
+it.each(["before open", "after open"])(
+  "refuses a log replaced %s before appending any edit",
+  async (when) => {
+    const root = await createTestScratch("dohc-database-log-identity-");
+    const absolutePath = join(root, "data.sqlite");
+    const db = new DatabaseSync(absolutePath);
+    try {
+      db.exec(
+        "CREATE TABLE items (id INTEGER PRIMARY KEY, value TEXT); INSERT INTO items VALUES (1, 'before')",
+      );
+    } finally {
+      db.close();
+    }
+    const logPath = join(root, "operations.jsonl");
+    const replacement = join(root, "replacement.jsonl");
+    const parked = join(root, "original.jsonl");
+    await fs.writeFile(logPath, "");
+    await fs.writeFile(replacement, "replacement\n");
+    const open = fs.open;
+    vi.mocked(fs.open).mockImplementationOnce(async (...args: Parameters<typeof fs.open>) => {
+      const swap = async () => {
+        await fs.rename(logPath, parked);
+        await fs.rename(replacement, logPath);
+      };
+      if (when === "before open") await swap();
+      const handle = await open(...args);
+      if (when === "after open") await swap();
+      return handle;
+    });
+    const edit = {
+      table: "items",
+      op: "update",
+      pkColumn: "id",
+      rowId: 1,
+      payload: { value: "changed" },
+    } as const;
+    await expect(
+      editDatabaseAtPath({
+        absolutePath,
+        resultPath: "data.sqlite",
+        logPath,
+        statePath: join(root, "state.sqlite"),
+        edit,
+        pageOffset: 0,
+        storageIdentity: await fs.lstat(root, { bigint: true }),
+        operation: {
+          operationId: "swap",
+          databasePath: "data.sqlite",
+          table: "items",
+          op: "update",
+          rowId: "1",
+          payload: edit.payload,
+          appliedAt: 1,
+          author: { kind: "user", userId: "local" },
+        },
+      }),
+    ).rejects.toThrow(/changed while dohc opened it.*Stop other programs.*Then retry\./);
+    expect(await fs.readFile(logPath, "utf8")).toBe("replacement\n");
+    expect(await fs.readFile(parked, "utf8")).toBe("");
+    expect(readDatabaseSnapshotAtPath(absolutePath, "data.sqlite").tables[0]?.rows[0]?.value).toBe(
+      "before",
+    );
+  },
+  30_000,
+);
 
 async function editFixture() {
   const root = await createTestScratch("dohc-database-log-open-");
   const absolutePath = join(root, "data.sqlite");
   const db = new DatabaseSync(absolutePath);
   try {
-    db.exec("CREATE TABLE items (id INTEGER PRIMARY KEY, value TEXT); INSERT INTO items VALUES (1, 'before')");
-  } finally { db.close(); }
+    db.exec(
+      "CREATE TABLE items (id INTEGER PRIMARY KEY, value TEXT); INSERT INTO items VALUES (1, 'before')",
+    );
+  } finally {
+    db.close();
+  }
   const directory = join(root, "storage");
   await fs.mkdir(directory);
   const logPath = join(directory, "operations.jsonl");
   await fs.writeFile(logPath, "");
-  const edit = { table: "items", op: "update", pkColumn: "id", rowId: 1, payload: { value: "changed" } } as const;
+  const edit = {
+    table: "items",
+    op: "update",
+    pkColumn: "id",
+    rowId: 1,
+    payload: { value: "changed" },
+  } as const;
   return {
-    root, directory,
+    root,
+    directory,
     input: {
-      absolutePath, resultPath: "data.sqlite", logPath, statePath: join(directory, "state.sqlite"), edit, pageOffset: 0,
+      absolutePath,
+      resultPath: "data.sqlite",
+      logPath,
+      statePath: join(directory, "state.sqlite"),
+      edit,
+      pageOffset: 0,
       storageIdentity: await fs.lstat(directory, { bigint: true }),
       operation: {
-        operationId: "open", databasePath: "data.sqlite", table: "items", op: "update", rowId: "1",
-        payload: edit.payload, appliedAt: 1, author: { kind: "user", userId: "local" },
+        operationId: "open",
+        databasePath: "data.sqlite",
+        table: "items",
+        op: "update",
+        rowId: "1",
+        payload: edit.payload,
+        appliedAt: 1,
+        author: { kind: "user", userId: "local" },
       } as const,
     },
   };
@@ -91,7 +148,9 @@ it("refuses append and restore handles that opened different files", async () =>
   expect(await fs.readFile(input.logPath, "utf8")).toBe("replacement\n");
   expect(await fs.readFile(parked, "utf8")).toBe("");
   await expect(fs.lstat(input.statePath)).rejects.toMatchObject({ code: "ENOENT" });
-  expect(readDatabaseSnapshotAtPath(input.absolutePath, "data.sqlite").tables[0]?.rows[0]?.value).toBe("before");
+  expect(
+    readDatabaseSnapshotAtPath(input.absolutePath, "data.sqlite").tables[0]?.rows[0]?.value,
+  ).toBe("before");
 });
 
 it("refuses a junction swapped in while opening the log before opening state SQLite", async () => {
@@ -109,8 +168,12 @@ it("refuses a junction swapped in while opening the log before opening state SQL
   expect(await fs.readdir(outside)).toEqual(["operations.jsonl"]);
   expect(await fs.readFile(join(outside, "operations.jsonl"), "utf8")).toBe("");
   expect(await fs.readdir(`${directory}-parked`)).toEqual([]);
-  await expect(fs.lstat(join(`${directory}-parked`, "state.sqlite"))).rejects.toMatchObject({ code: "ENOENT" });
-  expect(readDatabaseSnapshotAtPath(input.absolutePath, "data.sqlite").tables[0]?.rows[0]?.value).toBe("before");
+  await expect(fs.lstat(join(`${directory}-parked`, "state.sqlite"))).rejects.toMatchObject({
+    code: "ENOENT",
+  });
+  expect(
+    readDatabaseSnapshotAtPath(input.absolutePath, "data.sqlite").tables[0]?.rows[0]?.value,
+  ).toBe("before");
 });
 
 it("refuses a hard-linked log in the worker without relying on the main-process guard", async () => {
@@ -120,7 +183,9 @@ it("refuses a hard-linked log in the worker without relying on the main-process 
   await expect(editDatabaseAtPath(input)).rejects.toThrow(/has another link/);
   expect(await fs.readFile(target, "utf8")).toBe("");
   await expect(fs.lstat(input.statePath)).rejects.toMatchObject({ code: "ENOENT" });
-  expect(readDatabaseSnapshotAtPath(input.absolutePath, "data.sqlite").tables[0]?.rows[0]?.value).toBe("before");
+  expect(
+    readDatabaseSnapshotAtPath(input.absolutePath, "data.sqlite").tables[0]?.rows[0]?.value,
+  ).toBe("before");
 });
 
 it("counts through the checked log handle when its name becomes a link before reading", async () => {
@@ -144,11 +209,18 @@ it("counts through the checked log handle when its name becomes a link before re
   expect(fs.open).toHaveBeenCalledTimes(2);
   const counter = new DatabaseSync(input.statePath);
   try {
-    expect(counter.prepare("SELECT value FROM database_operation_state WHERE key = 'last_version'").get()?.value).toBe(41);
-  } finally { counter.close(); }
+    expect(
+      counter.prepare("SELECT value FROM database_operation_state WHERE key = 'last_version'").get()
+        ?.value,
+    ).toBe(41);
+  } finally {
+    counter.close();
+  }
   expect(await fs.readFile(target, "utf8")).toBe('{"version":999}\n');
   expect(await fs.readFile(parked, "utf8")).toBe('{"version":40}\n');
-  expect(readDatabaseSnapshotAtPath(input.absolutePath, "data.sqlite").tables[0]?.rows[0]?.value).toBe("before");
+  expect(
+    readDatabaseSnapshotAtPath(input.absolutePath, "data.sqlite").tables[0]?.rows[0]?.value,
+  ).toBe("before");
 });
 
 it("accepts a log on a volume that reports zero links", async () => {
@@ -162,7 +234,9 @@ it("accepts a log on a volume that reports zero links", async () => {
   vi.mocked(fs.open).mockImplementationOnce(async (...args: Parameters<typeof fs.open>) => {
     const handle = await open(...args);
     const stats = await handle.stat({ bigint: true });
-    vi.spyOn(handle, "stat").mockResolvedValueOnce(Object.assign(Object.create(stats), { nlink: 0n }));
+    vi.spyOn(handle, "stat").mockResolvedValueOnce(
+      Object.assign(Object.create(stats), { nlink: 0n }),
+    );
     return handle;
   });
   await expect(editDatabaseAtPath(input)).resolves.toMatchObject({ version: 1 });
@@ -192,30 +266,44 @@ it("commits the row and matching log line when close fails after a successful sy
   const result = await editDatabaseAtPath(input);
   expect(result.version).toBe(1);
   expect(result.page.rows[0]?.value).toBe("changed");
-  expect(readDatabaseSnapshotAtPath(input.absolutePath, "data.sqlite").tables[0]?.rows[0]?.value).toBe("changed");
+  expect(
+    readDatabaseSnapshotAtPath(input.absolutePath, "data.sqlite").tables[0]?.rows[0]?.value,
+  ).toBe("changed");
   const lines = (await fs.readFile(input.logPath, "utf8")).trimEnd().split("\n");
   expect(lines).toHaveLength(1);
   expect(JSON.parse(lines[0]!)).toEqual({ ...input.operation, version: result.version });
-  expect(reported).toHaveBeenCalledExactlyOnceWith("[desktop] database operation log close failed after sync:", closeError);
+  expect(reported).toHaveBeenCalledExactlyOnceWith(
+    "[desktop] database operation log close failed after sync:",
+    closeError,
+  );
   await expect(editDatabaseAtPath(input)).resolves.toMatchObject({ version: 2 });
 });
 
-it.each(["edit", "sync"])("preserves rollback and the %s error when log close also fails", async (failure) => {
-  const { input } = await editFixture();
-  const open = fs.open;
-  vi.mocked(fs.open).mockImplementationOnce(async (...args: Parameters<typeof fs.open>) => {
-    const handle = await open(...args);
-    if (failure === "sync") vi.spyOn(handle, "sync").mockRejectedValueOnce(new Error("log sync failed"));
-    const close = handle.close.bind(handle);
-    vi.spyOn(handle, "close").mockImplementationOnce(async () => {
-      await close();
-      throw new Error("log close failed");
+it.each(["edit", "sync"])(
+  "preserves rollback and the %s error when log close also fails",
+  async (failure) => {
+    const { input } = await editFixture();
+    const open = fs.open;
+    vi.mocked(fs.open).mockImplementationOnce(async (...args: Parameters<typeof fs.open>) => {
+      const handle = await open(...args);
+      if (failure === "sync")
+        vi.spyOn(handle, "sync").mockRejectedValueOnce(new Error("log sync failed"));
+      const close = handle.close.bind(handle);
+      vi.spyOn(handle, "close").mockImplementationOnce(async () => {
+        await close();
+        throw new Error("log close failed");
+      });
+      return handle;
     });
-    return handle;
-  });
-  await expect(editDatabaseAtPath({
-    ...input, edit: { ...input.edit, table: failure === "edit" ? "missing" : "items" },
-  })).rejects.toThrow(failure === "edit" ? /no such table: missing/ : /log sync failed/);
-  expect(readDatabaseSnapshotAtPath(input.absolutePath, "data.sqlite").tables[0]?.rows[0]?.value).toBe("before");
-  expect(await fs.readFile(input.logPath, "utf8")).toBe("");
-});
+    await expect(
+      editDatabaseAtPath({
+        ...input,
+        edit: { ...input.edit, table: failure === "edit" ? "missing" : "items" },
+      }),
+    ).rejects.toThrow(failure === "edit" ? /no such table: missing/ : /log sync failed/);
+    expect(
+      readDatabaseSnapshotAtPath(input.absolutePath, "data.sqlite").tables[0]?.rows[0]?.value,
+    ).toBe("before");
+    expect(await fs.readFile(input.logPath, "utf8")).toBe("");
+  },
+);

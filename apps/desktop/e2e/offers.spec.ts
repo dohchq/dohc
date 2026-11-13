@@ -34,11 +34,17 @@ test("@offers an outside write makes a folder an app, and Run opens it", async (
 
     const sentinel = "Written from outside dohc.";
     await writeWorkspaceFiles(temp, [
-      { path: "site/index.html", contents: `<!doctype html><title>Site</title><main>${sentinel}</main>` },
+      {
+        path: "site/index.html",
+        contents: `<!doctype html><title>Site</title><main>${sentinel}</main>`,
+      },
     ]);
     await expect(folder).toHaveAttribute("data-app", "true");
     // Still a tree row: it keeps its name and its expansion.
-    await expect(page.getByRole("treeitem", { name: "site" })).toHaveAttribute("aria-expanded", "true");
+    await expect(page.getByRole("treeitem", { name: "site" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
 
     // Only the entry file offers Run.
     await explorerRow(page, "site/notes.md").click();

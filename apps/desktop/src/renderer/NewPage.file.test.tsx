@@ -31,9 +31,15 @@ function bridgeFor(open: Open) {
       status: "written",
       contentHash: "f".repeat(64),
     })),
-    listWorkspaceFiles: vi.fn(async () => ({ files: [{ path: "Lisbon.md", kind: "file" }], folders: [] })),
+    listWorkspaceFiles: vi.fn(async () => ({
+      files: [{ path: "Lisbon.md", kind: "file" }],
+      folders: [],
+    })),
     readWorkspaceDatabase: vi.fn(async () => ({ tables: [] })),
-    getWorkspaceSettings: vi.fn(async () => ({ settings: DEFAULT_WORKSPACE_SETTINGS, source: "default" as const })),
+    getWorkspaceSettings: vi.fn(async () => ({
+      settings: DEFAULT_WORKSPACE_SETTINGS,
+      source: "default" as const,
+    })),
     openEngineYDocSession: vi.fn(async () => open),
     closeEngineYDocSession: vi.fn(async () => undefined),
   };
@@ -50,7 +56,13 @@ function renderNewPage() {
       body=""
       onBodyChange={() => undefined}
       onLeaveTitle={() => undefined}
-      file={withFile ? (onEditorReady) => <FileInspector workspaceId="ws-1" path="Lisbon.md" onEditorReady={onEditorReady} /> : null}
+      file={
+        withFile
+          ? (onEditorReady) => (
+              <FileInspector workspaceId="ws-1" path="Lisbon.md" onEditorReady={onEditorReady} />
+            )
+          : null
+      }
       handedOff={false}
       onHandedOff={() => undefined}
     />
@@ -93,7 +105,10 @@ it("hands the page to the plain editor when its file opens without a live sessio
   expect(editor.textContent).toBe("Day one");
   expect(editor).toBe(document.activeElement);
   await waitFor(
-    () => expect(bridge.writeWorkspaceText.mock.calls.at(-1)?.[0].text).toMatch(/^---\ntitle: Lisbon\n---\n\nDay one\n?$/),
+    () =>
+      expect(bridge.writeWorkspaceText.mock.calls.at(-1)?.[0].text).toMatch(
+        /^---\ntitle: Lisbon\n---\n\nDay one\n?$/,
+      ),
     { timeout: 3_000 },
   );
 });

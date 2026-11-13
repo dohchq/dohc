@@ -3,11 +3,21 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { type CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 import { createTestScratch } from "./testTemp";
-import { engine, roots, harness, seedSharedFiles, scope, settleShareViewThroughOwner, applyShareViewFileImport, storePaths, replicationLogRows, exists } from './shareViewFileOps.fixture';
+import {
+  engine,
+  roots,
+  harness,
+  seedSharedFiles,
+  scope,
+  settleShareViewThroughOwner,
+  applyShareViewFileImport,
+  storePaths,
+  replicationLogRows,
+  exists,
+} from "./shareViewFileOps.fixture";
 
 describe("share-view file operations through the real store", () => {
-
-it.skipIf(engine.missing)(
+  it.skipIf(engine.missing)(
     "reserves an absent projection's store name without regard to case",
     async () => {
       const view = await harness("dohc-share-import-store-case-", "edit");
@@ -22,9 +32,7 @@ it.skipIf(engine.missing)(
         metadata: { origin: "sync" },
       });
       await mkdir(join(view.rootPath, "docs"), { recursive: true });
-      const sourceDir = await createTestScratch(
-        "dohc-share-import-store-case-src-",
-      );
+      const sourceDir = await createTestScratch("dohc-share-import-store-case-src-");
       roots.push(sourceDir);
       const source = join(sourceDir, "note.md");
       await writeFile(source, "imported\n", "utf8");
@@ -40,35 +48,27 @@ it.skipIf(engine.missing)(
         outcome,
         "exact-case store lookup accepts a second engine path for the same physical name",
       ).toEqual({ imported: ["docs/note (2).md"], skipped: 0 });
-      expect(await storePaths(view)).toEqual([
-        "docs/Note.md",
-        "docs/note (2).md",
-      ]);
+      expect(await storePaths(view)).toEqual(["docs/Note.md", "docs/note (2).md"]);
       expect(await exists(join(view.rootPath, "docs", "Note.md"))).toBe(false);
-      await expect(
-        readFile(join(view.rootPath, "docs", "note (2).md"), "utf8"),
-      ).resolves.toBe("imported\n");
+      await expect(readFile(join(view.rootPath, "docs", "note (2).md"), "utf8")).resolves.toBe(
+        "imported\n",
+      );
     },
     60_000,
   );
 
-it.skipIf(engine.missing)(
+  it.skipIf(engine.missing)(
     "keeps capture disabled after chat opens first, imports sources, and renames a collision",
     async () => {
       const view = await harness("dohc-share-import-", "edit", {
         chatFirst: true,
       });
-      await seedSharedFiles(view, [
-        { path: "docs/note.md", text: "granter\n" },
-      ]);
+      await seedSharedFiles(view, [{ path: "docs/note.md", text: "granter\n" }]);
       const sourceDir = await createTestScratch("dohc-share-import-src-");
       roots.push(sourceDir);
       await writeFile(join(sourceDir, "added.md"), "imported\n", "utf8");
       await writeFile(join(sourceDir, "note.md"), "collides\n", "utf8");
-      await writeFile(
-        join(sourceDir, "picture.png"),
-        Buffer.from([0x89, 0x50, 0x00, 0x01]),
-      );
+      await writeFile(join(sourceDir, "picture.png"), Buffer.from([0x89, 0x50, 0x00, 0x01]));
       // A local addition whose name an import would otherwise take.
       await writeFile(join(sourceDir, "mine.md"), "imported mine\n", "utf8");
       await writeFile(join(view.rootPath, "docs", "mine.md"), "mine\n", "utf8");
@@ -100,10 +100,7 @@ it.skipIf(engine.missing)(
         readFile(join(view.rootPath, "docs", "mine.md"), "utf8"),
         "an import that only asks the store overwrites the recipient's own file",
       ).resolves.toBe("mine\n");
-      expect(
-        outcome.skipped,
-        "a source the engine cannot own is counted as imported",
-      ).toBe(1);
+      expect(outcome.skipped, "a source the engine cannot own is counted as imported").toBe(1);
       const paths = await storePaths(view);
       expect(
         paths,
@@ -120,28 +117,26 @@ it.skipIf(engine.missing)(
         replicationLogRows(view.rootPath),
         "an import that only copies files is a change the submit lane cannot see",
       ).toBeGreaterThan(journalBefore);
-      await expect(
-        readFile(join(view.rootPath, "docs", "note (2).md"), "utf8"),
-      ).resolves.toBe("collides\n");
+      await expect(readFile(join(view.rootPath, "docs", "note (2).md"), "utf8")).resolves.toBe(
+        "collides\n",
+      );
       await expect(
         readFile(join(view.rootPath, "docs", "note.md"), "utf8"),
         "an import that overwrites replaces the granter's file with the recipient's",
       ).resolves.toBe("granter\n");
-      await expect(
-        readFile(join(view.rootPath, "docs", "picture.png")),
-      ).resolves.toEqual(Buffer.from([0x89, 0x50, 0x00, 0x01]));
+      await expect(readFile(join(view.rootPath, "docs", "picture.png"))).resolves.toEqual(
+        Buffer.from([0x89, 0x50, 0x00, 0x01]),
+      );
       expect(await exists(join(view.rootPath, "docs", "folder"))).toBe(false);
     },
     60_000,
   );
 
-it.skipIf(engine.missing)(
+  it.skipIf(engine.missing)(
     "repairs an import whose store write landed before materialization failed",
     async () => {
       const view = await harness("dohc-share-import-repair-", "edit");
-      const sourceDir = await createTestScratch(
-        "dohc-share-import-repair-src-",
-      );
+      const sourceDir = await createTestScratch("dohc-share-import-repair-src-");
       roots.push(sourceDir);
       const source = join(sourceDir, "interrupted.md");
       await writeFile(source, "imported body\n", "utf8");
@@ -163,19 +158,16 @@ it.skipIf(engine.missing)(
         }),
       ).rejects.toThrow("projection materialization failed");
 
-      await expect(
-        settleShareViewThroughOwner(view, view.store),
-      ).resolves.toEqual({
+      await expect(settleShareViewThroughOwner(view, view.store)).resolves.toEqual({
         capturedPaths: 0,
         repairedPaths: 1,
         unjournalablePaths: [],
       });
-      await expect(
-        readFile(join(view.rootPath, "docs", "interrupted.md"), "utf8"),
-      ).resolves.toBe("imported body\n");
+      await expect(readFile(join(view.rootPath, "docs", "interrupted.md"), "utf8")).resolves.toBe(
+        "imported body\n",
+      );
       expect(await storePaths(view)).toContain("docs/interrupted.md");
     },
     60_000,
   );
-
 });

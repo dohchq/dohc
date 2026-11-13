@@ -26,8 +26,14 @@ export class WorkspaceFileListingCache {
   // in #listings still answers its own callers.
   readonly #walking = new Map<ListingEntry, string>();
 
-  constructor(private readonly platform: NodeJS.Platform = process.platform,
-    private readonly refreshContent?: (workspaceId: string, attachmentId: symbol, paths: readonly string[]) => Promise<readonly WorkspaceFileListingEntry[]>) {}
+  constructor(
+    private readonly platform: NodeJS.Platform = process.platform,
+    private readonly refreshContent?: (
+      workspaceId: string,
+      attachmentId: symbol,
+      paths: readonly string[],
+    ) => Promise<readonly WorkspaceFileListingEntry[]>,
+  ) {}
   private revision = 0;
 
   list(options: {
@@ -43,14 +49,21 @@ export class WorkspaceFileListingCache {
         // read, not the listing. An in-flight reuse is still the current walk,
         // so it stays unmarked and does not cause a redundant revalidation.
         return cached.settled
-          ? this.refresh(options.workspaceId, cached).then((listing) => ({ ...listing, cached: true }))
+          ? this.refresh(options.workspaceId, cached).then((listing) => ({
+              ...listing,
+              cached: true,
+            }))
           : cached.listing;
       }
     }
     return this.walk(options, true);
   }
 
-  private walk(options: { workspaceId: string; attachmentId: symbol; load: () => ListingPromise }, again: boolean, publish = true): ListingPromise {
+  private walk(
+    options: { workspaceId: string; attachmentId: symbol; load: () => ListingPromise },
+    again: boolean,
+    publish = true,
+  ): ListingPromise {
     const entry: ListingEntry = {
       attachmentId: options.attachmentId,
       listing: Promise.resolve({ files: [], folders: [] }),
@@ -59,10 +72,14 @@ export class WorkspaceFileListingCache {
       changed: new Set<string>(),
     };
     this.#walking.set(entry, options.workspaceId);
-    const listing = Promise.resolve().then(options.load).then(async result => {
+    const listing = Promise.resolve()
+      .then(options.load)
+      .then(async (result) => {
         for (let offset = 0; offset < result.files.length; offset += 128) {
-          for (const file of result.files.slice(offset, offset + 128)) entry.files.set(file.path, file);
-          if (offset + 128 < result.files.length) await new Promise<void>(resolve => setImmediate(resolve));
+          for (const file of result.files.slice(offset, offset + 128))
+            entry.files.set(file.path, file);
+          if (offset + 128 < result.files.length)
+            await new Promise<void>((resolve) => setImmediate(resolve));
         }
         this.#walking.delete(entry);
         // A file removed and written again behind the walk reads as changed,
@@ -71,7 +88,7 @@ export class WorkspaceFileListingCache {
         // it. That walk answers with what it finds: a path no walk lists, such
         // as a re-pointed symlink, would otherwise keep it walking. It replaces
         // the cached listing only if no newer walk has.
-        if (again && [...entry.changed].some(path => !entry.files.has(path))) {
+        if (again && [...entry.changed].some((path) => !entry.files.has(path))) {
           return this.walk(options, false, this.#listings.get(options.workspaceId) === entry);
         }
         for (const path of entry.changed) {
@@ -80,7 +97,8 @@ export class WorkspaceFileListingCache {
         }
         entry.settled = true;
         return result;
-      }).catch(error => {
+      })
+      .catch((error) => {
         this.#walking.delete(entry);
         if (this.#listings.get(options.workspaceId) === entry) {
           this.#listings.delete(options.workspaceId);
@@ -97,24 +115,30 @@ export class WorkspaceFileListingCache {
     if (!entry.changed.size) return entry.listing;
     const refreshing = this.refreshMetadata(workspaceId, entry);
     entry.refreshing = refreshing;
-    void refreshing.finally(() => { if (entry.refreshing === refreshing) delete entry.refreshing; }).catch(() => undefined);
+    void refreshing
+      .finally(() => {
+        if (entry.refreshing === refreshing) delete entry.refreshing;
+      })
+      .catch(() => undefined);
     return refreshing;
   }
 
   private async refreshMetadata(workspaceId: string, entry: ListingEntry): ListingPromise {
     const result = await entry.listing;
-    const paths = [...entry.changed].filter(path => entry.files.has(path));
-    const identities = new Map(paths.map(path => [path, entry.files.get(path)?.contentIdentity]));
+    const paths = [...entry.changed].filter((path) => entry.files.has(path));
+    const identities = new Map(paths.map((path) => [path, entry.files.get(path)?.contentIdentity]));
     entry.changed.clear();
     if (paths.length && this.refreshContent) {
       try {
         const metadata = await this.refreshContent(workspaceId, entry.attachmentId, paths);
-        if (this.#listings.get(workspaceId) === entry) for (const update of metadata) {
-          const file = entry.files.get(update.path);
-          if (file && file.contentIdentity === identities.get(update.path)) {
-            if (update.icon) file.icon = update.icon; else delete file.icon;
+        if (this.#listings.get(workspaceId) === entry)
+          for (const update of metadata) {
+            const file = entry.files.get(update.path);
+            if (file && file.contentIdentity === identities.get(update.path)) {
+              if (update.icon) file.icon = update.icon;
+              else delete file.icon;
+            }
           }
-        }
       } catch (error) {
         for (const path of paths) entry.changed.add(path);
         throw error;
@@ -128,12 +152,18 @@ export class WorkspaceFileListingCache {
    * finishes. Undefined with no listing in hand, when its walk fails, or when
    * a newer walk or a change replaced it meanwhile, since it may lack a newer file.
    */
-  async hasFile(workspaceId: string, attachmentId: symbol, matches: (path: string) => boolean): Promise<boolean | undefined> {
+  async hasFile(
+    workspaceId: string,
+    attachmentId: symbol,
+    matches: (path: string) => boolean,
+  ): Promise<boolean | undefined> {
     const entry = this.#listings.get(workspaceId);
     if (entry?.attachmentId !== attachmentId) return undefined;
     try {
       const listing = await entry.listing;
-      return this.#listings.get(workspaceId) === entry ? listing.files.some(file => matches(file.path)) : undefined;
+      return this.#listings.get(workspaceId) === entry
+        ? listing.files.some((file) => matches(file.path))
+        : undefined;
     } catch {
       return undefined;
     }
@@ -141,7 +171,9 @@ export class WorkspaceFileListingCache {
 
   observe(workspaceId: string, attachmentId: symbol, facts: readonly FileObservationFact[]): void {
     // Rules are read separately on every IPC response; they cannot change this path cache.
-    const visible = facts.filter(fact => !isWorkspaceVisibilityPolicyPath(fact.path, this.platform));
+    const visible = facts.filter(
+      (fact) => !isWorkspaceVisibilityPolicyPath(fact.path, this.platform),
+    );
     for (const [walk, id] of this.#walking) {
       if (id !== workspaceId || walk.attachmentId !== attachmentId) continue;
       for (const fact of visible) if (fact.kind === "changed") walk.changed.add(fact.path);
@@ -172,7 +204,10 @@ export class WorkspaceFileListingCache {
     if (event.pathSetChanged === false) return;
     if (
       !event.paths?.length ||
-      activityPathsAffectWorkspaceListing(event.paths.filter(path => !isWorkspaceVisibilityPolicyPath(path, this.platform)), this.platform)
+      activityPathsAffectWorkspaceListing(
+        event.paths.filter((path) => !isWorkspaceVisibilityPolicyPath(path, this.platform)),
+        this.platform,
+      )
     ) {
       this.#listings.delete(event.workspaceId);
     }

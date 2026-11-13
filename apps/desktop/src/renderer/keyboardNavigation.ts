@@ -11,10 +11,27 @@
 // from the keyboard shows where focus went. With an empty set, focus never
 // shows.
 const NAVIGATION_KEYS = new Set([
-  "Tab", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown", "F6",
+  "Tab",
+  "ArrowUp",
+  "ArrowDown",
+  "ArrowLeft",
+  "ArrowRight",
+  "Home",
+  "End",
+  "PageUp",
+  "PageDown",
+  "F6",
 ]);
 const UNCHANGED_KEYS = new Set([
-  "Shift", "Control", "Alt", "AltGraph", "Meta", "CapsLock", "Escape", "Delete", "Backspace",
+  "Shift",
+  "Control",
+  "Alt",
+  "AltGraph",
+  "Meta",
+  "CapsLock",
+  "Escape",
+  "Delete",
+  "Backspace",
 ]);
 
 export const KEYBOARD_NAV_ATTRIBUTE = "data-keyboard-nav";
@@ -22,7 +39,8 @@ export const KEYBOARD_NAV_ATTRIBUTE = "data-keyboard-nav";
 export function initKeyboardNavigation(root: Element = document.documentElement): () => void {
   const mark = (on: boolean) => {
     // An unchanged write would still restyle every element the rule matches.
-    if (root.hasAttribute(KEYBOARD_NAV_ATTRIBUTE) !== on) root.toggleAttribute(KEYBOARD_NAV_ATTRIBUTE, on);
+    if (root.hasAttribute(KEYBOARD_NAV_ATTRIBUTE) !== on)
+      root.toggleAttribute(KEYBOARD_NAV_ATTRIBUTE, on);
   };
   const onKeyDown = (event: KeyboardEvent) => {
     if (UNCHANGED_KEYS.has(event.key)) return;

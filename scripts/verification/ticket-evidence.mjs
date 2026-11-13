@@ -12,12 +12,19 @@ import { createHash } from "node:crypto";
 import { lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
+const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
 function queryWindowsProcess(pid) {
-  return execFileSync("pwsh.exe", ["-NoProfile", "-NonInteractive", "-Command",
-    `Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}' | Select-Object ProcessId,ParentProcessId,Name,@{n='CreationTimeUtc';e={$_.CreationDate.ToUniversalTime().ToString('o')}} | ConvertTo-Json -Compress`],
-  { encoding: "utf8", windowsHide: true, timeout: 60_000 });
+  return execFileSync(
+    "pwsh.exe",
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      `Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}' | Select-Object ProcessId,ParentProcessId,Name,@{n='CreationTimeUtc';e={$_.CreationDate.ToUniversalTime().ToString('o')}} | ConvertTo-Json -Compress`,
+    ],
+    { encoding: "utf8", windowsHide: true, timeout: 60_000 },
+  );
 }
 
 /**
@@ -25,17 +32,41 @@ function queryWindowsProcess(pid) {
  * it. Elsewhere, or when the lookup fails, CreationTimeUtc is null and
  * `unavailable` says why; a creation time is never inferred.
  */
-export function processIdentity({ pid = process.pid, platform = process.platform, query = queryWindowsProcess } = {}) {
+export function processIdentity({
+  pid = process.pid,
+  platform = process.platform,
+  query = queryWindowsProcess,
+} = {}) {
   const requestedAt = new Date().toISOString();
-  if (platform !== "win32") return { ProcessId: pid, CreationTimeUtc: null, requestedAt, unavailable: `Creation-time identity is recorded only on win32, not ${platform}.` };
+  if (platform !== "win32")
+    return {
+      ProcessId: pid,
+      CreationTimeUtc: null,
+      requestedAt,
+      unavailable: `Creation-time identity is recorded only on win32, not ${platform}.`,
+    };
   try {
     const rows = [].concat(JSON.parse(query(pid) || "[]"));
     const [row] = rows;
-    if (rows.length !== 1 || row?.ProcessId !== pid || typeof row.CreationTimeUtc !== "string" || !Number.isFinite(Date.parse(row.CreationTimeUtc))) {
-      throw new Error(`Win32_Process did not return one identity with a creation time for pid ${pid}.`);
+    if (
+      rows.length !== 1 ||
+      row?.ProcessId !== pid ||
+      typeof row.CreationTimeUtc !== "string" ||
+      !Number.isFinite(Date.parse(row.CreationTimeUtc))
+    ) {
+      throw new Error(
+        `Win32_Process did not return one identity with a creation time for pid ${pid}.`,
+      );
     }
-    return { ProcessId: row.ProcessId, ParentProcessId: row.ParentProcessId, Name: row.Name, CreationTimeUtc: row.CreationTimeUtc,
-      source: "Win32_Process.CreationDate", requestedAt, observedAt: new Date().toISOString() };
+    return {
+      ProcessId: row.ProcessId,
+      ParentProcessId: row.ParentProcessId,
+      Name: row.Name,
+      CreationTimeUtc: row.CreationTimeUtc,
+      source: "Win32_Process.CreationDate",
+      requestedAt,
+      observedAt: new Date().toISOString(),
+    };
   } catch (error) {
     return { ProcessId: pid, CreationTimeUtc: null, requestedAt, unavailable: error.message };
   }
@@ -51,7 +82,14 @@ export function processIdentity({ pid = process.pid, platform = process.platform
  */
 export function ticketEvidence({ output, checkout, commit, producer, persist }) {
   const directory = join(output, "ticket-evidence");
-  const record = { schema: "dohc-verification-ticket-evidence-v1", checkout, commit, producer, observations: [], cleanup: [] };
+  const record = {
+    schema: "dohc-verification-ticket-evidence-v1",
+    checkout,
+    commit,
+    producer,
+    observations: [],
+    cleanup: [],
+  };
   function observe({ root, kind, name, path }) {
     const readStartedAt = new Date().toISOString();
     const bytes = readFileSync(path);
@@ -59,16 +97,41 @@ export function ticketEvidence({ output, checkout, commit, producer, persist }) 
     const text = bytes.toString("utf8");
     const index = record.observations.length + 1;
     const file = `${String(index).padStart(2, "0")}-${name}`;
-    const observation = { schema: "dohc-verification-ticket-observation-v1", meaning: "producer-before-admission", index,
-      queueRoot: root, kind, ticket: name, path, readStartedAt, readFinishedAt, bytes: bytes.length, sha256: sha256(bytes),
-      text, payload: JSON.parse(text), payloadFile: `ticket-evidence/${file}`, checkout, commit, producer };
+    const observation = {
+      schema: "dohc-verification-ticket-observation-v1",
+      meaning: "producer-before-admission",
+      index,
+      queueRoot: root,
+      kind,
+      ticket: name,
+      path,
+      readStartedAt,
+      readFinishedAt,
+      bytes: bytes.length,
+      sha256: sha256(bytes),
+      text,
+      payload: JSON.parse(text),
+      payloadFile: `ticket-evidence/${file}`,
+      checkout,
+      commit,
+      producer,
+    };
     mkdirSync(directory, { recursive: true });
     writeFileSync(join(directory, file), bytes, { flag: "wx" });
-    if (sha256(readFileSync(join(directory, file))) !== observation.sha256) throw new Error(`The retained copy of ${name} differs from the bytes read.`);
+    if (sha256(readFileSync(join(directory, file))) !== observation.sha256)
+      throw new Error(`The retained copy of ${name} differs from the bytes read.`);
     const observationText = JSON.stringify(observation, null, 2) + "\n";
     writeFileSync(join(directory, `${file}.observation.json`), observationText, { flag: "wx" });
-    record.observations.push({ index, kind, ticket: name, path, payloadFile: observation.payloadFile, sha256: observation.sha256,
-      observationFile: `ticket-evidence/${file}.observation.json`, observationSha256: sha256(observationText) });
+    record.observations.push({
+      index,
+      kind,
+      ticket: name,
+      path,
+      payloadFile: observation.payloadFile,
+      sha256: observation.sha256,
+      observationFile: `ticket-evidence/${file}.observation.json`,
+      observationSha256: sha256(observationText),
+    });
     persist();
   }
   function settle() {
@@ -78,12 +141,15 @@ export function ticketEvidence({ output, checkout, commit, producer, persist }) 
         lstatSync(path);
         return { index, ticket, path, checkedAt, state: "present" };
       } catch (error) {
-        return error.code === "ENOENT" ? { index, ticket, path, checkedAt, state: "absent" }
+        return error.code === "ENOENT"
+          ? { index, ticket, path, checkedAt, state: "absent" }
           : { index, ticket, path, checkedAt, state: "unreadable", error: error.message };
       }
     });
-    const failed = record.cleanup.filter(entry => entry.state !== "absent");
-    return failed.length ? `Verification ticket cleanup is unverified: ${failed.map(entry => `${entry.ticket} is ${entry.state}`).join("; ")}.` : null;
+    const failed = record.cleanup.filter((entry) => entry.state !== "absent");
+    return failed.length
+      ? `Verification ticket cleanup is unverified: ${failed.map((entry) => `${entry.ticket} is ${entry.state}`).join("; ")}.`
+      : null;
   }
   return { record, observe, settle };
 }

@@ -7,7 +7,9 @@ vi.hoisted(() => {
     observe() {}
     unobserve() {}
     disconnect() {}
-    takeRecords(): never[] { return []; }
+    takeRecords(): never[] {
+      return [];
+    }
   }
   Object.assign(globalThis, { ResizeObserver: ObserverStub, IntersectionObserver: ObserverStub });
 });
@@ -38,16 +40,23 @@ function channel(id: string, name: string, createdAtMs: number) {
 function bridgeWithChannels(state: WorkspaceUiState | null) {
   const bridge = makeBridge(Promise.resolve(state));
   bridge.listChatChannels.mockResolvedValue({
-    channels: [channel("channel-1", "General", 1_700_000_000_000), channel("channel-2", "random", 1_700_000_000_001)],
+    channels: [
+      channel("channel-1", "General", 1_700_000_000_000),
+      channel("channel-2", "random", 1_700_000_000_001),
+    ],
     fileThreads: [],
   });
-  Object.assign(bridge, { listChatChannelShares: vi.fn(async () => ({ joined: [], sessionKey: null, relay: { state: "answered", granted: [], received: [], removed: [] } })) });
+  Object.assign(bridge, {
+    listChatChannelShares: vi.fn(async () => ({
+      joined: [],
+      sessionKey: null,
+      relay: { state: "answered", granted: [], received: [], removed: [] },
+    })),
+  });
   return bridge;
 }
 
-
 describe("Chats in the left side panel", () => {
-
   it("opens a clicked channel in the Chats tab and keeps the list as the navigator", async () => {
     const bridge = bridgeWithChannels(null);
     const user = userEvent.setup();
@@ -61,7 +70,9 @@ describe("Chats in the left side panel", () => {
 
     // The list is a navigator: the channel opens in the Chats tab and the
     // list stays.
-    const tab = await screen.findByTestId(`tab-dohc://chats/channel/${encodeURIComponent("channel-1")}`);
+    const tab = await screen.findByTestId(
+      `tab-dohc://chats/channel/${encodeURIComponent("channel-1")}`,
+    );
     expect(tab.dataset.active).toBe("true");
     expect(tab.textContent).toContain("General");
     const channelView = await screen.findByTestId("chats-channel-view");
@@ -83,17 +94,26 @@ describe("Chats in the left side panel", () => {
       expect(screen.getByTestId("chats-channel-title").textContent).toBe("random");
     });
     expect(tab.textContent).toContain("General");
-    expect(screen.getByTestId(`tab-dohc://chats/channel/${encodeURIComponent("channel-2")}`).textContent).toContain("random");
+    expect(
+      screen.getByTestId(`tab-dohc://chats/channel/${encodeURIComponent("channel-2")}`).textContent,
+    ).toContain("random");
     expect(within(panel).queryByTestId("chats-channel-view")).toBeNull();
     await user.type(screen.getByTestId("chats-new-thread-composer"), "Random draft");
     await user.click(within(panel).getByTestId("chats-feed-link"));
     await screen.findByTestId("chats-personal-feed");
     expect(screen.getByTestId("tab-dohc://chats").textContent).toContain("Home");
     await user.click(within(panel).getAllByTestId("chats-channel")[0]!);
-    await waitFor(() => expect((screen.getByTestId("chats-new-thread-composer") as HTMLTextAreaElement).value).toBe("General draft"));
+    await waitFor(() =>
+      expect((screen.getByTestId("chats-new-thread-composer") as HTMLTextAreaElement).value).toBe(
+        "General draft",
+      ),
+    );
     await user.click(within(panel).getAllByTestId("chats-channel")[1]!);
-    await waitFor(() => expect((screen.getByTestId("chats-new-thread-composer") as HTMLTextAreaElement).value).toBe("Random draft"));
+    await waitFor(() =>
+      expect((screen.getByTestId("chats-new-thread-composer") as HTMLTextAreaElement).value).toBe(
+        "Random draft",
+      ),
+    );
     expect(screen.getAllByTestId(/^tab-dohc:\/\/chats/)).toHaveLength(3);
   });
-
 });

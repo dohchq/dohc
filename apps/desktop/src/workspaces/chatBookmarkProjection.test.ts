@@ -76,12 +76,12 @@ describe("formatChatBookmarkProjection", () => {
       updatedAtMs: 0,
       messages: [],
     } as const;
-    expect(() =>
-      formatChatBookmarkProjection({ ...base, mode: "snapshot" }),
-    ).toThrow(/snapshotAtMs/u);
-    expect(() =>
-      formatChatBookmarkProjection({ ...base, mode: "live", state: "stale" }),
-    ).toThrow(/staleAtMs/u);
+    expect(() => formatChatBookmarkProjection({ ...base, mode: "snapshot" })).toThrow(
+      /snapshotAtMs/u,
+    );
+    expect(() => formatChatBookmarkProjection({ ...base, mode: "live", state: "stale" })).toThrow(
+      /staleAtMs/u,
+    );
   });
 
   it("recognizes only the canonical bookmark-specific frontmatter identity", () => {

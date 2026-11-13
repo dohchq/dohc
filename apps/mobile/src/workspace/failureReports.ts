@@ -19,11 +19,23 @@ export interface FailureStep {
   readonly takeBack: boolean;
 }
 
-export function failureStep(reported: Reported, instance: number, state: { readonly problem: ReadProblem | null; readonly failures: number }): FailureStep {
+export function failureStep(
+  reported: Reported,
+  instance: number,
+  state: { readonly problem: ReadProblem | null; readonly failures: number },
+): FailureStep {
   const replaced = reported.instance !== instance;
   const counted = replaced ? 0 : reported.failures;
   if (state.problem !== null && state.failures > counted) {
-    return { reported: { instance, failures: state.failures }, show: true, takeBack: replaced && reported.failures > 0 };
+    return {
+      reported: { instance, failures: state.failures },
+      show: true,
+      takeBack: replaced && reported.failures > 0,
+    };
   }
-  return { reported: { instance, failures: counted }, show: false, takeBack: (replaced && reported.failures > 0) || (state.problem === null && counted > 0) };
+  return {
+    reported: { instance, failures: counted },
+    show: false,
+    takeBack: (replaced && reported.failures > 0) || (state.problem === null && counted > 0),
+  };
 }

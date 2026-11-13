@@ -34,7 +34,9 @@ describe("resolveWorkspaceMetadataDir", () => {
     const root = await createTestScratch("dohc-metadata-read-");
     await expect(resolveWorkspaceMetadataDir(root, { create: false })).resolves.toBeNull();
     await expect(readdir(root)).resolves.toEqual([]);
-    await expect(resolveWorkspaceMetadataDir(join(root, "gone"), { create: false })).resolves.toBeNull();
+    await expect(
+      resolveWorkspaceMetadataDir(join(root, "gone"), { create: false }),
+    ).resolves.toBeNull();
     const dir = await resolveWorkspaceMetadataDir(root);
     await expect(resolveWorkspaceMetadataDir(root, { create: false })).resolves.toBe(dir);
   });

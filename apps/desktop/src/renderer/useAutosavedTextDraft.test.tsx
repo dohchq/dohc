@@ -12,7 +12,11 @@ import {
   resetSharedLocalDocumentsForTests,
 } from "./sharedLocalDocument";
 import { useAutosavedTextDraft, type DraftFlush } from "./useAutosavedTextDraft";
-import { EDITOR_WRITE_STALL_MS, hasPendingEditorDrafts, settlePendingEditorDrafts } from "./pendingEditorDrafts";
+import {
+  EDITOR_WRITE_STALL_MS,
+  hasPendingEditorDrafts,
+  settlePendingEditorDrafts,
+} from "./pendingEditorDrafts";
 import { RecoveryCloseGuard, resetGuardedExits } from "./RecoveryCloseGuard";
 
 type WriteResult = Awaited<ReturnType<DohcDesktopBridge["writeWorkspaceText"]>>;
@@ -56,112 +60,167 @@ afterEach(() => {
 });
 
 describe("useAutosavedTextDraft", () => {
-  it.each(["notes.txt", ".env", "storage-refused.txt"])("captures a stalled exit for %s and fences late completion", async (path) => {
-    vi.useFakeTimers();
-    const held = deferred<WriteResult>();
-    const later = deferred<WriteResult>();
-    const writeWorkspaceText = vi.fn().mockReturnValueOnce(held.promise).mockReturnValueOnce(later.promise);
-    vi.stubGlobal("dohcDesktop", { platform: "linux", writeWorkspaceText,
-      onExitRound: () => () => {}, holdQuit: async () => {} });
-    const refusal = path === "storage-refused.txt"
-      ? vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw Error("quota"); })
-      : null;
-    const close = vi.spyOn(window, "close").mockImplementation(() => {
-      window.dispatchEvent(new Event("beforeunload", { cancelable: true }));
-    });
-    const editor = renderHook(useAutosavedTextDraft, {
-      initialProps: documentProps("workspace", path, "before"),
-      wrapper: ({ children }) => <RecoveryCloseGuard>{children}</RecoveryCloseGuard>,
-    });
-    try {
-      act(() => editor.result.current.setDraft("first edit"));
-      await act(async () => { window.dispatchEvent(new Event("beforeunload", { cancelable: true })); });
-      expect(writeWorkspaceText).toHaveBeenCalledOnce();
-      act(() => editor.result.current.setDraft("latest edit"));
-      act(() => { window.dispatchEvent(new Event("beforeunload", { cancelable: true })); });
-      await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
-      expect(close).toHaveBeenCalledOnce();
-      const persisted = path === "notes.txt";
-      expect(loadStoredDrafts(Date.now())).toEqual(persisted
-        ? [expect.objectContaining({ text: "latest edit" })] : []);
-      expect(screen.queryByTestId("recovery-close-warning") !== null).toBe(!persisted);
-      expect(editor.result.current.saveState.kind).toBe("error");
-      act(() => editor.result.current.setDraft("newer edit"));
-      await act(async () => { held.resolve({ status: "written", contentHash: "first-saved" }); });
-      expect(editor.result.current.draft).toBe("newer edit");
-      expect(editor.result.current.saveState.kind).not.toBe("saved-here");
-      expect(writeWorkspaceText).toHaveBeenCalledTimes(2);
-      expect(writeWorkspaceText.mock.calls[1]![0].text).toBe("newer edit");
-      await act(async () => { later.resolve({ status: "written", contentHash: "newer-saved" }); });
-      expect(editor.result.current.draft).toBe("newer edit");
-      expect(close).toHaveBeenCalledOnce();
-    } finally {
-      await act(async () => {
-        held.resolve({ status: "written", contentHash: "first-saved" });
-        later.resolve({ status: "written", contentHash: "newer-saved" });
+  it.each(["notes.txt", ".env", "storage-refused.txt"])(
+    "captures a stalled exit for %s and fences late completion",
+    async (path) => {
+      vi.useFakeTimers();
+      const held = deferred<WriteResult>();
+      const later = deferred<WriteResult>();
+      const writeWorkspaceText = vi
+        .fn()
+        .mockReturnValueOnce(held.promise)
+        .mockReturnValueOnce(later.promise);
+      vi.stubGlobal("dohcDesktop", {
+        platform: "linux",
+        writeWorkspaceText,
+        onExitRound: () => () => {},
+        holdQuit: async () => {},
       });
-      refusal?.mockRestore();
-      close.mockRestore();
-      vi.useRealTimers();
-    }
-  });
+      const refusal =
+        path === "storage-refused.txt"
+          ? vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+              throw Error("quota");
+            })
+          : null;
+      const close = vi.spyOn(window, "close").mockImplementation(() => {
+        window.dispatchEvent(new Event("beforeunload", { cancelable: true }));
+      });
+      const editor = renderHook(useAutosavedTextDraft, {
+        initialProps: documentProps("workspace", path, "before"),
+        wrapper: ({ children }) => <RecoveryCloseGuard>{children}</RecoveryCloseGuard>,
+      });
+      try {
+        act(() => editor.result.current.setDraft("first edit"));
+        await act(async () => {
+          window.dispatchEvent(new Event("beforeunload", { cancelable: true }));
+        });
+        expect(writeWorkspaceText).toHaveBeenCalledOnce();
+        act(() => editor.result.current.setDraft("latest edit"));
+        act(() => {
+          window.dispatchEvent(new Event("beforeunload", { cancelable: true }));
+        });
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(20_000);
+        });
+        expect(close).toHaveBeenCalledOnce();
+        const persisted = path === "notes.txt";
+        expect(loadStoredDrafts(Date.now())).toEqual(
+          persisted ? [expect.objectContaining({ text: "latest edit" })] : [],
+        );
+        expect(screen.queryByTestId("recovery-close-warning") !== null).toBe(!persisted);
+        expect(editor.result.current.saveState.kind).toBe("error");
+        act(() => editor.result.current.setDraft("newer edit"));
+        await act(async () => {
+          held.resolve({ status: "written", contentHash: "first-saved" });
+        });
+        expect(editor.result.current.draft).toBe("newer edit");
+        expect(editor.result.current.saveState.kind).not.toBe("saved-here");
+        expect(writeWorkspaceText).toHaveBeenCalledTimes(2);
+        expect(writeWorkspaceText.mock.calls[1]![0].text).toBe("newer edit");
+        await act(async () => {
+          later.resolve({ status: "written", contentHash: "newer-saved" });
+        });
+        expect(editor.result.current.draft).toBe("newer edit");
+        expect(close).toHaveBeenCalledOnce();
+      } finally {
+        await act(async () => {
+          held.resolve({ status: "written", contentHash: "first-saved" });
+          later.resolve({ status: "written", contentHash: "newer-saved" });
+        });
+        refusal?.mockRestore();
+        close.mockRestore();
+        vi.useRealTimers();
+      }
+    },
+  );
   it("captures a retired editor without settling its original operation flush", async () => {
     vi.useFakeTimers();
     const held = deferred<WriteResult>();
     let flush: DraftFlush | null = null;
-    const writeWorkspaceText = vi.fn().mockReturnValueOnce(held.promise)
+    const writeWorkspaceText = vi
+      .fn()
+      .mockReturnValueOnce(held.promise)
       .mockResolvedValue({ status: "written", contentHash: "latest-saved" });
     vi.stubGlobal("dohcDesktop", { platform: "linux", writeWorkspaceText });
     const editor = renderHook(useAutosavedTextDraft, {
-      initialProps: { ...documentProps("workspace", "retired.txt", "before"),
-        registerDraftFlush: (next: DraftFlush | null) => { flush = next; } },
+      initialProps: {
+        ...documentProps("workspace", "retired.txt", "before"),
+        registerDraftFlush: (next: DraftFlush | null) => {
+          flush = next;
+        },
+      },
     });
     try {
       act(() => editor.result.current.setDraft("first"));
       let operationSettled = false;
-      const operation = flush!().then(() => { operationSettled = true; });
-      await act(async () => { await Promise.resolve(); });
+      const operation = flush!().then(() => {
+        operationSettled = true;
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
       act(() => editor.result.current.setDraft("retired latest"));
       editor.unmount();
       const drain = settlePendingEditorDrafts();
-      await act(async () => { await vi.advanceTimersByTimeAsync(EDITOR_WRITE_STALL_MS); });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(EDITOR_WRITE_STALL_MS);
+      });
       expect(await drain).toBe(true);
       expect(hasPendingEditorDrafts()).toBe(false);
       expect(operationSettled).toBe(false);
-      expect(loadStoredDrafts(Date.now())).toEqual(expect.arrayContaining([
-        expect.objectContaining({ text: "retired latest" }),
-      ]));
-      await act(async () => { held.resolve({ status: "written", contentHash: "first-saved" }); await operation; });
+      expect(loadStoredDrafts(Date.now())).toEqual(
+        expect.arrayContaining([expect.objectContaining({ text: "retired latest" })]),
+      );
+      await act(async () => {
+        held.resolve({ status: "written", contentHash: "first-saved" });
+        await operation;
+      });
       expect(operationSettled).toBe(true);
       expect(writeWorkspaceText.mock.calls.at(-1)![0].text).toBe("retired latest");
     } finally {
-      await act(async () => { held.resolve({ status: "written", contentHash: "first-saved" }); });
+      await act(async () => {
+        held.resolve({ status: "written", contentHash: "first-saved" });
+      });
       vi.useRealTimers();
     }
   });
   it("holds exit for the draft of an editor that already unmounted", async () => {
     const held = deferred<WriteResult>();
     const writeWorkspaceText = vi.fn(() => held.promise);
-    vi.stubGlobal("dohcDesktop", { platform: "linux", writeWorkspaceText,
-      onExitRound: () => () => {}, holdQuit: async () => {} });
+    vi.stubGlobal("dohcDesktop", {
+      platform: "linux",
+      writeWorkspaceText,
+      onExitRound: () => () => {},
+      holdQuit: async () => {},
+    });
     const close = vi.spyOn(window, "close").mockImplementation(() => {});
     render(<RecoveryCloseGuard>{null}</RecoveryCloseGuard>);
-    const editor = renderHook(useAutosavedTextDraft, { initialProps: documentProps("workspace", "old.txt", "before") });
+    const editor = renderHook(useAutosavedTextDraft, {
+      initialProps: documentProps("workspace", "old.txt", "before"),
+    });
     act(() => editor.result.current.setDraft("old pane edit"));
     editor.unmount();
     expect(writeWorkspaceText).toHaveBeenCalledOnce();
     const unload = new Event("beforeunload", { cancelable: true });
-    act(() => { window.dispatchEvent(unload); });
+    act(() => {
+      window.dispatchEvent(unload);
+    });
     expect(unload.defaultPrevented).toBe(true);
     expect(close).not.toHaveBeenCalled();
-    await act(async () => { held.resolve({ status: "written", contentHash: "saved" }); });
+    await act(async () => {
+      held.resolve({ status: "written", contentHash: "saved" });
+    });
     await waitFor(() => expect(close).toHaveBeenCalledOnce());
     close.mockRestore();
   });
   it.each(["notes.txt", ".env"])("preserves a failed exit flush for %s", async (path) => {
     const writeWorkspaceText = vi.fn().mockRejectedValue(Error("write refused"));
-    vi.stubGlobal("dohcDesktop", { platform: "linux", writeWorkspaceText,
-      onExitRound: () => () => {}, holdQuit: async () => {} });
+    vi.stubGlobal("dohcDesktop", {
+      platform: "linux",
+      writeWorkspaceText,
+      onExitRound: () => () => {},
+      holdQuit: async () => {},
+    });
     const close = vi.spyOn(window, "close").mockImplementation(() => {
       window.dispatchEvent(new Event("beforeunload", { cancelable: true }));
     });
@@ -171,14 +230,18 @@ describe("useAutosavedTextDraft", () => {
     });
     act(() => editor.result.current.setDraft("keep my last edit"));
     const unload = new Event("beforeunload", { cancelable: true });
-    act(() => { window.dispatchEvent(unload); });
+    act(() => {
+      window.dispatchEvent(unload);
+    });
     expect(unload.defaultPrevented).toBe(true);
     await waitFor(() => expect(close).toHaveBeenCalledOnce());
     if (path === ".env") {
       await screen.findByTestId("recovery-close-warning");
       expect(loadStoredDrafts(Date.now())).toEqual([]);
     } else {
-      expect(loadStoredDrafts(Date.now())).toEqual([expect.objectContaining({ text: "keep my last edit" })]);
+      expect(loadStoredDrafts(Date.now())).toEqual([
+        expect.objectContaining({ text: "keep my last edit" }),
+      ]);
       expect(screen.queryByTestId("recovery-close-warning")).toBeNull();
     }
     close.mockRestore();
@@ -186,8 +249,12 @@ describe("useAutosavedTextDraft", () => {
   it("holds native unload until a pending text draft is saved", async () => {
     const held = deferred<WriteResult>();
     const writeWorkspaceText = vi.fn(() => held.promise);
-    vi.stubGlobal("dohcDesktop", { platform: "linux", writeWorkspaceText,
-      onExitRound: () => () => {}, holdQuit: async () => {} });
+    vi.stubGlobal("dohcDesktop", {
+      platform: "linux",
+      writeWorkspaceText,
+      onExitRound: () => () => {},
+      holdQuit: async () => {},
+    });
     const close = vi.spyOn(window, "close").mockImplementation(() => {});
     const editor = renderHook(useAutosavedTextDraft, {
       initialProps: documentProps("workspace", "notes.txt", "before"),
@@ -195,11 +262,15 @@ describe("useAutosavedTextDraft", () => {
     });
     act(() => editor.result.current.setDraft("last edit"));
     const unload = new Event("beforeunload", { cancelable: true });
-    act(() => { window.dispatchEvent(unload); });
+    act(() => {
+      window.dispatchEvent(unload);
+    });
     expect(unload.defaultPrevented).toBe(true);
     await waitFor(() => expect(writeWorkspaceText).toHaveBeenCalled());
     expect(close).not.toHaveBeenCalled();
-    await act(async () => { held.resolve({ status: "written", contentHash: "saved" }); });
+    await act(async () => {
+      held.resolve({ status: "written", contentHash: "saved" });
+    });
     await waitFor(() => expect(close).toHaveBeenCalledOnce());
     close.mockRestore();
   });
@@ -336,22 +407,30 @@ describe("useAutosavedTextDraft", () => {
   });
 });
 
-
 it("publishes saving once across repeated dirty edits and saved once after the write", async () => {
   vi.useFakeTimers();
   const onSaveStateChange = vi.fn();
-  vi.stubGlobal("dohcDesktop", { writeWorkspaceText: vi.fn(async () => ({ status: "written", contentHash: "saved" })) });
-  const editor = renderHook(useAutosavedTextDraft, { initialProps: { ...documentProps("ws", "typing.txt", "before"), onSaveStateChange } });
+  vi.stubGlobal("dohcDesktop", {
+    writeWorkspaceText: vi.fn(async () => ({ status: "written", contentHash: "saved" })),
+  });
+  const editor = renderHook(useAutosavedTextDraft, {
+    initialProps: { ...documentProps("ws", "typing.txt", "before"), onSaveStateChange },
+  });
   try {
     onSaveStateChange.mockClear();
     act(() => editor.result.current.setDraft("first"));
     expect(onSaveStateChange).toHaveBeenCalledTimes(1);
     expect(onSaveStateChange).toHaveBeenLastCalledWith({ kind: "saving" });
     onSaveStateChange.mockClear();
-    for (let i = 0; i < 30; i++) act(() => editor.result.current.setDraft("first" + "!".repeat(i + 1)));
+    for (let i = 0; i < 30; i++)
+      act(() => editor.result.current.setDraft("first" + "!".repeat(i + 1)));
     expect(onSaveStateChange).not.toHaveBeenCalled();
-    await act(async () => { await editor.result.current.saveNow(); });
+    await act(async () => {
+      await editor.result.current.saveNow();
+    });
     expect(onSaveStateChange).toHaveBeenCalledTimes(1);
     expect(onSaveStateChange).toHaveBeenLastCalledWith({ kind: "saved-here" });
-  } finally { vi.useRealTimers(); }
+  } finally {
+    vi.useRealTimers();
+  }
 });

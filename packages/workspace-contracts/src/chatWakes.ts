@@ -22,7 +22,13 @@ const ID_MAX_CHARS = 1_024;
 
 /** Trimmed, nonempty, at most `maxChars` UTF-16 code units, and free of control characters, as the relay takes a line. */
 export function isChatWakeLine(value: unknown, maxChars: number): value is string {
-  return typeof value === "string" && value.length > 0 && value.length <= maxChars && value === value.trim() && !CONTROL.test(value);
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= maxChars &&
+    value === value.trim() &&
+    !CONTROL.test(value)
+  );
 }
 
 /** An agent ID a computer may declare: a settings ID, never a personal agent's. */
@@ -33,7 +39,14 @@ export function isChatRunnerAgentId(value: unknown): value is string {
 const line = (maxChars: number) => z.string().refine((value) => isChatWakeLine(value, maxChars));
 const Id = line(ID_MAX_CHARS);
 
-export const ChatWakeState = z.enum(["held", "waiting", "claimed", "queued", "unclaimed", "unconfirmed"]);
+export const ChatWakeState = z.enum([
+  "held",
+  "waiting",
+  "claimed",
+  "queued",
+  "unclaimed",
+  "unconfirmed",
+]);
 export type ChatWakeState = z.infer<typeof ChatWakeState>;
 
 /** What of the message a candidate matched: a mentioned handle, or the shown name of the agent it answers. */
@@ -69,7 +82,11 @@ export const ChatWakeView = z.strictObject(viewShape);
 export type ChatWakeView = z.infer<typeof ChatWakeView>;
 
 /** A waiting wake for one computer, with only that computer's candidate. */
-export const WaitingChatWake = z.strictObject({ ...viewShape, state: z.literal("waiting"), candidate: ChatWakeCandidate });
+export const WaitingChatWake = z.strictObject({
+  ...viewShape,
+  state: z.literal("waiting"),
+  candidate: ChatWakeCandidate,
+});
 export type WaitingChatWake = z.infer<typeof WaitingChatWake>;
 
 /**
@@ -98,7 +115,11 @@ export const ChatWakePage = z.strictObject({
 });
 
 /** `POST /sync/wakes/:wakeId/claim`. `won` is this computer's proof, never a matching label. */
-export const ChatWakeClaimReply = z.strictObject({ ok: z.literal(true), won: z.boolean(), wake: ChatWakeView });
+export const ChatWakeClaimReply = z.strictObject({
+  ok: z.literal(true),
+  won: z.boolean(),
+  wake: ChatWakeView,
+});
 
 /** `POST /sync/wakes/:wakeId/queued`. */
 export const ChatWakeQueuedReply = z.strictObject({ ok: z.literal(true), wake: ChatWakeView });

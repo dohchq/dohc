@@ -36,7 +36,8 @@ export function ReportsSettings(props: {
         if (current) setDiagnostics(result);
       })
       .catch((cause: unknown) => {
-        if (current) onError.current?.(ipcErrorMessage(cause, "dohc could not read diagnostics."), cause);
+        if (current)
+          onError.current?.(ipcErrorMessage(cause, "dohc could not read diagnostics."), cause);
       });
     return () => {
       current = false;
@@ -58,11 +59,17 @@ export function ReportsSettings(props: {
       <SettingRow
         title="Send usage reports"
         description="Counts when you open dohc, create or open a workspace, share, publish an app, or send a chat message. Includes a random ID for this installation. No names, content, or links."
-        aside={usageUnavailable ? (
-          <p id={usageUnavailableId} className="m-0 text-[12px] text-muted">This launch sends no usage reports.</p>
-        ) : null}
+        aside={
+          usageUnavailable ? (
+            <p id={usageUnavailableId} className="m-0 text-[12px] text-muted">
+              This launch sends no usage reports.
+            </p>
+          ) : null
+        }
         modified={props.privacy.usageReports !== DEFAULT_PRIVACY_SETTINGS.usageReports}
-        onReset={() => props.onChange({ ...props.privacy, usageReports: DEFAULT_PRIVACY_SETTINGS.usageReports })}
+        onReset={() =>
+          props.onChange({ ...props.privacy, usageReports: DEFAULT_PRIVACY_SETTINGS.usageReports })
+        }
         testId="settings-row-usage-reports"
       >
         <SwitchControl
@@ -75,11 +82,17 @@ export function ReportsSettings(props: {
       <SettingRow
         title="Send error reports"
         description="Sends an error's type and where in dohc's code it happened. No messages, file names, or other paths."
-        aside={errorsUnavailable ? (
-          <p id={errorsUnavailableId} className="m-0 text-[12px] text-muted">This launch sends no error reports.</p>
-        ) : null}
+        aside={
+          errorsUnavailable ? (
+            <p id={errorsUnavailableId} className="m-0 text-[12px] text-muted">
+              This launch sends no error reports.
+            </p>
+          ) : null
+        }
         modified={props.privacy.errorReports !== DEFAULT_PRIVACY_SETTINGS.errorReports}
-        onReset={() => props.onChange({ ...props.privacy, errorReports: DEFAULT_PRIVACY_SETTINGS.errorReports })}
+        onReset={() =>
+          props.onChange({ ...props.privacy, errorReports: DEFAULT_PRIVACY_SETTINGS.errorReports })
+        }
         testId="settings-row-error-reports"
       >
         <SwitchControl
@@ -109,7 +122,12 @@ export function ReportsSettings(props: {
           testId="diagnostics-copy"
           getText={async () => (await bridge().readDiagnostics({})).text}
         />
-        <button type="button" data-testid="diagnostics-save" onClick={() => void save()} className={BUTTON}>
+        <button
+          type="button"
+          data-testid="diagnostics-save"
+          onClick={() => void save()}
+          className={BUTTON}
+        >
           Save…
         </button>
       </SettingRow>

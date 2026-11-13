@@ -12,15 +12,26 @@ type Command = { id: number; command: { kind: string } };
 type Script = (command: Command, send: (message: unknown) => void) => void;
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const roots: string[] = [];
-afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
+afterEach(async () => {
+  for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
+});
 
-async function open(script: Script, timing: { silenceMs: number; commandCapMs: number }, onLaunch?: (exit: () => void) => void) {
+async function open(
+  script: Script,
+  timing: { silenceMs: number; commandCapMs: number },
+  onLaunch?: (exit: () => void) => void,
+) {
   const root = await mkdtemp(join(tmpdir(), "dohc-watchdog-test-"));
   roots.push(root);
   const launch: AppRuntimeLauncher = (options) => {
     let exited = false;
-    onLaunch?.(() => { exited = true; options.onExit(null); });
-    const send = (message: unknown) => { if (!exited) setImmediate(() => options.onMessage(message)); };
+    onLaunch?.(() => {
+      exited = true;
+      options.onExit(null);
+    });
+    const send = (message: unknown) => {
+      if (!exited) setImmediate(() => options.onMessage(message));
+    };
     send({ ready: true });
     return {
       postMessage(message) {
@@ -47,7 +58,12 @@ async function open(script: Script, timing: { silenceMs: number; commandCapMs: n
       directory: root,
       schemaSql: "CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT NOT NULL);",
       tables: ["items"],
-      scope: { workspaceId: "workspace", datasetId: "dataset", hostEpoch: "epoch-1", approvedRevisionHash: hash("approved") },
+      scope: {
+        workspaceId: "workspace",
+        datasetId: "dataset",
+        hostEpoch: "epoch-1",
+        approvedRevisionHash: hash("approved"),
+      },
       cursor: { revision: 0, digest: hash("initial") },
     },
     { launch, entryPath: join(root, "worker.mjs"), ...timing },
@@ -56,53 +72,72 @@ async function open(script: Script, timing: { silenceMs: number; commandCapMs: n
 
 it("keeps slow I/O work alive while the worker reports progress", async () => {
   let steps = 0;
-  const worker = await open((command, send) => {
-    // Six silence windows of work, one progress message per window.
-    const tick = () => {
-      if (++steps <= 12) {
-        send({ id: command.id, progress: `step ${steps}` });
-        setTimeout(tick, 20);
-      } else send({ id: command.id, ok: true, result: null });
-    };
-    tick();
-  }, { silenceMs: 40, commandCapMs: 60_000 });
+  const worker = await open(
+    (command, send) => {
+      // Six silence windows of work, one progress message per window.
+      const tick = () => {
+        if (++steps <= 12) {
+          send({ id: command.id, progress: `step ${steps}` });
+          setTimeout(tick, 20);
+        } else send({ id: command.id, ok: true, result: null });
+      };
+      tick();
+    },
+    { silenceMs: 40, commandCapMs: 60_000 },
+  );
   await expect(worker.discard("proposal")).resolves.toBeUndefined();
   expect(steps).toBe(13);
   await worker.close();
 });
 
 it("fails a worker that stops reporting, naming the step it stopped in", async () => {
-  const worker = await open((command, send) => {
-    send({ id: command.id, progress: "saving the change" });
-  }, { silenceMs: 40, commandCapMs: 60_000 });
+  const worker = await open(
+    (command, send) => {
+      send({ id: command.id, progress: "saving the change" });
+    },
+    { silenceMs: 40, commandCapMs: 60_000 },
+  );
   await expect(worker.discard("proposal")).rejects.toMatchObject({
     code: "worker_stalled",
-    message: "dohc made no progress on this Collection for 40 ms while saving the change. Try again.",
+    message:
+      "dohc made no progress on this Collection for 40 ms while saving the change. Try again.",
   });
 });
 
 it("lets a step with its own CPU budget stay quiet long enough to use it", async () => {
-  const worker = await open((command, send) => {
-    // A 100 ms budget: the host allows 40 ms + 2 × 100 ms of silence.
-    send({ id: command.id, progress: "checking the tables", cpuBudgetMs: 100 });
-    if (command.command.kind === "discard") setTimeout(() => send({ id: command.id, ok: true, result: null }), 120);
-  }, { silenceMs: 40, commandCapMs: 60_000 });
+  const worker = await open(
+    (command, send) => {
+      // A 100 ms budget: the host allows 40 ms + 2 × 100 ms of silence.
+      send({ id: command.id, progress: "checking the tables", cpuBudgetMs: 100 });
+      if (command.command.kind === "discard")
+        setTimeout(() => send({ id: command.id, ok: true, result: null }), 120);
+    },
+    { silenceMs: 40, commandCapMs: 60_000 },
+  );
   await expect(worker.discard("proposal")).resolves.toBeUndefined();
   await expect(worker.snapshot(join(roots.at(-1)!, "never.sqlite"))).rejects.toMatchObject({
     code: "worker_stalled",
-    message: "dohc made no progress on this Collection for 240 ms while checking the tables. Try again.",
+    message:
+      "dohc made no progress on this Collection for 240 ms while checking the tables. Try again.",
   });
 });
 
 it("fails a worker that keeps reporting but never finishes, at the command cap", async () => {
   let reporting: ReturnType<typeof setInterval> | undefined;
-  const worker = await open((command, send) => {
-    reporting = setInterval(() => send({ id: command.id, progress: "reapplying saved change 1 of 1" }), 10);
-  }, { silenceMs: 40, commandCapMs: 200 });
+  const worker = await open(
+    (command, send) => {
+      reporting = setInterval(
+        () => send({ id: command.id, progress: "reapplying saved change 1 of 1" }),
+        10,
+      );
+    },
+    { silenceMs: 40, commandCapMs: 200 },
+  );
   try {
     await expect(worker.discard("proposal")).rejects.toMatchObject({
       code: "worker_deadline",
-      message: "dohc did not finish this Collection's work in 200 ms while reapplying saved change 1 of 1. Try again.",
+      message:
+        "dohc did not finish this Collection's work in 200 ms while reapplying saved change 1 of 1. Try again.",
     });
   } finally {
     clearInterval(reporting);
@@ -111,11 +146,17 @@ it("fails a worker that keeps reporting but never finishes, at the command cap",
 
 it("says the app's code ran too long when the CPU budget watch ended the worker", async () => {
   let end!: () => void;
-  const worker = await open((command, send) => {
-    send({ id: command.id, progress: "running the Collection action" });
-    // The worker's budget watch leaves its marker, then the process ends.
-    void writeFile(join(roots.at(-1)!, "cpu-budget-exceeded-app-5000"), "").then(end);
-  }, { silenceMs: 60_000, commandCapMs: 60_000 }, (exit) => { end = exit; });
+  const worker = await open(
+    (command, send) => {
+      send({ id: command.id, progress: "running the Collection action" });
+      // The worker's budget watch leaves its marker, then the process ends.
+      void writeFile(join(roots.at(-1)!, "cpu-budget-exceeded-app-5000"), "").then(end);
+    },
+    { silenceMs: 60_000, commandCapMs: 60_000 },
+    (exit) => {
+      end = exit;
+    },
+  );
   await expect(
     worker.prepare({
       source: "globalThis.operations={run(){return 1}}",
@@ -128,39 +169,85 @@ it("says the app's code ran too long when the CPU budget watch ended the worker"
     }),
   ).rejects.toMatchObject({
     code: "worker_budget",
-    message: "The app's code ran too long: it used more than 5 s of CPU time while running the Collection action. Try again.",
+    message:
+      "The app's code ran too long: it used more than 5 s of CPU time while running the Collection action. Try again.",
   });
 });
 
 it.each([
-  {marker:"cpu-budget-exceeded-app-1000",step:"running the Collection action",message:"The app's code ran too long: it used more than 1 s of CPU time while running the Collection action. Try again."},
-  {marker:"cpu-budget-exceeded-checks-9000",step:"checking the tables",message:"dohc's checks of this Collection ran too long: they used more than 9 s of CPU time while checking the tables. Try again."},
-  {marker:"cpu-budget-exceeded-app-NaN",step:"running the Collection action",message:"The app's code ran too long while running the Collection action. Try again."},
-  {marker:"cpu-budget-exceeded-app-Infinity",step:"running the Collection action",message:"The app's code ran too long while running the Collection action. Try again."},
-  {marker:"cpu-budget-exceeded-app-1e309",step:"running the Collection action",message:"The app's code ran too long while running the Collection action. Try again."},
-  {marker:"cpu-budget-exceeded-checks-NaN",step:"checking the tables",message:"dohc's checks of this Collection ran too long while checking the tables. Try again."},
-])("reads an empty budget marker without showing a non-finite duration: $marker", async ({marker,step,message}) => {
-  let end!: () => void;
-  const worker = await open((command, send) => {
-    send({ id: command.id, progress: step });
-    void writeFile(join(roots.at(-1)!, marker), "").then(end);
-  }, { silenceMs: 60_000, commandCapMs: 60_000 }, exit => { end = exit; });
-  await expect(worker.discard("proposal")).rejects.toMatchObject({
-    code: "worker_budget",
-    message,
-  });
-  await worker.close();
-});
+  {
+    marker: "cpu-budget-exceeded-app-1000",
+    step: "running the Collection action",
+    message:
+      "The app's code ran too long: it used more than 1 s of CPU time while running the Collection action. Try again.",
+  },
+  {
+    marker: "cpu-budget-exceeded-checks-9000",
+    step: "checking the tables",
+    message:
+      "dohc's checks of this Collection ran too long: they used more than 9 s of CPU time while checking the tables. Try again.",
+  },
+  {
+    marker: "cpu-budget-exceeded-app-NaN",
+    step: "running the Collection action",
+    message: "The app's code ran too long while running the Collection action. Try again.",
+  },
+  {
+    marker: "cpu-budget-exceeded-app-Infinity",
+    step: "running the Collection action",
+    message: "The app's code ran too long while running the Collection action. Try again.",
+  },
+  {
+    marker: "cpu-budget-exceeded-app-1e309",
+    step: "running the Collection action",
+    message: "The app's code ran too long while running the Collection action. Try again.",
+  },
+  {
+    marker: "cpu-budget-exceeded-checks-NaN",
+    step: "checking the tables",
+    message: "dohc's checks of this Collection ran too long while checking the tables. Try again.",
+  },
+])(
+  "reads an empty budget marker without showing a non-finite duration: $marker",
+  async ({ marker, step, message }) => {
+    let end!: () => void;
+    const worker = await open(
+      (command, send) => {
+        send({ id: command.id, progress: step });
+        void writeFile(join(roots.at(-1)!, marker), "").then(end);
+      },
+      { silenceMs: 60_000, commandCapMs: 60_000 },
+      (exit) => {
+        end = exit;
+      },
+    );
+    await expect(worker.discard("proposal")).rejects.toMatchObject({
+      code: "worker_budget",
+      message,
+    });
+    await worker.close();
+  },
+);
 
-it.each(["cpu-budget-exceeded","cpu-budget-exceeded-other-1000"])("does not infer a budget from an unsupported marker: %s", async marker => {
-  let end!: () => void;
-  const worker = await open((command, send) => {
-    send({ id: command.id, progress: "running the Collection action" });
-    void writeFile(join(roots.at(-1)!, marker), "").then(end);
-  }, { silenceMs: 60_000, commandCapMs: 60_000 }, exit => { end = exit; });
-  await expect(worker.discard("proposal")).rejects.toMatchObject({
-    code: "worker_stopped",
-    message: "dohc's work on this Collection stopped while running the Collection action. Try again.",
-  });
-  await worker.close();
-});
+it.each(["cpu-budget-exceeded", "cpu-budget-exceeded-other-1000"])(
+  "does not infer a budget from an unsupported marker: %s",
+  async (marker) => {
+    let end!: () => void;
+    const worker = await open(
+      (command, send) => {
+        send({ id: command.id, progress: "running the Collection action" });
+        void writeFile(join(roots.at(-1)!, marker), "").then(end);
+      },
+      { silenceMs: 60_000, commandCapMs: 60_000 },
+      (exit) => {
+        end = exit;
+      },
+    );
+    await expect(worker.discard("proposal")).rejects.toMatchObject({
+      code: "worker_stopped",
+      message:
+        "dohc's work on this Collection stopped while running the Collection action. Try again.",
+    });
+    await worker.close();
+  },
+);

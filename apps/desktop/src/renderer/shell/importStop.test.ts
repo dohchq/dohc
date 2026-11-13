@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { errorDetails } from "./copyDetails";
-import { fitImportMessage, importedPathDetails, importStopSentence, namedPaths } from "./importStop";
+import {
+  fitImportMessage,
+  importedPathDetails,
+  importStopSentence,
+  namedPaths,
+} from "./importStop";
 import { SHELL_ERROR_MAX_CHARS } from "./useShellError";
 
 describe("importStopSentence", () => {
@@ -28,7 +33,12 @@ describe("importStopSentence", () => {
     expect(importStopSentence({ file: `${"l".repeat(200)}.md`, refusal: "dangling-link" })).toBe(
       `dohc did not import ${"l".repeat(59)}…, a symbolic link to a missing file. Restore that file, then import it instead.`,
     );
-    expect(importStopSentence({ file: `${"l".repeat(58)} ${"m".repeat(20)}.md`, refusal: "dangling-link" })).toBe(
+    expect(
+      importStopSentence({
+        file: `${"l".repeat(58)} ${"m".repeat(20)}.md`,
+        refusal: "dangling-link",
+      }),
+    ).toBe(
       `dohc did not import ${"l".repeat(58)}…, a symbolic link to a missing file. Restore that file, then import it instead.`,
     );
   });
@@ -37,7 +47,9 @@ describe("importStopSentence", () => {
 describe("fitImportMessage", () => {
   it("shortens the middle so the instruction at the end stays whole", () => {
     const tail = " Import only the files that are still missing.";
-    expect(fitImportMessage("Imported a.md.", " short.", tail)).toBe(`Imported a.md. short.${tail}`);
+    expect(fitImportMessage("Imported a.md.", " short.", tail)).toBe(
+      `Imported a.md. short.${tail}`,
+    );
     const fitted = fitImportMessage("Imported a.md.", ` ${"x".repeat(600)}`, tail);
     expect(fitted.length).toBe(SHELL_ERROR_MAX_CHARS);
     expect(fitted.endsWith(`…${tail}`)).toBe(true);
@@ -48,7 +60,9 @@ describe("fitImportMessage", () => {
     const head = "Imported a.md.";
     const tail = " Import only the files that are still missing.";
     const room = SHELL_ERROR_MAX_CHARS - head.length - tail.length;
-    expect(fitImportMessage(head, ` ${"x".repeat(room - 3)} ${"y".repeat(20)}`, tail)).toBe(`${head} ${"x".repeat(room - 3)}…${tail}`);
+    expect(fitImportMessage(head, ` ${"x".repeat(room - 3)} ${"y".repeat(20)}`, tail)).toBe(
+      `${head} ${"x".repeat(room - 3)}…${tail}`,
+    );
   });
 });
 

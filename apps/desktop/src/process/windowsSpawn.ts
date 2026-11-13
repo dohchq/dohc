@@ -119,11 +119,8 @@ export function killProcessTreeWin32(
 ): Promise<boolean> {
   if (process.platform !== "win32" || !pid || exited()) return Promise.resolve(false);
   return new Promise((resolve) => {
-    execFile(
-      "taskkill",
-      ["/pid", String(pid), "/T", "/F"],
-      { windowsHide: true },
-      (error) => resolve(!error),
+    execFile("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true }, (error) =>
+      resolve(!error),
     );
   });
 }
@@ -168,7 +165,7 @@ export function readProcessTableWithPowershell(
         "-NoProfile",
         "-NonInteractive",
         "-Command",
-        "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId) $($_.ParentProcessId) $($_.CreationDate)\" }",
+        'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.ParentProcessId) $($_.CreationDate)" }',
       ],
       { windowsHide: true, timeout: readTimeoutMs },
       (error, stdout) => {

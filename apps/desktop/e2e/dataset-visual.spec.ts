@@ -1,11 +1,17 @@
 import { activityPin, settingsNavPin } from "../src/testPins";
 import { expect, test, type Locator } from "@playwright/test";
 import { launchDesktopApp, assertDesktopEngineHealthy } from "./helpers/desktopApp";
-import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun } from "./helpers/workspace";
+import {
+  cleanupDesktopWorkspace,
+  createTempWorkspace,
+  openWorkspaceFromFirstRun,
+} from "./helpers/workspace";
 
 async function expectInsideViewport(locator: Locator) {
   const box = await locator.boundingBox();
-  const viewport = await locator.page().evaluate(() => ({ width: innerWidth, height: innerHeight }));
+  const viewport = await locator
+    .page()
+    .evaluate(() => ({ width: innerWidth, height: innerHeight }));
   expect(box).not.toBeNull();
   expect(box!.x).toBeGreaterThanOrEqual(0);
   expect(box!.y).toBeGreaterThanOrEqual(0);
@@ -21,37 +27,61 @@ for (const theme of ["light", "dark"] as const) {
     try {
       desktop = await launchDesktopApp({ workspace });
       const { page, app } = desktop;
-      await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setSize(1280, 900));
+      await app.evaluate(({ BrowserWindow }) =>
+        BrowserWindow.getAllWindows()[0]!.setSize(1280, 900),
+      );
       await openWorkspaceFromFirstRun(page, workspace);
       await page.emulateMedia({ reducedMotion: "reduce" });
       await page.getByTestId(activityPin("settings")).click();
       await page.getByTestId(settingsNavPin("appearance")).click();
-      await page.getByRole("radiogroup", { name: "Theme" }).getByRole("radio", { name: theme === "light" ? "Light" : "Dark", exact: true }).click();
+      await page
+        .getByRole("radiogroup", { name: "Theme" })
+        .getByRole("radio", { name: theme === "light" ? "Light" : "Dark", exact: true })
+        .click();
       await page.getByRole("button", { name: "Close settings", exact: true }).click();
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-      await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.webContents.send("desktop:menu-command", "new-collection"));
+      await app.evaluate(({ BrowserWindow }) =>
+        BrowserWindow.getAllWindows()[0]!.webContents.send(
+          "desktop:menu-command",
+          "new-collection",
+        ),
+      );
       const create = page.getByTestId("new-collection-dialog");
       await expect(create.getByLabel("Collection name")).toBeFocused();
       await create.getByLabel("Collection name").fill("Tournament");
       await create.getByLabel("Require Name").check();
-      for (const [index, name, type] of [[1, "Status", "select"], [2, "Date", "date"], [3, "Paid", "checkbox"]] as const) {
+      for (const [index, name, type] of [
+        [1, "Status", "select"],
+        [2, "Date", "date"],
+        [3, "Paid", "checkbox"],
+      ] as const) {
         await create.getByRole("button", { name: "Add field", exact: true }).click();
         await create.getByLabel("Field name", { exact: true }).nth(index).fill(name);
         await create.getByLabel("Field type", { exact: true }).nth(index).selectOption(type);
       }
       await create.getByLabel("Options", { exact: true }).fill("Registered, Confirmed");
       const preview = create.getByRole("region", { name: "Collection preview" });
-      await expect(preview.getByRole("columnheader", { name: "Status", exact: true })).toBeVisible();
+      await expect(
+        preview.getByRole("columnheader", { name: "Status", exact: true }),
+      ).toBeVisible();
       await expect(preview.getByText("0 records", { exact: true })).toBeVisible();
       const previewScroller = preview.getByRole("table").locator("..");
-      expect(await previewScroller.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+      expect(
+        await previewScroller.evaluate((element) => element.scrollWidth <= element.clientWidth),
+      ).toBe(true);
       await page.screenshot({ path: test.info().outputPath(`create-collection-${theme}.png`) });
-      await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setSize(760, 640));
+      await app.evaluate(({ BrowserWindow }) =>
+        BrowserWindow.getAllWindows()[0]!.setSize(760, 640),
+      );
       await expectInsideViewport(create.getByTestId("new-collection-create"));
-      await page.screenshot({ path: test.info().outputPath(`create-collection-narrow-${theme}.png`) });
+      await page.screenshot({
+        path: test.info().outputPath(`create-collection-narrow-${theme}.png`),
+      });
       await create.getByTestId("new-collection-create").click();
       await expect(create).toBeHidden();
-      await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setSize(1280, 900));
+      await app.evaluate(({ BrowserWindow }) =>
+        BrowserWindow.getAllWindows()[0]!.setSize(1280, 900),
+      );
       const collection = page.getByRole("region", { name: "Tournament", exact: true });
       // Create form is a command in the actions menu. Enter on the menu's button opens it from the keyboard, so Enter then runs the command that has focus.
       const manage = collection.getByRole("button", { name: "Manage Collection", exact: true });
@@ -65,14 +95,25 @@ for (const theme of ["light", "dark"] as const) {
       await page.keyboard.press("Enter");
       const form = page.getByTestId("create-dataset-form-dialog");
       await expect(form.getByLabel("Form title")).toBeFocused();
-      test.info().annotations.push({ type: "form-open-ms", description: String(Math.round(performance.now() - start)) });
+      test.info().annotations.push({
+        type: "form-open-ms",
+        description: String(Math.round(performance.now() - start)),
+      });
       await form.getByLabel("Form title").fill("Pickleball registration");
-      await expect(form.getByRole("region", { name: "Form preview" }).getByRole("heading", { name: "Pickleball registration" })).toBeVisible();
+      await expect(
+        form
+          .getByRole("region", { name: "Form preview" })
+          .getByRole("heading", { name: "Pickleball registration" }),
+      ).toBeVisible();
       await form.getByRole("checkbox", { name: "Paid", exact: true }).uncheck();
-      await expect(form.getByRole("region", { name: "Form preview" }).getByText("Paid", { exact: true })).toHaveCount(0);
+      await expect(
+        form.getByRole("region", { name: "Form preview" }).getByText("Paid", { exact: true }),
+      ).toHaveCount(0);
       await form.getByRole("checkbox", { name: "Paid", exact: true }).check();
       await page.screenshot({ path: test.info().outputPath(`create-form-${theme}.png`) });
-      await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setSize(760, 640));
+      await app.evaluate(({ BrowserWindow }) =>
+        BrowserWindow.getAllWindows()[0]!.setSize(760, 640),
+      );
       await expectInsideViewport(form.getByRole("button", { name: "Create form", exact: true }));
       await page.screenshot({ path: test.info().outputPath(`create-form-narrow-${theme}.png`) });
       await form.getByRole("button", { name: "Cancel", exact: true }).click();
@@ -80,11 +121,17 @@ for (const theme of ["light", "dark"] as const) {
       // Focus returns to the menu's button, which opened the command's dialog.
       await expect(manage).toBeFocused();
       await manage.click();
-      await expectInsideViewport(collection.getByRole("menu", { name: "Manage Collection", exact: true }));
-      await page.screenshot({ path: test.info().outputPath(`collection-toolbar-narrow-${theme}.png`) });
+      await expectInsideViewport(
+        collection.getByRole("menu", { name: "Manage Collection", exact: true }),
+      );
+      await page.screenshot({
+        path: test.info().outputPath(`collection-toolbar-narrow-${theme}.png`),
+      });
       await page.keyboard.press("Escape");
       assertDesktopEngineHealthy(desktop.logs);
-      expect(desktop.logs.filter(entry => entry.level === "pageerror")).toEqual([]);
-    } finally { await cleanupDesktopWorkspace(desktop, workspace); }
+      expect(desktop.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
+    } finally {
+      await cleanupDesktopWorkspace(desktop, workspace);
+    }
   });
 }

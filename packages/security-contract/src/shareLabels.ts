@@ -1,18 +1,39 @@
 // Display text only. Never use labels to resolve a share or authorize access.
-export interface ShareLabels { subjectName: string | null }
+export interface ShareLabels {
+  subjectName: string | null;
+}
 export const SHARE_LABEL_MAX_CHARS = 160;
-export function normalizeShareLabel(value: unknown, maxChars = SHARE_LABEL_MAX_CHARS): string | null {
+export function normalizeShareLabel(
+  value: unknown,
+  maxChars = SHARE_LABEL_MAX_CHARS,
+): string | null {
   if (typeof value !== "string") return null;
-  return Array.from(value.replace(/(?![\u200c\u200d])[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, "").trim()).slice(0, maxChars).join("") || null;
+  return (
+    Array.from(value.replace(/(?![\u200c\u200d])[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, "").trim())
+      .slice(0, maxChars)
+      .join("") || null
+  );
 }
 export function shareSubjectFallback(selector: unknown): string {
-  const value = selector as {kind?: unknown; paths?: unknown} | null;
+  const value = selector as { kind?: unknown; paths?: unknown } | null;
   if (value?.kind === "group" || value?.kind === "chat") return "a Group";
-  if (Array.isArray(value?.paths) && value.paths.length) return value.paths.length > 1 ? "several items" : "a folder or file";
+  if (Array.isArray(value?.paths) && value.paths.length)
+    return value.paths.length > 1 ? "several items" : "a folder or file";
   return "a workspace";
 }
 export function shareAccessLabel(access: string): string {
-  return ({view: "View", comment: "Comment", edit: "Edit", owner: "Owner", "read-only": "Read-only", "read-write": "Read-write"} as Record<string, string>)[access] ?? access;
+  return (
+    (
+      {
+        view: "View",
+        comment: "Comment",
+        edit: "Edit",
+        owner: "Owner",
+        "read-only": "Read-only",
+        "read-write": "Read-write",
+      } as Record<string, string>
+    )[access] ?? access
+  );
 }
 
 export function shareSenderLabel(name: unknown, email: unknown): string {

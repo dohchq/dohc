@@ -55,7 +55,11 @@ test("@ui-audit a group's Members dialog", async () => {
     await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: OWNER_TOKEN, workspaceId });
     await seedWorkspaceManifest(temp, workspaceId);
     await seedWorkspaceRegistry(temp, [
-      { workspaceId, rootPath: temp.rootPath, remote: { serverUrl: relay.baseUrl, ownerUserId: OWNER_USER } },
+      {
+        workspaceId,
+        rootPath: temp.rootPath,
+        remote: { serverUrl: relay.baseUrl, ownerUserId: OWNER_USER },
+      },
     ]);
     await seedCloudCredentials(temp, {
       serverUrl: relay.baseUrl,
@@ -129,8 +133,20 @@ test("@ui-audit a group's Members dialog", async () => {
     await page.mouse.move(0, 0);
     await shoot(page, "members-f-header");
   } finally {
-    try { await desktop?.close(); } catch (error) { console.error("Desktop cleanup failed:", error); }
-    try { await relay?.stop(); } catch (error) { console.error("Relay cleanup failed:", error); }
-    try { await temp.cleanup(); } catch (error) { console.error("Workspace cleanup failed:", error); }
+    try {
+      await desktop?.close();
+    } catch (error) {
+      console.error("Desktop cleanup failed:", error);
+    }
+    try {
+      await relay?.stop();
+    } catch (error) {
+      console.error("Relay cleanup failed:", error);
+    }
+    try {
+      await temp.cleanup();
+    } catch (error) {
+      console.error("Workspace cleanup failed:", error);
+    }
   }
 });

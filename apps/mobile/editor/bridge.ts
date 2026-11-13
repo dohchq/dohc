@@ -1,4 +1,6 @@
-interface NativeBridge { postMessage(message: string): void }
+interface NativeBridge {
+  postMessage(message: string): void;
+}
 
 /** Sends one message to the app. */
 export function post(kind: string, payload: Record<string, unknown> = {}) {

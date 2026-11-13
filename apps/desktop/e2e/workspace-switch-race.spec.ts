@@ -119,9 +119,7 @@ test("switching A->B with A's heavy panels open shows only B's history and chats
         });
       },
     );
-    await writeWorkspaceFiles(workspaceB, [
-      { path: "b-note.md", contents: "workspace b only\n" },
-    ]);
+    await writeWorkspaceFiles(workspaceB, [{ path: "b-note.md", contents: "workspace b only\n" }]);
 
     await seedWorkspaceRegistry(temp, [
       { workspaceId: WORKSPACE_A_ID, rootPath: temp.rootPath },
@@ -137,25 +135,28 @@ test("switching A->B with A's heavy panels open shows only B's history and chats
     // the measurement includes opening the view.
     const historyStart = Date.now();
     await openHistoryView(page);
-    await expect(
-      page.getByTestId("engine-moment").first(),
-    ).toBeVisible();
+    await expect(page.getByTestId("engine-moment").first()).toBeVisible();
     const historyFirstContentMs = Date.now() - historyStart;
-    const ipcTiming = await page.evaluate(async ({ id }) => {
-      const api = (window as unknown as {
-        dohcDesktop: EngineMomentsBridge;
-      }).dohcDesktop;
-      const start = performance.now();
-      const pageResult = await api.listEngineMoments({ workspaceId: id, limit: 50 });
-      if ("status" in pageResult) {
-        throw new Error("History was still updating after its first row rendered.");
-      }
-      return {
-        ms: performance.now() - start,
-        momentCount: pageResult.moments.length,
-        latestMomentOrder: pageResult.latestMomentOrder,
-      };
-    }, { id: WORKSPACE_A_ID });
+    const ipcTiming = await page.evaluate(
+      async ({ id }) => {
+        const api = (
+          window as unknown as {
+            dohcDesktop: EngineMomentsBridge;
+          }
+        ).dohcDesktop;
+        const start = performance.now();
+        const pageResult = await api.listEngineMoments({ workspaceId: id, limit: 50 });
+        if ("status" in pageResult) {
+          throw new Error("History was still updating after its first row rendered.");
+        }
+        return {
+          ms: performance.now() - start,
+          momentCount: pageResult.moments.length,
+          latestMomentOrder: pageResult.latestMomentOrder,
+        };
+      },
+      { id: WORKSPACE_A_ID },
+    );
     expect(ipcTiming.latestMomentOrder).toBeGreaterThanOrEqual(999);
     console.log(
       `[perf] history first useful content (1,000 moments): shell-ready->first row ${historyFirstContentMs}ms; ` +
@@ -179,7 +180,9 @@ test("switching A->B with A's heavy panels open shows only B's history and chats
     await expect(
       page.getByTestId("linked-chat-thread").locator('[role="list"][data-chat-virtualized="true"]'),
     ).toBeVisible();
-    await expect.poll(() => page.getByTestId("linked-chat-message").count()).toBeLessThan(CHAT_MESSAGES);
+    await expect
+      .poll(() => page.getByTestId("linked-chat-message").count())
+      .toBeLessThan(CHAT_MESSAGES);
     const chatOpenMs = Date.now() - chatStart;
     console.log(
       `[perf] chats panel open with ${CHAT_MESSAGES} messages: ${chatOpenMs}ms to latest message visible`,
@@ -196,9 +199,7 @@ test("switching A->B with A's heavy panels open shows only B's history and chats
     // B's shell renders B's history...
     await openHistoryView(page);
     await expect(
-      page.locator(
-        '[data-testid="engine-moment-open"][data-moment-path="b-note.md"]',
-      ),
+      page.locator('[data-testid="engine-moment-open"][data-moment-path="b-note.md"]'),
     ).toBeVisible();
     // ...and none of A's moments or chats.
     await expect(

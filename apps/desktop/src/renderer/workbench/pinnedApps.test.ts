@@ -26,10 +26,19 @@ afterEach(() => {
 
 describe("sidebar views", () => {
   it("shows dohc's views in the person's order, then the rest, without the hidden ones", () => {
-    expect(sidebarViews({ order: ["history", "search"], hidden: ["graph"] }))
-      .toEqual(["history", "search", "explorer", "chats"]);
-    expect(sidebarViews({ order: [], hidden: [] }))
-      .toEqual(["explorer", "chats", "search", "graph", "history"]);
+    expect(sidebarViews({ order: ["history", "search"], hidden: ["graph"] })).toEqual([
+      "history",
+      "search",
+      "explorer",
+      "chats",
+    ]);
+    expect(sidebarViews({ order: [], hidden: [] })).toEqual([
+      "explorer",
+      "chats",
+      "search",
+      "graph",
+      "history",
+    ]);
   });
 
   it("moves the selection to the first view on the rail when its view is hidden or its app unpinned", () => {
@@ -45,27 +54,38 @@ describe("sidebar views", () => {
     // Explorer is hidden too, so the first view on the rail takes over.
     expect(keepActiveViewShown(onApp, ["history"]).activeView).toBe("history");
     // With every view of dohc's hidden, a pinned app comes first.
-    expect(keepActiveViewShown(onSearch, [appViewId("report")]).activeView).toBe(appViewId("report"));
+    expect(keepActiveViewShown(onSearch, [appViewId("report")]).activeView).toBe(
+      appViewId("report"),
+    );
   });
 
   it("moves the selection only when the rail change removed the selected entry", () => {
     const rail = ["explorer", "search", appViewId("apps/trip")] as const;
     const onSearch = setView(defaultWorkbenchState(), "search");
     // Hiding the selected view moves it.
-    expect(keepActiveViewAfterRailChange(onSearch, rail, ["explorer", appViewId("apps/trip")]).activeView)
-      .toBe("explorer");
+    expect(
+      keepActiveViewAfterRailChange(onSearch, rail, ["explorer", appViewId("apps/trip")])
+        .activeView,
+    ).toBe("explorer");
     // Hiding another view, reordering, or pinning does not.
-    expect(keepActiveViewAfterRailChange(onSearch, rail, ["search", appViewId("apps/trip")])).toBe(onSearch);
-    expect(keepActiveViewAfterRailChange(onSearch, rail, [appViewId("apps/trip"), "search", "explorer"]))
-      .toBe(onSearch);
-    expect(keepActiveViewAfterRailChange(onSearch, rail, [...rail, appViewId("report")])).toBe(onSearch);
+    expect(keepActiveViewAfterRailChange(onSearch, rail, ["search", appViewId("apps/trip")])).toBe(
+      onSearch,
+    );
+    expect(
+      keepActiveViewAfterRailChange(onSearch, rail, [appViewId("apps/trip"), "search", "explorer"]),
+    ).toBe(onSearch);
+    expect(keepActiveViewAfterRailChange(onSearch, rail, [...rail, appViewId("report")])).toBe(
+      onSearch,
+    );
     // A view the rail never showed, opened by a link, stays open through any
     // rail change.
     const onHistory = setView(defaultWorkbenchState(), "history");
     expect(keepActiveViewAfterRailChange(onHistory, rail, ["search"])).toBe(onHistory);
     // Unpinning the selected app moves it.
     const onApp = setView(defaultWorkbenchState(), appViewId("apps/trip"));
-    expect(keepActiveViewAfterRailChange(onApp, rail, ["explorer", "search"]).activeView).toBe("explorer");
+    expect(keepActiveViewAfterRailChange(onApp, rail, ["explorer", "search"]).activeView).toBe(
+      "explorer",
+    );
   });
 
   it("opens the side panel on a view the rail shows, and nothing when the rail is empty", () => {
@@ -80,8 +100,9 @@ describe("sidebar views", () => {
       activeView: "graph",
       sidebarVisible: true,
     });
-    expect(toggleSidebarOnRail({ ...closed, activeView: "explorer" }, ["graph", "explorer"]))
-      .toMatchObject({ activeView: "explorer", sidebarVisible: true });
+    expect(
+      toggleSidebarOnRail({ ...closed, activeView: "explorer" }, ["graph", "explorer"]),
+    ).toMatchObject({ activeView: "explorer", sidebarVisible: true });
     expect(toggleSidebarOnRail(onSearch, ["graph"]).sidebarVisible).toBe(false);
   });
 
@@ -100,9 +121,12 @@ describe("pinned apps", () => {
 
   it("names each pin by its app's title, and marks a folder that holds no app", async () => {
     const getSitePackage = vi.fn(async ({ path }: { path: string }) =>
-      path === "apps/trip" ? site("apps/trip", "Trip planner")
-        : path === "apps/nested/inner" ? site("apps", "Outer")
-        : null);
+      path === "apps/trip"
+        ? site("apps/trip", "Trip planner")
+        : path === "apps/nested/inner"
+          ? site("apps", "Outer")
+          : null,
+    );
     vi.stubGlobal("dohcDesktop", { getSitePackage });
     const roots = ["apps/trip", "apps/nested/inner", "gone"];
     const { result } = renderHook(() => usePinnedApps("ws-a", roots));
@@ -118,7 +142,9 @@ describe("pinned apps", () => {
   });
 
   it("answers the same list while the pins and titles stay the same", async () => {
-    vi.stubGlobal("dohcDesktop", { getSitePackage: vi.fn(async () => site("apps/trip", "Trip planner")) });
+    vi.stubGlobal("dohcDesktop", {
+      getSitePackage: vi.fn(async () => site("apps/trip", "Trip planner")),
+    });
     const { result, rerender } = renderHook(({ roots }) => usePinnedApps("ws-a", roots), {
       initialProps: { roots: ["apps/trip"] },
     });

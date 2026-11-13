@@ -52,7 +52,13 @@ export function valueParts(value: AutomationValue): SentencePart[] {
 }
 
 const WEEKDAY_NAMES: Record<string, string> = {
-  mon: "Monday", tue: "Tuesday", wed: "Wednesday", thu: "Thursday", fri: "Friday", sat: "Saturday", sun: "Sunday",
+  mon: "Monday",
+  tue: "Tuesday",
+  wed: "Wednesday",
+  thu: "Thursday",
+  fri: "Friday",
+  sat: "Saturday",
+  sun: "Sunday",
 };
 
 export function triggerParts(trigger: AutomationTrigger): SentencePart[] {
@@ -63,19 +69,32 @@ export function triggerParts(trigger: AutomationTrigger): SentencePart[] {
       return [text("When a record is removed")];
     case "record-changed":
       // The builder's Chosen fields holds no field until someone ticks one.
-      return [text(trigger.fields === null ? "When a record changes"
-        : trigger.fields.length === 0 ? "When a chosen field changes" : `When ${orList(trigger.fields)} changes`)];
+      return [
+        text(
+          trigger.fields === null
+            ? "When a record changes"
+            : trigger.fields.length === 0
+              ? "When a chosen field changes"
+              : `When ${orList(trigger.fields)} changes`,
+        ),
+      ];
     case "field-changed":
       if (trigger.to === null) return [text(`When ${trigger.field} changes`)];
-      if (trigger.to.kind === "literal" && trigger.to.value === null) return [text(`When ${trigger.field} is cleared`)];
+      if (trigger.to.kind === "literal" && trigger.to.value === null)
+        return [text(`When ${trigger.field} is cleared`)];
       return [text(`When ${trigger.field} becomes `), ...valueParts(trigger.to)];
     case "starts-matching":
       return [text("When a record starts to match "), code(trigger.condition)];
     case "schedule":
       if (trigger.every === "week") {
-        return [text(`Every ${trigger.days.map((day) => WEEKDAY_NAMES[day] ?? day).join(", ")} at ${trigger.at}`)];
+        return [
+          text(
+            `Every ${trigger.days.map((day) => WEEKDAY_NAMES[day] ?? day).join(", ")} at ${trigger.at}`,
+          ),
+        ];
       }
-      if (trigger.every === "month") return [text(`Every month on day ${trigger.days.join(", ")} at ${trigger.at}`)];
+      if (trigger.every === "month")
+        return [text(`Every month on day ${trigger.days.join(", ")} at ${trigger.at}`)];
       return [text(`Every ${trigger.every} at ${trigger.at}`)];
     case "button":
       return [text(`When someone clicks ${trigger.field}`)];
@@ -84,7 +103,9 @@ export function triggerParts(trigger: AutomationTrigger): SentencePart[] {
   }
 }
 
-function fieldValuesParts(values: Extract<AutomationStep, { kind: "set" }>["values"]): SentencePart[] {
+function fieldValuesParts(
+  values: Extract<AutomationStep, { kind: "set" }>["values"],
+): SentencePart[] {
   return values.flatMap(({ field, value }, index) => {
     const joint = index === 0 ? [] : [text(" and ")];
     if (value.kind === "literal" && value.value === null) return [...joint, text(`clear ${field}`)];
@@ -95,22 +116,43 @@ function fieldValuesParts(values: Extract<AutomationStep, { kind: "set" }>["valu
 export function stepParts(step: AutomationStep): SentencePart[] {
   switch (step.kind) {
     case "set":
-      return [...fieldValuesParts(step.values), ...(step.records === null ? [] : [text(` on ${step.records}`)])];
+      return [
+        ...fieldValuesParts(step.values),
+        ...(step.records === null ? [] : [text(` on ${step.records}`)]),
+      ];
     case "add-record":
-      return [text(step.collection === null ? "add a record" : `add a record to ${collectionName(step.collection)}`)];
+      return [
+        text(
+          step.collection === null
+            ? "add a record"
+            : `add a record to ${collectionName(step.collection)}`,
+        ),
+      ];
     case "find":
       return [
-        text(step.collection === null ? "find records where " : `find records in ${collectionName(step.collection)} where `),
+        text(
+          step.collection === null
+            ? "find records where "
+            : `find records in ${collectionName(step.collection)} where `,
+        ),
         code(step.condition),
       ];
     case "invoke":
-      return [text(step.collection === null ? `run ${step.operation}` : `run ${step.operation} in ${collectionName(step.collection)}`)];
+      return [
+        text(
+          step.collection === null
+            ? `run ${step.operation}`
+            : `run ${step.operation} in ${collectionName(step.collection)}`,
+        ),
+      ];
     case "if":
       return [
         text("if "),
         code(step.if),
         text(`, run ${plural(step.do.length, "step", "steps")}`),
-        ...(step.otherwise.length === 0 ? [] : [text(`, otherwise ${plural(step.otherwise.length, "step", "steps")}`)]),
+        ...(step.otherwise.length === 0
+          ? []
+          : [text(`, otherwise ${plural(step.otherwise.length, "step", "steps")}`)]),
       ];
     case "notify":
       return [text(`notify ${plural(step.to.length, "person", "people")}`)];

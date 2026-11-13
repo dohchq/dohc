@@ -21,16 +21,26 @@ export function OptionColorPicker(props: {
   const swatches = useRef<Array<HTMLButtonElement | null>>([]);
   const current = Math.max(0, OPTION_COLORS.indexOf(props.value));
   const move = (event: KeyboardEvent<HTMLDivElement>) => {
-    const step = event.key === "ArrowRight" || event.key === "ArrowDown" ? 1
-      : event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 0;
+    const step =
+      event.key === "ArrowRight" || event.key === "ArrowDown"
+        ? 1
+        : event.key === "ArrowLeft" || event.key === "ArrowUp"
+          ? -1
+          : 0;
     if (step === 0) return;
     event.preventDefault();
     const focused = swatches.current.indexOf(event.target as HTMLButtonElement);
-    const next = ((focused >= 0 ? focused : current) + step + OPTION_COLORS.length) % OPTION_COLORS.length;
+    const next =
+      ((focused >= 0 ? focused : current) + step + OPTION_COLORS.length) % OPTION_COLORS.length;
     swatches.current[next]?.focus();
   };
   return (
-    <div role="radiogroup" aria-label={props.label} onKeyDown={move} className="flex items-center gap-1">
+    <div
+      role="radiogroup"
+      aria-label={props.label}
+      onKeyDown={move}
+      className="flex items-center gap-1"
+    >
       {OPTION_COLORS.map((color, index) => {
         const name = optionColorName(color);
         const chosen = props.value === color;

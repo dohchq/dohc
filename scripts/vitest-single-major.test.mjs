@@ -14,15 +14,24 @@ const repoRoot = fileURLToPath(new URL("../", import.meta.url));
 
 // Peer auto-installation can put Vitest on disk too.
 function declaredVitest(pkg) {
-  return pkg.devDependencies?.vitest ?? pkg.dependencies?.vitest
-    ?? pkg.peerDependencies?.vitest ?? pkg.optionalDependencies?.vitest;
+  return (
+    pkg.devDependencies?.vitest ??
+    pkg.dependencies?.vitest ??
+    pkg.peerDependencies?.vitest ??
+    pkg.optionalDependencies?.vitest
+  );
 }
 
 function vitestDeclarations(root) {
-  return [{ path: "", manifest: JSON.parse(readFileSync(join(root, "package.json"), "utf8")) },
-    ...readWorkspacePackages(root)]
+  return [
+    { path: "", manifest: JSON.parse(readFileSync(join(root, "package.json"), "utf8")) },
+    ...readWorkspacePackages(root),
+  ]
     .filter(({ manifest }) => declaredVitest(manifest))
-    .map(({ path, manifest }) => ({ path: join(path, "package.json"), range: declaredVitest(manifest) }));
+    .map(({ path, manifest }) => ({
+      path: join(path, "package.json"),
+      range: declaredVitest(manifest),
+    }));
 }
 
 function assertSingleMajor(root, declarations) {
@@ -34,21 +43,28 @@ function assertSingleMajor(root, declarations) {
     assert.ok(major, `${path} resolves an invalid Vitest version: ${version}`);
     byMajor.set(major, [...(byMajor.get(major) ?? []), `${path} (${range} -> ${version})`]);
   }
-  assert.equal(byMajor.size, 1,
-    `The workspace resolves ${byMajor.size} Vitest majors; it must resolve 1. `
-    + [...byMajor].map(([major, paths]) => `major ${major}: ${paths.join(", ")}`).join("; "));
+  assert.equal(
+    byMajor.size,
+    1,
+    `The workspace resolves ${byMajor.size} Vitest majors; it must resolve 1. ` +
+      [...byMajor].map(([major, paths]) => `major ${major}: ${paths.join(", ")}`).join("; "),
+  );
 }
 
 const declarations = vitestDeclarations(repoRoot);
 
 test("the repo root declares vitest so npx cannot substitute its own", () => {
-  assert.ok(declarations.some(({ path }) => path === "package.json"),
-    "The root package.json must declare Vitest so npx resolves a local runner.");
+  assert.ok(
+    declarations.some(({ path }) => path === "package.json"),
+    "The root package.json must declare Vitest so npx resolves a local runner.",
+  );
 });
 
 test("workspace discovery finds Vitest consumers beyond the root", () => {
-  assert.ok(declarations.length > 1,
-    `Found ${declarations.length} Vitest declarations; expected the root and workspace consumers.`);
+  assert.ok(
+    declarations.length > 1,
+    `Found ${declarations.length} Vitest declarations; expected the root and workspace consumers.`,
+  );
 });
 
 test("every Vitest consumer resolves the same installed major", () => {
@@ -71,11 +87,18 @@ test("installed majors determine the guard even with disjunctive ranges", () => 
       writeFileSync(join(root, "pnpm-workspace.yaml"), "packages: ['apps/*']\n");
       write("package.json", { name: "root", devDependencies: { vitest: "^4 || ^5" } });
       write("apps/peer/package.json", { name: "peer", peerDependencies: { vitest: "^4 || ^5" } });
-      if (rootVersion) write("node_modules/vitest/package.json", { name: "vitest", version: rootVersion });
-      if (peerVersion) write("apps/peer/node_modules/vitest/package.json", { name: "vitest", version: peerVersion });
+      if (rootVersion)
+        write("node_modules/vitest/package.json", { name: "vitest", version: rootVersion });
+      if (peerVersion)
+        write("apps/peer/node_modules/vitest/package.json", {
+          name: "vitest",
+          version: peerVersion,
+        });
       const check = () => assertSingleMajor(root, vitestDeclarations(root));
       if (error) assert.throws(check, error);
       else check();
-    } finally { rmSync(root, { recursive: true, force: true }); }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 });

@@ -38,10 +38,12 @@ const ISOLATE_ALL = process.env.DOHC_DESKTOP_TEST_ISOLATION === "all";
 
 const common = {
   // Source-backed examples outside this package use the same React instance as their desktop tests.
-  resolve: { alias: {
-    react: dirname(require.resolve("react/package.json")),
-    "react-dom": dirname(require.resolve("react-dom/package.json")),
-  } },
+  resolve: {
+    alias: {
+      react: dirname(require.resolve("react/package.json")),
+      "react-dom": dirname(require.resolve("react-dom/package.json")),
+    },
+  },
   test: {
     css: { include: [/[?&]raw(?:&|$)/] },
     testTimeout: 30_000,
@@ -76,35 +78,43 @@ export default defineConfig({
         test: {
           ...desktop,
           name: "desktop",
-          include: ISOLATE_ALL ? [...tests.isolated, ...tests.sharedDom, ...tests.sharedNode] : tests.isolated,
+          include: ISOLATE_ALL
+            ? [...tests.isolated, ...tests.sharedDom, ...tests.sharedNode]
+            : tests.isolated,
         },
       },
       // Files in a shared project run one after another in the same worker.
       // Each file starts from the worker's baseline: its environment
       // variables, globals, and real timers, and in jsdom an empty document,
       // empty storage, and its DOM prototypes.
-      ...ISOLATE_ALL ? [] : [
-        {
-          ...common,
-          test: {
-            ...desktop,
-            name: "desktop-shared-dom",
-            include: tests.sharedDom,
-            isolate: false,
-            setupFiles: [...desktop.setupFiles, SHARED_WORKER_SETUP, "./src/testSharedDomSetup.ts"],
-          },
-        },
-        {
-          ...common,
-          test: {
-            ...desktop,
-            name: "desktop-shared-node",
-            include: tests.sharedNode,
-            isolate: false,
-            setupFiles: [...desktop.setupFiles, SHARED_WORKER_SETUP],
-          },
-        },
-      ],
+      ...(ISOLATE_ALL
+        ? []
+        : [
+            {
+              ...common,
+              test: {
+                ...desktop,
+                name: "desktop-shared-dom",
+                include: tests.sharedDom,
+                isolate: false,
+                setupFiles: [
+                  ...desktop.setupFiles,
+                  SHARED_WORKER_SETUP,
+                  "./src/testSharedDomSetup.ts",
+                ],
+              },
+            },
+            {
+              ...common,
+              test: {
+                ...desktop,
+                name: "desktop-shared-node",
+                include: tests.sharedNode,
+                isolate: false,
+                setupFiles: [...desktop.setupFiles, SHARED_WORKER_SETUP],
+              },
+            },
+          ]),
       {
         ...common,
         test: {

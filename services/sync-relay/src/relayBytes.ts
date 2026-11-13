@@ -13,14 +13,21 @@ export async function readBytes(request: Request, maxBytes: number): Promise<Uin
  * `maxBytes` and within `timeoutMs`. Past either bound it stops reading and
  * throws; the adapter answers and closes the connection without draining it.
  */
-export async function readStreamedBytes(request: Request, maxBytes: number, timeoutMs: number): Promise<Uint8Array> {
+export async function readStreamedBytes(
+  request: Request,
+  maxBytes: number,
+  timeoutMs: number,
+): Promise<Uint8Array> {
   const length = request.headers.get("content-length");
   if (length !== null && Number(length) > maxBytes) throw relayError("payload_too_large");
   if (!request.body) return new Uint8Array();
   const reader = request.body.getReader();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new RelayError("bad_request", "request body timed out", 408)), timeoutMs);
+    timer = setTimeout(
+      () => reject(new RelayError("bad_request", "request body timed out", 408)),
+      timeoutMs,
+    );
   });
   const chunks: Uint8Array[] = [];
   let received = 0;

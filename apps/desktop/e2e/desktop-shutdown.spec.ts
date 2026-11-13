@@ -9,13 +9,21 @@ test("the real desktop launcher preserves a nonzero Electron exit", async () => 
   try {
     desktop = await launchDesktopApp({ workspace });
     const child = desktop.app.process();
-    await desktop.app.evaluate(({ app }) => app.exit(1)).catch((error: unknown) => {
-      // Exiting main can close its debugger before the evaluation replies.
-      if (!(error instanceof Error) || !/Target.*closed|Execution context was destroyed/iu.test(error.message)) throw error;
-    });
-    await expect.poll(() => ({ exitCode: child.exitCode, signalCode: child.signalCode }), {
-      message: "The launcher must forward Electron main's exit status.",
-    }).toEqual({ exitCode: 1, signalCode: null });
+    await desktop.app
+      .evaluate(({ app }) => app.exit(1))
+      .catch((error: unknown) => {
+        // Exiting main can close its debugger before the evaluation replies.
+        if (
+          !(error instanceof Error) ||
+          !/Target.*closed|Execution context was destroyed/iu.test(error.message)
+        )
+          throw error;
+      });
+    await expect
+      .poll(() => ({ exitCode: child.exitCode, signalCode: child.signalCode }), {
+        message: "The launcher must forward Electron main's exit status.",
+      })
+      .toEqual({ exitCode: 1, signalCode: null });
     await expect(desktop.close()).rejects.toThrow("Electron exited with status 1.");
     desktop = null;
   } finally {

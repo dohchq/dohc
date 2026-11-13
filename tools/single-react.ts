@@ -2,7 +2,8 @@
 // through it find no dispatcher and the component never renders (#3730).
 // This fails the build instead, naming the chunks that carry each copy.
 // It takes no Vite types, so Vite 7 (desktop) and Vite 8 (share page) both use it.
-const reactModule = /[\\/]node_modules[\\/](react|react-dom)[\\/]cjs[\\/]\1\.(?:production|development)\.js$/u;
+const reactModule =
+  /[\\/]node_modules[\\/](react|react-dom)[\\/]cjs[\\/]\1\.(?:production|development)\.js$/u;
 
 interface BuiltFile {
   type: string;
@@ -13,8 +14,15 @@ interface BuiltFile {
 export function singleReact() {
   return {
     name: "single-react",
-    generateBundle(this: { error(message: string): never }, _options: unknown, bundle: Record<string, BuiltFile>) {
-      const copies = new Map<string, string[]>([["react", []], ["react-dom", []]]);
+    generateBundle(
+      this: { error(message: string): never },
+      _options: unknown,
+      bundle: Record<string, BuiltFile>,
+    ) {
+      const copies = new Map<string, string[]>([
+        ["react", []],
+        ["react-dom", []],
+      ]);
       for (const file of Object.values(bundle)) {
         for (const id of file.type === "chunk" ? (file.moduleIds ?? []) : []) {
           const name = reactModule.exec(id)?.[1];
@@ -28,7 +36,10 @@ export function singleReact() {
             ? [`found no ${name} module; update the pattern in tools/single-react.ts`]
             : [`${name} is bundled ${found.length} times:\n  ${found.join("\n  ")}`],
       );
-      if (problems.length > 0) this.error(`This build must carry exactly one React and one React DOM (#3730):\n${problems.join("\n")}`);
+      if (problems.length > 0)
+        this.error(
+          `This build must carry exactly one React and one React DOM (#3730):\n${problems.join("\n")}`,
+        );
     },
   };
 }

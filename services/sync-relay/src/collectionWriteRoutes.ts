@@ -3,21 +3,42 @@ import { createHash } from "node:crypto";
 import { jsonResponse, TokenBucketLimiter } from "@dohc/service-http";
 import { LINK_SECRET_PATTERN } from "@dohc/security-contract/wire-patterns";
 import type { DiscussionActivityHub } from "./discussionActivity";
-import { badRequest, errorResponse, notFound, relayError, RelayError, RELAY_ERRORS } from "./errors";
+import {
+  badRequest,
+  errorResponse,
+  notFound,
+  relayError,
+  RelayError,
+  RELAY_ERRORS,
+} from "./errors";
 import type { LinkAuthorityResolver, PersonalAuthority } from "./linkAuthority";
 import { hashLinkProfileSecret } from "./linkSecurity";
 import { readStreamedBytes } from "./relayBytes";
 import { parseString, parseWorkspaceId } from "./requestInputs";
 import { grantEditsCollection, namedCollectionEditGrant } from "./collectionEditGrant";
 import { accountDisplayName } from "./accountDisplayName";
-import { collectionEditSelector, filterCollectionWriteForShare, MAX_COLLECTION_WRITE_BYTES, MAX_NEW_COLLECTION_RECORDS, pathVisibleThroughShare } from "./shareFilter";
-import { CollectionWriteStaleError, type CommitCollectionWriteInput, type SyncRelayStorage } from "./storage";
+import {
+  collectionEditSelector,
+  filterCollectionWriteForShare,
+  MAX_COLLECTION_WRITE_BYTES,
+  MAX_NEW_COLLECTION_RECORDS,
+  pathVisibleThroughShare,
+} from "./shareFilter";
+import {
+  CollectionWriteStaleError,
+  type CommitCollectionWriteInput,
+  type SyncRelayStorage,
+} from "./storage";
 import type { CommittedCollectionWrite } from "./storage/collectionWrites";
 import type { PersonalCredential } from "./storage/personalAgentChat";
 
 export type CollectionWriteRoute = { route: "share-collection-writes"; shareId: string };
 export type LinkCollectionWriteRoute = { route: "link-collection-writes" };
-export type OwnerCollectionWriteRoute = { route: "owner-collection-writes"; workspaceId: string; grantId: string };
+export type OwnerCollectionWriteRoute = {
+  route: "owner-collection-writes";
+  workspaceId: string;
+  grantId: string;
+};
 
 // A burst of 30 requests per grant, then one every two seconds.
 const COLLECTION_WRITE_BUCKET_CAPACITY = 30;
@@ -67,7 +88,8 @@ export function createCollectionWriteRoutes(input: {
     route: CollectionWriteRoute,
     actorUserId: string,
   ): Promise<Response> {
-    if (request.method !== "POST" && request.method !== "GET") throw relayError("method_not_allowed");
+    if (request.method !== "POST" && request.method !== "GET")
+      throw relayError("method_not_allowed");
     await input.claimPendingShares(actorUserId);
     const authorized = namedCollectionEditGrant(storage, route.shareId, actorUserId);
     const { share, grant } = authorized;
@@ -76,13 +98,27 @@ export function createCollectionWriteRoutes(input: {
       throw relayError("collection_write_rate_limited");
     }
     if (request.method === "GET") {
-      const collectionPath = parseString(new URL(request.url).searchParams.get("collectionPath"), "collectionPath", 4096);
+      const collectionPath = parseString(
+        new URL(request.url).searchParams.get("collectionPath"),
+        "collectionPath",
+        4096,
+      );
       if (!grantEditsCollection(storage, authorized, collectionPath)) throw notFound();
-      return jsonResponse({ ok: true, canSwitch: storage.automationSwitchableFolder(share.workspaceId, collectionPath) }, 200,
-        { "cache-control": "private, no-store" });
+      return jsonResponse(
+        {
+          ok: true,
+          canSwitch: storage.automationSwitchableFolder(share.workspaceId, collectionPath),
+        },
+        200,
+        { "cache-control": "private, no-store" },
+      );
     }
-    const humanName = accountDisplayName(input.lookupUserDisplayName, actorUserId).then(name => {
-      try { return parseLiveUpdateIdentifier(name); } catch { return "Unnamed"; }
+    const humanName = accountDisplayName(input.lookupUserDisplayName, actorUserId).then((name) => {
+      try {
+        return parseLiveUpdateIdentifier(name);
+      } catch {
+        return "Unnamed";
+      }
     });
     const body = await readBody(request);
     if (Object.keys(body).some((key) => key !== "submitId" && key !== "changes")) {
@@ -93,18 +129,22 @@ export function createCollectionWriteRoutes(input: {
       channelKind: (wireId) => storage.findChannelCreateKind(share.workspaceId, wireId),
     });
     if (!decision.allowed) throw relayError("share_op_rejected");
-    return commit(storage, {
-      shareId: share.shareId,
-      grantId: grant.grantId,
-      grantGeneration: grant.generation,
-      writer: { kind: "named", userId: actorUserId,
-        humanName: await humanName },
-      submitId,
-      rawChanges: body.changes,
-      write: decision.write,
-      nowMs: input.nowMs(),
-      newId: input.newId,
-    }, share.workspaceId, input.discussionActivity);
+    return commit(
+      storage,
+      {
+        shareId: share.shareId,
+        grantId: grant.grantId,
+        grantGeneration: grant.generation,
+        writer: { kind: "named", userId: actorUserId, humanName: await humanName },
+        submitId,
+        rawChanges: body.changes,
+        write: decision.write,
+        nowMs: input.nowMs(),
+        newId: input.newId,
+      },
+      share.workspaceId,
+      input.discussionActivity,
+    );
   };
 }
 
@@ -117,7 +157,12 @@ function commit(
   discussionActivity: Pick<DiscussionActivityHub, "wake">,
   headers: Record<string, string> = {},
 ): Response {
-  return answer(() => storage.commitCollectionWrite(input), workspaceId, discussionActivity, headers);
+  return answer(
+    () => storage.commitCollectionWrite(input),
+    workspaceId,
+    discussionActivity,
+    headers,
+  );
 }
 
 function answer(
@@ -131,13 +176,17 @@ function answer(
     committed = write();
   } catch (error) {
     if (!(error instanceof CollectionWriteStaleError)) throw error;
-    return jsonResponse({
-      ok: false,
-      error: error.message,
-      code: RELAY_ERRORS.stale.code,
-      path: error.path,
-      currentBlobSha256: error.currentBlobSha256,
-    }, RELAY_ERRORS.stale.status, headers);
+    return jsonResponse(
+      {
+        ok: false,
+        error: error.message,
+        code: RELAY_ERRORS.stale.code,
+        path: error.path,
+        currentBlobSha256: error.currentBlobSha256,
+      },
+      RELAY_ERRORS.stale.status,
+      headers,
+    );
   }
   if (committed.created) discussionActivity.wake(`log:${workspaceId}`);
   return jsonResponse({ ok: true, ...committed.receipt, created: committed.created }, 200, headers);
@@ -189,13 +238,17 @@ export function createLinkCollectionWriteRoute(input: {
     const capability = input.linkAuthority.resolve(request);
     const { credential } = capability;
     // A holder writes as the browser its profile names; an agent as its connection's principal.
-    let writer: { kind: "link"; capabilityHash: string; profileTokenHash: string } |
-      { kind: "agent"; accessTokenHash: string; resourceHash: string };
+    let writer:
+      | { kind: "link"; capabilityHash: string; profileTokenHash: string }
+      | { kind: "agent"; accessTokenHash: string; resourceHash: string };
     if (credential.kind === "holder") {
       const secret = request.headers.get("x-dohc-link-profile-secret");
       if (!secret || !LINK_SECRET_PATTERN.test(secret)) throw notFound();
-      writer = { kind: "link", capabilityHash: credential.capability.session.capabilityHash,
-        profileTokenHash: hashLinkProfileSecret(secret, input.linkKey) };
+      writer = {
+        kind: "link",
+        capabilityHash: credential.capability.session.capabilityHash,
+        profileTokenHash: hashLinkProfileSecret(secret, input.linkKey),
+      };
     } else {
       writer = { kind: "agent", ...credential.check };
     }
@@ -204,14 +257,27 @@ export function createLinkCollectionWriteRoute(input: {
     if (capability.access !== "edit") {
       throw notFound();
     }
-    const pinned = { shareId: capability.shareId, grantId: capability.grantId, grantGeneration: capability.generation };
+    const pinned = {
+      shareId: capability.shareId,
+      grantId: capability.grantId,
+      grantGeneration: capability.generation,
+    };
     // The agent's check reads its token again with the current clock, so a
     // token that expired or a connection that ended since stops the write.
-    const requireCurrentWriter = () => writer.kind === "link"
-      ? storage.authorizeLinkCollectionWrite({ ...pinned, capabilityHash: writer.capabilityHash,
-        profileTokenHash: writer.profileTokenHash, nowMs: input.nowMs() })
-      : storage.authorizeAgentCollectionWrite({ ...pinned, accessTokenHash: writer.accessTokenHash,
-        resourceHash: writer.resourceHash, nowMs: input.nowMs() });
+    const requireCurrentWriter = () =>
+      writer.kind === "link"
+        ? storage.authorizeLinkCollectionWrite({
+            ...pinned,
+            capabilityHash: writer.capabilityHash,
+            profileTokenHash: writer.profileTokenHash,
+            nowMs: input.nowMs(),
+          })
+        : storage.authorizeAgentCollectionWrite({
+            ...pinned,
+            accessTokenHash: writer.accessTokenHash,
+            resourceHash: writer.resourceHash,
+            nowMs: input.nowMs(),
+          });
     const { share } = requireCurrentWriter();
     let release: (() => void) | null = null;
     let body: Record<string, unknown> | undefined;
@@ -223,13 +289,17 @@ export function createLinkCollectionWriteRoute(input: {
       if (body.changes.length > MAX_NEW_COLLECTION_RECORDS + 2) return;
       for (const change of body.changes) {
         for (const path of [change?.basedOnPath, change?.afterPath]) {
-          if (typeof path === "string" && !pathVisibleThroughShare(selector, path)) throw notFound();
+          if (typeof path === "string" && !pathVisibleThroughShare(selector, path))
+            throw notFound();
         }
       }
     };
     try {
       if (request.method !== "POST") throw relayError("method_not_allowed");
-      if (request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") {
+      if (
+        request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !==
+        "application/json"
+      ) {
         throw badRequest("Collection writes require JSON.");
       }
       // Every holder of the link, in every browser and after any rotation,
@@ -252,21 +322,27 @@ export function createLinkCollectionWriteRoute(input: {
         channelKind: (wireId) => storage.findChannelCreateKind(share.workspaceId, wireId),
       });
       if (!decision.allowed) throw relayError("share_op_rejected");
-      return commit(storage, {
-        shareId: capability.shareId,
-        grantId: capability.grantId,
-        grantGeneration: capability.generation,
-        writer: {
-          ...writer,
-          content,
-          now: input.nowMs,
+      return commit(
+        storage,
+        {
+          shareId: capability.shareId,
+          grantId: capability.grantId,
+          grantGeneration: capability.generation,
+          writer: {
+            ...writer,
+            content,
+            now: input.nowMs,
+          },
+          submitId,
+          rawChanges: changes,
+          write: decision.write,
+          nowMs: input.nowMs(),
+          newId: input.newId,
         },
-        submitId,
-        rawChanges: changes,
-        write: decision.write,
-        nowMs: input.nowMs(),
-        newId: input.newId,
-      }, share.workspaceId, input.discussionActivity, NO_STORE);
+        share.workspaceId,
+        input.discussionActivity,
+        NO_STORE,
+      );
     } catch (error) {
       requireScope(requireCurrentWriter());
       if (!(error instanceof RelayError) || error.code === "not_found") throw error;
@@ -293,7 +369,10 @@ export const PERSONAL_WRITE_WORKSPACE_HEADER = "x-dohc-agent-workspace";
  * workspace's ownership, and Edit reach again inside its transaction.
  */
 export function createPersonalCollectionWriteRoute(input: {
-  storage: Pick<SyncRelayStorage, "checkPersonalCollectionWriter" | "commitPersonalCollectionWrite">;
+  storage: Pick<
+    SyncRelayStorage,
+    "checkPersonalCollectionWriter" | "commitPersonalCollectionWrite"
+  >;
   rateLimiter: TokenBucketLimiter;
   admission: LinkCollectionWriteAdmission;
   nowMs: () => number;
@@ -306,27 +385,47 @@ export function createPersonalCollectionWriteRoute(input: {
     authority: PersonalAuthority,
     fresh: () => Promise<PersonalCredential>,
   ): Promise<Response> {
-    if (request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") {
+    if (
+      request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !==
+      "application/json"
+    ) {
       throw badRequest("Collection writes require JSON.");
     }
     // A workspace the agent may not edit refuses the write before it holds a slot or reads a byte.
     // The commit reads the agent's access there again.
     const workspaceId = headerWorkspaceId(request);
-    input.storage.checkPersonalCollectionWriter({
-      check: authority.check, connectionId: authority.connectionId, fenceEpoch: authority.fenceEpoch, workspaceId,
-    }, input.nowMs());
+    input.storage.checkPersonalCollectionWriter(
+      {
+        check: authority.check,
+        connectionId: authority.connectionId,
+        fenceEpoch: authority.fenceEpoch,
+        workspaceId,
+      },
+      input.nowMs(),
+    );
     // One agent's writes spend one bucket and hold one body, whichever connection sends them.
     const key = `personal:${authority.agentId}`;
-    if (!input.rateLimiter.allow(key, input.nowMs())) throw relayError("collection_write_rate_limited");
+    if (!input.rateLimiter.allow(key, input.nowMs()))
+      throw relayError("collection_write_rate_limited");
     const release = input.admission.admit(key);
     if (!release) throw relayError("collection_write_rate_limited");
     try {
       // History names the agent on its owner's behalf, so the owner's name is looked up while the body arrives.
-      const ownerName = accountDisplayName(input.lookupUserDisplayName, authority.ownerUserId).then(name => {
-        try { return parseLiveUpdateIdentifier(name); } catch { return "Unnamed"; }
-      });
+      const ownerName = accountDisplayName(input.lookupUserDisplayName, authority.ownerUserId).then(
+        (name) => {
+          try {
+            return parseLiveUpdateIdentifier(name);
+          } catch {
+            return "Unnamed";
+          }
+        },
+      );
       const body = await readBody(request, MAX_LINK_COLLECTION_WRITE_BODY_BYTES);
-      if (Object.keys(body).some((field) => field !== "workspaceId" && field !== "submitId" && field !== "changes")) {
+      if (
+        Object.keys(body).some(
+          (field) => field !== "workspaceId" && field !== "submitId" && field !== "changes",
+        )
+      ) {
         throw badRequest("invalid request");
       }
       if (parseWorkspaceId(body.workspaceId) !== workspaceId) throw badRequest("invalid request");
@@ -334,9 +433,22 @@ export function createPersonalCollectionWriteRoute(input: {
       const credential = await fresh();
       const { changes, content } = personalChanges(body.changes);
       const owner = await ownerName;
-      return answer(() => input.storage.commitPersonalCollectionWrite({
-        ...credential, workspaceId, submitId, ownerName: owner, rawChanges: changes, content, now: input.nowMs, newId: input.newId,
-      }), workspaceId, input.discussionActivity, NO_STORE);
+      return answer(
+        () =>
+          input.storage.commitPersonalCollectionWrite({
+            ...credential,
+            workspaceId,
+            submitId,
+            ownerName: owner,
+            rawChanges: changes,
+            content,
+            now: input.nowMs,
+            newId: input.newId,
+          }),
+        workspaceId,
+        input.discussionActivity,
+        NO_STORE,
+      );
     } finally {
       release();
     }
@@ -359,7 +471,10 @@ function personalChanges(raw: unknown): ReturnType<typeof linkChanges> {
     return linkChanges(raw);
   } catch (error) {
     if (!(error instanceof RelayError) || error.code !== "share_op_rejected") throw error;
-    throw relayError("share_op_rejected", "dohc could not read these files. Send each file's complete text, or its content as standard base64, up to 4 MiB in all.");
+    throw relayError(
+      "share_op_rejected",
+      "dohc could not read these files. Send each file's complete text, or its content as standard base64, up to 4 MiB in all.",
+    );
   }
 }
 
@@ -368,23 +483,38 @@ function personalChanges(raw: unknown): ReturnType<typeof linkChanges> {
 // relay computes. A change that names a hash or a size of its own is
 // refused, so a link can never point at bytes it did not send.
 const LINK_CHANGE_KEYS = new Set([
-  "basedOnPath", "basedOnBlobSha256", "operation", "afterPath", "afterContentKind", "afterContentBase64", "recordedAtMs",
+  "basedOnPath",
+  "basedOnBlobSha256",
+  "operation",
+  "afterPath",
+  "afterContentKind",
+  "afterContentBase64",
+  "recordedAtMs",
 ]);
 
-function linkChanges(raw: unknown): { changes: Record<string, unknown>[]; content: Map<string, Uint8Array> } {
+function linkChanges(raw: unknown): {
+  changes: Record<string, unknown>[];
+  content: Map<string, Uint8Array>;
+} {
   if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_NEW_COLLECTION_RECORDS + 2) {
     throw relayError("share_op_rejected");
   }
   const content = new Map<string, Uint8Array>();
   let total = 0;
   const changes = raw.map((entry: unknown) => {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw relayError("share_op_rejected");
+    if (!entry || typeof entry !== "object" || Array.isArray(entry))
+      throw relayError("share_op_rejected");
     const record = entry as Record<string, unknown>;
-    if (Object.keys(record).some((key) => !LINK_CHANGE_KEYS.has(key))) throw relayError("share_op_rejected");
+    if (Object.keys(record).some((key) => !LINK_CHANGE_KEYS.has(key)))
+      throw relayError("share_op_rejected");
     const encoded = record.afterContentBase64;
     // Refuse before decoding: text a third longer than the write may carry.
-    if (typeof encoded !== "string" || encoded.length % 4 !== 0 || !BASE64.test(encoded) ||
-        encoded.length > Math.ceil(MAX_COLLECTION_WRITE_BYTES / 3) * 4) {
+    if (
+      typeof encoded !== "string" ||
+      encoded.length % 4 !== 0 ||
+      !BASE64.test(encoded) ||
+      encoded.length > Math.ceil(MAX_COLLECTION_WRITE_BYTES / 3) * 4
+    ) {
       throw relayError("share_op_rejected");
     }
     const bytes = Buffer.from(encoded, "base64");
@@ -430,7 +560,10 @@ export function readOwnerCollectionWrites(
   });
 }
 
-async function readBody(request: Request, maxBytes = MAX_COLLECTION_WRITE_BODY_BYTES): Promise<Record<string, unknown>> {
+async function readBody(
+  request: Request,
+  maxBytes = MAX_COLLECTION_WRITE_BODY_BYTES,
+): Promise<Record<string, unknown>> {
   const bytes = await readStreamedBytes(request, maxBytes, COLLECTION_WRITE_BODY_TIMEOUT_MS);
   let value: unknown;
   try {

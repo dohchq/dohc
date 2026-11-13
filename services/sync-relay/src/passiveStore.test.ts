@@ -17,10 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { requireEngineBinaryOrSkip } from "../../../apps/desktop/src/testing/engineBinary";
-import {
-  EngineClient,
-  DuplexEngineClientConnection,
-} from "@dohc/workspace-engine-client/daemon";
+import { EngineClient, DuplexEngineClientConnection } from "@dohc/workspace-engine-client/daemon";
 import { openEngineYdocProviderSession } from "../../../packages/workspace-engine-client/src/ydoc/ydocProviderSession";
 import { testStorage, testHandler, closeTestStorages } from "./testing/index";
 import { createServiceHostReplication } from "./serviceHostReplication";
@@ -41,7 +38,8 @@ it.skipIf(engineBinary.missing)(
       path: string;
       replica: boolean;
     }> = [];
-    const readHandler = createServiceHostReplication({activity: new DiscussionActivityHub(), 
+    const readHandler = createServiceHostReplication({
+      activity: new DiscussionActivityHub(),
       storage,
       prefix: "dohc-passive-test-v1.",
       authorize(input) {
@@ -57,8 +55,7 @@ it.skipIf(engineBinary.missing)(
         const chunks: Buffer[] = [];
         for await (const chunk of incoming) chunks.push(Buffer.from(chunk));
         const isReplica =
-          incoming.headers.authorization?.includes("dohc-passive-test-v1.") ??
-          false;
+          incoming.headers.authorization?.includes("dohc-passive-test-v1.") ?? false;
         httpRequests.push({
           method: incoming.method!,
           path: incoming.url!,
@@ -69,9 +66,7 @@ it.skipIf(engineBinary.missing)(
           headers: incoming.headers as Record<string, string>,
           ...(chunks.length ? { body: Buffer.concat(chunks) } : {}),
         });
-        const response = await (isReplica ? readHandler : ownerHandler)(
-          request,
-        );
+        const response = await (isReplica ? readHandler : ownerHandler)(request);
         const body = Buffer.from(await response.arrayBuffer());
         outgoing.writeHead(response.status, {
           ...Object.fromEntries(response.headers),
@@ -111,21 +106,13 @@ it.skipIf(engineBinary.missing)(
           params: params as never,
         });
       } catch (error) {
-        throw Error(
-          `${engine.name} ${method}: ${String(error)} ${JSON.stringify(error)}`,
-        );
+        throw Error(`${engine.name} ${method}: ${String(error)} ${JSON.stringify(error)}`);
       }
       if (response.error)
-        throw Error(
-          `${engine.name} ${method}: ${JSON.stringify(response.error)}`,
-        );
+        throw Error(`${engine.name} ${method}: ${JSON.stringify(response.error)}`);
       return response.result as any;
     };
-    const open = async (
-      name: string,
-      replica = false,
-      captureNone = replica,
-    ) => {
+    const open = async (name: string, replica = false, captureNone = replica) => {
       const dir = join(root, name);
       mkdirSync(dir, { recursive: true });
       const child = spawn(exe, [], {
@@ -141,9 +128,7 @@ it.skipIf(engineBinary.missing)(
         readable: child.stdout!,
         writable: child.stdin!,
       });
-      const exited = new Promise<void>((done) =>
-        child.once("close", () => done()),
-      );
+      const exited = new Promise<void>((done) => child.once("close", () => done()));
       const client = new EngineClient(
         new DuplexEngineClientConnection(stream),
         {
@@ -155,9 +140,7 @@ it.skipIf(engineBinary.missing)(
         exited,
       );
       child.stderr!.resume();
-      child.on("exit", (code, signal) =>
-        client.notifyProcessExit(code, signal),
-      );
+      child.on("exit", (code, signal) => client.notifyProcessExit(code, signal));
       const engine = { client, child, dir, name, workspace: "" };
       engines.push(engine);
       await client.ready();
@@ -165,9 +148,7 @@ it.skipIf(engineBinary.missing)(
         rootDir: dir,
         workspaceId,
         ...(captureNone ? { captureMode: "none" } : {}),
-        ...(replica
-          ? { storeMode: "passive" }
-          : {}),
+        ...(replica ? { storeMode: "passive" } : {}),
         recoverRunningDispatches: false,
         relay: {
           baseUrl,
@@ -176,17 +157,16 @@ it.skipIf(engineBinary.missing)(
         },
       });
       engine.workspace = opened.workspace;
-      if (!replica)
-        await rpc(engine, "versions.ensureMain", { workspaceId });
+      if (!replica) await rpc(engine, "versions.ensureMain", { workspaceId });
       return engine;
     };
-    const pull = async (
-      engine: (typeof engines)[number],
-      materialize = true,
-    ) => {
+    const pull = async (engine: (typeof engines)[number], materialize = true) => {
       let result: any;
       do {
-        result = await rpc(engine, "sync.applyPull", { workspaceId , pageToken: (await rpc(engine, "sync.fetchPull", { workspaceId })).pageToken});
+        result = await rpc(engine, "sync.applyPull", {
+          workspaceId,
+          pageToken: (await rpc(engine, "sync.fetchPull", { workspaceId })).pageToken,
+        });
         if (materialize && engine.name.startsWith("owner"))
           await rpc(engine, "sync.materializePendingCursor", {
             workspaceId,
@@ -228,20 +208,11 @@ it.skipIf(engineBinary.missing)(
           readOnly: true,
         });
         try {
+          expect(db.prepare("SELECT COUNT(*) AS n FROM materialization_jobs").get()!.n).toBe(0);
           expect(
-            db.prepare("SELECT COUNT(*) AS n FROM materialization_jobs").get()!
-              .n,
+            db.prepare("SELECT COUNT(*) AS n FROM replication_log WHERE imported=0").get()!.n,
           ).toBe(0);
-          expect(
-            db
-              .prepare(
-                "SELECT COUNT(*) AS n FROM replication_log WHERE imported=0",
-              )
-              .get()!.n,
-          ).toBe(0);
-          expect(
-            db.prepare("SELECT COUNT(*) AS n FROM automation_claims").get()!.n,
-          ).toBe(0);
+          expect(db.prepare("SELECT COUNT(*) AS n FROM automation_claims").get()!.n).toBe(0);
         } finally {
           db.close();
         }
@@ -249,9 +220,7 @@ it.skipIf(engineBinary.missing)(
       const untouched = () => {
         expect(readdirSync(r.dir)).toEqual([".dohc"]);
         inspect();
-        expect(
-          httpRequests.filter((x) => x.replica && x.method !== "GET"),
-        ).toEqual([]);
+        expect(httpRequests.filter((x) => x.replica && x.method !== "GET")).toEqual([]);
       };
       await pull(r);
       untouched();
@@ -299,9 +268,7 @@ it.skipIf(engineBinary.missing)(
         });
       const equal = async () => {
         const value = await stored("scenario.txt");
-        expect(Buffer.from(value.text, "utf8")).toEqual(
-          readFileSync(join(a.dir, "scenario.txt")),
-        );
+        expect(Buffer.from(value.text, "utf8")).toEqual(readFileSync(join(a.dir, "scenario.txt")));
         untouched();
       };
       await rpc(a, "versionedText.write", {
@@ -423,8 +390,12 @@ it.skipIf(engineBinary.missing)(
       for (const e of [a, b, r]) {
         const db = new DatabaseSync(join(e.dir, ".dohc/engine/engine.db"), { readOnly: true });
         try {
-          expect(db.prepare("SELECT COUNT(*) AS n FROM conflicts WHERE status='open'").get()!.n).toBe(0);
-        } finally { db.close(); }
+          expect(
+            db.prepare("SELECT COUNT(*) AS n FROM conflicts WHERE status='open'").get()!.n,
+          ).toBe(0);
+        } finally {
+          db.close();
+        }
       }
       const keyPath = join(r.dir, ".dohc/engine/secret.key");
       writeFileSync(keyPath, "invalid key sentinel");
@@ -443,9 +414,7 @@ it.skipIf(engineBinary.missing)(
         readOnly: true,
       });
       try {
-        expect(
-          db.prepare("SELECT COUNT(*) AS n FROM secret_files").get()!.n,
-        ).toBeGreaterThan(0);
+        expect(db.prepare("SELECT COUNT(*) AS n FROM secret_files").get()!.n).toBeGreaterThan(0);
       } finally {
         db.close();
       }
@@ -460,9 +429,7 @@ it.skipIf(engineBinary.missing)(
         "secrets.materialize",
         "secrets.recorded",
       ]) {
-        await expect(rpc(r, method, { workspaceId })).rejects.toThrow(
-          "passive store",
-        );
+        await expect(rpc(r, method, { workspaceId })).rejects.toThrow("passive store");
       }
       untouched();
     } finally {

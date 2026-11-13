@@ -13,9 +13,14 @@ export function useAgentsListening(): ReadonlySet<string> {
       heard = true;
       if (live) setListening(new Set(event.agentIds));
     });
-    void bridge().readAgentsListening({}).then((event) => {
-      if (live && !heard) setListening(new Set(event.agentIds));
-    }, () => undefined);
+    void bridge()
+      .readAgentsListening({})
+      .then(
+        (event) => {
+          if (live && !heard) setListening(new Set(event.agentIds));
+        },
+        () => undefined,
+      );
     return () => {
       live = false;
       stopListening();

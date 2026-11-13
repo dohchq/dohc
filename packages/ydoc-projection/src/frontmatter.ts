@@ -1,6 +1,6 @@
-import { exceedsLiveMarkdownLimit, utf8ByteLength } from '@dohc/live-session-contract/limits'
-import * as yaml from 'js-yaml'
-import type * as Y from 'yjs'
+import { exceedsLiveMarkdownLimit, utf8ByteLength } from "@dohc/live-session-contract/limits";
+import * as yaml from "js-yaml";
+import type * as Y from "yjs";
 import {
   boolCoreTag,
   COLLECTION_STYLE_BLOCK,
@@ -25,128 +25,115 @@ import {
   SCALAR_STYLE_PLAIN,
   SCALAR_STYLE_SINGLE_QUOTED,
   type ScalarTagDefinition,
-} from 'js-yaml'
+} from "js-yaml";
 
-const FRONTMATTER_PRIORITY_KEYS = ['id', 'title', 'icon'] as const
+const FRONTMATTER_PRIORITY_KEYS = ["id", "title", "icon"] as const;
 export const FRONTMATTER_EDIT_REFUSED_MESSAGE =
-  "dohc can't change one property in this file without rewriting the others. Edit the file's text instead."
+  "dohc can't change one property in this file without rewriting the others. Edit the file's text instead.";
 // The opening delimiter line, the YAML lines, the closing delimiter line, and
 // the rest of the document. A delimiter is `---` then only spaces or tabs.
-const FRONTMATTER_RE = /^(---[ \t]*\r?\n)((?:[\s\S]*?\r?\n)?)(---[ \t]*(?:\r?\n|$))([\s\S]*)$/
-const MAX_SAFE_INTEGER = BigInt(Number.MAX_SAFE_INTEGER)
-const MIN_YDOC_INTEGER = -(1n << 63n)
-const MAX_YDOC_INTEGER = (1n << 63n) - 1n
+const FRONTMATTER_RE = /^(---[ \t]*\r?\n)((?:[\s\S]*?\r?\n)?)(---[ \t]*(?:\r?\n|$))([\s\S]*)$/;
+const MAX_SAFE_INTEGER = BigInt(Number.MAX_SAFE_INTEGER);
+const MIN_YDOC_INTEGER = -(1n << 63n);
+const MAX_YDOC_INTEGER = (1n << 63n) - 1n;
 // Collection nesting a frontmatter block may reach, the root mapping included:
 // the root and the 129 levels (0 to 128) a public value may hold.
-const MAX_FRONTMATTER_DEPTH = 130
+const MAX_FRONTMATTER_DEPTH = 130;
 // Value nodes a frontmatter block may hold once aliases are expanded.
-const MAX_FRONTMATTER_NODES = 262_144
+const MAX_FRONTMATTER_NODES = 262_144;
 // UTF-8 bytes of string values and mapping keys once aliases are expanded.
 // Above the largest text file, so only aliases can reach it.
-const MAX_FRONTMATTER_STRING_BYTES = 16 * 1024 * 1024
-const MAX_FRONTMATTER_ALIASES = 256
+const MAX_FRONTMATTER_STRING_BYTES = 16 * 1024 * 1024;
+const MAX_FRONTMATTER_ALIASES = 256;
 // Text both loaders refuse before parsing: a `%TAG` directive, which would
 // copy its prefix into every tagged node, a second document's start marker,
 // or a carriage return that does not end a line.
-const REFUSED_FRONTMATTER_TEXT = /\r(?!\n)|^(?:%TAG|---)(?:[ \t\r\n]|$)/mu
+const REFUSED_FRONTMATTER_TEXT = /\r(?!\n)|^(?:%TAG|---)(?:[ \t\r\n]|$)/mu;
 // js-yaml counts nesting differently for block and flow collections, so its
 // own limit sits above MAX_FRONTMATTER_DEPTH for every form and the walk
 // below applies the shared limit.
-const PARSER_MAX_DEPTH = 140
+const PARSER_MAX_DEPTH = 140;
 
 function hasValidIntegerSeparators(source: string): boolean {
-  for (
-    let index = source.indexOf('_');
-    index !== -1;
-    index = source.indexOf('_', index + 1)
-  ) {
-    const previous = source[index - 1]
-    const next = source[index + 1]
+  for (let index = source.indexOf("_"); index !== -1; index = source.indexOf("_", index + 1)) {
+    const previous = source[index - 1];
+    const next = source[index + 1];
     if (
-      previous === undefined
-      || next === undefined
-      || !/[\dA-Fa-f]/u.test(previous)
-      || !/[\dA-Fa-f]/u.test(next)
+      previous === undefined ||
+      next === undefined ||
+      !/[\dA-Fa-f]/u.test(previous) ||
+      !/[\dA-Fa-f]/u.test(next)
     ) {
-      return false
+      return false;
     }
   }
-  return true
+  return true;
 }
 
 // A scalar the frontmatter value model cannot hold keeps its text: a
 // non-finite float, an integer outside int64, or a value its explicit tag
 // cannot resolve.
-const losslessIntegerTag = defineScalarTag('tag:yaml.org,2002:int', {
+const losslessIntegerTag = defineScalarTag("tag:yaml.org,2002:int", {
   implicit: true,
-  implicitFirstChars: ['-', '+', ...'0123456789'],
+  implicitFirstChars: ["-", "+", ..."0123456789"],
   resolve: (source, isExplicit, tagName) => {
-    if (!hasValidIntegerSeparators(source)) return NOT_RESOLVED
-    const normalizedSource = source.replaceAll('_', '')
-    if (
-      intCoreTag.resolve(normalizedSource, isExplicit, tagName) === NOT_RESOLVED
-    ) {
-      return NOT_RESOLVED
+    if (!hasValidIntegerSeparators(source)) return NOT_RESOLVED;
+    const normalizedSource = source.replaceAll("_", "");
+    if (intCoreTag.resolve(normalizedSource, isExplicit, tagName) === NOT_RESOLVED) {
+      return NOT_RESOLVED;
     }
-    let magnitude = normalizedSource
-    let sign = 1n
-    if (magnitude[0] === '-' || magnitude[0] === '+') {
-      if (magnitude[0] === '-') sign = -1n
-      magnitude = magnitude.slice(1)
+    let magnitude = normalizedSource;
+    let sign = 1n;
+    if (magnitude[0] === "-" || magnitude[0] === "+") {
+      if (magnitude[0] === "-") sign = -1n;
+      magnitude = magnitude.slice(1);
     }
-    const integer = sign * BigInt(magnitude)
-    if (integer < MIN_YDOC_INTEGER || integer > MAX_YDOC_INTEGER) return source
+    const integer = sign * BigInt(magnitude);
+    if (integer < MIN_YDOC_INTEGER || integer > MAX_YDOC_INTEGER) return source;
     if (integer >= -MAX_SAFE_INTEGER && integer <= MAX_SAFE_INTEGER) {
-      return Number(integer)
+      return Number(integer);
     }
-    return integer
+    return integer;
   },
-  identify: value =>
-    typeof value === 'bigint'
-    || (typeof value === 'number'
-      && Number.isSafeInteger(value)
-      && !Object.is(value, -0)),
-  represent: value => value.toString(),
-})
-const losslessFloatTag = defineScalarTag('tag:yaml.org,2002:float', {
+  identify: (value) =>
+    typeof value === "bigint" ||
+    (typeof value === "number" && Number.isSafeInteger(value) && !Object.is(value, -0)),
+  represent: (value) => value.toString(),
+});
+const losslessFloatTag = defineScalarTag("tag:yaml.org,2002:float", {
   implicit: true,
   implicitFirstChars: floatCoreTag.implicitFirstChars,
   resolve: (source, isExplicit, tagName) => {
-    const value = floatCoreTag.resolve(source, isExplicit, tagName)
-    return value === NOT_RESOLVED || Number.isFinite(value) ? value : source
+    const value = floatCoreTag.resolve(source, isExplicit, tagName);
+    return value === NOT_RESOLVED || Number.isFinite(value) ? value : source;
   },
-  identify: value =>
-    typeof value === 'number'
-    && (!Number.isSafeInteger(value) || Object.is(value, -0)),
-  represent: value => {
-    const represented = floatCoreTag.represent(value)
-    return Number.isInteger(value) && !represented.includes('.')
-      ? `${represented}.0`
-      : represented
+  identify: (value) =>
+    typeof value === "number" && (!Number.isSafeInteger(value) || Object.is(value, -0)),
+  represent: (value) => {
+    const represented = floatCoreTag.represent(value);
+    return Number.isInteger(value) && !represented.includes(".") ? `${represented}.0` : represented;
   },
-})
+});
 // An explicit core tag its value does not satisfy, such as `!!bool yes`,
 // keeps the text instead of failing the whole frontmatter.
-function keepingTextWhenExplicit(
-  tag: ScalarTagDefinition,
-): ScalarTagDefinition {
+function keepingTextWhenExplicit(tag: ScalarTagDefinition): ScalarTagDefinition {
   return {
     ...tag,
     resolve: (source, isExplicit, tagName) => {
-      const value = tag.resolve(source, isExplicit, tagName)
-      return value === NOT_RESOLVED && isExplicit ? source : value
+      const value = tag.resolve(source, isExplicit, tagName);
+      return value === NOT_RESOLVED && isExplicit ? source : value;
     },
-  }
+  };
 }
 const losslessFrontmatterSchema = CORE_SCHEMA.withTags(
   keepingTextWhenExplicit(nullCoreTag),
   keepingTextWhenExplicit(boolCoreTag),
   keepingTextWhenExplicit(losslessIntegerTag),
   keepingTextWhenExplicit(losslessFloatTag),
-)
+);
 
 // The root mapping of the load in progress, with its keys in document order.
-let loadingRoot: { mapping?: Record<string, unknown>; keys: string[] } | undefined
+let loadingRoot: { mapping?: Record<string, unknown>; keys: string[] } | undefined;
 
 // A mapping with a key that is a collection does not read; any other key is
 // its text. The core map and every other mapping tag behave the same way.
@@ -154,62 +141,62 @@ function frontmatterMappingTag(tagName: string, matchByTagPrefix: boolean) {
   return defineMappingTag(tagName, {
     matchByTagPrefix,
     create: () => {
-      const mapping = nullPrototypeRecord()
-      if (loadingRoot && loadingRoot.mapping === undefined) loadingRoot.mapping = mapping
-      return mapping
+      const mapping = nullPrototypeRecord();
+      if (loadingRoot && loadingRoot.mapping === undefined) loadingRoot.mapping = mapping;
+      return mapping;
     },
     addPair: (mapping, key, value) => {
-      if (key !== null && typeof key === 'object') {
-        return 'object-based map does not support complex keys'
+      if (key !== null && typeof key === "object") {
+        return "object-based map does not support complex keys";
       }
-      const text = String(key)
-      mapping[text] = value
-      if (loadingRoot?.mapping === mapping) loadingRoot.keys.push(text)
-      return ''
+      const text = String(key);
+      mapping[text] = value;
+      if (loadingRoot?.mapping === mapping) loadingRoot.keys.push(text);
+      return "";
     },
     has: (mapping, key) => Object.hasOwn(mapping, String(key)),
-    keys: mapping => Object.keys(mapping),
+    keys: (mapping) => Object.keys(mapping),
     get: (mapping, key) => mapping[String(key)],
-  })
+  });
 }
 
 // Any other tag keeps its node: a scalar its text, a collection its items.
 const frontmatterLoadSchema = losslessFrontmatterSchema.withTags(
-  frontmatterMappingTag('tag:yaml.org,2002:map', false),
-  defineScalarTag('', {
+  frontmatterMappingTag("tag:yaml.org,2002:map", false),
+  defineScalarTag("", {
     matchByTagPrefix: true,
-    resolve: source => source,
+    resolve: (source) => source,
   }),
-  defineSequenceTag('', {
+  defineSequenceTag("", {
     matchByTagPrefix: true,
     create: () => [] as unknown[],
     addItem: (values, value) => {
-      values.push(value)
+      values.push(value);
     },
   }),
-  frontmatterMappingTag('', true),
-)
+  frontmatterMappingTag("", true),
+);
 
-type LoadedFrontmatter = { value: unknown; keys: string[] }
+type LoadedFrontmatter = { value: unknown; keys: string[] };
 
 /** Load frontmatter YAML within the depth, node, and alias budgets. Throws when it does not read. */
 function loadFrontmatterYaml(text: string): LoadedFrontmatter {
-  const root: NonNullable<typeof loadingRoot> = { keys: [] }
-  loadingRoot = root
-  let loaded: unknown
+  const root: NonNullable<typeof loadingRoot> = { keys: [] };
+  loadingRoot = root;
+  let loaded: unknown;
   try {
     loaded = yaml.load(text, {
       schema: frontmatterLoadSchema,
       maxDepth: PARSER_MAX_DEPTH,
       maxAliases: MAX_FRONTMATTER_ALIASES,
-    })
+    });
   } finally {
-    loadingRoot = undefined
+    loadingRoot = undefined;
   }
   return {
     value: budgetedFrontmatterValue(loaded, 0, { nodes: 0, bytes: 0 }),
     keys: root.keys,
-  }
+  };
 }
 
 // Aliases share one object, so this walk is where an alias ladder would
@@ -219,75 +206,74 @@ function budgetedFrontmatterValue(
   depth: number,
   budget: { nodes: number; bytes: number },
 ): unknown {
-  budget.nodes += 1
-  if (typeof value === 'string') budget.bytes += utf8ByteLength(value)
+  budget.nodes += 1;
+  if (typeof value === "string") budget.bytes += utf8ByteLength(value);
   if (budget.nodes > MAX_FRONTMATTER_NODES || budget.bytes > MAX_FRONTMATTER_STRING_BYTES) {
-    throw new Error('frontmatter holds too much')
+    throw new Error("frontmatter holds too much");
   }
-  const collection = Array.isArray(value) || isFrontmatterMap(value)
-  if (collection && depth + 1 > MAX_FRONTMATTER_DEPTH) throw new Error('frontmatter nests too deeply')
+  const collection = Array.isArray(value) || isFrontmatterMap(value);
+  if (collection && depth + 1 > MAX_FRONTMATTER_DEPTH)
+    throw new Error("frontmatter nests too deeply");
   if (Array.isArray(value)) {
-    return value.map(child => budgetedFrontmatterValue(child, depth + 1, budget))
+    return value.map((child) => budgetedFrontmatterValue(child, depth + 1, budget));
   }
-  if (!isFrontmatterMap(value)) return value
-  const normalized = nullPrototypeRecord()
+  if (!isFrontmatterMap(value)) return value;
+  const normalized = nullPrototypeRecord();
   for (const key of Object.keys(value).sort()) {
-    budget.bytes += utf8ByteLength(key)
-    normalized[key] = budgetedFrontmatterValue(value[key], depth + 1, budget)
+    budget.bytes += utf8ByteLength(key);
+    normalized[key] = budgetedFrontmatterValue(value[key], depth + 1, budget);
   }
-  return normalized
+  return normalized;
 }
 
 export function nullPrototypeRecord(): Record<string, unknown> {
-  return Object.create(null) as Record<string, unknown>
+  return Object.create(null) as Record<string, unknown>;
 }
 
 /** A plain value with its mapping keys sorted, as the Y.Doc projection reads it. */
 export function normalizeFrontmatterValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(normalizeFrontmatterValue)
-  if (!isFrontmatterMap(value)) return value
+  if (Array.isArray(value)) return value.map(normalizeFrontmatterValue);
+  if (!isFrontmatterMap(value)) return value;
 
-  const normalized = nullPrototypeRecord()
+  const normalized = nullPrototypeRecord();
   for (const key of Object.keys(value).sort()) {
-    normalized[key] = normalizeFrontmatterValue(value[key])
+    normalized[key] = normalizeFrontmatterValue(value[key]);
   }
-  return normalized
+  return normalized;
 }
 
 export function isFrontmatterMap(value: unknown): value is Record<string, unknown> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    return false
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
   }
-  const prototype = Object.getPrototypeOf(value)
-  return prototype === Object.prototype || prototype === null
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 function isEmptyFrontmatter(text: string): boolean {
   return text.split(/\r?\n/).every((line) => {
-    const trimmed = line.trim()
-    return !trimmed || trimmed.startsWith('#')
-  })
+    const trimmed = line.trim();
+    return !trimmed || trimmed.startsWith("#");
+  });
 }
 
-export function orderFrontmatter(
-  frontmatter: Record<string, unknown>,
-): Record<string, unknown> {
-  const ordered = nullPrototypeRecord()
+export function orderFrontmatter(frontmatter: Record<string, unknown>): Record<string, unknown> {
+  const ordered = nullPrototypeRecord();
 
   for (const key of FRONTMATTER_PRIORITY_KEYS) {
-    if (Object.hasOwn(frontmatter, key)) ordered[key] = frontmatter[key]
+    if (Object.hasOwn(frontmatter, key)) ordered[key] = frontmatter[key];
   }
 
   for (const key of Object.keys(frontmatter).sort()) {
-    if (!Object.hasOwn(ordered, key)) ordered[key] = frontmatter[key]
+    if (!Object.hasOwn(ordered, key)) ordered[key] = frontmatter[key];
   }
 
-  return ordered
+  return ordered;
 }
 
 /** Frontmatter values as canonical YAML, one line break after each entry. */
 export function frontmatterYaml(frontmatter: Record<string, unknown>): string {
-  return frontmatterValueYaml(orderFrontmatter(frontmatter))
+  return frontmatterValueYaml(orderFrontmatter(frontmatter));
 }
 
 /** One frontmatter value as canonical YAML, ending with a line break. */
@@ -296,47 +282,49 @@ export function frontmatterValueYaml(value: unknown): string {
     schema: losslessFrontmatterSchema,
     lineWidth: -1,
     sortKeys: false,
-  })
+  });
 }
 
 /** One frontmatter value as YAML on one line: a list in brackets, a map in braces. */
 export function frontmatterValueFlowYaml(value: unknown): string {
-  return yaml.dump(value, {
-    schema: losslessFrontmatterSchema,
-    lineWidth: -1,
-    sortKeys: false,
-    flowLevel: 0,
-  }).trimEnd()
+  return yaml
+    .dump(value, {
+      schema: losslessFrontmatterSchema,
+      lineWidth: -1,
+      sortKeys: false,
+      flowLevel: 0,
+    })
+    .trimEnd();
 }
 
 type FrontmatterBlock = {
-  open: string
+  open: string;
   /** The lines between the delimiters, each with its line break. */
-  yaml: string
+  yaml: string;
   /** The closing delimiter line and everything after it. */
-  closing: string
+  closing: string;
   /** Everything after the closing delimiter line. */
-  rest: string
-  value: Record<string, unknown>
+  rest: string;
+  value: Record<string, unknown>;
   /** The top-level keys in document order. */
-  keys: string[]
-}
+  keys: string[];
+};
 
 /** The document's frontmatter block: `undefined` when it has none, `null` when it does not read as a mapping. */
 function readFrontmatterBlock(markdown: string): FrontmatterBlock | null | undefined {
-  const match = FRONTMATTER_RE.exec(markdown)
-  if (!match) return undefined
-  const [, open = '', text = '', closeLine = '', rest = ''] = match
-  const block = { open, yaml: text, closing: `${closeLine}${rest}`, rest }
-  if (REFUSED_FRONTMATTER_TEXT.test(text)) return null
-  if (isEmptyFrontmatter(text)) return { ...block, value: nullPrototypeRecord(), keys: [] }
+  const match = FRONTMATTER_RE.exec(markdown);
+  if (!match) return undefined;
+  const [, open = "", text = "", closeLine = "", rest = ""] = match;
+  const block = { open, yaml: text, closing: `${closeLine}${rest}`, rest };
+  if (REFUSED_FRONTMATTER_TEXT.test(text)) return null;
+  if (isEmptyFrontmatter(text)) return { ...block, value: nullPrototypeRecord(), keys: [] };
   try {
-    const loaded = loadFrontmatterYaml(text)
+    const loaded = loadFrontmatterYaml(text);
     return isFrontmatterMap(loaded.value)
       ? { ...block, value: loaded.value, keys: loaded.keys }
-      : null
+      : null;
   } catch {
-    return null
+    return null;
   }
 }
 
@@ -350,15 +338,15 @@ function readFrontmatterBlock(markdown: string): FrontmatterBlock | null | undef
  * crates/dohc-engine-domain/src/collections.rs).
  */
 function unreadableFrontmatterPrefix(markdown: string): string | undefined {
-  const match = FRONTMATTER_RE.exec(markdown)
-  if (!match || readFrontmatterBlock(markdown) !== null) return undefined
-  const [, open = '', text = '', closeLine = ''] = match
+  const match = FRONTMATTER_RE.exec(markdown);
+  if (!match || readFrontmatterBlock(markdown) !== null) return undefined;
+  const [, open = "", text = "", closeLine = ""] = match;
   const entry = (text.match(/[^\n]*\n/gu) ?? [])
-    .map(line => line.replace(/\r?\n$/u, ''))
-    .find(line => !/^[ \t]*(?:#|$)/u.test(line))
+    .map((line) => line.replace(/\r?\n$/u, ""))
+    .find((line) => !/^[ \t]*(?:#|$)/u.test(line));
   return (entry !== undefined && looksLikeMappingEntry(entry)) || /\r(?!\n)/u.test(text)
     ? open + text + closeLine
-    : undefined
+    : undefined;
 }
 
 // A frontmatter line that looks like a mapping entry: `?` then a space, tab, or
@@ -366,31 +354,32 @@ function unreadableFrontmatterPrefix(markdown: string): string | undefined {
 // colon followed by a space, tab, or the end. The engine uses the same rule
 // (`looks_like_mapping_entry` in crates/dohc-engine-domain/src/collections.rs).
 function looksLikeMappingEntry(line: string): boolean {
-  const separator = (rest: string): boolean => rest === '' || rest.startsWith(' ') || rest.startsWith('\t')
-  if (line.startsWith('?') && separator(line.slice(1))) return true
-  if (line === '' || /^[ \t#%-]/u.test(line)) return false
-  for (let index = line.indexOf(':', 1); index !== -1; index = line.indexOf(':', index + 1)) {
-    if (separator(line.slice(index + 1))) return true
+  const separator = (rest: string): boolean =>
+    rest === "" || rest.startsWith(" ") || rest.startsWith("\t");
+  if (line.startsWith("?") && separator(line.slice(1))) return true;
+  if (line === "" || /^[ \t#%-]/u.test(line)) return false;
+  for (let index = line.indexOf(":", 1); index !== -1; index = line.indexOf(":", index + 1)) {
+    if (separator(line.slice(index + 1))) return true;
   }
-  return false
+  return false;
 }
 
 /** Whether the entry splitter cannot preserve this block through property edits. */
 export function markdownFrontmatterEditsRefused(markdown: unknown): boolean {
-  if (typeof markdown !== 'string') return false
-  const block = readFrontmatterBlock(markdown)
-  if (!block) return false
+  if (typeof markdown !== "string") return false;
+  const block = readFrontmatterBlock(markdown);
+  if (!block) return false;
   try {
-    const entries = rootKeyEntries(block.yaml)
-    return entries === undefined || entries.length !== block.keys.length
+    const entries = rootKeyEntries(block.yaml);
+    return entries === undefined || entries.length !== block.keys.length;
   } catch {
-    return true
+    return true;
   }
 }
 
 /** Whether edits to a live document's properties would rewrite other entries. */
 export function frontmatterEditsRefused(doc: Y.Doc): boolean {
-  return markdownFrontmatterEditsRefused(doc.getMap('meta').get(FRONTMATTER_SOURCE_META_KEY))
+  return markdownFrontmatterEditsRefused(doc.getMap("meta").get(FRONTMATTER_SOURCE_META_KEY));
 }
 
 /**
@@ -398,11 +387,14 @@ export function frontmatterEditsRefused(doc: Y.Doc): boolean {
  * line, as a projection takes it from the body: a block that reads, or one
  * that does not read but looks like properties. Undefined otherwise.
  */
-export function leadingFrontmatter(markdown: string): { text: string; readable: boolean } | undefined {
-  const block = readFrontmatterBlock(markdown)
-  if (block) return { text: markdown.slice(0, markdown.length - block.rest.length), readable: true }
-  const prefix = unreadableFrontmatterPrefix(markdown)
-  return prefix === undefined ? undefined : { text: prefix, readable: false }
+export function leadingFrontmatter(
+  markdown: string,
+): { text: string; readable: boolean } | undefined {
+  const block = readFrontmatterBlock(markdown);
+  if (block)
+    return { text: markdown.slice(0, markdown.length - block.rest.length), readable: true };
+  const prefix = unreadableFrontmatterPrefix(markdown);
+  return prefix === undefined ? undefined : { text: prefix, readable: false };
 }
 
 /**
@@ -413,11 +405,11 @@ export function leadingFrontmatter(markdown: string): { text: string; readable: 
 export function loadMarkdownFrontmatter(
   markdown: string,
 ): { meta: Record<string, unknown>; keys: string[]; rest: string } | undefined {
-  const block = readFrontmatterBlock(markdown)
-  if (!block) return undefined
-  const meta = nullPrototypeRecord()
-  for (const key of block.keys) meta[key] = block.value[key]
-  return { meta, keys: block.keys, rest: block.rest }
+  const block = readFrontmatterBlock(markdown);
+  if (!block) return undefined;
+  const meta = nullPrototypeRecord();
+  for (const key of block.keys) meta[key] = block.value[key];
+  return { meta, keys: block.keys, rest: block.rest };
 }
 
 /**
@@ -425,37 +417,39 @@ export function loadMarkdownFrontmatter(
  * lines after it come back as `frontmatterSource` when canonical frontmatter
  * would be written differently, so a settle can keep them.
  */
-export function parseFrontmatter(src: string, usesCrlf: boolean): {
-  meta: Record<string, unknown>
-  body: string
-  frontmatterSource?: string
+export function parseFrontmatter(
+  src: string,
+  usesCrlf: boolean,
+): {
+  meta: Record<string, unknown>;
+  body: string;
+  frontmatterSource?: string;
 } {
-  const block = readFrontmatterBlock(src)
+  const block = readFrontmatterBlock(src);
   if (!block) {
     // A block neither loader reads stays as written, with no values.
-    const prefix = unreadableFrontmatterPrefix(src)
-    if (prefix === undefined) return { meta: {}, body: src }
-    const rest = src.slice(prefix.length)
-    const separator = /^(?:\r?\n)*/u.exec(rest)?.[0] ?? ''
-    return { meta: {}, body: rest.slice(separator.length), frontmatterSource: prefix + separator }
+    const prefix = unreadableFrontmatterPrefix(src);
+    if (prefix === undefined) return { meta: {}, body: src };
+    const rest = src.slice(prefix.length);
+    const separator = /^(?:\r?\n)*/u.exec(rest)?.[0] ?? "";
+    return { meta: {}, body: rest.slice(separator.length), frontmatterSource: prefix + separator };
   }
-  const separator = /^(?:\r?\n)*/u.exec(block.rest)?.[0] ?? ''
-  const source = src.slice(0, src.length - block.rest.length + separator.length)
-  let canonical: string
+  const separator = /^(?:\r?\n)*/u.exec(block.rest)?.[0] ?? "";
+  const source = src.slice(0, src.length - block.rest.length + separator.length);
+  let canonical: string;
   try {
-    canonical = Object.keys(block.value).length === 0
-      ? ''
-      : `---\n${frontmatterYaml(block.value)}---\n\n`
+    canonical =
+      Object.keys(block.value).length === 0 ? "" : `---\n${frontmatterYaml(block.value)}---\n\n`;
   } catch {
-    return { meta: {}, body: src }
+    return { meta: {}, body: src };
   }
   return {
     meta: block.value,
     body: block.rest.slice(separator.length),
-    ...(source === (usesCrlf ? canonical.replaceAll('\n', '\r\n') : canonical)
+    ...(source === (usesCrlf ? canonical.replaceAll("\n", "\r\n") : canonical)
       ? {}
       : { frontmatterSource: source }),
-  }
+  };
 }
 
 /**
@@ -479,102 +473,125 @@ export function keptFrontmatter(
   current: Record<string, unknown>,
   written?: ReadonlySet<string>,
 ): string | undefined {
-  if (exceedsLiveMarkdownLimit(source)) return undefined
+  if (exceedsLiveMarkdownLimit(source)) return undefined;
   try {
-    const block = readFrontmatterBlock(source)
+    const block = readFrontmatterBlock(source);
     if (!block) {
       // A block neither loader reads is kept as written while no key is set.
-      const prefix = unreadableFrontmatterPrefix(source)
-      return prefix !== undefined && Object.keys(current).length === 0
-        && /^(?:\r?\n)*$/u.test(source.slice(prefix.length))
+      const prefix = unreadableFrontmatterPrefix(source);
+      return prefix !== undefined &&
+        Object.keys(current).length === 0 &&
+        /^(?:\r?\n)*$/u.test(source.slice(prefix.length))
         ? source
-        : undefined
+        : undefined;
     }
-    if (!/^(?:\r?\n)*$/u.test(block.rest)) return undefined
+    if (!/^(?:\r?\n)*$/u.test(block.rest)) return undefined;
     // Each value renders once and compares as its canonical entry.
-    const rendered = renderedEntries(current)
+    const rendered = renderedEntries(current);
     const readsAsCurrent = (parsed: Map<string, string>): boolean =>
-      parsed.size === rendered.size
-      && [...rendered].every(([key, entry]) => parsed.get(key) === entry)
-    const parsed = renderedEntries(block.value)
-    const isWritten = (key: string): boolean => written === undefined || written.has(key)
-    if (readsAsCurrent(parsed) && block.keys.every(isWritten)) return source
-    const entries = rootKeyEntries(block.yaml)
-    if (entries === undefined || entries.length !== block.keys.length) return undefined
-    const indent = mappingIndent(block.yaml, entries)
-    const render = (entry: string): string => renderEntry(entry, indent, block.open.endsWith('\r\n'))
+      parsed.size === rendered.size &&
+      [...rendered].every(([key, entry]) => parsed.get(key) === entry);
+    const parsed = renderedEntries(block.value);
+    const isWritten = (key: string): boolean => written === undefined || written.has(key);
+    if (readsAsCurrent(parsed) && block.keys.every(isWritten)) return source;
+    const entries = rootKeyEntries(block.yaml);
+    if (entries === undefined || entries.length !== block.keys.length) return undefined;
+    const indent = mappingIndent(block.yaml, entries);
+    const render = (entry: string): string =>
+      renderEntry(entry, indent, block.open.endsWith("\r\n"));
     // Comments above the first key belong to it, like those above any other.
-    let kept = entries.length === 0 ? block.yaml : ''
-    let lead = entries.length === 0 ? '' : block.yaml.slice(0, entries[0]!.line)
+    let kept = entries.length === 0 ? block.yaml : "";
+    let lead = entries.length === 0 ? "" : block.yaml.slice(0, entries[0]!.line);
     block.keys.forEach((key, index) => {
-      const entry = entries[index]!
-      const region = block.yaml.slice(entry.line, entries[index + 1]?.line ?? block.yaml.length)
-      const split = entryTextEnd(region, entry.keptBlankLines, indent.length)
+      const entry = entries[index]!;
+      const region = block.yaml.slice(entry.line, entries[index + 1]?.line ?? block.yaml.length);
+      const split = entryTextEnd(region, entry.keptBlankLines, indent.length);
       if (Object.hasOwn(current, key) && !isWritten(key)) {
-        kept += (lead.match(/[^\n]*\n/gu) ?? []).filter(line => line.trim() === '').join('')
-        kept += render(rendered.get(key)!)
+        kept += (lead.match(/[^\n]*\n/gu) ?? []).filter((line) => line.trim() === "").join("");
+        kept += render(rendered.get(key)!);
       } else if (Object.hasOwn(current, key)) {
-        kept += lead
-        kept += parsed.get(key) === rendered.get(key)
-          ? region.slice(0, split)
-          : render(rendered.get(key)!)
+        kept += lead;
+        kept +=
+          parsed.get(key) === rendered.get(key)
+            ? region.slice(0, split)
+            : render(rendered.get(key)!);
       }
-      lead = region.slice(split)
-    })
+      lead = region.slice(split);
+    });
     for (const key of Object.keys(orderFrontmatter(current))) {
-      if (!Object.hasOwn(block.value, key)) kept += render(rendered.get(key)!)
+      if (!Object.hasOwn(block.value, key)) kept += render(rendered.get(key)!);
     }
-    kept += lead
-    if (kept === '') return ''
-    const candidate = `${block.open}${kept}${block.closing}`
-    const reread = readFrontmatterBlock(candidate)
-    const untouched = block.keys.filter(key => isWritten(key) && parsed.get(key) === rendered.get(key))
-    return reread && /^(?:\r?\n)*$/u.test(reread.rest) && readsAsCurrent(renderedEntries(reread.value))
-      && preservesYamlValues(block, reread, untouched)
+    kept += lead;
+    if (kept === "") return "";
+    const candidate = `${block.open}${kept}${block.closing}`;
+    const reread = readFrontmatterBlock(candidate);
+    const untouched = block.keys.filter(
+      (key) => isWritten(key) && parsed.get(key) === rendered.get(key),
+    );
+    return reread &&
+      /^(?:\r?\n)*$/u.test(reread.rest) &&
+      readsAsCurrent(renderedEntries(reread.value)) &&
+      preservesYamlValues(block, reread, untouched)
       ? candidate
-      : undefined
+      : undefined;
   } catch {
-    return undefined
+    return undefined;
   }
 }
 
 // Compare resolved YAML nodes as well as projected values: `.nan` and
 // `'.nan'` have the same projection, but an alias must not switch between them.
-function preservesYamlValues(before: FrontmatterBlock, after: FrontmatterBlock, keys: string[]): boolean {
+function preservesYamlValues(
+  before: FrontmatterBlock,
+  after: FrontmatterBlock,
+  keys: string[],
+): boolean {
   const values = (block: FrontmatterBlock): Map<string, unknown> => {
     const root = yaml.eventsToAst(yaml.parseEvents(block.yaml, { maxDepth: PARSER_MAX_DEPTH }), {
-      source: block.yaml, schema: frontmatterLoadSchema,
-    })[0]?.contents
-    if (!root || root.kind !== 'mapping') return new Map()
-    const anchors = new Map<string, unknown>()
+      source: block.yaml,
+      schema: frontmatterLoadSchema,
+    })[0]?.contents;
+    if (!root || root.kind !== "mapping") return new Map();
+    const anchors = new Map<string, unknown>();
     const resolve = (node: yaml.Node): unknown => {
-      if (node.kind === 'alias') {
-        if (!anchors.has(node.anchor)) throw new Error('unresolved alias')
-        return anchors.get(node.anchor)
+      if (node.kind === "alias") {
+        if (!anchors.has(node.anchor)) throw new Error("unresolved alias");
+        return anchors.get(node.anchor);
       }
-      const value: unknown = node.kind === 'scalar'
-        ? [node.kind, node.tag, node.value]
-        : [node.kind, node.tag, node.kind === 'sequence'
-            ? node.items.map(resolve)
-            : node.items.map(pair => [resolve(pair.key), resolve(pair.value)])]
-      if (node.anchor) anchors.set(node.anchor, value)
-      return value
-    }
-    return new Map(root.items.map((pair, index) => {
-      resolve(pair.key)
-      return [block.keys[index]!, resolve(pair.value)]
-    }))
-  }
-  const original = values(before)
-  const candidate = values(after)
-  return keys.every(key => original.has(key) && candidate.has(key)
-    && sameFrontmatterValue(original.get(key), candidate.get(key)))
+      const value: unknown =
+        node.kind === "scalar"
+          ? [node.kind, node.tag, node.value]
+          : [
+              node.kind,
+              node.tag,
+              node.kind === "sequence"
+                ? node.items.map(resolve)
+                : node.items.map((pair) => [resolve(pair.key), resolve(pair.value)]),
+            ];
+      if (node.anchor) anchors.set(node.anchor, value);
+      return value;
+    };
+    return new Map(
+      root.items.map((pair, index) => {
+        resolve(pair.key);
+        return [block.keys[index]!, resolve(pair.value)];
+      }),
+    );
+  };
+  const original = values(before);
+  const candidate = values(after);
+  return keys.every(
+    (key) =>
+      original.has(key) &&
+      candidate.has(key) &&
+      sameFrontmatterValue(original.get(key), candidate.get(key)),
+  );
 }
 
 /** The Y.Doc meta key that holds the frontmatter text a document keeps. */
-export const FRONTMATTER_SOURCE_META_KEY = 'dohcFrontmatterSource'
+export const FRONTMATTER_SOURCE_META_KEY = "dohcFrontmatterSource";
 /** The Y.Doc meta key that is true when the document's file ends lines with CRLF. */
-export const MARKDOWN_CRLF_META_KEY = 'dohcMarkdownCrlf'
+export const MARKDOWN_CRLF_META_KEY = "dohcMarkdownCrlf";
 
 /**
  * Refuse a property edit unless the block that `current` settles to holds
@@ -587,34 +604,48 @@ export function assertFrontmatterEdit(
   written: ReadonlySet<string>,
   requested: Record<string, unknown>,
 ): void {
-  assertRequestedValues(frontmatterBlockFor(current, source, '', '\n', written), requested)
+  assertRequestedValues(frontmatterBlockFor(current, source, "", "\n", written), requested);
 }
 
 function assertRequestedValues(candidate: string, requested: Record<string, unknown>): void {
-  if (Object.keys(requested).length === 0) return
-  const expected = readFrontmatterBlock(`---\n${frontmatterYaml(requested)}---\n`)
-  const actual = readFrontmatterBlock(candidate)
-  if (!expected || !actual
-    || !Object.keys(requested).every(key => sameFrontmatterValue(requested[key], actual.value[key]))
-    || !preservesYamlValues(expected, actual, Object.keys(requested))) {
-    throw new Error(FRONTMATTER_EDIT_REFUSED_MESSAGE)
+  if (Object.keys(requested).length === 0) return;
+  const expected = readFrontmatterBlock(`---\n${frontmatterYaml(requested)}---\n`);
+  const actual = readFrontmatterBlock(candidate);
+  if (
+    !expected ||
+    !actual ||
+    !Object.keys(requested).every((key) =>
+      sameFrontmatterValue(requested[key], actual.value[key]),
+    ) ||
+    !preservesYamlValues(expected, actual, Object.keys(requested))
+  ) {
+    throw new Error(FRONTMATTER_EDIT_REFUSED_MESSAGE);
   }
 }
 
 /** Whether two frontmatter values read as the same value. */
 export function sameFrontmatterValue(left: unknown, right: unknown): boolean {
-  if (Object.is(left, right)) return true
+  if (Object.is(left, right)) return true;
   if (Array.isArray(left) && Array.isArray(right)) {
-    if (left.length !== right.length) return false
+    if (left.length !== right.length) return false;
     for (let index = 0; index < left.length; index += 1) {
-      if (!Object.hasOwn(left, index) || !Object.hasOwn(right, index)
-        || !sameFrontmatterValue(left[index], right[index])) return false
+      if (
+        !Object.hasOwn(left, index) ||
+        !Object.hasOwn(right, index) ||
+        !sameFrontmatterValue(left[index], right[index])
+      )
+        return false;
     }
-    return true
+    return true;
   }
-  return isFrontmatterMap(left) && isFrontmatterMap(right)
-    && Object.keys(left).length === Object.keys(right).length
-    && Object.keys(left).every(key => Object.hasOwn(right, key) && sameFrontmatterValue(left[key], right[key]))
+  return (
+    isFrontmatterMap(left) &&
+    isFrontmatterMap(right) &&
+    Object.keys(left).length === Object.keys(right).length &&
+    Object.keys(left).every(
+      (key) => Object.hasOwn(right, key) && sameFrontmatterValue(left[key], right[key]),
+    )
+  );
 }
 
 /** The text with each renamed entry written under its new name, in place. */
@@ -623,18 +654,20 @@ function withRenamedEntries(
   current: Record<string, unknown>,
   renamed: ReadonlyMap<string, string>,
 ): string {
-  let text = source
+  let text = source;
   for (const [from, to] of renamed) {
-    if (Object.hasOwn(current, to)) text = keptTextRenamed(text, from, to) ?? text
+    if (Object.hasOwn(current, to)) text = keptTextRenamed(text, from, to) ?? text;
   }
-  return text
+  return text;
 }
 
 /** A key as written before `: ` on one line. Undefined when it needs the explicit `? ` form. */
 function inlineKey(key: string): string | undefined {
-  const entry = frontmatterYaml({ [key]: null })
-  const text = entry.slice(0, -': null\n'.length)
-  return entry.startsWith('? ') || !entry.endsWith(': null\n') || text.includes('\n') ? undefined : text
+  const entry = frontmatterYaml({ [key]: null });
+  const text = entry.slice(0, -": null\n".length);
+  return entry.startsWith("? ") || !entry.endsWith(": null\n") || text.includes("\n")
+    ? undefined
+    : text;
 }
 
 /**
@@ -645,57 +678,61 @@ function inlineKey(key: string): string | undefined {
  */
 export function keptTextRenamed(source: string, from: string, to: string): string | undefined {
   try {
-    const block = readFrontmatterBlock(source)
-    const entries = block ? rootKeyEntries(block.yaml) : undefined
-    if (!block || entries === undefined || entries.length !== block.keys.length) return undefined
-    const key = entries[block.keys.indexOf(from)]?.key
-    const name = inlineKey(to)
-    if (key === undefined || name === undefined) return undefined
-    const edits = [{ ...key, text: name }]
-    const stale = block.keys.indexOf(to)
+    const block = readFrontmatterBlock(source);
+    const entries = block ? rootKeyEntries(block.yaml) : undefined;
+    if (!block || entries === undefined || entries.length !== block.keys.length) return undefined;
+    const key = entries[block.keys.indexOf(from)]?.key;
+    const name = inlineKey(to);
+    if (key === undefined || name === undefined) return undefined;
+    const edits = [{ ...key, text: name }];
+    const stale = block.keys.indexOf(to);
     if (stale !== -1) {
-      const indent = mappingIndent(block.yaml, entries).length
+      const indent = mappingIndent(block.yaml, entries).length;
       const textEnd = (index: number): number => {
-        const entry = entries[index]!
-        const region = block.yaml.slice(entry.line, entries[index + 1]?.line ?? block.yaml.length)
-        return entry.line + entryTextEnd(region, entry.keptBlankLines, indent)
-      }
-      edits.push({ start: stale === 0 ? 0 : textEnd(stale - 1), end: textEnd(stale), text: '' })
+        const entry = entries[index]!;
+        const region = block.yaml.slice(entry.line, entries[index + 1]?.line ?? block.yaml.length);
+        return entry.line + entryTextEnd(region, entry.keptBlankLines, indent);
+      };
+      edits.push({ start: stale === 0 ? 0 : textEnd(stale - 1), end: textEnd(stale), text: "" });
     }
-    let yaml = block.yaml
+    let yaml = block.yaml;
     for (const edit of edits.sort((left, right) => right.start - left.start)) {
-      yaml = `${yaml.slice(0, edit.start)}${edit.text}${yaml.slice(edit.end)}`
+      yaml = `${yaml.slice(0, edit.start)}${edit.text}${yaml.slice(edit.end)}`;
     }
-    const candidate = `${block.open}${yaml}${block.closing}`
-    const reread = readFrontmatterBlock(candidate)
-    const keys = block.keys.filter(key => key !== to).map(key => key === from ? to : key)
-    return reread && reread.keys.length === keys.length
-      && keys.every((key, index) => reread.keys[index] === key
-        && sameFrontmatterValue(block.value[key === to ? from : key], reread.value[key]))
+    const candidate = `${block.open}${yaml}${block.closing}`;
+    const reread = readFrontmatterBlock(candidate);
+    const keys = block.keys.filter((key) => key !== to).map((key) => (key === from ? to : key));
+    return reread &&
+      reread.keys.length === keys.length &&
+      keys.every(
+        (key, index) =>
+          reread.keys[index] === key &&
+          sameFrontmatterValue(block.value[key === to ? from : key], reread.value[key]),
+      )
       ? candidate
-      : undefined
+      : undefined;
   } catch {
-    return undefined
+    return undefined;
   }
 }
 
 function renderedEntries(values: Record<string, unknown>): Map<string, string> {
-  return new Map(Object.keys(values).map(key => [key, frontmatterYaml({ [key]: values[key] })]))
+  return new Map(Object.keys(values).map((key) => [key, frontmatterYaml({ [key]: values[key] })]));
 }
 
 /**
  * A top-level entry: where its line starts, the blank lines its value keeps,
  * and the text of a plain or quoted key, quotes included.
  */
-type RootKeyEntry = { line: number; keptBlankLines: number; key?: { start: number; end: number } }
+type RootKeyEntry = { line: number; keptBlankLines: number; key?: { start: number; end: number } };
 
 function mappingIndent(text: string, entries: RootKeyEntry[]): string {
-  return entries.length === 0 ? '' : /^ */u.exec(text.slice(entries[0]!.line))![0]
+  return entries.length === 0 ? "" : /^ */u.exec(text.slice(entries[0]!.line))![0];
 }
 
 function renderEntry(entry: string, indent: string, crlf: boolean): string {
-  const indented = entry.replace(/^(?=.)/gmu, indent)
-  return crlf ? indented.replaceAll('\n', '\r\n') : indented
+  const indented = entry.replace(/^(?=.)/gmu, indent);
+  return crlf ? indented.replaceAll("\n", "\r\n") : indented;
 }
 
 /**
@@ -705,51 +742,59 @@ function renderEntry(entry: string, indent: string, crlf: boolean): string {
  * block mapping with one written key per line.
  */
 function rootKeyEntries(text: string): RootKeyEntry[] | undefined {
-  const events = yaml.parseEvents(text, { maxDepth: PARSER_MAX_DEPTH })
-  const frames: { mapping: boolean; keyNext: boolean }[] = []
-  const entries: RootKeyEntry[] = []
+  const events = yaml.parseEvents(text, { maxDepth: PARSER_MAX_DEPTH });
+  const frames: { mapping: boolean; keyNext: boolean }[] = [];
+  const entries: RootKeyEntry[] = [];
   for (const event of events) {
     if (event.type === EVENT_POP) {
-      frames.pop()
-      continue
+      frames.pop();
+      continue;
     }
     if (event.type === EVENT_DOCUMENT) {
-      frames.push({ mapping: false, keyNext: false })
-      continue
+      frames.push({ mapping: false, keyNext: false });
+      continue;
     }
-    const parent = frames.at(-1)
-    const isKey = parent?.mapping === true && parent.keyNext
-    const isRootKey = isKey && frames.length === 2
-    if (parent?.mapping) parent.keyNext = !parent.keyNext
+    const parent = frames.at(-1);
+    const isKey = parent?.mapping === true && parent.keyNext;
+    const isRootKey = isKey && frames.length === 2;
+    if (parent?.mapping) parent.keyNext = !parent.keyNext;
     if (event.type === EVENT_MAPPING || event.type === EVENT_SEQUENCE) {
-      if (frames.length === 1 && event.style !== COLLECTION_STYLE_BLOCK) return undefined
-      frames.push({ mapping: event.type === EVENT_MAPPING, keyNext: true })
-      continue
+      if (frames.length === 1 && event.style !== COLLECTION_STYLE_BLOCK) return undefined;
+      frames.push({ mapping: event.type === EVENT_MAPPING, keyNext: true });
+      continue;
     }
-    const last = entries.at(-1)
+    const last = entries.at(-1);
     if (!isKey && last !== undefined) {
       // A keep-chomped block scalar owns the blank lines after it.
-      last.keptBlankLines = event.type === EVENT_SCALAR
-        && (event.style === SCALAR_STYLE_LITERAL_BLOCK || event.style === SCALAR_STYLE_FOLDED_BLOCK)
-        ? Math.max(0, (/\n*$/u.exec(getScalarValue(text, event))?.[0].length ?? 0) - 1)
-        : 0
+      last.keptBlankLines =
+        event.type === EVENT_SCALAR &&
+        (event.style === SCALAR_STYLE_LITERAL_BLOCK || event.style === SCALAR_STYLE_FOLDED_BLOCK)
+          ? Math.max(0, (/\n*$/u.exec(getScalarValue(text, event))?.[0].length ?? 0) - 1)
+          : 0;
     }
-    if (!isRootKey) continue
-    const position = event.type === EVENT_SCALAR
-      ? Math.min(...[event.tagStart, event.anchorStart, event.valueStart].filter(at => at >= 0))
-      : event.type === EVENT_ALIAS ? event.anchorStart : -1
+    if (!isRootKey) continue;
+    const position =
+      event.type === EVENT_SCALAR
+        ? Math.min(...[event.tagStart, event.anchorStart, event.valueStart].filter((at) => at >= 0))
+        : event.type === EVENT_ALIAS
+          ? event.anchorStart
+          : -1;
     // js-yaml gives an empty key no position, so the block does not split.
-    if (!Number.isFinite(position) || position < 0) return undefined
-    const line = text.lastIndexOf('\n', position - 1) + 1
-    if (line <= (entries.at(-1)?.line ?? -1)) return undefined
-    const quote = event.type === EVENT_SCALAR
-      && (event.style === SCALAR_STYLE_SINGLE_QUOTED || event.style === SCALAR_STYLE_DOUBLE_QUOTED) ? 1 : 0
-    const key = event.type === EVENT_SCALAR && (quote === 1 || event.style === SCALAR_STYLE_PLAIN)
-      ? { start: event.valueStart - quote, end: event.valueEnd + quote }
-      : undefined
-    entries.push({ line, keptBlankLines: 0, ...(key ? { key } : {}) })
+    if (!Number.isFinite(position) || position < 0) return undefined;
+    const line = text.lastIndexOf("\n", position - 1) + 1;
+    if (line <= (entries.at(-1)?.line ?? -1)) return undefined;
+    const quote =
+      event.type === EVENT_SCALAR &&
+      (event.style === SCALAR_STYLE_SINGLE_QUOTED || event.style === SCALAR_STYLE_DOUBLE_QUOTED)
+        ? 1
+        : 0;
+    const key =
+      event.type === EVENT_SCALAR && (quote === 1 || event.style === SCALAR_STYLE_PLAIN)
+        ? { start: event.valueStart - quote, end: event.valueEnd + quote }
+        : undefined;
+    entries.push({ line, keptBlankLines: 0, ...(key ? { key } : {}) });
   }
-  return entries
+  return entries;
 }
 
 /**
@@ -758,20 +803,24 @@ function rootKeyEntries(text: string): RootKeyEntry[] | undefined {
  * below it, except the blank lines a keep-chomped block scalar keeps.
  */
 function entryTextEnd(region: string, keptBlankLines: number, indent: number): number {
-  let start = region.length
+  let start = region.length;
   while (start > 0) {
-    const lineStart = region.lastIndexOf('\n', start - 2) + 1
-    const line = region.slice(lineStart, start).replace(/\r?\n$/u, '')
-    const commentIndent = /^ *(?=#)/u.exec(line)?.[0].length
-    if (lineStart === 0 || !(line.trim() === '' || (commentIndent !== undefined && commentIndent <= indent))) break
-    start = lineStart
+    const lineStart = region.lastIndexOf("\n", start - 2) + 1;
+    const line = region.slice(lineStart, start).replace(/\r?\n$/u, "");
+    const commentIndent = /^ *(?=#)/u.exec(line)?.[0].length;
+    if (
+      lineStart === 0 ||
+      !(line.trim() === "" || (commentIndent !== undefined && commentIndent <= indent))
+    )
+      break;
+    start = lineStart;
   }
   for (let kept = 0; kept < keptBlankLines; kept += 1) {
-    const lineEnd = region.indexOf('\n', start) + 1
-    if (lineEnd === 0 || region.slice(start, lineEnd).trim() !== '') break
-    start = lineEnd
+    const lineEnd = region.indexOf("\n", start) + 1;
+    if (lineEnd === 0 || region.slice(start, lineEnd).trim() !== "") break;
+    start = lineEnd;
   }
-  return start
+  return start;
 }
 
 /**
@@ -783,19 +832,22 @@ export function frontmatterBlockFor(
   frontmatter: Record<string, unknown>,
   source: unknown,
   body: string,
-  lineEnding: '\n' | '\r\n',
+  lineEnding: "\n" | "\r\n",
   written?: ReadonlySet<string>,
 ): string {
-  const kept = typeof source === 'string' ? keptFrontmatter(source, frontmatter, written) : undefined
+  const kept =
+    typeof source === "string" ? keptFrontmatter(source, frontmatter, written) : undefined;
   if (kept !== undefined) {
     // A closing delimiter at the end of the file needs a line break before
     // the body a person adds under it.
-    return kept !== '' && body !== '' && !kept.endsWith('\n') ? `${kept}${lineEnding}${lineEnding}` : kept
+    return kept !== "" && body !== "" && !kept.endsWith("\n")
+      ? `${kept}${lineEnding}${lineEnding}`
+      : kept;
   }
-  if (typeof source === 'string') throw new Error(FRONTMATTER_EDIT_REFUSED_MESSAGE)
-  if (Object.keys(frontmatter).length === 0) return ''
-  const block = `---\n${frontmatterYaml(frontmatter)}---${body.startsWith('\n') ? '\n' : '\n\n'}`
-  return lineEnding === '\n' ? block : block.replaceAll('\n', '\r\n')
+  if (typeof source === "string") throw new Error(FRONTMATTER_EDIT_REFUSED_MESSAGE);
+  if (Object.keys(frontmatter).length === 0) return "";
+  const block = `---\n${frontmatterYaml(frontmatter)}---${body.startsWith("\n") ? "\n" : "\n\n"}`;
+  return lineEnding === "\n" ? block : block.replaceAll("\n", "\r\n");
 }
 
 /**
@@ -808,29 +860,39 @@ export function writeMarkdownFrontmatter(
   frontmatter: Record<string, unknown>,
   renamed: ReadonlyMap<string, string> = new Map(),
 ): string {
-  const lineEnding = markdown.includes('\r\n') ? '\r\n' : '\n'
-  const { body } = parseFrontmatter(markdown, lineEnding === '\r\n')
-  const written = markdown.slice(0, markdown.length - body.length)
-  const source = written === '' ? undefined : withRenamedEntries(written, frontmatter, renamed)
-  const candidate = frontmatterBlockFor(frontmatter, source, body, lineEnding)
-  const original = readFrontmatterBlock(written)
-  const requested = nullPrototypeRecord()
-  const unchanged: string[] = []
-  const renamedFrom = new Map([...renamed].map(([from, to]) => [to, from]))
+  const lineEnding = markdown.includes("\r\n") ? "\r\n" : "\n";
+  const { body } = parseFrontmatter(markdown, lineEnding === "\r\n");
+  const written = markdown.slice(0, markdown.length - body.length);
+  const source = written === "" ? undefined : withRenamedEntries(written, frontmatter, renamed);
+  const candidate = frontmatterBlockFor(frontmatter, source, body, lineEnding);
+  const original = readFrontmatterBlock(written);
+  const requested = nullPrototypeRecord();
+  const unchanged: string[] = [];
+  const renamedFrom = new Map([...renamed].map(([from, to]) => [to, from]));
   for (const key of Object.keys(frontmatter)) {
-    const from = renamedFrom.get(key)
+    const from = renamedFrom.get(key);
     if (from !== undefined) {
       // A renamed entry keeps its value text, which the candidate's reread checks.
-      if (!original || !Object.hasOwn(original.value, from)
-        || !sameFrontmatterValue(original.value[from], frontmatter[key])) requested[key] = frontmatter[key]
-    } else if (original && Object.hasOwn(original.value, key)
-      && frontmatterYaml({ [key]: original.value[key] }) === frontmatterYaml({ [key]: frontmatter[key] })) unchanged.push(key)
-    else requested[key] = frontmatter[key]
+      if (
+        !original ||
+        !Object.hasOwn(original.value, from) ||
+        !sameFrontmatterValue(original.value[from], frontmatter[key])
+      )
+        requested[key] = frontmatter[key];
+    } else if (
+      original &&
+      Object.hasOwn(original.value, key) &&
+      frontmatterYaml({ [key]: original.value[key] }) ===
+        frontmatterYaml({ [key]: frontmatter[key] })
+    )
+      unchanged.push(key);
+    else requested[key] = frontmatter[key];
   }
-  assertRequestedValues(candidate, requested)
+  assertRequestedValues(candidate, requested);
   if (original && unchanged.length > 0) {
-    const reread = readFrontmatterBlock(candidate)
-    if (!reread || !preservesYamlValues(original, reread, unchanged)) throw new Error(FRONTMATTER_EDIT_REFUSED_MESSAGE)
+    const reread = readFrontmatterBlock(candidate);
+    if (!reread || !preservesYamlValues(original, reread, unchanged))
+      throw new Error(FRONTMATTER_EDIT_REFUSED_MESSAGE);
   }
-  return `${candidate}${body}`
+  return `${candidate}${body}`;
 }

@@ -1,8 +1,14 @@
+import { isChatShareAccessValue, isShareAccessValue } from "@dohc/security-contract";
 import {
-  isChatShareAccessValue,
-  isShareAccessValue,
-} from "@dohc/security-contract";
-import { chatSideOf, groupChannelIsOrdinary, isGroupSelector, effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSelectorJson, type ShareLabelReader, type StoredAnyShareSelector } from "./shareFilter";
+  chatSideOf,
+  groupChannelIsOrdinary,
+  isGroupSelector,
+  effectiveShareSelector,
+  isLiveEditShareSelector,
+  parseStoredAnyShareSelectorJson,
+  type ShareLabelReader,
+  type StoredAnyShareSelector,
+} from "./shareFilter";
 import type {
   SyncRelayStorage,
   SyncRelayGrantedShareRow,
@@ -31,25 +37,51 @@ function storedSelectorKind(
 
 export function createShareSummaries(
   storage: Pick<SyncRelayStorage, "findChannelCreateKind">,
-  labels: (shareId: string, reader: ShareLabelReader) => import("@dohc/security-contract/share-labels").ShareLabels,
+  labels: (
+    shareId: string,
+    reader: ShareLabelReader,
+  ) => import("@dohc/security-contract/share-labels").ShareLabels,
   lookupUserEmail?: (userId: string) => Promise<string | null> | string | null,
   namedBrowserOrigin?: string,
 ) {
-  const namedBrowserInvitation = (workspaceId: string, grantId: string, selector: StoredAnyShareSelector, access: string) => {
+  const namedBrowserInvitation = (
+    workspaceId: string,
+    grantId: string,
+    selector: StoredAnyShareSelector,
+    access: string,
+  ) => {
     const effective = effectiveShareSelector(selector, access);
     if (!namedBrowserOrigin || !effective) return {};
-    if (isGroupSelector(effective) && !groupChannelIsOrdinary(effective, {
-      channelKind: wireId => storage.findChannelCreateKind(workspaceId, wireId),
-    })) return {};
-    const view = chatSideOf(effective) ? "chat" : isLiveEditShareSelector(effective) ? "edit" : null;
-    return view ? {browserInvitationUrl: `${namedBrowserOrigin}/s/${view}/${encodeURIComponent(grantId)}`} : {};
+    if (
+      isGroupSelector(effective) &&
+      !groupChannelIsOrdinary(effective, {
+        channelKind: (wireId) => storage.findChannelCreateKind(workspaceId, wireId),
+      })
+    )
+      return {};
+    const view = chatSideOf(effective)
+      ? "chat"
+      : isLiveEditShareSelector(effective)
+        ? "edit"
+        : null;
+    return view
+      ? { browserInvitationUrl: `${namedBrowserOrigin}/s/${view}/${encodeURIComponent(grantId)}` }
+      : {};
   };
-  const groupFileScope = (workspaceId: string, selector: StoredAnyShareSelector | null, access: string) => {
+  const groupFileScope = (
+    workspaceId: string,
+    selector: StoredAnyShareSelector | null,
+    access: string,
+  ) => {
     const effective = selector && effectiveShareSelector(selector, access);
     return effective && isGroupSelector(effective)
-      ? {fileScope: groupChannelIsOrdinary(effective, {
-          channelKind: (wireId) => storage.findChannelCreateKind(workspaceId, wireId),
-        }) ? "served" as const : "not-served" as const}
+      ? {
+          fileScope: groupChannelIsOrdinary(effective, {
+            channelKind: (wireId) => storage.findChannelCreateKind(workspaceId, wireId),
+          })
+            ? ("served" as const)
+            : ("not-served" as const),
+        }
       : {};
   };
   const shareSummaryBase = (
@@ -88,9 +120,7 @@ export function createShareSummaries(
       // routes a row to the right manager, and losing it made a damaged
       // chat grant surface in the path/version lists as an unreadable
       // path share. A kind that cannot be read is not invented.
-      ...(selector
-        ? {}
-        : { damaged: true as const, ...storedSelectorKind(share.selectorJson) }),
+      ...(selector ? {} : { damaged: true as const, ...storedSelectorKind(share.selectorJson) }),
       createdAtMs: share.createdAtMs,
     };
   };
@@ -112,15 +142,25 @@ export function createShareSummaries(
     return {
       // The granter reads the label as they wrote it, so a refresh compares like with like.
       ...shareSummaryBase(row, "owner", selector),
-      ...(roster ? { granterUserId: share.granterUserId, granterEmail: roster.granterEmail, status: grant.status } : {}),
+      ...(roster
+        ? {
+            granterUserId: share.granterUserId,
+            granterEmail: roster.granterEmail,
+            status: grant.status,
+          }
+        : {}),
       workspaceId: share.workspaceId,
       recipientUserId: grant.principalUserId,
       recipientEmail,
       revokedAtMs: grant.revokedAtMs,
       automationsGeneration: row.automationsGeneration,
-      ...(selector && grant.status === "active" && grant.revokedAtMs === null && grant.parentGrantId === null &&
-        (grant.principalKind === "user" || grant.principalKind === "email")
-        ? namedBrowserInvitation(share.workspaceId, grant.grantId, selector, grant.access) : {}),
+      ...(selector &&
+      grant.status === "active" &&
+      grant.revokedAtMs === null &&
+      grant.parentGrantId === null &&
+      (grant.principalKind === "user" || grant.principalKind === "email")
+        ? namedBrowserInvitation(share.workspaceId, grant.grantId, selector, grant.access)
+        : {}),
     };
   };
 
@@ -239,9 +279,7 @@ export function createShareSummaries(
       ...labels(share.shareId, "owner"),
       sharerName: null,
       selector,
-      ...(selector
-        ? {}
-        : { damaged: true as const, ...storedSelectorKind(share.selectorJson) }),
+      ...(selector ? {} : { damaged: true as const, ...storedSelectorKind(share.selectorJson) }),
       access: grant.access,
       generation: grant.generation,
       status: grant.status,
@@ -249,7 +287,7 @@ export function createShareSummaries(
       revokedAtMs: grant.revokedAtMs,
       lastUsedAtMs: row.lastUsedAtMs,
       urlIssuedAtMs: row.urlIssuedAtMs,
-      ...(share.creationProvenance ? {creationProvenance: share.creationProvenance} : {}),
+      ...(share.creationProvenance ? { creationProvenance: share.creationProvenance } : {}),
       automationsGeneration: row.automationsGeneration,
       dependents: await Promise.all(row.dependents.map(dependentGrantSummary)),
     };

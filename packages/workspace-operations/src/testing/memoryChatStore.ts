@@ -8,7 +8,13 @@ import type {
   ChatStreamItem,
   ChatThread,
 } from "@dohc/workspace-contracts/engine";
-import type { ChatReadStore, ChatsHost, DispatchFacts, ErrorDetail, ProvisionedChannel } from "../chats";
+import type {
+  ChatReadStore,
+  ChatsHost,
+  DispatchFacts,
+  ErrorDetail,
+  ProvisionedChannel,
+} from "../chats";
 import type { AnswerStages, ChatWriteHost, ChatWriteReadStore } from "../chatWrites";
 
 type Decision = Awaited<ReturnType<ChatReadStore["listThreadDecisions"]>>[number];
@@ -69,7 +75,13 @@ export class MemoryChatStore implements ChatReadStore, ChatWriteReadStore {
 
   addThread(input: Partial<ChatThread> & Pick<ChatThread, "id">): ChatThread {
     const at = this.now();
-    const thread: ChatThread = { workspaceId: WORKSPACE_ID, title: input.id, createdAtMs: at, updatedAtMs: at, ...input };
+    const thread: ChatThread = {
+      workspaceId: WORKSPACE_ID,
+      title: input.id,
+      createdAtMs: at,
+      updatedAtMs: at,
+      ...input,
+    };
     this.threads.push(thread);
     this.messages.set(thread.id, []);
     return thread;
@@ -90,16 +102,28 @@ export class MemoryChatStore implements ChatReadStore, ChatWriteReadStore {
     return message;
   }
 
-  addDecision(threadId: string, decision: Omit<Decision, "workspaceId" | "threadId" | "atMs">): void {
+  addDecision(
+    threadId: string,
+    decision: Omit<Decision, "workspaceId" | "threadId" | "atMs">,
+  ): void {
     const list = this.decisions.get(threadId) ?? [];
     list.push({ workspaceId: WORKSPACE_ID, threadId, atMs: this.now(), ...decision });
     this.decisions.set(threadId, list);
   }
 
-  addReaction(message: Pick<ChatMessage, "id" | "threadId">, emoji: string, author: ChatReaction["author"]): ChatReaction {
+  addReaction(
+    message: Pick<ChatMessage, "id" | "threadId">,
+    emoji: string,
+    author: ChatReaction["author"],
+  ): ChatReaction {
     const reaction: ChatReaction = {
-      reactionId: `${message.id}:${emoji}:${author.authorId}`, threadId: message.threadId, messageId: message.id, emoji, author,
-      state: "added", atMs: this.now(),
+      reactionId: `${message.id}:${emoji}:${author.authorId}`,
+      threadId: message.threadId,
+      messageId: message.id,
+      emoji,
+      author,
+      state: "added",
+      atMs: this.now(),
     };
     this.reactions.push(reaction);
     return reaction;
@@ -111,8 +135,10 @@ export class MemoryChatStore implements ChatReadStore, ChatWriteReadStore {
 
   async ensureGeneralChannel(input: { workspaceId: string }): Promise<ChatChannel> {
     this.enter("ensureGeneralChannel", input.workspaceId);
-    return this.channels.find((channel) => channel.slug === "general") ??
-      this.addChannel({ id: "channel-general", name: "General", slug: "general" });
+    return (
+      this.channels.find((channel) => channel.slug === "general") ??
+      this.addChannel({ id: "channel-general", name: "General", slug: "general" })
+    );
   }
 
   async listChannels(input: { workspaceId: string }): Promise<ChatChannelSummary[]> {
@@ -120,12 +146,19 @@ export class MemoryChatStore implements ChatReadStore, ChatWriteReadStore {
     return this.channels.map((channel) => ({ ...channel }));
   }
 
-  async getChannelWireId(input: { workspaceId: string; channelId: string }): Promise<string | null> {
+  async getChannelWireId(input: {
+    workspaceId: string;
+    channelId: string;
+  }): Promise<string | null> {
     this.enter("getChannelWireId", input.workspaceId);
     return this.wireIds.get(input.channelId) ?? null;
   }
 
-  async listChannelThreads(input: { workspaceId: string; channelId: string; lane?: "posts" | "chat" }): Promise<ChannelThreadSummary[]> {
+  async listChannelThreads(input: {
+    workspaceId: string;
+    channelId: string;
+    lane?: "posts" | "chat";
+  }): Promise<ChannelThreadSummary[]> {
     this.enter("listChannelThreads", input.workspaceId);
     const lane = input.lane ?? "posts";
     return this.threads
@@ -139,12 +172,17 @@ export class MemoryChatStore implements ChatReadStore, ChatWriteReadStore {
           messageCount,
           lastReadSequence,
           unreadCount: messageCount - lastReadSequence,
-          openDecisionCount: (this.decisions.get(thread.id) ?? []).filter((decision) => decision.state === "open").length,
+          openDecisionCount: (this.decisions.get(thread.id) ?? []).filter(
+            (decision) => decision.state === "open",
+          ).length,
         };
       });
   }
 
-  async listThreadsForFile(input: { workspaceId: string; objectId: string }): Promise<ChatThread[]> {
+  async listThreadsForFile(input: {
+    workspaceId: string;
+    objectId: string;
+  }): Promise<ChatThread[]> {
     this.enter("listThreadsForFile", input.workspaceId);
     return this.threads.filter((thread) => thread.linkedFile?.objectId === input.objectId);
   }
@@ -163,7 +201,9 @@ export class MemoryChatStore implements ChatReadStore, ChatWriteReadStore {
 
   async getMessage(input: { workspaceId: string; messageId: string }): Promise<ChatMessage> {
     this.enter("getMessage", input.workspaceId);
-    const message = [...this.messages.values()].flat().find((candidate) => candidate.id === input.messageId);
+    const message = [...this.messages.values()]
+      .flat()
+      .find((candidate) => candidate.id === input.messageId);
     if (!message) throw new Error("message-not-found");
     return message;
   }
@@ -195,10 +235,14 @@ export class MemoryChatStore implements ChatReadStore, ChatWriteReadStore {
   async listGroupStream(input: StreamInput) {
     this.enter("listGroupStream", input.workspaceId);
     const items: ChatStreamItem[] = [];
-    for (const thread of this.threads.filter((candidate) => candidate.channelId === input.channelId)) {
+    for (const thread of this.threads.filter(
+      (candidate) => candidate.channelId === input.channelId,
+    )) {
       const messages = this.messages.get(thread.id) ?? [];
       const decisionFor = (message: ChatMessage) => {
-        const decision = this.decisions.get(thread.id)?.find((candidate) => candidate.messageId === message.id);
+        const decision = this.decisions
+          .get(thread.id)
+          ?.find((candidate) => candidate.messageId === message.id);
         if (!decision) return {};
         const { workspaceId: _workspaceId, ...rest } = decision;
         return { decision: rest };
@@ -213,14 +257,21 @@ export class MemoryChatStore implements ChatReadStore, ChatWriteReadStore {
           reactions: this.reactionsOn(first.id),
           post: {
             replyCount: replies.length,
-            repliers: replies.slice(-1).map((reply) => ({ author: reply.author, lastReplyAtMs: reply.createdAtMs })),
+            repliers: replies
+              .slice(-1)
+              .map((reply) => ({ author: reply.author, lastReplyAtMs: reply.createdAtMs })),
             ...(replies.length ? { lastReplyAtMs: replies.at(-1)!.createdAtMs } : {}),
             openDecisionCount: 0,
           },
         });
       } else {
         for (const message of messages.filter((candidate) => !candidate.parentMessageId)) {
-          items.push({ position: { createdAtMs: message.createdAtMs, lane: "chat", id: message.id }, message, ...decisionFor(message), reactions: this.reactionsOn(message.id) });
+          items.push({
+            position: { createdAtMs: message.createdAtMs, lane: "chat", id: message.id },
+            message,
+            ...decisionFor(message),
+            reactions: this.reactionsOn(message.id),
+          });
         }
       }
     }
@@ -255,7 +306,12 @@ export const IDLE_DISPATCH: DispatchFacts = { paused: null, lastRun: null };
 // is logged beside the store's calls so their order can be checked.
 export function memoryHost(
   store: MemoryChatStore,
-  options: { writable?: boolean; files?: Record<string, string>; dispatch?: DispatchFacts; errorDetail?: ErrorDetail } = {},
+  options: {
+    writable?: boolean;
+    files?: Record<string, string>;
+    dispatch?: DispatchFacts;
+    errorDetail?: ErrorDetail;
+  } = {},
 ): ChatsHost & { provisions: ProvisionedChannel[] } {
   const files = options.files ?? {};
   const provisions: ProvisionedChannel[] = [];
@@ -266,7 +322,8 @@ export function memoryHost(
     writable: options.writable ?? true,
     errorDetail: options.errorDetail ?? "full",
     fileObjectId: async (path) => files[path] ?? null,
-    filePath: async (objectId) => Object.entries(files).find(([, id]) => id === objectId)?.[0] ?? null,
+    filePath: async (objectId) =>
+      Object.entries(files).find(([, id]) => id === objectId)?.[0] ?? null,
     dispatch: async () => options.dispatch ?? IDLE_DISPATCH,
     provisioned: (change) => {
       store.log.push("provisioned");
@@ -284,35 +341,60 @@ export function memoryWriteHost(store: MemoryChatStore, options: { findMessage?:
   const commands: unknown[] = [];
   let next = 0;
   const id = (prefix: string) => `${prefix}-${(next += 1)}`;
-  const write = (input: { threadId: string; body: string; messageId?: string; parentMessageId?: string }) =>
+  const write = (input: {
+    threadId: string;
+    body: string;
+    messageId?: string;
+    parentMessageId?: string;
+  }) =>
     store.addMessage({
-      id: input.messageId ?? id("message"), threadId: input.threadId, body: input.body,
+      id: input.messageId ?? id("message"),
+      threadId: input.threadId,
+      body: input.body,
       ...(input.parentMessageId ? { parentMessageId: input.parentMessageId } : {}),
     });
   const resolve: AnswerStages["resolve"] = async (command) => {
     store.log.push("resolve");
     commands.push({ resolve: command });
-    const decision = store.decisions.get(command.threadId)?.find((candidate) => candidate.messageId === command.messageId);
+    const decision = store.decisions
+      .get(command.threadId)
+      ?.find((candidate) => candidate.messageId === command.messageId);
     if (!decision) throw new Error("decision-not-found");
     if (decision.state === "open") {
-      Object.assign(decision, { state: "resolved", resolvedByMessageId: command.resolvedByMessageId },
-        command.chosenOption === undefined ? {} : { chosenOption: command.chosenOption });
+      Object.assign(
+        decision,
+        { state: "resolved", resolvedByMessageId: command.resolvedByMessageId },
+        command.chosenOption === undefined ? {} : { chosenOption: command.chosenOption },
+      );
     }
     return { ...decision };
   };
   const host: ChatWriteHost = {
     workspaceId: WORKSPACE_ID,
     store,
-    ...(options.findMessage ? { findMessage: (messageId: string) => store.getMessage({ workspaceId: WORKSPACE_ID, messageId }) } : {}),
+    ...(options.findMessage
+      ? {
+          findMessage: (messageId: string) =>
+            store.getMessage({ workspaceId: WORKSPACE_ID, messageId }),
+        }
+      : {}),
     async start(command) {
       store.log.push("admit", "start");
       commands.push({ start: command });
-      const running = command.lane === "chat"
-        ? store.threads.find((thread) => thread.channelId === command.channelId && thread.lane === "chat")
-        : undefined;
-      const thread = running ?? store.addThread({
-        id: command.threadId ?? id("thread"), channelId: command.channelId, lane: command.lane, title: command.title ?? "",
-      });
+      const running =
+        command.lane === "chat"
+          ? store.threads.find(
+              (thread) => thread.channelId === command.channelId && thread.lane === "chat",
+            )
+          : undefined;
+      const thread =
+        running ??
+        store.addThread({
+          id: command.threadId ?? id("thread"),
+          channelId: command.channelId,
+          lane: command.lane,
+          title: command.title ?? "",
+        });
       return { thread, message: write({ ...command, threadId: thread.id }) };
     },
     async reply(command) {
@@ -334,14 +416,22 @@ export function memoryWriteHost(store: MemoryChatStore, options: { findMessage?:
     },
     async answerWith(command, use) {
       store.log.push("admit");
-      return await use({ reply: await store.getMessage({ workspaceId: WORKSPACE_ID, messageId: command.replyId }), resolve });
+      return await use({
+        reply: await store.getMessage({ workspaceId: WORKSPACE_ID, messageId: command.replyId }),
+        resolve,
+      });
     },
     async react(command) {
       store.log.push("admit", "react");
       commands.push({ react: command });
       const reaction: ChatReaction = {
-        reactionId: `${command.messageId}:${command.emoji}`, threadId: command.threadId, messageId: command.messageId,
-        emoji: command.emoji, author: { authorId: "user-1", kind: "human", displayName: "Sam" }, state: command.state, atMs: store.now(),
+        reactionId: `${command.messageId}:${command.emoji}`,
+        threadId: command.threadId,
+        messageId: command.messageId,
+        emoji: command.emoji,
+        author: { authorId: "user-1", kind: "human", displayName: "Sam" },
+        state: command.state,
+        atMs: store.now(),
       };
       return reaction;
     },

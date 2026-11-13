@@ -5,11 +5,11 @@ import {
   ShareUnavailableError,
   SharedChannelReadOnlyError,
 } from "@dohc/workspace-contracts/relay";
-import { RELAY_API_VERSION, RELAY_API_VERSION_HEADER } from "@dohc/workspace-contracts/relay-values";
 import {
-  CHATS_METHOD,
-  type Request,
-} from "@dohc/workspace-engine-client";
+  RELAY_API_VERSION,
+  RELAY_API_VERSION_HEADER,
+} from "@dohc/workspace-contracts/relay-values";
+import { CHATS_METHOD, type Request } from "@dohc/workspace-engine-client";
 import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import {
@@ -588,22 +588,23 @@ describe("syncJoinedSharedChannels", () => {
   it("keeps the pages a failed pull applied, and an empty retry reports no change", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const push = vi.fn(async () => ({ pushed: 0 }));
-    const pull = vi.fn<(input: { onApplied: () => void }) => Promise<ReturnType<typeof pullResult>>>(
-      async (input) => {
-        // The engine committed the first page before the second failed.
-        input.onApplied();
-        throw new Error("ECONNRESET");
-      },
-    );
-    const pass = () => syncJoinedSharedChannels({
-      rootDir: "/tmp/ws",
-      workspaceId: "ws-1",
-      relay: RELAY,
-      ...passOver([joined()]),
-      passRows: 1,
-      pull,
-      push,
+    const pull = vi.fn<
+      (input: { onApplied: () => void }) => Promise<ReturnType<typeof pullResult>>
+    >(async (input) => {
+      // The engine committed the first page before the second failed.
+      input.onApplied();
+      throw new Error("ECONNRESET");
     });
+    const pass = () =>
+      syncJoinedSharedChannels({
+        rootDir: "/tmp/ws",
+        workspaceId: "ws-1",
+        relay: RELAY,
+        ...passOver([joined()]),
+        passRows: 1,
+        pull,
+        push,
+      });
     await expect(pass()).resolves.toMatchObject({ changed: true, failedRows: 1, uncovered: 0 });
     pull.mockImplementation(async () => pullResult(0));
     await expect(pass()).resolves.toMatchObject({ changed: false, failedRows: 0, uncovered: 0 });
@@ -723,23 +724,31 @@ describe("relayApiFetch", () => {
       headers: { authorization: "Bearer token" },
     });
     await relayApiFetch(recordingFetch)(
-      new Request("http://relay.test/sync/shares", { headers: { authorization: "Bearer request" } }),
+      new Request("http://relay.test/sync/shares", {
+        headers: { authorization: "Bearer request" },
+      }),
     );
-    expect(seen.map((headers) => [headers.get("authorization"), headers.get(RELAY_API_VERSION_HEADER)])).toEqual([
+    expect(
+      seen.map((headers) => [headers.get("authorization"), headers.get(RELAY_API_VERSION_HEADER)]),
+    ).toEqual([
       ["Bearer token", String(RELAY_API_VERSION)],
       ["Bearer request", String(RELAY_API_VERSION)],
     ]);
   });
 
   it("turns a version refusal into one error that names the side to update", async () => {
-    const refusing = (code: string): typeof fetch => async () =>
-      Response.json({ ok: false, code, error: "relay text" }, { status: 400 });
-    const old = await relayApiFetch(refusing("api_version_too_old"))("http://relay.test/sync/shares")
-      .catch((error: unknown) => error);
+    const refusing =
+      (code: string): typeof fetch =>
+      async () =>
+        Response.json({ ok: false, code, error: "relay text" }, { status: 400 });
+    const old = await relayApiFetch(refusing("api_version_too_old"))(
+      "http://relay.test/sync/shares",
+    ).catch((error: unknown) => error);
     expect(old).toBeInstanceOf(RelayApiVersionError);
     expect((old as RelayApiVersionError).update).toBe("app");
-    const newer = await relayApiFetch(refusing("api_version_too_new"))("http://relay.test/sync/shares")
-      .catch((error: unknown) => error);
+    const newer = await relayApiFetch(refusing("api_version_too_new"))(
+      "http://relay.test/sync/shares",
+    ).catch((error: unknown) => error);
     expect((newer as RelayApiVersionError).update).toBe("server");
 
     const other = await relayApiFetch(refusing("invalid_path"))("http://relay.test/sync/shares");
@@ -755,15 +764,21 @@ describe("relayApiFetch", () => {
     };
     let release!: () => void;
     const cancelled: unknown[] = [];
-    const cancel = vi.spyOn(ReadableStream.prototype, "cancel").mockImplementation(function (this: ReadableStream) {
+    const cancel = vi.spyOn(ReadableStream.prototype, "cancel").mockImplementation(function (
+      this: ReadableStream,
+    ) {
       cancelled.push(this);
       return cancelled.length === 1
-        ? new Promise<void>((resolve) => { release = resolve; })
+        ? new Promise<void>((resolve) => {
+            release = resolve;
+          })
         : Promise.reject(new Error("socket gone"));
     });
     try {
       let settled = false;
-      const first = relayApiFetch(refusing)("http://relay.test/sync/shares").finally(() => { settled = true; });
+      const first = relayApiFetch(refusing)("http://relay.test/sync/shares").finally(() => {
+        settled = true;
+      });
       await vi.waitFor(() => expect(cancelled).toHaveLength(1));
       // The refused response the caller never sees is the one released.
       expect(cancelled[0]).toBe(refusals[0]!.body);
@@ -772,14 +787,18 @@ describe("relayApiFetch", () => {
       release();
       await expect(first).rejects.toBeInstanceOf(RelayApiVersionError);
 
-      const second = await relayApiFetch(refusing)("http://relay.test/sync/shares").catch((error: unknown) => error);
+      const second = await relayApiFetch(refusing)("http://relay.test/sync/shares").catch(
+        (error: unknown) => error,
+      );
       expect((second as RelayApiVersionError).update).toBe("app");
       expect(cancelled).toEqual([refusals[0]!.body, refusals[1]!.body]);
     } finally {
       cancel.mockRestore();
     }
     // Unmocked, the refused body ends up released.
-    await expect(relayApiFetch(refusing)("http://relay.test/sync/shares")).rejects.toBeInstanceOf(RelayApiVersionError);
+    await expect(relayApiFetch(refusing)("http://relay.test/sync/shares")).rejects.toBeInstanceOf(
+      RelayApiVersionError,
+    );
     expect(refusals[2]!.bodyUsed).toBe(true);
   });
 });
@@ -825,7 +844,6 @@ describe("mergeJoinedChannel", () => {
     expect(merged).toHaveLength(20_001);
     expect(merged[merged.length - 1]!.shareId).toBe("share-new");
   });
-
 });
 
 // The joined lane is answered for the channels a caller is SHOWING.
@@ -868,12 +886,7 @@ describe("scopeJoinedChannels", () => {
       joined({ shareId: "share-ro", channelWireId: "wire-ro", access: "read-only" }),
       joined({ shareId: "share-left", channelWireId: "wire-left", ended: true }),
     ];
-    const answers = scopeJoinedChannels(rows, [
-      "wire-live",
-      "wire-ro",
-      "wire-left",
-      "wire-local",
-    ]);
+    const answers = scopeJoinedChannels(rows, ["wire-live", "wire-ro", "wire-left", "wire-local"]);
     expect(answers).toEqual([
       {
         channelWireId: "wire-live",
@@ -928,8 +941,9 @@ describe("scopeJoinedChannels", () => {
   });
 
   it("carries no row cap, because a refused joined lane locks every channel", () => {
-    const shown = Array.from({ length: MAX_CHAT_CHANNEL_SHARE_ROWS + 1 }, (_, index) =>
-      `wire-${index}`,
+    const shown = Array.from(
+      { length: MAX_CHAT_CHANNEL_SHARE_ROWS + 1 },
+      (_, index) => `wire-${index}`,
     );
     const answers = scopeJoinedChannels(historicLane(shown.length), shown);
     expect(() =>

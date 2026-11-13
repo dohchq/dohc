@@ -30,9 +30,11 @@ vi.mock("./workbench/workbenchState", async (importOriginal) => {
       // renderer state only to exercise its defensive shell fallback.
       return {
         ...state,
-        editorGroups: state.editorGroups.map(group => group.id === state.activeEditorGroup
-          ? { ...group, tabs: [{ path: "tab://app/" }], activeTab: "tab://app/" }
-          : group),
+        editorGroups: state.editorGroups.map((group) =>
+          group.id === state.activeEditorGroup
+            ? { ...group, tabs: [{ path: "tab://app/" }], activeTab: "tab://app/" }
+            : group,
+        ),
       };
     },
   };
@@ -45,33 +47,53 @@ vi.mock("./workbench/Explorer", () => ({
 // Keep the shell, its navigation callbacks and its authority gates real.
 // Leaf markers identify which component the switch actually mounts.
 vi.mock("./FileInspector", () => ({
-  FileInspector: (props: { path: string }) => <div data-testid="file-inspector" data-path={props.path} />,
+  FileInspector: (props: { path: string }) => (
+    <div data-testid="file-inspector" data-path={props.path} />
+  ),
 }));
 vi.mock("./workbench/GraphView", () => ({
   GraphView: () => <div data-testid="graph-view" />,
 }));
 vi.mock("./workbench/ChatsView", () => ({
-  ChatsView: (props: { editorTabPath?: string }) => <div data-testid="chats-view" data-path={props.editorTabPath} />,
+  ChatsView: (props: { editorTabPath?: string }) => (
+    <div data-testid="chats-view" data-path={props.editorTabPath} />
+  ),
 }));
 vi.mock("./workbench/WorkspaceVersions", async (importOriginal) => ({
-  ...await importOriginal<typeof import("./workbench/WorkspaceVersions")>(),
-  VersionComparePage: (props: { versionId: string }) => <div data-testid="version-compare-page" data-version={props.versionId} />,
+  ...(await importOriginal<typeof import("./workbench/WorkspaceVersions")>()),
+  VersionComparePage: (props: { versionId: string }) => (
+    <div data-testid="version-compare-page" data-version={props.versionId} />
+  ),
 }));
 vi.mock("./workbench/VersionsPage", () => ({
   VersionsPage: () => <div data-testid="versions-page" />,
 }));
 vi.mock("./workbench/EngineMomentDiffPage", () => ({
-  EngineMomentDiffPage: (props: { tabPath: string }) => <div data-testid="engine-moment-diff-page" data-path={props.tabPath} />,
+  EngineMomentDiffPage: (props: { tabPath: string }) => (
+    <div data-testid="engine-moment-diff-page" data-path={props.tabPath} />
+  ),
 }));
 vi.mock("./SitePreviewPage", () => ({
-  SitePreviewPage: (props: { siteRoot: string }) => <div data-testid="site-preview-page" data-root={props.siteRoot} />,
+  SitePreviewPage: (props: { siteRoot: string }) => (
+    <div data-testid="site-preview-page" data-root={props.siteRoot} />
+  ),
 }));
 vi.mock("./CollectionPage", () => ({
-  CollectionPage: (props: { collectionPath: string }) => <div data-testid="collection-page" data-path={props.collectionPath} />,
+  CollectionPage: (props: { collectionPath: string }) => (
+    <div data-testid="collection-page" data-path={props.collectionPath} />
+  ),
 }));
 vi.mock("./ConnectedTransactionalCollection", () => ({
-  ConnectedTransactionalCollection: (props: { datasetPath: string; tableId: string; onLifecycleChanged?(): void }) => (
-    <div data-testid="transactional-collection-page" data-path={props.datasetPath} data-table={props.tableId}>
+  ConnectedTransactionalCollection: (props: {
+    datasetPath: string;
+    tableId: string;
+    onLifecycleChanged?(): void;
+  }) => (
+    <div
+      data-testid="transactional-collection-page"
+      data-path={props.datasetPath}
+      data-table={props.tableId}
+    >
       <button onClick={() => props.onLifecycleChanged?.()}>Delete the Collection</button>
     </div>
   ),
@@ -85,7 +107,12 @@ function shownAppPage(groupId: string): HTMLElement | null {
 
 const tableId = "00000000-0000-4000-8000-000000000002";
 const cases = [
-  { name: "file", path: "notes.txt", surface: "file-inspector", attributes: { "data-path": "notes.txt" } },
+  {
+    name: "file",
+    path: "notes.txt",
+    surface: "file-inspector",
+    attributes: { "data-path": "notes.txt" },
+  },
   { name: "graph", path: GRAPH_TAB_PATH, surface: "graph-view" },
   { name: "history", path: HISTORY_TAB_PATH, surface: "history-page" },
   { name: "versions", path: VERSIONS_TAB_PATH, surface: "versions-page" },
@@ -94,22 +121,53 @@ const cases = [
     chatTabPath({ kind: "new" }),
     chatTabPath({ kind: "channel", id: "team/one" }),
     chatTabPath({ kind: "dm", id: "person one" }),
-  ].map(path => ({ name: `chats ${path}`, path, surface: "chats-view", attributes: { "data-path": path } })),
-  ...["main", "try/one"].map(version => ({
-    name: `versions compare ${version}`, path: versionCompareTabPath(version), surface: "version-compare-page", attributes: { "data-version": version },
+  ].map((path) => ({
+    name: `chats ${path}`,
+    path,
+    surface: "chats-view",
+    attributes: { "data-path": path },
   })),
-  { name: "moment diff", path: momentDiffTabPath("moment one"), surface: "engine-moment-diff-page", attributes: { "data-path": momentDiffTabPath("moment one") } },
-  ...["apps/trip", "sites/acme"].map(root => ({
-    name: `app/site ${root}`, path: siteTabPath(root), surface: "site-preview-page", attributes: { "data-root": root },
+  ...["main", "try/one"].map((version) => ({
+    name: `versions compare ${version}`,
+    path: versionCompareTabPath(version),
+    surface: "version-compare-page",
+    attributes: { "data-version": version },
   })),
-  { name: "document Collection", path: collectionTabPath("notes/旅"), surface: "collection-page", attributes: { "data-path": "notes/旅" } },
-  { name: "data Collection", path: transactionalCollectionTabPath("data/dataset.json", tableId), surface: "transactional-collection-page", attributes: { "data-path": "data/dataset.json", "data-table": tableId } },
+  {
+    name: "moment diff",
+    path: momentDiffTabPath("moment one"),
+    surface: "engine-moment-diff-page",
+    attributes: { "data-path": momentDiffTabPath("moment one") },
+  },
+  ...["apps/trip", "sites/acme"].map((root) => ({
+    name: `app/site ${root}`,
+    path: siteTabPath(root),
+    surface: "site-preview-page",
+    attributes: { "data-root": root },
+  })),
+  {
+    name: "document Collection",
+    path: collectionTabPath("notes/旅"),
+    surface: "collection-page",
+    attributes: { "data-path": "notes/旅" },
+  },
+  {
+    name: "data Collection",
+    path: transactionalCollectionTabPath("data/dataset.json", tableId),
+    surface: "transactional-collection-page",
+    attributes: { "data-path": "data/dataset.json", "data-table": tableId },
+  },
   ...[
     "tab://chats/dm/",
     transactionalCollectionTabPath("../dataset.json", tableId),
     transactionalCollectionTabPath("data/dataset.json", "bad-table-id"),
     "tab://unknown",
-  ].map(path => ({ name: `removed ${path}`, path, surface: "file-inspector", attributes: { "data-path": path } })),
+  ].map((path) => ({
+    name: `removed ${path}`,
+    path,
+    surface: "file-inspector",
+    attributes: { "data-path": path },
+  })),
 ];
 
 describe("shell tab surfaces", () => {
@@ -119,14 +177,16 @@ describe("shell tab surfaces", () => {
     requested.path = path;
     fireEvent.click(screen.getByRole("button", { name: "Open test tab" }));
     const pane = within(screen.getByTestId("editor-group-primary"));
-    const shown = (testId: string) => testId === "site-preview-page" ? shownAppPage("primary") : pane.queryByTestId(testId);
+    const shown = (testId: string) =>
+      testId === "site-preview-page" ? shownAppPage("primary") : pane.queryByTestId(testId);
     const view = await waitFor(() => {
       const found = shown(surface);
       expect(found).not.toBeNull();
       return found!;
     });
-    for (const [key, value] of Object.entries(attributes ?? {})) expect(view.getAttribute(key)).toBe(value);
-    for (const other of new Set(cases.map(test => test.surface))) {
+    for (const [key, value] of Object.entries(attributes ?? {}))
+      expect(view.getAttribute(key)).toBe(value);
+    for (const other of new Set(cases.map((test) => test.surface))) {
       if (other !== surface) expect(shown(other)).toBeNull();
     }
   });
@@ -147,10 +207,12 @@ describe("shell tab surfaces", () => {
       }
       const pane = within(screen.getByTestId("editor-group-primary"));
       if (fallback === "closed app") {
-        await waitFor(() => expect(error).toHaveBeenCalledWith("[desktop] invalid site tab path", {
-          activeTab: path,
-          detail: "active tab matched site tab format but groupSiteRoot parsed to null",
-        }));
+        await waitFor(() =>
+          expect(error).toHaveBeenCalledWith("[desktop] invalid site tab path", {
+            activeTab: path,
+            detail: "active tab matched site tab format but groupSiteRoot parsed to null",
+          }),
+        );
         expect(await pane.findByTestId("start-surface")).toBeTruthy();
         expect(pane.queryByTestId(editorTabTestId(path))).toBeNull();
       } else if (fallback === "collection error") {
@@ -189,13 +251,24 @@ describe("shell tab surfaces", () => {
     const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
     const fresh = Promise.withResolvers<Awaited<ReturnType<typeof bridge.listWorkspaceFiles>>>();
     bridge.listWorkspaceFiles
-      .mockResolvedValueOnce({ visibility: { status: "ready", rules: [] }, files: [], folders: [], cached: true })
+      .mockResolvedValueOnce({
+        visibility: { status: "ready", rules: [] },
+        files: [],
+        folders: [],
+        cached: true,
+      })
       .mockImplementationOnce(() => fresh.promise);
     renderShell(bridge);
     await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(bridge.listCollections).toHaveBeenCalled());
     const reads = bridge.listCollections.mock.calls.length;
-    await act(async () => fresh.resolve({ visibility: { status: "ready", rules: [] }, files: [{ path: "data/dataset.json", kind: "file" }], folders: [] }));
+    await act(async () =>
+      fresh.resolve({
+        visibility: { status: "ready", rules: [] },
+        files: [{ path: "data/dataset.json", kind: "file" }],
+        folders: [],
+      }),
+    );
     await waitFor(() => expect(bridge.listCollections.mock.calls.length).toBeGreaterThan(reads));
   });
 
@@ -233,53 +306,61 @@ describe("shell tab surfaces", () => {
   it.each([
     ["darwin", { key: "}", code: "BracketRight", metaKey: true, shiftKey: true }],
     ["win32", { key: "PageDown", ctrlKey: true }],
-  ] as const)("cycles the focused group's tabs on %s, and leaves a claimed chord alone", async (platform, alternate) => {
-    const tabs = ["a.txt", "b.txt", "c.txt"];
-    const bridge = makeBridge(Promise.resolve(storedStateWithTabs(tabs)), platform);
-    bridge.listWorkspaceFiles.mockResolvedValue({
-      visibility: { status: "ready", rules: [] },
-      files: tabs.map((path) => ({ path, kind: "file" as const })),
-      folders: [],
-    });
-    renderShell(bridge);
-    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
-    const pane = within(screen.getByTestId("editor-group-primary"));
-    const active = () => pane.getAllByRole("tab").find((tab) => tab.getAttribute("aria-selected") === "true")?.dataset.testid;
-    expect(active()).toBe(editorTabTestId("a.txt"));
+  ] as const)(
+    "cycles the focused group's tabs on %s, and leaves a claimed chord alone",
+    async (platform, alternate) => {
+      const tabs = ["a.txt", "b.txt", "c.txt"];
+      const bridge = makeBridge(Promise.resolve(storedStateWithTabs(tabs)), platform);
+      bridge.listWorkspaceFiles.mockResolvedValue({
+        visibility: { status: "ready", rules: [] },
+        files: tabs.map((path) => ({ path, kind: "file" as const })),
+        folders: [],
+      });
+      renderShell(bridge);
+      await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+      const pane = within(screen.getByTestId("editor-group-primary"));
+      const active = () =>
+        pane.getAllByRole("tab").find((tab) => tab.getAttribute("aria-selected") === "true")
+          ?.dataset.testid;
+      expect(active()).toBe(editorTabTestId("a.txt"));
 
-    fireEvent.keyDown(window, { key: "Tab", ctrlKey: true });
-    await waitFor(() => expect(active()).toBe(editorTabTestId("b.txt")));
-    fireEvent.keyDown(window, { key: "Tab", ctrlKey: true, shiftKey: true });
-    await waitFor(() => expect(active()).toBe(editorTabTestId("a.txt")));
-    fireEvent.keyDown(window, { key: "Tab", ctrlKey: true, shiftKey: true });
-    await waitFor(() => expect(active()).toBe(editorTabTestId("c.txt")));
-    fireEvent.keyDown(window, alternate);
-    await waitFor(() => expect(active()).toBe(editorTabTestId("a.txt")));
-    act(() => bridge.emitMenuCommand("previous-tab"));
-    await waitFor(() => expect(active()).toBe(editorTabTestId("c.txt")));
+      fireEvent.keyDown(window, { key: "Tab", ctrlKey: true });
+      await waitFor(() => expect(active()).toBe(editorTabTestId("b.txt")));
+      fireEvent.keyDown(window, { key: "Tab", ctrlKey: true, shiftKey: true });
+      await waitFor(() => expect(active()).toBe(editorTabTestId("a.txt")));
+      fireEvent.keyDown(window, { key: "Tab", ctrlKey: true, shiftKey: true });
+      await waitFor(() => expect(active()).toBe(editorTabTestId("c.txt")));
+      fireEvent.keyDown(window, alternate);
+      await waitFor(() => expect(active()).toBe(editorTabTestId("a.txt")));
+      act(() => bridge.emitMenuCommand("previous-tab"));
+      await waitFor(() => expect(active()).toBe(editorTabTestId("c.txt")));
 
-    // A control that gives ⌃Tab its own meaning claims it first.
-    const field = document.createElement("input");
-    document.body.append(field);
-    field.addEventListener("keydown", (event) => event.preventDefault());
-    fireEvent.keyDown(field, { key: "Tab", ctrlKey: true });
-    field.remove();
-    act(() => bridge.emitMenuCommand("next-tab"));
-    await waitFor(() => expect(active()).toBe(editorTabTestId("a.txt")));
-  });
+      // A control that gives ⌃Tab its own meaning claims it first.
+      const field = document.createElement("input");
+      document.body.append(field);
+      field.addEventListener("keydown", (event) => event.preventDefault());
+      fireEvent.keyDown(field, { key: "Tab", ctrlKey: true });
+      field.remove();
+      act(() => bridge.emitMenuCommand("next-tab"));
+      await waitFor(() => expect(active()).toBe(editorTabTestId("a.txt")));
+    },
+  );
 
-  it.each(["darwin", "win32"] as const)("closes the last tab, then on macOS the window (%s)", async (platform) => {
-    const bridge = makeBridge(Promise.resolve(storedStateWithTabs(["b.md"])), platform);
-    renderShell(bridge);
-    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
-    const pane = within(screen.getByTestId("editor-group-primary"));
-    expect(pane.getByTestId(editorTabTestId("b.md"))).toBeTruthy();
+  it.each(["darwin", "win32"] as const)(
+    "closes the last tab, then on macOS the window (%s)",
+    async (platform) => {
+      const bridge = makeBridge(Promise.resolve(storedStateWithTabs(["b.md"])), platform);
+      renderShell(bridge);
+      await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+      const pane = within(screen.getByTestId("editor-group-primary"));
+      expect(pane.getByTestId(editorTabTestId("b.md"))).toBeTruthy();
 
-    act(() => bridge.emitMenuCommand("close-tab"));
-    await waitFor(() => expect(pane.queryByTestId(editorTabTestId("b.md"))).toBeNull());
-    expect(bridge.closeThisWindow).not.toHaveBeenCalled();
+      act(() => bridge.emitMenuCommand("close-tab"));
+      await waitFor(() => expect(pane.queryByTestId(editorTabTestId("b.md"))).toBeNull());
+      expect(bridge.closeThisWindow).not.toHaveBeenCalled();
 
-    act(() => bridge.emitMenuCommand("close-tab"));
-    expect(bridge.closeThisWindow).toHaveBeenCalledTimes(platform === "darwin" ? 1 : 0);
-  });
+      act(() => bridge.emitMenuCommand("close-tab"));
+      expect(bridge.closeThisWindow).toHaveBeenCalledTimes(platform === "darwin" ? 1 : 0);
+    },
+  );
 });

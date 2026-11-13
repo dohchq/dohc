@@ -4,7 +4,13 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { DEFAULT_USER_SETTINGS, type DesktopUserSettings } from "../src/settings/userSettings";
 import { USER_SETTINGS_FILE } from "../src/settings/userSettingsStore";
-import { agentsListening, openAgentChat, openMyAgent, startAgentYouRun, stopAgentYouRun } from "./helpers/agentTools";
+import {
+  agentsListening,
+  openAgentChat,
+  openMyAgent,
+  startAgentYouRun,
+  stopAgentYouRun,
+} from "./helpers/agentTools";
 import { hardKillPid } from "./helpers/daemonKill";
 import { desktopRoot, launchDesktopApp } from "./helpers/desktopApp";
 import {
@@ -41,9 +47,17 @@ async function runnerPid(path: string): Promise<number | null> {
 }
 
 async function runActive(page: Page): Promise<boolean> {
-  const state = await page.evaluate((workspaceId) => (window as unknown as {
-    dohcDesktop: { readAgentRunState(payload: { workspaceId: string }): Promise<{ active: boolean }> };
-  }).dohcDesktop.readAgentRunState({ workspaceId }), WORKSPACE_ID);
+  const state = await page.evaluate(
+    (workspaceId) =>
+      (
+        window as unknown as {
+          dohcDesktop: {
+            readAgentRunState(payload: { workspaceId: string }): Promise<{ active: boolean }>;
+          };
+        }
+      ).dohcDesktop.readAgentRunState({ workspaceId }),
+    WORKSPACE_ID,
+  );
   return state.active;
 }
 
@@ -60,13 +74,26 @@ test("an agent you run gets a message in its chat and replies as itself while a 
       profile: { preferredName: "Sam" },
       agents: {
         default: {
-          name: "Nova", hue: "olive", launch: { command: `"${process.execPath}" "${fakeRunner}" hold "${pids}"` },
-          changesFiles: true, enabled: true, timeoutMinutes: 5,
+          name: "Nova",
+          hue: "olive",
+          launch: { command: `"${process.execPath}" "${fakeRunner}" hold "${pids}"` },
+          changesFiles: true,
+          enabled: true,
+          timeoutMinutes: 5,
         },
-        terminal: { name: "Terminal", hue: "rose", changesFiles: true, enabled: false, timeoutMinutes: 1 },
+        terminal: {
+          name: "Terminal",
+          hue: "rose",
+          changesFiles: true,
+          enabled: false,
+          timeoutMinutes: 1,
+        },
       },
     };
-    await writeFile(join(temp.homeDir, USER_SETTINGS_FILE), `${JSON.stringify(settings, null, 2)}\n`);
+    await writeFile(
+      join(temp.homeDir, USER_SETTINGS_FILE),
+      `${JSON.stringify(settings, null, 2)}\n`,
+    );
     desktop = await launchDesktopApp({ workspace: temp });
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);

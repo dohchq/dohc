@@ -36,7 +36,8 @@ export function AutomationBadge(props: {
         ? `Ran on ${author.authorOwnerDisplayName}'s computer`
         : "Ran on another computer";
   const collectionPath = author.automation?.collectionPath ?? null;
-  const openPath = collectionPath !== null && props.onOpenPath ? automationsFile(collectionPath) : undefined;
+  const openPath =
+    collectionPath !== null && props.onOpenPath ? automationsFile(collectionPath) : undefined;
   const markProps = {
     "data-testid": `${props.testIdPrefix}-automation-badge`,
     "data-chat-escape-local": "true",

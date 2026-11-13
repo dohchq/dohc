@@ -16,15 +16,25 @@ describe("real daemon workspace sessions", () => {
   it("launches the prepared witness checker for imported Markdown edits", async () => {
     const launch = vi.fn(async (): Promise<EngineDaemonClient> => ({
       close() {},
-      async sendRequest(request) { return { id: request.id, result: {} }; },
+      async sendRequest(request) {
+        return { id: request.id, result: {} };
+      },
     }));
-    const lifecycle = createRealDaemonLifecycle({ command: "engine", fileExists: () => true, launch });
+    const lifecycle = createRealDaemonLifecycle({
+      command: "engine",
+      fileExists: () => true,
+      launch,
+    });
     try {
       await lifecycle.start();
-      expect(launch).toHaveBeenCalledWith(expect.objectContaining({
-        env: expect.objectContaining({ DOHC_ENGINE_READER_CONFIG: "prepared-reader-config" }),
-      }));
-    } finally { await lifecycle.stop(); }
+      expect(launch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          env: expect.objectContaining({ DOHC_ENGINE_READER_CONFIG: "prepared-reader-config" }),
+        }),
+      );
+    } finally {
+      await lifecycle.stop();
+    }
   });
 
   it("gives every workspace open the shared real-daemon test deadline", async () => {
@@ -48,10 +58,7 @@ describe("real daemon workspace sessions", () => {
     });
 
     try {
-      await sessions.run(
-        { workspaceId: "real-daemon-test", rootPath },
-        async () => undefined,
-      );
+      await sessions.run({ workspaceId: "real-daemon-test", rootPath }, async () => undefined);
 
       expect(requests[0]).toMatchObject({
         method: "workspace.open",
@@ -85,10 +92,7 @@ describe("real daemon workspace sessions", () => {
     );
 
     try {
-      await sessions.run(
-        { workspaceId: "profile-daemon-test", rootPath },
-        async () => undefined,
-      );
+      await sessions.run({ workspaceId: "profile-daemon-test", rootPath }, async () => undefined);
       expect(requests[0]).toMatchObject({
         method: "workspace.open",
         deadlineMs: 300_000,
@@ -126,5 +130,4 @@ describe("real daemon workspace sessions", () => {
       await lifecycle.stop();
     }
   });
-
 });

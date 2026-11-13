@@ -41,9 +41,7 @@ export function FindReplaceBar({ editor }: { editor: Editor | null }) {
 
   useEffect(() => {
     if (!editor || !state.open || state.activeIndex < 0) return;
-    editor.view.dom
-      .querySelector(".dohc-find-match--active")
-      ?.scrollIntoView({ block: "nearest" });
+    editor.view.dom.querySelector(".dohc-find-match--active")?.scrollIntoView({ block: "nearest" });
   }, [editor, state.open, state.activeIndex]);
 
   if (!editor || !state.open) return null;

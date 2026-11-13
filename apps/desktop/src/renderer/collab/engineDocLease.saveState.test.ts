@@ -9,7 +9,12 @@ import { disposeEngineDocLeasesForTests, withClosedEngineDocSession } from "./en
 import { retainObservedEngineDocLease } from "./engineDocLeaseTestHarness";
 import { harnessBridge, IMAGE_DESCRIPTOR } from "./engineDocSaveStateTestHarness";
 import { parseExcalidrawDocument } from "../excalidrawDocument";
-import { REPLACED_DOCUMENT_SAVED, REPLACED_DOCUMENT_UNSAVED, useDocumentSaveNotices, type DocumentSaveFailure } from "../shell/useDocumentSaveNotices";
+import {
+  REPLACED_DOCUMENT_SAVED,
+  REPLACED_DOCUMENT_UNSAVED,
+  useDocumentSaveNotices,
+  type DocumentSaveFailure,
+} from "../shell/useDocumentSaveNotices";
 
 const projectionGate = vi.hoisted(() => ({
   pending: null as Promise<void> | null,
@@ -18,27 +23,23 @@ const projectionGate = vi.hoisted(() => ({
 }));
 
 vi.mock("@dohc/ydoc-projection", async (importOriginal) => {
-  const actual = await importOriginal<
-    typeof import("@dohc/ydoc-projection")
-  >();
+  const actual = await importOriginal<typeof import("@dohc/ydoc-projection")>();
   return {
     ...actual,
     yDocToArtifactMarkdown(doc: Y.Doc) {
       const markdown = actual.yDocToArtifactMarkdown(doc);
       const held = projectionGate.held;
       if (held) {
-        return new Promise<void>((release) => held.push({ markdown, release }))
-          .then(() => {
-            projectionGate.completed += 1;
-            return `${markdown} [projected]`;
-          });
+        return new Promise<void>((release) => held.push({ markdown, release })).then(() => {
+          projectionGate.completed += 1;
+          return `${markdown} [projected]`;
+        });
       }
       return (
         projectionGate.pending?.then(() => {
           projectionGate.completed += 1;
           return `${markdown} [projected]`;
-        }) ??
-        markdown
+        }) ?? markdown
       );
     },
   };
@@ -109,45 +110,59 @@ beforeEach(() => {
   projectionGate.held = null;
 });
 
-it.each([false, true])("flushes and closes Stop's draft before the request, then reopens it (waiting=%s)", async waiting => {
-  retainDocument();
-  await waitFor(() => expect(retained.snapshot.outcome?.kind).toBe("bound"));
-  const previous = harness.sessionId()!;
-  act(() => editDocument());
-  const work = vi.fn(async () => {
-    expect(harness.mainText()).toBe("seed!");
-    expect(harness.closed).toContain(previous);
-    expect(retained.snapshot.outcome).toBeNull();
-    if (waiting) throw new Error("Stop live editing is waiting. You can keep editing.");
-  });
-  await act(async () => {
-    const stop = withClosedEngineDocSession("ws-1", {path: "notes/big.md"}, work);
-    if (waiting) await expect(stop).rejects.toThrow("waiting"); else await stop;
-  });
-  await waitFor(() => expect(harness.openCount()).toBe(2));
-  expect(harness.sessionId()).not.toBe(previous);
-  expect(work).toHaveBeenCalledTimes(1);
-  expect(retained.boundDoc().getText("plainText").toString()).toBe("seed!");
-  act(() => editDocument());
-  await boundOutcome().flushPendingLocalUpdates();
-  expect(harness.mainText()).toBe("seed!!");
-});
+it.each([false, true])(
+  "flushes and closes Stop's draft before the request, then reopens it (waiting=%s)",
+  async (waiting) => {
+    retainDocument();
+    await waitFor(() => expect(retained.snapshot.outcome?.kind).toBe("bound"));
+    const previous = harness.sessionId()!;
+    act(() => editDocument());
+    const work = vi.fn(async () => {
+      expect(harness.mainText()).toBe("seed!");
+      expect(harness.closed).toContain(previous);
+      expect(retained.snapshot.outcome).toBeNull();
+      if (waiting) throw new Error("Stop live editing is waiting. You can keep editing.");
+    });
+    await act(async () => {
+      const stop = withClosedEngineDocSession("ws-1", { path: "notes/big.md" }, work);
+      if (waiting) await expect(stop).rejects.toThrow("waiting");
+      else await stop;
+    });
+    await waitFor(() => expect(harness.openCount()).toBe(2));
+    expect(harness.sessionId()).not.toBe(previous);
+    expect(work).toHaveBeenCalledTimes(1);
+    expect(retained.boundDoc().getText("plainText").toString()).toBe("seed!");
+    act(() => editDocument());
+    await boundOutcome().flushPendingLocalUpdates();
+    expect(harness.mainText()).toBe("seed!!");
+  },
+);
 
 // A record keeps the path its document had when it stopped. A Stop that names
 // the document by its object id closes the panes that opened it at a new path,
 // and none of another document that now has its old path.
 it("closes the panes of the document a Stop names, at whatever path they opened it, and only those", async () => {
   const open = harness.api.openEngineYDocSession.bind(harness.api);
-  vi.spyOn(harness.api, "openEngineYDocSession").mockImplementation(async payload => Object.assign(await open(payload), { objectId: "object-1" }));
+  vi.spyOn(harness.api, "openEngineYDocSession").mockImplementation(async (payload) =>
+    Object.assign(await open(payload), { objectId: "object-1" }),
+  );
   retainDocument("notes/new.md");
   await waitFor(() => expect(retained.snapshot.outcome?.kind).toBe("bound"));
   const previous = harness.sessionId()!;
   // The pane at notes/new.md now holds object-1; a Stop of another document there closes nothing.
-  await withClosedEngineDocSession("ws-1", {objectId: "other-object"}, async () => undefined);
-  await withClosedEngineDocSession("other-workspace", {objectId: "object-1"}, async () => undefined);
+  await withClosedEngineDocSession("ws-1", { objectId: "other-object" }, async () => undefined);
+  await withClosedEngineDocSession(
+    "other-workspace",
+    { objectId: "object-1" },
+    async () => undefined,
+  );
   expect(harness.closed).toEqual([]);
-  const work = vi.fn(async () => {expect(harness.closed).toContain(previous);});
-  await act(async () => {await withClosedEngineDocSession("ws-1", {objectId: "object-1"}, work);});
+  const work = vi.fn(async () => {
+    expect(harness.closed).toContain(previous);
+  });
+  await act(async () => {
+    await withClosedEngineDocSession("ws-1", { objectId: "object-1" }, work);
+  });
   expect(work).toHaveBeenCalledOnce();
   await waitFor(() => expect(harness.openCount()).toBe(2));
 });
@@ -230,9 +245,7 @@ it("loads scene asset bytes only when recovery needs them", async () => {
   });
   vi.stubGlobal("dohcDesktop", harness.api);
   retainDocument("drawing.excalidraw", "scene");
-  await waitFor(() =>
-    expect(retained.snapshot.outcome?.kind).toBe("bound"),
-  );
+  await waitFor(() => expect(retained.snapshot.outcome?.kind).toBe("bound"));
 
   expect(readAsset).not.toHaveBeenCalled();
 
@@ -242,9 +255,7 @@ it("loads scene asset bytes only when recovery needs them", async () => {
 
   await waitFor(() => expect(readAsset).toHaveBeenCalledOnce());
   await waitFor(() => {
-    const recovered = parseExcalidrawDocument(
-      drafts.result.current.at(-1)?.text!,
-    );
+    const recovered = parseExcalidrawDocument(drafts.result.current.at(-1)?.text!);
     expect(recovered.files[IMAGE_DESCRIPTOR.id]).toMatchObject({
       dataURL: "data:image/png;base64,AQID",
     });
@@ -289,12 +300,16 @@ it("keeps deletion recovery separate from refused winner edits", async () => {
 function observeReplacementNotices() {
   const report = vi.fn<(failure: DocumentSaveFailure) => void>();
   const clear = vi.fn<(identity: string) => void>();
-  renderHook(() => useDocumentSaveNotices({ workspaceId: "ws-1", report, clear, open: () => undefined }));
+  renderHook(() =>
+    useDocumentSaveNotices({ workspaceId: "ws-1", report, clear, open: () => undefined }),
+  );
   return {
     report,
     clear,
-    reports: () => report.mock.calls.map(([notice]) => notice)
-      .filter((notice) => notice.identity === "document-replacement:ws-1:notes/big.md"),
+    reports: () =>
+      report.mock.calls
+        .map(([notice]) => notice)
+        .filter((notice) => notice.identity === "document-replacement:ws-1:notes/big.md"),
   };
 }
 
@@ -304,7 +319,8 @@ function refuseDraftStorage() {
   });
 }
 
-const storedDraftTexts = () => loadStoredDrafts(Date.now(), { bindHandles: false }).map((draft) => draft.text);
+const storedDraftTexts = () =>
+  loadStoredDrafts(Date.now(), { bindHandles: false }).map((draft) => draft.text);
 
 it("keeps the retired editor frozen while storage refuses its edits, and Try again installs the same winner once", async () => {
   const notices = observeReplacementNotices();
@@ -334,72 +350,90 @@ it("keeps the retired editor frozen while storage refuses its edits, and Try aga
   expect(retained.snapshot.readOnlyTransition).toBeNull();
   expect(storedDraftTexts()).toEqual(["seed!!"]);
   expect(drafts.result.current).toHaveLength(1);
-  expect(notices.reports().at(-1)).toMatchObject({ tone: "success", message: REPLACED_DOCUMENT_SAVED });
+  expect(notices.reports().at(-1)).toMatchObject({
+    tone: "success",
+    message: REPLACED_DOCUMENT_SAVED,
+  });
 
   // The installed generation does not install again.
   act(() => failure.retry!());
-  await act(async () => { await Promise.resolve(); });
+  await act(async () => {
+    await Promise.resolve();
+  });
   expect(harness.acknowledgedGenerations).toEqual([2]);
   act(() => editDocument());
   await flushLocalBatch();
   expect(harness.applied).toHaveLength(2);
 });
 
-it.each(["newest text first"])("keeps the newest retired text whichever projection finishes last (%s)", async (order) => {
-  await retainBound();
-  const losingDoc = retained.boundDoc();
-  act(() => editDocument());
-  await flushLocalBatch();
-  projectionGate.held = [];
-  const setItem = refuseDraftStorage();
-  harness.emitLineageReplacement("winner");
-  await waitFor(() => expect(retained.snapshot.readOnlyTransition?.retry).toBeTypeOf("function"));
-  const retry = retained.snapshot.readOnlyTransition!.retry!;
-  // Typed into the frozen editor after the failed attempt.
-  act(() => editDocument());
+it.each(["newest text first"])(
+  "keeps the newest retired text whichever projection finishes last (%s)",
+  async (order) => {
+    await retainBound();
+    const losingDoc = retained.boundDoc();
+    act(() => editDocument());
+    await flushLocalBatch();
+    projectionGate.held = [];
+    const setItem = refuseDraftStorage();
+    harness.emitLineageReplacement("winner");
+    await waitFor(() => expect(retained.snapshot.readOnlyTransition?.retry).toBeTypeOf("function"));
+    const retry = retained.snapshot.readOnlyTransition!.retry!;
+    // Typed into the frozen editor after the failed attempt.
+    act(() => editDocument());
 
-  setItem.mockRestore();
-  act(() => retry());
-  await waitFor(() => expect(retained.boundDoc().getText("plainText").toString()).toBe("winner"));
-  // A late edit on the retired mirror after the winner installed.
-  act(() => {
-    const text = losingDoc.getText("plainText");
-    text.insert(text.length, "!");
-  });
+    setItem.mockRestore();
+    act(() => retry());
+    await waitFor(() => expect(retained.boundDoc().getText("plainText").toString()).toBe("winner"));
+    // A late edit on the retired mirror after the winner installed.
+    act(() => {
+      const text = losingDoc.getText("plainText");
+      text.insert(text.length, "!");
+    });
 
-  // Each attempt and edit projects once, one at a time, and so does the
-  // recovery slot's own refresh of the frozen edit beside them. Either the
-  // newest text finishes first, so an older projection that is still pending
-  // finishes last, or the refresh finishes after every retired projection.
-  const held = projectionGate.held;
-  const release = (entry: (typeof held)[number]) => {
-    held.splice(held.indexOf(entry), 1);
-    entry.release();
-  };
-  await waitFor(() => expect(held.map((entry) => entry.markdown).sort()).toEqual(["seed!", "seed!!"]));
-  const refresh = held.find((entry) => entry.markdown === "seed!!")!;
-  if (order === "newest text first") {
-    for (let released = 0; released < 5; released += 1) {
-      await waitFor(() => expect(held.length).toBeGreaterThan(0));
-      release(held.reduce((best, entry) => entry.markdown.length > best.markdown.length ? entry : best));
+    // Each attempt and edit projects once, one at a time, and so does the
+    // recovery slot's own refresh of the frozen edit beside them. Either the
+    // newest text finishes first, so an older projection that is still pending
+    // finishes last, or the refresh finishes after every retired projection.
+    const held = projectionGate.held;
+    const release = (entry: (typeof held)[number]) => {
+      held.splice(held.indexOf(entry), 1);
+      entry.release();
+    };
+    await waitFor(() =>
+      expect(held.map((entry) => entry.markdown).sort()).toEqual(["seed!", "seed!!"]),
+    );
+    const refresh = held.find((entry) => entry.markdown === "seed!!")!;
+    if (order === "newest text first") {
+      for (let released = 0; released < 5; released += 1) {
+        await waitFor(() => expect(held.length).toBeGreaterThan(0));
+        release(
+          held.reduce((best, entry) =>
+            entry.markdown.length > best.markdown.length ? entry : best,
+          ),
+        );
+      }
+    } else {
+      for (let released = 0; released < 4; released += 1) {
+        await waitFor(() => expect(held.some((entry) => entry !== refresh)).toBe(true));
+        release(held.find((entry) => entry !== refresh)!);
+      }
+      await waitFor(() => expect(projectionGate.completed).toBe(4));
+      await waitFor(() => expect(storedDraftTexts()).toEqual(["seed!!! [projected]"]));
+      release(refresh);
     }
-  } else {
-    for (let released = 0; released < 4; released += 1) {
-      await waitFor(() => expect(held.some((entry) => entry !== refresh)).toBe(true));
-      release(held.find((entry) => entry !== refresh)!);
-    }
-    await waitFor(() => expect(projectionGate.completed).toBe(4));
-    await waitFor(() => expect(storedDraftTexts()).toEqual(["seed!!! [projected]"]));
-    release(refresh);
-  }
-  await waitFor(() => expect(projectionGate.completed).toBe(5));
-  // Disposal waits for the recovery slot's queue, so its write has landed.
-  await act(async () => { await retained.lease.dispose(); });
-  const newestText = `${losingDoc.getText("plainText").toString()} [projected]`;
-  expect(losingDoc.getText("plainText").toString()).toBe("seed!!!");
-  await waitFor(() => expect(drafts.result.current.map((draft) => draft.text)).toEqual([newestText]));
-  expect(storedDraftTexts()).toEqual([newestText]);
-});
+    await waitFor(() => expect(projectionGate.completed).toBe(5));
+    // Disposal waits for the recovery slot's queue, so its write has landed.
+    await act(async () => {
+      await retained.lease.dispose();
+    });
+    const newestText = `${losingDoc.getText("plainText").toString()} [projected]`;
+    expect(losingDoc.getText("plainText").toString()).toBe("seed!!!");
+    await waitFor(() =>
+      expect(drafts.result.current.map((draft) => draft.text)).toEqual([newestText]),
+    );
+    expect(storedDraftTexts()).toEqual([newestText]);
+  },
+);
 
 // Turning sync on claims the open document's lineage, so main hands the
 // renderer a replacement while the person is still typing. The sandboxed
@@ -434,8 +468,11 @@ it.each([
     expect(drafts.result.current.map((draft) => draft.text)).toEqual(["seed!"]);
     expect(
       Object.keys(localStorage)
-        .filter(key => key === ORPHANED_DRAFT_STORAGE_KEY || key.startsWith(`${ORPHANED_DRAFT_STORAGE_KEY}:`))
-        .some(key => localStorage.getItem(key)?.includes("seed!")),
+        .filter(
+          (key) =>
+            key === ORPHANED_DRAFT_STORAGE_KEY || key.startsWith(`${ORPHANED_DRAFT_STORAGE_KEY}:`),
+        )
+        .some((key) => localStorage.getItem(key)?.includes("seed!")),
     ).toBe(stored);
   },
 );
@@ -444,7 +481,6 @@ it("does not report Saved while an earlier delivery is still unanswered", async 
   await retainBound();
   const rejectFirst = harness.deferNextApplyFailure();
   try {
-
     act(() => {
       editDocument();
     });
@@ -469,9 +505,7 @@ it("does not report Saved while an earlier delivery is still unanswered", async 
     expect(harness.mainText()).toBe("seed!!");
     // Every outstanding delivery is acknowledged; the deferred settle now
     // reports the mirror durable without another event.
-    await waitFor(() =>
-      expect(retained.snapshot.saveState.kind).toBe("saved-here"),
-    );
+    await waitFor(() => expect(retained.snapshot.saveState.kind).toBe("saved-here"));
   } finally {
     rejectFirst();
   }
@@ -532,9 +566,7 @@ it("does not claim Saved for a settle that predates the newest keystroke", async
   const secondSeq = harness.applied.at(-1)!.seq;
   expect(secondSeq).toBeGreaterThan(firstSeq);
   harness.emit("saved", secondSeq);
-  await waitFor(() =>
-    expect(retained.snapshot.saveState.kind).toBe("saved-here"),
-  );
+  await waitFor(() => expect(retained.snapshot.saveState.kind).toBe("saved-here"));
 });
 
 it("stays Saving while a rejected transport head retries ahead of later edits", async () => {
@@ -583,9 +615,7 @@ it("ignores a save-state report addressed to a different session", async () => {
   expect(retained.snapshot.saveState.kind).toBe("saving");
 
   harness.emit("saved", seq);
-  await waitFor(() =>
-    expect(retained.snapshot.saveState.kind).toBe("saved-here"),
-  );
+  await waitFor(() => expect(retained.snapshot.saveState.kind).toBe("saved-here"));
 });
 
 it("publishes no additional save snapshots during repeated dirty keystrokes", async () => {
@@ -595,7 +625,9 @@ it("publishes no additional save snapshots during repeated dirty keystrokes", as
   act(() => editDocument());
   expect(notified).toHaveBeenCalledTimes(1);
   notified.mockClear();
-  act(() => { for (let i = 0; i < 3; i++) editDocument(); });
+  act(() => {
+    for (let i = 0; i < 3; i++) editDocument();
+  });
   expect(notified).not.toHaveBeenCalled();
   await flushLocalBatch();
   harness.emit("saved", harness.applied.at(-1)!.seq);
@@ -624,7 +656,9 @@ it("keeps edits made before the clean read-only render commits", async () => {
   harness.emit("saved-to-host", 0);
   harness.emit("read-only", 0);
   let releaseProjection!: () => void;
-  projectionGate.pending = new Promise<void>((resolve) => { releaseProjection = resolve; });
+  projectionGate.pending = new Promise<void>((resolve) => {
+    releaseProjection = resolve;
+  });
   try {
     act(() => editDocument());
     expect(loadStoredDrafts(Date.now()).at(-1)?.text).toBe("seed!");

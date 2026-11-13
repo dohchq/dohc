@@ -32,7 +32,9 @@ export function RemoveFromListDialog(props: {
       onConfirm={props.onConfirm}
     >
       {removalFacts(props.workspace).map((fact) => (
-        <p key={fact} className="m-0">{fact}</p>
+        <p key={fact} className="m-0">
+          {fact}
+        </p>
       ))}
       {props.error ? (
         <p data-testid="workspace-remove-error" role="alert" className="m-0 text-danger">

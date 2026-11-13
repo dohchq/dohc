@@ -27,14 +27,27 @@ export interface RecordHistorySession {
   key: number;
 }
 
-const recordOf = (shown: RecordHistorySession) => JSON.stringify([shown.workspaceId, shown.target.collectionPath, shown.target.recordId]);
+const recordOf = (shown: RecordHistorySession) =>
+  JSON.stringify([shown.workspaceId, shown.target.collectionPath, shown.target.recordId]);
 
-export function useRecordHistory(workspaceId: string, shell: {
-  reportShellError: (fallback: string, error: unknown, retry: (() => void) | null, kind?: ShellErrorKind) => void;
-  clearKind: (...kinds: ShellErrorKind[]) => void;
-  /** Opens the ⚡ panel at one run; resolves to a sentence when it cannot. */
-  openAutomationRun: (automationId: string, claimId: string, name: string) => Promise<string | null>;
-}) {
+export function useRecordHistory(
+  workspaceId: string,
+  shell: {
+    reportShellError: (
+      fallback: string,
+      error: unknown,
+      retry: (() => void) | null,
+      kind?: ShellErrorKind,
+    ) => void;
+    clearKind: (...kinds: ShellErrorKind[]) => void;
+    /** Opens the ⚡ panel at one run; resolves to a sentence when it cannot. */
+    openAutomationRun: (
+      automationId: string,
+      claimId: string,
+      name: string,
+    ) => Promise<string | null>;
+  },
+) {
   const [session, setSession] = useState<RecordHistorySession | null>(null);
   const deps = useRef(shell);
   deps.current = shell;
@@ -48,25 +61,40 @@ export function useRecordHistory(workspaceId: string, shell: {
   // The record and runs Notices says dohc could not place, and the oldest page to read back to.
   const unplaced = useRef<{ record: string; runs: Set<string>; until: number | null } | null>(null);
 
-  const show = useCallback((forWorkspace: string, target: RecordHistoryTarget, until: number | null) => {
-    key.current += 1;
-    live.current = key.current;
-    setSession({ workspaceId: forWorkspace, target, until, key: key.current });
-  }, []);
-  const open = useCallback((target: RecordHistoryTarget) => show(workspaceId, target, null), [show, workspaceId]);
+  const show = useCallback(
+    (forWorkspace: string, target: RecordHistoryTarget, until: number | null) => {
+      key.current += 1;
+      live.current = key.current;
+      setSession({ workspaceId: forWorkspace, target, until, key: key.current });
+    },
+    [],
+  );
+  const open = useCallback(
+    (target: RecordHistoryTarget) => show(workspaceId, target, null),
+    [show, workspaceId],
+  );
   const close = useCallback(() => {
     live.current = null;
     setSession(null);
   }, []);
   useEffect(close, [workspaceId, close]);
 
-  const failed = useCallback((shown: RecordHistorySession, before: number | null, error: unknown) => {
-    if (shown.key !== live.current || shown.workspaceId !== workspace.current) return;
-    failedRead.current = { record: recordOf(shown), before };
-    deps.current.reportShellError(HISTORY_READ_FAILED, error, () => {
-      if (workspace.current === shown.workspaceId) show(shown.workspaceId, shown.target, before);
-    }, "record-history");
-  }, [show]);
+  const failed = useCallback(
+    (shown: RecordHistorySession, before: number | null, error: unknown) => {
+      if (shown.key !== live.current || shown.workspaceId !== workspace.current) return;
+      failedRead.current = { record: recordOf(shown), before };
+      deps.current.reportShellError(
+        HISTORY_READ_FAILED,
+        error,
+        () => {
+          if (workspace.current === shown.workspaceId)
+            show(shown.workspaceId, shown.target, before);
+        },
+        "record-history",
+      );
+    },
+    [show],
+  );
   // A page read reaches the failed one once the next page starts below it.
   // Entries added since can move page edges, so the edges need not match.
   const read = useCallback((shown: RecordHistorySession, next: number | null) => {
@@ -77,17 +105,36 @@ export function useRecordHistory(workspaceId: string, shell: {
     failedRead.current = null;
     deps.current.clearKind("record-history");
   }, []);
-  const runsUnchecked = useCallback((shown: RecordHistorySession, until: number | null, error: unknown, runs: readonly string[]) => {
-    if (shown.key !== live.current || shown.workspaceId !== workspace.current) return;
-    const record = recordOf(shown);
-    const held = unplaced.current?.record === record ? unplaced.current : null;
-    // A null page is the first, so any page id is older.
-    const oldest = held === null || held.until === null ? until : until === null ? held.until : Math.min(held.until, until);
-    unplaced.current = { record, runs: new Set([...(held?.runs ?? []), ...runs]), until: oldest };
-    deps.current.reportShellError(RUN_NOT_CHECKED, error, () => {
-      if (workspace.current === shown.workspaceId) show(shown.workspaceId, shown.target, oldest);
-    }, "record-history-run");
-  }, [show]);
+  const runsUnchecked = useCallback(
+    (
+      shown: RecordHistorySession,
+      until: number | null,
+      error: unknown,
+      runs: readonly string[],
+    ) => {
+      if (shown.key !== live.current || shown.workspaceId !== workspace.current) return;
+      const record = recordOf(shown);
+      const held = unplaced.current?.record === record ? unplaced.current : null;
+      // A null page is the first, so any page id is older.
+      const oldest =
+        held === null || held.until === null
+          ? until
+          : until === null
+            ? held.until
+            : Math.min(held.until, until);
+      unplaced.current = { record, runs: new Set([...(held?.runs ?? []), ...runs]), until: oldest };
+      deps.current.reportShellError(
+        RUN_NOT_CHECKED,
+        error,
+        () => {
+          if (workspace.current === shown.workspaceId)
+            show(shown.workspaceId, shown.target, oldest);
+        },
+        "record-history-run",
+      );
+    },
+    [show],
+  );
   const runsChecked = useCallback((shown: RecordHistorySession, runs: readonly string[]) => {
     if (shown.key !== live.current || shown.workspaceId !== workspace.current) return;
     const held = unplaced.current;
@@ -99,18 +146,25 @@ export function useRecordHistory(workspaceId: string, shell: {
   }, []);
 
   // The ⚡ panel takes focus.
-  const openRun = useCallback((automationId: string, claimId: string, name: string) => {
-    const owner = workspace.current;
-    close();
-    void deps.current.openAutomationRun(automationId, claimId, name).then((note) => {
-      if (note !== null && workspace.current === owner) deps.current.reportShellError(note, new Error(note), null);
-    }).catch((error: unknown) => {
-      if (workspace.current !== owner) return;
-      deps.current.reportShellError("dohc could not open this run.", error, () => {
-        if (workspace.current === owner) openRun(automationId, claimId, name);
-      });
-    });
-  }, [close]);
+  const openRun = useCallback(
+    (automationId: string, claimId: string, name: string) => {
+      const owner = workspace.current;
+      close();
+      void deps.current
+        .openAutomationRun(automationId, claimId, name)
+        .then((note) => {
+          if (note !== null && workspace.current === owner)
+            deps.current.reportShellError(note, new Error(note), null);
+        })
+        .catch((error: unknown) => {
+          if (workspace.current !== owner) return;
+          deps.current.reportShellError("dohc could not open this run.", error, () => {
+            if (workspace.current === owner) openRun(automationId, claimId, name);
+          });
+        });
+    },
+    [close],
+  );
 
   const shown = session?.workspaceId === workspaceId ? session : null;
   return {

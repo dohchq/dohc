@@ -1,24 +1,24 @@
 import { documentChange, isCodeBlockNode, normalizeLanguage } from "./pmHelpers";
 
-import type { LanguageFn } from 'highlight.js'
-import bash from 'highlight.js/lib/languages/bash'
-import css from 'highlight.js/lib/languages/css'
-import go from 'highlight.js/lib/languages/go'
-import javascript from 'highlight.js/lib/languages/javascript'
-import json from 'highlight.js/lib/languages/json'
-import markdown from 'highlight.js/lib/languages/markdown'
-import python from 'highlight.js/lib/languages/python'
-import rust from 'highlight.js/lib/languages/rust'
-import sql from 'highlight.js/lib/languages/sql'
-import typescript from 'highlight.js/lib/languages/typescript'
-import xml from 'highlight.js/lib/languages/xml'
-import yaml from 'highlight.js/lib/languages/yaml'
-import { createLowlight } from 'lowlight'
-import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
-import { Plugin, PluginKey } from '@tiptap/pm/state'
-import { Decoration, DecorationSet } from '@tiptap/pm/view'
+import type { LanguageFn } from "highlight.js";
+import bash from "highlight.js/lib/languages/bash";
+import css from "highlight.js/lib/languages/css";
+import go from "highlight.js/lib/languages/go";
+import javascript from "highlight.js/lib/languages/javascript";
+import json from "highlight.js/lib/languages/json";
+import markdown from "highlight.js/lib/languages/markdown";
+import python from "highlight.js/lib/languages/python";
+import rust from "highlight.js/lib/languages/rust";
+import sql from "highlight.js/lib/languages/sql";
+import typescript from "highlight.js/lib/languages/typescript";
+import xml from "highlight.js/lib/languages/xml";
+import yaml from "highlight.js/lib/languages/yaml";
+import { createLowlight } from "lowlight";
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
+import { Plugin, PluginKey } from "@tiptap/pm/state";
+import { Decoration, DecorationSet } from "@tiptap/pm/view";
 
-export const codeHighlightKey = new PluginKey('dohc-code-highlight')
+export const codeHighlightKey = new PluginKey("dohc-code-highlight");
 
 // Keys mirror CODE_LANGUAGE_OPTIONS' `value`s exactly (minus "" / Plain
 // text), so the plugin can key straight off the codeBlock's `language`
@@ -38,36 +38,36 @@ const REGISTERED_GRAMMARS: Readonly<Record<string, LanguageFn>> = {
   yaml,
   go,
   rust,
-}
+};
 
-const lowlight = createLowlight(REGISTERED_GRAMMARS)
+const lowlight = createLowlight(REGISTERED_GRAMMARS);
 
 // Skip huge blocks — lowlight is a full tokenizer pass, not worth paying for
 // on pathological documents (and the editor already caps other expensive
 // per-doc work at similar sizes).
-const MAX_HIGHLIGHT_CHARS = 20_000
+const MAX_HIGHLIGHT_CHARS = 20_000;
 
 function isHighlightableLanguage(language: string): boolean {
-  return Object.prototype.hasOwnProperty.call(REGISTERED_GRAMMARS, language)
+  return Object.prototype.hasOwnProperty.call(REGISTERED_GRAMMARS, language);
 }
 
 // Minimal structural shape of the hast tree lowlight returns — narrow enough
 // to avoid pulling in `@types/hast` directly, wide enough for hljs output
 // (which only ever emits `root` > `element`/`text`).
 type HastNode = {
-  type: string
-  value?: string
-  properties?: { className?: unknown }
-  children?: HastNode[]
-}
+  type: string;
+  value?: string;
+  properties?: { className?: unknown };
+  children?: HastNode[];
+};
 
-type HighlightSpan = { start: number; end: number; className: string }
+type HighlightSpan = { start: number; end: number; className: string };
 
 function classNameOf(node: HastNode): string | null {
-  const className = node.properties?.className
-  if (!Array.isArray(className) || className.length === 0) return null
-  const names = className.filter((name): name is string => typeof name === 'string')
-  return names.length > 0 ? names.join(' ') : null
+  const className = node.properties?.className;
+  if (!Array.isArray(className) || className.length === 0) return null;
+  const names = className.filter((name): name is string => typeof name === "string");
+  return names.length > 0 ? names.join(" ") : null;
 }
 
 // Walk the hast tree, emitting one span per element covering its full text
@@ -75,36 +75,36 @@ function classNameOf(node: HastNode): string | null {
 // hljs-doctag inside a hljs-comment) naturally produce overlapping spans,
 // which `Decoration.inline` supports directly.
 function collectSpans(nodes: HastNode[], offset: number, spans: HighlightSpan[]): number {
-  let pos = offset
+  let pos = offset;
   for (const node of nodes) {
-    if (node.type === 'text') {
-      pos += (node.value ?? '').length
-      continue
+    if (node.type === "text") {
+      pos += (node.value ?? "").length;
+      continue;
     }
-    const start = pos
-    pos = collectSpans(node.children ?? [], pos, spans)
-    const className = classNameOf(node)
-    if (className && pos > start) spans.push({ start, end: pos, className })
+    const start = pos;
+    pos = collectSpans(node.children ?? [], pos, spans);
+    const className = classNameOf(node);
+    if (className && pos > start) spans.push({ start, end: pos, className });
   }
-  return pos
+  return pos;
 }
 
 /** Pure: tokenize `text` as `language` and return highlight spans relative
  *  to the start of `text`. Returns `[]` for unregistered languages or if
  *  hljs itself throws (malformed input should never crash the editor). */
 export function highlightSpans(language: string, text: string): HighlightSpan[] {
-  if (!isHighlightableLanguage(language) || text.length === 0) return []
+  if (!isHighlightableLanguage(language) || text.length === 0) return [];
   try {
-    const tree = lowlight.highlight(language, text) as unknown as { children: HastNode[] }
-    const spans: HighlightSpan[] = []
-    collectSpans(tree.children, 0, spans)
-    return spans
+    const tree = lowlight.highlight(language, text) as unknown as { children: HastNode[] };
+    const spans: HighlightSpan[] = [];
+    collectSpans(tree.children, 0, spans);
+    return spans;
   } catch {
-    return []
+    return [];
   }
 }
 
-type CodeHighlightRange = { from: number; to: number; className: string }
+type CodeHighlightRange = { from: number; to: number; className: string };
 
 /** Adds one codeBlock's ranges, with its spans from `cache` when the node
  *  object is unchanged — ProseMirror nodes are immutable, so a cache hit
@@ -115,22 +115,26 @@ function addBlockRanges(
   cache: WeakMap<ProseMirrorNode, HighlightSpan[]>,
   ranges: CodeHighlightRange[],
 ): void {
-  if (!isCodeBlockNode(node)) return
-  const language = normalizeLanguage(node.attrs.language)
-  if (!isHighlightableLanguage(language)) return
-  const text = node.textContent
-  if (text.length === 0 || text.length > MAX_HIGHLIGHT_CHARS) return
+  if (!isCodeBlockNode(node)) return;
+  const language = normalizeLanguage(node.attrs.language);
+  if (!isHighlightableLanguage(language)) return;
+  const text = node.textContent;
+  if (text.length === 0 || text.length > MAX_HIGHLIGHT_CHARS) return;
 
-  let spans = cache.get(node)
+  let spans = cache.get(node);
   if (!spans) {
-    spans = highlightSpans(language, text)
-    cache.set(node, spans)
+    spans = highlightSpans(language, text);
+    cache.set(node, spans);
   }
 
-  const blockStart = pos + 1
+  const blockStart = pos + 1;
   for (const span of spans) {
-    if (span.end <= span.start) continue
-    ranges.push({ from: blockStart + span.start, to: blockStart + span.end, className: span.className })
+    if (span.end <= span.start) continue;
+    ranges.push({
+      from: blockStart + span.start,
+      to: blockStart + span.end,
+      className: span.className,
+    });
   }
 }
 
@@ -140,50 +144,53 @@ export function computeCodeHighlightRanges(
   doc: ProseMirrorNode,
   cache: WeakMap<ProseMirrorNode, HighlightSpan[]>,
 ): CodeHighlightRange[] {
-  const ranges: CodeHighlightRange[] = []
+  const ranges: CodeHighlightRange[] = [];
   doc.descendants((node, pos) => {
-    if (!isCodeBlockNode(node)) return !node.isTextblock // inline content holds no codeBlock
-    addBlockRanges(node, pos, cache, ranges)
-    return false // codeBlock content is plain text — nothing more to descend into
-  })
-  return ranges
+    if (!isCodeBlockNode(node)) return !node.isTextblock; // inline content holds no codeBlock
+    addBlockRanges(node, pos, cache, ranges);
+    return false; // codeBlock content is plain text — nothing more to descend into
+  });
+  return ranges;
 }
 
 function highlightDecorations(ranges: CodeHighlightRange[]): Decoration[] {
-  return ranges.map((range) => Decoration.inline(range.from, range.to, { class: range.className }))
+  return ranges.map((range) => Decoration.inline(range.from, range.to, { class: range.className }));
 }
 
 /** Build the plugin. A fresh WeakMap per instance caches lowlight's (fairly
  *  expensive) tokenizer pass per codeBlock node object, so an unchanged
  *  block inside a changed range isn't tokenized again. */
 export function makeCodeHighlightPlugin() {
-  const cache = new WeakMap<ProseMirrorNode, HighlightSpan[]>()
+  const cache = new WeakMap<ProseMirrorNode, HighlightSpan[]>();
   return new Plugin({
     key: codeHighlightKey,
     state: {
       init(_, instance) {
-        return DecorationSet.create(instance.doc, highlightDecorations(computeCodeHighlightRanges(instance.doc, cache)))
+        return DecorationSet.create(
+          instance.doc,
+          highlightDecorations(computeCodeHighlightRanges(instance.doc, cache)),
+        );
       },
       // Only the code blocks the transaction changed are highlighted again;
       // the rest of the note's spans move with the edit.
       apply(tr, old) {
-        if (!tr.docChanged) return old
-        const { textblocks, mapping } = documentChange(tr.before, tr.doc)
-        const decorations = old.map(mapping, tr.doc)
-        const first = textblocks[0]
-        const last = textblocks.at(-1)
-        if (!first || !last) return decorations
-        const ranges: CodeHighlightRange[] = []
-        for (const { node, pos } of textblocks) addBlockRanges(node, pos, cache, ranges)
+        if (!tr.docChanged) return old;
+        const { textblocks, mapping } = documentChange(tr.before, tr.doc);
+        const decorations = old.map(mapping, tr.doc);
+        const first = textblocks[0];
+        const last = textblocks.at(-1);
+        if (!first || !last) return decorations;
+        const ranges: CodeHighlightRange[] = [];
+        for (const { node, pos } of textblocks) addBlockRanges(node, pos, cache, ranges);
         return decorations
           .remove(decorations.find(first.pos + 1, last.pos + last.node.nodeSize - 1))
-          .add(tr.doc, highlightDecorations(ranges))
+          .add(tr.doc, highlightDecorations(ranges));
       },
     },
     props: {
       decorations(state) {
-        return codeHighlightKey.getState(state) as DecorationSet | undefined
+        return codeHighlightKey.getState(state) as DecorationSet | undefined;
       },
     },
-  })
+  });
 }

@@ -6,7 +6,14 @@ import type { FailureCode, FailureFacts } from "./failure";
 // with no new toast. `onDismiss` runs when the person dismisses the row, and
 // `clear` takes the row back.
 export interface NoticeSink {
-  report(words: string, cause: unknown, retry: () => void, identity: string, quiet: boolean, onDismiss: () => void): void;
+  report(
+    words: string,
+    cause: unknown,
+    retry: () => void,
+    identity: string,
+    quiet: boolean,
+    onDismiss: () => void,
+  ): void;
   clear(identity: string): void;
 }
 
@@ -61,15 +68,22 @@ export class NoticeOwner {
         if (filed?.words === words) return;
         const quiet = filed !== null;
         filed = { facts, words };
-        sink.report(words, cause, () => {
-          // Notices takes the row away once Try again runs.
-          filed = null;
-          run?.();
-        }, identity, quiet, () => {
-          if (filed === null) return;
-          filed = null;
-          dismissedAt = failures;
-        });
+        sink.report(
+          words,
+          cause,
+          () => {
+            // Notices takes the row away once Try again runs.
+            filed = null;
+            run?.();
+          },
+          identity,
+          quiet,
+          () => {
+            if (filed === null) return;
+            filed = null;
+            dismissedAt = failures;
+          },
+        );
       },
       shown: () => filed?.facts,
       resolve: () => {

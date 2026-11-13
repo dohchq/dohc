@@ -2,8 +2,7 @@ import { escapeHtml } from "@dohc/workspace-core/html";
 import DOMPurify, { type Config } from "dompurify";
 import { Marked } from "marked";
 
-const BLOB_IMAGE =
-  /^\/api\/view\/blob\/[a-f0-9]{64}(?:\?session=[A-Za-z0-9_-]{12})?$/u;
+const BLOB_IMAGE = /^\/api\/view\/blob\/[a-f0-9]{64}(?:\?session=[A-Za-z0-9_-]{12})?$/u;
 const SAFE_LINK = /^(?:https?:\/\/|mailto:|\/[^/]|#|\.\.?\/)/iu;
 const EXTERNAL_LINK = /^(?:https?:\/\/|mailto:)/iu;
 const NON_FILE_LINK = /^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/iu;
@@ -66,14 +65,14 @@ export const MARKDOWN_SANITIZE_CONFIG: Config = {
 
 DOMPurify.addHook("uponSanitizeAttribute", (node, data) => {
   if (node instanceof HTMLAnchorElement && data.attrName === "href") {
-    data.keepAttr = SAFE_LINK.test(data.attrValue) && !/^\s*(?:data|javascript):/iu.test(data.attrValue);
+    data.keepAttr =
+      SAFE_LINK.test(data.attrValue) && !/^\s*(?:data|javascript):/iu.test(data.attrValue);
   }
 });
 
 export function renderSafeMarkdown(
   markdown: string,
-  resolveImage: (href: string) => string | null = (href) =>
-    BLOB_IMAGE.test(href) ? href : null,
+  resolveImage: (href: string) => string | null = (href) => (BLOB_IMAGE.test(href) ? href : null),
   resolveLink: (href: string) => string | null = () => null,
 ): string {
   const parser = new Marked({
@@ -86,8 +85,7 @@ export function renderSafeMarkdown(
         const match = this.rules.block.html.exec(source);
         if (!match) return false;
         const newlineIndex = source.indexOf("\n");
-        const raw =
-          newlineIndex < 0 ? source : source.slice(0, newlineIndex + 1);
+        const raw = newlineIndex < 0 ? source : source.slice(0, newlineIndex + 1);
         const pre = match[1] === "pre" || match[1] === "script" || match[1] === "style";
         return { type: "html", raw, text: raw, block: true, pre };
       },

@@ -1,9 +1,6 @@
 import { mainProcessLogLines } from "./mainProcessCrashText";
 import { test, type Page } from "@playwright/test";
-import {
-  _electron as electron,
-  type ElectronApplication,
-} from "playwright";
+import { _electron as electron, type ElectronApplication } from "playwright";
 import { createRequire } from "node:module";
 import { appendFileSync, existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -27,8 +24,17 @@ export interface DesktopLogEntry {
 
 /** Fail the flow while the app is still open when its engine has already failed. */
 export function assertDesktopEngineHealthy(logs: readonly DesktopLogEntry[]): void {
-  const failures = logs.filter(entry => entry.source === "main" && /Rust engine daemon:|EngineDaemonUnavailableError|engine stopped answering|engine client is closed/i.test(entry.text));
-  if (failures.length) throw new Error(`Rust engine failed during the flow:\n${failures.map(entry => entry.text.trim()).join("\n")}`);
+  const failures = logs.filter(
+    (entry) =>
+      entry.source === "main" &&
+      /Rust engine daemon:|EngineDaemonUnavailableError|engine stopped answering|engine client is closed/i.test(
+        entry.text,
+      ),
+  );
+  if (failures.length)
+    throw new Error(
+      `Rust engine failed during the flow:\n${failures.map((entry) => entry.text.trim()).join("\n")}`,
+    );
 }
 
 export interface LaunchedDesktopApp {
@@ -52,43 +58,55 @@ const launchedApps = new WeakMap<Page, ElectronApplication>();
 export async function within<T>(work: Promise<T>, ms: number): Promise<T | null> {
   void work.catch(() => undefined);
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const late = new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), ms); });
+  const late = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), ms);
+  });
   return Promise.race([work, late]).finally(() => clearTimeout(timer));
 }
 
 /** Reads state for a failure message, giving up after 2 s. */
 function stateWithin(read: Promise<object>): Promise<string> {
   return within(read, 2_000).then(
-    state => state ? JSON.stringify(state) : "no answer in 2 s",
+    (state) => (state ? JSON.stringify(state) : "no answer in 2 s"),
     (error: unknown) => `unreadable (${error instanceof Error ? error.message : String(error)})`,
   );
 }
 
 /** The renderer's startup marks, in ms since its page started, for a failure message. */
 function describeRenderer(page: Page): Promise<string> {
-  return stateWithin(page.evaluate(() => ({
-    now: Math.round(performance.now()),
-    visibilityState: document.visibilityState,
-    marks: performance.getEntriesByType("mark").filter(mark => mark.name.startsWith("dohc:"))
-      .map(mark => `${mark.name} ${Math.round(mark.startTime)}`),
-  })));
+  return stateWithin(
+    page.evaluate(() => ({
+      now: Math.round(performance.now()),
+      visibilityState: document.visibilityState,
+      marks: performance
+        .getEntriesByType("mark")
+        .filter((mark) => mark.name.startsWith("dohc:"))
+        .map((mark) => `${mark.name} ${Math.round(mark.startTime)}`),
+    })),
+  );
 }
 
 /** What Electron says about the page's window, for a failure message. */
 function describeWindow(page: Page): Promise<string> {
   const app = launchedApps.get(page);
   if (!app) return Promise.resolve("unknown, not launched by launchDesktopApp");
-  return stateWithin((async () => {
-    const window = await app.browserWindow(page);
-    try {
-      return await window.evaluate(window => ({
-        visible: window.isVisible(), minimized: window.isMinimized(), focused: window.isFocused(),
-        bounds: window.getBounds(), crashed: window.webContents.isCrashed(), loading: window.webContents.isLoading(),
-      }));
-    } finally {
-      await window.dispose();
-    }
-  })());
+  return stateWithin(
+    (async () => {
+      const window = await app.browserWindow(page);
+      try {
+        return await window.evaluate((window) => ({
+          visible: window.isVisible(),
+          minimized: window.isMinimized(),
+          focused: window.isFocused(),
+          bounds: window.getBounds(),
+          crashed: window.webContents.isCrashed(),
+          loading: window.webContents.isLoading(),
+        }));
+      } finally {
+        await window.dispose();
+      }
+    })(),
+  );
 }
 
 /**
@@ -99,19 +117,31 @@ function describeWindow(page: Page): Promise<string> {
 export async function waitForPaintedFrames(page: Page): Promise<void> {
   let failure: unknown;
   try {
-    const painted = await within(page.evaluate(() => new Promise<boolean>(resolve => {
-      requestAnimationFrame(() => requestAnimationFrame(() => resolve(true)));
-    })), 5_000);
+    const painted = await within(
+      page.evaluate(
+        () =>
+          new Promise<boolean>((resolve) => {
+            requestAnimationFrame(() => requestAnimationFrame(() => resolve(true)));
+          }),
+      ),
+      5_000,
+    );
     if (painted) return;
   } catch (error) {
     failure = error;
   }
-  const pageState = await stateWithin(page.evaluate(() => ({
-    visibilityState: document.visibilityState, hasFocus: document.hasFocus(),
-  })));
-  const reason = failure ? "couldn't be checked for animation frames" : "didn't get two animation frames within 5 s";
-  const message = `The desktop window ${reason}, so Playwright can't click in it. Page: ${pageState}. Window: ${
-    await describeWindow(page)}.`;
+  const pageState = await stateWithin(
+    page.evaluate(() => ({
+      visibilityState: document.visibilityState,
+      hasFocus: document.hasFocus(),
+    })),
+  );
+  const reason = failure
+    ? "couldn't be checked for animation frames"
+    : "didn't get two animation frames within 5 s";
+  const message = `The desktop window ${reason}, so Playwright can't click in it. Page: ${pageState}. Window: ${await describeWindow(
+    page,
+  )}.`;
   throw failure ? new Error(message, { cause: failure }) : new Error(message);
 }
 
@@ -134,16 +164,18 @@ function requireBuiltDesktopApp() {
 // removeTestScratch retries EBUSY/EPERM, and cleanupDesktopWorkspace logs a
 // failure rather than failing the spec. A leaked profile under the scratch run
 // root costs disk until the sweep; a shared one costs the run.
-async function createUserDataDir(
-  workspace: Pick<TempWorkspace, "baseDir">,
-): Promise<string> {
+async function createUserDataDir(workspace: Pick<TempWorkspace, "baseDir">): Promise<string> {
   const dir = join(workspace.baseDir, "electron-user-data");
   await mkdir(dir, { recursive: true });
   return dir;
 }
 
-const holdsAgentTool = (dir: string) => AGENT_TOOLS.some(({ command }) =>
-  ["", ".exe", ".cmd", ".bat", ".com"].some((extension) => existsSync(join(dir, `${command}${extension}`))));
+const holdsAgentTool = (dir: string) =>
+  AGENT_TOOLS.some(({ command }) =>
+    ["", ".exe", ".cmd", ".bat", ".com"].some((extension) =>
+      existsSync(join(dir, `${command}${extension}`)),
+    ),
+  );
 
 // The app's own APPDATA and LOCALAPPDATA, inside its home folder. The engine
 // keeps its private-folder records in LOCALAPPDATA.
@@ -155,7 +187,8 @@ const appDataFolders = (homeDir: string) => ({
 // The tester's PATH without the folders that hold an agent tool, so agent
 // detection finds only the fakes a spec installs. Node's own folder stays,
 // because runner commands and dohc's CLI shim run `node`.
-export const testSearchPath = (process.env.Path ?? process.env.PATH ?? "").split(delimiter)
+export const testSearchPath = (process.env.Path ?? process.env.PATH ?? "")
+  .split(delimiter)
   .filter((entry) => {
     // Detection reads a quoted entry without its quotes, so this does too.
     const dir = entry.replace(/^"(.*)"$/u, "$1");
@@ -218,7 +251,8 @@ export async function launchDesktopApp(input: {
 }): Promise<LaunchedDesktopApp> {
   const build = requireBuiltDesktopApp();
   const userDataDir = await createUserDataDir(input.workspace);
-  for (const dir of Object.values(appDataFolders(input.workspace.homeDir))) await mkdir(dir, { recursive: true });
+  for (const dir of Object.values(appDataFolders(input.workspace.homeDir)))
+    await mkdir(dir, { recursive: true });
   const artifacts = test.info().outputPath(`electron-${randomUUID()}`);
   await mkdir(artifacts, { recursive: true });
 
@@ -228,13 +262,24 @@ export async function launchDesktopApp(input: {
   await writeFile(logPath, "");
   let logFailure: unknown;
   const record = (entry: DesktopLogEntry) => {
-    const timed = {...entry,timestamp:new Date().toISOString(),elapsedMs:Math.round(performance.now()-launchedAt)};
+    const timed = {
+      ...entry,
+      timestamp: new Date().toISOString(),
+      elapsedMs: Math.round(performance.now() - launchedAt),
+    };
     logs.push(timed);
-    try { appendFileSync(logPath, JSON.stringify(timed) + "\n"); }
-    catch (error) { logFailure ??= error; }
+    try {
+      appendFileSync(logPath, JSON.stringify(timed) + "\n");
+    } catch (error) {
+      logFailure ??= error;
+    }
   };
-  const stdoutLines = mainProcessLogLines(text => record({source: "main", level: "stdout", text}));
-  const stderrLines = mainProcessLogLines(text => record({source: "main", level: "stderr", text}));
+  const stdoutLines = mainProcessLogLines((text) =>
+    record({ source: "main", level: "stdout", text }),
+  );
+  const stderrLines = mainProcessLogLines((text) =>
+    record({ source: "main", level: "stderr", text }),
+  );
   const onStdoutData = (chunk: string) => stdoutLines.chunk(chunk);
   const onStderrData = (chunk: string) => stderrLines.chunk(chunk);
 
@@ -275,11 +320,20 @@ export async function launchDesktopApp(input: {
     // first paint (#2973). The first screen's 20 s wait needs that paint anyway.
     const window = await app.browserWindow(page);
     try {
-      const shown = await within(window.evaluate(window => window.isVisible()
-        || new Promise<boolean>(resolve => window.once("show", () => resolve(true)))), 20_000);
+      const shown = await within(
+        window.evaluate(
+          (window) =>
+            window.isVisible() ||
+            new Promise<boolean>((resolve) => window.once("show", () => resolve(true))),
+        ),
+        20_000,
+      );
       if (!shown) {
-        throw new Error(`The desktop window didn't show within 20 s. Window: ${
-          await describeWindow(page)}. Renderer: ${await describeRenderer(page)}.`);
+        throw new Error(
+          `The desktop window didn't show within 20 s. Window: ${await describeWindow(
+            page,
+          )}. Renderer: ${await describeRenderer(page)}.`,
+        );
       }
     } finally {
       await window.dispose();
@@ -287,11 +341,21 @@ export async function launchDesktopApp(input: {
 
     const launchedApp = app;
     const launchedProcess = processHandle;
-    await writeFile(join(artifacts, "instance.json"), JSON.stringify({
-      launcherPid: launchedProcess.pid, electronPid: await launchedApp.evaluate(() => process.pid),
-      root: desktopRoot, userDataDir,
-      workspace: input.workspace.rootPath, build,
-    }, null, 2));
+    await writeFile(
+      join(artifacts, "instance.json"),
+      JSON.stringify(
+        {
+          launcherPid: launchedProcess.pid,
+          electronPid: await launchedApp.evaluate(() => process.pid),
+          root: desktopRoot,
+          userDataDir,
+          workspace: input.workspace.rootPath,
+          build,
+        },
+        null,
+        2,
+      ),
+    );
     return {
       app: launchedApp,
       page,
@@ -299,16 +363,21 @@ export async function launchDesktopApp(input: {
       close: async () => {
         try {
           if (!page.isClosed()) {
-            await page.screenshot({ path: join(artifacts, "last-screen.png"), timeout: 5000 }).catch(() => undefined);
+            await page
+              .screenshot({ path: join(artifacts, "last-screen.png"), timeout: 5000 })
+              .catch(() => undefined);
           }
         } finally {
           try {
             await closeElectronApplication(launchedApp, launchedProcess, DESKTOP_CLOSE_GRACE_MS);
           } finally {
-            stdoutLines.end(); stderrLines.end();
+            stdoutLines.end();
+            stderrLines.end();
             launchedProcess.stdout?.off("data", onStdoutData);
             launchedProcess.stderr?.off("data", onStderrData);
-            await test.info().attach("desktop logs", { path: logPath, contentType: "application/x-ndjson" });
+            await test
+              .info()
+              .attach("desktop logs", { path: logPath, contentType: "application/x-ndjson" });
             if (logFailure) throw new Error("Desktop log recording failed.", { cause: logFailure });
           }
         }
@@ -319,11 +388,13 @@ export async function launchDesktopApp(input: {
       await writeFile(join(artifacts, "launch-error.txt"), String(error)).catch(() => undefined);
     } finally {
       try {
-        if (app && processHandle) await closeElectronApplication(app, processHandle, DESKTOP_CLOSE_GRACE_MS);
+        if (app && processHandle)
+          await closeElectronApplication(app, processHandle, DESKTOP_CLOSE_GRACE_MS);
       } catch (cleanupError) {
         console.error("Failed-launch cleanup:", cleanupError);
       } finally {
-        stdoutLines.end(); stderrLines.end();
+        stdoutLines.end();
+        stderrLines.end();
         processHandle?.stdout?.off("data", onStdoutData);
         processHandle?.stderr?.off("data", onStderrData);
       }

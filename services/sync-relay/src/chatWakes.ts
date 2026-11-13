@@ -31,7 +31,8 @@ export class TooManyWakeCandidates extends Error {
 }
 
 // The characters the engine drops from a name (names.rs, shown_name), keeping ZWNJ, ZWJ, and variation selectors.
-const HIDDEN_IN_NAMES = /(?![\u200C\u200D\p{Variation_Selector}])[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/gu;
+const HIDDEN_IN_NAMES =
+  /(?![\u200C\u200D\p{Variation_Selector}])[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/gu;
 
 /** A name as the engine shows it: hidden characters dropped, trimmed, and cut to 40 characters. */
 export function shownName(name: string): string {
@@ -58,21 +59,32 @@ export type DmSource = { complete: true; message: ChatMessage | null } | { compl
 type AgentMessage = ChatMessage & { authorAgentId: string };
 
 // Only the account's own agent's message names an agent to wake. A participant's or a personal agent's never does.
-const accountAgent = (accountId: string) => (message: ChatMessage | null | undefined): message is AgentMessage =>
-  message?.author.kind === "agent" && message.authorUserId === accountId && typeof message.authorAgentId === "string" && message.authorAgentId !== "";
+const accountAgent =
+  (accountId: string) =>
+  (message: ChatMessage | null | undefined): message is AgentMessage =>
+    message?.author.kind === "agent" &&
+    message.authorUserId === accountId &&
+    typeof message.authorAgentId === "string" &&
+    message.authorAgentId !== "";
 
 // The agent messages a write answers: its DM's agent, the parent it replies under or else the post or file thread's
 // opening, and the question it answers. A Group's running conversation has no opening that answers. `unread`: the
 // DM's bounded read couldn't cover every message, so its agent is unknown, even if one of its messages was seen.
-async function answeredMessages(sources: WakeSources, accountId: string, write: Exclude<WriteCommand, { kind: "react" }>):
-  Promise<{ messages: AgentMessage[]; unread: boolean }> {
+async function answeredMessages(
+  sources: WakeSources,
+  accountId: string,
+  write: Exclude<WriteCommand, { kind: "react" }>,
+): Promise<{ messages: AgentMessage[]; unread: boolean }> {
   const ours = accountAgent(accountId);
   const found: Array<ChatMessage | null | undefined> = [];
   let unread = false;
   const dm = async (channelId: string) => {
     const agentId = await sources.dmAgent(channelId);
     if (agentId === null) return;
-    const source = await sources.latest(channelId, (message) => ours(message) && message.authorAgentId === agentId);
+    const source = await sources.latest(
+      channelId,
+      (message) => ours(message) && message.authorAgentId === agentId,
+    );
     if (source.complete) found.push(source.message);
     else unread = true;
   };
@@ -83,18 +95,28 @@ async function answeredMessages(sources: WakeSources, accountId: string, write: 
   const thread = await sources.thread(write.threadId);
   if (thread === null) return { messages: [], unread };
   if (thread.channelId !== undefined) await dm(thread.channelId);
-  const parent = write.parentMessageId === undefined ? null : await sources.message(write.parentMessageId);
+  const parent =
+    write.parentMessageId === undefined ? null : await sources.message(write.parentMessageId);
   if (ours(parent)) found.push(parent);
   else if (thread.lane !== "chat") found.push(await sources.opening(write.threadId));
   if (write.kind === "answer") found.push(await sources.message(write.questionId));
   return { messages: found.filter(ours), unread };
 }
 
-const candidateOf = (runner: ChatRunner, matched: ChatWakeCandidate["matched"]): ChatWakeCandidate =>
-  ({ installId: runner.installId, agentId: runner.agentId, label: runner.computerLabel, matched });
-const pair = (candidate: ChatWakeCandidate) => JSON.stringify([candidate.installId, candidate.agentId]);
+const candidateOf = (
+  runner: ChatRunner,
+  matched: ChatWakeCandidate["matched"],
+): ChatWakeCandidate => ({
+  installId: runner.installId,
+  agentId: runner.agentId,
+  label: runner.computerLabel,
+  matched,
+});
+const pair = (candidate: ChatWakeCandidate) =>
+  JSON.stringify([candidate.installId, candidate.agentId]);
 // An agent across computers: its local ID alone can name another agent elsewhere, so its shown name goes with it.
-const agentKey = (agentId: string, displayName: string) => JSON.stringify([agentId, shownName(displayName)]);
+const agentKey = (agentId: string, displayName: string) =>
+  JSON.stringify([agentId, shownName(displayName)]);
 
 /**
  * A write's wake targets. Each handle the body mentions that enabled agents
@@ -106,15 +128,26 @@ const agentKey = (agentId: string, displayName: string) => JSON.stringify([agent
  * enabled agents, wakes nothing.
  * Throws TooManyWakeCandidates past MAX_WAKE_CANDIDATES, rather than wake some.
  */
-export async function resolveWakeTargets(sources: WakeSources, accountId: string, write: WriteCommand): Promise<FrozenWakes> {
+export async function resolveWakeTargets(
+  sources: WakeSources,
+  accountId: string,
+  write: WriteCommand,
+): Promise<FrozenWakes> {
   const runners = sources.runners.filter((runner) => runner.enabled);
   if (write.kind === "react" || runners.length === 0) return NO_WAKES;
   const mentions: ChatWakeTarget[] = [];
   const mentionedAgents = new Set<string>();
-  for (const handle of new Set(chatMentionTokens(write.body).map((token) => normalizeHandle(token.handle)))) {
+  for (const handle of new Set(
+    chatMentionTokens(write.body).map((token) => normalizeHandle(token.handle)),
+  )) {
     const matching = runners.filter((runner) => runner.handle !== "" && runner.handle === handle);
-    for (const runner of matching) mentionedAgents.add(agentKey(runner.agentId, runner.displayName));
-    if (matching.length > 0) mentions.push({ target: `mention:${handle}`, candidates: matching.map((runner) => candidateOf(runner, { handle })) });
+    for (const runner of matching)
+      mentionedAgents.add(agentKey(runner.agentId, runner.displayName));
+    if (matching.length > 0)
+      mentions.push({
+        target: `mention:${handle}`,
+        candidates: matching.map((runner) => candidateOf(runner, { handle })),
+      });
   }
   const mentioned = new Set(mentions.flatMap((target) => target.candidates.map(pair)));
   const implicit = new Map<string, ChatWakeTarget>();
@@ -124,10 +157,14 @@ export async function resolveWakeTargets(sources: WakeSources, accountId: string
   let unmatched = answered.unread;
   for (const message of answered.messages) {
     const name = shownName(message.author.displayName);
-    const matches = runners.filter((runner) => runner.agentId === message.authorAgentId && shownName(runner.displayName) === name);
+    const matches = runners.filter(
+      (runner) =>
+        runner.agentId === message.authorAgentId && shownName(runner.displayName) === name,
+    );
     const [runner] = matches;
     if (matches.length !== 1 || runner === undefined) {
-      if (!mentionedAgents.has(agentKey(message.authorAgentId, message.author.displayName))) unmatched = true;
+      if (!mentionedAgents.has(agentKey(message.authorAgentId, message.author.displayName)))
+        unmatched = true;
       continue;
     }
     const candidate = candidateOf(runner, { displayName: runner.displayName });
@@ -135,7 +172,8 @@ export async function resolveWakeTargets(sources: WakeSources, accountId: string
     if (!mentioned.has(pair(candidate))) implicit.set(target, { target, candidates: [candidate] });
   }
   const targets = [...mentions, ...implicit.values()];
-  if (targets.reduce((total, target) => total + target.candidates.length, 0) > MAX_WAKE_CANDIDATES) throw new TooManyWakeCandidates();
+  if (targets.reduce((total, target) => total + target.candidates.length, 0) > MAX_WAKE_CANDIDATES)
+    throw new TooManyWakeCandidates();
   return { targets, unmatched };
 }
 
@@ -147,7 +185,11 @@ export function frozenWakes(command: JsonValue): FrozenWakes {
   // This module wrote them; a target without candidates would make no row.
   const kept = (targets as unknown[]).filter((each): each is ChatWakeTarget => {
     const target = asRecord(each);
-    return typeof target?.target === "string" && Array.isArray(target.candidates) && target.candidates.length > 0;
+    return (
+      typeof target?.target === "string" &&
+      Array.isArray(target.candidates) &&
+      target.candidates.length > 0
+    );
   });
   return { targets: kept, unmatched: wakes?.unmatched === true };
 }
@@ -159,17 +201,28 @@ export function frozenWakes(command: JsonValue): FrozenWakes {
  * question's decision when the answer was saved, without it when the
  * decision was lost or the write refused.
  */
-export function operationWakeChange(command: JsonValue, verdict: Verdict): OperationWakeChange | undefined {
+export function operationWakeChange(
+  command: JsonValue,
+  verdict: Verdict,
+): OperationWakeChange | undefined {
   const { targets } = frozenWakes(command);
   const write = asRecord(asRecord(command)?.write);
-  const messageId = write?.messageId, questionId = write?.questionId;
+  const messageId = write?.messageId,
+    questionId = write?.questionId;
   if (targets.length === 0 || typeof messageId !== "string") return undefined;
   const answer = write?.kind === "answer";
   const threadId = verdict.stage === "pending" ? verdict.threadId : verdict.result.threadId;
   return {
-    ...(verdict.messagePublished && threadId !== null ? { publish: { messageId, threadId, held: answer, targets } } : {}),
+    ...(verdict.messagePublished && threadId !== null
+      ? { publish: { messageId, threadId, held: answer, targets } }
+      : {}),
     ...(answer && verdict.stage !== "pending"
-      ? { release: { prerequisite: verdict.stage === "saved" && typeof questionId === "string" ? questionId : null } }
+      ? {
+          release: {
+            prerequisite:
+              verdict.stage === "saved" && typeof questionId === "string" ? questionId : null,
+          },
+        }
       : {}),
   };
 }

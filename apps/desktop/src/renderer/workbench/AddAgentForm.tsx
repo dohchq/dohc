@@ -4,8 +4,18 @@ import {
   MAX_PREFERRED_NAME_LENGTH,
   preferredNameFromInput,
 } from "@dohc/workspace-contracts/chat-identity-values";
-import { agentIdDohcStarts, newAgentDefaults, withAgentDohcStarts, type DesktopUserSettings } from "../../settings/userSettings";
-import { launchCommand, launchCommandHint, launchFrom, launchProfile } from "../../agents/agentToolCatalog";
+import {
+  agentIdDohcStarts,
+  newAgentDefaults,
+  withAgentDohcStarts,
+  type DesktopUserSettings,
+} from "../../settings/userSettings";
+import {
+  launchCommand,
+  launchCommandHint,
+  launchFrom,
+  launchProfile,
+} from "../../agents/agentToolCatalog";
 import { AgentToolPicker } from "../settings/AgentToolPicker";
 import { useRequestSequence } from "../useRequestSequence";
 import { bridge } from "../bridge";
@@ -52,7 +62,9 @@ export function AddAgentForm(props: {
   // The tool the command field started from. Typing keeps it only while the
   // command starts that same program.
   const [startProfile, setStartProfile] = useState(savedProfile);
-  const [advanced, setAdvanced] = useState(savedCommand.length > 0 || (savedProfile?.arguments?.length ?? 0) > 0);
+  const [advanced, setAdvanced] = useState(
+    savedCommand.length > 0 || (savedProfile?.arguments?.length ?? 0) > 0,
+  );
   const requests = useRequestSequence([props.workspaceId]);
   const [command, setCommand] = useState(savedCommand);
   const [error, setError] = useState<string | null>(null);
@@ -83,7 +95,10 @@ export function AddAgentForm(props: {
     setStartProfile(savedProfile);
   }, [agent?.name, savedCommand, savedProfile?.tool, savedProfileCommand]);
 
-  const launch = useMemo(() => launchFrom(profile, command, startProfile), [profile, command, startProfile]);
+  const launch = useMemo(
+    () => launchFrom(profile, command, startProfile),
+    [profile, command, startProfile],
+  );
   const trimmedCommand = launch ? launchCommand(launch) : "";
   const preview = agentName.trim() || "Your agent";
 
@@ -109,15 +124,20 @@ export function AddAgentForm(props: {
     setSaving(true);
     setError(null);
     try {
-      await onSave(withAgentDohcStarts(settings, (current) => ({
-        ...(current ?? newAgentDefaults(settings, settings.appearance.yourColor ?? ownPresentation.hue)),
-        name: validAgentName,
-        launch,
-        enabled: true,
-      })), settings);
+      await onSave(
+        withAgentDohcStarts(settings, (current) => ({
+          ...(current ??
+            newAgentDefaults(settings, settings.appearance.yourColor ?? ownPresentation.hue)),
+          name: validAgentName,
+          launch,
+          enabled: true,
+        })),
+        settings,
+      );
       return requests.isCurrent(token);
     } catch (cause) {
-      if (requests.isCurrent(token)) props.onError(ipcErrorMessage(cause, "Could not save the agent."), cause);
+      if (requests.isCurrent(token))
+        props.onError(ipcErrorMessage(cause, "Could not save the agent."), cause);
       return false;
     } finally {
       if (requests.isCurrent(token)) setSaving(false);
@@ -130,9 +150,13 @@ export function AddAgentForm(props: {
     setCheck({ status: "running" });
     try {
       // The save above made that agent when there was none.
-      const result = await bridge().runnerSelfTest({ workspaceId: props.workspaceId, agentId: agentIdDohcStarts(settings) });
+      const result = await bridge().runnerSelfTest({
+        workspaceId: props.workspaceId,
+        agentId: agentIdDohcStarts(settings),
+      });
       if (!requests.isCurrent(token)) return;
-      if (!result.ok) props.onError(result.logPath ? `${result.detail} Log: ${result.logPath}` : result.detail);
+      if (!result.ok)
+        props.onError(result.logPath ? `${result.detail} Log: ${result.logPath}` : result.detail);
       setCheck({ status: result.ok ? "ok" : "failed", detail: result.detail });
     } catch (cause) {
       if (!requests.isCurrent(token)) return;
@@ -166,8 +190,16 @@ export function AddAgentForm(props: {
         data-scrolls={scrolls ? "" : undefined}
         className={`dohc-elevated flex w-[min(600px,calc(100vw-32px))] flex-col rounded-xl border border-line bg-panel ${scrolls ? "" : "gap-4 p-5"} ${DIALOG_HEIGHT_CLASS}`}
       >
-        <div data-testid="chats-add-agent-header" className={`flex items-center gap-2 ${scrolls ? "border-b border-line px-5 pb-4 pt-5" : ""}`}>
-          <ChatAvatar presentation={ownAgentPresentation} name={preview} kind="agent" size="strip" />
+        <div
+          data-testid="chats-add-agent-header"
+          className={`flex items-center gap-2 ${scrolls ? "border-b border-line px-5 pb-4 pt-5" : ""}`}
+        >
+          <ChatAvatar
+            presentation={ownAgentPresentation}
+            name={preview}
+            kind="agent"
+            size="strip"
+          />
           <h3 id="chats-add-agent-title" className="m-0 text-base font-semibold text-ink">
             Add an agent
           </h3>
@@ -179,100 +211,133 @@ export function AddAgentForm(props: {
           data-testid="chats-add-agent-body"
           className={`min-h-0 overflow-y-auto [&_:focus-visible]:-outline-offset-2 ${scrolls ? "px-5 py-4" : "-mx-5 -my-1 px-5 py-1"}`}
         >
-        <div ref={contentRef} className="flex flex-col gap-4">
-        <div className="flex flex-col gap-1">
-          <label htmlFor="chats-add-agent-agent-name" className={LABEL_CLASS}>Agent name</label>
-          <input
-            id="chats-add-agent-agent-name"
-            data-testid="chats-add-agent-agent-name"
-            value={agentName}
-            maxLength={MAX_PREFERRED_NAME_LENGTH}
-            disabled={busy}
-            autoComplete="off"
-            onChange={(event) => setAgentName(event.currentTarget.value)}
-            className={INPUT_CLASS}
-          />
-          <p data-testid="chats-add-agent-preview" className={HINT_CLASS}>
-            Posts as <span className="font-medium text-muted">{preview}</span>
-          </p>
+          <div ref={contentRef} className="flex flex-col gap-4">
+            <div className="flex flex-col gap-1">
+              <label htmlFor="chats-add-agent-agent-name" className={LABEL_CLASS}>
+                Agent name
+              </label>
+              <input
+                id="chats-add-agent-agent-name"
+                data-testid="chats-add-agent-agent-name"
+                value={agentName}
+                maxLength={MAX_PREFERRED_NAME_LENGTH}
+                disabled={busy}
+                autoComplete="off"
+                onChange={(event) => setAgentName(event.currentTarget.value)}
+                className={INPUT_CLASS}
+              />
+              <p data-testid="chats-add-agent-preview" className={HINT_CLASS}>
+                Posts as <span className="font-medium text-muted">{preview}</span>
+              </p>
+            </div>
+
+            <AgentToolPicker
+              workspaceId={props.workspaceId}
+              profile={launch ? launchProfile(launch) : undefined}
+              usingCommand={command.trim().length > 0}
+              disabled={busy}
+              advancedOpen={advanced}
+              onAdvancedToggle={setAdvanced}
+              onError={props.onError}
+              onChange={(value) => {
+                setProfile(value);
+                setStartProfile(value);
+                setCheck({ status: "idle" });
+              }}
+            >
+              {profile && command.trim() ? (
+                <SecondaryButton
+                  size="compact"
+                  disabled={busy}
+                  onClick={() => {
+                    setProfile(undefined);
+                    setCheck({ status: "idle" });
+                  }}
+                >
+                  Use saved command
+                </SecondaryButton>
+              ) : null}
+              <div className="mt-2 flex flex-col gap-1">
+                <label htmlFor="chats-add-agent-command" className={LABEL_CLASS}>
+                  Runner command
+                </label>
+                <input
+                  id="chats-add-agent-command"
+                  data-testid="chats-add-agent-command"
+                  value={profile ? launchCommand(profile) : command}
+                  maxLength={4096}
+                  disabled={busy}
+                  spellCheck={false}
+                  autoCapitalize="none"
+                  autoComplete="off"
+                  placeholder={COMMAND_PLACEHOLDER}
+                  onChange={(event) => {
+                    setCommand(event.currentTarget.value);
+                    setProfile(undefined);
+                    setCheck({ status: "idle" });
+                  }}
+                  className={`${INPUT_CLASS} font-mono text-[12px]`}
+                />
+                <p className={HINT_CLASS}>{launchCommandHint(launch)}</p>
+              </div>
+            </AgentToolPicker>
+          </div>
         </div>
 
-        <AgentToolPicker workspaceId={props.workspaceId} profile={launch ? launchProfile(launch) : undefined} usingCommand={command.trim().length > 0} disabled={busy}
-          advancedOpen={advanced} onAdvancedToggle={setAdvanced}
-          onError={props.onError} onChange={(value) => { setProfile(value); setStartProfile(value); setCheck({ status: "idle" }); }}>
-          {profile && command.trim() ? <SecondaryButton size="compact" disabled={busy} onClick={() => { setProfile(undefined); setCheck({ status: "idle" }); }}>Use saved command</SecondaryButton> : null}
-        <div className="mt-2 flex flex-col gap-1">
-          <label htmlFor="chats-add-agent-command" className={LABEL_CLASS}>
-            Runner command
-          </label>
-          <input
-            id="chats-add-agent-command"
-            data-testid="chats-add-agent-command"
-            value={profile ? launchCommand(profile) : command}
-            maxLength={4096}
-            disabled={busy}
-            spellCheck={false}
-            autoCapitalize="none"
-            autoComplete="off"
-            placeholder={COMMAND_PLACEHOLDER}
-            onChange={(event) => { setCommand(event.currentTarget.value); setProfile(undefined); setCheck({ status: "idle" }); }}
-            className={`${INPUT_CLASS} font-mono text-[12px]`}
-          />
-          <p className={HINT_CLASS}>
-            {launchCommandHint(launch)}
-          </p>
-        </div>
-        </AgentToolPicker>
-        </div>
-        </div>
+        <div
+          data-testid="chats-add-agent-footer"
+          className={`flex flex-col gap-4 ${scrolls ? "border-t border-line px-5 pb-5 pt-4" : ""}`}
+        >
+          {error ? (
+            <p
+              data-testid="chats-add-agent-error"
+              role="alert"
+              className="m-0 text-[11px] text-danger"
+            >
+              {error}
+            </p>
+          ) : null}
+          {check.status === "ok" || check.status === "failed" ? (
+            <p
+              data-testid="chats-add-agent-check-result"
+              data-state={check.status}
+              role={check.status === "failed" ? "alert" : "status"}
+              className={`m-0 text-[11px] ${check.status === "ok" ? "text-success" : "text-danger"}`}
+            >
+              {check.status === "ok" ? check.detail : "Check failed. See Notices."}
+            </p>
+          ) : null}
 
-        <div data-testid="chats-add-agent-footer" className={`flex flex-col gap-4 ${scrolls ? "border-t border-line px-5 pb-5 pt-4" : ""}`}>
-        {error ? (
-          <p data-testid="chats-add-agent-error" role="alert" className="m-0 text-[11px] text-danger">
-            {error}
-          </p>
-        ) : null}
-        {check.status === "ok" || check.status === "failed" ? (
-          <p
-            data-testid="chats-add-agent-check-result"
-            data-state={check.status}
-            role={check.status === "failed" ? "alert" : "status"}
-            className={`m-0 text-[11px] ${check.status === "ok" ? "text-success" : "text-danger"}`}
-          >
-            {check.status === "ok" ? check.detail : "Check failed. See Notices."}
-          </p>
-        ) : null}
-
-        <div className="flex items-center gap-1.5">
-          <SecondaryButton
-            size="compact"
-            data-testid="chats-add-agent-check"
-            disabled={busy || !agentName.trim() || trimmedCommand.length === 0}
-            onClick={() => void runCheck()}
-            className="flex items-center gap-1"
-          >
-            <FlaskConical size={12} aria-hidden />
-            {check.status === "running" ? "Checking…" : "Check"}
-          </SecondaryButton>
-          <span className="flex-1" />
-          <button
-            type="button"
-            data-testid="chats-add-agent-cancel"
-            disabled={busy}
-            onClick={props.onCancel}
-            className="h-7 rounded-md px-2.5 text-[11px] text-muted hover:bg-hover hover:text-ink disabled:opacity-50"
-          >
-            Cancel
-          </button>
-          <PrimaryButton
-            size="compact"
-            type="submit"
-            data-testid="chats-add-agent-submit"
-            disabled={busy || !agentName.trim() || trimmedCommand.length === 0}
-          >
-            {saving ? "Saving…" : "Add agent"}
-          </PrimaryButton>
-        </div>
+          <div className="flex items-center gap-1.5">
+            <SecondaryButton
+              size="compact"
+              data-testid="chats-add-agent-check"
+              disabled={busy || !agentName.trim() || trimmedCommand.length === 0}
+              onClick={() => void runCheck()}
+              className="flex items-center gap-1"
+            >
+              <FlaskConical size={12} aria-hidden />
+              {check.status === "running" ? "Checking…" : "Check"}
+            </SecondaryButton>
+            <span className="flex-1" />
+            <button
+              type="button"
+              data-testid="chats-add-agent-cancel"
+              disabled={busy}
+              onClick={props.onCancel}
+              className="h-7 rounded-md px-2.5 text-[11px] text-muted hover:bg-hover hover:text-ink disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <PrimaryButton
+              size="compact"
+              type="submit"
+              data-testid="chats-add-agent-submit"
+              disabled={busy || !agentName.trim() || trimmedCommand.length === 0}
+            >
+              {saving ? "Saving…" : "Add agent"}
+            </PrimaryButton>
+          </div>
         </div>
       </form>
     </Overlay>

@@ -7,14 +7,7 @@ import { SkeletonRows } from "../ui/SkeletonRows";
 import { SecondaryButton } from "../ui/controls";
 import { StateMark } from "../ui/StateMark";
 import { AlertTriangle, X } from "lucide-react";
-import {
-  useCallback,
-  useContext,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import {
   DEFAULT_SIDEBAR_SETTINGS,
   DEFAULT_USER_SETTINGS,
@@ -98,8 +91,7 @@ function isModified(value: unknown, defaultValue: unknown): boolean {
 
 // The document chip's "your edits are still here" is false here: a failed
 // save goes back to the settings the file holds.
-export const SETTINGS_SAVE_ERROR_TITLE =
-  "dohc could not save this setting. Try changing it again.";
+export const SETTINGS_SAVE_ERROR_TITLE = "dohc could not save this setting. Try changing it again.";
 
 function StatusPill(props: { state: SettingsSaveState }) {
   if (props.state === "idle") return null;
@@ -119,18 +111,33 @@ function StatusPill(props: { state: SettingsSaveState }) {
 // when it fails, and its Try again sends the same write. A save sends only its
 // change, which main writes onto the file as it is then. Main's broadcast of
 // the file brings the look, so an answer that arrives late can't undo a newer one.
-function reportCutOffWrite(send: () => Promise<unknown>, words: (cause: unknown) => string, cause: unknown): void {
-  reportInstallationFailure({ message: words(cause), cause, serverUrl: null, retry: () => {
-    void send().catch((next: unknown) => reportCutOffWrite(send, words, next));
-    return true;
-  } });
+function reportCutOffWrite(
+  send: () => Promise<unknown>,
+  words: (cause: unknown) => string,
+  cause: unknown,
+): void {
+  reportInstallationFailure({
+    message: words(cause),
+    cause,
+    serverUrl: null,
+    retry: () => {
+      void send().catch((next: unknown) => reportCutOffWrite(send, words, next));
+      return true;
+    },
+  });
 }
 const saveWords = (cause: unknown) => ipcErrorMessage(cause, "dohc could not save your settings.");
 
 export function SettingsDialog(props: {
   // `details` are facts for Copy details, one line each. A report with an
   // `identity` replaces the row of that identity, and `onClearError` takes it back.
-  onError?: (message: string, cause?: unknown, retry?: () => Promise<void>, details?: ReadonlyArray<ErrorDetailField>, identity?: string) => void;
+  onError?: (
+    message: string,
+    cause?: unknown,
+    retry?: () => Promise<void>,
+    details?: ReadonlyArray<ErrorDetailField>,
+    identity?: string,
+  ) => void;
   onClearError?: (identity: string) => void;
   /** A change that went through, with its Undo. */
   onNotice?: (message: string, undo?: () => void) => void;
@@ -173,7 +180,10 @@ export function SettingsDialog(props: {
 }) {
   const { onWorkspaceSettingsRead } = props;
   // A shared view never runs app code, so it has no trust to change.
-  const workspaceTrust = useWorkspaceTrust(props.workspaceId, props.workspaceIsReady && !props.sharedView);
+  const workspaceTrust = useWorkspaceTrust(
+    props.workspaceId,
+    props.workspaceIsReady && !props.sharedView,
+  );
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
   const userSaveRequestRef = useRequestSequence();
@@ -201,8 +211,7 @@ export function SettingsDialog(props: {
   );
   const [query, setQuery] = useState("");
   const [userResult, setUserResult] = useState<DesktopUserSettingsResult | null>(null);
-  const [workspaceResult, setWorkspaceResult] =
-    useState<WorkspaceSettingsResult | null>(null);
+  const [workspaceResult, setWorkspaceResult] = useState<WorkspaceSettingsResult | null>(null);
   const [saveState, setSaveState] = useState<SettingsSaveState>("idle");
   const [error, setError] = useState<string | null>(null);
   const update = useDesktopUpdate(useContext(ShellErrorReporter));
@@ -300,7 +309,9 @@ export function SettingsDialog(props: {
     setWorkspaceResult(null);
     void Promise.all([
       bridge().getUserSettings(),
-      props.workspaceIsReady ? bridge().getWorkspaceSettings({ workspaceId: props.workspaceId }) : undefined,
+      props.workspaceIsReady
+        ? bridge().getWorkspaceSettings({ workspaceId: props.workspaceId })
+        : undefined,
     ])
       .then(([nextUser, nextWorkspace]) => {
         if (cancelled) return;
@@ -326,7 +337,11 @@ export function SettingsDialog(props: {
     () => SETTINGS_SECTIONS.filter((section) => sectionMatches(section, query)),
     [query],
   );
-  const sharingResults = useSharingSearch(props.workspaceId, !!props.sharedView, props.workspaceIsReady && props.onOpenSharing ? query : "");
+  const sharingResults = useSharingSearch(
+    props.workspaceId,
+    !!props.sharedView,
+    props.workspaceIsReady && props.onOpenSharing ? query : "",
+  );
 
   useEffect(() => {
     if (
@@ -339,73 +354,84 @@ export function SettingsDialog(props: {
   }, [activeSection, filteredSections, query]);
 
   // Answers with what main saved, or null. A failed save reports why and puts back what the file holds.
-  const saveUserSettings = useCallback(async (settings: DesktopUserSettings): Promise<DesktopUserSettingsResult | null> => {
-    if (!userResult) {
-      setError("User settings are still loading.");
-      return null;
-    }
-    const requestId = userSaveRequestRef.next();
-    const previous = userResult;
-    setUserResult((current) => ({
-      settings,
-      source: current?.source ?? "default",
-      ...(current?.warning ? { warning: current.warning } : {}),
-      // The entries dohc could not use stay in their rows while it saves.
-      ...(current?.agentProblems ? { agentProblems: current.agentProblems } : {}),
-    }));
-    applyLookSettings(settings);
-    const look = currentLookRevision();
-    markSaving();
-    setError(null);
-    try {
-      const saved = await bridge().setUserSettings({ settings, base: previous.settings });
-      if (!userSaveRequestRef.isCurrent(requestId)) return saved;
-      setUserResult(saved);
-      markSaved();
-      return saved;
-    } catch (cause) {
-      // Closing Settings can cut a save off. Its failure still reports.
-      const cutOff = userSaveRequestRef.isCutOff(requestId);
-      if (!cutOff && !userSaveRequestRef.isCurrent(requestId)) return null;
-      setSaveState("error");
-      setError(ipcErrorMessage(cause));
-      const change = { settings, base: previous.settings };
-      if (cutOff) reportCutOffWrite(() => bridge().setUserSettings(change), saveWords, cause);
-      else props.onError?.(saveWords(cause), cause);
-      // `previous` can hold a change an earlier save failed to make, so the
-      // dialog goes back to the settings the file holds. A cut-off save puts
-      // back the look only while no newer look, from a reopened Settings or
-      // another window, has replaced its own.
-      const restored = await bridge().getUserSettings().catch(() => previous);
-      if (cutOff ? currentLookRevision() !== look : !userSaveRequestRef.isCurrent(requestId)) return null;
-      setUserResult(restored);
-      applyLookSettings(restored.settings);
-      return null;
-    }
-  }, [markSaved, markSaving, props.onError, userResult]);
+  const saveUserSettings = useCallback(
+    async (settings: DesktopUserSettings): Promise<DesktopUserSettingsResult | null> => {
+      if (!userResult) {
+        setError("User settings are still loading.");
+        return null;
+      }
+      const requestId = userSaveRequestRef.next();
+      const previous = userResult;
+      setUserResult((current) => ({
+        settings,
+        source: current?.source ?? "default",
+        ...(current?.warning ? { warning: current.warning } : {}),
+        // The entries dohc could not use stay in their rows while it saves.
+        ...(current?.agentProblems ? { agentProblems: current.agentProblems } : {}),
+      }));
+      applyLookSettings(settings);
+      const look = currentLookRevision();
+      markSaving();
+      setError(null);
+      try {
+        const saved = await bridge().setUserSettings({ settings, base: previous.settings });
+        if (!userSaveRequestRef.isCurrent(requestId)) return saved;
+        setUserResult(saved);
+        markSaved();
+        return saved;
+      } catch (cause) {
+        // Closing Settings can cut a save off. Its failure still reports.
+        const cutOff = userSaveRequestRef.isCutOff(requestId);
+        if (!cutOff && !userSaveRequestRef.isCurrent(requestId)) return null;
+        setSaveState("error");
+        setError(ipcErrorMessage(cause));
+        const change = { settings, base: previous.settings };
+        if (cutOff) reportCutOffWrite(() => bridge().setUserSettings(change), saveWords, cause);
+        else props.onError?.(saveWords(cause), cause);
+        // `previous` can hold a change an earlier save failed to make, so the
+        // dialog goes back to the settings the file holds. A cut-off save puts
+        // back the look only while no newer look, from a reopened Settings or
+        // another window, has replaced its own.
+        const restored = await bridge()
+          .getUserSettings()
+          .catch(() => previous);
+        if (cutOff ? currentLookRevision() !== look : !userSaveRequestRef.isCurrent(requestId))
+          return null;
+        setUserResult(restored);
+        applyLookSettings(restored.settings);
+        return null;
+      }
+    },
+    [markSaved, markSaving, props.onError, userResult],
+  );
 
   // Moves agents to the front of the file. A later save outranks it, as saves do.
-  const orderAgents = useCallback(async (order: readonly string[], failure?: string): Promise<boolean> => {
-    const requestId = userSaveRequestRef.next();
-    markSaving();
-    setError(null);
-    try {
-      const saved = await bridge().orderAgents({ order: [...order] });
-      if (!userSaveRequestRef.isCurrent(requestId)) return true;
-      setUserResult(saved);
-      markSaved();
-      return true;
-    } catch (cause) {
-      const cutOff = userSaveRequestRef.isCutOff(requestId);
-      if (!cutOff && !userSaveRequestRef.isCurrent(requestId)) return false;
-      setSaveState("error");
-      setError(ipcErrorMessage(cause));
-      const words = (reason: unknown) => (failure ? withErrorWords(failure, reason) : saveWords(reason));
-      if (cutOff) reportCutOffWrite(() => bridge().orderAgents({ order: [...order] }), words, cause);
-      else props.onError?.(words(cause), cause);
-      return false;
-    }
-  }, [markSaved, markSaving, props.onError]);
+  const orderAgents = useCallback(
+    async (order: readonly string[], failure?: string): Promise<boolean> => {
+      const requestId = userSaveRequestRef.next();
+      markSaving();
+      setError(null);
+      try {
+        const saved = await bridge().orderAgents({ order: [...order] });
+        if (!userSaveRequestRef.isCurrent(requestId)) return true;
+        setUserResult(saved);
+        markSaved();
+        return true;
+      } catch (cause) {
+        const cutOff = userSaveRequestRef.isCutOff(requestId);
+        if (!cutOff && !userSaveRequestRef.isCurrent(requestId)) return false;
+        setSaveState("error");
+        setError(ipcErrorMessage(cause));
+        const words = (reason: unknown) =>
+          failure ? withErrorWords(failure, reason) : saveWords(reason);
+        if (cutOff)
+          reportCutOffWrite(() => bridge().orderAgents({ order: [...order] }), words, cause);
+        else props.onError?.(words(cause), cause);
+        return false;
+      }
+    },
+    [markSaved, markSaving, props.onError],
+  );
 
   // Takes the changed controls, not the whole file. Main merges them onto the
   // settings on disk, so an edit made outside this dialog (or a file the user
@@ -423,10 +449,7 @@ export function SettingsDialog(props: {
       const token = workspaceTokenRef.current();
       const previous = workspaceResult;
       setWorkspaceResult((current) => ({
-        settings: mergeWorkspaceSettings(
-          current?.settings ?? DEFAULT_WORKSPACE_SETTINGS,
-          patch,
-        ),
+        settings: mergeWorkspaceSettings(current?.settings ?? DEFAULT_WORKSPACE_SETTINGS, patch),
         source: current?.source ?? "default",
         ...(current?.warning ? { warning: current.warning } : {}),
       }));
@@ -437,10 +460,7 @@ export function SettingsDialog(props: {
           workspaceId: props.workspaceId,
           patch,
         });
-        if (
-          !workspaceTokenRef.isCurrent(token) ||
-          !workspaceSaveRequestRef.isCurrent(requestId)
-        ) {
+        if (!workspaceTokenRef.isCurrent(token) || !workspaceSaveRequestRef.isCurrent(requestId)) {
           return;
         }
         // A refusal means main wrote nothing: it holds the settings file dohc
@@ -462,33 +482,47 @@ export function SettingsDialog(props: {
         );
       }
     },
-    [markSaved, markSaving, onWorkspaceSettingsRead, props.onError, props.workspaceId, workspaceResult],
+    [
+      markSaved,
+      markSaving,
+      onWorkspaceSettingsRead,
+      props.onError,
+      props.workspaceId,
+      workspaceResult,
+    ],
   );
 
   // Zoom goes through main's one serialized mutation instead of a full-file
   // save: main persists the level before re-tinting the windows, and its
   // answer is the settings now on disk, so the row paints the level actually
   // in effect.
-  const stepZoomSetting = useCallback(async (step: "in" | "out" | "reset") => {
-    const requestId = userSaveRequestRef.next();
-    markSaving();
-    setError(null);
-    try {
-      const saved = await bridge().stepWindowZoom({ step });
-      if (!userSaveRequestRef.isCurrent(requestId)) return;
-      setUserResult(saved);
-      markSaved();
-    } catch (cause) {
-      // Open Settings shows the refusal, which names the file and the way
-      // out. Once closing Settings cut the step off, it reports instead.
-      if (userSaveRequestRef.isCutOff(requestId)) {
-        reportCutOffWrite(() => bridge().stepWindowZoom({ step }), (reason) => ipcErrorMessage(reason, "dohc could not change the window zoom."), cause);
+  const stepZoomSetting = useCallback(
+    async (step: "in" | "out" | "reset") => {
+      const requestId = userSaveRequestRef.next();
+      markSaving();
+      setError(null);
+      try {
+        const saved = await bridge().stepWindowZoom({ step });
+        if (!userSaveRequestRef.isCurrent(requestId)) return;
+        setUserResult(saved);
+        markSaved();
+      } catch (cause) {
+        // Open Settings shows the refusal, which names the file and the way
+        // out. Once closing Settings cut the step off, it reports instead.
+        if (userSaveRequestRef.isCutOff(requestId)) {
+          reportCutOffWrite(
+            () => bridge().stepWindowZoom({ step }),
+            (reason) => ipcErrorMessage(reason, "dohc could not change the window zoom."),
+            cause,
+          );
+        }
+        if (!userSaveRequestRef.isCurrent(requestId)) return;
+        setSaveState("error");
+        setError(ipcErrorMessage(cause));
       }
-      if (!userSaveRequestRef.isCurrent(requestId)) return;
-      setSaveState("error");
-      setError(ipcErrorMessage(cause));
-    }
-  }, [markSaved, markSaving]);
+    },
+    [markSaved, markSaving],
+  );
 
   const resetUserSettings = useCallback(async () => {
     const requestId = userSaveRequestRef.next();
@@ -505,7 +539,8 @@ export function SettingsDialog(props: {
       if (!cutOff && !userSaveRequestRef.isCurrent(requestId)) return;
       setSaveState("error");
       setError(ipcErrorMessage(cause));
-      const words = (reason: unknown) => ipcErrorMessage(reason, "dohc could not reset your settings.");
+      const words = (reason: unknown) =>
+        ipcErrorMessage(reason, "dohc could not reset your settings.");
       if (cutOff) reportCutOffWrite(() => bridge().resetUserSettings(), words, cause);
       else props.onError?.(words(cause), cause);
     }
@@ -520,10 +555,7 @@ export function SettingsDialog(props: {
       const next = await bridge().resetWorkspaceSettings({
         workspaceId: props.workspaceId,
       });
-      if (
-        !workspaceTokenRef.isCurrent(token) ||
-        !workspaceSaveRequestRef.isCurrent(requestId)
-      ) {
+      if (!workspaceTokenRef.isCurrent(token) || !workspaceSaveRequestRef.isCurrent(requestId)) {
         return;
       }
       setWorkspaceResult(next);
@@ -547,32 +579,40 @@ export function SettingsDialog(props: {
   // Trusted opens main's dialog, and the person answers there. Restricted
   // Mode also stops the workspace's running app commands.
   const { requestTrust, restrict } = workspaceTrust;
-  const changeWorkspaceTrust = useCallback(async (value: "trusted" | "restricted") => {
-    try {
-      if (value === "trusted") await requestTrust();
-      else await restrict();
-    } catch (cause) {
-      props.onError?.(
-        ipcErrorMessage(cause, value === "trusted"
-          ? "dohc could not trust this workspace."
-          : "dohc could not put this workspace in Restricted Mode."),
-        cause,
-        () => changeWorkspaceTrust(value),
-      );
-    }
-  }, [props.onError, requestTrust, restrict]);
+  const changeWorkspaceTrust = useCallback(
+    async (value: "trusted" | "restricted") => {
+      try {
+        if (value === "trusted") await requestTrust();
+        else await restrict();
+      } catch (cause) {
+        props.onError?.(
+          ipcErrorMessage(
+            cause,
+            value === "trusted"
+              ? "dohc could not trust this workspace."
+              : "dohc could not put this workspace in Restricted Mode.",
+          ),
+          cause,
+          () => changeWorkspaceTrust(value),
+        );
+      }
+    },
+    [props.onError, requestTrust, restrict],
+  );
 
   const userSettings = userResult?.settings ?? DEFAULT_USER_SETTINGS;
   const colorScheme = useColorScheme();
   const workspaceSettings = workspaceResult?.settings ?? DEFAULT_WORKSPACE_SETTINGS;
   const activeMeta =
-    SETTINGS_SECTIONS.find((section) => section.id === activeSection) ??
-    SETTINGS_SECTIONS[0];
+    SETTINGS_SECTIONS.find((section) => section.id === activeSection) ?? SETTINGS_SECTIONS[0];
   const zoomModified = isModified(
     userSettings.appearance.zoomLevel,
     DEFAULT_USER_SETTINGS.appearance.zoomLevel,
   );
-  const editorSizeModified = isModified(userSettings.editor.fontSize, DEFAULT_USER_SETTINGS.editor.fontSize);
+  const editorSizeModified = isModified(
+    userSettings.editor.fontSize,
+    DEFAULT_USER_SETTINGS.editor.fontSize,
+  );
   const shortcutPlatform = window.dohcDesktop?.platform;
 
   const warnings = [
@@ -603,7 +643,11 @@ export function SettingsDialog(props: {
 
     if (!props.workspaceIsReady && activeMeta.scope !== "User") {
       if (props.workspaceOpenFailed) {
-        return <p className="text-sm text-muted">Couldn’t open this workspace. Close Settings to try again.</p>;
+        return (
+          <p className="text-sm text-muted">
+            Couldn’t open this workspace. Close Settings to try again.
+          </p>
+        );
       }
       return <SkeletonRows layout="panel" label="Loading settings..." />;
     }
@@ -679,8 +723,7 @@ export function SettingsDialog(props: {
               >
                 <ColorControl
                   label="Accent color"
-                  value={userSettings.appearance.accentColor ??
-                    palette[colorScheme].accent}
+                  value={userSettings.appearance.accentColor ?? palette[colorScheme].accent}
                   onChange={(accentColor) => void saveAppearance({ accentColor })}
                 />
               </SettingRow>
@@ -713,8 +756,13 @@ export function SettingsDialog(props: {
             <SettingsSection title="Editor">
               <SettingRow
                 title="Editor font"
-                modified={isModified(userSettings.editor.fontFamily, DEFAULT_USER_SETTINGS.editor.fontFamily)}
-                onReset={() => void saveEditor({ fontFamily: DEFAULT_USER_SETTINGS.editor.fontFamily })}
+                modified={isModified(
+                  userSettings.editor.fontFamily,
+                  DEFAULT_USER_SETTINGS.editor.fontFamily,
+                )}
+                onReset={() =>
+                  void saveEditor({ fontFamily: DEFAULT_USER_SETTINGS.editor.fontFamily })
+                }
                 testId="settings-row-editor-font"
                 {...customizeRow("settings-row-editor-font")}
               >
@@ -728,7 +776,12 @@ export function SettingsDialog(props: {
                     // A font installed on this computer that the file names.
                     ...((EDITOR_FONTS as readonly string[]).includes(userSettings.editor.fontFamily)
                       ? []
-                      : [{ value: userSettings.editor.fontFamily, label: userSettings.editor.fontFamily }]),
+                      : [
+                          {
+                            value: userSettings.editor.fontFamily,
+                            label: userSettings.editor.fontFamily,
+                          },
+                        ]),
                   ]}
                   onChange={(fontFamily) => void saveEditor({ fontFamily })}
                 />
@@ -751,7 +804,8 @@ export function SettingsDialog(props: {
                     label: `Reset to ${DEFAULT_USER_SETTINGS.editor.fontSize}px`,
                     to: `${DEFAULT_USER_SETTINGS.editor.fontSize}px`,
                     onClick: () => {
-                      if (editorSizeModified) void saveEditor({ fontSize: DEFAULT_USER_SETTINGS.editor.fontSize });
+                      if (editorSizeModified)
+                        void saveEditor({ fontSize: DEFAULT_USER_SETTINGS.editor.fontSize });
                     },
                   }}
                   increase={{
@@ -767,7 +821,11 @@ export function SettingsDialog(props: {
       case "keyboard":
         return (
           <div data-testid={settingsSectionPin("keyboard")}>
-            <KeyboardSettings platform={shortcutPlatform} devTools={bridge().devTools} query={query} />
+            <KeyboardSettings
+              platform={shortcutPlatform}
+              devTools={bridge().devTools}
+              query={query}
+            />
           </div>
         );
       case "agents":
@@ -776,7 +834,9 @@ export function SettingsDialog(props: {
             <AgentsMcpSettings
               onError={props.onError}
               workspaceId={props.workspaceId}
-              workspaceName={props.workspaceName ?? workspaceName({ rootPath: props.workspacePath })}
+              workspaceName={
+                props.workspaceName ?? workspaceName({ rootPath: props.workspacePath })
+              }
               {...(props.openAgent ? { openAgent: props.openAgent } : {})}
               settings={userSettings}
               agentProblems={userResult?.agentProblems}
@@ -800,7 +860,12 @@ export function SettingsDialog(props: {
           <div data-testid={settingsSectionPin("cloud")}>
             <SettingsSection>
               {props.cloud ? (
-                <CloudSyncSettings workspaceId={props.workspaceId} sharedView={props.sharedView} cloud={props.cloud} agents={userSettings.agents} />
+                <CloudSyncSettings
+                  workspaceId={props.workspaceId}
+                  sharedView={props.sharedView}
+                  cloud={props.cloud}
+                  agents={userSettings.agents}
+                />
               ) : null}
               {!props.sharedView && props.onOpenLiveDocuments ? (
                 <SettingRow
@@ -838,13 +903,20 @@ export function SettingsDialog(props: {
               onDefaultReset={() =>
                 void saveWorkspaceSettings({
                   sites: {
-                    defaultPreviewMode:
-                      DEFAULT_WORKSPACE_SETTINGS.sites.defaultPreviewMode,
+                    defaultPreviewMode: DEFAULT_WORKSPACE_SETTINGS.sites.defaultPreviewMode,
                   },
                 })
               }
               {...(!props.sharedView
-                ? { trust: { trusted: workspaceTrust.trusted, onOpen: () => { setQuery(""); setActiveSection("privacy"); } } }
+                ? {
+                    trust: {
+                      trusted: workspaceTrust.trusted,
+                      onOpen: () => {
+                        setQuery("");
+                        setActiveSection("privacy");
+                      },
+                    },
+                  }
                 : {})}
               pinned={pinnedAppsFor(userSettings, props.workspaceId)}
               {...(props.onSetAppPinned ? { onSetPinned: props.onSetAppPinned } : {})}
@@ -867,8 +939,7 @@ export function SettingsDialog(props: {
                 onReset={() =>
                   void saveWorkspaceSettings({
                     files: {
-                      attachmentLocation:
-                        DEFAULT_WORKSPACE_SETTINGS.files.attachmentLocation,
+                      attachmentLocation: DEFAULT_WORKSPACE_SETTINGS.files.attachmentLocation,
                     },
                   })
                 }
@@ -901,8 +972,7 @@ export function SettingsDialog(props: {
                 onReset={() =>
                   void saveWorkspaceSettings({
                     files: {
-                      attachmentFolderName:
-                        DEFAULT_WORKSPACE_SETTINGS.files.attachmentFolderName,
+                      attachmentFolderName: DEFAULT_WORKSPACE_SETTINGS.files.attachmentFolderName,
                     },
                   })
                 }
@@ -976,8 +1046,7 @@ export function SettingsDialog(props: {
                 onReset={() =>
                   void saveWorkspaceSettings({
                     privacy: {
-                      confirmExternalLinks:
-                        DEFAULT_WORKSPACE_SETTINGS.privacy.confirmExternalLinks,
+                      confirmExternalLinks: DEFAULT_WORKSPACE_SETTINGS.privacy.confirmExternalLinks,
                     },
                   })
                 }
@@ -1016,8 +1085,12 @@ export function SettingsDialog(props: {
               >
                 {settingsFilePath ? (
                   <div className="min-w-0 max-w-70">
-                    <CopyField label="Copy settings file path" copiedLabel="Path copied"
-                      copyTestId="settings-file-path-copy" getText={() => settingsFilePath}>
+                    <CopyField
+                      label="Copy settings file path"
+                      copiedLabel="Path copied"
+                      copyTestId="settings-file-path-copy"
+                      getText={() => settingsFilePath}
+                    >
                       <code title={settingsFilePath}>{settingsFilePath}</code>
                     </CopyField>
                   </div>
@@ -1069,7 +1142,12 @@ export function SettingsDialog(props: {
               <div
                 data-testid="settings-row-preferred-name"
                 {...(props.focus?.row === "settings-row-preferred-name"
-                  ? { "data-highlighted": true, role: "group", "aria-label": "Profile", tabIndex: -1 }
+                  ? {
+                      "data-highlighted": true,
+                      role: "group",
+                      "aria-label": "Profile",
+                      tabIndex: -1,
+                    }
                   : {})}
                 className={`py-5 ${props.focus?.row === "settings-row-preferred-name" ? "-mx-2 my-2 rounded-md bg-selected px-2 py-3" : ""}`}
               >
@@ -1086,7 +1164,11 @@ export function SettingsDialog(props: {
                   <div data-testid="settings-row-your-color" className="flex items-center gap-2">
                     {/* Reset gives the choice back to dohc. */}
                     <ResetButton
-                      onReset={userSettings.appearance.yourColor === null ? undefined : () => void saveAppearance({ yourColor: null })}
+                      onReset={
+                        userSettings.appearance.yourColor === null
+                          ? undefined
+                          : () => void saveAppearance({ yourColor: null })
+                      }
                     />
                     <HueControl
                       label="Your color"
@@ -1102,18 +1184,26 @@ export function SettingsDialog(props: {
               <SettingRow
                 title="dohc"
                 lead={
-                  <span aria-hidden className="grid size-9 shrink-0 place-items-center rounded-lg border border-line bg-bg text-ink">
+                  <span
+                    aria-hidden
+                    className="grid size-9 shrink-0 place-items-center rounded-lg border border-line bg-bg text-ink"
+                  >
                     <DohcMark size={18} />
                   </span>
                 }
                 // No channel: a nightly's version names it, and "latest"
                 // beside a failure reads as up to date.
-                detail={updateState?.currentVersion ? (
-                  <span data-testid="desktop-updates-version" className="font-mono text-[12px] tabular-nums text-subtle">
-                    <span className="sr-only">Version </span>
-                    {updateState.currentVersion}
-                  </span>
-                ) : null}
+                detail={
+                  updateState?.currentVersion ? (
+                    <span
+                      data-testid="desktop-updates-version"
+                      className="font-mono text-[12px] tabular-nums text-subtle"
+                    >
+                      <span className="sr-only">Version </span>
+                      {updateState.currentVersion}
+                    </span>
+                  ) : null
+                }
                 description={
                   <span
                     data-testid="desktop-updates-status"
@@ -1123,14 +1213,23 @@ export function SettingsDialog(props: {
                     {updateState ? updateStatusLine(updateState) : "Update status unavailable."}
                   </span>
                 }
-                aside={updateState?.installCommand ? (
-                  <CopyField label="Copy install command" copiedLabel="Install command copied"
-                    copyTestId="desktop-updates-install-command-copy" getText={() => updateState.installCommand ?? null}>
-                    <code data-testid="desktop-updates-install-command" title={updateState.installCommand}>
-                      {updateState.installCommand}
-                    </code>
-                  </CopyField>
-                ) : undefined}
+                aside={
+                  updateState?.installCommand ? (
+                    <CopyField
+                      label="Copy install command"
+                      copiedLabel="Install command copied"
+                      copyTestId="desktop-updates-install-command-copy"
+                      getText={() => updateState.installCommand ?? null}
+                    >
+                      <code
+                        data-testid="desktop-updates-install-command"
+                        title={updateState.installCommand}
+                      >
+                        {updateState.installCommand}
+                      </code>
+                    </CopyField>
+                  ) : undefined
+                }
                 testId="settings-row-desktop-updates"
               >
                 {/* One button for every step. It fills once the next step is
@@ -1209,12 +1308,18 @@ export function SettingsDialog(props: {
           {/* Only Sharing matched: no section's heading stands over its results. */}
           <h3
             // The Agents and Apps pages show their own titles.
-            hidden={activeSection === "agents" || activeSection === "apps" || (!!query.trim() && filteredSections.length === 0 && sharingResults.length > 0)}
+            hidden={
+              activeSection === "agents" ||
+              activeSection === "apps" ||
+              (!!query.trim() && filteredSections.length === 0 && sharingResults.length > 0)
+            }
             className="m-0 mb-6 text-base font-semibold text-ink"
           >
             {activeMeta.label}
           </h3>
-          {props.onOpenSharing ? <SharingSearchResults results={sharingResults} onOpen={props.onOpenSharing} /> : null}
+          {props.onOpenSharing ? (
+            <SharingSearchResults results={sharingResults} onOpen={props.onOpenSharing} />
+          ) : null}
           {renderSection()}
         </section>
       </main>

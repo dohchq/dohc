@@ -56,11 +56,7 @@ function callHandleDomClick(
   view: Parameters<NonNullable<LinkPlugin["props"]["handleClick"]>>[0],
   event: MouseEvent,
 ): boolean | void | undefined {
-  return plugin.props.handleDOMEvents?.click?.call(
-    plugin,
-    view,
-    event as PointerEvent,
-  );
+  return plugin.props.handleDOMEvents?.click?.call(plugin, view, event as PointerEvent);
 }
 
 function callHandleAuxClick(
@@ -68,11 +64,7 @@ function callHandleAuxClick(
   view: Parameters<NonNullable<LinkPlugin["props"]["handleClick"]>>[0],
   event: MouseEvent,
 ): boolean | void | undefined {
-  return plugin.props.handleDOMEvents?.auxclick?.call(
-    plugin,
-    view,
-    event as PointerEvent,
-  );
+  return plugin.props.handleDOMEvents?.auxclick?.call(plugin, view, event as PointerEvent);
 }
 
 /** openLinkExternally asks the confirm gate before it reaches the bridge, so
@@ -85,22 +77,16 @@ async function flushExternalOpen(): Promise<void> {
 describe("normalizeLinkUrl", () => {
   it("prefixes a bare host with https://", () => {
     expect(normalizeLinkUrl("example.com")).toBe("https://example.com/");
-    expect(normalizeLinkUrl("example.com/path?a=1")).toBe(
-      "https://example.com/path?a=1",
-    );
+    expect(normalizeLinkUrl("example.com/path?a=1")).toBe("https://example.com/path?a=1");
   });
 
   it("keeps explicit http(s) URLs, case/host-normalized", () => {
     expect(normalizeLinkUrl("http://example.com")).toBe("http://example.com/");
-    expect(normalizeLinkUrl("HTTPS://Example.com/Path")).toBe(
-      "https://example.com/Path",
-    );
+    expect(normalizeLinkUrl("HTTPS://Example.com/Path")).toBe("https://example.com/Path");
   });
 
   it("normalizes network-path URLs to https", () => {
-    expect(normalizeLinkUrl("//example.com/path")).toBe(
-      "https://example.com/path",
-    );
+    expect(normalizeLinkUrl("//example.com/path")).toBe("https://example.com/path");
   });
 
   it("allows mailto, prefixing bare email addresses", () => {
@@ -110,9 +96,7 @@ describe("normalizeLinkUrl", () => {
 
   it("prefixes host:port dev links with https:// instead of rejecting them", () => {
     expect(normalizeLinkUrl("localhost:3000")).toBe("https://localhost:3000/");
-    expect(normalizeLinkUrl("example.com:8080/path")).toBe(
-      "https://example.com:8080/path",
-    );
+    expect(normalizeLinkUrl("example.com:8080/path")).toBe("https://example.com:8080/path");
     expect(normalizeLinkUrl("127.0.0.1:5173")).toBe("https://127.0.0.1:5173/");
     // A declared scheme with a numeric tail must not be misread as host:port.
     expect(normalizeLinkUrl("tel:1234")).toBeNull();
@@ -144,10 +128,7 @@ describe("openLinkExternally", () => {
     try {
       await expect(openLinkExternally("https://example.com")).resolves.toBeUndefined();
       expect(openExternalUrl).toHaveBeenCalledWith({ url: "https://example.com/" });
-      expect(warn).toHaveBeenCalledWith(
-        "[dohc] could not open external link:",
-        error,
-      );
+      expect(warn).toHaveBeenCalledWith("[dohc] could not open external link:", error);
     } finally {
       warn.mockRestore();
     }
@@ -216,9 +197,7 @@ describe("applyLinkMenu / removeLinkMenu (real Editor instance)", () => {
   });
 
   it("edits an existing link's href via a collapsed cursor inside it", () => {
-    const editor = makeEditor(
-      '<p><a href="https://old.example.com/">hello</a> world</p>',
-    );
+    const editor = makeEditor('<p><a href="https://old.example.com/">hello</a> world</p>');
     editor.commands.setTextSelection(3); // inside "hello"
     const state = computeLinkMenuState(editor.view);
     expect(state.open).toBe(true);
@@ -233,9 +212,7 @@ describe("applyLinkMenu / removeLinkMenu (real Editor instance)", () => {
   });
 
   it("removes a link, leaving the plain text behind", () => {
-    const editor = makeEditor(
-      '<p><a href="https://example.com/">hello</a> world</p>',
-    );
+    const editor = makeEditor('<p><a href="https://example.com/">hello</a> world</p>');
     editor.commands.setTextSelection(3);
     const state = computeLinkMenuState(editor.view);
     expect(state.open).toBe(true);
@@ -311,9 +288,7 @@ describe("makeLinkMenuPlugin: click", () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it("opens the popover in edit mode when clicking a link", () => {
-    const editor = makeEditor(
-      '<p><a href="https://example.com/">hello</a> world</p>',
-    );
+    const editor = makeEditor('<p><a href="https://example.com/">hello</a> world</p>');
     const setState = vi.fn();
     const plugin = makeLinkMenuPlugin({
       stateRef: { current: CLOSED_LINK_MENU_STATE },
@@ -345,47 +320,46 @@ describe("makeLinkMenuPlugin: click", () => {
   it.each([
     ["darwin", { metaKey: true, ctrlKey: false }],
     ["win32", { metaKey: false, ctrlKey: true }],
-  ] as const)("opens externally via the safe bridge on a %s primary-modifier click, without opening the popover", async (platform, modifiers) => {
-    vi.stubGlobal("dohcDesktop", { platform });
-    const openExternalUrl = vi.fn().mockResolvedValue(undefined);
-    vi.mocked(bridge).mockReturnValue({
-      openExternalUrl,
-    } as any);
+  ] as const)(
+    "opens externally via the safe bridge on a %s primary-modifier click, without opening the popover",
+    async (platform, modifiers) => {
+      vi.stubGlobal("dohcDesktop", { platform });
+      const openExternalUrl = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(bridge).mockReturnValue({
+        openExternalUrl,
+      } as any);
 
-    const editor = makeEditor(
-      '<p><a href="https://example.com/">hello</a> world</p>',
-    );
-    const setState = vi.fn();
-    const plugin = makeLinkMenuPlugin({
-      stateRef: { current: CLOSED_LINK_MENU_STATE },
-      setState,
-    });
-    const anchor = editor.view.dom.querySelector("a")!;
-    const pos = editor.view.posAtDOM(anchor, 0);
-    const event = {
-      target: anchor,
-      button: 0,
-      ...modifiers,
-      preventDefault: vi.fn(),
-    } as unknown as MouseEvent;
+      const editor = makeEditor('<p><a href="https://example.com/">hello</a> world</p>');
+      const setState = vi.fn();
+      const plugin = makeLinkMenuPlugin({
+        stateRef: { current: CLOSED_LINK_MENU_STATE },
+        setState,
+      });
+      const anchor = editor.view.dom.querySelector("a")!;
+      const pos = editor.view.posAtDOM(anchor, 0);
+      const event = {
+        target: anchor,
+        button: 0,
+        ...modifiers,
+        preventDefault: vi.fn(),
+      } as unknown as MouseEvent;
 
-    const handled = callHandleClick(plugin, editor.view, pos, event);
+      const handled = callHandleClick(plugin, editor.view, pos, event);
 
-    expect(handled).toBe(true);
-    expect(event.preventDefault).toHaveBeenCalled();
-    await flushExternalOpen();
-    expect(openExternalUrl).toHaveBeenCalledWith({ url: "https://example.com/" });
-    expect(setState).not.toHaveBeenCalled();
-    editor.destroy();
-  });
+      expect(handled).toBe(true);
+      expect(event.preventDefault).toHaveBeenCalled();
+      await flushExternalOpen();
+      expect(openExternalUrl).toHaveBeenCalledWith({ url: "https://example.com/" });
+      expect(setState).not.toHaveBeenCalled();
+      editor.destroy();
+    },
+  );
 
   it("leaves a macOS Control-click to the context menu", async () => {
     vi.stubGlobal("dohcDesktop", { platform: "darwin" });
     const openExternalUrl = vi.fn().mockResolvedValue(undefined);
     vi.mocked(bridge).mockReturnValue({ openExternalUrl } as unknown as ReturnType<typeof bridge>);
-    const editor = makeEditor(
-      '<p><a href="https://example.com/">hello</a> world</p>',
-    );
+    const editor = makeEditor('<p><a href="https://example.com/">hello</a> world</p>');
     const setState = vi.fn();
     const plugin = makeLinkMenuPlugin({
       stateRef: { current: CLOSED_LINK_MENU_STATE },
@@ -416,9 +390,7 @@ describe("makeLinkMenuPlugin: click", () => {
       openExternalUrl,
     } as any);
 
-    const editor = makeEditor(
-      '<p><a href="https://example.com/a%20path">hello</a> world</p>',
-    );
+    const editor = makeEditor('<p><a href="https://example.com/a%20path">hello</a> world</p>');
     editor.setEditable(false);
     const setState = vi.fn();
     const plugin = makeLinkMenuPlugin({
@@ -475,9 +447,7 @@ describe("makeLinkMenuPlugin: click", () => {
       openExternalUrl,
     } as any);
 
-    const editor = makeEditor(
-      '<p><a href="../plans/launch.md#risks">launch plan</a></p>',
-    );
+    const editor = makeEditor('<p><a href="../plans/launch.md#risks">launch plan</a></p>');
     editor.setEditable(false);
     const plugin = makeLinkMenuPlugin({
       stateRef: { current: CLOSED_LINK_MENU_STATE },
@@ -525,11 +495,7 @@ describe("makeLinkMenuPlugin: click", () => {
   });
 
   it.each([
-    [
-      "relative query",
-      "plan.md?mode=preview#risks",
-      { path: "./plan.md", rawFragment: "risks" },
-    ],
+    ["relative query", "plan.md?mode=preview#risks", { path: "./plan.md", rawFragment: "risks" }],
     [
       "root-relative query",
       "/plan.md?mode=preview#risks",
@@ -545,11 +511,7 @@ describe("makeLinkMenuPlugin: click", () => {
       "%23notes.md?mode=preview#risks",
       { path: "./#notes.md", rawFragment: "risks" },
     ],
-    [
-      "multiple hashes in a filename",
-      "new%23release%231.md",
-      { path: "./new#release#1.md" },
-    ],
+    ["multiple hashes in a filename", "new%23release%231.md", { path: "./new#release#1.md" }],
     [
       "root-relative encoded delimiter",
       "/%23notes.md?mode=preview#risks",
@@ -565,21 +527,9 @@ describe("makeLinkMenuPlugin: click", () => {
       "../faq%3F.md?mode=preview#answers",
       { path: "../faq?.md", rawFragment: "answers" },
     ],
-    [
-      "same-document encoded fragment",
-      "#next%20steps",
-      { path: "", rawFragment: "next%20steps" },
-    ],
-    [
-      "same-document double-encoded fragment",
-      "#a%2520b",
-      { path: "", rawFragment: "a%2520b" },
-    ],
-    [
-      "empty same-document fragment",
-      "#",
-      { path: "", rawFragment: "" },
-    ],
+    ["same-document encoded fragment", "#next%20steps", { path: "", rawFragment: "next%20steps" }],
+    ["same-document double-encoded fragment", "#a%2520b", { path: "", rawFragment: "a%2520b" }],
+    ["empty same-document fragment", "#", { path: "", rawFragment: "" }],
     [
       "malformed path and fragment escapes",
       "%E0%A4%A.md?mode=preview#bad%E0%A4%A",
@@ -642,28 +592,16 @@ describe("makeLinkMenuPlugin: click", () => {
       { path: "../plans/launch plan.md", rawFragment: "next%20steps" },
     ],
     ["non-ASCII text", "../notes/caf%C3%A9.md", { path: "../notes/café.md" }],
-    [
-      "mixed valid escapes and a literal percent",
-      "Q2%20at%20100%.md",
-      { path: "./Q2 at 100%.md" },
-    ],
+    ["mixed valid escapes and a literal percent", "Q2%20at%20100%.md", { path: "./Q2 at 100%.md" }],
     [
       "valid escapes before malformed UTF-8",
       "Q2%20bad%E0%A4%A.md",
       { path: "./Q2 bad%E0%A4%A.md" },
     ],
-    [
-      "an incomplete multibyte escape",
-      "../notes/%E0%A4.md",
-      { path: "../notes/%E0%A4.md" },
-    ],
+    ["an incomplete multibyte escape", "../notes/%E0%A4.md", { path: "../notes/%E0%A4.md" }],
     ["an encoded percent", "../notes/100%25.md", { path: "../notes/100%.md" }],
     ["a literal percent", "../notes/100%.md", { path: "../notes/100%.md" }],
-    [
-      "malformed percent input",
-      "../plans/%E0%A4%A.md",
-      { path: "../plans/%E0%A4%A.md" },
-    ],
+    ["malformed percent input", "../plans/%E0%A4%A.md", { path: "../plans/%E0%A4%A.md" }],
   ])("decodes %s in a read-only workspace link", async (_label, href, expected) => {
     const openWorkspaceLink = vi.fn();
     const openExternalUrl = vi.fn().mockResolvedValue(undefined);
@@ -890,9 +828,7 @@ describe("makeLinkMenuPlugin: click", () => {
       openExternalUrl,
     } as any);
 
-    const editor = makeEditor(
-      '<p><a href="https://example.com/keyboard">keyboard link</a></p>',
-    );
+    const editor = makeEditor('<p><a href="https://example.com/keyboard">keyboard link</a></p>');
     editor.setEditable(false);
     const plugin = makeLinkMenuPlugin({
       stateRef: { current: CLOSED_LINK_MENU_STATE },

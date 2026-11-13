@@ -3,7 +3,11 @@ import { mkdir, open, readFile } from "node:fs/promises";
 import { atomicReplaceFile } from "../atomicReplaceFile";
 import { dirname } from "node:path";
 import { isAutomationWake } from "@dohc/workspace-contracts/relay";
-import { automationMessageId, automationWakeThreadId, type AutomationChatMessage } from "@dohc/automation-executor/automation-chat";
+import {
+  automationMessageId,
+  automationWakeThreadId,
+  type AutomationChatMessage,
+} from "@dohc/automation-executor/automation-chat";
 import type { PendingAutomationWake } from "../notices/noticeStore";
 
 export interface AutomationWakeIntent extends PendingAutomationWake {
@@ -19,20 +23,31 @@ export function createAutomationWakeIntents(file: string) {
   };
   const read = async (): Promise<AutomationWakeIntent[]> => {
     let text: string;
-    try { text = await readFile(file, "utf8"); }
-    catch (error) {
+    try {
+      text = await readFile(file, "utf8");
+    } catch (error) {
       if (error instanceof Error && "code" in error && error.code === "ENOENT") return [];
       throw error;
     }
     const value: unknown = JSON.parse(text);
-    if (!Array.isArray(value) || !value.every((row: unknown) => {
-      if (!row || typeof row !== "object") return false;
-      const intent = row as Record<string, unknown>;
-      return typeof intent.account === "string" && intent.account.length > 0 &&
-        typeof intent.workspaceId === "string" && intent.workspaceId.length > 0 &&
-        typeof intent.noticeId === "string" && /^automation-wake:[a-f0-9]{64}$/.test(intent.noticeId) &&
-        typeof intent.claimed === "boolean" && isAutomationWake(intent.wake);
-    })) throw new Error("The saved agent wakes could not be read.");
+    if (
+      !Array.isArray(value) ||
+      !value.every((row: unknown) => {
+        if (!row || typeof row !== "object") return false;
+        const intent = row as Record<string, unknown>;
+        return (
+          typeof intent.account === "string" &&
+          intent.account.length > 0 &&
+          typeof intent.workspaceId === "string" &&
+          intent.workspaceId.length > 0 &&
+          typeof intent.noticeId === "string" &&
+          /^automation-wake:[a-f0-9]{64}$/.test(intent.noticeId) &&
+          typeof intent.claimed === "boolean" &&
+          isAutomationWake(intent.wake)
+        );
+      })
+    )
+      throw new Error("The saved agent wakes could not be read.");
     return value as AutomationWakeIntent[];
   };
   const same = (a: PendingAutomationWake, b: PendingAutomationWake) =>
@@ -41,25 +56,39 @@ export function createAutomationWakeIntents(file: string) {
     await mkdir(dirname(file), { recursive: true });
     await atomicReplaceFile(file, async (temporary) => {
       const handle = await open(temporary, "w", 0o600);
-      try { await handle.writeFile(JSON.stringify(rows) + "\n"); await handle.sync(); }
-      finally { await handle.close(); }
+      try {
+        await handle.writeFile(JSON.stringify(rows) + "\n");
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
     });
   };
   return {
     list: () => serial(read),
-    save: (intent: AutomationWakeIntent) => serial(async () =>
-      write([...(await read()).filter((row) => !same(row, intent)), intent])),
-    remove: (intent: AutomationWakeIntent) => serial(async () =>
-      write((await read()).filter((row) => !same(row, intent)))),
+    save: (intent: AutomationWakeIntent) =>
+      serial(async () => write([...(await read()).filter((row) => !same(row, intent)), intent])),
+    remove: (intent: AutomationWakeIntent) =>
+      serial(async () => write((await read()).filter((row) => !same(row, intent)))),
   };
 }
 
 export function automationWakeMessage(intent: PendingAutomationWake): AutomationChatMessage {
-  const effectId = "relay-wake:" + createHash("sha256").update(JSON.stringify([intent.account, intent.noticeId])).digest("hex");
+  const effectId =
+    "relay-wake:" +
+    createHash("sha256")
+      .update(JSON.stringify([intent.account, intent.noticeId]))
+      .digest("hex");
   return {
-    target: { kind: "agent" }, effectId, messageId: automationMessageId(effectId),
+    target: { kind: "agent" },
+    effectId,
+    messageId: automationMessageId(effectId),
     threadId: automationWakeThreadId(intent.wake.automationId),
-    automation: { automationId: intent.wake.automationId, name: intent.wake.name, depth: intent.wake.depth },
+    automation: {
+      automationId: intent.wake.automationId,
+      name: intent.wake.name,
+      depth: intent.wake.depth,
+    },
     body: intent.wake.body,
   };
 }
@@ -95,10 +124,15 @@ export function createAutomationWakeConsumer(deps: {
           const saved = await deps.intents.list();
           if (stopped) break;
           const pending = await deps.pending();
-          const savedKeys = new Set(saved.map((row) => JSON.stringify([row.account, row.noticeId])));
-          const intents = [...saved, ...pending.filter((row) =>
-            !savedKeys.has(JSON.stringify([row.account, row.noticeId])))
-            .map((row) => ({ ...row, claimed: false }))];
+          const savedKeys = new Set(
+            saved.map((row) => JSON.stringify([row.account, row.noticeId])),
+          );
+          const intents = [
+            ...saved,
+            ...pending
+              .filter((row) => !savedKeys.has(JSON.stringify([row.account, row.noticeId])))
+              .map((row) => ({ ...row, claimed: false })),
+          ];
           for (const intent of intents) {
             // Admission, and the check after pending: past it the intent runs its whole path.
             if (stopped) break;
@@ -107,12 +141,16 @@ export function createAutomationWakeConsumer(deps: {
             attempted.add(key);
             try {
               if (!(await deps.ready(intent, false))) continue;
-              if (!(await deps.ready(intent, true)) && await deps.enabledIfOpen(intent) !== false) continue;
+              if (!(await deps.ready(intent, true)) && (await deps.enabledIfOpen(intent)) !== false)
+                continue;
               if (!intent.claimed) {
                 await deps.intents.save(intent);
                 const result = await deps.dismiss(intent);
                 if (result === "unanswered") continue;
-                if (result === "not-first") { await deps.intents.remove(intent); continue; }
+                if (result === "not-first") {
+                  await deps.intents.remove(intent);
+                  continue;
+                }
                 intent.claimed = true;
                 await deps.intents.save(intent);
               }
@@ -122,17 +160,23 @@ export function createAutomationWakeConsumer(deps: {
                   if (!(await deps.ready(intent, true))) continue;
                   await deps.wake(intent, automationWakeMessage(intent));
                 }
-              } else if (await deps.enabledIfOpen(intent) !== false) continue;
+              } else if ((await deps.enabledIfOpen(intent)) !== false) continue;
               await deps.intents.remove(intent);
-            } catch (error) { deps.onError(error); }
+            } catch (error) {
+              deps.onError(error);
+            }
           }
         }
-      })().catch(deps.onError).finally(() => { running = null; });
+      })()
+        .catch(deps.onError)
+        .finally(() => {
+          running = null;
+        });
       return running;
     },
     stop(): Promise<void> {
       again = false;
-      return stopped ??= running ?? Promise.resolve();
+      return (stopped ??= running ?? Promise.resolve());
     },
   };
 }

@@ -1,7 +1,4 @@
-import {
-  exceedsUtf8Bytes,
-  utf8ByteLength,
-} from "../../workspaces/workspaceTextLimits";
+import { exceedsUtf8Bytes, utf8ByteLength } from "../../workspaces/workspaceTextLimits";
 
 // What one conflict side is allowed to paint, and what a combined copy is
 // allowed to hold.
@@ -142,9 +139,7 @@ function isHighSurrogate(code: number): boolean {
 
 /// What one change to the combined copy does: it is taken, or it is refused
 /// for being past the editing bound and the attempted size is reported.
-type CombinedChange =
-  | { accepted: true; text: string }
-  | { accepted: false; refusedBytes: number };
+type CombinedChange = { accepted: true; text: string } | { accepted: false; refusedBytes: number };
 
 /// The decision behind every keystroke in the combine textarea.
 ///

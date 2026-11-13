@@ -10,12 +10,20 @@ import { harnessBridge } from "./collab/engineDocSaveStateTestHarness";
 import { FileInspector } from "./FileInspector";
 import { REPLACED_HISTORY_DRAFT_NOTICE } from "./fileInspectorUi";
 import { REPLACEMENT_FAILED_REASON } from "./readOnlyReasons";
-import { resetOrphanedDraftsAndSettle, settleAfterUnmount, TEST_CONTENT_HASH } from "./FileInspector.draft-fixture";
+import {
+  resetOrphanedDraftsAndSettle,
+  settleAfterUnmount,
+  TEST_CONTENT_HASH,
+} from "./FileInspector.draft-fixture";
 import { stubEditorGlobals } from "./FileInspector.editor-fixture";
 import { loadStoredDrafts } from "./orphanedDraftStorage";
 import { errorDetails } from "./shell/copyDetails";
 import { ConnectionNotices } from "./shell/connectionNotices";
-import { REPLACED_DOCUMENT_SAVED, REPLACED_DOCUMENT_UNSAVED, useDocumentSaveNotices } from "./shell/useDocumentSaveNotices";
+import {
+  REPLACED_DOCUMENT_SAVED,
+  REPLACED_DOCUMENT_UNSAVED,
+  useDocumentSaveNotices,
+} from "./shell/useDocumentSaveNotices";
 import { useShellError } from "./shell/useShellError";
 
 setupFileInspectorTests();
@@ -27,7 +35,12 @@ let harness: ReturnType<typeof harnessBridge>;
 // that can belong to another one.
 function Shell(props: { workspaceId: string; children: ReactNode }) {
   const shell = useShellError(props.workspaceId);
-  useDocumentSaveNotices({ workspaceId: props.workspaceId, report: shell.reportShellFailure, clear: shell.clearIdentity, open: () => undefined });
+  useDocumentSaveNotices({
+    workspaceId: props.workspaceId,
+    report: shell.reportShellFailure,
+    clear: shell.clearIdentity,
+    open: () => undefined,
+  });
   return (
     <>
       <ConnectionNotices
@@ -81,10 +94,17 @@ beforeEach(() => {
   vi.stubGlobal("dohcDesktop", {
     ...harness.api,
     onWorkspaceActivity: () => () => undefined,
-    readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(async () => ({ text: "", truncated: false, contentHash: TEST_CONTENT_HASH })),
+    readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(async () => ({
+      text: "",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    })),
     listWorkspaceFiles: async () => ({ files: [{ path: PATH, kind: "file" }], folders: [] }),
     readWorkspaceDatabase: async () => ({ tables: [] }),
-    getWorkspaceSettings: async () => ({ settings: DEFAULT_WORKSPACE_SETTINGS, source: "default" as const }),
+    getWorkspaceSettings: async () => ({
+      settings: DEFAULT_WORKSPACE_SETTINGS,
+      source: "default" as const,
+    }),
     getUpdateState: () => new Promise(() => {}),
     onUpdateState: () => () => {},
   });
@@ -102,19 +122,35 @@ it("keeps Try again on the frozen editor after its row is dismissed", async () =
   const user = userEvent.setup();
   render(surface("ws-1"));
   const { setItem } = await failReplacement();
-  expect(screen.getByTestId("workspace-shell-error").textContent).toContain(REPLACED_DOCUMENT_UNSAVED);
-  expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe(REPLACEMENT_FAILED_REASON);
-  expect(screen.getByTestId("orphaned-draft-notice").textContent).not.toContain(REPLACED_HISTORY_DRAFT_NOTICE);
+  expect(screen.getByTestId("workspace-shell-error").textContent).toContain(
+    REPLACED_DOCUMENT_UNSAVED,
+  );
+  expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe(
+    REPLACEMENT_FAILED_REASON,
+  );
+  expect(screen.getByTestId("orphaned-draft-notice").textContent).not.toContain(
+    REPLACED_HISTORY_DRAFT_NOTICE,
+  );
   await user.click(screen.getByTestId("notice-center-toggle"));
-  await user.click(within(screen.getByRole("dialog", { name: "Notices" })).getByRole("button", { name: "Dismiss notice" }));
+  await user.click(
+    within(screen.getByRole("dialog", { name: "Notices" })).getByRole("button", {
+      name: "Dismiss notice",
+    }),
+  );
   expect(screen.queryByTestId("connection-notices")).toBeNull();
 
   setItem.mockRestore();
   await user.click(screen.getByTestId("markdown-save-state-action"));
   await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
   await waitFor(() => expect(screen.queryByTestId("markdown-save-state-action")).toBeNull());
-  expect(screen.getByTestId("workspace-shell-error").textContent).toContain(REPLACED_DOCUMENT_SAVED);
-  expect(loadStoredDrafts(Date.now(), { bindHandles: false }).map((draft) => draft.path)).toEqual([PATH]);
+  expect(screen.getByTestId("workspace-shell-error").textContent).toContain(
+    REPLACED_DOCUMENT_SAVED,
+  );
+  expect(loadStoredDrafts(Date.now(), { bindHandles: false }).map((draft) => draft.path)).toEqual([
+    PATH,
+  ]);
   // Storage kept the edits, so the document's row no longer asks for a copy to keep them.
-  expect(screen.getByTestId("orphaned-draft-notice").textContent).toContain(REPLACED_HISTORY_DRAFT_NOTICE);
+  expect(screen.getByTestId("orphaned-draft-notice").textContent).toContain(
+    REPLACED_HISTORY_DRAFT_NOTICE,
+  );
 });

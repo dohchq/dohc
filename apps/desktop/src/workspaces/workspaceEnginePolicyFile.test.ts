@@ -11,8 +11,11 @@ import {
 } from "./workspaceEnginePolicyFile";
 
 describe("historyExcludesSubtree", () => {
-  const excludes = (rules: Array<{ path: string; tracked?: boolean }>, folder: string, errors: string[] = []) =>
-    historyExcludesSubtree(snapshot({ filesPolicy: rules, errors }), folder);
+  const excludes = (
+    rules: Array<{ path: string; tracked?: boolean }>,
+    folder: string,
+    errors: string[] = [],
+  ) => historyExcludesSubtree(snapshot({ filesPolicy: rules, errors }), folder);
 
   it("proves a folder excluded only by a rule covering its whole subtree", () => {
     expect(excludes([{ path: "build/**", tracked: false }], "build")).toBe(true);
@@ -27,17 +30,60 @@ describe("historyExcludesSubtree", () => {
   });
 
   it("keeps walking when a later rule could track something inside", () => {
-    expect(excludes([{ path: "build/**", tracked: false }, { path: "build/keep.md", tracked: true }], "build")).toBe(false);
-    expect(excludes([{ path: "build/**", tracked: false }, { path: "*/notes/**", tracked: true }], "build")).toBe(false);
-    expect(excludes([{ path: "build/**", tracked: false }, { path: "**", tracked: true }], "build")).toBe(false);
+    expect(
+      excludes(
+        [
+          { path: "build/**", tracked: false },
+          { path: "build/keep.md", tracked: true },
+        ],
+        "build",
+      ),
+    ).toBe(false);
+    expect(
+      excludes(
+        [
+          { path: "build/**", tracked: false },
+          { path: "*/notes/**", tracked: true },
+        ],
+        "build",
+      ),
+    ).toBe(false);
+    expect(
+      excludes(
+        [
+          { path: "build/**", tracked: false },
+          { path: "**", tracked: true },
+        ],
+        "build",
+      ),
+    ).toBe(false);
     // Searchable-only rules and rules elsewhere do not reach the folder.
-    expect(excludes([{ path: "build/**", tracked: false }, { path: "build/**" }, { path: "docs/**", tracked: true }], "build")).toBe(true);
+    expect(
+      excludes(
+        [
+          { path: "build/**", tracked: false },
+          { path: "build/**" },
+          { path: "docs/**", tracked: true },
+        ],
+        "build",
+      ),
+    ).toBe(true);
     // A later exclusion of the whole subtree takes the earlier inclusion back.
-    expect(excludes([{ path: "build/keep.md", tracked: true }, { path: "build/**", tracked: false }], "build")).toBe(true);
+    expect(
+      excludes(
+        [
+          { path: "build/keep.md", tracked: true },
+          { path: "build/**", tracked: false },
+        ],
+        "build",
+      ),
+    ).toBe(true);
   });
 
   it("proves nothing from a policy that did not parse", () => {
-    expect(excludes([{ path: "build/**", tracked: false }], "build", ["files.toml: invalid TOML"])).toBe(false);
+    expect(
+      excludes([{ path: "build/**", tracked: false }], "build", ["files.toml: invalid TOML"]),
+    ).toBe(false);
   });
 });
 
@@ -64,9 +110,7 @@ describe("resolveEngineSearchPolicy", () => {
   // WS-F): resolveEffectivePolicy defaults tracked paths to searchable, so
   // null rules from an unparseable file would widen search.
   it("blocks search outright when the policy snapshot carries errors", () => {
-    const decision = resolveEngineSearchPolicy(
-      snapshot({ errors: ["files.toml: bad TOML"] }),
-    );
+    const decision = resolveEngineSearchPolicy(snapshot({ errors: ["files.toml: bad TOML"] }));
     expect(decision).toEqual({ kind: "blocked", message: "files.toml: bad TOML" });
   });
 
@@ -153,7 +197,10 @@ describe("readWorkspaceEnginePolicy + resolveEngineSearchPolicy (fail closed end
     await writeFile(join(root, ".dohc", "visibility.toml"), "this is [[ not toml");
     expect((await readWorkspaceEnginePolicy(root)).unreadable).toEqual([".dohc/visibility.toml"]);
     await writeFile(join(root, ".dohc", "files.toml"), "this is [[ not toml");
-    expect((await readWorkspaceEnginePolicy(root)).unreadable).toEqual([".dohc/files.toml", ".dohc/visibility.toml"]);
+    expect((await readWorkspaceEnginePolicy(root)).unreadable).toEqual([
+      ".dohc/files.toml",
+      ".dohc/visibility.toml",
+    ]);
   });
 
   it("names the .dohc folder when it is not a real folder", async () => {

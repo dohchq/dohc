@@ -1,11 +1,24 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  renderHook,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { deferred } from "../../testing/deferred";
 import { bridge } from "../bridge";
 import { ShellErrorReporter, type ReportShellFailure } from "../shell/useShellError";
-import { CopyMessageLink, MESSAGE_LINK_FAILURE, MessageLinks, useMessageLinkMaker } from "./messageLinks";
+import {
+  CopyMessageLink,
+  MESSAGE_LINK_FAILURE,
+  MessageLinks,
+  useMessageLinkMaker,
+} from "./messageLinks";
 
 vi.mock("../bridge", () => ({ bridge: vi.fn() }));
 
@@ -14,9 +27,13 @@ const LINK = `https://dohc.example/l/${"a".repeat(43)}`;
 type Made = { url: string } | null;
 type Sync = "on" | "paused" | undefined;
 
-function mockBridge(makeMessageLink: (payload: { workspaceId: string; messageId: string }) => Promise<Made>) {
+function mockBridge(
+  makeMessageLink: (payload: { workspaceId: string; messageId: string }) => Promise<Made>,
+) {
   const make = vi.fn(makeMessageLink);
-  vi.mocked(bridge).mockReturnValue({ makeMessageLink: make } as unknown as ReturnType<typeof bridge>);
+  vi.mocked(bridge).mockReturnValue({ makeMessageLink: make } as unknown as ReturnType<
+    typeof bridge
+  >);
   return make;
 }
 

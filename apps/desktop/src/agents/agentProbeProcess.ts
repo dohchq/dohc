@@ -9,9 +9,18 @@ const PROBE_OUTPUT_LIMIT = 64 * 1024;
 // agentProbeOwner.cs accepts the same bound.
 export const MAX_ADMISSION_BYTES = 16 * 1024 * 1024;
 
-export interface ProbeCommand { command: string; args: readonly string[]; windowsVerbatimArguments?: boolean }
+export interface ProbeCommand {
+  command: string;
+  args: readonly string[];
+  windowsVerbatimArguments?: boolean;
+}
 /** Installed paths chosen by Electron main, never by a workspace or renderer. */
-export interface WindowsProbeOwner { root: string; executable: string; relay: string; node: string }
+export interface WindowsProbeOwner {
+  root: string;
+  executable: string;
+  relay: string;
+  node: string;
+}
 
 // No NODE_OPTIONS, NODE_PATH or credentials reach the owner or relay.
 export function ownerEnvironment(): NodeJS.ProcessEnv {
@@ -29,11 +38,14 @@ export function windowsProbeOwner(resourcesRoot: string): WindowsProbeOwner {
   if (!isAbsolute(resourcesRoot)) throw new Error("Agent probe resources path must be absolute.");
   const root = join(resourcesRoot, "agent-probe");
   const owner = {
-    root, executable: join(root, "agentProbeOwner.exe"), relay: join(root, "agentProbeRelay.mjs"),
+    root,
+    executable: join(root, "agentProbeOwner.exe"),
+    relay: join(root, "agentProbeRelay.mjs"),
     node: join(resourcesRoot, "app-compiler", "node.exe"),
   };
   for (const path of [owner.executable, owner.relay, owner.node]) {
-    if (!statSync(path, { throwIfNoEntry: false })?.isFile()) throw new Error(`Agent detection is missing ${path}.`);
+    if (!statSync(path, { throwIfNoEntry: false })?.isFile())
+      throw new Error(`Agent detection is missing ${path}.`);
   }
   return owner;
 }
@@ -44,7 +56,11 @@ export function windowsProbeOwner(resourcesRoot: string): WindowsProbeOwner {
 // job has exited. Cancellation rejects with the signal's reason; a timeout,
 // output overflow or child error resolves as a failed probe. A setup failure
 // after spawn rejects once the child drains.
-export function runProbeProcess(command: ProbeCommand, signal: AbortSignal, owner?: WindowsProbeOwner): Promise<ProbeOutput> {
+export function runProbeProcess(
+  command: ProbeCommand,
+  signal: AbortSignal,
+  owner?: WindowsProbeOwner,
+): Promise<ProbeOutput> {
   return new Promise((resolve, reject) => {
     signal.throwIfAborted();
     const windows = process.platform === "win32";
@@ -53,19 +69,32 @@ export function runProbeProcess(command: ProbeCommand, signal: AbortSignal, owne
     if (windows) {
       if (!owner) throw new Error("Agent detection on Windows requires its probe owner.");
       // The environment carries credentials, so it travels over stdin, never a command line.
-      admission = Buffer.from(JSON.stringify({
-        command: command.command, args: command.args,
-        windowsVerbatimArguments: command.windowsVerbatimArguments ?? false, cwd: homedir(), env: process.env,
-      }));
-      if (admission.byteLength > MAX_ADMISSION_BYTES) throw new Error("The agent probe environment is too large.");
+      admission = Buffer.from(
+        JSON.stringify({
+          command: command.command,
+          args: command.args,
+          windowsVerbatimArguments: command.windowsVerbatimArguments ?? false,
+          cwd: homedir(),
+          env: process.env,
+        }),
+      );
+      if (admission.byteLength > MAX_ADMISSION_BYTES)
+        throw new Error("The agent probe environment is too large.");
       child = spawn(owner.executable, [owner.node, owner.relay, String(admission.byteLength)], {
-        cwd: owner.root, env: ownerEnvironment(), windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
+        cwd: owner.root,
+        env: ownerEnvironment(),
+        windowsHide: true,
+        stdio: ["pipe", "pipe", "pipe"],
       });
     } else {
       // Node can return a child without pipes and report its spawn failure later.
       child = spawn(command.command, command.args, {
-        cwd: homedir(), env: process.env, windowsHide: true,
-        windowsVerbatimArguments: command.windowsVerbatimArguments, detached: true, stdio: ["ignore", "pipe", "pipe"],
+        cwd: homedir(),
+        env: process.env,
+        windowsHide: true,
+        windowsVerbatimArguments: command.windowsVerbatimArguments,
+        detached: true,
+        stdio: ["ignore", "pipe", "pipe"],
       });
     }
     let stdout = "";
@@ -95,13 +124,29 @@ export function runProbeProcess(command: ProbeCommand, signal: AbortSignal, owne
       stopped = true;
       if (windows) child.stdin?.destroy();
       else if (child.pid) {
-        try { process.kill(-child.pid, "SIGKILL"); } catch { /* Already exited. */ }
+        try {
+          process.kill(-child.pid, "SIGKILL");
+        } catch {
+          /* Already exited. */
+        }
       }
     };
     // After a stop, keep reading so the pipes can close, but discard the output.
-    const onStdout = (text: string) => { if (stopped) return; stdout += text; if (stdout.length + stderr.length > PROBE_OUTPUT_LIMIT) stop(); };
-    const onStderr = (text: string) => { if (stopped) return; stderr += text; if (stdout.length + stderr.length > PROBE_OUTPUT_LIMIT) stop(); };
-    const onClose = (code: number | null) => { closed = true; exitCode = code; settle(); };
+    const onStdout = (text: string) => {
+      if (stopped) return;
+      stdout += text;
+      if (stdout.length + stderr.length > PROBE_OUTPUT_LIMIT) stop();
+    };
+    const onStderr = (text: string) => {
+      if (stopped) return;
+      stderr += text;
+      if (stdout.length + stderr.length > PROBE_OUTPUT_LIMIT) stop();
+    };
+    const onClose = (code: number | null) => {
+      closed = true;
+      exitCode = code;
+      settle();
+    };
     child.on("error", stop).on("close", onClose);
     signal.addEventListener("abort", stop, { once: true });
     try {

@@ -23,11 +23,18 @@ export interface RelayRefusal {
   reason: string;
 }
 
-const COLUMN = "relay_admission TEXT CHECK(relay_admission IS NULL OR relay_admission IN ('refused','departed'))";
+const COLUMN =
+  "relay_admission TEXT CHECK(relay_admission IS NULL OR relay_admission IN ('refused','departed'))";
 
 /** Runs after every earlier `sync_relay_log` column, whose positions are checked. */
 export function initializeRelayAdmissionColumn(db: SqliteDb): void {
-  if (db.prepare("PRAGMA table_info(sync_relay_log)").all().some(column => column.name === "relay_admission")) return;
+  if (
+    db
+      .prepare("PRAGMA table_info(sync_relay_log)")
+      .all()
+      .some((column) => column.name === "relay_admission")
+  )
+    return;
   db.exec(`ALTER TABLE sync_relay_log ADD COLUMN ${COLUMN}`);
 }
 
@@ -41,10 +48,16 @@ export function refuseOp(op: SyncRelayLogInput, refusal: RelayRefusal): void {
 }
 
 /** The refusal a relay-written row records, or null for any other row. */
-export function readRefusal(row: Pick<SyncRelayLogInput, "opKind" | "payloadJson">): RelayRefusal | null {
+export function readRefusal(
+  row: Pick<SyncRelayLogInput, "opKind" | "payloadJson">,
+): RelayRefusal | null {
   if (row.opKind !== REFUSED_OP_KIND) return null;
   const payload = asRecord(JSON.parse(row.payloadJson));
-  if (typeof payload?.opKind !== "string" || typeof payload.payloadSha256 !== "string" || typeof payload.reason !== "string") {
+  if (
+    typeof payload?.opKind !== "string" ||
+    typeof payload.payloadSha256 !== "string" ||
+    typeof payload.reason !== "string"
+  ) {
     throw new Error("A relay refusal row is damaged.");
   }
   return { opKind: payload.opKind, payloadSha256: payload.payloadSha256, reason: payload.reason };

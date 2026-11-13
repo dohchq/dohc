@@ -59,18 +59,14 @@ type EngineStoreRecoveryDependencies = EngineStoreMoveDependencies & {
 
 class EngineStoreManifestDriftError extends Error {
   constructor(path: string, cause?: unknown) {
-    super(
-      `The data store file at ${path} changed or disappeared during the rebuild.`,
-      { cause },
-    );
+    super(`The data store file at ${path} changed or disappeared during the rebuild.`, { cause });
     this.name = "EngineStoreManifestDriftError";
   }
 }
 
 export class EngineStoreRecoveryFailedError extends Error {
   constructor(cause: unknown) {
-    const driftDetail =
-      cause instanceof EngineStoreManifestDriftError ? ` ${cause.message}` : "";
+    const driftDetail = cause instanceof EngineStoreManifestDriftError ? ` ${cause.message}` : "";
     super(
       `dohc could not finish rebuilding this workspace's data store.${driftDetail} Rebuild files remain at ${ENGINE_STORE_BACKUP_DIR}. Open this workspace again to retry.`,
       { cause },
@@ -158,9 +154,7 @@ async function captureMoveManifest(
   return {
     files: ENGINE_STORE_FILES.flatMap((name) => {
       const metadata = scan.get(name);
-      return metadata
-        ? [{ name, size: metadata.size, mtimeMs: metadata.mtimeMs }]
-        : [];
+      return metadata ? [{ name, size: metadata.size, mtimeMs: metadata.mtimeMs }] : [];
     }),
   };
 }
@@ -169,10 +163,7 @@ async function readMoveManifest(path: string): Promise<EngineStoreMoveManifest> 
   try {
     return parseMoveManifest(await readFile(path, "utf8"));
   } catch (cause) {
-    throw new Error(
-      `The recovery manifest at ${path} is unreadable or corrupt.`,
-      { cause },
-    );
+    throw new Error(`The recovery manifest at ${path} is unreadable or corrupt.`, { cause });
   }
 }
 
@@ -189,9 +180,7 @@ async function syncDirectory(path: string): Promise<void> {
   }
 }
 
-function moveFileSystem(
-  deps: EngineStoreMoveDependencies,
-): EngineStoreMoveFileSystem {
+function moveFileSystem(deps: EngineStoreMoveDependencies): EngineStoreMoveFileSystem {
   return {
     lstat: deps.lstat ?? lstat,
     rename: deps.rename ?? renameFile,
@@ -345,9 +334,7 @@ export async function completePendingEngineStoreMove(
 export async function withEngineStoreRecoveredUnderEngineStoreLock<T>(
   workspace: Pick<CreatedWorkspace, "rootPath">,
   body: () => Promise<T>,
-  completePendingMove: (
-    rootPath: string,
-  ) => Promise<void> = completePendingEngineStoreMove,
+  completePendingMove: (rootPath: string) => Promise<void> = completePendingEngineStoreMove,
 ): Promise<T> {
   await completePendingMove(workspace.rootPath);
   return body();
@@ -361,10 +348,7 @@ async function throwAfterReservationCleanup(
   fileSystem: EngineStoreMoveFileSystem,
 ): Promise<never> {
   const cleanupErrors: unknown[] = [];
-  for (const path of [
-    join(backupDir, MOVE_IN_PROGRESS_TEMP),
-    inProgressMarker,
-  ]) {
+  for (const path of [join(backupDir, MOVE_IN_PROGRESS_TEMP), inProgressMarker]) {
     try {
       await fileSystem.unlink(path);
     } catch (error) {
@@ -419,26 +403,14 @@ export async function moveEngineStoreAside(
       manifest = await captureMoveManifest(engineDir, fileSystem);
       if (!manifest.files.some(({ name }) => name === "engine.db")) {
         const liveDatabase = join(engineDir, "engine.db");
-        throw Object.assign(
-          new Error(`ENOENT: no engine database at ${liveDatabase}`),
-          { code: "ENOENT" },
-        );
+        throw Object.assign(new Error(`ENOENT: no engine database at ${liveDatabase}`), {
+          code: "ENOENT",
+        });
       }
-      await writeMoveManifest(
-        backupDir,
-        inProgressMarker,
-        manifest,
-        fileSystem,
-      );
+      await writeMoveManifest(backupDir, inProgressMarker, manifest, fileSystem);
       await fileSystem.syncDirectory(engineDir);
     } catch (error) {
-      await throwAfterReservationCleanup(
-        engineDir,
-        backupDir,
-        inProgressMarker,
-        error,
-        fileSystem,
-      );
+      await throwAfterReservationCleanup(engineDir, backupDir, inProgressMarker, error, fileSystem);
       throw error;
     }
   } else {
@@ -461,13 +433,7 @@ export async function moveEngineStoreAside(
     return "moved";
   } catch (error) {
     if (freshReservation && !movedAny) {
-      await throwAfterReservationCleanup(
-        engineDir,
-        backupDir,
-        inProgressMarker,
-        error,
-        fileSystem,
-      );
+      await throwAfterReservationCleanup(engineDir, backupDir, inProgressMarker, error, fileSystem);
     }
     throw error;
   }
@@ -479,12 +445,8 @@ type EngineStoreRebuildRequestFailure =
   | "agent-run-active"
   | "close-failed";
 
-const engineStoreRebuildRequestMessages: Record<
-  EngineStoreRebuildRequestFailure,
-  string
-> = {
-  "not-refused":
-    "dohc can read this workspace's current data store. Nothing moved.",
+const engineStoreRebuildRequestMessages: Record<EngineStoreRebuildRequestFailure, string> = {
+  "not-refused": "dohc can read this workspace's current data store. Nothing moved.",
   "update-required":
     "This workspace's data store needs a newer version of dohc. Nothing moved. Update dohc to continue.",
   "agent-run-active":
@@ -497,10 +459,7 @@ export class EngineStoreRebuildRequestError extends Error {
   readonly reason: EngineStoreRebuildRequestFailure;
 
   constructor(reason: EngineStoreRebuildRequestFailure, cause?: unknown) {
-    super(
-      engineStoreRebuildRequestMessages[reason],
-      cause === undefined ? undefined : { cause },
-    );
+    super(engineStoreRebuildRequestMessages[reason], cause === undefined ? undefined : { cause });
     this.name = "EngineStoreRebuildRequestError";
     this.reason = reason;
   }
@@ -557,8 +516,7 @@ async function rebuildEngineStore(
 
   if (operationError !== undefined) {
     const moveCompleted =
-      moveAttempted &&
-      (await exists(join(rootPath, ENGINE_STORE_BACKUP_DIR, MOVE_COMPLETE)));
+      moveAttempted && (await exists(join(rootPath, ENGINE_STORE_BACKUP_DIR, MOVE_COMPLETE)));
     if (!moveCompleted) throw operationError;
     console.error(
       "The engine store move reported an error, but reopening completed the move.",
@@ -569,14 +527,8 @@ async function rebuildEngineStore(
   if (outcome === undefined) {
     throw new Error("The data store rebuild finished without an outcome.");
   }
-  if (
-    reopenError !== undefined &&
-    !(reopenError instanceof EngineStoreRecoveryFailedError)
-  ) {
-    console.error(
-      "The engine store could not reopen after the rebuild.",
-      reopenError,
-    );
+  if (reopenError !== undefined && !(reopenError instanceof EngineStoreRecoveryFailedError)) {
+    console.error("The engine store could not reopen after the rebuild.", reopenError);
   }
   const reopenFailed =
     reopenError === undefined

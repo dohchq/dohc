@@ -17,21 +17,36 @@ export async function sharedViewRefusal(): Promise<unknown> {
   await writeFile(join(folder, "share-collision-record.json"), "not json", { mode: 0o600 });
   if (process.platform === "win32") {
     const binding = { localStateReady: true };
-    readLocalStateFrom({ currentBinding: () => binding, localStateOpenAt: async () => ({ current: () => true }) });
+    readLocalStateFrom({
+      currentBinding: () => binding,
+      localStateOpenAt: async () => ({ current: () => true }),
+    });
   }
   try {
     return await withExclusiveWorkspaceOperation(rootPath, async (_changed, workspaceLease) => {
-      return withShareViewFilesOwner({ workspaceLease, resource: {
-        kind: "standalone", workspaceId: "refused-view", storeWorkspaceId: "refused-view",
-        rootPath, schedulingRootPath: rootPath, shareId: "share",
-      } }, async capability => {
-        try {
-          await shareViewFilesProjection(capability).recordCollisions(rootPath, "share", ["docs/a.md"]);
-        } catch (error) {
-          return error;
-        }
-        throw new Error("Expected the shared file read to refuse.");
-      });
+      return withShareViewFilesOwner(
+        {
+          workspaceLease,
+          resource: {
+            kind: "standalone",
+            workspaceId: "refused-view",
+            storeWorkspaceId: "refused-view",
+            rootPath,
+            schedulingRootPath: rootPath,
+            shareId: "share",
+          },
+        },
+        async (capability) => {
+          try {
+            await shareViewFilesProjection(capability).recordCollisions(rootPath, "share", [
+              "docs/a.md",
+            ]);
+          } catch (error) {
+            return error;
+          }
+          throw new Error("Expected the shared file read to refuse.");
+        },
+      );
     });
   } finally {
     if (process.platform === "win32") readLocalStateFrom(null);

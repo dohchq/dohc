@@ -3,13 +3,32 @@ import "../../testing/legendListMock";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { ChatDispatchStateForThreadResult, ListChatReactionsResult } from "../../ipc/bridgeContract";
+import type {
+  ChatDispatchStateForThreadResult,
+  ListChatReactionsResult,
+} from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
-import { channel, personalFeedItem, shareListing, thread, message, bridgeMock, renderView, navigatorView, mentionRoster } from "./ChatsView.testHarness";
+import {
+  channel,
+  personalFeedItem,
+  shareListing,
+  thread,
+  message,
+  bridgeMock,
+  renderView,
+  navigatorView,
+  mentionRoster,
+} from "./ChatsView.testHarness";
 
 describe("ChatsView agents' chats", () => {
   it("shows a new message in an agent DM's conversation", async () => {
-    const agentDm = channel({ id: "channel-agent", name: "agent-internal", slug: "agent", kind: "agent", agentId: "default" });
+    const agentDm = channel({
+      id: "channel-agent",
+      name: "agent-internal",
+      slug: "agent",
+      kind: "agent",
+      agentId: "default",
+    });
     const conversation = thread({ id: "conversation", channelId: agentDm.id, title: "" });
     const sent = message({ id: "message-new", threadId: conversation.id, body: "Book the train" });
     let started = false;
@@ -17,7 +36,9 @@ describe("ChatsView agents' chats", () => {
     bridgeMock.listChannelThreads.mockImplementation(async (input) => ({
       threads: input.lane === "chat" && started ? [conversation] : [],
     }));
-    bridgeMock.listChatMessages.mockImplementation(async () => ({ messages: started ? [sent] : [] }));
+    bridgeMock.listChatMessages.mockImplementation(async () => ({
+      messages: started ? [sent] : [],
+    }));
     bridgeMock.startChannelThread.mockImplementation(async () => {
       started = true;
       return { thread: conversation, message: sent, viewerAuthorId: "author-me" };
@@ -29,9 +50,13 @@ describe("ChatsView agents' chats", () => {
     fireEvent.change(composer, { target: { value: "Book the train" } });
     fireEvent.keyDown(composer, { key: "Enter" });
     expect(await screen.findByText("Book the train")).toBeTruthy();
-    expect(bridgeMock.startChannelThread).toHaveBeenCalledWith(expect.objectContaining({
-      channelId: agentDm.id, body: "Book the train", lane: "chat",
-    }));
+    expect(bridgeMock.startChannelThread).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channelId: agentDm.id,
+        body: "Book the train",
+        lane: "chat",
+      }),
+    );
     expect(bridgeMock.startChannelThread.mock.lastCall?.[0]).not.toHaveProperty("title");
   });
 });
@@ -67,9 +92,7 @@ describe("ChatsView composer-first threads (anti-forum)", () => {
     expect((await screen.findByTestId("chats-thread-title")).textContent).toBe(
       "Should we ship on Friday?",
     );
-    expect(screen.getByTestId("chats-message-body").textContent).toBe(
-      "Should we ship on Friday?",
-    );
+    expect(screen.getByTestId("chats-message-body").textContent).toBe("Should we ship on Friday?");
     expect(onThreadStarted).toHaveBeenCalledTimes(1);
   });
 
@@ -97,7 +120,9 @@ describe("ChatsView composer-first threads (anti-forum)", () => {
     expect(await screen.findByTestId("chats-message-body")).toBeTruthy();
 
     const reactionTrigger = screen.getByTestId("chats-add-reaction");
-    vi.spyOn(reactionTrigger, "getBoundingClientRect").mockReturnValue(new DOMRect(100, 100, 20, 20));
+    vi.spyOn(reactionTrigger, "getBoundingClientRect").mockReturnValue(
+      new DOMRect(100, 100, 20, 20),
+    );
     await user.click(reactionTrigger);
     const thumbsUp = screen
       .getAllByTestId("chats-reaction-choice")
@@ -147,9 +172,7 @@ describe("ChatsView document thread", () => {
     await user.click(await screen.findByTestId("chats-channel"));
     await user.click(await screen.findByTestId("chats-thread"));
     await user.click(await screen.findByTestId("chats-comment-reply"));
-    expect(screen.getByTestId("chats-replying-mode").textContent).toContain(
-      "Replying to Ana",
-    );
+    expect(screen.getByTestId("chats-replying-mode").textContent).toContain("Replying to Ana");
     await user.type(screen.getByTestId("chats-composer"), "Monday works.{Enter}");
     await waitFor(() =>
       expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({
@@ -171,7 +194,9 @@ describe("group details", () => {
   it("resets group purpose and type after a workspace switch", async () => {
     const view = render(navigatorView(0));
     fireEvent.click(await screen.findByTestId("chats-new-channel"));
-    fireEvent.change(screen.getByTestId("chats-new-channel-purpose"), { target: { value: "Old purpose" } });
+    fireEvent.change(screen.getByTestId("chats-new-channel-purpose"), {
+      target: { value: "Old purpose" },
+    });
     fireEvent.click(screen.getByRole("radio", { name: "Both" }));
     view.rerender(navigatorView(0, { workspaceId: "workspace-b" }));
     fireEvent.click(await screen.findByTestId("chats-new-channel"));
@@ -182,16 +207,34 @@ describe("group details", () => {
   it("keeps agents distinct across shares with null emails and within one owner's share", async () => {
     const channels = [channel({ id: "c1", wireId: "w1" }), channel({ id: "c2", wireId: "w2" })];
     bridgeMock.listChatChannels.mockResolvedValue({ channels, fileThreads: [] });
-    bridgeMock.listChatChannelShares.mockResolvedValue(shareListing({ joined: channels.map((channel, index) => ({
-      shareId: `share-${index}`, channelWireId: channel.wireId, granterEmail: null, access: "read-write", ended: false,
-    })) }));
-    bridgeMock.listPersonalChatFeed.mockResolvedValue({ items: [
-      [0, "agent-a"], [0, "agent-b"], [1, "agent-a"],
-    ].map(([channelIndex, targetId], index) => ({
-      ...personalFeedItem("Update", `agent-message-${index}`),
-      message: message({ id: `agent-message-${index}`, authorKind: "agent", authorDisplayName: "Same name" }),
-      channel: channels[Number(channelIndex)], authorFollowTarget: { targetKind: "agent", targetId },
-    })), nextCursor: null });
+    bridgeMock.listChatChannelShares.mockResolvedValue(
+      shareListing({
+        joined: channels.map((channel, index) => ({
+          shareId: `share-${index}`,
+          channelWireId: channel.wireId,
+          granterEmail: null,
+          access: "read-write",
+          ended: false,
+        })),
+      }),
+    );
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({
+      items: [
+        [0, "agent-a"],
+        [0, "agent-b"],
+        [1, "agent-a"],
+      ].map(([channelIndex, targetId], index) => ({
+        ...personalFeedItem("Update", `agent-message-${index}`),
+        message: message({
+          id: `agent-message-${index}`,
+          authorKind: "agent",
+          authorDisplayName: "Same name",
+        }),
+        channel: channels[Number(channelIndex)],
+        authorFollowTarget: { targetKind: "agent", targetId },
+      })),
+      nextCursor: null,
+    });
     renderView();
     fireEvent.click(await screen.findByTestId("chats-feed-link"));
     await waitFor(() => expect(bridgeMock.listPersonalChatFeed).toHaveBeenCalled());
@@ -203,11 +246,18 @@ describe("group details", () => {
 
 describe("ChatsView agent offer", () => {
   const ready = {
-    workspaceId: "workspace-a", agentName: "Nova", runnerConfigured: true, runnerEnabled: true, agentRunActive: false,
+    workspaceId: "workspace-a",
+    agentName: "Nova",
+    runnerConfigured: true,
+    runnerEnabled: true,
+    agentRunActive: false,
     agents: [{ id: "default", name: "Nova", enabled: true }],
   };
   const withAgent = (agentSetup = ready, onSetupAgent = vi.fn()) => ({
-    mentionCandidates: mentionRoster, agentSetup, onSetupAgent, workspacePath: "C:\\people\\ice\\work",
+    mentionCandidates: mentionRoster,
+    agentSetup,
+    onSetupAgent,
+    workspacePath: "C:\\people\\ice\\work",
   });
   async function pickAgent(user: ReturnType<typeof userEvent.setup>, prefix: string) {
     await user.type(screen.getByTestId(`${prefix}-composer`), "@No");
@@ -218,13 +268,22 @@ describe("ChatsView agent offer", () => {
   it("follows a thread's dispatch once read, and leaves when another thread opens", async () => {
     const user = userEvent.setup();
     const dispatch = deferred<ChatDispatchStateForThreadResult>();
-    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread(), thread({ id: "thread-2", title: "Second" })] });
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [thread(), thread({ id: "thread-2", title: "Second" })],
+    });
     bridgeMock.chatDispatchStateForThread.mockReturnValueOnce(dispatch.promise);
     renderView(vi.fn(), vi.fn(), withAgent());
     await user.click(await screen.findByTestId("chats-channel"));
     await user.click((await screen.findAllByTestId("chats-thread"))[0]!);
     expect((await pickAgent(user, "chats")).dataset.state).toBe("unknown");
-    await act(async () => { dispatch.resolve({ liveRunId: null, liveTriggerMessageId: null, pendingCount: 0, paused: true }); });
+    await act(async () => {
+      dispatch.resolve({
+        liveRunId: null,
+        liveTriggerMessageId: null,
+        pendingCount: 0,
+        paused: true,
+      });
+    });
     expect(screen.getByTestId("composer-agent-offer").dataset.state).toBe("paused");
     await user.click(screen.getByTestId("chats-thread-back"));
     await user.click((await screen.findAllByTestId("chats-thread"))[1]!);

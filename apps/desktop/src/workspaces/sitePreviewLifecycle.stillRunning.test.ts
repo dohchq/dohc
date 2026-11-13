@@ -8,8 +8,13 @@ import { deferred } from "../testing/deferred";
 function handle(state: { alive: boolean }) {
   const stop = vi.fn(async () => undefined);
   const value: SiteProcessHandle = {
-    url: "http://127.0.0.1:43210/", command: "node", args: ["server.js"], cwd: "/trip/portal",
-    logs: () => [], onExit: () => undefined, stop,
+    url: "http://127.0.0.1:43210/",
+    command: "node",
+    args: ["server.js"],
+    cwd: "/trip/portal",
+    logs: () => [],
+    onExit: () => undefined,
+    stop,
     stillRunning: async () => (state.alive ? [4242] : []),
   };
   return { value, stop };
@@ -18,11 +23,17 @@ function handle(state: { alive: boolean }) {
 const acquire = (
   lifecycle: ReturnType<typeof createSitePreviewLifecycle>,
   execute: (signal: AbortSignal) => Promise<{ handle: SiteProcessHandle; result: { logs: [] } }>,
-) => lifecycle.acquire({
-  holderId: "tab", senderId: 1, workspaceId: "trip", siteRoot: "portal", mode: "dev", restart: false,
-  isCurrent: () => true,
-  prepare: async () => execute,
-});
+) =>
+  lifecycle.acquire({
+    holderId: "tab",
+    senderId: 1,
+    workspaceId: "trip",
+    siteRoot: "portal",
+    mode: "dev",
+    restart: false,
+    isCurrent: () => true,
+    prepare: async () => execute,
+  });
 
 describe("a workspace stop that has to report app commands still running", () => {
   it("reports a start cancelled before its handle was installed whose processes outlived the stop, and stops them on retry", async () => {
@@ -33,18 +44,28 @@ describe("a workspace stop that has to report app commands still running", () =>
     const started = acquire(lifecycle, (signal) => {
       executing.resolve();
       return new Promise((_resolve, reject) => {
-        signal.addEventListener("abort", () => reject(new AppCommandStillRunningError(leftover.value, [4242])), { once: true });
+        signal.addEventListener(
+          "abort",
+          () => reject(new AppCommandStillRunningError(leftover.value, [4242])),
+          { once: true },
+        );
       });
     });
     void started.catch(() => undefined);
     await executing.promise;
 
-    await expect(lifecycle.stopWorkspace("trip", { rejectOnFailure: true })).rejects.toThrow(AppCommandStillRunningError);
+    await expect(lifecycle.stopWorkspace("trip", { rejectOnFailure: true })).rejects.toThrow(
+      AppCommandStillRunningError,
+    );
     expect(lifecycle.status("trip", "portal").running).toBe(true);
 
-    await expect(lifecycle.stopWorkspace("trip", { rejectOnFailure: true })).rejects.toThrow(AppCommandStillRunningError);
+    await expect(lifecycle.stopWorkspace("trip", { rejectOnFailure: true })).rejects.toThrow(
+      AppCommandStillRunningError,
+    );
     state.alive = false;
-    await expect(lifecycle.stopWorkspace("trip", { rejectOnFailure: true })).resolves.toBeUndefined();
+    await expect(
+      lifecycle.stopWorkspace("trip", { rejectOnFailure: true }),
+    ).resolves.toBeUndefined();
     expect(leftover.stop).toHaveBeenCalledTimes(2);
     expect(lifecycle.status("trip", "portal").running).toBe(false);
   });
@@ -55,14 +76,21 @@ describe("a workspace stop that has to report app commands still running", () =>
     const running = handle(state);
     await acquire(lifecycle, async () => ({ handle: running.value, result: { logs: [] } }));
 
-    await expect(lifecycle.stopWorkspace("trip", { rejectOnFailure: true })).rejects.toThrow(AppCommandStillRunningError);
+    await expect(lifecycle.stopWorkspace("trip", { rejectOnFailure: true })).rejects.toThrow(
+      AppCommandStillRunningError,
+    );
     expect(lifecycle.status("trip", "portal").running).toBe(true);
-    const replacement = vi.fn(async () => ({ handle: handle({ alive: false }).value, result: { logs: [] as [] } }));
+    const replacement = vi.fn(async () => ({
+      handle: handle({ alive: false }).value,
+      result: { logs: [] as [] },
+    }));
     await expect(acquire(lifecycle, replacement)).rejects.toThrow(AppCommandStillRunningError);
     expect(replacement).not.toHaveBeenCalled();
 
     state.alive = false;
-    await expect(lifecycle.stopWorkspace("trip", { rejectOnFailure: true })).resolves.toBeUndefined();
+    await expect(
+      lifecycle.stopWorkspace("trip", { rejectOnFailure: true }),
+    ).resolves.toBeUndefined();
     expect(lifecycle.status("trip", "portal").running).toBe(false);
   });
 
@@ -88,7 +116,9 @@ describe("a workspace stop that has to report app commands still running", () =>
     expect(lifecycle.status("trip", "portal").running).toBe(true);
 
     state.alive = false;
-    await expect(lifecycle.stopWorkspace("trip", { rejectOnFailure: true })).resolves.toBeUndefined();
+    await expect(
+      lifecycle.stopWorkspace("trip", { rejectOnFailure: true }),
+    ).resolves.toBeUndefined();
   });
 
   it("still only logs it for a workspace switch", async () => {

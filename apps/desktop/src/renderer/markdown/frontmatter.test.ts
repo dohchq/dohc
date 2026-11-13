@@ -13,9 +13,7 @@ import { EDGE_DISPLAY, EDGE_MARKDOWN, receivedYDoc } from "./frontmatter.edge-fi
 
 describe("markdown frontmatter helpers", () => {
   it("keeps malformed frontmatter visible as body text", () => {
-    const markdown = ["---", "title: Broken", "tags: [", "---", "# Body"].join(
-      "\n",
-    );
+    const markdown = ["---", "title: Broken", "tags: [", "---", "# Body"].join("\n");
 
     expect(parseFrontmatter(markdown)).toEqual({ meta: {}, body: markdown });
     expect(frontmatterEntries(markdown)).toEqual([]);
@@ -33,9 +31,7 @@ describe("markdown frontmatter helpers", () => {
     });
     expect(parseFrontmatter(array)).toEqual({ meta: {}, body: array });
     expect(applyFrontmatter(scalar, { status: "active" })).toBe(
-      ["---", "status: active", "---", "", "---", "just a divider", "---", "# Body"].join(
-        "\n",
-      ),
+      ["---", "status: active", "---", "", "---", "just a divider", "---", "# Body"].join("\n"),
     );
   });
 
@@ -50,11 +46,21 @@ describe("markdown frontmatter helpers", () => {
 
   it("reads values the settle keeps as text and writes back only the changed key", () => {
     const markdown = [
-      "---", "count: !custom 7", "flag: !!bool yes", "id: 99999999999999999999", "title: Draft", "---", "", "Body",
+      "---",
+      "count: !custom 7",
+      "flag: !!bool yes",
+      "id: 99999999999999999999",
+      "title: Draft",
+      "---",
+      "",
+      "Body",
     ].join("\n");
 
     expect(parseFrontmatter(markdown).meta).toEqual({
-      count: "7", flag: "yes", id: "99999999999999999999", title: "Draft",
+      count: "7",
+      flag: "yes",
+      id: "99999999999999999999",
+      title: "Draft",
     });
     expect(applyFrontmatter(markdown, { ...parseFrontmatter(markdown).meta, title: "Plan" })).toBe(
       markdown.replace("title: Draft", "title: Plan"),
@@ -79,7 +85,14 @@ describe("markdown frontmatter helpers", () => {
     );
 
     expect(entries).toEqual([
-      { key: "tags", value: "a, b", list: true, sourceKey: "tags", sourceValue: "a, b", rawValue: ["a", "b"] },
+      {
+        key: "tags",
+        value: "a, b",
+        list: true,
+        sourceKey: "tags",
+        sourceValue: "a, b",
+        rawValue: ["a", "b"],
+      },
       {
         key: "years",
         value: "2026, yes, null",
@@ -94,21 +107,30 @@ describe("markdown frontmatter helpers", () => {
   });
 
   it("shows any other list or map on one line, with why it can't be edited", () => {
-    const entries = frontmatterEntries([
-      "---",
-      "places: [\"Kyoto, Japan\", Osaka]",
-      "days: [1, 2]",
-      "spaced: [' a', b]",
-      "blank: ['', b]",
-      "broken: [\"a\\nb\"]",
-      "where: {lat: 35.5, lng: 135.7}",
-      "---",
-      "",
-    ].join("\n"));
+    const entries = frontmatterEntries(
+      [
+        "---",
+        'places: ["Kyoto, Japan", Osaka]',
+        "days: [1, 2]",
+        "spaced: [' a', b]",
+        "blank: ['', b]",
+        'broken: ["a\\nb"]',
+        "where: {lat: 35.5, lng: 135.7}",
+        "---",
+        "",
+      ].join("\n"),
+    );
     const reason = (problem: string) => `dohc can't edit this list here because ${problem}.`;
 
-    expect(entries.map(({ key, value, list, readOnly }) => ({ key, value, list, readOnly }))).toEqual([
-      { key: "places", value: "['Kyoto, Japan', Osaka]", list: undefined, readOnly: reason("an item has a comma") },
+    expect(
+      entries.map(({ key, value, list, readOnly }) => ({ key, value, list, readOnly })),
+    ).toEqual([
+      {
+        key: "places",
+        value: "['Kyoto, Japan', Osaka]",
+        list: undefined,
+        readOnly: reason("an item has a comma"),
+      },
       { key: "days", value: "[1, 2]", list: undefined, readOnly: reason("some items aren't text") },
       {
         key: "spaced",
@@ -122,7 +144,12 @@ describe("markdown frontmatter helpers", () => {
         list: undefined,
         readOnly: reason("an item is blank or starts or ends with a space"),
       },
-      { key: "broken", value: "[\"a\\nb\"]", list: undefined, readOnly: reason("an item has a line break") },
+      {
+        key: "broken",
+        value: '["a\\nb"]',
+        list: undefined,
+        readOnly: reason("an item has a line break"),
+      },
       {
         key: "where",
         value: "{lat: 35.5, lng: 135.7}",
@@ -144,9 +171,13 @@ describe("markdown frontmatter helpers", () => {
     const doc = receivedYDoc(EDGE_MARKDOWN);
     try {
       const fromFile = frontmatterEntries(EDGE_MARKDOWN);
-      const fromDocument = frontmatterEntriesFromPairs(Object.entries(frontmatterMapValues(doc.getMap("frontmatter"))));
+      const fromDocument = frontmatterEntriesFromPairs(
+        Object.entries(frontmatterMapValues(doc.getMap("frontmatter"))),
+      );
       for (const entries of [fromFile, fromDocument]) {
-        expect(Object.fromEntries(entries.map((entry) => [entry.key, entry.value]))).toEqual(EDGE_DISPLAY);
+        expect(Object.fromEntries(entries.map((entry) => [entry.key, entry.value]))).toEqual(
+          EDGE_DISPLAY,
+        );
       }
     } finally {
       doc.destroy();

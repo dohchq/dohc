@@ -60,7 +60,14 @@ function menu(props: MenuFixture) {
       <AgentLinkAppMenu
         link={props.link}
         server="dohc-share"
-        sensitive={props.sensitive ? { what: "the address for an agent", again: "Reset the link in Share to get a new one." } : undefined}
+        sensitive={
+          props.sensitive
+            ? {
+                what: "the address for an agent",
+                again: "Reset the link in Share to get a new one.",
+              }
+            : undefined
+        }
         testId="apps"
       />
     </ShellErrorReporter.Provider>
@@ -84,12 +91,16 @@ it("copies the picked agent's setup, says so on its row, then closes", async () 
   ]);
   await user.click(screen.getByTestId("apps-codex"));
   expect(writeText).toHaveBeenCalledTimes(1);
-  expect(writeText).toHaveBeenCalledWith(`codex mcp add dohc-share --url ${SHARE}\ncodex mcp login dohc-share`);
+  expect(writeText).toHaveBeenCalledWith(
+    `codex mcp add dohc-share --url ${SHARE}\ncodex mcp login dohc-share`,
+  );
   expect(screen.getByTestId("apps-codex").textContent).toBe("Copied");
   expect(screen.getByRole("status", { hidden: true }).textContent).toBe("Copied");
   // The other rows keep their names while one answers.
   expect(screen.getByTestId("apps-grok-bot").textContent).toBe("Message for Grok Bot");
-  act(() => { vi.advanceTimersByTime(COPY_FEEDBACK_MS); });
+  act(() => {
+    vi.advanceTimersByTime(COPY_FEEDBACK_MS);
+  });
   expect(list()).toBeNull();
   // Opened again, the row has its name back.
   await user.click(screen.getByRole("button", { name: "Copy setup for an agent" }));
@@ -107,14 +118,18 @@ it("keeps a list opened again open when the earlier answer's time is up", async 
   await user.keyboard("{Escape}");
   expect(list()).toBeNull();
   await user.click(trigger);
-  act(() => { vi.advanceTimersByTime(COPY_FEEDBACK_MS); });
+  act(() => {
+    vi.advanceTimersByTime(COPY_FEEDBACK_MS);
+  });
   expect(list()).not.toBeNull();
   expect(screen.getByTestId("apps-grok-bot").textContent).toBe("Message for Grok Bot");
 });
 
 it("says a refused copy on its row and reports it without keeping a secret link to try again with", async () => {
   const user = userWith("real");
-  const writeText = vi.spyOn(navigator.clipboard, "writeText").mockRejectedValue(new Error("denied"));
+  const writeText = vi
+    .spyOn(navigator.clipboard, "writeText")
+    .mockRejectedValue(new Error("denied"));
   const report = vi.fn<ReportShellFailure>();
   renderMenu({ link: SHARE, sensitive: true, report });
   await user.click(screen.getByRole("button", { name: "Copy setup for an agent" }));
@@ -137,7 +152,10 @@ it("says a refused copy on its row and reports it without keeping a secret link 
 
 it("never copies a link its surface has replaced when Try again comes after a failed copy", async () => {
   const user = userWith("real");
-  const writeText = vi.spyOn(navigator.clipboard, "writeText").mockRejectedValueOnce(new Error("denied")).mockResolvedValue(undefined);
+  const writeText = vi
+    .spyOn(navigator.clipboard, "writeText")
+    .mockRejectedValueOnce(new Error("denied"))
+    .mockResolvedValue(undefined);
   const report = vi.fn<ReportShellFailure>();
   const { rerender } = renderMenu({ link: SHARE, sensitive: true, report });
   await user.click(screen.getByRole("button", { name: "Copy setup for an agent" }));
@@ -148,7 +166,9 @@ it("never copies a link its surface has replaced when Try again comes after a fa
   rerender({ link: replaced, sensitive: true, report });
   await act(async () => report.mock.calls[0]![0].retry?.());
   expect(writeText).toHaveBeenCalledTimes(2);
-  expect(writeText).toHaveBeenLastCalledWith(`codex mcp add dohc-share --url ${replaced}\ncodex mcp login dohc-share`);
+  expect(writeText).toHaveBeenLastCalledWith(
+    `codex mcp add dohc-share --url ${replaced}\ncodex mcp login dohc-share`,
+  );
   // With no link left, Try again copies nothing.
   rerender({ link: null, sensitive: true, report });
   await act(async () => report.mock.calls[0]![0].retry?.());
@@ -158,7 +178,9 @@ it("never copies a link its surface has replaced when Try again comes after a fa
 it("cannot open while there is no link", async () => {
   const user = userWith("real");
   renderMenu({ link: null });
-  const trigger = screen.getByRole<HTMLButtonElement>("button", { name: "Copy setup for an agent" });
+  const trigger = screen.getByRole<HTMLButtonElement>("button", {
+    name: "Copy setup for an agent",
+  });
   expect(trigger.disabled).toBe(true);
   await user.click(trigger);
   expect(list()).toBeNull();

@@ -16,12 +16,15 @@ afterEach(() => {
 it("gives up on a check past its deadline, and remembers no verdict", async () => {
   vi.useFakeTimers();
   const terminate = vi.fn();
-  vi.stubGlobal("Worker", class {
-    onmessage = null;
-    onerror = null;
-    postMessage() {}
-    terminate = terminate;
-  });
+  vi.stubGlobal(
+    "Worker",
+    class {
+      onmessage = null;
+      onerror = null;
+      postMessage() {}
+      terminate = terminate;
+    },
+  );
   const check = checkLossyNote("e".repeat(64), "# Note\n");
   const refused = expect(check).rejects.toThrow("The note check took too long.");
   await vi.advanceTimersByTimeAsync(30_000);
@@ -31,7 +34,9 @@ it("gives up on a check past its deadline, and remembers no verdict", async () =
 });
 
 it("remembers an answered verdict by content hash", async () => {
-  await expect(checkLossyNote("f".repeat(64), "<details>\n\nHidden.\n</details>\n")).resolves.toBe(true);
+  await expect(checkLossyNote("f".repeat(64), "<details>\n\nHidden.\n</details>\n")).resolves.toBe(
+    true,
+  );
   expect(knownLossyNoteVerdict("f".repeat(64))).toBe(true);
 });
 
@@ -39,15 +44,22 @@ it("remembers verdicts across a restart of a built app, for the same checker onl
   vi.stubEnv("DEV", false);
   try {
     // A restart is a new window: a fresh module that reads storage again.
-    await expect(checkLossyNote("a".repeat(64), "<details>\n\nHidden.\n</details>\n")).resolves.toBe(true);
+    await expect(
+      checkLossyNote("a".repeat(64), "<details>\n\nHidden.\n</details>\n"),
+    ).resolves.toBe(true);
     await expect(checkLossyNote("b".repeat(64), "# Note\n")).resolves.toBe(false);
     vi.resetModules();
     const restarted = await import("./lossyNote");
     expect(restarted.knownLossyNoteVerdict("a".repeat(64))).toBe(true);
     expect(restarted.knownLossyNoteVerdict("b".repeat(64))).toBe(false);
 
-    const stored = JSON.parse(localStorage.getItem("dohc.lossyNoteVerdicts") ?? "null") as { checker: string };
-    localStorage.setItem("dohc.lossyNoteVerdicts", JSON.stringify({ ...stored, checker: `${stored.checker}-other` }));
+    const stored = JSON.parse(localStorage.getItem("dohc.lossyNoteVerdicts") ?? "null") as {
+      checker: string;
+    };
+    localStorage.setItem(
+      "dohc.lossyNoteVerdicts",
+      JSON.stringify({ ...stored, checker: `${stored.checker}-other` }),
+    );
     vi.resetModules();
     expect((await import("./lossyNote")).knownLossyNoteVerdict("a".repeat(64))).toBeUndefined();
   } finally {
@@ -59,8 +71,14 @@ it("checks again when stored verdicts are damaged", async () => {
   vi.stubEnv("DEV", false);
   try {
     await expect(checkLossyNote("d".repeat(64), "# Note\n")).resolves.toBe(false);
-    const { checker } = JSON.parse(localStorage.getItem("dohc.lossyNoteVerdicts") ?? "null") as { checker: string };
-    for (const damaged of ["{", JSON.stringify({ checker, verdicts: [["d".repeat(64), "false"]] }), JSON.stringify({ checker, verdicts: "d" })]) {
+    const { checker } = JSON.parse(localStorage.getItem("dohc.lossyNoteVerdicts") ?? "null") as {
+      checker: string;
+    };
+    for (const damaged of [
+      "{",
+      JSON.stringify({ checker, verdicts: [["d".repeat(64), "false"]] }),
+      JSON.stringify({ checker, verdicts: "d" }),
+    ]) {
       localStorage.setItem("dohc.lossyNoteVerdicts", damaged);
       vi.resetModules();
       expect((await import("./lossyNote")).knownLossyNoteVerdict("d".repeat(64))).toBeUndefined();
@@ -89,9 +107,13 @@ describe("useBoundNoteCheck", () => {
 
   it("clears an absent witness and checks a lossy witness", async () => {
     const plain = markdownToYDoc("# Note\n");
-    expect(renderHook(() => useBoundNoteCheck({ open: "a", doc: plain })).result.current).toBe("clear");
+    expect(renderHook(() => useBoundNoteCheck({ open: "a", doc: plain })).result.current).toBe(
+      "clear",
+    );
     const doc = seeded();
-    const { result } = renderHook(() => useBoundNoteCheck({ open: "a", doc, headSha256: sha(LOSSY) }));
+    const { result } = renderHook(() =>
+      useBoundNoteCheck({ open: "a", doc, headSha256: sha(LOSSY) }),
+    );
     expect(result.current).toBe("checking");
     await waitFor(() => expect(result.current).toBe("lossy"));
   });
@@ -107,9 +129,12 @@ describe("useBoundNoteCheck", () => {
       return doc;
     };
     const first = witnessed();
-    const view = renderHook(({ doc }) => useBoundNoteCheck({ open: "a", doc, headSha256: sha(source) }), {
-      initialProps: { doc: first },
-    });
+    const view = renderHook(
+      ({ doc }) => useBoundNoteCheck({ open: "a", doc, headSha256: sha(source) }),
+      {
+        initialProps: { doc: first },
+      },
+    );
     expect(view.result.current).toBe("checking");
     await waitFor(() => expect(view.result.current).toBe("clear"));
 
@@ -129,10 +154,14 @@ describe("useBoundNoteCheck", () => {
     keeping.getMap("meta").set("dohcMarkdownSource", source);
     keeping.getMap("meta").set("dohcMarkdownSourceSha256", sha(source));
     keeping.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(keeping)));
-    const clear = renderHook(() => useBoundNoteCheck({ open: "a", doc: keeping, headSha256: null }));
+    const clear = renderHook(() =>
+      useBoundNoteCheck({ open: "a", doc: keeping, headSha256: null }),
+    );
     await waitFor(() => expect(clear.result.current).toBe("clear"));
     const lossyDoc = seeded();
-    const lossy = renderHook(() => useBoundNoteCheck({ open: "b", doc: lossyDoc, headSha256: null }));
+    const lossy = renderHook(() =>
+      useBoundNoteCheck({ open: "b", doc: lossyDoc, headSha256: null }),
+    );
     await waitFor(() => expect(lossy.result.current).toBe("lossy"));
   });
 
@@ -143,12 +172,14 @@ describe("useBoundNoteCheck", () => {
     await waitFor(() => expect(result.current).toBe("lossy"));
     const source = "Title\n=====\n\n* one\n";
     const imported = markdownToYDoc(source);
-    act(() => doc.transact(() => {
-      const meta = doc.getMap("meta");
-      meta.set("dohcMarkdownSource", source);
-      meta.set("dohcMarkdownSourceSha256", sha(source));
-      meta.set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(imported)));
-    }));
+    act(() =>
+      doc.transact(() => {
+        const meta = doc.getMap("meta");
+        meta.set("dohcMarkdownSource", source);
+        meta.set("dohcMarkdownSourceSha256", sha(source));
+        meta.set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(imported)));
+      }),
+    );
     imported.destroy();
     await waitFor(() => expect(result.current).toBe("clear"));
   });
@@ -159,12 +190,18 @@ describe("useBoundNoteCheck", () => {
     const atLimit = respelled + "a".repeat(LIVE_MARKDOWN_MAX_BYTES - respelled.length);
     // Fewer characters than the limit, and one byte over it in UTF-8.
     const multibyte = respelled + "é".repeat((LIVE_MARKDOWN_MAX_BYTES + 1 - respelled.length) / 2);
-    for (const [open, source, verdict] of [["a", atLimit, "clear"], ["b", `${atLimit}a`, "lossy"], ["c", multibyte, "lossy"]]) {
+    for (const [open, source, verdict] of [
+      ["a", atLimit, "clear"],
+      ["b", `${atLimit}a`, "lossy"],
+      ["c", multibyte, "lossy"],
+    ]) {
       const doc = markdownToYDoc(source);
       doc.getMap("meta").set("dohcMarkdownSource", source);
       doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(source));
       doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(doc)));
-      const { result } = renderHook(() => useBoundNoteCheck({ open, doc, headSha256: sha(source) }));
+      const { result } = renderHook(() =>
+        useBoundNoteCheck({ open, doc, headSha256: sha(source) }),
+      );
       await waitFor(() => expect(result.current).toBe(verdict));
     }
   });
@@ -176,9 +213,12 @@ describe("useBoundNoteCheck", () => {
       doc.getMap("meta").set("dohcMarkdownSource", source);
       doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(source));
       doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(doc)));
-      const view = renderHook(({ headSha256 }) => useBoundNoteCheck({ open: "a", doc, headSha256 }), {
-        initialProps: { headSha256: sha(source) },
-      });
+      const view = renderHook(
+        ({ headSha256 }) => useBoundNoteCheck({ open: "a", doc, headSha256 }),
+        {
+          initialProps: { headSha256: sha(source) },
+        },
+      );
       await waitFor(() => expect(view.result.current).toBe("clear"));
       return { doc, view };
     }
@@ -189,7 +229,6 @@ describe("useBoundNoteCheck", () => {
       view.rerender({ headSha256: sha("# Title\n\n- one\n") });
       expect(view.result.current).toBe("clear");
     });
-
   });
 
   // A change outside dohc resyncs a lossy source into the same document. Its
@@ -200,32 +239,40 @@ describe("useBoundNoteCheck", () => {
     async (when) => {
       const posted: Array<{ id: number; headSha256: string | null }> = [];
       let reply!: (id: number, lossy: boolean) => void;
-      vi.stubGlobal("Worker", class {
-        onmessage: ((event: { data: { id: number; lossy: boolean } }) => void) | null = null;
-        onerror = null;
-        constructor() {
-          reply = (id, lossy) => this.onmessage?.({ data: { id, lossy } });
-        }
-        postMessage(message: { id: number; headSha256: string | null }) {
-          posted.push(message);
-        }
-        terminate() {}
-      });
+      vi.stubGlobal(
+        "Worker",
+        class {
+          onmessage: ((event: { data: { id: number; lossy: boolean } }) => void) | null = null;
+          onerror = null;
+          constructor() {
+            reply = (id, lossy) => this.onmessage?.({ data: { id, lossy } });
+          }
+          postMessage(message: { id: number; headSha256: string | null }) {
+            posted.push(message);
+          }
+          terminate() {}
+        },
+      );
       const source = "Title\n=====\n\n* one\n";
       const doc = markdownToYDoc(source);
       doc.getMap("meta").set("dohcMarkdownSource", source);
       doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(source));
       doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(doc)));
       const initialProps: { headSha256?: string | null } = { headSha256: sha(source) };
-      const view = renderHook((props: { headSha256?: string | null }) =>
-        useBoundNoteCheck({ open: "a", doc, headSha256: props.headSha256 }), { initialProps });
+      const view = renderHook(
+        (props: { headSha256?: string | null }) =>
+          useBoundNoteCheck({ open: "a", doc, headSha256: props.headSha256 }),
+        { initialProps },
+      );
       expect(posted).toEqual([expect.objectContaining({ headSha256: sha(source) })]);
       expect(view.result.current).toBe("checking");
 
       act(() => {
         doc.getMap("meta").set("dohcMarkdownSource", LOSSY);
         doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(LOSSY));
-        doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(markdownToYDoc(LOSSY))));
+        doc
+          .getMap("meta")
+          .set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(markdownToYDoc(LOSSY))));
         view.rerender({ headSha256: undefined });
       });
       expect(view.result.current).toBe("checking");
@@ -259,7 +306,9 @@ describe("useBoundNoteCheck", () => {
         swapped = true;
         doc.getMap("meta").set("dohcMarkdownSource", kept);
         doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(kept));
-        doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(markdownToYDoc(kept))));
+        doc
+          .getMap("meta")
+          .set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(markdownToYDoc(kept))));
       }
       return check;
     });
@@ -277,9 +326,12 @@ describe("useBoundNoteCheck", () => {
     const paragraph = new Y.XmlElement("paragraph");
     paragraph.insert(0, [new Y.XmlText("Typed.")]);
     edited.getXmlFragment("body").push([paragraph]);
-    const view = renderHook(({ doc, headSha256 }) => useBoundNoteCheck({ open: "a", doc, headSha256 }), {
-      initialProps: { doc: edited, headSha256: sha("converted file") },
-    });
+    const view = renderHook(
+      ({ doc, headSha256 }) => useBoundNoteCheck({ open: "a", doc, headSha256 }),
+      {
+        initialProps: { doc: edited, headSha256: sha("converted file") },
+      },
+    );
     await waitFor(() => expect(view.result.current).toBe("clear"));
 
     // Sync swaps in another device's unedited import of the same bytes.
@@ -293,9 +345,12 @@ describe("useBoundNoteCheck", () => {
     const paragraph = new Y.XmlElement("paragraph");
     paragraph.insert(0, [new Y.XmlText("Typed.")]);
     doc.getXmlFragment("body").push([paragraph]);
-    const { result, rerender } = renderHook(({ headSha256 }) => useBoundNoteCheck({ open: "a", doc, headSha256 }), {
-      initialProps: { headSha256: sha(LOSSY) },
-    });
+    const { result, rerender } = renderHook(
+      ({ headSha256 }) => useBoundNoteCheck({ open: "a", doc, headSha256 }),
+      {
+        initialProps: { headSha256: sha(LOSSY) },
+      },
+    );
     await waitFor(() => expect(result.current).toBe("lossy"));
     rerender({ headSha256: sha("converted file") });
     await waitFor(() => expect(result.current).toBe("clear"));

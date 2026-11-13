@@ -1,8 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import {
-  acquireSharedLocalDocument,
-  getSharedLocalDocument,
-} from "./sharedLocalDocument";
+import { acquireSharedLocalDocument, getSharedLocalDocument } from "./sharedLocalDocument";
 import { documentVersionKey } from "./documentVersionKey";
 
 describe("SharedLocalDocument", () => {
@@ -11,9 +8,16 @@ describe("SharedLocalDocument", () => {
     const source = {};
     buffer.initializeRead("before", "hash-1", buffer.beginRead());
     buffer.publishDraft("draft", source);
-    const result = await buffer.write(source, async () => ({ status: "conflict", currentContentHash: "hash-2" }));
+    const result = await buffer.write(source, async () => ({
+      status: "conflict",
+      currentContentHash: "hash-2",
+    }));
     expect(result.status).toBe("conflict");
-    expect(buffer.getSnapshot().saveState).toEqual({ kind: "error", reason: "The file changed on disk.", issueId: null });
+    expect(buffer.getSnapshot().saveState).toEqual({
+      kind: "error",
+      reason: "The file changed on disk.",
+      issueId: null,
+    });
     expect(buffer.getSnapshot().body).toBe("draft");
   });
 
@@ -112,13 +116,7 @@ describe("SharedLocalDocument", () => {
       saveState: { kind: "error" },
     });
     expect(
-      parent.buffer.acceptRead(
-        "version body",
-        "hash-v2",
-        {},
-        false,
-        parent.buffer.beginRead(),
-      ),
+      parent.buffer.acceptRead("version body", "hash-v2", {}, false, parent.buffer.beginRead()),
     ).toBe(true);
     expect(parent.buffer.getSnapshot()).toMatchObject({
       body: "version body",
@@ -236,9 +234,7 @@ describe("SharedLocalDocument", () => {
   });
 
   it("serializes overlapping saves and writes the newest draft with the new hash", async () => {
-    const buffer = getSharedLocalDocument(
-      documentVersionKey("ws", "overlap.txt", 1),
-    );
+    const buffer = getSharedLocalDocument(documentVersionKey("ws", "overlap.txt", 1));
     const release = buffer.retain();
     buffer.initializeRead("zero", "hash-0", buffer.beginRead());
     buffer.publishDraft("one", {});
@@ -273,9 +269,7 @@ describe("SharedLocalDocument", () => {
   });
 
   it("keeps a newer peer as the source when an older writer succeeds", async () => {
-    const buffer = getSharedLocalDocument(
-      documentVersionKey("ws", "source-owner.txt", 1),
-    );
+    const buffer = getSharedLocalDocument(documentVersionKey("ws", "source-owner.txt", 1));
     const release = buffer.retain();
     const writerSource = {};
     const peerSource = {};
@@ -305,9 +299,7 @@ describe("SharedLocalDocument", () => {
   });
 
   it("keeps a peer's lazy draft dirty when an older writer succeeds", async () => {
-    const buffer = getSharedLocalDocument(
-      documentVersionKey("ws", "lazy-peer-owner.md", 1),
-    );
+    const buffer = getSharedLocalDocument(documentVersionKey("ws", "lazy-peer-owner.md", 1));
     const release = buffer.retain();
     const writerSource = {};
     const peerSource = {};
@@ -343,9 +335,7 @@ describe("SharedLocalDocument", () => {
   });
 
   it("rejects a read that started before a shared write completed", async () => {
-    const buffer = getSharedLocalDocument(
-      documentVersionKey("ws", "write-before-read.txt", 1),
-    );
+    const buffer = getSharedLocalDocument(documentVersionKey("ws", "write-before-read.txt", 1));
     const release = buffer.retain();
     const source = {};
     buffer.initializeRead("before", "hash-0", buffer.beginRead());
@@ -357,9 +347,7 @@ describe("SharedLocalDocument", () => {
       contentHash: "hash-1",
     }));
 
-    expect(
-      buffer.acceptRead("before", "hash-0", {}, false, staleRead),
-    ).toBe(false);
+    expect(buffer.acceptRead("before", "hash-0", {}, false, staleRead)).toBe(false);
     expect(buffer.getSnapshot()).toMatchObject({
       body: "after",
       contentHash: "hash-1",
@@ -367,25 +355,21 @@ describe("SharedLocalDocument", () => {
       saveState: { kind: "saved-here" },
     });
     const freshRead = buffer.beginRead();
-    expect(buffer.acceptRead("fresh", "hash-2", {}, false, freshRead)).toBe(
-      true,
-    );
+    expect(buffer.acceptRead("fresh", "hash-2", {}, false, freshRead)).toBe(true);
     release();
   });
 
   it("recovers after a writer rejects without poisoning later writes", async () => {
-    const buffer = getSharedLocalDocument(
-      documentVersionKey("ws", "retry-after-error.txt", 1),
-    );
+    const buffer = getSharedLocalDocument(documentVersionKey("ws", "retry-after-error.txt", 1));
     const release = buffer.retain();
     const source = {};
     buffer.initializeRead("before", "hash-1", buffer.beginRead());
     buffer.publishDraft("after", source);
 
     const writeError = new Error("disk unavailable");
-    await expect(
-      buffer.write(source, vi.fn().mockRejectedValue(writeError)),
-    ).rejects.toBe(writeError);
+    await expect(buffer.write(source, vi.fn().mockRejectedValue(writeError))).rejects.toBe(
+      writeError,
+    );
     expect(buffer.getSnapshot()).toMatchObject({
       body: "after",
       contentHash: "hash-1",
@@ -442,9 +426,7 @@ describe("SharedLocalDocument", () => {
   });
 
   it("lets only the pending draft owner take its lazy text", () => {
-    const buffer = getSharedLocalDocument(
-      documentVersionKey("ws", "pending-owner.md", 1),
-    );
+    const buffer = getSharedLocalDocument(documentVersionKey("ws", "pending-owner.md", 1));
     const release = buffer.retain();
     const source = {};
     const otherSource = {};
@@ -470,9 +452,7 @@ describe("SharedLocalDocument", () => {
   });
 
   it("notifies when materializing a pending draft leaves the snapshot unchanged", () => {
-    const buffer = getSharedLocalDocument(
-      documentVersionKey("ws", "pending-same.md", 1),
-    );
+    const buffer = getSharedLocalDocument(documentVersionKey("ws", "pending-same.md", 1));
     const release = buffer.retain();
     const source = {};
     buffer.initializeRead("same", "hash-1", buffer.beginRead());
@@ -494,9 +474,7 @@ describe("SharedLocalDocument", () => {
   });
 
   it("refuses an external reread while a lazy draft still owns the clean baseline", () => {
-    const buffer = getSharedLocalDocument(
-      documentVersionKey("ws", "pending-read.md", 1),
-    );
+    const buffer = getSharedLocalDocument(documentVersionKey("ws", "pending-read.md", 1));
     const release = buffer.retain();
     const draftSource = {};
     const readSource = {};
@@ -504,15 +482,9 @@ describe("SharedLocalDocument", () => {
     buffer.initializeRead("before", "hash-1", buffer.beginRead());
     buffer.setPendingDraft({ source: draftSource, materialize });
 
-    expect(
-      buffer.acceptRead(
-        "external",
-        "hash-2",
-        readSource,
-        false,
-        buffer.beginRead(),
-      ),
-    ).toBe(false);
+    expect(buffer.acceptRead("external", "hash-2", readSource, false, buffer.beginRead())).toBe(
+      false,
+    );
     expect(materialize).not.toHaveBeenCalled();
     expect(buffer.getSnapshot()).toMatchObject({
       body: "before",
@@ -530,9 +502,7 @@ describe("SharedLocalDocument", () => {
   });
 
   it("lets a forced read replace its own lazy draft without materializing it", () => {
-    const buffer = getSharedLocalDocument(
-      documentVersionKey("ws", "pending-own-read.md", 1),
-    );
+    const buffer = getSharedLocalDocument(documentVersionKey("ws", "pending-own-read.md", 1));
     const release = buffer.retain();
     const source = {};
     const materialize = vi.fn(() => "obsolete draft");
@@ -541,15 +511,7 @@ describe("SharedLocalDocument", () => {
     const listener = vi.fn();
     const unsubscribe = buffer.subscribe(listener);
 
-    expect(
-      buffer.acceptRead(
-        "reconciled",
-        "hash-2",
-        source,
-        true,
-        buffer.beginRead(),
-      ),
-    ).toBe(true);
+    expect(buffer.acceptRead("reconciled", "hash-2", source, true, buffer.beginRead())).toBe(true);
     expect(materialize).not.toHaveBeenCalled();
     expect(buffer.getPendingDraftSource()).toBeNull();
     expect(buffer.getSnapshot()).toMatchObject({
@@ -566,9 +528,7 @@ describe("SharedLocalDocument", () => {
   });
 
   it("refuses an owned pending read when a peer owns the dirty snapshot", () => {
-    const buffer = getSharedLocalDocument(
-      documentVersionKey("ws", "pending-peer-read.md", 1),
-    );
+    const buffer = getSharedLocalDocument(documentVersionKey("ws", "pending-peer-read.md", 1));
     const release = buffer.retain();
     const pendingSource = {};
     const peerSource = {};
@@ -577,15 +537,9 @@ describe("SharedLocalDocument", () => {
     buffer.publishDraft("peer draft", peerSource);
     buffer.setPendingDraft({ source: pendingSource, materialize });
 
-    expect(
-      buffer.acceptRead(
-        "external",
-        "hash-2",
-        pendingSource,
-        true,
-        buffer.beginRead(),
-      ),
-    ).toBe(false);
+    expect(buffer.acceptRead("external", "hash-2", pendingSource, true, buffer.beginRead())).toBe(
+      false,
+    );
     expect(materialize).not.toHaveBeenCalled();
     expect(buffer.getPendingDraftSource()).toBe(pendingSource);
     expect(buffer.getSnapshot()).toMatchObject({
@@ -600,9 +554,7 @@ describe("SharedLocalDocument", () => {
   });
 
   it("reports a dirty draft that has no write baseline", async () => {
-    const buffer = getSharedLocalDocument(
-      documentVersionKey("ws", "no-baseline.txt", 1),
-    );
+    const buffer = getSharedLocalDocument(documentVersionKey("ws", "no-baseline.txt", 1));
     const release = buffer.retain();
     buffer.publishDraft("unsaved", {});
     const writer = vi.fn();
@@ -641,15 +593,9 @@ describe("SharedLocalDocument", () => {
     finishWrite();
     await writing;
 
-    expect(
-      buffer.acceptRead(
-        "disk after",
-        "hash-2",
-        writerSource,
-        true,
-        buffer.beginRead(),
-      ),
-    ).toBe(false);
+    expect(buffer.acceptRead("disk after", "hash-2", writerSource, true, buffer.beginRead())).toBe(
+      false,
+    );
 
     expect(buffer.getSnapshot()).toMatchObject({
       body: "peer draft",
@@ -677,9 +623,7 @@ describe("SharedLocalDocument", () => {
   });
 
   it("replaces an earlier clean initialization with a later successful read", () => {
-    const buffer = getSharedLocalDocument(
-      documentVersionKey("ws", "newer-initialization.md", 1),
-    );
+    const buffer = getSharedLocalDocument(documentVersionKey("ws", "newer-initialization.md", 1));
     const release = buffer.retain();
     const older = buffer.beginRead();
     const newer = buffer.beginRead();
@@ -697,9 +641,7 @@ describe("SharedLocalDocument", () => {
   });
 
   it("refuses a newer initialization while local work is busy and blocks older responses", async () => {
-    const buffer = getSharedLocalDocument(
-      documentVersionKey("ws", "busy-initialization.md", 1),
-    );
+    const buffer = getSharedLocalDocument(documentVersionKey("ws", "busy-initialization.md", 1));
     const release = buffer.retain();
     const source = {};
     buffer.initializeRead("before", "hash-0", buffer.beginRead());
@@ -723,9 +665,7 @@ describe("SharedLocalDocument", () => {
   });
 
   it("rejects an older read after a newer response was refused while dirty", async () => {
-    const buffer = getSharedLocalDocument(
-      documentVersionKey("ws", "refused-newer-read.txt", 1),
-    );
+    const buffer = getSharedLocalDocument(documentVersionKey("ws", "refused-newer-read.txt", 1));
     const release = buffer.retain();
     const draftSource = {};
     buffer.reset("before", "hash-0", draftSource);
@@ -733,17 +673,13 @@ describe("SharedLocalDocument", () => {
     const newer = buffer.beginRead();
     buffer.publishDraft("written draft", draftSource);
 
-    expect(
-      buffer.acceptRead("newer response", "hash-newer", {}, false, newer),
-    ).toBe(false);
+    expect(buffer.acceptRead("newer response", "hash-newer", {}, false, newer)).toBe(false);
     await buffer.write(draftSource, async () => ({
       status: "written",
       contentHash: "hash-written",
     }));
 
-    expect(
-      buffer.acceptRead("older response", "hash-older", {}, false, older),
-    ).toBe(false);
+    expect(buffer.acceptRead("older response", "hash-older", {}, false, older)).toBe(false);
     expect(buffer.getSnapshot()).toMatchObject({
       body: "written draft",
       contentHash: "hash-written",
@@ -754,9 +690,7 @@ describe("SharedLocalDocument", () => {
   });
 
   it("initializes from an older successful read when the newer read fails", () => {
-    const buffer = getSharedLocalDocument(
-      documentVersionKey("ws", "fallback.txt", 1),
-    );
+    const buffer = getSharedLocalDocument(documentVersionKey("ws", "fallback.txt", 1));
     const release = buffer.retain();
     const older = buffer.beginRead();
     buffer.beginRead(); // The later request settles without an accepted read.
@@ -773,20 +707,12 @@ describe("SharedLocalDocument", () => {
 
   it("isolates the same path across workspaces and version reopen keys", () => {
     const first = getSharedLocalDocument(documentVersionKey("ws-a", "a.txt", 1));
-    const otherWorkspace = getSharedLocalDocument(
-      documentVersionKey("ws-b", "a.txt", 1),
-    );
-    const otherVersion = getSharedLocalDocument(
-      documentVersionKey("ws-a", "a.txt", 2),
-    );
+    const otherWorkspace = getSharedLocalDocument(documentVersionKey("ws-b", "a.txt", 1));
+    const otherVersion = getSharedLocalDocument(documentVersionKey("ws-a", "a.txt", 2));
     const releases = [first.retain(), otherWorkspace.retain(), otherVersion.retain()];
 
     first.initializeRead("first", "hash-a", first.beginRead());
-    otherWorkspace.initializeRead(
-      "workspace",
-      "hash-b",
-      otherWorkspace.beginRead(),
-    );
+    otherWorkspace.initializeRead("workspace", "hash-b", otherWorkspace.beginRead());
     otherVersion.initializeRead("version", "hash-c", otherVersion.beginRead());
 
     expect(first.getSnapshot().body).toBe("first");

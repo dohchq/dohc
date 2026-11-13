@@ -2,9 +2,19 @@ import { describe, expect, it } from "vitest";
 import { invitationOutcome, nextInvitationList, type InvitationList } from "./invitationOutcome";
 
 const LISTS: InvitationList[] = ["waiting", "listed", "failed"];
-const EVERY_INPUT = LISTS.flatMap((shares) => LISTS.flatMap((dms) =>
-  [false, true].flatMap((rowMounted) => [false, true].flatMap((chatsOn) => [false, true].map((waitedTooLong) =>
-    ({ progress: { rowMounted, shares, dms }, chatsOn, waitedTooLong }))))));
+const EVERY_INPUT = LISTS.flatMap((shares) =>
+  LISTS.flatMap((dms) =>
+    [false, true].flatMap((rowMounted) =>
+      [false, true].flatMap((chatsOn) =>
+        [false, true].map((waitedTooLong) => ({
+          progress: { rowMounted, shares, dms },
+          chatsOn,
+          waitedTooLong,
+        })),
+      ),
+    ),
+  ),
+);
 
 describe("invitationOutcome", () => {
   it.each([
@@ -26,12 +36,19 @@ describe("invitationOutcome", () => {
     [true, "waiting", "waiting", true, false, "shown"],
     [true, "failed", "failed", true, true, "shown"],
     [true, "listed", "listed", false, false, "shown"],
-  ] as const)("row %s, shares %s, messages %s, chats on %s, waited too long %s: %s", (rowMounted, shares, dms, chatsOn, waitedTooLong, outcome) => {
-    expect(invitationOutcome({ progress: { rowMounted, shares, dms }, chatsOn, waitedTooLong })).toBe(outcome);
-  });
+  ] as const)(
+    "row %s, shares %s, messages %s, chats on %s, waited too long %s: %s",
+    (rowMounted, shares, dms, chatsOn, waitedTooLong, outcome) => {
+      expect(
+        invitationOutcome({ progress: { rowMounted, shares, dms }, chatsOn, waitedTooLong }),
+      ).toBe(outcome);
+    },
+  );
 
   it("is pending, late or off before Chats reports anything", () => {
-    expect(invitationOutcome({ progress: null, chatsOn: true, waitedTooLong: false })).toBe("pending");
+    expect(invitationOutcome({ progress: null, chatsOn: true, waitedTooLong: false })).toBe(
+      "pending",
+    );
     expect(invitationOutcome({ progress: null, chatsOn: true, waitedTooLong: true })).toBe("late");
     expect(invitationOutcome({ progress: null, chatsOn: false, waitedTooLong: false })).toBe("off");
   });

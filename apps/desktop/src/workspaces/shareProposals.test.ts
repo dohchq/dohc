@@ -74,12 +74,8 @@ describe("requireShareViewMembership (seeing and taking back)", () => {
 
 describe("requireShareViewProposalScope (the recipient lane)", () => {
   it("treats reordered selector paths as the same effective scope", () => {
-    const left = requireShareViewProposalScope(
-      marker({ paths: ["docs", "images"] }),
-    );
-    const right = requireShareViewProposalScope(
-      marker({ paths: ["images", "docs"] }),
-    );
+    const left = requireShareViewProposalScope(marker({ paths: ["docs", "images"] }));
+    const right = requireShareViewProposalScope(marker({ paths: ["images", "docs"] }));
 
     expect(sameShareViewProposalScope(left, right)).toBe(true);
     expect(
@@ -104,9 +100,9 @@ describe("requireShareViewProposalScope (the recipient lane)", () => {
   });
 
   it("refuses a comment-level share view", () => {
-    expect(() =>
-      requireShareViewProposalScope(marker({ access: "comment" })),
-    ).toThrow(SharedFileReadOnlyError);
+    expect(() => requireShareViewProposalScope(marker({ access: "comment" }))).toThrow(
+      SharedFileReadOnlyError,
+    );
   });
 
   it("refuses a share view whose grant reads back as damage", () => {
@@ -130,9 +126,7 @@ describe("requireShareViewProposalScope (the recipient lane)", () => {
 
   it("refuses a marker that lost its recipient, while membership still resolves", () => {
     const damaged = marker({ recipientUserId: "" });
-    expect(() => requireShareViewProposalScope(damaged)).toThrow(
-      SharedFileReadOnlyError,
-    );
+    expect(() => requireShareViewProposalScope(damaged)).toThrow(SharedFileReadOnlyError);
     expect(requireShareViewMembership(damaged).shareId).toBe("share-1");
   });
 

@@ -9,16 +9,26 @@ import {
   renderThreads,
 } from "./render";
 import type { CliShowThreadResult as ShowResult } from "./protocol";
-import {
-  formatMessageHandle,
-  renderThreadMarkdown,
-} from "./threadMarkdown";
+import { formatMessageHandle, renderThreadMarkdown } from "./threadMarkdown";
 
 it("prints operation link progress and the committed History receipt", () => {
-  const operation = {ok: true as const, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", members: [], nextCursor: null};
-  expect(renderCliResult("historyOperation", {...operation, links: {state: "updating"}})).toBe("Updating links…");
-  expect(renderCliResult("historyOperation", {...operation, links: {state: "done", documents: 3, unchecked: ["source.md"], uncheckedCount: 2}}))
-    .toBe("Link updates committed in History: 3 documents. Disk writes follow.\n2 linking documents not checked.\nNot checked: source.md");
+  const operation = {
+    ok: true as const,
+    operationId: "dohc-operation:11111111-1111-4111-8111-111111111111",
+    members: [],
+    nextCursor: null,
+  };
+  expect(renderCliResult("historyOperation", { ...operation, links: { state: "updating" } })).toBe(
+    "Updating links…",
+  );
+  expect(
+    renderCliResult("historyOperation", {
+      ...operation,
+      links: { state: "done", documents: 3, unchecked: ["source.md"], uncheckedCount: 2 },
+    }),
+  ).toBe(
+    "Link updates committed in History: 3 documents. Disk writes follow.\n2 linking documents not checked.\nNot checked: source.md",
+  );
 });
 
 const engineering = {
@@ -70,7 +80,8 @@ describe("markdown renderers", () => {
 
   it("renders a no-reply failure in show", () => {
     const dispatch: ShowResult["dispatch"] = {
-      paused: null, lastRun: { state: "failed", failureReason: "no-reply", exitCode: 0 },
+      paused: null,
+      lastRun: { state: "failed", failureReason: "no-reply", exitCode: 0 },
     };
     expect(renderShowMarkdown({ ...showResult, dispatch })).toContain(
       'dispatch: {"paused":null,"lastRun":{"state":"failed","failureReason":"no-reply","exitCode":0}}',
@@ -114,10 +125,12 @@ describe("markdown renderers", () => {
   it("says a message came from an automation", () => {
     const fromAutomation: ShowResult = {
       ...showResult,
-      messages: [{
-        ...showResult.messages[0]!,
-        author: { kind: "automation", displayName: "Stamp the finish date" },
-      }],
+      messages: [
+        {
+          ...showResult.messages[0]!,
+          author: { kind: "automation", displayName: "Stamp the finish date" },
+        },
+      ],
     };
     expect(renderThreadMarkdown(fromAutomation)).toContain(
       "**Stamp the finish date** · automation · 2026-07-03T04:05:06.000Z · msg_root",
@@ -135,7 +148,9 @@ describe("markdown renderers", () => {
     };
     const markdown = renderThreadMarkdown(worked);
     const at = new Date(reply.createdAtMs).toISOString();
-    expect(markdown).toContain(`**Sam** · work waiting https://example.com/pull/7 (as reported) · ${at} · msg_reply`);
+    expect(markdown).toContain(
+      `**Sam** · work waiting https://example.com/pull/7 (as reported) · ${at} · msg_reply`,
+    );
     expect(markdown).toContain(`**Sam** · work done (as reported) · ${at} · msg_done`);
   });
 
@@ -144,14 +159,19 @@ describe("markdown renderers", () => {
     const reported: ShowResult = {
       ...showResult,
       messages: [
-        { ...reply, authorReported: { product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" } },
+        {
+          ...reply,
+          authorReported: { product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" },
+        },
         { ...reply, id: "msg_product", authorReported: { product: "Claude Code" } },
         { ...reply, id: "msg_silent" },
       ],
     };
     const markdown = renderThreadMarkdown(reported);
     const at = new Date(reply.createdAtMs).toISOString();
-    expect(markdown).toContain(`**Sam** · Claude Code 2.1, Claude Opus 5.5 (as reported) · ${at} · msg_reply`);
+    expect(markdown).toContain(
+      `**Sam** · Claude Code 2.1, Claude Opus 5.5 (as reported) · ${at} · msg_reply`,
+    );
     expect(markdown).toContain(`**Sam** · Claude Code (as reported) · ${at} · msg_product`);
     expect(markdown).toContain(`**Sam** · ${at} · msg_silent`);
   });
@@ -159,10 +179,12 @@ describe("markdown renderers", () => {
   it("renders a redacted attachment with an opaque label", () => {
     const redacted: ShowResult = {
       ...showResult,
-      messages: [{
-        ...showResult.messages[0]!,
-        attachments: [{}],
-      }],
+      messages: [
+        {
+          ...showResult.messages[0]!,
+          attachments: [{}],
+        },
+      ],
     };
 
     expect(renderThreadMarkdown(redacted)).toContain("[attach: attachment]");
@@ -182,7 +204,13 @@ describe("markdown renderers", () => {
       renderGroups({
         groups: [
           { ...engineering, channelWireId: "wire" },
-          { id: "ch_agent", name: "my-agent", slug: "my-agent", kind: "agent", channelWireId: null },
+          {
+            id: "ch_agent",
+            name: "my-agent",
+            slug: "my-agent",
+            kind: "agent",
+            channelWireId: null,
+          },
         ],
       }),
     ).toMatchInlineSnapshot(`
@@ -267,10 +295,13 @@ describe("markdown renderers", () => {
     `);
     expect(renderGrep(result, { filesWithMatches: true, context: 1 })).toBe("th_8f2k1c");
     expect(
-      renderGrep({ threadIds: ["th_8f2k1c", "th_other"] }, {
-        filesWithMatches: true,
-        context: 0,
-      }),
+      renderGrep(
+        { threadIds: ["th_8f2k1c", "th_other"] },
+        {
+          filesWithMatches: true,
+          context: 0,
+        },
+      ),
     ).toBe("th_8f2k1c\nth_other");
   });
 
@@ -285,14 +316,25 @@ describe("markdown renderers", () => {
             position: { createdAtMs: 1_000, lane: "posts", id: "th_1" },
             threadId: "th_1",
             message: {
-              id: "msg_1", author: sam, body: "Plan the trip", createdAtMs: 1_000, attachments: [],
-              decisionState: "resolved", decisionOptions: ["Train", "Bus"], decisionChosenOption: "Train",
+              id: "msg_1",
+              author: sam,
+              body: "Plan the trip",
+              createdAtMs: 1_000,
+              attachments: [],
+              decisionState: "resolved",
+              decisionOptions: ["Train", "Bus"],
+              decisionChosenOption: "Train",
             },
             post: {
               replyCount: 2,
               repliers: [{ author: scout, lastReplyAtMs: 3_000 }],
               lastReplyAtMs: 3_000,
-              latestAgentReply: { id: "msg_3", author: scout, createdAtMs: 3_000, bodyExcerpt: "Booked the train." },
+              latestAgentReply: {
+                id: "msg_3",
+                author: scout,
+                createdAtMs: 3_000,
+                bodyExcerpt: "Booked the train.",
+              },
               openDecisionCount: 1,
             },
           },
@@ -300,8 +342,13 @@ describe("markdown renderers", () => {
             position: { createdAtMs: 4_000, lane: "chat", id: "msg_4" },
             threadId: "th_chat",
             message: {
-              id: "msg_4", author: sam, body: "Who is driving?", createdAtMs: 4_000, attachments: [],
-              decisionState: "open", decisionOptions: ["Sam", "Ada"],
+              id: "msg_4",
+              author: sam,
+              body: "Who is driving?",
+              createdAtMs: 4_000,
+              attachments: [],
+              decisionState: "open",
+              decisionOptions: ["Sam", "Ada"],
               agentRequests: [{ agentId: "default", state: "failed", failureReason: "no-reply" }],
             },
           },
@@ -310,44 +357,77 @@ describe("markdown renderers", () => {
         readPosition: { createdAtMs: 1_000, lane: "posts", id: "th_1" },
       },
     });
-    expect(markdown).toBe([
-      "# #engineering",
-      "older: --before 1000:posts:th_1",
-      "",
-      "**Sam** · 1970-01-01T00:00:01.000Z · th_1 · needs-decision(resolved) · 2 replies · from Scout · last reply 1970-01-01T00:00:03.000Z · open decisions: 1",
-      "Plan the trip",
-      "- [x] Train",
-      "- [ ] Bus",
-      "> **Scout** · 1970-01-01T00:00:03.000Z · msg_3: Booked the train.",
-      "",
-      "--- read up to here ---",
-      "",
-      "**Sam** · 1970-01-01T00:00:04.000Z · msg_4 · agent default failed (no-reply) · needs-decision(open)",
-      "Who is driving?",
-      "- [ ] Sam",
-      "- [ ] Ada",
-      "",
-    ].join("\n"));
+    expect(markdown).toBe(
+      [
+        "# #engineering",
+        "older: --before 1000:posts:th_1",
+        "",
+        "**Sam** · 1970-01-01T00:00:01.000Z · th_1 · needs-decision(resolved) · 2 replies · from Scout · last reply 1970-01-01T00:00:03.000Z · open decisions: 1",
+        "Plan the trip",
+        "- [x] Train",
+        "- [ ] Bus",
+        "> **Scout** · 1970-01-01T00:00:03.000Z · msg_3: Booked the train.",
+        "",
+        "--- read up to here ---",
+        "",
+        "**Sam** · 1970-01-01T00:00:04.000Z · msg_4 · agent default failed (no-reply) · needs-decision(open)",
+        "Who is driving?",
+        "- [ ] Sam",
+        "- [ ] Ada",
+        "",
+      ].join("\n"),
+    );
   });
 });
 
 describe("renderNotices", () => {
   it("prints each row with its text and where it opens, or why it has nowhere to go", () => {
-    expect(renderNotices({ notices: [
-      { id: "a", kind: "agent-run", title: "Nova replied", body: "Done", sender: { kind: "agent", label: "Nova" },
-        createdAtMs: Date.UTC(2026, 10, 6), read: false, opens: { to: "chat", thread: "th_1", message: "msg_2" } },
-      { id: "b", kind: "mention", title: "Bea mentioned you", body: "", sender: null,
-        createdAtMs: Date.UTC(2026, 10, 5), read: true, opens: { to: "file", path: "plans/day-1.md" } },
-      { id: "c", kind: "mention", title: "Shared plan", body: "", sender: null,
-        createdAtMs: Date.UTC(2026, 10, 4), read: true, opens: null, note: "Your access to this ended." },
-    ] })).toBe([
-      "[unread] · 2026-11-06 · Nova · Nova replied",
-      "  Done",
-      "  opens: msg_2",
-      "[read] · 2026-11-05 · Bea mentioned you",
-      "  opens: plans/day-1.md",
-      "[read] · 2026-11-04 · Shared plan",
-      "  Your access to this ended.",
-    ].join("\n"));
+    expect(
+      renderNotices({
+        notices: [
+          {
+            id: "a",
+            kind: "agent-run",
+            title: "Nova replied",
+            body: "Done",
+            sender: { kind: "agent", label: "Nova" },
+            createdAtMs: Date.UTC(2026, 10, 6),
+            read: false,
+            opens: { to: "chat", thread: "th_1", message: "msg_2" },
+          },
+          {
+            id: "b",
+            kind: "mention",
+            title: "Bea mentioned you",
+            body: "",
+            sender: null,
+            createdAtMs: Date.UTC(2026, 10, 5),
+            read: true,
+            opens: { to: "file", path: "plans/day-1.md" },
+          },
+          {
+            id: "c",
+            kind: "mention",
+            title: "Shared plan",
+            body: "",
+            sender: null,
+            createdAtMs: Date.UTC(2026, 10, 4),
+            read: true,
+            opens: null,
+            note: "Your access to this ended.",
+          },
+        ],
+      }),
+    ).toBe(
+      [
+        "[unread] · 2026-11-06 · Nova · Nova replied",
+        "  Done",
+        "  opens: msg_2",
+        "[read] · 2026-11-05 · Bea mentioned you",
+        "  opens: plans/day-1.md",
+        "[read] · 2026-11-04 · Shared plan",
+        "  Your access to this ended.",
+      ].join("\n"),
+    );
   });
 });

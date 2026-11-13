@@ -53,28 +53,20 @@ async function uiStateIn(dir: string | null): Promise<unknown> {
   return JSON.parse(await readFile(path, "utf8"));
 }
 
-async function writeUiStateFileNow(
-  workspace: LocalStateWorkspace,
-  state: unknown,
-): Promise<void> {
+async function writeUiStateFileNow(workspace: LocalStateWorkspace, state: unknown): Promise<void> {
   const path = join(await localStateDir(workspace), UI_STATE_FILE);
   // Atomic temp+rename so a crash mid-write never truncates the state file
   // (the unique suffix keeps concurrent writers apart).
   await atomicReplaceFile(path, (tmp) => writeFile(tmp, `${JSON.stringify(state, null, 2)}\n`));
 }
 
-export function writeUiStateFile(
-  workspace: LocalStateWorkspace,
-  state: unknown,
-): Promise<void> {
+export function writeUiStateFile(workspace: LocalStateWorkspace, state: unknown): Promise<void> {
   // Renderer activity can emit several IPC writes in the same frame. Keep a
   // per-workspace FIFO so Windows never has multiple rename-over-destination
   // operations racing against the same ui-state.json file.
   const key = workspace.rootPath;
   const previous = writeQueues.get(key) ?? Promise.resolve();
-  const current = previous
-    .catch(() => undefined)
-    .then(() => writeUiStateFileNow(workspace, state));
+  const current = previous.catch(() => undefined).then(() => writeUiStateFileNow(workspace, state));
   writeQueues.set(key, current);
 
   return current.finally(() => {

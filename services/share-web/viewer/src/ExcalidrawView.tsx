@@ -1,7 +1,4 @@
-import {
-  Excalidraw,
-  restore,
-} from "@excalidraw/excalidraw";
+import { Excalidraw, restore } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import { useMemo } from "react";
 import type { ExcalidrawInitialDataState } from "@excalidraw/excalidraw/types";

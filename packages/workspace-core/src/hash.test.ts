@@ -5,10 +5,8 @@ import { sha256Hex } from "./hash";
 // test. Relay blobs, key envelopes, scan metadata, MCP tools, and the sqlite
 // worker all share this digest; a byte-handling regression here corrupts
 // every one of their content addresses at once.
-const SHA256_ABC =
-  "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
-const SHA256_EMPTY =
-  "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+const SHA256_ABC = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+const SHA256_EMPTY = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
 describe("sha256Hex", () => {
   it("matches the FIPS 180-2 known answers for text input", () => {

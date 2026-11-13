@@ -128,8 +128,7 @@ const DEFINITION_DESTINATION_RE =
 // paragraph, so the header is only a header when this follows it. Leading and
 // trailing pipes are both optional; a pipe somewhere is not, or `---` alone
 // would read as a one-column table instead of a break.
-const TABLE_DELIMITER_RE =
-  /^[ \t]{0,3}\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$/;
+const TABLE_DELIMITER_RE = /^[ \t]{0,3}\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$/;
 
 /** The cells a table row declares. The outer pipes bound the row rather than
  *  dividing it, and a BACKSLASH-escaped pipe is cell text — `A \| B | C` is
@@ -199,7 +198,9 @@ function escapeCodeSpanPipes(line: string): string {
       continue;
     }
     const close = starts[closer];
-    const span = line.slice(open, close).replace(/\\\||\|/g, (pipe) => (pipe === "|" ? "\\|" : pipe));
+    const span = line
+      .slice(open, close)
+      .replace(/\\\||\|/g, (pipe) => (pipe === "|" ? "\\|" : pipe));
     result += line.slice(index, open) + span + line.slice(close, close + open - index);
     index = close + open - index;
   }
@@ -303,14 +304,11 @@ function continuationIndent(text: string): { indent: number; lazy: boolean; fenc
   const marker = columnAt(text, match[0].length);
   const content = columnAt(text, match[0].length + spaces.length);
   const body = text.slice(match[0].length).trim();
-  const indent = content - marker > 4 || !body
-    ? marker + 1
-    : content;
+  const indent = content - marker > 4 || !body ? marker + 1 : content;
   const fence = content - marker > 4 ? null : fenceOpener(body);
   return {
     indent,
-    lazy: !!body && content - marker < 4 &&
-      !body.startsWith("#") && !fence && !BREAK_RE.test(body),
+    lazy: !!body && content - marker < 4 && !body.startsWith("#") && !fence && !BREAK_RE.test(body),
     fence,
   };
 }
@@ -484,8 +482,7 @@ export function blockForLine(body: string, line: number): LineBlock {
           ? "table"
           : blockKind(text);
     const marker = listMarker(text);
-    const listOpen =
-      openKind === "bullet" || openKind === "task" || openKind === "ordered";
+    const listOpen = openKind === "bullet" || openKind === "task" || openKind === "ordered";
     let opener = fenceOpener(text);
     const mathClose = mathBlockEnd(lines, index);
     // A blank line does not end a block the next line continues: another item
@@ -494,9 +491,7 @@ export function blockForLine(body: string, line: number): LineBlock {
     // those continuations, which is why this is read before the starts below.
     const indent = leadingColumns(text);
     const resumes =
-      (listOpen &&
-        ((kind === openKind && marker === openMarker) ||
-          indent >= openIndent)) ||
+      (listOpen && ((kind === openKind && marker === openMarker) || indent >= openIndent)) ||
       (openKind === "code" && kind === "code");
     // Indented code ends where the indentation stops, blank line or not — the
     // same "ends at its own last line" shape a heading and a fence have. It
@@ -541,10 +536,11 @@ export function blockForLine(body: string, line: number): LineBlock {
         (kind === "bullet" ||
           kind === "task" ||
           HTML_BLOCK_RE.test(text) ||
-          (kind === "ordered" &&
-            (quoteCallout || INTERRUPTING_ORDERED_RE.test(text))))) ||
+          (kind === "ordered" && (quoteCallout || INTERRUPTING_ORDERED_RE.test(text))))) ||
       // Ordinary item paragraphs accept underindented lazy continuation.
-      (open && listOpen && indent < openIndent &&
+      (open &&
+        listOpen &&
+        indent < openIndent &&
         (previousEndsLazy ||
           (indent <= Math.min(3, openIndent - 1) &&
             (/^ *#/.test(text) || /^ *<(?:[a-z].*>|!--)/i.test(text)))));
@@ -564,13 +560,15 @@ export function blockForLine(body: string, line: number): LineBlock {
       openKind = kind;
       openMarker = marker;
       quoteOpen = false;
-      quoteCallout =
-        kind === "quote" && CALLOUT_RE.test(text.replace(QUOTE_PREFIX_RE, ""));
+      quoteCallout = kind === "quote" && CALLOUT_RE.test(text.replace(QUOTE_PREFIX_RE, ""));
       quoteFence = null;
     }
-    previousEndsLazy = listOpen &&
-      (text.includes("\t") ? leadingColumns(text.replace(/\t/g, "    ")) : indent) >= openIndent + 4 ||
-      (listOpen && indent >= openIndent &&
+    previousEndsLazy =
+      (listOpen &&
+        (text.includes("\t") ? leadingColumns(text.replace(/\t/g, "    ")) : indent) >=
+          openIndent + 4) ||
+      (listOpen &&
+        indent >= openIndent &&
         indent - openIndent <= Math.min(3, openIndent - 1) &&
         /^ *#/.test(text.slice(openIndent)));
     // The item at the top level of this list sets the continuation column, so
@@ -579,11 +577,7 @@ export function blockForLine(body: string, line: number): LineBlock {
     // what continues the list.
     if (
       (kind === "bullet" || kind === "task" || kind === "ordered") &&
-      (opens ||
-        (listOpen &&
-          kind === openKind &&
-          marker === openMarker &&
-          indent < openIndent))
+      (opens || (listOpen && kind === openKind && marker === openMarker && indent < openIndent))
     ) {
       const continuation = continuationIndent(text);
       openIndent = continuation.indent;

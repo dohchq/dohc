@@ -5,17 +5,29 @@ import type { CloudCredentials } from "./cloudCredentialStore";
 import { createServerAccountDeletion } from "./serverAccountDeletion";
 
 const credentials: CloudCredentials = {
-  serverUrl: "https://account.example.test", relayUrl: "https://relay.example.test",
-  token: "session-token", userId: "member", email: "member@example.test",
+  serverUrl: "https://account.example.test",
+  relayUrl: "https://relay.example.test",
+  token: "session-token",
+  userId: "member",
+  email: "member@example.test",
 };
 const scope = {
-  email: credentials.email, serverOrigin: credentials.serverUrl, workspaceIds: ["ws-elsewhere", "ws-notes", "ws-trip"],
-  workspaceCount: 3, ownedShareCount: 2, heldGrantCount: 1, storedBytes: 5 * 1024 * 1024,
-  passwordRequired: true, previewToken: "expiry.digest.signature",
+  email: credentials.email,
+  serverOrigin: credentials.serverUrl,
+  workspaceIds: ["ws-elsewhere", "ws-notes", "ws-trip"],
+  workspaceCount: 3,
+  ownedShareCount: 2,
+  heldGrantCount: 1,
+  storedBytes: 5 * 1024 * 1024,
+  passwordRequired: true,
+  previewToken: "expiry.digest.signature",
 };
-const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+const json = (status: number, body: unknown) =>
+  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
-function harness(answer: (path: string, body: Record<string, unknown>) => Response | Promise<Response>) {
+function harness(
+  answer: (path: string, body: Record<string, unknown>) => Response | Promise<Response>,
+) {
   const calls: { url: string; init: RequestInit; body: Record<string, unknown> }[] = [];
   const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -34,10 +46,22 @@ function harness(answer: (path: string, body: Record<string, unknown>) => Respon
     disconnect,
     fetch: fetch as typeof globalThis.fetch,
   });
-  return { deletion, calls, fetch, disconnect, switchTo: (next: CloudCredentials | null) => { current = next; } };
+  return {
+    deletion,
+    calls,
+    fetch,
+    disconnect,
+    switchTo: (next: CloudCredentials | null) => {
+      current = next;
+    },
+  };
 }
 
-const deleteInput = { server: credentials.serverUrl, previewToken: scope.previewToken, password: "correct horse" };
+const deleteInput = {
+  server: credentials.serverUrl,
+  previewToken: scope.previewToken,
+  password: "correct horse",
+};
 
 // A harness whose session already reviewed the preview; `answer` answers the
 // delete call, the only call it records.
@@ -53,15 +77,28 @@ describe("server account deletion", () => {
   it("previews with the stored session and names the owned workspaces this computer has", async () => {
     const h = harness(() => json(200, scope));
     await expect(h.deletion.preview()).resolves.toEqual({
-      email: credentials.email, server: credentials.serverUrl,
-      workspaces: [{ workspaceId: "ws-notes", name: "Notes" }, { workspaceId: "ws-trip", name: "Trip to Lisbon" }],
-      workspacesElsewhere: 1, storedBytes: scope.storedBytes, ownedShareCount: 2, heldGrantCount: 1,
+      email: credentials.email,
+      server: credentials.serverUrl,
+      workspaces: [
+        { workspaceId: "ws-notes", name: "Notes" },
+        { workspaceId: "ws-trip", name: "Trip to Lisbon" },
+      ],
+      workspacesElsewhere: 1,
+      storedBytes: scope.storedBytes,
+      ownedShareCount: 2,
+      heldGrantCount: 1,
       previewToken: scope.previewToken,
     });
     expect(h.calls).toHaveLength(1);
     expect(h.calls[0]!.url).toBe("https://account.example.test/api/auth/account/deletion-preview");
-    expect(h.calls[0]!.init).toMatchObject({ method: "POST", redirect: "error", credentials: "omit" });
-    expect((h.calls[0]!.init.headers as Record<string, string>).authorization).toBe("Bearer session-token");
+    expect(h.calls[0]!.init).toMatchObject({
+      method: "POST",
+      redirect: "error",
+      credentials: "omit",
+    });
+    expect((h.calls[0]!.init.headers as Record<string, string>).authorization).toBe(
+      "Bearer session-token",
+    );
   });
 
   it.each([
@@ -76,7 +113,14 @@ describe("server account deletion", () => {
   it.each([
     [401, {}, "session expired"],
     [429, {}, "too many attempts"],
-    [503, { code: "DELETION_UNAVAILABLE", message: "This server cannot delete accounts yet. Contact the server owner." }, "cannot delete accounts yet"],
+    [
+      503,
+      {
+        code: "DELETION_UNAVAILABLE",
+        message: "This server cannot delete accounts yet. Contact the server owner.",
+      },
+      "cannot delete accounts yet",
+    ],
     [500, { message: "internal detail" }, "answered 500"],
   ])("explains a preview the server answered %i", async (status, body, words) => {
     const h = harness(() => json(status, body));
@@ -84,7 +128,9 @@ describe("server account deletion", () => {
   });
 
   it("explains an unreachable server and a missing session", async () => {
-    const h = harness(() => { throw new TypeError("fetch failed"); });
+    const h = harness(() => {
+      throw new TypeError("fetch failed");
+    });
     await expect(h.deletion.preview()).rejects.toThrow("could not reach this server");
     h.switchTo(null);
     await expect(h.deletion.preview()).rejects.toThrow("Connect to a server first.");
@@ -94,18 +140,27 @@ describe("server account deletion", () => {
   it("sends the token and password only to the reviewed server, then disconnects that account", async () => {
     const h = await reviewed(() => json(200, { finished: true }));
     await expect(h.deletion.delete(deleteInput)).resolves.toEqual({
-      ok: true, finished: true, email: credentials.email, server: credentials.serverUrl, disconnectError: null,
+      ok: true,
+      finished: true,
+      email: credentials.email,
+      server: credentials.serverUrl,
+      disconnectError: null,
     });
-    expect(h.calls.map((call) => [call.url, call.body])).toEqual([[
-      "https://account.example.test/api/auth/account/delete",
-      { previewToken: scope.previewToken, password: "correct horse" },
-    ]]);
+    expect(h.calls.map((call) => [call.url, call.body])).toEqual([
+      [
+        "https://account.example.test/api/auth/account/delete",
+        { previewToken: scope.previewToken, password: "correct horse" },
+      ],
+    ]);
     expect(h.disconnect).toHaveBeenCalledWith(credentials);
   });
 
   it("reports a pending deletion as unfinished and still disconnects", async () => {
     const h = await reviewed(() => json(200, { finished: false, pending: true }));
-    await expect(h.deletion.delete(deleteInput)).resolves.toMatchObject({ ok: true, finished: false });
+    await expect(h.deletion.delete(deleteInput)).resolves.toMatchObject({
+      ok: true,
+      finished: false,
+    });
     expect(h.disconnect).toHaveBeenCalledOnce();
   });
 
@@ -124,7 +179,11 @@ describe("server account deletion", () => {
     const h = await reviewed(() => json(200, { finished: true }));
     h.disconnect.mockRejectedValueOnce(new Error("store failed"));
     await expect(h.deletion.delete(deleteInput)).resolves.toEqual({
-      ok: true, finished: true, email: credentials.email, server: credentials.serverUrl, disconnectError: "store failed",
+      ok: true,
+      finished: true,
+      email: credentials.email,
+      server: credentials.serverUrl,
+      disconnectError: "store failed",
     });
     h.disconnect.mockRejectedValueOnce(new Error("store still failed"));
     await expect(h.deletion.retryDisconnect()).rejects.toThrow("store still failed");
@@ -145,16 +204,26 @@ describe("server account deletion", () => {
   it("never sends the password after the session moved to another server", async () => {
     const h = await reviewed(() => json(200, { finished: true }));
     h.switchTo({ ...credentials, serverUrl: "https://other.example.test" });
-    await expect(h.deletion.delete(deleteInput)).resolves.toMatchObject({ ok: false, code: "preview-changed" });
+    await expect(h.deletion.delete(deleteInput)).resolves.toMatchObject({
+      ok: false,
+      code: "preview-changed",
+    });
     expect(h.fetch).not.toHaveBeenCalled();
     expect(h.disconnect).not.toHaveBeenCalled();
   });
 
   it("never sends the password after the session moved to another account on the same server", async () => {
     const h = await reviewed(() => json(200, { finished: true }));
-    h.switchTo({ ...credentials, userId: "someone-else", email: "someone@example.test", token: "other-token" });
+    h.switchTo({
+      ...credentials,
+      userId: "someone-else",
+      email: "someone@example.test",
+      token: "other-token",
+    });
     await expect(h.deletion.delete(deleteInput)).resolves.toEqual({
-      ok: false, code: "preview-changed", reason: "This computer is now connected to another account. Review deletion again.",
+      ok: false,
+      code: "preview-changed",
+      reason: "This computer is now connected to another account. Review deletion again.",
     });
     expect(h.fetch).not.toHaveBeenCalled();
     expect(h.disconnect).not.toHaveBeenCalled();
@@ -163,16 +232,26 @@ describe("server account deletion", () => {
   it("deletes after a same-account token rotation", async () => {
     const h = await reviewed(() => json(200, { finished: true }));
     h.switchTo({ ...credentials, token: "rotated-token" });
-    await expect(h.deletion.delete(deleteInput)).resolves.toMatchObject({ ok: true, finished: true });
-    expect((h.calls[0]!.init.headers as Record<string, string>).authorization).toBe("Bearer rotated-token");
+    await expect(h.deletion.delete(deleteInput)).resolves.toMatchObject({
+      ok: true,
+      finished: true,
+    });
+    expect((h.calls[0]!.init.headers as Record<string, string>).authorization).toBe(
+      "Bearer rotated-token",
+    );
   });
 
   it("refuses a token this app did not review, or one past its five minutes", async () => {
     const h = await reviewed(() => json(200, { finished: true }));
-    await expect(h.deletion.delete({ ...deleteInput, previewToken: "someone.else.s" })).resolves.toMatchObject({ ok: false, code: "preview-changed" });
+    await expect(
+      h.deletion.delete({ ...deleteInput, previewToken: "someone.else.s" }),
+    ).resolves.toMatchObject({ ok: false, code: "preview-changed" });
     vi.useFakeTimers({ now: Date.now() + 5 * 60_000 });
     try {
-      await expect(h.deletion.delete(deleteInput)).resolves.toMatchObject({ ok: false, code: "preview-changed" });
+      await expect(h.deletion.delete(deleteInput)).resolves.toMatchObject({
+        ok: false,
+        code: "preview-changed",
+      });
     } finally {
       vi.useRealTimers();
     }
@@ -193,7 +272,14 @@ describe("server account deletion", () => {
 
   it.each([
     [401, {}, "session expired"],
-    [503, { code: "DELETION_PENDING", message: "Account deletion is waiting for the server. Try again later." }, "waiting for the server"],
+    [
+      503,
+      {
+        code: "DELETION_PENDING",
+        message: "Account deletion is waiting for the server. Try again later.",
+      },
+      "waiting for the server",
+    ],
     [502, {}, "could not delete this account"],
   ])("fails a delete the server answered %i", async (status, body, words) => {
     const h = await reviewed(() => json(status, body));
@@ -206,15 +292,30 @@ describe("server account IPC", () => {
   it("checks the sender and the payload before main calls the server", async () => {
     const handlers = new Map<string, (trusted: boolean, payload: unknown) => Promise<unknown>>();
     const deletion = {
-      preview: vi.fn(async () => { throw new Error("unused"); }),
-      delete: vi.fn(async () => ({ ok: false as const, code: "rate-limited" as const, reason: "Wait." })),
+      preview: vi.fn(async () => {
+        throw new Error("unused");
+      }),
+      delete: vi.fn(async () => ({
+        ok: false as const,
+        code: "rate-limited" as const,
+        reason: "Wait.",
+      })),
       retryDisconnect: vi.fn(async () => undefined),
     };
-    registerServerAccountIpc<boolean, never>({
-      handle: (channel, handler) => { handlers.set(channel, handler); },
-      assertTrustedSender: (trusted) => { if (!trusted) throw new Error("Untrusted sender"); },
-      withActiveWorkspace: () => { throw new Error("device scope"); },
-    }, deletion);
+    registerServerAccountIpc<boolean, never>(
+      {
+        handle: (channel, handler) => {
+          handlers.set(channel, handler);
+        },
+        assertTrustedSender: (trusted) => {
+          if (!trusted) throw new Error("Untrusted sender");
+        },
+        withActiveWorkspace: () => {
+          throw new Error("device scope");
+        },
+      },
+      deletion,
+    );
     expect([...handlers.keys()]).toEqual([
       serverAccountOperations.previewServerAccountDeletion.channel,
       serverAccountOperations.deleteServerAccount.channel,
@@ -229,7 +330,11 @@ describe("server account IPC", () => {
     await expect(remove(true, { ...deleteInput, password: "" })).rejects.toThrow();
     await expect(remove(true, { ...deleteInput, userId: "someone-else" })).rejects.toThrow();
     expect(deletion.delete).not.toHaveBeenCalled();
-    await expect(remove(true, deleteInput)).resolves.toEqual({ ok: false, code: "rate-limited", reason: "Wait." });
+    await expect(remove(true, deleteInput)).resolves.toEqual({
+      ok: false,
+      code: "rate-limited",
+      reason: "Wait.",
+    });
     expect(deletion.delete).toHaveBeenCalledWith(deleteInput);
     const retry = handlers.get(serverAccountOperations.retryServerAccountDisconnect.channel)!;
     await expect(retry(false, {})).rejects.toThrow("Untrusted sender");

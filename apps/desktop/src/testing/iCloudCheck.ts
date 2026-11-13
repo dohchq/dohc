@@ -1,7 +1,10 @@
 import { iCloudCheck, SF_DATALESS } from "../workspaces/workspaceICloudOnly";
 
 /** Runs `work` with the iCloud check changed, then puts it back. */
-export async function withICloudCheck<T>(changes: Partial<typeof iCloudCheck>, work: () => Promise<T>): Promise<T> {
+export async function withICloudCheck<T>(
+  changes: Partial<typeof iCloudCheck>,
+  work: () => Promise<T>,
+): Promise<T> {
   const saved = { ...iCloudCheck };
   Object.assign(iCloudCheck, changes);
   try {

@@ -5,8 +5,19 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import type { ActorPresentation } from "../../ipc/bridgeContract";
 import type { IdentityHue } from "@dohc/workspace-contracts/agent-hues";
-import { AgentColorAvatar, AgentColorContext, AgentColorName, AgentColorScope, saveAgentColor } from "./AgentColorPicker";
-import { bindAgentColorUpdates, clearAgentColorOverrides, neutralPresentation, ownAgentPresentation } from "./actorPresentation";
+import {
+  AgentColorAvatar,
+  AgentColorContext,
+  AgentColorName,
+  AgentColorScope,
+  saveAgentColor,
+} from "./AgentColorPicker";
+import {
+  bindAgentColorUpdates,
+  clearAgentColorOverrides,
+  neutralPresentation,
+  ownAgentPresentation,
+} from "./actorPresentation";
 import { ChatAvatar } from "./ChatAvatar";
 import { ChatMessageList } from "./chatMessages";
 
@@ -26,18 +37,28 @@ function Row(props: {
   const kind = props.kind ?? "agent";
   const row = (
     <AgentColorScope name="Orbit" kind={kind} presentation={presentation}>
-      <AgentColorAvatar><ChatAvatar name="Orbit" kind={kind} presentation={presentation} /></AgentColorAvatar>
-      <span data-testid="author"><AgentColorName>Orbit</AgentColorName></span>
+      <AgentColorAvatar>
+        <ChatAvatar name="Orbit" kind={kind} presentation={presentation} />
+      </AgentColorAvatar>
+      <span data-testid="author">
+        <AgentColorName>Orbit</AgentColorName>
+      </span>
       <button type="button">After</button>
     </AgentColorScope>
   );
-  return props.save === undefined ? row : <AgentColorContext.Provider value={props.save}>{row}</AgentColorContext.Provider>;
+  return props.save === undefined ? (
+    row
+  ) : (
+    <AgentColorContext.Provider value={props.save}>{row}</AgentColorContext.Provider>
+  );
 }
 
 // jsdom has no top layer, so an open popover reads as hidden to role and
 // name queries. Its roles and names are read as attributes.
 const dialog = () => screen.queryByTestId("agent-color-popover");
-const radios = () => [...dialog()!.querySelectorAll<HTMLElement>('[role="radiogroup"] [role="radio"]')];
+const radios = () => [
+  ...dialog()!.querySelectorAll<HTMLElement>('[role="radiogroup"] [role="radio"]'),
+];
 const swatch = (name: string) => {
   const found = radios().find((radio) => radio.getAttribute("aria-label") === name);
   if (!found) throw new Error(`no ${name} swatch`);
@@ -55,9 +76,19 @@ it("opens square swatches from the avatar, olive first, the agent's choice check
   expect(dialog()?.getAttribute("popover")).toBe("manual");
   expect(dialog()?.getAttribute("role")).toBe("dialog");
   expect(dialog()?.getAttribute("aria-label")).toBe("Color for Orbit");
-  expect(dialog()?.querySelector('[role="radiogroup"]')?.getAttribute("aria-label")).toBe("Color for Orbit");
-  expect(radios().map((radio) => radio.getAttribute("aria-label"))).toEqual(
-    ["Olive", "Rust", "Amber", "Teal", "Blue", "Indigo", "Plum", "Rose"]);
+  expect(dialog()?.querySelector('[role="radiogroup"]')?.getAttribute("aria-label")).toBe(
+    "Color for Orbit",
+  );
+  expect(radios().map((radio) => radio.getAttribute("aria-label"))).toEqual([
+    "Olive",
+    "Rust",
+    "Amber",
+    "Teal",
+    "Blue",
+    "Indigo",
+    "Plum",
+    "Rose",
+  ]);
   expect(radios()[0]!.className).toContain("bg-agent");
   for (const radio of radios()) expect(radio.className).toContain("rounded-md");
   expect(swatch("Plum").getAttribute("aria-checked")).toBe("true");
@@ -105,7 +136,11 @@ it("closes on Escape and returns focus to the avatar, saving nothing", async () 
   const user = userEvent.setup();
   const save = vi.fn();
   const outer = vi.fn();
-  render(<div onKeyDown={(event) => outer(event.key)}><Row save={save} /></div>);
+  render(
+    <div onKeyDown={(event) => outer(event.key)}>
+      <Row save={save} />
+    </div>,
+  );
   const trigger = screen.getByRole("button", { name: "Color for Orbit" });
   trigger.focus();
   await user.keyboard("{Enter}");
@@ -121,7 +156,10 @@ it("closes on Escape and returns focus to the avatar, saving nothing", async () 
 // user-event moves Tab on from the key's original target, which this close
 // removes; a browser moves on from the focused element. So the test pins what
 // the browser moves on from: focus on the trigger, the key not prevented.
-it.each([["Tab", false], ["Shift+Tab", true]] as const)(
+it.each([
+  ["Tab", false],
+  ["Shift+Tab", true],
+] as const)(
   "closes on %s from a swatch the arrows reached, and leaves the key to move focus on from the avatar",
   async (_, shiftKey) => {
     const user = userEvent.setup();
@@ -133,7 +171,9 @@ it.each([["Tab", false], ["Shift+Tab", true]] as const)(
     await user.keyboard("{ArrowLeft}");
     expect(document.activeElement).toBe(swatch("Indigo"));
     let notPrevented = false;
-    act(() => { notPrevented = fireEvent.keyDown(swatch("Indigo"), { key: "Tab", shiftKey }); });
+    act(() => {
+      notPrevented = fireEvent.keyDown(swatch("Indigo"), { key: "Tab", shiftKey });
+    });
     expect(notPrevented).toBe(true);
     expect(document.activeElement).toBe(trigger);
     await act(async () => undefined);
@@ -148,7 +188,11 @@ it.each([
   ["the window resizes", () => fireEvent(window, new Event("resize"))],
 ] as const)("closes when %s, returning focus that was inside it to the avatar", async (_, move) => {
   const user = userEvent.setup();
-  render(<div data-testid="chat"><Row save={vi.fn()} /></div>);
+  render(
+    <div data-testid="chat">
+      <Row save={vi.fn()} />
+    </div>,
+  );
   const trigger = screen.getByRole("button", { name: "Color for Orbit" });
   await user.click(trigger);
   expect(document.activeElement).toBe(swatch("Plum"));
@@ -171,8 +215,18 @@ it("opens from the agent's name, which stays plain text to the keyboard", async 
 
 it("checks what main's event says, not the save", async () => {
   const user = userEvent.setup();
-  let changed: Parameters<import("../../ipc/bridgeContract").DohcDesktopBridge["onAgentColorChanged"]>[0] = () => undefined;
-  const stop = bindAgentColorUpdates({ onAgentColorChanged: (listener) => { changed = listener; return () => undefined; } }, () => "w");
+  let changed: Parameters<
+    import("../../ipc/bridgeContract").DohcDesktopBridge["onAgentColorChanged"]
+  >[0] = () => undefined;
+  const stop = bindAgentColorUpdates(
+    {
+      onAgentColorChanged: (listener) => {
+        changed = listener;
+        return () => undefined;
+      },
+    },
+    () => "w",
+  );
   render(<Row save={vi.fn()} />);
   await user.click(screen.getByRole("button", { name: "Color for Orbit" }));
   await user.click(swatch("Teal"));
@@ -206,7 +260,9 @@ it("leaves your agent's run post unclickable, its color set in Settings", () => 
   render(<Row save={vi.fn()} presentation={{ ...ORBIT, self: true, agentId: "codex" }} />);
   expect(screen.queryByTestId("agent-color-trigger")).toBeNull();
   expect(screen.getByTitle("Orbit").closest("button")).toBeNull();
-  expect(screen.getByTestId("author").querySelector(".cursor-pointer, .hover\\:underline")).toBeNull();
+  expect(
+    screen.getByTestId("author").querySelector(".cursor-pointer, .hover\\:underline"),
+  ).toBeNull();
   expect(screen.getByTestId("author").innerHTML).toBe("Orbit");
 });
 
@@ -215,31 +271,71 @@ it("puts the choice on an agent's message in a conversation, and saves it with t
   const api = { setAgentColor: vi.fn(async () => undefined) };
   render(
     <AgentColorContext.Provider value={saveAgentColor(api, "workspace-a", vi.fn())}>
-      <ChatMessageList testIdPrefix="chat" loading={false} emptyLabel="None" messages={[
-        { id: "m1", threadId: "t", authorKind: "human", authorDisplayName: "Sam", presentation: { group: "3", hue: "rust", self: false }, body: "Hi", createdAtMs: 1 },
-        { id: "m2", threadId: "t", authorKind: "agent", authorDisplayName: "Orbit", presentation: ORBIT, body: "Hello", createdAtMs: 2 },
-      ]} />
+      <ChatMessageList
+        testIdPrefix="chat"
+        loading={false}
+        emptyLabel="None"
+        messages={[
+          {
+            id: "m1",
+            threadId: "t",
+            authorKind: "human",
+            authorDisplayName: "Sam",
+            presentation: { group: "3", hue: "rust", self: false },
+            body: "Hi",
+            createdAtMs: 1,
+          },
+          {
+            id: "m2",
+            threadId: "t",
+            authorKind: "agent",
+            authorDisplayName: "Orbit",
+            presentation: ORBIT,
+            body: "Hello",
+            createdAtMs: 2,
+          },
+        ]}
+      />
     </AgentColorContext.Provider>,
   );
   expect(screen.queryByRole("button", { name: "Color for Sam" })).toBeNull();
   // The name and the sparkle take the avatar's plum; the person's name stays ink.
   const authors = await screen.findAllByTestId("chat-message-author");
-  expect(authors.map((author) => author.querySelector(".text-hue-plum")?.textContent ?? null)).toEqual([null, "Orbit"]);
+  expect(
+    authors.map((author) => author.querySelector(".text-hue-plum")?.textContent ?? null),
+  ).toEqual([null, "Orbit"]);
   expect(authors[0]!.className).toContain("text-ink");
-  expect(screen.getByTestId("chat-agent-badge").parentElement!.className).toContain("text-hue-plum");
+  expect(screen.getByTestId("chat-agent-badge").parentElement!.className).toContain(
+    "text-hue-plum",
+  );
   await user.click(await screen.findByRole("button", { name: "Color for Orbit" }));
   await user.click(swatch("Blue"));
-  expect(api.setAgentColor).toHaveBeenCalledWith({ workspaceId: "workspace-a", group: "7", hue: "blue" });
+  expect(api.setAgentColor).toHaveBeenCalledWith({
+    workspaceId: "workspace-a",
+    group: "7",
+    hue: "blue",
+  });
 });
 
 it("reports a refused save with Try again, which saves the same choice again", async () => {
-  const api = { setAgentColor: vi.fn().mockRejectedValueOnce(new Error("Choose an agent shown in this workspace.")).mockResolvedValue(undefined) };
+  const api = {
+    setAgentColor: vi
+      .fn()
+      .mockRejectedValueOnce(new Error("Choose an agent shown in this workspace."))
+      .mockResolvedValue(undefined),
+  };
   const report = vi.fn();
   saveAgentColor(api, "workspace-a", report)("7", null);
   await vi.waitFor(() => expect(report).toHaveBeenCalledOnce());
   expect(report.mock.calls[0]![0]).toBe("dohc could not save this agent's color.");
-  expect((report.mock.calls[0]![1] as Error).message).toContain("Choose an agent shown in this workspace.");
+  expect((report.mock.calls[0]![1] as Error).message).toContain(
+    "Choose an agent shown in this workspace.",
+  );
   (report.mock.calls[0]![2] as () => void)();
-  expect(api.setAgentColor).toHaveBeenLastCalledWith({ workspaceId: "workspace-a", group: "7", hue: null });
+  expect(api.setAgentColor).toHaveBeenLastCalledWith({
+    workspaceId: "workspace-a",
+    group: "7",
+    hue: null,
+  });
   expect(api.setAgentColor).toHaveBeenCalledTimes(2);
 });

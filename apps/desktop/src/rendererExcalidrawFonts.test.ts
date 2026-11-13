@@ -11,13 +11,13 @@ async function excalidrawBundle(): Promise<string> {
 }
 
 describe("Excalidraw fonts in the renderer", () => {
-
   it("drops the CDN Excalidraw adds after the asset path", async () => {
     const bundle = await excalidrawBundle();
     expect(bundle).toContain("https://esm.sh/");
-    expect(withoutExcalidrawCdnFallback(bundle)).not.toMatch(/\.push\(new URL\([^()]*ASSETS_FALLBACK_URL\)\)/u);
+    expect(withoutExcalidrawCdnFallback(bundle)).not.toMatch(
+      /\.push\(new URL\([^()]*ASSETS_FALLBACK_URL\)\)/u,
+    );
     // An upgrade that moves the fallback fails the build instead of bringing the CDN back.
     expect(() => withoutExcalidrawCdnFallback("urls.push(new URL(path, base));")).toThrow();
   });
-
 });

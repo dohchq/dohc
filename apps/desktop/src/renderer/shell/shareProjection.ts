@@ -35,9 +35,7 @@ export function goneMountProjections(input: {
   foldersLeftBehind: Set<string>;
 }): Array<{ id: string; kind: "delete-folder"; path: string }> {
   return input.previous
-    .filter(
-      (mount) => !input.next.some((candidate) => candidate.shareId === mount.shareId),
-    )
+    .filter((mount) => !input.next.some((candidate) => candidate.shareId === mount.shareId))
     .flatMap((mount) =>
       shareUnmountProjection({
         shareId: mount.shareId,

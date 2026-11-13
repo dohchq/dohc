@@ -4,7 +4,12 @@ import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 import type { ReactionStore } from "./reactionStore";
 
-export function usePersonalChatFeed({ workspaceId, liveToken, reactions, onError }: {
+export function usePersonalChatFeed({
+  workspaceId,
+  liveToken,
+  reactions,
+  onError,
+}: {
   workspaceId: string;
   liveToken: Readonly<{ current: number }>;
   // Each item's reactions are a read of its one message.

@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
 import type { JsonValue } from "@dohc/workspace-engine-client";
 import { stableJsonStringify } from "../canonicalJson";
-import { applyOperationWakesInTransaction, retryUsesOperationIdInTransaction, type OperationWakeChange } from "./chatWakes";
+import {
+  applyOperationWakesInTransaction,
+  retryUsesOperationIdInTransaction,
+  type OperationWakeChange,
+} from "./chatWakes";
 import type { StorageContext } from "./context";
 import { rowToLogRow } from "./rows";
 import type { SqliteDb, SyncRelayLogRow } from "./types";
@@ -75,14 +79,21 @@ function tombstone(stage: string): string {
 const normalize = (sql: string) => sql.trim().replace(/;$/u, "").replace(/\s+/gu, " ");
 
 function assertSchema(db: SqliteDb): void {
-  const objects = db.prepare("SELECT name, sql FROM sqlite_schema WHERE (tbl_name = ? OR name IN (?, ?)) AND sql IS NOT NULL ORDER BY name")
+  const objects = db
+    .prepare(
+      "SELECT name, sql FROM sqlite_schema WHERE (tbl_name = ? OR name IN (?, ?)) AND sql IS NOT NULL ORDER BY name",
+    )
     .all(ACCOUNT_OPERATIONS, WORKSPACE_DELETED, IDENTITY_ENDED);
   const expected = Object.keys(SCHEMA).sort();
   const schema: Record<string, string> = SCHEMA;
   if (
     objects.length !== expected.length ||
-    objects.some((row, index) => row.name !== expected[index] || typeof row.sql !== "string" ||
-      normalize(row.sql) !== normalize(schema[row.name as string]!))
+    objects.some(
+      (row, index) =>
+        row.name !== expected[index] ||
+        typeof row.sql !== "string" ||
+        normalize(row.sql) !== normalize(schema[row.name as string]!),
+    )
   ) {
     throw new Error("account operation schema is missing or damaged");
   }
@@ -94,12 +105,19 @@ export function initializeOperationRecordSchema(db: SqliteDb): void {
     return;
   }
   const names = Object.keys(SCHEMA);
-  if (db.prepare(`SELECT 1 FROM sqlite_schema WHERE name IN (${names.map(() => "?").join(", ")})`).get(...names)) {
+  if (
+    db
+      .prepare(`SELECT 1 FROM sqlite_schema WHERE name IN (${names.map(() => "?").join(", ")})`)
+      .get(...names)
+  ) {
     throw new Error("unmarked account operation schema already exists");
   }
   for (const sql of Object.values(SCHEMA)) db.exec(sql);
   assertSchema(db);
-  db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(MARKER, Date.now());
+  db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(
+    MARKER,
+    Date.now(),
+  );
 }
 
 // The end of active publication attempts, after which an unfinished row is stalled.
@@ -113,12 +131,25 @@ export const OPERATION_STALLED_KEEP_MS = 30 * 24 * 60 * 60 * 1000;
 // The most rows one call turns into tombstones; the caller repeats until fewer come back.
 export const OPERATION_TOMBSTONE_BATCH = 1_000;
 
-export type OperationStage = "recorded" | "reply-written" | "answer-written" | "publishing" | "saved" | "stalled" | "refused";
+export type OperationStage =
+  | "recorded"
+  | "reply-written"
+  | "answer-written"
+  | "publishing"
+  | "saved"
+  | "stalled"
+  | "refused";
 export type OperationMessageState = "pending" | "published";
 
 // A stage moves only forward along this order. `saved` and `refused` are final.
 const STAGE_ORDER: Record<OperationStage, number> = {
-  recorded: 0, "reply-written": 1, "answer-written": 2, publishing: 3, stalled: 4, saved: 5, refused: 5,
+  recorded: 0,
+  "reply-written": 1,
+  "answer-written": 2,
+  publishing: 3,
+  stalled: 4,
+  saved: 5,
+  refused: 5,
 };
 const isFinal = (stage: OperationStage) => stage === "saved" || stage === "refused";
 
@@ -192,11 +223,13 @@ export interface AdvanceOperationInput {
 }
 
 function bindingHash(binding: OperationBinding): string {
-  return createHash("sha256").update(stableJsonStringify([binding.workspaceId, binding.operation, binding.args])).digest("hex");
+  return createHash("sha256")
+    .update(stableJsonStringify([binding.workspaceId, binding.operation, binding.args]))
+    .digest("hex");
 }
 
 const parse = (value: unknown) => JSON.parse(String(value)) as JsonValue;
-const nullableNumber = (value: unknown) => value === null ? null : Number(value);
+const nullableNumber = (value: unknown) => (value === null ? null : Number(value));
 
 function recordOf(row: Record<string, unknown>): OperationRecord {
   return {
@@ -210,7 +243,8 @@ function recordOf(row: Record<string, unknown>): OperationRecord {
     bindingHash: String(row.binding_hash),
     command: parse(row.command_json),
     stage: String(row.stage) as OperationStage,
-    messageState: row.message_state === null ? null : String(row.message_state) as OperationMessageState,
+    messageState:
+      row.message_state === null ? null : (String(row.message_state) as OperationMessageState),
     result: row.result_json === null ? null : parse(row.result_json),
     activeUntilMs: Number(row.active_until_ms),
     createdAtMs: Number(row.created_at_ms),
@@ -219,8 +253,15 @@ function recordOf(row: Record<string, unknown>): OperationRecord {
   };
 }
 
-function readRow(storage: StorageContext, accountId: string, operationId: string): Record<string, unknown> | undefined {
-  return storage.db.prepare("SELECT * FROM sync_relay_account_operations WHERE account_id = ? AND operation_id = ?")
+function readRow(
+  storage: StorageContext,
+  accountId: string,
+  operationId: string,
+): Record<string, unknown> | undefined {
+  return storage.db
+    .prepare(
+      "SELECT * FROM sync_relay_account_operations WHERE account_id = ? AND operation_id = ?",
+    )
     .get(accountId, operationId);
 }
 
@@ -236,7 +277,9 @@ export function lookupOperation(
   storage: StorageContext,
   input: { accountId: string; operationId: string; binding: OperationBinding },
 ): OperationLookup {
-  return storage.readTx(() => classify(readRow(storage, input.accountId, input.operationId), bindingHash(input.binding)));
+  return storage.readTx(() =>
+    classify(readRow(storage, input.accountId, input.operationId), bindingHash(input.binding)),
+  );
 }
 
 /**
@@ -246,11 +289,15 @@ export function lookupOperation(
  * the same transaction, so a write that arrives after its workspace was
  * deleted leaves nothing behind.
  */
-export function recordOperation(storage: StorageContext, input: RecordOperationInput): OperationClaim {
+export function recordOperation(
+  storage: StorageContext,
+  input: RecordOperationInput,
+): OperationClaim {
   const hash = bindingHash(input.binding);
   return storage.tx(() => {
-    const inserted = storage.db.prepare(
-      `INSERT INTO sync_relay_account_operations (account_id, operation_id, binding_hash, stage, workspace_id, incarnation,
+    const inserted = storage.db
+      .prepare(
+        `INSERT INTO sync_relay_account_operations (account_id, operation_id, binding_hash, stage, workspace_id, incarnation,
          replication_epoch, stream_identity, operation, command_json, message_state, result_json, active_until_ms,
          created_at_ms, updated_at_ms, settled_at_ms, log_floor, log_ceiling)
        SELECT ?, ?, ?, 'recorded', ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, NULL,
@@ -258,18 +305,35 @@ export function recordOperation(storage: StorageContext, input: RecordOperationI
        WHERE EXISTS (SELECT 1 FROM sync_relay_workspaces WHERE workspace_id = ? AND owner_user_id = ?)
          AND NOT EXISTS (SELECT 1 FROM sync_relay_chat_wake_retries WHERE account_id = ? AND operation_id = ?)
        ON CONFLICT (account_id, operation_id) DO NOTHING`,
-    ).run(
-      input.accountId, input.operationId, hash, input.binding.workspaceId, input.incarnation, input.replicationEpoch,
-      input.streamIdentity, input.binding.operation, JSON.stringify(input.command), input.writesMessage ? "pending" : null,
-      input.nowMs + OPERATION_ACTIVE_MS, input.nowMs, input.nowMs, input.binding.workspaceId, input.binding.workspaceId,
-      input.accountId, input.accountId, input.operationId,
-    );
+      )
+      .run(
+        input.accountId,
+        input.operationId,
+        hash,
+        input.binding.workspaceId,
+        input.incarnation,
+        input.replicationEpoch,
+        input.streamIdentity,
+        input.binding.operation,
+        JSON.stringify(input.command),
+        input.writesMessage ? "pending" : null,
+        input.nowMs + OPERATION_ACTIVE_MS,
+        input.nowMs,
+        input.nowMs,
+        input.binding.workspaceId,
+        input.binding.workspaceId,
+        input.accountId,
+        input.accountId,
+        input.operationId,
+      );
     const row = readRow(storage, input.accountId, input.operationId);
     if (Number(inserted.changes) === 1) return { kind: "recorded", record: recordOf(row!) };
     const found = classify(row, hash);
     if (found.kind !== "absent") return found;
     // A wake's Try again used the key, so it names another write.
-    return retryUsesOperationIdInTransaction(storage, input.accountId, input.operationId) ? { kind: "mismatch" } : { kind: "not-owner" };
+    return retryUsesOperationIdInTransaction(storage, input.accountId, input.operationId)
+      ? { kind: "mismatch" }
+      : { kind: "not-owner" };
   });
 }
 
@@ -292,23 +356,43 @@ export function advanceOperation(
       throw new Error("This operation writes no message.");
     }
     const stage = input.stage ?? record.stage;
-    if (isFinal(record.stage) || STAGE_ORDER[stage] < STAGE_ORDER[record.stage]) return { moved: false, record };
+    if (isFinal(record.stage) || STAGE_ORDER[stage] < STAGE_ORDER[record.stage])
+      return { moved: false, record };
     const messageState = input.message ?? record.messageState;
     const resultJson = input.result === undefined ? row.result_json : JSON.stringify(input.result);
-    if (stage === record.stage && messageState === record.messageState && resultJson === row.result_json) {
+    if (
+      stage === record.stage &&
+      messageState === record.messageState &&
+      resultJson === row.result_json
+    ) {
       return { moved: false, record };
     }
-    storage.db.prepare(
-      `UPDATE sync_relay_account_operations SET stage = ?, message_state = ?, result_json = ?, updated_at_ms = ?, settled_at_ms = ?
+    storage.db
+      .prepare(
+        `UPDATE sync_relay_account_operations SET stage = ?, message_state = ?, result_json = ?, updated_at_ms = ?, settled_at_ms = ?
        WHERE account_id = ? AND operation_id = ?`,
-    ).run(
-      stage, messageState, resultJson, Math.max(input.nowMs, record.createdAtMs),
-      isFinal(stage) ? Math.max(input.nowMs, record.createdAtMs) : null, input.accountId, input.operationId,
-    );
+      )
+      .run(
+        stage,
+        messageState,
+        resultJson,
+        Math.max(input.nowMs, record.createdAtMs),
+        isFinal(stage) ? Math.max(input.nowMs, record.createdAtMs) : null,
+        input.accountId,
+        input.operationId,
+      );
     if (input.wakes !== undefined) {
-      applyOperationWakesInTransaction(storage, {
-        accountId: input.accountId, operationId: input.operationId, workspaceId: record.workspaceId, messagePublished: messageState === "published",
-      }, input.wakes, input.nowMs);
+      applyOperationWakesInTransaction(
+        storage,
+        {
+          accountId: input.accountId,
+          operationId: input.operationId,
+          workspaceId: record.workspaceId,
+          messagePublished: messageState === "published",
+        },
+        input.wakes,
+        input.nowMs,
+      );
     }
     return { moved: true, record: recordOf(readRow(storage, input.accountId, input.operationId)!) };
   });
@@ -325,24 +409,48 @@ export function listUnfinishedOperations(
   input: { workspaceId: string; incarnation?: number },
 ): OperationRecord[] {
   const incarnation = input.incarnation ?? null;
-  return storage.readTx(() => storage.db.prepare(UNFINISHED_OPERATIONS_SQL)
-    .all(input.workspaceId, incarnation, incarnation).map(recordOf));
+  return storage.readTx(() =>
+    storage.db
+      .prepare(UNFINISHED_OPERATIONS_SQL)
+      .all(input.workspaceId, incarnation, incarnation)
+      .map(recordOf),
+  );
 }
 
 /** Each copy, by workspace and incarnation, that holds writes still to finish. */
-export function listUnfinishedOperationCopies(storage: StorageContext): Array<{ workspaceId: string; incarnation: number }> {
-  return storage.readTx(() => storage.db.prepare(
-    `SELECT DISTINCT workspace_id, incarnation FROM sync_relay_account_operations
+export function listUnfinishedOperationCopies(
+  storage: StorageContext,
+): Array<{ workspaceId: string; incarnation: number }> {
+  return storage.readTx(() =>
+    storage.db
+      .prepare(
+        `SELECT DISTINCT workspace_id, incarnation FROM sync_relay_account_operations
      WHERE ${UNFINISHED} ORDER BY workspace_id, incarnation`,
-  ).all().map(row => ({ workspaceId: String(row.workspace_id), incarnation: Number(row.incarnation) })));
+      )
+      .all()
+      .map((row) => ({
+        workspaceId: String(row.workspace_id),
+        incarnation: Number(row.incarnation),
+      })),
+  );
 }
 
 /** Each workspace with writes still to finish, with the earliest end of their active time. */
-export function unfinishedOperationActiveEnds(storage: StorageContext): Array<{ workspaceId: string; activeUntilMs: number }> {
-  return storage.readTx(() => storage.db.prepare(
-    `SELECT workspace_id, MIN(active_until_ms) AS active_until_ms FROM sync_relay_account_operations
+export function unfinishedOperationActiveEnds(
+  storage: StorageContext,
+): Array<{ workspaceId: string; activeUntilMs: number }> {
+  return storage.readTx(() =>
+    storage.db
+      .prepare(
+        `SELECT workspace_id, MIN(active_until_ms) AS active_until_ms FROM sync_relay_account_operations
      WHERE ${UNFINISHED} GROUP BY workspace_id ORDER BY workspace_id`,
-  ).all().map(row => ({ workspaceId: String(row.workspace_id), activeUntilMs: Number(row.active_until_ms) })));
+      )
+      .all()
+      .map((row) => ({
+        workspaceId: String(row.workspace_id),
+        activeUntilMs: Number(row.active_until_ms),
+      })),
+  );
 }
 
 /**
@@ -354,8 +462,9 @@ export function unfinishedOperationActiveEnds(storage: StorageContext): Array<{ 
  * workspaces, which SQL can't name.
  */
 export function publishingCopiesInTransaction(storage: StorageContext): PublishingCopy[] {
-  return storage.db.prepare(
-    `SELECT o.workspace_id, o.account_id, MIN(o.created_at_ms) AS since, MAX(o.stage <> 'stalled') AS active
+  return storage.db
+    .prepare(
+      `SELECT o.workspace_id, o.account_id, MIN(o.created_at_ms) AS since, MAX(o.stage <> 'stalled') AS active
      FROM sync_relay_account_operations o
      JOIN sync_relay_automation_workspaces a ON a.workspace_id = o.workspace_id AND a.incarnation = o.incarnation
        AND a.owner_user_id = o.account_id AND a.replication_epoch = o.replication_epoch AND a.stream_identity = o.stream_identity
@@ -365,7 +474,13 @@ export function publishingCopiesInTransaction(storage: StorageContext): Publishi
        AND NOT EXISTS (SELECT 1 FROM sync_relay_phone_hidden_workspaces h
          WHERE h.workspace_id = o.workspace_id AND h.owner_user_id = o.account_id)
      GROUP BY o.workspace_id, o.account_id ORDER BY active DESC, since, o.workspace_id`,
-  ).all().map(row => ({ workspaceId: String(row.workspace_id), ownerUserId: String(row.account_id), active: Number(row.active) === 1 }));
+    )
+    .all()
+    .map((row) => ({
+      workspaceId: String(row.workspace_id),
+      ownerUserId: String(row.account_id),
+      active: Number(row.active) === 1,
+    }));
 }
 
 /** A copy whose phone writes may still publish. `active` while one of them isn't stalled. */
@@ -381,13 +496,22 @@ export interface PublishingCopy {
  * the write was recorded, and while the workspace still had the epoch and
  * stream the write was recorded under. Null otherwise.
  */
-export function operationLogRow(storage: StorageContext, input: {
-  accountId: string; operationId: string; workspaceId: string; replicationEpoch: string; streamIdentity: string;
-  originId: string; originSeq: number;
-}): SyncRelayLogRow | null {
+export function operationLogRow(
+  storage: StorageContext,
+  input: {
+    accountId: string;
+    operationId: string;
+    workspaceId: string;
+    replicationEpoch: string;
+    streamIdentity: string;
+    originId: string;
+    originSeq: number;
+  },
+): SyncRelayLogRow | null {
   return storage.readTx(() => {
-    const row = storage.db.prepare(
-      `SELECT l.workspace_id, l.origin_id, l.origin_seq, l.op_kind, l.payload_json, l.recorded_at_ms, l.relay_seq,
+    const row = storage.db
+      .prepare(
+        `SELECT l.workspace_id, l.origin_id, l.origin_seq, l.op_kind, l.payload_json, l.recorded_at_ms, l.relay_seq,
          l.admitted_author_snapshot_json, l.settlement_admission_json, l.relay_admission
        FROM sync_relay_account_operations o
        JOIN sync_relay_log l ON l.workspace_id = o.workspace_id AND l.origin_id = ? AND l.origin_seq = ?
@@ -398,36 +522,61 @@ export function operationLogRow(storage: StorageContext, input: {
            THEN w.replication_epoch = o.replication_epoch AND w.stream_identity = o.stream_identity
              AND l.relay_seq > COALESCE(w.epoch_log_floor, 0)
            ELSE l.relay_seq <= o.log_ceiling END`,
-    ).get(input.originId, input.originSeq, input.accountId, input.operationId, input.workspaceId, input.replicationEpoch,
-      input.streamIdentity);
+      )
+      .get(
+        input.originId,
+        input.originSeq,
+        input.accountId,
+        input.operationId,
+        input.workspaceId,
+        input.replicationEpoch,
+        input.streamIdentity,
+      );
     return row ? rowToLogRow(row) : null;
   });
 }
 
 /** The copies that keep the `publication` reason now. Runs inside the caller's transaction. */
 export function publicationReasonCopiesInTransaction(storage: StorageContext): string[] {
-  return storage.db.prepare("SELECT workspace_id FROM sync_relay_automation_workspace_reasons WHERE reason = 'publication'")
-    .all().map(row => String(row.workspace_id));
+  return storage.db
+    .prepare(
+      "SELECT workspace_id FROM sync_relay_automation_workspace_reasons WHERE reason = 'publication'",
+    )
+    .all()
+    .map((row) => String(row.workspace_id));
 }
 
 /** Exactly these copies keep the `publication` reason. Runs inside the caller's write transaction. */
-export function setPublicationReasonsInTransaction(storage: StorageContext, workspaceIds: readonly string[]): void {
+export function setPublicationReasonsInTransaction(
+  storage: StorageContext,
+  workspaceIds: readonly string[],
+): void {
   const ids = JSON.stringify(workspaceIds);
-  storage.db.prepare(
-    `DELETE FROM sync_relay_automation_workspace_reasons
+  storage.db
+    .prepare(
+      `DELETE FROM sync_relay_automation_workspace_reasons
      WHERE reason = 'publication' AND workspace_id NOT IN (SELECT value FROM json_each(?))`,
-  ).run(ids);
-  storage.db.prepare(
-    `INSERT OR IGNORE INTO sync_relay_automation_workspace_reasons (workspace_id, reason)
+    )
+    .run(ids);
+  storage.db
+    .prepare(
+      `INSERT OR IGNORE INTO sync_relay_automation_workspace_reasons (workspace_id, reason)
      SELECT value, 'publication' FROM json_each(?)`,
-  ).run(ids);
+    )
+    .run(ids);
 }
 
 /** Turns rows settled more than OPERATION_KEEP_SETTLED_MS ago into tombstones. Returns how many. */
 export function tombstoneSettledOperations(storage: StorageContext, nowMs: number): number {
-  return storage.tx(() => Number(storage.db.prepare(
-    `UPDATE sync_relay_account_operations SET ${tombstone("stage")}
+  return storage.tx(() =>
+    Number(
+      storage.db
+        .prepare(
+          `UPDATE sync_relay_account_operations SET ${tombstone("stage")}
      WHERE rowid IN (SELECT rowid FROM sync_relay_account_operations
        WHERE settled_at_ms IS NOT NULL AND settled_at_ms < ? LIMIT ?)`,
-  ).run(nowMs - OPERATION_KEEP_SETTLED_MS, OPERATION_TOMBSTONE_BATCH).changes));
+        )
+        .run(nowMs - OPERATION_KEEP_SETTLED_MS, OPERATION_TOMBSTONE_BATCH).changes,
+    ),
+  );
 }

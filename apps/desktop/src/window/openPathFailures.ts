@@ -37,7 +37,10 @@ export function createOpenPathFailures<Renderer extends OpenPathFailureRenderer>
   // that they combine into one. Main keeps `limit` taken ones for Try again,
   // oldest dropped first. It never drops one a window has not taken.
   const limit = dependencies.limit ?? WORKSPACE_PATH_OPEN_FAILURES_MAX;
-  const held = new Map<string, { failure: WorkspacePathOpenFailure; rendererId: number; taken: boolean }>();
+  const held = new Map<
+    string,
+    { failure: WorkspacePathOpenFailure; rendererId: number; taken: boolean }
+  >();
   const watched = new WeakSet<Renderer>();
 
   function watch(renderer: Renderer): void {
@@ -45,7 +48,8 @@ export function createOpenPathFailures<Renderer extends OpenPathFailureRenderer>
     watched.add(renderer);
     // A closed window's failures and attempts go with it.
     renderer.once("destroyed", () => {
-      for (const [attemptId, entry] of held) if (entry.rendererId === renderer.id) held.delete(attemptId);
+      for (const [attemptId, entry] of held)
+        if (entry.rendererId === renderer.id) held.delete(attemptId);
     });
   }
 
@@ -57,33 +61,53 @@ export function createOpenPathFailures<Renderer extends OpenPathFailureRenderer>
   ): void {
     if (renderer.isDestroyed()) return;
     watch(renderer);
-    const waiting = [...held.values()].filter((entry) => entry.rendererId === renderer.id && !entry.taken
-      && !("moveToApplications" in entry.failure));
+    const waiting = [...held.values()].filter(
+      (entry) =>
+        entry.rendererId === renderer.id &&
+        !entry.taken &&
+        !("moveToApplications" in entry.failure),
+    );
     const attemptId = randomUUID();
     if (waiting.length < limit) {
       const failure = { attemptId, path, cause: String(ipcWireError(error)), workspaceId };
       held.set(attemptId, { failure, rendererId: renderer.id, taken: false });
     } else {
-      const more = waiting.find(({ failure }) => "paths" in failure && failure.workspaceId === workspaceId)?.failure;
+      const more = waiting.find(
+        ({ failure }) => "paths" in failure && failure.workspaceId === workspaceId,
+      )?.failure;
       if (more && "paths" in more) {
         more.count += 1;
         if (more.paths.length < WORKSPACE_PATH_OPEN_MORE_PATHS_MAX) more.paths.push(path);
       } else {
-        held.set(attemptId, { failure: { attemptId, paths: [path], count: 1, workspaceId }, rendererId: renderer.id, taken: false });
+        held.set(attemptId, {
+          failure: { attemptId, paths: [path], count: 1, workspaceId },
+          rendererId: renderer.id,
+          taken: false,
+        });
       }
     }
     dependencies.notify(renderer);
   }
 
-  function reportMove(error: unknown, renderer: Renderer, workspaceId = dependencies.workspaceIdOf(renderer)): void {
+  function reportMove(
+    error: unknown,
+    renderer: Renderer,
+    workspaceId = dependencies.workspaceIdOf(renderer),
+  ): void {
     if (renderer.isDestroyed()) return;
     watch(renderer);
     // A newer failed move replaces one this window has not taken.
     for (const [attemptId, entry] of held) {
-      if (entry.rendererId === renderer.id && !entry.taken && "moveToApplications" in entry.failure) held.delete(attemptId);
+      if (entry.rendererId === renderer.id && !entry.taken && "moveToApplications" in entry.failure)
+        held.delete(attemptId);
     }
     const attemptId = randomUUID();
-    const failure = { attemptId, moveToApplications: true as const, cause: String(ipcWireError(error)), workspaceId };
+    const failure = {
+      attemptId,
+      moveToApplications: true as const,
+      cause: String(ipcWireError(error)),
+      workspaceId,
+    };
     held.set(attemptId, { failure, rendererId: renderer.id, taken: false });
     dependencies.notify(renderer);
   }
@@ -102,12 +126,14 @@ export function createOpenPathFailures<Renderer extends OpenPathFailureRenderer>
         else entry.taken = true;
       }
       const spent = [...held].filter(([, entry]) => entry.taken);
-      for (const [attemptId] of spent.slice(0, Math.max(0, spent.length - limit))) held.delete(attemptId);
+      for (const [attemptId] of spent.slice(0, Math.max(0, spent.length - limit)))
+        held.delete(attemptId);
       return taken;
     },
     async retry(attemptId: string, renderer: Renderer): Promise<void> {
       const entry = held.get(attemptId);
-      if (entry?.rendererId !== renderer.id || "paths" in entry.failure) throw new Error("Open the folder again.");
+      if (entry?.rendererId !== renderer.id || "paths" in entry.failure)
+        throw new Error("Open the folder again.");
       held.delete(attemptId);
       const { failure } = entry;
       const workspaceId = dependencies.workspaceIdOf(renderer);

@@ -14,7 +14,10 @@ describe("crash report preview", () => {
     const opened: string[] = [];
     // A file left by an earlier dohc, with looser permissions.
     writeFileSync(path, "old text", { mode: 0o644 });
-    const preview = createCrashReportPreview({ path, openPath: async (target) => (opened.push(target), "") });
+    const preview = createCrashReportPreview({
+      path,
+      openPath: async (target) => (opened.push(target), ""),
+    });
     await preview.show("dohc crash report\n\nProcess: main");
     expect(opened).toEqual([path]);
     expect(readFileSync(path, "utf8")).toBe("dohc crash report\n\nProcess: main");
@@ -26,7 +29,12 @@ describe("crash report preview", () => {
   });
 
   it("says why when the editor cannot open it", async () => {
-    const preview = createCrashReportPreview({ path, openPath: async () => "no application is associated" });
-    await expect(preview.show("dohc crash report")).rejects.toThrow("dohc could not open the report: no application is associated");
+    const preview = createCrashReportPreview({
+      path,
+      openPath: async () => "no application is associated",
+    });
+    await expect(preview.show("dohc crash report")).rejects.toThrow(
+      "dohc could not open the report: no application is associated",
+    );
   });
 });

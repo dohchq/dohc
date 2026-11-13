@@ -3,7 +3,11 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ExplorerMenuEntry, SitePackageInfo, WorkspaceFileEntry } from "../../ipc/bridgeContract";
+import type {
+  ExplorerMenuEntry,
+  SitePackageInfo,
+  WorkspaceFileEntry,
+} from "../../ipc/bridgeContract";
 import type { ExplorerApps } from "./AppsSection";
 import { Explorer, type ExplorerProps } from "./Explorer";
 import { FILES_SHOWN } from "./explorerHomeModel";
@@ -91,7 +95,9 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
     appFolders: new Set(["trip"]),
     onOpenCollection: vi.fn(),
     apps: apps(),
-    dataCollections: [{ datasetId: "d", datasetPath: "guests/dataset.json", tableId: TABLE, name: "Guests" }],
+    dataCollections: [
+      { datasetId: "d", datasetPath: "guests/dataset.json", tableId: TABLE, name: "Guests" },
+    ],
     onOpenDataCollection: vi.fn(),
     onPathsChanged: vi.fn(),
     onImportFiles: vi.fn(),
@@ -112,17 +118,36 @@ function section(name: string): HTMLElement {
 
 function rowLabels(name: string): string[] {
   return [...section(name).querySelectorAll<HTMLElement>("[data-home-key]")]
-    .filter((element) => element.dataset.testid !== undefined && !element.dataset.homeKey!.startsWith("section:") && !element.dataset.homeKey!.endsWith(":more"))
+    .filter(
+      (element) =>
+        element.dataset.testid !== undefined &&
+        !element.dataset.homeKey!.startsWith("section:") &&
+        !element.dataset.homeKey!.endsWith(":more"),
+    )
     .map((element) => element.querySelector(".truncate")?.textContent ?? element.textContent ?? "");
 }
 
-const PAGE_PATHS = Array.from({ length: 500 }, (_, index) => `file-${String(index).padStart(4, "0")}.md`);
+const PAGE_PATHS = Array.from(
+  { length: 500 },
+  (_, index) => `file-${String(index).padStart(4, "0")}.md`,
+);
 
 // Home with 500 pages and 40 of them open in one group.
 function largeHome(): Partial<ExplorerProps> {
   return {
-    files: PAGE_PATHS.map(file), folders: [], apps: undefined, dataCollections: [], collectionFolders: new Set(),
-    editorGroups: [{ id: "group-1", tabs: PAGE_PATHS.slice(0, 40).map((path) => ({ path })), activeTab: PAGE_PATHS[0]!, size: 1 }],
+    files: PAGE_PATHS.map(file),
+    folders: [],
+    apps: undefined,
+    dataCollections: [],
+    collectionFolders: new Set(),
+    editorGroups: [
+      {
+        id: "group-1",
+        tabs: PAGE_PATHS.slice(0, 40).map((path) => ({ path })),
+        activeTab: PAGE_PATHS[0]!,
+        size: 1,
+      },
+    ],
   };
 }
 
@@ -131,7 +156,17 @@ function mounted(path: string): boolean {
 }
 
 function rect(top: number, height: number) {
-  return { x: 0, y: top, top, left: 0, right: 280, bottom: top + height, width: 280, height, toJSON: () => ({}) };
+  return {
+    x: 0,
+    y: top,
+    top,
+    left: 0,
+    right: 280,
+    bottom: top + height,
+    width: 280,
+    height,
+    toJSON: () => ({}),
+  };
 }
 
 // Renders Home in a 280 px scroller, 100 rows into Pages less `offset`: how
@@ -141,7 +176,9 @@ function scrolledHome(props: ExplorerProps, offset: () => number) {
   const scroller = screen.getByTestId("file-tree");
   Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 280 });
   vi.spyOn(scroller, "getBoundingClientRect").mockReturnValue(rect(0, 280));
-  vi.spyOn(section("Pages").querySelector("ul")!, "getBoundingClientRect").mockImplementation(() => rect(-2_800 + offset(), 14_000));
+  vi.spyOn(section("Pages").querySelector("ul")!, "getBoundingClientRect").mockImplementation(() =>
+    rect(-2_800 + offset(), 14_000),
+  );
   fireEvent.scroll(scroller);
   return view;
 }
@@ -150,7 +187,10 @@ const RENAME: ExplorerMenuEntry = { kind: "item", label: "Rename", id: "rename" 
 const DELETE: ExplorerMenuEntry = { kind: "item", label: "Delete", id: "delete" };
 
 const bridge = {
-  readExplorerMenu: vi.fn(async (_input: unknown): Promise<ExplorerMenuEntry[]> => [RENAME, DELETE]),
+  readExplorerMenu: vi.fn(async (_input: unknown): Promise<ExplorerMenuEntry[]> => [
+    RENAME,
+    DELETE,
+  ]),
   deleteWorkspacePath: vi.fn(async (_input: { workspaceId: string; relativePath: string }) => ({
     trashed: true,
     operationId: "dohc-operation:22222222-2222-4222-8222-222222222222",
@@ -170,7 +210,9 @@ afterEach(() => {
 
 describe("Explorer Files", () => {
   it("shows nothing below the Files header before the first listing", () => {
-    render(<Explorer {...explorerProps({ mode: "files", listed: false, files: [], folders: [] })} />);
+    render(
+      <Explorer {...explorerProps({ mode: "files", listed: false, files: [], folders: [] })} />,
+    );
 
     expect(screen.queryByText("No files yet.")).toBeNull();
     expect(screen.queryByRole("button", { name: "Create your first file" })).toBeNull();
@@ -178,10 +220,15 @@ describe("Explorer Files", () => {
   });
 
   it('shows "No files yet." after an empty listing', () => {
-    render(<Explorer {...explorerProps({ mode: "files", files: [], folders: [], editorGroups: [] })} />);
+    render(
+      <Explorer {...explorerProps({ mode: "files", files: [], folders: [], editorGroups: [] })} />,
+    );
 
     // An empty-state line says something, so it reads in muted, not subtle.
-    for (const line of [within(section("Files")).getByText("No files yet."), screen.getByText("No files open.")]) {
+    for (const line of [
+      within(section("Files")).getByText("No files yet."),
+      screen.getByText("No files open."),
+    ]) {
       expect(line.className).toContain("text-muted");
       expect(line.className).not.toContain("text-subtle");
     }
@@ -190,9 +237,13 @@ describe("Explorer Files", () => {
   });
 
   it("shows the tree after a listing with a file", () => {
-    render(<Explorer {...explorerProps({ mode: "files", files: [file("notes.md")], folders: [] })} />);
+    render(
+      <Explorer {...explorerProps({ mode: "files", files: [file("notes.md")], folders: [] })} />,
+    );
 
-    expect(within(screen.getByRole("tree")).getByRole("treeitem", { name: "notes.md" })).toBeTruthy();
+    expect(
+      within(screen.getByRole("tree")).getByRole("treeitem", { name: "notes.md" }),
+    ).toBeTruthy();
     expect(screen.queryByText("No files yet.")).toBeNull();
     expect(screen.queryByRole("button", { name: "Create your first file" })).toBeNull();
   });
@@ -203,7 +254,9 @@ describe("Explorer Files", () => {
 
     await user.click(within(section("Files")).getByRole("button", { name: "New folder" }));
 
-    expect((await screen.findByTestId("tree-edit-input")).getAttribute("aria-label")).toBe("New folder name");
+    expect((await screen.findByTestId("tree-edit-input")).getAttribute("aria-label")).toBe(
+      "New folder name",
+    );
     expect(screen.queryByText("No files yet.")).toBeNull();
   });
 });
@@ -213,8 +266,15 @@ describe("Explorer Home", () => {
     render(<Explorer {...explorerProps({ pinned: ["notes.md"] })} />);
 
     const sections = [...screen.getByTestId("file-tree").querySelectorAll("section")];
-    expect(sections.map((element) => element.getAttribute("aria-label")))
-      .toEqual(["Open editors", "Apps", "Pinned", "Pages", "Sketches", "Collections", "Other files"]);
+    expect(sections.map((element) => element.getAttribute("aria-label"))).toEqual([
+      "Open editors",
+      "Apps",
+      "Pinned",
+      "Pages",
+      "Sketches",
+      "Collections",
+      "Other files",
+    ]);
     expect(screen.getByTestId("file-tree").getAttribute("aria-label")).toBe("Home");
   });
 
@@ -222,18 +282,35 @@ describe("Explorer Home", () => {
     const onActivateTab = vi.fn();
     const onCloseTab = vi.fn();
     const user = userEvent.setup();
-    render(<Explorer {...explorerProps({
-      onActivateTab,
-      onCloseTab,
-      editorGroups: [{ id: "group-1", tabs: [{ path: "notes.md" }, { path: "budget.csv" }], activeTab: "notes.md", size: 1 }],
-    })} />);
+    render(
+      <Explorer
+        {...explorerProps({
+          onActivateTab,
+          onCloseTab,
+          editorGroups: [
+            {
+              id: "group-1",
+              tabs: [{ path: "notes.md" }, { path: "budget.csv" }],
+              activeTab: "notes.md",
+              size: 1,
+            },
+          ],
+        })}
+      />,
+    );
 
     const openEditors = section("Open editors");
-    expect(within(openEditors).getAllByTestId("open-editor-row").map((row) => row.dataset.path)).toEqual(["notes.md", "budget.csv"]);
+    expect(
+      within(openEditors)
+        .getAllByTestId("open-editor-row")
+        .map((row) => row.dataset.path),
+    ).toEqual(["notes.md", "budget.csv"]);
     // A page shows its title, as Pages does, and another file its name.
     expect(within(openEditors).getByRole("button", { name: "notes" }).title).toBe("notes.md");
     expect(within(openEditors).getByRole("button", { name: "Close notes" })).toBeTruthy();
-    expect(within(openEditors).getByRole("separator", { name: "Resize open editors" })).toBeTruthy();
+    expect(
+      within(openEditors).getByRole("separator", { name: "Resize open editors" }),
+    ).toBeTruthy();
     await user.click(within(openEditors).getByRole("button", { name: "budget.csv" }));
     expect(onActivateTab).toHaveBeenCalledWith("group-1", "budget.csv");
     const close = within(openEditors).getByRole("button", { name: "Close budget.csv" });
@@ -249,7 +326,10 @@ describe("Explorer Home", () => {
     render(<Explorer {...explorerProps({ mode: "files", pinned: ["notes.md"] })} />);
 
     const sections = [...screen.getByTestId("file-tree").querySelectorAll(":scope > section")];
-    expect(sections.map((element) => element.getAttribute("aria-label"))).toEqual(["Open editors", "Files"]);
+    expect(sections.map((element) => element.getAttribute("aria-label"))).toEqual([
+      "Open editors",
+      "Files",
+    ]);
     expect(screen.queryByTestId("explorer-home")).toBeNull();
     // Files names an open page by its file name, as its tree does.
     expect(within(section("Open editors")).getByRole("button", { name: "notes.md" })).toBeTruthy();
@@ -258,14 +338,25 @@ describe("Explorer Home", () => {
   it("draws no Pinned section with nothing in it, and always draws Open editors and Pages with its +", async () => {
     const onNewPage = vi.fn();
     const user = userEvent.setup();
-    render(<Explorer {...explorerProps({
-      files: [], folders: [], apps: undefined, dataCollections: [], collectionFolders: new Set(), onNewPage,
-      editorGroups: [{ id: "group-1", tabs: [], activeTab: null, size: 1 }],
-    })} />);
+    render(
+      <Explorer
+        {...explorerProps({
+          files: [],
+          folders: [],
+          apps: undefined,
+          dataCollections: [],
+          collectionFolders: new Set(),
+          onNewPage,
+          editorGroups: [{ id: "group-1", tabs: [], activeTab: null, size: 1 }],
+        })}
+      />,
+    );
 
     // Its line is the toggle's description, as Pages' line is.
     const empty = within(section("Open editors")).getByText("No files open.");
-    expect(screen.getByTestId("open-editors-toggle").getAttribute("aria-describedby")).toBe(empty.id);
+    expect(screen.getByTestId("open-editors-toggle").getAttribute("aria-describedby")).toBe(
+      empty.id,
+    );
     expect(screen.queryByRole("region", { name: "Pinned" })).toBeNull();
     expect(screen.queryByRole("region", { name: "Apps" })).toBeNull();
     expect(screen.queryByRole("region", { name: "Sketches" })).toBeNull();
@@ -300,7 +391,9 @@ describe("Explorer Home", () => {
       const line = screen.getByTestId(`explorer-${id}-empty`);
       expect(line.textContent).toBe(words);
       // The header's toggle reads the line, since focus never lands on it.
-      expect(screen.getByTestId(`explorer-${id}-toggle`).getAttribute("aria-describedby")).toBe(line.id);
+      expect(screen.getByTestId(`explorer-${id}-toggle`).getAttribute("aria-describedby")).toBe(
+        line.id,
+      );
     }
     expect(screen.queryByTestId("sites-count")).toBeNull();
 
@@ -331,15 +424,30 @@ describe("Explorer Home", () => {
     const view = render(<Explorer {...explorerProps({ apps: empty })} />);
     expect(screen.getByTestId("explorer-apps-empty")).toBeTruthy();
 
-    view.rerender(<Explorer {...explorerProps({ apps: empty, shareView: { granterEmail: "sam@example.com" } })} />);
+    view.rerender(
+      <Explorer
+        {...explorerProps({ apps: empty, shareView: { granterEmail: "sam@example.com" } })}
+      />,
+    );
     expect(screen.queryByRole("region", { name: "Apps" })).toBeNull();
 
-    view.rerender(<Explorer {...explorerProps({ shareView: { granterEmail: "sam@example.com" } })} />);
+    view.rerender(
+      <Explorer {...explorerProps({ shareView: { granterEmail: "sam@example.com" } })} />,
+    );
     expect(rowLabels("Apps")).toEqual(["Trip"]);
 
     // A share that holds only an app shows no Pages either.
-    view.rerender(<Explorer {...explorerProps({ files: [file("trip/index.html")], folders: ["trip"], dataCollections: [], collectionFolders: new Set(),
-      shareView: { granterEmail: "sam@example.com" } })} />);
+    view.rerender(
+      <Explorer
+        {...explorerProps({
+          files: [file("trip/index.html")],
+          folders: ["trip"],
+          dataCollections: [],
+          collectionFolders: new Set(),
+          shareView: { granterEmail: "sam@example.com" },
+        })}
+      />,
+    );
     expect(rowLabels("Apps")).toEqual(["Trip"]);
     expect(screen.queryByRole("region", { name: "Pages" })).toBeNull();
     expect(screen.queryByTestId("explorer-pages-empty")).toBeNull();
@@ -348,22 +456,45 @@ describe("Explorer Home", () => {
   // Show archived Collections clears the list and reads it again. Until that
   // read lands, the list is not known to be empty.
   it("holds Collections' place while its list is read again, and says nothing yet", () => {
-    render(<Explorer {...explorerProps({ dataCollections: [], collectionFolders: new Set(), onIncludeArchivedCollections: vi.fn(),
-      includeArchivedCollections: true, collectionsUnknown: "reading" })} />);
+    render(
+      <Explorer
+        {...explorerProps({
+          dataCollections: [],
+          collectionFolders: new Set(),
+          onIncludeArchivedCollections: vi.fn(),
+          includeArchivedCollections: true,
+          collectionsUnknown: "reading",
+        })}
+      />,
+    );
 
     expect(section("Collections")).toBeTruthy();
     expect(screen.queryByTestId("explorer-collections-empty")).toBeNull();
     expect(screen.queryByTestId("collections-failed")).toBeNull();
-    expect(screen.getByTestId("explorer-collections-toggle").hasAttribute("aria-describedby")).toBe(false);
+    expect(screen.getByTestId("explorer-collections-toggle").hasAttribute("aria-describedby")).toBe(
+      false,
+    );
   });
 
   it("leaves Try again in Collections' place when that read fails, and still says nothing", () => {
     const onRetryCollections = vi.fn();
-    render(<Explorer {...explorerProps({ dataCollections: [], collectionFolders: new Set(), onIncludeArchivedCollections: vi.fn(),
-      includeArchivedCollections: true, collectionsUnknown: "failed", onRetryCollections })} />);
+    render(
+      <Explorer
+        {...explorerProps({
+          dataCollections: [],
+          collectionFolders: new Set(),
+          onIncludeArchivedCollections: vi.fn(),
+          includeArchivedCollections: true,
+          collectionsUnknown: "failed",
+          onRetryCollections,
+        })}
+      />,
+    );
 
     expect(screen.queryByTestId("explorer-collections-empty")).toBeNull();
-    fireEvent.click(within(screen.getByTestId("collections-failed")).getByRole("button", { name: "Try again" }));
+    fireEvent.click(
+      within(screen.getByTestId("collections-failed")).getByRole("button", { name: "Try again" }),
+    );
     expect(onRetryCollections).toHaveBeenCalledOnce();
   });
 
@@ -388,7 +519,16 @@ describe("Explorer Home", () => {
     const onToggleFolder = vi.fn();
     const onSetFolderExpanded = vi.fn();
     const user = userEvent.setup();
-    render(<Explorer {...explorerProps({ onOpenFile, onToggleFolder, onSetFolderExpanded, expandedFolders: ["Plans"] })} />);
+    render(
+      <Explorer
+        {...explorerProps({
+          onOpenFile,
+          onToggleFolder,
+          onSetFolderExpanded,
+          expandedFolders: ["Plans"],
+        })}
+      />,
+    );
 
     await user.click(within(section("Pages")).getByRole("button", { name: "notes" }));
     expect(onOpenFile).toHaveBeenCalledWith("notes.md");
@@ -448,17 +588,37 @@ describe("Explorer Home", () => {
     expect(onOpenFile).toHaveBeenCalledWith(siteTabPath("trip"));
 
     const tab = siteTabPath("trip");
-    view.rerender(<Explorer {...props} editorGroups={[{ id: "group-1", tabs: [{ path: tab }], activeTab: tab, size: 1 }]} />);
+    view.rerender(
+      <Explorer
+        {...props}
+        editorGroups={[{ id: "group-1", tabs: [{ path: tab }], activeTab: tab, size: 1 }]}
+      />,
+    );
     expect(screen.getByTestId("sites-row").getAttribute("aria-current")).toBe("page");
   });
 
   it("counts the Collections loaded so far with a + while more can load", () => {
-    const loaded = Array.from({ length: 24 }, (_, index) => ({ datasetId: `d${index}`, datasetPath: `c${index}/dataset.json`, tableId: TABLE, name: `Collection ${index}` }));
-    const view = render(<Explorer {...explorerProps({ dataCollections: loaded, collectionFolders: new Set(), onMoreDataCollections: vi.fn() })} />);
+    const loaded = Array.from({ length: 24 }, (_, index) => ({
+      datasetId: `d${index}`,
+      datasetPath: `c${index}/dataset.json`,
+      tableId: TABLE,
+      name: `Collection ${index}`,
+    }));
+    const view = render(
+      <Explorer
+        {...explorerProps({
+          dataCollections: loaded,
+          collectionFolders: new Set(),
+          onMoreDataCollections: vi.fn(),
+        })}
+      />,
+    );
     expect(screen.getByLabelText("24 or more Collections").textContent).toBe("24+");
     expect(screen.getByTestId("collections-more").textContent).toBe("Show more Collections");
     // Once every Collection has loaded, the count is a total.
-    view.rerender(<Explorer {...explorerProps({ dataCollections: loaded, collectionFolders: new Set() })} />);
+    view.rerender(
+      <Explorer {...explorerProps({ dataCollections: loaded, collectionFolders: new Set() })} />,
+    );
     expect(screen.getByLabelText("24 Collections").textContent).toBe("24");
     expect(screen.queryByTestId("collections-more")).toBeNull();
   });
@@ -468,14 +628,22 @@ describe("Explorer Home", () => {
     const user = userEvent.setup();
     const view = render(<Explorer {...explorerProps({ onModeChange })} />);
     expect(rowLabels("Other files")).toEqual(["budget.csv", "tram.png"]);
-    expect(within(section("Other files")).getByRole("button", { name: /^tram\.png/ }).textContent).toBe("tram.pngphotos");
+    expect(
+      within(section("Other files")).getByRole("button", { name: /^tram\.png/ }).textContent,
+    ).toBe("tram.pngphotos");
     expect(screen.queryByTestId("other-files-show-all")).toBeNull();
 
-    const many = Array.from({ length: FILES_SHOWN + 3 }, (_, index) => file(`data/${String(index).padStart(2, "0")}.json`));
-    view.rerender(<Explorer {...explorerProps({ onModeChange, files: many, folders: ["data"] })} />);
+    const many = Array.from({ length: FILES_SHOWN + 3 }, (_, index) =>
+      file(`data/${String(index).padStart(2, "0")}.json`),
+    );
+    view.rerender(
+      <Explorer {...explorerProps({ onModeChange, files: many, folders: ["data"] })} />,
+    );
     expect(rowLabels("Other files")).toHaveLength(FILES_SHOWN);
     // Other files counts every file, so its count is a total, with no "+".
-    expect(screen.getByLabelText(`${FILES_SHOWN + 3} files`).textContent).toBe(String(FILES_SHOWN + 3));
+    expect(screen.getByLabelText(`${FILES_SHOWN + 3} files`).textContent).toBe(
+      String(FILES_SHOWN + 3),
+    );
     await user.click(screen.getByTestId("other-files-show-all"));
     expect(onModeChange).toHaveBeenCalledWith("files");
   });
@@ -486,35 +654,64 @@ describe("Explorer Home", () => {
     const user = userEvent.setup();
     const view = render(<Explorer {...explorerProps({ onModeChange, onOpenFile })} />);
     expect(rowLabels("Sketches")).toEqual(["board.excalidraw"]);
-    expect(within(section("Sketches")).getByRole("button", { name: /^board\.excalidraw/ }).textContent).toBe("board.excalidrawplans");
+    expect(
+      within(section("Sketches")).getByRole("button", { name: /^board\.excalidraw/ }).textContent,
+    ).toBe("board.excalidrawplans");
     expect(screen.getByLabelText("1 sketch").textContent).toBe("1");
     expect(rowLabels("Other files")).not.toContain("board.excalidraw");
-    await user.click(within(section("Sketches")).getByRole("button", { name: /^board\.excalidraw/ }));
+    await user.click(
+      within(section("Sketches")).getByRole("button", { name: /^board\.excalidraw/ }),
+    );
     expect(onOpenFile).toHaveBeenCalledWith("plans/board.excalidraw");
     expect(screen.queryByTestId("sketches-show-all")).toBeNull();
 
     // Sketches alone leave no Other files section.
-    const many = Array.from({ length: FILES_SHOWN + 2 }, (_, index) => file(`ideas/${String(index).padStart(2, "0")}.excalidraw`));
-    view.rerender(<Explorer {...explorerProps({ onModeChange, files: many, folders: ["ideas"] })} />);
+    const many = Array.from({ length: FILES_SHOWN + 2 }, (_, index) =>
+      file(`ideas/${String(index).padStart(2, "0")}.excalidraw`),
+    );
+    view.rerender(
+      <Explorer {...explorerProps({ onModeChange, files: many, folders: ["ideas"] })} />,
+    );
     expect(rowLabels("Sketches")).toHaveLength(FILES_SHOWN);
-    expect(screen.getByLabelText(`${FILES_SHOWN + 2} sketches`).textContent).toBe(String(FILES_SHOWN + 2));
+    expect(screen.getByLabelText(`${FILES_SHOWN + 2} sketches`).textContent).toBe(
+      String(FILES_SHOWN + 2),
+    );
     expect(screen.queryByRole("region", { name: "Other files" })).toBeNull();
     await user.click(screen.getByTestId("sketches-show-all"));
     expect(onModeChange).toHaveBeenCalledWith("files");
   });
 
   it("shows the files a deleted Collection left in its folder, and still leaves out a listed Collection's", () => {
-    const files = [file("guests/dataset.json"), file("guests/notes.md"), file("old/dataset.json"), file("old/plan.md"), file("old/app/index.html")];
-    render(<Explorer {...explorerProps({ files, folders: ["guests", "old", "old/app"], expandedFolders: ["old"], unclaimedDatasetFolders: new Set(["old"]) })} />);
+    const files = [
+      file("guests/dataset.json"),
+      file("guests/notes.md"),
+      file("old/dataset.json"),
+      file("old/plan.md"),
+      file("old/app/index.html"),
+    ];
+    render(
+      <Explorer
+        {...explorerProps({
+          files,
+          folders: ["guests", "old", "old/app"],
+          expandedFolders: ["old"],
+          unclaimedDatasetFolders: new Set(["old"]),
+        })}
+      />,
+    );
     expect(rowLabels("Pages")).toEqual(["old", "plan"]);
     expect(rowLabels("Other files")).toEqual(["dataset.json", "index.html"]);
   });
 
   it("pins apps first, then everything else pinned, once each", () => {
-    render(<Explorer {...explorerProps({
-      pinned: ["notes.md", "trip", collectionTabPath("tasks"), "gone.md"],
-      apps: apps({ pinnedApps: ["trip"] }),
-    })} />);
+    render(
+      <Explorer
+        {...explorerProps({
+          pinned: ["notes.md", "trip", collectionTabPath("tasks"), "gone.md"],
+          apps: apps({ pinnedApps: ["trip"] }),
+        })}
+      />,
+    );
 
     expect(rowLabels("Pinned")).toEqual(["Trip", "notes", "tasks"]);
   });
@@ -523,11 +720,21 @@ describe("Explorer Home", () => {
     render(<Explorer {...explorerProps({ apps: apps({ pinnedApps: ["trip"] }) })} />);
 
     fireEvent.contextMenu(within(section("Pages")).getByRole("button", { name: "notes" }));
-    expect(bridge.readExplorerMenu).toHaveBeenLastCalledWith({ workspaceId: "workspace-1", path: "notes.md", kind: "file", pinned: false });
+    expect(bridge.readExplorerMenu).toHaveBeenLastCalledWith({
+      workspaceId: "workspace-1",
+      path: "notes.md",
+      kind: "file",
+      pinned: false,
+    });
     await screen.findByRole("menu", { name: "notes.md" });
     await userEvent.hover(within(section("Apps")).getByTestId("sites-row"));
     fireEvent.click(within(section("Apps")).getByRole("button", { name: "More actions for Trip" }));
-    expect(bridge.readExplorerMenu).toHaveBeenLastCalledWith({ workspaceId: "workspace-1", path: "trip", kind: "folder", pinned: true });
+    expect(bridge.readExplorerMenu).toHaveBeenLastCalledWith({
+      workspaceId: "workspace-1",
+      path: "trip",
+      kind: "folder",
+      pinned: true,
+    });
     await screen.findByRole("menu", { name: "trip" });
   });
 
@@ -540,7 +747,12 @@ describe("Explorer Home", () => {
     fireEvent.keyDown(target, { key: "ContextMenu" });
     const menu = await screen.findByRole("menu", { name: "notes.md" });
     expect(menu.style.top).toBe("128px");
-    expect(bridge.readExplorerMenu).toHaveBeenCalledWith({ workspaceId: "workspace-1", path: "notes.md", kind: "file", pinned: false });
+    expect(bridge.readExplorerMenu).toHaveBeenCalledWith({
+      workspaceId: "workspace-1",
+      path: "notes.md",
+      kind: "file",
+      pinned: false,
+    });
     expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "Rename" }));
     // The browser's own contextmenu event for the key opens no second menu.
     fireEvent.contextMenu(target);
@@ -559,8 +771,18 @@ describe("Explorer Home", () => {
     fireEvent.contextMenu(within(section("Pages")).getByRole("button", { name: "notes" }));
     await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
     expect(screen.queryByTestId("delete-confirm")).toBeNull();
-    await waitFor(() => expect(bridge.deleteWorkspacePath).toHaveBeenCalledWith({ workspaceId: "workspace-1", relativePath: "notes.md" }));
-    await waitFor(() => expect(props.onNotice).toHaveBeenCalledWith("Deleted notes.md. It's in the system trash.", expect.any(Function)));
+    await waitFor(() =>
+      expect(bridge.deleteWorkspacePath).toHaveBeenCalledWith({
+        workspaceId: "workspace-1",
+        relativePath: "notes.md",
+      }),
+    );
+    await waitFor(() =>
+      expect(props.onNotice).toHaveBeenCalledWith(
+        "Deleted notes.md. It's in the system trash.",
+        expect.any(Function),
+      ),
+    );
   });
 
   it("measures the Pages window again while Open editors above it is resized", () => {
@@ -582,21 +804,32 @@ describe("Explorer Home", () => {
       expect(screen.getByTestId("open-editors-list").style.maxHeight).toBe("600px");
       expect(mounted("file-0080.md")).toBe(true);
     } finally {
-      Object.defineProperty(window, "innerHeight", { configurable: true, value: originalInnerHeight });
+      Object.defineProperty(window, "innerHeight", {
+        configurable: true,
+        value: originalInnerHeight,
+      });
     }
   });
 
   it("measures the Pages window again when a tab moves into a new group", () => {
     const props = explorerProps(largeHome());
     // Each group heading pushes Pages down, here by an exaggerated 150 px.
-    const view = scrolledHome(props, () => 150 * section("Open editors").querySelectorAll('[role="heading"]').length);
+    const view = scrolledHome(
+      props,
+      () => 150 * section("Open editors").querySelectorAll('[role="heading"]').length,
+    );
     expect(mounted("file-0080.md")).toBe(false);
 
     const tabs = props.editorGroups[0]!.tabs;
-    view.rerender(<Explorer {...props} editorGroups={[
-      { id: "group-1", tabs: tabs.slice(0, 20), activeTab: tabs[0]!.path, size: 1 },
-      { id: "group-2", tabs: tabs.slice(20), activeTab: tabs[20]!.path, size: 1 },
-    ]} />);
+    view.rerender(
+      <Explorer
+        {...props}
+        editorGroups={[
+          { id: "group-1", tabs: tabs.slice(0, 20), activeTab: tabs[0]!.path, size: 1 },
+          { id: "group-2", tabs: tabs.slice(20), activeTab: tabs[20]!.path, size: 1 },
+        ]}
+      />,
+    );
 
     expect(mounted("file-0080.md")).toBe(true);
   });
@@ -607,8 +840,17 @@ describe("Explorer Home", () => {
     const view = scrolledHome(props, () => 150 * screen.queryAllByTestId("sites-row").length);
     expect(mounted("file-0080.md")).toBe(false);
 
-    const loaded = Array.from({ length: 4 }, (_, index) => ({ ...app, root: `app-${index}`, title: `App ${index}` }));
-    view.rerender(<Explorer {...props} apps={apps({ state: { status: "ready", workspaceId: "workspace-1", apps: loaded } })} />);
+    const loaded = Array.from({ length: 4 }, (_, index) => ({
+      ...app,
+      root: `app-${index}`,
+      title: `App ${index}`,
+    }));
+    view.rerender(
+      <Explorer
+        {...props}
+        apps={apps({ state: { status: "ready", workspaceId: "workspace-1", apps: loaded } })}
+      />,
+    );
 
     expect(mounted("file-0080.md")).toBe(true);
   });
@@ -692,9 +934,13 @@ describe("selecting several rows in Home", () => {
     render(<Explorer {...explorerProps()} />);
     homeRow("pages:notes.md").focus();
     await user.keyboard("{Control>}a{/Control}");
-    const rows = [...document.querySelectorAll<HTMLElement>("[data-home-key]")].filter((button) => button.dataset.path);
+    const rows = [...document.querySelectorAll<HTMLElement>("[data-home-key]")].filter(
+      (button) => button.dataset.path,
+    );
     expect(picked()).toEqual(rows.map((button) => button.dataset.homeKey));
-    expect(bar()?.textContent).toBe(`${new Set(rows.map((button) => button.dataset.path)).size} selected`);
+    expect(bar()?.textContent).toBe(
+      `${new Set(rows.map((button) => button.dataset.path)).size} selected`,
+    );
     await user.keyboard("{Escape}");
     expect(picked()).toEqual([]);
     expect(bar()).toBeNull();
@@ -705,7 +951,12 @@ describe("selecting several rows in Home", () => {
     const view = render(<Explorer {...props} />);
     fireEvent.click(homeRow("apps:trip"));
     const tab = siteTabPath("trip");
-    view.rerender(<Explorer {...props} editorGroups={[{ id: "group-1", tabs: [{ path: tab }], activeTab: tab, size: 1 }]} />);
+    view.rerender(
+      <Explorer
+        {...props}
+        editorGroups={[{ id: "group-1", tabs: [{ path: tab }], activeTab: tab, size: 1 }]}
+      />,
+    );
     expect(picked()).toEqual([]);
     expect(homeRow("apps:trip").parentElement?.className).toContain("bg-selected font-medium");
 
@@ -719,10 +970,15 @@ describe("selecting several rows in Home", () => {
   // Undo brings every row back.
   it("deletes the whole selection without asking, with the folders of apps and Collections, under one Undo", async () => {
     const deleteWorkspacePath = vi.fn(async ({ relativePath }: { relativePath: string }) => ({
-      trashed: true, operationId: `dohc-operation:${relativePath}`, undo: { available: true as const },
+      trashed: true,
+      operationId: `dohc-operation:${relativePath}`,
+      undo: { available: true as const },
     }));
     const undoHistoryOperation = vi.fn(async (_input: { operationId: string }) => ({
-      ok: true, tracked: { state: "restored", momentCount: 1 }, restored: [], remaining: [],
+      ok: true,
+      tracked: { state: "restored", momentCount: 1 },
+      restored: [],
+      remaining: [],
     }));
     vi.stubGlobal("dohcDesktop", { ...bridge, deleteWorkspacePath, undoHistoryOperation });
     const props = explorerProps();
@@ -732,9 +988,18 @@ describe("selecting several rows in Home", () => {
     fireEvent.click(homeRow("apps:trip"), { ctrlKey: true });
     fireEvent.keyDown(homeRow("apps:trip"), { key: "Delete" });
     expect(screen.queryByTestId("delete-confirm")).toBeNull();
-    await waitFor(() => expect(props.onNotice).toHaveBeenCalledWith("Deleted 3 items. They're in the system trash.", expect.any(Function)));
+    await waitFor(() =>
+      expect(props.onNotice).toHaveBeenCalledWith(
+        "Deleted 3 items. They're in the system trash.",
+        expect.any(Function),
+      ),
+    );
     expect(props.onNotice).toHaveBeenCalledOnce();
-    expect(deleteWorkspacePath.mock.calls.map(([input]) => input.relativePath)).toEqual(["notes.md", "tasks", "trip"]);
+    expect(deleteWorkspacePath.mock.calls.map(([input]) => input.relativePath)).toEqual([
+      "notes.md",
+      "tasks",
+      "trip",
+    ]);
 
     act(() => vi.mocked(props.onNotice).mock.calls[0]![1]!());
     await waitFor(() => expect(props.onNotice).toHaveBeenLastCalledWith("Restored 3 items"));
@@ -747,7 +1012,9 @@ describe("selecting several rows in Home", () => {
   // which trash took each row, as main answered.
   it("says where each row of the selection went", async () => {
     const deleteWorkspacePath = vi.fn(async ({ relativePath }: { relativePath: string }) => ({
-      trashed: relativePath !== "tasks", operationId: `dohc-operation:${relativePath}`, undo: { available: true as const },
+      trashed: relativePath !== "tasks",
+      operationId: `dohc-operation:${relativePath}`,
+      undo: { available: true as const },
     }));
     vi.stubGlobal("dohcDesktop", { ...bridge, deleteWorkspacePath });
     const props = explorerProps();
@@ -756,19 +1023,31 @@ describe("selecting several rows in Home", () => {
     fireEvent.click(homeRow("collections:tasks/"), { ctrlKey: true });
     fireEvent.click(homeRow("apps:trip"), { ctrlKey: true });
     fireEvent.keyDown(homeRow("apps:trip"), { key: "Delete" });
-    await waitFor(() => expect(props.onNotice).toHaveBeenCalledWith(
-      "Deleted 3 items. 2 are in the system trash, and 1 is in .dohc/local/trash in this workspace.",
-      expect.any(Function),
-    ));
+    await waitFor(() =>
+      expect(props.onNotice).toHaveBeenCalledWith(
+        "Deleted 3 items. 2 are in the system trash, and 1 is in .dohc/local/trash in this workspace.",
+        expect.any(Function),
+      ),
+    );
   });
 
   it("names the row that did not go when the rest of the selection went, under one Undo for the rest", async () => {
     const deleteWorkspacePath = vi.fn(async ({ relativePath }: { relativePath: string }) => {
-      if (relativePath === "tasks") throw new Error("Error invoking remote method 'desktop:delete-workspace-path': Error: The disk is full.");
-      return { trashed: true, operationId: `dohc-operation:${relativePath}`, undo: { available: true as const } };
+      if (relativePath === "tasks")
+        throw new Error(
+          "Error invoking remote method 'desktop:delete-workspace-path': Error: The disk is full.",
+        );
+      return {
+        trashed: true,
+        operationId: `dohc-operation:${relativePath}`,
+        undo: { available: true as const },
+      };
     });
     const undoHistoryOperation = vi.fn(async (_input: { operationId: string }) => ({
-      ok: true, tracked: { state: "restored", momentCount: 1 }, restored: [], remaining: [],
+      ok: true,
+      tracked: { state: "restored", momentCount: 1 },
+      restored: [],
+      remaining: [],
     }));
     vi.stubGlobal("dohcDesktop", { ...bridge, deleteWorkspacePath, undoHistoryOperation });
     const props = explorerProps();
@@ -778,9 +1057,16 @@ describe("selecting several rows in Home", () => {
     fireEvent.click(homeRow("apps:trip"), { ctrlKey: true });
     fireEvent.keyDown(homeRow("apps:trip"), { key: "Delete" });
 
-    await waitFor(() => expect(props.onNotice).toHaveBeenCalledWith("Deleted 2 items. They're in the system trash.", expect.any(Function)));
+    await waitFor(() =>
+      expect(props.onNotice).toHaveBeenCalledWith(
+        "Deleted 2 items. They're in the system trash.",
+        expect.any(Function),
+      ),
+    );
     expect(props.onError).toHaveBeenCalledOnce();
-    expect(vi.mocked(props.onError).mock.calls[0]![0]).toMatch(/^dohc could not delete "tasks"\. \S/);
+    expect(vi.mocked(props.onError).mock.calls[0]![0]).toMatch(
+      /^dohc could not delete "tasks"\. \S/,
+    );
 
     act(() => vi.mocked(props.onNotice).mock.calls[0]![1]!());
     await waitFor(() => expect(props.onNotice).toHaveBeenLastCalledWith("Restored 2 items"));
@@ -798,14 +1084,19 @@ describe("selecting several rows in Home", () => {
     fireEvent.keyDown(homeRow("apps:trip"), { key: "Delete" });
     const dialog = screen.getByTestId("delete-confirm");
     expect(within(dialog).getByRole("heading").textContent).toBe("Delete 3 items?");
-    expect([...dialog.querySelectorAll("li")].map((item) => item.textContent)).toEqual(["notes.md", "tasks", "trip"]);
+    expect([...dialog.querySelectorAll("li")].map((item) => item.textContent)).toEqual([
+      "notes.md",
+      "tasks",
+      "trip",
+    ]);
     expect(bridge.deleteWorkspacePath).not.toHaveBeenCalled();
   });
 
   it("deletes the selection from a heading, and the focused row alone when it is outside the selection", async () => {
     const user = userEvent.setup();
     render(<Explorer {...explorerProps()} />);
-    const deleted = () => bridge.deleteWorkspacePath.mock.calls.map(([input]) => input.relativePath);
+    const deleted = () =>
+      bridge.deleteWorkspacePath.mock.calls.map(([input]) => input.relativePath);
     await user.click(homeRow("pages:Plans/"));
     await user.keyboard("{Shift>}{ArrowDown}{/Shift}");
     act(() => document.querySelector<HTMLElement>('[data-home-key^="section:"]')!.focus());
@@ -826,7 +1117,9 @@ describe("selecting several rows in Home", () => {
     fireEvent.click(homeRow("pages:notes.md"), { ctrlKey: true });
     fireEvent.click(homeRow("pages:Plans/"), { ctrlKey: true });
     const setData = vi.fn();
-    fireEvent.dragStart(homeRow("pages:notes.md"), { dataTransfer: { effectAllowed: "none", setData } });
+    fireEvent.dragStart(homeRow("pages:notes.md"), {
+      dataTransfer: { effectAllowed: "none", setData },
+    });
     expect(setData).toHaveBeenCalledWith("text/plain", "notes.md\nPlans");
   });
 
@@ -837,7 +1130,9 @@ describe("selecting several rows in Home", () => {
     render(<Explorer {...props} />);
     homeRow("pages:notes.md").focus();
     await user.keyboard("{Control>}a{/Control}");
-    expect(picked()).toEqual(expect.arrayContaining(["pages:Plans/", "pages:Plans/Old/", "pages:Plans/Spring.md"]));
+    expect(picked()).toEqual(
+      expect.arrayContaining(["pages:Plans/", "pages:Plans/Old/", "pages:Plans/Spring.md"]),
+    );
     await user.keyboard("{Delete}");
 
     expect(screen.queryByTestId("delete-confirm")).toBeNull();
@@ -846,7 +1141,12 @@ describe("selecting several rows in Home", () => {
     expect(deleted).toContain("Plans");
     expect(deleted.filter((path) => path.startsWith("Plans/"))).toEqual([]);
     // The notice counts what the delete took, not every selected row.
-    await waitFor(() => expect(props.onNotice).toHaveBeenCalledWith(`Deleted ${deleted.length} items. They're in the system trash.`, expect.any(Function)));
+    await waitFor(() =>
+      expect(props.onNotice).toHaveBeenCalledWith(
+        `Deleted ${deleted.length} items. They're in the system trash.`,
+        expect.any(Function),
+      ),
+    );
   });
 
   it("drags a selected folder without its selected contents", () => {
@@ -855,7 +1155,9 @@ describe("selecting several rows in Home", () => {
     fireEvent.click(homeRow("pages:Plans/Spring.md"), { ctrlKey: true });
     fireEvent.click(homeRow("pages:notes.md"), { ctrlKey: true });
     const setData = vi.fn();
-    fireEvent.dragStart(homeRow("pages:Plans/Spring.md"), { dataTransfer: { effectAllowed: "none", setData } });
+    fireEvent.dragStart(homeRow("pages:Plans/Spring.md"), {
+      dataTransfer: { effectAllowed: "none", setData },
+    });
     expect(setData).toHaveBeenCalledWith("text/plain", "Plans\nnotes.md");
   });
 
@@ -864,9 +1166,20 @@ describe("selecting several rows in Home", () => {
     fireEvent.click(homeRow("pages:notes.md"), { ctrlKey: true });
     fireEvent.click(homeRow("other:budget.csv"), { ctrlKey: true });
     fireEvent.contextMenu(homeRow("other:budget.csv"));
-    expect(bridge.readExplorerMenu).toHaveBeenLastCalledWith({ workspaceId: "workspace-1", path: "budget.csv", kind: "file", pinned: false, count: 2 });
+    expect(bridge.readExplorerMenu).toHaveBeenLastCalledWith({
+      workspaceId: "workspace-1",
+      path: "budget.csv",
+      kind: "file",
+      pinned: false,
+      count: 2,
+    });
     fireEvent.contextMenu(homeRow("pages:Plans/"));
-    expect(bridge.readExplorerMenu).toHaveBeenLastCalledWith({ workspaceId: "workspace-1", path: "Plans", kind: "folder", pinned: false });
+    expect(bridge.readExplorerMenu).toHaveBeenLastCalledWith({
+      workspaceId: "workspace-1",
+      path: "Plans",
+      kind: "folder",
+      pinned: false,
+    });
     await screen.findByRole("menu", { name: "Plans" });
     expect(bar()).toBeNull();
   });
@@ -880,7 +1193,15 @@ describe("selecting several rows in Home", () => {
     fireEvent.contextMenu(homeRow("other:budget.csv"));
     await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
     expect(screen.queryByTestId("delete-confirm")).toBeNull();
-    await waitFor(() => expect(props.onNotice).toHaveBeenCalledWith("Deleted 2 items. They're in the system trash.", expect.any(Function)));
-    expect(bridge.deleteWorkspacePath.mock.calls.map(([input]) => input.relativePath)).toEqual(["notes.md", "budget.csv"]);
+    await waitFor(() =>
+      expect(props.onNotice).toHaveBeenCalledWith(
+        "Deleted 2 items. They're in the system trash.",
+        expect.any(Function),
+      ),
+    );
+    expect(bridge.deleteWorkspacePath.mock.calls.map(([input]) => input.relativePath)).toEqual([
+      "notes.md",
+      "budget.csv",
+    ]);
   });
 });

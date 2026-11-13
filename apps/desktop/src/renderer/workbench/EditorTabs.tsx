@@ -90,7 +90,8 @@ const PANE_CORNER_ARC = `${DECORATION_ARC} border-t shadow-[0_0_0_8px_var(--dohc
 const ACTIVE_GROUP_LINE =
   "border-t-2 border-accent forced-colors:border-[Highlight] [[data-split]_[data-editor-group-id][data-active]_&]:block";
 const INACTIVE_GROUP_TAB = "[[data-split]_[data-editor-group-id]:not([data-active])_&]:text-muted";
-const INACTIVE_GROUP_GLYPH = "[[data-split]_[data-editor-group-id]:not([data-active])_&]:text-subtle";
+const INACTIVE_GROUP_GLYPH =
+  "[[data-split]_[data-editor-group-id]:not([data-active])_&]:text-subtle";
 
 const EDGE_FADE = 40;
 const REVEAL_MARGIN = EDGE_FADE + CORNER_RADIUS + 1;
@@ -103,8 +104,10 @@ const STRIP_BUTTON =
   "grid w-7 shrink-0 place-items-center border-b border-line text-muted hover:text-ink focus-visible:-outline-offset-2";
 
 const CLOSE_SLOT = "[grid-area:1/1]";
-const DIRTY_DOT_SWAP = "group-hover/tab:opacity-0 keyboard:group-focus-visible/tab:opacity-0 group-has-[:focus]/tab:opacity-0";
-const DIRTY_CLOSE_SWAP = "opacity-0 group-hover/tab:opacity-100 keyboard:group-focus-visible/tab:opacity-100 focus:opacity-100";
+const DIRTY_DOT_SWAP =
+  "group-hover/tab:opacity-0 keyboard:group-focus-visible/tab:opacity-0 group-has-[:focus]/tab:opacity-0";
+const DIRTY_CLOSE_SWAP =
+  "opacity-0 group-hover/tab:opacity-100 keyboard:group-focus-visible/tab:opacity-100 focus:opacity-100";
 
 // Scrolls only the strip, and only when the tab is not already clear of the
 // fades: scrollIntoView would also scroll every scrolling ancestor, the
@@ -242,12 +245,25 @@ const Tab = memo(function Tab(props: {
           active glyph is muted. The other glyphs are subtle. Its color fades
           with the name's. */}
       <span className="flex items-center gap-2">
-        <TabGlyph glyph={props.glyph} icon={props.icon} size={TAB_GLYPH_SIZE} className={props.active ? `text-muted transition-colors duration-150 ${INACTIVE_GROUP_GLYPH}` : "text-subtle"} />
+        <TabGlyph
+          glyph={props.glyph}
+          icon={props.icon}
+          size={TAB_GLYPH_SIZE}
+          className={
+            props.active
+              ? `text-muted transition-colors duration-150 ${INACTIVE_GROUP_GLYPH}`
+              : "text-subtle"
+          }
+        />
         <span className="max-w-44 truncate">{name}</span>
         {/* Ink when the user was addressed, as in Chats: a person or their
             agent. A group's count is quiet. */}
         {props.active ? null : (
-          <UnreadPill count={props.unread} tone={props.glyph === "group" ? "quiet" : "ink"} testId="tab-unread" />
+          <UnreadPill
+            count={props.unread}
+            tone={props.glyph === "group" ? "quiet" : "ink"}
+            testId="tab-unread"
+          />
         )}
       </span>
       {/* The close's slot. An unsaved tab shows its dot here, so it is as
@@ -276,7 +292,11 @@ const Tab = memo(function Tab(props: {
             props.onClose(props.groupId, props.path);
           }}
           className={`grid size-4 place-items-center rounded text-subtle hover:bg-hover hover:text-ink ${CLOSE_SLOT} ${
-            props.dirty ? DIRTY_CLOSE_SWAP : props.active ? "" : "opacity-0 focus:opacity-100 group-hover:opacity-100"
+            props.dirty
+              ? DIRTY_CLOSE_SWAP
+              : props.active
+                ? ""
+                : "opacity-0 focus:opacity-100 group-hover:opacity-100"
           }`}
         >
           <X size={12} aria-hidden />
@@ -293,11 +313,12 @@ function editorGroupAtPoint(
   const hit = document.elementFromPoint?.(clientX, clientY);
   // An app's page lies over its group, outside the group's element.
   const appGroupId = hit?.closest<HTMLElement>("[data-app-group-id]")?.dataset.appGroupId;
-  const group = appGroupId === undefined
-    ? hit?.closest<HTMLElement>("[data-editor-group-id]")
-    : [...document.querySelectorAll<HTMLElement>("[data-editor-group-id]")].find(
-      (candidate) => candidate.dataset.editorGroupId === appGroupId,
-    );
+  const group =
+    appGroupId === undefined
+      ? hit?.closest<HTMLElement>("[data-editor-group-id]")
+      : [...document.querySelectorAll<HTMLElement>("[data-editor-group-id]")].find(
+          (candidate) => candidate.dataset.editorGroupId === appGroupId,
+        );
   const groupId = group?.dataset.editorGroupId;
   if (!group || !groupId) return null;
 
@@ -322,17 +343,13 @@ const settling = new WeakMap<HTMLElement, Animation>();
 function settleTab(tab: HTMLElement, visualLeft: number) {
   tab.style.transform = "";
   const delta = visualLeft - tab.offsetLeft;
-  if (
-    Math.abs(delta) < 0.5 ||
-    prefersReducedMotion() ||
-    typeof tab.animate !== "function"
-  ) {
+  if (Math.abs(delta) < 0.5 || prefersReducedMotion() || typeof tab.animate !== "function") {
     return;
   }
-  const animation = tab.animate(
-    [{ transform: `translateX(${delta}px)` }, { transform: "none" }],
-    { duration: SETTLE_MS, easing: SETTLE_EASING },
-  );
+  const animation = tab.animate([{ transform: `translateX(${delta}px)` }, { transform: "none" }], {
+    duration: SETTLE_MS,
+    easing: SETTLE_EASING,
+  });
   settling.set(tab, animation);
   animation.addEventListener("finish", () => settling.delete(tab));
 }
@@ -424,10 +441,12 @@ function createTabDrag(host: TabDragHost) {
     const frame = host.frame();
     const scroller = host.scroller();
     if (!frame || !scroller || !s.tab.isConnected) return false;
-    s.slots = Array.from(
-      scroller.querySelectorAll<HTMLElement>('[role="tab"]'),
-      (el) => ({ el, left: el.offsetLeft, width: el.offsetWidth, offset: 0 }),
-    );
+    s.slots = Array.from(scroller.querySelectorAll<HTMLElement>('[role="tab"]'), (el) => ({
+      el,
+      left: el.offsetLeft,
+      width: el.offsetWidth,
+      offset: 0,
+    }));
     s.index = s.slots.findIndex((slot) => slot.el === s.tab);
     if (s.index < 0) return false;
     s.frameLeft = frame.getBoundingClientRect().left;
@@ -498,11 +517,7 @@ function createTabDrag(host: TabDragHost) {
     if (!slot) return;
     s.slots.forEach((other, i) => {
       const offset =
-        i > s.index && i <= toIndex
-          ? -slot.width
-          : i < s.index && i >= toIndex
-            ? slot.width
-            : 0;
+        i > s.index && i <= toIndex ? -slot.width : i < s.index && i >= toIndex ? slot.width : 0;
       if (other === slot || other.offset === offset) return;
       other.offset = offset;
       other.el.style.transform = offset === 0 ? "" : `translateX(${offset}px)`;
@@ -619,10 +634,7 @@ function createTabDrag(host: TabDragHost) {
       return;
     }
     if (!s.active) {
-      if (
-        Math.hypot(event.clientX - s.startX, event.clientY - s.startY) <
-        DRAG_THRESHOLD
-      ) {
+      if (Math.hypot(event.clientX - s.startX, event.clientY - s.startY) < DRAG_THRESHOLD) {
         return;
       }
       if (!activate(s)) {
@@ -717,10 +729,7 @@ const MIN_THUMB_WIDTH = 32;
 // range negative).
 function thumbWidth(strip: HTMLElement): number {
   return Math.min(
-    Math.max(
-      (strip.clientWidth * strip.clientWidth) / strip.scrollWidth,
-      MIN_THUMB_WIDTH,
-    ),
+    Math.max((strip.clientWidth * strip.clientWidth) / strip.scrollWidth, MIN_THUMB_WIDTH),
     strip.clientWidth,
   );
 }
@@ -777,11 +786,19 @@ export const EditorTabs = memo(function EditorTabs(props: {
   // starts at the pane's left edge, so a tab's offsetLeft is its content
   // position and offsetLeft minus scrollLeft its distance from that edge.
   const frameRef = useRef<HTMLDivElement | null>(null);
-  useFocusSurface(frameRef, () => frameRef.current?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]'));
+  useFocusSurface(frameRef, () =>
+    frameRef.current?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]'),
+  );
   useLayoutEffect(() => {
     const focused = document.activeElement;
-    if (focused instanceof HTMLElement && focused.matches('[role="tab"]') && frameRef.current?.contains(focused)) {
-      focusSurface(frameRef.current.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]'));
+    if (
+      focused instanceof HTMLElement &&
+      focused.matches('[role="tab"]') &&
+      frameRef.current?.contains(focused)
+    ) {
+      focusSurface(
+        frameRef.current.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]'),
+      );
     }
   }, [props.activeTab]);
   // VS Code wheel behavior: a vertical wheel over the strip scrolls it
@@ -825,15 +842,9 @@ export const EditorTabs = memo(function EditorTabs(props: {
       scroller: () => stripRef.current,
       paneCorners: () => [leftCornerRef.current, rightCornerRef.current],
       groupId: () => latest.current.groupId,
-      move: (path, toIndex) =>
-        latest.current.onMove(latest.current.groupId, path, toIndex),
+      move: (path, toIndex) => latest.current.onMove(latest.current.groupId, path, toIndex),
       moveToGroup: (targetGroupId, path, toIndex) =>
-        latest.current.onMoveToGroup(
-          latest.current.groupId,
-          targetGroupId,
-          path,
-          toIndex,
-        ),
+        latest.current.onMoveToGroup(latest.current.groupId, targetGroupId, path, toIndex),
       settle: (tab, left) => {
         pendingSettle.current = { tab, left };
         requestAnimationFrame(() => {
@@ -970,15 +981,32 @@ export const EditorTabs = memo(function EditorTabs(props: {
       id: "/new-group-right",
       label: "New editor group right",
       icon: <Columns2 size={14} aria-hidden />,
-      shortcut: { label: shortcutText("new-editor-group-right", platform), keys: shortcutAria("new-editor-group-right", platform) },
+      shortcut: {
+        label: shortcutText("new-editor-group-right", platform),
+        keys: shortcutAria("new-editor-group-right", platform),
+      },
       disabled: TAB_KINDS[parseTab(activeTab)?.kind ?? "removed"].singleton,
       onSelect: () => props.onCreateGroupRight(groupId),
     },
     ...(onShare && activeTab
-      ? [{ id: "/share", label: "Share file", icon: <Share2 size={14} aria-hidden />, onSelect: () => onShare(activeTab) }]
+      ? [
+          {
+            id: "/share",
+            label: "Share file",
+            icon: <Share2 size={14} aria-hidden />,
+            onSelect: () => onShare(activeTab),
+          },
+        ]
       : []),
     ...(closeGroup
-      ? [{ id: "/close-group", label: "Close group", icon: <X size={14} aria-hidden />, onSelect: () => closeGroup(groupId) }]
+      ? [
+          {
+            id: "/close-group",
+            label: "Close group",
+            icon: <X size={14} aria-hidden />,
+            onSelect: () => closeGroup(groupId),
+          },
+        ]
       : []),
   ];
   return (
@@ -1000,9 +1028,16 @@ export const EditorTabs = memo(function EditorTabs(props: {
           if (!(target instanceof HTMLElement) || target.getAttribute("role") !== "tab") return;
           const tabs = [...event.currentTarget.querySelectorAll<HTMLElement>('[role="tab"]')];
           const index = tabs.indexOf(target);
-          const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1
-            : event.key === "ArrowRight" ? (index + 1) % tabs.length
-            : event.key === "ArrowLeft" ? (index - 1 + tabs.length) % tabs.length : null;
+          const next =
+            event.key === "Home"
+              ? 0
+              : event.key === "End"
+                ? tabs.length - 1
+                : event.key === "ArrowRight"
+                  ? (index + 1) % tabs.length
+                  : event.key === "ArrowLeft"
+                    ? (index - 1 + tabs.length) % tabs.length
+                    : null;
           if (next !== null && props.tabs[next]) {
             event.preventDefault();
             tabs[next]?.focus({ preventScroll: true });
@@ -1037,7 +1072,10 @@ export const EditorTabs = memo(function EditorTabs(props: {
         ))}
         {/* Continues the hairline across the empty strip — only the active
             tab interrupts it. */}
-        <div aria-hidden className={`min-w-4 flex-1 border-b border-line ${NARROW_GROUP_NO_MIN_WIDTH}`} />
+        <div
+          aria-hidden
+          className={`min-w-4 flex-1 border-b border-line ${NARROW_GROUP_NO_MIN_WIDTH}`}
+        />
       </div>
       {/* The fades at the strip's edges, shown by styles.css at an edge it
           can still scroll past. The strip starts at the frame's left edge;
@@ -1146,8 +1184,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
           const maxScroll = strip.scrollWidth - strip.clientWidth;
           if (range <= 0 || maxScroll <= 0) return;
           strip.scrollLeft =
-            state.startScrollLeft +
-            ((event.clientX - state.startX) * maxScroll) / range;
+            state.startScrollLeft + ((event.clientX - state.startX) * maxScroll) / range;
         }}
         onPointerUp={() => {
           thumbDrag.current = null;

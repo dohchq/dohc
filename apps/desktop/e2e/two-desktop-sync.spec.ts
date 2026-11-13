@@ -10,7 +10,17 @@ import { launchDesktopApp } from "./helpers/desktopApp";
 import { readHistoryMoments } from "./helpers/history";
 import { withEngineDb } from "./helpers/engineDb";
 import { spawnSyncRelay } from "./helpers/syncRelay";
-import { cleanupDesktopWorkspace, createTempWorkspace, explorerRow, openWorkspaceFromFirstRun, seedCloudCredentials, showExplorerFiles, waitForWorkspaceFile, waitForWorkspaceReady, writeWorkspaceFiles } from "./helpers/workspace";
+import {
+  cleanupDesktopWorkspace,
+  createTempWorkspace,
+  explorerRow,
+  openWorkspaceFromFirstRun,
+  seedCloudCredentials,
+  showExplorerFiles,
+  waitForWorkspaceFile,
+  waitForWorkspaceReady,
+  writeWorkspaceFiles,
+} from "./helpers/workspace";
 
 type Desktop = Awaited<ReturnType<typeof launchDesktopApp>>;
 type Workspace = Awaited<ReturnType<typeof createTempWorkspace>>;
@@ -18,29 +28,58 @@ type Relay = Awaited<ReturnType<typeof spawnSyncRelay>>;
 
 // A relay workspace holding shared.md, claimed and pushed by a third machine,
 // and sign-in credentials for both desktops.
-async function seedSharedWorkspace(workspaceId: string, first: Workspace, second: Workspace): Promise<Relay> {
+async function seedSharedWorkspace(
+  workspaceId: string,
+  first: Workspace,
+  second: Workspace,
+): Promise<Relay> {
   const relay = await spawnSyncRelay({ dbPath: join(first.baseDir, "relay", "relay.sqlite") });
   try {
     const seedRoot = join(first.baseDir, "seed");
     await mkdir(seedRoot);
     const source = await openLiveDaemonWorkspace({ workspaceId, rootPath: seedRoot });
-    const capture = createWorkspaceEngineCapture({ ...source.workspace, rustEngineSessions: source.sessions });
+    const capture = createWorkspaceEngineCapture({
+      ...source.workspace,
+      rustEngineSessions: source.sessions,
+    });
     try {
-      const remote = source.relay.bind({ ...source.workspace, relay: { baseUrl: relay.baseUrl, token: "test:e2e-user" } });
+      const remote = source.relay.bind({
+        ...source.workspace,
+        relay: { baseUrl: relay.baseUrl, token: "test:e2e-user" },
+      });
       await remote.claim();
       await writeFile(join(seedRoot, "shared.md"), "# Shared\n\nStarting together.\n");
       await waitForPathMoments(capture, "shared.md", 1);
       expect((await remote.push()).pushed).toBeGreaterThan(0);
     } finally {
-      try { await capture.stop(); } finally { await source.close(); }
+      try {
+        await capture.stop();
+      } finally {
+        await source.close();
+      }
     }
-    for (const workspace of [first, second]) await seedCloudCredentials(workspace, { serverUrl: relay.baseUrl, relayUrl: relay.baseUrl, userId: "e2e-user" });
+    for (const workspace of [first, second])
+      await seedCloudCredentials(workspace, {
+        serverUrl: relay.baseUrl,
+        relayUrl: relay.baseUrl,
+        userId: "e2e-user",
+      });
     return relay;
-  } catch (error) { await relay.stop(); throw error; }
+  } catch (error) {
+    await relay.stop();
+    throw error;
+  }
 }
 
-async function joinWorkspace(workspace: Workspace, workspaceId: string, relayUrl: string): Promise<Desktop> {
-  const desktop = await launchDesktopApp({ workspace, env: { DOHC_TEST_SYNC_DEBOUNCE_MS: "150", DOHC_TEST_SYNC_BACKOFF_MS: "250" } });
+async function joinWorkspace(
+  workspace: Workspace,
+  workspaceId: string,
+  relayUrl: string,
+): Promise<Desktop> {
+  const desktop = await launchDesktopApp({
+    workspace,
+    env: { DOHC_TEST_SYNC_DEBOUNCE_MS: "150", DOHC_TEST_SYNC_BACKOFF_MS: "250" },
+  });
   try {
     await desktop.page.getByTestId("first-run-join-synced").click();
     await desktop.page.getByTestId("join-sync-code").fill(`dohc-sync:${workspaceId}:${relayUrl}`);
@@ -50,21 +89,35 @@ async function joinWorkspace(workspace: Workspace, workspaceId: string, relayUrl
     await showExplorerFiles(desktop.page);
     await waitForWorkspaceFile(desktop.page, workspaceId, "shared.md");
     return desktop;
-  } catch (error) { await desktop.close(); throw error; }
+  } catch (error) {
+    await desktop.close();
+    throw error;
+  }
 }
 
 async function syncState(page: Page, workspaceId: string) {
   return page.evaluate(async (workspaceId) => {
     const api = (window as unknown as { dohcDesktop: DohcDesktopBridge }).dohcDesktop;
-    return { sync: await api.getSyncStatus({ workspaceId }), conflicts: await api.listWorkspaceVersionConflicts({ workspaceId }) };
+    return {
+      sync: await api.getSyncStatus({ workspaceId }),
+      conflicts: await api.listWorkspaceVersionConflicts({ workspaceId }),
+    };
   }, workspaceId);
 }
 
-async function logSyncStatus(workspaceId: string, desktops: ReadonlyArray<readonly [string, Desktop | null]>) {
+async function logSyncStatus(
+  workspaceId: string,
+  desktops: ReadonlyArray<readonly [string, Desktop | null]>,
+) {
   for (const [name, desktop] of desktops) {
     if (!desktop || desktop.page.isClosed()) continue;
-    const status = await syncState(desktop.page, workspaceId).catch((error) => ({ error: String(error) }));
-    await test.info().attach(`${name} sync status`, { body: JSON.stringify(status, null, 2), contentType: "application/json" });
+    const status = await syncState(desktop.page, workspaceId).catch((error) => ({
+      error: String(error),
+    }));
+    await test.info().attach(`${name} sync status`, {
+      body: JSON.stringify(status, null, 2),
+      contentType: "application/json",
+    });
     console.log(`[two-client] ${name}: ${JSON.stringify(status)}`);
   }
 }
@@ -109,7 +162,8 @@ test("@two-client two desktops resolve conflicting offline edits and keep the ch
       if (moments === null) throw new Error("History is unavailable.");
       return moments.length;
     }
-    let beforeLeft = 0, beforeRight = 0;
+    let beforeLeft = 0,
+      beforeRight = 0;
     await expect(async () => {
       beforeLeft = await momentCount(left!);
       beforeRight = await momentCount(right!);
@@ -124,44 +178,81 @@ test("@two-client two desktops resolve conflicting offline edits and keep the ch
     }).toPass({ timeout: 30_000 });
     relay = await spawnSyncRelay({ dbPath: relayDb, port: relayPort });
     let receivingRight = true;
-    await expect.poll(async () => {
-      if (await right!.page.getByTestId("sync-status").getAttribute("data-state") === "conflict") return true;
-      if (await left!.page.getByTestId("sync-status").getAttribute("data-state") === "conflict") {
-        receivingRight = false;
-        return true;
-      }
-      return false;
-    }, { timeout: 90_000 }).toBe(true);
+    await expect
+      .poll(
+        async () => {
+          if (
+            (await right!.page.getByTestId("sync-status").getAttribute("data-state")) === "conflict"
+          )
+            return true;
+          if (
+            (await left!.page.getByTestId("sync-status").getAttribute("data-state")) === "conflict"
+          ) {
+            receivingRight = false;
+            return true;
+          }
+          return false;
+        },
+        { timeout: 90_000 },
+      )
+      .toBe(true);
     let receiver = receivingRight ? right : left;
     const receivingWorkspace = receivingRight ? second : first;
     const incomingText = receivingRight ? leftText : rightText;
     await receiver.page.getByTestId("notice-center-toggle").click();
-    await receiver.page.getByTestId("notice-sync-conflict").getByRole("button", { name: "Review", exact: true }).click();
-    const card = receiver.page.locator('[data-testid="version-conflict"][data-conflict-path="shared.md"]');
+    await receiver.page
+      .getByTestId("notice-sync-conflict")
+      .getByRole("button", { name: "Review", exact: true })
+      .click();
+    const card = receiver.page.locator(
+      '[data-testid="version-conflict"][data-conflict-path="shared.md"]',
+    );
     await expect(card).toContainText(leftText.trim());
     await expect(card).toContainText(rightText.trim());
     await card.getByTestId("version-conflict-keep-incoming").click();
     await expect(receiver.page.getByTestId("conflict-review-empty")).toBeVisible();
     await receiver.page.getByTestId("conflict-review-done").click();
-    await expect.poll(() => readFile(join(receivingWorkspace.rootPath, "shared.md"), "utf8")).toBe(incomingText);
+    await expect
+      .poll(() => readFile(join(receivingWorkspace.rootPath, "shared.md"), "utf8"))
+      .toBe(incomingText);
     await receiver.close();
-    if (receivingRight) right = null; else left = null;
+    if (receivingRight) right = null;
+    else left = null;
     receiver = await launchDesktopApp({ workspace: receivingWorkspace });
-    if (receivingRight) right = receiver; else left = receiver;
+    if (receivingRight) right = receiver;
+    else left = receiver;
     await openWorkspaceFromFirstRun(receiver.page, receivingWorkspace);
     await waitForWorkspaceFile(receiver.page, workspaceId, "shared.md");
     await explorerRow(receiver.page, "shared.md").click();
     await expect(receiver.page.getByTestId("markdown-editor")).toContainText(incomingText.trim());
-    expect(await readFile(join(receivingWorkspace.rootPath, "shared.md"), "utf8")).toBe(incomingText);
-    const remaining = await receiver.page.evaluate(async (workspaceId) => (window as unknown as { dohcDesktop: DohcDesktopBridge }).dohcDesktop.listWorkspaceVersionConflicts({ workspaceId }), workspaceId);
+    expect(await readFile(join(receivingWorkspace.rootPath, "shared.md"), "utf8")).toBe(
+      incomingText,
+    );
+    const remaining = await receiver.page.evaluate(
+      async (workspaceId) =>
+        (
+          window as unknown as { dohcDesktop: DohcDesktopBridge }
+        ).dohcDesktop.listWorkspaceVersionConflicts({ workspaceId }),
+      workspaceId,
+    );
     expect(remaining.conflicts).toEqual([]);
   } finally {
     try {
-      await logSyncStatus(workspaceId, [["left", left], ["right", right]]);
+      await logSyncStatus(workspaceId, [
+        ["left", left],
+        ["right", right],
+      ]);
     } finally {
       await cleanupDesktopWorkspace(right, second);
-      try { if (left) await left.close(); }
-      finally { try { await relay?.stop(); } finally { await first.cleanup(); } }
+      try {
+        if (left) await left.close();
+      } finally {
+        try {
+          await relay?.stop();
+        } finally {
+          await first.cleanup();
+        }
+      }
     }
   }
 });
@@ -176,7 +267,12 @@ test("@two-client two desktops that open a document offline each show the other'
   let relay: Relay | null = null;
   const disk = (workspace: Workspace) => readFile(join(workspace.rootPath, "shared.md"), "utf8");
   const lineageClaims = (workspace: Workspace) =>
-    withEngineDb(workspace.rootPath, (db) => db.prepare("SELECT lineage_claim_id AS claim FROM ydoc_docs WHERE path = 'shared.md'").all().map((row) => row.claim)) ?? [];
+    withEngineDb(workspace.rootPath, (db) =>
+      db
+        .prepare("SELECT lineage_claim_id AS claim FROM ydoc_docs WHERE path = 'shared.md'")
+        .all()
+        .map((row) => row.claim),
+    ) ?? [];
   const count = (text: string, needle: string) => text.split(needle).length - 1;
   try {
     relay = await seedSharedWorkspace(workspaceId, first, second);
@@ -192,14 +288,18 @@ test("@two-client two desktops that open a document offline each show the other'
     await openLiveDocument(left.page);
     await openLiveDocument(right.page);
     await expect.poll(() => lineageClaims(first)).toHaveLength(1);
-    await expect.poll(() => lineageClaims(second), { message: "both editors originate the same base" }).toEqual(lineageClaims(first));
+    await expect
+      .poll(() => lineageClaims(second), { message: "both editors originate the same base" })
+      .toEqual(lineageClaims(first));
     relay = await spawnSyncRelay({ dbPath: relayDb, port: relayPort });
 
     // Online: the left types while nobody touches the right. The right's open
     // editor shows the edit, and its file follows.
     await typeAtEnd(left.page, " Typed on the left.");
     await expect.poll(() => disk(first)).toContain("Typed on the left.");
-    await expect(right.page.getByTestId("markdown-editor")).toContainText("Typed on the left.", { timeout: 90_000 });
+    await expect(right.page.getByTestId("markdown-editor")).toContainText("Typed on the left.", {
+      timeout: 90_000,
+    });
     await expect.poll(() => disk(second), { timeout: 90_000 }).toContain("Typed on the left.");
 
     // Offline: each desktop types into the same open document.
@@ -214,33 +314,60 @@ test("@two-client two desktops that open a document offline each show the other'
     // Back online, each open editor shows every sentence exactly once.
     const typed = ["Starting together.", "Typed on the left.", "Left offline.", "Right offline."];
     for (const desktop of [left, right]) {
-      await expect.poll(async () => {
-        const shown = await desktop.page.getByTestId("markdown-editor").innerText();
-        return typed.every((edit) => count(shown, edit) === 1);
-      }, { timeout: 120_000 }).toBe(true);
+      await expect
+        .poll(
+          async () => {
+            const shown = await desktop.page.getByTestId("markdown-editor").innerText();
+            return typed.every((edit) => count(shown, edit) === 1);
+          },
+          { timeout: 120_000 },
+        )
+        .toBe(true);
     }
     for (const desktop of [left, right]) await desktop.page.keyboard.press("ControlOrMeta+w");
 
     const everyEdit = ["# Shared", ...typed];
-    await expect.poll(async () => {
-      const [leftText, rightText] = [await disk(first), await disk(second)];
-      return leftText === rightText && everyEdit.every((edit) => count(leftText, edit) === 1);
-    }, { timeout: 120_000 }).toBe(true);
+    await expect
+      .poll(
+        async () => {
+          const [leftText, rightText] = [await disk(first), await disk(second)];
+          return leftText === rightText && everyEdit.every((edit) => count(leftText, edit) === 1);
+        },
+        { timeout: 120_000 },
+      )
+      .toBe(true);
     const merged = await disk(first);
     for (const edit of everyEdit) expect(count(merged, edit), edit).toBe(1);
-    for (const [desktop, workspace] of [[left, first], [right, second]] as const) {
+    for (const [desktop, workspace] of [
+      [left, first],
+      [right, second],
+    ] as const) {
       const files = (await readdir(workspace.rootPath)).filter((name) => name !== ".dohc");
-      expect(files, "no recovered copy or conflict file beside the document").toEqual(["shared.md"]);
-      await expect.poll(async () => (await syncState(desktop.page, workspaceId)).sync.state).toBe("synced");
+      expect(files, "no recovered copy or conflict file beside the document").toEqual([
+        "shared.md",
+      ]);
+      await expect
+        .poll(async () => (await syncState(desktop.page, workspaceId)).sync.state)
+        .toBe("synced");
       expect((await syncState(desktop.page, workspaceId)).conflicts.conflicts).toEqual([]);
     }
   } finally {
     try {
-      await logSyncStatus(workspaceId, [["left", left], ["right", right]]);
+      await logSyncStatus(workspaceId, [
+        ["left", left],
+        ["right", right],
+      ]);
     } finally {
       await cleanupDesktopWorkspace(right, second);
-      try { if (left) await left.close(); }
-      finally { try { await relay?.stop(); } finally { await first.cleanup(); } }
+      try {
+        if (left) await left.close();
+      } finally {
+        try {
+          await relay?.stop();
+        } finally {
+          await first.cleanup();
+        }
+      }
     }
   }
 });

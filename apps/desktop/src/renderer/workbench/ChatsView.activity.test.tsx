@@ -2,7 +2,12 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { ChatChannelRecord, ChatMessageRecord, DmRecord, FileChatThreadRecord } from "../../ipc/bridgeContract";
+import type {
+  ChatChannelRecord,
+  ChatMessageRecord,
+  DmRecord,
+  FileChatThreadRecord,
+} from "../../ipc/bridgeContract";
 import {
   ChatsView,
   NOW,
@@ -20,7 +25,6 @@ import {
 } from "./ChatsView.testHarness";
 
 describe("ChatsView live activity refresh", () => {
-
   it("drops an older pagination page when activity starts a fresh Feed refresh", async () => {
     type FeedPage = {
       items: ReturnType<typeof personalFeedItem>[];
@@ -58,9 +62,7 @@ describe("ChatsView live activity refresh", () => {
   });
 
   it("drops a delayed Feed activity response after switching workspaces", async () => {
-    let resolveOldRefresh!: (value: {
-      items: ReturnType<typeof personalFeedItem>[];
-    }) => void;
+    let resolveOldRefresh!: (value: { items: ReturnType<typeof personalFeedItem>[] }) => void;
     const oldRefresh = new Promise<{
       items: ReturnType<typeof personalFeedItem>[];
     }>((resolve) => {
@@ -83,23 +85,13 @@ describe("ChatsView live activity refresh", () => {
       },
     );
     const { rerender } = render(
-      <ChatsView
-        workspaceId="workspace-old"
-        onOpenFileChat={vi.fn()}
-        onError={vi.fn()}
-      />,
+      <ChatsView workspaceId="workspace-old" onOpenFileChat={vi.fn()} onError={vi.fn()} />,
     );
     await userEvent.click(await screen.findByTestId("chats-feed-link"));
     await screen.findByText("Old workspace Feed");
     act(() => emitWorkspaceActivity());
 
-    rerender(
-      <ChatsView
-        workspaceId="workspace-new"
-        onOpenFileChat={vi.fn()}
-        onError={vi.fn()}
-      />,
-    );
+    rerender(<ChatsView workspaceId="workspace-new" onOpenFileChat={vi.fn()} onError={vi.fn()} />);
     await waitFor(() => expect(screen.queryByTestId("chats-personal-feed")).toBeNull());
     await userEvent.click(await screen.findByTestId("chats-feed-link"));
     await screen.findByText("New workspace Feed");
@@ -117,7 +109,8 @@ describe("ChatsView live activity refresh", () => {
   it("reloads an open thread's messages, decisions, and run records in place", async () => {
     const user = userEvent.setup();
     const opening = message();
-    const agentReport = message({ presentation: { group: "fixture", hue: null, self: false },
+    const agentReport = message({
+      presentation: { group: "fixture", hue: null, self: false },
       id: "agent-live-report",
       parentMessageId: opening.id,
       authorKind: "agent",
@@ -179,9 +172,7 @@ describe("ChatsView live activity refresh", () => {
     // The same view stayed mounted; activity caused fresh reads rather than a
     // back/forward navigation or optimistic local append.
     expect(screen.getByTestId("chats-thread-view")).toBeTruthy();
-    expect(bridgeMock.listChatMessages.mock.calls.length).toBeGreaterThan(
-      messageReadsBefore,
-    );
+    expect(bridgeMock.listChatMessages.mock.calls.length).toBeGreaterThan(messageReadsBefore);
     expect(bridgeMock.listChatThreadDecisions.mock.calls.length).toBeGreaterThan(
       decisionReadsBefore,
     );
@@ -235,17 +226,12 @@ describe("ChatsView live activity refresh", () => {
     const syncsBefore = bridgeMock.syncDms.mock.calls.length;
 
     let release!: () => void;
-    const held = new Promise<{ available: boolean; dms: DmRecord[] }>(
-      (resolve) => {
-        release = () =>
-          resolve({ available: true, dms: [dm({ unreadCount: 1 })] });
-      },
-    );
+    const held = new Promise<{ available: boolean; dms: DmRecord[] }>((resolve) => {
+      release = () => resolve({ available: true, dms: [dm({ unreadCount: 1 })] });
+    });
     bridgeMock.syncDms.mockImplementation(() => held);
     act(() => emitWorkspaceActivity());
-    await waitFor(() =>
-      expect(bridgeMock.syncDms.mock.calls.length).toBe(syncsBefore + 1),
-    );
+    await waitFor(() => expect(bridgeMock.syncDms.mock.calls.length).toBe(syncsBefore + 1));
 
     // The burst lands while that sync is in flight.
     act(() => {
@@ -253,16 +239,17 @@ describe("ChatsView live activity refresh", () => {
       emitWorkspaceActivity();
       emitWorkspaceActivity();
     });
-    expect(bridgeMock.syncDms.mock.calls.length, "revert refreshDms to a plain un-coalesced sync. Each of these starts its own relay sync and the count below reads syncsBefore + 4.").toBe(syncsBefore + 1);
+    expect(
+      bridgeMock.syncDms.mock.calls.length,
+      "revert refreshDms to a plain un-coalesced sync. Each of these starts its own relay sync and the count below reads syncsBefore + 4.",
+    ).toBe(syncsBefore + 1);
 
     // One trailing pass when the held sync settles — not one per event.
     await act(async () => {
       release();
       await held;
     });
-    await waitFor(() =>
-      expect(bridgeMock.syncDms.mock.calls.length).toBe(syncsBefore + 2),
-    );
+    await waitFor(() => expect(bridgeMock.syncDms.mock.calls.length).toBe(syncsBefore + 2));
     expect((await screen.findByTestId("chats-dm-unread")).textContent).toBe("1");
     expect(bridgeMock.syncDms.mock.calls.length).toBe(syncsBefore + 2);
   });
@@ -283,32 +270,24 @@ describe("ChatsView live activity refresh", () => {
       });
       let oldReads = 0;
       let newReads = 0;
-      bridgeMock.syncDms.mockImplementation(
-        ({ workspaceId }: { workspaceId: string }) => {
-          if (workspaceId !== "workspace-old") {
-            newReads += 1;
-            return Promise.resolve({
-              available: true,
-              dms: [
-                dm({
-                  channelId: "channel-dm-new",
-                  peerLabel: "carol@example.com",
-                }),
-              ],
-            });
-          }
-          oldReads += 1;
-          return oldReads === 1
-            ? Promise.resolve({ available: true, dms: [dm()] })
-            : leftBehind;
-        },
-      );
+      bridgeMock.syncDms.mockImplementation(({ workspaceId }: { workspaceId: string }) => {
+        if (workspaceId !== "workspace-old") {
+          newReads += 1;
+          return Promise.resolve({
+            available: true,
+            dms: [
+              dm({
+                channelId: "channel-dm-new",
+                peerLabel: "carol@example.com",
+              }),
+            ],
+          });
+        }
+        oldReads += 1;
+        return oldReads === 1 ? Promise.resolve({ available: true, dms: [dm()] }) : leftBehind;
+      });
       const view = render(
-        <ChatsView
-          workspaceId="workspace-old"
-          onOpenFileChat={vi.fn()}
-          onError={vi.fn()}
-        />,
+        <ChatsView workspaceId="workspace-old" onOpenFileChat={vi.fn()} onError={vi.fn()} />,
       );
       await act(async () => {
         await vi.advanceTimersByTimeAsync(0);
@@ -321,19 +300,16 @@ describe("ChatsView live activity refresh", () => {
       expect(oldReads).toBe(2);
 
       view.rerender(
-        <ChatsView
-          workspaceId="workspace-new"
-          onOpenFileChat={vi.fn()}
-          onError={vi.fn()}
-        />,
+        <ChatsView workspaceId="workspace-new" onOpenFileChat={vi.fn()} onError={vi.fn()} />,
       );
       await act(async () => {
         await vi.advanceTimersByTimeAsync(0);
       });
-      expect(newReads, "weaken the drain's entry guard to `if (active !== null)`. The switch's own refreshDms then queues onto the dead drain and no workspace-new sync starts.").toBeGreaterThan(0);
-      expect(screen.getByTestId("chats-dm-name").textContent).toBe(
-        "carol@example.com",
-      );
+      expect(
+        newReads,
+        "weaken the drain's entry guard to `if (active !== null)`. The switch's own refreshDms then queues onto the dead drain and no workspace-new sync starts.",
+      ).toBeGreaterThan(0);
+      expect(screen.getByTestId("chats-dm-name").textContent).toBe("carol@example.com");
     } finally {
       vi.useRealTimers();
     }
@@ -354,20 +330,18 @@ describe("ChatsView live activity refresh", () => {
       resolveStale = resolve;
     });
     let oldWorkspaceReads = 0;
-    bridgeMock.listChatChannels.mockImplementation(
-      ({ workspaceId }: { workspaceId: string }) => {
-        if (workspaceId !== "workspace-old") {
-          return Promise.resolve({
-            channels: [channel({ id: "channel-new", name: "planning", slug: "planning" })],
-            fileThreads: [],
-          });
-        }
-        oldWorkspaceReads += 1;
-        return oldWorkspaceReads === 1
-          ? Promise.resolve({ channels: [channel()], fileThreads: [] })
-          : staleRefresh;
-      },
-    );
+    bridgeMock.listChatChannels.mockImplementation(({ workspaceId }: { workspaceId: string }) => {
+      if (workspaceId !== "workspace-old") {
+        return Promise.resolve({
+          channels: [channel({ id: "channel-new", name: "planning", slug: "planning" })],
+          fileThreads: [],
+        });
+      }
+      oldWorkspaceReads += 1;
+      return oldWorkspaceReads === 1
+        ? Promise.resolve({ channels: [channel()], fileThreads: [] })
+        : staleRefresh;
+    });
     const view = render(
       <ChatsView workspaceId="workspace-old" onOpenFileChat={vi.fn()} onError={vi.fn()} />,
     );
@@ -405,30 +379,26 @@ describe("ChatsView live activity refresh", () => {
     });
     let oldWorkspaceReads = 0;
     let newWorkspaceReads = 0;
-    bridgeMock.listChatChannels.mockImplementation(
-      ({ workspaceId }: { workspaceId: string }) => {
-        if (workspaceId !== "workspace-old") {
-          newWorkspaceReads += 1;
-          return Promise.resolve({
-            channels: [channel({ id: "channel-new", name: "planning", slug: "planning" })],
-            fileThreads: [],
-          });
-        }
-        oldWorkspaceReads += 1;
-        if (oldWorkspaceReads === 1) {
-          return Promise.resolve({ channels: [channel()], fileThreads: [] });
-        }
-        if (oldWorkspaceReads === 2) return leftBehindRead;
-        // Any later read for the workspace the user left is the drain this
-        // test exists to prevent; make what it would paint unmistakable.
+    bridgeMock.listChatChannels.mockImplementation(({ workspaceId }: { workspaceId: string }) => {
+      if (workspaceId !== "workspace-old") {
+        newWorkspaceReads += 1;
         return Promise.resolve({
-          channels: [
-            channel({ id: "channel-left", name: "left-behind", slug: "left-behind" }),
-          ],
+          channels: [channel({ id: "channel-new", name: "planning", slug: "planning" })],
           fileThreads: [],
         });
-      },
-    );
+      }
+      oldWorkspaceReads += 1;
+      if (oldWorkspaceReads === 1) {
+        return Promise.resolve({ channels: [channel()], fileThreads: [] });
+      }
+      if (oldWorkspaceReads === 2) return leftBehindRead;
+      // Any later read for the workspace the user left is the drain this
+      // test exists to prevent; make what it would paint unmistakable.
+      return Promise.resolve({
+        channels: [channel({ id: "channel-left", name: "left-behind", slug: "left-behind" })],
+        fileThreads: [],
+      });
+    });
     const view = render(
       <ChatsView workspaceId="workspace-old" onOpenFileChat={vi.fn()} onError={vi.fn()} />,
     );
@@ -553,9 +523,7 @@ describe("ChatsView live activity refresh", () => {
     await waitFor(() => expect(shareReads).toBe(2));
     act(() => emitWorkspaceActivity());
     await waitFor(() =>
-      expect(screen.getByTestId("chats-channel-shared").textContent).toContain(
-        "no longer shared",
-      ),
+      expect(screen.getByTestId("chats-channel-shared").textContent).toContain("no longer shared"),
     );
 
     // The full lookup answers, carrying an invitation only it can report.
@@ -567,9 +535,7 @@ describe("ChatsView live activity refresh", () => {
     // Both answers stand: the invitation lands, and the newer joined row is
     // not undone by the older listing that carried it.
     expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
-    expect(screen.getByTestId("chats-channel-shared").textContent).toContain(
-      "no longer shared",
-    );
+    expect(screen.getByTestId("chats-channel-shared").textContent).toContain("no longer shared");
   });
 
   // The badge drain must not be held by a request that may never return. The
@@ -615,9 +581,7 @@ describe("ChatsView live activity refresh", () => {
     });
     act(() => emitWorkspaceActivity());
 
-    await waitFor(() =>
-      expect(screen.getAllByTestId("chats-channel")).toHaveLength(2),
-    );
+    await waitFor(() => expect(screen.getAllByTestId("chats-channel")).toHaveLength(2));
     await waitFor(() =>
       expect(screen.getByTestId("chats-channel-shared").textContent).toContain(
         "Shared by owner@example.com — read-only",
@@ -708,9 +672,7 @@ describe("ChatsView live activity refresh", () => {
     // A write lands, and the badge pass corrects the joined grant.
     act(() => emitWorkspaceActivity());
     await waitFor(() =>
-      expect(screen.getByTestId("chats-channel-shared").textContent).toContain(
-        "no longer shared",
-      ),
+      expect(screen.getByTestId("chats-channel-shared").textContent).toContain("no longer shared"),
     );
 
     // Now the older lookup fails.
@@ -721,9 +683,7 @@ describe("ChatsView live activity refresh", () => {
 
     // The correction stands, and nothing locked behind a response that
     // learned nothing: the owned channel still has its composer.
-    expect(screen.getByTestId("chats-channel-shared").textContent).toContain(
-      "no longer shared",
-    );
+    expect(screen.getByTestId("chats-channel-shared").textContent).toContain("no longer shared");
     await user.click(screen.getAllByTestId("chats-channel")[0]);
     expect(await screen.findByTestId("chats-new-thread-composer")).toBeTruthy();
     expect(screen.queryByTestId("chats-readonly-note")).toBeNull();
@@ -748,9 +708,7 @@ describe("ChatsView live activity refresh", () => {
     // Back out: that refresh owns both lanes, and its lookup fails.
     bridgeMock.listChatChannelShares.mockRejectedValue(new Error("signed out"));
     await user.click(await screen.findByTestId("chats-channel-back"));
-    await waitFor(() =>
-      expect(bridgeMock.listChatChannelShares).toHaveBeenCalledTimes(2),
-    );
+    await waitFor(() => expect(bridgeMock.listChatChannelShares).toHaveBeenCalledTimes(2));
 
     await user.click(await screen.findByTestId("chats-channel"));
     expect(await screen.findByTestId("chats-readonly-note")).toBeTruthy();
@@ -796,9 +754,7 @@ describe("ChatsView live activity refresh", () => {
     act(() => emitWorkspaceActivity());
 
     await waitFor(() =>
-      expect(screen.getByTestId("chats-channel-shared").textContent).toContain(
-        "no longer shared",
-      ),
+      expect(screen.getByTestId("chats-channel-shared").textContent).toContain("no longer shared"),
     );
     expect(screen.getByTestId("chats-join-shared")).toBeTruthy();
   });
@@ -844,7 +800,6 @@ describe("ChatsView live activity refresh", () => {
     expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("5 unread");
     expect(bridgeMock.listChatChannels).toHaveBeenCalledTimes(3);
   });
-
 });
 
 describe("ChatsView read cursors", () => {
@@ -882,14 +837,11 @@ describe("ChatsView read cursors", () => {
       ],
     });
     await user.click(screen.getByTestId("chats-thread-back"));
-    await waitFor(() =>
-      expect(screen.getAllByTestId("chats-thread-unread")).toHaveLength(1),
-    );
+    await waitFor(() => expect(screen.getAllByTestId("chats-thread-unread")).toHaveLength(1));
   });
 });
 
 describe("ChatsView liveness", () => {
-
   it("keeps a newer send busy when an abandoned thread send settles", async () => {
     const user = userEvent.setup();
     const firstThread = thread({ id: "thread-1", title: "First thread" });
@@ -998,5 +950,4 @@ describe("ChatsView liveness", () => {
     expect(bridgeMock.sendChatMessage).toHaveBeenCalledTimes(1);
     expect(screen.getByText("Still sending")).toBeTruthy();
   });
-
 });

@@ -44,8 +44,7 @@ export function buildThreadCommentTree(
 
   for (const node of nodes) {
     const parentId = node.message.parentMessageId;
-    const parent =
-      parentId && parentId !== openingMessageId ? byId.get(parentId) : undefined;
+    const parent = parentId && parentId !== openingMessageId ? byId.get(parentId) : undefined;
     if (parent && !reachesCycle(node.message.id)) {
       parent.replies.push(node);
     } else {

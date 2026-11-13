@@ -124,12 +124,8 @@ describe("RelayFilePeer", () => {
       beforeMetadata: first.metadata,
     });
 
-    const firstHave = relay.requests.findIndex((request) =>
-      request.url.endsWith("/blobs/have"),
-    );
-    const firstPut = relay.requests.findIndex(
-      (request) => request.method === "PUT",
-    );
+    const firstHave = relay.requests.findIndex((request) => request.url.endsWith("/blobs/have"));
+    const firstPut = relay.requests.findIndex((request) => request.method === "PUT");
     const firstMomentAppend = relay.requests.findIndex((request) => {
       if (!request.url.endsWith("/log")) return false;
       return String(request.body).includes('"opKind":"moment.append"');

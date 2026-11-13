@@ -9,7 +9,10 @@ export const CHAT_PARSE_DEADLINE_MS = 1000;
 // A pane that remounts at once, as under React's strict mode, keeps the worker.
 const IDLE_STOP_MS = 5000;
 
-type Job = { request: Omit<ChatParseRequest, "id">; resolve: (answer: ChatParseAnswer | null) => void };
+type Job = {
+  request: Omit<ChatParseRequest, "id">;
+  resolve: (answer: ChatParseAnswer | null) => void;
+};
 
 let worker: Worker | null = null;
 let panes = 0;
@@ -19,7 +22,9 @@ let running: { id: number; job: Job; timer: ReturnType<typeof setTimeout> } | nu
 const queue: Job[] = [];
 
 function startWorker(): Worker {
-  const started = new Worker(new URL("./chatMarkdown.worker.ts", import.meta.url), { type: "module" });
+  const started = new Worker(new URL("./chatMarkdown.worker.ts", import.meta.url), {
+    type: "module",
+  });
   started.onmessage = ({ data }: MessageEvent<ChatParseAnswer>) => {
     if (worker === started && running?.id === data.id) finish(data);
   };
@@ -94,7 +99,9 @@ export function retainChatParser(): () => void {
 }
 
 // Resolves to null when the worker gave up on the body.
-export function parseChatInWorker(request: Omit<ChatParseRequest, "id">): Promise<ChatParseAnswer | null> {
+export function parseChatInWorker(
+  request: Omit<ChatParseRequest, "id">,
+): Promise<ChatParseAnswer | null> {
   return new Promise((resolve) => {
     queue.push({ request, resolve });
     pump();

@@ -108,9 +108,7 @@ describe.skipIf(!measuring)("history diff work measurement", () => {
       [499, 2_000],
     ] as const) {
       const before = longSimilarLines(lines, lineChars);
-      rows.push(
-        measure(`${lines} x ${lineChars} chars`, before, editEveryNthLine(before, 50)),
-      );
+      rows.push(measure(`${lines} x ${lineChars} chars`, before, editEveryNthLine(before, 50)));
     }
 
     // The reported failures: line counts parked at the cell ceiling with huge
@@ -142,9 +140,7 @@ describe.skipIf(!measuring)("history diff work measurement", () => {
     const rows: Row[] = [];
     for (const lineChars of [100, 250, 500, 1_000, 2_000, 3_990]) {
       const before = longSimilarLines(499, lineChars);
-      rows.push(
-        measure(`499 x ${lineChars} chars`, before, editEveryNthLine(before, 50)),
-      );
+      rows.push(measure(`499 x ${lineChars} chars`, before, editEveryNthLine(before, 50)));
     }
     const rates = rows.map(
       (row) => `${row.scenario}: ${(row.work / row.renderMs / 1e6).toFixed(1)} M units/ms`,

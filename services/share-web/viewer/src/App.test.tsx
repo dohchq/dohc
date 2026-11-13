@@ -1,7 +1,10 @@
 // @vitest-environment jsdom
-import {SHARE_WEB_API_VERSION, SHARE_WEB_API_VERSION_HEADER} from "@dohc/workspace-contracts/relay-values";
+import {
+  SHARE_WEB_API_VERSION,
+  SHARE_WEB_API_VERSION_HEADER,
+} from "@dohc/workspace-contracts/relay-values";
 // App discovery has its own request, cancellation, and rendering tests.
-vi.mock("./PublishedApps", () => ({PublishedApps: () => null}));
+vi.mock("./PublishedApps", () => ({ PublishedApps: () => null }));
 import { jsonResponse, requestPath as fullRequestPath, settle, setControlValue } from "./testing";
 import { act } from "react";
 import { LINK_REFUSALS, linkRefusalBody } from "@dohc/security-contract/link-refusal";
@@ -27,9 +30,11 @@ const PUBLIC_RELAY_URL = "https://relay.example.test";
 let exposeHeldLogQuery = false;
 
 // Legacy replay fixtures use Edit; current-only access has explicit coverage.
-const LINK_UNAVAILABLE = "This link isn't available." +
+const LINK_UNAVAILABLE =
+  "This link isn't available." +
   "Ask the person who shared it to send the link again. The address in a browser's address bar works only in that browser.";
-const VERSION_MISMATCH = "This page does not match its server.Reload it to get the version the server expects.Reload";
+const VERSION_MISMATCH =
+  "This page does not match its server.Reload it to get the version the server expects.Reload";
 
 const DEFAULT_META: ViewMeta = {
   access: "edit",
@@ -43,26 +48,40 @@ const DEFAULT_META: ViewMeta = {
   lastSettledKnown: true,
 };
 
-it.each(["view", "comment"] as const)("current-only %s loading needs no History replay", async access => {
-  const file = {path:"current.md",blobSha256:"a".repeat(64),contentKind:"text" as const};
-  const fetcher = vi.spyOn(globalThis,"fetch").mockImplementation(async input => {
-    expect(fullRequestPath(input)).toBe("/api/view/current");
-    return currentPage([file],9,0,{...DEFAULT_META,access,effectiveSelector:{...DEFAULT_META.effectiveSelector,access}});
-  });
-  try {
-    expect((await loadCurrentState(SESSION)).fileAccumulator.get(file.path)).toEqual(file);
-    expect(fetcher).toHaveBeenCalledTimes(1);
-  } finally {fetcher.mockRestore();}
-});
+it.each(["view", "comment"] as const)(
+  "current-only %s loading needs no History replay",
+  async (access) => {
+    const file = { path: "current.md", blobSha256: "a".repeat(64), contentKind: "text" as const };
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      expect(fullRequestPath(input)).toBe("/api/view/current");
+      return currentPage([file], 9, 0, {
+        ...DEFAULT_META,
+        access,
+        effectiveSelector: { ...DEFAULT_META.effectiveSelector, access },
+      });
+    });
+    try {
+      expect((await loadCurrentState(SESSION)).fileAccumulator.get(file.path)).toEqual(file);
+      expect(fetcher).toHaveBeenCalledTimes(1);
+    } finally {
+      fetcher.mockRestore();
+    }
+  },
+);
 
 it("retries current state if Edit narrows during the initial raw catch-up", async () => {
   const file: SharedFile = { path: "current.md", blobSha256: "a".repeat(64), contentKind: "text" };
-  const viewMeta: ViewMeta = { ...DEFAULT_META, access: "view", effectiveSelector: { ...DEFAULT_META.effectiveSelector, access: "view" } };
+  const viewMeta: ViewMeta = {
+    ...DEFAULT_META,
+    access: "view",
+    effectiveSelector: { ...DEFAULT_META.effectiveSelector, access: "view" },
+  };
   const paths: string[] = [];
-  const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async input => {
+  const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     const path = fullRequestPath(input);
     paths.push(path);
-    if (path === "/api/view/current") return currentPage([file], 9, 0, paths.length === 1 ? DEFAULT_META : viewMeta);
+    if (path === "/api/view/current")
+      return currentPage([file], 9, 0, paths.length === 1 ? DEFAULT_META : viewMeta);
     if (path === "/api/view/log?since=9&limit=500") return new Response(null, { status: 404 });
     if (path === "/api/view/meta") return jsonResponse(viewMeta);
     throw new Error(path);
@@ -71,8 +90,15 @@ it("retries current state if Edit narrows during the initial raw catch-up", asyn
     const loaded = await loadCurrentState(SESSION);
     expect(loaded.meta.access).toBe("view");
     expect(loaded.fileAccumulator.get(file.path)).toEqual(file);
-    expect(paths).toEqual(["/api/view/current", "/api/view/log?since=9&limit=500", "/api/view/meta", "/api/view/current"]);
-  } finally { fetcher.mockRestore(); }
+    expect(paths).toEqual([
+      "/api/view/current",
+      "/api/view/log?since=9&limit=500",
+      "/api/view/meta",
+      "/api/view/current",
+    ]);
+  } finally {
+    fetcher.mockRestore();
+  }
 });
 
 // Follower log requests carry `&hold=30000`; most suites match the held-log
@@ -120,12 +146,14 @@ function logPage(files: readonly SharedFile[]): Response {
   return logOpsPage(
     files.length === 0
       ? []
-      : [{
-          relaySeq: 1,
-          opKind: "version.create",
-          payload: { forkSnapshots: files },
-          recordedAtMs: 1,
-        }],
+      : [
+          {
+            relaySeq: 1,
+            opKind: "version.create",
+            payload: { forkSnapshots: files },
+            recordedAtMs: 1,
+          },
+        ],
     files.length,
   );
 }
@@ -220,15 +248,13 @@ describe("App", () => {
   }
 
   function renderedFilePaths(): Array<string | null> {
-    return [...container.querySelectorAll("button.file")]
-      .map((button) => button.textContent);
+    return [...container.querySelectorAll("button.file")].map((button) => button.textContent);
   }
 
   function buttonNamed(name: string): HTMLButtonElement | undefined {
-    return [...container.querySelectorAll("button")]
-      .find((button) => button.textContent === name) as
-        | HTMLButtonElement
-        | undefined;
+    return [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === name,
+    ) as HTMLButtonElement | undefined;
   }
 
   function clickButton(name: string): void {
@@ -304,17 +330,13 @@ describe("App", () => {
             return currentPage([file], 7, 0, meta);
           }
           if (path === "/api/view/meta") return jsonResponse(meta);
-          if (
-            path === "/api/view/log?since=7&limit=500&current=true&hold=30000"
-          ) {
+          if (path === "/api/view/log?since=7&limit=500&current=true&hold=30000") {
             return new Promise<Response>((resolve) => {
               deliver = resolve;
             });
           }
-          if (path === "/api/view/blob/" + file.blobSha256)
-            return new Response("# Original");
-          if (path === "/api/view/blob/" + "b".repeat(64))
-            return new Response("# Changed");
+          if (path === "/api/view/blob/" + file.blobSha256) return new Response("# Original");
+          if (path === "/api/view/blob/" + "b".repeat(64)) return new Response("# Changed");
           return new Promise<Response>((_resolve, reject) => {
             init?.signal?.addEventListener(
               "abort",
@@ -325,10 +347,7 @@ describe("App", () => {
         }),
       );
       await renderApp();
-      await settle(
-        () =>
-          deliver !== undefined && container.textContent.includes("Original"),
-      );
+      await settle(() => deliver !== undefined && container.textContent.includes("Original"));
       await act(async () =>
         deliver?.(
           logOpsPage(
@@ -347,66 +366,110 @@ describe("App", () => {
         ),
       );
       await settle(
-        () =>
-          container
-            .querySelector("main.content")
-            ?.textContent?.includes("Changed") === true,
+        () => container.querySelector("main.content")?.textContent?.includes("Changed") === true,
       );
       expect(inventories).toBe(1);
     },
   );
 
-  it.each(["downgrade", "reset"] as const)("refreshes current state after a follower %s and keeps following", async (reason) => {
-    const objectId = "share-object:v1:" + "a".repeat(64);
-    const file: SharedFile = { path: "note.md", objectId, blobSha256: "a".repeat(64), contentKind: "text" };
-    const meta: ViewMeta = { ...DEFAULT_META, access: "view", effectiveSelector: { ...DEFAULT_META.effectiveSelector, access: "view" } };
-    const paths: string[] = [];
-    let inventories = 0;
-    let deliver: ((response: Response) => void) | undefined;
-    let following: ((response: Response) => void) | undefined;
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
-      const path = fullRequestPath(input);
-      paths.push(path);
-      if (path === "/api/view/current") {
-        inventories++;
-        return inventories === 1
-          ? currentPage([file], 7, 0, reason === "downgrade" ? DEFAULT_META : meta)
-          : currentPage([{ ...file, blobSha256: "b".repeat(64) }], 8, 0, meta);
+  it.each(["downgrade", "reset"] as const)(
+    "refreshes current state after a follower %s and keeps following",
+    async (reason) => {
+      const objectId = "share-object:v1:" + "a".repeat(64);
+      const file: SharedFile = {
+        path: "note.md",
+        objectId,
+        blobSha256: "a".repeat(64),
+        contentKind: "text",
+      };
+      const meta: ViewMeta = {
+        ...DEFAULT_META,
+        access: "view",
+        effectiveSelector: { ...DEFAULT_META.effectiveSelector, access: "view" },
+      };
+      const paths: string[] = [];
+      let inventories = 0;
+      let deliver: ((response: Response) => void) | undefined;
+      let following: ((response: Response) => void) | undefined;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn<typeof fetch>(async (input, init) => {
+          const path = fullRequestPath(input);
+          paths.push(path);
+          if (path === "/api/view/current") {
+            inventories++;
+            return inventories === 1
+              ? currentPage([file], 7, 0, reason === "downgrade" ? DEFAULT_META : meta)
+              : currentPage([{ ...file, blobSha256: "b".repeat(64) }], 8, 0, meta);
+          }
+          if (path === "/api/view/meta") return jsonResponse(meta);
+          if (path === "/api/view/log?since=7&limit=500") return logOpsPage([], 7);
+          if (
+            path ===
+            `/api/view/log?since=7&limit=500${reason === "reset" ? "&current=true" : ""}&hold=30000`
+          ) {
+            return new Promise<Response>((resolve) => {
+              deliver = resolve;
+            });
+          }
+          if (path === "/api/view/log?since=8&limit=500&current=true&hold=30000") {
+            return new Promise<Response>((resolve) => {
+              following = resolve;
+            });
+          }
+          if (path === "/api/view/blob/" + file.blobSha256) return new Response("# Original");
+          if (path === "/api/view/blob/" + "b".repeat(64)) return new Response("# Refreshed");
+          if (path === "/api/view/blob/" + "c".repeat(64)) return new Response("# Changed again");
+          return new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener(
+              "abort",
+              () => reject(new DOMException("Aborted", "AbortError")),
+              { once: true },
+            );
+          });
+        }),
+      );
+      await renderApp();
+      await settle(() => deliver !== undefined && container.textContent.includes("Original"));
+      await act(async () =>
+        deliver?.(
+          reason === "downgrade"
+            ? new Response(null, { status: 404 })
+            : logOpsPage([{ relaySeq: 8, opKind: "files.reset", payload: {} }], 8),
+        ),
+      );
+      await settle(() => following !== undefined && container.textContent.includes("Refreshed"));
+      expect(inventories).toBe(2);
+      if (reason === "downgrade") {
+        expect(paths.indexOf("/api/view/meta")).toBeLessThan(
+          paths.lastIndexOf("/api/view/current"),
+        );
+        expect(
+          paths.filter((path) => path.includes("/api/view/log") && !path.includes("current=true")),
+        ).toEqual([
+          "/api/view/log?since=7&limit=500",
+          "/api/view/log?since=7&limit=500&hold=30000",
+        ]);
       }
-      if (path === "/api/view/meta") return jsonResponse(meta);
-      if (path === "/api/view/log?since=7&limit=500") return logOpsPage([], 7);
-      if (path === `/api/view/log?since=7&limit=500${reason === "reset" ? "&current=true" : ""}&hold=30000`) {
-        return new Promise<Response>(resolve => { deliver = resolve; });
-      }
-      if (path === "/api/view/log?since=8&limit=500&current=true&hold=30000") {
-        return new Promise<Response>(resolve => { following = resolve; });
-      }
-      if (path === "/api/view/blob/" + file.blobSha256) return new Response("# Original");
-      if (path === "/api/view/blob/" + "b".repeat(64)) return new Response("# Refreshed");
-      if (path === "/api/view/blob/" + "c".repeat(64)) return new Response("# Changed again");
-      return new Promise<Response>((_resolve, reject) => {
-        init?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
-      });
-    }));
-    await renderApp();
-    await settle(() => deliver !== undefined && container.textContent.includes("Original"));
-    await act(async () => deliver?.(reason === "downgrade"
-      ? new Response(null, { status: 404 })
-      : logOpsPage([{ relaySeq: 8, opKind: "files.reset", payload: {} }], 8)));
-    await settle(() => following !== undefined && container.textContent.includes("Refreshed"));
-    expect(inventories).toBe(2);
-    if (reason === "downgrade") {
-      expect(paths.indexOf("/api/view/meta")).toBeLessThan(paths.lastIndexOf("/api/view/current"));
-      expect(paths.filter(path => path.includes("/api/view/log") && !path.includes("current=true")))
-        .toEqual(["/api/view/log?since=7&limit=500", "/api/view/log?since=7&limit=500&hold=30000"]);
-    }
-    await act(async () => following?.(logOpsPage([{
-      relaySeq: 9, opKind: "file.current", payload: { objectId, file: { ...file, blobSha256: "c".repeat(64) } },
-    }], 9)));
-    await settle(() => container.textContent.includes("Changed again"));
-    expect(inventories).toBe(2);
-    expect(container.querySelector("main.state")).toBeNull();
-  });
+      await act(async () =>
+        following?.(
+          logOpsPage(
+            [
+              {
+                relaySeq: 9,
+                opKind: "file.current",
+                payload: { objectId, file: { ...file, blobSha256: "c".repeat(64) } },
+              },
+            ],
+            9,
+          ),
+        ),
+      );
+      await settle(() => container.textContent.includes("Changed again"));
+      expect(inventories).toBe(2);
+      expect(container.querySelector("main.state")).toBeNull();
+    },
+  );
 
   it.each([
     ["view", null, "doc.md"],
@@ -417,76 +480,133 @@ describe("App", () => {
     ["edit", null, "trip/packing/collection.yaml"],
     ["comment", null, "trip/packing/automations.yaml"],
     ["view", null, null],
-  ] as const)("explains link access and available next steps for %s, version=%s, file=%s", async (access, versionId, path) => {
-    const meta: ViewMeta = {...DEFAULT_META, access, effectiveSelector: {access, versionId, paths: ["docs"]}};
-    const files: SharedFile[] = path ? [{path, blobSha256: "a".repeat(64), contentKind: "text"}] : [];
-    const fallback = viewerFetch(() => { throw new Error("Unexpected handoff"); });
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
-      const route = requestPath(input);
-      if (route === "/api/view/meta") return jsonResponse(meta);
-      if (route === "/api/view/current") return currentPage(files, 0, 0, meta);
-      if (route.startsWith("/api/view/blob/")) return new Response("Shared content");
-      return fallback(input, init);
-    }));
-    await renderApp();
-    const entry = container.querySelector('section[aria-labelledby="link-entry-title"]');
-    expect(entry).not.toBeNull();
-    const agent = container.querySelector('section[aria-labelledby="link-agent-title"]');
-    expect(agent?.querySelector("#link-agent-title")?.textContent).toBe("Use with an agent");
-    expect(agent?.textContent).toContain(`${location.origin}/mcp/s/<secret>`);
-    const copy = entry?.textContent ?? "";
-    expect(copy).toContain(`Anyone with this link can ${access}`);
-    expect(copy).toContain(access === "view" ? "You can read the files and the comments." :
-      access === "comment" ? "You can read the files, and read and post comments." :
-      versionId !== null ? "A saved version can't be edited." : "You can edit pages here.");
-    expect(copy).toContain(path === null ? "No files yet in docs" : "1 file in docs");
-    expect(copy).toContain(versionId === null ? "Follows the current version" : "Shows a saved version");
-    const editable = access === "edit" && versionId === null && (path === "doc.md" || path === "trip/packing/collection.yaml");
-    expect(buttonNamed("Edit file") !== undefined).toBe(editable);
-    expect(container.querySelector(".badge")?.textContent).toBe(editable ? undefined :
-      access === "view" ? "View only" : access === "comment" ? "Can comment" : versionId !== null ? "Saved version, read-only" : "Can edit");
-    expect(buttonNamed("Open in dohc")).toBeDefined();
-  });
+  ] as const)(
+    "explains link access and available next steps for %s, version=%s, file=%s",
+    async (access, versionId, path) => {
+      const meta: ViewMeta = {
+        ...DEFAULT_META,
+        access,
+        effectiveSelector: { access, versionId, paths: ["docs"] },
+      };
+      const files: SharedFile[] = path
+        ? [{ path, blobSha256: "a".repeat(64), contentKind: "text" }]
+        : [];
+      const fallback = viewerFetch(() => {
+        throw new Error("Unexpected handoff");
+      });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn<typeof fetch>(async (input, init) => {
+          const route = requestPath(input);
+          if (route === "/api/view/meta") return jsonResponse(meta);
+          if (route === "/api/view/current") return currentPage(files, 0, 0, meta);
+          if (route.startsWith("/api/view/blob/")) return new Response("Shared content");
+          return fallback(input, init);
+        }),
+      );
+      await renderApp();
+      const entry = container.querySelector('section[aria-labelledby="link-entry-title"]');
+      expect(entry).not.toBeNull();
+      const agent = container.querySelector('section[aria-labelledby="link-agent-title"]');
+      expect(agent?.querySelector("#link-agent-title")?.textContent).toBe("Use with an agent");
+      expect(agent?.textContent).toContain(`${location.origin}/mcp/s/<secret>`);
+      const copy = entry?.textContent ?? "";
+      expect(copy).toContain(`Anyone with this link can ${access}`);
+      expect(copy).toContain(
+        access === "view"
+          ? "You can read the files and the comments."
+          : access === "comment"
+            ? "You can read the files, and read and post comments."
+            : versionId !== null
+              ? "A saved version can't be edited."
+              : "You can edit pages here.",
+      );
+      expect(copy).toContain(path === null ? "No files yet in docs" : "1 file in docs");
+      expect(copy).toContain(
+        versionId === null ? "Follows the current version" : "Shows a saved version",
+      );
+      const editable =
+        access === "edit" &&
+        versionId === null &&
+        (path === "doc.md" || path === "trip/packing/collection.yaml");
+      expect(buttonNamed("Edit file") !== undefined).toBe(editable);
+      expect(container.querySelector(".badge")?.textContent).toBe(
+        editable
+          ? undefined
+          : access === "view"
+            ? "View only"
+            : access === "comment"
+              ? "Can comment"
+              : versionId !== null
+                ? "Saved version, read-only"
+                : "Can edit",
+      );
+      expect(buttonNamed("Open in dohc")).toBeDefined();
+    },
+  );
 
   it("hides agent guidance while loading and after a refusal", async () => {
     let deliver: ((response: Response) => void) | undefined;
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () => new Promise<Response>(resolve => {deliver = resolve;})));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>(
+        async () =>
+          new Promise<Response>((resolve) => {
+            deliver = resolve;
+          }),
+      ),
+    );
     await act(async () => {
       root = createRoot(container);
       root.render(<App />);
     });
     expect(container.textContent).toContain("Opening shared files");
     expect(container.querySelector("#link-agent-title")).toBeNull();
-    await act(async () => deliver?.(new Response(null, {status: 404})));
+    await act(async () => deliver?.(new Response(null, { status: 404 })));
     await settle(() => container.textContent.includes("This link isn't available."));
     expect(container.querySelector("#link-agent-title")).toBeNull();
     expect(container.textContent).not.toContain("/mcp/s/");
   });
 
   it("keeps the page readable when live editing can't start, with a way to try again and a way back", async () => {
-    const meta: ViewMeta = {...DEFAULT_META, access: "edit", effectiveSelector: {access: "edit", versionId: null, paths: ["docs"]}};
-    const files: SharedFile[] = [{path: "doc.md", blobSha256: "a".repeat(64), contentKind: "text"}];
-    const fallback = viewerFetch(() => { throw new Error("Unexpected handoff"); });
+    const meta: ViewMeta = {
+      ...DEFAULT_META,
+      access: "edit",
+      effectiveSelector: { access: "edit", versionId: null, paths: ["docs"] },
+    };
+    const files: SharedFile[] = [
+      { path: "doc.md", blobSha256: "a".repeat(64), contentKind: "text" },
+    ];
+    const fallback = viewerFetch(() => {
+      throw new Error("Unexpected handoff");
+    });
     let opens = 0;
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
-      const route = requestPath(input);
-      if (route === "/api/view/meta") return jsonResponse(meta);
-      if (route === "/api/view/current") return currentPage(files, 0, 0, meta);
-      if (route.startsWith("/api/view/blob/")) return new Response("Shared content");
-      if (route === "/api/live/link-document") {
-        opens += 1;
-        return jsonResponse(linkRefusalBody("link_live_unavailable"), LINK_REFUSALS.link_live_unavailable.status);
-      }
-      return fallback(input, init);
-    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>(async (input, init) => {
+        const route = requestPath(input);
+        if (route === "/api/view/meta") return jsonResponse(meta);
+        if (route === "/api/view/current") return currentPage(files, 0, 0, meta);
+        if (route.startsWith("/api/view/blob/")) return new Response("Shared content");
+        if (route === "/api/live/link-document") {
+          opens += 1;
+          return jsonResponse(
+            linkRefusalBody("link_live_unavailable"),
+            LINK_REFUSALS.link_live_unavailable.status,
+          );
+        }
+        return fallback(input, init);
+      }),
+    );
     await renderApp();
     await settle(() => container.querySelector("article.markdown") !== null);
 
     await act(async () => buttonNamed("Edit file")!.click());
     await settle(() => container.querySelector(".edit-notice") !== null);
 
-    expect(container.querySelector(".edit-notice")?.textContent)
-      .toContain("dohc could not start editing this page.You can still read and comment here.");
+    expect(container.querySelector(".edit-notice")?.textContent).toContain(
+      "dohc could not start editing this page.You can still read and comment here.",
+    );
     expect(container.querySelector("article.markdown")?.textContent).toContain("Shared content");
     expect(buttonNamed("Open in dohc")).toBeDefined();
 
@@ -500,19 +620,32 @@ describe("App", () => {
   });
 
   it("keeps comments closed until asked for, with their count on the button", async () => {
-    const fallback = viewerFetch(() => { throw new Error("Unexpected handoff"); });
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
-      if (requestPath(input) === "/api/view/discussion?direction=newest-first") {
-        return jsonResponse({
-          ok: true,
-          activityRevision: 0,
-          messages: [{ messageId: "m1", createdAtMs: 1, deleted: false, body: "Shared comment", author: { kind: "named", displayName: "Sam" } }],
-          nextCursor: null,
-          profileName: null,
-        });
-      }
-      return fallback(input, init);
-    }));
+    const fallback = viewerFetch(() => {
+      throw new Error("Unexpected handoff");
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>(async (input, init) => {
+        if (requestPath(input) === "/api/view/discussion?direction=newest-first") {
+          return jsonResponse({
+            ok: true,
+            activityRevision: 0,
+            messages: [
+              {
+                messageId: "m1",
+                createdAtMs: 1,
+                deleted: false,
+                body: "Shared comment",
+                author: { kind: "named", displayName: "Sam" },
+              },
+            ],
+            nextCursor: null,
+            profileName: null,
+          });
+        }
+        return fallback(input, init);
+      }),
+    );
     await renderApp();
     const toggle = container.querySelector<HTMLButtonElement>('button[aria-label="Comments"]')!;
     const panel = container.querySelector<HTMLElement>("#link-discussion")!;
@@ -527,7 +660,9 @@ describe("App", () => {
     expect(panel.textContent).toContain("Shared comment");
     expect(document.activeElement).toBe(panel);
 
-    await act(async () => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })); });
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    });
     expect(panel.dataset.open).toBe("false");
     expect(document.activeElement).toBe(toggle);
   });
@@ -538,14 +673,17 @@ describe("App", () => {
       { path: "docs/b.md", blobSha256: "b".repeat(64), contentKind: "text" },
     ];
     let shared = files.slice(0, 1);
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input) => {
-      const path = requestPath(input);
-      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
-      if (path === "/api/view/current") return currentPage(shared, 0);
-      if (path === "/api/view/log?since=0&limit=500") return logPage(shared);
-      if (path.startsWith("/api/view/blob/")) return new Response("Text");
-      throw new Error(`Unexpected request: ${path}`);
-    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>(async (input) => {
+        const path = requestPath(input);
+        if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+        if (path === "/api/view/current") return currentPage(shared, 0);
+        if (path === "/api/view/log?since=0&limit=500") return logPage(shared);
+        if (path.startsWith("/api/view/blob/")) return new Response("Text");
+        throw new Error(`Unexpected request: ${path}`);
+      }),
+    );
     await renderApp();
     expect(container.querySelector("header nav")?.textContent).toBe("a.md");
     expect(container.querySelector("button.folder")).toBeNull();
@@ -564,16 +702,27 @@ describe("App", () => {
   });
 
   it("opens a Collection's schema in the plain-text editor, not the live document editor", async () => {
-    const meta: ViewMeta = {...DEFAULT_META, access: "edit", effectiveSelector: {access: "edit", versionId: null, paths: ["trip"]}};
-    const files: SharedFile[] = [{path: "trip/packing/collection.yaml", blobSha256: "a".repeat(64), contentKind: "text"}];
-    const fallback = viewerFetch(() => { throw new Error("Unexpected handoff"); });
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
-      const route = requestPath(input);
-      if (route === "/api/view/meta") return jsonResponse(meta);
-      if (route === "/api/view/current") return currentPage(files, 0, 0, meta);
-      if (route.startsWith("/api/view/blob/")) return new Response("name: Packing\n");
-      return fallback(input, init);
-    }));
+    const meta: ViewMeta = {
+      ...DEFAULT_META,
+      access: "edit",
+      effectiveSelector: { access: "edit", versionId: null, paths: ["trip"] },
+    };
+    const files: SharedFile[] = [
+      { path: "trip/packing/collection.yaml", blobSha256: "a".repeat(64), contentKind: "text" },
+    ];
+    const fallback = viewerFetch(() => {
+      throw new Error("Unexpected handoff");
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>(async (input, init) => {
+        const route = requestPath(input);
+        if (route === "/api/view/meta") return jsonResponse(meta);
+        if (route === "/api/view/current") return currentPage(files, 0, 0, meta);
+        if (route.startsWith("/api/view/blob/")) return new Response("name: Packing\n");
+        return fallback(input, init);
+      }),
+    );
     await renderApp();
     await act(async () => buttonNamed("Edit file")!.click());
     await settle(() => container.querySelector("textarea") !== null);
@@ -584,12 +733,13 @@ describe("App", () => {
   it("aborts parked Comments activity when the viewer unmounts", async () => {
     let parkedSignal: AbortSignal | undefined;
     const fetchMock = viewerFetch(
-      () => jsonResponse({
-        ok: true,
-        code: FIRST_HANDOFF_CODE,
-        relayUrl: PUBLIC_RELAY_URL,
-        expiresAtMs: Date.now() + 60_000,
-      }),
+      () =>
+        jsonResponse({
+          ok: true,
+          code: FIRST_HANDOFF_CODE,
+          relayUrl: PUBLIC_RELAY_URL,
+          expiresAtMs: Date.now() + 60_000,
+        }),
       (signal) => {
         parkedSignal = signal;
       },
@@ -605,23 +755,20 @@ describe("App", () => {
   });
 
   it("builds the browser handoff coordinate with the canonical issuer relay", () => {
-    expect(
-      dohcNavigation.urlForCode(
-        FIRST_HANDOFF_CODE,
-        PUBLIC_RELAY_URL,
-      ),
-    ).toBe(
+    expect(dohcNavigation.urlForCode(FIRST_HANDOFF_CODE, PUBLIC_RELAY_URL)).toBe(
       `dohc://open/${FIRST_HANDOFF_CODE}?relay=https%3A%2F%2Frelay.example.test`,
     );
   });
 
   it("requires explicit consent before the first handoff request", async () => {
-    const fetchMock = viewerFetch(() => jsonResponse({
-      ok: true,
-      code: FIRST_HANDOFF_CODE,
-      relayUrl: PUBLIC_RELAY_URL,
-      expiresAtMs: Date.now() + 60_000,
-    }));
+    const fetchMock = viewerFetch(() =>
+      jsonResponse({
+        ok: true,
+        code: FIRST_HANDOFF_CODE,
+        relayUrl: PUBLIC_RELAY_URL,
+        expiresAtMs: Date.now() + 60_000,
+      }),
+    );
     vi.stubGlobal("fetch", fetchMock);
 
     await renderApp();
@@ -647,8 +794,7 @@ describe("App", () => {
     expect(handoffCalls(fetchMock)).toHaveLength(0);
 
     clickButton("Open in dohc");
-    const navigate = vi.spyOn(dohcNavigation, "openCode")
-      .mockImplementation(() => undefined);
+    const navigate = vi.spyOn(dohcNavigation, "openCode").mockImplementation(() => undefined);
     clickButton("Agree and open");
     await settle(() => handoffCalls(fetchMock).length === 1);
 
@@ -666,15 +812,16 @@ describe("App", () => {
       "share-sensitive-id",
       "grant-sensitive-id",
     ];
-    const fetchMock = viewerFetch(() => jsonResponse({
-      ok: true,
-      code: FIRST_HANDOFF_CODE,
-      relayUrl: PUBLIC_RELAY_URL,
-      expiresAtMs: Date.now() + 60_000,
-    }));
+    const fetchMock = viewerFetch(() =>
+      jsonResponse({
+        ok: true,
+        code: FIRST_HANDOFF_CODE,
+        relayUrl: PUBLIC_RELAY_URL,
+        expiresAtMs: Date.now() + 60_000,
+      }),
+    );
     vi.stubGlobal("fetch", fetchMock);
-    const navigate = vi.spyOn(dohcNavigation, "openCode")
-      .mockImplementation(() => undefined);
+    const navigate = vi.spyOn(dohcNavigation, "openCode").mockImplementation(() => undefined);
 
     await renderApp();
     clickButton("Open in dohc");
@@ -688,8 +835,13 @@ describe("App", () => {
     expect(init?.method).toBe("POST");
     expect(init?.credentials).toBe("same-origin");
     expect(init).not.toHaveProperty("body");
-    expect(init?.headers).toEqual({ "x-dohc-link-session": SESSION, [SHARE_WEB_API_VERSION_HEADER]: String(SHARE_WEB_API_VERSION) });
-    expect(Object.keys(init?.headers ?? {}).sort()).toEqual(["x-dohc-link-session", SHARE_WEB_API_VERSION_HEADER].sort());
+    expect(init?.headers).toEqual({
+      "x-dohc-link-session": SESSION,
+      [SHARE_WEB_API_VERSION_HEADER]: String(SHARE_WEB_API_VERSION),
+    });
+    expect(Object.keys(init?.headers ?? {}).sort()).toEqual(
+      ["x-dohc-link-session", SHARE_WEB_API_VERSION_HEADER].sort(),
+    );
 
     expect(navigate).toHaveBeenCalledWith(FIRST_HANDOFF_CODE, PUBLIC_RELAY_URL);
     const launchedCode = String(navigate.mock.calls[0]?.[0]);
@@ -700,24 +852,64 @@ describe("App", () => {
     );
     for (const secret of secrets) expect(launchUrl).not.toContain(secret);
     expect(launchUrl).not.toContain("#");
-    expect(() => dohcNavigation.urlForCode("bad/code", PUBLIC_RELAY_URL))
-      .toThrow("invalid handoff code");
+    expect(() => dohcNavigation.urlForCode("bad/code", PUBLIC_RELAY_URL)).toThrow(
+      "invalid handoff code",
+    );
   });
 
   it.each([
-    ["a response without ok true", { code: FIRST_HANDOFF_CODE, relayUrl: PUBLIC_RELAY_URL, expiresAtMs: Date.now() + 60_000 }],
-    ["a malformed code", { ok: true, code: "short", relayUrl: PUBLIC_RELAY_URL, expiresAtMs: Date.now() + 60_000 }],
-    ["a missing relay coordinate", { ok: true, code: FIRST_HANDOFF_CODE, expiresAtMs: Date.now() + 60_000 }],
-    ["an empty relay coordinate", { ok: true, code: FIRST_HANDOFF_CODE, relayUrl: "", expiresAtMs: Date.now() + 60_000 }],
-    ["an oversized relay coordinate", { ok: true, code: FIRST_HANDOFF_CODE, relayUrl: "x".repeat(2049), expiresAtMs: Date.now() + 60_000 }],
-    ["an expired code", { ok: true, code: FIRST_HANDOFF_CODE, relayUrl: PUBLIC_RELAY_URL, expiresAtMs: Date.now() }],
-    ["a non-integer expiry", { ok: true, code: FIRST_HANDOFF_CODE, relayUrl: PUBLIC_RELAY_URL, expiresAtMs: Date.now() + 60_000.5 }],
-    ["an unexpected response field", { ok: true, code: FIRST_HANDOFF_CODE, relayUrl: PUBLIC_RELAY_URL, expiresAtMs: Date.now() + 60_000, extra: true }],
+    [
+      "a response without ok true",
+      { code: FIRST_HANDOFF_CODE, relayUrl: PUBLIC_RELAY_URL, expiresAtMs: Date.now() + 60_000 },
+    ],
+    [
+      "a malformed code",
+      { ok: true, code: "short", relayUrl: PUBLIC_RELAY_URL, expiresAtMs: Date.now() + 60_000 },
+    ],
+    [
+      "a missing relay coordinate",
+      { ok: true, code: FIRST_HANDOFF_CODE, expiresAtMs: Date.now() + 60_000 },
+    ],
+    [
+      "an empty relay coordinate",
+      { ok: true, code: FIRST_HANDOFF_CODE, relayUrl: "", expiresAtMs: Date.now() + 60_000 },
+    ],
+    [
+      "an oversized relay coordinate",
+      {
+        ok: true,
+        code: FIRST_HANDOFF_CODE,
+        relayUrl: "x".repeat(2049),
+        expiresAtMs: Date.now() + 60_000,
+      },
+    ],
+    [
+      "an expired code",
+      { ok: true, code: FIRST_HANDOFF_CODE, relayUrl: PUBLIC_RELAY_URL, expiresAtMs: Date.now() },
+    ],
+    [
+      "a non-integer expiry",
+      {
+        ok: true,
+        code: FIRST_HANDOFF_CODE,
+        relayUrl: PUBLIC_RELAY_URL,
+        expiresAtMs: Date.now() + 60_000.5,
+      },
+    ],
+    [
+      "an unexpected response field",
+      {
+        ok: true,
+        code: FIRST_HANDOFF_CODE,
+        relayUrl: PUBLIC_RELAY_URL,
+        expiresAtMs: Date.now() + 60_000,
+        extra: true,
+      },
+    ],
   ])("rejects %s", async (_label, body) => {
     const fetchMock = viewerFetch(() => jsonResponse(body));
     vi.stubGlobal("fetch", fetchMock);
-    const navigate = vi.spyOn(dohcNavigation, "openCode")
-      .mockImplementation(() => undefined);
+    const navigate = vi.spyOn(dohcNavigation, "openCode").mockImplementation(() => undefined);
 
     await renderApp();
     clickButton("Open in dohc");
@@ -760,8 +952,7 @@ describe("App", () => {
           });
     });
     vi.stubGlobal("fetch", fetchMock);
-    const navigate = vi.spyOn(dohcNavigation, "openCode")
-      .mockImplementation(() => undefined);
+    const navigate = vi.spyOn(dohcNavigation, "openCode").mockImplementation(() => undefined);
 
     await renderApp();
     clickButton("Open in dohc");
@@ -797,8 +988,7 @@ describe("App", () => {
           });
     });
     vi.stubGlobal("fetch", fetchMock);
-    const navigate = vi.spyOn(dohcNavigation, "openCode")
-      .mockImplementation(() => undefined);
+    const navigate = vi.spyOn(dohcNavigation, "openCode").mockImplementation(() => undefined);
 
     await renderApp();
     clickButton("Open in dohc");
@@ -818,15 +1008,16 @@ describe("App", () => {
   it("keeps post-navigation recovery visible and retries with a fresh code", async () => {
     const codes = [FIRST_HANDOFF_CODE, SECOND_HANDOFF_CODE];
     let handoffRequests = 0;
-    const fetchMock = viewerFetch(() => jsonResponse({
-      ok: true,
-      code: codes[handoffRequests++],
-      relayUrl: PUBLIC_RELAY_URL,
-      expiresAtMs: Date.now() + 60_000,
-    }));
+    const fetchMock = viewerFetch(() =>
+      jsonResponse({
+        ok: true,
+        code: codes[handoffRequests++],
+        relayUrl: PUBLIC_RELAY_URL,
+        expiresAtMs: Date.now() + 60_000,
+      }),
+    );
     vi.stubGlobal("fetch", fetchMock);
-    const navigate = vi.spyOn(dohcNavigation, "openCode")
-      .mockImplementation(() => undefined);
+    const navigate = vi.spyOn(dohcNavigation, "openCode").mockImplementation(() => undefined);
 
     await renderApp();
     clickButton("Open in dohc");
@@ -857,8 +1048,7 @@ describe("App", () => {
       return heldHandoff;
     });
     vi.stubGlobal("fetch", fetchMock);
-    const navigate = vi.spyOn(dohcNavigation, "openCode")
-      .mockImplementation(() => undefined);
+    const navigate = vi.spyOn(dohcNavigation, "openCode").mockImplementation(() => undefined);
 
     await renderApp();
     clickButton("Open in dohc");
@@ -866,17 +1056,17 @@ describe("App", () => {
     await settle(() => handoffCalls(fetchMock).length === 1);
 
     expect(container.textContent).toContain("Opening in dohc…");
-    expect(container.textContent).toContain(
-      "Your browser may ask for permission to open dohc.",
-    );
+    expect(container.textContent).toContain("Your browser may ask for permission to open dohc.");
     act(() => root?.unmount());
     root = null;
-    resolveHandoff?.(jsonResponse({
-      ok: true,
-      code: FIRST_HANDOFF_CODE,
-      relayUrl: PUBLIC_RELAY_URL,
-      expiresAtMs: Date.now() + 60_000,
-    }));
+    resolveHandoff?.(
+      jsonResponse({
+        ok: true,
+        code: FIRST_HANDOFF_CODE,
+        relayUrl: PUBLIC_RELAY_URL,
+        expiresAtMs: Date.now() + 60_000,
+      }),
+    );
     await settle(() => handoffSignal?.aborted === true);
 
     expect(navigate).not.toHaveBeenCalled();
@@ -900,8 +1090,7 @@ describe("App", () => {
       return handoffSignals.length === 1 ? firstHandoff : secondHandoff;
     });
     vi.stubGlobal("fetch", fetchMock);
-    const navigate = vi.spyOn(dohcNavigation, "openCode")
-      .mockImplementation(() => undefined);
+    const navigate = vi.spyOn(dohcNavigation, "openCode").mockImplementation(() => undefined);
 
     await renderApp();
     clickButton("Open in dohc");
@@ -909,36 +1098,38 @@ describe("App", () => {
     await settle(() => handoffSignals.length === 1);
 
     expect(container.textContent).toContain("Opening in dohc…");
-    expect(container.textContent).toContain(
-      "Your browser may ask for permission to open dohc.",
-    );
+    expect(container.textContent).toContain("Your browser may ask for permission to open dohc.");
     expect(buttonNamed("Cancel")).toBeDefined();
 
     clickButton("Cancel");
 
     expect(handoffSignals[0]?.aborted).toBe(true);
     expect(
-      [...container.querySelectorAll("#link-more .handoff-button")]
-        .map((button) => button.textContent),
+      [...container.querySelectorAll("#link-more .handoff-button")].map(
+        (button) => button.textContent,
+      ),
     ).toEqual(["Open in dohc"]);
     expect(container.textContent).not.toContain("Opening in dohc…");
     expect(buttonNamed("Agree and open")).toBeUndefined();
     expect(buttonNamed("Cancel")).toBeUndefined();
 
     await act(async () => {
-      resolveFirstHandoff?.(jsonResponse({
-        ok: true,
-        code: FIRST_HANDOFF_CODE,
-        relayUrl: PUBLIC_RELAY_URL,
-        expiresAtMs: Date.now() + 60_000,
-      }));
+      resolveFirstHandoff?.(
+        jsonResponse({
+          ok: true,
+          code: FIRST_HANDOFF_CODE,
+          relayUrl: PUBLIC_RELAY_URL,
+          expiresAtMs: Date.now() + 60_000,
+        }),
+      );
       await firstHandoff;
     });
 
     expect(navigate).not.toHaveBeenCalled();
     expect(
-      [...container.querySelectorAll("#link-more .handoff-button")]
-        .map((button) => button.textContent),
+      [...container.querySelectorAll("#link-more .handoff-button")].map(
+        (button) => button.textContent,
+      ),
     ).toEqual(["Open in dohc"]);
 
     clickButton("Open in dohc");
@@ -953,18 +1144,18 @@ describe("App", () => {
     expect(handoffSignals[1]).not.toBe(handoffSignals[0]);
     expect(handoffSignals[1]?.aborted).toBe(false);
 
-    resolveSecondHandoff?.(jsonResponse({
-      ok: true,
-      code: SECOND_HANDOFF_CODE,
-      relayUrl: PUBLIC_RELAY_URL,
-      expiresAtMs: Date.now() + 60_000,
-    }));
+    resolveSecondHandoff?.(
+      jsonResponse({
+        ok: true,
+        code: SECOND_HANDOFF_CODE,
+        relayUrl: PUBLIC_RELAY_URL,
+        expiresAtMs: Date.now() + 60_000,
+      }),
+    );
     await settle(() => navigate.mock.calls.length === 1);
 
     expect(handoffCalls(fetchMock)).toHaveLength(2);
-    expect(navigate.mock.calls).toEqual([
-      [SECOND_HANDOFF_CODE, PUBLIC_RELAY_URL],
-    ]);
+    expect(navigate.mock.calls).toEqual([[SECOND_HANDOFF_CODE, PUBLIC_RELAY_URL]]);
   });
 
   it("does not navigate or repaint a replacement ready session", async () => {
@@ -985,8 +1176,7 @@ describe("App", () => {
       throw new Error(`Unexpected request: ${path}`);
     });
     vi.stubGlobal("fetch", fetchMock);
-    const navigate = vi.spyOn(dohcNavigation, "openCode")
-      .mockImplementation(() => undefined);
+    const navigate = vi.spyOn(dohcNavigation, "openCode").mockImplementation(() => undefined);
 
     await renderApp();
     clickButton("Open in dohc");
@@ -998,12 +1188,14 @@ describe("App", () => {
       root?.render(<App key={SECOND_SESSION} />);
     });
     await settle(() => container.querySelector(".viewer") !== null);
-    resolveFirstHandoff?.(jsonResponse({
-      ok: true,
-      code: FIRST_HANDOFF_CODE,
-      relayUrl: PUBLIC_RELAY_URL,
-      expiresAtMs: Date.now() + 60_000,
-    }));
+    resolveFirstHandoff?.(
+      jsonResponse({
+        ok: true,
+        code: FIRST_HANDOFF_CODE,
+        relayUrl: PUBLIC_RELAY_URL,
+        expiresAtMs: Date.now() + 60_000,
+      }),
+    );
     await settle(() => firstHandoffSignal?.aborted === true);
 
     expect(navigate).not.toHaveBeenCalled();
@@ -1042,8 +1234,7 @@ describe("App", () => {
       throw new Error(`Unexpected request: ${path}`);
     });
     vi.stubGlobal("fetch", fetchMock);
-    const navigate = vi.spyOn(dohcNavigation, "openCode")
-      .mockImplementation(() => undefined);
+    const navigate = vi.spyOn(dohcNavigation, "openCode").mockImplementation(() => undefined);
 
     await renderApp();
     clickButton("Open in dohc");
@@ -1054,12 +1245,14 @@ describe("App", () => {
     await settle(() => container.textContent.includes("This link isn't available."));
     expect(container.textContent).toContain("This link isn't available.");
 
-    resolveHandoff?.(jsonResponse({
-      ok: true,
-      code: FIRST_HANDOFF_CODE,
-      relayUrl: PUBLIC_RELAY_URL,
-      expiresAtMs: Date.now() + 60_000,
-    }));
+    resolveHandoff?.(
+      jsonResponse({
+        ok: true,
+        code: FIRST_HANDOFF_CODE,
+        relayUrl: PUBLIC_RELAY_URL,
+        expiresAtMs: Date.now() + 60_000,
+      }),
+    );
     await settle(() => handoffSignal?.aborted === true);
 
     expect(navigate).not.toHaveBeenCalled();
@@ -1068,27 +1261,37 @@ describe("App", () => {
   });
 
   it.each([
-    ["lost answer", () => new Response(JSON.stringify({ ok: false, code: "link_unavailable" }), { status: 503 })],
+    [
+      "lost answer",
+      () => new Response(JSON.stringify({ ok: false, code: "link_unavailable" }), { status: 503 }),
+    ],
     ["lost connection", () => Promise.reject(new TypeError("Failed to fetch"))],
-  ])("offers Try again when the first files answer is a %s, not an ended link", async (_label, fail) => {
-    let inventories = 0;
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input) => {
-      const path = requestPath(input);
-      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
-      if (path === "/api/view/current") return ++inventories === 1 ? await fail() : currentPage([], 0);
-      if (path === "/api/view/log?since=0&limit=500") return logPage([]);
-      throw new Error(`Unexpected request: ${path}`);
-    }));
+  ])(
+    "offers Try again when the first files answer is a %s, not an ended link",
+    async (_label, fail) => {
+      let inventories = 0;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn<typeof fetch>(async (input) => {
+          const path = requestPath(input);
+          if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+          if (path === "/api/view/current")
+            return ++inventories === 1 ? await fail() : currentPage([], 0);
+          if (path === "/api/view/log?since=0&limit=500") return logPage([]);
+          throw new Error(`Unexpected request: ${path}`);
+        }),
+      );
 
-    await renderApp(() => buttonNamed("Try again") !== undefined);
-    expect(container.querySelector("[role=alert]")?.textContent).toBe(
-      "dohc couldn't open the shared files.Check your connection, then choose Try again.Try again",
-    );
-    clickButton("Try again");
-    await settle(() => container.querySelector(".viewer") !== null);
-    expect(inventories).toBe(2);
-    expect(container.textContent).not.toContain("couldn't open");
-  });
+      await renderApp(() => buttonNamed("Try again") !== undefined);
+      expect(container.querySelector("[role=alert]")?.textContent).toBe(
+        "dohc couldn't open the shared files.Check your connection, then choose Try again.Try again",
+      );
+      clickButton("Try again");
+      await settle(() => container.querySelector(".viewer") !== null);
+      expect(inventories).toBe(2);
+      expect(container.textContent).not.toContain("couldn't open");
+    },
+  );
 
   it("renders a successful empty share instead of refusing it", async () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
@@ -1102,13 +1305,9 @@ describe("App", () => {
 
     await renderApp();
 
-    expect(container.querySelector("header")?.textContent).toContain(
-      "Trip plans",
-    );
+    expect(container.querySelector("header")?.textContent).toContain("Trip plans");
     expect(container.querySelector(".badge")?.textContent).toBe("Can edit");
-    expect(container.querySelector(".freshness")?.textContent).toBe(
-      "No changes yet",
-    );
+    expect(container.querySelector(".freshness")?.textContent).toBe("No changes yet");
     expect(container.querySelector("main.content")?.textContent).toBe(
       "No files on this link yet. This page shows them as soon as they arrive.",
     );
@@ -1122,9 +1321,7 @@ describe("App", () => {
       const path = requestPath(input);
       if (path === "/api/view/current") {
         currentRequests += 1;
-        return currentRequests === 1
-          ? new Response(null, { status: 429 })
-          : currentPage([], 0);
+        return currentRequests === 1 ? new Response(null, { status: 429 }) : currentPage([], 0);
       }
       if (path === "/api/view/log?since=0&limit=500") return logPage([]);
       throw new Error(`Unexpected request: ${path}`);
@@ -1147,9 +1344,7 @@ describe("App", () => {
     });
 
     expect(currentRequests).toBe(2);
-    expect(container.querySelector("header")?.textContent).toContain(
-      "Trip plans",
-    );
+    expect(container.querySelector("header")?.textContent).toContain("Trip plans");
     expect(container.querySelector("main.content")?.textContent).toBe(
       "No files on this link yet. This page shows them as soon as they arrive.",
     );
@@ -1289,10 +1484,14 @@ describe("App", () => {
       const path = requestPath(input);
       if (path === "/api/view/current") {
         currentSignal = init?.signal ?? undefined;
-        currentSignal?.addEventListener("abort", () => {
-          currentAborts += 1;
-          rejectCurrent?.(new DOMException("The request was aborted.", "AbortError"));
-        }, { once: true });
+        currentSignal?.addEventListener(
+          "abort",
+          () => {
+            currentAborts += 1;
+            rejectCurrent?.(new DOMException("The request was aborted.", "AbortError"));
+          },
+          { once: true },
+        );
         return currentHeld;
       }
       throw new Error(`Unexpected request: ${path}`);
@@ -1495,9 +1694,7 @@ describe("App", () => {
       if (path === "/api/view/current") {
         currentRequests += 1;
         if (currentRequests > 1) await refreshHeld;
-        return currentRequests === 1
-          ? currentPage([staleFile], 0)
-          : currentPage([currentFile], 2);
+        return currentRequests === 1 ? currentPage([staleFile], 0) : currentPage([currentFile], 2);
       }
       if (path.startsWith("/api/view/log?")) logPaths.push(path);
       if (path === "/api/view/log?since=0&limit=500") {
@@ -1522,10 +1719,10 @@ describe("App", () => {
 
     await renderApp();
     await settle(() => {
-      const text = container.querySelector("main.content .file-status")?.textContent ??
+      const text =
+        container.querySelector("main.content .file-status")?.textContent ??
         container.querySelector("main.content .state")?.textContent;
-      return text === "This link isn't available." ||
-        text === "This file changed. Refreshing.";
+      return text === "This link isn't available." || text === "This file changed. Refreshing.";
     });
 
     const content = container.querySelector("main.content");
@@ -1533,20 +1730,21 @@ describe("App", () => {
     expect(content?.querySelector(".file-status")?.textContent).toBe(
       "This file changed. Refreshing.",
     );
-    expect(container.querySelector("header")?.textContent).toContain(
-      "Trip plans",
-    );
+    expect(container.querySelector("header")?.textContent).toContain("Trip plans");
     expect(container.querySelector("h1")?.textContent).toBe("readme");
     expect(buttonNamed("Edit file")).toBeDefined();
-    expect(container.querySelector('nav[aria-label="Shared files"]')?.textContent)
-      .toContain(staleFile.path);
+    expect(container.querySelector('nav[aria-label="Shared files"]')?.textContent).toContain(
+      staleFile.path,
+    );
     expect(metaRequests).toBe(0);
     expect(logPaths).toContain("/api/view/log?since=1&limit=500");
 
     releaseRefresh?.();
-    await settle(() =>
-      container.querySelector("article.markdown")?.textContent
-        ?.includes("Recovered with the new hash.") === true
+    await settle(
+      () =>
+        container
+          .querySelector("article.markdown")
+          ?.textContent?.includes("Recovered with the new hash.") === true,
     );
 
     expect(container.querySelector("article.markdown")?.textContent).toContain(
@@ -1585,19 +1783,19 @@ describe("App", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await renderApp();
-    await settle(() =>
-      container.querySelector("main.content .file-status")?.textContent ===
-        "This file isn't available right now."
+    await settle(
+      () =>
+        container.querySelector("main.content .file-status")?.textContent ===
+        "This file isn't available right now.",
     );
 
     expect(container.querySelector("main.content .file-status")?.textContent).toBe(
       "This file isn't available right now.",
     );
-    expect(container.querySelector("header")?.textContent).toContain(
-      "Trip plans",
+    expect(container.querySelector("header")?.textContent).toContain("Trip plans");
+    expect(container.querySelector('nav[aria-label="Shared files"]')?.textContent).toContain(
+      file.path,
     );
-    expect(container.querySelector('nav[aria-label="Shared files"]')?.textContent)
-      .toContain(file.path);
     expect({ metaRequests, logPaths, blobRequests }).toEqual({
       metaRequests: 1,
       logPaths: [
@@ -1638,9 +1836,7 @@ describe("App", () => {
       await vi.advanceTimersByTimeAsync(1_000);
     });
 
-    expect(container.querySelector("main.content")?.textContent).toContain(
-      "Content after retry.",
-    );
+    expect(container.querySelector("main.content")?.textContent).toContain("Content after retry.");
     expect(blobRequests).toBe(2);
   });
 
@@ -1680,18 +1876,24 @@ describe("App", () => {
     const file: SharedFile = { path: "readme.md", blobSha256: "5".repeat(64), contentKind: "text" };
     const blobSignals: AbortSignal[] = [];
     let finishRetry: ((response: Response) => void) | undefined;
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
-      const path = requestPath(input);
-      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
-      if (path === "/api/view/current") return currentPage([file], 0);
-      if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
-      if (path === `/api/view/blob/${file.blobSha256}`) {
-        blobSignals.push(init!.signal!);
-        if (blobSignals.length === 1) return jsonResponse({ ok: false, code: "link_unavailable" }, 503);
-        return await new Promise<Response>((resolve) => { finishRetry = resolve; });
-      }
-      throw new Error(`Unexpected request: ${path}`);
-    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>(async (input, init) => {
+        const path = requestPath(input);
+        if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+        if (path === "/api/view/current") return currentPage([file], 0);
+        if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
+        if (path === `/api/view/blob/${file.blobSha256}`) {
+          blobSignals.push(init!.signal!);
+          if (blobSignals.length === 1)
+            return jsonResponse({ ok: false, code: "link_unavailable" }, 503);
+          return await new Promise<Response>((resolve) => {
+            finishRetry = resolve;
+          });
+        }
+        throw new Error(`Unexpected request: ${path}`);
+      }),
+    );
 
     await renderApp(() => buttonNamed("Try again") !== undefined);
     expect(container.querySelector("main.content [role=alert]")?.textContent).toBe(
@@ -1703,7 +1905,10 @@ describe("App", () => {
     await act(async () => {
       finishRetry!(new Response("# Readme\n\nBack again."));
     });
-    await settle(() => container.querySelector("article.markdown")?.textContent?.includes("Back again.") === true);
+    await settle(
+      () =>
+        container.querySelector("article.markdown")?.textContent?.includes("Back again.") === true,
+    );
     expect(blobSignals).toHaveLength(2);
     // Try again replaces the failed read's controller, as a new selection does.
     expect(blobSignals.map((signal) => signal.aborted)).toEqual([true, false]);
@@ -1744,8 +1949,9 @@ describe("App", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await renderApp();
-    const secondFileButton = [...container.querySelectorAll("button.file")]
-      .find((button) => button.textContent === secondFile.path);
+    const secondFileButton = [...container.querySelectorAll("button.file")].find(
+      (button) => button.textContent === secondFile.path,
+    );
     await act(async () => {
       secondFileButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await Promise.resolve();
@@ -1796,14 +2002,18 @@ describe("App", () => {
         let finishPull: (() => void) | null = null;
         const body = new ReadableStream<Uint8Array>({
           start(controller) {
-            init?.signal?.addEventListener("abort", () => {
-              streamEvents.push("cancel");
-              if (pendingTimer !== null) window.clearTimeout(pendingTimer);
-              pendingTimer = null;
-              controller.error(new DOMException("The request was aborted.", "AbortError"));
-              finishPull?.();
-              finishPull = null;
-            }, { once: true });
+            init?.signal?.addEventListener(
+              "abort",
+              () => {
+                streamEvents.push("cancel");
+                if (pendingTimer !== null) window.clearTimeout(pendingTimer);
+                pendingTimer = null;
+                controller.error(new DOMException("The request was aborted.", "AbortError"));
+                finishPull?.();
+                finishPull = null;
+              },
+              { once: true },
+            );
           },
           pull(controller) {
             streamEvents.push(`read:${nextChunk + 1}`);
@@ -1850,8 +2060,9 @@ describe("App", () => {
     });
     observer.observe(container, { childList: true, subtree: true });
 
-    const secondFileButton = [...container.querySelectorAll("button.file")]
-      .find((button) => button.textContent === secondFile.path);
+    const secondFileButton = [...container.querySelectorAll("button.file")].find(
+      (button) => button.textContent === secondFile.path,
+    );
     await act(async () => {
       secondFileButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await vi.advanceTimersByTimeAsync(500);
@@ -1910,9 +2121,7 @@ describe("App", () => {
       await Promise.resolve();
     });
 
-    expect(`${location.pathname}${location.search}${location.hash}`).toBe(
-      "/s/?view=compact",
-    );
+    expect(`${location.pathname}${location.search}${location.hash}`).toBe("/s/?view=compact");
 
     await act(async () => {
       if (!finishExchange) throw new Error("Exchange request did not start");
@@ -1928,103 +2137,146 @@ describe("App", () => {
     expect(container.textContent).not.toContain("Replace <secret>");
   });
 
-  it.each(["same page", "reload", "another link refused"] as const)("keeps the real MCP address only for the admitted page: %s", async scenario => {
-    const secret = "m".repeat(43), refusedSecret = "n".repeat(43);
-    const address = `${location.origin}/mcp/s/${secret}`;
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(navigator, "clipboard", {configurable: true, value: {writeText}});
-    const store = vi.spyOn(Storage.prototype, "setItem");
-    const fallback = viewerFetch(() => { throw new Error("Unexpected handoff"); });
-    let refuse = false;
-    const exchange = vi.fn(() => refuse ? new Response(null, {status: 403}) : jsonResponse({session: SESSION}));
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) =>
-      requestPath(input) === "/api/exchange" ? exchange() : fallback(input, init)));
-    history.replaceState(null, "", `/s/#${secret}`);
-    await renderApp();
-    const entry = () => container.querySelector('section[aria-labelledby="link-agent-title"]');
-    expect(entry()?.querySelector("code")?.textContent).toBe(address);
-    // The address text is the only place the secret appears on the page.
-    expect(container.innerHTML.split(secret).length).toBe(2);
-    expect(entry()?.textContent).not.toContain("Replace <secret>");
-    expect(entry()?.textContent).toContain("Anyone with the full address gets this link's access");
-    expect(location.hash).toBe("");
-    expect(location.href).not.toContain(secret);
-    await act(async () => (entry()?.querySelector("button") as HTMLButtonElement).click());
-    expect(writeText).toHaveBeenLastCalledWith(address);
-    expect(store).not.toHaveBeenCalled();
-    if (scenario === "same page") return;
-
-    await act(async () => root?.unmount());
-    root = null;
-    writeText.mockClear();
-    if (scenario === "another link refused") {
-      refuse = true;
-      history.replaceState(null, "", `/s/#${refusedSecret}`);
-    }
-    await renderApp();
-    expect(location.hash).toBe("");
-    expect(container.innerHTML).not.toContain(secret);
-    expect(container.innerHTML).not.toContain(refusedSecret);
-    if (scenario === "another link refused") {
-      expect(container.textContent).toContain("This link isn't available.");
-      expect(entry()).toBeNull();
-      expect(writeText).not.toHaveBeenCalled();
-    } else {
-      const template = `${location.origin}/mcp/s/<secret>`;
-      expect(entry()?.querySelector("code")?.textContent).toBe(template);
-      expect(entry()?.textContent).toContain("Replace <secret> with the text after # in the original share link.");
+  it.each(["same page", "reload", "another link refused"] as const)(
+    "keeps the real MCP address only for the admitted page: %s",
+    async (scenario) => {
+      const secret = "m".repeat(43),
+        refusedSecret = "n".repeat(43);
+      const address = `${location.origin}/mcp/s/${secret}`;
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+      const store = vi.spyOn(Storage.prototype, "setItem");
+      const fallback = viewerFetch(() => {
+        throw new Error("Unexpected handoff");
+      });
+      let refuse = false;
+      const exchange = vi.fn(() =>
+        refuse ? new Response(null, { status: 403 }) : jsonResponse({ session: SESSION }),
+      );
+      vi.stubGlobal(
+        "fetch",
+        vi.fn<typeof fetch>(async (input, init) =>
+          requestPath(input) === "/api/exchange" ? exchange() : fallback(input, init),
+        ),
+      );
+      history.replaceState(null, "", `/s/#${secret}`);
+      await renderApp();
+      const entry = () => container.querySelector('section[aria-labelledby="link-agent-title"]');
+      expect(entry()?.querySelector("code")?.textContent).toBe(address);
+      // The address text is the only place the secret appears on the page.
+      expect(container.innerHTML.split(secret).length).toBe(2);
+      expect(entry()?.textContent).not.toContain("Replace <secret>");
+      expect(entry()?.textContent).toContain(
+        "Anyone with the full address gets this link's access",
+      );
+      expect(location.hash).toBe("");
+      expect(location.href).not.toContain(secret);
       await act(async () => (entry()?.querySelector("button") as HTMLButtonElement).click());
-      expect(writeText).toHaveBeenLastCalledWith(template);
-      expect(exchange).toHaveBeenCalledTimes(1);
-    }
-    expect(store).not.toHaveBeenCalled();
-  });
+      expect(writeText).toHaveBeenLastCalledWith(address);
+      expect(store).not.toHaveBeenCalled();
+      if (scenario === "same page") return;
 
-  it.each(["exchange", "current"] as const)("offers a reload for a share-web mismatch at %s", async (step) => {
-    const message = "Reload this share page to use the supported API version.";
-    const mismatch = () => jsonResponse({ ok: false, api: "share-web", code: "api_version_too_new", error: message }, 409);
-    history.replaceState(null, "", `/s/#${"v".repeat(43)}`);
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input) => {
-      const path = requestPath(input);
-      if (path === "/api/exchange") return step === "exchange" ? mismatch() : jsonResponse({ session: SESSION });
-      if (path === "/api/view/current") return mismatch();
-      throw new Error(`Unexpected request: ${path}`);
-    }));
-
-    await renderApp(() => container.querySelector("main.state")?.textContent === VERSION_MISMATCH);
-
-    expect(container.textContent).not.toContain("This link isn't available.");
-  });
-
-  it.each(["log", "meta"] as const)("offers a reload and stops following after a share-web mismatch at %s", async (step) => {
-    const message = "Reload this share page to use the supported API version.";
-    const mismatch = () => jsonResponse({ ok: false, api: "share-web", code: "api_version_too_old", error: message }, 409);
-    vi.useFakeTimers();
-    history.replaceState(null, "", `/s/${SESSION}`);
-    let logRequests = 0;
-    let metaRequests = 0;
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input) => {
-      const path = requestPath(input);
-      if (path === "/api/view/current") return currentPage([], 0);
-      if (path === "/api/view/log?since=0&limit=500") {
-        logRequests += 1;
-        return step === "log" && logRequests > 1 ? mismatch() : logOpsPage([], 0);
+      await act(async () => root?.unmount());
+      root = null;
+      writeText.mockClear();
+      if (scenario === "another link refused") {
+        refuse = true;
+        history.replaceState(null, "", `/s/#${refusedSecret}`);
       }
-      if (path === "/api/view/meta") {
-        metaRequests += 1;
-        return mismatch();
+      await renderApp();
+      expect(location.hash).toBe("");
+      expect(container.innerHTML).not.toContain(secret);
+      expect(container.innerHTML).not.toContain(refusedSecret);
+      if (scenario === "another link refused") {
+        expect(container.textContent).toContain("This link isn't available.");
+        expect(entry()).toBeNull();
+        expect(writeText).not.toHaveBeenCalled();
+      } else {
+        const template = `${location.origin}/mcp/s/<secret>`;
+        expect(entry()?.querySelector("code")?.textContent).toBe(template);
+        expect(entry()?.textContent).toContain(
+          "Replace <secret> with the text after # in the original share link.",
+        );
+        await act(async () => (entry()?.querySelector("button") as HTMLButtonElement).click());
+        expect(writeText).toHaveBeenLastCalledWith(template);
+        expect(exchange).toHaveBeenCalledTimes(1);
       }
-      throw new Error(`Unexpected request: ${path}`);
-    }));
+      expect(store).not.toHaveBeenCalled();
+    },
+  );
 
-    await renderApp(() => container.querySelector("main.state")?.textContent === VERSION_MISMATCH);
+  it.each(["exchange", "current"] as const)(
+    "offers a reload for a share-web mismatch at %s",
+    async (step) => {
+      const message = "Reload this share page to use the supported API version.";
+      const mismatch = () =>
+        jsonResponse(
+          { ok: false, api: "share-web", code: "api_version_too_new", error: message },
+          409,
+        );
+      history.replaceState(null, "", `/s/#${"v".repeat(43)}`);
+      vi.stubGlobal(
+        "fetch",
+        vi.fn<typeof fetch>(async (input) => {
+          const path = requestPath(input);
+          if (path === "/api/exchange")
+            return step === "exchange" ? mismatch() : jsonResponse({ session: SESSION });
+          if (path === "/api/view/current") return mismatch();
+          throw new Error(`Unexpected request: ${path}`);
+        }),
+      );
 
-    // The follower stopped: past its longest retry delay, nothing reads again.
-    const reads = logRequests + metaRequests;
-    await act(async () => { await vi.advanceTimersByTimeAsync(RETRY_MAX_MS * 2); });
-    expect(logRequests + metaRequests).toBe(reads);
-    expect(container.textContent).not.toContain("This link isn't available.");
-  });
+      await renderApp(
+        () => container.querySelector("main.state")?.textContent === VERSION_MISMATCH,
+      );
+
+      expect(container.textContent).not.toContain("This link isn't available.");
+    },
+  );
+
+  it.each(["log", "meta"] as const)(
+    "offers a reload and stops following after a share-web mismatch at %s",
+    async (step) => {
+      const message = "Reload this share page to use the supported API version.";
+      const mismatch = () =>
+        jsonResponse(
+          { ok: false, api: "share-web", code: "api_version_too_old", error: message },
+          409,
+        );
+      vi.useFakeTimers();
+      history.replaceState(null, "", `/s/${SESSION}`);
+      let logRequests = 0;
+      let metaRequests = 0;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn<typeof fetch>(async (input) => {
+          const path = requestPath(input);
+          if (path === "/api/view/current") return currentPage([], 0);
+          if (path === "/api/view/log?since=0&limit=500") {
+            logRequests += 1;
+            return step === "log" && logRequests > 1 ? mismatch() : logOpsPage([], 0);
+          }
+          if (path === "/api/view/meta") {
+            metaRequests += 1;
+            return mismatch();
+          }
+          throw new Error(`Unexpected request: ${path}`);
+        }),
+      );
+
+      await renderApp(
+        () => container.querySelector("main.state")?.textContent === VERSION_MISMATCH,
+      );
+
+      // The follower stopped: past its longest retry delay, nothing reads again.
+      const reads = logRequests + metaRequests;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(RETRY_MAX_MS * 2);
+      });
+      expect(logRequests + metaRequests).toBe(reads);
+      expect(container.textContent).not.toContain("This link isn't available.");
+    },
+  );
 
   it("retries a rejected exchange and establishes the session", async () => {
     vi.useFakeTimers();
@@ -2061,10 +2313,7 @@ describe("App", () => {
       await vi.advanceTimersByTimeAsync(1);
     });
 
-    expect(exchangeBodies).toEqual([
-      JSON.stringify({ secret }),
-      JSON.stringify({ secret }),
-    ]);
+    expect(exchangeBodies).toEqual([JSON.stringify({ secret }), JSON.stringify({ secret })]);
     expect(location.pathname).toBe(`/s/${SESSION}`);
     expect(location.hash).toBe("");
     expect(container.querySelector("main.content")?.textContent).toBe(
@@ -2073,42 +2322,48 @@ describe("App", () => {
     expect(container.textContent).not.toContain("This link isn't available.");
   });
 
-  it.each([429, 503])("offers Try again after an exchange answered %i for the whole retry budget, and repeats it with the scrubbed secret", async (status) => {
-    vi.useFakeTimers();
-    const secret = "q".repeat(43);
-    history.replaceState(null, "", `/s/#${secret}`);
-    const exchangeBodies: string[] = [];
-    let busy = true;
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
-      const path = requestPath(input);
-      if (path === "/api/exchange") {
-        exchangeBodies.push(String(init?.body));
-        return busy ? new Response(null, { status }) : jsonResponse({ session: SESSION });
-      }
-      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
-      if (path === "/api/view/current") return currentPage([], 0);
-      if (path === "/api/view/log?since=0&limit=500") return logPage([]);
-      throw new Error(`Unexpected request: ${path}`);
-    }));
+  it.each([429, 503])(
+    "offers Try again after an exchange answered %i for the whole retry budget, and repeats it with the scrubbed secret",
+    async (status) => {
+      vi.useFakeTimers();
+      const secret = "q".repeat(43);
+      history.replaceState(null, "", `/s/#${secret}`);
+      const exchangeBodies: string[] = [];
+      let busy = true;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn<typeof fetch>(async (input, init) => {
+          const path = requestPath(input);
+          if (path === "/api/exchange") {
+            exchangeBodies.push(String(init?.body));
+            return busy ? new Response(null, { status }) : jsonResponse({ session: SESSION });
+          }
+          if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+          if (path === "/api/view/current") return currentPage([], 0);
+          if (path === "/api/view/log?since=0&limit=500") return logPage([]);
+          throw new Error(`Unexpected request: ${path}`);
+        }),
+      );
 
-    await renderApp(() => exchangeBodies.length === 1);
-    expect(location.hash).toBe("");
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(120_000);
-    });
+      await renderApp(() => exchangeBodies.length === 1);
+      expect(location.hash).toBe("");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(120_000);
+      });
 
-    expect(exchangeBodies).toHaveLength(12);
-    expect(container.textContent).not.toContain("This link isn't available.");
-    expect(container.textContent).toContain("dohc couldn't open the shared files.");
-    expect(location.hash).toBe("");
+      expect(exchangeBodies).toHaveLength(12);
+      expect(container.textContent).not.toContain("This link isn't available.");
+      expect(container.textContent).toContain("dohc couldn't open the shared files.");
+      expect(location.hash).toBe("");
 
-    busy = false;
-    clickButton("Try again");
-    await settle(() => container.querySelector(".viewer") !== null);
-    expect(exchangeBodies.slice(-1)).toEqual([JSON.stringify({ secret })]);
-    expect(location.pathname).toBe(`/s/${SESSION}`);
-    expect(location.hash).toBe("");
-  });
+      busy = false;
+      clickButton("Try again");
+      await settle(() => container.querySelector(".viewer") !== null);
+      expect(exchangeBodies.slice(-1)).toEqual([JSON.stringify({ secret })]);
+      expect(location.pathname).toBe(`/s/${SESSION}`);
+      expect(location.hash).toBe("");
+    },
+  );
 
   it("refuses a 404 exchange without retrying", async () => {
     vi.useFakeTimers();
@@ -2171,14 +2426,12 @@ describe("App", () => {
     const downloadRequests: string[] = [];
     const deliveredBlobs: Blob[] = [];
     const objectUrl = "blob:dohc-download";
-    const createObjectUrl = vi.spyOn(URL, "createObjectURL")
-      .mockImplementation((blob) => {
-        if (!(blob instanceof Blob)) throw new Error("Expected download bytes");
-        deliveredBlobs.push(blob);
-        return objectUrl;
-      });
-    const revokeObjectUrl = vi.spyOn(URL, "revokeObjectURL")
-      .mockImplementation(() => undefined);
+    const createObjectUrl = vi.spyOn(URL, "createObjectURL").mockImplementation((blob) => {
+      if (!(blob instanceof Blob)) throw new Error("Expected download bytes");
+      deliveredBlobs.push(blob);
+      return objectUrl;
+    });
+    const revokeObjectUrl = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
     const clickedDownloads: Array<{
       href: string;
       download: string;
@@ -2217,9 +2470,10 @@ describe("App", () => {
 
     let followedRawAnchor = true;
     await act(async () => {
-      followedRawAnchor = visibleDownload?.dispatchEvent(
-        new MouseEvent("click", { bubbles: true, cancelable: true }),
-      ) ?? true;
+      followedRawAnchor =
+        visibleDownload?.dispatchEvent(
+          new MouseEvent("click", { bubbles: true, cancelable: true }),
+        ) ?? true;
       await Promise.resolve();
     });
 
@@ -2238,11 +2492,13 @@ describe("App", () => {
 
     expect(downloadRequests).toEqual([downloadPath, downloadPath]);
     expect(await deliveredBlobs[0]?.text()).toBe("shared file bytes");
-    expect(clickedDownloads).toEqual([{
-      href: objectUrl,
-      download: "payload.bin",
-      connected: true,
-    }]);
+    expect(clickedDownloads).toEqual([
+      {
+        href: objectUrl,
+        download: "payload.bin",
+        connected: true,
+      },
+    ]);
     expect(createObjectUrl).toHaveBeenCalledTimes(1);
     expect(revokeObjectUrl).toHaveBeenCalledWith(objectUrl);
     expect(document.body.querySelector(`a[href="${objectUrl}"]`)).toBeNull();
@@ -2273,9 +2529,7 @@ describe("App", () => {
     await renderApp();
     const visibleDownload = container.querySelector("a[download]");
     await act(async () => {
-      visibleDownload?.dispatchEvent(
-        new MouseEvent("click", { bubbles: true, cancelable: true }),
-      );
+      visibleDownload?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
       await Promise.resolve();
     });
     await act(async () => {
@@ -2288,9 +2542,7 @@ describe("App", () => {
     );
 
     await act(async () => {
-      visibleDownload?.dispatchEvent(
-        new MouseEvent("click", { bubbles: true, cancelable: true }),
-      );
+      visibleDownload?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
       await Promise.resolve();
     });
 
@@ -2328,21 +2580,18 @@ describe("App", () => {
     await renderApp();
     const visibleDownload = container.querySelector("a[download]");
     await act(async () => {
-      visibleDownload?.dispatchEvent(
-        new MouseEvent("click", { bubbles: true, cancelable: true }),
-      );
+      visibleDownload?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
       await Promise.resolve();
     });
-    await settle(() =>
-      container.querySelector(".download-error")?.textContent ===
-        "The download didn't finish. Try again."
+    await settle(
+      () =>
+        container.querySelector(".download-error")?.textContent ===
+        "The download didn't finish. Try again.",
     );
 
     expect(downloadRequests).toBe(1);
     await act(async () => {
-      visibleDownload?.dispatchEvent(
-        new MouseEvent("click", { bubbles: true, cancelable: true }),
-      );
+      visibleDownload?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
       await Promise.resolve();
     });
 
@@ -2369,9 +2618,13 @@ describe("App", () => {
         if (!signal) throw new Error("Expected a download abort signal");
         downloadSignals.push(signal);
         return new Promise<Response>((_resolve, reject) => {
-          signal.addEventListener("abort", () => {
-            reject(new DOMException("The request was aborted.", "AbortError"));
-          }, { once: true });
+          signal.addEventListener(
+            "abort",
+            () => {
+              reject(new DOMException("The request was aborted.", "AbortError"));
+            },
+            { once: true },
+          );
         });
       }
       throw new Error(`Unexpected request: ${path}`);
@@ -2381,22 +2634,16 @@ describe("App", () => {
     await renderApp();
     const visibleDownload = container.querySelector("a[download]");
     await act(async () => {
-      visibleDownload?.dispatchEvent(
-        new MouseEvent("click", { bubbles: true, cancelable: true }),
-      );
+      visibleDownload?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
       await Promise.resolve();
     });
     await settle(() => downloadSignals.length === 1);
 
     await act(async () => {
-      visibleDownload?.dispatchEvent(
-        new MouseEvent("click", { bubbles: true, cancelable: true }),
-      );
+      visibleDownload?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
       await Promise.resolve();
     });
-    await settle(() =>
-      downloadSignals.length === 2 && downloadSignals[0]?.aborted === true
-    );
+    await settle(() => downloadSignals.length === 2 && downloadSignals[0]?.aborted === true);
 
     expect(container.querySelector(".download-error")).toBeNull();
   });
@@ -2427,23 +2674,20 @@ describe("App", () => {
 
     await renderApp();
 
-    const createObjectUrl = vi.spyOn(URL, "createObjectURL")
-      .mockReturnValue("blob:stale-download");
+    const createObjectUrl = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:stale-download");
     const appendedAnchors: HTMLAnchorElement[] = [];
-    const append = vi.spyOn(document.body, "append")
-      .mockImplementation((...nodes) => {
-        for (const node of nodes) {
-          if (node instanceof HTMLAnchorElement) appendedAnchors.push(node);
-        }
-      });
-    const click = vi.spyOn(HTMLAnchorElement.prototype, "click")
+    const append = vi.spyOn(document.body, "append").mockImplementation((...nodes) => {
+      for (const node of nodes) {
+        if (node instanceof HTMLAnchorElement) appendedAnchors.push(node);
+      }
+    });
+    const click = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
       .mockImplementation(() => undefined);
     const visibleDownload = container.querySelector("a[download]");
 
     await act(async () => {
-      visibleDownload?.dispatchEvent(
-        new MouseEvent("click", { bubbles: true, cancelable: true }),
-      );
+      visibleDownload?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
       await Promise.resolve();
     });
     expect(downloadRequests).toEqual([downloadPath]);
@@ -2527,17 +2771,7 @@ describe("App", () => {
     const { image } = await renderRasterImage();
     const requests = trackImageSourceRequests(image);
     const retryDelays = [
-      1_000,
-      2_000,
-      4_000,
-      8_000,
-      15_000,
-      15_000,
-      15_000,
-      15_000,
-      15_000,
-      15_000,
-      15_000,
+      1_000, 2_000, 4_000, 8_000, 15_000, 15_000, 15_000, 15_000, 15_000, 15_000, 15_000,
     ];
 
     act(() => image.dispatchEvent(new Event("error")));
@@ -2547,18 +2781,7 @@ describe("App", () => {
     }
 
     expect(requests.times).toEqual([
-      0,
-      1_000,
-      3_000,
-      7_000,
-      15_000,
-      30_000,
-      45_000,
-      60_000,
-      75_000,
-      90_000,
-      105_000,
-      120_000,
+      0, 1_000, 3_000, 7_000, 15_000, 30_000, 45_000, 60_000, 75_000, 90_000, 105_000, 120_000,
     ]);
     await act(async () => vi.advanceTimersByTimeAsync(15_000));
     expect(requests.sources).toHaveLength(12);
@@ -2580,9 +2803,7 @@ describe("App", () => {
       new Uint8Array(TEXT_PREVIEW_BYTE_CAP),
       encoder.encode("# Must not render"),
     ];
-    expect(
-      markdownChunks.reduce((size, chunk) => size + chunk.byteLength, 0),
-    ).toBeGreaterThan(
+    expect(markdownChunks.reduce((size, chunk) => size + chunk.byteLength, 0)).toBeGreaterThan(
       TEXT_PREVIEW_BYTE_CAP,
     );
     let nextChunk = 0;
@@ -2653,12 +2874,8 @@ describe("App", () => {
 
     await renderApp();
 
-    expect(container.querySelector("article.markdown h1")?.textContent).toBe(
-      "Previewed Markdown",
-    );
-    expect(container.querySelector("article.markdown")?.textContent).toContain(
-      "Still rendered.",
-    );
+    expect(container.querySelector("article.markdown h1")?.textContent).toBe("Previewed Markdown");
+    expect(container.querySelector("article.markdown")?.textContent).toContain("Still rendered.");
     expect(container.querySelector(".download-card")).toBeNull();
   });
 
@@ -2696,7 +2913,10 @@ describe("App", () => {
   it.each([
     ["a NUL byte", new Uint8Array([0x68, 0x69, 0x00, 0x0a])],
     ["BOM-less UTF-16LE", new Uint8Array([0x68, 0x00, 0x69, 0x00, 0x0a, 0x00])],
-    ["many control bytes", new TextEncoder().encode(`${"\u0001\u0002".repeat(10)}${"text".repeat(100)}`)],
+    [
+      "many control bytes",
+      new TextEncoder().encode(`${"\u0001\u0002".repeat(10)}${"text".repeat(100)}`),
+    ],
     ["bytes that are not UTF-8", new Uint8Array([0x68, 0xff, 0xfe, 0x0a])],
   ])("offers a text file with %s as a download", async (_label, bytes) => {
     const file: SharedFile = {
@@ -2804,17 +3024,13 @@ describe("App", () => {
 
     await renderApp();
 
-    expect(container.querySelector(".freshness")?.textContent).toBe(
-      "Updated just now",
-    );
+    expect(container.querySelector(".freshness")?.textContent).toBe("Updated just now");
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(60_000);
     });
 
-    expect(container.querySelector(".freshness")?.textContent).toBe(
-      "Updated 2 minutes ago",
-    );
+    expect(container.querySelector(".freshness")?.textContent).toBe("Updated 2 minutes ago");
   });
 
   it("follows log deltas from the last cursor", async () => {
@@ -2896,19 +3112,22 @@ describe("App", () => {
 
     await renderApp();
     expect(renderedFilePaths()).toEqual(["survives.txt"]);
-    const survivingButton = [...container.querySelectorAll("button.file")]
-      .find((button) => button.textContent === "survives.txt");
+    const survivingButton = [...container.querySelectorAll("button.file")].find(
+      (button) => button.textContent === "survives.txt",
+    );
     await act(async () => {
       survivingButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
 
     expect(renderedFilePaths()).toEqual(["survives.txt"]);
     expect(container.querySelector("h1")?.textContent).toBe("survives.txt");
-    expect(logPaths).toEqual(expect.arrayContaining([
-      "/api/view/log?since=7&limit=500",
-      "/api/view/log?since=7&limit=500",
-      "/api/view/log?since=11&limit=500",
-    ]));
+    expect(logPaths).toEqual(
+      expect.arrayContaining([
+        "/api/view/log?since=7&limit=500",
+        "/api/view/log?since=7&limit=500",
+        "/api/view/log?since=11&limit=500",
+      ]),
+    );
   });
 
   it("renders the next Markdown settlement after an epoch reload", async () => {
@@ -2922,19 +3141,21 @@ describe("App", () => {
       ...initialFile,
       blobSha256: "b".repeat(64),
     };
-    const changedOps: RelayOp[] = [{
-      relaySeq: 12,
-      opKind: "moment.append",
-      payload: {
-        operation: "write",
-        payloadBeforePath: initialFile.path,
-        payloadBeforeBlobSha256: initialFile.blobSha256,
-        payloadAfterPath: changedFile.path,
-        payloadAfterBlobSha256: changedFile.blobSha256,
-        payloadAfterContentKind: changedFile.contentKind,
+    const changedOps: RelayOp[] = [
+      {
+        relaySeq: 12,
+        opKind: "moment.append",
+        payload: {
+          operation: "write",
+          payloadBeforePath: initialFile.path,
+          payloadBeforeBlobSha256: initialFile.blobSha256,
+          payloadAfterPath: changedFile.path,
+          payloadAfterBlobSha256: changedFile.blobSha256,
+          payloadAfterContentKind: changedFile.contentKind,
+        },
+        recordedAtMs: 3,
       },
-      recordedAtMs: 3,
-    }];
+    ];
     const logPaths: string[] = [];
     let currentRequests = 0;
     let sinceSevenRequests = 0;
@@ -2980,13 +3201,9 @@ describe("App", () => {
 
     await renderApp();
     expect(initialBlobRequests).toBe(1);
-    expect(container.querySelector("article.markdown")?.textContent).toContain(
-      "Changed preview",
-    );
+    expect(container.querySelector("article.markdown")?.textContent).toContain("Changed preview");
     expect(changedBlobRequests).toBe(1);
-    expect(container.querySelector("article.markdown")?.textContent).toContain(
-      "Changed preview",
-    );
+    expect(container.querySelector("article.markdown")?.textContent).toContain("Changed preview");
     expect(logPaths).toEqual([
       "/api/view/log?since=7&limit=500",
       "/api/view/log?since=7&limit=500",
@@ -3013,12 +3230,14 @@ describe("App", () => {
     const survivingWriteSha = "5".repeat(64);
     const createdSha = "6".repeat(64);
     const divergentRenameSha = "7".repeat(64);
-    const initialOps: RelayOp[] = [{
-      relaySeq: 1,
-      opKind: "version.create",
-      payload: { forkSnapshots: [fileA, fileB] },
-      recordedAtMs: 1,
-    }];
+    const initialOps: RelayOp[] = [
+      {
+        relaySeq: 1,
+        opKind: "version.create",
+        payload: { forkSnapshots: [fileA, fileB] },
+        recordedAtMs: 1,
+      },
+    ];
     const deltaOps: RelayOp[] = [
       {
         relaySeq: 2,
@@ -3145,9 +3364,7 @@ describe("App", () => {
       if (path.startsWith("/api/view/log?")) logPaths.push(path);
       if (path === "/api/view/log?since=1&limit=500") {
         sinceOneRequests += 1;
-        return sinceOneRequests === 1
-          ? logOpsPage([], 1)
-          : logOpsPage(deltaOps, 8);
+        return sinceOneRequests === 1 ? logOpsPage([], 1) : logOpsPage(deltaOps, 8);
       }
       if (path === "/api/view/log?since=8&limit=500") {
         return logOpsPage(deleteOps, 10);
@@ -3161,8 +3378,9 @@ describe("App", () => {
 
     await renderApp();
 
-    const afterDelete = filesFromLog([...initialOps, ...deltaOps, ...deleteOps])
-      .map((file) => file.path);
+    const afterDelete = filesFromLog([...initialOps, ...deltaOps, ...deleteOps]).map(
+      (file) => file.path,
+    );
     expect(afterDelete).toEqual(["a.txt", "final-b.txt"]);
     expect(renderedFilePaths()).toEqual(afterDelete);
     expect(logPaths).toEqual([
@@ -3184,12 +3402,14 @@ describe("App", () => {
       blobSha256: "5".repeat(64),
       contentKind: "text",
     };
-    const firstPageOps: RelayOp[] = [{
-      relaySeq: 7,
-      opKind: "version.create",
-      payload: { forkSnapshots: [fileA, fileB] },
-      recordedAtMs: 1,
-    }];
+    const firstPageOps: RelayOp[] = [
+      {
+        relaySeq: 7,
+        opKind: "version.create",
+        payload: { forkSnapshots: [fileA, fileB] },
+        recordedAtMs: 1,
+      },
+    ];
     const secondPageOps: RelayOp[] = [
       {
         relaySeq: 8,
@@ -3268,19 +3488,24 @@ describe("App", () => {
       if (path === "/api/view/current") return currentPage([initialFile], 7);
       if (path.startsWith("/api/view/log?")) logPaths.push(path);
       if (path === "/api/view/log?since=7&limit=500") {
-        return logOpsPage([{
-          relaySeq: 8,
-          opKind: "moment.append",
-          payload: {
-            operation: "rename",
-            payloadBeforePath: initialFile.path,
-            payloadBeforeBlobSha256: initialFile.blobSha256,
-            payloadAfterPath: renamedFile.path,
-            payloadAfterBlobSha256: renamedFile.blobSha256,
-            payloadAfterContentKind: renamedFile.contentKind,
-          },
-          recordedAtMs: 8,
-        }], 8);
+        return logOpsPage(
+          [
+            {
+              relaySeq: 8,
+              opKind: "moment.append",
+              payload: {
+                operation: "rename",
+                payloadBeforePath: initialFile.path,
+                payloadBeforeBlobSha256: initialFile.blobSha256,
+                payloadAfterPath: renamedFile.path,
+                payloadAfterBlobSha256: renamedFile.blobSha256,
+                payloadAfterContentKind: renamedFile.contentKind,
+              },
+              recordedAtMs: 8,
+            },
+          ],
+          8,
+        );
       }
       if (path === "/api/view/log?since=8&limit=500") {
         return logOpsPage([], 8);
@@ -3299,93 +3524,142 @@ describe("App", () => {
   });
 
   it.each([
-    ["duplicate file paths", {
-      ...DEFAULT_META,
-      ok: true,
-      files: [
-        { path: "same.txt", blobSha256: "1".repeat(64), contentKind: "text" },
-        { path: "same.txt", blobSha256: "2".repeat(64), contentKind: "text" },
-      ],
-      nextCursor: 2,
-      epochLogFloor: 0,
-    }],
-    ["a cursor below the epoch floor", {
-      ...DEFAULT_META,
-      ok: true,
-      files: [],
-      nextCursor: 1,
-      epochLogFloor: 2,
-    }],
-    ["an unsupported access level", {
-      ...DEFAULT_META,
-      ok: true,
-      access: "owner",
-      files: [],
-      nextCursor: 0,
-      epochLogFloor: 0,
-    }],
-    ["an invalid file digest", {
-      ...DEFAULT_META,
-      ok: true,
-      files: [{ path: "bad.txt", blobSha256: "short", contentKind: "text" }],
-      nextCursor: 1,
-      epochLogFloor: 0,
-    }],
+    [
+      "duplicate file paths",
+      {
+        ...DEFAULT_META,
+        ok: true,
+        files: [
+          { path: "same.txt", blobSha256: "1".repeat(64), contentKind: "text" },
+          { path: "same.txt", blobSha256: "2".repeat(64), contentKind: "text" },
+        ],
+        nextCursor: 2,
+        epochLogFloor: 0,
+      },
+    ],
+    [
+      "a cursor below the epoch floor",
+      {
+        ...DEFAULT_META,
+        ok: true,
+        files: [],
+        nextCursor: 1,
+        epochLogFloor: 2,
+      },
+    ],
+    [
+      "an unsupported access level",
+      {
+        ...DEFAULT_META,
+        ok: true,
+        access: "owner",
+        files: [],
+        nextCursor: 0,
+        epochLogFloor: 0,
+      },
+    ],
+    [
+      "an invalid file digest",
+      {
+        ...DEFAULT_META,
+        ok: true,
+        files: [{ path: "bad.txt", blobSha256: "short", contentKind: "text" }],
+        nextCursor: 1,
+        epochLogFloor: 0,
+      },
+    ],
   ])("rejects current state with %s", async (_label, projection) => {
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input) => {
-      const path = requestPath(input);
-      if (path === "/api/view/current") return jsonResponse(projection);
-      throw new Error(`Unexpected request: ${path}`);
-    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>(async (input) => {
+        const path = requestPath(input);
+        if (path === "/api/view/current") return jsonResponse(projection);
+        throw new Error(`Unexpected request: ${path}`);
+      }),
+    );
 
     await expect(loadCurrentState(SESSION)).rejects.toThrow("refused");
   });
 
   it.each([
-    ["a non-boolean continuation flag", {
-      ops: [], nextCursor: 1, hasMore: "false", epochLogFloor: 0,
-    }],
-    ["an unsafe operation sequence", {
-      ops: [{ relaySeq: Number.MAX_SAFE_INTEGER + 1, opKind: "moment.append", payload: {}, recordedAtMs: 1 }],
-      nextCursor: 1,
-      hasMore: false,
-      epochLogFloor: 0,
-    }],
-    ["an unsupported operation kind", {
-      ops: [{ relaySeq: 1, opKind: "unknown", payload: {}, recordedAtMs: 1 }],
-      nextCursor: 1,
-      hasMore: false,
-      epochLogFloor: 0,
-    }],
-    ["an unsafe operation timestamp", {
-      ops: [{ relaySeq: 1, opKind: "moment.append", payload: {}, recordedAtMs: 1.5 }],
-      nextCursor: 1,
-      hasMore: false,
-      epochLogFloor: 0,
-    }],
-    ["a stale operation sequence", {
-      ops: [{ relaySeq: 0, opKind: "moment.append", payload: {}, recordedAtMs: 1 }],
-      nextCursor: 1,
-      hasMore: false,
-      epochLogFloor: 0,
-    }],
-    ["operations outside strict relay order", {
-      ops: [
-        { relaySeq: 2, opKind: "moment.append", payload: {}, recordedAtMs: 1 },
-        { relaySeq: 1, opKind: "moment.append", payload: {}, recordedAtMs: 1 },
-      ],
-      nextCursor: 2,
-      hasMore: false,
-      epochLogFloor: 0,
-    }],
-    ["an operation beyond the page cursor", {
-      ops: [{ relaySeq: 2, opKind: "moment.append", payload: {}, recordedAtMs: 1 }],
-      nextCursor: 1,
-      hasMore: false,
-      epochLogFloor: 0,
-    }],
+    [
+      "a non-boolean continuation flag",
+      {
+        ops: [],
+        nextCursor: 1,
+        hasMore: "false",
+        epochLogFloor: 0,
+      },
+    ],
+    [
+      "an unsafe operation sequence",
+      {
+        ops: [
+          {
+            relaySeq: Number.MAX_SAFE_INTEGER + 1,
+            opKind: "moment.append",
+            payload: {},
+            recordedAtMs: 1,
+          },
+        ],
+        nextCursor: 1,
+        hasMore: false,
+        epochLogFloor: 0,
+      },
+    ],
+    [
+      "an unsupported operation kind",
+      {
+        ops: [{ relaySeq: 1, opKind: "unknown", payload: {}, recordedAtMs: 1 }],
+        nextCursor: 1,
+        hasMore: false,
+        epochLogFloor: 0,
+      },
+    ],
+    [
+      "an unsafe operation timestamp",
+      {
+        ops: [{ relaySeq: 1, opKind: "moment.append", payload: {}, recordedAtMs: 1.5 }],
+        nextCursor: 1,
+        hasMore: false,
+        epochLogFloor: 0,
+      },
+    ],
+    [
+      "a stale operation sequence",
+      {
+        ops: [{ relaySeq: 0, opKind: "moment.append", payload: {}, recordedAtMs: 1 }],
+        nextCursor: 1,
+        hasMore: false,
+        epochLogFloor: 0,
+      },
+    ],
+    [
+      "operations outside strict relay order",
+      {
+        ops: [
+          { relaySeq: 2, opKind: "moment.append", payload: {}, recordedAtMs: 1 },
+          { relaySeq: 1, opKind: "moment.append", payload: {}, recordedAtMs: 1 },
+        ],
+        nextCursor: 2,
+        hasMore: false,
+        epochLogFloor: 0,
+      },
+    ],
+    [
+      "an operation beyond the page cursor",
+      {
+        ops: [{ relaySeq: 2, opKind: "moment.append", payload: {}, recordedAtMs: 1 }],
+        nextCursor: 1,
+        hasMore: false,
+        epochLogFloor: 0,
+      },
+    ],
   ])("rejects %s", async (_label, page) => {
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () => jsonResponse(page)));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>(async () => jsonResponse(page)),
+    );
 
     await expect(loadLog(SESSION, 0, new Map(), 1)).rejects.toThrow("refused");
   });
@@ -3429,12 +3703,9 @@ describe("App", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(loadLog(
-      SESSION,
-      5,
-      new Map([[priorEpochFile.path, priorEpochFile]]),
-      3,
-    )).rejects.toThrow("epoch floor changed");
+    await expect(
+      loadLog(SESSION, 5, new Map([[priorEpochFile.path, priorEpochFile]]), 3),
+    ).rejects.toThrow("epoch floor changed");
     expect(logPaths).toEqual([
       "/api/view/log?since=5&limit=500",
       "/api/view/log?since=6&limit=500",
@@ -3462,31 +3733,40 @@ describe("App", () => {
       const path = requestPath(input);
       logPaths.push(path);
       if (path === "/api/view/log?since=5&limit=500") {
-        return logOpsPage([{
-          relaySeq: 6,
-          opKind: "version.create",
-          payload: { forkSnapshots: [firstPageFile] },
-          recordedAtMs: 6,
-        }], 6, true, 5);
+        return logOpsPage(
+          [
+            {
+              relaySeq: 6,
+              opKind: "version.create",
+              payload: { forkSnapshots: [firstPageFile] },
+              recordedAtMs: 6,
+            },
+          ],
+          6,
+          true,
+          5,
+        );
       }
       if (path === "/api/view/log?since=6&limit=500") {
-        return logOpsPage([{
-          relaySeq: 7,
-          opKind: "version.create",
-          payload: { forkSnapshots: [secondPageFile] },
-          recordedAtMs: 7,
-        }], 7, false, 5);
+        return logOpsPage(
+          [
+            {
+              relaySeq: 7,
+              opKind: "version.create",
+              payload: { forkSnapshots: [secondPageFile] },
+              recordedAtMs: 7,
+            },
+          ],
+          7,
+          false,
+          5,
+        );
       }
       throw new Error(`Unexpected request: ${path}`);
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const loaded = await loadLog(
-      SESSION,
-      5,
-      new Map([[priorFile.path, priorFile]]),
-      2,
-    );
+    const loaded = await loadLog(SESSION, 5, new Map([[priorFile.path, priorFile]]), 2);
 
     expect({
       files: [...loaded.fileAccumulator.keys()].sort(),
@@ -3497,10 +3777,7 @@ describe("App", () => {
       files: [firstPageFile.path, priorFile.path, secondPageFile.path],
       nextCursor: 7,
       epochLogFloor: 5,
-      logPaths: [
-        "/api/view/log?since=5&limit=500",
-        "/api/view/log?since=6&limit=500",
-      ],
+      logPaths: ["/api/view/log?since=5&limit=500", "/api/view/log?since=6&limit=500"],
     });
   });
 
@@ -3530,11 +3807,7 @@ describe("App", () => {
       ...initialFile,
       blobSha256: "4".repeat(64),
     };
-    const write = (
-      relaySeq: number,
-      before: SharedFile,
-      after: SharedFile,
-    ): RelayOp => ({
+    const write = (relaySeq: number, before: SharedFile, after: SharedFile): RelayOp => ({
       relaySeq,
       opKind: "moment.append",
       payload: {
@@ -3598,12 +3871,16 @@ describe("App", () => {
             settled: false,
             signal,
           };
-          signal.addEventListener("abort", () => {
-            if (held.settled || held.allowLateResolution) return;
-            held.settled = true;
-            trace.push(`abort:${path}`);
-            reject(new DOMException("Aborted", "AbortError"));
-          }, { once: true });
+          signal.addEventListener(
+            "abort",
+            () => {
+              if (held.settled || held.allowLateResolution) return;
+              held.settled = true;
+              trace.push(`abort:${path}`);
+              reject(new DOMException("Aborted", "AbortError"));
+            },
+            { once: true },
+          );
           heldLogs.push(held);
           trace.push(`park:${path}`);
         });
@@ -3656,9 +3933,10 @@ describe("App", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const parkedAt = (since: number): HeldLog | undefined =>
-      heldLogs.find((held) =>
-        held.path === `/api/view/log?since=${String(since)}&limit=500&hold=30000` &&
-        !held.settled
+      heldLogs.find(
+        (held) =>
+          held.path === `/api/view/log?since=${String(since)}&limit=500&hold=30000` &&
+          !held.settled,
       );
     const publish = (since: number, op: RelayOp): void => {
       const parked = parkedAt(since);
@@ -3677,18 +3955,22 @@ describe("App", () => {
     expect(metadataRequests).toBe(0);
 
     publish(1, write(2, initialFile, firstFile));
-    await settle(() =>
-      container.querySelector("article.markdown")?.textContent
-        ?.includes("First published settlement") === true
+    await settle(
+      () =>
+        container
+          .querySelector("article.markdown")
+          ?.textContent?.includes("First published settlement") === true,
     );
     await settle(() => parkedAt(2) !== undefined);
     expect(container.querySelector(".viewer")).toBe(mountedViewer);
     expect(trace.indexOf("meta:1")).toBeGreaterThan(trace.indexOf("publish:2"));
 
     publish(2, write(3, firstFile, secondFile));
-    await settle(() =>
-      container.querySelector("article.markdown")?.textContent
-        ?.includes("Second published settlement") === true
+    await settle(
+      () =>
+        container
+          .querySelector("article.markdown")
+          ?.textContent?.includes("Second published settlement") === true,
     );
     await settle(() => parkedAt(3) !== undefined);
     expect(container.querySelector(".viewer")).toBe(mountedViewer);
@@ -3698,28 +3980,24 @@ describe("App", () => {
     await settle(() => staleBlobResolve !== undefined);
     await settle(() => parkedAt(4) !== undefined);
     staleBlobResolve?.(new Response(null, { status: 404 }));
-    await settle(() =>
-      container.querySelector("article.markdown")?.textContent
-        ?.includes("Recovered current settlement") === true
+    await settle(
+      () =>
+        container
+          .querySelector("article.markdown")
+          ?.textContent?.includes("Recovered current settlement") === true,
     );
     expect(currentRequests).toBe(2);
-    expect(trace).toContain(
-      "abort:/api/view/log?since=4&limit=500&hold=30000",
-    );
+    expect(trace).toContain("abort:/api/view/log?since=4&limit=500&hold=30000");
     expect(parkedAt(4)).toBeDefined();
     expect(container.querySelector(".viewer")).toBe(mountedViewer);
 
     const personVisibleNetworkTrace = trace
       .filter((entry) => entry.startsWith("request:"))
       .join("\n");
-    expect(personVisibleNetworkTrace).not.toMatch(
-      /live-session|ticket|ydoc|websocket|presence/iu,
-    );
+    expect(personVisibleNetworkTrace).not.toMatch(/live-session|ticket|ydoc|websocket|presence/iu);
 
     const abandoned = [...heldLogs].reverse().find((held) => !held.settled);
-    expect(abandoned?.path).toBe(
-      "/api/view/log?since=4&limit=500&hold=30000",
-    );
+    expect(abandoned?.path).toBe("/api/view/log?since=4&limit=500&hold=30000");
     abandoned!.allowLateResolution = true;
     act(() => root?.unmount());
     root = null;
@@ -3731,9 +4009,7 @@ describe("App", () => {
       await Promise.resolve();
     });
     expect(trace).toHaveLength(traceLengthAtUnmount + 1);
-    expect(trace.at(-1)).toBe(
-      "resolve:/api/view/log?since=4&limit=500&hold=30000",
-    );
+    expect(trace.at(-1)).toBe("resolve:/api/view/log?since=4&limit=500&hold=30000");
     expect(container.textContent).toBe("");
     expect(vi.getTimerCount()).toBe(0);
   });
@@ -3806,9 +4082,7 @@ describe("App", () => {
     await renderApp();
 
     expect(metaPaths).toHaveLength(0);
-    expect(container.querySelector(".freshness")?.textContent).toBe(
-      "No changes yet",
-    );
+    expect(container.querySelector(".freshness")?.textContent).toBe("No changes yet");
     expect(renderedFilePaths()).toEqual(["zeta.txt"]);
     expect(container.querySelector("h1")?.textContent).toBe("zeta.txt");
 
@@ -3906,12 +4180,14 @@ describe("App", () => {
       if (path === "/api/view/meta") {
         metaRequests += 1;
         heartbeatMetaSignal = init?.signal ?? undefined;
-        heartbeatMetaSignal?.addEventListener("abort", () => {
-          metaAborts += 1;
-          rejectHeartbeatMeta?.(
-            new DOMException("The request was aborted.", "AbortError"),
-          );
-        }, { once: true });
+        heartbeatMetaSignal?.addEventListener(
+          "abort",
+          () => {
+            metaAborts += 1;
+            rejectHeartbeatMeta?.(new DOMException("The request was aborted.", "AbortError"));
+          },
+          { once: true },
+        );
         return heartbeatMetaHeld;
       }
       if (path === "/api/view/current") return currentPage([file], 0);
@@ -3933,9 +4209,7 @@ describe("App", () => {
 
     act(() => root?.unmount());
     root = null;
-    await settle(
-      () => heartbeatMetaSignal?.aborted === true && metaAborts === 1,
-    );
+    await settle(() => heartbeatMetaSignal?.aborted === true && metaAborts === 1);
 
     expect(heartbeatMetaSignal?.aborted).toBe(true);
     expect(metaAborts).toBe(1);
@@ -3984,9 +4258,7 @@ describe("App", () => {
         metaRequests += 1;
         return jsonResponse({
           ...DEFAULT_META,
-          lastSettledAtMs: metaRequests === 1
-            ? null
-            : startedAt + (metaRequests - 1) * 4 * 60_000,
+          lastSettledAtMs: metaRequests === 1 ? null : startedAt + (metaRequests - 1) * 4 * 60_000,
         });
       }
       if (path === "/api/view/current") {
@@ -4014,8 +4286,9 @@ describe("App", () => {
 
     await renderApp();
 
-    const selectedButton = [...container.querySelectorAll("button.file")]
-      .find((button) => button.textContent === selectedFile.path);
+    const selectedButton = [...container.querySelectorAll("button.file")].find(
+      (button) => button.textContent === selectedFile.path,
+    );
     expect(selectedButton).toBeDefined();
     act(() => {
       selectedButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -4045,9 +4318,9 @@ describe("App", () => {
       if (path === "/api/view/meta") {
         metaRequests += 1;
         if (metaRequests === 1) throw new Error("network error");
-        return jsonResponse(metaRequests === 2
-          ? { ...DEFAULT_META, lastSettledAtMs: Date.now() }
-          : DEFAULT_META);
+        return jsonResponse(
+          metaRequests === 2 ? { ...DEFAULT_META, lastSettledAtMs: Date.now() } : DEFAULT_META,
+        );
       }
       if (path === "/api/view/current") return currentPage([file], 1);
       if (path === "/api/view/log?since=0&limit=500") {
@@ -4080,9 +4353,7 @@ describe("App", () => {
     expect(metaRequests).toBe(2);
     expect(logRequests).toBe(3);
     expect(renderedFilePaths()).toEqual([file.path]);
-    expect(container.querySelector(".freshness")?.textContent).toBe(
-      "Updated just now",
-    );
+    expect(container.querySelector(".freshness")?.textContent).toBe("Updated just now");
   });
 
   it("keeps settled work visible and retries when the follower receives 409", async () => {
@@ -4163,9 +4434,7 @@ describe("App", () => {
     await renderApp();
     await settle(() => logRequests === 2);
     await settle(() => vi.getTimerCount() >= 1);
-    expect(container.querySelector("article.markdown")?.textContent).toContain(
-      "Last settled body",
-    );
+    expect(container.querySelector("article.markdown")?.textContent).toContain("Last settled body");
     expect(container.textContent).not.toContain("This link isn't available.");
     expect(metaRequests).toBe(0);
 
@@ -4173,15 +4442,14 @@ describe("App", () => {
       await vi.advanceTimersByTimeAsync(999);
     });
     expect(logRequests).toBe(2);
-    expect(container.querySelector("article.markdown")?.textContent).toContain(
-      "Last settled body",
-    );
+    expect(container.querySelector("article.markdown")?.textContent).toContain("Last settled body");
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1);
     });
-    await settle(() =>
-      container.querySelector("article.markdown")?.textContent
-        ?.includes("Retried settlement") === true
+    await settle(
+      () =>
+        container.querySelector("article.markdown")?.textContent?.includes("Retried settlement") ===
+        true,
     );
     await settle(() => logRequests === 4);
     expect(logRequests).toBe(4);
@@ -4329,9 +4597,11 @@ describe("App", () => {
       times: [0, 0, 1_000, 3_000, 3_000],
     });
     await settle(() => recoveredBlobRequests === 1);
-    await settle(() =>
-      container.querySelector("article.markdown")?.textContent
-        ?.includes("Settlement after epoch reset") === true
+    await settle(
+      () =>
+        container
+          .querySelector("article.markdown")
+          ?.textContent?.includes("Settlement after epoch reset") === true,
     );
     expect(logRequests).toBe(6);
     expect(currentRequestTimes).toEqual([0, 0, 1_000, 3_000, 3_000]);
@@ -4350,21 +4620,14 @@ describe("App", () => {
     });
     await settle(() => currentRequests === 6);
     await settle(() => resetBlobRequests === 1);
-    await settle(() =>
-      container.querySelector("article.markdown")?.textContent
-        ?.includes("Settlement after retry reset") === true
+    await settle(
+      () =>
+        container
+          .querySelector("article.markdown")
+          ?.textContent?.includes("Settlement after retry reset") === true,
     );
     expect(currentRequestTimes).toEqual([0, 0, 1_000, 3_000, 3_000, 4_000]);
-    expect(logRequestTimes.slice(0, 8)).toEqual([
-      0,
-      0,
-      1_000,
-      3_000,
-      3_000,
-      3_000,
-      4_000,
-      4_000,
-    ]);
+    expect(logRequestTimes.slice(0, 8)).toEqual([0, 0, 1_000, 3_000, 3_000, 3_000, 4_000, 4_000]);
     expect(container.textContent).not.toContain("This link isn't available.");
   });
 
@@ -4388,9 +4651,7 @@ describe("App", () => {
         }
         if (path === "/api/view/log?since=1&limit=500") {
           logRequests += 1;
-          return logRequests === 1
-            ? logOpsPage([], 1, false, 0)
-            : logOpsPage([], 2, false, 2);
+          return logRequests === 1 ? logOpsPage([], 1, false, 0) : logOpsPage([], 2, false, 2);
         }
         if (path === `/api/view/blob/${initialFile.blobSha256}`) {
           return new Response("# Settlement before terminal reload");
@@ -4418,9 +4679,7 @@ describe("App", () => {
 
       await renderApp();
       await settle(() => currentRequests === 2);
-      await settle(() =>
-        container.textContent?.includes("This link isn't available.") === true
-      );
+      await settle(() => container.textContent?.includes("This link isn't available.") === true);
       expect(logRequests).toBe(2);
       expect(container.querySelector("article.markdown")).toBeNull();
 
@@ -4483,9 +4742,9 @@ describe("App", () => {
       if (path === "/api/view/meta") {
         metaRequests += 1;
         if (metaRequests === 1) return new Response(null, { status: 503 });
-        return jsonResponse(metaRequests === 2
-          ? { ...DEFAULT_META, lastSettledAtMs: Date.now() }
-          : DEFAULT_META);
+        return jsonResponse(
+          metaRequests === 2 ? { ...DEFAULT_META, lastSettledAtMs: Date.now() } : DEFAULT_META,
+        );
       }
       if (path === "/api/view/current") return currentPage([file], 1);
       if (path === "/api/view/log?since=0&limit=500") {
@@ -4516,9 +4775,7 @@ describe("App", () => {
     expect(metaRequests).toBe(2);
     expect(logRequests).toBe(3);
     expect(renderedFilePaths()).toEqual([file.path]);
-    expect(container.querySelector(".freshness")?.textContent).toBe(
-      "Updated just now",
-    );
+    expect(container.querySelector(".freshness")?.textContent).toBe("Updated just now");
   });
 
   it("caps follower log pagination", async () => {
@@ -4538,11 +4795,7 @@ describe("App", () => {
       if (cursorMatch) {
         heartbeatLogPaths.push(path);
         const cursor = Number(cursorMatch[1]);
-        return logOpsPage(
-          [],
-          cursor + 1,
-          heartbeatLogPaths.length <= MAX_LOG_PAGES,
-        );
+        return logOpsPage([], cursor + 1, heartbeatLogPaths.length <= MAX_LOG_PAGES);
       }
       throw new Error(`Unexpected request: ${path}`);
     });
@@ -4552,9 +4805,7 @@ describe("App", () => {
     await settle(() => heartbeatLogPaths.length === MAX_LOG_PAGES);
 
     expect(heartbeatLogPaths).toHaveLength(MAX_LOG_PAGES);
-    expect(heartbeatLogPaths.at(-1)).toBe(
-      "/api/view/log?since=200&limit=500",
-    );
+    expect(heartbeatLogPaths.at(-1)).toBe("/api/view/log?since=200&limit=500");
     expect(container.textContent).not.toContain("This link isn't available.");
     expect(renderedFilePaths()).toEqual([file.path]);
   });
@@ -4580,13 +4831,15 @@ describe("App", () => {
         return jsonResponse({
           ok: true,
           activityRevision: 7,
-          messages: [{
-            messageId: "comment-app",
-            createdAtMs: 1,
-            deleted: false,
-            body: "Shared comment",
-            author: { kind: "named", displayName: "Named Person" },
-          }],
+          messages: [
+            {
+              messageId: "comment-app",
+              createdAtMs: 1,
+              deleted: false,
+              body: "Shared comment",
+              author: { kind: "named", displayName: "Named Person" },
+            },
+          ],
           nextCursor: null,
           profileName: null,
         });
@@ -4606,7 +4859,8 @@ describe("App", () => {
       }
       if (path === "/api/view/meta") return jsonResponse(commentMeta);
       // Not a Group share's link, so it has no channel.
-      if (path === "/api/view/chat/channels") return jsonResponse({ ok: false, error: "not found" }, 404);
+      if (path === "/api/view/chat/channels")
+        return jsonResponse({ ok: false, error: "not found" }, 404);
       unexpectedRequests += 1;
       throw new Error(`Unexpected request: ${path} ${String(init?.method)}`);
     });
@@ -4634,44 +4888,82 @@ describe("App", () => {
   });
 
   it("shows a Group link's channel in place of the share discussion", async () => {
-    const file: SharedFile = { path: "team/plan.md", blobSha256: "6".repeat(64), contentKind: "text" };
+    const file: SharedFile = {
+      path: "team/plan.md",
+      blobSha256: "6".repeat(64),
+      contentKind: "text",
+    };
     // The files' answer names the link's channel, so the viewer never opens the share discussion.
-    const viewMeta: ViewMeta = { ...DEFAULT_META, access: "view", effectiveSelector: { ...DEFAULT_META.effectiveSelector, access: "view" },
-      channel: { channelWireId: "wire" } };
+    const viewMeta: ViewMeta = {
+      ...DEFAULT_META,
+      access: "view",
+      effectiveSelector: { ...DEFAULT_META.effectiveSelector, access: "view" },
+      channel: { channelWireId: "wire" },
+    };
     const paths: string[] = [];
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
-      const path = requestPath(input);
-      paths.push(path);
-      if (path === "/api/view/current") return currentPage([file], 1, 0, viewMeta);
-      if (path === "/api/view/log?since=1&limit=500&current=true") return logOpsPage([], 1);
-      if (path === "/api/view/meta") return jsonResponse(viewMeta);
-      if (path === `/api/view/blob/${file.blobSha256}`) return new Response("# Plan");
-      if (path === "/api/view/chat/channels") {
-        return jsonResponse({ shareId: "share", profileName: null, channels: [{ channelWireId: "wire", name: "Team", access: "read-only" }] });
-      }
-      if (path.startsWith("/api/view/chat/messages?") && !path.includes("since=")) {
-        return jsonResponse({ shareId: "share", channelWireId: "wire", nextCursor: 3, olderCursor: null, messages: [{
-          relaySeq: 2, messageId: "m2", threadId: "t", authorDisplayName: "Sam", authorKind: "link",
-          authorOwnerDisplayName: null, createdAtMs: 1, body: "Count me in", bodyTooLarge: false,
-        }] });
-      }
-      if (path.startsWith("/api/view/discussion")) return new Promise<Response>(() => undefined);
-      if (path.startsWith("/api/view/chat/messages?")) {
-        return await new Promise<Response>((_resolve, reject) => {
-          init?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
-        });
-      }
-      throw new Error(`Unexpected request: ${path}`);
-    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>(async (input, init) => {
+        const path = requestPath(input);
+        paths.push(path);
+        if (path === "/api/view/current") return currentPage([file], 1, 0, viewMeta);
+        if (path === "/api/view/log?since=1&limit=500&current=true") return logOpsPage([], 1);
+        if (path === "/api/view/meta") return jsonResponse(viewMeta);
+        if (path === `/api/view/blob/${file.blobSha256}`) return new Response("# Plan");
+        if (path === "/api/view/chat/channels") {
+          return jsonResponse({
+            shareId: "share",
+            profileName: null,
+            channels: [{ channelWireId: "wire", name: "Team", access: "read-only" }],
+          });
+        }
+        if (path.startsWith("/api/view/chat/messages?") && !path.includes("since=")) {
+          return jsonResponse({
+            shareId: "share",
+            channelWireId: "wire",
+            nextCursor: 3,
+            olderCursor: null,
+            messages: [
+              {
+                relaySeq: 2,
+                messageId: "m2",
+                threadId: "t",
+                authorDisplayName: "Sam",
+                authorKind: "link",
+                authorOwnerDisplayName: null,
+                createdAtMs: 1,
+                body: "Count me in",
+                bodyTooLarge: false,
+              },
+            ],
+          });
+        }
+        if (path.startsWith("/api/view/discussion")) return new Promise<Response>(() => undefined);
+        if (path.startsWith("/api/view/chat/messages?")) {
+          return await new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener(
+              "abort",
+              () => reject(new DOMException("Aborted", "AbortError")),
+              { once: true },
+            );
+          });
+        }
+        throw new Error(`Unexpected request: ${path}`);
+      }),
+    );
 
     await renderApp();
     await settle(() => container.textContent?.includes("Count me in") === true);
     expect(container.querySelector(".link-channel h2")?.textContent).toBe("Team");
-    expect(container.querySelector('.link-channel [role="img"]')?.getAttribute("aria-label")).toBe("Link holder");
+    expect(container.querySelector('.link-channel [role="img"]')?.getAttribute("aria-label")).toBe(
+      "Link holder",
+    );
     expect(container.querySelector('.link-channel textarea[name="body"]')).toBeNull();
-    expect(container.querySelector(".link-channel")?.textContent).toContain("You can read this channel but not post.");
+    expect(container.querySelector(".link-channel")?.textContent).toContain(
+      "You can read this channel but not post.",
+    );
     expect(container.querySelector(".comments-panel:not(.link-channel)")).toBeNull();
-    expect(paths.filter(path => path.startsWith("/api/view/discussion"))).toEqual([]);
+    expect(paths.filter((path) => path.startsWith("/api/view/discussion"))).toEqual([]);
   });
 
   it("applies narrowed View access from activity and ignores stale Comment metadata", async () => {
@@ -4688,53 +4980,59 @@ describe("App", () => {
     };
     let metaCalls = 0;
     let parkedSignal: AbortSignal | undefined;
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
-      const path = requestPath(input);
-      if (path === "/api/view/current") return currentPage([file], 1, 0, commentMeta);
-      if (path === "/api/view/log?since=1&limit=500&current=true") return logOpsPage([], 1);
-      if (path === "/api/view/meta") {
-        metaCalls += 1;
-        return jsonResponse(commentMeta);
-      }
-      if (path === "/api/view/discussion?direction=newest-first") {
-        return jsonResponse({
-          ok: true,
-          activityRevision: 7,
-          messages: [],
-          nextCursor: null,
-          profileName: null,
-        });
-      }
-      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
-        return jsonResponse({
-          profileName: null,
-          ok: true,
-          access: "view",
-          latestRevision: 7,
-          cursorRevision: 7,
-          hasMore: false,
-          messages: [],
-          composerState: "available",
-        });
-      }
-      if (path === "/api/view/discussion/activity?since=7&hold=30000&limit=100") {
-        parkedSignal = init?.signal ?? undefined;
-        return await new Promise<Response>(() => undefined);
-      }
-      if (path === `/api/view/blob/${file.blobSha256}`) {
-        return new Response("# Narrowed link");
-      }
-      throw new Error(`Unexpected request: ${path}`);
-    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>(async (input, init) => {
+        const path = requestPath(input);
+        if (path === "/api/view/current") return currentPage([file], 1, 0, commentMeta);
+        if (path === "/api/view/log?since=1&limit=500&current=true") return logOpsPage([], 1);
+        if (path === "/api/view/meta") {
+          metaCalls += 1;
+          return jsonResponse(commentMeta);
+        }
+        if (path === "/api/view/discussion?direction=newest-first") {
+          return jsonResponse({
+            ok: true,
+            activityRevision: 7,
+            messages: [],
+            nextCursor: null,
+            profileName: null,
+          });
+        }
+        if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+          return jsonResponse({
+            profileName: null,
+            ok: true,
+            access: "view",
+            latestRevision: 7,
+            cursorRevision: 7,
+            hasMore: false,
+            messages: [],
+            composerState: "available",
+          });
+        }
+        if (path === "/api/view/discussion/activity?since=7&hold=30000&limit=100") {
+          parkedSignal = init?.signal ?? undefined;
+          return await new Promise<Response>(() => undefined);
+        }
+        if (path === `/api/view/blob/${file.blobSha256}`) {
+          return new Response("# Narrowed link");
+        }
+        throw new Error(`Unexpected request: ${path}`);
+      }),
+    );
 
     await renderApp();
-    await settle(() =>
-      parkedSignal !== undefined &&
-      container.querySelector(".badge")?.textContent === "View only"
+    await settle(
+      () =>
+        parkedSignal !== undefined &&
+        container.querySelector(".badge")?.textContent === "View only",
     );
 
     expect(container.querySelector(".comments-panel form")).toBeNull();
-    expect(container.querySelector('section[aria-labelledby="link-entry-title"]')?.textContent).toContain("Anyone with this link can view");
+    expect(
+      container.querySelector('section[aria-labelledby="link-entry-title"]')?.textContent,
+    ).toContain("Anyone with this link can view");
     await settle(() => metaCalls === 1);
 
     expect(container.querySelector(".badge")?.textContent).toBe("View only");
@@ -4744,97 +5042,108 @@ describe("App", () => {
   it.each([
     ["blocked", "The owner turned off comments for this browser."],
     ["paused", "The owner paused comments. You can still read everything."],
-  ] as const)("keeps the file and timeline readable when Comment append is %s", async (writeState, copy) => {
-    let activitySignal: AbortSignal | undefined;
-    let unexpectedRequests = 0;
-    const file: SharedFile = {
-      path: "docs/readable.md",
-      blobSha256: "8".repeat(64),
-      contentKind: "text",
-    };
-    const commentMeta: ViewMeta = {
-      ...DEFAULT_META,
-      access: "comment",
-      effectiveSelector: { ...DEFAULT_META.effectiveSelector, access: "comment" },
-    };
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
-      const path = requestPath(input);
-      if (path === "/api/view/current") return currentPage([file], 1, 0, commentMeta);
-      if (path === "/api/view/log?since=1&limit=500&current=true") return logOpsPage([], 1);
-      if (path === "/api/view/discussion" && init?.method === "POST") {
-        return jsonResponse({ ok: false, state: writeState, activityRevision: 7 }, 403);
-      }
-      if (path === "/api/view/discussion?direction=newest-first") {
-        return jsonResponse({
-          ok: true,
-          activityRevision: 7,
-          messages: [{
-            messageId: "readable-comment",
-            createdAtMs: 1,
-            deleted: false,
-            body: "Readable timeline",
-            author: { kind: "named", displayName: "Named Person" },
-          }],
-          nextCursor: null,
-          profileName: null,
-        });
-      }
-      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
-        return jsonResponse({
-          profileName: null,
-          ok: true,
-          access: "comment",
-          latestRevision: 7,
-          cursorRevision: 7,
-          hasMore: false,
-          messages: [],
-          composerState: "available",
-        });
-      }
-      if (path === "/api/view/discussion/activity?since=7&hold=30000&limit=100") {
-        const signal = init?.signal;
-        if (!signal) throw new Error("Discussion activity request has no abort signal");
-        activitySignal = signal;
-        return await new Promise<Response>((_resolve, reject) => {
-          const abort = () => reject(new DOMException("Aborted", "AbortError"));
-          if (signal.aborted) abort();
-          else signal.addEventListener("abort", abort, { once: true });
-        });
-      }
-      if (path === `/api/view/blob/${file.blobSha256}`) return new Response("Readable file bytes");
-      if (path === "/api/view/meta") return jsonResponse(commentMeta);
-      if (path === "/api/view/chat/channels") return jsonResponse({ ok: false, error: "not found" }, 404);
-      unexpectedRequests += 1;
-      throw new Error(`Unexpected request: ${path}`);
-    }));
+  ] as const)(
+    "keeps the file and timeline readable when Comment append is %s",
+    async (writeState, copy) => {
+      let activitySignal: AbortSignal | undefined;
+      let unexpectedRequests = 0;
+      const file: SharedFile = {
+        path: "docs/readable.md",
+        blobSha256: "8".repeat(64),
+        contentKind: "text",
+      };
+      const commentMeta: ViewMeta = {
+        ...DEFAULT_META,
+        access: "comment",
+        effectiveSelector: { ...DEFAULT_META.effectiveSelector, access: "comment" },
+      };
+      vi.stubGlobal(
+        "fetch",
+        vi.fn<typeof fetch>(async (input, init) => {
+          const path = requestPath(input);
+          if (path === "/api/view/current") return currentPage([file], 1, 0, commentMeta);
+          if (path === "/api/view/log?since=1&limit=500&current=true") return logOpsPage([], 1);
+          if (path === "/api/view/discussion" && init?.method === "POST") {
+            return jsonResponse({ ok: false, state: writeState, activityRevision: 7 }, 403);
+          }
+          if (path === "/api/view/discussion?direction=newest-first") {
+            return jsonResponse({
+              ok: true,
+              activityRevision: 7,
+              messages: [
+                {
+                  messageId: "readable-comment",
+                  createdAtMs: 1,
+                  deleted: false,
+                  body: "Readable timeline",
+                  author: { kind: "named", displayName: "Named Person" },
+                },
+              ],
+              nextCursor: null,
+              profileName: null,
+            });
+          }
+          if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+            return jsonResponse({
+              profileName: null,
+              ok: true,
+              access: "comment",
+              latestRevision: 7,
+              cursorRevision: 7,
+              hasMore: false,
+              messages: [],
+              composerState: "available",
+            });
+          }
+          if (path === "/api/view/discussion/activity?since=7&hold=30000&limit=100") {
+            const signal = init?.signal;
+            if (!signal) throw new Error("Discussion activity request has no abort signal");
+            activitySignal = signal;
+            return await new Promise<Response>((_resolve, reject) => {
+              const abort = () => reject(new DOMException("Aborted", "AbortError"));
+              if (signal.aborted) abort();
+              else signal.addEventListener("abort", abort, { once: true });
+            });
+          }
+          if (path === `/api/view/blob/${file.blobSha256}`)
+            return new Response("Readable file bytes");
+          if (path === "/api/view/meta") return jsonResponse(commentMeta);
+          if (path === "/api/view/chat/channels")
+            return jsonResponse({ ok: false, error: "not found" }, 404);
+          unexpectedRequests += 1;
+          throw new Error(`Unexpected request: ${path}`);
+        }),
+      );
 
-    await renderApp();
-    await settle(() =>
-      container.querySelector("main.content")?.textContent?.includes(
-        "Readable file bytes",
-      ) === true &&
-      container.querySelector(".comments-panel")?.textContent?.includes(
+      await renderApp();
+      await settle(
+        () =>
+          container.querySelector("main.content")?.textContent?.includes("Readable file bytes") ===
+            true &&
+          container.querySelector(".comments-panel")?.textContent?.includes("Readable timeline") ===
+            true &&
+          activitySignal !== undefined,
+      );
+      const body = container.querySelector<HTMLTextAreaElement>('textarea[name="body"]');
+      if (!body) throw new Error("comment body is missing");
+      setControlValue(body, "Refused comment");
+      clickButton("Post comment");
+      await settle(() => container.textContent?.includes(copy) === true);
+
+      expect(container.querySelector("main.content")?.textContent).toContain("Readable file bytes");
+      expect(container.querySelector(".comments-panel")?.textContent).toContain(
         "Readable timeline",
-      ) === true &&
-      activitySignal !== undefined
-    );
-    const body = container.querySelector<HTMLTextAreaElement>('textarea[name="body"]');
-    if (!body) throw new Error("comment body is missing");
-    setControlValue(body, "Refused comment");
-    clickButton("Post comment");
-    await settle(() => container.textContent?.includes(copy) === true);
+      );
+      expect(body.disabled).toBe(true);
+      expect(unexpectedRequests).toBe(0);
+      act(() => root?.unmount());
+      root = null;
+      await settle(() => activitySignal?.aborted === true);
 
-    expect(container.querySelector("main.content")?.textContent).toContain("Readable file bytes");
-    expect(container.querySelector(".comments-panel")?.textContent).toContain("Readable timeline");
-    expect(body.disabled).toBe(true);
-    expect(unexpectedRequests).toBe(0);
-    act(() => root?.unmount());
-    root = null;
-    await settle(() => activitySignal?.aborted === true);
-
-    expect(activitySignal).toBeInstanceOf(AbortSignal);
-    expect(activitySignal?.aborted).toBe(true);
-  });
+      expect(activitySignal).toBeInstanceOf(AbortSignal);
+      expect(activitySignal?.aborted).toBe(true);
+    },
+  );
 
   it("refuses mismatched top-level and effective Comment access", async () => {
     const mismatched = {
@@ -4842,19 +5151,22 @@ describe("App", () => {
       access: "comment",
       effectiveSelector: { ...DEFAULT_META.effectiveSelector, access: "view" },
     };
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input) => {
-      const path = requestPath(input);
-      if (path === "/api/view/current") {
-        return jsonResponse({
-          ok: true,
-          ...mismatched,
-          files: [],
-          nextCursor: 0,
-          epochLogFloor: 0,
-        });
-      }
-      throw new Error(`Unexpected request: ${path}`);
-    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>(async (input) => {
+        const path = requestPath(input);
+        if (path === "/api/view/current") {
+          return jsonResponse({
+            ok: true,
+            ...mismatched,
+            files: [],
+            nextCursor: 0,
+            epochLogFloor: 0,
+          });
+        }
+        throw new Error(`Unexpected request: ${path}`);
+      }),
+    );
 
     await renderApp();
 
@@ -4887,7 +5199,11 @@ describe("App", () => {
       expect(container.textContent).not.toContain("This link isn't available.");
       expect(logTimes).toEqual([0]);
 
-      for (const [wait, attempts] of [[1_000, 2], [2_000, 3], [4_000, 4]] as const) {
+      for (const [wait, attempts] of [
+        [1_000, 2],
+        [2_000, 3],
+        [4_000, 4],
+      ] as const) {
         await act(async () => {
           await vi.advanceTimersByTimeAsync(wait - 1);
         });
@@ -4948,7 +5264,9 @@ describe("App", () => {
       throttled = false;
       clickButton("Try again");
       await settle(() => container.querySelector(".viewer") !== null);
-      expect(container.querySelector("main.content")?.textContent).toBe("No files on this link yet. This page shows them as soon as they arrive.");
+      expect(container.querySelector("main.content")?.textContent).toBe(
+        "No files on this link yet. This page shows them as soon as they arrive.",
+      );
     });
 
     it("offers Try again for a non-429 log failure without retrying it unasked", async () => {

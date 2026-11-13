@@ -2,7 +2,16 @@
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import { channel, thread, message, bridgeMock, shareListing, emitCloudSessionChanged, renderView, navigatorView } from "./ChatsView.testHarness";
+import {
+  channel,
+  thread,
+  message,
+  bridgeMock,
+  shareListing,
+  emitCloudSessionChanged,
+  renderView,
+  navigatorView,
+} from "./ChatsView.testHarness";
 
 // --- Shared channels (MU-C4) -----------------------------------------------
 
@@ -31,9 +40,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
     await screen.findByTestId("chats-channel-view");
     expect(screen.queryByTestId("chats-share-channel")).toBeNull();
     expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
-    expect(screen.getByTestId("chats-readonly-note").textContent).toContain(
-      "read-only for you",
-    );
+    expect(screen.getByTestId("chats-readonly-note").textContent).toContain("read-only for you");
   });
 
   it("keeps an owned local channel writable after authoritative empty share metadata", async () => {
@@ -89,9 +96,10 @@ describe("ChatsView shared channels (MU-C4)", () => {
 
     view.rerender(navigator(1));
     await waitFor(() => expect(shareReads).toBe(2));
-    expect(
-      [...bridgeMock.listChatChannelShares.mock.calls[1]![0].channelWireIds].sort(),
-    ).toEqual(["wire-imported", "wire-team"]);
+    expect([...bridgeMock.listChatChannelShares.mock.calls[1]![0].channelWireIds].sort()).toEqual([
+      "wire-imported",
+      "wire-team",
+    ]);
 
     act(() => emitCloudSessionChanged("session-a", "ready"));
     await waitFor(() => expect(shareReads).toBe(3));
@@ -167,105 +175,121 @@ describe("ChatsView shared channels (MU-C4)", () => {
     await userEvent.click(screen.getByTestId("chats-channel"));
     await screen.findByTestId("chats-channel-view");
     expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
-    expect(screen.getByTestId("chats-readonly-note").textContent).toContain(
-      "read-only for you",
-    );
+    expect(screen.getByTestId("chats-readonly-note").textContent).toContain("read-only for you");
   });
 
-  it.each([false])("manages members through the share panel (already ended: %s)", async alreadyEnded => {
-    bridgeMock.listChatChannels.mockResolvedValue({
-      channels: [teamChannel()],
-      fileThreads: [],
-    });
-    bridgeMock.listChatChannelShares.mockResolvedValue(
-      shareListing({
-        granted: [
-          {
-            shareId: "share-1",
-            channelWireId: "wire-team",
-            access: "read-write",
-            recipientEmail: "ana@example.com",
-            revokedAtMs: null,
-          },
-        ],
-      }),
-    );
-    bridgeMock.shareChatChannel.mockResolvedValue({ shareId: "share-2" });
-    const undo = alreadyEnded ? undefined : { undoId: "undo-1", expiresAtMs: 600_000 };
-    bridgeMock.revokeRelayShare.mockResolvedValue({ undo });
-    const shareRemovals = { removed: vi.fn(), failed: vi.fn(), agentDisconnected: vi.fn() };
-    renderView(vi.fn(), vi.fn(), { shareRemovals });
-    expect((await screen.findByTestId("chats-channel-shared")).textContent).toContain(
-      "Shared with 1",
-    );
+  it.each([false])(
+    "manages members through the share panel (already ended: %s)",
+    async (alreadyEnded) => {
+      bridgeMock.listChatChannels.mockResolvedValue({
+        channels: [teamChannel()],
+        fileThreads: [],
+      });
+      bridgeMock.listChatChannelShares.mockResolvedValue(
+        shareListing({
+          granted: [
+            {
+              shareId: "share-1",
+              channelWireId: "wire-team",
+              access: "read-write",
+              recipientEmail: "ana@example.com",
+              revokedAtMs: null,
+            },
+          ],
+        }),
+      );
+      bridgeMock.shareChatChannel.mockResolvedValue({ shareId: "share-2" });
+      const undo = alreadyEnded ? undefined : { undoId: "undo-1", expiresAtMs: 600_000 };
+      bridgeMock.revokeRelayShare.mockResolvedValue({ undo });
+      const shareRemovals = { removed: vi.fn(), failed: vi.fn(), agentDisconnected: vi.fn() };
+      renderView(vi.fn(), vi.fn(), { shareRemovals });
+      expect((await screen.findByTestId("chats-channel-shared")).textContent).toContain(
+        "Shared with 1",
+      );
 
-    await userEvent.click(screen.getByTestId("chats-channel"));
-    const shareButton = await screen.findByTestId("chats-share-channel");
-    expect(shareButton.textContent).toBe("A1");
-    expect(shareButton.getAttribute("aria-label")).toBe("1 member");
-    await userEvent.click(shareButton);
+      await userEvent.click(screen.getByTestId("chats-channel"));
+      const shareButton = await screen.findByTestId("chats-share-channel");
+      expect(shareButton.textContent).toBe("A1");
+      expect(shareButton.getAttribute("aria-label")).toBe("1 member");
+      await userEvent.click(shareButton);
 
-    // The member list shows who has it, and Remove revokes their grant. The
-    // shell gets the receipt and the words for the notice that holds Undo.
-    const member = await screen.findByTestId("chats-share-member");
-    expect(member.textContent).toContain("ana@example.com");
-    await userEvent.click(screen.getByTestId("chats-share-revoke"));
-    await waitFor(() =>
-      expect(bridgeMock.revokeRelayShare).toHaveBeenCalledWith({ shareId: "share-1" }),
-    );
-    await waitFor(() => expect(shareRemovals.removed).toHaveBeenCalledTimes(1));
-    expect(shareRemovals.removed.mock.calls[0]![0]).toMatchObject({
-      workspaceId: "workspace-a",
-      shareId: "share-1",
-      undo,
-      message: alreadyEnded ? "ana@example.com no longer has access to team." : "Removed ana@example.com from team.",
-      restoredMessage: "Restored ana@example.com to team.",
-    });
-
-    // Adding someone as View only, from Add people at the top of the list.
-    // The dialog goes back to the list, which shows them while it reloads.
-    let finishListing = () => {};
-    bridgeMock.listChatChannelShares.mockImplementation(
-      () => new Promise((resolve) => { finishListing = () => resolve(shareListing()); }),
-    );
-    await userEvent.click(screen.getByTestId("chats-share-add-people"));
-    expect(document.activeElement).toBe(screen.getByTestId("chats-share-email"));
-    await userEvent.type(screen.getByTestId("chats-share-email"), "bo@example.com");
-    await userEvent.click(screen.getByTestId("chats-share-readonly"));
-    await userEvent.click(screen.getByTestId("chats-share-submit"));
-    await waitFor(() =>
-      expect(bridgeMock.shareChatChannel).toHaveBeenCalledWith({
+      // The member list shows who has it, and Remove revokes their grant. The
+      // shell gets the receipt and the words for the notice that holds Undo.
+      const member = await screen.findByTestId("chats-share-member");
+      expect(member.textContent).toContain("ana@example.com");
+      await userEvent.click(screen.getByTestId("chats-share-revoke"));
+      await waitFor(() =>
+        expect(bridgeMock.revokeRelayShare).toHaveBeenCalledWith({ shareId: "share-1" }),
+      );
+      await waitFor(() => expect(shareRemovals.removed).toHaveBeenCalledTimes(1));
+      expect(shareRemovals.removed.mock.calls[0]![0]).toMatchObject({
         workspaceId: "workspace-a",
-        channelId: "channel-team",
-        recipientEmail: "bo@example.com",
-        access: "read-only",
-      }),
-    );
-    const added = await screen.findByText("bo@example.com");
-    expect(added.closest("[data-testid='chats-share-member']")?.textContent).toContain("View only");
-    await act(async () => finishListing());
+        shareId: "share-1",
+        undo,
+        message: alreadyEnded
+          ? "ana@example.com no longer has access to team."
+          : "Removed ana@example.com from team.",
+        restoredMessage: "Restored ana@example.com to team.",
+      });
 
-    // Add people starts fresh: no one picked, and Can post chosen again.
-    await userEvent.click(screen.getByTestId("chats-share-add-people"));
-    expect((screen.getByTestId("chats-share-email") as HTMLInputElement).value).toBe("");
-    expect(screen.getByTestId("chats-share-canpost").getAttribute("aria-checked")).toBe("true");
+      // Adding someone as View only, from Add people at the top of the list.
+      // The dialog goes back to the list, which shows them while it reloads.
+      let finishListing = () => {};
+      bridgeMock.listChatChannelShares.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            finishListing = () => resolve(shareListing());
+          }),
+      );
+      await userEvent.click(screen.getByTestId("chats-share-add-people"));
+      expect(document.activeElement).toBe(screen.getByTestId("chats-share-email"));
+      await userEvent.type(screen.getByTestId("chats-share-email"), "bo@example.com");
+      await userEvent.click(screen.getByTestId("chats-share-readonly"));
+      await userEvent.click(screen.getByTestId("chats-share-submit"));
+      await waitFor(() =>
+        expect(bridgeMock.shareChatChannel).toHaveBeenCalledWith({
+          workspaceId: "workspace-a",
+          channelId: "channel-team",
+          recipientEmail: "bo@example.com",
+          access: "read-only",
+        }),
+      );
+      const added = await screen.findByText("bo@example.com");
+      expect(added.closest("[data-testid='chats-share-member']")?.textContent).toContain(
+        "View only",
+      );
+      await act(async () => finishListing());
 
-    // Close leaves the members button where it was.
-    await userEvent.click(screen.getByTestId("chats-share-close"));
-    expect(screen.queryByTestId("chats-share-panel")).toBeNull();
-    expect(screen.getByTestId("chats-share-channel")).toBeTruthy();
-  });
+      // Add people starts fresh: no one picked, and Can post chosen again.
+      await userEvent.click(screen.getByTestId("chats-share-add-people"));
+      expect((screen.getByTestId("chats-share-email") as HTMLInputElement).value).toBe("");
+      expect(screen.getByTestId("chats-share-canpost").getAttribute("aria-checked")).toBe("true");
+
+      // Close leaves the members button where it was.
+      await userEvent.click(screen.getByTestId("chats-share-close"));
+      expect(screen.queryByTestId("chats-share-panel")).toBeNull();
+      expect(screen.getByTestId("chats-share-channel")).toBeTruthy();
+    },
+  );
 
   it("closes Add people on an account change and adds no one else from its batch", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({ channels: [teamChannel()], fileThreads: [] });
     bridgeMock.listChatChannelShares.mockResolvedValue(shareListing());
     let finishFirst!: (value: unknown) => void;
-    bridgeMock.shareChatChannel.mockImplementationOnce(() => new Promise((resolve) => { finishFirst = resolve; }));
+    bridgeMock.shareChatChannel.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishFirst = resolve;
+        }),
+    );
     bridgeMock.shareChatChannel.mockResolvedValue({});
     renderView();
     await userEvent.click(await screen.findByTestId("chats-channel"));
     await userEvent.click(await screen.findByTestId("chats-share-channel"));
-    await userEvent.type(screen.getByTestId("chats-share-email"), "ana@example.com,ben@example.com,");
+    await userEvent.type(
+      screen.getByTestId("chats-share-email"),
+      "ana@example.com,ben@example.com,",
+    );
     await userEvent.click(screen.getByTestId("chats-share-submit"));
     expect(bridgeMock.shareChatChannel).toHaveBeenCalledTimes(1);
 
@@ -301,13 +325,11 @@ describe("ChatsView shared channels (MU-C4)", () => {
     await userEvent.click(await screen.findByTestId("chats-share-channel"));
 
     // The panel says what is wrong...
-    expect(
-      (await screen.findByTestId("chats-share-members-unreadable")).dataset.failure,
-    ).toBe("over-limit");
+    expect((await screen.findByTestId("chats-share-members-unreadable")).dataset.failure).toBe(
+      "over-limit",
+    );
     // ...and the control that would make it worse is off.
-    expect(
-      (screen.getByTestId("chats-share-add-people") as HTMLButtonElement).disabled,
-    ).toBe(true);
+    expect((screen.getByTestId("chats-share-add-people") as HTMLButtonElement).disabled).toBe(true);
     await userEvent.click(screen.getByTestId("chats-share-add-people"));
     expect(screen.queryByTestId("chats-share-email")).toBeNull();
     expect(bridgeMock.shareChatChannel).not.toHaveBeenCalled();
@@ -434,9 +456,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
     await screen.findByTestId("chats-joined-banner");
     // Read-only: the thread composer is replaced by an honest notice, and a
     // joined channel is never re-shareable from here.
-    expect(screen.getByTestId("chats-readonly-note").textContent).toContain(
-      "read-only for you",
-    );
+    expect(screen.getByTestId("chats-readonly-note").textContent).toContain("read-only for you");
     expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
     expect(screen.queryByTestId("chats-share-channel")).toBeNull();
 
@@ -582,7 +602,15 @@ describe("ChatsView shared channels (MU-C4)", () => {
       { path: "finance/budget.md", kind: "file" as const },
     ];
     bridgeMock.listChatChannels.mockResolvedValue({
-      channels: [channel({ id: "channel-team", name: "team", slug: "team", wireId: "wire-team", folderPath: "team" })],
+      channels: [
+        channel({
+          id: "channel-team",
+          name: "team",
+          slug: "team",
+          wireId: "wire-team",
+          folderPath: "team",
+        }),
+      ],
       fileThreads: [],
     });
     bridgeMock.listChatChannelShares.mockResolvedValue(

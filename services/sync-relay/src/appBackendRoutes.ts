@@ -1,4 +1,12 @@
-export type AppBackendAction = "activate" | "invoke" | "upload" | "file" | "attempt" | "descriptor" | "summary" | "blob";
+export type AppBackendAction =
+  | "activate"
+  | "invoke"
+  | "upload"
+  | "file"
+  | "attempt"
+  | "descriptor"
+  | "summary"
+  | "blob";
 export interface AppBackendRoute {
   route: "app-backend";
   publicationId: string;

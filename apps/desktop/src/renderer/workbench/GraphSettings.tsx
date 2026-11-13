@@ -52,7 +52,13 @@ export function ShapeMark(props: { shape: GraphShape; className?: string; hollow
       ? { fill: "none", stroke: "currentColor", strokeWidth: 2 }
       : { fill: "currentColor" };
   return (
-    <svg aria-hidden viewBox="-8 -8 16 16" width={12} height={12} className={`shrink-0 ${props.className ?? ""}`}>
+    <svg
+      aria-hidden
+      viewBox="-8 -8 16 16"
+      width={12}
+      height={12}
+      className={`shrink-0 ${props.className ?? ""}`}
+    >
       {props.shape === "diamond" ? (
         <path d="M0 -6.5 L6.5 0 L0 6.5 L-6.5 0 Z" {...paint} />
       ) : props.shape === "square" ? (
@@ -68,7 +74,13 @@ export function ShapeMark(props: { shape: GraphShape; className?: string; hollow
   );
 }
 
-function Section(props: { title: string; open: boolean; onToggle: () => void; children: ReactNode; action?: ReactNode }) {
+function Section(props: {
+  title: string;
+  open: boolean;
+  onToggle: () => void;
+  children: ReactNode;
+  action?: ReactNode;
+}) {
   return (
     <section className="flex flex-col">
       <div className="flex h-7 items-center gap-1 px-2">
@@ -95,13 +107,22 @@ function Section(props: { title: string; open: boolean; onToggle: () => void; ch
 function Row(props: { label: ReactNode; children: ReactNode }) {
   return (
     <div className="flex h-8 items-center gap-2 px-2 pl-6">
-      <span className="flex min-w-0 flex-1 items-center gap-2 truncate text-[13px] text-muted">{props.label}</span>
+      <span className="flex min-w-0 flex-1 items-center gap-2 truncate text-[13px] text-muted">
+        {props.label}
+      </span>
       {props.children}
     </div>
   );
 }
 
-function Slider(props: { label: string; value: number; onChange: (value: number) => void; min?: number; max?: number; step?: number }) {
+function Slider(props: {
+  label: string;
+  value: number;
+  onChange: (value: number) => void;
+  min?: number;
+  max?: number;
+  step?: number;
+}) {
   return (
     <Row label={props.label}>
       <input
@@ -127,12 +148,20 @@ export function GraphSettings(props: {
 }) {
   const [open, setOpen] = useState({ filters: true, groups: false, display: false, forces: false });
   const { value, onChange } = props;
-  const toggle = (key: keyof typeof open) => setOpen((current) => ({ ...current, [key]: !current[key] }));
-  const setDisplay = (patch: Partial<GraphDisplay>) => onChange({ ...value, display: { ...value.display, ...patch } });
-  const setForces = (patch: Partial<GraphForces>) => onChange({ ...value, forces: { ...value.forces, ...patch } });
+  const toggle = (key: keyof typeof open) =>
+    setOpen((current) => ({ ...current, [key]: !current[key] }));
+  const setDisplay = (patch: Partial<GraphDisplay>) =>
+    onChange({ ...value, display: { ...value.display, ...patch } });
+  const setForces = (patch: Partial<GraphForces>) =>
+    onChange({ ...value, forces: { ...value.forces, ...patch } });
   const setGroup = (id: number, patch: Partial<GraphGroup>) =>
-    onChange({ ...value, groups: value.groups.map((group) => (group.id === id ? { ...group, ...patch } : group)) });
-  const forcesChanged = (Object.keys(DEFAULT_FORCES) as (keyof GraphForces)[]).some((key) => value.forces[key] !== DEFAULT_FORCES[key]);
+    onChange({
+      ...value,
+      groups: value.groups.map((group) => (group.id === id ? { ...group, ...patch } : group)),
+    });
+  const forcesChanged = (Object.keys(DEFAULT_FORCES) as (keyof GraphForces)[]).some(
+    (key) => value.forces[key] !== DEFAULT_FORCES[key],
+  );
 
   return (
     <div
@@ -141,17 +170,30 @@ export function GraphSettings(props: {
       aria-label="Graph settings"
       className={`dohc-popover dohc-pop-in absolute right-3 z-10 flex w-72 max-w-[calc(100%-24px)] flex-col overflow-y-auto rounded-xl border border-line bg-panel py-1 ${
         // In the side panel, open below the local graph so a change shows as it is made.
-        props.local ? "top-[calc(18rem+8px)] max-h-[calc(100%-18rem-20px)]" : "top-3 max-h-[calc(100%-24px)]"
+        props.local
+          ? "top-[calc(18rem+8px)] max-h-[calc(100%-18rem-20px)]"
+          : "top-3 max-h-[calc(100%-24px)]"
       }`}
     >
       <div className="flex h-7 items-center justify-end px-2">
-        <IconButton aria-label="Close graph settings" title="Close graph settings" onClick={props.onClose}>
+        <IconButton
+          aria-label="Close graph settings"
+          title="Close graph settings"
+          onClick={props.onClose}
+        >
           <X size={13} aria-hidden />
         </IconButton>
       </div>
       <Section title="Filters" open={open.filters} onToggle={() => toggle("filters")}>
         {props.local ? (
-          <Slider label="Depth" min={1} max={3} step={1} value={value.depth} onChange={(depth) => onChange({ ...value, depth })} />
+          <Slider
+            label="Depth"
+            min={1}
+            max={3}
+            step={1}
+            value={value.depth}
+            onChange={(depth) => onChange({ ...value, depth })}
+          />
         ) : null}
         {GRAPH_KINDS.map(({ kind, name, shape }) => {
           const shown = !value.hidden.includes(kind);
@@ -160,9 +202,15 @@ export function GraphSettings(props: {
               key={kind}
               label={
                 <>
-                  <ShapeMark shape={shape} hollow={!shown && shape !== "ring"} className="text-subtle" />
+                  <ShapeMark
+                    shape={shape}
+                    hollow={!shown && shape !== "ring"}
+                    className="text-subtle"
+                  />
                   <span className="truncate">{name}</span>
-                  <span className="text-[12px] tabular-nums text-subtle">{props.counts[kind].toLocaleString()}</span>
+                  <span className="text-[12px] tabular-nums text-subtle">
+                    {props.counts[kind].toLocaleString()}
+                  </span>
                 </>
               }
             >
@@ -172,7 +220,9 @@ export function GraphSettings(props: {
                 onChange={(checked) =>
                   onChange({
                     ...value,
-                    hidden: checked ? value.hidden.filter((hidden) => hidden !== kind) : [...value.hidden, kind],
+                    hidden: checked
+                      ? value.hidden.filter((hidden) => hidden !== kind)
+                      : [...value.hidden, kind],
                   })
                 }
               />
@@ -180,7 +230,11 @@ export function GraphSettings(props: {
           );
         })}
         <Row label="Orphans">
-          <SwitchControl label="Show files with no links" checked={value.orphans} onChange={(orphans) => onChange({ ...value, orphans })} />
+          <SwitchControl
+            label="Show files with no links"
+            checked={value.orphans}
+            onChange={(orphans) => onChange({ ...value, orphans })}
+          />
         </Row>
       </Section>
       <Section title="Groups" open={open.groups} onToggle={() => toggle("groups")}>
@@ -207,7 +261,12 @@ export function GraphSettings(props: {
               <IconButton
                 aria-label="Remove group"
                 title="Remove group"
-                onClick={() => onChange({ ...value, groups: value.groups.filter((other) => other.id !== group.id) })}
+                onClick={() =>
+                  onChange({
+                    ...value,
+                    groups: value.groups.filter((other) => other.id !== group.id),
+                  })
+                }
               >
                 <X size={13} aria-hidden />
               </IconButton>
@@ -221,7 +280,11 @@ export function GraphSettings(props: {
                 ...value,
                 groups: [
                   ...value.groups,
-                  { id: Math.max(0, ...value.groups.map((group) => group.id)) + 1, query: "", hue: value.groups.length % GROUP_HUES.length },
+                  {
+                    id: Math.max(0, ...value.groups.map((group) => group.id)) + 1,
+                    query: "",
+                    hue: value.groups.length % GROUP_HUES.length,
+                  },
                 ],
               })
             }
@@ -233,11 +296,27 @@ export function GraphSettings(props: {
       </Section>
       <Section title="Display" open={open.display} onToggle={() => toggle("display")}>
         <Row label="Arrows">
-          <SwitchControl label="Arrows" checked={value.display.arrows} onChange={(arrows) => setDisplay({ arrows })} />
+          <SwitchControl
+            label="Arrows"
+            checked={value.display.arrows}
+            onChange={(arrows) => setDisplay({ arrows })}
+          />
         </Row>
-        <Slider label="Text fade" value={value.display.textFade} onChange={(textFade) => setDisplay({ textFade })} />
-        <Slider label="Node size" value={value.display.nodeSize} onChange={(nodeSize) => setDisplay({ nodeSize })} />
-        <Slider label="Link thickness" value={value.display.linkThickness} onChange={(linkThickness) => setDisplay({ linkThickness })} />
+        <Slider
+          label="Text fade"
+          value={value.display.textFade}
+          onChange={(textFade) => setDisplay({ textFade })}
+        />
+        <Slider
+          label="Node size"
+          value={value.display.nodeSize}
+          onChange={(nodeSize) => setDisplay({ nodeSize })}
+        />
+        <Slider
+          label="Link thickness"
+          value={value.display.linkThickness}
+          onChange={(linkThickness) => setDisplay({ linkThickness })}
+        />
       </Section>
       <Section
         title="Forces"
@@ -245,16 +324,36 @@ export function GraphSettings(props: {
         onToggle={() => toggle("forces")}
         action={
           forcesChanged ? (
-            <IconButton aria-label="Reset forces" title="Reset forces" onClick={() => onChange({ ...value, forces: DEFAULT_FORCES })}>
+            <IconButton
+              aria-label="Reset forces"
+              title="Reset forces"
+              onClick={() => onChange({ ...value, forces: DEFAULT_FORCES })}
+            >
               <RotateCcw size={12} aria-hidden />
             </IconButton>
           ) : null
         }
       >
-        <Slider label="Center force" value={value.forces.center} onChange={(center) => setForces({ center })} />
-        <Slider label="Repel force" value={value.forces.repel} onChange={(repel) => setForces({ repel })} />
-        <Slider label="Link force" value={value.forces.link} onChange={(link) => setForces({ link })} />
-        <Slider label="Link distance" value={value.forces.distance} onChange={(distance) => setForces({ distance })} />
+        <Slider
+          label="Center force"
+          value={value.forces.center}
+          onChange={(center) => setForces({ center })}
+        />
+        <Slider
+          label="Repel force"
+          value={value.forces.repel}
+          onChange={(repel) => setForces({ repel })}
+        />
+        <Slider
+          label="Link force"
+          value={value.forces.link}
+          onChange={(link) => setForces({ link })}
+        />
+        <Slider
+          label="Link distance"
+          value={value.forces.distance}
+          onChange={(distance) => setForces({ distance })}
+        />
       </Section>
     </div>
   );

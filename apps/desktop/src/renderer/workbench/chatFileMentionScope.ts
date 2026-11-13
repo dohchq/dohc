@@ -20,5 +20,7 @@ export function channelFileCandidates(
   if (!shared) return files;
   const { folderPath } = channel;
   if (folderPath === undefined) return NO_FILES;
-  return files.filter(file => shareCoversLinkPath({ paths: [folderPath], versionId: null }, file.path));
+  return files.filter((file) =>
+    shareCoversLinkPath({ paths: [folderPath], versionId: null }, file.path),
+  );
 }

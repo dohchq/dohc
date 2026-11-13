@@ -1,8 +1,19 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import { createPortal } from "react-dom";
 import { LoaderCircle, RefreshCw } from "lucide-react";
 import { IconButton, PrimaryButton, SecondaryButton } from "../ui/controls";
-import { BUTTON_CHECKING, type IrreversibleAction } from "@dohc/automation-executor/automation-buttons";
+import {
+  BUTTON_CHECKING,
+  type IrreversibleAction,
+} from "@dohc/automation-executor/automation-buttons";
 import { useButtonView, type AutomationButtons } from "./useAutomationButtons";
 
 const BUTTON_NOT_CHECKED = "dohc could not check this button.";
@@ -18,18 +29,33 @@ export function RecordButton(props: {
   /** The record's name, as in "Mark paid for Invoice 12". */
   recordLabel: string;
 }) {
-  const { state, running, note, checking } = useButtonView(props.buttons, props.field, props.recordId);
+  const { state, running, note, checking } = useButtonView(
+    props.buttons,
+    props.field,
+    props.recordId,
+  );
   const id = useId();
   const button = useRef<HTMLButtonElement>(null);
   const words = useRef<HTMLSpanElement>(null);
   const [hovered, setHovered] = useState(false);
   const [focused, setFocused] = useState(false);
-  const [place, setPlace] = useState<CSSProperties>({ position: "fixed", left: 0, top: 0, visibility: "hidden" });
+  const [place, setPlace] = useState<CSSProperties>({
+    position: "fixed",
+    left: 0,
+    top: 0,
+    visibility: "hidden",
+  });
   // Focus that a click gives shows nothing, as for any control.
   const pointer = useRef(false);
-  const description = note ?? (checking ? BUTTON_CHECKING
-    : state === null ? BUTTON_NOT_CHECKED
-    : state.kind === "ready" ? null : state.reason);
+  const description =
+    note ??
+    (checking
+      ? BUTTON_CHECKING
+      : state === null
+        ? BUTTON_NOT_CHECKED
+        : state.kind === "ready"
+          ? null
+          : state.reason);
   const blocked = running || state === null || state.kind !== "ready";
   // Offered once dohc could not check, and kept, unpressable, while main answers.
   const recheck = !running && (state?.kind === "unchecked" || (state === null && !checking));
@@ -43,13 +69,19 @@ export function RecordButton(props: {
       if (document.activeElement === node) handBack.current = true;
     };
   }, []);
-  const irreversible = state?.kind === "ready" ? state.irreversible ?? [] : [];
+  const irreversible = state?.kind === "ready" ? (state.irreversible ?? []) : [];
   const [asking, setAsking] = useState<readonly IrreversibleAction[] | null>(null);
   const confirmId = useId();
   const warningId = useId();
   const open = asking !== null || (description !== null && (hovered || focused));
   const run = useRef<HTMLButtonElement>(null);
-  const press = (confirmed: readonly IrreversibleAction[] = []) => void props.buttons.press(props.field, { id: props.recordId, label: props.recordLabel }, undefined, confirmed.map((action) => action.name));
+  const press = (confirmed: readonly IrreversibleAction[] = []) =>
+    void props.buttons.press(
+      props.field,
+      { id: props.recordId, label: props.recordLabel },
+      undefined,
+      confirmed.map((action) => action.name),
+    );
   // Closing the question gives focus back to the button when focus was in
   // it, so it never falls to the page.
   const stopAsking = () => {
@@ -61,7 +93,11 @@ export function RecordButton(props: {
   // longer run, or would run other actions, it goes away.
   const warned = irreversible.map((action) => action.name).join("\u0000");
   useEffect(() => {
-    if (asking !== null && (blocked || asking.map((action) => action.name).join("\u0000") !== warned)) stopAsking();
+    if (
+      asking !== null &&
+      (blocked || asking.map((action) => action.name).join("\u0000") !== warned)
+    )
+      stopAsking();
   }, [blocked, warned]);
   useEffect(() => {
     if (asking !== null) run.current?.focus();
@@ -78,7 +114,10 @@ export function RecordButton(props: {
     const size = words.current.getBoundingClientRect();
     const left = Math.max(EDGE, Math.min(anchor.left, window.innerWidth - size.width - EDGE));
     const below = anchor.bottom + GAP;
-    const top = below + size.height + EDGE <= window.innerHeight ? below : Math.max(EDGE, anchor.top - GAP - size.height);
+    const top =
+      below + size.height + EDGE <= window.innerHeight
+        ? below
+        : Math.max(EDGE, anchor.top - GAP - size.height);
     setPlace({ position: "fixed", left, top });
   }, [open, description, asking !== null]);
 
@@ -107,7 +146,11 @@ export function RecordButton(props: {
   }, [open, asking !== null]);
 
   return (
-    <span className="inline-flex min-w-0 max-w-full" onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)}>
+    <span
+      className="inline-flex min-w-0 max-w-full"
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
       <SecondaryButton
         ref={button}
         size="row"
@@ -142,10 +185,20 @@ export function RecordButton(props: {
         }}
       >
         {/* An invisible copy of the label, with room for the spinner, sits under the label, so the button keeps its width while it runs. */}
-        <span data-label={props.field} className="grid min-w-0 grid-cols-1 before:invisible before:col-start-1 before:row-start-1 before:min-w-0 before:truncate before:pl-4 before:content-[attr(data-label)]">
+        <span
+          data-label={props.field}
+          className="grid min-w-0 grid-cols-1 before:invisible before:col-start-1 before:row-start-1 before:min-w-0 before:truncate before:pl-4 before:content-[attr(data-label)]"
+        >
           <span className="col-start-1 row-start-1 flex min-w-0 items-center justify-center gap-1">
             {/* Turns only where motion is allowed; with reduced motion it stays as a still mark beside the words. */}
-            {running || state?.kind === "checking" ? <LoaderCircle aria-hidden size={12} strokeWidth={1.9} className="shrink-0 animate-spin" /> : null}
+            {running || state?.kind === "checking" ? (
+              <LoaderCircle
+                aria-hidden
+                size={12}
+                strokeWidth={1.9}
+                className="shrink-0 animate-spin"
+              />
+            ) : null}
             <span className="truncate">{props.field}</span>
           </span>
         </span>
@@ -181,66 +234,86 @@ export function RecordButton(props: {
           <RefreshCw aria-hidden size={12} strokeWidth={1.9} />
         </IconButton>
       ) : null}
-      {asking !== null ? createPortal(
-        <span
-          ref={words}
-          id={confirmId}
-          role="dialog"
-          aria-label={`Run ${props.field} for ${props.recordLabel}`}
-          aria-describedby={warningId}
-          style={place}
-          onKeyDown={(event) => {
-            // A held key opened the question; it does not answer it.
-            if (event.repeat && (event.key === "Enter" || event.key === " ")) event.preventDefault();
-            // Tab stays in the question, which sits at the end of the page.
-            if (event.key === "Tab") {
-              const controls = [...event.currentTarget.querySelectorAll<HTMLElement>("button")];
-              const at = controls.indexOf(document.activeElement as HTMLElement);
-              const next = controls[(at + (event.shiftKey ? -1 : 1) + controls.length) % controls.length];
-              if (next) {
-                event.preventDefault();
-                next.focus();
-              }
-            }
-            if (event.key === "Escape") {
-              event.stopPropagation();
-              stopAsking();
-            }
-          }}
-          onBlur={(event) => {
-            // Focus that leaves both the question and its button answers Cancel.
-            const next = event.relatedTarget;
-            if (next instanceof Node && (event.currentTarget.contains(next) || next === button.current)) return;
-            if (next === null) stopAsking();
-            else setAsking(null);
-          }}
-          className="dohc-popover dohc-pop-in z-50 flex w-max max-w-64 flex-col gap-2 rounded-lg border border-line bg-panel p-2 text-left text-[12px] font-normal text-ink"
-        >
-          <span id={warningId}>{list.format(asking.map((action) => action.label))} can't be undone.</span>
-          <span className="flex justify-end gap-1.5">
-            <SecondaryButton size="compact" onClick={stopAsking}>Cancel</SecondaryButton>
-            <PrimaryButton ref={run} size="compact" onClick={() => {
-              const confirmed = asking;
-              setAsking(null);
-              button.current?.focus();
-              if (!blocked) press(confirmed);
-            }}>Run</PrimaryButton>
-          </span>
-        </span>,
-        document.body,
-      ) : description === null ? null : createPortal(
-        <span
-          ref={words}
-          id={id}
-          role="tooltip"
-          hidden={!open}
-          style={place}
-          className="dohc-popover dohc-pop-in z-50 w-max max-w-64 rounded-lg border border-line bg-panel px-2 py-1 text-left text-[12px] font-normal text-ink"
-        >
-          {description}
-        </span>,
-        document.body,
-      )}
+      {asking !== null
+        ? createPortal(
+            <span
+              ref={words}
+              id={confirmId}
+              role="dialog"
+              aria-label={`Run ${props.field} for ${props.recordLabel}`}
+              aria-describedby={warningId}
+              style={place}
+              onKeyDown={(event) => {
+                // A held key opened the question; it does not answer it.
+                if (event.repeat && (event.key === "Enter" || event.key === " "))
+                  event.preventDefault();
+                // Tab stays in the question, which sits at the end of the page.
+                if (event.key === "Tab") {
+                  const controls = [...event.currentTarget.querySelectorAll<HTMLElement>("button")];
+                  const at = controls.indexOf(document.activeElement as HTMLElement);
+                  const next =
+                    controls[(at + (event.shiftKey ? -1 : 1) + controls.length) % controls.length];
+                  if (next) {
+                    event.preventDefault();
+                    next.focus();
+                  }
+                }
+                if (event.key === "Escape") {
+                  event.stopPropagation();
+                  stopAsking();
+                }
+              }}
+              onBlur={(event) => {
+                // Focus that leaves both the question and its button answers Cancel.
+                const next = event.relatedTarget;
+                if (
+                  next instanceof Node &&
+                  (event.currentTarget.contains(next) || next === button.current)
+                )
+                  return;
+                if (next === null) stopAsking();
+                else setAsking(null);
+              }}
+              className="dohc-popover dohc-pop-in z-50 flex w-max max-w-64 flex-col gap-2 rounded-lg border border-line bg-panel p-2 text-left text-[12px] font-normal text-ink"
+            >
+              <span id={warningId}>
+                {list.format(asking.map((action) => action.label))} can't be undone.
+              </span>
+              <span className="flex justify-end gap-1.5">
+                <SecondaryButton size="compact" onClick={stopAsking}>
+                  Cancel
+                </SecondaryButton>
+                <PrimaryButton
+                  ref={run}
+                  size="compact"
+                  onClick={() => {
+                    const confirmed = asking;
+                    setAsking(null);
+                    button.current?.focus();
+                    if (!blocked) press(confirmed);
+                  }}
+                >
+                  Run
+                </PrimaryButton>
+              </span>
+            </span>,
+            document.body,
+          )
+        : description === null
+          ? null
+          : createPortal(
+              <span
+                ref={words}
+                id={id}
+                role="tooltip"
+                hidden={!open}
+                style={place}
+                className="dohc-popover dohc-pop-in z-50 w-max max-w-64 rounded-lg border border-line bg-panel px-2 py-1 text-left text-[12px] font-normal text-ink"
+              >
+                {description}
+              </span>,
+              document.body,
+            )}
     </span>
   );
 }

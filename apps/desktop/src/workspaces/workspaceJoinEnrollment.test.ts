@@ -14,10 +14,7 @@ it("checks the envelope inside the capture-free identity bootstrap", async () =>
   const installed: Buffer[] = [];
   const transport = {
     bootstrapJoinIdentity: vi.fn(
-      async (
-        identity: RelayWorkspaceIdentity | null,
-        initialize: () => Promise<void>,
-      ) => {
+      async (identity: RelayWorkspaceIdentity | null, initialize: () => Promise<void>) => {
         expect(identity).toEqual(IDENTITY);
         order.push("identity");
         await initialize();

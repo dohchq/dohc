@@ -39,7 +39,12 @@ const OTHER_VERIFIER = "other-pkce-verifier-0123456789-abcdefghijklmnopqrstuvwxy
 const EDIT_RELEASED: HandlerOverrides = {
   publicEditRelease: { version: 1 },
   namedBrowserSessionLimits: {
-    maxSessions: 8, retentionMs: 60_000, maxPendingRequests: 4, maxRequestBytes: 8192, maxResponseBytes: 16384, timeoutMs: 1000,
+    maxSessions: 8,
+    retentionMs: 60_000,
+    maxPendingRequests: 4,
+    maxRequestBytes: 8192,
+    maxResponseBytes: 16384,
+    timeoutMs: 1000,
   },
 };
 const AGENT_TABLES = [
@@ -51,12 +56,31 @@ const AGENT_TABLES = [
 
 afterEach(closeTestStorages);
 
-type Fixture = { storage: SyncRelayStorage; dbPath: string; h: SyncRelayHandler; now: { value: number } };
+type Fixture = {
+  storage: SyncRelayStorage;
+  dbPath: string;
+  h: SyncRelayHandler;
+  now: { value: number };
+};
 type Link = { shareId: string; grantId: string; secret: string; resource: string };
-type Connected = { clientId: string; code: string; accessToken: string; refreshToken: string; connectionId: string };
+type Connected = {
+  clientId: string;
+  code: string;
+  accessToken: string;
+  refreshToken: string;
+  connectionId: string;
+};
 
-function handler(storage: SyncRelayStorage, now: { value: number }, overrides: HandlerOverrides = {}): SyncRelayHandler {
-  return testHandler(storage, { nowMs: () => now.value, relayExchangeKey: RELAY_EXCHANGE_KEY, ...overrides });
+function handler(
+  storage: SyncRelayStorage,
+  now: { value: number },
+  overrides: HandlerOverrides = {},
+): SyncRelayHandler {
+  return testHandler(storage, {
+    nowMs: () => now.value,
+    relayExchangeKey: RELAY_EXCHANGE_KEY,
+    ...overrides,
+  });
 }
 
 async function fixture(overrides: HandlerOverrides = {}): Promise<Fixture> {
@@ -79,29 +103,55 @@ async function ok(response: Response): Promise<Record<string, unknown>> {
 // Every refusal is the same bytes as a link that never existed.
 async function expectRefused(response: Response): Promise<void> {
   const refusal = errorResponse(notFound());
-  expect({ status: response.status, body: await response.text() })
-    .toEqual({ status: refusal.status, body: await refusal.text() });
+  expect({ status: response.status, body: await response.text() }).toEqual({
+    status: refusal.status,
+    body: await refusal.text(),
+  });
 }
 
 async function createLink(f: Fixture, paths: string[] = ["docs"], access = "view"): Promise<Link> {
-  const shareId = await createShare(f.h, OWNER, WORKSPACE, { recipientUserId: "seed-recipient", paths });
-  const link = await ok(await f.h(request(OWNER, `/sync/${WORKSPACE}/shares/${shareId}/links`, jsonBody({ access }))));
+  const shareId = await createShare(f.h, OWNER, WORKSPACE, {
+    recipientUserId: "seed-recipient",
+    paths,
+  });
+  const link = await ok(
+    await f.h(request(OWNER, `/sync/${WORKSPACE}/shares/${shareId}/links`, jsonBody({ access }))),
+  );
   const secret = linkSecret(link.url);
   return { shareId, grantId: String(link.grantId), secret, resource: resourceFor(secret) };
 }
 
-function internal(f: Fixture, path: string, body: unknown, exchangeKey: string | null = RELAY_EXCHANGE_KEY): Promise<Response> {
+function internal(
+  f: Fixture,
+  path: string,
+  body: unknown,
+  exchangeKey: string | null = RELAY_EXCHANGE_KEY,
+): Promise<Response> {
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (exchangeKey !== null) headers["x-dohc-relay-exchange-key"] = exchangeKey;
-  return f.h(request(null, `/sync/link/${path}`, { method: "POST", headers, body: JSON.stringify(body) }));
+  return f.h(
+    request(null, `/sync/link/${path}`, { method: "POST", headers, body: JSON.stringify(body) }),
+  );
 }
 
 async function registerClient(f: Fixture, redirectUris: string[] = [REDIRECT]): Promise<string> {
-  const body = await ok(await internal(f, "agent-clients", { registration: "registered", redirectUris, clientName: "Test agent" }));
+  const body = await ok(
+    await internal(f, "agent-clients", {
+      registration: "registered",
+      redirectUris,
+      clientName: "Test agent",
+    }),
+  );
   return String(body.clientId);
 }
 
-function begin(f: Fixture, link: Link, clientId: string, redirectUri = REDIRECT, verifier = VERIFIER): Promise<Response> {
+function begin(
+  f: Fixture,
+  link: Link,
+  clientId: string,
+  redirectUri = REDIRECT,
+  verifier = VERIFIER,
+): Promise<Response> {
   return internal(f, "agent-authorizations", {
     clientId,
     resource: link.resource,
@@ -116,18 +166,36 @@ async function beginRequest(f: Fixture, link: Link, clientId: string): Promise<s
   return String((await ok(await begin(f, link, clientId))).requestId);
 }
 
-function decide(f: Fixture, requestId: string, decision: "allow" | "cancel" = "allow"): Promise<Response> {
+function decide(
+  f: Fixture,
+  requestId: string,
+  decision: "allow" | "cancel" = "allow",
+): Promise<Response> {
   return internal(f, "agent-authorizations/decision", { requestId, decision });
 }
 
-async function authorize(f: Fixture, link: Link, clientId: string, redirectUri = REDIRECT): Promise<string> {
+async function authorize(
+  f: Fixture,
+  link: Link,
+  clientId: string,
+  redirectUri = REDIRECT,
+): Promise<string> {
   const requestId = String((await ok(await begin(f, link, clientId, redirectUri))).requestId);
   const decided = await ok(await decide(f, requestId));
   expect(decided).toMatchObject({ redirectUri, state: "agent-state" });
   return String(decided.code);
 }
 
-function redeem(f: Fixture, input: { clientId: string; code: string; resource: string; redirectUri?: string; codeVerifier?: string }): Promise<Response> {
+function redeem(
+  f: Fixture,
+  input: {
+    clientId: string;
+    code: string;
+    resource: string;
+    redirectUri?: string;
+    codeVerifier?: string;
+  },
+): Promise<Response> {
   return internal(f, "agent-token", {
     grantType: "authorization_code",
     clientId: input.clientId,
@@ -138,8 +206,18 @@ function redeem(f: Fixture, input: { clientId: string; code: string; resource: s
   });
 }
 
-function refresh(f: Fixture, clientId: string, refreshToken: string, resource: string): Promise<Response> {
-  return internal(f, "agent-token", { grantType: "refresh_token", clientId, refreshToken, resource });
+function refresh(
+  f: Fixture,
+  clientId: string,
+  refreshToken: string,
+  resource: string,
+): Promise<Response> {
+  return internal(f, "agent-token", {
+    grantType: "refresh_token",
+    clientId,
+    refreshToken,
+    resource,
+  });
 }
 
 function introspect(f: Fixture, accessToken: string): Promise<Response> {
@@ -147,56 +225,101 @@ function introspect(f: Fixture, accessToken: string): Promise<Response> {
 }
 
 async function connect(f: Fixture, link: Link, clientId?: string): Promise<Connected> {
-  const client = clientId ?? await registerClient(f);
+  const client = clientId ?? (await registerClient(f));
   const code = await authorize(f, link, client);
   const tokens = await ok(await redeem(f, { clientId: client, code, resource: link.resource }));
   const accessToken = String(tokens.accessToken);
   const introspected = await ok(await introspect(f, accessToken));
-  return { clientId: client, code, accessToken, refreshToken: String(tokens.refreshToken), connectionId: String(introspected.connectionId) };
+  return {
+    clientId: client,
+    code,
+    accessToken,
+    refreshToken: String(tokens.refreshToken),
+    connectionId: String(introspected.connectionId),
+  };
 }
 
 function agentsPath(link: Link, workspaceId = WORKSPACE, suffix = ""): string {
   return `/sync/${workspaceId}/shares/${link.shareId}/links/${link.grantId}/agents${suffix}`;
 }
 
-function listAgents(f: Fixture, user: string, link: Link, options: { workspaceId?: string; cursor?: string } = {}): Promise<Response> {
+function listAgents(
+  f: Fixture,
+  user: string,
+  link: Link,
+  options: { workspaceId?: string; cursor?: string } = {},
+): Promise<Response> {
   const query = options.cursor ? `?cursor=${encodeURIComponent(options.cursor)}` : "";
   return f.h(request(user, `${agentsPath(link, options.workspaceId)}${query}`));
 }
 
-function disconnect(f: Fixture, user: string, link: Link, connectionId: string, workspaceId = WORKSPACE): Promise<Response> {
-  return f.h(request(user, agentsPath(link, workspaceId, `/${connectionId}/disconnect`), jsonBody({})));
+function disconnect(
+  f: Fixture,
+  user: string,
+  link: Link,
+  connectionId: string,
+  workspaceId = WORKSPACE,
+): Promise<Response> {
+  return f.h(
+    request(user, agentsPath(link, workspaceId, `/${connectionId}/disconnect`), jsonBody({})),
+  );
 }
 
 async function agentStatuses(f: Fixture, link: Link): Promise<Record<string, unknown>> {
   const body = await ok(await listAgents(f, OWNER, link));
-  return Object.fromEntries((body.agents as Array<{ connectionId: string; status: string }>).map((agent) => [agent.connectionId, agent.status]));
+  return Object.fromEntries(
+    (body.agents as Array<{ connectionId: string; status: string }>).map((agent) => [
+      agent.connectionId,
+      agent.status,
+    ]),
+  );
 }
 
 function endLink(f: Fixture, link: Link): Promise<Response> {
-  return f.h(request(OWNER, `/sync/shares/${link.shareId}/revoke`,
-    jsonBody({ workspaceId: WORKSPACE, expectedDependentGrantIds: [], grantId: link.grantId })));
+  return f.h(
+    request(
+      OWNER,
+      `/sync/shares/${link.shareId}/revoke`,
+      jsonBody({ workspaceId: WORKSPACE, expectedDependentGrantIds: [], grantId: link.grantId }),
+    ),
+  );
 }
 
 function retuneLink(f: Fixture, link: Link, access: string): Promise<Response> {
-  return f.h(request(OWNER, `/sync/shares/${link.shareId}/links/${link.grantId}/retune`,
-    jsonBody({ workspaceId: WORKSPACE, access, expectedDependentGrantIds: [] })));
+  return f.h(
+    request(
+      OWNER,
+      `/sync/shares/${link.shareId}/links/${link.grantId}/retune`,
+      jsonBody({ workspaceId: WORKSPACE, access, expectedDependentGrantIds: [] }),
+    ),
+  );
 }
 
 function workspaceUsage(dbPath: string): number {
   return inspect(dbPath, (db) =>
-    Number(db.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id = ?").get(WORKSPACE)?.usage_bytes));
+    Number(
+      db
+        .prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id = ?")
+        .get(WORKSPACE)?.usage_bytes,
+    ),
+  );
 }
 
 function connectionRow(dbPath: string, connectionId: string): { status: unknown; tokens: unknown } {
   return inspect(dbPath, (db) => ({
-    status: db.prepare("SELECT status FROM sync_relay_agent_connections WHERE connection_id = ?").get(connectionId)?.status,
-    tokens: db.prepare("SELECT COUNT(*) AS count FROM sync_relay_agent_tokens WHERE connection_id = ?").get(connectionId)?.count,
+    status: db
+      .prepare("SELECT status FROM sync_relay_agent_connections WHERE connection_id = ?")
+      .get(connectionId)?.status,
+    tokens: db
+      .prepare("SELECT COUNT(*) AS count FROM sync_relay_agent_tokens WHERE connection_id = ?")
+      .get(connectionId)?.count,
   }));
 }
 
 function rowCount(dbPath: string, table: (typeof AGENT_TABLES)[number]): number {
-  return inspect(dbPath, (db) => Number(db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get()?.count ?? 0));
+  return inspect(dbPath, (db) =>
+    Number(db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get()?.count ?? 0),
+  );
 }
 
 describe("agent sign-in for share links", () => {
@@ -206,10 +329,27 @@ describe("agent sign-in for share links", () => {
     const clientId = await registerClient(f);
     const routes: Array<[string, unknown]> = [
       ["agent-clients", { registration: "registered", redirectUris: [REDIRECT] }],
-      ["agent-authorizations", { clientId, resource: link.resource, redirectUri: REDIRECT, codeChallenge: pkceS256Challenge(VERIFIER), codeChallengeMethod: "S256" }],
+      [
+        "agent-authorizations",
+        {
+          clientId,
+          resource: link.resource,
+          redirectUri: REDIRECT,
+          codeChallenge: pkceS256Challenge(VERIFIER),
+          codeChallengeMethod: "S256",
+        },
+      ],
       ["agent-authorizations/consent", { requestId: "x".repeat(43) }],
       ["agent-authorizations/decision", { requestId: "x".repeat(43), decision: "allow" }],
-      ["agent-token", { grantType: "refresh_token", clientId, refreshToken: "x".repeat(43), resource: link.resource }],
+      [
+        "agent-token",
+        {
+          grantType: "refresh_token",
+          clientId,
+          refreshToken: "x".repeat(43),
+          resource: link.resource,
+        },
+      ],
       ["agent-introspect", { accessToken: "x".repeat(43) }],
     ];
     for (const [path, body] of routes) {
@@ -217,7 +357,12 @@ describe("agent sign-in for share links", () => {
       await expectRefused(await internal(f, path, body, `${RELAY_EXCHANGE_KEY}-wrong`));
     }
     const unconfigured = { ...f, h: testHandler(f.storage, { nowMs: () => f.now.value }) };
-    await expectRefused(await internal(unconfigured, "agent-clients", { registration: "registered", redirectUris: [REDIRECT] }));
+    await expectRefused(
+      await internal(unconfigured, "agent-clients", {
+        registration: "registered",
+        redirectUris: [REDIRECT],
+      }),
+    );
   });
 
   it("connects an agent with consent, stores only hashes, and keeps the connection across a restart", async () => {
@@ -225,7 +370,9 @@ describe("agent sign-in for share links", () => {
     const link = await createLink(f);
     const clientId = await registerClient(f);
     const requestId = await beginRequest(f, link, clientId);
-    expect(await ok(await internal(f, "agent-authorizations/consent", { requestId }))).toMatchObject({
+    expect(
+      await ok(await internal(f, "agent-authorizations/consent", { requestId })),
+    ).toMatchObject({
       access: "view",
       reportedClientName: "Test agent",
       redirectUri: REDIRECT,
@@ -235,20 +382,27 @@ describe("agent sign-in for share links", () => {
     const accessToken = String(tokens.accessToken);
     const refreshToken = String(tokens.refreshToken);
     const introspected = await ok(await introspect(f, accessToken));
-    expect(introspected).toMatchObject({ shareId: link.shareId, grantId: link.grantId, access: "view" });
+    expect(introspected).toMatchObject({
+      shareId: link.shareId,
+      grantId: link.grantId,
+      access: "view",
+    });
 
     const listed = await ok(await listAgents(f, OWNER, link));
     expect(listed.nextCursor).toBeNull();
-    expect(listed.agents).toEqual([{
-      connectionId: introspected.connectionId,
-      reportedName: "Test agent",
-      connectedAtMs: 10_000,
-      lastActionAtMs: null,
-      status: "active",
-    }]);
+    expect(listed.agents).toEqual([
+      {
+        connectionId: introspected.connectionId,
+        reportedName: "Test agent",
+        connectedAtMs: 10_000,
+        lastActionAtMs: null,
+        status: "active",
+      },
+    ]);
 
     const stored = inspect(f.dbPath, (db) =>
-      JSON.stringify(AGENT_TABLES.map((table) => db.prepare(`SELECT * FROM ${table}`).all())));
+      JSON.stringify(AGENT_TABLES.map((table) => db.prepare(`SELECT * FROM ${table}`).all())),
+    );
     for (const raw of [link.secret, requestId, code, accessToken, refreshToken]) {
       expect(stored).not.toContain(raw);
     }
@@ -256,10 +410,16 @@ describe("agent sign-in for share links", () => {
     closeTestStorage(f.storage);
     const storage = reopenTestStorage(f.dbPath);
     const reopened: Fixture = { ...f, storage, h: handler(storage, f.now) };
-    expect(await ok(await introspect(reopened, accessToken))).toMatchObject({ connectionId: introspected.connectionId });
+    expect(await ok(await introspect(reopened, accessToken))).toMatchObject({
+      connectionId: introspected.connectionId,
+    });
     const refreshed = await ok(await refresh(reopened, clientId, refreshToken, link.resource));
-    expect(await ok(await introspect(reopened, String(refreshed.accessToken)))).toMatchObject({ connectionId: introspected.connectionId });
-    expect(await agentStatuses(reopened, link)).toEqual({ [String(introspected.connectionId)]: "active" });
+    expect(await ok(await introspect(reopened, String(refreshed.accessToken)))).toMatchObject({
+      connectionId: introspected.connectionId,
+    });
+    expect(await agentStatuses(reopened, link)).toEqual({
+      [String(introspected.connectionId)]: "active",
+    });
   });
 
   it("refuses a redirect address the client did not register, and spends a code sent to another one", async () => {
@@ -271,8 +431,17 @@ describe("agent sign-in for share links", () => {
 
     const both = await registerClient(f, [REDIRECT, OTHER_REDIRECT]);
     const code = await authorize(f, link, both, REDIRECT);
-    await expectRefused(await redeem(f, { clientId: both, code, resource: link.resource, redirectUri: OTHER_REDIRECT }));
-    await expectRefused(await redeem(f, { clientId: both, code, resource: link.resource, redirectUri: REDIRECT }));
+    await expectRefused(
+      await redeem(f, {
+        clientId: both,
+        code,
+        resource: link.resource,
+        redirectUri: OTHER_REDIRECT,
+      }),
+    );
+    await expectRefused(
+      await redeem(f, { clientId: both, code, resource: link.resource, redirectUri: REDIRECT }),
+    );
     expect(rowCount(f.dbPath, "sync_relay_agent_connections")).toBe(0);
   });
 
@@ -281,7 +450,9 @@ describe("agent sign-in for share links", () => {
     const link = await createLink(f);
     const clientId = await registerClient(f);
     const code = await authorize(f, link, clientId);
-    await expectRefused(await redeem(f, { clientId, code, resource: link.resource, codeVerifier: OTHER_VERIFIER }));
+    await expectRefused(
+      await redeem(f, { clientId, code, resource: link.resource, codeVerifier: OTHER_VERIFIER }),
+    );
     await expectRefused(await redeem(f, { clientId, code, resource: link.resource }));
     expect(rowCount(f.dbPath, "sync_relay_agent_connections")).toBe(0);
     expect(rowCount(f.dbPath, "sync_relay_agent_tokens")).toBe(0);
@@ -293,8 +464,20 @@ describe("agent sign-in for share links", () => {
     const other = await createLink(f, ["notes"]);
     const clientId = await registerClient(f);
     const otherClient = await registerClient(f);
-    await expectRefused(await redeem(f, { clientId: otherClient, code: await authorize(f, link, clientId), resource: link.resource }));
-    await expectRefused(await redeem(f, { clientId, code: await authorize(f, link, clientId), resource: other.resource }));
+    await expectRefused(
+      await redeem(f, {
+        clientId: otherClient,
+        code: await authorize(f, link, clientId),
+        resource: link.resource,
+      }),
+    );
+    await expectRefused(
+      await redeem(f, {
+        clientId,
+        code: await authorize(f, link, clientId),
+        resource: other.resource,
+      }),
+    );
     expect(rowCount(f.dbPath, "sync_relay_agent_connections")).toBe(0);
   });
 
@@ -302,23 +485,36 @@ describe("agent sign-in for share links", () => {
     const f = await fixture();
     const link = await createLink(f);
     const agent = await connect(f, link);
-    const refreshTokens = () => inspect(f.dbPath, (db) => db.prepare(`SELECT COUNT(*) AS count FROM sync_relay_agent_tokens
-      WHERE connection_id = ? AND kind = 'refresh'`).get(agent.connectionId)?.count);
+    const refreshTokens = () =>
+      inspect(
+        f.dbPath,
+        (db) =>
+          db
+            .prepare(`SELECT COUNT(*) AS count FROM sync_relay_agent_tokens
+      WHERE connection_id = ? AND kind = 'refresh'`)
+            .get(agent.connectionId)?.count,
+      );
     const first = await ok(await refresh(f, agent.clientId, agent.refreshToken, link.resource));
     f.now.value += AGENT_USED_REFRESH_TOKEN_RETENTION_MS;
 
     // Used 30 days ago, and not yet pruned: unknown, so the connection stays.
     await expectRefused(await refresh(f, agent.clientId, agent.refreshToken, link.resource));
     expect(refreshTokens()).toBe(2);
-    const second = await ok(await refresh(f, agent.clientId, String(first.refreshToken), link.resource));
-    expect(await ok(await introspect(f, String(second.accessToken)))).toMatchObject({ connectionId: agent.connectionId });
+    const second = await ok(
+      await refresh(f, agent.clientId, String(first.refreshToken), link.resource),
+    );
+    expect(await ok(await introspect(f, String(second.accessToken)))).toMatchObject({
+      connectionId: agent.connectionId,
+    });
     // That refresh pruned the old token's hash; the one it used and the new one remain.
     expect(refreshTokens()).toBe(2);
     await expectRefused(await refresh(f, agent.clientId, agent.refreshToken, link.resource));
     expect(connectionRow(f.dbPath, agent.connectionId).status).toBe("active");
 
     // A token used just now still ends the connection when reused.
-    await expectRefused(await refresh(f, agent.clientId, String(first.refreshToken), link.resource));
+    await expectRefused(
+      await refresh(f, agent.clientId, String(first.refreshToken), link.resource),
+    );
     expect(connectionRow(f.dbPath, agent.connectionId)).toEqual({ status: "retired", tokens: 0 });
   });
 
@@ -330,13 +526,18 @@ describe("agent sign-in for share links", () => {
     const agent = await connect(f, link);
 
     await expectRefused(await listAgents(f, OWNER, link, { workspaceId: OWNER_SECOND_WORKSPACE }));
-    await expectRefused(await disconnect(f, OWNER, link, agent.connectionId, OWNER_SECOND_WORKSPACE));
+    await expectRefused(
+      await disconnect(f, OWNER, link, agent.connectionId, OWNER_SECOND_WORKSPACE),
+    );
     await expectRefused(await listAgents(f, OWNER, { ...other, grantId: link.grantId }));
     await expectRefused(await disconnect(f, OWNER, other, agent.connectionId));
     expect((await ok(await listAgents(f, OWNER, other))).agents).toEqual([]);
 
     await expectRefused(await refresh(f, agent.clientId, agent.refreshToken, other.resource));
-    expect(await ok(await introspect(f, agent.accessToken))).toMatchObject({ shareId: link.shareId, grantId: link.grantId });
+    expect(await ok(await introspect(f, agent.accessToken))).toMatchObject({
+      shareId: link.shareId,
+      grantId: link.grantId,
+    });
     expect(await agentStatuses(f, link)).toEqual({ [agent.connectionId]: "active" });
     await ok(await refresh(f, agent.clientId, agent.refreshToken, link.resource));
   });
@@ -349,7 +550,13 @@ describe("agent sign-in for share links", () => {
 
     const ended = await ok(await disconnect(f, OWNER, link, first.connectionId));
     expect(ended.agent).toMatchObject({ connectionId: first.connectionId, status: "disconnected" });
-    expect(Object.keys(ended.agent as object).sort()).toEqual(["connectedAtMs", "connectionId", "lastActionAtMs", "reportedName", "status"]);
+    expect(Object.keys(ended.agent as object).sort()).toEqual([
+      "connectedAtMs",
+      "connectionId",
+      "lastActionAtMs",
+      "reportedName",
+      "status",
+    ]);
     await expectRefused(await introspect(f, first.accessToken));
     await expectRefused(await refresh(f, first.clientId, first.refreshToken, link.resource));
     await ok(await introspect(f, second.accessToken));
@@ -363,13 +570,23 @@ describe("agent sign-in for share links", () => {
 
   // Each change, once through the owner route and once straight in storage, so a
   // race can commit it inside a sign-in step after the route has read its request.
-  const changes: Array<[
-    name: string,
-    change: (f: Fixture, link: Link) => Promise<Response>,
-    changeInStorage: (storage: SyncRelayStorage, link: Link, atMs: number) => unknown,
-  ]> = [
-    ["End link", endLink, (storage, link, atMs) =>
-      storage.revokeShareGrant({ shareId: link.shareId, grantId: link.grantId, revokedAtMs: atMs })],
+  const changes: Array<
+    [
+      name: string,
+      change: (f: Fixture, link: Link) => Promise<Response>,
+      changeInStorage: (storage: SyncRelayStorage, link: Link, atMs: number) => unknown,
+    ]
+  > = [
+    [
+      "End link",
+      endLink,
+      (storage, link, atMs) =>
+        storage.revokeShareGrant({
+          shareId: link.shareId,
+          grantId: link.grantId,
+          revokedAtMs: atMs,
+        }),
+    ],
   ];
 
   describe.each(changes)("%s", (_name, change, changeInStorage) => {
@@ -386,46 +603,64 @@ describe("agent sign-in for share links", () => {
 
       await expectRefused(await introspect(f, agent.accessToken));
       await expectRefused(await refresh(f, agent.clientId, agent.refreshToken, link.resource));
-      await expectRefused(await internal(f, "agent-authorizations/consent", { requestId: pending }));
+      await expectRefused(
+        await internal(f, "agent-authorizations/consent", { requestId: pending }),
+      );
       await expectRefused(await decide(f, pending));
-      await expectRefused(await redeem(f, { clientId: agent.clientId, code, resource: link.resource }));
+      await expectRefused(
+        await redeem(f, { clientId: agent.clientId, code, resource: link.resource }),
+      );
       const remaining = inspect(f.dbPath, (db) => ({
-        authorizations: db.prepare("SELECT COUNT(*) AS count FROM sync_relay_agent_authorizations WHERE grant_id = ?").get(link.grantId)?.count,
-        tokens: db.prepare("SELECT COUNT(*) AS count FROM sync_relay_agent_tokens WHERE connection_id = ?").get(agent.connectionId)?.count,
-        status: db.prepare("SELECT status FROM sync_relay_agent_connections WHERE connection_id = ?").get(agent.connectionId)?.status,
+        authorizations: db
+          .prepare(
+            "SELECT COUNT(*) AS count FROM sync_relay_agent_authorizations WHERE grant_id = ?",
+          )
+          .get(link.grantId)?.count,
+        tokens: db
+          .prepare("SELECT COUNT(*) AS count FROM sync_relay_agent_tokens WHERE connection_id = ?")
+          .get(agent.connectionId)?.count,
+        status: db
+          .prepare("SELECT status FROM sync_relay_agent_connections WHERE connection_id = ?")
+          .get(agent.connectionId)?.status,
       }));
       expect(remaining).toEqual({ authorizations: 0, tokens: 0, status: "retired" });
       await ok(await introspect(f, bystander.accessToken));
     });
 
-    it.each(["code exchange"])("refuses an agent when the change lands during its %s", async (step) => {
-      const f = await fixture();
-      const link = await createLink(f);
-      const clientId = await registerClient(f);
-      const requestId = await beginRequest(f, link, clientId);
-      const code = step === "code exchange" ? String((await ok(await decide(f, requestId))).code) : null;
-      const landed: unknown[] = [];
-      const racing = interceptStorage(f.storage, {
-        decideAgentAuthorization: (target, input) => {
-          landed.push(changeInStorage(target, link, f.now.value));
-          return target.decideAgentAuthorization(input);
-        },
-        redeemAgentAuthorizationCode: (target, input) => {
-          landed.push(changeInStorage(target, link, f.now.value));
-          return target.redeemAgentAuthorizationCode(input);
-        },
-      });
-      const raced: Fixture = { ...f, h: handler(racing, f.now) };
-      if (step === "decision") {
-        await expectRefused(await decide(raced, requestId));
-      } else {
-        await expectRefused(await redeem(raced, { clientId, code: code!, resource: link.resource }));
-      }
-      expect(landed).toEqual([expect.objectContaining({ ok: true })]);
-      expect(rowCount(f.dbPath, "sync_relay_agent_connections")).toBe(0);
-      expect(rowCount(f.dbPath, "sync_relay_agent_tokens")).toBe(0);
-      expect(rowCount(f.dbPath, "sync_relay_agent_authorizations")).toBe(0);
-    });
+    it.each(["code exchange"])(
+      "refuses an agent when the change lands during its %s",
+      async (step) => {
+        const f = await fixture();
+        const link = await createLink(f);
+        const clientId = await registerClient(f);
+        const requestId = await beginRequest(f, link, clientId);
+        const code =
+          step === "code exchange" ? String((await ok(await decide(f, requestId))).code) : null;
+        const landed: unknown[] = [];
+        const racing = interceptStorage(f.storage, {
+          decideAgentAuthorization: (target, input) => {
+            landed.push(changeInStorage(target, link, f.now.value));
+            return target.decideAgentAuthorization(input);
+          },
+          redeemAgentAuthorizationCode: (target, input) => {
+            landed.push(changeInStorage(target, link, f.now.value));
+            return target.redeemAgentAuthorizationCode(input);
+          },
+        });
+        const raced: Fixture = { ...f, h: handler(racing, f.now) };
+        if (step === "decision") {
+          await expectRefused(await decide(raced, requestId));
+        } else {
+          await expectRefused(
+            await redeem(raced, { clientId, code: code!, resource: link.resource }),
+          );
+        }
+        expect(landed).toEqual([expect.objectContaining({ ok: true })]);
+        expect(rowCount(f.dbPath, "sync_relay_agent_connections")).toBe(0);
+        expect(rowCount(f.dbPath, "sync_relay_agent_tokens")).toBe(0);
+        expect(rowCount(f.dbPath, "sync_relay_agent_authorizations")).toBe(0);
+      },
+    );
   });
 
   it("refuses a code when the agent's principal would pass the workspace quota", async () => {
@@ -435,18 +670,44 @@ describe("agent sign-in for share links", () => {
     const code = await authorize(f, link, clientId);
     const usage = workspaceUsage(f.dbPath);
     closeTestStorage(f.storage);
-    const full = reopenTestStorage(f.dbPath, { workspaceQuotaBytes: usage + LINK_DISCUSSION_PRINCIPAL_FIXED_STORAGE_BYTES });
-    await expectRefused(await redeem({ ...f, storage: full, h: handler(full, f.now) }, { clientId, code, resource: link.resource }));
+    const full = reopenTestStorage(f.dbPath, {
+      workspaceQuotaBytes: usage + LINK_DISCUSSION_PRINCIPAL_FIXED_STORAGE_BYTES,
+    });
+    await expectRefused(
+      await redeem(
+        { ...f, storage: full, h: handler(full, f.now) },
+        { clientId, code, resource: link.resource },
+      ),
+    );
     expect(rowCount(f.dbPath, "sync_relay_agent_connections")).toBe(0);
-    expect(inspect(f.dbPath, (db) => db.prepare("SELECT COUNT(*) AS count FROM sync_relay_link_principals").get()?.count)).toBe(0);
+    expect(
+      inspect(
+        f.dbPath,
+        (db) => db.prepare("SELECT COUNT(*) AS count FROM sync_relay_link_principals").get()?.count,
+      ),
+    ).toBe(0);
     expect(workspaceUsage(f.dbPath)).toBe(usage);
 
     closeTestStorage(full);
-    const roomy = reopenTestStorage(f.dbPath, { workspaceQuotaBytes: usage + LINK_DISCUSSION_PRINCIPAL_FIXED_STORAGE_BYTES + 1_000 });
+    const roomy = reopenTestStorage(f.dbPath, {
+      workspaceQuotaBytes: usage + LINK_DISCUSSION_PRINCIPAL_FIXED_STORAGE_BYTES + 1_000,
+    });
     // The refusal spent the code, so it fails even with room.
-    await expectRefused(await redeem({ ...f, storage: roomy, h: handler(roomy, f.now) }, { clientId, code, resource: link.resource }));
-    const connected = await connect({ ...f, storage: roomy, h: handler(roomy, f.now) }, link, clientId);
-    expect(connectionRow(f.dbPath, connected.connectionId)).toEqual({ status: "active", tokens: 2 });
+    await expectRefused(
+      await redeem(
+        { ...f, storage: roomy, h: handler(roomy, f.now) },
+        { clientId, code, resource: link.resource },
+      ),
+    );
+    const connected = await connect(
+      { ...f, storage: roomy, h: handler(roomy, f.now) },
+      link,
+      clientId,
+    );
+    expect(connectionRow(f.dbPath, connected.connectionId)).toEqual({
+      status: "active",
+      tokens: 2,
+    });
     expect(workspaceUsage(f.dbPath)).toBeGreaterThan(usage);
   });
 
@@ -478,7 +739,10 @@ describe("agent sign-in for share links", () => {
     expect(await ok(await introspect(f, agent.accessToken))).toMatchObject({ access: "comment" });
 
     await ok(await retuneLink(f, link, "view"));
-    expect(await ok(await introspect(f, agent.accessToken))).toMatchObject({ access: "view", connectionId: agent.connectionId });
+    expect(await ok(await introspect(f, agent.accessToken))).toMatchObject({
+      access: "view",
+      connectionId: agent.connectionId,
+    });
     expect(await agentStatuses(f, link)).toEqual({ [agent.connectionId]: "active" });
 
     const widened = await ok(await retuneLink(f, link, "comment"));
@@ -533,23 +797,31 @@ describe("agent sign-in for share links", () => {
   // no longer served, the servable check alone; for a new owner, the binding
   // check and the servable check both. Introspect makes its servable check in
   // the route, after its read.
-  const unservable: Array<[
-    name: string,
-    overrides: HandlerOverrides,
-    access: string,
-    apply: (f: Fixture) => Fixture,
-  ]> = [
-    ["the owner no longer owns the workspace", {}, "view", (f) => {
-      const db = inspectDatabase(f.dbPath, { foreignKeys: true });
-      db.prepare("UPDATE sync_relay_workspaces SET owner_user_id = 'new-owner' WHERE workspace_id = ?").run(WORKSPACE);
-      db.close();
-      return f;
-    }],
-    ["the relay stops serving Edit links", EDIT_RELEASED, "edit", (f) => ({ ...f, h: handler(f.storage, f.now) })],
+  const unservable: Array<
+    [name: string, overrides: HandlerOverrides, access: string, apply: (f: Fixture) => Fixture]
+  > = [
+    [
+      "the owner no longer owns the workspace",
+      {},
+      "view",
+      (f) => {
+        const db = inspectDatabase(f.dbPath, { foreignKeys: true });
+        db.prepare(
+          "UPDATE sync_relay_workspaces SET owner_user_id = 'new-owner' WHERE workspace_id = ?",
+        ).run(WORKSPACE);
+        db.close();
+        return f;
+      },
+    ],
+    [
+      "the relay stops serving Edit links",
+      EDIT_RELEASED,
+      "edit",
+      (f) => ({ ...f, h: handler(f.storage, f.now) }),
+    ],
   ];
 
   describe.each(unservable)("when %s", (_name, overrides, access, apply) => {
-
     it("refuses introspection", async () => {
       const f = await fixture(overrides);
       const link = await createLink(f, ["docs"], access);
