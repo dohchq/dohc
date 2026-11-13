@@ -184,8 +184,8 @@ export interface ServiceActivationReplica {
 export type ServiceCatchUp = Map<string, Promise<{ head: number; hasMore: boolean }>>;
 /** What the document's hosted replica confirmed of it since it began departing. */
 export interface RetirementScope {
-  /** A pull confirmed the document left the hosted scope. */
-  departed(): boolean;
+  /** Undefined once a pull confirmed the document left the hosted scope; until then, why none has. */
+  departureWait(): string | undefined;
   /** A pull confirmed it parked: it is no longer departed. */
   parked(): boolean;
 }
@@ -1159,10 +1159,11 @@ export class ServiceActivationDriver {
       return { kind: "pending", reason: "Hosted publication has more pages." };
     }
     check();
-    if (!scope.departed())
+    const waiting = scope.departureWait();
+    if (waiting !== undefined)
       return {
         kind: "pending",
-        reason: "Waiting for its hosted replica to confirm the document left.",
+        reason: `Waiting for its hosted replica to confirm the document left: ${waiting}.`,
       };
     const released = answer(await send("liveApplication.releaseActivation", { ...key }), {
       pending: ["reason"],
