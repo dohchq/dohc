@@ -2248,6 +2248,9 @@ export async function startServiceLiveHost(options: {
             );
             available();
           } catch (error) {
+            // A held read the engine received and did not answer in time stops it, as a queued request does.
+            if (changes && error instanceof EngineRequestDeadlineError && !error.unsent)
+              unanswered(error);
             const invalidated = ended();
             if (invalidated) return invalidated;
             // The engine runs one proof per workspace and refuses other reads beside it,

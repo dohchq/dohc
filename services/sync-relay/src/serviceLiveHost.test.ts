@@ -2189,6 +2189,40 @@ it("answers a held-document read its detach or retired registration overtook as 
   await expect(read()).rejects.toMatchObject({ code: "not_found" });
 });
 
+it("stops the engine for a held read it received and did not answer in time", async () => {
+  const o = await emptyServiceHost({ frameChanges: true }),
+    workspaces = [o.workspace];
+  await o.host.update({ workspaces, documents: [o.sibling], ...stay });
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  const send = o.client().sendRequest,
+    through = send.getMockImplementation()! as (...args: unknown[]) => ReturnType<typeof send>;
+  let sent = false;
+  send.mockImplementation(async (...args: unknown[]) => {
+    const request = args[0] as { id: number; method: string };
+    if (request.method !== "sync.heldDocument") return through(...args);
+    throw new EngineRequestDeadlineError(request.id, request.method, 50, !sent);
+  });
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  cleanup.push(async () => log.mockRestore());
+
+  await expect(
+    o.host.heldDocument("workspace", "object", { markdown: false }),
+  ).rejects.toMatchObject({ unsent: true });
+  expect(o.host.invalidated.aborted).toBe(false);
+
+  sent = true;
+  await expect(
+    o.host.heldDocument("workspace", "object", { markdown: false }),
+  ).rejects.toMatchObject({ unsent: false });
+  expect(o.host.invalidated.aborted).toBe(true);
+  expect(
+    log.mock.calls.filter(([message]) => String(message).startsWith("Live host")),
+  ).toContainEqual([
+    "Live host stopped an engine that did not answer in time.",
+    { method: "sync.heldDocument", deadlineMs: 50 },
+  ]);
+});
+
 it("frees a cancelled held read's slot on the engine's answer, and answers the engine's busy refusal 429 to the owner alone", async () => {
   const o = await emptyServiceHost(),
     workspaces = [o.workspace];
