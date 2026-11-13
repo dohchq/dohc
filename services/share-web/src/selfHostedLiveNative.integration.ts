@@ -2312,12 +2312,29 @@ async function openSelfHostProof(name: string) {
             boundary: row.boundary === null ? null : JSON.parse(String(row.boundary)),
           })),
       /** How the host lists a ready document: its current binding, through the activation that holds it. */
-      ready: (path: string) => ({
-        path,
-        objectId: activation(path)!.source.objectId,
-        status: "ready",
-        document: { binding: activation(path)!.binding, relayDatabaseNamespace: history.namespace },
-      }),
+      ready: (path: string) => {
+        const binding = activation(path)!.binding;
+        return {
+          path,
+          objectId: activation(path)!.source.objectId,
+          status: "ready",
+          document: { binding, relayDatabaseNamespace: history.namespace },
+          // The owner's list also gives the last journal position the relay accepted for the note.
+          head: Number(
+            (
+              relayRead
+                .prepare(`SELECT COALESCE(MAX(journal_cursor),0) AS head FROM sync_relay_live_update_journal
+            WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?`)
+                .get(
+                  binding.workspaceId,
+                  binding.mainVersionId,
+                  binding.objectId,
+                  binding.lineageClaimId,
+                ) as { head: number }
+            ).head,
+          ),
+        };
+      },
       /** A document's rows in the relay's live journal. */
       journal: (object = objectId) =>
         relayRead
