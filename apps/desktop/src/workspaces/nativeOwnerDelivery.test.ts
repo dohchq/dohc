@@ -22,7 +22,8 @@ const config = parseDesktopOwnerDeliveryConfig({version: 1, nativeConfigPath: re
   relayUrl: "https://relay.example.test", frames: {receive: {maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
     maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096},
   attemptTimeoutMs: 5000, retryDelayMs: 1000, documents: [{binding, relayDatabaseNamespace: "namespace"}]});
-afterEach(() => {vi.clearAllMocks(); vi.useRealTimers(); mock.synchronized = false;});
+// Resetting drain drops answers a failed test left queued, so they do not reach the next test.
+afterEach(() => {vi.clearAllMocks(); mock.drain.mockReset(); vi.useRealTimers(); mock.synchronized = false;});
 
 it("keeps a known-document preparation overload on the work retry cadence", async () => {
   vi.useFakeTimers();

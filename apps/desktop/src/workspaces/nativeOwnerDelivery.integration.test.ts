@@ -65,7 +65,8 @@ function serve() {
 function outbox(entries: Entry[]) {
   let next = 0;
   vi.spyOn(OwnerYDocOutbox.prototype, "readHead").mockImplementation(async () => head(entries[next] ?? null));
-  return vi.spyOn(OwnerYDocOutbox.prototype, "acknowledge").mockImplementation(async () => {
+  // A second delivery in one test spies again on the same method, so it counts only its own calls.
+  return vi.spyOn(OwnerYDocOutbox.prototype, "acknowledge").mockClear().mockImplementation(async () => {
     next++;
     return {acknowledged: 1, pendingBytes: entries.slice(next).reduce((sum, entry) => sum + entry.byteLength, 0), oldestEntryAtMs: null};
   });
