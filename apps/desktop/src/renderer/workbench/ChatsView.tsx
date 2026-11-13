@@ -1407,7 +1407,8 @@ export function ChatsView(props: {
     const mutationGeneration = bookmarkMutationGeneration.current;
     const desktopBridge = bridge();
     // Older preload fixtures deliberately omit newly added additive surfaces.
-    if (typeof desktopBridge.listChatBookmarks !== "function") return;
+    // A joined workspace keeps no saved messages yet.
+    if (inJoinedWorkspace || typeof desktopBridge.listChatBookmarks !== "function") return;
     try {
       const result = await desktopBridge.listChatBookmarks({ workspaceId });
       if (
@@ -1428,7 +1429,7 @@ export function ChatsView(props: {
     } catch {
       // A projection problem must not make the core chat surface unavailable.
     }
-  }, [workspaceId]);
+  }, [inJoinedWorkspace, workspaceId]);
 
   // DM sync: refresh received requests, push the member's local ops, pull the
   // peers' ops, and refresh the established DM list. Best-effort —
@@ -1510,9 +1511,15 @@ export function ChatsView(props: {
     },
     [noteListing, workspaceId],
   );
+  // A joined workspace has no direct messages yet, and its relay would
+  // refuse each pass.
   const refreshDms = useCallback(
     (cause: DmSyncCause) =>
       new Promise<void>((resolve) => {
+        if (inJoinedWorkspace) {
+          resolve();
+          return;
+        }
         const active = dmSync.current;
         if (active !== null && active.token === liveToken.current) {
           active.queued = queueDmSync(active.queued, cause);
@@ -1527,7 +1534,7 @@ export function ChatsView(props: {
         dmSync.current = mine;
         void drainDms(mine);
       }),
-    [drainDms],
+    [drainDms, inJoinedWorkspace],
   );
 
   // Workspace switch: drop everything stale and reload from the top.
@@ -6196,7 +6203,9 @@ export function ChatsView(props: {
               ) : null}
             </div>
           ) : null}
-          {agentChats.length > 0 || props.userSettings || otherAgents.length > 0 ? (
+          {/* Agents cannot run in a joined workspace yet, so it lists none. */}
+          {!inJoinedWorkspace &&
+          (agentChats.length > 0 || props.userSettings || otherAgents.length > 0) ? (
             <section data-testid="chats-my-agent-section" aria-label="Agents">
               <SectionLabel as="p" className="mt-4 flex h-6 items-center px-3">
                 Agents

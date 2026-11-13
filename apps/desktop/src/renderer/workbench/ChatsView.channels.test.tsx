@@ -15,6 +15,7 @@ import {
   navigatorView,
 } from "./ChatsView.testHarness";
 import { deferred } from "../../testing/deferred";
+import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
 
 describe("ChatsView channels", () => {
   describe("in a joined workspace at Comment", () => {
@@ -48,6 +49,16 @@ describe("ChatsView channels", () => {
         "Members post in Groups only.",
       );
       expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
+    });
+
+    it("shows no Agents section and makes no direct-message or saved-message calls", async () => {
+      bridgeMock.listChatChannels.mockResolvedValue({ channels: [channel({ name: "Launch team" })], fileThreads: [] });
+      renderView(vi.fn(), vi.fn(), { joinedWorkspace: { createsGroups: false }, userSettings: DEFAULT_USER_SETTINGS });
+      await screen.findByTestId("chats-channel");
+      expect(screen.queryByTestId("chats-my-agent-section")).toBeNull();
+      expect(screen.queryByText("Add an agent")).toBeNull();
+      expect(bridgeMock.syncDms).not.toHaveBeenCalled();
+      expect(bridgeMock.listChatBookmarks).not.toHaveBeenCalled();
     });
 
     it("offers New group to an admin only", async () => {
