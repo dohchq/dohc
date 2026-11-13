@@ -100,7 +100,7 @@ it("admits a personal agent's live edit on behalf of its owner, and never by wha
   const f = registered({deployment: true, host: personalHost});
   try {
     const actor = personalEditor(f);
-    const helper = [{kind: "agent", agentId: helperId, agentName: "Helper", onBehalfOf: "owner", depth: 0}];
+    const helper = [{kind: "agent", agentId: helperId, agentName: "Helper", onBehalfOf: "owner"}];
     const declaring = (input: Input, authorContext: import("@dohc/live-session-contract").LiveAuthorContext): Input =>
       ({...input, metadata: {...input.metadata, authorContext}});
     const human = {kind: "account" as const, accountId: "reader"};
