@@ -31,7 +31,7 @@ it("refuses a declared command under a command that does not exist", async () =>
 
 it("refuses a declared socket verb that repeats a hand-written verb", async () => {
   changeLinksResolve(declaration => ({ ...declaration, cli: { ...declaration.cli, verb: "stopSync" } }));
-  await expect(import("./protocol")).rejects.toThrow("stopSync");
+  await expect(import("./protocol")).rejects.toThrow("stopSync is declared twice.");
 });
 
 it("loads the declarations as they are", async () => {
