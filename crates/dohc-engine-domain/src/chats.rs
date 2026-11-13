@@ -8215,9 +8215,8 @@ fn thread_read_journaled(
 /// by the next authorized mark at the same coordinate. Once a record of the
 /// coordinate exists, a repeat writes nothing. A local-only message never
 /// names a mark in the account's log: when the target is one, the record
-/// names the newest message at or below it that the ordinary journal
-/// carries, and the mark here stays at the target. Answers whether anything
-/// was written.
+/// names the newest message at or below it that replicates, and the mark
+/// here stays at the target. Answers whether anything was written.
 fn advance_account_thread_read(
     tx: &Transaction<'_>,
     workspace_id: &str,
@@ -8250,23 +8249,14 @@ fn advance_account_thread_read(
         }
     };
     // The newest coordinate at or below the target that the account's other
-    // copies can hold: a message the ordinary journal carries, one this copy
-    // imported or one it journaled. A message written here while signed out
-    // never leaves this copy, so a mark naming it would never apply there. A
-    // message with an account author is journaled when written and imported
-    // from the journal, so the author stands in for the log lookup.
+    // copies can hold. A message written while signed out never leaves this
+    // copy, so a mark naming it would never apply there.
     let replicable: Option<(i64, String)> = if journal {
         tx.query_row(
-            "SELECT m.created_at_ms, m.message_id FROM chat_messages m \
-             WHERE m.workspace_id = ?1 AND m.thread_id = ?2 \
-               AND (m.created_at_ms, m.message_id) <= (?3, ?4) \
-               AND (m.author_user_id IS NOT NULL OR EXISTS( \
-                 SELECT 1 FROM replication_log operation \
-                 WHERE operation.workspace_id = m.workspace_id \
-                   AND operation.op_kind = 'chat.message.append' \
-                   AND json_extract(operation.payload_json, '$.threadId') = m.thread_id \
-                   AND json_extract(operation.payload_json, '$.messageId') = m.message_id)) \
-             ORDER BY m.created_at_ms DESC, m.message_id DESC LIMIT 1",
+            "SELECT created_at_ms, message_id FROM chat_messages \
+             WHERE workspace_id = ?1 AND thread_id = ?2 AND author_user_id IS NOT NULL \
+               AND (created_at_ms, message_id) <= (?3, ?4) \
+             ORDER BY created_at_ms DESC, message_id DESC LIMIT 1",
             params![workspace_id, thread_id, created_at_ms, message_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )

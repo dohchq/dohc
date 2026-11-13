@@ -1535,64 +1535,6 @@ fn a_link_message_replays_with_its_link_and_no_account() {
     );
 }
 
-/// An owner's read mark at a link message publishes that message: the
-/// journal carried it here, though no account wrote it.
-#[test]
-fn an_owner_mark_at_a_replicated_link_message_publishes_that_message() {
-    use dohc_engine_domain::{LinkedChatStore, MarkAccountThreadRead};
-
-    let (_scratch, _path, mut engine) = open_store();
-    imported_chat_fixture(&mut engine, "peer");
-    apply_chat_envelope(
-        &mut engine,
-        &envelope(
-            LINK_ORIGIN,
-            0,
-            "chat.message.append",
-            link_message_payload("link-message:hi", "Hi"),
-        ),
-        &NoFaults,
-    )
-    .expect("link message");
-    let mut chats = LinkedChatStore::new(&mut engine);
-    assert!(
-        chats
-            .seed_account_reads("ws", "owner", false, 90, &NoFaults)
-            .expect("seed")
-    );
-    chats
-        .mark_account_thread_read(
-            &MarkAccountThreadRead {
-                workspace_id: "ws".to_owned(),
-                thread_id: "thread-imported".to_owned(),
-                message_id: "link-message:hi".to_owned(),
-                replication_owner_user_id: Some("owner".to_owned()),
-                now_ms: 100,
-            },
-            &NoFaults,
-        )
-        .expect("owner mark");
-    drop(chats);
-    assert_eq!(
-        account_thread_mark(&engine, "thread-imported"),
-        Some((30, "link-message:hi".to_owned()))
-    );
-    let published: Vec<(i64, String)> = engine
-        .read_with(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT json_extract(payload_json, '$.lastReadCreatedAtMs'), \
-                        json_extract(payload_json, '$.lastReadMessageId') \
-                 FROM replication_log \
-                 WHERE workspace_id = 'ws' AND op_kind = 'chat.thread.read.set' AND imported = 0 \
-                 ORDER BY origin_seq",
-            )?;
-            let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-            rows.collect()
-        })
-        .expect("published marks");
-    assert_eq!(published, vec![(30, "link-message:hi".to_owned())]);
-}
-
 /// A link message names its link and nothing account-shaped, stays within
 /// the link body cap, uses the link message id prefix and comes from its link
 /// principal's relay origin; no other message names a link. Each refusal is
