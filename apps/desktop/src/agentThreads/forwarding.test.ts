@@ -258,7 +258,7 @@ describe("forwarding", () => {
     const first = forwarding.wake(WORKSPACE);
     await vi.waitFor(() => expect(tool.forward).toHaveBeenCalledTimes(1));
     agents = [{ ...agent, threadId: "t3-thread-new" }];
-    const changed = forwarding.wake(WORKSPACE);
+    const changed = forwarding.wake(WORKSPACE, true);
     release();
     await Promise.all([first, changed]);
 
@@ -271,6 +271,25 @@ describe("forwarding", () => {
     agents = [];
     await forwarding.wake(WORKSPACE);
     expect(sent).toHaveLength(3);
+  });
+
+  it("keeps forwarding while chat writes keep coming", async () => {
+    const { forwarding, sent, holdThread } = setup([request("m1", 10), request("m2", 20)]);
+    // Each read of a chat thread meets another chat write, twenty times over.
+    let reads = 0;
+    holdThread(async () => {
+      reads += 1;
+      if (reads <= 20) void forwarding.wake(WORKSPACE);
+    });
+
+    await forwarding.wake(WORKSPACE);
+
+    expect(sent.map((message) => message.forwardId)).toEqual([
+      forwardIdOf(WORKSPACE, "chief", "m1"),
+      forwardIdOf(WORKSPACE, "chief", "m2"),
+    ]);
+    // No write sent it back to read a chat thread again.
+    expect(reads).toBe(2);
   });
 
   it("forwards a message that arrives while it works, without a second copy of the first", async () => {

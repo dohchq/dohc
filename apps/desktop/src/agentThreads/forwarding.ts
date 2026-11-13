@@ -73,7 +73,7 @@ export function createForwarding(dependencies: ForwardingDependencies) {
   const { chats } = dependencies;
   const retryAfterMs = dependencies.retryAfterMs ?? RETRY_AFTER_MS;
   // A workspace's messages go out one at a time. A wake during that work runs it once more.
-  const working = new Map<string, { again: boolean; done: Promise<void> }>();
+  const working = new Map<string, { again: boolean; stale: boolean; done: Promise<void> }>();
   const retries = new Map<string, { attempt: number; timer?: ReturnType<typeof setTimeout> }>();
   const stuck = new Set<string>();
   let stopped = false;
@@ -194,25 +194,29 @@ export function createForwarding(dependencies: ForwardingDependencies) {
   }
 
   /** Settles when the work it started, or joined, ends. */
-  function wake(workspaceId: string): Promise<void> {
+  function wake(workspaceId: string, settingsChanged = false): Promise<void> {
     if (stopped) return Promise.resolve();
     const current = working.get(workspaceId);
     if (current) {
       current.again = true;
+      current.stale ||= settingsChanged;
       return current.done;
     }
     clearTimeout(retries.get(workspaceId)?.timer);
-    const work = { again: false, done: Promise.resolve() };
+    const work = { again: false, stale: false, done: Promise.resolve() };
     working.set(workspaceId, work);
-    // A wake ends the pass at its next message, and the next pass reads the
-    // agents again. So an agent turned off, or pointed at another thread,
-    // gets nothing more from a pass that started before the change.
-    const live = () => !stopped && !work.again;
+    // A change to an agent's settings ends the pass at its next message, and
+    // the next pass reads the agents again. So an agent turned off, or
+    // pointed at another thread, gets nothing more from a pass that started
+    // before the change. A chat write lets the pass go on, so writes that
+    // keep coming cannot hold a message back.
+    const live = () => !stopped && !work.stale;
     work.done = (async () => {
       let reached = false;
       try {
         do {
           work.again = false;
+          work.stale = false;
           reached = await forwardUnread(workspaceId, live);
         } while (work.again && !stopped);
       } finally {
@@ -235,7 +239,11 @@ export function createForwarding(dependencies: ForwardingDependencies) {
   }
 
   return {
-    /** Forwards what the workspace's agents have unread. Call it when a chat write lands and when an agent's settings change. */
+    /**
+     * Forwards what the workspace's agents have unread. Call it when a chat
+     * write lands. After an agent's settings are saved, call it with
+     * `settingsChanged`, so work that started before the change stops.
+     */
     wake,
     /**
      * Marks the unread requests it meets as read without forwarding them. A
