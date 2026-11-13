@@ -762,6 +762,78 @@ it.skipIf(engine.missing)(
       { parentMessageId: postMessage },
     ]);
 
+    // A question whose choices the engine trims, then the answer that picks one.
+    const question = await saved("reply", {
+      operationId: "op-question",
+      threadId: postThread,
+      body: "Alfama or Baixa?",
+      options: [" Alfama ", "Baixa "],
+    });
+    expect(
+      accepted("chat.decision.set", { messageId: question.messageId!, state: "open" }),
+    ).toMatchObject([{ options: ["Alfama", "Baixa"] }]);
+    const answered = await saved("reply", {
+      operationId: "op-answer",
+      threadId: postThread,
+      body: "Alfama, then.",
+      resolves: { messageId: question.messageId!, chosenOption: " Alfama " },
+    });
+    expect(
+      accepted("chat.decision.set", { messageId: question.messageId!, state: "resolved" }),
+    ).toMatchObject([{ resolvedByMessageId: answered.messageId, chosenOption: "Alfama" }]);
+    await sameThread(postThread);
+
+    // A reaction added, then removed.
+    for (const state of ["added", "removed"] as const) {
+      await saved("react", {
+        operationId: `op-${state}`,
+        messageId: postMessage,
+        emoji: "👍",
+        state,
+      });
+      expect(accepted("chat.reaction.set", { messageId: postMessage, state }), state).toMatchObject(
+        [{ emoji: "👍", authorId: "owner", authorDisplayName: "Ana" }],
+      );
+      await sameThread(postThread);
+    }
+
+    // A thread on a file the copy never held reads with its file unavailable, and takes a reply and a reaction.
+    const onFile = (await route("chat", { threadId: gone.id })) as {
+      ok: boolean;
+      projection: { text: string };
+    };
+    expect(onFile.ok).toBe(true);
+    expect(onFile.projection.text).toContain("Linked file: unavailable");
+    await saved("reply", { operationId: "op-gone", threadId: gone.id, body: "It moved." });
+    await saved("react", {
+      operationId: "op-gone-seen",
+      messageId: onGone.id,
+      emoji: "👀",
+      state: "added",
+    });
+    await sameThread(gone.id);
+
+    // One on a secret file reads, and takes writes, as a thread that isn't there, and no write is recorded.
+    const hidden = { ok: false, reason: `chat thread not found: ${keys.id}`, refusal: "missing" };
+    expect(await route("chat", { threadId: keys.id })).toEqual(hidden);
+    expect(
+      await route("reply", { operationId: "op-keys", threadId: keys.id, body: "This one." }),
+    ).toEqual(hidden);
+    expect(
+      await route("react", {
+        operationId: "op-keys-seen",
+        messageId: onKeys.id,
+        emoji: "👀",
+        state: "added",
+      }),
+    ).toEqual({
+      ok: false,
+      reason: `dohc: no such message in this thread: ${onKeys.id}`,
+      refusal: "missing",
+    });
+    expect(recorded("op-keys")).toBeUndefined();
+    expect(recorded("op-keys-seen")).toBeUndefined();
+
     // A retry under the account's new name answers from the row: the copy sends nothing, and the post keeps its author.
     name = "Ana Maria";
     const before = logRows();
