@@ -913,6 +913,40 @@ describe("fix round 1", () => {
     await consumer.stop();
   });
 
+  it("sends no recovered claim when the attachment retires during its re-save, until it is back", async () => {
+    const w = await setup();
+    w.relay.add();
+    const real = createChatWakeIntents(w.file);
+    await real.save(intentOf("claim-pending"));
+    const reached = deferred();
+    const release = deferred();
+    let held = false;
+    const intents: ChatWakeIntents = {
+      ...real,
+      save: async (intent) => {
+        await real.save(intent);
+        if (intent.phase !== "claim-pending" || held) return;
+        held = true;
+        reached.resolve();
+        await release.promise;
+      },
+    };
+    const parked = w.relay.nextPark();
+    const { consumer } = w.consumer({ intents });
+    consumer.start();
+    await reached.promise;
+    w.mac.local.current = false;
+    release.resolve();
+    await parked;
+    expect(w.relay.calls.claims).toEqual([]);
+    expect(await w.intents()).toEqual([intentOf("claim-pending")]);
+    w.mac.local.current = true;
+    await consumer.resume();
+    expect(w.relay.calls.claims).toEqual(["mac"]);
+    expect(w.mac.local.recorded).toEqual([true]);
+    await consumer.stop();
+  });
+
   it.each(["claim", "confirmation"] as const)(
     "tries a %s the server refused as busy again after its backoff, with nothing calling resume",
     async (step) => {

@@ -15,7 +15,7 @@ import type { ChatWakeIntent, ChatWakeIntents } from "./chatWakeIntents";
 // new generation.
 //
 // Order, each step saved before the next: claim-pending, claim, won, the
-// local trigger, recorded, the dispatch scan, queued, removed. A restart
+// local trigger, the dispatch scan, recorded, queued, removed. A restart
 // finishes each saved intent from its phase; an intent of another account
 // or another install waits in the file for its own lifetime. A save that
 // failed can still have reached the file, so a phase read back is saved again
@@ -295,6 +295,7 @@ export function createChatWakeConsumer(deps: ChatWakeConsumerDeps): ChatWakeCons
           await opened(intent.workspaceId, async (workspace) => {
             if (!workspace.current()) return;
             await deps.intents.save(intent);
+            if (!workspace.current()) return;
             await settle(intent, workspace);
           });
         } else {
