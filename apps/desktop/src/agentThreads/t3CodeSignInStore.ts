@@ -9,10 +9,16 @@ import type { T3CodeSignIn } from "./t3Code";
 // person has there, so it is kept only encrypted with the system's credential
 // encryption, never in plain text, and never synced. When the system cannot
 // encrypt, nothing is kept and dohc does not connect T3 Code.
+//
+// The encryption keeps the sign-in from other people who use this computer
+// and from a copy of the file. It does not keep it from another program
+// running as the same person, which can ask the system to decrypt it.
 
 const FILE_NAME = "dohc-t3-code.json";
 
-const Kept = z.object({ version: z.literal(1), expiresAtMs: z.number(), token: z.string().min(1) }).strict();
+const Kept = z.object({ version: z.literal(1), origin: z.string().min(1), expiresAtMs: z.number(), token: z.string().min(1) }).strict();
+// What a request header can carry. A decryption that went wrong fails this.
+const VISIBLE_ASCII = /^[\x21-\x7e]+$/u;
 
 export class T3CodeSignInNotKept extends Error {
   constructor() {
@@ -36,6 +42,14 @@ export function createT3CodeSignInStore(options: { dir: string; cipher?: TokenCi
   const file = join(options.dir, FILE_NAME);
   const nowMs = options.nowMs ?? Date.now;
   const canKeep = () => options.cipher?.isAvailable() === true;
+  // Each save and clear finishes before the next starts, so a save still
+  // writing cannot bring back a sign-in a later clear dropped.
+  let last: Promise<unknown> = Promise.resolve();
+  const inOrder = <T>(change: () => Promise<T>): Promise<T> => {
+    const done = last.then(change, change);
+    last = done.catch(() => undefined);
+    return done;
+  };
   return {
     canKeep,
     async load() {
@@ -43,21 +57,22 @@ export function createT3CodeSignInStore(options: { dir: string; cipher?: TokenCi
       try {
         const kept = Kept.parse(JSON.parse(await readFile(file, "utf8")));
         if (kept.expiresAtMs <= nowMs()) return null;
-        return { token: options.cipher!.decrypt(kept.token), expiresAtMs: kept.expiresAtMs };
+        const token = options.cipher!.decrypt(kept.token);
+        return VISIBLE_ASCII.test(token) ? { origin: kept.origin, token, expiresAtMs: kept.expiresAtMs } : null;
       } catch {
         return null;
       }
     },
-    async save(signIn) {
+    save: (signIn) => inOrder(async () => {
       if (!canKeep()) throw new T3CodeSignInNotKept();
-      const kept: z.infer<typeof Kept> = { version: 1, expiresAtMs: signIn.expiresAtMs, token: options.cipher!.encrypt(signIn.token) };
+      const kept: z.infer<typeof Kept> = { version: 1, origin: signIn.origin, expiresAtMs: signIn.expiresAtMs, token: options.cipher!.encrypt(signIn.token) };
       await mkdir(options.dir, { recursive: true, mode: 0o700 });
       await atomicReplaceFile(file, (tmp) => writeFile(tmp, `${JSON.stringify(kept, null, 2)}\n`, { mode: 0o600 }));
-    },
-    async clear() {
+    }),
+    clear: () => inOrder(async () => {
       await unlink(file).catch((error: NodeJS.ErrnoException) => {
         if (error.code !== "ENOENT") throw error;
       });
-    },
+    }),
   };
 }

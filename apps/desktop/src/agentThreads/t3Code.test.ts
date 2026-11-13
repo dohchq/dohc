@@ -41,19 +41,26 @@ interface FakeT3Code {
   eventStream: boolean;
   /** Names every sign-in address under this origin in place of the server's own. */
   metadataOrigin: string | null;
+  /** Answers 404 where the sign-in addresses are published, as a T3 Code without the sign-in does. */
+  noSignIn: boolean;
+  /** Opens a session, then answers the handshake in a shape dohc cannot read. */
+  badHandshake: boolean;
+  /** How many sessions dohc ended. */
+  ended: number;
 }
 
 // A stand-in for T3 Code's server: its sign-in addresses and its MCP endpoint,
 // with the checks T3 Code makes on the code, the redirect, and the verifier.
 async function fakeT3Code(): Promise<FakeT3Code> {
   const pending = new Map<string, { clientId: string; redirectUri: string; challenge: string; resource: string }>();
-  const fake: FakeT3Code = { origin: "", registrations: [], authorizations: [], calls: [], tools: {}, decline: false, eventStream: false, metadataOrigin: null };
+  const fake: FakeT3Code = { origin: "", registrations: [], authorizations: [], calls: [], tools: {}, decline: false, eventStream: false, metadataOrigin: null, noSignIn: false, badHandshake: false, ended: 0 };
   const server: Server = createServer((request, response) => {
     void (async () => {
       const url = new URL(request.url ?? "/", fake.origin);
       const json = (status: number, value: unknown, headers: Record<string, string> = {}) =>
         response.writeHead(status, { "content-type": "application/json", ...headers }).end(JSON.stringify(value));
       if (request.method === "GET" && url.pathname === "/.well-known/oauth-authorization-server") {
+        if (fake.noSignIn) return json(404, { error: "not_found" });
         const at = fake.metadataOrigin ?? fake.origin;
         return json(200, { issuer: at, authorization_endpoint: `${at}/oauth/mcp/authorize`, token_endpoint: `${at}/oauth/mcp/token`, registration_endpoint: `${at}/oauth/mcp/register` });
       }
@@ -84,11 +91,14 @@ async function fakeT3Code(): Promise<FakeT3Code> {
       }
       if (url.pathname === "/mcp") {
         if (request.headers.authorization !== "Bearer token-1") return json(401, { error: "invalid_mcp_credential" });
-        if (request.method === "DELETE") return response.writeHead(200).end();
+        if (request.method === "DELETE") {
+          fake.ended += 1;
+          return response.writeHead(200).end();
+        }
         const message = JSON.parse(await bodyOf(request)) as { id?: string; method: string; params?: { name: string; arguments: Record<string, unknown> } };
         if (message.method === "notifications/initialized") return response.writeHead(202).end();
         let result: unknown;
-        if (message.method === "initialize") result = { protocolVersion: "2025-06-18", capabilities: {}, serverInfo: { name: "fake", version: "0" } };
+        if (message.method === "initialize") result = fake.badHandshake ? { capabilities: {} } : { protocolVersion: "2025-06-18", capabilities: {}, serverInfo: { name: "fake", version: "0" } };
         else {
           const { name, arguments: args } = message.params!;
           fake.calls.push({ tool: name, args });
@@ -96,7 +106,9 @@ async function fakeT3Code(): Promise<FakeT3Code> {
           result = answer ? { structuredContent: answer(args) } : { isError: true, content: [{ type: "text", text: `No thread tool named ${name}.` }] };
         }
         const envelope = { jsonrpc: "2.0", id: message.id, result };
-        if (fake.eventStream) return response.writeHead(200, { "content-type": "text/event-stream", "mcp-session-id": "session-1" }).end(`event: message\ndata: ${JSON.stringify(envelope)}\n\n`);
+        // One event's JSON spread over several data lines, as the event stream format allows.
+        const dataLines = JSON.stringify(envelope, null, 1).split("\n").map((line) => `data: ${line}`).join("\n");
+        if (fake.eventStream) return response.writeHead(200, { "content-type": "text/event-stream", "mcp-session-id": "session-1" }).end(`event: message\n${dataLines}\n\n`);
         return json(200, envelope, { "mcp-session-id": "session-1" });
       }
       return response.writeHead(404).end();
@@ -107,6 +119,8 @@ async function fakeT3Code(): Promise<FakeT3Code> {
   cleanups.push(() => new Promise<void>((resolve) => { server.closeAllConnections(); server.close(() => resolve()); }));
   return fake;
 }
+
+const signInAt = (origin: string) => ({ origin, token: "token-1", expiresAtMs: Number.MAX_SAFE_INTEGER });
 
 // The person's browser: it opens T3 Code's page and follows where T3 Code sends it.
 async function browser(url: string): Promise<void> {
@@ -143,7 +157,7 @@ describe("signing in to T3 Code", () => {
   it("signs in after the person allows, proving the code is its own", async () => {
     const t3 = await fakeT3Code();
     const signIn = await signInToT3Code({ origin: t3.origin, open: browser, nowMs: () => 1_000 });
-    expect(signIn).toEqual({ token: "token-1", expiresAtMs: 1_000 + 2_592_000_000 });
+    expect(signIn).toEqual({ origin: t3.origin, token: "token-1", expiresAtMs: 1_000 + 2_592_000_000 });
     // The redirect is on this computer by number, and dohc registers as a client with no secret.
     expect(t3.registrations).toEqual([{ client_name: "dohc", redirect_uris: [expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/t3-code$/u)], token_endpoint_auth_method: "none" }]);
     const asked = t3.authorizations[0]!;
@@ -158,6 +172,23 @@ describe("signing in to T3 Code", () => {
     await expect(signInToT3Code({ origin: t3.origin, open: () => undefined, timeoutMs: 20 })).rejects.toMatchObject({ problem: "not-allowed" });
     const cancel = new AbortController();
     await expect(signInToT3Code({ origin: t3.origin, open: () => cancel.abort(), signal: cancel.signal })).rejects.toMatchObject({ problem: "not-allowed" });
+  });
+
+  it("stops every step when the person cancels, and when nobody answers while the browser is still opening", async () => {
+    const t3 = await fakeT3Code();
+    // Cancelled before it began: nothing is asked of T3 Code.
+    const cancelled = new AbortController();
+    cancelled.abort();
+    await expect(signInToT3Code({ origin: t3.origin, open: browser, signal: cancelled.signal })).rejects.toMatchObject({ problem: "not-allowed", message: "The sign-in to T3 Code was cancelled." });
+    expect(t3.registrations).toEqual([]);
+    // The step that opens the browser never returns.
+    await expect(signInToT3Code({ origin: t3.origin, open: () => new Promise<void>(() => undefined), timeoutMs: 20 })).rejects.toMatchObject({ problem: "not-allowed", message: "Nobody allowed dohc in T3 Code in time." });
+  });
+
+  it("says so when this T3 Code offers no sign-in to other programs", async () => {
+    const t3 = await fakeT3Code();
+    t3.noSignIn = true;
+    await expect(signInToT3Code({ origin: t3.origin, open: browser })).rejects.toMatchObject({ problem: "refused" });
   });
 
   it("takes only the answer that carries its own state", async () => {
@@ -182,7 +213,7 @@ describe("signing in to T3 Code", () => {
     expect(opened).toBe(false);
     expect(t3.registrations).toEqual([]);
     await expect(signInToT3Code({ origin: "http://collector.example", open: () => undefined })).rejects.toMatchObject({ problem: "not-this-computer" });
-    await expect(openT3CodeSession({ origin: "http://collector.example", token: "token-1" })).rejects.toMatchObject({ problem: "not-this-computer" });
+    await expect(openT3CodeSession({ origin: "http://collector.example", signIn: signInAt("http://collector.example") })).rejects.toMatchObject({ problem: "not-this-computer" });
   });
 
   it("says T3 Code is not running when nothing answers", async () => {
@@ -190,7 +221,7 @@ describe("signing in to T3 Code", () => {
     const origin = t3.origin;
     await cleanups.pop()!();
     await expect(signInToT3Code({ origin, open: () => undefined })).rejects.toMatchObject({ problem: "not-running" });
-    await expect(openT3CodeSession({ origin, token: "token-1" })).rejects.toMatchObject({ problem: "not-running" });
+    await expect(openT3CodeSession({ origin, signIn: signInAt(origin) })).rejects.toMatchObject({ problem: "not-running" });
   });
 });
 
@@ -203,7 +234,7 @@ describe("T3 Code's thread tools", () => {
     t3.tools.t3_thread_list = () => ({ threads: [{ threadId: "t1", projectId: "p1", title: "Chief of Staff", status: "running", updatedAt: "2026-11-13T10:00:00.000Z", extra: 1 }], nextCursor: 50, total: 11_552 });
     t3.tools.t3_thread_send = () => ({ threadId: "t1", runId: "run-9", status: "starting", delivery: "started" });
     t3.tools.t3_thread_read = () => ({ thread: { title: "Chief of Staff", activeRunId: "run-9", pendingRequestCount: 1, archived: false, settled: false } });
-    const session = await openT3CodeSession({ origin: t3.origin, token: "token-1" });
+    const session = await openT3CodeSession({ origin: t3.origin, signIn: signInAt(t3.origin) });
     cleanups.push(() => session.close());
 
     await expect(listT3CodeProjects(session)).resolves.toEqual([{ id: "p1", title: "dohc" }, { id: "p3", title: "garage" }]);
@@ -223,18 +254,27 @@ describe("T3 Code's thread tools", () => {
     ]);
   });
 
+  it("sends a sign-in only to the address it was issued at, and ends a session whose handshake failed", async () => {
+    const t3 = await fakeT3Code();
+    await expect(openT3CodeSession({ origin: t3.origin, signIn: signInAt("http://127.0.0.1:1") })).rejects.toMatchObject({ problem: "not-allowed" });
+    expect(t3.ended).toBe(0);
+    t3.badHandshake = true;
+    await expect(openT3CodeSession({ origin: t3.origin, signIn: signInAt(t3.origin) })).rejects.toMatchObject({ problem: "unexpected" });
+    expect(t3.ended).toBe(1);
+  });
+
   it("reads an answer sent as an event stream", async () => {
     const t3 = await fakeT3Code();
     t3.eventStream = true;
     t3.tools.t3_thread_read = () => ({ thread: { title: "Quiet", activeRunId: null, pendingRequestCount: 0, archived: true, settled: false } });
-    const session = await openT3CodeSession({ origin: t3.origin, token: "token-1" });
+    const session = await openT3CodeSession({ origin: t3.origin, signIn: signInAt(t3.origin) });
     await expect(readT3CodeThread(session, "t1")).resolves.toEqual({ title: "Quiet", working: false, waitingOnPerson: false, closed: true });
   });
 
   it("tells a sign-in T3 Code no longer takes from a call it refused and an answer it cannot read", async () => {
     const t3 = await fakeT3Code();
-    await expect(openT3CodeSession({ origin: t3.origin, token: "old-token" })).rejects.toMatchObject({ problem: "not-allowed" });
-    const session = await openT3CodeSession({ origin: t3.origin, token: "token-1" });
+    await expect(openT3CodeSession({ origin: t3.origin, signIn: { ...signInAt(t3.origin), token: "old-token" } })).rejects.toMatchObject({ problem: "not-allowed" });
+    const session = await openT3CodeSession({ origin: t3.origin, signIn: signInAt(t3.origin) });
     await expect(session.call("t3_thread_delete", {})).rejects.toMatchObject({ problem: "refused", message: "No thread tool named t3_thread_delete." });
     t3.tools.t3_thread_read = () => ({ thread: { title: 7 } });
     const unread = await readT3CodeThread(session, "t1").catch((error: unknown) => error);
@@ -256,9 +296,9 @@ describe("keeping the sign-in to T3 Code", () => {
     let now = 1_000;
     const store = createT3CodeSignInStore({ dir, cipher: cipher(true), nowMs: () => now });
     await expect(store.load()).resolves.toBeNull();
-    await store.save({ token: "token-1", expiresAtMs: 5_000 });
+    await store.save({ origin: "http://127.0.0.1:3773", token: "token-1", expiresAtMs: 5_000 });
     expect(await readFile(join(dir, "dohc-t3-code.json"), "utf8")).not.toContain("token-1");
-    await expect(store.load()).resolves.toEqual({ token: "token-1", expiresAtMs: 5_000 });
+    await expect(store.load()).resolves.toEqual({ origin: "http://127.0.0.1:3773", token: "token-1", expiresAtMs: 5_000 });
     now = 5_000;
     await expect(store.load()).resolves.toBeNull();
     await store.clear();
@@ -267,12 +307,23 @@ describe("keeping the sign-in to T3 Code", () => {
     await expect(store.load()).resolves.toBeNull();
   });
 
+  it("drops a sign-in whose save was still going when it was cleared, and one that decrypts to something no header can carry", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "dohc-t3-store-"));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const store = createT3CodeSignInStore({ dir, cipher: cipher(true), nowMs: () => 1_000 });
+    await Promise.all([store.save({ origin: "http://127.0.0.1:3773", token: "token-1", expiresAtMs: 5_000 }), store.clear()]);
+    await expect(store.load()).resolves.toBeNull();
+    const garbled = createT3CodeSignInStore({ dir, cipher: { ...cipher(true), decrypt: () => "token\u0000one" }, nowMs: () => 1_000 });
+    await garbled.save({ origin: "http://127.0.0.1:3773", token: "token-1", expiresAtMs: 5_000 });
+    await expect(garbled.load()).resolves.toBeNull();
+  });
+
   it("keeps nothing when this computer cannot encrypt", async () => {
     const dir = await mkdtemp(join(tmpdir(), "dohc-t3-store-"));
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
     for (const store of [createT3CodeSignInStore({ dir, cipher: cipher(false) }), createT3CodeSignInStore({ dir })]) {
       expect(store.canKeep()).toBe(false);
-      await expect(store.save({ token: "token-1", expiresAtMs: 5_000 })).rejects.toBeInstanceOf(T3CodeSignInNotKept);
+      await expect(store.save({ origin: "http://127.0.0.1:3773", token: "token-1", expiresAtMs: 5_000 })).rejects.toBeInstanceOf(T3CodeSignInNotKept);
       await expect(store.load()).resolves.toBeNull();
     }
     await expect(readFile(join(dir, "dohc-t3-code.json"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });

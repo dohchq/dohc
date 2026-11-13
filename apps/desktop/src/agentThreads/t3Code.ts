@@ -9,6 +9,10 @@ import { z } from "zod";
 // server on this computer, sign in once with the person's Allow, and call its
 // thread tools. dohc reaches T3 Code only here, and only on this computer
 // (docs/engineering/adr/0016-chat-forwards-to-an-agent-thread.md).
+//
+// dohc cannot tell which program answers at an address. Another program
+// running as the same person can take T3 Code's port, or rewrite the file
+// that names it, and receive what dohc sends there.
 
 /** Why T3 Code could not be used. Each reason is a state a person can act on. */
 export type T3CodeProblem =
@@ -37,7 +41,10 @@ export interface T3CodeAddress {
 
 const RuntimeFile = z.object({ origin: z.string(), serverVersion: z.string().optional() });
 
-/** `origin` when it is plain http on this computer by number, else null. A host name is refused: it can resolve elsewhere. */
+/**
+ * `origin` when it is plain http on this computer by number, spelled as T3
+ * Code writes it, else null. A host name is refused: it can resolve elsewhere.
+ */
 export function t3CodeOriginOnThisComputer(origin: string): string | null {
   let url: URL;
   try { url = new URL(origin); } catch { return null; }
@@ -64,13 +71,25 @@ export async function readT3CodeAddress(home: string): Promise<T3CodeAddress | n
 
 type Fetch = typeof fetch;
 
-// A redirect is refused, so nothing dohc sends follows T3 Code's address anywhere else.
+// A redirect is refused, so nothing dohc sends follows T3 Code's address
+// anywhere else. A request its caller stopped fails with the caller's reason.
 async function answerOf(fetcher: Fetch, url: string, init?: RequestInit): Promise<Response> {
-  try { return await fetcher(url, { ...init, redirect: "error" }); } catch { throw new T3CodeError("not-running", "T3 Code is not answering on this computer."); }
+  try {
+    return await fetcher(url, { ...init, redirect: "error" });
+  } catch {
+    if (init?.signal?.aborted && init.signal.reason instanceof T3CodeError) throw init.signal.reason;
+    throw new T3CodeError("not-running", "T3 Code is not answering on this computer.");
+  }
 }
 
 async function jsonOf(response: Response): Promise<unknown> {
   try { return await response.json() as unknown; } catch { throw new T3CodeError("unexpected", "T3 Code sent an answer dohc could not read."); }
+}
+
+/** Drops an answer dohc will not read, so its connection is freed, and fails with `error`. */
+async function refuse(response: Response, error: T3CodeError): Promise<never> {
+  await response.body?.cancel().catch(() => undefined);
+  throw error;
 }
 
 function shaped<T>(schema: z.ZodType<T>, value: unknown): T {
@@ -88,9 +107,11 @@ const SignInMetadata = z.object({
   registration_endpoint: z.string(),
 });
 const RegisteredClient = z.object({ client_id: z.string().min(1) });
-const IssuedToken = z.object({ access_token: z.string().min(1), expires_in: z.number().positive() });
+const IssuedToken = z.object({ access_token: z.string().min(1), token_type: z.literal("Bearer"), expires_in: z.number().positive() });
 
 export interface T3CodeSignIn {
+  /** The address T3 Code issued it at. dohc sends the token nowhere else. */
+  origin: string;
   token: string;
   expiresAtMs: number;
 }
@@ -109,8 +130,8 @@ interface Redirect {
 
 // T3 Code sends the person's browser here with the code. Only this computer
 // can reach the listener, and only the answer that carries this sign-in's
-// state is taken.
-async function listenForRedirect(input: { state: string; issuer: string; timeoutMs: number; signal?: AbortSignal }): Promise<Redirect> {
+// state is taken. The page reaches the browser before the sign-in goes on.
+async function listenForRedirect(input: { state: string; issuer: string }): Promise<Redirect> {
   let settle!: { resolve(code: string): void; reject(error: Error): void };
   const code = new Promise<string>((resolve, reject) => { settle = { resolve, reject }; });
   // The caller awaits the code only after it opens the browser.
@@ -118,32 +139,32 @@ async function listenForRedirect(input: { state: string; issuer: string; timeout
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
     if (request.method !== "GET" || url.pathname !== "/t3-code" || url.searchParams.get("state") !== input.state) {
-      response.writeHead(404).end();
+      response.writeHead(404, { connection: "close" }).end();
       return;
     }
     const issuer = url.searchParams.get("iss");
     const got = url.searchParams.get("code");
     const allowed = got !== null && got !== "" && (issuer === null || issuer === input.issuer);
-    response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }).end(allowed ? ALLOWED_PAGE : DECLINED_PAGE);
-    if (allowed) settle.resolve(got);
-    else settle.reject(new T3CodeError("not-allowed", "T3 Code did not allow dohc."));
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", connection: "close" });
+    response.end(allowed ? ALLOWED_PAGE : DECLINED_PAGE, () => {
+      if (allowed) settle.resolve(got);
+      else settle.reject(new T3CodeError("not-allowed", "T3 Code did not allow dohc."));
+    });
   });
+  // A connection that never sends a request cannot hold the listener open.
+  server.headersTimeout = 5_000;
+  server.requestTimeout = 5_000;
+  server.unref();
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(0, "127.0.0.1", () => resolve());
   });
-  const timer = setTimeout(() => settle.reject(new T3CodeError("not-allowed", "Nobody allowed dohc in T3 Code in time.")), input.timeoutMs);
-  const onAbort = () => settle.reject(new T3CodeError("not-allowed", "The sign-in to T3 Code was cancelled."));
-  input.signal?.addEventListener("abort", onAbort, { once: true });
-  if (input.signal?.aborted) onAbort();
   return {
     uri: `http://127.0.0.1:${(server.address() as AddressInfo).port}/t3-code`,
     code,
     close() {
-      clearTimeout(timer);
-      input.signal?.removeEventListener("abort", onAbort);
       server.close();
-      server.closeAllConnections();
+      server.closeIdleConnections();
     },
   };
 }
@@ -152,6 +173,7 @@ async function listenForRedirect(input: { state: string; issuer: string; timeout
  * Signs dohc in to T3 Code. `open` shows the person T3 Code's own page, where
  * they allow or decline. Resolves with the sign-in T3 Code issued; rejects
  * with "not-allowed" when they decline, cancel, or do not answer in time.
+ * Cancelling or running out of time stops every step, whichever one is going.
  */
 export async function signInToT3Code(input: {
   origin: string;
@@ -164,23 +186,34 @@ export async function signInToT3Code(input: {
   const origin = t3CodeOriginOnThisComputer(input.origin);
   if (origin === null) throw new T3CodeError("not-this-computer", "T3 Code's server is not on this computer.");
   const fetcher = input.fetch ?? fetch;
-  const metadata = shaped(SignInMetadata, await jsonOf(await answerOf(fetcher, `${origin}/.well-known/oauth-authorization-server`)));
-  // Every address the sign-in uses must be T3 Code's own, so nothing dohc sends leaves this computer.
-  const endpoints = [metadata.issuer, metadata.authorization_endpoint, metadata.token_endpoint, metadata.registration_endpoint];
-  if (endpoints.some((endpoint) => { try { return new URL(endpoint).origin !== origin; } catch { return true; } })) {
-    throw new T3CodeError("not-this-computer", "T3 Code's sign-in is not on this computer.");
-  }
-  const verifier = base64Url(randomBytes(32));
-  const state = base64Url(randomBytes(16));
-  const resource = `${origin}/mcp`;
-  const redirect = await listenForRedirect({ state, issuer: metadata.issuer, timeoutMs: input.timeoutMs ?? T3_CODE_ALLOW_TIMEOUT_MS, signal: input.signal });
+  const stop = new AbortController();
+  const stopped = new Promise<never>((_, reject) => stop.signal.addEventListener("abort", () => reject(stop.signal.reason as Error), { once: true }));
+  stopped.catch(() => undefined);
+  const timer = setTimeout(() => stop.abort(new T3CodeError("not-allowed", "Nobody allowed dohc in T3 Code in time.")), input.timeoutMs ?? T3_CODE_ALLOW_TIMEOUT_MS);
+  const cancel = () => stop.abort(new T3CodeError("not-allowed", "The sign-in to T3 Code was cancelled."));
+  input.signal?.addEventListener("abort", cancel, { once: true });
+  if (input.signal?.aborted) cancel();
+  let redirect: Redirect | null = null;
   try {
+    const found = await answerOf(fetcher, `${origin}/.well-known/oauth-authorization-server`, { signal: stop.signal });
+    if (!found.ok) await refuse(found, new T3CodeError("refused", "This T3 Code does not offer a sign-in to other programs."));
+    const metadata = shaped(SignInMetadata, await jsonOf(found));
+    // Every address the sign-in uses must be T3 Code's own, so nothing dohc sends leaves this computer.
+    const endpoints = [metadata.issuer, metadata.authorization_endpoint, metadata.token_endpoint, metadata.registration_endpoint];
+    if (endpoints.some((endpoint) => { try { return new URL(endpoint).origin !== origin; } catch { return true; } })) {
+      throw new T3CodeError("not-this-computer", "T3 Code's sign-in is not on this computer.");
+    }
+    const verifier = base64Url(randomBytes(32));
+    const state = base64Url(randomBytes(16));
+    const resource = `${origin}/mcp`;
+    redirect = await listenForRedirect({ state, issuer: metadata.issuer });
     const registered = await answerOf(fetcher, metadata.registration_endpoint, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ client_name: "dohc", redirect_uris: [redirect.uri], token_endpoint_auth_method: "none" }),
+      signal: stop.signal,
     });
-    if (!registered.ok) throw new T3CodeError("refused", "T3 Code did not take dohc's sign-in request.");
+    if (!registered.ok) await refuse(registered, new T3CodeError("refused", "T3 Code did not take dohc's sign-in request."));
     const client = shaped(RegisteredClient, await jsonOf(registered));
     const authorize = new URL(metadata.authorization_endpoint);
     for (const [name, value] of Object.entries({
@@ -192,18 +225,23 @@ export async function signInToT3Code(input: {
       state,
       resource,
     })) authorize.searchParams.set(name, value);
-    await input.open(authorize.href);
-    const code = await redirect.code;
+    await Promise.race([Promise.resolve(input.open(authorize.href)), stopped]);
+    const code = await Promise.race([redirect.code, stopped]);
     const issued = await answerOf(fetcher, metadata.token_endpoint, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({ grant_type: "authorization_code", code, redirect_uri: redirect.uri, client_id: client.client_id, code_verifier: verifier, resource }).toString(),
+      signal: stop.signal,
     });
-    if (!issued.ok) throw new T3CodeError("not-allowed", "T3 Code did not issue dohc a sign-in.");
+    if (!issued.ok) await refuse(issued, new T3CodeError("not-allowed", "T3 Code did not issue dohc a sign-in."));
     const token = shaped(IssuedToken, await jsonOf(issued));
-    return { token: token.access_token, expiresAtMs: (input.nowMs ?? Date.now)() + token.expires_in * 1000 };
+    // A sign-in the person cancelled is not kept, even when T3 Code issued it in time.
+    if (stop.signal.aborted) throw stop.signal.reason as Error;
+    return { origin, token: token.access_token, expiresAtMs: (input.nowMs ?? Date.now)() + token.expires_in * 1000 };
   } finally {
-    redirect.close();
+    clearTimeout(timer);
+    input.signal?.removeEventListener("abort", cancel);
+    redirect?.close();
   }
 }
 
@@ -226,12 +264,16 @@ const ToolResult = z.object({
   content: z.array(z.object({ type: z.string(), text: z.string().optional() })).optional(),
 });
 
-// T3 Code answers a request with JSON or with an event stream that carries JSON.
+// T3 Code answers a request with JSON or with an event stream that carries
+// JSON. An event's data can span lines; a blank line ends the event.
 async function payloadsOf(response: Response): Promise<unknown[]> {
   const text = await response.text();
   try {
     if ((response.headers.get("content-type") ?? "").includes("text/event-stream")) {
-      return text.split(/\r?\n/u).filter((line) => line.startsWith("data:")).map((line) => JSON.parse(line.slice(5)) as unknown);
+      return text.split(/\r?\n\r?\n/u)
+        .map((event) => event.split(/\r?\n/u).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).replace(/^ /u, "")).join("\n"))
+        .filter((data) => data !== "")
+        .map((data) => JSON.parse(data) as unknown);
     }
     if (text.trim() === "") return [];
     const parsed = JSON.parse(text) as unknown;
@@ -241,10 +283,15 @@ async function payloadsOf(response: Response): Promise<unknown[]> {
   }
 }
 
-/** Opens one session with T3 Code's thread tools. The token goes only to `origin`, which must be on this computer. */
-export async function openT3CodeSession(input: { origin: string; token: string; fetch?: Fetch }): Promise<T3CodeSession> {
+/**
+ * Opens one session with T3 Code's thread tools. The token goes only to the
+ * address it was issued at, which must be on this computer. A sign-in issued
+ * at another address is refused, so the person signs in again.
+ */
+export async function openT3CodeSession(input: { origin: string; signIn: T3CodeSignIn; fetch?: Fetch }): Promise<T3CodeSession> {
   const origin = t3CodeOriginOnThisComputer(input.origin);
   if (origin === null) throw new T3CodeError("not-this-computer", "T3 Code's server is not on this computer.");
+  if (input.signIn.origin !== origin) throw new T3CodeError("not-allowed", "T3 Code moved to another address. Allow dohc in T3 Code again.");
   const fetcher = input.fetch ?? fetch;
   const endpoint = `${origin}/mcp`;
   let sessionId: string | null = null;
@@ -252,7 +299,7 @@ export async function openT3CodeSession(input: { origin: string; token: string; 
   let nextId = 0;
   const headers = (): Record<string, string> => ({
     accept: "application/json, text/event-stream",
-    authorization: `Bearer ${input.token}`,
+    authorization: `Bearer ${input.signIn.token}`,
     ...(sessionId === null ? {} : { "mcp-session-id": sessionId }),
     ...(protocolVersion === null ? {} : { "mcp-protocol-version": protocolVersion }),
   });
@@ -263,14 +310,8 @@ export async function openT3CodeSession(input: { origin: string; token: string; 
       body: JSON.stringify(message),
     });
     sessionId = response.headers.get("mcp-session-id") ?? sessionId;
-    if (response.status === 401 || response.status === 403) {
-      await response.body?.cancel();
-      throw new T3CodeError("not-allowed", "dohc is not allowed in T3 Code.");
-    }
-    if (!response.ok) {
-      await response.body?.cancel();
-      throw new T3CodeError("refused", `T3 Code answered ${response.status}.`);
-    }
+    if (response.status === 401 || response.status === 403) await refuse(response, new T3CodeError("not-allowed", "dohc is not allowed in T3 Code."));
+    if (!response.ok) await refuse(response, new T3CodeError("refused", `T3 Code answered ${response.status}.`));
     return payloadsOf(response);
   };
   const request = async (method: string, params: Record<string, unknown>): Promise<unknown> => {
@@ -281,22 +322,30 @@ export async function openT3CodeSession(input: { origin: string; token: string; 
     if (answer.data.error !== undefined) throw new T3CodeError("refused", answer.data.error.message ?? "T3 Code refused the call.");
     return answer.data.result;
   };
-  protocolVersion = shaped(Initialized, await request("initialize", {
-    protocolVersion: "2025-06-18",
-    capabilities: {},
-    clientInfo: { name: "dohc", version: "0.0.0" },
-  })).protocolVersion;
-  await send({ jsonrpc: "2.0", method: "notifications/initialized" });
+  const close = async (): Promise<void> => {
+    if (sessionId === null) return;
+    await answerOf(fetcher, endpoint, { method: "DELETE", headers: headers() }).then((response) => response.body?.cancel(), () => undefined);
+    sessionId = null;
+  };
+  try {
+    protocolVersion = shaped(Initialized, await request("initialize", {
+      protocolVersion: "2025-06-18",
+      capabilities: {},
+      clientInfo: { name: "dohc", version: "0.0.0" },
+    })).protocolVersion;
+    await send({ jsonrpc: "2.0", method: "notifications/initialized" });
+  } catch (error) {
+    // A session T3 Code opened before the handshake failed is ended, not left behind.
+    await close();
+    throw error;
+  }
   return {
     async call(tool, args) {
       const result = shaped(ToolResult, await request("tools/call", { name: tool, arguments: args }));
       if (result.isError) throw new T3CodeError("refused", result.content?.find((block) => block.text)?.text ?? "T3 Code refused the call.");
       return result.structuredContent;
     },
-    async close() {
-      if (sessionId === null) return;
-      await fetcher(endpoint, { method: "DELETE", headers: headers() }).then((response) => response.body?.cancel(), () => undefined);
-    },
+    close,
   };
 }
 
