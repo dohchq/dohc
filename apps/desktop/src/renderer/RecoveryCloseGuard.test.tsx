@@ -57,6 +57,7 @@ function stubBridge(overrides: Record<string, unknown> = {}): void {
     onExitRound: () => () => undefined,
     onWindowFullScreen: () => () => undefined,
     onWindowFocused: () => () => undefined,
+    getSystemReducedMotion: async () => false,
     answerExitRound: async () => undefined,
     holdQuit: async () => undefined,
     resumeQuit: async () => undefined,
@@ -769,6 +770,12 @@ describe("main.tsx composition", () => {
       "notes/a.md:true",
     );
     restored.unmount();
+    // On Linux main.tsx polls the native reduced-motion setting every second
+    // until pagehide stops it. Left running, its timer fires after this
+    // file's jsdom is gone and fails the whole run.
+    await waitFor(() => expect(document.documentElement.dataset.systemReducedMotion).toBe("false"));
+    window.dispatchEvent(new Event("pagehide"));
+    expect(document.documentElement.dataset.systemReducedMotion).toBeUndefined();
     act(() => mountedRoot?.unmount());
     container.remove();
     vi.doUnmock("./DesktopRoot");
