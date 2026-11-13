@@ -28,7 +28,7 @@ Android has been run since the host was added.
 ## Controls that act
 
 The app shows its sample data only in a sample build: a development build, or one made with `EXPO_PUBLIC_DOHC_SAMPLE=1`, as the simulator tests are (`src/sampleBuild.ts`).
-Any other build signs in to a server first (`src/account/Connect.tsx`), then reads the open workspace from it, read-only: Home, Chats, a chat and a page (`src/server/workspaceData.ts`).
+Any other build signs in to a server first (`src/account/Connect.tsx`), then reads the open workspace from it, read-only: Home, Chats, a chat and a page (`src/server/workspaceData.ts`). It reads and marks the account's Notices.
 Search shows "Not built yet".
 
 - An installable build never presents sample data as someone's work, and its bundle holds none. Import a sample module (`sample.ts`, or a screen in `Sample*.tsx`) elsewhere only as a type, or require it behind the exact test `src/sampleBuild.ts` gives.
@@ -46,6 +46,7 @@ The server client is in `src/server`. Its files hold how each part works.
 - The phone opens only workspaces the list marks `canOpen`. A 404 for the open workspace clears and stops its store, and the phone reads its workspace list again (`src/server/openWorkspace.ts`).
 - The read cache keeps a copy on disk in Caches, so a relaunch opens the last workspace from disk before the server answers. `src/server/cacheFiles.ts` and the `ReadCache` in `src/server/workspaceData.ts` hold when it writes and deletes its files.
 - Raise `CACHE_FORMAT` when a view's value changes shape.
+- The account's Notices live in one store per sign-in, beside the workspace list, not in the open workspace's (`src/server/noticeStore.ts`). It reads the whole list again at each start, return from the background, refresh, and change to which workspaces show on the phone. Its waiting marks are a separate file in Documents (`src/server/noticeFiles.ts`). Raise `NOTICE_LIST_FORMAT` or `NOTICE_MARKS_FORMAT` when a file's shape changes.
 - Ending a token deletes it from the keychain first, then revokes its session, so a phone closed between the two keeps no token (`src/server/account.ts`).
 
 ## Copy

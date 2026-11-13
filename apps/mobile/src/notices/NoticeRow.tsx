@@ -1,20 +1,23 @@
 import { noticesWords } from "@dohc/interface-words/notices";
 import * as Haptics from "expo-haptics";
-import { X } from "lucide-react-native";
+import { Mail, MailOpen, X } from "lucide-react-native";
 import { memo, useEffect, useRef, useState } from "react";
 import { demoMode } from "../demo";
 import { StyleSheet, Text, View, type AccessibilityActionEvent } from "react-native";
 import ReanimatedSwipeable, {
+  SwipeDirection,
   type SwipeableMethods,
 } from "react-native-gesture-handler/ReanimatedSwipeable";
 import { useAccessibilityTextSize, useLineClamp } from "../textScale";
 import { useTheme } from "../theme";
-import type { PhoneNotice } from "./sample";
+import type { PhoneNotice } from "./phoneNotice";
 import { copyText } from "../copy";
 import { ActionPill } from "./ActionPill";
 import {
   ageMinutes,
+  marksRead,
   noticeDetails,
+  noticeMeta,
   noticeRowAccessibility,
   noticeRowHandlers,
   shortAgo,
@@ -26,9 +29,12 @@ import { TitleControls } from "./TitleControls";
 export const NoticeRow = memo(function NoticeRow({
   notice,
   onDismiss,
+  onToggleRead,
 }: {
   notice: PhoneNotice;
   onDismiss(id: string): void;
+  /** Mark read or Mark unread, for a Notice from the server. */
+  onToggleRead?(id: string): void;
 }) {
   const theme = useTheme();
   const titleLines = useLineClamp(3);
@@ -51,18 +57,26 @@ export const NoticeRow = memo(function NoticeRow({
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     onDismiss(notice.id);
   };
+  const toggleRead = () => {
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    onToggleRead?.(notice.id);
+  };
   const router = useRouter();
   const { label, actions } = noticeRowAccessibility(notice);
-  // Open goes where the phone can go (a chat), and Try again does what the notice says failed. In the dev-only sample,
-  // Try again and an Open with nowhere to go need the server, so they do nothing.
+  // Open goes where the phone can go, and Try again does what the notice says failed. In the dev-only sample, Try again
+  // and an Open with nowhere to go need the server, so they do nothing.
   const handlers = noticeRowHandlers(notice, {
-    open: notice.openChat
-      ? () => router.push({ pathname: "/chat/[id]", params: notice.openChat ?? {} })
-      : undefined,
+    open:
+      notice.onOpen ??
+      (notice.openChat
+        ? () => router.push({ pathname: "/chat/[id]", params: notice.openChat ?? {} })
+        : undefined),
     retry: notice.onRetry,
+    toggleRead: onToggleRead ? toggleRead : undefined,
     copy: () => copyText(noticeDetails(notice)),
     dismiss,
   });
+  const readToggle = marksRead(notice) && onToggleRead !== undefined;
   const onAction = (event: AccessibilityActionEvent) => handlers[event.nativeEvent.actionName]?.();
   const controls = (
     <TitleControls
@@ -72,7 +86,9 @@ export const NoticeRow = memo(function NoticeRow({
       onDismiss={dismiss}
       demoCopied={demoMode === "notice-copied" && notice.id === "n1"}
       // On the action line their 44pt targets reach 11pt past each icon, so they keep clear of the pill's.
-      style={roomy && (notice.retry || notice.open) ? styles.actionControls : undefined}
+      style={
+        roomy && (notice.retry || notice.open || readToggle) ? styles.actionControls : undefined
+      }
     />
   );
   const row = (
@@ -113,7 +129,7 @@ export const NoticeRow = memo(function NoticeRow({
             {notice.body}
           </Text>
         ) : null}
-        {notice.retry || notice.open || roomy ? (
+        {notice.retry || notice.open || readToggle || roomy ? (
           <View style={styles.actions}>
             {notice.retry ? (
               <ActionPill label={noticesWords.tryAgain} onPress={handlers.worded} />
@@ -124,25 +140,54 @@ export const NoticeRow = memo(function NoticeRow({
                 onPress={handlers.worded}
               />
             ) : null}
+            {/* The swipe right's visible control. */}
+            {readToggle ? (
+              <ActionPill
+                label={notice.read ? noticesWords.markUnread : noticesWords.markRead}
+                onPress={handlers.read}
+              />
+            ) : null}
             {roomy ? controls : null}
           </View>
         ) : null}
         <Text style={[styles.meta, { color: theme.subtle }]}>
-          {notice.folder
-            ? `${shortAgo(ageMinutes(notice))} · ${notice.folder}`
-            : shortAgo(ageMinutes(notice))}
+          {noticeMeta(notice, shortAgo(ageMinutes(notice)))}
         </Text>
       </View>
     </View>
   );
   if (!notice.dismissible) return row;
+  // Swiping left dismisses; swiping right, on a Notice from the server, marks it read or unread and springs back.
   return (
     <ReanimatedSwipeable
       ref={swipeable}
       friction={2}
+      leftThreshold={64}
       rightThreshold={64}
+      overshootLeft={false}
       overshootRight={false}
-      onSwipeableOpen={swipeOpen ? undefined : dismiss}
+      onSwipeableOpen={
+        swipeOpen
+          ? undefined
+          : (direction) => {
+              if (direction === SwipeDirection.LEFT) return dismiss();
+              swipeable.current?.close();
+              toggleRead();
+            }
+      }
+      renderLeftActions={
+        readToggle
+          ? () => (
+              <View style={[styles.swipe, { backgroundColor: theme.panel2 }]}>
+                {notice.read ? (
+                  <Mail size={22} color={theme.ink} strokeWidth={2} />
+                ) : (
+                  <MailOpen size={22} color={theme.ink} strokeWidth={2} />
+                )}
+              </View>
+            )
+          : undefined
+      }
       renderRightActions={() => (
         <View style={[styles.swipe, { backgroundColor: theme.panel2 }]}>
           <X size={22} color={theme.ink} strokeWidth={2} />

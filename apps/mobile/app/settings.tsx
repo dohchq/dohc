@@ -4,7 +4,7 @@ import { Pressable, ScrollView, StyleSheet, Switch, Text, View } from "react-nat
 import { useAccount, useSignIn } from "../src/account/AccountProvider";
 import { ProblemLine } from "../src/account/ProblemLine";
 import { AgentMark } from "../src/AgentMark";
-import { workspaceName } from "../src/chats/Workspaces";
+import { workspaceName } from "../src/chats/workspaceName";
 import { confirm } from "../src/confirm";
 import type { SignIn } from "../src/server/account";
 import {

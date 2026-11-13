@@ -22,10 +22,23 @@ import {
   type MarkKey,
 } from "./pageParts";
 
+// A page opened from a Notice names its workspace. It shows only while that workspace is the one open, so it never
+// reads the page from another.
 export function ServerPage() {
   const { data } = useAccount();
-  const { path = "" } = useLocalSearchParams<{ path?: string }>();
+  const { path = "", workspace } = useLocalSearchParams<{ path?: string; workspace?: string }>();
+  if (workspace !== undefined && data?.workspaceId !== workspace) return <ElsewherePage />;
   return <PageScreen key={`${data?.instance ?? 0}:${path}`} path={path} />;
+}
+
+/** A page whose workspace is no longer the one open, as when another device hid it. */
+function ElsewherePage() {
+  const theme = useTheme();
+  return (
+    <View style={[styles.screen, { backgroundColor: theme.bg }]}>
+      <ScreenFailure text={documentWords.noLongerAvailable} />
+    </View>
+  );
 }
 
 function PageScreen({ path }: { path: string }) {
