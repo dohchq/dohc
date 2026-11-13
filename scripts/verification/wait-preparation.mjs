@@ -1,6 +1,6 @@
 import { setTimeout } from "node:timers/promises";
 import { resolve } from "node:path";
-import { cloudApi, QUEUED_STATUSES } from "./cloud-api.mjs";
+import { cloudApi, QUEUED_STATUSES, WorkflowAllowanceError } from "./cloud-api.mjs";
 
 export async function waitForPreparation(
   scope,
@@ -24,32 +24,36 @@ export async function waitForPreparation(
   ]) {
     if (!env[key]) throw new Error(`Missing ${key} for shared preparation.`);
   }
-  const deadline = now() + 15 * 60_000,
+  const startedAt = now(),
+    deadline = startedAt + 15 * 60_000,
     api = cloudApi({ env, request, pause, now, deadline });
   const names = preparation.artifacts.map((artifact) => `${artifact}-${env.GITHUB_RUN_ATTEMPT}`);
   let name = names.shift();
   let build,
-    checkAt = -Infinity;
+    checkAt = startedAt + 120_000;
+  const checkBuild = async () => {
+    const { jobs } = await api.read(`/attempts/${env.GITHUB_RUN_ATTEMPT}/jobs?per_page=100`, {
+      deadline: now() >= deadline ? now() + 10_000 : deadline,
+    });
+    if (!Array.isArray(jobs) || jobs.length >= 100)
+      throw new Error("Cannot identify the complete preparation job group.");
+    const builds = jobs.filter((job) => job.name === preparation.job);
+    if (builds.length > 1) throw new Error(`Duplicate ${preparation.job} jobs.`);
+    build = builds[0];
+    checkAt = now() + 120_000;
+    if (build?.status === "completed" && build.conclusion !== "success")
+      throw new Error(`${preparation.job} ended with ${build.conclusion}.`);
+  };
   console.log(`Waiting for ${name}; dependency setup overlaps the shared build.`);
   try {
     for (;;) {
-      if (now() >= checkAt && now() < deadline) {
-        const { jobs } = await api.read(`/attempts/${env.GITHUB_RUN_ATTEMPT}/jobs?per_page=100`);
-        if (!Array.isArray(jobs) || jobs.length >= 100)
-          throw new Error("Cannot identify the complete preparation job group.");
-        const builds = jobs.filter((job) => job.name === preparation.job);
-        if (builds.length > 1) throw new Error(`Duplicate ${preparation.job} jobs.`);
-        build = builds[0];
-        checkAt = now() + 60_000;
-        if (build?.status === "completed" && build.conclusion !== "success")
-          throw new Error(`${preparation.job} ended with ${build.conclusion}.`);
-      }
+      if (now() >= deadline) await checkBuild();
       const queued = build && QUEUED_STATUSES.includes(build.status);
       if (now() >= deadline)
         throw new Error(
           `Shared ${scope} preparation exceeded its 15-minute wait cap; ${preparation.job} ${!build ? "build job missing from the job list" : queued ? "still queued for a runner" : build.status === "in_progress" ? "still running" : "has no published artifact"}.`,
         );
-      if (build && ["in_progress", "completed"].includes(build.status)) {
+      {
         const { artifacts } = await api.read(
           `/artifacts?name=${encodeURIComponent(name)}&per_page=100`,
           { conditional: true },
@@ -86,6 +90,7 @@ export async function waitForPreparation(
                 deadline - now(),
               );
             } catch (error) {
+              if (error instanceof WorkflowAllowanceError) throw error;
               lastRequestError = error;
               if (now() >= downloadDeadline) throw unavailable(error);
               await pause(Math.min(2_000, downloadDeadline - now()));
@@ -136,9 +141,11 @@ export async function waitForPreparation(
             if (now() >= downloadDeadline) throw unavailable();
             await pause(Math.min(2_000, downloadDeadline - now()));
           }
+        } else if (now() >= checkAt && now() < deadline) {
+          await checkBuild();
         }
       }
-      await pause(Math.max(0, Math.min(api.pollMs, deadline - now())));
+      await pause(Math.max(0, Math.min(api.pollMs, deadline - now(), Math.max(0, checkAt - now()))));
     }
   } finally {
     api.log(`${scope} preparation wait`);

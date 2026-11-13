@@ -4,6 +4,20 @@ export const QUEUED_STATUSES = ["queued", "waiting", "pending", "requested"];
 export const CLOUD_POLL_MS = 2_500;
 export const GATE_POLL_MS = { js: 3_000, rust: 10_000 };
 
+export class WorkflowAllowanceError extends Error {}
+
+function requireAllowance(response) {
+  if (
+    ![403, 429].includes(response.status) ||
+    response.headers.get("x-ratelimit-remaining") !== "0"
+  )
+    return;
+  const reset = new Date(Number(response.headers.get("x-ratelimit-reset")) * 1000).toISOString();
+  const message = `The repository's hourly GitHub API allowance for workflow runs is used up. Re-run all jobs after ${reset}.`;
+  console.error(`::error title=GitHub API allowance used up::${message}`);
+  throw new WorkflowAllowanceError(message);
+}
+
 export function cloudApi({
   env = process.env,
   request = fetch,
@@ -18,7 +32,10 @@ export function cloudApi({
     unchanged = 0;
   return {
     pollMs: CLOUD_POLL_MS,
-    async read(path, { conditional = false } = {}) {
+    async read(
+      path,
+      { conditional = false, slowUnchanged = true, deadline: readDeadline = deadline } = {},
+    ) {
       const previous = conditional ? cache.get(path) : undefined;
       let cause,
         attempts = 0;
@@ -27,7 +44,7 @@ export function cloudApi({
           `Cannot read workflow ${path}: ${cause?.message ?? "deadline reached"} after ${attempts} attempt${attempts === 1 ? "" : "s"}.`,
           { cause },
         );
-      while (now() < deadline) {
+      while (now() < readDeadline) {
         attempts++;
         let response;
         try {
@@ -37,7 +54,7 @@ export function cloudApi({
               Accept: "application/vnd.github+json",
               ...(previous?.etag ? { "If-None-Match": previous.etag } : {}),
             },
-            signal: AbortSignal.timeout(Math.min(10_000, deadline - now())),
+            signal: AbortSignal.timeout(Math.min(10_000, readDeadline - now())),
           });
         } catch (error) {
           cause = error;
@@ -50,10 +67,16 @@ export function cloudApi({
             return previous.data;
           }
           counted++;
+          requireAllowance(response);
           if (response.ok) {
             try {
               const data = await response.json();
-              if (conditional && previous && JSON.stringify(data) === JSON.stringify(previous.data))
+              if (
+                slowUnchanged &&
+                conditional &&
+                previous &&
+                JSON.stringify(data) === JSON.stringify(previous.data)
+              )
                 this.pollMs = 10_000;
               if (conditional) cache.set(path, { etag: last?.get("etag"), data });
               return data;
@@ -67,8 +90,8 @@ export function cloudApi({
               throw failed();
           }
         }
-        if (attempts === 3 || now() >= deadline) throw failed();
-        await pause(Math.min(1_000, deadline - now()));
+        if (attempts === 3 || now() >= readDeadline) throw failed();
+        await pause(Math.min(1_000, readDeadline - now()));
       }
       throw failed();
     },
@@ -99,13 +122,15 @@ export function cloudApi({
       counted++;
       // Redirected blob responses have no REST rate-limit headers.
       if (response.headers.has("x-ratelimit-limit")) last = response.headers;
+      requireAllowance(response);
       return response;
     },
-    async jobs() {
+    async jobs(options) {
       const result = [];
       for (let page = 1; ; page++) {
         const data = await this.read(
           `/attempts/${env.GITHUB_RUN_ATTEMPT}/jobs?per_page=100&page=${page}`,
+          options,
         );
         if (!Array.isArray(data.jobs)) throw new Error("Missing workflow jobs.");
         result.push(...data.jobs);
