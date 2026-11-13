@@ -6227,11 +6227,13 @@ mod tests {
         assert!(matches!(classify(acl), MaterializeError::Io { .. }));
     }
 
+    #[cfg(unix)]
     struct AlwaysFailReplacer {
         error: fn() -> std::io::Error,
         attempts: AtomicUsize,
     }
 
+    #[cfg(unix)]
     impl AtomicReplacer for AlwaysFailReplacer {
         fn displace(&self, _target: &Path, _displaced: &Path) -> std::io::Result<()> {
             self.attempts.fetch_add(1, Ordering::Relaxed);
