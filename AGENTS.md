@@ -130,7 +130,7 @@ A check enforces some of these rules. Its limit says what it does not catch.
 
 | Rule | Check | Limit |
 | --- | --- | --- |
-| Read workspace data with `useWorkspaceQuery`. | `scripts/check-bridge-reads.mjs`. `scripts/bridge-reads.json` lists older reads and only shrinks. | A loader that calls a setter it captured can still write late. Keep loaders to reading and returning. |
+| Read workspace data with `useWorkspaceQuery`. | `scripts/check-bridge-reads.mjs`. `scripts/bridge-reads.json` lists older reads. A ceiling in the script stops that list from growing. | The check does not see reads in a file that is not a hook or component, methods outside its read list, or a bridge passed through a parameter or a longer helper. A new read can take an older entry for the same method in the same file. A loader that calls a setter it captured can still write late. Keep loaders to reading and returning. |
 
 Within these boundaries, app authors choose frameworks and services and own app behavior, including where received data goes.
 
