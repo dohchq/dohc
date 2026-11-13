@@ -17,7 +17,7 @@ import type { AutomationReplica } from "./automationReplicas";
 import { ACCOUNT_VISITS_PER_CALLER, startServerCopies } from "./serverCopies";
 import { streamsRequestBody } from "./server";
 import type { SyncRelayStorage } from "./storage";
-import { CHAT_WAKE_CONFIRM_MS, chatWakeId } from "./storage/chatWakes";
+import { CHAT_WAKE_CONFIRM_MS, CHAT_WAKE_KEEP_MS, chatWakeId } from "./storage/chatWakes";
 import type { StorageContext } from "./storage/context";
 import { closeTestStorages, denialBytes, json, testHandler, testStorage } from "./testing";
 import { PhoneWriteEngine, seedPhoneChats } from "./testing/phoneWriteEngine";
@@ -1561,6 +1561,41 @@ describe("an account's chat writes through the server's copy", () => {
     expect(await answer(await retrying)).toEqual({ ok: false, reason: `no such wake: ${wakeId}`, refusal: "missing" });
     expect(count(f, "SELECT count(*) AS n FROM sync_relay_chat_wakes WHERE message_id = 'message-notes'")).toBe(1);
     expect(count(f, "SELECT count(*) AS n FROM sync_relay_chat_wake_retries")).toBe(0);
+  });
+
+  it("answers a repeated retry whose named wake went only while the generation it answered is in a thread the account may see", async () => {
+    const f = await writeRelay({ nowMs: () => RETRY_NOW + CHAT_WAKE_CONFIRM_MS });
+    const chats = new ChatsLiveAdapter(f.engine.chats, "trip", { workspaceId: "trip" });
+    f.engine.files.seedTextFile({ workspace: "trip", path: "notes.md", text: "# Notes\n", objectId: "object-notes" });
+    const onNotes = await chats.createThread({ workspaceId: "trip", title: "Notes", linkedFile: { objectId: "object-notes", pathHint: "notes.md" } });
+    const wakeId = unconfirmedWake(f, "op-notes", "message-notes", onNotes.id);
+    const next = chatWakeId("ana", "trip", "message-notes", "mention:claude", 2);
+    const retry = { operationId: "retry-1", wakeId };
+    expect(await answer(await f.write("retryWake", retry))).toMatchObject({ ok: true, wake: { wakeId: next, generation: 2 } });
+
+    // The named wake ended at the retry; 30 days on it is swept, and the generation it led to, which ended later, stays.
+    expect(f.storage.sweepChatWakes(RETRY_NOW + CHAT_WAKE_CONFIRM_MS + CHAT_WAKE_KEEP_MS + 1)).toBeGreaterThan(0);
+    const left = () => (f.storage as StorageContext).db.prepare("SELECT wake_id FROM sync_relay_chat_wakes WHERE message_id = 'message-notes'").all()
+      .map((row) => row.wake_id);
+    expect(left()).toEqual([next]);
+    expect(await answer(await f.write("retryWake", retry)), "a repeat in a thread still shown answers its generation")
+      .toMatchObject({ ok: true, wake: { wakeId: next, generation: 2 } });
+
+    // The file moves to .env: the relay accepts the move, and the copy's engine applies it.
+    const db = (f.storage as StorageContext).db;
+    const relaySeq = Number(db.prepare(`INSERT INTO sync_relay_log (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms)
+      VALUES ('trip', 'another-device', 1, 'moment.append', '{}', 1) RETURNING relay_seq`).get()!.relay_seq);
+    db.prepare(`INSERT INTO sync_relay_object_moments (workspace_id, object_id, relay_seq, moment_id, version_id, path, recorded_at_ms)
+      VALUES ('trip', 'object-notes', ?, 'moment-env', 'main', '.env', 1)`).run(relaySeq);
+    await new VersionedLiveAdapter(f.engine, "trip", { workspaceId: "trip" })
+      .deleteTextFile({ workspaceId: "trip", versionId: "main", path: "notes.md", metadata: { origin: "api" } });
+    const bytes = async (args: { operationId: string; wakeId: string }) =>
+      (await (await f.write("retryWake", args)).text()).replaceAll(args.wakeId, "<id>");
+    const hidden = await bytes(retry);
+    expect(hidden).toBe(await bytes({ operationId: "retry-unknown", wakeId: chatWakeId("ana", "trip", "message-nowhere", "mention:claude", 1) }));
+    expect(hidden).toContain('"refusal":"missing"');
+    for (const id of [next, onNotes.id, "message-notes"]) expect(hidden).not.toContain(id);
+    expect(left()).toEqual([next]);
   });
 
   it("answers a new write whose copy can't sync as not sent, without the relay's words", async () => {

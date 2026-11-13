@@ -1021,8 +1021,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return chatWakeStorage.confirmChatWakeQueued(this, input);
   }
 
-  chatWakeThread(input: { accountId: string; workspaceId: string; wakeId: string }) {
-    return chatWakeStorage.chatWakeThread(this, input);
+  retryWakeThreads(input: Parameters<typeof chatWakeStorage.retryWakeThreads>[1]) {
+    return chatWakeStorage.retryWakeThreads(this, input);
   }
 
   retryChatWake(input: Parameters<typeof chatWakeStorage.retryChatWake>[1]) {

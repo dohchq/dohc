@@ -336,10 +336,27 @@ export function retryUsesOperationIdInTransaction(storage: StorageContext, accou
   return Boolean(storage.db.prepare("SELECT 1 FROM sync_relay_chat_wake_retries WHERE account_id = ? AND operation_id = ?").get(accountId, operationId));
 }
 
-/** The thread of a wake the account has in a workspace it owns, or null. */
-export function chatWakeThread(storage: StorageContext, input: { accountId: string; workspaceId: string; wakeId: string }): string | null {
-  return storage.readTx(() => nullableString(storage.db.prepare(`${OWNED} WHERE c.wake_id = ? AND c.account_id = ? AND c.workspace_id = ?`)
-    .get(input.wakeId, input.accountId, input.workspaceId)?.thread_id ?? null));
+/**
+ * The threads of every wake a retry could answer, each read through its own
+ * wake ID: the wake it names, and the generation a matching binding of its
+ * operation ID answered, which can outlive the named wake. Only wakes the
+ * account has in a workspace it owns count.
+ */
+export function retryWakeThreads(storage: StorageContext, input: {
+  accountId: string; workspaceId: string; operationId: string; wakeId: string;
+}): string[] {
+  return storage.readTx(() => {
+    const bound = storage.db.prepare(
+      "SELECT next_wake_id FROM sync_relay_chat_wake_retries WHERE account_id = ? AND operation_id = ? AND workspace_id = ? AND wake_id = ?",
+    ).get(input.accountId, input.operationId, input.workspaceId, input.wakeId);
+    const thread = storage.db.prepare(`${OWNED} WHERE c.wake_id = ? AND c.account_id = ? AND c.workspace_id = ?`);
+    const threads = [input.wakeId, ...(bound === undefined ? [] : [String(bound.next_wake_id)])]
+      .flatMap((wakeId) => {
+        const row = thread.get(wakeId, input.accountId, input.workspaceId);
+        return row === undefined ? [] : [String(row.thread_id)];
+      });
+    return [...new Set(threads)];
+  });
 }
 
 /** The account's change head for its wakes. */

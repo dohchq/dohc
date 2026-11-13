@@ -1068,9 +1068,11 @@ type RetryWakeAnswer = { ok: true; wake: ChatWakeView } | { ok: false; refusal: 
 
 /**
  * Tries a wake again, in a visit to the account's copy of `workspaceId`,
- * after the copy syncs. A wake whose thread the account may no longer see,
- * through the reads' secret-file filter, answers as one that isn't there,
- * and nothing changes. The relay log's head bounds what any sync of the copy
+ * after the copy syncs. Every wake the retry could answer, the one it names
+ * and the generation a repeat answers, has its thread read through the
+ * reads' secret-file filter. A thread the account may no longer see answers
+ * as a wake that isn't there, and nothing changes; so does an answer whose
+ * thread wasn't read and shown. The relay log's head bounds what any sync of the copy
  * can pull, so the thread is judged against it: when the head is unchanged
  * from before the copy synced, through the read and the last session check,
  * the read still holds, and the retry commits with nothing awaited after
@@ -1104,24 +1106,27 @@ export async function runAccountRetryWake(
       await input.authorize();
       return { result, cursor };
     };
-    // Whether the account may see the wake's thread now. A wake it doesn't have is left to the retry to answer.
-    const visible = async () => {
-      const threadId = storage.chatWakeThread({ accountId, workspaceId, wakeId });
-      if (threadId === null) return true;
-      try {
-        await visibleTargets(storage, copy).thread(threadId);
-        return true;
-      } catch (error) {
-        if (error instanceof TargetMissing) return false;
-        throw error;
+    // The threads of the wakes this retry could answer, and those of them the account may see now. A wake it doesn't
+    // have has no thread here; the retry answers it without one.
+    const read = async () => {
+      const threads = storage.retryWakeThreads({ accountId, workspaceId, operationId, wakeId });
+      const shown = new Set<string>();
+      for (const threadId of threads) {
+        try {
+          await visibleTargets(storage, copy).thread(threadId);
+          shown.add(threadId);
+        } catch (error) {
+          if (!(error instanceof TargetMissing)) throw error;
+        }
       }
+      return { hidden: shown.size < threads.length, shown };
     };
     for (let attempt = 1; ; attempt += 1) {
       const head = logHead();
-      let shown: boolean;
+      let threads: Awaited<ReturnType<typeof read>>;
       try {
         await copy.sync(signal);
-        shown = await visible();
+        threads = await read();
       } catch (error) {
         if (error instanceof RelayError || signal.aborted) throw error;
         return await answered(notSent);
@@ -1129,9 +1134,13 @@ export async function runAccountRetryWake(
       await input.authorize();
       // Nothing is awaited from this check to the commit.
       if (logHead() === head) {
-        if (!shown) return await answered(missingWake);
+        if (threads.hidden) return await answered(missingWake);
         const retried = storage.retryChatWake({ accountId, workspaceId, operationId, wakeId, nowMs: input.nowMs() });
-        if (retried.kind === "retried") return await answered({ ok: true, wake: retried.wake });
+        // A generation returns only with a thread read and shown above. A new one is made only from the named wake,
+        // whose thread was read, so this check guards the answer, never a commit.
+        if (retried.kind === "retried") {
+          return await answered(threads.shown.has(retried.wake.threadId) ? { ok: true, wake: retried.wake } : missingWake);
+        }
         if (retried.kind === "missing") return await answered(missingWake);
         return await answered({ ok: false, refusal: "refused", reason: retried.kind === "too-old" ? TOO_OLD : COULD_NOT_SEND });
       }
