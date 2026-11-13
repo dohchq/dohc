@@ -1115,12 +1115,23 @@ describe("the owner's notice page", () => {
     expect((await roster(f)).revision).toBe(8);
   });
 
+  it("moves the Notice head with each roster change, so a read from before it answers the new revision and no row", async () => {
+    const f = await fixture();
+    const agent = await signIn(f);
+    const before = await notices(f);
+    await ok(await owner(f, `/${agent.agentId}/name`, { method: "PUT", body: { name: "Research" } }));
+    const after = await ok(await f.h(request(OWNER, `/sync/notices?cursor=${before.nextCursor}`))) as unknown as RelayNoticePage;
+    expect(after).toMatchObject({ notices: [], hasMore: false, replace: false, personalAgentsRevision: before.personalAgentsRevision + 1 });
+    expect(Number(after.nextCursor)).toBe(Number(before.nextCursor) + 1);
+  });
+
   it("tells the owner each time an agent signs in as theirs, and opens that agent's page in Settings › Agents", async () => {
     const f = await fixture();
     const agent = await signIn(f, { reach: [{ workspaceId: WS_B, level: "view" }] });
     expect(signedIn(await notices(f))).toEqual([{
       noticeId: `personal-agent-signed-in:${agent.connectionId}`,
-      changeSeq: 1,
+      // The sign-in's roster change took the first.
+      changeSeq: 2,
       // The address the agent signed in at.
       workspaceId: WS_A,
       recipientShareId: null,

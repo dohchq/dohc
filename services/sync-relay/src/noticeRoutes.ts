@@ -12,15 +12,22 @@ import {
   NOTICE_MARKS_PER_REQUEST,
   NOTICE_PAGE_MAX,
   NOTICE_POSTED_ID_MAX_CHARS,
+  NOTICE_SCOPES,
   NOTICE_TITLE_MAX_CHARS,
+  NOTICE_WAIT_MAX_MS,
   type NoticeKind,
   type NoticeMark,
   type PostableNoticeKind,
   type NoticeMarksResponse,
   type NoticeReach,
+  type NoticeScope,
 } from "@dohc/workspace-contracts/relay";
+import type { ResolveAccountSession } from "@dohc/workspace-auth/session";
 import { accountDisplayName } from "./accountDisplayName";
-import { badRequest, relayError } from "./errors";
+import { bearerAccountSession } from "./accountWorkspaceRoutes";
+import { DiscussionActivityCapacityError, type DiscussionActivityHub } from "./discussionActivity";
+import { badRequest, notFound, RelayError, relayError } from "./errors";
+import { observeNoticeChanges } from "./relayWriteChanges";
 import { parseString, parseWorkspaceId, readJsonObject } from "./requestInputs";
 import type { SyncRelayStorage } from "./storage";
 import { parseNoticeCursor, type NoticeCursor, type PostNoticeInput } from "./storage/notices";
@@ -38,26 +45,140 @@ const MAX_USER_ID_CHARS = 256;
 const MAX_INSTALL_ID_CHARS = 256;
 const DEFAULT_NOTICE_PAGE = 100;
 
+/** The Notice reads one sign-in may hold waiting at once. */
+export const NOTICE_WAITS_PER_SESSION = 2;
+/** The Notice reads one account may hold waiting at once, across its sign-ins. */
+export const NOTICE_WAITS_PER_ACCOUNT = 16;
+/** The Notice reads this server holds waiting at once, so they never fill the slots other waits share. */
+export const NOTICE_WAITS_TOTAL = 1_024;
+
+/** Each account's Notice reads wait in their own group. */
+function noticeWaitGroup(userId: string): string {
+  return `notices:${userId}`;
+}
+
+/**
+ * Notice reads held for their recipient. A committed change to the list
+ * wakes them, after its transaction, and so does a credential change, by
+ * wakeAccount. A held read is a parked promise with one timer: it runs no
+ * query until something wakes it or its time ends. Past a sign-in's, an
+ * account's, or the server's waits, `wait` answers null and parks nothing.
+ */
+export function createNoticeWaits(storage: object, hub: Pick<DiscussionActivityHub, "wait" | "wake">) {
+  const accounts = new Map<string, Map<string, number>>();
+  let total = 0;
+  const closing = new AbortController();
+  const stopObserving = observeNoticeChanges(storage, (userId) => hub.wake(noticeWaitGroup(userId)));
+
+  return {
+    wait(input: { userId: string; sessionId: string; holdMs: number; signal: AbortSignal; shouldPark(): boolean }): Promise<void> | null {
+      const sessions = accounts.get(input.userId) ?? new Map<string, number>();
+      const held = [...sessions.values()].reduce((sum, count) => sum + count, 0);
+      if (closing.signal.aborted || total >= NOTICE_WAITS_TOTAL || held >= NOTICE_WAITS_PER_ACCOUNT ||
+        (sessions.get(input.sessionId) ?? 0) >= NOTICE_WAITS_PER_SESSION) return null;
+      let parked: Promise<void>;
+      try {
+        parked = hub.wait(noticeWaitGroup(input.userId), `notices:${input.sessionId}`, {
+          holdMs: input.holdMs, signal: AbortSignal.any([input.signal, closing.signal]), shouldPark: input.shouldPark,
+        });
+      } catch (error) {
+        if (error instanceof DiscussionActivityCapacityError) return null;
+        throw error;
+      }
+      accounts.set(input.userId, sessions);
+      sessions.set(input.sessionId, (sessions.get(input.sessionId) ?? 0) + 1);
+      total += 1;
+      return parked.finally(() => {
+        total -= 1;
+        const left = sessions.get(input.sessionId)! - 1;
+        if (left > 0) sessions.set(input.sessionId, left);
+        else sessions.delete(input.sessionId);
+        if (sessions.size === 0) accounts.delete(input.userId);
+      });
+    },
+    /** The account's credentials changed: its reads check them again. */
+    wakeAccount(userId: string): void {
+      hub.wake(noticeWaitGroup(userId));
+    },
+    /** Ends every held read, which then answers its page, and stops listening. */
+    close(): void {
+      closing.abort();
+      stopObserving();
+    },
+  };
+}
+
+export type NoticeWaits = ReturnType<typeof createNoticeWaits>;
+
 // A person's notice list: GET pulls changes after a cursor, POST adds a
 // notice to someone's list, and POST /marks sets read or dismissed. Every
 // route acts for the authenticated caller, who is the sender of a post and
-// the owner of the list it pulls or marks.
+// the owner of the list it pulls or marks. A GET with `scope` or `wait` is
+// the account's own read: only a Bearer account session makes it.
 export function createNoticeRoutes(
-  storage: Pick<SyncRelayStorage, "postNotice" | "readNoticeChanges" | "markNotices" | "getShare">,
+  storage: SyncRelayStorage,
   nowMs: () => number,
   lookupUserDisplayName: ((userId: string) => Promise<string | null> | string | null) | undefined,
   claimPendingShares: (userId: string, signal?: AbortSignal) => Promise<void>,
   deliverPendingShareNotices: (userId: string) => Promise<void>,
   postRateLimiter: TokenBucketLimiter,
+  account: {
+    /** Absent, an account read answers as missing. */
+    resolveAccountSession: ResolveAccountSession | undefined;
+    /** Keyed by sign-in. */
+    limiter: TokenBucketLimiter;
+    waits: NoticeWaits;
+  },
 ) {
+  /**
+   * `GET /sync/notices?cursor=&limit=&scope=phone&wait=`. The sign-in is
+   * checked before each read, so after every wait, and nothing is awaited
+   * between the last read and its answer. A read parks only while its cursor
+   * is caught up: a snapshot, a replacement, a part of a longer pull, or a
+   * moved head answers at once, even when the phone's scope left every row
+   * out.
+   */
+  async function readForAccount(request: Request, url: URL): Promise<Response> {
+    const scope = parseScope(url.searchParams.get("scope"));
+    const waitMs = parseWait(url.searchParams.get("wait"));
+    const cursor = parseCursorParam(url.searchParams.get("cursor"));
+    const limit = parseNoticePageLimit(url.searchParams.get("limit"));
+    const resolveAccountSession = account.resolveAccountSession;
+    if (resolveAccountSession === undefined) throw notFound();
+    const session = () => bearerAccountSession(storage, resolveAccountSession, request);
+    const caller = await session();
+    if (!account.limiter.allow(caller.sessionId, nowMs())) {
+      throw new RelayError("server_busy", "This sign-in is asking faster than your server answers. Try again shortly.");
+    }
+    const userId = caller.userId;
+    const deadlineAtMs = Date.now() + waitMs;
+    for (;;) {
+      await deliverPendingShareNotices(userId);
+      const current = await session();
+      if (current.sessionId !== caller.sessionId || current.userId !== userId) throw notFound();
+      const page = storage.readNoticeChanges({ recipientUserId: userId, cursor, limit, nowMs: nowMs(), ...(scope ? { scope } : {}) });
+      const caughtUpAt = cursor !== null && cursor.snapshotHead === null && !page.replace && page.nextCursor === String(cursor.seq)
+        ? cursor.seq : null;
+      const holdMs = deadlineAtMs - Date.now();
+      const parked = caughtUpAt === null || holdMs <= 0 || request.signal.aborted ? null : account.waits.wait({
+        userId, sessionId: caller.sessionId, holdMs, signal: request.signal,
+        shouldPark: () => storage.noticeHead(userId) === caughtUpAt,
+      });
+      if (parked === null) return jsonResponse({ ok: true, ...page }, 200);
+      await parked;
+    }
+  }
+
   return async function respondToNotices(
     request: Request,
     route: NoticeRoute,
-    userId: string,
+    caller: () => Promise<string>,
   ): Promise<Response> {
     if (route.route === "notices" && request.method === "GET") {
-      await deliverPendingShareNotices(userId);
       const url = new URL(request.url);
+      if (url.searchParams.has("scope") || url.searchParams.has("wait")) return await readForAccount(request, url);
+      const userId = await caller();
+      await deliverPendingShareNotices(userId);
       const page = storage.readNoticeChanges({
         recipientUserId: userId,
         cursor: parseCursorParam(url.searchParams.get("cursor")),
@@ -67,6 +188,7 @@ export function createNoticeRoutes(
       return jsonResponse({ ok: true, ...page }, 200);
     }
     if (route.route === "notices" && request.method === "POST") {
+      const userId = await caller();
       const { toWorkspaceOwner, ...posted } = parsePostNotice(await readJsonObject(request));
       // The share names the owner. The placement check below still decides
       // whether the sender may post through it.
@@ -96,6 +218,7 @@ export function createNoticeRoutes(
       return jsonResponse({ ok: true }, 200);
     }
     if (route.route === "notice-marks" && request.method === "POST") {
+      const userId = await caller();
       const body = await readJsonObject(request);
       if (body.installId !== undefined && !isNoticeLine(body.installId, 256)) throw badRequest("installId is invalid");
       const dismissed = storage.markNotices({
@@ -176,6 +299,23 @@ function parseCursorParam(value: string | null): NoticeCursor | null {
   const cursor = parseNoticeCursor(value);
   if (!cursor) throw badRequest("cursor is invalid");
   return cursor;
+}
+
+function parseScope(value: string | null): NoticeScope | null {
+  if (value === null) return null;
+  const scope = NOTICE_SCOPES.find((known) => known === value);
+  if (scope === undefined) throw badRequest(`scope must be ${NOTICE_SCOPES.join(" or ")}`);
+  return scope;
+}
+
+// Whole milliseconds, 0 to NOTICE_WAIT_MAX_MS; absent answers at once.
+function parseWait(value: string | null): number {
+  if (value === null) return 0;
+  const waitMs = Number(value);
+  if (!/^(?:0|[1-9]\d{0,5})$/u.test(value) || waitMs > NOTICE_WAIT_MAX_MS) {
+    throw badRequest(`wait must be whole milliseconds from 0 to ${NOTICE_WAIT_MAX_MS}`);
+  }
+  return waitMs;
 }
 
 function parseNoticePageLimit(value: string | null): number {

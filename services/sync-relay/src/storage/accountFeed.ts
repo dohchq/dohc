@@ -82,21 +82,24 @@ export function accountFeedJournalRows(
  * file, or one the log has no create for.
  */
 export function accountFeedThreadPaths(storage: StorageContext, workspaceId: string, threadId: string): { lastKnownPath: string | null; named: string[] } {
-  return storage.readTx(() => {
-    let create: Record<string, unknown> | undefined;
-    for (const row of threadCreateRows(storage, workspaceId, threadId)) {
-      let payload: unknown;
-      try { payload = JSON.parse(String(row.payload_json)); } catch { continue; }
-      if (payload && typeof payload === "object" && (payload as Record<string, unknown>).threadId === threadId) {
-        create = payload as Record<string, unknown>;
-        break;
-      }
+  return storage.readTx(() => threadPathsInTransaction(storage, workspaceId, threadId));
+}
+
+/** `accountFeedThreadPaths`, inside the caller's transaction. */
+export function threadPathsInTransaction(storage: StorageContext, workspaceId: string, threadId: string): { lastKnownPath: string | null; named: string[] } {
+  let create: Record<string, unknown> | undefined;
+  for (const row of threadCreateRows(storage, workspaceId, threadId)) {
+    let payload: unknown;
+    try { payload = JSON.parse(String(row.payload_json)); } catch { continue; }
+    if (payload && typeof payload === "object" && (payload as Record<string, unknown>).threadId === threadId) {
+      create = payload as Record<string, unknown>;
+      break;
     }
-    const text = (value: unknown) => typeof value === "string" && value.length > 0 ? [value] : [];
-    const objectId = text(create?.linkedObjectId)[0];
-    return {
-      lastKnownPath: (objectId === undefined ? undefined : objectLastKnownPath(storage, workspaceId, objectId)) ?? null,
-      named: [...text(create?.linkedPath), ...text(create?.linkedPathHint)],
-    };
-  });
+  }
+  const text = (value: unknown) => typeof value === "string" && value.length > 0 ? [value] : [];
+  const objectId = text(create?.linkedObjectId)[0];
+  return {
+    lastKnownPath: (objectId === undefined ? undefined : objectLastKnownPath(storage, workspaceId, objectId)) ?? null,
+    named: [...text(create?.linkedPath), ...text(create?.linkedPathHint)],
+  };
 }

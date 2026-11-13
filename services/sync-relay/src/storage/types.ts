@@ -712,6 +712,8 @@ export interface SyncRelayStorage {
   postNotice(input: import("./notices").PostNoticeInput): void;
   postAutomationWake(input: import("./notices").PostAutomationWakeInput): import("./notices").PostedAutomationWake;
   readNoticeChanges(input: import("./notices").ReadNoticeChangesInput): import("@dohc/workspace-contracts/relay").RelayNoticePage;
+  /** The recipient's Notice change head; zero for a list that never changed. */
+  noticeHead(recipientUserId: string): number;
   markNotices(input: import("./notices").MarkNoticesInput): string[];
   noticeShareReceived(input: import("./notices").NoticeShareReceivedInput): void;
   pendingShareNotices(recipientUserId: string): { grantId: string; granterUserId: string }[];

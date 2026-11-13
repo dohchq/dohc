@@ -39,6 +39,7 @@ import { createNamedShareTransportRoutes } from "./namedShareTransportRoutes";
 import { createKeyEnvelopeRoutes } from "./keyEnvelopeRoutes";
 import {
   createNoticeRoutes,
+  createNoticeWaits,
   NOTICE_POST_BUCKET_CAPACITY,
   NOTICE_POST_MAX_SENDERS,
   NOTICE_POST_REFILL_PER_SECOND,
@@ -488,6 +489,7 @@ export function createSyncRelayHandler({
     nowMs,
   );
 
+  const noticeWaits = createNoticeWaits(storage, discussionActivity);
   const respondToNotices = createNoticeRoutes(
     storage,
     nowMs,
@@ -495,6 +497,7 @@ export function createSyncRelayHandler({
     claimPendingShares,
     deliverPendingShareNotices,
     noticePostRateLimiter,
+    { resolveAccountSession, limiter: accountOperationRateLimiter, waits: noticeWaits },
   );
   const respondToAutomationHost = createAutomationHostRoutes(
     storage, nowMs, automationHostRateLimiter, automationServer ?? null,
@@ -504,10 +507,11 @@ export function createSyncRelayHandler({
     ? createAccountWorkspaceRoutes({ storage, resolveAccountSession }) : undefined;
   const accountFeedWaits = createAccountFeedWaits(storage, discussionActivity);
   const chatWakeWaits = createChatWakeWaits(storage, discussionActivity);
-  // A credential change makes the account's held feed and wake reads check it now.
+  // A credential change makes the account's held feed, wake, and Notice reads check it now.
   const wakeAccountWaits = (userId: string) => {
     accountFeedWaits.wakeAccount(userId);
     chatWakeWaits.wakeAccount(userId);
+    noticeWaits.wakeAccount(userId);
   };
   const respondToAccountSessions = resolveAccountSession && accountSessions
     ? createAccountSessionRoutes({ storage, resolveAccountSession, sessions: accountSessions, feedWaits: { wakeAccount: wakeAccountWaits } }) : undefined;
@@ -1109,13 +1113,15 @@ export function createSyncRelayHandler({
         return await respondToChatWakes(request, route);
       }
       if (route.route === "notices" || route.route === "notice-marks") {
-        // Desktop and agent credentials only, never ambient browser cookies.
-        const authorization = request.headers.get("authorization");
-        if (request.headers.has("cookie") || !/^Bearer [^\s]+$/.test(authorization ?? "")) throw notFound();
-        const actor = await resolveActor(new Request(request.url, {
-          headers: {authorization: authorization!}, signal: request.signal,
-        }), "");
-        return await respondToNotices(request, route, actor.userId);
+        // Desktop and agent credentials only, never ambient browser cookies. A read with `scope` or `wait` takes the account session itself.
+        return await respondToNotices(request, route, async () => {
+          const authorization = request.headers.get("authorization");
+          if (request.headers.has("cookie") || !/^Bearer [^\s]+$/.test(authorization ?? "")) throw notFound();
+          const actor = await resolveActor(new Request(request.url, {
+            headers: {authorization: authorization!}, signal: request.signal,
+          }), "");
+          return actor.userId;
+        });
       }
       if (route.route === "personal-agents" || route.route === "personal-agent" || route.route === "workspace-name") {
         // The account's own credential only, never ambient browser cookies.
@@ -1265,9 +1271,12 @@ export function createSyncRelayHandler({
       replicaLinkReads?.close();
       accountFeedWaits.close();
       chatWakeWaits.close();
+      noticeWaits.close();
       return personalAgents.dispose();
     },
     deleteAccount(userId: string, workspaceIds: readonly string[], shareIds: readonly string[]) {
+      // Held reads check the fenced account now.
+      wakeAccountWaits(userId);
       personalAgents.deleteAccount(userId);
       presence.deleteAccount(userId, workspaceIds);
       deletePresenceAccount(userId);

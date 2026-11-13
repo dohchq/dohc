@@ -35,6 +35,7 @@ import { LINK_SESSION_RENEWAL_GRACE_MS } from "../linkSecurity";
 import { linkAccessLevels, parseStoredAnyShareSelectorJson } from "../shareFilter";
 import { RETIRED_LINK_CREDENTIAL_HISTORY_LIMIT, GRANTED_INVENTORY_PAGE_SIZE, RECEIVED_INVENTORY_PAGE_SIZE, LINK_INVENTORY_PAGE_SIZE, LINK_INVENTORY_INDEPENDENT_GRANT_LIMIT } from "./limits";
 import { forgetReplicaCurrentViewCaches } from "../replicaCurrentViewReads";
+import { notifyNoticeChange } from "../relayWriteChanges";
 import { retireUncoveredServiceActivations, serviceHostEnrollmentsCoveredByShare, type KeptServiceActivation } from "./serviceHostEnrollment";
 import { retireAgentConnectionsInTransaction } from "./agentConnections";
 
@@ -74,6 +75,8 @@ export function createShare(storage: StorageContext, input: {
       storage.db.prepare(
         "INSERT INTO sync_relay_share_notice_deliveries (grant_id, created_at_ms) VALUES (?, ?)",
       ).run(input.grant.grantId, Math.trunc(input.grant.createdAtMs));
+      // Its person's waiting Notice reads deliver it.
+      if (recipient !== null) notifyNoticeChange(storage, recipient);
       return true;
     });
   }
