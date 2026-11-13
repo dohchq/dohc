@@ -1371,4 +1371,81 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn applied_sync_refuses_stopped_or_retired_registration() {
+        let vector = vectors()
+            .into_iter()
+            .find(|v| v.registration_accepted)
+            .unwrap();
+        let (_dir, mut store, mut cache, mut owner, handle) = fixture(&vector);
+        run(&mut store, &mut cache, &handle, &vector, &NoFaults).unwrap();
+        let cut = read_applied_sync(&store, &handle, &[0], sync_policy(), || true).unwrap();
+        let (fence, coordinate) = fence_input(&handle);
+        owner
+            .fence_restore(
+                &mut store,
+                None,
+                fence,
+                coordinate,
+                200,
+                &NoFaults,
+                |_, _| Ok(()),
+            )
+            .unwrap();
+        assert!(read_applied_sync(&store, &handle, &[0], sync_policy(), || true).is_err());
+        assert!(read_next_applied(&store, &handle, &cut.position, sync_policy(), || true).is_err());
+        owner.invalidate(&mut store).unwrap();
+        assert!(read_applied_sync(&store, &handle, &[0], sync_policy(), || true).is_err());
+    }
+
+    #[test]
+    fn restore_fence_replay_refuses_changed_durable_state() {
+        for sql in [
+            "UPDATE live_device_application_bindings SET available=1",
+            "UPDATE live_device_application_bindings SET restore_fence_generation=2",
+            "UPDATE ydoc_docs SET path='other.md'",
+            "DELETE FROM ydoc_docs",
+        ] {
+            let vector = vectors()
+                .into_iter()
+                .find(|v| v.registration_accepted)
+                .unwrap();
+            let (_dir, mut store, mut cache, mut owner, handle) = fixture(&vector);
+            run(&mut store, &mut cache, &handle, &vector, &NoFaults).unwrap();
+            let (input, coordinate) = fence_input(&handle);
+            owner
+                .fence_restore(
+                    &mut store,
+                    None,
+                    input.clone(),
+                    coordinate.clone(),
+                    200,
+                    &NoFaults,
+                    |_, _| Ok(()),
+                )
+                .unwrap();
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(sql, []).unwrap();
+                    Ok::<_, StorageError>(())
+                })
+                .unwrap();
+            assert!(
+                owner
+                    .fence_restore(
+                        &mut store,
+                        None,
+                        input,
+                        coordinate,
+                        201,
+                        &NoFaults,
+                        |_, _| Ok(())
+                    )
+                    .is_err(),
+                "{sql}"
+            );
+            assert_eq!(store.table_row_count("live_restore_fences").unwrap(), 1);
+        }
+    }
 }

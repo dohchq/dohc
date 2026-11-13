@@ -2888,5 +2888,4 @@ mod tests {
             assert!(!root.path().join(".dohc/engine/engine.db").exists());
         }
     }
-
 }

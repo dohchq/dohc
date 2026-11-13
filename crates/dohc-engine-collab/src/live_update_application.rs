@@ -5378,4 +5378,25 @@ mod tests {
             (samples[14] + samples[15]) / 2
         );
     }
+
+    #[test]
+    fn ack_read_refuses_an_active_restore_fence_even_with_a_retained_application() {
+        let (_dir, mut store, mut cache, _owner, handle) = fixture();
+        let update = event("fenced-ack", 1, Ydoc::wire().plaintext_insert(0, "draft"));
+        let identity = LiveApplicationAckIdentity {
+            delivery_id: "fenced-ack".into(),
+            update_digest: update.metadata.accepted.receipt.update_digest.clone(),
+        };
+        apply(&mut store, &mut cache, &handle, update);
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,operation_id,input_json,receipt_json) VALUES ('workspace-1','main','object-1','relay-A','stopped',?1,'{}')",
+                [serde_json::json!({"oldBinding":binding(),"newFence":8}).to_string()]).unwrap();
+            Ok::<_,StorageError>(())
+        }).unwrap();
+        assert!(matches!(
+            read_application_ack(&store, &handle, &identity),
+            Err(ApplicationError::Collab(CollabError::RestoreFenced))
+        ));
+        assert_eq!(count(&store, "live_device_update_applications"), 1);
+    }
 }

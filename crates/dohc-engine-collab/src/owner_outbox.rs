@@ -3244,5 +3244,4 @@ mod tests {
         ));
         assert_eq!(durable_write_counts(&store), before);
     }
-
 }
