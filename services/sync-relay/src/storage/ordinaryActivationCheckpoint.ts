@@ -310,3 +310,28 @@ export function replaceOrdinaryCheckpoint(
   if (usage.changes !== 1) throw new Error("Ordinary checkpoint usage is damaged.");
   return true;
 }
+
+/**
+ * Deletes the workspace's checkpoints folded under any identity but `current`, and returns their charge, in the caller's
+ * transaction. A checkpoint is read only under the workspace's current epoch and stream, and a superseded epoch never
+ * becomes current again.
+ */
+export function forgetSupersededOrdinaryCheckpoints(
+  storage: StorageContext,
+  workspaceId: string,
+  current: { readonly replicationEpoch: string; readonly streamIdentity: string },
+) {
+  const freed = storage.db
+    .prepare(
+      `DELETE FROM ${ORDINARY_CHECKPOINTS} WHERE workspace_id=? AND NOT (replication_epoch=? AND stream_identity=?) RETURNING accounted_bytes`,
+    )
+    .all(workspaceId, current.replicationEpoch, current.streamIdentity)
+    .reduce((sum, row) => sum + Number(row.accounted_bytes), 0);
+  if (freed === 0) return;
+  const usage = storage.db
+    .prepare(
+      "UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes-? WHERE workspace_id=? AND usage_bytes>=?",
+    )
+    .run(freed, workspaceId, freed);
+  if (usage.changes !== 1) throw new Error("Ordinary checkpoint usage is damaged.");
+}
