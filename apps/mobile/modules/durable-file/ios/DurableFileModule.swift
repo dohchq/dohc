@@ -174,18 +174,22 @@ final class DurableFolder {
     return fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory) && isDirectory.boolValue
   }
 
-  /// Creates the folder, syncing the folder that holds each one created, and sets its protection and backup exclusion.
+  /// Creates any missing folder, sets the outbox folder's protection and backup exclusion, then syncs Library, which
+  /// holds Application Support's entry, and Application Support, which holds the outbox folder's. The syncs run once
+  /// each run whether or not this run created the folders: an earlier run may have died, or failed, between a mkdir
+  /// and its sync. `ready` is set only after every step succeeds, so a failure is retried by the next call.
   private func prepareFolder() throws {
     if ready && exists() { return }
+    ready = false
     if !fileManager.fileExists(atPath: support.path) {
       try fileManager.createDirectory(at: support, withIntermediateDirectories: true)
-      try syncDirectory(support.deletingLastPathComponent())
     }
     if !exists() {
       try fileManager.createDirectory(at: url, withIntermediateDirectories: false, attributes: protection)
-      try syncDirectory(support)
     }
     try protect(url)
+    try syncDirectory(support.deletingLastPathComponent())
+    try syncDirectory(support)
     ready = true
   }
 
@@ -266,12 +270,15 @@ final class DurableFolder {
   }
 
   /// Flushes the folder's entries, so a rename or delete in it survives power loss. F_FULLFSYNC also flushes the
-  /// drive's cache; where a folder doesn't take it, plain fsync still orders the entry onto the disk.
+  /// drive's cache. Only when the file system refuses F_FULLFSYNC as unsupported, with ENOTSUP or ENOTTY (how XNU
+  /// file systems refuse an fcntl they don't implement), does plain fsync stand in. Any other error, EIO included,
+  /// means the flush failed, and throws.
   private func syncDirectory(_ directory: URL) throws {
     let fd = Darwin.open(directory.path, O_RDONLY | O_CLOEXEC)
     guard fd >= 0 else { throw DurableFileFailure.failed(posix("open the folder")) }
     defer { _ = Darwin.close(fd) }
     if Darwin.fcntl(fd, F_FULLFSYNC) != -1 { return }
+    guard errno == ENOTSUP || errno == ENOTTY else { throw DurableFileFailure.failed(posix("flush the folder")) }
     guard fsync(fd) == 0 else { throw DurableFileFailure.failed(posix("sync the folder")) }
   }
 }
