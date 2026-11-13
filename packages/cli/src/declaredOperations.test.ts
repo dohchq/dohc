@@ -1,6 +1,7 @@
 // Each test changes one declaration in memory, as a contributor would in
 // linksDeclarations.ts, and expects the CLI to refuse it when it loads.
 import { afterEach, expect, it, vi } from "vitest";
+import { z } from "zod";
 import type { LINKS_DECLARATIONS } from "@dohc/workspace-contracts/links-declarations";
 
 type LinksResolve = (typeof LINKS_DECLARATIONS)["linksResolve"];
@@ -32,6 +33,16 @@ it("refuses a declared command under a command that does not exist", async () =>
 it("refuses a declared socket verb that repeats a hand-written verb", async () => {
   changeLinksResolve(declaration => ({ ...declaration, cli: { ...declaration.cli, verb: "stopSync" } }));
   await expect(import("./protocol")).rejects.toThrow("stopSync is declared twice.");
+});
+
+it("refuses a declaration whose access a cast changed to write", async () => {
+  changeLinksResolve(declaration => ({ ...declaration, access: "write" as "read" }));
+  await expect(import("./protocol")).rejects.toThrow("linksResolve is declared as write. Only reads can be declared.");
+});
+
+it("refuses a declared input that names an envelope field", async () => {
+  changeLinksResolve(declaration => ({ ...declaration, input: declaration.input.extend({ runSecret: z.string() }) }));
+  await expect(import("./protocol")).rejects.toThrow("linksResolve input names runSecret, which its doors set.");
 });
 
 it("loads the declarations as they are", async () => {

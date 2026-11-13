@@ -1,6 +1,5 @@
 import { ChatLinksInput } from "@dohc/workspace-contracts/chat-links";
-import { CHAT_DECLARATIONS } from "@dohc/workspace-contracts/chat-declarations";
-import { LINKS_DECLARATIONS } from "@dohc/workspace-contracts/links-declarations";
+import { DECLARATION_FAMILIES } from "@dohc/workspace-contracts/all-declarations";
 import { byName, distinct, mapNamed, type EnvelopeField } from "@dohc/workspace-contracts/operation-declaration";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import { HeldChange } from "@dohc/workspace-contracts/held-changes";
@@ -249,8 +248,9 @@ export const chatLinksGroupInputSchema = ChatLinksInput.omit({ channelWireId: tr
 }).strict();
 
 // The operations declared in workspace-contracts, by the socket verb each answers.
-const declaredOperations = [...Object.values(CHAT_DECLARATIONS), ...Object.values(LINKS_DECLARATIONS)];
-export type DeclaredOperation = (typeof declaredOperations)[number];
+type Families = typeof DECLARATION_FAMILIES;
+export type DeclaredOperation = { [Family in keyof Families]: Families[Family][keyof Families[Family]] }[keyof Families];
+const declaredOperations = Object.values(DECLARATION_FAMILIES).flatMap(family => Object.values<DeclaredOperation>(family));
 export type DeclaredVerb = DeclaredOperation["cli"]["verb"];
 type DeclaredOperationOf<Verb extends DeclaredVerb> = Extract<DeclaredOperation, { readonly cli: { readonly verb: Verb } }>;
 export const DECLARED_VERBS = byName(declaredOperations, operation => operation.cli.verb) as {

@@ -1,7 +1,6 @@
 // Metadata describes existing doors and drives desktop MCP registration. It never invokes a handler or admits a call.
-import { CHAT_DECLARATIONS } from "./chatDeclarations";
-import { LINKS_DECLARATIONS } from "./linksDeclarations";
-import { ENVELOPE_FIELDS, type McpAccessLevel, type OperationDeclaration } from "./operationDeclaration";
+import { DECLARATION_FAMILIES } from "./allDeclarations";
+import type { McpAccessLevel, OperationDeclaration } from "./operationDeclaration";
 
 export const CAPABILITY_WAYS = ["control", "palette", "menu", "shortcut", "cli", "mcp", "app"] as const;
 export const CAPABILITY_ID_PATTERN = /^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+$/;
@@ -340,9 +339,7 @@ function withDeclarations<Listed extends Readonly<Record<string, CapabilityMetad
   const operations = new Set(Object.values(listed).flatMap(meta => meta.ipc.operations));
   const tools = new Set(Object.values(listed).flatMap(meta => [...meta.mcp.owner, ...meta.mcp.view, ...meta.mcp.comment, ...meta.mcp.edit]));
   for (const family of families) {
-    for (const [name, { capabilityId, input, mcp }] of Object.entries(family)) {
-      const field = ENVELOPE_FIELDS.find(envelope => Object.hasOwn(input.shape, envelope));
-      if (field) throw new Error(`${name} input names ${field}, which its doors set.`);
+    for (const [name, { capabilityId, mcp }] of Object.entries(family)) {
       for (const [names, value] of [[operations, name], [tools, mcp.tool]] as const) {
         if (names.has(value)) throw new Error(`${value} is declared twice.`);
         names.add(value);
@@ -360,6 +357,6 @@ function withDeclarations<Listed extends Readonly<Record<string, CapabilityMetad
   return joined as Listed;
 }
 
-export const CAPABILITIES = withDeclarations(LISTED_CAPABILITIES, LINKS_DECLARATIONS, CHAT_DECLARATIONS);
+export const CAPABILITIES = withDeclarations(LISTED_CAPABILITIES, ...Object.values(DECLARATION_FAMILIES));
 
 export type CapabilityId = keyof typeof CAPABILITIES;

@@ -1,5 +1,5 @@
-// Each test changes one declaration in memory, as a contributor would in
-// linksDeclarations.ts, and expects the capability table to refuse it at load.
+// Each test changes one declaration or the family list in memory, as a
+// contributor would in linksDeclarations.ts or allDeclarations.ts.
 import { afterEach, expect, it, vi } from "vitest";
 import { z } from "zod";
 import type { LINKS_DECLARATIONS } from "./linksDeclarations";
@@ -17,6 +17,7 @@ function changeLinks(change: (declarations: Declarations) => object) {
 
 afterEach(() => {
   vi.doUnmock("./linksDeclarations");
+  vi.doUnmock("./allDeclarations");
   vi.resetModules();
 });
 
@@ -33,6 +34,23 @@ it("refuses a declared operation named like one in another family", async () => 
 it("refuses a declared MCP tool named like a hand-written tool", async () => {
   changeLinks(declarations => ({ ...declarations, linksEdges: { ...declarations.linksEdges, mcp: { ...declarations.linksEdges.mcp, tool: "dohc_read_chat" } } }));
   await expect(import("./capabilities")).rejects.toThrow("dohc_read_chat is declared twice.");
+});
+
+it("refuses a declaration whose access a cast changed to write", async () => {
+  changeLinks(declarations => ({ ...declarations, linksEdges: { ...declarations.linksEdges, access: "write" as "read" } }));
+  await expect(import("./capabilities")).rejects.toThrow("linksEdges is declared as write. Only reads can be declared.");
+});
+
+it("joins every listed family, and only those", async () => {
+  vi.resetModules();
+  vi.doMock("./allDeclarations", async importOriginal => {
+    const { DECLARATION_FAMILIES: { links } } = await importOriginal<typeof import("./allDeclarations")>();
+    return { DECLARATION_FAMILIES: { links } };
+  });
+  const { CAPABILITIES } = await import("./capabilities");
+  expect(CAPABILITIES["links.edges"].mcp.view).toEqual(["dohc_links_edges"]);
+  expect(CAPABILITIES["chat.read"].ipc.operations).not.toContain("chatLinks");
+  expect(CAPABILITIES["chat.read"].mcp.view).not.toContain("dohc_chat_links");
 });
 
 // The type refuses these too, unless the input is widened to z.ZodObject.
