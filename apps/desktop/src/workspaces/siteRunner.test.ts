@@ -13,6 +13,7 @@ import {
   AppCommandStillRunningError,
   assertLoopbackOnlyDevServerCommand,
   buildSite,
+  defaultDescendantsReader,
   detectBuildOutput,
   detectDevUrl,
   packageManagerCommand,
@@ -955,38 +956,40 @@ describe("startSiteDevServer", () => {
   );
 
   it.runIf(process.platform !== "win32")(
-    "captures a descendant that backgrounds and exits well inside the FIRST poll interval",
+    "stops a child the wrapper backgrounds when every snapshot runs after the wrapper exits",
     async () => {
       await mkdir(join(root, "site"), { recursive: true });
-      // The poll interval is set far longer than this whole test takes, so
-      // the descendant can only be captured by an immediate/near-immediate
-      // snapshot, never by the interval's own first tick. A brief real
-      // delay (well under the old 5s default, comfortably over one `ps`
-      // round-trip) keeps this realistic — the descendant tree walk itself
-      // takes real wall-clock time (spawning `ps`, reading /proc), so a
-      // wrapper that exits in literally zero time is an unfixable race
-      // no synchronous snapshot can win (the same residual #857 accepted);
-      // this pin proves the fix closes the gap from 5s down to tens of
-      // milliseconds, not that it closes it to zero.
+      // A wrapper can exit before any process-table read finishes, and on a
+      // busy machine it does (#3917). Every snapshot here, including the one
+      // taken at the ready line, reads the real table only once the wrapper
+      // is gone and its child belongs to init. The interval never ticks.
+      let wrapperExited!: () => void;
+      const exited = new Promise<void>((resolve) => { wrapperExited = resolve; });
+      let reads = 0;
+      const spawnedAt = Date.now();
       const handle = await startSiteDevServer({
         workspaceRoot: root,
         siteRoot: "site",
         command: "sh",
-        args: [
-          "-c",
-          "sleep 500 & child=$!; echo CHILD:$child; echo 'Local: http://127.0.0.1:43213'; sleep 0.05",
-        ],
+        args: ["-c", "sleep 500 & echo CHILD:$!; echo 'Local: http://127.0.0.1:43213'"],
         readyTimeoutMs: 20_000,
         descendantCaptureIntervalMs: 60_000,
+        descendantsReader: async (pid) => {
+          await exited;
+          reads += 1;
+          return defaultDescendantsReader(pid, spawnedAt);
+        },
       });
+      handle.onExit(wrapperExited);
       const childLog = handle.logs().find((entry) => entry.text.includes("CHILD:"));
       const descendantPid = Number(/CHILD:(\d+)/.exec(childLog?.text ?? "")?.[1]);
       expect(descendantPid).toBeGreaterThan(0);
 
-      await new Promise<void>((resolve) => handle.onExit(resolve));
+      await exited;
 
       try {
         await handle.stop();
+        expect(reads).toBeGreaterThan(0);
         expect(await waitForProcessDeath(descendantPid)).toBe(true);
       } finally {
         try {

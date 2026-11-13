@@ -161,7 +161,7 @@ function isPidAlive(pid: number): boolean {
 // orphan behind on Windows exactly as it does on POSIX, and taskkill /T
 // needs a live root pid to walk — a snapshot taken while the wrapper was
 // still running is the only way to reach it once that wrapper is gone.
-function defaultDescendantsReader(pid: number, spawnedAt: number): Promise<number[]> {
+export function defaultDescendantsReader(pid: number, spawnedAt: number): Promise<number[]> {
   if (process.platform !== "win32") return processDescendants(pid, readProcessTableWithPs);
   return processDescendants(pid, async () =>
     withoutReusedParents(await readProcessTableWithPowershell(), pid, spawnedAt),
