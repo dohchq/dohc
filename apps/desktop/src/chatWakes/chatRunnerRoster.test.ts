@@ -5,7 +5,9 @@ import type { Agent } from "../settings/userSettings";
 import { deferred } from "../testing/deferred";
 import { ChatWakeBusyError, ChatWakeMissingError, type ChatWakeClient } from "./chatWakeClient";
 import { ChatRunnerLedgerUnreadableError, type ChatRunnerLedger, type ChatRunnerLedgerEntry } from "./chatRunnerLedger";
-import { CHAT_RUNNER_REFRESH_MS, CHAT_RUNNER_WITHDRAW_MS, createChatRunnerRoster, type ChatRunnerRosterDeps } from "./chatRunnerRoster";
+import {
+  CHAT_RUNNER_CHECK_MS, CHAT_RUNNER_REFRESH_MS, CHAT_RUNNER_WITHDRAW_MS, createChatRunnerRoster, type ChatRunnerRosterDeps,
+} from "./chatRunnerRoster";
 import { sleepUnlessAborted, type ChatWakeSession } from "./chatWakeLifetime";
 
 // The server, the ledger, and settings are fakes. A held or hanging PUT waits
@@ -33,6 +35,10 @@ type Behavior = (put: Put, signal: AbortSignal) => Promise<void>;
 /** The server's runner rows by account and workspace. Each PUT takes the next queued behavior, if any. */
 function fakeServer() {
   const puts: Put[] = [];
+  // For each PUT: the (fake) wall-clock time, the session whose client sent it, and whether it was current then.
+  const putTimes: number[] = [];
+  const putSessions: ChatWakeSession[] = [];
+  const putCurrent: boolean[] = [];
   const rows = new Map<string, ChatRunnerDeclaration["runners"]>();
   const behaviors: Behavior[] = [];
   let inFlight = 0;
@@ -44,6 +50,9 @@ function fakeServer() {
     async replaceRunners(workspaceId, declaration, signal) {
       const put = { scope: wakeSession.account.scope, workspaceId, declaration };
       puts.push(put);
+      putTimes.push(Date.now());
+      putSessions.push(wakeSession);
+      putCurrent.push(wakeSession.isCurrent());
       inFlight += 1;
       mostInFlight = Math.max(mostInFlight, inFlight);
       try {
@@ -64,7 +73,7 @@ function fakeServer() {
     confirmQueued: async () => { throw new Error("The roster never confirms."); },
   });
   return {
-    puts, rows, behaviors, client,
+    puts, putTimes, putSessions, putCurrent, rows, behaviors, client,
     mostInFlight: () => mostInFlight,
     /** Resolves once `count` PUTs have succeeded. */
     untilDone: (count: number) => done >= count ? Promise.resolve()
@@ -100,6 +109,7 @@ function memoryLedger(rows: ChatRunnerLedgerEntry[] = []) {
     /** Reads throw this while set; `once` clears it after one read. */
     listFails: null as { error: Error; once: boolean } | null,
     removeFailsOnce: false,
+    addFailsOnce: false,
     /** Resolves on the next removal that succeeds. */
     removed: deferred<void>(),
   };
@@ -114,7 +124,13 @@ function memoryLedger(rows: ChatRunnerLedgerEntry[] = []) {
       }
       return [...state.rows];
     },
-    add: async (entry) => { if (!state.rows.some((row) => same(row, entry))) state.rows = [...state.rows, entry]; },
+    add: async (entry) => {
+      if (state.addFailsOnce) {
+        state.addFailsOnce = false;
+        throw new Error("The ledger could not be read just now.");
+      }
+      if (!state.rows.some((row) => same(row, entry))) state.rows = [...state.rows, entry];
+    },
     remove: async (entry) => {
       if (state.removeFailsOnce) {
         state.removeFailsOnce = false;
@@ -162,8 +178,9 @@ function setup(over: Partial<ChatRunnerRosterDeps> = {}) {
     computerLabel: () => "Mac",
     // A retry waits until the roster stops, unless a test passes its own.
     sleep: (_ms, signal) => new Promise<void>((resolve) => { signal.addEventListener("abort", () => resolve(), { once: true }); }),
-    // The daily refresh waits until the roster stops, unless a test passes its own.
+    // The hourly due check waits until the roster stops, unless a test passes its own.
     refreshSleep: (_ms, signal) => new Promise<void>((resolve) => { signal.addEventListener("abort", () => resolve(), { once: true }); }),
+    nowMs: () => Date.now(),
     backoffMs: (failures) => 1_000 * failures,
     timeout: vi.fn(() => deadline.signal),
     refused: vi.fn(),
@@ -514,69 +531,107 @@ function countedSleep() {
 }
 
 describe("keeping the relay's lease", () => {
+  const HOUR = 60 * 60 * 1000;
   afterEach(() => {
     vi.useRealTimers();
   });
 
-  it("declares everything again about daily, past what the server confirmed, and stops when its session ends", async () => {
+  it("sends a confirmed declaration again once it is a day old, past what the server confirmed, and not before", async () => {
     vi.useFakeTimers();
-    const refreshes = countedSleep();
-    const r = setup({ refreshSleep: refreshes.sleep });
+    const checks = countedSleep();
+    const r = setup({ refreshSleep: checks.sleep });
     const a = session("A");
     await r.roster.reconcile(a);
     expect(r.server.puts).toHaveLength(2);
-    await refreshes.until(1);
-    await vi.advanceTimersByTimeAsync(CHAT_RUNNER_REFRESH_MS - 1);
+    await checks.until(1);
+    await vi.advanceTimersByTimeAsync(CHAT_RUNNER_REFRESH_MS - CHAT_RUNNER_CHECK_MS);
+    // An ordinary reconciliation before then sends nothing.
+    await r.roster.reconcile(a);
     expect(r.server.puts).toHaveLength(2);
-    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(CHAT_RUNNER_CHECK_MS);
     await r.server.untilDone(4);
     // The same declarations again: the relay starts each lease again.
     expect(r.server.puts.slice(2)).toEqual(r.server.puts.slice(0, 2));
-    await refreshes.until(2);
-    await vi.advanceTimersByTimeAsync(CHAT_RUNNER_REFRESH_MS);
-    await r.server.untilDone(6);
-    await refreshes.until(3);
-    // An ordinary reconciliation in between still sends nothing the server confirmed.
-    await r.roster.reconcile(a);
-    expect(r.server.puts).toHaveLength(6);
+    // Its session ends: nothing more goes out for it, and stop leaves no timer.
     a.end();
     await vi.advanceTimersByTimeAsync(2 * CHAT_RUNNER_REFRESH_MS);
-    expect(r.server.puts).toHaveLength(6);
-    expect(vi.getTimerCount()).toBe(0);
-  });
-
-  it("ends a session's refresh when it is withdrawn, starts the next session's, and ends that at stop", async () => {
-    vi.useFakeTimers();
-    const refreshes = countedSleep();
-    const r = setup({ refreshSleep: refreshes.sleep });
-    r.owned.B = ["ws9"];
-    const a = session("A");
-    await r.roster.reconcile(a);
-    a.end();
-    await r.roster.withdraw(a);
-    const b = session("B");
-    await r.roster.reconcile(b);
-    await refreshes.until(2);
-    // A's wait was called off with it; only B's is on the clock.
-    expect(vi.getTimerCount()).toBe(1);
-    await vi.advanceTimersByTimeAsync(CHAT_RUNNER_REFRESH_MS);
-    // A's two declarations, A's two withdrawals, B's declaration, and B's refresh.
-    await r.server.untilDone(6);
-    expect(r.server.puts.at(-1)).toEqual({ scope: "B", workspaceId: "ws9", declaration: declared(CLAUDE_ON) });
-    expect(r.server.puts.filter((put) => put.scope === "A")).toHaveLength(4);
+    expect(r.server.puts).toHaveLength(4);
     await r.roster.stop();
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("retries a refresh the server was too busy for, with the same backoff", async () => {
+  it("renews within the lease across same-account session replacements, each time with the session current then", async () => {
     vi.useFakeTimers();
-    const refreshes = countedSleep();
+    const checks = countedSleep();
+    const r = setup({ refreshSleep: checks.sleep });
+    r.owned.A = ["ws1"];
+    const started = Date.now();
+    const sessions = [session("A")];
+    await r.roster.reconcile(sessions[0]!);
+    await checks.until(1);
+    // A credential reload every 20 hours, as opening a shared view does: a new session for the same account each time.
+    for (let index = 1; index <= 4; index += 1) {
+      await vi.advanceTimersByTimeAsync(20 * HOUR);
+      sessions.at(-1)!.end();
+      sessions.push(session("A"));
+      await r.roster.reconcile(sessions.at(-1)!);
+    }
+    await r.server.untilDone(4);
+    expect(r.server.putTimes.map((at) => at - started)).toEqual([0, 24 * HOUR, 48 * HOUR, 72 * HOUR]);
+    // By reference: the session replaced at 20 h renewed at 24 h, the next at 48 h, and so on.
+    expect(r.server.putSessions.map((each) => sessions.indexOf(each))).toEqual([0, 1, 2, 3]);
+    expect(r.server.putCurrent).toEqual([true, true, true, true]);
+    await r.roster.stop();
+  });
+
+  it("keeps a renewal due through a failed read and a failed ledger write before its PUT, and sends it on the retry", async () => {
+    vi.useFakeTimers();
+    const checks = countedSleep();
     const backoffs = countedSleep();
-    const r = setup({ refreshSleep: refreshes.sleep, sleep: backoffs.sleep });
+    const r = setup({ refreshSleep: checks.sleep, sleep: backoffs.sleep });
+    r.owned.A = ["ws1"];
+    await r.roster.reconcile(session("A"));
+    await checks.until(1);
+    // The renewal's pass can't read the ledger, once.
+    r.ledger.state.listFails = { error: new Error("The disk is busy."), once: true };
+    await vi.advanceTimersByTimeAsync(CHAT_RUNNER_REFRESH_MS);
+    await backoffs.until(1);
+    // Its retry reads the ledger, then can't save the workspace's row, once, before the PUT.
+    r.ledger.state.addFailsOnce = true;
+    await vi.advanceTimersByTimeAsync(1_000);
+    await backoffs.until(2);
+    expect(r.server.puts).toHaveLength(1);
+    // The next retry sends it, with no other check and no other call.
+    await vi.advanceTimersByTimeAsync(2_000);
+    await r.server.untilDone(2);
+    expect(r.server.putTimes[1]! - r.server.putTimes[0]!).toBe(CHAT_RUNNER_REFRESH_MS + 3_000);
+    await r.roster.stop();
+  });
+
+  it("sends what is due when the computer wakes from a long sleep, and nothing when nothing is due", async () => {
+    vi.useFakeTimers();
+    const r = setup();
+    r.owned.A = ["ws1"];
+    await r.roster.reconcile(session("A"));
+    await r.roster.check();
+    expect(r.server.puts).toHaveLength(1);
+    // Asleep for four days: the wall clock moved, and no timer did.
+    vi.setSystemTime(Date.now() + 4 * 24 * HOUR);
+    await r.roster.check();
+    expect(r.server.puts).toHaveLength(2);
+    expect(r.server.putTimes[1]! - r.server.putTimes[0]!).toBe(4 * 24 * HOUR);
+    await r.roster.stop();
+  });
+
+  it("retries a renewal the server was too busy for, with the same backoff", async () => {
+    vi.useFakeTimers();
+    const checks = countedSleep();
+    const backoffs = countedSleep();
+    const r = setup({ refreshSleep: checks.sleep, sleep: backoffs.sleep });
     r.owned.A = ["ws1"];
     await r.roster.reconcile(session("A"));
     r.server.refuse(new ChatWakeBusyError());
-    await refreshes.until(1);
+    await checks.until(1);
     await vi.advanceTimersByTimeAsync(CHAT_RUNNER_REFRESH_MS);
     await backoffs.until(1);
     expect(r.server.puts).toHaveLength(2);
@@ -584,6 +639,28 @@ describe("keeping the relay's lease", () => {
     await r.server.untilDone(2);
     expect(r.server.puts).toHaveLength(3);
     expect(r.server.row("A", "ws1")).toEqual(CLAUDE_ON);
+    await r.roster.stop();
+  });
+
+  it("renews nothing for an account that was withdrawn, and the next account's own", async () => {
+    vi.useFakeTimers();
+    const checks = countedSleep();
+    const r = setup({ refreshSleep: checks.sleep });
+    r.owned.B = ["ws9"];
+    const a = session("A");
+    await r.roster.reconcile(a);
+    a.end();
+    await r.roster.withdraw(a);
+    const b = session("B");
+    await r.roster.reconcile(b);
+    await checks.until(1);
+    await vi.advanceTimersByTimeAsync(CHAT_RUNNER_REFRESH_MS);
+    // A's two declarations, A's two withdrawals, B's declaration, and B's renewal.
+    await r.server.untilDone(6);
+    expect(r.server.puts.at(-1)).toEqual({ scope: "B", workspaceId: "ws9", declaration: declared(CLAUDE_ON) });
+    expect(r.server.puts.filter((put) => put.scope === "A")).toHaveLength(4);
+    await r.roster.stop();
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
 

@@ -98,6 +98,9 @@ it("deletes runners and wakes with their workspace, keeps retries' bindings, and
     context.db.prepare("UPDATE sync_relay_workspaces SET owner_user_id = ? WHERE workspace_id = ?").run(ownerUserId, workspaceId);
   // A wake that wasn't confirmed, tried again under `operationId`.
   const retried = (accountId: string, workspaceId: string, operationId: string) => {
+    // The computer the retry moves to holds a leased declaration.
+    expect(storage.replaceChatRunners({ accountId, workspaceId, installId: "laptop", computerLabel: "Laptop",
+      runners: [{ agentId: "default", handle: "claude", displayName: "Claude", enabled: true }], nowMs: NOW })).toBe(true);
     const wakeId = wakeOf(`message-${workspaceId}`, "claude", 1, workspaceId, accountId);
     storage.claimChatWake({ accountId, wakeId, installId: "mac", nowMs: NOW });
     expect(storage.retryChatWake({ accountId, workspaceId, operationId, wakeId, nowMs: NOW + CHAT_WAKE_CONFIRM_MS }).kind).toBe("retried");
@@ -220,6 +223,11 @@ it("ends a wake with no claim in 7 days, a claim with no queued in 24 hours, tak
 
 it("retries a wake that didn't start or wasn't confirmed once per generation, bound to its operation ID", async () => {
   const storage = await relay();
+  // Both computers declared, so their leases hold for the retries below.
+  for (const installId of ["mac", "laptop"]) {
+    storage.replaceChatRunners({ accountId: "ana", workspaceId: "trip", installId, computerLabel: installId,
+      runners: [{ agentId: "default", handle: "claude", displayName: "Claude", enabled: true }], nowMs: NOW });
+  }
   publish(storage, "op-1", "message-1", [target("claude", "mac", "laptop")]);
   publish(storage, "op-2", "message-2", [target("codex", "mac")]);
   const source = wakeOf("message-1", "claude");
@@ -291,4 +299,30 @@ it("names a computer as a wake target only while its declaration's lease holds, 
   expect(count(storage, "sync_relay_chat_runners")).toBe(2);
   declare("laptop", NOW + 2 * CHAT_RUNNER_LEASE_MS, "Nova");
   expect(targets(NOW + 2 * CHAT_RUNNER_LEASE_MS).sort()).toEqual(["laptop"]);
+});
+
+it("tries a wake again only on computers whose declaration of its agent is enabled and still leased", async () => {
+  const storage = await relay();
+  const late = NOW + CHAT_WAKE_CLAIM_MS;
+  const declare = (installId: string, nowMs: number, enabled = true) => storage.replaceChatRunners({
+    accountId: "ana", workspaceId: "trip", installId, computerLabel: installId,
+    runners: [{ agentId: "default", handle: "claude", displayName: "Claude", enabled }], nowMs,
+  });
+  // Every wake below waited its whole claim time unclaimed. By then: the Mac never declared, the laptop's lease holds,
+  // the desktop's ended just then, and the tablet declared its agent switched off.
+  publish(storage, "op-some", "message-some", [target("claude", "mac", "laptop", "desktop", "tablet")]);
+  publish(storage, "op-none", "message-none", [target("claude", "mac", "desktop", "tablet")]);
+  declare("laptop", late - 1);
+  declare("desktop", late - CHAT_RUNNER_LEASE_MS);
+  declare("tablet", late - 1, false);
+  const retry = (operationId: string, messageId: string) =>
+    storage.retryChatWake({ accountId: "ana", workspaceId: "trip", operationId, wakeId: wakeOf(messageId, "claude"), nowMs: late });
+
+  const next = wakeOf("message-some", "claude", 2);
+  expect(retry("retry-some", "message-some")).toMatchObject({ kind: "retried", wake: { wakeId: next, generation: 2, state: "waiting" } });
+  expect(wakes(storage).find((row) => row.wake_id === next)?.candidates_json).toEqual(target("claude", "laptop").candidates);
+  // None left: answered as a wake with no other computer to try, and no empty generation.
+  const before = count(storage, "sync_relay_chat_wakes");
+  expect(retry("retry-none", "message-none")).toEqual({ kind: "refused" });
+  expect(count(storage, "sync_relay_chat_wakes")).toBe(before);
 });

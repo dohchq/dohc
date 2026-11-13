@@ -1213,6 +1213,7 @@ const chatRunners = createChatRunnerRoster({
   },
   sleep: sleepUnlessAborted,
   refreshSleep: sleepUnlessAborted,
+  nowMs: () => Date.now(),
   backoffMs: chatWakeBackoffMs,
   timeout: (ms) => AbortSignal.timeout(ms),
   refused: (workspaceId, refusal) => chatWakeNotices.refused(workspaceId, refusal),

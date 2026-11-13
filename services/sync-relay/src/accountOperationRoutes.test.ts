@@ -1525,6 +1525,9 @@ describe("an account's chat writes through the server's copy", () => {
       wakes: { publish: { messageId, threadId, held: false, targets: [claude] } } });
     const wakeId = chatWakeId("ana", "trip", messageId, "mention:claude", 1);
     f.storage.claimChatWake({ accountId: "ana", wakeId, installId: "mac", nowMs: RETRY_NOW });
+    // The laptop, where a retry goes, declared its agent then, so its lease holds a day later.
+    f.storage.replaceChatRunners({ accountId: "ana", workspaceId: "trip", installId: "laptop", computerLabel: "laptop",
+      runners: [{ agentId: "default", handle: "claude", displayName: "Claude", enabled: true }], nowMs: RETRY_NOW });
     return wakeId;
   };
   const count = (f: WriteRelay, sql: string) => Number((f.storage as StorageContext).db.prepare(sql).get()?.n);

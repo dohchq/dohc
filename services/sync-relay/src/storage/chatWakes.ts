@@ -267,7 +267,8 @@ export function replaceChatRunners(storage: StorageContext, input: {
 
 /**
  * The account's enabled agents on its computers in the workspace, whose declarations' leases hold at `nowMs`.
- * Every wake target and candidate comes from here.
+ * Every new wake target and its candidates come from here. A retry starts from the frozen candidates of the
+ * generation it answers, and keeps only those whose declaration is enabled and still leased (retryChatWake).
  */
 export function enabledChatRunners(storage: StorageContext, input: { accountId: string; workspaceId: string; nowMs: number }): ChatRunner[] {
   return storage.readTx(() => storage.db.prepare(
@@ -462,7 +463,15 @@ export function retryChatWake(storage: StorageContext, input: {
     if (owned(nextId) !== undefined) return answer();
     const source = expire(storage, found, nowMs);
     if (source.state !== "unclaimed" && source.state !== "unconfirmed") return { kind: "refused" };
-    const candidates = candidatesOf(source).filter((each) => source.state !== "unconfirmed" || each.installId !== source.winner_install_id);
+    // Only computers whose declaration of that agent is enabled and still leased: one that quit after signing out,
+    // or never came back, can't take the retry the person asked for.
+    const leased = storage.db.prepare(
+      `SELECT 1 FROM sync_relay_chat_runners WHERE workspace_id = ? AND account_id = ? AND install_id = ? AND agent_id = ?
+         AND enabled = 1 AND updated_at_ms > ?`,
+    );
+    const candidates = candidatesOf(source).filter((each) =>
+      (source.state !== "unconfirmed" || each.installId !== source.winner_install_id) &&
+      leased.get(workspaceId, accountId, each.installId, each.agentId, nowMs - CHAT_RUNNER_LEASE_MS) !== undefined);
     if (candidates.length === 0) return { kind: "refused" };
     storage.db.prepare(
       `INSERT INTO sync_relay_chat_wakes (wake_id, account_id, workspace_id, operation_id, message_id, thread_id, target, generation,
