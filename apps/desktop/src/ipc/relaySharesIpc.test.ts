@@ -488,6 +488,8 @@ describe("owner live document enrollment", () => {
         {path: "diverged.md", objectId: "diverged", status: "unavailable", reason: "session-host-diverged"},
         {path: "edited.md", objectId: "edited", status: "unavailable", reason: "live-edit-unadmitted"},
         {path: "long.md", objectId: "long", status: "unavailable", reason: "live-history-over-budget"},
+        {path: "failing.md", objectId: "failing", status: "unavailable", reason: "live-start-failing", failure: {word: "engine-refused", since: "2026-11-13T01:00:00.000Z"}},
+        {path: "newer.md", objectId: "newer", status: "unavailable", reason: "a-reason-from-a-newer-server", failure: {word: "x"}},
       ]});
     await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId, retiredAfter: "older.md"})).resolves.toEqual({
       documents: [
@@ -504,6 +506,10 @@ describe("owner live document enrollment", () => {
         {path: "edited.md", objectId: "edited", status: "unavailable", reason: "live-edit-unadmitted", canResume: true},
         // A Resume fails the same way because ordinary edits never give the document a new base.
         {path: "long.md", objectId: "long", status: "unavailable", reason: "live-history-over-budget", canResume: false},
+        // The server keeps trying; a Resume tries now.
+        {path: "failing.md", objectId: "failing", status: "unavailable", reason: "live-start-failing", failure: {word: "engine-refused", since: "2026-11-13T01:00:00.000Z"}, canResume: true},
+        // A newer server's reason this build doesn't know keeps the row, by its status alone.
+        {path: "newer.md", objectId: "newer", status: "unavailable", canResume: false},
       ], nextCursor: "old.md",
     });
     expect(h.request.mock.calls.map((call) => call[1])).toEqual([
@@ -874,7 +880,11 @@ describe("owner live document enrollment", () => {
     await expect(h.invoke(relayShareOperations.stopOwnerLiveDocument.channel, {workspaceId, path: "live.md"})).rejects.toThrow();
   });
 
-  it.each(["status", "reason"] as const)("keeps known active and retired rows beside an unknown %s, using the last raw cursor", async field => {
+  // A status this build doesn't know leaves nothing to show, so its row is dropped. A reason it doesn't know leaves the row by its status alone.
+  it.each([
+    ["drops a row with an unknown status", "status", []],
+    ["keeps a row with an unknown reason as a row by its status", "reason", [{path: "unknown.md", objectId: "unknown", status: "ready", canResume: false}]],
+  ] as const)("%s, beside the known active and retired rows, using the last raw cursor", async (_name, field, kept) => {
     const h = harness();
     const unknown = (status: string) => ({path: "unknown.md", objectId: "unknown", status, [field]: "future-value"});
     h.request.mockImplementation(async (_credentials, path) => path.includes("retired=1")
@@ -883,6 +893,7 @@ describe("owner live document enrollment", () => {
         {path: "held.md", objectId: "held", status: "unavailable", reason: "conflict-parent-withheld"}]});
     await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId})).resolves.toEqual({documents: [
       {path: "old.md", objectId: "old", status: "retired", canResume: true},
+      ...kept,
       {path: "live.md", objectId: "live", status: "ready", canResume: false},
       {path: "held.md", objectId: "held", status: "unavailable", reason: "conflict-parent-withheld", canResume: false},
     ], nextCursor: "unknown.md"});

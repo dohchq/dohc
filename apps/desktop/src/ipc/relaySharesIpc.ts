@@ -69,9 +69,16 @@ import { liveChangeOutcome, type LiveDocumentStatus } from "@dohc/workspace-cont
 
 const RELAY_SHARE_DISCUSSION_ACTIVITY_POLL_SAFETY_MS = 35_000;
 const liveDocumentStatus = OwnerLiveDocument.omit({canResume: true}).strip();
-const rawLiveDocuments = z.array(liveDocumentStatus.extend({status: z.string(), reason: z.string().optional()})).max(64);
+const rawLiveDocuments = z.array(liveDocumentStatus.extend({status: z.string(), reason: z.string().optional(), failure: z.unknown().optional()})).max(64);
 function knownLiveDocuments<Row extends z.ZodType>(rows: z.infer<typeof rawLiveDocuments>, schema: Row) {
-  return rows.flatMap(row => {const parsed = schema.safeParse(row); return parsed.success ? [parsed.data] : [];});
+  return rows.flatMap(row => {
+    const parsed = schema.safeParse(row);
+    if (parsed.success) return [parsed.data];
+    // A reason this build doesn't know, from a newer server, leaves the row by its status alone, so the row never disappears.
+    const {reason, failure, ...generic} = row;
+    const known = reason === undefined ? parsed : schema.safeParse(generic);
+    return known.success ? [known.data] : [];
+  });
 }
 const activeLiveDocuments = z.object({ok: z.literal(true), documents: rawLiveDocuments}).transform(page => ({
   ...page, documents: knownLiveDocuments(page.documents, liveDocumentStatus.extend({
@@ -179,7 +186,7 @@ function liveStopWaits(refusal: LiveStopRefusal): boolean {
 
 function ownerLiveDocumentCanResume(document: {reason?: string; status: string}): boolean {
   return document.reason === "session-host-refused" || document.reason === "live-document-without-lineage" ||
-    document.reason === "live-edit-unadmitted" || (!document.reason && (document.status === "retired" || document.status === "paused"));
+    document.reason === "live-edit-unadmitted" || document.reason === "live-start-failing" || (!document.reason && (document.status === "retired" || document.status === "paused"));
 }
 
 /**
@@ -478,7 +485,7 @@ export function createOwnerLiveDocumentActions<
       // Resume is also how the owner tries again a document the server refused,
       // one it could not start until the owner opened it, or one whose server
       // copy is missing an owner edit: Resume retires the held session so the
-      // edit can apply.
+      // edit can apply. For one whose start keeps failing, Resume tries now.
       const documents = new Map([...stopped.documents, ...current.documents].map(document => [document.path, {
         ...document, canResume: ownerLiveDocumentCanResume(document),
       }]));

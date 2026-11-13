@@ -376,6 +376,8 @@ export async function startSelfHostedLiveHost(options: {
     blocked(document: {workspaceId: string; objectId: string}) {return current?.blocked(document);},
     /** Why the running daemon's hosted pass left this document held. */
     holdReason(document: {workspaceId: string; objectId: string}) {return current?.holdReason(document);},
+    /** Why the running daemon keeps failing to start the document, once its owner sees it. It keeps trying. */
+    failing(document: {workspaceId: string; objectId: string}) {return current?.failing(document);},
     /** Whether the enrolled document's hosted replica diverged from the relay. Nothing continues it. */
     diverged(row: Pick<ServiceHostEnrollment, "workspaceId" | "replicationEpoch" | "streamIdentity">) {return storeDiverged(row);},
     /** Whether this host cannot continue the document: it is blocked, or its workspace's current hosted replica diverged. */
@@ -383,7 +385,10 @@ export async function startSelfHostedLiveHost(options: {
       const identity = storage.getWorkspaceIdentity(document.workspaceId);
       return current?.blocked(document) !== undefined || (!!identity && diverged.has(storeName({workspaceId: document.workspaceId, ...identity})));
     },
-    /** Lets a blocked document try once more. Returns whether it was blocked. Its next block is reported again. */
+    /**
+     * Lets a blocked document try once more, and a failing one try now. Returns whether it was blocked or its owner saw it
+     * failing. Its next block is reported again.
+     */
     unblock(document: {workspaceId: string; objectId: string}) {
       const unblocked = current?.unblock(document) ?? false;
       if (unblocked) refused.delete(documentKey(document));

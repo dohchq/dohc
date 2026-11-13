@@ -7,11 +7,14 @@ import { EmptyState, SecondaryButton } from "./ui/controls";
 import { SkeletonLines } from "./ui/SkeletonRows";
 import { useRequestSequence } from "./useRequestSequence";
 import { keptEditsLabel } from "./liveQueueState";
+import { formatShortTime } from "./time";
 
 export type LiveDocumentRow = {
   path: string;
   status: "ready" | "preparing" | "paused" | "unavailable" | "retired";
-  reason?: "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage" | "live-edit-unadmitted" | "conflict-parent-withheld" | "live-history-over-budget";
+  reason?: "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage" | "live-edit-unadmitted" | "conflict-parent-withheld" | "live-history-over-budget" | "live-start-failing";
+  /** The server's word for why the row isn't live, and since when, as an ISO time. A live-start-failing row has it. */
+  failure?: {word: string; since: string};
   canResume: boolean;
   /** A retired row's: its owner's Pause or Stop retired it, not the server. */
   stopped?: boolean;
@@ -194,6 +197,7 @@ function statusLabel(row: LiveDocumentRow): string {
   if (row.reason === "live-edit-unadmitted") return "Server copy is missing an edit";
   if (row.reason === "conflict-parent-withheld") return "Can't resume";
   if (row.reason === "live-history-over-budget") return "History too long";
+  if (row.reason === "live-start-failing") return "Can't start";
   switch (row.status) {
     case "ready":
       return "Live";
@@ -207,6 +211,11 @@ function statusLabel(row: LiveDocumentRow): string {
     default:
       return "Unavailable";
   }
+}
+
+// For the server's operator. The word never shows without the row's sentence above it.
+function failureLine(failure: NonNullable<LiveDocumentRow["failure"]>): string {
+  return `Server's reason: ${failure.word}, since ${formatShortTime(Date.parse(failure.since))}`;
 }
 
 function statusTone(row: LiveDocumentRow): string {
@@ -827,7 +836,7 @@ export function LiveDocumentsDialog({
                 {/* A Resume alone fails again until dohc has opened the document once. */}
                 {row.reason === "live-document-without-lineage" && !pendingStops.has(row.objectId) && !(busy?.kind === "stop" && busy.objectId === row.objectId) ? (
                   <p className="m-0 basis-full text-[12px] text-muted">
-                    Live editing can't start until you open this document once in dohc. After you open it, resume live editing.
+                    Live editing can't start until you open this document once in dohc. After you open it, resume live editing. A note larger than 256 KB doesn't open as a document in dohc. Make it smaller or split it, then open it.
                   </p>
                 ) : null}
                 {/* A Resume retries the edit. One that would remove live work stays held. A deferred Stop's note already offers Resume. */}
@@ -850,6 +859,19 @@ export function LiveDocumentsDialog({
                   <p className="m-0 basis-full text-[12px] text-muted">
                     This document's edit history is too long for the server to check, so live editing can't start. You can keep editing it in dohc, and your edits keep syncing. People you shared it with can't edit it live.
                   </p>
+                ) : null}
+                {/* The server keeps trying it. Resume tries now, and Stop ends live editing for it. */}
+                {row.reason === "live-start-failing" && !pendingStops.has(row.objectId) && !(busy?.kind === "stop" && busy.objectId === row.objectId) ? (
+                  <p className="m-0 basis-full text-[12px] text-muted">
+                    The server can't start live editing for this document. It keeps trying. You can keep editing it in dohc and your edits keep syncing, but people you shared it with can't edit it live until it starts.
+                  </p>
+                ) : null}
+                {/* Any reason the server words this way, under its row's own sentence. */}
+                {row.failure && !pendingStops.has(row.objectId) && !(busy?.kind === "stop" && busy.objectId === row.objectId) ? (
+                  <div className="flex basis-full items-start gap-2">
+                    <p className="m-0 text-[12px] text-muted">{failureLine(row.failure)}</p>
+                    <CopyButton iconOnly label="Copy the server's reason" getText={() => failureLine(row.failure!)} />
+                  </div>
                 ) : null}
                 {/* Resume and Stop can't help here, so the row offers neither. */}
                 {row.reason === "session-host-diverged" && !pendingStops.has(row.objectId) && !(busy?.kind === "stop" && busy.objectId === row.objectId) ? (

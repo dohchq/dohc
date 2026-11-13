@@ -47,6 +47,12 @@ it("refuses a document with no native history at once, and holds one with no sha
   await expectCode(await a.open(), 409, "live-document-without-lineage");
   expect(f.route.held()).toEqual({ waiters: 0, documents: 0 });
   f.blocked.clear();
+  // One whose start keeps failing ends at once too, and says the server keeps trying.
+  f.host.failing.mockReturnValue({ word: "relay-error", since: 0 });
+  expect(await body(await a.open(), 409)).toEqual({ ok: false, code: "live-start-failing",
+    error: "The server can't start live editing for this document. It keeps trying, and its owner can resume it to try now." });
+  expect(f.route.held()).toEqual({ waiters: 0, documents: 0 });
+  f.host.failing.mockReturnValue(undefined);
   const held = a.open();
   await f.holding(1, 1);
   f.ready();

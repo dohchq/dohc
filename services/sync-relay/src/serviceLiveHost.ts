@@ -1750,9 +1750,15 @@ export async function startServiceLiveHost(options: {
         const key = hostedKey(document);
         return key === undefined ? undefined : activation!.holdReason(hosted.get(key)!.target);
       },
+      /** Why the hosted document's activation keeps failing, once its owner sees it. Passes keep trying it. */
+      failing(document: {workspaceId: string; objectId: string}) {
+        const key = hostedKey(document);
+        return key === undefined ? undefined : activation!.failing(hosted.get(key)!.target);
+      },
       /**
        * Lets a blocked hosted document try one more capture on the next pass,
-       * as when its owner tries again. Returns whether it was blocked.
+       * as when its owner tries again, and a failing one try now. Returns
+       * whether it was blocked or its owner saw it failing.
        */
       unblock(document: {workspaceId: string; objectId: string}): boolean {
         const key = hostedKey(document);

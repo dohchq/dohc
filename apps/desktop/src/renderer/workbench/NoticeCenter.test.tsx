@@ -1528,7 +1528,7 @@ describe("notice center", () => {
     {
       reason: "live-document-without-lineage" as const,
       title: "Live editing can't start",
-      body: "The server can't start live editing for a document in this workspace until you open it once in dohc. Open Live documents to see which document. After you open it, resume live editing there.",
+      body: "The server can't start live editing for a document in this workspace until you open it once in dohc. A note larger than 256 KB doesn't open as a document in dohc. Make it smaller or split it, then open it. Open Live documents to see which document. After you open it, resume live editing there.",
     },
     // A diverged server copy offers no Resume: only the server's operator can continue it.
     {
@@ -1549,12 +1549,19 @@ describe("notice center", () => {
       title: "Live editing can't start",
       body: "A document in this workspace has too much edit history for the server to check, so live editing can't start for it. Your edits are saved and keep syncing. Open Live documents to see which document.",
     },
+    // The server keeps trying it, so it keeps the retry mark.
+    {
+      reason: "live-start-failing" as const,
+      title: "Live editing can't start",
+      body: "The server can't start live editing for a document in this workspace. It keeps trying. Open Live documents to see which one.",
+      icon: "refresh-cw",
+    },
     {
       reason: "conflict-parent-withheld" as const,
       title: "Live editing can't resume",
       body: "A conflict was resolved in a document in this workspace, so the server can't resume live editing for it. People with its link can still read the last shared version, but your edits in dohc may not reach them. Open Live documents to see which document.",
     },
-  ])("sends a $reason document to the live documents list", async ({ reason, title, body }) => {
+  ] as {reason: SyncStatusResult["ownerLiveDeliveryReason"]; title: string; body: string; icon?: string}[])("sends a $reason document to the live documents list", async ({ reason, title, body, icon = "triangle-alert" }) => {
     const onOpenLiveDocuments = vi.fn();
     const onRetryLiveDelivery = vi.fn();
     const user = userEvent.setup();
@@ -1566,7 +1573,7 @@ describe("notice center", () => {
 
     const toast = screen.getByTestId("owner-live-delivery-toast");
     expect(toast.textContent).toContain(`${title}. ${body}`);
-    expect(liveDeliveryIcon(toast)).toBe("triangle-alert");
+    expect(liveDeliveryIcon(toast)).toBe(icon);
     expect(within(toast).queryByRole("button", { name: "Try again" })).toBeNull();
     expect(within(toast).getByRole("button", { name: "Live documents" })).toBeTruthy();
     await user.click(screen.getByTestId("owner-live-delivery-toast-action"));
@@ -1575,7 +1582,7 @@ describe("notice center", () => {
     await user.click(screen.getByTestId("notice-center-toggle"));
     const notice = screen.getByTestId("notice-owner-live-delivery");
     expect(notice.textContent).toContain(title);
-    expect(liveDeliveryIcon(notice)).toBe("triangle-alert");
+    expect(liveDeliveryIcon(notice)).toBe(icon);
     expect(notice.textContent).toContain(body);
     expect(within(notice).queryByRole("button", { name: "Try again" })).toBeNull();
     await copyDetails(user, notice);

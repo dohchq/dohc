@@ -22,6 +22,12 @@ import {ServiceActivationHistoryOverBudget,type OrdinaryActivationValidator} fro
 export class ServiceActivationDamaged extends Error {
   constructor(options?: ErrorOptions) { super("Retained service activation is damaged.", options); }
 }
+/** Validation refused the captured history. The message is the validator's, so the owner sees only that it was refused. */
+export class ServiceActivationRefused extends Error {}
+/** A capture past the relay's configured byte budget. */
+export class ServiceActivationCaptureOverBudget extends Error {
+  constructor() { super("Ordinary activation capture exceeds its configured byte budget."); }
+}
 export {ServiceActivationBusy,ServiceActivationStaleCut,ServiceActivationTooLarge} from "./ordinaryActivationSource";
 export {ServiceActivationHistoryOverBudget} from "./ordinaryActivationValidation";
 /** The activation fields readiness reads, without its state or baseline bytes. */
@@ -372,7 +378,7 @@ export class ServiceActivationStore {
     input.guard(); requireLiveJournalHistory(this.storage, this.history);
     for(const limit of Object.values(input.bounds))if(!Number.isSafeInteger(limit)||limit<1)throw new Error("Invalid ordinary activation read budget.");
     const capturedBytes=input.capture.baselineBytes.byteLength+input.capture.fullState.byteLength+Buffer.byteLength(JSON.stringify(input.capture.source));
-    if(capturedBytes>input.bounds.maxCaptureBytes)throw new Error("Ordinary activation capture exceeds its configured byte budget.");
+    if(capturedBytes>input.bounds.maxCaptureBytes)throw new ServiceActivationCaptureOverBudget();
     // The history read charges the baseline to the same budget, so a baseline past it waits for a new base too.
     if(input.capture.baselineBytes.byteLength>input.bounds.maxBytesPerDrain){
       throw new ServiceActivationHistoryOverBudget("Ordinary activation history exceeds its configured byte budget.");
@@ -417,7 +423,7 @@ export class ServiceActivationStore {
     if (validation.kind === "retry") throw new ServiceActivationBusy();
     if (validation.kind === "capacity-refused") throw new ServiceActivationTooLarge();
     if (validation.kind === "over-budget") throw new ServiceActivationHistoryOverBudget(validation.message);
-    if (validation.kind !== "accepted") throw new Error(validation.message);
+    if (validation.kind !== "accepted") throw new ServiceActivationRefused(validation.message);
     const base = validation.baseline;
     return this.storage.tx(() => {
       input.guard(); requireLiveJournalHistory(this.storage, this.history);

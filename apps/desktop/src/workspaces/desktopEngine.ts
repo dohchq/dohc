@@ -90,7 +90,7 @@ export function hasNoOrdinarySync(entry: RegistryEntry | null): boolean {
 }
 
 export type OwnerLiveDeliveryStatus = "preparing" | "active" | "retrying";
-type OwnerLiveDeliveryReason = "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage" | "live-edit-unadmitted" | "conflict-parent-withheld" | "live-history-over-budget" | "restart-required" | "unsent-edits-limit";
+type OwnerLiveDeliveryReason = "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage" | "live-edit-unadmitted" | "conflict-parent-withheld" | "live-history-over-budget" | "live-start-failing" | "restart-required" | "unsent-edits-limit";
 
 type EngineAuthorityState = {
   collectionAutomations: CollectionAutomationsLifecycle;
@@ -451,12 +451,14 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               // One it cannot start goes before it: the owner must open it before a Resume can help.
               // One whose server copy is missing an owner edit follows both: its Resume retries that edit.
               // A diverged server copy, or one document's damaged server record, goes first: only the server's operator can continue it.
+              // One whose start keeps failing follows every reason that needs its owner, since the server keeps trying it.
               const reason = diverged === true || unavailableFor("session-host-diverged") ? "session-host-diverged" :
                 unavailableFor("live-document-without-lineage") ? "live-document-without-lineage" :
                 unavailableFor("session-host-refused") ? "session-host-refused" :
                 unavailableFor("live-edit-unadmitted") ? "live-edit-unadmitted" :
                 unavailableFor("conflict-parent-withheld") ? "conflict-parent-withheld" :
                 unavailableFor("live-history-over-budget") ? "live-history-over-budget" :
+                unavailableFor("live-start-failing") ? "live-start-failing" :
                 unavailableFor("workspace-changed") ? "workspace-changed" :
                 unavailableFor("document-unavailable") ? "document-unavailable" : undefined;
               const ownerMustAct = reason === "session-host-diverged" || reason === "live-document-without-lineage" ||

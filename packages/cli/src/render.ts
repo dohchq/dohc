@@ -371,6 +371,7 @@ const LIVE_REASON_WORDS = {
   "document-unavailable": "file moved or removed", "workspace-changed": "workspace changed", "session-host-refused": "stopped by the server",
   "session-host-diverged": "server copy doesn't match", "live-document-without-lineage": "not started",
   "live-edit-unadmitted": "server copy is missing an edit", "conflict-parent-withheld": "can't resume", "live-history-over-budget": "history too long",
+  "live-start-failing": "can't start",
 } as const;
 const LIVE_STATUS_WORDS = { ready: "live", preparing: "preparing", paused: "paused", unavailable: "unavailable", retired: "stopped" } as const;
 
@@ -380,6 +381,7 @@ function renderLiveDocuments(page: Extract<CliResultByVerb["liveDocuments"], { o
     ...page.documents.map(row => [
       lineSafe(row.path),
       row.reason ? LIVE_REASON_WORDS[row.reason] : LIVE_STATUS_WORDS[row.status],
+      ...(row.failure ? [`server's reason ${row.failure.word} since ${row.failure.since}`] : []),
       ...(row.canResume && !row.saveOnly ? ["can resume"] : []),
       ...(row.deferredStop ? [`Stop waits for ${row.deferredStop.unsentEdits} unsent ${row.deferredStop.unsentEdits === 1 ? "edit" : "edits"}`] : []),
       ...(row.quarantine ? [`kept edits ${row.quarantine}`] : []),

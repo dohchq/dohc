@@ -2264,7 +2264,7 @@ async function liveDocumentsFixture(options: { caller?: string; record?: ReturnT
       resume: (path: string) => resumeLiveEditing(ctx, { path }),
     },
   };
-  return { ...f, h, activity, authors, answer, transport, doors };
+  return { ...f, h, activity, authors, answer, documents, transport, doors };
 }
 
 // Agents read reason codes, so each one the window's list can carry has its documented next step.
@@ -2276,10 +2276,13 @@ describe.each(["cli", "mcp"] as const)("live documents through %s", door => {
   it("lists each live document with its state and reason, as Live documents does", async () => {
     const f = await liveDocumentsFixture();
     f.kept.workspace = [f.row("object-plan", "notes/plan.md", "outbox:delivery:0", "stopping")];
+    const failure = { word: "engine-refused", since: "2026-11-13T01:00:00.000Z" };
+    f.documents.push({ path: "notes/failing.md", objectId: "object-failing", status: "unavailable", reason: "live-start-failing", failure });
     expect(await f.doors[door].list()).toEqual({ ok: true, nextCursor: null, documents: [
       { path: "notes/old.md", objectId: "object-old", status: "retired", canResume: true },
       { path: "notes/plan.md", objectId: "object-plan", status: "ready", canResume: false, quarantine: "stopping", storedOn: "this-computer", incident: "outbox:delivery:0" },
       { path: "notes/held.md", objectId: "object-held", status: "unavailable", reason: "conflict-parent-withheld", canResume: false },
+      { path: "notes/failing.md", objectId: "object-failing", status: "unavailable", reason: "live-start-failing", failure, canResume: true },
     ] });
   });
   it("stops and resumes live editing for a page, as this computer's unnamed agent", async () => {

@@ -3390,9 +3390,15 @@ describe("sync status IPC contract", () => {
     const status = { state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null,
       historyRecordingUnavailable: false, historyShareView: false, liveSessionsGeneration: 0, ownerLiveDelivery: "retrying" };
     const row = { path: "docs/a.md", objectId: "object", status: "unavailable", canResume: true };
-    for (const reason of ["session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "live-history-over-budget"] as const) {
+    for (const reason of ["session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted", "live-history-over-budget", "live-start-failing"] as const) {
       expect(SyncStatusResult.parse({ ...status, ownerLiveDeliveryReason: reason }).ownerLiveDeliveryReason).toBe(reason);
       expect(OwnerLiveDocument.parse({ ...row, reason }).reason).toBe(reason);
+    }
+    // The server's reason is a word from its list, never its message or a path.
+    const failure = { word: "engine-refused", since: "2026-11-13T01:00:00.000Z" };
+    expect(OwnerLiveDocument.parse({ ...row, reason: "live-start-failing", failure }).failure).toEqual(failure);
+    for (const bad of [{ ...failure, word: "docs/a.md: occupied" }, { ...failure, since: "yesterday" }, { ...failure, detail: "x" }]) {
+      expect(OwnerLiveDocument.safeParse({ ...row, reason: "live-start-failing", failure: bad }).success).toBe(false);
     }
     expect(SyncStatusResult.safeParse({ ...status, ownerLiveDeliveryReason: "session-host-blocked" }).success).toBe(false);
     expect(OwnerLiveDocument.safeParse({ ...row, reason: "session-host-blocked" }).success).toBe(false);

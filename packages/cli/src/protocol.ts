@@ -432,10 +432,11 @@ export const LIVE_DOCUMENT_REASON_STEPS = {
   "workspace-changed": "The workspace changed while live editing ran. Review it in Live documents.",
   "session-host-refused": "The server stopped live editing. The file and its history are unchanged. Resume tries again.",
   "session-host-diverged": "The server's copy no longer matches the synced one. Resume and Stop can't help. Contact the server's operator.",
-  "live-document-without-lineage": "Live editing can't start until the document is opened once in dohc. Open it, then Resume.",
+  "live-document-without-lineage": "Live editing can't start until the document is opened once in dohc. Open it, then Resume. A note larger than 256 KB doesn't open as a document in dohc. Make it smaller or split it, then open it.",
   "live-edit-unadmitted": "The server hasn't applied an edit. Resume tries again.",
   "conflict-parent-withheld": "A conflict in the file was resolved, so live editing can't resume. Edits made in dohc may not reach people with the link.",
   "live-history-over-budget": "The document's edit history is too long for the server to check, so live editing can't start. Edits still sync, but people it is shared with can't edit it live. Resume can't help.",
+  "live-start-failing": "The server can't start live editing and keeps trying. failure.word is the server's reason, and failure.since is when it began. Resume tries now.",
 } as const;
 const liveDocumentReasonSchema = z.enum(Object.keys(LIVE_DOCUMENT_REASON_STEPS) as [keyof typeof LIVE_DOCUMENT_REASON_STEPS, ...(keyof typeof LIVE_DOCUMENT_REASON_STEPS)[]]);
 
@@ -1796,6 +1797,7 @@ const liveDocumentsResultSchema = z.discriminatedUnion("ok", [
       objectId: liveDocumentObjectIdSchema,
       status: z.enum(["ready", "preparing", "paused", "unavailable", "retired"]),
       reason: liveDocumentReasonSchema.optional(),
+      failure: z.object({ word: z.string().regex(/^[a-z0-9-]{1,64}$/u), since: z.iso.datetime() }).strict().optional(),
       canResume: z.boolean(),
       deferredStop: z.object({ unsentEdits: z.number().int().nonnegative().safe(), editable: z.boolean() }).strict().optional(),
       quarantine: z.enum(["paused", "retrying", "stopping", "stopped-kept", "not-written", "cannot-write", "copied", "unreadable"]).optional(),

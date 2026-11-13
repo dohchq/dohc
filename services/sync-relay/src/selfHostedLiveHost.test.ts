@@ -162,6 +162,7 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
       stop: async <T>(document: Document, fence: () => T) => stopWithoutSessionHost(document, {code: "host-not-loaded", sessionHost: "running, document not loaded yet"}, fence),
       blocked: (document: Document) => holds(document) ? blocked.get(document.objectId) : undefined,
       holdReason: (document: Document) => holds(document) ? holdReasons.get(document.objectId) : undefined,
+      failing: () => undefined,
       unblock: (document: Document) => holds(document) && blocked.delete(document.objectId),
       diverged: () => [...diverged].map(([workspaceId, root]) => ({workspaceId, root}))} as never;
   });
