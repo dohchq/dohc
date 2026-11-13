@@ -2086,16 +2086,6 @@ it("reports a refused restore publication as needing repair", async () => {
   }
 });
 
-// Proves: a proof normalization refuses for capacity gets the same answer on
-// every retry, so a single push publishing a restore is refused instead of
-// asked to retry, and the device's next op lands behind it. The next restore
-// says it needs repair until a later settlement publishes the restore.
-
-// Proves: when the newest refused settlement at a resumed restore's
-// generation reaches its last row, beginning or fencing the next restore says
-// it needs repair, with no later edit and across a restart. A settlement the
-// relay refuses and one past the push's proof budget both count.
-
 it("funds a restore's publication at admission and releases it once with its binding", async () => {
   const f = await admittedRestoreFixture("owner", false);
   try {
@@ -2647,13 +2637,6 @@ function declinedAtFence(
     throw error;
   }
 }
-
-// Proves: a host's `cancelled` answer, which puts the generation back and
-// leaves admission closed, lets the next restore begin from that state after
-// a resumed restore and after one declined after its fence. The restore whose
-// fence the generation follows stays the predecessor; the cancelled one is no
-// step in the chain. The next restore completes and publishes, also across a
-// restart.
 
 // Proves: the next restore follows a declined one only from the generation
 // and lineage its host's recorded answer ended at. A document moved to

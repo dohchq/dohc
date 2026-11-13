@@ -2668,18 +2668,6 @@ function keptEdits(o: Awaited<ReturnType<typeof enrolledServiceHost>>) {
   };
 }
 
-// Proves: a stopped document whose owner has no recovery copy of edits the
-// server kept departs as an ordinary unload, then stays, with its workspace
-// attached, through later passes. A Try again granted before Stop ends,
-// keeping the queue. Once the owner confirms a copy, its retirement proves the
-// refused edit absent from the journal and completes, its workspace drains and
-// its rows go. Try again needs the live authority Stop ended; on a hosted
-// document it grants the refused head through the host's own connection.
-
-// Proves: the relay refused the owner's adoption seed and nothing applied it. Stop's retirement asks
-// the journal, which proves the seed absent; the engine abandons it, and the retirement completes without
-// waiting for a recovery copy, which stays asked for. The first Resume activates the successor.
-
 // The accepted state a recovery copy reads, as the engine pages it through the host.
 async function keptCheckpoint(
   host: Awaited<ReturnType<typeof enrolledServiceHost>>["host"],
@@ -3014,11 +3002,6 @@ it("records a departed application only as the next accepted row, for its adopti
   });
   expect(() => store.departedOwnerDelivery(input)).toThrow("Committed delivery stale-session.");
 });
-
-// Proves: a retirement resumes after its daemon stops at any point, from its
-// durable obligation alone: before the engine reconciled it, after it settled,
-// after the engine released it, or after the relay retired it. A released
-// activation's release replays its boundary, and a retired one needs nothing more.
 
 // Proves: deleting the last Edit share cuts off admission at once, as Stop
 // does, while the owner's frame session is open and a drain waits in the
@@ -3854,11 +3837,6 @@ it("keeps the owner editing a note after restoring it, when the restore ended it
   expect(o.f.storage.serviceActivationRetirement(o.document)).toBeNull();
 });
 
-// Proves: a restore the owner declines, or cancels, ends the live session it
-// kept. Ending it opens the retirement the restore's revocation skipped, at
-// the fence the note is left at, and the relay refuses the owner's live
-// editing. Once the host lets the note go, the activation retires.
-
 // The retiring host's push of the restored note, which puts the restore in the relay's ordinary history. Returns the
 // restored note's complete state.
 const pushRestoredUpdate = (o: Enrolled) => {
@@ -3909,7 +3887,7 @@ const firstText = (node: Y.XmlFragment | Y.XmlElement): Y.XmlText | null => {
   }
   return null;
 };
-// That push, and the successor's native capture after it: the restored state, sourced from the restore's settlement moment.
+// The successor's native capture: the restored state, sourced from the restore's settlement moment.
 
 const restoredCapture = (o: Enrolled, fullState: Buffer): NativeOwnerActivation => {
   const moment = o.raw
@@ -3936,9 +3914,6 @@ const restoredCapture = (o: Enrolled, fullState: Buffer): NativeOwnerActivation 
     },
   };
 };
-
-// The kind of the owner's binding through the pending successor's access,
-// while its stored binding names `generation`. The row is put back before this returns.
 
 // Proves: after a restore and Stop, the successor that Resume starts, whose source is the restore's settlement
 // moment, reads from a checkpoint folded through that moment. Here the owner's ordinary history reached the restored

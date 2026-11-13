@@ -261,7 +261,3 @@ it("explains a document the session host blocked as unavailable until the block 
   blocked = false;
   expect(await (await f.handle(request())).json()).toEqual({ objectId: binding.objectId });
 });
-
-// A link sees each share root by its own name, so a nested folder named
-// shared-with-me shows as the reserved top-level folder, which no binding can
-// hold. The share is valid and covers the file, so only the link's view refuses.
