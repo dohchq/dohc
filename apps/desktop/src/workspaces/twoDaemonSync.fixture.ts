@@ -2,10 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { getCACertificates, setDefaultCACertificates } from "node:tls";
 import { mintLocalhostCa } from "../../../../services/share-web/src/testing/localhostCa";
-import {
-  startServerProxy,
-  type HostedLogResponseBarrier,
-} from "../../e2e/helpers/selfHostOnboarding";
+import { startServerProxy } from "../../e2e/helpers/selfHostOnboarding";
 import { DatabaseSync } from "node:sqlite";
 
 import {
@@ -79,27 +76,6 @@ import { deleteWorkspacePathByHand, moveWorkspacePathByHand } from "./workspaceF
 import { readLocalStateFrom, type LocalStateBindings } from "./workspaceLocalState";
 
 export const engine = requireEngineBinaryOrSkip();
-
-export async function waitForHostedLog<T>(
-  barrier: HostedLogResponseBarrier,
-  promise: Promise<T>,
-  phase: string,
-): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => {
-          reject(new Error(`Hosted-log ${phase} did not finish within 60 s.`));
-          barrier.destroy();
-        }, 60_000);
-      }),
-    ]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
 
 let relayBuildDirectory: string;
 export let compiledRelayMain: string;
@@ -453,7 +429,7 @@ export async function expectTwoDaemonFileSync(input: {
 
 // A stale ready copy at Resume is covered by the relay test "captures a retired
 // activation's successor only after a hosted pull that started after Resume".
-export const heldStopCase = "stale-binding quarantine, Stop refused while the host is held";
+export const stopQuarantineCase = "stale-binding quarantine, released by Stop";
 
 export interface OpenEditor {
   session: Awaited<ReturnType<WorkspaceEngineCapture["openYDocSession"]>>;

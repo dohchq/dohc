@@ -7196,6 +7196,37 @@ it("releases the block and keeps the document live when Stop is cancelled during
   expect(engineParams(o, "liveApplication.prepareRetirement")).toHaveLength(2);
 });
 
+// Proves: Stop waits, and prepares and fences nothing, when the host does not
+// answer its drain in time.
+it("waits to stop when the host does not answer Stop's drain in time, and fences nothing", async () => {
+  const o = await enrolledServiceHost({ frameChanges: true });
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  o.passes.deliver = false;
+  const send = o.client().sendRequest,
+    through = send.getMockImplementation()! as (...args: unknown[]) => ReturnType<typeof send>,
+    held = deferred<void>(),
+    missed = deferred<void>();
+  send.mockImplementation(async (...args: unknown[]) => {
+    const request = args[0] as { id: number; method: string; deadlineMs: number };
+    if (request.method !== "liveApplication.ownerState") return through(...args);
+    held.resolve();
+    await missed.promise;
+    throw new EngineRequestDeadlineError(request.id, request.method, request.deadlineMs);
+  });
+  const stopping = hostStop(o);
+  await held.promise;
+  missed.resolve();
+  await expect(stopping).resolves.toBe("waiting");
+  expect(o.host.invalidated.aborted).toBe(true);
+  expect(log).toHaveBeenCalledWith("Live host stopped an engine that did not answer in time.", {
+    method: "liveApplication.ownerState",
+    deadlineMs: expect.any(Number),
+  });
+  expect(engineParams(o, "liveApplication.prepareRetirement")).toEqual([]);
+  expect(o.engine.prepared).toBeUndefined();
+  stillLive(o);
+});
+
 // Proves: a relay failure after the engine prepared releases the block, and
 // a release that fails ends the host's connection, which ends the block.
 it("releases the block when the fence fails after preparation, and closes the host when the release fails", async () => {
