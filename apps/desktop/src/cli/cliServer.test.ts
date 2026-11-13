@@ -1969,6 +1969,11 @@ describe("CLI socket server", () => {
     }
     // Only an id the registry lists selects a workspace.
     await expect(named("workspace-elsewhere", workspaceRoot)).resolves.toMatchObject({ ok: false, error: "dohc: No workspace on this computer has this id." });
+    // When two entries share a folder, a request runs only in the one it named.
+    serverOptions.listWorkspaces = () => [registryWorkspace, { workspaceId: "twin", rootPath: workspaceRoot }];
+    const answers = await Promise.all([WORKSPACE_ID, "twin"].map((id) => named(id, tempRoot)));
+    expect(answers.map((answer) => answer.ok).sort()).toEqual([false, true]);
+    expect(answers.find((answer) => !answer.ok)).toMatchObject({ error: "dohc: This workspace's folder belongs to another workspace on this computer." });
   });
 
   it("writes an agent's collection and document changes at the depth of the run an automation started", async () => {
@@ -2061,6 +2066,9 @@ describe("CLI socket server", () => {
     serverOptions.listWorkspaces = () => [registryWorkspace, { workspaceId: "nested", rootPath: nestedRoot }];
     const opened = calls.openWorkspace;
     await expect(invoke("reply", { ...args, cwd: nestedRoot, attachments: [] })).rejects.toThrow("Agent runs cannot write in another workspace.");
+    // Naming the other workspace by id is refused the same way as standing in it.
+    await expect(rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "reply", workspaceId: "nested", runSecret: RUN_SECRET, args: { ...args, attachments: [] } }))
+      .resolves.toMatchObject({ ok: false, error: "dohc: Agent runs cannot write in another workspace." });
     expect(calls.openWorkspace).toBe(opened);
   });
 
