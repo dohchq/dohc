@@ -44,6 +44,8 @@ describe("quoted", () => {
       [0xfeff, escape("feff")], // byte order mark
       [0x00ad, escape("00ad")], // soft hyphen
       [0x180e, escape("180e")], // Mongolian vowel separator
+      [0x034f, escape("034f")], // combining grapheme joiner
+      [0x180b, escape("180b")], // Mongolian free variation selector
       [0x3164, escape("3164")], // Hangul filler
       [0xfe0f, escape("fe0f")], // variation selector
       [0xfff9, escape("fff9")], // annotation anchor
@@ -123,7 +125,7 @@ describe("forwardedMessageText", () => {
       message({
         workspace: { id: "w".repeat(200), name: widest },
         agentId: "a".repeat(64),
-        place: { kind: "file", path: widest },
+        place: { kind: "group", name: widest },
         thread: { id: "t".repeat(200), title: widest },
         author: widest,
         body: "x".repeat(150_000),
@@ -136,15 +138,12 @@ describe("forwardedMessageText", () => {
     expect(text).toContain("chat reply");
   });
 
-  it("names the agent's own chat and a file's chat, with and without the file's place", () => {
+  it("names the agent's own chat and a file's chat", () => {
     expect(forwardedMessageText(message({ place: { kind: "own" } }))).toContain(
       `your own chat, chat thread "Windows build".`,
     );
-    expect(forwardedMessageText(message({ place: { kind: "file", path: null } }))).toContain(
+    expect(forwardedMessageText(message({ place: { kind: "file" } }))).toContain(
       `a file's chat, chat thread "Windows build".`,
-    );
-    expect(forwardedMessageText(message({ place: { kind: "file", path: "a b.md" } }))).toContain(
-      `the chat of file "a b.md", chat thread "Windows build".`,
     );
   });
 });

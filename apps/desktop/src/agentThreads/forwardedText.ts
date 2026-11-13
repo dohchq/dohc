@@ -13,20 +13,13 @@ const MAX_NOTE_CHARS = 4_000;
 // or space. Everything else is escaped: controls, line separators, and the
 // marks that hide or reorder text.
 const SEEN = /^[\p{L}\p{M}\p{N}\p{P}\p{S}\p{Zs}]$/u;
-// Characters in those classes that draw nothing, so text can hide in them:
-// the Hangul fillers and the variation selectors.
-const BLANK: ReadonlyArray<readonly [number, number]> = [
-  [0x115f, 0x1160],
-  [0x3164, 0x3164],
-  [0xfe00, 0xfe0f],
-  [0xffa0, 0xffa0],
-  [0xe0100, 0xe01ef],
-];
+// Characters in those classes that Unicode says to draw nothing for, so text
+// can hide in them: the Hangul fillers, the variation selectors, and others.
+const UNDRAWN = /\p{Default_Ignorable_Code_Point}/u;
 
 function shown(character: string): string {
   const code = character.codePointAt(0)!;
-  if (SEEN.test(character) && !BLANK.some(([from, to]) => code >= from && code <= to))
-    return character;
+  if (SEEN.test(character) && !UNDRAWN.test(character)) return character;
   return code > 0xffff ? `\\u{${code.toString(16)}}` : `\\u${code.toString(16).padStart(4, "0")}`;
 }
 
@@ -51,7 +44,7 @@ export interface ForwardedMessage {
   workspace: { id: string; name: string };
   agentId: string;
   /** The chat that holds the message: the agent's own, a Group, or a file's. */
-  place: { kind: "own" } | { kind: "group"; name: string } | { kind: "file"; path: string | null };
+  place: { kind: "own" } | { kind: "group"; name: string } | { kind: "file" };
   /** The chat thread, by the id the CLI takes. */
   thread: { id: string; title: string };
   author: string;
@@ -68,9 +61,7 @@ function placeOf(message: ForwardedMessage): string {
     case "group":
       return `Group ${quoted(message.place.name)}, ${thread}`;
     case "file":
-      return message.place.path === null
-        ? `a file's chat, ${thread}`
-        : `the chat of file ${quoted(message.place.path)}, ${thread}`;
+      return `a file's chat, ${thread}`;
   }
 }
 

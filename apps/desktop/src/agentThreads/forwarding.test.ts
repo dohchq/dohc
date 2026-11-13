@@ -171,7 +171,8 @@ describe("forwarding", () => {
     await forwarding.wake(WORKSPACE);
 
     expect(sent[0]!.message).toContain('Group "launch", chat thread "title of thread-a".');
-    expect(sent[1]!.message).toContain('the chat of file "plans/release.md", chat thread');
+    expect(sent[1]!.message).toContain(`a file's chat, chat thread "title of thread-file".`);
+    expect(sent[1]!.message).not.toContain("plans/release.md");
     expect(sent[0]!.message).toContain('Note from "Ice": Post decisions here.');
     expect(sent[0]!.message).not.toContain("Attached");
     expect(sent.map((message) => message.how)).toEqual(["steer", "steer"]);
@@ -239,6 +240,37 @@ describe("forwarding", () => {
       forwardIdOf(WORKSPACE, "chief", "m1"),
     ]);
     forwarding.stop();
+  });
+
+  it("gives an agent nothing more once it is turned off or pointed at another thread", async () => {
+    let agents: ServedAgent[] = [agent];
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const { forwarding, sent, tool } = setup(
+      [request("m1", 10), request("m2", 20), request("m3", 30)],
+      { workspace: async () => ({ name: "Launch", agents }) },
+    );
+    tool.forward.mockImplementationOnce(async (input) => {
+      await held;
+      sent.push(input);
+    });
+
+    const first = forwarding.wake(WORKSPACE);
+    await vi.waitFor(() => expect(tool.forward).toHaveBeenCalledTimes(1));
+    agents = [{ ...agent, threadId: "t3-thread-new" }];
+    const changed = forwarding.wake(WORKSPACE);
+    release();
+    await Promise.all([first, changed]);
+
+    expect(sent.map((message) => message.threadId)).toEqual([
+      "t3-thread-1",
+      "t3-thread-new",
+      "t3-thread-new",
+    ]);
+
+    agents = [];
+    await forwarding.wake(WORKSPACE);
+    expect(sent).toHaveLength(3);
   });
 
   it("forwards a message that arrives while it works, without a second copy of the first", async () => {

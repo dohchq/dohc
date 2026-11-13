@@ -97,12 +97,15 @@ export function createForwarding(dependencies: ForwardingDependencies) {
       upTo: { createdAtMs: request.createdAtMs, messageId: request.messageId },
     });
 
-  /** Walks the agent's unread requests, oldest first. A later page starts after the last request met. */
+  /**
+   * Walks the agent's unread requests, oldest first. A later page starts after
+   * the last request met. False when `visit` ended the walk early.
+   */
   async function eachUnread(
     workspaceId: string,
     agent: ServedAgent,
-    visit: (request: Request) => Promise<void>,
-  ): Promise<void> {
+    visit: (request: Request) => Promise<boolean>,
+  ): Promise<boolean> {
     let after: { createdAtMs: number; messageId: string } | undefined;
     for (;;) {
       const page = await chats.listAgentRequestsPage({
@@ -112,26 +115,28 @@ export function createForwarding(dependencies: ForwardingDependencies) {
         limit: PAGE,
       });
       for (const request of page.requests) {
-        if (stopped) return;
-        await visit(request);
+        if (!(await visit(request))) return false;
         after = { createdAtMs: request.createdAtMs, messageId: request.messageId };
       }
-      if (!page.more || page.requests.length === 0) return;
+      if (!page.more || page.requests.length === 0) return true;
     }
   }
 
+  /** False when the pass ended before the message went out. */
   async function forwardOne(
     workspace: { id: string; name: string },
     agent: ServedAgent,
     request: Request,
-  ): Promise<void> {
+    live: () => boolean,
+  ): Promise<boolean> {
+    if (!live()) return false;
     const { thread } = await chats.getThread({
       workspaceId: workspace.id,
       threadId: request.threadId,
     });
     const { channel } = request;
-    // Stopped while it read the thread: nothing new goes out.
-    if (stopped) return;
+    // The pass ended while it read the thread: nothing new goes out.
+    if (!live()) return false;
     await dependencies.tool.forward({
       threadId: agent.threadId,
       how: agent.whileBusy,
@@ -142,7 +147,7 @@ export function createForwarding(dependencies: ForwardingDependencies) {
         agentId: agent.id,
         place:
           channel === null
-            ? { kind: "file", path: thread.linkedFile?.pathHint ?? null }
+            ? { kind: "file" }
             : channel.kind === "agent"
               ? { kind: "own" }
               : { kind: "group", name: channel.name },
@@ -155,10 +160,14 @@ export function createForwarding(dependencies: ForwardingDependencies) {
     // The tool took it. A failure from here leaves it unread, and the next
     // try sends it under the same id.
     await markRead(workspace.id, agent, request);
+    return true;
   }
 
-  /** Forwards what each agent has unread. False when something stopped an agent's messages. */
-  async function forwardUnread(workspaceId: string): Promise<boolean> {
+  /**
+   * Forwards what each agent has unread, while `live` holds. False when
+   * something stopped an agent's messages.
+   */
+  async function forwardUnread(workspaceId: string, live: () => boolean): Promise<boolean> {
     let workspace: Awaited<ReturnType<ForwardingDependencies["workspace"]>>;
     try {
       workspace = await dependencies.workspace(workspaceId);
@@ -171,9 +180,10 @@ export function createForwarding(dependencies: ForwardingDependencies) {
     let reached = true;
     for (const agent of workspace.agents) {
       try {
-        await eachUnread(workspaceId, agent, (request) =>
-          forwardOne({ id: workspaceId, name: workspace.name }, agent, request),
+        const walked = await eachUnread(workspaceId, agent, (request) =>
+          forwardOne({ id: workspaceId, name: workspace.name }, agent, request, live),
         );
+        if (!walked) return reached;
         report(workspaceId, agent.id, null);
       } catch (error) {
         reached = false;
@@ -194,12 +204,16 @@ export function createForwarding(dependencies: ForwardingDependencies) {
     clearTimeout(retries.get(workspaceId)?.timer);
     const work = { again: false, done: Promise.resolve() };
     working.set(workspaceId, work);
+    // A wake ends the pass at its next message, and the next pass reads the
+    // agents again. So an agent turned off, or pointed at another thread,
+    // gets nothing more from a pass that started before the change.
+    const live = () => !stopped && !work.again;
     work.done = (async () => {
       let reached = false;
       try {
         do {
           work.again = false;
-          reached = await forwardUnread(workspaceId);
+          reached = await forwardUnread(workspaceId, live);
         } while (work.again && !stopped);
       } finally {
         working.delete(workspaceId);
@@ -224,15 +238,16 @@ export function createForwarding(dependencies: ForwardingDependencies) {
     /** Forwards what the workspace's agents have unread. Call it when a chat write lands and when an agent's settings change. */
     wake,
     /**
-     * Marks what an agent has unread in a workspace as read without forwarding
-     * it. A person connecting a thread means its messages from then on, and
-     * "then" is when this settles. Call it before the agent is on, so no wake
+     * Marks the unread requests it meets as read without forwarding them. A
+     * request that arrives after its last page stays unread, and is forwarded
+     * once the agent is on. Call it before the agent is on, so no wake
      * forwards for the agent while it runs.
      */
     async setAside(workspaceId: string, agent: ServedAgent): Promise<void> {
       const last = new Map<string, Request>();
       await eachUnread(workspaceId, agent, async (request) => {
         last.set(request.threadId, request);
+        return true;
       });
       for (const request of last.values()) await markRead(workspaceId, agent, request);
     },
