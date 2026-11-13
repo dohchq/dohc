@@ -108,25 +108,17 @@ pub(crate) fn is_owned_op_kind(kind: &str) -> bool {
     OWNED_OP_ROUTES.iter().any(|(owned, _)| *owned == kind)
 }
 
-/// Whether the chat applier reads this kind. A quietly retained owner-private
-/// record replays through it once this build knows the kind.
-pub(crate) fn is_chat_op_kind(kind: &str) -> bool {
+/// The kinds this build knows to be owner-private: each changes only the named
+/// account's own state, and each routes to the chat applier. Only these replay
+/// from the log after an earlier build kept them quietly, so a content kind
+/// never does. The relay registers the same kinds with `ownerPrivate: true`.
+pub(crate) const OWNER_PRIVATE_KINDS: &[&str] = &["chat.feed.read.set", "chat.thread.read.set"];
+
+#[cfg(test)]
+pub(crate) fn routes_to_chat(kind: &str) -> bool {
     OWNED_OP_ROUTES
         .iter()
         .any(|(owned, route)| *owned == kind && matches!(route, OwnedRoute::Chat))
-}
-
-/// The chat kinds this build reads, sorted and joined. A build that learns a
-/// kind has a new fingerprint, so its first open replays what earlier builds
-/// kept quietly.
-pub(crate) fn chat_op_kinds_fingerprint() -> String {
-    let mut kinds: Vec<&str> = OWNED_OP_ROUTES
-        .iter()
-        .filter(|(_, route)| matches!(route, OwnedRoute::Chat))
-        .map(|(kind, _)| *kind)
-        .collect();
-    kinds.sort_unstable();
-    kinds.join(",")
 }
 
 pub fn apply_replication_envelope(
@@ -232,7 +224,7 @@ pub(crate) fn apply_replication_envelope_in_batch(
             envelope,
             faults,
             |tx, op| {
-                if crate::owner_private::retains_quietly(tx, op)? {
+                if crate::owner_private::admit_quietly(tx, op)? {
                     Ok(crate::apply::MutationOutcome::<()>::RetainedQuietly)
                 } else {
                     Err(SyncError::UnsupportedOperation)

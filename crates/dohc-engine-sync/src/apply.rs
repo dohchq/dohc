@@ -901,7 +901,8 @@ struct FeedReadSet {
     last_seen_created_at_ms: i64,
     last_seen_message_id: String,
     at_ms: i64,
-    #[serde(default)]
+    // Missing is fine; a present null is malformed.
+    #[serde(default, deserialize_with = "deserialize_present_string")]
     owner_private_account_id: Option<String>,
 }
 
@@ -913,7 +914,7 @@ struct ThreadReadSet {
     last_read_created_at_ms: i64,
     last_read_message_id: String,
     at_ms: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_present_string")]
     owner_private_account_id: Option<String>,
 }
 

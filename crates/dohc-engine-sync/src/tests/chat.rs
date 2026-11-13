@@ -8036,8 +8036,9 @@ fn pending_refusal_count(engine: &EngineStore) -> i64 {
         .expect("pending refusals")
 }
 
-/// The fingerprint of the later build these tests stand in for.
-const LATER_BUILD: &str = "later-build";
+/// The fingerprint of the later build these tests stand in for: its one
+/// owner-private kind.
+const LATER_BUILD: &str = FUTURE_PRIVATE_KIND;
 
 fn stored_fingerprint(engine: &EngineStore) -> Option<String> {
     engine
@@ -8052,18 +8053,12 @@ fn replay_as_later_build(
     faults: &dyn FaultInjector,
     applies: &std::cell::Cell<usize>,
 ) -> Result<usize, SyncError> {
-    crate::owner_private::replay_known(
-        engine,
-        faults,
-        LATER_BUILD,
-        |kind| kind == FUTURE_PRIVATE_KIND,
-        |tx, op| {
-            applies.set(applies.get() + 1);
-            let mut known = op.clone();
-            known.op_kind = "chat.thread.read.set".to_owned();
-            crate::apply::apply_chat_lww_projection_tx(tx, &known)
-        },
-    )
+    crate::owner_private::replay_known(engine, faults, &[FUTURE_PRIVATE_KIND], |tx, op| {
+        applies.set(applies.get() + 1);
+        let mut known = op.clone();
+        known.op_kind = "chat.thread.read.set".to_owned();
+        crate::apply::apply_chat_lww_projection_tx(tx, &known)
+    })
 }
 
 fn assert_refused_as_unsupported(engine: &mut EngineStore, op: &ReplicationEnvelope) {
@@ -8659,4 +8654,251 @@ fn replay_reads_the_log_only_when_the_builds_kinds_change() {
     assert_eq!(stored_fingerprint(&engine), Some(this_build));
     assert_eq!(log_row(&engine, "phone", 0).expect("kept").3, "applied");
     assert_eq!(applies.get(), 1);
+}
+
+/// Replays as a build whose owner-private kinds are `kinds`, recording which
+/// origins reach the applier. The future kind applies as a thread read mark.
+fn replay_recording(
+    engine: &mut EngineStore,
+    kinds: &[&str],
+    tried: &std::cell::RefCell<Vec<String>>,
+) -> Result<usize, SyncError> {
+    crate::owner_private::replay_known(engine, &NoFaults, kinds, |tx, op| {
+        tried.borrow_mut().push(op.origin_id.clone());
+        let mut known = op.clone();
+        if known.op_kind == FUTURE_PRIVATE_KIND {
+            known.op_kind = "chat.thread.read.set".to_owned();
+        }
+        crate::apply::apply_chat_lww_projection_tx(tx, &known)
+    })
+}
+
+#[test]
+fn a_dismissed_visible_refusal_never_replays_even_when_it_names_the_owner() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "read-fixture");
+    // Refused visibly before this copy recorded its owner.
+    assert_refused_as_unsupported(
+        &mut engine,
+        &future_private_op("before-seed", 0, Some(json!("owner"))),
+    );
+    seed_owner_account(&mut engine, "owner");
+    // Refused visibly after it: a known owner-private kind its applier
+    // refuses, and a content kind, both marked for the owner.
+    let mut known = thread_read_op(
+        "known-private",
+        0,
+        "thread-imported",
+        21,
+        "message-imported",
+    );
+    known.payload["ownerPrivateAccountId"] = json!("owner");
+    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &known, &NoFaults));
+    let content = envelope(
+        "content",
+        0,
+        "chat.message.append",
+        json!({"messageId": 7, "ownerPrivateAccountId": "owner"}),
+    );
+    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &content, &NoFaults));
+    // The person dismisses every Notice.
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "DELETE FROM replication_pending_refusals WHERE workspace_id='ws'",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("dismiss");
+    // Even a content record somehow admitted quietly never replays: the
+    // engine's owner-private list doesn't name its kind.
+    engine
+        .write_with(&NoFaults, |tx| {
+            assert!(crate::owner_private::admit_quietly(tx, &content)?);
+            Ok::<_, SyncError>(())
+        })
+        .expect("admit the content record");
+    // One record kept quietly on arrival.
+    assert_eq!(
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &future_private_op("phone", 0, Some(json!("owner"))),
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("kept"),
+        ApplyOutcome::new(ApplyDisposition::Skipped)
+    );
+
+    // This build's own kinds: nothing reaches an applier.
+    let tried = std::cell::RefCell::new(Vec::new());
+    assert_eq!(
+        replay_recording(&mut engine, crate::router::OWNER_PRIVATE_KINDS, &tried)
+            .expect("this build"),
+        0
+    );
+    assert!(tried.borrow().is_empty(), "{:?}", tried.borrow());
+
+    // A later build that knows the future kind applies only the quiet record.
+    assert_eq!(
+        replay_recording(
+            &mut engine,
+            &[FUTURE_PRIVATE_KIND, "chat.thread.read.set"],
+            &tried
+        )
+        .expect("later build"),
+        1
+    );
+    assert_eq!(*tried.borrow(), vec!["phone".to_owned()]);
+    assert_eq!(
+        account_thread_mark(&engine, "thread-imported"),
+        Some((20, "message-imported".to_owned()))
+    );
+    for origin in ["before-seed", "known-private", "content"] {
+        assert_eq!(
+            log_row(&engine, origin, 0).expect("kept").3,
+            "refused",
+            "{origin}"
+        );
+    }
+    assert_eq!(log_row(&engine, "phone", 0).expect("kept").3, "applied");
+    assert_eq!(pending_refusal_count(&engine), 0);
+    let admissions: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM engine_requests WHERE kind='owner-private-quiet'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("admissions");
+    assert_eq!(admissions, 1, "the applied record consumed its admission");
+}
+
+#[test]
+fn a_record_that_fails_to_replay_stays_kept_and_the_rest_still_apply() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "read-fixture");
+    seed_owner_account(&mut engine, "owner");
+    for origin in ["broken", "phone"] {
+        assert_eq!(
+            apply_replication_envelope(
+                &mut engine,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &future_private_op(origin, 0, Some(json!("owner"))),
+                &NoFaults,
+                &NoLiveLeases,
+            )
+            .expect("kept"),
+            ApplyOutcome::new(ApplyDisposition::Skipped)
+        );
+    }
+    let tried = std::cell::RefCell::new(Vec::<String>::new());
+    let replay = |engine: &mut EngineStore| {
+        crate::owner_private::replay_known(engine, &NoFaults, &[FUTURE_PRIVATE_KIND], |tx, op| {
+            tried.borrow_mut().push(op.origin_id.clone());
+            if op.origin_id == "broken" {
+                // An error that isn't a refusal.
+                return Err(SyncError::CoordinateDiverged);
+            }
+            let mut known = op.clone();
+            known.op_kind = "chat.thread.read.set".to_owned();
+            crate::apply::apply_chat_lww_projection_tx(tx, &known)
+        })
+    };
+    let attempt = |count: u32| format!("{FUTURE_PRIVATE_KIND}\nattempt:{count}");
+
+    // The failure doesn't stop the record after it.
+    assert_eq!(replay(&mut engine).expect("first"), 1);
+    assert_eq!(
+        *tried.borrow(),
+        vec!["broken".to_owned(), "phone".to_owned()]
+    );
+    assert_eq!(log_row(&engine, "broken", 0).expect("kept").3, "refused");
+    assert_eq!(log_row(&engine, "phone", 0).expect("kept").3, "applied");
+    assert_eq!(pending_refusal_count(&engine), 0);
+    assert_eq!(stored_fingerprint(&engine), Some(attempt(1)));
+
+    // The next opens try it again, a bounded number of times.
+    assert_eq!(replay(&mut engine).expect("second"), 0);
+    assert_eq!(stored_fingerprint(&engine), Some(attempt(2)));
+    assert_eq!(replay(&mut engine).expect("third"), 0);
+    assert_eq!(
+        stored_fingerprint(&engine).as_deref(),
+        Some(FUTURE_PRIVATE_KIND)
+    );
+    assert_eq!(tried.borrow().len(), 4);
+    // Then the fingerprint holds: no more scans, and the record stays kept
+    // for the next build whose owner-private kinds differ.
+    assert_eq!(replay(&mut engine).expect("settled"), 0);
+    assert_eq!(tried.borrow().len(), 4);
+    assert_eq!(log_row(&engine, "broken", 0).expect("kept").3, "refused");
+}
+
+#[test]
+fn a_thread_read_with_a_null_marker_is_malformed() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "read-fixture");
+    let mut read = thread_read_op("null-marker", 0, "thread-imported", 20, "message-imported");
+    read.payload["ownerPrivateAccountId"] = serde_json::Value::Null;
+    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &read, &NoFaults));
+    assert_eq!(account_thread_mark(&engine, "thread-imported"), None);
+}
+
+#[test]
+fn a_feed_read_with_a_null_marker_is_malformed() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "read-fixture");
+    let read = envelope(
+        "null-marker",
+        0,
+        "chat.feed.read.set",
+        json!({
+            "ownerUserId": "owner",
+            "lastSeenCreatedAtMs": 20,
+            "lastSeenMessageId": "message-imported",
+            "atMs": 100,
+            "ownerPrivateAccountId": null
+        }),
+    );
+    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &read, &NoFaults));
+    let feed_rows: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM chat_feed_read_state WHERE workspace_id='ws'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("feed rows");
+    assert_eq!(feed_rows, 0);
+}
+
+/// The engine's owner-private list and the relay's registry name the same
+/// kinds, and each routes to the chat applier that replays it.
+#[test]
+fn the_owner_private_kinds_match_the_relay_registry() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../services/sync-relay/src/relayLogInputs.ts"),
+    )
+    .expect("the relay's chat op policy");
+    let mut relay: Vec<&str> = source
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with('"') && line.contains("ownerPrivate: true"))
+        .filter_map(|line| line.split('"').nth(1))
+        .collect();
+    relay.sort_unstable();
+    let mut engine = crate::router::OWNER_PRIVATE_KINDS.to_vec();
+    engine.sort_unstable();
+    assert_eq!(relay, engine);
+    for kind in crate::router::OWNER_PRIVATE_KINDS {
+        assert!(crate::router::routes_to_chat(kind), "{kind}");
+    }
 }
