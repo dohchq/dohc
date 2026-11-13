@@ -1,4 +1,4 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import type { ChatLinksPage } from "@dohc/workspace-contracts/chat-links";
 import { bridge } from "../bridge";
 import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
@@ -29,15 +29,21 @@ export function useChatLinks({ workspaceId, channelWireId, onError }: {
   const { retry, pending: loading } = query;
   const pages = query.value?.pages ?? NO_PAGES;
   const load = useCallback(() => retry(), [retry]);
-  // The pages a page read extends. A second call before React renders again
-  // sees the same pages and sends nothing.
-  const extending = useRef<Page[] | null>(null);
+  // The page read in flight and the pages it extends. A second call before
+  // React renders again sees the same pages and sends nothing. The guard ends
+  // with loading, so a page read that a refresh superseded does not hold the
+  // next one back.
+  const extending = useRef<{ pages: Page[] } | null>(null);
+  useEffect(() => {
+    if (!loading) extending.current = null;
+  }, [loading]);
   const loadMore = useCallback(() => {
     const cursor = pages.at(-1)?.nextCursor;
-    if (!cursor || loading || extending.current === pages) return Promise.resolve();
-    extending.current = pages;
+    if (!cursor || loading || extending.current?.pages === pages) return Promise.resolve();
+    const attempt = { pages };
+    extending.current = attempt;
     return retry({ cursor, pages }).finally(() => {
-      if (extending.current === pages) extending.current = null;
+      if (extending.current === attempt) extending.current = null;
     });
   }, [loading, pages, retry]);
   const status = loading ? "loading" : query.error !== null ? "unavailable" : query.value?.status ?? "idle";

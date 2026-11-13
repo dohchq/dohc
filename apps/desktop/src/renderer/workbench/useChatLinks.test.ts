@@ -64,6 +64,18 @@ it("two page reads before a render send one request",async()=>{
   await act(async()=>{next.resolve(page("a",null));await Promise.all([first,second]);});
   expect(h.result.current.pages).toHaveLength(2);
 });
+it("pages again after a refresh that superseded a page read fails",async()=>{
+  const h=setup(),older=deferred<ReturnType<typeof page>>();
+  h.read.mockResolvedValueOnce(page()).mockReturnValueOnce(older.promise).mockRejectedValueOnce(Error("refresh")).mockResolvedValueOnce(page("a",null));
+  await act(()=>h.result.current.load());
+  act(()=>{void h.result.current.loadMore();});
+  await act(()=>h.result.current.load());
+  expect(h.result.current.loading).toBe(false);
+  await act(()=>h.result.current.loadMore());
+  expect(h.read).toHaveBeenCalledTimes(4);
+  expect(h.read).toHaveBeenLastCalledWith({workspaceId:"w",channelWireId:"a",cursor:"next"});
+  expect(h.result.current.pages).toHaveLength(2);
+});
 it("reports current errors but suppresses errors after unmount",async()=>{
   const h=setup(),pending=deferred<never>();
   h.read.mockRejectedValueOnce(Error("current")).mockReturnValueOnce(pending.promise);
