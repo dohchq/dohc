@@ -51,8 +51,7 @@ function setup(agents: Record<string, unknown>, unread: string[] = ["m1"]) {
   });
   const forget = vi.fn(async () => {});
   const agentThreads = createAgentThreads({
-    cli: "dohc",
-    cliFolder: null,
+    cli: { program: "dohc", notes: [] },
     t3Code: { forward, forget } as unknown as T3CodeConnection,
     chats,
     readSettings: async () => ({ agents: settings }),

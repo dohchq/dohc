@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { ChatAgentReader, LinkedChatStore } from "@dohc/workspace-contracts/engine";
 import { cliThreadId } from "@dohc/workspace-operations/chats";
-import { forwardedMessageText } from "./forwardedText";
+import { forwardedMessageText, type CliForThread } from "./forwardedText";
 
 // Forwarding (CONTEXT.md, ADR 0016): dohc gives a person's message to the
 // agent's own thread when that message wakes the agent. The messages are the
@@ -41,10 +41,8 @@ export interface ServedAgent {
 }
 
 export interface ForwardingDependencies {
-  /** dohc's CLI as a shell runs it. */
-  cli: string;
-  /** The folder that holds that program, for a shell that does not find it. */
-  cliFolder: string | null;
+  /** dohc's CLI as a thread runs it. */
+  cli: CliForThread;
   /** The workspace's name and its agents that have a thread and are on. Null when this computer no longer has the workspace. */
   workspace(workspaceId: string): Promise<{ name: string; agents: ServedAgent[] } | null>;
   chats: Pick<LinkedChatStore, "listAgentRequestsPage" | "markThreadReadByAgent" | "getThread">;
@@ -145,7 +143,6 @@ export function createForwarding(dependencies: ForwardingDependencies) {
       forwardId: forwardIdOf(workspace.id, agent.id, request.messageId),
       message: forwardedMessageText({
         cli: dependencies.cli,
-        cliFolder: dependencies.cliFolder,
         workspace,
         agentId: agent.id,
         place:

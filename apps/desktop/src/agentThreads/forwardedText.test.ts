@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  cliForThread,
   forwardedMessageText,
   introductionText,
   quoted,
@@ -7,8 +8,7 @@ import {
 } from "./forwardedText";
 
 const message = (over: Partial<ForwardedMessage> = {}): ForwardedMessage => ({
-  cli: "dohc",
-  cliFolder: null,
+  cli: { program: "dohc", notes: [] },
   workspace: { id: "ws-1", name: "Launch" },
   agentId: "chief",
   place: { kind: "group", name: "launch" },
@@ -149,26 +149,59 @@ describe("forwardedMessageText", () => {
   });
 });
 
-describe("where dohc's CLI is", () => {
-  it("names the folder on one line, in the message and in the introduction", () => {
-    const folder = `C:/Users/O'Brien "Ice"${at(0x0a)}/cli-bin`;
-    const line = `When your shell does not find dohc, run it from the folder ${JSON.stringify(folder)}.`;
-
-    const text = forwardedMessageText(message({ cliFolder: folder }));
-    expect(lines(text)).toContain(line);
-    expect(lines(text)).toHaveLength(lines(forwardedMessageText(message())).length + 1);
+describe("cliForThread", () => {
+  it("names dohc's own program by its full path, in quotes every shell reads whole", () => {
+    expect(cliForThread("C:\\Users\\First Last\\dohc\\cli-bin\\dohc.cmd", "win32")).toEqual({
+      program: '"C:/Users/First Last/dohc/cli-bin/dohc.cmd"',
+      notes: [
+        "In PowerShell, put & before the quoted program.",
+        "Do not install or download a program named dohc.",
+      ],
+    });
     expect(
-      lines(introductionText({ cli: "dohc", cliFolder: folder, agentName: "Chief" })),
-    ).toContain(`- ${line}`);
-    expect(forwardedMessageText(message())).not.toContain("When your shell");
+      cliForThread("/Applications/dohc.app/Contents/Resources/cli-bin/dohc", "darwin"),
+    ).toEqual({
+      program: '"/Applications/dohc.app/Contents/Resources/cli-bin/dohc"',
+      notes: ["Do not install or download a program named dohc."],
+    });
+  });
+
+  it("falls back to the bare name for a path double quotes cannot hold whole", () => {
+    for (const path of [
+      '/home/a"b/dohc',
+      "/home/$HOME/dohc",
+      "/home/a`b`/dohc",
+      "/home/a\\b/dohc",
+      "C:\\Users\\%USERNAME%\\dohc.cmd",
+      "/home/a!b/dohc",
+      `/home/a${at(0x0a)}b/dohc`,
+    ]) {
+      const cli = cliForThread(path, path.startsWith("C:") ? "win32" : "linux");
+
+      expect(cli.program).toBe("dohc");
+      expect(cli.notes).toEqual(["Do not install or download a program named dohc."]);
+    }
+  });
+
+  it("puts the program in each command and its notes on one line after them", () => {
+    const cli = cliForThread("C:\\dohc\\cli-bin\\dohc.cmd", "win32");
+    const text = lines(forwardedMessageText(message({ cli })));
+
+    expect(text.slice(-3)).toEqual([
+      'Reply in that chat thread, with your text on stdin: "C:/dohc/cli-bin/dohc.cmd" chat reply th_a --workspace ws-1 --agent-id chief -',
+      'Read it first when this message points at something you were not sent, such as a file: "C:/dohc/cli-bin/dohc.cmd" chat show th_a --workspace ws-1 --agent-id chief --peek',
+      "In PowerShell, put & before the quoted program. Do not install or download a program named dohc.",
+    ]);
+    expect(lines(introductionText({ cli, agentName: "Chief" })).at(-1)).toBe(
+      "- In PowerShell, put & before the quoted program. Do not install or download a program named dohc.",
+    );
   });
 });
 
 describe("introductionText", () => {
   it("names the agent on one line and the command that lists the reply options", () => {
     const text = introductionText({
-      cli: "dohc",
-      cliFolder: null,
+      cli: { program: "dohc", notes: [] },
       agentName: `Chief${at(0x0a)}"of Staff"`,
     });
 

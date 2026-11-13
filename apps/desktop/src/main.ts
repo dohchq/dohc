@@ -603,6 +603,7 @@ import { noticeReachFor } from "./notices/noticeReach";
 import { agentNotices } from "./notices/agentNotices";
 import { createCloudCredentialStore, mayUseKeychain } from "./workspaces/cloudCredentialStore";
 import { createAgentThreads, forwardProblemWords } from "./agentThreads/agentThreads";
+import { cliForThread } from "./agentThreads/forwardedText";
 import { createT3CodeConnection, type T3CodeConnection } from "./agentThreads/t3CodeConnection";
 import { createT3CodeSignInStore, encryptsWithSystemKey } from "./agentThreads/t3CodeSignInStore";
 import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
@@ -1597,12 +1598,17 @@ function agentThreads(): ReturnType<typeof createAgentThreads> {
     read: (store: DesktopLinkedChatStore) => Promise<Result>,
   ) => withWorkspaceAttachmentAsync({ workspaceId }, (lease) => read(linkedChatStoreFor(lease)));
   cachedAgentThreads ??= createAgentThreads({
-    cli: "dohc",
-    cliFolder: resolveDohcCliBinDirectory({
-      appRoot: desktopPackageRootInDev(),
-      isPackaged: app.isPackaged,
-      resourcesPath: process.resourcesPath,
-    }),
+    cli: cliForThread(
+      join(
+        resolveDohcCliBinDirectory({
+          appRoot: desktopPackageRootInDev(),
+          isPackaged: app.isPackaged,
+          resourcesPath: process.resourcesPath,
+        }),
+        process.platform === "win32" ? "dohc.cmd" : "dohc",
+      ),
+      process.platform,
+    ),
     t3Code: t3Code(),
     chats: {
       listAgentRequestsPage: (input) =>

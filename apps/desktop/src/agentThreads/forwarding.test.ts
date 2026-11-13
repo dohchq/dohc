@@ -104,8 +104,7 @@ function setup(requests: Request[], over: Partial<ForwardingDependencies> = {}) 
   const problems: Array<[string, string | null, unknown]> = [];
   const tool = { forward: vi.fn(async (input: Sent) => void sent.push(input)) };
   const forwarding = createForwarding({
-    cli: "dohc",
-    cliFolder: null,
+    cli: { program: "dohc", notes: [] },
     workspace: async () => ({ name: "Launch", agents: [agent] }),
     chats: store.chats,
     tool,
@@ -479,8 +478,7 @@ describe("forwarding", () => {
     };
     const sent: Sent[] = [];
     const forwarding = createForwarding({
-      cli: "dohc",
-      cliFolder: null,
+      cli: { program: "dohc", notes: [] },
       workspace: async (workspaceId) => ({ name: workspaceId, agents: [agent] }),
       chats: {
         listAgentRequestsPage: (input) => store(input.workspaceId).listAgentRequestsPage(input),

@@ -24,9 +24,12 @@ function shown(character: string): string {
 }
 
 /** A value another person can set, as one escaped, quoted line. */
-export function quoted(value: string, most = MAX_QUOTED_CHARS): string {
+export function quoted(value: string): string {
   const characters = Array.from(value);
-  const kept = characters.length > most ? `${characters.slice(0, most).join("")}…` : value;
+  const kept =
+    characters.length > MAX_QUOTED_CHARS
+      ? `${characters.slice(0, MAX_QUOTED_CHARS).join("")}…`
+      : value;
   return Array.from(JSON.stringify(kept), shown).join("");
 }
 
@@ -35,11 +38,37 @@ export function quoted(value: string, most = MAX_QUOTED_CHARS): string {
 // than letters, digits, dashes, and underscores, goes into no command.
 const fitsCommand = (id: string) => /^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$/.test(id);
 
+/** dohc's CLI as a thread runs it. dohc on this computer writes both parts. */
+export interface CliForThread {
+  /** The program as the commands write it. */
+  program: string;
+  /** What the thread must know to run it. */
+  notes: readonly string[];
+}
+
+// A path every shell reads whole inside double quotes: nothing that ends the
+// quotes, and nothing a shell expands or escapes there.
+const QUOTES_WHOLE = /^[^"$`%!\\\p{Cc}]+$/u;
+
+/**
+ * The commands name dohc's own program by its full path, so no other program
+ * named dohc on the search path, or in the thread's folder, runs in its
+ * place. A path double quotes cannot hold whole falls back to the bare name.
+ */
+export function cliForThread(path: string, platform: NodeJS.Platform): CliForThread {
+  const spelled = platform === "win32" ? path.replaceAll("\\", "/") : path;
+  const whole = QUOTES_WHOLE.test(spelled);
+  return {
+    program: whole ? `"${spelled}"` : "dohc",
+    notes: [
+      ...(whole && platform === "win32" ? ["In PowerShell, put & before the quoted program."] : []),
+      "Do not install or download a program named dohc.",
+    ],
+  };
+}
+
 export interface ForwardedMessage {
-  /** dohc's CLI as a shell runs it. dohc on this computer writes it. */
-  cli: string;
-  /** The folder that holds that program, for a shell that does not find it. */
-  cliFolder: string | null;
+  cli: CliForThread;
   workspace: { id: string; name: string };
   agentId: string;
   /** The chat that holds the message: the agent's own, a Group, or a file's. */
@@ -64,14 +93,8 @@ function placeOf(message: ForwardedMessage): string {
   }
 }
 
-// A folder's place is this computer's own, and as long as the system allows.
-const MAX_FOLDER_CHARS = 1024;
-const whereCliIs = (input: Pick<ForwardedMessage, "cli" | "cliFolder">): string[] =>
-  input.cliFolder === null
-    ? []
-    : [
-        `When your shell does not find ${input.cli}, run it from the folder ${quoted(input.cliFolder, MAX_FOLDER_CHARS)}.`,
-      ];
+const cliNotes = (cli: CliForThread): string[] =>
+  cli.notes.length > 0 ? [cli.notes.join(" ")] : [];
 
 // The reply's text goes in on stdin, so no shell reads it.
 function commandLines(message: ForwardedMessage): string[] {
@@ -79,9 +102,9 @@ function commandLines(message: ForwardedMessage): string[] {
     return ["dohc can't name this chat thread in a command, so you can't reply there."];
   const target = `${message.thread.id} --workspace ${message.workspace.id} --agent-id ${message.agentId}`;
   return [
-    ...whereCliIs(message),
-    `Reply in that chat thread, with your text on stdin: ${message.cli} chat reply ${target} -`,
-    `Read it first when this message points at something you were not sent, such as a file: ${message.cli} chat show ${target} --peek`,
+    `Reply in that chat thread, with your text on stdin: ${message.cli.program} chat reply ${target} -`,
+    `Read it first when this message points at something you were not sent, such as a file: ${message.cli.program} chat show ${target} --peek`,
+    ...cliNotes(message.cli),
   ];
 }
 
@@ -104,11 +127,7 @@ export function forwardedMessageText(message: ForwardedMessage): string {
 }
 
 /** What dohc tells an agent thread once, when a person connects it. */
-export function introductionText(input: {
-  cli: string;
-  cliFolder: string | null;
-  agentName: string;
-}): string {
+export function introductionText(input: { cli: CliForThread; agentName: string }): string {
   return [
     `A person connected this thread to dohc as their agent ${quoted(input.agentName)}. dohc is the workspace where they keep files, chats, and apps.`,
     "",
@@ -117,7 +136,7 @@ export function introductionText(input: {
     "- Reply in the chat thread a message came from. Give the reply's text on stdin, never as an argument, so no shell reads what other people wrote.",
     `- To ask the person to choose, add --needs-decision and one --option "<choice>" for each choice to the reply. When you get the answer another way, close the decision with --resolve <message id>.`,
     "- Read the chat thread when a message points at something you were not sent.",
-    `- Report long work with --work and --link. \`${input.cli} chat reply --help\` lists every option.`,
-    ...whereCliIs(input).map((line) => `- ${line}`),
+    `- Report long work with --work and --link. \`${input.cli.program} chat reply --help\` lists every option.`,
+    ...cliNotes(input.cli).map((line) => `- ${line}`),
   ].join("\n");
 }

@@ -6,7 +6,7 @@ import {
   type DesktopUserSettings,
 } from "../settings/userSettings";
 import { subscribeChatWrites } from "../workspaces/chatWriteSignals";
-import { introductionText } from "./forwardedText";
+import { introductionText, type CliForThread } from "./forwardedText";
 import { T3CodeError } from "./t3Code";
 import { createForwarding, type ForwardingDependencies, type ServedAgent } from "./forwarding";
 import type { T3CodeConnection } from "./t3CodeConnection";
@@ -25,10 +25,8 @@ export interface AgentThreadsWorkspace {
 }
 
 export interface AgentThreadsDependencies {
-  /** dohc's CLI as the forwarded text names it. */
-  cli: string;
-  /** The folder that holds that program, for a shell that does not find it. */
-  cliFolder: string | null;
+  /** dohc's CLI as a thread runs it. */
+  cli: CliForThread;
   t3Code: T3CodeConnection;
   chats: ForwardingDependencies["chats"];
   readSettings(): Promise<Pick<DesktopUserSettings, "agents">>;
@@ -82,7 +80,6 @@ export function forwardProblemWords(name: string | null, problem: unknown): stri
 export function createAgentThreads(dependencies: AgentThreadsDependencies) {
   const forwarding = createForwarding({
     cli: dependencies.cli,
-    cliFolder: dependencies.cliFolder,
     tool: dependencies.t3Code,
     chats: dependencies.chats,
     onProblem: dependencies.onProblem,
@@ -155,11 +152,7 @@ export function createAgentThreads(dependencies: AgentThreadsDependencies) {
       await dependencies.t3Code.forward({
         threadId: reaching.threadId,
         how: "line",
-        message: introductionText({
-          cli: dependencies.cli,
-          cliFolder: dependencies.cliFolder,
-          agentName: agent.name,
-        }),
+        message: introductionText({ cli: dependencies.cli, agentName: agent.name }),
         // One introduction for each time a person connects this thread as this agent.
         forwardId: `dohc-intro-${randomUUID()}`,
       });
