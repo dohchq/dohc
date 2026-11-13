@@ -27,14 +27,24 @@ function editsLive(selector: ShareViewSelector, path: string): boolean {
   );
 }
 
-/**
- * The relay's live host answered that it will not host the document now, as
- * when it is full. The page opens read-only instead of waiting for the host.
- */
-export class LiveHostRefusedError extends Error {
-  constructor(readonly code: string) {
-    super("The server did not host this document for live editing.");
-  }
+// Why the relay's live host would not take a document, as a person reads it.
+// A code dohc does not know gets no reason, rather than a guess.
+const HOST_REFUSAL_REASONS: Readonly<Record<string, string>> = {
+  live_host_full: "The server is editing too many pages right now.",
+  live_paused_by_owner: "The owner paused live editing for this page.",
+  "document-unavailable": "The page moved or was deleted.",
+};
+
+/** The host's answer ends the open read-only, instead of waiting for the host again. */
+function hostRefused(code: string): SharedDocumentWaitingError {
+  const reason = Object.hasOwn(HOST_REFUSAL_REASONS, code) ? HOST_REFUSAL_REASONS[code] : undefined;
+  return new SharedDocumentWaitingError({
+    state: "host-refused",
+    message: reason
+      ? `dohc could not open this page for editing. ${reason}`
+      : "dohc could not open this page for editing.",
+    ...(reason ? { reason } : {}),
+  });
 }
 
 interface Credentials {
@@ -83,7 +93,7 @@ export function createNamedDesktopLiveCapture(options: {
           refusal && typeof refusal === "object" && !Array.isArray(refusal)
             ? (refusal as Record<string, unknown>).code
             : undefined;
-        if (typeof code === "string") throw new LiveHostRefusedError(code);
+        if (typeof code === "string") throw hostRefused(code);
       }
       if (
         response.status !== 200 ||
@@ -181,8 +191,7 @@ export function createNamedDesktopLiveCapture(options: {
       try {
         first = await admit(input.path, opening);
       } catch (error) {
-        if (error instanceof SharedDocumentWaitingError || error instanceof LiveHostRefusedError)
-          throw error;
+        if (error instanceof SharedDocumentWaitingError) throw error;
         throw new SharedDocumentWaitingError({
           state: "failed",
           message:

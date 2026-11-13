@@ -236,8 +236,12 @@ test("@members-live a member at Edit and the owner write in one document and eac
     const opened = Date.now();
     await clickDocument(mine, LATER);
     const notice = mine.getByTestId("engine-may-hold-document-notice");
-    await expect(notice).toHaveText(/dohc could not open this document for editing\. You can still read it\.\s*Try again/, { timeout: 60_000 });
+    await expect(notice).toHaveText(/dohc could not open this page for editing\. The server is editing too many pages right now\.\s*Try again/, { timeout: 60_000 });
     testInfo.annotations.push({ type: "host-full answer ms", description: String(Date.now() - opened) });
+    // A toast says the same once, and its row stays in Notices.
+    const toast = mine.getByTestId("workspace-shell-error").filter({ hasText: 'dohc could not open "later.md" for editing' });
+    await expect(toast).toHaveCount(1);
+    await expect(toast).toContainText("The server is editing too many pages right now. You can still read it.");
     // The page shows the file read-only, not the live editor.
     const reader = mine.getByTestId("view-markdown");
     await expect(reader).toContainText("Ideas for next year.");
@@ -249,10 +253,12 @@ test("@members-live a member at Edit and the owner write in one document and eac
       await mine.bringToFront();
       await mine.screenshot({ path: shot(`host-full-member-${theme.toLowerCase()}`), animations: "disabled" });
     }
-    // Try again asks once more and hears the same answer.
+    // Try again asks once more and hears the same answer, without a second toast.
+    await toast.getByRole("button", { name: "Dismiss workspace error" }).click();
     await notice.getByRole("button", { name: "Try again" }).click();
     await expect(notice).toBeVisible({ timeout: 60_000 });
     await expect(reader.locator('[contenteditable="true"]')).toHaveCount(0);
+    await expect(toast).toHaveCount(0);
 
     expect(owner.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
     expect(member.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);

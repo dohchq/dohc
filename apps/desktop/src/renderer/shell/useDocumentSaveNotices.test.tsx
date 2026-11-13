@@ -49,6 +49,8 @@ import {
   useDocumentSaveNotices,
 } from "./useDocumentSaveNotices";
 import { useShellError } from "./useShellError";
+import { useLiveHostRefusalNotice } from "../collab/useLiveHostRefusalNotice";
+import type { SharedDocumentOpenState } from "../../ipc/sharedDocumentOpenState";
 
 type WriteResult = Awaited<ReturnType<DohcDesktopBridge["writeWorkspaceText"]>>;
 const listeners = new Set<(event: EngineYDocSaveStateEvent) => void>();
@@ -1028,5 +1030,58 @@ describe("document save notices", () => {
     expect(titleBar().textContent).toBe("Local · saved");
     expect(screen.queryByTestId("connection-notices")).toBeNull();
     await closeEditor(editor, document);
+  });
+  it("raises a page the server would not host once per open, keeps its row through Try again, and clears it once the page opens", async () => {
+    const user = userEvent.setup();
+    const copied = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+    const retry = vi.fn();
+    const TITLE = 'dohc could not open "plan.md" for editing';
+    const BODY = "The server is editing too many pages right now. You can still read it.";
+    const refused = (): SharedDocumentOpenState => ({ state: "host-refused", message: "dohc could not open this page for editing. The server is editing too many pages right now.",
+      reason: "The server is editing too many pages right now." });
+    function Page(props: { workspaceId?: string; refusal: SharedDocumentOpenState | null; available?: boolean }) {
+      useLiveHostRefusalNotice({ workspaceId: props.workspaceId ?? "ws-1", path: "notes/plan.md", refusal: props.refusal, available: props.available ?? false, retry });
+      return null;
+    }
+    const noticeRows = async () => {
+      await user.click(screen.getByTestId("notice-center-toggle"));
+      const found = within(screen.getByRole("dialog", { name: "Notices" })).queryAllByText(TITLE, { exact: false });
+      await user.keyboard("{Escape}");
+      return found;
+    };
+    // The refusal arrives after the shell is listening, as an open's answer does.
+    const view = render(<Shell />);
+    view.rerender(<Shell><Page refusal={refused()} /></Shell>);
+    const toast = screen.getByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(TITLE);
+    expect(toast.textContent).toContain(BODY);
+    await user.click(within(toast).getByRole("button", { name: "Details" }));
+    await user.click(within(toast).getByRole("button", { name: "Copy details" }));
+    expect(copied.mock.calls[0]![0]).toContain("File: notes/plan.md");
+    expect(await noticeRows()).toHaveLength(1);
+
+    // Try again asks the page to open again. The same answer keeps one row and raises no second toast.
+    await user.click(within(screen.getByTestId("workspace-shell-error")).getByRole("button", { name: "Try again" }));
+    expect(retry).toHaveBeenCalledOnce();
+    view.rerender(<Shell><Page refusal={refused()} /></Shell>);
+    view.rerender(<Shell><Page refusal={refused()} /></Shell>);
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(await noticeRows()).toHaveLength(1);
+
+    // The page opens for editing: its row goes.
+    view.rerender(<Shell><Page refusal={null} available /></Shell>);
+    expect(screen.queryByTestId("connection-notices")).toBeNull();
+
+    // Another workspace's page files nothing here.
+    view.rerender(<Shell><Page workspaceId="ws-2" refusal={refused()} /></Shell>);
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+
+    // A closed page's Try again opens it.
+    view.rerender(<Shell><Page refusal={refused()} /></Shell>);
+    expect(screen.getByTestId("workspace-shell-error").textContent).toContain(TITLE);
+    view.rerender(<Shell />);
+    await user.click(within(screen.getByTestId("workspace-shell-error")).getByRole("button", { name: "Try again" }));
+    expect(retry).toHaveBeenCalledOnce();
+    expect(open).toHaveBeenCalledWith("notes/plan.md");
   });
 });

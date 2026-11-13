@@ -49,6 +49,7 @@ import {
 import { bridge } from "./bridge";
 import { useHeldChange } from "./useHeldChange";
 import { useEngineDoc } from "./collab/useEngineDoc";
+import { useLiveHostRefusalNotice } from "./collab/useLiveHostRefusalNotice";
 import { useBoundNoteCheck, useLossyNote, warmLossyNoteCheck } from "./editor/lossyNote";
 import { useAuthorCapacityNotice } from "./collab/useAuthorCapacityNotice";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
@@ -643,6 +644,13 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
     authorCapacity: engine.authorCapacity,
     saveState: engine.saveState,
     reportError: props.onButtonError,
+    retry: retryEngineOpen,
+  });
+  useLiveHostRefusalNotice({
+    workspaceId: props.workspaceId,
+    path: props.path,
+    refusal: engine.sharedWaiting ?? null,
+    available: engine.available,
     retry: retryEngineOpen,
   });
   // Derived, never stored. The hook keys its outcome to the request that

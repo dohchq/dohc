@@ -5,11 +5,7 @@ import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
-import {
-  createNamedDesktopLiveCapture,
-  LiveHostRefusedError,
-  waitForNamedDesktopAdmission,
-} from "./namedDesktopLive";
+import { createNamedDesktopLiveCapture, waitForNamedDesktopAdmission } from "./namedDesktopLive";
 import { SharedDocumentWaitingError } from "../ipc/sharedDocumentOpenState";
 import {
   LiveAuthorityUnavailableError,
@@ -521,24 +517,46 @@ it("returns unavailable when the relay ends a readiness wait", async () => {
 });
 
 // The relay's host answered at once that it will not host the document, as
-// when it is full. The open ends with that answer instead of the waiting
-// state that waits for the host again.
-it.each(["live_host_full", "live_paused_by_owner"])(
-  "ends the open with the host's %s refusal instead of waiting",
-  async (code) => {
-    const f = fixture();
-    f.request.mockResolvedValueOnce(Response.json({ ok: false, code }, { status: 409 }));
-    const opened = f.capture.openYDocSession({
+// when it is full. The open ends with that answer, in words, instead of the
+// waiting state that waits for the host again.
+it.each([
+  ["live_host_full", "The server is editing too many pages right now."],
+  ["live_paused_by_owner", "The owner paused live editing for this page."],
+  ["document-unavailable", "The page moved or was deleted."],
+])("ends the open with the host's %s refusal and says why", async (code, reason) => {
+  const f = fixture();
+  f.request.mockResolvedValueOnce(Response.json({ ok: false, code }, { status: 409 }));
+  const opened = f.capture.openYDocSession({
+    path: "docs/a.md",
+    contentKind: "richdoc",
+    onRemoteUpdate: vi.fn(),
+  });
+  await expect(opened).rejects.toBeInstanceOf(SharedDocumentWaitingError);
+  await expect(opened).rejects.toMatchObject({
+    waiting: {
+      state: "host-refused",
+      message: `dohc could not open this page for editing. ${reason}`,
+      reason,
+    },
+  });
+  expect(transport.factory).not.toHaveBeenCalled();
+});
+
+it("does not guess why when the host gives a refusal dohc does not know", async () => {
+  const f = fixture();
+  f.request.mockResolvedValueOnce(
+    Response.json({ ok: false, code: "something-new" }, { status: 409 }),
+  );
+  await expect(
+    f.capture.openYDocSession({
       path: "docs/a.md",
       contentKind: "richdoc",
       onRemoteUpdate: vi.fn(),
-    });
-    await expect(opened).rejects.toBeInstanceOf(LiveHostRefusedError);
-    await expect(opened).rejects.toMatchObject({ code });
-    await expect(opened).rejects.not.toBeInstanceOf(SharedDocumentWaitingError);
-    expect(transport.factory).not.toHaveBeenCalled();
-  },
-);
+    }),
+  ).rejects.toMatchObject({
+    waiting: { state: "host-refused", message: "dohc could not open this page for editing." },
+  });
+});
 
 it("keeps waiting for the host after a refusal without a host answer", async () => {
   const f = fixture();

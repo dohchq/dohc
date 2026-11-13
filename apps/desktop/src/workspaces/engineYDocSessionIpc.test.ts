@@ -1,6 +1,5 @@
 import { registerTypingCheckpoint } from "./outageTypingRecovery";
 import { SharedDocumentWaitingError } from "../ipc/sharedDocumentOpenState";
-import { LiveHostRefusedError } from "./namedDesktopLive";
 import { engineSaveState } from "./engineYDocSaveState";
 import {
   DaemonRefusalError,
@@ -749,17 +748,23 @@ describe("engine Y.Doc IPC adapter", () => {
   });
 
   it("keeps a named document read-only when the relay's host refuses to host it", async () => {
+    const waiting = {
+      state: "host-refused" as const,
+      message:
+        "dohc could not open this page for editing. The server is editing too many pages right now.",
+      reason: "The server is editing too many pages right now.",
+    };
     const h = harness(providerSession(), {
       sharedCaptureFor: async () => ({
         openYDocSession: async () => {
-          throw new LiveHostRefusedError("live_host_full");
+          throw new SharedDocumentWaitingError(waiting);
         },
       }),
     });
     h.setReadOnly(true);
     expect(await h.ipc.open(new FakeSender(7), openPayload)).toEqual({
       available: false,
-      liveHostUnavailable: true,
+      sharedWaiting: waiting,
     });
   });
 
