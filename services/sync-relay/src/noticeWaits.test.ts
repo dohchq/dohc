@@ -362,17 +362,16 @@ it("wakes only its own account, and another account's same notice ID stays apart
   post("same");
   post("same", { recipientUserId: "ben", senderUserId: "ben", reach: { workspaceId: "bens" } });
   const { parks } = parking(storage);
-  const wakes = vi.spyOn(hub, "wake");
   const parked = parks(1);
   const held = read(`scope=phone&cursor=1&wait=${MAX}`);
   await parked;
+  // Watched only from here: the setup posts' own notification, ana's included, ran before her read parked.
+  const wakes = vi.spyOn(hub, "wake");
   post("other", { recipientUserId: "ben", senderUserId: "ben", reach: { workspaceId: "bens" } });
   const marked = await h(request("ben", "/sync/notices/marks", jsonBody({ marks: [{ noticeId: "same", mark: "read" }] })));
   expect(marked.status).toBe(200);
   await Promise.resolve();
-  const groups = wakes.mock.calls.map(([group]) => group);
-  expect(groups).toContain("notices:ben");
-  expect(groups).not.toContain("notices:ana");
+  expect([...new Set(wakes.mock.calls.map(([group]) => group))], "only ben's group wakes").toEqual(["notices:ben"]);
   vi.advanceTimersByTime(MAX);
   expect(await page(await held)).toMatchObject({ notices: [], nextCursor: "1" });
   expect((await full()).notices.find((notice) => notice.noticeId === "same")?.readAtMs).toBeNull();
