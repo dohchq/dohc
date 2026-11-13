@@ -72,6 +72,12 @@ export interface WorkspaceVisit {
   admit(): void;
   /** Marks a phase of this selection's switch. False when another selection started or the phase was marked. */
   markSwitchPhase(phase: SwitchCompletionPhase, details?: SwitchPhaseDetails): boolean;
+  /**
+   * This window can't act on the workspace now: Forget left it showing, or
+   * its store needs a newer build. The shell learns it late in its render and
+   * sets it there; work reads it when it runs.
+   */
+  readonly stopped: { current: boolean };
   readonly workbench: VisitWorkbench;
 }
 
@@ -84,8 +90,8 @@ interface AdmissionGate {
 }
 
 /**
- * Selection, admission, readiness and the workbench for the workspace this
- * shell shows. `openWorkspace` installs main's exact renderer session before
+ * Selection, admission, readiness, the stop and the workbench for the
+ * workspace this shell shows. `openWorkspace` installs main's exact renderer session before
  * it waits for watcher readiness. Its response is the renderer's existing
  * proof that both happened; there is no separate admission IPC.
  * Exact-session bootstrap reads wait for that proof before they reach main.
@@ -173,6 +179,7 @@ export function useWorkspaceVisit(workspaceId: string): WorkspaceVisit {
     },
     [replace],
   );
+  const stopped = useRef(false);
 
   return {
     workspaceId,
@@ -182,6 +189,7 @@ export function useWorkspaceVisit(workspaceId: string): WorkspaceVisit {
     ready,
     admit,
     markSwitchPhase,
+    stopped,
     workbench: { state, latest, replace, update, navigation },
   };
 }

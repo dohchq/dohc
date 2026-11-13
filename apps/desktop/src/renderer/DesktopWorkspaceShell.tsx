@@ -770,7 +770,6 @@ export function DesktopWorkspaceShell(props: {
   // slow update check must not act for a workspace this window has left.
   const workspaceIdRef = useRef(workspaceId);
   workspaceIdRef.current = workspaceId;
-  const workspaceStoppedRef = useRef(false);
   const visit = useWorkspaceVisit(workspaceId);
   const {
     selection: workspaceSelectionGeneration,
@@ -5208,7 +5207,7 @@ export function DesktopWorkspaceShell(props: {
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       // A stopped workspace answers no workspace shortcut.
-      if (workspaceStoppedRef.current) return;
+      if (visit.stopped.current) return;
       const platform = bridge().platform;
       // Typing matches no chord, so a keystroke never pays for the page-wide
       // modal query, which grows with a long note's elements.
@@ -5264,7 +5263,7 @@ export function DesktopWorkspaceShell(props: {
       // A stopped workspace answers only the menu commands that need no
       // workspace, as a window without the workspace shell does. On macOS a
       // shortcut the keydown listener leaves alone arrives here.
-      if (workspaceStoppedRef.current && command !== "check-updates" && command !== "install-update" && command !== "toggle-theme") return;
+      if (visit.stopped.current && command !== "check-updates" && command !== "install-update" && command !== "toggle-theme") return;
       // App-menu commands originate outside the modal; only keydown is guarded.
       if (isEditorMenuCommand(command)) sendToFocusedEditor(command);
       else if (command === "command-palette") setPaletteOpen(true);
@@ -6212,7 +6211,7 @@ export function DesktopWorkspaceShell(props: {
   }, [workspaceId]);
   // A stopped workspace or a failed open shows in place of the opening cover.
   openingCoverShown.current = !workbenchRestored && !workspaceStopped && (workspaceIsReady || !workspaceOpenFailure);
-  workspaceStoppedRef.current = workspaceStopped;
+  visit.stopped.current = workspaceStopped;
   const storeDetailFields = useMemo(
     (): ReadonlyArray<readonly [string, string | null | undefined]> => [
       ["Problem", storeUpdateRefusal && engineStoreRefusalSentence(storeUpdateRefusal)],
