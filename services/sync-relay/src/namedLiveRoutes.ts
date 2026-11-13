@@ -118,6 +118,8 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
   const kind = options.kind;
   const desktop = options.kind === "named" && options.desktopBearer === true;
   const routeKind = desktop ? "desktop" : kind;
+  // Named (not desktop) and link editors reach the relay only through the share page's gateway.
+  const gatewayFronted = !desktop && (kind === "named" || kind === "link");
   if (kind !== "named" && kind !== "link" && kind !== "owner" && kind !== "personal") throw new TypeError("Explicit live route kind required.");
   const origin = parseLiveTicketAudience(options.publicOrigin), keyHash = hashRelayExchangeKey(options.exchangeKey);
   if (!origin.startsWith("https:") || options.exchangeKey.length < 32 || hosts.size === 0 || [...hosts].some(host => !host || new URL(`http://${host}`).host !== host)) {
@@ -429,6 +431,13 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
         accepted.on("ping", bytes => {
           if (done || controlFrames >= frames.maxControlFrames || bytes.length > frames.maxControlBytes - controlBytes ||
             accepted.bufferedAmount > limits.maxPendingBytes - bytes.length) { stop(); return; }
+          // The share page's gateway pings an idle editor to keep it open. Each of
+          // its pings reads the editor's standing again first, so an expired link
+          // session closes within one ping. Direct clients keep today's idle close.
+          if (gatewayFronted) {
+            try { host!.assertCurrent(); } catch { stop(); return; }
+            touch();
+          }
           let releaseBytes: () => void;
           try { releaseBytes = reserveBytes(bytes.length); } catch { refuseLimit("live_buffer_limit"); return; }
           controlBytes += bytes.length; controlFrames++;
