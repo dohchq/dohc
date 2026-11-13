@@ -435,9 +435,9 @@ export async function waitForGate(
   try {
     for (;;) {
       if (now() < deadline) {
-        required = (await (readJobs ? readJobs() : api.jobs())).filter((job) =>
-          expected.includes(job.name),
-        );
+        required = (
+          await (readJobs ? readJobs() : api.jobs({ conditional: true, slowUnchanged: false }))
+        ).filter((job) => expected.includes(job.name));
         if (expected.some((name) => required.filter((job) => job.name === name).length > 1))
           throw new Error(`Duplicate ${scope} jobs.`);
         if (required.some((job) => job.status === "completed" && job.conclusion !== "success"))

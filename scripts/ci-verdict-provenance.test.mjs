@@ -1753,3 +1753,21 @@ test("workflows reject self-hosted runner labels", async () => {
   }
   assert.deepEqual(unsafe, [], "unrestricted runner labels");
 });
+
+test("prepared uploads require success while failure evidence remains available", () => {
+  const { jobs } = load(workflow);
+  for (const [job, prepared, evidence] of [
+    ["javascript-prepare", "javascript-prepared", "verification-js-prepare"],
+    ["rust-archive", "rust-tests", "verification-rust-archive"],
+  ]) {
+    const upload = (name) =>
+      jobs[job].steps.find(
+        (step) =>
+          step.uses?.startsWith("actions/upload-artifact@") &&
+          step.with?.name === `${name}-\${{ github.run_attempt }}`,
+      );
+    assert.ok(upload(prepared));
+    assert.equal(Object.hasOwn(upload(prepared), "if"), false);
+    assert.equal(upload(evidence).if, "always()");
+  }
+});

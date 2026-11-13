@@ -914,6 +914,7 @@ test("workflow reads retry transient responses and request errors within their c
     [500, 3],
     [429, 3],
     [404, 1],
+    [403, 1],
   ]) {
     let clock = 0,
       attempts = 0;
@@ -989,12 +990,17 @@ test("workflow reads retry transient responses and request errors within their c
             jobs: [{ name: "shared preparation", status: "completed", conclusion: "success" }],
           });
         if (url.includes("/artifacts?"))
-          return apiResponse({ artifacts: [{ id: 42, name: "javascript-prepared-2" }] });
+          return apiResponse({
+            artifacts:
+              failedRead === "jobs" && clock < 121_000
+                ? []
+                : [{ id: 42, name: "javascript-prepared-2" }],
+          });
         return apiResponse("archive");
       },
     });
     assert.equal(failures, 2);
-    assert.equal(clock, 1_000);
+    assert.equal(clock, failedRead === "jobs" ? 131_000 : 1_000);
   }
 });
 
@@ -1116,7 +1122,7 @@ for (const [scope, jobName, artifact] of [
   ["js", "shared preparation", "javascript-prepared"],
   ["rust", "Rust build once", "rust-tests"],
 ]) {
-  test(`${scope} preparation polls conditionally only after the build starts`, async (t) => {
+  test(`${scope} preparation polls artifacts conditionally before reading jobs`, async (t) => {
     let clock = 0,
       jobReads = 0,
       artifactReads = 0;
@@ -1138,7 +1144,6 @@ for (const [scope, jobName, artifact] of [
           );
         }
         if (url.endsWith("/zip")) return apiResponse("archive");
-        assert.ok(clock >= 60_000, "queued builds cannot have published artifacts");
         artifactReads++;
         if (artifactReads === 1)
           return apiResponse(
@@ -1158,11 +1163,15 @@ for (const [scope, jobName, artifact] of [
       },
     });
     assert.equal(result.artifact.id, 42);
-    assert.equal(clock, 65_000);
-    assert.equal(jobReads, 2);
+    assert.equal(clock, 5_000);
+    // A Rust consumer starts after its build has ended, so it reads the jobs once when the archive is missing.
+    assert.equal(jobReads, scope === "rust" ? 1 : 0);
     assert.match(
       log.mock.calls.at(-1).arguments[0],
-      /x-ratelimit-limit=1000 x-ratelimit-remaining=997 x-ratelimit-used=3 counted=5 304=1/u,
+      new RegExp(
+        `x-ratelimit-limit=1000 x-ratelimit-remaining=997 x-ratelimit-used=3 counted=${scope === "rust" ? 4 : 3} 304=1`,
+        "u",
+      ),
     );
   });
 
@@ -1341,6 +1350,7 @@ for (const [scope, jobName, artifact] of [
     for (const state of ["queued", "in_progress", "missing", "completed"]) {
       let clock = 0,
         lastJobRead = -1;
+      const jobReadTimes = [];
       await assert.rejects(
         waitForPreparation(scope, {
           env: apiEnv,
@@ -1351,6 +1361,7 @@ for (const [scope, jobName, artifact] of [
           request: async (url) => {
             if (url.includes("/jobs?")) {
               lastJobRead = clock;
+              jobReadTimes.push(clock);
               return apiResponse({
                 jobs:
                   state === "missing"
@@ -1364,7 +1375,6 @@ for (const [scope, jobName, artifact] of [
                       ],
               });
             }
-            assert.ok(["in_progress", "completed"].includes(state));
             return apiResponse({ artifacts: [] });
           },
         }),
@@ -1374,27 +1384,35 @@ for (const [scope, jobName, artifact] of [
         ),
       );
       assert.equal(clock, 900_000);
-      assert.ok(
-        lastJobRead >= 840_000 && lastJobRead < 900_000,
-        "the last build read is within a minute of the cap, before its deadline",
-      );
+      assert.equal(lastJobRead, 900_000, "the cap refreshes the build state");
+      assert.deepEqual(jobReadTimes, [
+        ...(scope === "rust" ? [0] : []),
+        ...[120_000, 240_000, 360_000, 480_000, 600_000, 720_000, 840_000, 900_000],
+      ]);
     }
-    for (const conclusion of ["failure", "cancelled", "skipped"])
+    for (const conclusion of ["failure", "cancelled", "skipped", "duplicate"]) {
+      let clock = 0;
       await assert.rejects(
         waitForPreparation(scope, {
           env: apiEnv,
-          request: async () =>
-            apiResponse({ jobs: [{ name: jobName, status: "completed", conclusion }] }),
+          now: () => clock,
+          pause: async (ms) => {
+            clock += ms;
+          },
+          request: async (url) =>
+            url.includes("/jobs?")
+              ? apiResponse({
+                  jobs:
+                    conclusion === "duplicate"
+                      ? [{ name: jobName }, { name: jobName }]
+                      : [{ name: jobName, status: "completed", conclusion }],
+                })
+              : apiResponse({ artifacts: [] }),
         }),
-        new RegExp(`ended with ${conclusion}`, "u"),
+        conclusion === "duplicate" ? /Duplicate/u : new RegExp(`ended with ${conclusion}`, "u"),
       );
-    await assert.rejects(
-      waitForPreparation(scope, {
-        env: apiEnv,
-        request: async () => apiResponse({ jobs: [{ name: jobName }, { name: jobName }] }),
-      }),
-      /Duplicate/u,
-    );
+      assert.equal(clock, scope === "rust" ? 0 : 120_000);
+    }
   });
 }
 
@@ -1431,15 +1449,6 @@ test("compiler preparation waits for exactly both consumed artifacts under one c
     assert.equal(downloaded.length, publishArchive ? 2 : 1);
     assert.ok(clock <= 900_000, "the second artifact cannot restart the 15-minute cap");
   }
-  for (const conclusion of ["failure", "cancelled", "skipped"])
-    await assert.rejects(
-      waitForPreparation("compiler", {
-        env: apiEnv,
-        request: async () =>
-          apiResponse({ jobs: [{ name: "shared preparation", status: "completed", conclusion }] }),
-      }),
-      new RegExp(`shared preparation ended with ${conclusion}`, "u"),
-    );
 });
 
 test("reporting joins its own successful group and caps queued or running siblings at 20 minutes", async () => {
@@ -1543,7 +1552,7 @@ test("API-backed group waits retain the cap message and last observed jobs", asy
   );
 });
 
-test("aggregate polling bounds latency by scope and counts each jobs request", async (t) => {
+test("aggregate polling keeps its interval and revalidates unchanged jobs", async (t) => {
   const log = t.mock.method(console, "log", () => {});
   for (const [scope, interval, name] of [
     ["js", 3_000, "JS worker 1"],
@@ -1563,13 +1572,14 @@ test("aggregate polling bounds latency by scope and counts each jobs request", a
         clock += ms;
       },
       request: async (url, { headers }) => {
-        assert.equal(headers["If-None-Match"], undefined);
-        if (++reads === 3) Object.assign(sibling, { status: "completed", conclusion: "success" });
+        assert.equal(headers["If-None-Match"], reads === 0 ? undefined : '"fixture"');
+        if (++reads === 2) return apiResponse(null, 304);
+        if (reads === 3) Object.assign(sibling, { status: "completed", conclusion: "success" });
         return apiResponse({ jobs });
       },
     });
     assert.equal(clock, interval * 2);
-    assert.match(log.mock.calls.at(-1).arguments[0], /counted=3 304=0/u);
+    assert.match(log.mock.calls.at(-1).arguments[0], /counted=2 304=1/u);
   }
 });
 
@@ -1603,7 +1613,8 @@ test("polling waits for initially missing jobs and rejects invalid HTTP response
           })
         : apiResponse({ artifacts: [{ id: 1, name: "javascript-prepared-2" }] }),
   });
-  assert.equal(clock, 60_000);
+  assert.equal(clock, 0);
+  assert.equal(reads, 0);
   for (const status of [304, 503]) {
     await assert.rejects(
       waitForPreparation("js", {
@@ -2512,4 +2523,137 @@ test("JavaScript flaky evidence survives aggregation and the completed receipt w
     verifyCompletedCloud("js", { env, readJobs: async () => jobs, outputDirectory }),
     /ENOENT/u,
   );
+});
+test("preparation spends only artifact requests before two minutes", async (t) => {
+  const log = t.mock.method(console, "log", () => {});
+  // A Rust consumer starts after its build has ended, so it checks a missing archive at once.
+  for (const [scope, readyAt, expectedJobs, expectedCounted, jobsAt] of [
+    ["rust", 0, 0, 2],
+    ["rust", 5_000, 1, 4, 0],
+    ["js", 0, 0, 2],
+    ["js", 90_000, 0, 3],
+    ["js", 130_000, 1, 4, 120_000],
+  ]) {
+    const [job, artifact] =
+      scope === "rust"
+        ? ["Rust build once", "rust-tests-2"]
+        : ["shared preparation", "javascript-prepared-2"];
+    let clock = 0,
+      jobs = 0,
+      lists = 0,
+      downloads = 0;
+    await waitForPreparation(scope, {
+      env: apiEnv,
+      now: () => clock,
+      pause: async (ms) => {
+        clock += ms;
+      },
+      request: async (url, { headers }) => {
+        if (url.includes("/jobs?")) {
+          jobs++;
+          assert.equal(clock, jobsAt);
+          return apiResponse({ jobs: [{ name: job, status: "in_progress" }] });
+        }
+        if (url.endsWith("/zip")) {
+          downloads++;
+          return apiResponse("archive");
+        }
+        lists++;
+        assert.equal(headers["If-None-Match"], lists === 1 ? undefined : '"fixture"');
+        return clock >= readyAt
+          ? apiResponse({ artifacts: [{ id: 42, name: artifact }] })
+          : lists === 1
+            ? apiResponse({ artifacts: [] })
+            : apiResponse(null, 304);
+      },
+    });
+    assert.equal(clock, readyAt);
+    assert.equal(jobs, expectedJobs);
+    assert.equal(downloads, 1);
+    assert.equal(lists, readyAt / 2_500 + 1);
+    assert.match(
+      log.mock.calls.at(-1).arguments[0],
+      new RegExp(`counted=${expectedCounted} 304=`, "u"),
+    );
+  }
+});
+
+test("conditional jobs cache each page independently without slowing gate polls", async () => {
+  const pages = [Array.from({ length: 100 }, (_, id) => ({ id })), [{ id: 100 }]];
+  let poll = 0;
+  const api = cloudApi({
+    env: apiEnv,
+    request: async (url, { headers }) => {
+      const page = Number(new URL(url).searchParams.get("page"));
+      assert.equal(headers["If-None-Match"], poll ? `"page-${page}"` : undefined);
+      return poll === 1
+        ? apiResponse(null, 304)
+        : apiResponse({ jobs: pages[page - 1] }, 200, `"page-${page}"`);
+    },
+  });
+  for (; poll < 3; poll++) {
+    assert.deepEqual(await api.jobs({ conditional: true, slowUnchanged: false }), pages.flat());
+    assert.equal(api.pollMs, 2_500);
+  }
+});
+
+test("exhausted workflow allowance fails reads and downloads immediately with one annotation", async (t) => {
+  const log = t.mock.method(console, "error", () => {});
+  const message =
+    "The repository's hourly GitHub API allowance for workflow runs is used up. Re-run all jobs after 2026-11-13T16:30:00.000Z.";
+  for (const status of [403, 429])
+    for (const operation of ["read", "download", "preparation download"]) {
+      let requests = 0,
+        pauses = 0;
+      const request = async (url) => {
+        requests++;
+        if (operation === "preparation download" && url.includes("/artifacts?"))
+          return apiResponse({ artifacts: [{ id: 42, name: "javascript-prepared-2" }] });
+        return new Response(null, {
+          status,
+          headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "1794587400" },
+        });
+      };
+      const options = {
+        env: apiEnv,
+        request,
+        pause: async () => {
+          pauses++;
+        },
+      };
+      const api = cloudApi(options);
+      const before = log.mock.calls.length;
+      await assert.rejects(
+        operation === "read"
+          ? api.read("/artifacts")
+          : operation === "download"
+            ? api.download(42, 30_000, 60_000)
+            : waitForPreparation("js", options),
+        { message },
+      );
+      assert.equal(requests, operation === "preparation download" ? 2 : 1);
+      assert.equal(pauses, 0);
+      assert.equal(log.mock.calls.length, before + 1);
+      assert.equal(
+        log.mock.calls.at(-1).arguments[0],
+        `::error title=GitHub API allowance used up::${message}`,
+      );
+    }
+  for (const reset of [undefined, "soon"]) {
+    const api = cloudApi({
+      env: apiEnv,
+      request: async () =>
+        new Response("{}", {
+          status: 403,
+          headers: {
+            "x-ratelimit-remaining": "0",
+            ...(reset ? { "x-ratelimit-reset": reset } : {}),
+          },
+        }),
+    });
+    await assert.rejects(api.read("/artifacts"), {
+      message:
+        "The repository's hourly GitHub API allowance for workflow runs is used up. Re-run all jobs after the reset time.",
+    });
+  }
 });

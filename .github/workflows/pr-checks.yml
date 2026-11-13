@@ -276,7 +276,6 @@ jobs:
           apps/desktop/target/debug/dohc-workspace-engine apps/desktop/dist apps/desktop/resources/cli-bin apps/desktop/resources/app-backend-runtime
           apps/desktop/resources/app-compiler apps/desktop/resources/engine-reader services/share-web/viewer/dist services/sync-relay/dist
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
         with:
           name: javascript-prepared-${{ github.run_attempt }}
           path: /tmp/javascript-prepared.tar.zst
@@ -586,7 +585,6 @@ jobs:
       - name: Compile and inventory every workspace test
         run: node scripts/verification/cloud-rust.mjs archive
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
         with:
           name: rust-tests-${{ github.run_attempt }}
           path: |-
