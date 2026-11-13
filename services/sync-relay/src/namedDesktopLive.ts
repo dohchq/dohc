@@ -13,6 +13,7 @@ import {
   type NamedLiveBrowserHttpLimits,
 } from "./namedLiveBrowserHttp";
 import { authorizeNamedLiveEditShareGrant } from "./shareAuthorization";
+import { fileSideOf, pathVisibleThroughShare } from "./shareFilter";
 import type { createLiveTickets } from "./liveTickets";
 import type { SyncRelayStorage } from "./storage";
 import { type LiveHostChanges } from "./relayWriteChanges";
@@ -177,9 +178,7 @@ export function createNamedDesktopLive(options: {
               });
               if (
                 !authority.ok ||
-                !authority.effectiveSelector.paths.some(
-                  (root) => path.normalized === root || path.normalized.startsWith(`${root}/`),
-                )
+                !pathVisibleThroughShare(fileSideOf(authority.effectiveSelector)!, path.normalized)
               )
                 continue;
               authorized = true;

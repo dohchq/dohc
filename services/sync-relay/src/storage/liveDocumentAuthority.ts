@@ -63,7 +63,13 @@ import {
 } from "@dohc/live-session-contract/live-object-binding";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import { createHash } from "node:crypto";
-import { type ShareSelector, isLiveEditShareSelector } from "../shareFilter";
+import {
+  type ShareSelector,
+  type WorkspaceShareSelector,
+  fileSideOf,
+  isLiveEditShareSelector,
+  pathVisibleThroughShare,
+} from "../shareFilter";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import type { StorageContext } from "./context";
 import {
@@ -663,7 +669,13 @@ export function decodeLiveDocumentAuthorityStructure(
   };
 }
 
-export function canonicalLiveSelector(share: SyncRelayShareRow, selector: ShareSelector): boolean {
+// A path share whose stored selector names exactly its paths. A workspace
+// share is never canonical: owner hosting and restore stay with path shares.
+export function canonicalLiveSelector(
+  share: SyncRelayShareRow,
+  selector: ShareSelector | WorkspaceShareSelector,
+): selector is ShareSelector {
+  if ("kind" in selector) return false;
   const raw = JSON.parse(share.selectorJson) as Record<string, unknown>;
   if (
     Object.keys(raw).length !== 2 ||
@@ -1848,21 +1860,27 @@ function bindLiveDocument(
   stored: StoredLiveBinding | null,
   actor: LiveRecipient,
   share: SyncRelayShareRow,
-  selector: ShareSelector,
+  selector: ShareSelector | WorkspaceShareSelector,
 ): BoundLiveDocument | LiveBindingRefusal {
   if (!liveDocumentIsCurrent(storage, document, stored))
     return { kind: "refused", reason: "stale-document" };
   if (share.workspaceId !== document.workspaceId)
     return { kind: "refused", reason: "not-authorized" };
-  if (
-    !canonicalLiveSelector(share, selector) ||
-    visibleSharePath(selector, stored.binding.currentPath) !== stored.binding.currentPath
-  ) {
-    return { kind: "refused", reason: "stale-selector" };
-  }
+  const path = stored.binding.currentPath;
+  // A member sees the document through the workspace file reach, and the
+  // binding names only this document.
+  const reached =
+    "kind" in selector
+      ? pathVisibleThroughShare(fileSideOf(selector)!, path)
+      : canonicalLiveSelector(share, selector) && visibleSharePath(selector, path) === path;
+  if (!reached) return { kind: "refused", reason: "stale-selector" };
   const bound = bindRecordedLiveDocument(storage, document, stored);
   if (bound.kind !== "bound") return bound;
-  const view = liveRecipientView(bound.binding, actor, selector.paths);
+  const view = liveRecipientView(
+    bound.binding,
+    actor,
+    "kind" in selector ? [path] : selector.paths,
+  );
   return view ? { ...bound, view } : { kind: "refused", reason: "stale-selector" };
 }
 

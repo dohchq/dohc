@@ -79,7 +79,7 @@ export function createShareSummaries(
       return {};
     const view = chatSideOf(effective)
       ? "chat"
-      : isLiveEditShareSelector(effective)
+      : isLiveEditShareSelector(effective) && !("kind" in effective)
         ? "edit"
         : null;
     return view
