@@ -441,7 +441,6 @@ globalThis.operations["invoices.release"] = (ctx, input) => {
         opened.push(open);
         if (!hostOpen && !open) return null;
         if (!hostOpen && storeFails) throw new Error("The dataset store is in use by another process.");
-        // As in main, an opened host serves the executor until it closes.
         hostOpen = true;
         const override = indexed;
         const current = override === null ? host.automations : { ...host.automations,

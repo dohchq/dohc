@@ -1,27 +1,3 @@
-// In-document find & replace — Cmd/Ctrl+F opens a find bar, and ⌥⌘F on macOS
-// or Ctrl+H elsewhere opens it with the replace row expanded. ⌘G on macOS or
-// F3 elsewhere finds the next match, with Shift the previous one. macOS's
-// Edit > Find menu runs the same commands (`runFindCommand`). Search state
-// (query, case sensitivity, active-match index, the replace row's
-// open/value) lives entirely in a ProseMirror plugin, not React state: the
-// plugin is the single source of truth, `FindReplaceBar.tsx` just renders
-// whatever it reads off
-// `findReplaceKey.getState(editor.state)` and dispatches meta transactions
-// back in. That keeps MarkdownEditor.tsx's edit down to "register the
-// extension, render the bar" — no new state/refs needed there.
-//
-// Matching is text-wide and mark-agnostic: `computeMatches` walks the doc's
-// text nodes and merges any that are positionally contiguous (next node's
-// `pos` picks up exactly where the previous one's text ended) into one
-// search string before running the query against it. Adjacent text nodes
-// inside the same textblock are always contiguous regardless of the marks
-// they carry, so `**bo**ld` (a bold "bo" + plain "ld") is searched as
-// "bold" — a query for "old" correctly spans the mark boundary. A block
-// boundary, or any non-text leaf (hardBreak, an inline atom, …) sitting
-// between two text nodes, breaks contiguity and starts a new run, so a
-// match never silently jumps across one. Code blocks are not excluded —
-// find/replace is meant to reach fenced code same as prose.
-
 import { Extension, type Editor } from '@tiptap/core'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { Plugin, PluginKey, type EditorState, type Transaction } from '@tiptap/pm/state'

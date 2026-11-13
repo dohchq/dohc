@@ -126,7 +126,6 @@ export interface SentFailure {
 }
 
 const kindValues = Object.keys(NOTICE_KINDS) as [NoticeKind, ...NoticeKind[]];
-// The kinds this computer may post; the relay writes the others itself.
 const postableKindValues = kindValues.filter(
   (kind): kind is PostableNoticeKind => NOTICE_KINDS[kind].recipients !== "relay",
 ) as [PostableNoticeKind, ...PostableNoticeKind[]];
@@ -249,11 +248,6 @@ const OutboxMark = z.object({
 });
 type OutboxMark = z.infer<typeof OutboxMark>;
 
-// An account's rows as the relay last served them, dismissed rows kept as
-// tombstones, the pull cursor, and the outbox. The outbox holds your own
-// posts until a finished pull shows them, and one mark per notice until the
-// relay accepts it. Unsent posts are capped at the relay's list size, oldest
-// dropped first.
 const AccountFile = z.object({
   version: z.literal(1),
   cursor: z.string().max(64).nullable(),
@@ -296,7 +290,6 @@ class RelayRefusal extends Error {
   }
 }
 
-// The signed-in session changed before a notice was queued or sent.
 class SessionChanged extends Error {}
 
 /**

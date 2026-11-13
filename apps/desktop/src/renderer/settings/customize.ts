@@ -16,10 +16,6 @@ export const CUSTOMIZE_TARGETS: Record<CustomizePart, CustomizeTarget> = {
   editor: { section: "appearance", row: "settings-row-editor-font" },
 };
 
-/**
- * What a part inside a workspace shell needs to be customized: Settings at
- * its row. Absent outside a shell.
- */
 export const CustomizeContext = createContext<{
   customize: (part: CustomizePart) => void;
 } | null>(null);

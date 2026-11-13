@@ -42,12 +42,6 @@ import { NewVersionDialog } from "./NewVersionDialog";
 import { UnifiedDiffLines, buildUnifiedDiffLines, computeTextDiff } from "./unifiedDiff";
 import { versionDotClass } from "./versionHue";
 
-// Named versions surface. Product vocabulary only: Version, Main, compare,
-// merge, keep — never git terms. The shell mounts it only for a workspace
-// with a capture, and every async response is gated by a liveness token before it
-// touches state (plan-level non-negotiable: a slow response for one
-// workspace must never repaint another).
-
 export interface WorkspaceVersionsSnapshot {
   versions: WorkspaceVersionRecord[];
   activeVersionId: string;
@@ -241,7 +235,6 @@ export interface WorkspaceVersions {
   loadFailed: boolean;
   reload(): void;
   requestSwitch(versionId: string): void;
-  // Opens the New version dialog.
   openCreate(): void;
   openMerge(version: WorkspaceVersionRecord): void;
   // The save-first prompt, the New version dialog and the merge dialog. The
@@ -610,8 +603,6 @@ export function useWorkspaceVersions(props: WorkspaceVersionsOptions): Workspace
   return { snapshot, active, onMain, busy, loadFailed, reload, requestSwitch, openCreate, openMerge, dialogs };
 }
 
-// The version breadcrumb in the titlebar: shows the active version, switches
-// on click, and opens New version, compare, merge and the Versions page.
 export function VersionMenu(props: {
   versions: WorkspaceVersions;
   // The workspace is not ready for a version change.
@@ -752,9 +743,6 @@ type MergeStage =
   | { stage: "confirm"; failure?: { error: unknown } }
   | { stage: "running" }
   | { stage: "clean"; mergedFileCount: number }
-  // One loaded window of the open-conflict listing: the rows shown so
-  // far, and the continuation for the rest. Resolving replaces the window
-  // with the first page of what remains.
   | {
       stage: "conflicts";
       conflicts: WorkspaceVersionConflict[];
@@ -823,13 +811,6 @@ export function VersionMergeDialog(props: {
       });
       props.onWorkspaceStateChanged();
       props.onMerged();
-      // The merge's own count decides the stage: the rows are the first page
-      // of all open conflicts, and a lingering sync conflict must not turn a
-      // clean merge into a conflicted one. The rows gate it too: a count
-      // with an empty terminal page means every conflict was already
-      // resolved elsewhere between the merge and the listing — painting a
-      // zero-card decide stage over that would ask for decisions that no
-      // longer exist.
       const decide =
         result.conflictCount > 0 &&
         (result.conflicts.length > 0 || result.nextAfterConflictId !== null);
@@ -1230,13 +1211,6 @@ function sideNote(
   return binary ? `Binary copy, ${binary.byteLength} bytes` : missingNote;
 }
 
-// Side labels depend on where the conflict came from: a version merge names
-// the versions ("On Main" / "In Client Draft"); a sync divergence names the
-// machines ("On this machine" / "On your other machine") — never sync
-// jargon, and never a misleading version name for a two-machine conflict.
-// Takes the ORIGIN, not the whole conflict, because it is the only field that
-// decides the labels — and because a caller memoizing on the whole conflict
-// object would recompute on every render for no reason.
 function conflictSideLabels(
   origin: WorkspaceVersionConflict["origin"],
   sourceName: string,
@@ -1292,22 +1266,6 @@ type SeedCandidate = {
 /// Where "Combine by hand" starts, and the line that says where that is.
 type CombineSeed = { text: string; startedFrom: string };
 
-/// Pick where "Combine by hand" starts: the first side, in preference order,
-/// that the engine could actually apply — or an empty copy, which it always
-/// can.
-///
-/// There is no unavailable case, because `apply-merged` measures the submitted
-/// text and nothing else (`lib.rs:7587-7594`). Whatever the two sides weigh, a
-/// user writing a short replacement by hand is posting a body the engine
-/// takes. So the sides only decide what the box is PREFILLED with, never
-/// whether the affordance exists.
-///
-/// Three ways that prefill is chosen, in order. A side that fits wins — and a
-/// side over the cap loses to its smaller SIBLING, because a 5 MiB incoming
-/// copy beside a 3 KB copy on Main is still a conflict a user can combine.
-/// Failing that, a side with no file is a zero-byte start. Failing that, both
-/// copies are too large to load into the box, and it starts empty — which is
-/// a worse start, but not a refusal.
 function chooseCombineSeed(candidates: SeedCandidate[]): CombineSeed {
   const present = candidates.filter(
     (candidate): candidate is SeedCandidate & { text: string } => candidate.text !== null,
@@ -1359,22 +1317,6 @@ function ConflictResolver(props: {
   const isBinary = conflict.contentKind === "binary";
   const labels = conflictSideLabels(conflict.origin, sourceName);
   const { currentName, incomingName, currentMissing, incomingMissing } = labels;
-  // What "Combine by hand" would start from, and whether the engine could
-  // apply it. The seed prefers the incoming side, as it always has, but a side
-  // the engine would refuse is not a usable seed — so a side that fits wins
-  // over the preference, and the affordance only disappears when no side does.
-  //
-  // Gated on `expanded` because it is only read there, and because it is not
-  // free: an over-cap side needs an exact byte count for its message, and a
-  // dialog can hold hundreds of collapsed cards. Counting all of them on mount
-  // was 750 ms for twenty 10 MiB sides against 79 ms for this — the cost this
-  // whole change exists to remove, reintroduced one layer up.
-  //
-  // The dependencies are the PRIMITIVES this reads, never the labels object:
-  // that object is rebuilt every render, so depending on it made every local
-  // rerender — the one after "Keep Main's copy" sets busy, the one after a
-  // refusal — rescan every byte of both sides. A memo that recomputes every
-  // render is not a memo.
   const combineSeed = useMemo<CombineSeed | null>(
     () =>
       expanded && !isBinary

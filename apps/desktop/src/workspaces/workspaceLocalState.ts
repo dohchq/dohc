@@ -21,7 +21,6 @@ export interface LocalStateWorkspace {
   readonly attachmentId?: symbol;
 }
 
-/** What the engine's current open of a workspace said about `.dohc/local`. */
 export interface LocalStateBindings {
   currentBinding(workspace: LocalStateWorkspace): { readonly localStateReady: boolean } | null;
   /** The engine open of the workspace already under way, or null. Never starts one. */
@@ -60,7 +59,6 @@ export class LocalStateUnavailableError extends Error {
 
 let bindings: LocalStateBindings | null = null;
 
-/** The engine sessions set this once; readiness lives and ends with their bindings. */
 export function readLocalStateFrom(source: LocalStateBindings | null): void {
   bindings = source;
 }

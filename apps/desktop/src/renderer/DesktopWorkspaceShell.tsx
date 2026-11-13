@@ -513,7 +513,6 @@ const LazyTransactionalCollection = lazy(() =>
   import("./ConnectedTransactionalCollection").then(mod => ({ default: mod.ConnectedTransactionalCollection })),
 );
 
-// Every folder above a path — expanded when a create/open must reveal it.
 function ancestorDirs(path: string): string[] {
   const segments = path.split("/");
   return segments.slice(0, -1).map((_, i) => segments.slice(0, i + 1).join("/"));
@@ -749,7 +748,6 @@ export function DesktopWorkspaceShell(props: {
   }, []);
   // Relay-share dialog target: paths, or a version.
   const [shareTarget, setShareTarget] = useState<RelayShareTarget | null>(null);
-  // The Open a share surface: empty, or for a share a notice named.
   const [openShare, setOpenShare] = useState<NoticeShare | "blank" | null>(null);
   const openSharePath = openShare && openShare !== "blank" ? openShare.path ?? undefined : undefined;
   const handoffStatus = props.handoffStatus ?? { status: "idle" as const };
@@ -7777,7 +7775,6 @@ export function DesktopWorkspaceShell(props: {
                 ? "This workspace is open in another window."
                 : "This window can't edit this workspace anymore."}
             </h2>
-            {/* Each button takes focus as its state appears. */}
             {oldWindow.openElsewhere ? (
               <PrimaryButton key="go" autoFocus onClick={goToWorkspaceWindow}>Go to that window</PrimaryButton>
             ) : (

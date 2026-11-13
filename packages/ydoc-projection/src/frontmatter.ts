@@ -1,11 +1,3 @@
-// Markdown frontmatter: how a document's YAML block reads as values, how
-// values write back as YAML, and how a settle keeps the text a person wrote.
-// The engine applies the same rules (crates/dohc-engine-domain/src/collections.rs
-// and crates/dohc-engine-collab/src/ydoc/frontmatter_yaml.rs); the shared
-// fixtures in crates/dohc-engine-domain/tests/fixtures/collection-frontmatter.json
-// and crates/dohc-engine-collab/tests/live-bootstrap-fixtures pin both sides.
-// At run time this module imports only js-yaml, so the desktop can read
-// frontmatter without loading the editor.
 import { exceedsLiveMarkdownLimit, utf8ByteLength } from '@dohc/live-session-contract/limits'
 import * as yaml from 'js-yaml'
 import type * as Y from 'yjs'

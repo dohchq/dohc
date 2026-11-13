@@ -302,12 +302,6 @@ export function createPresenceChannel(options: PresenceChannelOptions): Presence
         // Wait out any publish already in flight before sending leave (#742
         // P2, round 5) — see inFlightPublish's own comment.
         await inFlightPublish;
-        // Best-effort explicit leave so peers see the departure before the
-        // TTL — awaited, not fire-and-forget: a caller can
-        // rely on this having actually reached the transport once stop()'s
-        // own promise settles. Guarded: this channel accepts any transport,
-        // and a rejecting leave must never surface as an unhandled rejection
-        // or throw out of stop().
         try {
           await options.transport.leave({
             topic: options.topic,

@@ -209,7 +209,6 @@ describe("trust against races and failed files", () => {
     const restricting = trust.restrict("trip");
     release.resolve();
     expect(await granting).toBe(false);
-    // Between the grant's write and the revoke's, nothing may run.
     expect(await trust.isTrusted(workspace)).toBe(false);
     await restricting;
     expect(await trust.isTrusted(workspace)).toBe(false);

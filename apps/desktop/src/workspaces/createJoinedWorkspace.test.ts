@@ -7,7 +7,6 @@ import { createWorkspaceAuthorityOwner } from "./workspaceAuthorityOwner";
 import { createTestScratch } from "./testTemp";
 import type { RegistryEntry } from "./registryStore";
 
-// Folder creation against a real folder, as main wires it.
 const createRealFolder = async (input: { rootPath: string; workspaceId: string; kind: "personal" }) =>
   createWorkspaceFolder({ ...input, homeDir: await createTestScratch("dohc-join-home-"), stateDir: await createTestScratch("dohc-join-state-"), computer: { installId: "install-here", label: "This Mac" } });
 

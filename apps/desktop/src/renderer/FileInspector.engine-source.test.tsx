@@ -1075,13 +1075,6 @@ describe("engine markdown source view", () => {
     expect(screen.getByTestId("view-markdown").hidden).toBe(false);
   });
 
-  // The user clicked a file that exists only in the version they are
-  // LEAVING. The content read wins the race and returns the file; the engine
-  // open loses it, running after the switch removed the path. Every other
-  // available:false downgrades the document to the writable plain editor —
-  // whose autosave would write that file straight back into the version the
-  // user just entered, as a phantom. notInVersion must not downgrade: the
-  // document is replaced by a state that says what happened.
   it("replaces the document with the honest state when the path is not in this version", async () => {
     const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
     vi.stubGlobal("dohcDesktop", {
@@ -3675,29 +3668,6 @@ describe("engine markdown source view", () => {
     }
   });
 
-  // The P1 the review reproduced, restaged for #565. Typing during the open
-  // wait is no longer reachable — that surface is read-only now — so the
-  // pending draft is armed the only way that remains: legitimately, on a
-  // document the engine already answered "not engine-backed" for, and then a
-  // version switch reopens it and the reopen refuses.
-  //
-  // When the refusal arrived, `readOnly` flipped false->true, and both write
-  // guards held a stale `readOnly`: the unmount flush had it in its deps, so
-  // React ran that effect's previous cleanup with `readOnly === false`
-  // captured, walked past its own guard, and wrote the phantom. Turning the
-  // document read-only was itself the write. The armed 800ms autosave carried
-  // the same stale value in the closure that armed it.
-  //
-  // Timers are advanced only after the refusal lands. A timer that fires
-  // before it is the window, which this change does not close and does not
-  // claim to.
-  // The refusal's delivery must survive the reread that races it.
-  // A version switch bumps refreshKey and engineVersionKey together, so the
-  // same-path reread can ENOENT before the queued Y.Doc open answers. The
-  // parent then takes its loading/error branch, and if the engine open lives
-  // in the child that branch unmounts, the refusal lands on nobody: the user
-  // is told "dohc could not read this file", which is true of the read and says
-  // nothing about the version.
   it("shows the version-specific notice when the reread fails before the open refuses", async () => {
     const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
     let reads = 0;

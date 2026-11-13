@@ -32,7 +32,6 @@ import type { StepReach } from "./automationReach";
 export type ReachVerdict = "allowed" | "stopped" | "held";
 
 export interface StoredReachVerdict {
-  /** The engine automation id. */
   automationId: string;
   definitionHash: string;
   /** The step's place among the steps the reach check sees, or, with `recipient`, the step's place in the automation. */

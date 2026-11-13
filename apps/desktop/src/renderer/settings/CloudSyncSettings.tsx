@@ -78,8 +78,6 @@ export function CloudSyncSettings(props: {
   agents?: DesktopUserSettings["agents"];
 }) {
   const { status } = props.cloud;
-  // A successful enable or stop shows at once, until the shell's next read
-  // replaces it.
   const [changed, setChanged] = useState<WorkspaceSync | null>(null);
   const [syncBusy, setSyncBusy] = useState<"enable" | "stop" | null>(null);
   const [syncError, setSyncError] = useState<string | null>(null);

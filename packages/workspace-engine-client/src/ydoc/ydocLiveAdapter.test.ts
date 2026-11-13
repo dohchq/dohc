@@ -98,7 +98,6 @@ describe("closing a settled revision", () => {
         async sendRequest(request) {
           if (request.method === YDOC_METHOD.settle) {
             settle();
-            // The daemon refuses NoMarker until the first durable update.
             if (!engine.requests.some(request => request.method === YDOC_METHOD.recordUpdate)) {
               throw new DaemonRefusalError({
                 code: "INVALID_PARAMS", message: "workspace operation failed", retry: "no",
@@ -843,8 +842,6 @@ it("tells the provider the head is unknown for a restore that lands while a save
   control.hold = release.promise;
   const settled = provider.settleNow();
   await drain();
-  // A restore changes the file while the save is in flight. Main reads the
-  // state again, but no head pairs with it until the save ends.
   const peer = new Y.Doc(); Y.applyUpdate(peer, Y.encodeStateAsUpdate(provider.doc));
   const vector = Y.encodeStateVector(peer);
   peer.getText("plainText").insert(0, "restored ");
@@ -3110,14 +3107,6 @@ describe("YdocLiveAdapter", () => {
     await provider.close({ settle: false });
   });
 
-  // A provider whose settle is refused by a transient blocker until the test
-  // clears it, with the settle scheduler captured so the ladder can be driven
-  // a rung at a time. Shared by the tests below; each drives it differently,
-  // because a debounced settle and an explicit flush are different behaviors.
-  //
-  // The blocker is a parameter because the two answers must come from the
-  // same fixture: a copy of it per blocker is where one of the two ladders
-  // quietly stops being exercised.
   async function openAgainstABlockedSettle(
     text: string,
     options?: {
@@ -3550,7 +3539,6 @@ describe("YdocLiveAdapter", () => {
     const durableChanges = vi.fn();
     const stopDurableChanges = provider.nativeOwner!.onDurableLocalChange(durableChanges);
 
-    // The caller still hears the truth about its own update.
     await expect(journaled).rejects.toThrow("engine-store-busy");
     expect(durableChanges).not.toHaveBeenCalled();
     expect(settled).toEqual([]);
@@ -3638,7 +3626,6 @@ describe("YdocLiveAdapter", () => {
     );
     await expect(journaled).rejects.toThrow("engine-store-busy");
 
-    // The store is free by now, so the pre-close settle resends and settles.
     await provider.close();
   });
 
@@ -5811,9 +5798,6 @@ describe("the ydoc.open deadline", () => {
     });
     expect(session.doc.getText("plainText").toString()).toBe("shared text");
 
-    // The path is rebound to a different object with identical markdown —
-    // a delete + unrelated recreate that happens to land on the same
-    // bytes.
     engine.seedFile({
       workspace: WORKSPACE,
       versionId: VERSION,
@@ -6275,12 +6259,6 @@ describe("the ydoc.open deadline", () => {
     adapter.dispose();
   });
 
-  // Codex round on #728 head ed57b683, finding 2 (the certifier's own
-  // recorded residual). `objectHasLiveAliasElsewhere` scanned every
-  // workspace. The daemon's `object_has_live_alias` filters by
-  // `workspace_id` — object ids are only unique within a workspace, so a
-  // fixture in a different workspace that happens to reuse this exact
-  // string must never collide.
   it("object-alias-collision is scoped to the target workspace, not global", async () => {
     const OTHER_WORKSPACE = "workspace-handle-other";
     const engine = new YdocLoopbackEngine();

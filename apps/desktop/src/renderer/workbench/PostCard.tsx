@@ -10,20 +10,6 @@ import { UnreadPill } from "./ChatsControls";
 import { WorkLinkText } from "./workReferences";
 import { WorkStatus } from "./WorkCard";
 
-// A post in a group's feed, drawn as a row: who and when on one line, the
-// title or the text, then a meta line with the thread's Work card,
-// reactions, an open poll, and the comment count when there are any. Add reaction, Comment, and Save as file
-// sit in a toolbar shown on hover and focus. The whole row opens the post.
-// Controls inside stop the click so a reaction never also opens it.
-//
-// Pinned names from the previous card are kept: chats-post-card,
-// chats-thread, chats-post-author, chats-post-agent-badge, chats-post-time,
-// chats-post-title, chats-post-excerpt, chats-post-footer,
-// chats-post-reaction-pill, chats-post-decision-open,
-// chats-post-comment-count, chats-post-bookmark, chats-thread-unread.
-// The Work card adds chats-post-work, chats-post-work-reporter and
-// chats-post-work-open.
-
 export type PostOpeningMessage = Omit<
   NonNullable<ChannelThreadRecord["openingMessage"]>,
   "reactions"
@@ -84,7 +70,6 @@ export const FEED_ROW =
 export const FEED_TOOLBAR = "top-1 right-9";
 // Home's rows have no unread count, so their toolbar sits at the row's edge.
 export const HOME_TOOLBAR = "top-1 right-2";
-// A feed row's meta line: reactions and counts.
 export const FEED_META = "mt-1.5 flex flex-wrap items-center gap-3 text-[11px] tabular-nums text-subtle";
 
 // One icon button in a row's toolbar.
@@ -254,8 +239,6 @@ export function PostCard(props: {
       }}
       className={`${FEED_ROW} cursor-pointer text-left dohc-focus-row focus-visible:rounded-lg`}
     >
-      {/* Compatibility target retained for existing navigation and e2e
-          drivers. The row itself is the semantic button. */}
       <div data-testid="chats-thread" data-thread-id={props.thread.id} className="flex items-start gap-3">
         <ChatAvatar presentation={message?.presentation ?? neutralPresentation}
           name={message?.authorDisplayName ?? "?"}

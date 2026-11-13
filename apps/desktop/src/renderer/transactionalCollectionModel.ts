@@ -1,7 +1,6 @@
 import { parseAppBackendJson, type AppBackendJson } from "@dohc/security-contract/app-backend";
 import { datasetColumnFields, type DatasetColumnField, type DatasetDescription, type DatasetOperation } from "@dohc/security-contract/dataset";
 
-/** A field the table shows and edits: a column. Buttons come with their own interface. */
 export type TransactionalField = Omit<DatasetColumnField, "sqlColumn">;
 export function isGeneratedRecordIdField(field: TransactionalField): boolean {
   return field.generated === "record-id";

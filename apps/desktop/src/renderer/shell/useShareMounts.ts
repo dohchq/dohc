@@ -113,11 +113,6 @@ export function useShareMounts(
     }
   }, [commitShareMounts, refreshWorkspaceRegistry, workspaceId]);
 
-  // Share mounts: pull every mount's share once (quietly — offline or
-  // signed-out refreshes are no-ops main-side). `announce` adds the visible
-  // summary for the explicit "Refresh Share(s)" menu action.
-  // Announced refreshes share one Notices row, so only the newest may write
-  // it: an older one that finishes late must not replace a newer failure.
   const announcedRefreshToken = useRef(0);
   // Every refresh, polled or not, may file or end a share's refusal row, so
   // only the newest one to start writes it.

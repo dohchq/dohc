@@ -155,7 +155,6 @@ export const ShellNoticeClear = createContext<((identity: string) => void) | nul
 
 const SECRET_KEY_FILE = ".dohc/engine/secret.key";
 
-// Words for the engine's codes for an unavailable workspace secret key.
 function secretKeyWords(reason: string): string {
   switch (reason) {
     case "volume-shares-new-files":
@@ -577,7 +576,6 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
           // A hold is on purpose: nothing failed.
           ...(attributionRefused || markdownHeld ? { tone: "warning" as const } : {}),
           ...(bindingChanged && path && openFile ? step("Open", () => openFile(path)) : {}),
-          // A held note's row stays until the change is saved.
           ...(markdownHeld && path && openFile ? step("Open note", () => openFile(path)) : {}),
           ...(attributionRefused && openHistory ? step("Open History", openHistory) : {}),
           ...(attributionRefused ? { target: { to: "history" } as const } : path ? { target: { to: "file", path } as const } : {}) };
@@ -841,8 +839,6 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     }
     target?.action?.run();
   }, []);
-  // A kind makes a newer message replace the row of an older one, such as
-  // one import's result replacing the last import's.
   const showSuccessNotice = useCallback(
     (message: string, undo?: () => void, kind?: ShellErrorKind, action?: ShellError["action"], target?: NoticeTarget) => {
       push({
@@ -883,8 +879,6 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
   const showWarningNotice = useCallback((message: string) => {
     push({message, retry: null, tone: "warning"});
   }, [push]);
-  // The one-time notice about the reports this launch sends, with the way
-  // to turn them off. It stays until the person closes it.
   const showReportsNotice = useCallback((reports: ReportKinds, openPrivacy: () => void) => {
     push({
       message: reportsNoticeText(reports),

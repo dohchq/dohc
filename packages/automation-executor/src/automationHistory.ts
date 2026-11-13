@@ -7,7 +7,6 @@ import type { MomentAuthor, VersionedTextMoment } from "@dohc/workspace-contract
 export type AutomationHistoryMoment = Pick<VersionedTextMoment, "operation" | "authors"> & {
   payload: { before?: { text?: string } | null; after: { text: string } };
 };
-/** One file's History, as the owner's computer reads it. */
 export interface AutomationsFileHistory {
   /** Waits until every change the engine has seen is in History. */
   flush(): Promise<void>;
@@ -24,7 +23,6 @@ export interface AutomationsFileHistory {
 const HISTORY_PAGE = 50;
 const HISTORY_MOMENTS = 1_000;
 
-/** The automation's entry in one side of a moment, or null when that side does not have it. */
 function entryIn(text: string | undefined, id: string): AutomationEntry | null {
   const parsed = text === undefined ? null : parseAutomationsFile(text);
   if (parsed?.status !== "read") return null;

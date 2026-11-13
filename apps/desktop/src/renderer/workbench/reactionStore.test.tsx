@@ -12,11 +12,6 @@ import {
   type ReactionStore,
 } from "./reactionStore";
 
-// The workspace reaction store (WS-MU-C2): one ordered write chain per
-// (message, emoji) cell for every surface, one confirmed state built from
-// every surface's reads in ticket order, optimistic paint until the server
-// answers, and rollback to the newest state the server is known to hold.
-
 const bridgeMock = {
   setChatReaction: vi.fn(),
   listChatReactions: vi.fn(),
@@ -751,7 +746,6 @@ describe("reaction store: visits and accounts", () => {
         const { store, read, local, owned } = signedOut(false);
         read([local, owned], fallback);
         expect(store.view("thread-1", "m2")).toEqual({ reactions: [owned], viewerAuthorId: fallback });
-        // The fallback's like there is its own, beside the account's.
         bridgeMock.setChatReaction.mockReturnValueOnce(deferred<undefined>().promise);
         store.toggle({ threadId: "thread-1", messageId: "m2", emoji: "👍", nextState: "added", viewerAuthorId: fallback, onError: vi.fn() });
         expect(store.view("thread-1", "m2").reactions.map((row) => row.authorId)).toEqual([account, fallback]);

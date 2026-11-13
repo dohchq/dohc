@@ -356,8 +356,6 @@ describe("ChatsView presence (MU-C1)", () => {
     const t = topicAwareTransport();
     renderView(collabWith(t.transport), settingsWithAgent({ name: "Me" }));
 
-    // The overview row listens on the stable workspace agent-summary topic,
-    // but is completely quiet until the reserved agent client appears.
     await screen.findByTestId("chats-my-agent");
     await waitFor(() => expect(t.topics).toContain("chat:agent"));
     expect(screen.queryByTestId("chats-my-agent-presence")).toBeNull();
@@ -753,16 +751,6 @@ describe("ChatsView presence scope selection (DM)", () => {
     expect(keys).toContain("ws:workspace-a");
   });
 
-  // leaveDm ends the DM's share, and an ended scope
-  // rejects further presence calls (the same ended-grant gate messages use)
-  // — so leaveDm must not fire until the presence leave has genuinely
-  // settled at the transport, not merely been dispatched. A transport whose
-  // leave() resolves synchronously (or a hook-level spy) cannot tell a
-  // fire-and-forget void-launch from a real await — both would show
-  // "presence-leave" before "leave-dm" in the order array. This transport's
-  // leave() hangs until the test releases it, and only records itself after
-  // that await — so a void-launch upstream would let leaveDm fire while the
-  // release is still pending, which the assertion below catches directly.
   it("awaits the transport leave settling before ending the row", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({ channels: [], fileThreads: [] });
     bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [participantDm] });

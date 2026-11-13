@@ -8,15 +8,6 @@ import { readError } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
 import { serializeCollectionSchema } from "./schemaAuthoring";
 
-// One schema rewrite: read the schema file once, parse that exact snapshot,
-// apply the mutation to the parsed model, serialize, and replace through the
-// authored write path. Deriving the model from the same read that supplies
-// expectedContentHash means a change elsewhere cannot slip a stale schema
-// over a newer file; a concurrent edit surfaces as a conflict instead of a
-// lost write, and the caller retries from fresh state. A degraded parse is
-// rejected because serializeCollectionSchema writes only modeled properties
-// and would silently drop whatever the parser flagged.
-
 type SchemaWriteResult =
   | { status: "written" }
   | { status: "conflict" }

@@ -19,7 +19,6 @@ function rank(
 
 describe("quick-open match tiers", () => {
   it("matches case-insensitively and treats /-_. and space as word boundaries", () => {
-    // A basename prefix outranks a shorter substring match.
     expect(rank("NOTE", ["x/keynotes.md", "docs/Notes-and-more.md"])).toEqual([
       "docs/Notes-and-more.md",
       "x/keynotes.md",

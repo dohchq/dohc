@@ -20,8 +20,6 @@ import {
 export const CRASH_REPORT_MAX_PROBLEMS = 5;
 const SEND_TIMEOUT_MS = 20_000;
 
-// dohc's own report server. The owner chooses it together with the update
-// host. Until then a packaged build has none, so it offers Copy report only.
 const DOHC_REPORT_SERVER: URL | null = null;
 
 const PendingReport = z.object({

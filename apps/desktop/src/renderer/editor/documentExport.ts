@@ -1,12 +1,3 @@
-// "Export as HTML" / "Export as PDF" (the document menu) both
-// render through this one pure function: a SELF-CONTAINED HTML document —
-// title, the body rendered through the same tiptap schema the editor uses
-// (markdownBodyToHtml, import-export.ts), and an inline print-quality
-// stylesheet. No external assets (fonts, scripts, stylesheets) — the file
-// has to open correctly on its own, offline, in any browser, and print
-// identically through Electron's printToPDF. Pure and dependency-free
-// beyond import-export.ts, so it's covered by ordinary unit tests instead of
-// needing an Electron window.
 import { escapeHtml } from '@dohc/workspace-core/html'
 import katex from 'katex'
 import { parseFrontmatter, displayFrontmatterValue } from '../markdown/frontmatter'
@@ -163,14 +154,6 @@ const EXPORT_STYLE_CSS = `
   .dohc-callout-body > *:last-child { margin-bottom: 0; }
 `.trim()
 
-// markdownBodyToHtml renders the math atom nodes (dohc-markdown-extensions.ts) as their raw
-// TeX source — <span data-dohc-math-inline>$tex$</span> and
-// <div data-dohc-math-block>$$tex$$</div> — which would print as literal
-// dollar-delimited LaTeX. Typeset them with KaTeX so the export matches what
-// the editor shows. renderToString is self-contained markup (no runtime
-// script); the KaTeX layout CSS is inlined separately, font-file-free, so this
-// stays a single offline document. Returns whether any math was found so the
-// (large) KaTeX CSS is only inlined when a document actually uses math.
 function typesetMath(content: DocumentFragment): boolean {
   let hasMath = false
   const typeset = (el: Element, displayMode: boolean, delimiterLength: number) => {
@@ -195,28 +178,6 @@ function typesetMath(content: DocumentFragment): boolean {
   return hasMath
 }
 
-// EXPORT IMAGE CONTRACT — an exported document never reaches outside its own
-// folder.
-//
-// The editor resolves a workspace-relative image src against the DOCUMENT's
-// folder (imageSrc.ts) and serves the bytes over dohc-file://. An export has
-// neither: the file is opened from wherever the user saved it (HTML), or from a
-// throwaway temp dir (PDF — documentPdfExport writes the HTML to os.tmpdir()
-// and loads it with `file://`). The only base an exported document actually has
-// is its own directory, so its containment rule is stricter than the editor's:
-//
-//   http(s)                              → kept (a remote image is still remote)
-//   plain path at/below the export dir   → kept ("assets/x.png" still resolves
-//                                          when the HTML is saved beside the doc)
-//   anything else → emitted with NO src
-//
-// "Anything else" is every src that could climb out of the export directory or
-// name a local resource: `../` traversal (which a global-folder attachment src
-// legitimately carries in the workspace, but which from a temp dir would point
-// at the real filesystem), absolute and protocol-relative paths, and any
-// non-http(s) scheme (data:, file:, dohc-file:). Those images render as their
-// alt text. Nothing is dropped from the DOCUMENT — this only shapes the
-// exported artifact; the markdown keeps its lossless src.
 function isExportSafeImageSrc(src: string): boolean {
   const trimmed = src.trim()
   if (trimmed.length === 0) return false
@@ -230,7 +191,6 @@ function isExportSafeImageSrc(src: string): boolean {
   }
   // Backslashes fold to '/' so a Windows-style `..\` traversal is caught too.
   const forCheck = compact.replace(/\\/g, '/')
-  // Absolute ("/abs") and protocol-relative ("//host") both leave the export dir.
   if (forCheck.startsWith('/')) return false
   // Any `..` segment climbs above the exported file.
   return !/(^|\/)\.\.(\/|$)/.test(forCheck)

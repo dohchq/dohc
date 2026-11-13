@@ -24,10 +24,6 @@ const check = (address: string) => checkServerAddress(address, { developmentServ
 
 const ADDRESS_PROBLEM = { empty: accountWords.enterAddress, insecure: accountWords.enterHttps, invalid: accountWords.enterAddressLike } as const;
 
-// Connecting this phone to a server: the address, typed or scanned from a computer's Connect a phone code, then the
-// server's device sign-in. The phone opens the server's approval page in the system browser, with its code filled in,
-// and polls until the person approves it there. The page doesn't return to the app, so the browser opens as a plain
-// sheet and closes once the phone is signed in.
 export function Connect() {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
@@ -35,7 +31,6 @@ export function Connect() {
   const last = state.status === "signed-out" ? state : null;
   const [address, setAddress] = useState(last?.origin ?? "");
   const [phase, setPhase] = useState<Phase>({ kind: "form" });
-  // What the field holds that has to change, shown under it.
   const [addressProblem, setAddressProblem] = useState<string | null>(null);
   // What the last attempt ended with, above the button that tries again.
   const [outcome, setOutcome] = useState<string | null>(last?.ended && last.origin ? accountWords.sessionEnded(serverName(last.origin)) : null);
@@ -112,7 +107,6 @@ export function Connect() {
           </View>
         ) : (
           <View style={styles.block}>
-            {/* The last sign-out could not delete its token, so it is still on this phone. */}
             {last?.forgetFailed ? <ProblemLine text={accountWords.forgetFailed} onRetry={() => void account.retryForget()} /> : null}
             <Text style={[styles.label, { color: theme.muted }]}>{accountWords.serverAddress}</Text>
             <View style={styles.addressRow}>

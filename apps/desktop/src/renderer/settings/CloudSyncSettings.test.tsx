@@ -271,8 +271,6 @@ describe("CloudSyncSettings", () => {
     expect(settings.onDeleteAccount).toHaveBeenCalledOnce();
   });
 
-  // The words a mark cannot carry reach the keyboard and a screen reader, not
-  // only a pointer's title.
   it("explains a private server on keyboard focus and to a screen reader", async () => {
     const user = userEvent.setup();
     render(<CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SIGNED_IN, networkAccess: "private" })} />);
@@ -1015,7 +1013,6 @@ describe("CloudSyncSettings", () => {
     },
   );
 
-  // The switch stays disabled until Try again answers, so the move waits for it.
   it("moves focus to the switch once Try again answers, when the account is confirmed while it runs", async () => {
     const enable = deferred<void>();
     bridgeMock.cloudEnableSync.mockReturnValueOnce(enable.promise);

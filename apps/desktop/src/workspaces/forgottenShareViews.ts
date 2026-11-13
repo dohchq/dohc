@@ -108,9 +108,6 @@ export function createForgottenShareViews(dependencies: {
     return result;
   };
 
-  // A missing file holds no records, and so does one dohc cannot parse; that
-  // file stays as it is until the next Forget of a share view replaces it.
-  // Any other failure throws.
   async function load(): Promise<ForgottenShareView[]> {
     let text: string;
     try {

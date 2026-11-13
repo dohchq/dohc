@@ -98,10 +98,6 @@ const DEFAULT_PING_INTERVAL_MS = 30_000;
 // It is file-change driven, so an idle wedge still goes silent and is still
 // caught; a workspace being edited only defers the verdict, never loses it.
 const DEFAULT_PING_EXPIRY_MS = 45_000;
-// Three silent probes in a row. They are one interval apart and each waits out
-// its own expiry, so a wedge verdict needs at least 2 intervals + 3 expiries —
-// three and a half minutes of unbroken silence from a process that answers in
-// milliseconds when it is well. One answer in that span clears the count.
 const DEFAULT_MAX_PING_EXPIRIES = 3;
 // A wedge cannot be counted like a crash, so it gets its own budget.
 //
@@ -1294,11 +1290,6 @@ export class EngineDaemonLifecycle {
     // `handleUnexpectedExit` reads `terminal` to decide whether to relaunch.
     // Setting it here does not depend on when that exit is delivered.
     if (terminal) this.terminal = true;
-    // Kill before reporting because `reportFailure` runs consumer code: on a
-    // terminal verdict the desktop app answers it with `dialog.showErrorBox`,
-    // a modal that does not return until the user dismisses it. Killing after
-    // that call would leave the wedged child alive for as long as the dialog
-    // stands, while this lifecycle already called the engine gone.
     killForReplacement(client);
     this.reportFailure(
       new EngineDaemonUnavailableError(

@@ -57,7 +57,6 @@ export function EmptyEditorGroup(props: {
   create: Partial<Record<StartKind, CreateAction>>;
   // Opened paths, most recent first.
   recent: readonly string[];
-  // The workspace's files, or null until its first listing lands.
   files: readonly ListedFile[] | null;
   onOpen: (path: string) => void;
   // Adds dropped files. Absent where the workspace takes no import.

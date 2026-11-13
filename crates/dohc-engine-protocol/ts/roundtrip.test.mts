@@ -1,10 +1,3 @@
-// TypeScript half of the cross-language round-trip proof. Consumes the same
-// fixtures file as tests/fixtures.rs, the ts-rs generated types, and the
-// schemars-generated JSON Schema + limits.
-//
-// Run from the crate root: node --test ts/
-// (Node >= 22.18 runs .mts directly via type stripping; no dependencies.)
-
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";

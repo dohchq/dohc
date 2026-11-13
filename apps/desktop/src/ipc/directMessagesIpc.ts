@@ -119,13 +119,6 @@ export function registerDirectMessagesIpcHandlers<
   } = dependencies;
   const { resolveChatFileReferences } = dependencies.chatScope;
 
-  // --- Direct messages (WS-MU-C3) ------------------------------------------
-  // A DM is a `kind:"dm"` channel plus one MU-C4 chat grant per
-  // participant, riding the shared-channel lane. The whole surface is gated on
-  // collaboration: signed out / no relay ⇒ available:false and the renderer
-  // shows nothing. Authorization lives at the relay. This layer lists
-  // requests, accepts them into a workspace, and displays established DMs.
-
   function dmRecordForIpc(dm: DmRecordInfo) {
     return {
       channelId: dm.channelId,
@@ -250,19 +243,6 @@ export function registerDirectMessagesIpcHandlers<
             );
             assertCurrentDmSyncSession();
             if (outcome.failed) failed = true;
-            // Only a pass that applied ops gives the cloud engine follow-up
-            // work: the queued pass scans the pulled messages for agents to
-            // call. Queueing after an idle pass would emit a change event,
-            // refresh Chats, and run this handler again. The renderer's own
-            // polls also ask for a pull, which fetches members' replies to
-            // the DMs and Groups this workspace owns without recording a
-            // change. A poll asks even after a changed pass: each write
-            // restarts the sync's debounce, and only the pull keeps its own
-            // deadline. That log does not depend on the listing or the joined
-            // rows, so their failures do not skip it; the engine backs off
-            // on its own failures. The cloud engine owns its work after this
-            // request queues it. Do not extend the renderer operation into
-            // that durable process.
             if (outcome.changed) activity.queueCloudSync(workspace.workspaceId);
             if (input.poll) activity.queueCloudPull(workspace.workspaceId);
           } catch (error) {

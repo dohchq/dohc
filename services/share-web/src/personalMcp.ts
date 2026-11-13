@@ -154,7 +154,6 @@ export async function servePersonalMcp(request: Request, options: PersonalMcpOpt
   } finally {body.release();}
 }
 
-/** The longest start of `text` that fits in `maxBytes` of UTF-8, on a whole code point. */
 function utf8Prefix(text: string, maxBytes: number): string {
   let bytes = 0, end = 0;
   for (const char of text) {

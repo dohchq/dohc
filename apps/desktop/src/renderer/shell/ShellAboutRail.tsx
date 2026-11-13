@@ -133,17 +133,6 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
             so each one takes over from the last without blinking. */}
         <SkeletonSlot>
         {!captureAvailable && !shareView ? (
-          // Main's capture cannot serve the file's chats here, so mounting
-          // About would issue calls it refuses and show the refusal as an
-          // error. The rail stays where the user left it and states the
-          // fact, with the one next step that can change it. Before the
-          // decision it states nothing.
-          //
-          // A shared view needs no capture and waits for no decision: main
-          // answers its per-file chat from the share scope.
-          //
-          // A file's links come from the engine's own index, not from
-          // capture, so they stay above the fact.
           !captureDecided ? (
             loading
           ) : activeDocumentPath ? (

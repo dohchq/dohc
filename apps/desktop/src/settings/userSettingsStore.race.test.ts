@@ -10,8 +10,6 @@ import {
   writeUserSettingsFile,
 } from "./userSettingsStore";
 
-// A seam in the save: runs once dohc has written its temporary file and before
-// it replaces the settings file, which is where an editor's save can land.
 const race = vi.hoisted(() => ({ beforeReplace: null as (() => Promise<void>) | null, renameLocked: false }));
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();

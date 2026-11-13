@@ -493,7 +493,6 @@ it.skipIf(engine.missing).each(["existing id", heldStopCase])("settles open Coll
           diagnostics: relayServer!.diagnostics()}), {cause: error});
       };
       await resume();
-      // A successor captures the stopped edit, and the session host's copy has it.
       await expect.poll(liveRow, {timeout: 120_000}).toEqual(ready).catch(notReady);
       expect(await hostDocumentState()).toBe("ready");
       expect(reports()).toBe(0);

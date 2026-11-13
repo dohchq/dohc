@@ -1971,11 +1971,6 @@ async function completeRestore<F extends Pick<ReturnType<typeof readyNativeFence
   return next;
 }
 
-// Proves: a retirement that carries a resumed restore stays pending, with
-// nothing changed, until the log holds the restore's settlement moment, so the
-// retiring host publishes what the restore wrote before a successor can take
-// the document. That holds across a restart. Once the push lands it retires,
-// across a restart and a lost response to either the push or the completion.
 it("retires an activation that carries a restore only once its settlement moment is in the log", async () => {
   const f = (await admittedRestoreFixture("owner", false, "service", revokeOtherGrantDuringRestore));
   const opened: ReturnType<typeof openSyncRelayStorage>[] = [];
@@ -2013,13 +2008,6 @@ it("retires an activation that carries a restore only once its settlement moment
   } finally {if (!closed) f.close(); opened.at(-1)?.close();}
 });
 
-// Proves: a retirement that carries a published restore still completes after
-// a later restore is fenced and declined. Restore A completes and publishes at
-// generation 2 while another Edit grant keeps the activation running. Restore
-// B begins through A's share, shared again, and the owner then revokes that
-// other grant, which opens the retirement at A's row; B's fence moves it to
-// generation 3 and B's Decline keeps it there. A's settlement at its own
-// generation is the publication the retirement waits for, across a restart.
 it("retires after a declined restore that follows a published one", async () => {
   const f = (await admittedRestoreFixture("owner", false, "service", hosted => hostRestoredDocument(hosted, "other")));
   const opened: ReturnType<typeof openSyncRelayStorage>[] = [];
@@ -2063,12 +2051,6 @@ it("retires after a declined restore that follows a published one", async () => 
 });
 
 const publicationPending = "The last restore of this file has not reached the server yet. Try again in a moment.";
-// Proves: the next restore of a file waits until the resumed restore before
-// it is published, since that settlement commits only at the resumed
-// restore's generation. Beginning answers pending with nothing changed, also
-// after a restart. Once the settlement lands, restore B begins, fences and is
-// declined after its fence, and restore C completes on the generation B left
-// and publishes its own settlement, which moves the file and its history.
 it("waits for a resumed restore's settlement before the next restore begins", async () => {
   const first = (await admittedRestoreFixture("owner", false));
   let f = first;
@@ -2095,9 +2077,6 @@ it("waits for a resumed restore's settlement before the next restore begins", as
   } finally {f.close();}
 });
 
-// Proves: the fence rechecks that publication, so a restore begun while it
-// was there does not fence once it is missing. Nothing changes until it is
-// back, and then the fence goes on.
 it("holds a restore's fence while its resumed predecessor's settlement is missing", async () => {
   const f = (await admittedRestoreFixture("owner", false));
   try {
@@ -2229,13 +2208,6 @@ it("refuses an exhausted settlement across a restore whose publication was refus
   } finally {doc.destroy(); f.close();}
 });
 
-// Proves: an exhausted restore publication is retried only from where
-// admission measures it, the last row at another binding when one follows the
-// latest binding. Here the file's first row is set to another selector, as a
-// journal recorded under an earlier binding holds, or to another path, as if
-// accepted before a rename. Out of budget, a
-// publication starting at that row is asked to retry; one starting before it
-// is refused, and the device's next op lands behind it.
 it.each([["selector", "selector_paths_json", '["docs"]'], ["rename", "current_path", "docs/old.md"]] as const)(
   "refuses an exhausted restore publication that starts before a %s change", async (_change, column, value) => {
   const f = (await admittedRestoreFixture("owner", false));
@@ -2658,14 +2630,6 @@ it.each([["revoked during the restore", true], ["kept by the owner's restore", f
   } finally {f.close();}
 });
 
-// Proves: when the fencing host answers with its terminal receipt, the
-// Decline ends the restore at the fenced generation, whether or not the relay
-// saved the native fence's reply. The receipt takes its own journal cursor,
-// served to replicas as a control entry, and survives a restart; the
-// retirement stays at the fenced generation with its accepted-through
-// unchanged, completes there, and the old key is refused. When the restore
-// kept the owner's live session, the Decline ends it and opens the retirement
-// at the fenced generation and the same accepted-through.
 it.each([[false, true], [true, true], [false, false], [true, false]])(
   "ends a declined restore at the fenced generation with its host's receipt, native fence saved=%s, revoked during the restore=%s", async (native, revoked) => {
   const f = declinedFence(native, revoked);
@@ -2806,14 +2770,6 @@ function declinedAtFence(restart: boolean, answer: "cancelled" | "fenceCancelled
   } catch (error) {if (reopened) {f.raw.close(); reopened.close();} else f.close(); throw error;}
 }
 
-// Proves: a restore declined after its fence leaves the document closed at the
-// fenced generation, and a host's `cancelled` answer leaves it closed at the
-// old one. The next restore of the file goes on from there: it is offered,
-// begins on the closed document with the restore whose fence the generation
-// follows as its predecessor, fences, and completes, reopening live editing.
-// Its settlement steps across the declined restore, where no event was
-// accepted, and publishes the restored file and its history. The same holds
-// when the relay restarts between the Decline and the next restore.
 it.each([["fenceCancelled", false], ["fenceCancelled", true], ["cancelled", false], ["cancelled", true]] as const)(
   "completes and publishes a restore that follows one declined with %s, restart=%s", async (answer, restart) => {
     const f = declinedAtFence(restart, answer), generation = answer === "cancelled" ? 1 : 2;
@@ -3090,15 +3046,6 @@ it("declines a restore whose file is renamed before its fence", () => {
   } finally {f.close();}
 });
 
-// Proves: once relay admission takes a restore, a rename no longer ends it.
-// Its host finishes it across a restart at the frozen path, generation and
-// binding. The renamed file and the object now at the old path keep their
-// moments, the live document keeps the path it registered at, and the
-// retirement its resume opens settles the frozen path. The restore's settlement moment
-// lands as retirement output at the frozen path and projects nowhere. The
-// retirement then completes at the restore's own key, with the owner
-// delivery's boundary at the restore's accepted row. A successor needs fresh
-// authority for the renamed path.
 it("finishes an admitted restore at its frozen path after its file is renamed", async () => {
   const f = (await admittedRestoreFixture("owner", false, "service", hosted => hostRestoredDocument(hosted, hosted.intent.shareId)));
   let reopened: ReturnType<typeof openSyncRelayStorage> | undefined, closed = false;

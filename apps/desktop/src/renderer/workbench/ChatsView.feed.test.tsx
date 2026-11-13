@@ -326,8 +326,6 @@ describe("ChatsView hybrid feed", () => {
     await userEvent.click(screen.getByTestId("chats-feed-back"));
     await userEvent.click(await screen.findByTestId("chats-feed-link"));
 
-    // The reopened page has no like yet, but the write is still on its way:
-    // Home shows it, and the message rests until it settles.
     const trigger = await screen.findByTestId("chats-feed-like");
     expect(feedPill().getAttribute("aria-pressed")).toBe("true");
     expect(isPending(trigger)).toBe(true);
@@ -1191,8 +1189,6 @@ describe("ChatsView hybrid feed", () => {
   });
 });
 
-// Home and the file rail's chat under one workspace owner, as the shell
-// mounts them: one write chain, and one confirmed state from both reads.
 describe("Home and a file's chat share one reaction store", () => {
   it("shows one surface's toggle on the other, and rolls back to the newest read either took", async () => {
     const write = deferred<unknown>();
@@ -1239,8 +1235,6 @@ describe("Home and a file's chat share one reaction store", () => {
     const filePill = () => fileChat.getByTestId("linked-chat-reaction-pill");
     await waitFor(() => expect(fileThumbs()).toBeTruthy());
 
-    // A like from the file's chat is on Home at once, and Home's controls
-    // for that message rest until it settles.
     await userEvent.click(fileThumbs());
     expect(feedPill().getAttribute("aria-pressed")).toBe("true");
     expect(isPending(homeLike)).toBe(true);

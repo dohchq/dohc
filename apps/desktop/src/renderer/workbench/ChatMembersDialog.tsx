@@ -44,7 +44,6 @@ export function ChatMembersDialog(props: Props) {
   const [view, setView] = useState<"members" | "add">(
     props.members.length === 0 && props.readFailure === null ? "add" : "members",
   );
-  // People just added, shown as members until the reloaded list names them.
   const [added, setAdded] = useState<ReadonlyArray<{ email: string; viewOnly: boolean }>>([]);
   const memberKeys = useMemo(
     () => new Set(props.members.flatMap((member) => (member.recipientEmail ? [emailKey(member.recipientEmail)] : []))),

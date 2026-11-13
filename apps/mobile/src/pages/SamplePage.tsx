@@ -21,7 +21,6 @@ import { explanationOf, labelOf, LoadingLines, Mark, pageStyles, Strip, type Mar
 
 type Failure = "couldntRead" | "couldntOpen" | "noLongerAvailable";
 
-// Stands in for the server's answers until the phone opens live documents. Design review only.
 const demo = {
   failure: demoMode === "page-fail-read" ? "couldntRead" as const : demoMode === "page-fail-missing" ? "noLongerAvailable" as const : null,
   opening: demoMode === "page-opening",

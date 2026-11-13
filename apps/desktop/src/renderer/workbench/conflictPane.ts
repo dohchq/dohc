@@ -68,62 +68,6 @@ import {
 export const CONFLICT_PREVIEW_MAX_CHARS = 200_000;
 export const CONFLICT_PREVIEW_MAX_LINES = 5_000;
 
-/// The largest combined copy this surface will edit, in UTF-8 bytes.
-///
-/// This is a renderer bound, not the engine's. #569 replaced the old
-/// merged-text cap with a frame budget: `conflicts.resolve` succeeds when the
-/// whole JSON-ENCODED request fits `RESOLVE_REQUEST_FRAME_BYTES` (8 MiB), so
-/// what a body may weigh is whatever the rest of its request leaves.
-///
-/// What binds IT is that frame, not responsiveness. JSON escaping costs at
-/// most six bytes per raw byte — a body of control characters is the worst
-/// case — so a body must stay under about (8 MiB minus the envelope) / 6.
-/// `engineTextLimits.test.ts` proves this value clears that with the imported
-/// contract rather than a restated number: at this bound the worst case is
-/// 6 MiB encoded, leaving about 2 MiB of the frame spare.
-///
-/// RESPONSIVENESS TURNED OUT NOT TO bind, and the first version of this
-/// constant was wrong about that. Its benchmark assigned `textarea.value`
-/// directly and reported 26-36 ms per keystroke here, which set the bound at
-/// half this. That measured a write the shipping path does not make: on an
-/// ordinary keystroke the browser applies the edit itself, and React's
-/// controlled input skips the value write because the DOM already holds what
-/// it wanted. Driving the real path — native input event, `onChange`,
-/// `applyCombinedChange`, commit — costs about 1 ms per MiB:
-///
-///     495,878 characters   0.6 ms
-///   1,048,576 characters   1.1 ms
-///   8,388,608 characters   9.0 ms
-///
-/// The one expensive keystroke is the refused one, about 28 ms at half a
-/// megabyte and rising with the draft: a refusal leaves React holding a value
-/// the DOM disagrees with, so it writes the whole string back. That lands once
-/// when the user reaches the bound, which is the price of not letting the
-/// draft grow without limit.
-///
-/// Re-measure with conflictPane.measure.test.ts, which drives the shipping
-/// component in the Chromium this app ships:
-///
-///   DOHC_MEASURE_CONFLICT=1 pnpm --filter @dohc/desktop exec vitest run conflictPane.measure
-///
-/// Why this VALUE. It is the largest round value that provably fits the frame
-/// in the worst case, and it clears `CONFLICT_HEALTHY_DOCUMENT_MAX_BYTES` by
-/// more than double — which matters, because that corpus figure grew by 6%
-/// during the writing of this change alone. UTF-8 never spends less than one
-/// byte per UTF-16 code unit, so a bound in bytes caps the code units that
-/// drive the cost above for every script.
-///
-/// What IT holds, per script, because bytes are not characters. About
-/// 1,048,576 characters of ASCII; about 524,288 of Latin-1 accented text or
-/// Greek or Cyrillic at two bytes; about 349,525 of CJK or most other
-/// three-byte text; about 262,144 emoji. The corpus behind the healthy figure
-/// is ASCII-dominated source and Markdown, so it says nothing about how large
-/// a healthy CJK document is — that is the open question in this number, and
-/// it is why the guard pins the CJK case explicitly rather than trusting a
-/// character count to stand in for a byte one.
-///
-/// Above the bound the surface degrades rather than refuses: keep a side, then
-/// edit the file in the editor, which is incremental and pays none of this.
 export const CONFLICT_COMBINED_EDIT_MAX_BYTES = 1024 * 1024;
 
 /// The largest document in the measured corpus, in UTF-8 bytes: the healthy

@@ -93,12 +93,6 @@ function LinkedChatsPanel(props: Omit<PanelProps, "notices" | "accessContext" | 
   );
 }
 
-// CodeRabbit major (WS-D gate): a chat opened from a search result is
-// consumed ONCE. The Shell clears its searchChatThread state through
-// onInitialThreadConsumed, so toggling History <-> Chats (which fully
-// unmounts/remounts this panel and resets its consumed ref) must not trap
-// the user back inside the stale thread.
-
 const searchThread: ChatThreadRecord = {
   id: "thread-1",
   title: "Plan discussion",

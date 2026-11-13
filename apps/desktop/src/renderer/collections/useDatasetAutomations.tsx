@@ -62,7 +62,6 @@ export function useDatasetAutomations(props: {
   const [found, setFound] = useState<FindDatasetCollectionResult | "failed" | null>(null);
   const request = useRequestSequence([workspaceId, datasetId]);
   const find = useCallback(async () => {
-    // The page has no dataset id until it has read its dataset.
     if (!datasetId) return;
     const token = request.next();
     try {

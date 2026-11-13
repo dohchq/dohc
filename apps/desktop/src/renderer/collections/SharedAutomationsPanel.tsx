@@ -173,9 +173,6 @@ export function SharedAutomationsPanel(props: {
       });
   };
 
-  // A notice's ask lands on the automation's switch, or its row when the
-  // share allows no switch. An automation this panel has not read yet gets
-  // one more read, and Close holds focus until it shows.
   const rows = useRef(new Map<string, HTMLLIElement>());
   const closeButton = useRef<HTMLButtonElement | null>(null);
   const rowRef = (id: string | null) => (element: HTMLLIElement | null) => {

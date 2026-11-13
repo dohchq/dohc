@@ -1,21 +1,3 @@
-// Measurement harness behind the conflict-pane preview window, the
-// sibling of unifiedDiff.measure.test.ts.
-//
-// It is not part of the normal suite: it walks the whole repository and one of
-// its numbers is wall-clock, so running it on every `pnpm test` would be slow
-// and flaky. Run it deliberately to re-measure the window:
-//
-//   DOHC_MEASURE_CONFLICT=1 pnpm --filter @dohc/desktop exec vitest run conflictPane.measure
-//
-// What IT measures, and what it cannot. A conflict side goes into one `<pre>`
-// with `whitespace-pre-wrap break-words`, so the browser lays out every
-// character before it knows the scroll height. That layout is Chromium's and
-// Node cannot time it. So the window is derived the other way round: from the
-// SIZE of representative healthy documents, set above them, so a healthy
-// conflict shows whole and never asks for "Show more". The second measurement
-// here only proves the guard itself is cheap — that slicing the window off a
-// 10 MiB side costs nothing next to painting it.
-
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { readFileSync, rmSync, statSync, writeFileSync } from "node:fs";

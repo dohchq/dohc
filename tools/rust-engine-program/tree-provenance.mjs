@@ -1,37 +1,3 @@
-// The commit a gate run examined, and whether that claim is trustworthy.
-//
-// A verdict that cannot name the tree it read is not evidence. Two runs
-// sharing one worktree once reported PASS and FAIL for the same commit, and
-// neither log could say which tree it had actually examined — the checks had
-// straddled a `git checkout` performed by the other run.
-//
-// The gate reads the tree at every step boundary and this decides what that
-// series proves. Reading it twice — once before the run and once after — does
-// not: a tree that changes and changes back reads identical at both ends
-// while the steps between them ran against something else. Sampling per step
-// narrows the unobserved window to one step and names the step that straddled
-// a change, which is what a reader needs in order to know what to re-run.
-//
-// Sampling alone cannot see a change made and undone INSIDE one step, and no
-// sample rate removes that — between any two readings there is an interval
-// nothing observes. For the founding case, git removes it instead: every HEAD
-// move is written to this checkout's HEAD reflog, so a run that checks out
-// another commit and restores it leaves two entries behind while
-// `git rev-parse HEAD` reads identical at both ends. A reading counts that
-// log, and a step whose bracketing readings agree on the commit but disagree
-// on the count is refused. The observation is exact and needs no watcher: the
-// record is already there when the step returns.
-//
-// What is left is a worktree edit made and undone inside one step, with no
-// HEAD move. Git keeps no record of that, and removing it needs isolation —
-// a checkout nothing else can reach — not a faster sample rate. The stamp
-// reports how many readings agreed for that reason, rather than claiming the
-// run was clean throughout. A weaker true claim beats a stronger unverifiable
-// one.
-//
-// The classifier is pure so it can be tested without a repository: the gate
-// reads the tree state, this decides what those states prove.
-
 const UNATTRIBUTABLE = "UNATTRIBUTABLE";
 
 /**
@@ -56,14 +22,9 @@ export const HEAD_REFLOG_RECOVERY = [
 const short = (head) => head.slice(0, 8);
 
 function unattributable(reason) {
-  // A run that cannot name its tree must not print a stamp that names one.
-  // The stamp and the judgement come from the same call for that reason: a
-  // reader who trusts `<sha> clean` beside a FAIL row is reading the defect
-  // this module exists to catch.
   return { status: "FAIL", reason, stamp: UNATTRIBUTABLE };
 }
 
-/** The `git status` entries that appeared or vanished between two readings. */
 function changedEntries(before, after) {
   const wasThere = new Set(before);
   const stillThere = new Set(after);

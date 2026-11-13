@@ -260,7 +260,6 @@ describe("relaySyncEngine", () => {
     await pass;
     expect(events).toEqual(["push 1", "document opened", "authored write", "pull"]);
     expect(sync.snapshot()).toMatchObject({ syncing: false, pendingChangeCount: 1, syncFailure: null });
-    // New edits must not postpone a drain's continuation until the debounce.
     sync.queueSync();
     await vi.advanceTimersToNextTimerAsync();
     expect(events).toEqual(["push 1", "document opened", "authored write", "pull", "push 2", "pull"]);

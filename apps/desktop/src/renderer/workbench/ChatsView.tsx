@@ -184,26 +184,6 @@ export interface AgentSetupSummary {
   agents: Array<{ id: string; name: string; enabled: boolean }>;
 }
 
-// The Chats view (PR 13, WS-E): workspace Chats organized in channels, plus
-// a read-only "Files" grouping that cross-links to the per-file rail. Built
-// to feel like chat, not a forum: the channel composer sends on Enter and a
-// new thread never asks for a title — it displays its first-message snippet.
-//
-// Every async response is gated by a liveness token before it touches state
-// (workspace switches and rapid navigation must never repaint stale data).
-//
-// Shared channels (MU-C4): a channel can be shared to other accounts through
-// a relay chat grant. This view marks shared/joined channels, offers
-// share/revoke on channels you own, lists invitations under "Shared with
-// you", and disables composers in read-only channels. All sharing affordances
-// require the signed-in collaboration surface — when share listing fails
-// (signed out, local-only workspace), the solo view renders byte-identically
-// to before.
-//
-// Presence seam (MU-C1): once the ephemeral awareness channel lands, member
-// presence for a shared channel attaches here keyed by (shareId |
-// channelWireId) — no durable state involved.
-
 type OverviewState =
   | { status: "loading" }
   | { status: "unavailable"; message: string }
@@ -344,12 +324,6 @@ const EMPTY_MENTION_CANDIDATES: readonly MentionCandidate[] = [];
 // run again the moment it ends.
 const DM_SYNC_HOLD_MS = 15_000;
 
-// Why a DM sync runs, and what the cause allows.
-// - `pull`: main also pulls this workspace's relay log, where members' replies
-//   to owned DMs and Groups land. Only the view's own schedule pulls. A sync
-//   that reacts to an activity event must not, because the pull's own events
-//   would cause another one.
-// - `asked`: a person is waiting on it, so it runs during a hold.
 const DM_SYNC_CAUSES = {
   // Chats or a conversation opened.
   open: { pull: true, asked: true },
@@ -4414,9 +4388,6 @@ export function ChatsView(props: {
                   byEmoji.set(reaction.emoji, (byEmoji.get(reaction.emoji) ?? 0) + 1);
                 }
                 const itemViewer = itemView.viewerAuthorId;
-                // One reaction write per message at a time: its controls
-                // refuse another write, but keep focus, until it settles.
-                // Other items stay live.
                 const reactionPending = reactions.pending(item.thread.id, item.message.id);
                 const where = item.channel
                   ? item.channel.kind === "dm"

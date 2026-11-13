@@ -245,7 +245,6 @@ export function RecordHistoryDialog(props: {
           const shown = new Set(current.entries.map((entry) => entry.historyId));
           return { entries: [...current.entries, ...result.entries.filter((entry) => !shown.has(entry.historyId))], next: result.nextBeforeHistoryId };
         });
-        // Read on until the page asked for is shown.
         const until = reports.current.until ?? null;
         const next = result.nextBeforeHistoryId;
         if (until !== null && next !== null && next >= until) load(next);

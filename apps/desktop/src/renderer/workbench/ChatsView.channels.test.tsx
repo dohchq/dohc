@@ -509,10 +509,6 @@ describe("ChatsView panel navigator unread badges", () => {
     expect(screen.getByTestId("chats-join-shared")).toBeTruthy();
   });
 
-  // A relay outage resolves the listing with `relay.state ===
-  // "unreachable"` — it does not reject. That resolution must not read as
-  // "there are no shares": the cached relay-backed rows stand until the relay
-  // answers.
   it("keeps cached relay share rows when a catch-up refresh resolves with the relay unreachable", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({
       channels: [channel({ unreadCount: 2 })],
@@ -535,7 +531,6 @@ describe("ChatsView panel navigator unread badges", () => {
     expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
     expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("2 unread");
 
-    // The read lands; the relay is down, so the listing resolves unreachable.
     bridgeMock.listChatChannels.mockResolvedValue({
       channels: [channel({ unreadCount: 0 })],
       fileThreads: [],
@@ -651,8 +646,6 @@ describe("ChatsView panel navigator unread badges", () => {
       channels: [channel()],
       fileThreads: [],
     });
-    // The mount's read never settles until this test says so; the background
-    // refresh behind it fails first and therefore holds the newer ticket.
     let resolveMount!: (value: ReturnType<typeof shareListing>) => void;
     const mountRead = new Promise<ReturnType<typeof shareListing>>((resolve) => {
       resolveMount = resolve;
@@ -1090,7 +1083,6 @@ describe("ChatsView panel navigator unread badges", () => {
     });
     expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
 
-    // A read lands: account A's catch-up lookup is issued and stalls.
     view.rerender(navigator(1));
     await waitFor(() => expect(answerShares).toHaveLength(2));
 

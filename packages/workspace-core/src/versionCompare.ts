@@ -5,21 +5,6 @@ import type {
   WorkspaceId,
 } from "@dohc/workspace-contracts/engine";
 
-// UI-facing whole-version comparison, page-shaped. The per-file
-// three-way comparison (compareTextFileVersions) answers "how do these sides
-// relate for one path"; this hydrates the engine's differing-path listing
-// (`versions.compareFiles`) into the shape the compare surface needs: one page
-// of differing paths, with both texts for diffing, and a continuation for the
-// rest. The old shape hydrated every file of both versions and returned one
-// unbounded array; nothing between the store and the renderer bounded it.
-//
-// Status reads from the SOURCE version's perspective against the TARGET
-// (product framing: "what does this Version change relative to Main"):
-//   - added:    the path exists only in the source version.
-//   - deleted:  the path exists only in the target version.
-//   - modified: both versions have the path with different content.
-// Identical paths are omitted — an empty final page means "no differences".
-
 export type { VersionFileChange } from "@dohc/workspace-contracts/engine";
 
 /**

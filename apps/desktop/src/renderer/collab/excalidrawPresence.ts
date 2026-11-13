@@ -13,15 +13,6 @@ import type { PresenceTransport } from "./presenceChannel";
 
 const CURSOR_PUBLISH_MS = 33;
 const MAX_POINTER_COORDINATE = 10_000_000;
-// Budgeted against the transport's real envelope: the relay refuses a
-// presence state above PRESENCE_STATE_MAX_BYTES of UTF-8 JSON, and the
-// awareness update rides base64-wrapped inside that state, so selection
-// bytes cost 4/3 by the time the relay measures them. The headroom is a
-// conservative round number, not a measurement: the envelope test measures
-// the user/pointer wrapper plus base64 framing at ~310 bytes around a
-// full-budget selection. A total budget, not a per-id cap: the scene codec
-// accepts any nonempty well-formed id, so even a single long imported id is
-// valid work while it fits the envelope.
 const SELECTION_HEADROOM_BYTES = 4096;
 const MAX_SELECTION_ID_BYTES_TOTAL = Math.floor(
   ((PRESENCE_STATE_MAX_BYTES - SELECTION_HEADROOM_BYTES) * 3) / 4,

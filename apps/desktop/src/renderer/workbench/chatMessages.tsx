@@ -64,12 +64,6 @@ export function usePersonalAgentNames(): number {
   return useSyncExternalStore(subscribeChosenColors, personalAgentsVersion);
 }
 
-// Renders a message body with @-mention chips. A mention that resolves to a
-// known candidate gets a calm inline chip; everything else is plain text, so
-// the message reads exactly as written. Whitespace/newlines are preserved by
-// the parent's `whitespace-pre-wrap`.
-// Whether a body holds a file or work link: a chip a reader can open, so the
-// row around it is not itself a button.
 export function hasChatLinks(body: string): boolean {
   const { files, works } = scanChatLinks(body);
   return files.length > 0 || works.length > 0;
@@ -82,10 +76,6 @@ export function MentionText(props: {
   testId?: string;
   onOpenPath?: (path: string, headingAnchor?: string) => void;
 }) {
-  // Classify code ranges once, against the complete message. File chips split
-  // the rendered output into pieces, but must not reset Markdown fence state
-  // and accidentally turn a handle inside an unmatched/multiline fence into a
-  // mention.
   const { files: fileTokens, works } = scanChatLinks(props.body);
   const fileTargets = resolveFileMentionNavigationTargets(
     fileTokens,

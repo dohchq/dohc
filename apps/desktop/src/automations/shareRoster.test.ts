@@ -40,7 +40,6 @@ it.each(["Mira", null, ""])("names the received share's owner from relay identit
   expect.soft(names.person(WORKSPACE, "u-owner")).toBe(sharerName || "mira@example.test");
   expect(names.person(WORKSPACE, "someone-else")).toBe("Someone you shared with");
   expect(lookupAccounts).not.toHaveBeenCalled();
-  // An old identity has no verified owner id until its next refresh.
   shareView.granterUserId = "";
   expect(names.person(WORKSPACE, "u-owner")).toBe("Someone you shared with");
 });
@@ -1022,7 +1021,6 @@ describe("a shared workspace forgotten and attached again", () => {
     await rm(record, { recursive: true });
     await writeFile(record, synced);
 
-    // Synced again, the roster is listed again: until then it stays unknown.
     store.setRemote(WORKSPACE, remote);
     expect(await check()).toEqual(steps.map(() => expect.objectContaining({ allowed: false })));
     now += SHARE_ROSTER_FRESH_MS;

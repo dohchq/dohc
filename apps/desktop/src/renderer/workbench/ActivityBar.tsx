@@ -5,13 +5,6 @@ import { pinnedAppInitial, type PinnedApp } from "./pinnedApps";
 import { VIEW_IDENTITY } from "./viewIdentity";
 import { appViewId, SHARING_VIEW_ID, type ActivityViewId, type ViewId } from "./workbenchState";
 
-// VS Code-style activity bar: 48px icon rail, leftmost column of the
-// workbench. Ported a11y/active patterns from the retired web ActivityBar
-// (7277c39^): data-table of items, title + aria-label + aria-current on every
-// button, active = full-ink icon with a 2px left ink indicator. Clicking the
-// active item toggles the side panel (the old explicit collapse button).
-// dohc's own views draw the label and icon VIEW_IDENTITY names.
-
 // Every rail glyph is drawn the same size and weight; only the icon differs.
 function RailGlyph(props: { Icon: LucideIcon }) {
   return <props.Icon size={18} strokeWidth={1.9} aria-hidden />;

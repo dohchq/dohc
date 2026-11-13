@@ -72,7 +72,6 @@ describe("CloudLogin fields", () => {
     expect(field.getAttribute("aria-invalid")).toBe("true");
     expect(field.getAttribute("aria-describedby")).toBe("cloud-connection-error");
 
-    // Typing clears it until the next check.
     await user.type(field, "x");
     expect(screen.queryByTestId("cloud-connection-error")).toBeNull();
     expect(field.getAttribute("aria-invalid")).toBeNull();

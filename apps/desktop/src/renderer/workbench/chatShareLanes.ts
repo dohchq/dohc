@@ -40,30 +40,6 @@ export function shownChannelWireIds(
   return [...ids];
 }
 
-// A share listing answers two independent questions. The joined rows come from
-// the local registry, so any reader that got a listing at all has the true
-// answer. The granted/received rows come from the relay — a reader that is not
-// authoritative for them must leave them exactly as they were.
-// The joined lane is a set of PER-CHANNEL facts, so a read replaces the
-// channels it named and leaves the rest alone. Replacing the whole array threw
-// away answers the new read never spoke to — a read issued before a channel
-// was created landing after it dropped that channel's answer, and the composer
-// vanished under the user.
-//
-// Ordering is unaffected: claimLanes still decides who may write at all, and a
-// claim now writes only what it answered.
-// Two different questions, and they must not be confused:
-//
-//  - Merging is answer-driven. A read writes the channels it answered and
-//    leaves the rest, so a read that never named a channel cannot drop it.
-//  - Eviction is view-driven. The newest read also discards answers for
-//    channels the view no longer shows — an invitation that was revoked or
-//    claimed by another workspace would otherwise sit in the map forever, and
-//    a cache that grows with history is the growth this whole change removes.
-//
-// `keep` is the newest read's view: its own scope plus anything answered
-// locally since it was issued. Older reads pass null and evict nothing — they
-// are not entitled to say what the view shows.
 function applyJoinedAnswers(
   current: readonly JoinedChannelAnswer[],
   answers: readonly JoinedChannelAnswer[],
@@ -131,12 +107,6 @@ export function answerLocally(
   order.local.add(channelWireId);
 }
 
-// The one decision the joined lane makes: what this response may write, and
-// what the cache may still hold once it has.
-//
-// Exported with its state because the property this change exists for — a
-// cache bounded by the view rather than by history — is a property of these
-// two collections and of nothing on screen.
 export function planJoinedCommit(
   order: JoinedLaneOrder,
   input: {

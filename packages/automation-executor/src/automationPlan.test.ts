@@ -147,7 +147,6 @@ describe("find conditions", () => {
         find(either),
         find(both, "Data"),
         { kind: "if", if: "true", do: [find(both)], otherwise: [find('contains(record.Tags, "urgent")', "Data")] },
-        // A syntax error is formulaProblems', an empty condition the builder's, and an unknown Collection the run's.
         find("record.Name =="), find(" "), find(either, "Elsewhere"),
       ],
     };

@@ -33,7 +33,6 @@ import { buildRunnerThreadContext } from "./runnerThreadContext";
 import { handleForName } from "@dohc/workspace-contracts/chat-mentions";
 import { WorkspaceRestrictedError } from "../workspaces/workspaceTrust";
 
-// How a run ended, as its notice says it.
 type RunOutcome =
   | "finished" | "no-reply" | "timed-out" | "failed" | "not-started" | "restarted" | "quit" | "stopped"
   | "restricted";
@@ -993,8 +992,6 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     };
     // A run that couldn't start or needs Node.js has its own next step.
     if (outcome === "not-started" || needsNodeJs(outcome, nodeAvailable)) return words;
-    // Try again stays until the request has had two attempts, unless
-    // running it again would repeat what it posted.
     if (canRepeatFailedRun(outcome, posted)) {
       let attempts = attemptCount;
       try {
@@ -1776,8 +1773,6 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     return waits;
   }
 
-  // Main's trust dialog opened for the workspace, by any path. Sends stop
-  // asking until its trust changes.
   function trustAsked(workspaceId: string): void {
     told(workspaceId).asked = true;
   }

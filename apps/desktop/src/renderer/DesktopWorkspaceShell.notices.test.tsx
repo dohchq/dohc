@@ -1823,11 +1823,6 @@ describe("workspace shell errors", () => {
   });
 });
 
-// Automation failures (ADR 0008, Phase 4): the engine's failed claim rows
-// become one durable notice per automation until the owner acknowledges the
-// generation on screen. Modelled on the share-refusal banner above: the
-// read comes from main on open and on every failure poke, so a restart
-// re-raises anything unacknowledged.
 describe("crash report notice", () => {
   const REPORT = {
     revision: 3,
@@ -3129,7 +3124,6 @@ describe("notices sent to you", () => {
       const synced = syncs.length;
       await answerEvery(syncs, dmSyncResult());
       await answerEvery(shares, third);
-      // The other reveal's own message sync queued behind a held one.
       await waitFor(() => expect(syncs.length).toBeGreaterThan(synced));
       await answerEvery(syncs, dmSyncResult());
       await waitFor(() => expect(screen.getByTestId("chats-join-shared").getAttribute("data-invitation")).toBe("share-3"));
@@ -4269,7 +4263,6 @@ describe("owner live documents", () => {
     expect(within(row).getByRole("button", {name: "Save recovery copy"})).toBeTruthy();
     expect(within(row).getByRole("button", {name: "Try again"})).toBeTruthy();
   });
-  // A dismissed row says nothing, so Live documents reports the wait itself.
   it("reports a waiting Stop from Live documents after its Stopping row was dismissed", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.listOwnerLiveDocuments = vi.fn(async () => ({documents: [LIVE_ROW], nextCursor: null}));
@@ -5249,9 +5242,6 @@ describe("owner live documents", () => {
     );
   });
 
-  // The shell remounts on every workspace switch, with its status unknown
-  // until the workspace answers. Coming back to the same outage must not
-  // bring back a toast, or a row the person dismissed.
   it("keeps a sync failure quiet across a remount once shown and dismissed", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const failing: SyncStatusResult = {

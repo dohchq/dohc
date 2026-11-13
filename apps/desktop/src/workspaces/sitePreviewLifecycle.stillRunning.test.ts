@@ -42,7 +42,6 @@ describe("a workspace stop that has to report app commands still running", () =>
     await expect(lifecycle.stopWorkspace("trip", { rejectOnFailure: true })).rejects.toThrow(AppCommandStillRunningError);
     expect(lifecycle.status("trip", "portal").running).toBe(true);
 
-    // Still running: the next stop fails again and keeps the handle.
     await expect(lifecycle.stopWorkspace("trip", { rejectOnFailure: true })).rejects.toThrow(AppCommandStillRunningError);
     state.alive = false;
     await expect(lifecycle.stopWorkspace("trip", { rejectOnFailure: true })).resolves.toBeUndefined();

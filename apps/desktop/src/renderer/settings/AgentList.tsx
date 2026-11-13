@@ -759,7 +759,6 @@ export function AgentList(props: {
     if (!result.ok) onError?.(result.error, undefined, async () => { await changePersonal(entry, next, failure); });
     return result.ok;
   };
-  // Remove hides a signed-out agent. Undo brings it back signed out.
   const removePersonal = async (entry: PersonalEntry) => {
     const { agent } = entry;
     if (!(await changePersonal(entry, { kind: "remove" }, `dohc could not remove ${agent.name}.`))) return;

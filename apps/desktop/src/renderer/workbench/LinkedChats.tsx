@@ -33,15 +33,6 @@ import {
 import { useReactions, type ReactionView } from "./reactionStore";
 import { CopyMessageLink } from "./messageLinks";
 
-// The About rail for a file: who has it, its comments, what changed and what
-// links to it. A focused chat tab gets AboutConversationPanel instead.
-// Per-file Chats (PR 0M-5) are stored in the engine and linked to the file's
-// stable object id, so a chat follows its file through renames, and that id
-// is what History asks about. About calls them comments: each is a chat about
-// the file, listed in Chats like any other.
-// Message rendering + composer are the shared chatMessages pieces
-// so this surface and the workspace Chats view can never drift.
-
 // The composer's replacement for every received file share.
 // Same words main throws (SharedFileReadOnlyError) and the same shape the
 // Chats view's read-only notice uses.
@@ -467,12 +458,6 @@ export function LinkedChatsPanel(props: {
     [activeThread, props.onError, reactions, threadReactions.viewerAuthorId],
   );
 
-  // Stable for ChatMessageList's memo — an inline literal would defeat it on
-  // every composer keystroke. A reaction is a write, so a share that refuses
-  // writes offers no picker — but the reactions already on a message are part
-  // of the conversation and stay readable. `readOnly` is the affordance built
-  // for exactly this; omitting the whole prop would have hidden other
-  // people's reactions too.
   const reactionControls = useMemo(
     () => ({
       reactions: threadReactions.reactions,

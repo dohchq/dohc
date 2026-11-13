@@ -6,11 +6,6 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const requiredSteps = [
-  // Without this row the log cannot say which tree produced it, and a run
-  // whose HEAD moved mid-way reports FAIL here rather than a green verdict
-  // over two commits. Requiring the row is what makes the provenance
-  // load-bearing: a log from a gate that never checked would otherwise read
-  // exactly as green as one that did.
   "tree provenance",
   // Without this row the platform in the verdict line is Node's unverified
   // claim, which is what the line was before the gate asked rustc.
@@ -28,12 +23,6 @@ const requiredSteps = [
   "doctests",
   "build daemon",
   "cargo-deny",
-  // cargo-audit was deliberately absent from this list because CI did not
-  // install the tool, so the gate probed for it and reported SKIP -- which
-  // meant every PR showed "cargo-audit=SKIP" beside a row of PASSes and no
-  // advisory scan ever ran. The workflow now installs a pinned cargo-audit,
-  // so a SKIP here is a regression in the install, not an honest absence,
-  // and must fail the gate rather than read as green.
   "cargo-audit",
   "scratch leak",
 ];

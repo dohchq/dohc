@@ -47,7 +47,6 @@ export interface AgentWakeDependencies {
   scan(): void | Promise<void>;
 }
 
-/** The agent an automation wakes, from the settings, or null with none dohc can start. */
 export function wokenAgent(settings: Pick<DesktopUserSettings, "agents">): WokenAgent | null {
   const agent = automationAgent(settings);
   return agent ? { id: agent.id, name: agent.name } : null;

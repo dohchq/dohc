@@ -2,32 +2,6 @@ import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// One place that answers "where is the engine daemon this test should drive?".
-// Four suites each answered it differently and one of them answered wrong: it
-// looked only under the repo root, so its coverage appeared or vanished
-// depending on whether somebody had run `cargo build` first, and a clean
-// checkout reported green having run nothing.
-//
-// Candidates, tried in order:
-// 1. DOHC_TEST_ENGINE_BINARY — explicit override, resolved absolute, and nothing
-//    else is consulted.
-// 2. <repo>/target/debug — where `cargo build` puts it. AUTHORITATIVE for tests,
-//    because it is the only one a build refreshes.
-// 3. apps/desktop/target/debug — a *copy* staged for Electron by
-//    scripts/require-e2e-engine.mjs, which the app resolves at launch.
-//
-// Root before staged, first match, no mtime comparison. An earlier revision of
-// this module compared mtimes to answer "which of these is fresher", and that
-// heuristic generated four separate defects in review — seed/app skew, a
-// clobbered override, an unresolved relative path, and a symlink whose target got
-// overwritten. The simpler answer is that freshness is not this module's
-// question: `cargo build` owns (2), the staging hook owns (3) and keeps it equal
-// to (2) or to the override, and a test just needs the cargo output.
-//
-// This module holds no Playwright or vitest import, so both `src/**` tests and
-// `e2e/**` helpers can use it. It computes the desktop root itself rather than
-// importing `desktopRoot` from `e2e/helpers/desktopApp`, which loads Playwright
-// at module scope.
 const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 /** The only supported override. */

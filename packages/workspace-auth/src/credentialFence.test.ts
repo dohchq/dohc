@@ -118,7 +118,6 @@ describe.skipIf(!pgAvailable)("the credential fence", () => {
       .toEqual({ epoch: 1, sessionCurrent: false });
     expect((await fence().readConsentCredentials("fence-delete", "fence-delete-new"))?.sessionCurrent).toBe(true);
 
-    // Deleting the user deletes its password and its fence, with or without an earlier fence.
     await account("fence-delete-unfenced", "first");
     await pool.query(`delete from "user" where id in ('fence-delete', 'fence-delete-unfenced')`);
     expect(await fence().readEpoch("fence-delete")).toBe(0);

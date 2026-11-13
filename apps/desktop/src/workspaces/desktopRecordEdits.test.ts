@@ -139,7 +139,6 @@ it("a hand-made record keeps the person who asked while it waits for its workspa
   const creating = createRecordByHand({ collectionPath: "tasks", name: "hand" }, {
     author: createLocalChangeAuthor("Alice"),
     localPerson: async () => personNamed(account),
-    // The workspace operation and its engine capture are still opening.
     withWorkspaceOperation: async work => {
       entered.resolve();
       await release.promise;

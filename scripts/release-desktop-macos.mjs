@@ -1,11 +1,5 @@
 #!/usr/bin/env node
 
-// Adds the macOS files to a desktop release that the Desktop Release workflow
-// published. It builds the release commit for Apple silicon in a throwaway
-// worktree, signs and notarizes with the release keychain, checks the result,
-// and uploads it. It never changes the files of the checkout it runs from.
-// docs/engineering/desktop-release.md describes the procedure.
-
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync, readFileSync } from "node:fs";

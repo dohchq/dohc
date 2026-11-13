@@ -1,23 +1,5 @@
 import { Directory, File, Paths } from "expo-file-system";
 
-// The read cache's copy on disk, so that after a relaunch the phone shows what it read last while it reads again. Each
-// scope, a server, account and workspace, has one file in the app's Caches folder, named for a hash of the scope so
-// no name holds an account detail. The account's workspace list has one more, named for its server and account. iOS
-// doesn't back up Caches and may empty it, which costs only a read.
-//
-// A file holds its format, the scope it was written for, and either each view's value, cursor and staleness, or the
-// list. A file of another format or scope, one that doesn't parse, and one that can't be read count as absent, and
-// are deleted.
-//
-// A scope's first write waits until it stops changing for WRITE_DELAY_MS, and at most WRITE_MAX_DELAY_MS after the
-// first change. Later writes of it wait WRITE_INTERVAL_MS from the last, so a reply streaming into a chat costs one
-// write every 30 s, not one per change. `flush`, when the app goes to the background, writes everything at once. Each
-// write goes to a temporary file that then replaces the scope's file, so a read never finds half a file. A scope keeps
-// the views that fit in SCOPE_MAX_BYTES, in the order given, and leaves out the rest without writing them out. The
-// scopes' files together stay within TOTAL_MAX_BYTES: the scopes used least recently go first. Writes and deletes run
-// one at a time, in order, so a delete lands after any write it raced, and no file comes back after a sign-out. A
-// write that fails is dropped without a word: the next change writes again.
-
 /** One view as a scope's file keeps it. */
 export interface SavedView {
   readonly id: string;
@@ -138,7 +120,6 @@ export function createCacheFiles(options: {
     return found;
   }
 
-  /** Deletes temporary files a closed app left, then the least recently used scopes past the cap. */
   function trim() {
     if (!folder.exists) return;
     const saved: { file: File; size: number; usedAt: number }[] = [];

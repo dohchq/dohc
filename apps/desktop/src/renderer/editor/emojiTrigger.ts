@@ -1,31 +1,5 @@
 import { cursorText } from "./cursorText";
 import { makeTriggerPlugin } from "./triggerPlugin";
-// `:shortcode:` emoji autocomplete trigger.
-//
-// A third trigger surface alongside `[[` wikilinks (wikilinkPlugin.ts) and
-// `@`-mentions (mentionTrigger.ts) — same detection shape, same shared
-// picker infrastructure conventions, but it inserts PLAIN UNICODE TEXT
-// (see EmojiPicker.tsx's `applyEmojiPick`). No schema/node involved, so
-// there is zero round-trip surface: the emoji character is just text,
-// same as if the user had typed or pasted it directly.
-//
-// Detection mirrors wikilinkPlugin's `detectAutocomplete` / mentionTrigger's
-// `detectMentionAutocomplete`: resolve the text node under the cursor, look
-// at the text before it, apply the same code-block / inline-code-mark
-// exclusions, require the trigger character to sit at a word boundary
-// (start-of-node or after whitespace) so `12:30` and URLs don't fire.
-//
-// One extra rule the other two triggers don't need: the query must be at
-// least 2 characters before the picker opens (`:s` does nothing, `:sm`
-// opens) — a bare `:` shows up too often in prose (times, URLs, ratios) to
-// pop a picker on the very first character.
-//
-// A second behavior layered on top: typing the *closing* colon of a
-// complete, known shortcode (`:smile:`) inserts the emoji immediately,
-// Slack/GitHub-style, without waiting for the user to pick from the list.
-// That's handled via `appendTransaction` (not a manual `view.dispatch` from
-// inside `view.update`) so the replacement is folded into the same
-// transaction cycle instead of racing a second dispatch.
 
 import type { Node as ProseMirrorNode, ResolvedPos } from '@tiptap/pm/model'
 import { PluginKey, type Transaction } from '@tiptap/pm/state'

@@ -12,7 +12,6 @@ const readSource = (path: string) => readFileSync(resolve(desktopRoot, path), "u
 
 interface ResolvedProject { name: string; maxWorkers: number; isolate: boolean; files: string[] }
 
-// The projects as the real config resolves them, with DOHC_DESKTOP_TEST_ISOLATION set to `isolation`.
 const resolved = new Map<string, ResolvedProject[]>();
 function resolvedProjects(isolation = ""): ResolvedProject[] {
   if (!resolved.has(isolation)) {

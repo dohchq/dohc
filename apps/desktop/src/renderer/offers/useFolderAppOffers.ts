@@ -49,9 +49,6 @@ export function useFolderAppOffers(input: {
     });
   }, []);
 
-  // Every failure keeps the folder's Notices row. Only the first raises a
-  // toast: asking again on its own, as focus does, stays quiet until the
-  // folder reads or the person presses Try again.
   const ask = useCallback((folder: string, retried = false) => {
     asked.current.add(folder);
     const failed = failing.current;

@@ -157,9 +157,6 @@ describe("history page ordering", () => {
     expect(it0.markReady).toHaveBeenCalledTimes(1);
   });
 
-  // A refresh someone asked again is superseded. Its answer commits neither
-  // while the newer read is in flight nor after that read failed; the rows on
-  // screen stay, and the failure is the newest refresh's to report.
   it("drops an older page while a newer refresh is in flight", async () => {
     const it0 = mount();
     await committed(it0, page("shown"));
@@ -684,8 +681,6 @@ describe("history page updating retries", () => {
     expect(it0.ids()).toEqual(["newer"]);
   });
 
-  // A refresh that reads no page still supersedes the page reads before it:
-  // their failure stays quiet and their ladder stops.
   it("lets a refresh with no page supersede an older page read", async () => {
     vi.useFakeTimers();
     const it0 = mount();

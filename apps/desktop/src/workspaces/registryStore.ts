@@ -315,8 +315,6 @@ export interface ShareMountRecord {
 }
 
 export interface RegistryEntry extends CreatedWorkspace {
-  // When a window last opened this workspace, epoch ms. Absent until the
-  // first open after this field existed; the manager sorts those last.
   lastOpenedAt?: number;
   // Present only after the user explicitly enables cloud sync.
   remote?: RemoteIdentity;
@@ -650,7 +648,6 @@ export function createRegistryStore(
       });
     },
 
-    /** Keep the relay's latest answer for which computer runs the schedules. */
     setAutomationHost(workspaceId: string, host: RelayAutomationHost | null): void {
       updateWorkspaceEntry(workspaceId, (entry) => ({ ...entry, automationHost: host }));
     },

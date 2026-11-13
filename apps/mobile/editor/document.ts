@@ -37,8 +37,6 @@ export function mountDocument(page: PageConfig) {
   if (page.icon && !page.large) root.append(element("div", "icon", page.icon));
   if (!page.large) root.append(element("h1", "title", page.title));
   if (page.properties.length > 0 && !page.large) {
-    // Read-only on the phone for now: a pill each, its name then its value, as on the desktop, with a chevron only on a
-    // value that opens something.
     const list = element("dl", "properties");
     for (const property of page.properties) {
       const row = element("div", property.opens ? "property opens" : "property");

@@ -6,14 +6,6 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { summarize } from './summarize-packaged-benchmark.mjs';
 
-// Compare packages on the same host and harness. Collection open and typing gate on p95 within 10%
-// or 17 ms, whichever is larger. Automation press-to-settled gates on p50 within 25% or 17 ms, with
-// at least five runs per case on each side. Contention press-to-settled is reported; typing still gates.
-// On this host, the same main package failed 10 of 24 p95 checks across two three-run passes.
-// Finished-case medians agreed within 10% for 7 of 12 cases; at-cap Finds varied 24 to 36%, and
-// press-to-settled while typing varied 45 to 47%. With few runs, p95 is the slowest run.
-// Alternate baseline and candidate runs. --margin-percent, --automation-margin-percent and --floor-ms
-// control the recorded margins. The 17 ms floor is one 60 Hz frame, matching the timing endpoints.
 export const DEFAULT_MARGIN = { percent: 10, automationPercent: 25, floorMs: 17 };
 // Bump when a measurement's start or end changes. A receipt without the setting is version 1.
 // Version 2 starts a document open at the Explorer click, after the harness scrolls the row into view.

@@ -85,9 +85,6 @@ function localPersonKey(installationId: string, account: LocalActorIdentity["acc
 function localPersonKeys(installationId: string, account: LocalActorIdentity["account"]): string[] {
   return [localPersonKey(installationId, null), ...(account ? [localPersonKey(installationId, account)] : [])].map(serializeActorKey);
 }
-// Chat and History share one rule: a group per key, a personal agent hue or a human hash, and self for this computer's person and their agents.
-// A connected agent takes the plug wherever it shows. Its post or edit decides that, since a share's key can be unknown.
-// Your agent's message from one of its runs also names its agent, so the renderer colors it as Settings does.
 function presentationFor(workspaceId: string, key: ActorKey, unknownIdentity: () => string, own: readonly string[], colors: Map<string, ActorPresentation["hue"]>, connected: ActorPresentation["connected"] | false, agentId?: string): ActorPresentation {
   const serialized = serializeActorKey(key);
   const unknown = key.kind === "unknown";

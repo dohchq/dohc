@@ -18,10 +18,6 @@ import { markShown, markShownPosts } from "./readMarks";
 import { conversationItems, serverMessage } from "./serverMessages";
 
 
-// A chat or a thread in a signed-in build, read-only, as the server holds it: oldest at the top, newest at the bottom.
-// A chat's posts open their threads. The phone has no composer yet. The view reads again when the feed reports a change
-// to one of its threads. While the screen is in front and the app is active, as on the desktop, a thread and a chat's
-// conversation are read up to the newest message shown, and an unread post up to its own message.
 export function ServerConversation() {
   const { id = "", name } = useLocalSearchParams<{ id: string; name?: string }>();
   return id.startsWith("thread-") ? <Thread threadId={id} /> : <Stream groupId={id} name={name ?? ""} />;

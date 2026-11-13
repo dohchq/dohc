@@ -169,13 +169,6 @@ export const identityHues: Record<"light" | "dark", Record<IdentityHue, string>>
   },
 };
 
-/**
- * The type stacks, which do not change with theme. Same duplication guard as
- * the palette: tokens.test.ts asserts these against styles.css :root.
- *
- * Both stacks name bundled families first and fall through to the system
- * families rather than to the browser default.
- */
 export const fonts = {
   "--font-sans": '"Inter Variable", system-ui, "Segoe UI", sans-serif',
   "--font-mono":

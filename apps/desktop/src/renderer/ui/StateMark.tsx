@@ -4,17 +4,6 @@ import type { SaveState } from "@dohc/workspace-contracts/save-state";
 import { SecondaryButton } from "./controls";
 import { useShownAfter } from "./useShownAfter";
 
-// Save facts and access/view facts share this presentation map.
-//
-// The shape says what kind of state it is before the word is read. Filled
-// means settled, a clock means settled but old, a ring means dohc is still
-// working, a lock means the file is held and no edit is lost, a triangle
-// means the person has to act. Nothing animates, so reduced motion needs no
-// special case.
-//
-// A `Record` over the union, so a new state is a compile error here until it
-// has a label, and every label is one it can defend from code (see
-// StateMark.test.tsx for what each may claim).
 export type StateMarkKind = "settled" | "dated" | "working" | "held" | "attention";
 
 export type StatePresentation = {
@@ -149,16 +138,8 @@ export function saveStatePresentationKey(state: SaveState): SaveStateKey | null 
   }
 }
 
-// Save states that need nothing from the person and pass on their own: an
-// edit in flight, and an edit the file or its host has taken. Pending share
-// is not one: it can last while the host is away, and until it ends
-// collaborators do not have the edits.
 const CALM: ReadonlySet<SaveStateKey | AccessStateKey> = new Set(["saved", "saving", "saved-to-host"]);
 
-// A settle that beats the host's acknowledgement passes through pending share
-// on its way to saved to host, so its words wait until it has lasted. A host
-// that answers within this never makes the row flash; one that does not is
-// away, and the person is told.
 export const PENDING_SHARE_WORDS_DELAY_MS = 2_000;
 
 const MARK_TONE: Record<StateMarkKind, string> = {
@@ -211,10 +192,6 @@ export function StateMark(props: {
 }) {
   const storedKey = typeof props.shown === "string" ? props.shown : saveStatePresentationKey(props.shown);
   const quiet = props.quietWhenCalm === true;
-  // Once a pending share has shown its words, they stay through the saves the
-  // person's typing starts, until the share takes the edits or the state
-  // otherwise resolves: each keystroke passes through saving, and dropping
-  // the words there would hide them for as long as the person types.
   const [shareHeld, setShareHeld] = useState(false);
   const shownKey = quiet && shareHeld && storedKey === "saving" ? "pending-share" : storedKey;
   const pendingShareLasted = useShownAfter(quiet && shownKey === "pending-share", PENDING_SHARE_WORDS_DELAY_MS);

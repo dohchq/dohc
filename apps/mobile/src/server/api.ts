@@ -29,8 +29,6 @@ export function segment(value: string): string {
   return encodeURIComponent(value);
 }
 
-// --- who is signed in ---------------------------------------------------------------------------------------------
-
 export interface SignedInAccount {
   readonly userId: string;
   readonly email: string;
@@ -44,8 +42,6 @@ export function readAccount(client: ServerClient): Promise<SignedInAccount> {
     return { userId: user.id, email: user.email };
   });
 }
-
-// --- workspaces ---------------------------------------------------------------------------------------------------
 
 export interface AccountWorkspace {
   readonly workspaceId: string;
@@ -74,8 +70,6 @@ export async function setShowOnPhone(client: ServerClient, workspaceId: string, 
   }, { showOnPhone });
 }
 
-// --- sessions -----------------------------------------------------------------------------------------------------
-
 export interface AccountSession {
   readonly sessionId: string;
   readonly createdAtMs: number;
@@ -96,10 +90,6 @@ export function listSessions(client: ServerClient): Promise<AccountSession[]> {
 export async function endSession(client: ServerClient, sessionId: string): Promise<true> {
   return client.send("POST", `/sync/account/sessions/${segment(sessionId)}/revoke`, body => okAnswer(body) ? true : null);
 }
-
-// --- personal agents ----------------------------------------------------------------------------------------------
-// Only the fields personalAgents.test.ts pins: the agent's ID, name, hue, status and reach, and the roster's
-// workspaces with their names.
 
 export type PersonalAgentStatus = "active" | "signed_out" | "removed";
 

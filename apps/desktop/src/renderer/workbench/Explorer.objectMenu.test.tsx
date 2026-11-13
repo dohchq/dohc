@@ -118,7 +118,6 @@ async function renameTo(path: string, name: string): Promise<void> {
   fireEvent.keyDown(input, { key: "Enter" });
 }
 
-// The Undo the notice offered, as the shell's toast would run it.
 async function noticeWithUndo(props: ExplorerProps, message: string): Promise<() => void> {
   await waitFor(() => expect(props.onNotice).toHaveBeenCalledWith(message, expect.any(Function)));
   return vi.mocked(props.onNotice).mock.calls.find(([text]) => text === message)![1]!;

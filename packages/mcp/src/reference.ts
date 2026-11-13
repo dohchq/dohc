@@ -1,11 +1,3 @@
-// Renders docs/reference/cli-mcp-sdk.md. MCP tool names, arguments, and
-// descriptions come from the running desktop MCP server. CLI verbs, flags,
-// summaries, and fields come from CLI_COMMANDS, the table `dohc --help`
-// prints. Result shapes come from the CLI's zod schemas. This file adds only
-// what those lack: which result each verb returns, what each MCP tool
-// returns and the app channel. reference.test.ts fails when any of
-// them drifts.
-
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { z } from "zod";

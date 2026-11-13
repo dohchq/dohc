@@ -663,7 +663,6 @@ describe("OwnerYDocOutbox pending byte boundary", () => {
     expect(run.requests.map(request => (request.params as {cursor?: {part: string}}).cursor?.part ?? "header")).toEqual(["header","entryHeader","update"]);
   });
 
-  // #2982: a check that needs only the head's key reads none of its update bytes.
   it("names the delivery head without reading its update", async () => {
     const result = pendingResult(); result.binding.lineageClaimId = result.baseUpdateDigest;
     result.entries.push({...result.entries[0]!,sequence: 2,appendKey: "append-2",deliveryId: "delivery-2"});

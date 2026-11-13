@@ -11,17 +11,6 @@ import {
 } from "./engineDaemonLifecycle";
 import { inEngineRun, insideEngineRun } from "./engineRunScope";
 
-// Every cross-machine wait in this file carries this bound. Each
-// relaunch runs the startup smoke against a real temporary directory, so a
-// wait's duration is honest fs work plus whatever else the machine is doing.
-// Measured 2026-08-03 on a 24-process load (4 copies of this suite plus 4
-// each of five desktop suites, 3 waves, 12 runs): every wait whose subject
-// arrived completed within 2.5s; 15s is 6x that, and the package's 30s test
-// deadline still fails a genuine hang as itself. The rolling-window failures that
-// same load produced (6/12 and 3/12 runs) were not slow waits — the crash
-// landed while the replacement's startup smoke was still in flight, so it
-// was spent on the burst budget and the window signal never existed to wait
-// for. Those tests now await the real became-healthy signal below.
 const WAIT = { timeout: 15_000 } as const;
 
 function probesSent(client: FakeClient | undefined): number {
@@ -597,13 +586,6 @@ describe("Rust engine daemon lifecycle", () => {
     try {
       await lifecycle.start();
       exits[0]?.(1, null);
-      // A crash exercises the budget it is aimed at only if it lands on a
-      // healthy generation: one that dies during its own startup smoke is a
-      // failed launch attempt instead, and the rolling window and reset
-      // timer never see it. The smoke runs against a real temporary
-      // directory, so under load it outlasts any fixed sleep — exactly how
-      // this family failed on a busy box. onLaunch fires after
-      // running=true: the real became-healthy signal.
       await vi.waitFor(() => expect(live).toBe(2), WAIT);
       // The budget-reset timer is armed just before onLaunch, so after the
       // wait above a wide multiple of the window lets it fire.
@@ -697,7 +679,6 @@ describe("Rust engine daemon lifecycle", () => {
     try {
       await lifecycle.start();
       for (let generation = 0; generation < 3; generation += 1) {
-        // Crash only a healthy generation, spaced four windows apart.
         await vi.waitFor(() => expect(live).toBe(generation + 1), WAIT);
         await new Promise((resolve) => setTimeout(resolve, restartWindowMs * 4));
         exits[generation]?.(1, null);
@@ -1119,10 +1100,6 @@ describe("Rust engine daemon lifecycle", () => {
   });
 
   it("kills the wedged daemon before the terminal report can block", async () => {
-    // The desktop answers a terminal verdict with dialog.showErrorBox, which
-    // does not return until the user dismisses the modal. Reporting first
-    // would leave the wedged child alive behind that dialog for as long as it
-    // stands, while this lifecycle already called the engine gone.
     const clients: SelfExitingClient[] = [];
     const closedWhenReported: boolean[] = [];
     const lifecycle = new EngineDaemonLifecycle({

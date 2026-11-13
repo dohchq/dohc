@@ -110,7 +110,6 @@ export interface RelayedPressHostOptions {
 export function createRelayedPressHost(options: RelayedPressHostOptions) {
   const { host, delay } = options;
   let running: Fiber.Fiber<void, unknown> | null = null;
-  // Presses this host has pressed, by claim, until their runs settle.
   const byClaim = new Map<string, { press: RelayAutomationPress; field: string | null }>();
   // Presses taken this session, so a list naming them again does not press twice.
   const taken = new Set<string>();
@@ -138,7 +137,6 @@ export function createRelayedPressHost(options: RelayedPressHostOptions) {
     }
   }
 
-  // Follows a claim the engine held before this session until its run settles.
   async function resume(relay: PressTransport, press: RelayAutomationPress, held: NonNullable<HeldClaim>): Promise<void> {
     let settled = held.settled;
     if (settled === null) {

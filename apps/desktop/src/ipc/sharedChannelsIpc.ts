@@ -95,12 +95,6 @@ export function createSharedChannelsIpc<
     notifyRenderer, mountShareFolder, unmountShareFolder, sharesChanged, reconcileReceivedShares,
   } = dependencies;
 
-  // --- Shared channels (MU-C4) --------------------------------------------
-  // A chat grant shares a whole channel (threads/messages/reactions)
-  // with another account, read-write by default. The relay owns every
-  // security decision (membership, authorship, channel scoping, revocation);
-  // these handlers only address grants and move the member-side sync.
-
   const shareChatChannelHandler: Handlers["shareChatChannel"] = async (input, { operation }) => {
     const { workspace } = await requireEngineCapture(
       operation.workspace,
@@ -194,16 +188,6 @@ export function createSharedChannelsIpc<
     return ShareChatChannelResult.parse({ shareId: created.shareId });
   };
 
-  // What this machine joined, for the channels the caller named. The grant
-  // side lives on the relay; this side does not, so asking it costs no network
-  // — and a caller that needs only this must not wait on a relay that may
-  // never answer.
-  //
-  // The scope is a required argument, not a filter a caller may skip: the
-  // registry array grows with every channel this workspace has ever joined,
-  // and an unscoped answer would carry that history to the renderer. The write
-  // gate is unaffected — assertSharedChannelWritable reads the whole array
-  // here in main and never crosses IPC at all.
   function joinedChannelAnswers(
     workspace: RegistryEntry,
     channelWireIds: readonly string[],

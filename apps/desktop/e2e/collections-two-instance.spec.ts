@@ -181,8 +181,6 @@ test("a drag's field write on one device moves the card on the other device's op
       timeout: 30_000,
     });
 
-    // The schema's only view is the board, so the open collection IS the
-    // open board: Apollo under Todo, Zephyr under Doing.
     const todoApollo = page.locator(
       'section[aria-label="Todo"] [role="listitem"][aria-label="Apollo"]',
     );
@@ -343,8 +341,6 @@ test("an agent's file save on one device opens a conflict against a record the o
     ]);
     expect((await deviceARelay.push()).pushed).toBeGreaterThan(0);
 
-    // A third computer, also file-only, joins now and takes the Todo record.
-    // Its later save starts from Todo, so it does not continue A's side.
     deviceC = await openLiveDaemonWorkspace(
       { workspaceId, rootPath: computerCRoot },
       { maxRestarts: 0 },
@@ -524,7 +520,6 @@ test("an agent's file save on one device opens a conflict against a record the o
     expect(conflict.incomingText).toContain("Status: Doing");
     await expect(page.getByTestId("sync-status")).toHaveAttribute("data-state", "conflict");
 
-    // Until the person resolves it, B's file, index, and board keep Todo.
     expect(await readFile(join(temp.rootPath, apolloPath), "utf8")).toContain("Status: Todo");
     expect(await statusOnB(apolloPath)).toBe("Todo");
     await expect(todoApollo).toBeVisible();

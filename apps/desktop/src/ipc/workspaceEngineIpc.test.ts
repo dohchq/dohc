@@ -942,7 +942,6 @@ describe("workspace engine IPC registrations", () => {
     await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "shared" })).resolves.toMatchObject({
       moment: { id: "shared", agentAuthorName: "trip-agent-hosted", afterText: "body" },
     });
-    // A guessed ID outside the imported share has no row in its store.
     await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "hidden-moment" })).resolves.toEqual({ moment: null });
     expect(h.readPolicy).not.toHaveBeenCalled();
     // Restore still needs a capture, which a shared view never has.

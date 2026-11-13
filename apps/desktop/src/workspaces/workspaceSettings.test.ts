@@ -365,8 +365,6 @@ describe("workspace settings file store", () => {
   });
 
   it("an on-disk file from before the files group still parses as stored", async () => {
-    // Files from that time also carry the retired agents group: it is named
-    // as unknown, and the settings beside it still apply.
     const workspace = await openedWorkspace();
     const root = workspace.rootPath;
     await writeWorkspaceSettingsFile(workspace, DEFAULT_WORKSPACE_SETTINGS);
@@ -481,7 +479,6 @@ describe("workspace settings file store", () => {
     expect(result.warning).toBe(
       "This workspace's .dohc is not a folder, so dohc is using default settings. Rename or move it, then try again.",
     );
-    // Its way out works.
     await rename(join(root, ".dohc"), join(root, "moved-aside"));
     expect((await readWorkspaceSettingsFile(squatted)).source).toBe("default");
   });

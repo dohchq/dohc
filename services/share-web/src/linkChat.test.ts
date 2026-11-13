@@ -342,7 +342,6 @@ it("says what to do when the link's messages run out, or the owner blocks or pau
   expect(await refusal(await blocked.post({ body: "Two", idempotencyKey: "post-2" }))).toEqual({ status: 403, body: { ok: false,
     code: "link_discussion_blocked", error: "The owner stopped this link holder from posting. Ask the owner to allow your posts again." } });
 
-  // A pause reads as temporary.
   expect(s.storage.setShareLinkWritesPaused({ shareId: s.shareId, workspaceId: WORKSPACE, actorUserId: OWNER, pausedAtMs: Date.now() })).toBe(true);
   expect(await refusal(await second.post({ body: "Hi", idempotencyKey: "post-1" }))).toEqual({ status: 403, body: { ok: false,
     code: "link_discussion_paused", error: "The owner paused posts from share links. Try again later." } });

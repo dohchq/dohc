@@ -22,11 +22,6 @@ import {
 // scan, so its call count is the render-cost probe for the memo boundaries.
 vi.mock("@dohc/workspace-contracts/chat-mentions", { spy: true });
 
-// The perf contract for chat surfaces: composer drafts live in ChatsView, so
-// a keystroke re-renders the view — but it must not reconcile the message
-// list, whose bodies each re-run the file-token and mention scans. The spied
-// extractChatFileReferenceTokens call count is the probe: it grows only when
-// a message body actually renders.
 describe("chat render cost", () => {
   it("DM composer keystrokes do not re-render the conversation's messages", async () => {
     const user = userEvent.setup();

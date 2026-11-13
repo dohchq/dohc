@@ -1408,8 +1408,6 @@ describe("ChatsView shared channels (MU-C4)", () => {
     );
     cleanup();
 
-    // An ended row whose invitation is still listed is one this workspace
-    // left: the owner did nothing, and Join is the way back.
     bridgeMock.listChatChannelShares.mockResolvedValue(
       shareListing({
         received: [

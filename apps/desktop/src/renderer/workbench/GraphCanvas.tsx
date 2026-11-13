@@ -362,7 +362,6 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
 
   function relight(): void {
     const next = hover >= 0 ? hover : focus;
-    // A cleared light keeps its node until the fade out ends.
     if (next >= 0 && next !== lit) {
       litSet.fill(0);
       litSet[next] = 1;
@@ -403,8 +402,6 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
   function step(now: number): void {
     frame = null;
     if (!visible) return;
-    // With reduced motion the starting places stay still until the settled
-    // picture replaces them. A picture that arrives during a drag waits for the drop.
     if (incoming && !(reduced && held)) {
       // Hand the drawn buffer back; the worker fills it with the next tick.
       const drawn = positions;
@@ -586,13 +583,6 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
       ctx.fill();
     }
 
-    // A label shows once its node is big enough on screen, bigger nodes first,
-    // and fades in or out over FADE_MS, so a still graph has no half-faded
-    // labels. The lit node, the open page and the lit neighbours claim space
-    // first; a label that would overlap a placed one or run off the canvas is
-    // left out, and so is one that would cross another node's dot, unless it
-    // is lit or the open page. A halo in the background colour keeps text
-    // clear of links.
     const fadeAt = Math.pow(2, (display.textFade - 0.5) * 4) * (options.local ? 0.55 : 1.1);
     ctx.font = `12px ${palette.font}`;
     ctx.textAlign = "center";

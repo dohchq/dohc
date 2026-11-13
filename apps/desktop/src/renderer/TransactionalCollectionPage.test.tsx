@@ -157,7 +157,6 @@ function type(field: string, value: string, row = 0): void {
   fireEvent.change(input, { target: { value } });
   fireEvent.keyDown(input, { key: "Enter" });
 }
-/** What a cell says about a change its host has not confirmed, or null. */
 const mark = (field: string, row = 0) => cell(field, row).querySelector("[data-cell-status]")?.getAttribute("data-cell-status") ?? null;
 const why = (field: string, row = 0) => cell(field, row).querySelector("[data-cell-status]")?.getAttribute("title") ?? null;
 const press = (key: string) => fireEvent.keyDown(grid(), { key });

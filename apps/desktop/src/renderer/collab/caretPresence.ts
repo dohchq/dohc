@@ -1,14 +1,5 @@
 import type { Awareness } from "y-protocols/awareness";
 
-// Remote collaboration carets (CollaborationCaret, editor/MarkdownEditor.tsx).
-// docPresence.ts already binds an Awareness to the doc for exactly this:
-// "the Awareness lives on the doc so a future CollaborationCaret can render
-// remote cursors." This module is the small, pure piece that extension needs
-// from us — a stable color per Yjs clientID, and a friendly fallback name for
-// a peer whose awareness user field has no real display name yet — kept
-// separate from docPresence.ts so it has no dependency on the presence
-// transport and is trivial to unit test.
-
 // Muted, brand-adjacent hues (warm paper + graphite) — deliberately not
 // rainbow. Picked at a saturation/lightness band that reads as a clear
 // border on both the light paper background and the dark graphite

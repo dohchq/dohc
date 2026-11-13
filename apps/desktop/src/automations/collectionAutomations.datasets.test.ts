@@ -116,7 +116,6 @@ describe("Collection automations on a dataset", () => {
     expect(executor.locate(AUTOMATION)).toBeNull();
     resume.resolve();
     await expect.poll(() => f.claims()[0]?.state).toBe("pending");
-    // Another claim notification must not settle the temporarily missing source.
     executor.notifyClaimed();
     await expect.poll(() => releases).toBeGreaterThanOrEqual(2);
     expect(f.claims()[0]?.state).toBe("pending");

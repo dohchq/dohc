@@ -66,8 +66,6 @@ describe("protected write copies", () => {
     await expect(copies.read(id)).rejects.toThrow(`dohc could not read ${PROTECTED_COPIES_PATH}/${id}.json.`);
   });
 
-  // #3496: right after launch, the sync client's first request closes the
-  // engine's binding and opens it again. A list in between showed a red toast.
   it("lists kept changes while the engine opens the workspace again", async () => {
     const opens = fakeLocalStateOpens();
     const workspace = { workspaceId: "protected-copy-reopen", rootPath: await createTestScratch("protected-copy-") };

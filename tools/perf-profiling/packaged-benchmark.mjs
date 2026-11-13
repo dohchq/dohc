@@ -743,7 +743,6 @@ async function press(page, name, texts) {
   void settled.catch(() => {});
   return { settled };
 }
-// Process snapshots and the case's journal size, about once a second, until the run settles.
 async function sampleDuring(settled, pid, root, automation) {
   let done = false;
   const finished = settled.then(() => { done = true; }, () => { done = true; });

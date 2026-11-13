@@ -42,7 +42,6 @@ test('link index readiness waits through startup refusal and indexing without hi
   await assert.rejects(linkIndexReady(page, 'workspace'), /unrelated failure/);
 });
 
-// A jsdom window with a fake clock. Frames and timers only advance through step() and frame().
 function fakePage(t, html) {
   const require = createRequire(new URL('../../apps/desktop/package.json', import.meta.url));
   const { JSDOM } = require('jsdom');

@@ -1,11 +1,4 @@
 #!/usr/bin/env node
-// Renders the build SVGs to PNGs with the repo's installed Playwright
-// chromium. Run from apps/desktop:
-//   node scripts/render-icon.mjs
-// Windows uses icon.ico and Linux uses icon.png, both from icon.svg. The
-// Windows and Linux tray uses the light/dark variants selected at runtime.
-// macOS uses icon.icns, packed by iconutil from icon-mac.svg, so it runs
-// only on a Mac.
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

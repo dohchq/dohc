@@ -345,11 +345,6 @@ describe("grantDmRecipients", () => {
 });
 
 describe("peekReceivedGrantKind", () => {
-  // The share-log GET paginates raw relay rows before the share filter, so the
-  // first page of a normal owner log (workspace.init THEN chat.channel.create)
-  // is served empty with hasMore=true. The peek must page nextCursor until the
-  // first served op — the create bootstrap — appears; matching the relay's real
-  // {ops, nextCursor, hasMore} response shape.
   it("pages past a filtered prefix and detects kind:dm on the first served op", async () => {
     const pages = new Map<number, ShareLogPage>([
       // since=0: workspace.init is filtered out → empty page, cursor advances.
@@ -1613,15 +1608,6 @@ describe("createLastKnownDmRequestLanesCache / classifyDmRequestsWithFallback", 
     expect(cache.get("workspace-b")).toEqual(laneB);
   });
 
-  // Security: the cache write happens after classify()'s
-  // own awaits — a session transition (account switch) can land while an
-  // old account's classify is still in flight. Without the generation
-  // guard, that stale result would repopulate the cache right after the
-  // transition just cleared it, silently reopening the round-4/5
-  // cross-account leak. This drives the exact sequence: start sync as
-  // account A, transition to B mid-await (bump the generation and clear the
-  // cache, exactly as main.ts's clearCachedCredentials does), then resolve
-  // A's classify — the cache must stay empty.
   it("drops the cache write if the credential generation changed mid-classify (a session transition raced the poll)", async () => {
     const cache = createLastKnownDmRequestLanesCache();
     let generation = 1; // account A

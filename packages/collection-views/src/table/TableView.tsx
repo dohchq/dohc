@@ -471,7 +471,6 @@ function createNewRow() {
     drop(field: string) {
       if (cells.delete(field)) tell();
     },
-    /** Says the host's words for a value the row gave back, until the next value is typed or the row is saved. */
     say(reason: string) {
       if (!row) return;
       row = { ...row, note: { state: "said", reason } };
@@ -682,10 +681,6 @@ interface EditingCell extends TableCell {
   left: number;
 }
 
-/**
- * One field's header: its name sorts the table. The tooltip state for a
- * mark's words lives here, so showing them renders this header alone.
- */
 function FieldHeader(props: {
   name: string;
   type: FieldDefinition["type"];
@@ -1204,11 +1199,6 @@ export function TableView({
     else if (field.type !== "button") scrollRef.current?.focus({ preventScroll: true });
   };
 
-  /**
-   * The keys of a selected cell of the new row. They are a row's keys, with
-   * these differences: the row holds what is typed until it is saved, and a
-   * key that takes the cursor out of the row saves it.
-   */
   const onNewRowKeyDown = (event: KeyboardEvent<HTMLDivElement>, column: number) => {
     const { key } = event;
     const field = fields[column];

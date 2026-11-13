@@ -61,7 +61,6 @@ describe.skipIf(process.platform !== "win32")("Windows run-store replacement", (
     const reading = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
     let held = false;
-    // A read opens the file with numeric flags; a write opens a temporary name.
     io.open.mockImplementation(async (file, flags, mode) => {
       if (file === path && typeof flags === "number" && !held) {
         held = true;

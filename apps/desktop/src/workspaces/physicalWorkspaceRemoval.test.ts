@@ -170,7 +170,6 @@ it("leaves no grant behind when a Trust is given while Forget runs", async () =>
   await h.trustIt();
   let late: Promise<boolean> | undefined;
   h.writeText.mockImplementationOnce(async (file, text) => {
-    // Another window's Trust holds the workspace until it is written.
     late = h.owner.withAuthority("workspace", () => h.trustIt());
     h.files.set(file, text);
   });

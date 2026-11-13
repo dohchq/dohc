@@ -53,7 +53,6 @@ export function createAgentRunStateStore(
 const listenToNothing = () => () => undefined;
 const idle = () => false;
 
-// Nothing is read or shown until the workspace is ready in this window.
 export function useAgentRunActive(
   workspaceId: string,
   workspaceIsReady: boolean,

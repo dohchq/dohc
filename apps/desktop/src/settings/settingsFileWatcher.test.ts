@@ -78,7 +78,6 @@ describe("settings file watcher", () => {
     vi.advanceTimersByTime(150);
     onChange.mockClear();
 
-    // An editor's save: a temporary file, a rename onto the file, a touch.
     settingsWatch.emit("dohc-settings.json.tmp-1");
     settingsWatch.emit("dohc-settings.json");
     vi.advanceTimersByTime(100);

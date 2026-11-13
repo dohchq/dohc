@@ -21,9 +21,7 @@ export function startRelayWatch(input: {
   watched: (value: boolean) => void;
 }) {
   const lifetime = new AbortController();
-  // The newest cursor, until the worker takes it. A stuck one backs off first.
   let next: { since: number; stuck: boolean } | undefined;
-  // The cursor the worker waits past, until it reports a change.
   let watching: number | undefined;
   let read: AbortController | undefined;
   let wake: (() => void) | undefined;

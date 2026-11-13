@@ -1302,7 +1302,6 @@ describe("the builder's If", () => {
     const mode = screen.getByRole("combobox", { name: "Step 2, if" }) as HTMLSelectElement;
     expect(document.activeElement).toBe(mode);
     expect(mode.value).toBe("rows");
-    // An If always has a condition, so it offers no Always.
     expect(within(mode).getAllByRole("option").map((option) => option.textContent)).toEqual(["Fields match", "Formula"]);
     await user.selectOptions(screen.getByRole("combobox", { name: "Step 2, condition 1, field" }), "Status");
     await user.selectOptions(screen.getByRole("combobox", { name: "Step 2, condition 1, value" }), "Done");
@@ -2278,7 +2277,6 @@ describe("the builder's people", () => {
     // Bob gets Edit on Tasks, so a run could no longer post in the direct message.
     bridge.listAutomationPeople.mockResolvedValue({ status: "listed", people: PEOPLE.map((person) =>
       person.userId === "user-ana" ? { ...person, dmStopped: stopped } : person) });
-    // A reply for another workspace reads nothing.
     act(() => holdListeners.forEach((listener) => listener({ workspaceId: "ws-2" })));
     const before = bridge.listAutomationPeople.mock.calls.length;
     act(() => holdListeners.forEach((listener) => listener({ workspaceId: "ws-1" })));

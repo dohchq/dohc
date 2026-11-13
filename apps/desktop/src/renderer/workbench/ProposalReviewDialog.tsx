@@ -14,13 +14,6 @@ import {
   computeTextDiff,
 } from "./unifiedDiff";
 
-// The granter's review of one recipient's submitted changes.
-// Modelled on ConflictReviewDialog: a notice opens it, it reads its own
-// window under a liveness token, and it decides one thing.
-//
-// `proposal` is the code and storage word for what the user sees as
-// "changes" — one name for one thing on screen, and the wire keeps its own.
-
 // The name the granter reads. A submitter whose email the relay could not
 // state reads the same way the share banner names an unknown account.
 export function proposerName(
@@ -67,11 +60,6 @@ type ContentState =
   | { status: "error"; message: string }
   | { status: "ready"; currentText: string | null; incomingText: string | null };
 
-// One file of the review, closed until the granter opens it.
-//
-// Opening is what fetches the content. A review of a repository-sized folder
-// lists thousands of these, and fetching every file's two sides to show that
-// list is what made such a review impossible to open at all.
 function ProposalFileSection(props: {
   workspaceId: string;
   proposalId: string;
@@ -306,12 +294,6 @@ export function ProposalReviewDialog(props: {
           >
             Finish later
           </button>
-          {/* Decline is the safe exit, so nothing about reading the changes
-              can take it away. It moves nothing into this workspace, and a
-              granter who cannot see a proposal must still be able to refuse
-              it — otherwise the only way out is ending the share, which
-              discards work without asking. Accept is the opposite: it writes,
-              so it stays disabled until the review actually loaded. */}
           <button
             type="button"
             data-testid="proposal-review-decline"

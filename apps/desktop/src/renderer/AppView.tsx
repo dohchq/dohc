@@ -63,7 +63,6 @@ export function useAppView(options: {
   enabled: boolean;
   visible: boolean;
   focused: boolean;
-  // Changes each time the person presses the app's tab. 0 until then.
   focusRequest: number;
   approvals: number;
   holdFocus: boolean;
@@ -77,7 +76,6 @@ export function useAppView(options: {
   const downloadId = `app-view-download:${viewId}`;
   const [state, setState] = useState<ViewState>({ status: "checking" });
   const [loading, setLoading] = useState(false);
-  // The first load finished, so the app has painted. Until then the webview shows dohc's paper.
   const [painted, setPainted] = useState(false);
   const [publicationId, setPublicationId] = useState<string | null>(null);
   const theme = useColorScheme();

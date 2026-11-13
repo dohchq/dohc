@@ -495,7 +495,6 @@ export async function ownerDesktopTransport({standalone, link}: {standalone: boo
     });
     const handoffsBeforeStop = handoffCount;
     const stoppedRequests = vi.spyOn(singleton,"sendRequest");
-    // The desktop publishes its own journal. Until the old settlements reach the relay, the fence commits nothing.
     expect(await stop()).toEqual({kind: "pending",reason: "publication-pending"});
     expect(native.prepare("SELECT COUNT(*) AS n FROM live_restore_fences").get()!.n).toBe(0);
     expect(await publish()).toBeGreaterThan(0);

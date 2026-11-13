@@ -33,8 +33,6 @@ export function ScheduleHostRow(props: { workspaceId: string; onError?: (message
   const takeOverRef = useRef<HTMLButtonElement | null>(null);
   const cancelRef = useRef<HTMLButtonElement | null>(null);
   const computerRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  // The computer the list's one tab stop is on: the focused one once focus
-  // moves, and the chosen one until then.
   const [focusedId, setFocusedId] = useState<string | null>(null);
   const warningId = useId();
 

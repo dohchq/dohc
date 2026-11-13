@@ -752,7 +752,6 @@ describe("workspaceActivity cloud sync nudge", () => {
   });
 
   describe("the Collections wait across signing in and out", () => {
-    // Signing in attaches this engine; it knows nothing about the wait.
     const syncEngine = () => ({
       start: async () => {}, queueSync: () => {}, queuePull: () => {}, queueWatchedUpload: () => {}, retryNow: async () => undefined, pushRecorded: async () => undefined, catchUp: async () => undefined, stop: async () => {},
       snapshot: () => ({

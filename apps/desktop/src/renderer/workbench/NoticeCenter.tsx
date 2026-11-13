@@ -2005,7 +2005,6 @@ export function NoticeCenter(props: {
   const setAsideUnread = setAsideKey !== null && !localRead.has(setAsideKey);
   const keptTypingUnread = keptTypingKey !== null && !localRead.has(keptTypingKey);
   const unreadLocal = unreadNotices.length + (setAsideUnread ? 1 : 0) + (keptTypingUnread ? 1 : 0);
-  // Every row counts until it is read.
   const count = unreadLocal + unreadSent;
   const canReadAll = unreadLocal > 0 || (unreadSent > 0 && props.onReadAllSentNotices !== undefined);
   // Reading a row of this computer's keeps the row and closes its toast. A
@@ -2069,7 +2068,6 @@ export function NoticeCenter(props: {
   const sentToast = props.sentNoticeToast ?? null;
   const sentToastKey = sentToast ? sentKey(sentAccount, sentToast.notice) : null;
   const { onHideSentNoticeToast } = props;
-  // A failure's toast stays until it is closed; any other fades.
   const sentToastFails = sentToast !== null && isFailure(sentToast.notice);
   const sentToastFades = sentToast !== null && !sentToastFails;
   const sentToastRetries = sentToast !== null && (retriesRun(sentToast.notice) || sentToast.retryable) && Boolean(props.onRetrySentNotice);
@@ -2135,12 +2133,6 @@ export function NoticeCenter(props: {
 
   return (
     <>
-      {/* One stack in the window's bottom-right corner: the toasts lay
-          themselves out in order instead of counting row heights. Opening
-          Notices hides it — every row is in the panel, and a toast must never
-          sit over it. A corner host renders the stack at the body, outside
-          its fixed wrapper's stacking context, so the toasts rise above
-          dialogs there too. */}
       {open ? null : inToastLayer(host, (
         <div ref={toastsRef} data-testid="notice-toasts" data-dohc-toasts className={TOAST_STACK_CLASS[host]}>
           {errorToast ? (
@@ -2488,7 +2480,6 @@ export function NoticeCenter(props: {
             ) : null}
           </header>
           {localCount === 0 && sentNotices.length === 0 ? (
-            // Nothing to say until the first list of sent notices answers.
             props.sentNoticesLoading ? null : (
               <div className="flex h-20 items-center justify-center gap-2 px-3 text-subtle">
                 <Check size={14} aria-hidden />

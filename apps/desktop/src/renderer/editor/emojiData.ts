@@ -1,14 +1,3 @@
-// Built-in `:shortcode:` emoji table for the editor's emoji autocomplete
-// (emojiTrigger.ts + EmojiPicker.tsx). Not a dependency — a small curated
-// list (~300 entries) of common emoji with GitHub-style shortcodes plus a
-// few search keywords each, covering smileys, gestures, hearts, animals,
-// food, objects, symbols, and a handful of flags.
-//
-// Shape is intentionally not shared with PageIdentity.tsx's `EMOJI_CHOICES`:
-// that's a flat array of bare emoji strings for a browse-only grid with no
-// search, so there's nothing to share beyond "these are also emoji". If
-// PageIdentity ever grows shortcode search, this module is the place to pull
-// from.
 export type EmojiEntry = {
   emoji: string;
   /** Canonical GitHub-style shortcode, no colons (e.g. "smile"). */

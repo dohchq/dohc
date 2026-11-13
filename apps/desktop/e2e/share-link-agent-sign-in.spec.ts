@@ -134,8 +134,6 @@ test("@share-link-agent-sign-in an agent signs in to a share link, keeps working
     expect(address).toBe(`${sharedDatasetViewerOrigin}/mcp/s/${secret}`);
     await closeDialog(dialog);
 
-    // 1. Register, consent, token, and a tool call: the agent reads the
-    // linked file, and only it.
     const claude = await signInLinkAgent({ handle, browser: shared.browser, callback, address, clientName: "Claude Code" });
     const codex = await signInLinkAgent({ handle, browser: shared.browser, callback, address, clientName: "Codex" });
     const listed = await claude.tool("dohc_list_files");

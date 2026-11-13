@@ -170,8 +170,6 @@ export function EngineMomentDiffPage({
   // Only the newest read may set what the page shows; a newer History answer
   // or Try again makes every earlier read stale.
   const readToken = useRef(0);
-  // The change the page has an answer for. Reading it again keeps that
-  // answer on screen until the new one arrives.
   const answeredFor = useRef<string | null>(null);
   // A restore request from the shell is settled only by a read issued after
   // it arrived: History's rules may hide the change since the page last read.

@@ -12,9 +12,6 @@ export const CRASH_REPORT_HEADER = "dohc crash report";
 // The desktop caps a report at 32,768 UTF-16 code units, which is at most
 // 96 KiB of UTF-8.
 export const CRASH_REPORT_MAX_BYTES = 96 * 1024;
-// Before a 413, the server reads and throws away the rest of an oversized
-// upload, until it has read this many bytes in all, made this many reads, or
-// spent this long. See tooLarge.
 export const CRASH_REPORT_DRAIN_MAX_BYTES = 1024 * 1024;
 export const CRASH_REPORT_DRAIN_MAX_READS = 1024;
 export const CRASH_REPORT_DRAIN_MAX_MS = 10_000;
@@ -153,7 +150,6 @@ export function createCrashReportIntake(deps: {
     }
   }
 
-  // Seconds until the oldest entry that blocks this client leaves the window.
   function retryAfter(now: number, client: string | null): string {
     const oldest = client === null ? accepted[0] : accepted.find((entry) => entry.client === client);
     return String(Math.max(1, Math.ceil(((oldest?.atMs ?? now) + HOUR_MS - now) / 1000)));
@@ -248,9 +244,6 @@ async function readAtMost(
   return "too-large";
 }
 
-// Reads and throws away the rest of an upload until it ends, `total` reaches
-// CRASH_REPORT_DRAIN_MAX_BYTES, it has made CRASH_REPORT_DRAIN_MAX_READS
-// reads, or `maxMs` runs out.
 async function drain(reader: ReadableStreamDefaultReader<Uint8Array>, total: number, maxMs: number): Promise<void> {
   // Releasing the lock rejects the read in progress. A race against one
   // promise that lasts the whole drain would keep every chunk until it ended.

@@ -1,41 +1,4 @@
 #!/usr/bin/env node
-// The Rust gate, shared by local verification and CI. It runs the Rust
-// policy checks and prints a timestamped evidence line the integrator pastes
-// into the pull request.
-//
-// Requirements: Node >= 22, zero npm dependencies. Windows-first — works from
-// PowerShell and Git Bash (spawns through the platform shell).
-//
-// Steps: native target (see below), fixture drift, cargo fmt --check, cargo
-// clippy -D warnings, the workspace test run including crash recovery (cargo
-// nextest), the Markdown reader regressions over a built reader, the doctest
-// run (nextest runs no doctests by design), the
-// shipping-default daemon build, then cargo-deny / cargo-audit IF
-// installed (skip-with-warning when absent, never fail on a missing tool).
-//
-// A REQUIRED step that SKIPs fails the verdict: a gate that silently drops a
-// row is how the fault-injection tests went unrun for a month. Optional tools
-// may still skip.
-//
-// BUDGET: see the `budget` block below.
-//
-// PROVENANCE: the run reads the tree at every step boundary and stamps the
-// commit into both the summary block and the evidence line. A verdict that
-// cannot name the tree it examined is not evidence — two concurrent runs
-// sharing one worktree produced PASS and FAIL for the same commit, and neither
-// log could say which tree it had read. HEAD moving mid-run FAILS the verdict,
-// and so does the worktree changing under it, and so does a HEAD that moved
-// and returned inside one step — the reading carries the HEAD reflog, which
-// records that even when both ends name the same commit. A tree already dirty
-// when the run starts is recorded, not failed, because running the gate over
-// uncommitted work is the normal local loop and a check that forbids it just
-// gets removed. Recorded is the point: the reader learns the sha does not
-// describe everything that ran.
-//
-// Usage:
-//   node tools/rust-engine-program/run-rust-checks.mjs
-// Exit code is non-zero if any REQUIRED step fails (optional tool skips do not
-// fail the run).
 
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -67,13 +30,6 @@ const policyOnly = process.argv.includes("--policy-only");
 const resultIndex = process.argv.indexOf("--result");
 const resultPath = resultIndex < 0 ? null : resolve(process.argv[resultIndex + 1]);
 
-// The machine's build budget. On the shared dev box the gate refuses to
-// start under the free-space floor, takes one of the four build slots before
-// any cargo runs, and caps its compiler and test parallelism to its share of
-// the cores. A single-tenant host (CI)
-// has no slot root and runs uncapped. Incremental compilation is off on both:
-// a full-workspace gate never reuses incremental caches, it only pays their
-// disk — the dev loop keeps its own setting.
 const budget = resolveBuildBudget();
 if (budget) {
   const free = freeDiskGb(repoRoot);
@@ -97,13 +53,6 @@ if (budget) {
   }
 }
 const slot = budget ? await acquireBuildSlot(budget) : null;
-// The caps ride process.env so every child sees them — including the
-// native-target probe, which spawns its own cargo. A snapshot handed to
-// spawnSync would REPLACE the child environment and silently drop whatever
-// this file exports after the snapshot; that defect shipped once and made
-// the scratch-leak row vacuous. Jobs and test threads preserve stricter
-// caller caps and clamp larger or invalid values; incremental is always off — a full-workspace run
-// never reuses incremental caches, it only pays their disk.
 process.env.CARGO_INCREMENTAL = "0";
 if (budget) {
   const capped = capBuildParallelism(process.env, budget.jobs);

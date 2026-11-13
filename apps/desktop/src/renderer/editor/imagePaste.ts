@@ -33,20 +33,6 @@ const DEFAULT_ATTACHMENT_SETTINGS: AttachmentSettings = {
   folderName: DEFAULT_ATTACHMENT_FOLDER,
 };
 
-// Coerces a stored folder name to a single path segment the writer will accept.
-//
-// The folder name is user input that becomes one segment of the write path, so
-// "safe" here means exactly one thing: whatever we return, writeWorkspaceAsset
-// must accept. The main process runs every write through validateUserWritePath,
-// which rejects more than traversal — reserved names (`.dohc`,
-// `shared-with-me`), ignored ones (`node_modules`, `.git`), percent-encoded
-// traversal (`%2e%2e`), and Windows dot/space aliases. Re-deriving that list
-// here would drift; instead we ask the same validator, and require the path it
-// normalizes to be the segment we passed in (so a name that decodes into
-// several segments, like `a%2fb`, is rejected rather than quietly widening the
-// target). Anything it refuses falls back to "assets" — a rejected name must
-// degrade to the default, never make every paste fail its write and silently
-// drop the image.
 export function sanitizeAttachmentFolderName(name: string): string {
   const trimmed = name.trim();
   if (trimmed.length === 0) return DEFAULT_ATTACHMENT_FOLDER;

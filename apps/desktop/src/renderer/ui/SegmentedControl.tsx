@@ -46,8 +46,6 @@ export function useRadioGroup<T extends string>(props: {
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (props.disabled || props.options.length === 0) return;
-    // The arrows move from the focused radio. The checked one can be disabled
-    // or absent, and then the tab stop is where the person started from.
     const focused = optionRefs.current.indexOf(event.target as HTMLButtonElement);
     const from = focused >= 0 ? focused : tabbableIndex;
     let target: number;

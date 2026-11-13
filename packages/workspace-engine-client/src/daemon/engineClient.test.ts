@@ -3851,12 +3851,6 @@ describe("EngineClient", () => {
     });
   });
 
-  // AUDIT-KILLREC. A client that died because the daemon crashed and a client
-  // the desktop deliberately closed are not the same condition: the first is a
-  // relaunching daemon that callers must retry through (isTransportError gates
-  // every rebind path), the second is a shutdown they must not. Reporting a
-  // bare "closed" for both made a hard daemon kill abandon a recoverable
-  // restart and permanently kill the editor's Y.Doc session.
   it("keeps reporting the transport failure that closed it, not a bare closed", async () => {
     const peer = new FakePeerConnection();
     const transport = client(peer);
@@ -3912,8 +3906,6 @@ describe("EngineClient", () => {
     });
     await pending;
 
-    // Traffic for an ordinary caller, not a probe: exactly the frames that
-    // arrive while a probe waits its turn behind them.
     expect(transport.inboundActivity()).toBeGreaterThan(beforeWork);
   });
 

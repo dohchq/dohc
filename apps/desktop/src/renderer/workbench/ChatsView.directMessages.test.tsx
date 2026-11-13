@@ -1302,11 +1302,6 @@ describe("ChatsView direct messages", () => {
   });
 });
 
-// The DM polls and the workspace activity event both refresh the list, but
-// only the polls may pull the owner's relay log. A refresh an activity event
-// caused must not, or the pull's own events would refresh again while the
-// desktop sits idle. A failed sync holds the syncs nobody asked for instead
-// of running a queued one the moment it ends.
 describe("ChatsView DM polling", () => {
   const idle = { available: true, dms: [], pending: [], declined: [], failed: false };
 

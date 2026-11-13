@@ -20,9 +20,6 @@ type Item =
   | { type: "row"; key: string; row: ChatRowData }
   | { type: "state"; key: string };
 
-// Chats in a signed-in build: the header, with the switcher and Settings, then the open workspace's groups, people and
-// agents, as the server lists them, unread by the account's read marks. A chat opens its stream. The list reads again
-// when the feed reports a chat change, as when a mark from this phone or the account's computer reaches the server.
 export function ServerChats() {
   const theme = useTheme();
   const { current } = useWorkspaces();
@@ -85,7 +82,6 @@ function ChatList({ workspaceId, workspace, onScrolled }: { workspaceId: string;
     });
   }, []);
   const open = useCallback((row: ChatRowData) => router.push({ pathname: "/chat/[id]", params: { id: row.id, name: row.name } }), [router]);
-  // Until the first answer, one row's height, or Try again once a read has failed; then the empty line, if it's empty.
   const placeholder = state.value ? <EmptyLine text={workspaceWords.noChats} /> : state.problem ? <RetryRow label={failed} onRetry={retry} /> : <HoldRow />;
   return (
     <LegendList

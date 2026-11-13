@@ -219,11 +219,6 @@ test("owner + participant chat and co-presence converge in the real app", async 
     const { shareId, channelWireId } = await grantedShare(page, workspaceId);
     expect(channelWireId.length).toBeGreaterThan(0);
 
-    // --- (e1) CHANNEL-level co-presence: the participant appears in the owner's
-    // real app, and the participant's own relay view converges on the owner. The
-    // owner publishes channel presence while viewing the channel, so poll the
-    // participant's publish until it sees the owner (bidirectional convergence).
-    // Test auth labels accounts with their user IDs; published state carries no identity.
     let sawOwner = false;
     await expect
       .poll(

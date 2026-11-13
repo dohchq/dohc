@@ -48,7 +48,6 @@ type OffsetAt = (instant: number) => number;
 
 const offsetClocks = new Map<string, OffsetAt>();
 
-/** This computer's ICU does not know a schedule's time zone. */
 export class UnknownTimeZoneError extends Error {
   constructor(readonly timeZone: string) {
     super(`This computer does not know the time zone "${timeZone}".`);

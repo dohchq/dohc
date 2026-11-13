@@ -26,11 +26,6 @@ export function useCloudPresence(
   // per render would churn the presence channel.
   const [presenceClientId] = useState(() => crypto.randomUUID());
 
-  // MU-C5 presence: track the signed-in relay session for this workspace. The
-  // request token + workspaceId key uphold the no-repaint invariant — a slow
-  // cloud-status response for workspace A must never set state after a switch
-  // to B. `refreshCloudStatus` is also called when the cloud dialog closes so a
-  // fresh sign-in lights presence up without waiting for a workspace switch.
   const cloudStatusToken = useRef(0);
   // A workspace still taking in files is busy, not unreadable: its refusal
   // keeps the last status, and the next workspace activity reads again. An

@@ -232,7 +232,6 @@ it("waits quietly while the account has its maximum of open follows, then resume
   vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
   try {
     await act(async () => follows.at(-1)!.answer({ok: false, error: "too many follow requests", code: "share_access_rate_limited"}, 429));
-    // Advance until the backoff timer exists and fires the next follow.
     await settle(() => {vi.advanceTimersByTime(1_000); return follows.length === 2;});
     expect(follows.at(-1)!.since).toBe("10");
     expect(container.querySelector(".chat-follow-status")).toBeNull();

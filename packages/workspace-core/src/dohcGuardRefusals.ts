@@ -1,21 +1,3 @@
-// The words every guard on a workspace's own .dohc paths refuses with.
-//
-// Three surfaces guard a workspace's internal paths: the desktop main
-// process, the MCP server, and the engine client's session preparation. They
-// answered in four different ways. Two returned a raw errno ("EEXIST: file
-// already exists, mkdir …"); one wrote developer prose ("workspace trash
-// directory is a symlink"); the engine client said "must not be a symlink"
-// about a plain file and printed the absolute host path. None names the
-// constraint and the way out, and the refusals that did
-// name a constraint disagreed on whether the thing at the path is a "folder"
-// or a "directory".
-//
-// The copy lives here once so it cannot drift: one noun, one shape, every
-// surface.
-//
-// The shape, per the dohc-interface skill: what dohc could not do, what is at the
-// path and what it must be, one instruction, then retry.
-
 // What a guard learned from lstat. Structural, so node:fs Stats satisfies it
 // and this module stays free of a filesystem import. lstat only: a symlink
 // must read as a link, never as what it points at.

@@ -71,7 +71,6 @@ async function deleteComment(input: {
   );
 }
 
-// Comments stay closed until the reader opens them, and a reload closes them again.
 async function openComments(page: Page): Promise<void> {
   await page.getByRole("button", { name: "Comments", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Comments", exact: true })).toBeVisible();

@@ -153,10 +153,6 @@ export function useSentNoticeProps(input: {
     () => (sentNotices?.notices ?? []).filter(notice => !isRefusalNoticeKind(notice.kind) || notice.workspaceId !== workspaceId).map(describe),
     [describe, sentNotices?.notices, workspaceId],
   );
-  // An agent run the person can already see in its chat posts no toast. A
-  // notice names its reply only when the run finished with one; that notice
-  // leaves no row once the dismiss lands. A failed run's notice says why in
-  // its body, and its row stays, read, for Copy and Try again.
   const seenRun = useMemo(() => {
     const notice = sentNotices?.toast;
     const run = notice ? agentRunOfNotice(notice, workspaceId) : null;
@@ -238,15 +234,6 @@ export function useSentNoticeProps(input: {
     [reportShellError, sentNotices],
   );
 
-  // Where Open goes: the notice's file here, the workspace that holds it,
-  // or the share it came through. An automation's notice here goes to the
-  // ⚡ panel, on its switch with `controls`, else on its runs. A Group
-  // invitation or message request goes to Chats in a workspace of this
-  // person's own, where it waits with Join or Accept. A failed lookup goes to
-  // the shell's errors, whose Try again goes where Open goes again; any
-  // other outcome takes that error back. A lookup that answers once the
-  // person has left this workspace, or after a later Open of the same notice
-  // started, opens nothing, as a cancelled Open does.
   const workspace = useRequestSequence([workspaceId]);
   const latestOpens = useRef(new Map<string, number>());
   const go = useCallback(

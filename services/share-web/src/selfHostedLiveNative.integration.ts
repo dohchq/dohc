@@ -502,7 +502,6 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
       attribution: {actorKind: "automation", onBehalfOf: automation.onBehalfOf, depth: automation.depth}};
     const admittedSnapshot = (deliveryId: string) => JSON.parse(String((relayRead.prepare(
       "SELECT author_snapshot_json FROM sync_relay_live_update_journal WHERE delivery_id=?").get(deliveryId) as {author_snapshot_json: unknown} | undefined)?.author_snapshot_json ?? "null"));
-    // The audit settlement whose interval holds exactly this receipt.
     const settlementOf = (receipt: {journalCursor: number}, previousCursor: number, markdown: string) => vi.waitFor(() => {
       const settlement = auditSettlements().find(({record}) => record.previousCursor < receipt.journalCursor && receipt.journalCursor <= record.terminalCursor);
       expect(settlement).toBeDefined();
@@ -602,11 +601,6 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     const personalSettlement = await settlementOf(personalAck, automationAck.journalCursor, personalMarkdown);
     await publication(personalSettlement, [personal]);
 
-    // Publication credits each interval with the relay-admitted authors in
-    // History's flat form: the snapshot person and the declared agent, never
-    // the grant authority, and the personal agent on behalf of its owner. The
-    // service keeps the same credit that owner devices import.
-    // Import marks the relay-admitted person confirmed; the admitted snapshot carries no marker.
     const importedHuman = {...human, relayConfirmed: true};
     const declaredCredit = [
       {momentId: agentSettlement.record.momentId, imported: [agent, importedHuman]},
@@ -904,10 +898,6 @@ async function openSelfHostProof(name: string) {
       get storage() {return storage;},
       /** Stops the running daemon, as when it loses an engine reply. The supervisor starts another. */
       retire: () => live().close(),
-      /**
-       * Restarts the relay process: stops the supervisor and its daemon, closes
-       * relay storage, reopens it from its durable files, and starts the supervisor again.
-       */
       restartRelay: async () => {await stopSupervisor(); deployment!.storage.close(); openRelay(); await startSupervisor();},
       /** Whether browsers are told live editing of the document is unavailable, as the relay's `main.ts` decides it. */
       sessionHostBlocked: (document: {workspaceId: string; objectId: string}) =>
@@ -1134,12 +1124,6 @@ it("settles a live edit whose application reply was held when Stop reached the h
   return {cursor, acceptedCursor: stop.acceptedCursor};
 }), 120000);
 
-// The engine applies a live edit and its daemon goes before the relay records
-// it. The owner stops while no daemon runs, and the relay refuses, changing
-// nothing: no daemon can deliver and prepare the activation. Once a daemon
-// runs again, the owner's second Stop settles the edit from the relay's
-// journal and the engine's record. An absent host accepting the first Stop is
-// no longer covered.
 it("settles a live edit its daemon applied before it went, after a refused Stop no daemon saw and a retry, then parks (no Stop accepted without a daemon)", () => withSelfHostProof("self-host-stop-restart", async proof => {
   const markdown = await proof.markdownWith("beforeRestart", "live");
   const held = proof.holdApplication();
@@ -1162,9 +1146,6 @@ it("settles a live edit its daemon applied before it went, after a refused Stop 
   return {cursor, acceptedCursor: stop.acceptedCursor};
 }), 120000);
 
-// Deleting the share ends live authority as Stop does, while its enrollment
-// stays enabled until the host lets the document go. As before, the daemon
-// that applied the edit goes first and the one after it settles it.
 it("settles a live edit its daemon applied before it went, after the share was deleted, then parks", () => withSelfHostProof("self-host-share-deleted", async proof => {
   const markdown = await proof.markdownWith("beforeDeletion", "live");
   const held = proof.holdApplication();
@@ -1188,10 +1169,6 @@ it("settles a live edit its daemon applied before it went, after the share was d
   return {cursor};
 }), 120000);
 
-// Deleting the last Edit share cuts off admission at once, as Stop does. The
-// owner's live view, open across the deletion, cannot submit again. The edit
-// the running daemon accepted before it settles into the file, the document
-// parks, and the relay's journal holds nothing after that edit.
 it("refuses a live edit after the share was deleted, and parks with the edit accepted before it", () => withSelfHostProof("self-host-share-deleted-open", async proof => {
   const markdown = await proof.markdownWith("beforeDeletion", "live");
   const accepted = await proof.liveEdit("beforeDeletion", "live");
@@ -1251,12 +1228,6 @@ it("pushes a write the host accepted before it reconnected, while another docume
   return {accepted, waiting: waiting.map(({origin_id, origin_seq, op_kind}) => ({origin_id, origin_seq, op_kind})), reconnected: proof.live().coordinate.connectionId};
 }), 120000);
 
-// Stop retires docs/a.md's activation while docs/b.md stays live. Its output
-// never reaches the relay, so its replica cannot park it and the engine will
-// not release it. The relay restarts inside that retirement, and the reply to
-// the release is lost. Once it retired, its owner edits it on their
-// device, and Resume activates a successor that holds that edit and takes the
-// collaborator's live edit.
 it("retires a stopped document while another stays live, then resumes it as a successor", () => withSelfHostProof("self-host-successor", async proof => {
   const second = await proof.ownerDocument("docs/b.md", "Second\n");
   await bothReady(proof);
@@ -1458,13 +1429,6 @@ it("resumes a document its owner edited while live editing was stopped as a succ
   return {attemptsBeforeResume: before, reports: proof.reports};
 }), 120000);
 
-// The relay side of an owner open. Revoking the Edit share retires a document
-// without a Stop, while a sibling its owner opened stays hosted by their demand
-// and keeps the workspace attached. An edit the owner makes afterwards reaches
-// the relay but no session host, and nothing hosts the document again until an
-// owner open reaches the route. That open enrolls it again, and a successor
-// holds the edit. The desktop side, with the edit queued on the owner's
-// computer, is the `@live-owner-open` e2e.
 it("keeps a document retired without a Stop parked until an owner open reaches the route, which enrolls it as owner demand and starts a successor holding the edit made meanwhile", () => withSelfHostProof("self-host-owner-open", async proof => {
   const saved = proof.activation()!;
   const second = await proof.ownerDocument("docs/b.md", "Second\n");
@@ -1504,12 +1468,6 @@ it("keeps a document retired without a Stop parked until an owner open reaches t
   return {attemptsBeforeOpen: before, reports: proof.reports};
 }), 120000);
 
-// Reclaim, as the host's sweep runs it once the retention period has passed.
-// After the share goes, only the owner's open keeps the document. With no live
-// connection and no edit for that period, the sweep retires its activation and
-// the document parks, keeping its store. An edit the owner makes afterwards
-// reaches the relay but no session host. Their next open enrolls it again, and
-// a successor holds the edit.
 it("reclaims a document only its owner's open keeps once idle past retention, and their next open starts a successor holding the edit made meanwhile", () => withSelfHostProof("self-host-reclaim", async proof => {
   const saved = proof.activation()!;
   expect(await proof.route("POST", {path: "docs/a.md", open: true}))
@@ -1544,13 +1502,6 @@ it("reclaims a document only its owner's open keeps once idle past retention, an
   return {attemptsBeforeOpen: before, reports: proof.reports};
 }), 120000);
 
-// Reclaim, with the owner's open arriving while the document departs. Each
-// request to release its activation fails before it reaches the engine, so
-// its retirement stays open and the host cannot drain it. The replica still
-// parks it, and the host confirms it left before it asks for any release. The
-// owner's open enrolls it again before the drain, and it stays departing. Once
-// a release reaches the engine the activation retires, and a successor holds
-// the edit the owner made after the reclaim.
 it("keeps a reclaimed document departing when its owner's open enrolls it again before the host drains it, then starts a successor holding the edit made meanwhile", () => withSelfHostProof("self-host-reclaim-reopen", async proof => {
   const saved = proof.activation()!;
   expect(await proof.route("POST", {path: "docs/a.md", open: true}))
@@ -1600,11 +1551,6 @@ it("keeps a reclaimed document departing when its owner's open enrolls it again 
   return {attemptsBeforeOpen: before, releasesHeld: held, releases: harness.releases, reports: proof.reports};
 }), 120000);
 
-// Pause fences live admission and retires the document's activation at once,
-// at its seed, before the document parks. Its owner's ordinary edit made while
-// paused then waits for no activation to admit it. Resume through the
-// enrollment route captures once, and a successor of the retired activation
-// holds the edit.
 it("retires a paused document's activation at once, and Resume starts a successor that holds the edit its owner made while paused", () => withSelfHostProof("self-host-paused", async proof => {
   const saved = proof.activation()!, P = saved.activationId, [seed] = proof.journal() as {journal_cursor: number; delivery_id: string; update_digest: string}[];
   expect(proof.journal()).toEqual([journaled({journalCursor: seed!.journal_cursor, deliveryId: seed!.delivery_id, updateDigest: seed!.update_digest})]);
@@ -1748,11 +1694,6 @@ const hostFolder = (proof: SelfHostProof, folder: string) => existsSync(join(pro
 // every character that is not a letter or a digit as a hyphen. An id of up to 96 characters is kept whole.
 const conflictFileName = (path: string, jobId: string) => `${basename(path)}.${jobId.replace(/[^A-Za-z0-9]/g, "-")}.conflict`;
 
-// #3804: a note with several past versions is shared for editing. The host pulls its history, and each
-// version's projection queues a write of the note's file while the pull's page writes the file itself.
-// The note's capture then settled it, and each settle replayed one queued write of a past version: the
-// write conflicted, left that version beside the file as a conflict file, and refused the settle with
-// conflict-stale-target. The note stayed at Preparing for one refused settle per past version.
 it("takes a note with several past versions live without replaying their file writes", () => withSelfHostProof("self-host-long-history", async proof => {
   const from = harness.calls.length, path = "notes/long.md";
   // Its owner types it before anyone shares it: five versions reach the relay.
@@ -1823,12 +1764,6 @@ it("writes no conflict file for a hosted note's queued writes when the engine re
   return {path};
 }), 120000);
 
-// #3793: a note that never activated stayed in its host's replica after live editing ended for it. Its
-// enrollment was never released, and its workspace pulled on every pass until the server restarted.
-// The engine refuses this note's capture as it refuses a first version from before #3805, which names no
-// schema version. The owner's engine now writes that version, so this note stands in for one: its first
-// version names a schema version the engine does not support, which the capture refuses at the same check
-// with the same answer.
 for (const ending of ["its owner stops live editing", "its last link ends"] as const) {
   it(`lets a note go whose capture the engine refuses, once ${ending}`, () => withSelfHostProof("self-host-refused-capture", async proof => {
     const from = harness.calls.length, path = "docs/refused.md";

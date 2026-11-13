@@ -90,7 +90,6 @@ export function AddAgentSheet(props: {
   if (initial === null && start !== null) setInitial(start);
   const [picked, setPicked] = useState<RunsWith | null>(null);
   const choice = picked ?? start;
-  // The name follows the choice until the person types one.
   const [typed, setTyped] = useState<string | null>(null);
   const name = typed ?? newAgentName(props.agents, baseName(choice ?? "mcp"), props.takenElsewhere);
   const [hue, setHue] = useState<AgentHue>(props.hue);

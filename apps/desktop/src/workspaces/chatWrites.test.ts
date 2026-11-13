@@ -344,7 +344,6 @@ describe("chat writes", () => {
       ...(input.parentMessageId ? { parentMessageId: input.parentMessageId } : {}), resolveAttachments: async () => [],
     });
     const woken = () => test.store.sendMessage.mock.calls.map(([input]) => input.wakeAgentIds ?? []);
-    // A post Codex started: a person's reply in it answers Codex.
     test.store.listMessagesPage.mockResolvedValue({ messages: [byAgent("opening", "codex")], nextAfterMessageOrder: 1 });
     await reply();
     // Naming Codex too wakes it once.

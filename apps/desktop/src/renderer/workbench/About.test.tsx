@@ -207,7 +207,6 @@ describe("About Access", () => {
     const result = await screen.findByTestId("about-access-answer");
     expect(result.dataset.freshness).toBe("fresh");
     expect(result.dataset.coverage).toBe("granted");
-    // A fresh answer keeps when it was checked in its head's tooltip.
     expect(screen.queryByTestId("about-access-freshness")).toBeNull();
     expect(screen.getByTitle(`Checked ${formatChatTime(CHECKED_AT).label}`)).toBeTruthy();
     const rows = screen.getAllByTestId("about-access-row");
@@ -1064,7 +1063,6 @@ describe("About Links", () => {
       .mockReturnValueOnce(last.promise);
     view.rerender(<Links revision={1} />);
     await waitFor(() => expect(bridgeMock.linksIn).toHaveBeenCalledTimes(4));
-    // The rows stay until the read holds as many as they are.
     expect(linkRows().map((row) => row.dataset.line)).toEqual(["2", "5"]);
     await act(async () => last.resolve(linksPage([link("notes/gamma.md", 7)])));
     expect(linkRows().map((row) => row.dataset.path)).toEqual(["notes/alpha.md", "notes/gamma.md"]);
@@ -1654,7 +1652,6 @@ describe("About History", () => {
     expect(rows.map((row) => row.dataset.momentId)).toEqual(["run-1", "edit-1", "edit-2"]);
     const fold = screen.getByTestId("engine-moment-run-toggle");
     expect(fold.getAttribute("aria-label")).toBe("3 changes");
-    // The head counts changes, not rows.
     expect(screen.getByTestId("about-history-count").textContent).toBe("6");
     // The run opens in place, its earlier edits under its newest.
     await userEvent.setup().click(fold);

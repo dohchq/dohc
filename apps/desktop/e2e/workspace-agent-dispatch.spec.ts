@@ -226,7 +226,6 @@ test("an agent's reply in Notices opens its conversation at the reply, washed an
       await api.sendChatMessage({ workspaceId, threadId: conversation.id, body: "also audit the export totals" });
     }, workspaceId);
 
-    // With UI_AUDIT_SHOT_DIR set, saves the window in both themes.
     const shots = async (name: string) => {
       const dir = process.env.UI_AUDIT_SHOT_DIR;
       if (!dir) return;
@@ -434,7 +433,6 @@ test("an agent's open question shows Answer, which starts the reply that answers
     await expect(question.getByTestId("chats-lane-decision-open")).toHaveText("Unanswered");
     await expect(question.getByTestId("chats-lane-poll-option")).toHaveCount(0);
 
-    // Answer opens the question's thread with the reply box focused.
     await question.getByTestId("chats-lane-decision-resolve").click();
     const reply = page.getByTestId("chats-lane-thread-composer");
     await expect(reply).toBeFocused();

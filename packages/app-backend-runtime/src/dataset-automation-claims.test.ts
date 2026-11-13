@@ -218,7 +218,6 @@ it("reads which tables a refused change holds without reading its values", () =>
   const f = ledger();
   f.claims.subscribe(scope, subscription("collection:tasks#a", ["added"]));
   f.claims.subscribe(scope, subscription("collection:tags#gone", ["removed"], null, TAGS));
-  // Text that is not UTF-8 is a value the reader refuses.
   expect(f.commit("INSERT INTO tasks VALUES('a',CAST(x'80' AS TEXT),'')").kind).toBe("committed");
   expect(f.db.prepare("SELECT automation_id,state,attempts FROM dohc_dataset_automation_claims").all())
     .toEqual([{ automation_id: "collection:tasks#a", state: "failed", attempts: 0 }]);

@@ -2314,7 +2314,6 @@ describe("trash ladder stop classification", () => {
     expect(classifyLadderProbe(null, { looked: true, now: entry })).toBe("unchecked");
   });
 
-  // A filesystem with no inode to give proves neither sameness nor difference.
   it("says it could not check when the filesystem gives no inode", () => {
     expect(classifyLadderProbe({ ino: 0n, dev: 3n }, { looked: true, now: entry })).toBe(
       "unchecked",
@@ -2415,16 +2414,6 @@ describe("import surfaces a vanished source instead of skipping it", () => {
     }
   });
 
-  // The narrowest instance of the same defect: the check and the copy
-  // disagreed about what "exists" means. `copyFile` Follows the source link and
-  // answered ENOENT for a link whose target is gone; the guard asked `lstat`,
-  // which answers about the LINK, said the source was still there, and let the
-  // ladder shorten the name until the source counted as skipped.
-  //
-  // Mutation: ask `lstat` for the source again and this test fails with a bare
-  // ENOENT that names a path the user can plainly see. No deep folder is
-  // needed for it: every ENOENT is probed before the length arithmetic, so the
-  // over-budget case is the length ladder's own test, not this one.
   it("names a dangling symbolic link instead of skipping it", async () => {
     const base = await mkdtemp(join(tmpdir(), "dohc-dangling-"));
     try {

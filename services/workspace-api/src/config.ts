@@ -67,11 +67,6 @@ export function readConfig(env: NodeJS.ProcessEnv): WorkspaceApiConfig {
     throw new ConfigError("POSTGRES_URL must be set outside development/test.");
   }
 
-  // The /test/device/approve impersonation seam is fail-CLOSED: it requires an
-  // explicit dev/test signal, never merely "not production". An operator who
-  // copies a dev .env (DOHC_TEST_AUTH=1) into a real deployment must crash the
-  // server, not silently expose a full-impersonation endpoint with a
-  // source-visible secret.
   const testAuthSeam = env.DOHC_TEST_AUTH === "1" && isDevOrTest;
   if (env.DOHC_TEST_AUTH === "1" && !isDevOrTest) {
     throw new ConfigError(

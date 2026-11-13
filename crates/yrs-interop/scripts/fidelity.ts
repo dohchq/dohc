@@ -1,22 +1,3 @@
-// Criterion 1 — fidelity corpus (synthetic + harvested) through yrs.
-//
-// For each doc, the JS reference (Yjs 13.6.30 + @dohc/ydoc-projection) and
-// the Rust harness (yrs) must agree on content — canonical doc JSON (maps,
-// text deltas with attributes, full XML tree) and the markdown projection —
-// in both directions:
-//   JS -> Rust: yrs applies the JS-encoded updates (in order and in reverse
-//                order, exercising the pending-update store) and its content
-//                view equals the Yjs view.
-//   Rust -> JS : yrs re-encodes its full state; a fresh Y.Doc built from
-//                those bytes projects the same canonical JSON and markdown.
-// Plus: state vectors agree semantically, cross diffs are no-ops, and a yrs
-// merge_updates of the whole log reconstructs the same content (compaction).
-//
-// Usage: pnpm --filter @dohc/yrs-interop-scripts fidelity [-- --require-harvested]
-// Harvested fixtures are optional for a dev run (scripts/harvest.mjs
-// produces them); certification runs must pass --require-harvested so the
-// real-lineage half of criterion 1 cannot silently drop out.
-
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -166,7 +147,7 @@ function frontmatterOrderOnly(a: string, b: string): boolean {
   const ma = FM_RE.exec(a);
   const mb = FM_RE.exec(b);
   if (!ma || !mb) return false;
-  if ((ma[2] ?? "") !== (mb[2] ?? "")) return false; // bodies must match exactly
+  if ((ma[2] ?? "") !== (mb[2] ?? "")) return false;
   let pa: unknown;
   let pb: unknown;
   try {
@@ -237,7 +218,6 @@ async function runCase(rust: RustPeer, c: DocCase): Promise<void> {
   const jsMarkdown = jsProjection.markdown;
   const jsSv = Y.encodeStateVector(jsDoc);
 
-  // JS -> Rust, in order.
   const idFwd = `fid-${(docSeq += 1)}`;
   await rust.newDoc(idFwd);
   for (const u of c.updates) {
@@ -265,7 +245,6 @@ async function runCase(rust: RustPeer, c: DocCase): Promise<void> {
     await rust.free(idRev);
   }
 
-  // State vectors agree semantically.
   const rustState = await rust.state(idFwd);
   check(
     `${c.name} / state vector`,

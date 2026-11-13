@@ -174,7 +174,6 @@ describe("Titlebar", () => {
     expect(group.contains(version)).toBe(true);
     expect(name.compareDocumentPosition(version) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(version.compareDocumentPosition(status) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    // The switcher names the workspace and nothing else.
     expect(name.textContent).toBe("dohc");
     expect(group.textContent).toBe("dohcMain");
     // The separator hides with its version while the picker has nothing to name.

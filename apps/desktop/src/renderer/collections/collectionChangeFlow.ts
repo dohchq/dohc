@@ -94,7 +94,6 @@ async function attribute(api: Api, workspaceId: string, proposal: CollectionChan
   return { rows, paths, history };
 }
 
-/** A message's attached change file, which names its Collection. Null when the file isn't one. */
 export async function readCollectionChangeProposal(api: Api, workspaceId: string, path: string): Promise<CollectionChangeProposal | null> {
   const text = await readText(api, workspaceId, path);
   if (text === null) return null;

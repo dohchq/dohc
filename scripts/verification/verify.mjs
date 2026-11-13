@@ -61,11 +61,6 @@ export function desktopProofCommand(args, { platform = process.platform, env = p
     : command;
 }
 
-// The states page compares its baselines on Windows, where they were taken.
-// Elsewhere its pixel test skips itself, which the desktop proof's skip check
-// would count as a failure, so it is left out and the report says so.
-// @states-page selects every one of its tests; the pixel test alone carries
-// @states-baselines, and that is the proof required.
 export function desktopProofTags({platform = process.platform} = {}) {
   const gallery = platform === "win32";
   const restart = ["@restart-durability-idle-external", "@restart-durability-overlapping-typing", "@restart-durability-capture-before-reopen", "@restart-durability-person-agent"];

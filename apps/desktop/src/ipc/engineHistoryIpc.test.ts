@@ -555,9 +555,6 @@ describe("versionConflictForIpc binary sides", () => {
   });
 
   it("renders both texts when only the base was binary", () => {
-    // WS-G1 opens a conflict for any path a binary head touches, including one
-    // whose bytes are only in the fork base. Both live sides are text and the
-    // user can read and combine them.
     const conflict = versionConflictForIpc({
       ...base,
       path: "notes.md",

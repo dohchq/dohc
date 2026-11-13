@@ -57,7 +57,6 @@ function runWithRoster(
 // A dataset run against a scripted host: what it sends, under which key,
 // and what it does when the approved rules change under a saved plan.
 
-// These automations have no code steps.
 const noCode = async (): Promise<never> => { throw new Error("This automation has no code step."); };
 
 const id = (number: number) => `00000000-0000-4000-8000-${String(number).padStart(12, "0")}`;
@@ -206,7 +205,6 @@ describe("a dataset automation run", () => {
     const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-run-")));
     const run = (surface: DatasetRunHost) => runWithRoster({
       withHost: async (work) => await work(surface),
-      // The second step's formula meets a busy evaluator, so the run waits once the first step landed.
       evaluator: { runCode: noCode, evaluate: async () => "busy" as const },
       store, nowMs: () => 2_000, personName: (userId: string) => userId, ...sendsNothing,
     }, {
@@ -587,8 +585,6 @@ function findPages(sent: readonly DatasetInvocation[]) {
 }
 
 describe("a record the run reads twice", () => {
-  // The record: Find sees a newer version than the trigger read until the
-  // edits stop, after `settlesAfter` plans.
   const conflicting = (settlesAfter: number) => {
     const read = parseAutomationsFile(`version: 1
 automations:

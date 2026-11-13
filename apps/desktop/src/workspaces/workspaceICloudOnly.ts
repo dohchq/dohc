@@ -86,7 +86,6 @@ export async function refuseOnlyInICloud(target: string): Promise<void> {
       }
     }
   }
-  // An answer that came late is no answer.
   if (overdue()) throw refusal(top.isDirectory() ? "too-large" : "unchecked");
   if (!candidates.length) return;
   let flags: readonly number[];

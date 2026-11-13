@@ -14,11 +14,6 @@ export type BandLines = { region: number; line: number; text: number };
 /** The capped form's measures, from a hidden copy: the band's whole height, its words' height, and one line. */
 export type BandLinesLayout = { total: number; text: number; line: number };
 
-// Only when the whole workspace can't sync: one band at the top, with the desktop's title and the phone's body.
-//
-// Capped, at the largest text sizes, the title and body scroll inside a region of whole lines, a line at a time, so a
-// line is never cut at rest; a fade at the bottom shows there's more while there is, and the indicator flashes as the
-// band arrives. Try again stays below the region, always in view. VoiceOver reads the words whole, as one element.
 export function SyncBand({ problem, lines, onLinesLayout }: {
   problem: SyncProblem;
   /** Draw the capped form in a region of whole lines. */

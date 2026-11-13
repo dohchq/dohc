@@ -2276,7 +2276,6 @@ describe("SettingsDialog", () => {
     await waitFor(() => expect(screen.getByTestId("mcp-enable-toggle").hasAttribute("disabled")).toBe(false));
     expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running");
     expect(screen.getByTestId("mcp-load-error").textContent).toBe("Retry");
-    // Once the recovery settles, Retry reads the newer status.
     await user.click(screen.getByRole("button", { name: "Retry" }));
     await waitFor(() =>
       expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("stopped"),

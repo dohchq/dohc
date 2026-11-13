@@ -1,15 +1,3 @@
-// The conflict surface bounds what "Combine by hand" will edit. That
-// bound is only honest while it stays inside what `conflicts.resolve` accepts,
-// and #569 changed what that is: there is no longer a cap on the merged body.
-// A resolve succeeds when the whole JSON-ENCODED request fits one control
-// frame, so what a body may weigh is whatever the rest of its request leaves.
-//
-// The gate no longer restates the engine's number. It imports the
-// contract from `@dohc/workspace-engine-client/limits` — a leaf module that
-// imports nothing, so a renderer can take it without pulling `node:crypto`
-// into the browser bundle — and proves the renderer's own editing bound fits
-// inside it. The import IS the drift guard: when the frame budget moves, this
-// arithmetic moves with it, and no hand-copied number can fall behind.
 import {
   RESOLVE_REQUEST_FRAME_BYTES,
   jsonStringEncodedLength,

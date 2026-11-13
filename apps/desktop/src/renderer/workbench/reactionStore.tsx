@@ -121,7 +121,6 @@ interface Confirmed {
 interface Thread {
   // The newest whole-thread read.
   full: Confirmed | null;
-  // Messages read since then, each by its newest read.
   messages: Map<string, Confirmed>;
   viewer: { id: string; at: number } | null;
   // Every name main listed each stable reaction id under, and its newest.

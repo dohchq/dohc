@@ -24,7 +24,6 @@ export const demoScroll: number = (() => {
   return Number.isFinite(points) ? points : 30;
 })();
 
-// Stands in for the workspace's sync state until the phone talks to a server.
 export const syncProblem: SyncProblem | null = (demoMode === "band" || demoMode === "band-empty" || demoMode === "band-half-fold" || demoMode === "band-problem-change" || demoMode === "band-scrolled") ? "serverUnreachable"
   // The longest body, for the capped band's long-body frames.
   : demoMode === "band-sync-failed" ? "syncFailed" : null;

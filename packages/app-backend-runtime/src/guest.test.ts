@@ -248,7 +248,6 @@ describe("guest memory", () => {
     await withDatabase(async db => {
       const persistent = { persistentConnection: true };
       const fill = "let held = []; try { for (;;) held.push(new Uint8Array(1 << 20)); } catch {}";
-      // The deadline stops a loop that runs after the operation caught its out-of-memory error.
       await expect(evaluate(db, request(`${fill} while (true) {}`, { limits: { ...DEFAULT_LIMITS, evaluationMs: 100 } }), persistent))
         .rejects.toThrow("App operation took longer than its 0.1-second time limit, so it stopped.");
       // A host check keeps its own error.

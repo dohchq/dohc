@@ -110,51 +110,6 @@ export class YdocOwnerDraftPendingError extends Error {
   }
 }
 
-// How long one in-flight `ydoc.open` may go unanswered. Its sibling
-// `workspace.open` has carried a 2 s bound since it was written; this request
-// carried none, so a daemon that accepted an open and then said nothing held
-// the capture chain for as long as the silence lasted — the wedge watchdog's
-// ~225 s at best, and longer behind other traffic.
-//
-// Measured, because the only work this limit can reject is a healthy open
-// (AGENTS.md, "measure limits that reject work"). Every case below is the real
-// daemon — dohc-workspace-engine, debug build of de3fb9d5 — driven through this
-// adapter and the real transport on a Ryzen 9 7950X / Windows 11 / 64 GB. The
-// number is the `ydoc.open` request alone: response minus send.
-//
-//   cold store, small document                                     0.9 ms
-//   cold store, 47 KiB document (the largest a seeded open can carry:
-//     the daemon refuses a seed past INBAND_CONTENT_CAP_BYTES)      2.3 ms
-//   warm store, same document                                      2.1 ms
-//   open while the daemon captures 40 x 32 KiB files               0.9 ms
-//   reopen after 7,500 settled appends (42 KiB of typed text) 2.0 ms
-//   resurrect a lineage nothing settled, 500 real appends          13.7 ms
-//   resurrect a lineage nothing settled, 3,000 real appends        67.4 ms
-//   resurrect a lineage nothing settled, 10,000 real appends      120.9 ms
-//
-// What the shape of that says: a settled document reopens flat, because its
-// close compacted the lineage. The cost is in a lineage nothing settled — a
-// draft a dead daemon left behind — where the open replays every journalled
-// update, and it grows with how many there are. 10,000 of them is already past
-// ordinary: the settle debounce is 800 ms, so a lineage that deep means the
-// daemon never settled once across 10,000 keystrokes.
-//
-// ydocOpenMeasurement.e2e.test.ts runs these cases again on whatever machine it
-// is on, and fails when the bound stops clearing them.
-//
-// 5,000 ms is 41x the widest of those, past the headroom this repo usually
-// gives a measured limit, and deliberately so. The table is one fast machine's
-// debug build and the population is every machine dohc runs on. The costs are
-// not symmetric either: too tight rejects a healthy open and the user gets a
-// read-only document, while too loose holds the capture chain a few seconds
-// longer on a daemon that has already stopped answering. If a healthy open ever
-// does reach this limit, measure again rather than widening it here.
-//
-// One number for both sides: the daemon's supervisor adopts a request's own
-// `deadline_ms` as its deadline (dohc-engine-protocol/src/supervisor.rs, capped
-// at `max_deadline`), so it cancels the handler at the same instant this client
-// stops waiting, instead of the 30 s default it applies to a request that names
-// none.
 export const YDOC_OPEN_DEADLINE_MS = 5_000;
 
 /**

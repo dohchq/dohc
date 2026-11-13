@@ -462,7 +462,6 @@ function fakeEngine() {
     records,
     lookups,
     listeners,
-    /** Resolves once the seam is waiting for an announcement. */
     listening(): Promise<void> {
       if (listeners.size > 0) return Promise.resolve();
       return new Promise((resolve) => waitingForListener.push(resolve));

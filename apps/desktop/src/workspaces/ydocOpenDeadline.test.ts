@@ -860,16 +860,6 @@ describe("the document open's capture-chain hold", () => {
     });
 
     it("binds the lineage an evicted orphan left behind, with no restart", async () => {
-      // On a path no capture will ever reach — one
-      // `.dohc/files.toml` excludes, or a file above the engine text capture
-      // limit and the 2 MiB editor limit — the orphan's close can never be
-      // satisfied, because only a captured or settled artifact can satisfy it.
-      // Evicting is what breaks that loop: the daemon lets go of the session
-      // and keeps the lineage, so the next open finds the resurrected draft
-      // (head absent, lineage existing) and binds it. Before this, the answer
-      // was ydoc-session-busy until the daemon restarted — and on these two
-      // paths a restart did not help either, because the reopen still found
-      // no head.
       const root = await createTestScratch("dohc-ydoc-deadline-");
       const excluded = "x".repeat(MAX_ENGINE_CAPTURE_TEXT_BYTES + 1024) + "\n";
       await write(root, "note.md", excluded);

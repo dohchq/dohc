@@ -143,7 +143,6 @@ describe("readRelayChatShareLanes", () => {
               grantId: "grant-mine",
               generation: 1,
             },
-            // Managed by another workspace: not this listing's row.
             {
               shareId: "share-elsewhere",
               workspaceId: "remote-2",
@@ -369,7 +368,6 @@ describe("readRelayChatShareLanes", () => {
     });
   }
 
-  // Naming one of two over-cap lanes sends the reader to fix half the problem.
   it("names every over-cap lane, not the first one it meets", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {

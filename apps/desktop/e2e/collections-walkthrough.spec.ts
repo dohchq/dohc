@@ -10,15 +10,6 @@ import {
   seedWorkspaceManifest,
 } from "./helpers/workspace";
 
-// The Phase 2 collections gate walkthrough,
-// driven through the real app: create two document collections from the File menu's
-// New Collection command, add a field of every v1 type through the Fields
-// dialog, create records with New record, edit every field type inline in
-// the table, drag a board card and read the write back from the record's
-// file on disk, and rekey the calendar to a second date field — all without
-// collection.yaml ever opening on screen. A board drag must not open the
-// record's tab (the pickers-lane watch item).
-
 type Desktop = Awaited<ReturnType<typeof launchDesktopApp>>;
 
 const PROJECTS_TAB = editorTabTestId("tab://collection/projects");

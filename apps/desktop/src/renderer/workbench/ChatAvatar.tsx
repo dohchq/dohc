@@ -26,14 +26,6 @@ export function AgentName(props: { kind: ChatAuthorKind; presentation: ActorPres
     : <>{props.children}</>;
 }
 
-// One avatar for every chat surface: a person's initial on a tint of their
-// admitted hue, the agent's sparkle in the agent voice (a connected agent's
-// plug), an automation's bare lightning mark, the same mark as the
-// Automations button, or a link holder's initial in a share link's dashed
-// ring. An agent that joined with a link is the agent's olive square with the
-// same dashed edge. Sized by the caller; 36px in the composer, 32px on a feed
-// row or an opening post, 28px on a comment, 18px in a strip.
-
 const SIZES = {
   post: "size-9 text-[14px]",
   row: "size-8 text-[13px]",

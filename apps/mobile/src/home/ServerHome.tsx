@@ -50,7 +50,6 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
     else if (row.kind === "page") router.push({ pathname: "/page", params: { path: row.path } });
   }, [router, toggle]);
 
-  // Until the first answer, the section holds one row's height, or Try again once a read has failed.
   const pending = state.problem ? <RetryRow label={failed} onRetry={retry} /> : <HoldRow />;
   return (
     <>

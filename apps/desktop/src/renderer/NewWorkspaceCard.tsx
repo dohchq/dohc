@@ -10,11 +10,6 @@ import { FieldError, GhostButton, PrimaryButton } from "./ui/controls";
 import { PathLine } from "./ui/PathLine";
 import { useRequestSequence } from "./useRequestSequence";
 
-// The folder card: the new workspace's name on the folder's tab, where its
-// folder goes on one line in the card, then Create. Sheets of the kinds a
-// workspace holds stand in the folder behind the tab. First run shows it as
-// the primary; the workspace manager shows the same card beside its list.
-
 const DEFAULT_FOLDER_NAME = "Personal";
 
 function isWindows(): boolean {
@@ -43,15 +38,11 @@ export function NewWorkspaceCard(props: {
   const [folderName, setFolderName] = useState(DEFAULT_FOLDER_NAME);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // The name's error as of its last check, when focus left the field or the
-  // person pressed Create. Typing clears it until the next check.
   const [nameError, setNameError] = useState<string | null>(null);
   // A picked location shows once its suggested name arrives; until then
   // Create would use the location still on screen.
   const [placing, setPlacing] = useState(false);
   const nameField = useRef<HTMLInputElement>(null);
-  // Until the person types, the name is dohc's suggestion and follows the
-  // location.
   const nameTyped = useRef(false);
   const locationTooltip = useTooltip();
   // The default suggestion and the picker race for the same field. The
@@ -221,10 +212,6 @@ export function NewWorkspaceCard(props: {
             >
               Change
             </GhostButton>
-            {/* The path opens above its line, as wide as the card, so a long
-                one takes few lines and covers only the tab. Clicks go through
-                it, and it closes once the pointer leaves the line. The shared
-                Tooltip opens below its holder, at most 16rem wide. */}
             <span
               id={locationTooltip.tooltipProps.id}
               role="tooltip"

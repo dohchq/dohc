@@ -1,14 +1,3 @@
-// Builds a fixed, unsigned Windows package of one commit into a delivery
-// folder that someone can open beside their installed dohc.
-//
-//   pnpm qa:preview --commit <full SHA> --base <ref> [--pr <number>] [--output <new folder>]
-//
-// The checkout must be clean and at --commit. The builder packages it,
-// copies the package into the delivery folder, smokes that copy with the
-// release workflow's packaged benchmark, and records the hashes in
-// manifest.json. `Try it.cmd` in the folder runs launch.mjs, which checks
-// those hashes before it starts the app with its own data and no updates.
-
 import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";

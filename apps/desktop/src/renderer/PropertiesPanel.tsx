@@ -54,8 +54,6 @@ export type PropertiesPanelProps = (
 ) & {
   // For a Collection record: the automations that set each field, by name.
   fieldMarks?: ReadonlyMap<string, readonly string[]>;
-  // A document still opening shows its properties where they will be and
-  // refuses edits until it opens: no write, no ×, and the + holds its box.
   opening?: boolean;
   // A note the person can only view shows its pills with no +, no × and no
   // edits.
@@ -419,7 +417,6 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     const entry = entries[index];
     if (entry && nameTaken(index, key, entries, noteKeys())) {
       setHeldName({ row: entry.id, text: key });
-      // The row keeps the name it was read with until the new name is free.
       const read = entry.sourceKey ?? "";
       if (entry.key !== read) setEntries(entries.map((row, i) => (i === index ? { ...row, key: read } : row)));
       return;

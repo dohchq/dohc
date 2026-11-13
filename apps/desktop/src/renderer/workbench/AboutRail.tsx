@@ -64,7 +64,6 @@ export function AboutRail(props: {
           props.onWidthChange(nextWidth);
         }}
         onPointerDown={(event) => {
-          // Left button only — a right/middle press must never start a resize.
           if (event.button !== 0) return;
           dragRight.current =
             panelRef.current?.getBoundingClientRect().right ?? window.innerWidth;

@@ -52,11 +52,6 @@ const lstatOverride = vi.hoisted(() => ({
   path: null as string | null,
   results: [] as (NodeJS.ErrnoException | null)[],
 }));
-// realpath can fail where the lstat just before it succeeded: a permission
-// change, or another process moving the path in the gap between the two calls.
-// Neither is arrangeable as a real filesystem state on this host, and both must
-// report a check that did not finish rather than an escape that was never
-// established. The armed path fails every call until it is disarmed.
 const realpathOverride = vi.hoisted(() => ({
   path: null as string | null,
   error: null as NodeJS.ErrnoException | null,
@@ -1241,14 +1236,6 @@ describe("mcp tools operate on allowed paths", () => {
 
   it("dohc_detect_apps prefers a real configured build output over a real conventional one", async () => {
     await withWorkspace(async (ctx) => {
-      // Both a conventional "dist" And a configured, nested "public/dist"
-      // hold a real index.html — the conventional loop runs first and would
-      // claim builtEntry before the configured check ever gets a chance to
-      // run, unless that check is unconditional (not gated on builtEntry
-      // still being undefined). workspace-core's preferredBuildOutput/
-      // presentBuildOutput (packages/workspace-core/src/sites.ts) give the
-      // configured artifact priority whenever both are real, so a stale
-      // "dist" left over from an earlier build must not win here either.
       await mkdir(join(ctx.root, "dual-output/dist"), { recursive: true });
       await writeFile(join(ctx.root, "dual-output/dist/index.html"), "<h1>Stale</h1>");
       await mkdir(join(ctx.root, "dual-output/public/dist"), { recursive: true });
@@ -1350,12 +1337,6 @@ describe("mcp tools operate on allowed paths", () => {
       const result = await detectApps(ctx);
       expect(result).toMatchObject({ ok: true, count: 1 });
       if (!result.ok) return;
-      // A genuinely valid dohc.json ({"type":"app"}) reads kind "configured"
-      // and confidence "high" here (see the "finds configured, package, and
-      // static sites" test above); an array parses without throwing, so
-      // without the shape check this folder would misclassify the same way.
-      // kind stays "configured" (dohc.json is present, matching
-      // workspace-core's own siteKind rule) but confidence must not.
       expect(result.apps[0]).toMatchObject({
         root: "not-an-object",
         kind: "configured",
@@ -1467,11 +1448,6 @@ describe("mcp tools operate on allowed paths", () => {
         join(ctx.root, "portal/dohc.json"),
         JSON.stringify({ type: "app", build: { output: "dist" } }),
       );
-      // A genuinely separate, independently detectable web project happens
-      // to live at that exact claimed (but unbuilt) path — the claim alone
-      // must not hide it, the same way workspace-core's discoverSites only
-      // credits a build.output claim to its declaring site once a real
-      // index.html exists at the claimed path, never on the claim alone.
       await mkdir(join(ctx.root, "portal/dist"), { recursive: true });
       await writeFile(
         join(ctx.root, "portal/dist/package.json"),
@@ -1803,14 +1779,6 @@ function expectWorkspaceRelative(text: string, ctx: ToolContext): void {
   expect(text, "a POSIX absolute path reached the agent").not.toMatch(/(^|\s)\/\w/);
 }
 
-// safeMetadataDir prepares .dohc with mkdir + lstat, and every errno
-// from those used to reach the agent whole -- `EPERM: operation not
-// permitted, lstat 'C:\Users\...\ws\.dohc'`. Seven mutating tools refuse
-// through this one catch, so all seven said it.
-//
-// A guard refusal is an Error this code wrote and carries no errno, so it
-// still passes through whole; only a platform failure is translated. The two
-// are told apart by the code, not by the message.
 describe("a metadata-folder failure reaches the agent translated", () => {
   const armMetadataErrno = (ctx: ToolContext, code: string) => {
     lstatOverride.path = join(ctx.root, ".dohc");
@@ -1913,15 +1881,6 @@ describe("a refused recordability boundary leaves the filesystem alone", () => {
 
 });
 
-// The reserved rule used to read the path as spelled, and containment
-// was proved only INTO the root -- never out of.dohc. So an in-workspace
-// symlink named anything but `.dohc` carried every mutating tool straight into
-// the workspace's control plane: the probe on the issue rewrote the settings
-// file through one, and a delete through the same alias moved it to trash.
-//
-// Every case below is decided on the resolved path, which is what makes the
-// spelling irrelevant. Revert safeResolve to the lexical check alone and each
-// one fails.
 describe("a symlink cannot alias a reserved area", () => {
   const settingsPath = (root: string) => join(root, ".dohc", "local", "settings.local.json");
   const SETTINGS = JSON.stringify({
@@ -2131,13 +2090,6 @@ describe("a symlink cannot alias a reserved area", () => {
     });
   });
 
-  // A dangling alias is the ordering trap. With no `.dohc` on disk yet,
-  // realpath fails for the alias itself, so a walk that treats every
-  // unresolvable component as "not there yet" reports an ordinary path. Then
-  // the mutator calls ensureRecordable, which creates `.dohc` -- the alias
-  // goes live between the check and the operation, and the operation follows
-  // it in. A component that exists cannot be absent, so lstat decides this,
-  // not realpath.
   describe("through an alias that is still dangling", () => {
     async function withDanglingAlias<T>(fn: (ctx: ToolContext) => Promise<T>): Promise<T> {
       return withWorkspace(async (ctx) => {

@@ -49,7 +49,6 @@ const tooLarge = { code: "too_large", message: "The record and step results are 
 const runSpent = { code: "timeout", message: "The formula did not run because the run took longer than 8 s." };
 const readSpent = { code: "timeout", message: "The formula did not run because reading the record and step results took longer than 8 s in all." };
 
-/** Writes a stand-in worker to a temporary file. `handler` is the body of its message listener, given `items`, `spent`, and `reply`. */
 async function standInWorker(handler: string) {
   const directory = await mkdtemp(join(tmpdir(), "dohc-automation-worker-"));
   const entryPath = join(directory, "worker.mjs");

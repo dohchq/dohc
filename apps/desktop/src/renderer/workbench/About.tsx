@@ -701,10 +701,6 @@ function LinkRow(props: { link: LinkEntry; onOpen: () => void }) {
   );
 }
 
-// The rows render again only when a read lands, not on every render of the
-// panel around them, so a long list costs nothing while someone types there.
-// A row out of the rail's view skips layout and paint until it scrolls in;
-// its focus ring and hover fill sit inside it, so nothing is clipped.
 export const OFFSCREEN_ROW = "[content-visibility:auto] [contain-intrinsic-size:auto_28px]";
 const OFFSCREEN_TWO_LINES = "[content-visibility:auto] [contain-intrinsic-size:auto_48px]";
 
@@ -1005,7 +1001,6 @@ export function AboutHistoryView(props: {
   const readMore = view.status === "ready" && view.more;
   // The head counts changes, as a run's "5+ changes" does, not rows.
   const count = view.status === "ready" ? `${view.moments.length}${readMore ? "+" : ""}` : undefined;
-  // The runs opened in place, by their key, which a newer edit on top keeps.
   const [openRuns, setOpenRuns] = useState<ReadonlySet<string>>(() => new Set());
   const toggleRun = (key: string) => setOpenRuns((open) => {
     const next = new Set(open);
@@ -1360,8 +1355,6 @@ export function AccessUnknown(props: {
     );
   }
   switch (setup.reason) {
-    // Nothing explains the answer until the server connection is read, so
-    // nothing is claimed: it reads as still loading.
     case "checking":
       return <SkeletonLines rows={2} className="px-2 py-1" />;
     case "not-synced":

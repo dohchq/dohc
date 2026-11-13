@@ -184,7 +184,6 @@ export async function runProbes({ archive, dist, send = false, env = process.env
       },
       fetch: guarded,
     });
-    // The person who runs the check asked for these two reports.
     telemetry.acknowledgeNotice({ usage: false, errors: true });
     telemetry.setPrivacy({ usageReports: false, errorReports: true });
     const [main, renderer] = targets;

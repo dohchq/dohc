@@ -70,8 +70,6 @@ test("a window Forget left showing its workspace stops and follows the window th
     const go = state.getByRole("button", { name: "Go to that window", exact: true });
     await expect(go).toBeFocused();
 
-    // The workbench takes no focus, from the keyboard or a focus call, and
-    // Chromium leaves it out of the accessibility tree.
     const workbench = old.getByTestId("workspace-workbench");
     await expect(workbench).toHaveAttribute("inert", "");
     for (let step = 0; step < 8; step += 1) {

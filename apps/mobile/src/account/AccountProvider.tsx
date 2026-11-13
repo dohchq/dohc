@@ -93,7 +93,6 @@ export function useSignIn(): SignIn {
   return state.signIn;
 }
 
-// Connect until the phone is signed in. While the saved sign-in is read, at launch, only the paper shows.
 export function AccountGate({ children }: { children: ReactNode }) {
   const theme = useTheme();
   const { state } = useAccount();

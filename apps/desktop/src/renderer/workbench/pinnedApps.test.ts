@@ -16,10 +16,6 @@ import {
   sidebarViews,
 } from "./workbenchState";
 
-// These wait on async bridge answers and userEvent settles. On a loaded
-// machine they can take longer than Testing Library's 1000 ms default, and a
-// wait that gives up first fails a test that was about to pass. Every wait
-// here runs until the condition holds, within the test's own budget.
 configure({ asyncUtilTimeout: 10_000 });
 vi.setConfig({ testTimeout: 20_000 });
 
@@ -110,7 +106,6 @@ describe("pinned apps", () => {
     vi.stubGlobal("dohcDesktop", { getSitePackage });
     const roots = ["apps/trip", "apps/nested/inner", "gone"];
     const { result } = renderHook(() => usePinnedApps("ws-a", roots));
-    // The folder stands in until the app is read.
     expect(result.current.map((app) => app.label)).toEqual(["trip", "inner", "gone"]);
     await waitFor(() => expect(result.current[0]!.label).toBe("Trip planner"));
     expect(result.current).toEqual([

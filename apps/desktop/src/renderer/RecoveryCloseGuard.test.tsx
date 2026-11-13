@@ -780,9 +780,6 @@ describe("RecoveryCloseGuard", () => {
     expect(stopped).toHaveBeenCalledOnce();
   });
 
-  // Go back leaves the person in the app. An approval a previous local
-  // warning granted for D1 must not outlive that choice, or dismissing D2
-  // leaves D1 unguarded for an unrelated close until the fail-safe timer.
   it("re-arms the draft approval locally on Go back", async () => {
     const user = userEvent.setup();
     const installUpdate = vi.fn(async () => ({ accepted: false, state: READY_STATE }));

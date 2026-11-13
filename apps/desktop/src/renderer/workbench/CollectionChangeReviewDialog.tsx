@@ -35,7 +35,6 @@ export function CollectionChangeReviewDialog(props: {
   asked: CollectionChange;
   /** Applies the review and posts its reply. Rejects with the failure to show. */
   onApply: (review: CollectionChangeReview) => Promise<void>;
-  /** Words and Try again for a failed Apply. */
   failure: (error: unknown) => { words: string; retry: boolean };
   locked: boolean;
   onNotNow: () => void;

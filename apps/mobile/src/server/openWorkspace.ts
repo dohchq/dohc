@@ -2,15 +2,6 @@ import type { SignIn } from "./account";
 import { cacheScope, createWorkspaceData, type ReadCache, type WorkspaceData } from "./workspaceData";
 import type { WorkspaceListStore } from "./workspaceList";
 
-// The workspace open on the phone, and the store that reads it. The open workspace is the one the person chose in the
-// switcher, or else the first the list shows on the phone that the server can open. Changing it stops the last store
-// and makes another, so nothing the last one started can reach the screen.
-//
-// A store that the server answers 404 has stopped and cleared itself, and the list is read again to decide. If the
-// list no longer shows the workspace, or the server can't open it, the phone opens the next. If it still shows it, it
-// stays open, empty, as a failed read, until Try again opens it in a new store. Nothing opens again by itself, so a
-// workspace that keeps answering 404 can't make the phone loop.
-
 export interface OpenWorkspaceState {
   readonly currentWorkspaceId: string | null;
   readonly data: WorkspaceData | null;

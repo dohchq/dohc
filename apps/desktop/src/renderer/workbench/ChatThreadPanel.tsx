@@ -192,12 +192,6 @@ export function WaitingLine(props: { testIdPrefix: string; agentName: string; pr
   );
 }
 
-// Under the message an agent didn't answer, one shape whatever the cause:
-// why, in its notice's words, with the icon on their first line, then the
-// next step on a line of its own that starts under the words. The step is a
-// control where one is at hand: Try again while the request can run once
-// more, a button that readies a message to the agent (nothing sends), or one
-// that opens the Agents page. Without one, the same line says it in words.
 export function FailedRunLine(props: {
   testIdPrefix: string;
   failed: ChatDispatchFailedRun;

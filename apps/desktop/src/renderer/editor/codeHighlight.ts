@@ -1,15 +1,4 @@
 import { documentChange, isCodeBlockNode, normalizeLanguage } from "./pmHelpers";
-// Syntax highlighting inside WYSIWYG code blocks — a ProseMirror decoration
-// plugin, deliberately not a schema/nodeView change. The `codeBlock` schema
-// is contract-locked across the desktop and workspace-api packages (see
-// schema-parity.test.ts); a decoration layer paints `hljs-*` classes over the
-// existing text without touching the node's markdown round-trip.
-//
-// Only the languages offered by the code-block language <select> (see
-// CODE_LANGUAGE_OPTIONS in codeLanguages.ts) are registered, keeping the
-// lowlight/highlight.js grammar bundle small. `tsx`/`jsx` intentionally reuse
-// the typescript/javascript grammars — there is no meaningfully different
-// highlight.js grammar for the JSX variants.
 
 import type { LanguageFn } from 'highlight.js'
 import bash from 'highlight.js/lib/languages/bash'

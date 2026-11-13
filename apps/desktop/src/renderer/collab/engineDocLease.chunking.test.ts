@@ -9,9 +9,6 @@ import { ORPHANED_DRAFT_STORAGE_PREFIX } from "../orphanedDraftStorage";
 import { harnessBridge } from "./engineDocChunkingTestHarness";
 
 let projectionShouldFail = false;
-// A held gate: while armed, the mocked import does not resolve until the
-// test releases it — the only way to prove what is durable before the
-// projection module answers, not just eventually.
 let projectionGate: { promise: Promise<void>; release: () => void } | null =
   null;
 vi.mock("@dohc/ydoc-projection", async (importOriginal) => {
@@ -233,12 +230,6 @@ it("persists a lossless rich snapshot when a deletion's projection fails", async
 // module scope, for the lifetime of this whole test FILE — once resolved by
 // an earlier test, a later "held" gate has nothing left to hold.
 it("persists a crude-text draft synchronously, before the held projection import resolves", async () => {
-  // While the projection chunk is loading, the deletion
-  // snapshot must not exist only in the queue's promise closure — a
-  // renderer close/reload/crash in that window would lose the text, with
-  // the file already deleted and no draft for the recovery close guard to
-  // find. Hold the import so the faithful path can never complete inside
-  // this test, and prove the crude path already persisted regardless.
   const release = armProjectionGate();
   harness = harnessBridge(richTextInitialUpdate());
   vi.stubGlobal("dohcDesktop", harness.api);

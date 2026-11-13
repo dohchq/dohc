@@ -2,20 +2,6 @@ import type { ChatPresenceCollaboration } from "../workbench/ChatsView";
 import type { PresenceScopeInput } from "../../ipc/bridgeContract";
 import { createIpcPresenceTransport } from "./ipcPresenceTransport";
 
-// MU-C5 — build the ephemeral presence collaboration for the active workspace's
-// Chats, or null when there is no signed-in relay session (solo/offline →
-// today's exactly-dormant Chats: no transport, no channel, no publish).
-//
-// Rather than one baked transport, this hands ChatsView a per-SCOPE factory: an
-// owner of a shared channel (and any plain local channel) resolves a WORKSPACE
-// scope, while a participant viewing a channel shared TO them resolves a SHARE
-// scope — the relay maps that share scope back to the granter's workspace so
-// owner and participants converge in one presence scope. Each transport is
-// still workspace/share-scoped in main, so a slow presence response can only
-// ever carry that scope's peers; the caller memoizes per scope and rebuilds the
-// collaboration per workspace, so a switch tears the old transport down and
-// aborts its in-flight poll — the no-repaint invariant (AGENTS.md).
-
 interface ChatCollaborationInput {
   // From cloudStatus: a signed-in relay session is required for any presence.
   connected: boolean;

@@ -193,7 +193,6 @@ it("leaves a queued change unsent, and not failed, when main can't open the work
 it("leaves a queued change unsent, and not failed, while another workspace's unsaved change holds the workspace closed", async () => {
   const window = collectionWindow(), { changes, asked } = window;
   await leaveWithOneQueued(window);
-  // A cell edit in the other workspace did not save, so this workspace does not open until the person decides about it.
   setCollectionFieldWriteAccess(OTHER_WORKSPACE.workspaceId, "This share is view only.");
   enqueueCollectionFieldWrite(OTHER_WORKSPACE.workspaceId, "tasks", { recordId: "task-1", recordPath: "tasks/task-1.md", field: "title", value: "Later" });
   window.mount(WORKSPACE);

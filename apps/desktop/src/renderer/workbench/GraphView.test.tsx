@@ -204,7 +204,6 @@ describe("GraphView", () => {
     const canvas = await screen.findByTestId("graph-canvas");
     await waitFor(() => expect(canvas.dataset.nodeCount).toBe("2"));
     const description = screen.getByTestId("graph-focused-node");
-    // Sweep the pointer until it lands on a node, so hover is proven to have lit one.
     const hoverSomeNode = (except = "") => {
       for (let y = 0; y < 300; y += 3) for (let x = 0; x < 400; x += 3) {
         fireEvent.pointerMove(canvas, { clientX: x, clientY: y, pointerId: 1 });

@@ -104,7 +104,6 @@ export function OpenSharedView(props: {
   const [chosen, setChosen] = useState<string | null>(null);
   const [suggested, setSuggested] = useState<{ shareId: string; root: string } | null>(null);
   const [settledSuggestionShareId, setSettledSuggestionShareId] = useState<string | null>(null);
-  // The mode the person chose. Until they choose, the grant decides.
   const [pickedMode, setPickedMode] = useState<"mount" | "separate" | null>(null);
   // Whether each pasted share opens for live editing, asked once per share
   // id while this dialog is open. A failed lookup counts as no.
@@ -231,8 +230,6 @@ export function OpenSharedView(props: {
     if (opening || checkingAccess || shareCode.length === 0) return;
     if (!mounting && !folder) return;
     if (gate.kind !== "signed-in") {
-      // Sign-in is a gate, not a step: open the panel inline and let the
-      // person come back to Open once the session lands.
       setSigningIn(true);
       return;
     }

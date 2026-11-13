@@ -65,7 +65,6 @@ vi.mock("node:fs", async importOriginal => {
   const fs = await importOriginal<typeof import("node:fs")>();
   return { ...fs, createReadStream: vi.fn(fs.createReadStream) };
 });
-// Reads one `lstat` of `path`, then holds its answer until the test releases it.
 const lstatGate = vi.hoisted(() => ({ held: null as { path: string; entered: () => void; release: Promise<void> } | null }));
 vi.mock("node:fs/promises", async importOriginal => {
   const fs = await importOriginal<typeof import("node:fs/promises")>();
@@ -117,7 +116,6 @@ let loseNextRecordAnswer = false;
 let loseNextResync = false;
 // The claim a claimed lineage answers under. A restore gives it another one.
 let servedClaim = "owner-claim";
-// Resyncs counted from zero, and which of them lose their answer.
 let resyncCount = 0;
 let lostResyncs = new Set<number>();
 let heldResync: { at: number; entered: PromiseWithResolvers<void>; release: Promise<void> } | null = null;
@@ -1909,11 +1907,6 @@ it("still opens a file the user just created that capture has not ingested", asy
 });
 
 it("refuses an uncaptured artifact that has content, without calling it missing", async () => {
-  // Head absent but the file is really on disk with bytes in it. The daemon
-  // seeds an absent-head bind from the HEAD, so the doc comes up empty and the
-  // first settle would erase the file. Refuse the session — but this is an
-  // ordinary refusal: the file exists, so the caller keeps the plain editor and
-  // must not tell the user the version does not have it.
   const UNCAPTURED = "notes/uncaptured.md";
   await writeFile(join(root, UNCAPTURED), "# Real content", "utf8");
 
@@ -2035,8 +2028,6 @@ it("settles nothing when a reopened document holds only its seed", async () => {
   expect(await readFile(join(root, PATH), "utf8")).toBe(INITIAL_MARKDOWN);
 });
 
-// edges-04: the document showed the retained edit as Saved while its file
-// lacked it, and nothing wrote it until the next keystroke.
 it("writes a retained edit when its document reopens, and says Saving… before the open returns", async () => {
   await retainLineage("Typed before the crash.");
   expect(await readFile(join(root, PATH), "utf8")).toBe(INITIAL_MARKDOWN);

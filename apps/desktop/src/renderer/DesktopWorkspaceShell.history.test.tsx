@@ -1173,8 +1173,6 @@ describe("history page", () => {
       limit: 50,
       cursor: timelineCursor(1),
     });
-    // The earlier page still has a cursor, so the control stays and is
-    // usable again once the page lands.
     await act(async () => {
       earlier.resolve({
         ...historyPage([historyMoment("m-earlier", "Started the plan")]),
@@ -1248,7 +1246,6 @@ describe("history page", () => {
     let issued = 0;
     const bridge = makeBridge(Promise.resolve(null));
     bridge.listHistory = vi.fn(() => responses[issued++]!);
-    // The workspace reports the draft until the switch runs, Main after.
     let switched = false;
     bridge.listWorkspaceVersions = vi.fn(async () => ({
       versions: [
@@ -1410,8 +1407,6 @@ describe("history page", () => {
     await user.click(mainItem!);
     await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(2));
 
-    // The switch resolves, the shell runs its boundary, and its own refresh
-    // fails.
     await act(async () => {
       switchInvoke.resolve();
       await switchInvoke.promise;
@@ -3312,25 +3307,6 @@ describe("versions surface after a failed capture build", () => {
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
-  // The same window, entered the way production actually enters it: through
-  // an activity refresh, while main's entry still holds the defaults it
-  // registered before it awaited the capture build.
-  //
-  // `workspaceActivity.open` registers that entry before the build — it must,
-  // so a batch settling during the build finds a slot — and until the build
-  // answers it holds `historyRecordingUnavailable: false` and
-  // `historyRecordingUnavailable: false`. Any workspace's activity event
-  // makes this shell refresh, so the refresh is what used to read those
-  // defaults and commit them as a status. Reading that as "there is a
-  // recorder" is the same defect as reading a missing status that way, one
-  // indirection along.
-  //
-  // The refresh no longer reads them at all: before the decision it
-  // returns, because both of its branches are wrong in this window — and the
-  // status it used to commit could arrive after the decided one and put the
-  // defaults back. So this pins two things at once: the refresh asks main
-  // nothing here, and the gate stays shut through the whole window on the
-  // decision alone.
   it("asks main for nothing while its capture decision is still pending", async () => {
     const settings = deferred<WorkspaceSettingsResult>();
     const decision = deferred<typeof FAILED_STATUS>();
@@ -3456,7 +3432,6 @@ describe("shared view moment-diff tab", () => {
 
     await screen.findByTestId("engine-moment-diff-page");
     expect(bridge.readEngineMoment).toHaveBeenCalledWith({ workspaceId: SHARE_VIEW.workspaceId, momentId: "m-1" });
-    // More still opens the file, and holds no way to restore.
     await userEvent.setup().click(screen.getByTestId("engine-diff-more"));
     expect(screen.getByTestId("engine-diff-open-file")).toBeTruthy();
     for (const control of ["engine-diff-restore-file", "engine-diff-shared-restore", "engine-diff-stop-and-restore", "engine-diff-undo-restore"]) {

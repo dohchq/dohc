@@ -138,8 +138,6 @@ export function useSettingsFileNotices(input: {
 
   const userMessage = settingsFileNotice(USER_FILE, userSettings);
   const workspaceMessage = settingsFileNotice(WORKSPACE_FILE, workspaceRead);
-  // The same message arriving again runs nothing, so a row the person
-  // dismissed stays dismissed until the file says something new.
   useEffect(() => showNotice("user-settings-file", userMessage), [showNotice, userMessage]);
   useEffect(
     () => showNotice("workspace-settings-file", workspaceMessage),

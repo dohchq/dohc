@@ -285,11 +285,6 @@ test("an outage longer than the retry window still persists the text at quit", a
   }
 });
 
-// edges-04. The whole app dies after the engine journaled an edit but before
-// the debounced settle wrote the file. On relaunch the editor shows the edit
-// from the engine's copy, and nothing else reads it: an agent or another app
-// sees the old file. The document must not claim Saved until the file has the
-// text, and dohc must write it without waiting for another keystroke.
 test("a document reopened after an app crash reads Saved only once its file has the text", async () => {
   test.setTimeout(150_000);
   const temp = await createTempWorkspace();

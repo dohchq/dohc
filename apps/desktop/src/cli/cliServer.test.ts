@@ -3374,7 +3374,6 @@ describe("CLI socket server", () => {
       reason: "This computer has no run atc_9 of this automation. Each computer keeps the runs of the automations it ran.",
     });
 
-    // A changed automation is refused until the caller confirms starting over.
     const refused = await invoke("automationRetry", { ...args, run: "atc_1", startOver: false });
     expect(refused).toMatchObject({ ok: false, status: "definition-changed", repeatsMessages: true });
     expect("reason" in refused && refused.reason).toContain("This automation changed since the run failed.");
@@ -3611,8 +3610,6 @@ describe("CLI socket server", () => {
       fields: {},
     })).resolves.toEqual({ ok: false, reason: "a document created through the CLI socket is recorded as an agent's; send actor \"agent\"" });
 
-    // The seam sees plain JSON fields and a main-derived author; the request
-    // can claim only the behavior-bearing actor kind.
     expect(seamCalls).toEqual([
       {
         kind: "setFields",
@@ -4547,7 +4544,6 @@ describe("CLI socket server", () => {
     const engineThread = listed.groups.flatMap(group => group.threads).find(candidate => cliThreadId(candidate.id) === thread);
     if (!engineThread) throw new Error("Posted thread is not listed");
     const messages = await store.listMessages({ workspaceId: WORKSPACE_ID, threadId: engineThread.id });
-    // Outside a run, an agent that gives no name is the unnamed "Agent".
     expect(messages.map(message => [message.author.displayName, message.authorReported])).toEqual([
       ["Agent", reported],
       ["Agent", { product: "Claude Code" }],

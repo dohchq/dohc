@@ -310,7 +310,6 @@ it("keeps an entry's submitted account through a missing lookup", async () => {
 
 it("finishes an accepted Try again of a quarantined head and resumes delivery", async () => {
   const outbox = {state: "quarantined" as "quarantined" | "active", retryDeliveryId: envelope.deliveryId as string | null};
-  // Like the engine, a quarantined outbox proves and acknowledges only the head its owner asked to try again.
   const granted = (deliveryId: string) => outbox.state !== "quarantined" || outbox.retryDeliveryId === deliveryId;
   const applied = new Map<number, string>(), checked = deferred<void>();
   const isReceiptApplied = vi.fn<OwnerAcceptedState["isReceiptApplied"]>(async ({receipt}) => {

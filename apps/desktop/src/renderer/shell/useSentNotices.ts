@@ -67,8 +67,6 @@ export interface SentNotices {
   // answers.
   listFailure: { error: unknown } | null;
   relist: () => void;
-  // The newest notice that arrived while this window was open, until its
-  // toast closes or it is read.
   toast: NoticeRow | null;
   hideToast: () => void;
   // Both mark notices from the list on screen, for the account it shows.
@@ -203,8 +201,6 @@ export function useSentNotices(enabled: boolean): SentNotices {
           }),
     [listed, held],
   );
-  // Read on another computer, dismissed, or listed for another account ends
-  // the toast too.
   const toast = useMemo(
     () =>
       toastKey === null

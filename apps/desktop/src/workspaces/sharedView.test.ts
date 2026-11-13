@@ -301,14 +301,6 @@ async function denyFileContentRead(absolutePath: string): Promise<void> {
   await denyRead(absolutePath, "file");
 }
 
-// This file no longer references the legacy TypeScript engine at all — not by import
-// and not by vi.mock. That is a stronger guarantee than a not-called spy: the
-// module cannot be reached from here even indirectly. The production side is
-// held by the ratchet, which fails if sharedView.ts ever gains a runtime
-// import of the legacy package.
-//
-// materializeSharedViewPaths touches only ensureMainVersion and the two read
-// methods, so the tests that drive it directly need nothing more than this.
 function stubStore(
   readTextFile: () => Promise<{ text: string }>,
 ): Parameters<typeof materializeSharedViewPaths>[3] {
@@ -1075,8 +1067,6 @@ describe("shared view refresh", () => {
     }
   });
 
-  // A Collection file stored as binary before capture read it as text. Its
-  // bytes on disk are the same, so nothing changed.
   async function binaryAutomationsView() {
     const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
@@ -5992,29 +5982,6 @@ describe("shared view refresh", () => {
     }
   });
 
-  // A share-view FOLDER delete crashing between the store deleting its
-  // children and `materializeSharedViewPaths`' single recursive rm on the
-  // folder path used to leave the projection showing files the store had
-  // already deleted — the old delete primitive marked only the FOLDER path
-  // pending,
-  // so recovery never revisited the children at all, found a still-present
-  // directory with no matching preimage, and misclassified it as an
-  // unjournalable non-file replacement. #862 changed the delete primitive to
-  // mark every CHILD path pending before the store mutation, which is what
-  // makes them reachable here: the leftover-pending arm below predates #862
-  // unchanged, but a path only reaches it when the marker names it.
-  //
-  // The crash is driven through the real writer, not hand-assembled: a
-  // failing store proxy lets both `deleteTextFile` calls succeed, then makes
-  // the very first call `materializeSharedViewPaths` itself makes
-  // (`ensureMainVersion`) throw — so `applyShareViewPathDelete` leaves
-  // whatever state `applyShareViewPathDelete` produces at that exact point,
-  // with disk untouched because materialization never ran its rm.
-  //
-  // Also pins a known, accepted residue: recovery finishes each
-  // child individually and has no equivalent of the folder-level rm's
-  // directory removal, so the emptied `docs/plans` stays on disk after
-  // recovery where an uninterrupted delete would have removed it too.
   it("recovers a crashed folder delete's children, but leaves the emptied folder until something prunes it", async () => {
     const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
@@ -8014,12 +7981,6 @@ describe("shared view refresh", () => {
     ).toContain("share.view.pull");
   });
 
-  // The pin is part of the share record's contract: both accept paths write a
-  // selector before the record exists, so a record without a readable one is
-  // DAMAGED. Every damaged shape must refuse the pull outright. It must not be
-  // repaired from the relay — that ask is the one a relay able to damage or
-  // race a record would answer with a wider scope, which is exactly the
-  // widening the pin exists to stop.
   const damagedPins: Array<[string, unknown]> = [
     ["absent — the record was never written with one", undefined],
     ["null", null],
@@ -8153,19 +8114,6 @@ describe("shared view refresh", () => {
     await harness.closeAll();
   });
 
-  // A pinned selector is used exactly as recorded, and the relay is never
-  // asked to restate it. There is no code path left that could.
-  // The pull skips an op it refuses and keeps going, which is the right
-  // liveness call — one op a diverging relay serves must not wedge the share.
-  // The cost is that the view quietly stops carrying part of what the granter
-  // shares, so the refusal has to reach the caller and the user. The engine
-  // produces these (see `share_view_pull_reports_why_it_skipped_a_version_
-  // refused_op`); what this pins is that the refresh does not swallow them.
-  //
-  // The daemon double deliberately enforces no grant, so the refusal is
-  // supplied here rather than provoked — provoking it would need a second
-  // implementation of the boundary rule in a test double, which is how a
-  // double starts certifying fiction.
   it("reports the refusals its pull returned instead of swallowing them", async () => {
     const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const errors: string[] = [];
@@ -8857,7 +8805,6 @@ describe("share-refresh records in .dohc/local", () => {
     },
   );
 
-  // Sol's case: a folder dohc can't look into is not a folder with no records.
   it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
     "refuses a refresh while it can't look into .dohc, and keeps the person's file",
     async () => {
@@ -9531,8 +9478,6 @@ describe("shareViewIdentitySelector", () => {
         "https://other.example",
       ),
     ).toBeNull();
-    // A record with no origin relay predates that field; the session's relay
-    // is all there is, and it enrols.
     expect(decide({ grantedSelector: EDIT })).toEqual({
       paths: ["docs"],
       versionId: null,

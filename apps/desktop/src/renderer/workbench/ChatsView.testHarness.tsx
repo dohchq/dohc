@@ -188,15 +188,6 @@ export const bridgeMock = {
 
 Element.prototype.scrollIntoView = vi.fn();
 
-// The contract listing for a relay that ANSWERED. An unreachable relay
-// resolves `{ joined, relay: { state: "unreachable" } }` instead — never an
-// empty listing — and a missing session resolves `{ state: "signed-out" }`.
-// The joined lane the way main answers it: one entry per channel the
-// caller named, carrying the registry row for that channel or null. The fake
-// below applies this to every joined-lane read, so a fixture states what the
-// registry holds and the scoping is exercised rather than assumed. A fixture
-// that answered its own rows regardless of the payload would certify a
-// scoping no test ever drove.
 function scopeJoinedLane(
   rows: readonly unknown[],
   channelWireIds: readonly string[],

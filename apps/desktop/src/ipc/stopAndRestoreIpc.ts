@@ -328,7 +328,6 @@ export function registerStopAndRestoreIpc<
         }
         if (active.released) break;
         add("server", server, again);
-        // What the server put back reaches this computer, and what this one puts back reaches the server.
         await dependencies.syncNow(workspaceId);
         if (!await stillPending()) break;
         const here = await undoHere(again);

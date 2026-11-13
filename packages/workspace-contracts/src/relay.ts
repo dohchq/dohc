@@ -535,7 +535,6 @@ export interface NoticeTarget {
   automation?: string;
   run?: string;
   recovery?: "automation-controls";
-  // A Settings page to open.
   settings?: "agents";
   // The personal agent (p-…) whose page opens in Settings › Agents. Only
   // with `settings: "agents"`.

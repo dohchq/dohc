@@ -118,7 +118,6 @@ describe("History timeline rows", () => {
     expect(calls.openHistory).toHaveBeenCalledTimes(2);
   });
 
-  // The operation's name is the definition's ID, not the person's words.
   it("titles a Collection change with its operation's label, else by its Collection", () => {
     view({ entries: [change(4, DAY - 2_000), change(2, DAY - 3_000, GUESTS, "Guests")] });
     const [labelled, unlabelled] = screen.getAllByRole("listitem").filter((row) => row.dataset.historyKey);

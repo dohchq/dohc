@@ -21,10 +21,6 @@ export { PersistentRuntimeError } from "./persistent-protocol.js";
 // worker (RuntimeLimits.cpuBudgetMs), so a slow disk never counts against it.
 export const WORKER_SILENCE_MS=30_000;
 export const WORKER_COMMAND_CAP_MS=600_000;
-// A dataset check such as the integrity check reports nothing until it ends,
-// so it may stay quiet longer than other steps, up to this bound. The slowest
-// measured check, the integrity check of a 128 MiB dataset with six indexes on
-// random keys, took 87 s on a loaded desktop machine; this is twice that.
 export const CHECK_SILENCE_CAP_MS=180_000;
 export interface PersistentRuntimeOptions { launch?:AppRuntimeLauncher; entryPath?:string; silenceMs?:number; commandCapMs?:number }
 // How long a command waits for the worker by default. A loaded machine can take seconds to start a worker process.

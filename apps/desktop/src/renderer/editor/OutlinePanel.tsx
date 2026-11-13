@@ -1,15 +1,3 @@
-// Notion-style outline rail: a slim column of dash marks pinned to the
-// editor's right margin once the doc has ≥ 2 headings. Hovering (or
-// keyboard-focusing, via :focus-within) expands it into a floating panel
-// listing every heading; clicking one scrolls the editor there. The active
-// section — the topmost heading currently in view — is emphasized in both.
-//
-// Positioning is CSS-only (position: sticky inside the shared grid cell
-// set up in styles.css — see the "outline rail" comment there), so this
-// component never measures or tracks its own placement; the only DOM
-// measurement it does is figuring out which heading is "active", with one
-// hit test at the reading line per frame.
-
 import { useEffect, useRef, useState, type RefObject } from "react";
 import type { Editor } from "@tiptap/core";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";

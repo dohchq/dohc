@@ -1,11 +1,6 @@
 import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import type { WorkspaceFile } from "../server/workspaceReads";
 
-// Home's rows from the workspace's files, by the desktop's rules (apps/desktop/src/renderer/workbench/explorerHomeModel.ts):
-// pages nested in the folders that hold them, folders first, each sorted by the name its row shows, then the sketches
-// and the other files by name. A Collection's documents are its records, so neither list shows them. The phone has no Collections or Apps
-// sections yet, and doesn't know which folders hold an app.
-
 export type HomeRow =
   | { readonly kind: "folder"; readonly key: string; readonly path: string; readonly name: string; readonly depth: number; readonly open: boolean }
   | { readonly kind: "page"; readonly key: string; readonly path: string; readonly name: string; readonly depth: number }

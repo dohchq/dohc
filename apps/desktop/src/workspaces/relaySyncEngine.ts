@@ -161,7 +161,6 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   let lastSyncedAtMs: number | null = null;
   let pendingChangeCount = 0;
   let conflictCount = 0;
-  // True until the first successful pull of a join-bootstrap engine.
   let bootstrapPullPending = options.joinBootstrap === true;
   let updateRequired: RelayApiUpdate | null = null;
   let authExpired = false;
@@ -541,8 +540,6 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         ended?.();
       }
     };
-    // A join-bootstrap engine is pull-only until its first pull succeeds:
-    // a fresh join must never append ops before it has the remote state.
     if (!bootstrapPass) {
       try {
         await push();
