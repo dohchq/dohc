@@ -1099,7 +1099,7 @@ it("keeps a link socket through bearer refresh and closes it on revocation", asy
       guard() {},
     }),
   ).toBe(true);
-  f.changes.notify();
+  f.changes.notifyWrite();
   expect(f.storage.findLinkSessionByCapabilityHash(old.capabilityHash)).toBeNull();
   expect(
     (
@@ -1117,7 +1117,7 @@ it("keeps a link socket through bearer refresh and closes it on revocation", asy
   expect(provider.state().binding?.workspaceId).toBe(`link:${scope.grantId}`);
   const closed = once(browser.ws, "close");
   f.storage.revokeShareGrant({ shareId: scope.shareId, grantId: scope.grantId, revokedAtMs: 1001 });
-  f.changes.notify();
+  f.changes.notifyWrite();
   await closed;
   expect(f.invalidated.signal.aborted).toBe(false);
   expect(
@@ -1293,7 +1293,7 @@ it("closes only the disconnected agent's live session and keeps the holder's and
       guard: () => undefined,
     }),
   ).not.toBeNull();
-  f.changes.notify();
+  f.changes.notifyWrite();
   await closed;
   for (const socket of [holder, kept]) {
     const pong = once(socket.ws, "pong");
@@ -1608,7 +1608,7 @@ describe("an owner's phone", () => {
             workspaceId: f.binding.workspaceId,
             showOnPhone: false,
           });
-          f.changes.notify();
+          f.changes.notifyWrite();
         }
       });
       expect(f.native.invalidated.aborted).toBe(false);
@@ -1724,7 +1724,7 @@ it.each([
     f.raw
       .prepare("UPDATE sync_relay_shares SET selector_json=?")
       .run(JSON.stringify({ paths: [binding.currentPath], versionId: null }));
-    f.changes.notify();
+    f.changes.notifyWrite();
     await closed;
     expect(f.native.invalidated.aborted).toBe(false);
     const second = f.connect((await f.mint()).token);
@@ -2553,4 +2553,80 @@ it("admits a workspace member at Edit for a reached path, and refuses View, Comm
     101,
   );
   expect((await open(".env/notes.md")).status).toBe(404);
+});
+
+it("wakes only the connections on a changed document and still closes a revoked one elsewhere", async () => {
+  const profile = selfHostLiveProfile(), admission = createLiveConnectionAdmission();
+  const f = await fixture(profile.namedLive.transport, false, {maxSessions: 16, maxMembers: 16, maxSnapshotBytes: 4096},
+    false, false, admission, 0, 0, true, scope.workspaceId, scope.shareId, {people: 4, documents: 2});
+  const published = new Map<string, number>(), applied = new Map<string, number>(), standing = new Map<string, number>();
+  const updateBytes = Buffer.alloc(16, 7), updateDigest = createHash("sha256").update(updateBytes).digest("hex");
+  f.captureNative.mockImplementation(async (current?: LiveObjectBinding) => {
+    const native = {...current!, selectorPaths: [current!.currentPath]};
+    return {...f.native, binding: native, client: {
+      openLiveAppliedSync: async () => ({binding: native, hostVector: Buffer.from([0]), missingStateUpdate: Buffer.from([0, 0]),
+        observedLocalYDocHeadSequence: 100, position: {eventCount: 0, journalCursor: 0, evidenceDigest: "ab".repeat(32)}}),
+      readNextLiveApplied: async (_request: unknown, after: {eventCount: number}) => {
+        applied.set(native.objectId, (applied.get(native.objectId) ?? 0) + 1);
+        const next = after.eventCount + 1;
+        if (next > (published.get(native.objectId) ?? 0)) return null;
+        return {position: {eventCount: next, journalCursor: next, evidenceDigest: "cd".repeat(32)}, updateBytes,
+          ack: {deliveryId: `edit-${next}`, updateDigest, journalCursor: next, acceptingHostEpoch: host.hostEpoch, localYDocSequence: next, applicationReplayed: false}};
+      },
+      readLiveApplicationAck: async () => null,
+    }} as NamedFrameNativeHost;
+  });
+  const sockets = new Map<number, {document: number; socket: ReturnType<typeof f.connect>}>();
+  for (let person = 1; person <= 4; person++) {
+    const document = (person - 1) % 2 + 1, peer = await f.peer(person, document), socket = peer.connect((await peer.mint()).token);
+    expect(await socket.status).toBe(101);
+    await openProductionSync(f, socket);
+    sockets.set(person, {document, socket});
+  }
+  // Each connection holds one standing listener and one waiting native read.
+  await vi.waitFor(() => expect(f.changes.listenerCount()).toBe(8));
+  const resolve = f.storage.resolveCurrentLiveDocumentBinding.bind(f.storage);
+  vi.spyOn(f.storage, "resolveCurrentLiveDocumentBinding").mockImplementation((input, activation) => {
+    standing.set(input.document.objectId, (standing.get(input.document.objectId) ?? 0) + 1);
+    return resolve(input, activation);
+  });
+  const arrived = (socket: ReturnType<typeof f.connect>, cursor: number) => socket.until(() => socket.received.some(frame =>
+    frame.kind === "begin" && frame.purpose === "applied-update" && frame.journalCursor === cursor), `applied update ${cursor}`);
+  applied.clear();
+  published.set("object-1", 1);
+  f.changes.notify({...f.binding, objectId: "object-1"});
+  await Promise.all([...sockets.values()].filter(({document}) => document === 1).map(({socket}) => arrived(socket, 1)));
+  await new Promise(resolve => setImmediate(resolve));
+  expect({standing: standing.get("object-2") ?? 0, applied: applied.get("object-2") ?? 0}).toEqual({standing: 0, applied: 0});
+  expect(standing.get("object-1")).toBeGreaterThan(0);
+  expect(applied.get("object-1")).toBeGreaterThan(0);
+  // A relay write naming document 2 rechecks only document 2's standing.
+  standing.clear(); applied.clear();
+  f.changes.notifyWrite([{...f.binding, objectId: "object-2"}]);
+  await new Promise(resolve => setImmediate(resolve));
+  expect(Object.fromEntries(standing)).toEqual({"object-2": 2});
+  expect(applied.size).toBe(0);
+  // A relay write that names no document rechecks every connection, so a
+  // revoked grant on document 2 still closes its connection.
+  const revoked = sockets.get(2)!.socket;
+  f.raw.prepare("UPDATE sync_relay_share_grants SET generation=generation+1 WHERE grant_id=?").run("edit-2");
+  f.changes.notifyWrite();
+  expect((await revoked.closed)[0]).not.toBe(1000);
+  await vi.waitFor(() => expect(f.changes.listenerCount()).toBe(6));
+  expect([1, 3, 4].every(person => sockets.get(person)!.socket.ws.readyState === WebSocket.OPEN)).toBe(true);
+  for (const person of [1, 3, 4]) sockets.get(person)!.socket.ws.close();
+  await vi.waitFor(() => expect(f.changes.listenerCount()).toBe(0));
+}, 60_000);
+
+it.each([
+  ["maxConnections", "live_total_limit"], ["maxConnectionsPerWorkspace", "live_workspace_limit"], ["maxConnectionsPerGrant", "live_grant_limit"],
+  ["maxConnectionsPerPrincipal", "live_person_limit"], ["maxConnectionsPerSession", "live_session_limit"],
+] as const)("names %s only after authenticating and redeeming an in-scope ticket", async (limit, code) => {
+  const f = await fixture({...limits, [limit]: 1});
+  const first = f.connect((await f.mint()).token); expect(await first.status).toBe(101);
+  const ticket = await f.mint();
+  expect(await f.connect(ticket.token, "account=other").status).toBe(404);
+  const refused = f.connect(ticket.token); expect(await refused.status).toBe(101);
+  expect(await refused.closed).toEqual([LIVE_CONNECTION_LIMIT_CLOSE_CODE, code]);
+  expect(f.captureNative).toHaveBeenCalledTimes(5);
 });

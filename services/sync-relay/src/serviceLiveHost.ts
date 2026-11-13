@@ -1015,9 +1015,9 @@ export async function startServiceLiveHost(options: {
             // Subscribed before any pull reads relay state, so no write between the two goes unnoticed.
             const stop =
               changes || config.activation
-                ? observeRelayWrites(storage, () => {
+                ? observeRelayWrites(storage, (documents) => {
                     for (const attached of attachments.values()) attached.check = true;
-                    changes?.notify();
+                    changes?.notifyWrite(documents);
                     nudgePass();
                   })
                 : () => {};
@@ -3272,7 +3272,8 @@ export async function startServiceLiveHost(options: {
                     noteWaiting(target, outcome);
                   } finally {
                     timed.ms = Math.round(now() - startedAt);
-                    if (activation!.blocked(target) !== blocked) changes?.notifyHost([target.workspaceId]);
+                    if (activation!.blocked(target) !== blocked)
+                      changes?.notifyHost([target.workspaceId]);
                   }
                 }
               });

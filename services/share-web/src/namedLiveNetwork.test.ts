@@ -68,9 +68,9 @@ const transport = {
   maxConnectionsPerPrincipal: 3,
   maxConnectionsPerGrant: 4,
   maxBufferedBytes: 134217728,
-    maxBufferedBytesPerPrincipal: 100663296,
-    maxBufferedBytesPerShare: 134217728,
-    maxBufferedBytesPerWorkspace: 134217728,
+  maxBufferedBytesPerPrincipal: 100663296,
+  maxBufferedBytesPerShare: 134217728,
+  maxBufferedBytesPerWorkspace: 134217728,
   maxBufferedBytesPerPrincipal: 100663296,
   maxBufferedBytesPerShare: 134217728,
   maxBufferedBytesPerWorkspace: 134217728,
@@ -718,7 +718,7 @@ it("retires both network hops when the current grant changes", async () => {
   await f.waitingRead.promise;
   const closed = once(browser.ws, "close");
   f.raw.exec("UPDATE sync_relay_share_grants SET generation=generation+1");
-  f.changes.notify();
+  f.changes.notifyWrite();
   await closed;
   await f.noListeners.promise;
   expect(provider.state().status).toBe("disconnected");

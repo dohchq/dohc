@@ -339,8 +339,8 @@ it("authenticates two accounts through the production browser transport and pres
     });
     const frameChanges = {
       ...sharedChanges,
-      subscribe(changed: () => void) {
-        const remove = sharedChanges.subscribe(changed);
+      subscribe(...args: Parameters<typeof sharedChanges.subscribe>) {
+        const remove = sharedChanges.subscribe(...args);
         return () => {
           remove();
           if (sharedChanges.listenerCount() === 0) released();

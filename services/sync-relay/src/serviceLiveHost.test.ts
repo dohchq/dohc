@@ -6377,7 +6377,7 @@ it("wakes the document's waiting opens when it blocks for lack of lineage, and a
     () => {
       seen.push(o.host.blocked(o.sibling));
     },
-    { workspaceId: o.sibling.workspaceId, objectId: o.sibling.objectId },
+    { kind: "object", workspaceId: o.sibling.workspaceId, objectId: o.sibling.objectId },
   );
   o.refuseCapture(withoutLineage());
   await o.host.update({ workspaces, documents: [o.sibling], ...stay });

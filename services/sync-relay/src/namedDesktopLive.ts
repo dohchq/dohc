@@ -184,6 +184,7 @@ export function createNamedDesktopLive(options: {
         let wake = () => {};
         const changed = () => wake();
         const removeHost = options.changes.subscribe(changed, {
+          kind: "object",
           workspaceId: share.workspaceId,
           objectId: objectIdAtStart,
         });
