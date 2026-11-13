@@ -688,8 +688,7 @@ export interface RelayNotice {
   // When the relay lets the row go. Each mark starts the row's retention
   // again, so a computer keeps its copy until this time and no longer.
   expiresAtMs: number;
-  // The relay removed the row to make room in the list, or, on the phone's
-  // scope, the recipient lost a share-received row's share. Drop it; its body
+  // The relay removed the row to make room in the list. Drop it; its body
   // and target are gone.
   removed: boolean;
 }
@@ -699,10 +698,12 @@ export interface RelayNotice {
 // a thread on one, and every row whose kind's words the relay can't confirm:
 // an automation's rows without their Collection's path, a mention or agent run
 // naming no place, an automation wake, and any kind it doesn't know. A
-// share-received row whose share the recipient lost arrives as removed. A
-// removed row carries no title, body, sender name, or target. The cursor still
-// moves past what it left out, so a page can be empty with `hasMore`. With
-// `wait`, a read whose cursor is caught up waits for the next change.
+// removed row carries no title, body, sender name, or target. When a row read
+// through a share loses its target, as when the recipient loses the share,
+// the next page starts the list over with `replace`, and the whole list
+// leaves that row out. The cursor still moves past what it left out, so a
+// page can be empty with `hasMore`. With `wait`, a read whose cursor is
+// caught up waits for the next change.
 export interface RelayNoticePage {
   notices: RelayNotice[];
   // Opaque. Pass it back as `cursor` for the changes after this page; no
@@ -710,7 +711,8 @@ export interface RelayNoticePage {
   nextCursor: string;
   hasMore: boolean;
   // The page starts the list over, because the cursor is older than the
-  // relay keeps removed rows or came from another relay history. Drop every
+  // relay keeps removed rows or came from another relay history, or, on the
+  // phone's scope, a row read through a share lost its target. Drop every
   // cached row, keep your own waiting posts and marks, and take this page
   // and the pages after it as the whole list.
   replace: boolean;
