@@ -98,7 +98,7 @@ export function createSharedChannelsIpc<
     shareId: string | undefined,
     generation: number,
   ): unknown;
-  notifyRenderer(input: { workspaceId: string }): void;
+  notifyRenderer(input: { workspaceId: string; summaryChanged?: true }): void;
   // Mounts a group's folder under shared-with-me, the way a pasted share
   // code does. Joining a group is one action: the channel, then its folder.
   unmountShareFolder(input: {
@@ -557,6 +557,8 @@ export function createSharedChannelsIpc<
         throw new Error(`Joined the group's chat, but its folder could not be added. ${reason}`);
       }
       operation.assertCurrent();
+      // The new mount is in the workspace's summary, which the Group's composer reads its files from.
+      notifyRenderer({ workspaceId: operation.workspace.workspaceId, summaryChanged: true });
     }
     return JoinSharedChannelResult.parse({
       joined: { ...joined, ended: false },

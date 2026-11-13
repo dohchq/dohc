@@ -715,6 +715,8 @@ describe("registered shared-channel handlers", () => {
       },
     });
     expect(h.write).toHaveBeenCalledOnce();
+    // The window reloads the workspace's summary, which lists the new mount.
+    expect(h.notify.mock.calls).toEqual([[{ workspaceId: "workspace", summaryChanged: true }]]);
     expect(h.mount).toHaveBeenCalledWith({
       workspace: expect.objectContaining({ workspaceId: "workspace" }),
       shareId: "share-g",
