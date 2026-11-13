@@ -611,7 +611,6 @@ test("one near-budget arm per size extends, decided on planned pairs against the
     repetitions: Array.from({ length: 20 }, (_, i) => i + 1),
   });
   assert.equal(compareSummaries(baseline, candidate).selectedMiB, 10);
-  // A clear failure is not extended.
   candidate.documentSize.cases["5/plain"].basePhases.fresh.typingMs = stats(60, 177);
   assert.equal(
     documentExtensionTarget(
@@ -620,7 +619,6 @@ test("one near-budget arm per size extends, decided on planned pairs against the
     ),
     0,
   );
-  // At 2 MiB the baseline package is the control, so the candidate's own 2 MiB data cannot decide.
   baseline.documentSize.cases["2/plain"].phases.fresh.typingMs = stats(40, 177);
   candidate.documentSize.cases["2/plain"].basePhases.fresh.typingMs = stats(32, 177);
   const item = candidate.documentSize.cases["2/plain"];
@@ -685,7 +683,6 @@ test("a run stopped by a failed 5 MiB worst shape selects 2 MiB once its control
     if (!key.startsWith("2/") && key !== "5/formatted-retained")
       delete candidate.documentSize.cases[key];
   assert.equal(compareSummaries(passingDocumentSummary(), candidate).selectedMiB, 2);
-  // Without the finished controls, the stop would turn this answer into an inconclusive result.
   candidate.documentSize.controls.legacyOpenMs = stats(100, 39);
   assert.equal(compareSummaries(passingDocumentSummary(), candidate).selectedMiB, null);
 });

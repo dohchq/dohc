@@ -896,7 +896,6 @@ test("proof edits during preparation reject full source provenance", () => {
       );
       if (path.startsWith("scripts/"))
         assert.deepEqual(receipt().engine, previous.engine, `${path} records no engine receipt`);
-      // The proof edit alone leaves the rebuilt artifact reusable.
       const reused = invoke();
       assert.equal(reused.status, 0, reused.stderr);
       assert.match(reused.stdout, /reuse engine[\s\S]*reuse desktop/);

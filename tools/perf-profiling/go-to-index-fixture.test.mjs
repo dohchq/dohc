@@ -13,7 +13,6 @@ for (const count of [5000, 30000])
     assert.equal(sources.groups[0].name, "General");
     assert.ok(sources.listing.files.some((file) => file.path.startsWith("src/")));
     assert.ok(sources.listing.files.some((file) => file.path.startsWith("shared-with-me/")));
-    // Future admission counts are explicit; no synthetic renderer identities are seeded.
     assert.equal(GO_TO_COUNTS.people, 9);
     assert.equal(GO_TO_COUNTS.agents, 18);
     assert.equal(GO_TO_COUNTS.dms, 7);

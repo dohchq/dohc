@@ -68,7 +68,6 @@ function setup(...lists: Answer[]) {
   };
 }
 
-/** Opens A's files, so A's store has read something and its feed is running. */
 async function readA({ server, cache, open, scope }: ReturnType<typeof setup>) {
   await vi.waitFor(() => expect(open.state().currentWorkspaceId).toBe("ws-a"));
   const a = open.state().data!;
@@ -140,7 +139,6 @@ describe("a 404 for a workspace the list still shows", () => {
     expect(context.open.state().currentWorkspaceId).toBe("ws-a");
     expect(a.state(views.files)).toMatchObject({ value: null, problem: "refused" });
     expect(context.cache.entries(context.scope("ws-a"))).toEqual([]);
-    // Nothing reads it again by itself.
     expect(
       context.server.calls.filter((call) => call.path === "/sync/ws-a/ops/listFiles"),
     ).toHaveLength(1);

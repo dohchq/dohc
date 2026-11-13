@@ -2,7 +2,6 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// A fake file system: paths that exist, and a write that fails while `failing` is set.
 const disk = vi.hoisted(() => ({ paths: new Set<string>(), failing: false, noFolder: false }));
 vi.mock("expo-file-system", () => {
   class Directory {
@@ -65,7 +64,6 @@ describe("a write that ran out of space", () => {
   });
 });
 
-// A page whose editor files couldn't be written once must be able to try again, not wait forever.
 describe("the editor files", () => {
   it("are written again after a write fails, and nothing half-written is kept", async () => {
     const { editorHtmlUri } = await import("./editorFile");

@@ -1,13 +1,3 @@
-// The build-slot budget, exercised against a private slot root.
-//
-// The contract under test is the machine's build budget: four slots,
-// atomic directory acquisition, owner-safe reclamation (stale heartbeat AND
-// an owner that is gone: a dead pid or a pid that now names another process,
-// never either alone), and a denial that names the constraint. The
-// gate holds a slot for its whole run, so a defect here either deadlocks
-// every lane or lets five unbounded cargos share one machine — the crash this
-// module exists to prevent.
-
 import assert from "node:assert/strict";
 import test from "node:test";
 import { spawn, spawnSync } from "node:child_process";
@@ -44,7 +34,6 @@ import { pauseQueue, resumeQueue } from "./verification/queue.mjs";
 const buildSlotUrl = new URL("../tools/rust-engine-program/build-slot.mjs", import.meta.url).href;
 
 const slotRoot = () => mkdtempSync(join(tmpdir(), "dohc-build-slot-"));
-// The lane guard admits only this checkout's PR verifier as the entry script.
 const verifier = fileURLToPath(new URL("../scripts/verification/verify.mjs", import.meta.url));
 const verifierLane = (env, options) =>
   acquireVerificationSlot(env, { entry: verifier, ...options });
@@ -522,7 +511,6 @@ function queueHarness(t) {
   return { root, start, message, acquired };
 }
 
-/** A pid that once existed and is dead now: a spawned-and-exited child's. */
 function deadPid() {
   const res = spawnSync(process.execPath, ["-e", ""], { encoding: "utf8" });
   assert.equal(res.status, 0);
@@ -562,11 +550,8 @@ test("the budget is an even share of the cores across four slots", () => {
     diskFloorGb: 40,
   });
 
-  // The share is cores/slots with no invented minimum: four cores, one job.
   assert.equal(resolveBuildBudget({ DOHC_BUILD_SLOT_ROOT: "X:" }, { cores: 4 }).jobs, 1);
 
-  // No slot root, no budget: a single-tenant host runs uncapped. An empty
-  // string is "no root", not a root.
   assert.equal(resolveBuildBudget({}, { platform: "linux", cores: 32 }), null);
   assert.equal(
     resolveBuildBudget({ DOHC_BUILD_SLOT_ROOT: "" }, { platform: "linux", cores: 32 }),
@@ -629,7 +614,6 @@ test("the lane count is one unless the slot root's setting says otherwise, up to
   } finally {
     for (const lane of lanes) lane.release();
   }
-  // An isolated trial root has its own setting.
   const trial = join(root, "trial");
   mkdirSync(trial);
   const trialEnv = { ...env, DOHC_VERIFICATION_SLOT_ROOT: trial, DOHC_VERIFICATION_TRIAL: "1" };
@@ -643,7 +627,6 @@ test("the lane count is one unless the slot root's setting says otherwise, up to
 });
 
 test("older tickets claim first, and code with more slots takes the ones older code cannot use", () => {
-  // One slot count for everyone: the ticket at position k takes the k-th free slot.
   assert.deepEqual(
     [0, 1, 2].map((position) => admissionSlot([2, 3], [4, 4, 4], position)),
     [2, 3, undefined],
@@ -655,7 +638,6 @@ test("older tickets claim first, and code with more slots takes the ones older c
     undefined,
     "slot 1 is the first older ticket's",
   );
-  // A two-lane ticket ahead of an older one leaves it slot 1.
   assert.deepEqual(
     [0, 1].map((position) => admissionSlot([1, 2], [2, 1], position)),
     [2, 1],
@@ -701,12 +683,10 @@ test("a lowered lane count admits nothing until the runs in flight fall under it
   ];
   first.release();
   second.release();
-  // Slot 3 still runs, so a count of 1 is already met even though slots 1 and 2 are free.
   setting(1);
   await assert.rejects(verifierLane(env, { waitMs: 0 }), /no verification slot freed/);
   setting(2);
   const fourth = await verifierLane(env, { waitMs: 0 });
-  // A run that started waiting under 2 stops admitting once the count drops to 1.
   const waiting = verifierLane(env, { waitMs: 3000 });
   setting(1);
   fourth.release();
@@ -812,7 +792,6 @@ test("status CLI reads absent queues without creating or acquiring anything", (t
 test("a hold that throws after its slot was created gives the slot back", async () => {
   const root = slotRoot();
   try {
-    // The first look admits; the look after the claim throws, as a deadline that passes in between does.
     let looks = 0;
     const hold = () => {
       looks += 1;
@@ -1131,7 +1110,6 @@ test("an inline gate takes no lane while the queue is paused, says so once, and 
     child.messages.filter((item) => item.type === "checked" && item.held).length;
   const cancelled = start("cancelled", { kind: "verification-slot", pausedQueue: queue });
   const waiting = start("waiting", { kind: "verification-slot", pausedQueue: queue });
-  // A waiter that looked three times waited between its looks.
   await waitFor(
     () => looks(waiting) >= 3 && looks(cancelled) >= 1,
     "held waiters must keep looking",
@@ -1144,7 +1122,6 @@ test("an inline gate takes no lane while the queue is paused, says so once, and 
     said[0].message,
     /the verification queue is paused since \S+ \(the computer restarted\); this gate starts after pnpm verify:queue resume$/u,
   );
-  // Ctrl+C stops a held wait like any other.
   cancelled.send("SIGINT");
   await waitFor(() => cancelled.closed, "a cancelled held waiter must exit");
   assert.equal(cancelled.exitCode, 130, cancelled.stderrText);
@@ -1351,7 +1328,6 @@ test("acquire takes a free slot, writes its owner, and release frees it", async 
     assert.equal(owner.pid, process.pid);
     slot.release();
     assert.equal(existsSync(slot.dir), false);
-    // Idempotent: a second release is a no-op, not a crash.
     slot.release();
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -1364,8 +1340,6 @@ test("release removes nothing when the slot no longer holds this claim", async (
   const listenersBefore = events.map((event) => process.listeners(event));
   try {
     const slot = await acquireBuildSlot({ root, slots: 1, waitMs: 0 });
-    // The slot was reclaimed out from under a suspended holder and
-    // re-granted: the path now carries another lane's owner record.
     writeFileSync(
       join(slot.dir, "owner.json"),
       JSON.stringify({ pid: 99999, start: "someone else" }),
@@ -1802,7 +1776,6 @@ test("a full house is refused with the constraint, the limit, and the holders", 
       assert.match(error.message, new RegExp(`pid ${process.pid}`));
       return true;
     });
-    // The denial is on the record beside the slots.
     assert.match(readFileSync(join(root, "events.log"), "utf8"), /denied: pid/);
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -1854,14 +1827,12 @@ test("a slot with no working heartbeat for the stale window is reclaimed", () =>
     writeFileSync(join(corrupt, "owner.json"), "not json");
     const then = new Date(Date.now() - 45 * 60_000);
     utimesSync(join(corrupt, "owner.json"), then, then);
-    // Crash between mkdir and the owner write: a bare directory, old.
     const bare = join(root, "build-slot-2");
     mkdirSync(bare, { recursive: true });
     utimesSync(bare, then, then);
     assert.equal(reclaimStaleSlots({ root, slots: 2, staleMs: 30 * 60_000 }), 2);
     assert.equal(existsSync(corrupt), false);
     assert.equal(existsSync(bare), false);
-    // But the same states with fresh timestamps stay held.
     const fresh = plantSlot(root, 3, { pid: process.pid, heartbeatAgeMs: 0 });
     writeFileSync(join(fresh, "owner.json"), "not json");
     assert.equal(reclaimStaleSlots({ root, slots: 3, staleMs: 30 * 60_000 }), 0);
@@ -1876,7 +1847,6 @@ test("a live sweep lock defers reclamation to the sweeper that holds it", () => 
     plantSlot(root, 1, { pid: deadPid(), heartbeatAgeMs: 45 * 60_000 });
     mkdirSync(join(root, "reclaim.lock"), { recursive: true });
     assert.equal(reclaimStaleSlots({ root, slots: 1, staleMs: 30 * 60_000 }), 0);
-    // A dead sweeper's lock is taken over after its own stale window.
     const then = new Date(Date.now() - 6 * 60_000);
     utimesSync(join(root, "reclaim.lock"), then, then);
     assert.equal(reclaimStaleSlots({ root, slots: 1, staleMs: 30 * 60_000 }), 1);
@@ -1918,8 +1888,6 @@ test("the heartbeat keeps restoring the owner file's freshness", async () => {
       heartbeatMs: 20,
     });
     const ownerPath = join(slot.dir, "owner.json");
-    // Back-date the heartbeat to reclaimable age; a live owner's next tick
-    // must bring it back, which is what keeps a long build's slot its own.
     const then = new Date(Date.now() - 45 * 60_000);
     utimesSync(ownerPath, then, then);
     await waitFor(
@@ -2026,7 +1994,6 @@ test("a cargo lane keeps its long grace for a dead holder; the verification lane
     plantSlot(root, 1, { pid: deadPid(), heartbeatAgeMs: 3 * 60_000 });
     await assert.rejects(acquireBuildSlot({ root, slots: 1, waitMs: 0 }), /all 1 slots are held/);
     plantSlot(root, 1, { pid: deadPid(), heartbeatAgeMs: 3 * 60_000, kind: "verification-slot" });
-    // Only the PR verifier may hold the lane once that guard is on main; naming it as the entry works either way.
     const lane = await acquireVerificationSlot(
       { DOHC_BUILD_SLOT_ROOT: root },
       {
@@ -2098,7 +2065,6 @@ for (const [when, successorOwner] of [
       plantOwner(root, 1, { pid: process.pid, created: "lost-lock-claimer" }, 3 * 60_000);
       const lock = join(root, "reclaim.lock");
       const identify = () => {
-        // A successor takes the lock over while this sweep is suspended in its probe.
         rmSync(lock, { recursive: true, force: true });
         mkdirSync(lock);
         if (successorOwner) writeFileSync(join(lock, "owner"), successorOwner);
@@ -2122,7 +2088,6 @@ test("a sweeper that resumes after a takeover finds the lock owned and backs off
   const root = slotRoot();
   try {
     plantSlot(root, 1, { pid: deadPid(), heartbeatAgeMs: 3 * 60_000, kind: "verification-slot" });
-    // The sweeper creates the lock, then a successor takes it over before the sweeper writes its owner file.
     const result = spawnSync(
       process.execPath,
       [

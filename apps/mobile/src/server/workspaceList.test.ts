@@ -78,7 +78,6 @@ describe("Show on phone", () => {
     await vi.waitFor(() => expect(shown(list).pending).toEqual(["ws-a"]));
     answerA.resolve(changed("ws-a", false));
     await vi.waitFor(() => expect(shown(list).pending).toEqual([]));
-    // Once nothing waits, the list is read again.
     await vi.waitFor(() =>
       expect(server.paths().filter((path) => path === "GET /sync/account/workspaces")).toHaveLength(
         2,
@@ -96,7 +95,6 @@ describe("Show on phone", () => {
     await vi.waitFor(() =>
       expect(shown(list)).toEqual({ values: { "ws-a": true }, pending: [], problem: "offline" }),
     );
-    // The read after the change keeps its failure in view.
     await vi.waitFor(() =>
       expect(server.paths().filter((path) => path === "GET /sync/account/workspaces")).toHaveLength(
         2,
@@ -120,7 +118,6 @@ describe("Show on phone", () => {
     const answer = deferred<Answer>();
     server.on("PATCH", "/sync/account/workspaces/ws-a", () => answer.promise);
     list.setShowOnPhone("ws-a", false);
-    // The read from before the change answers with the old value: it must not land.
     staleRead.resolve(listed(A));
     await settled();
     expect(shown(list).values).toEqual({ "ws-a": false });

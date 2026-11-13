@@ -158,7 +158,6 @@ test(
       );
       const first = await project("a", disk);
 
-      // An unmounted disk leaves the folder missing. The volume mount fails and nothing is created.
       assert.notEqual(
         compose(first, ["run", "--rm", "--no-deps", "-T", "relay-initialize"], {
           allowFailure: true,
@@ -240,7 +239,6 @@ test(
       });
       compose(first, ["up", "-d", "--wait", "sync-relay"]);
 
-      // The old server dies without a clean shutdown and never runs again.
       compose(first, ["kill"]);
       assert.equal(compose(first, ["ps", "--quiet", "--status", "running"]).stdout.trim(), "");
       compose(first, ["down"]);
@@ -252,7 +250,6 @@ test(
         override,
         `volumes:\n  dohc_self_host_postgres:\n    external: true\n    name: ${first.name}_dohc_self_host_postgres\n`,
       );
-      // With the accounts database present, move still refuses an empty folder and leaves it empty.
       const empty = await project("c", join(scratch, "empty"), ["-f", override]);
       assert.throws(
         () => runMove({ envFile: empty.env }, mover(empty), () => {}),

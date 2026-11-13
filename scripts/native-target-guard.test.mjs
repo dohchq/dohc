@@ -1,7 +1,3 @@
-// The native-target guard decides whether a gate run may be recorded as native
-// evidence. Its first version collapsed cfg values into a Set, so two targets
-// that shared an arch and an os counted as one and passed; the defect shipped
-// because nothing could import the function to test it.
 import assert from "node:assert/strict";
 import test from "node:test";
 import { cfgValues, verifyNativeTarget } from "../tools/rust-engine-program/native-target.mjs";

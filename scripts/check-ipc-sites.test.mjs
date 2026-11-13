@@ -804,7 +804,6 @@ test("type positions do not create uncalled transport references", () => {
     "type RawTransport = typeof ipcRenderer.invoke;",
     "const typed: typeof invoke = invoke; operationBridge(ops, typed);",
   ]) {
-    // A value reference assigned to typed still escapes; its annotation does not add a second site.
     const expected = source.startsWith("const typed")
       ? [preload + " | invoke transport reference: invoke"]
       : [];

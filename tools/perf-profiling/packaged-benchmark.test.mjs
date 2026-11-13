@@ -535,7 +535,6 @@ test("surface observer carries a first and a full milestone from one trigger and
   p.frame();
   p.frame();
   const observed = await pending;
-  // Both milestones matched between frames through mutations; each ends at the next frame callback.
   assert.deepEqual(
     [
       observed.triggerMs,
@@ -1064,7 +1063,6 @@ test(
     const failed = JSON.parse(await readFile(join(output, "result.json"), "utf8"));
     assert.equal(failed.binary, join(bundle, "Contents/MacOS/dohc"));
     assert.equal(failed.settings.metricVersion, METRIC_VERSION);
-    // The engine is the first missing file, at the bundle's Resources path and without .exe.
     assert.match(
       failed.error,
       /ENOENT.*dohc\.app\/Contents\/Resources\/workspace-engine\/dohc-workspace-engine'/,
@@ -1802,7 +1800,6 @@ test("automation cases expect the package limits to refuse only the cases over t
     cases.filter((spec) => spec.contention).map((spec) => spec.name),
     ["baseline-typing", "find-500-typing"],
   );
-  // Five Finds of 100 records each, so their 1,000 assignments count records in two Finds twice.
   const five = caseNamed(cases, "five-finds");
   assert.deepEqual(
     [1, 2, 3, 4, 5].map((k) => five.seed.filter((record) => record[`F${k}`]).length),
@@ -1891,7 +1888,6 @@ test("document records read back from frontmatter and the verifier tells step vi
   const staged = caseNamed(cases, "set-then-find");
   const read = await readDocumentCase(root, staged, loadYaml);
   assert.equal(read.length, 40);
-  // A case reads its own seeded files and the records its runs created, never another file.
   await writeFile(
     join(root, "automation-bench", "Added.md"),
     '---\nCase: "find-500"\nN: 501\n---\n',
@@ -2000,7 +1996,6 @@ test("settle texts distinguish automation outcomes and names", () => {
   assert.deepEqual(baseline.done, ["Ran baseline on Trigger"]);
   assert.deepEqual(baseline.skipped, ["baseline made no changes to Trigger"]);
   assert.deepEqual(baseline.ended, ["baseline finished on Trigger"]);
-  // A case's words never match another case's settle text.
   const typing = Object.values(outcomeTexts("baseline-typing", "Trigger")).flat();
   assert.ok(
     Object.values(baseline)
@@ -2340,7 +2335,6 @@ test("run journal reads saved headers and progress, and a refused run leaves non
     writeMs: null,
     writes: null,
   });
-  // A mixed journal cannot turn unmeasured stages into zeros or partial totals.
   assert.deepEqual(
     await timing([...measured, { kind: "step", ordinal: 2, effects: [], findMs: 2 }]),
     { findMs: 22, planMs: null, writeMs: 25, writes: 2 },
@@ -2505,7 +2499,6 @@ test("automation observer times a press on its own button to the painted settle 
   p.step();
   press('[aria-label="baseline for Trigger"] span');
   p.step();
-  // Text outside the toast stack and Notices, such as a table cell, is not a settle.
   p.document
     .getElementById("cells")
     .insertAdjacentHTML("beforeend", "<div>Ran baseline on Trigger</div>");
@@ -2817,7 +2810,6 @@ test("summary reports automation cases per kind and keeps missing measurements m
   );
 });
 
-// A fake executeCli: it records each call and answers as the desktop CLI server does.
 const fakeCli = (calls) => `import { appendFileSync } from 'node:fs';
 const ok = body => ({ exitCode: 0, stdout: JSON.stringify({ schemaVersion: 1, ...body }), stderr: '' });
 export async function executeCli({ argv }) {
@@ -2912,7 +2904,6 @@ test("dataset CLI script creates, seeds, and lists through executeCli, and fails
   assert.ok(
     recorded.every((call) => call.stateDir === "profile" && resolve(call.cwd) === resolve(root)),
   );
-  // The CLI names a dataset by its dataset.json path and refuses a body that still carries datasetId.
   assert.ok(
     recorded
       .slice(1)
@@ -2953,7 +2944,6 @@ test(
     t.after(() => rm(root, { recursive: true, force: true }));
     const pidFile = join(root, "descendant.pid");
     const cliModule = join(root, "fake-cli.mjs");
-    // The CLI starts a process that outlives it, then fails, as a crashed CLI worker would leave one.
     await writeFile(
       cliModule,
       `import { spawn } from 'node:child_process'; import { writeFileSync } from 'node:fs';
@@ -3287,7 +3277,6 @@ test("comparison checks a case whose fixture changed only within the candidate, 
     "typing small.md dispatch to two frames: missing",
     "document baseline: missing",
   ]);
-  // A receipt from before per-case digests cannot pass as comparable.
   const old = receipt({ settled: [5000, 6000, 7000, 8000, 9000] });
   for (const run of old.runs) delete run.collectionAutomations.document.cases[0].fixtureSha256;
   const undigested = await summarize(old);

@@ -114,7 +114,6 @@ fn reads_nothing() {}
 
 test("every ignored test that needs only a staged reader runs in the phase", () => {
   const names = readerTests();
-  // The tests named in the issue that widened the phase, across both crates and test kinds.
   for (const name of [
     "a_reader_built_lineage_adopts_its_successor",
     "reader_restore_no_reader_prefix_refuses_before_fencing",
@@ -199,7 +198,6 @@ test("the phase refuses a list that selects a regression other than as often as 
     "dohc-engine-runtime::reader_settlement": { reads_two: "matches" },
   });
   assert.deepEqual(readerTestMismatches(["reads_one", "reads_two"], listed), []);
-  // Renamed or moved out of the build: declared, never found.
   assert.deepEqual(readerTestMismatches(["reads_one", "reads_two", "reads_three"], listed), [
     "reads_three (declared 1, found 0)",
   ]);

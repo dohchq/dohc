@@ -116,7 +116,6 @@ describe("a workspace's reads", () => {
     a.subscribe(views.files, paintedA);
     await vi.waitFor(() => expect(count(server, "/sync/ws-a/ops/listFiles")).toBe(1));
 
-    // The switch: A's store stops, and B's opens.
     a.stop();
     const { data: b } = open(server, "ws-b", cache);
     b.subscribe(views.files, () => {});
@@ -243,7 +242,6 @@ describe("what a read answers", () => {
       expect(a.state(views.page("a.md")).value).toEqual({ kind: "missing", last: "Text from A" }),
     );
 
-    // The person switches to B with the page open: B has no a.md, and nothing of A's comes with it.
     a.stop();
     const b = open(server, "ws-b", cache).data;
     b.subscribe(views.page("a.md"), () => {});
@@ -282,7 +280,6 @@ describe("what a read answers", () => {
   it("ignores a superseded read's 404: a newer read has landed, and the store stays as it is", async () => {
     const server = testServer();
     const old = deferred<Answer>();
-    // The first read lands; a change starts a second, held; a later change starts a third, which lands.
     server.on(
       "POST",
       "/sync/ws-a/ops/listFiles",
@@ -381,10 +378,8 @@ describe("what a read answers", () => {
     expect(
       server.calls.find((call) => call.path === feedPath("ws-a", "0.5.2"))?.signal.aborted,
     ).toBe(true);
-    // Try again reads nothing through a store that has gone.
     data.retry(views.files);
     expect(count(server, "/sync/ws-a/ops/listFiles")).toBe(1);
-    // A view first opened after that shows the same failed read, never a loading line that never ends.
     data.subscribe(views.chats, () => {});
     expect(data.state(views.chats)).toMatchObject({
       value: null,
@@ -679,7 +674,6 @@ describe("a failing feed", () => {
       });
     const { data } = open(server, "ws-a", createReadCache(), sleep);
     data.subscribe(views.files, () => {});
-    /** Waits for the next backoff wait, then ends it. */
     const pass = async (waited: number) => {
       await vi.waitFor(() => expect(waits).toHaveLength(waited));
       ends[waited - 1]!();
@@ -736,7 +730,6 @@ describe("a failing feed", () => {
     const { server, data, waits, pass } = await failing(busy, busy, held);
     await pass(1);
     await vi.waitFor(() => expect(waits).toHaveLength(2));
-    // Two failures, then the app goes to the background during the second wait.
     data.pause();
     // The network went while the app was away, so the first request after it returns fails too.
     server.on("GET", feedPath("ws-a", "0.5.2"), "offline", held);
@@ -861,10 +854,8 @@ describe("a read mark the server couldn't send", () => {
     const { data } = open(server);
     await data.markRead("thread-1", "message-1");
     expect(count(server, path)).toBe(1);
-    // The next showing sends it again, and the server takes it.
     await data.markRead("thread-1", "message-1");
     expect(count(server, path)).toBe(2);
-    // Once the server took it, a later showing sends nothing.
     await data.markRead("thread-1", "message-1");
     expect(count(server, path)).toBe(2);
   });
