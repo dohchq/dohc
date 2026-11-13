@@ -260,6 +260,33 @@ it("terminally refuses an oversized submission as a capacity refusal before vali
   expect(f.validate).not.toHaveBeenCalled();
 });
 
+it("logs a slow or unsuccessful submission with cut ids, timings and a fixed word, once a minute for each document and result", async () => {
+  const f = await setup(); journal(f);
+  // Far past any line an earlier test logged, so none of their minutes still holds a line back.
+  let clock = 1e12;
+  vi.spyOn(performance, "now").mockImplementation(() => clock);
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  const oversized = new Uint8Array(f.bounds.maxSubmissionBytes + 1);
+  const submit = (deliveryId: string, updateBytes: Uint8Array) =>
+    f.capture.submit({deliveryId, updateDigest: hash(updateBytes), updateBytes}, new AbortController().signal);
+  expect(await submit(ack.deliveryId, bytes)).toEqual({result: "success", ack});
+  expect(log).not.toHaveBeenCalled();
+  f.drain.mockImplementationOnce(async () => { clock += 600; });
+  expect(await submit(ack.deliveryId, bytes)).toEqual({result: "success", ack});
+  for (let i = 0; i < 3; i++) expect(await submit("delivery-with-a-longer-id", oversized)).toEqual({result: "refused", reason: "capacity-refused"});
+  clock += 60_000;
+  expect(await submit("delivery-with-a-longer-id", oversized)).toEqual({result: "refused", reason: "capacity-refused"});
+  const object = binding.objectId.slice(0, 8);
+  expect(log.mock.calls).toEqual([
+    ["Live submit answered.", {submitter: "named", object, checkMs: 0, commitMs: 0, drainMs: 600, result: "success"}],
+    ["Live submit answered.", {submitter: "named", object, checkMs: 0, commitMs: null, drainMs: null, result: "capacity-refused"}],
+    ["Live submit answered.", {submitter: "named", object, checkMs: 0, commitMs: null, drainMs: null, result: "capacity-refused", repeated: 2}],
+  ]);
+  const shown = JSON.stringify(log.mock.calls);
+  // No part of a delivery id, which the client chooses, reaches the log.
+  for (const hidden of [binding.currentPath, binding.workspaceId, binding.lineageClaimId, hash(oversized), "deliver"]) expect(shown).not.toContain(hidden);
+});
+
 it("refuses an applied payload only after reading its size without retaining budget", async () => {
   const budget = createLiveBufferBudget(30), f = await setup(4, budget.reserve), signal = new AbortController().signal;
   const sync = await f.capture.openSync(Uint8Array.of(0), signal);
