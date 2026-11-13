@@ -91,11 +91,11 @@ export function readOrdinaryActivationHistory(storage:StorageContext,input:Histo
   const params=[document.workspaceId,lower,source.committedCursor,document.mainVersionId,document.objectId,document.lineageClaimId,entryLimit+1];
   // octet_length() takes each size from the row's header; no payload is read before the read is known to fit.
   const readable=bounds.maxBytesPerDrain-start.length;
-  let read=0,walked=0;
+  let read=0,pageRows=0;
   const rowsSha256=documentRows(storage,document,source,lower,row=>{
     requireValue(integer(row.payload_bytes),"Ordinary activation metadata is damaged.");
     // A lineage that may fold walks at most one fold page of the note's rows; more fold into its checkpoint first.
-    if(input.checkpoint&&++walked>ORDINARY_FOLD_PAGE_ROWS)return false;
+    if(input.checkpoint&&++pageRows>ORDINARY_FOLD_PAGE_ROWS)return false;
     read+=Number(row.payload_bytes);
     if(read>readable&&!input.checkpoint)requireWithinBudget(false,"Ordinary activation metadata exceeds its configured byte budget.");
     return read<=readable;
