@@ -18,6 +18,8 @@ import { publicationStages, type AuthorSnapshot, type WriteCommand } from "./acc
 import type { SyncRelayStorage } from "./storage";
 import { OPERATION_ACTIVE_MS, OPERATION_TOMBSTONE_BATCH, type OperationRecord, type OperationStage } from "./storage/operationRecords";
 import { closeTestStorages, inspectDatabase, storagePath, testStorage } from "./testing";
+import { chatWakeId } from "./storage/chatWakes";
+import type { StorageContext } from "./storage/context";
 
 afterEach(async () => {
   vi.useRealTimers();
@@ -465,6 +467,63 @@ describe("settling a write whose folder goes", () => {
     expect(storage.listUnfinishedAccountOperations({ workspaceId: WORKSPACE })).toMatchObject([{ stage: "recorded" }]);
     await settleOperations(storage, [write], null, COULD_NOT_SEND, 5);
     expect(advance(storage, "saved")).toMatchObject({ stage: "refused", messageState: "pending", result: { threadId: null, reason: COULD_NOT_SEND } });
+  });
+});
+
+describe("a published message's wakes", () => {
+  const claude = { target: "mention:claude", candidates: [{ installId: "mac", agentId: "default", label: "Mac", matched: { handle: "claude" } }] };
+  // A command with the wakes its write froze.
+  const withWakes = (command: PublicationCommand, kind: "reply" | "answer", id = "reply-1") =>
+    ({ ...command, write: { kind, threadId: THREAD, messageId: id, questionId: "question" }, wakes: { targets: [claude], unmatched: false } });
+  const wakeRows = (storage: SyncRelayStorage) => (storage as StorageContext).db.prepare(
+    "SELECT message_id, thread_id, state, prerequisite_message_id FROM sync_relay_chat_wakes ORDER BY message_id",
+  ).all();
+  const waiting = (messageId: string, prerequisite: string | null = null) =>
+    ({ message_id: messageId, thread_id: THREAD, state: "waiting", prerequisite_message_id: prerequisite });
+
+  it("makes a message's wakes in the verdict that publishes it, on a foreground write", async () => {
+    const { storage, accepted } = await relay();
+    const write = record(storage, withWakes({ stages: [replyStage()] }, "reply"));
+    accepted(1, "chat.message.append", messagePayload());
+    const receipts = new Map<string, unknown>([["reply-1:reply", written("reply-1:reply", [[1, "pushed"]])]]);
+    expect(await publishOperation({ storage, copy: copy(receipts).replica, record: write, ...clock() })).toMatchObject({ state: "saved" });
+    expect(wakeRows(storage)).toEqual([waiting("reply-1")]);
+  });
+
+  it("holds an answer's wakes while its decision is unfinished, and releases them through it once accepted, in background passes", async () => {
+    const { storage, accepted } = await relay();
+    let write = record(storage, withWakes(answer(), "answer"));
+    accepted(1, "chat.message.append", messagePayload());
+    const receipts = new Map<string, unknown>([
+      ["reply-1:reply", written("reply-1:reply", [[1, "pushed"]])],
+      ["reply-1:decision", written("reply-1:decision", [[2, "pending"]])],
+    ]);
+    [write] = (await publishOnce(storage, copy(receipts).replica, [write], () => 1)) as [OperationRecord];
+    expect(write).toMatchObject({ stage: "recorded", messageState: "published" });
+    expect(wakeRows(storage)).toEqual([{ ...waiting("reply-1"), state: "held" }]);
+    expect(storage.claimChatWake({ accountId: OWNER, wakeId: chatWakeId(OWNER, WORKSPACE, "reply-1", "mention:claude", 1), installId: "mac", nowMs: 2 }))
+      .toMatchObject({ won: false, wake: { state: "held" } });
+
+    accepted(2, "chat.decision.set", decisionPayload());
+    receipts.set("reply-1:decision", written("reply-1:decision", [[2, "pushed"]]));
+    expect(await publishOnce(storage, copy(receipts).replica, [write], () => 3)).toMatchObject([{ stage: "saved" }]);
+    expect(wakeRows(storage)).toEqual([waiting("reply-1", "question")]);
+  });
+
+  it("releases a published answer's wakes without the decision when it was lost, or when its folder settles first", async () => {
+    const { storage, accepted } = await relay();
+    const beaten = record(storage, withWakes(answer("reply-2"), "answer", "reply-2"), "beaten");
+    const settling = record(storage, withWakes(answer("reply-3"), "answer", "reply-3"), "settling");
+    accepted(3, "chat.message.append", messagePayload("reply-2"));
+    accepted(4, "chat.message.append", messagePayload("reply-3"));
+    const receipts = new Map<string, unknown>([
+      ["reply-2:reply", written("reply-2:reply", [[3, "pushed"]])],
+      ["reply-2:decision", lost("reply-2:decision", "reply-1")],
+      ["reply-3:reply", written("reply-3:reply", [[4, "pushed"]])],
+    ]);
+    expect(await publishOnce(storage, copy(receipts).replica, [beaten], () => 1)).toMatchObject([{ stage: "refused" }]);
+    await settleOperations(storage, [settling], reader(receipts), COULD_NOT_SEND, 5);
+    expect(wakeRows(storage)).toEqual([waiting("reply-2"), waiting("reply-3")]);
   });
 });
 

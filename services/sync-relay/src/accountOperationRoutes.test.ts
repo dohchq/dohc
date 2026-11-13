@@ -1184,12 +1184,12 @@ describe("an account's chat writes through the server's copy", () => {
       return { request, read };
     };
     const missing = await denialBytes(await f.write("changes", {}));
-    for (const name of ["changes", "retryWake", "groupCreate", "toString", "__proto__", "constructor"]) {
+    for (const name of ["changes", "groupCreate", "toString", "__proto__", "constructor"]) {
       const { request, read } = streamed(name);
       expect(await denialBytes(await f.h(request)), name).toBe(missing);
       expect(read.pulled, name).toBe(false);
     }
-    for (const name of ["post", "send", "reply", "react", "markRead"]) {
+    for (const name of ["post", "send", "reply", "react", "markRead", "retryWake"]) {
       const { request, read } = streamed(name);
       const response = await f.h(request);
       expect(await json(response), name).toEqual(schemaRefusal(name));
@@ -1240,6 +1240,76 @@ describe("an account's chat writes through the server's copy", () => {
       .toEqual({ ok: false, reason: "dohc: no such group: channel-nowhere", refusal: "missing" });
     expect(f.rows()).toBe(0);
     expect(f.engine.writes).toEqual([]);
+  });
+
+  it("freezes each message's wake targets from the account's own computers before the engine writes, and publishes them without its text", async () => {
+    const f = await writeRelay();
+    const { planning, onSecret } = f.seeded;
+    const chats = new ChatsLiveAdapter(f.engine.chats, "trip", { workspaceId: "trip" });
+    const declare = async (installId: string, computerLabel: string, runners: Array<{ agentId: string; displayName: string }>) => {
+      const response = await f.h(new Request("http://relay.test/sync/workspaces/trip/runners", {
+        method: "PUT", headers: { ...signedIn("ana", "mac"), "content-type": "application/json" },
+        body: JSON.stringify({ installId, computerLabel, runners: runners.map((runner) => ({ ...runner, enabled: true })) }),
+      }));
+      expect(response.status, await response.clone().text()).toBe(200);
+    };
+    // Two computers whose first agents are both `default` under different names. Claude runs on both.
+    await declare("mac", "Ana's Mac", [{ agentId: "default", displayName: "Claude" }]);
+    await declare("laptop", "Ana's Laptop", [{ agentId: "default", displayName: "Codex" }, { agentId: "helper", displayName: "Claude" }]);
+    // Posts opened by the account's Claude, by a participant's agent with the same ID and name, and by an agent no computer runs.
+    for (const [threadId, authorUserId, displayName] of [["thread-claude", "ana", "Claude"], ["thread-ben", "ben", "Claude"], ["thread-nova", "ana", "Nova"]] as const) {
+      await chats.startChannelThread({
+        workspaceId: "trip", channelId: planning.channelId, threadId, messageId: `${threadId}-opening`, lane: "posts",
+        author: { kind: "agent", displayName }, authorOwnerDisplayName: "Ana", authorUserId, authorAgentId: "default", authorActorKey: null, body: "Done.",
+      });
+    }
+    const db = (f.storage as StorageContext).db;
+    type Frozen = { targets: Array<{ target: string; candidates: unknown[] }>; unmatched: boolean };
+    const frozen = (operationId: string) => (JSON.parse(String(db.prepare(
+      "SELECT command_json FROM sync_relay_account_operations WHERE account_id = 'ana' AND operation_id = ?").get(operationId)?.command_json)) as { wakes: Frozen }).wakes;
+    const candidate = (installId: string, agentId: string, label: string, matched: Record<string, string>) => ({ installId, agentId, label, matched });
+    const mac = (matched: Record<string, string>) => candidate("mac", "default", "Ana's Mac", matched);
+    const saved = async (operation: string, args: Record<string, unknown>) =>
+      expect(await answer(await f.write(operation, args))).toMatchObject({ ok: true, state: "saved" });
+
+    await saved("reply", { operationId: "op-answered", threadId: "thread-claude", body: "Thanks" });
+    expect(frozen("op-answered")).toEqual({ targets: [{ target: "implicit:mac:default", candidates: [mac({ displayName: "Claude" })] }], unmatched: false });
+    await saved("reply", { operationId: "op-participant", threadId: "thread-ben", body: "Thanks" });
+    expect(frozen("op-participant"), "a participant's agent is no one's to wake").toEqual({ targets: [], unmatched: false });
+    await saved("reply", { operationId: "op-nobody", threadId: "thread-nova", body: "Thanks" });
+    expect(frozen("op-nobody"), "no computer runs Nova").toEqual({ targets: [], unmatched: true });
+    await saved("post", { operationId: "op-codex", groupId: planning.channelId, body: "@codex look" });
+    expect(frozen("op-codex").targets).toEqual([{ target: "mention:codex", candidates: [candidate("laptop", "default", "Ana's Laptop", { handle: "codex" })] }]);
+    await saved("reply", { operationId: "op-both", threadId: "thread-claude", body: "@claude yes, secret-phrase-xyz" });
+    expect(frozen("op-both"), "the answered Claude is already a candidate of the mention").toEqual({ targets: [{ target: "mention:claude", candidates: [
+      candidate("laptop", "helper", "Ana's Laptop", { handle: "claude" }), mac({ handle: "claude" }),
+    ] }], unmatched: false });
+    await saved("react", { operationId: "op-react", messageId: "thread-claude-opening", emoji: "👍", state: "added" });
+    expect(frozen("op-react")).toEqual({ targets: [], unmatched: false });
+
+    // A write recorded before the computers changed publishes the targets it froze.
+    const lost = { operationId: "op-lost", threadId: "thread-claude", body: "Again" };
+    f.engine.failing.set(CHATS_METHOD.messageSend, new Error("the engine went away"));
+    expect(await f.earlier({ operation: "reply", args: lost })).toMatchObject({ ok: true, state: "pending" });
+    f.engine.failing.clear();
+    await declare("mac", "Ana's Mac", []);
+    await declare("desktop", "Ana's Desktop", [{ agentId: "default", displayName: "Claude" }]);
+    await saved("reply", lost);
+
+    const rows = db.prepare("SELECT * FROM sync_relay_chat_wakes ORDER BY operation_id").all();
+    const ids = (operationId: string) => phoneWriteIds("ana", "trip", operationId);
+    expect(rows.map((row) => [row.operation_id, row.message_id, row.thread_id, row.target, row.state, JSON.parse(String(row.candidates_json))])).toEqual([
+      ["op-answered", ids("op-answered").messageId("reply"), "thread-claude", "implicit:mac:default", "waiting", [mac({ displayName: "Claude" })]],
+      ["op-both", ids("op-both").messageId("reply"), "thread-claude", "mention:claude", "waiting", frozen("op-both").targets[0]!.candidates],
+      ["op-codex", ids("op-codex").messageId("post"), ids("op-codex").threadId, "mention:codex", "waiting", frozen("op-codex").targets[0]!.candidates],
+      ["op-lost", ids("op-lost").messageId("reply"), "thread-claude", "implicit:mac:default", "waiting", [mac({ displayName: "Claude" })]],
+    ]);
+    expect(JSON.stringify(rows), "a wake keeps no message text").not.toContain("secret-phrase-xyz");
+
+    // With computers declared, a hidden thread still answers exactly as a missing one.
+    const bytes = async (operationId: string, threadId: string) =>
+      (await (await f.write("reply", { operationId, threadId, body: "@claude hi" })).text()).replaceAll(threadId, "<id>");
+    expect(await bytes("op-hidden", onSecret.id)).toBe(await bytes("op-missing", "thread-nowhere"));
   });
 
   it("answers a new write whose copy can't sync as not sent, without the relay's words", async () => {

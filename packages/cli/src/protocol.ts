@@ -318,6 +318,12 @@ export type PhoneWriteOperation = keyof typeof phoneWriteArgsSchemas;
 // The phone's read mark: the newest message it showed in a thread. It has no
 // operation ID: a repeat, or an older mark, moves nothing.
 export const phoneMarkReadArgsSchema = z.object({ threadId: phoneTargetIdSchema, messageId: phoneTargetIdSchema }).strict();
+// The phone's Try again on an agent wake that didn't start or wasn't
+// confirmed. The wake ID is the server's own; the phone names nothing else.
+export const phoneRetryWakeArgsSchema = z.object({
+  operationId: phoneOperationIdSchema,
+  wakeId: z.string().regex(/^wake-[0-9a-f]{32}$/u),
+}).strict();
 // A key the caller chooses for one request. Sent again with the same key,
 // after a timeout for example, the request returns its first result while
 // dohc runs instead of doing its work twice.

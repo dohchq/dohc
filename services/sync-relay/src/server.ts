@@ -60,6 +60,7 @@ import {
 import { createWorkspaceBlobRoutes } from "./workspaceBlobRoutes";
 import { createAccountFeedWaits } from "./accountFeed";
 import { createAccountOperationRateLimiter, createAccountOperationRoute } from "./accountOperationRoutes";
+import { createChatWakeRoutes, createChatWakeWaits } from "./chatWakeRoutes";
 import type { ServerCopies } from "./serverCopies";
 import { createAccountSessionRoutes } from "./accountSessionRoutes";
 import { createAccountWorkspaceRoutes } from "./accountWorkspaceRoutes";
@@ -501,13 +502,21 @@ export function createSyncRelayHandler({
   const respondToAccountWorkspaces = resolveAccountSession
     ? createAccountWorkspaceRoutes({ storage, resolveAccountSession }) : undefined;
   const accountFeedWaits = createAccountFeedWaits(storage, discussionActivity);
+  const chatWakeWaits = createChatWakeWaits(storage, discussionActivity);
+  // A credential change makes the account's held feed and wake reads check it now.
+  const wakeAccountWaits = (userId: string) => {
+    accountFeedWaits.wakeAccount(userId);
+    chatWakeWaits.wakeAccount(userId);
+  };
   const respondToAccountSessions = resolveAccountSession && accountSessions
-    ? createAccountSessionRoutes({ storage, resolveAccountSession, sessions: accountSessions, feedWaits: accountFeedWaits }) : undefined;
+    ? createAccountSessionRoutes({ storage, resolveAccountSession, sessions: accountSessions, feedWaits: { wakeAccount: wakeAccountWaits } }) : undefined;
   const respondToAccountOperation = resolveAccountSession
     ? createAccountOperationRoute({
       storage, resolveAccountSession, copies: serverCopies, nowMs, limiter: accountOperationRateLimiter, feedWaits: accountFeedWaits,
       lookupUserDisplayName, serverUrl: relayPublicOrigin,
     }) : undefined;
+  const respondToChatWakes = resolveAccountSession
+    ? createChatWakeRoutes({ storage, resolveAccountSession, waits: chatWakeWaits, nowMs, limiter: accountOperationRateLimiter }) : undefined;
   const automationPresses = createAutomationPressRoutes({
     storage, nowMs, newId, claimPendingShares, activity: discussionActivity, rateLimiters: automationPressRateLimiters,
   });
@@ -675,7 +684,7 @@ export function createSyncRelayHandler({
   };
 
   const personalAgents = createPersonalAgents({
-    storage, fence: credentialFence, activity: discussionActivity, nowMs, onFence: (userId) => accountFeedWaits.wakeAccount(userId),
+    storage, fence: credentialFence, activity: discussionActivity, nowMs, onFence: wakeAccountWaits,
   });
 
   // The routes share-web's MCP tool loop calls take a link holder's
@@ -1094,6 +1103,10 @@ export function createSyncRelayHandler({
         if (!respondToAccountOperation) throw notFound();
         return await respondToAccountOperation(request, route);
       }
+      if (route.route === "chat-runners" || route.route === "chat-wakes" || route.route === "chat-wake") {
+        if (!respondToChatWakes) throw notFound();
+        return await respondToChatWakes(request, route);
+      }
       if (route.route === "notices" || route.route === "notice-marks") {
         // Desktop and agent credentials only, never ambient browser cookies.
         const authorization = request.headers.get("authorization");
@@ -1245,6 +1258,7 @@ export function createSyncRelayHandler({
     dispose() {
       replicaLinkReads?.close();
       accountFeedWaits.close();
+      chatWakeWaits.close();
       return personalAgents.dispose();
     },
     deleteAccount(userId: string, workspaceIds: readonly string[], shareIds: readonly string[]) {

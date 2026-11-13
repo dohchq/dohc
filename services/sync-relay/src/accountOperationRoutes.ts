@@ -2,9 +2,10 @@ import { jsonResponse, readBoundedJson, TokenBucketLimiter } from "@dohc/service
 import type { ResolveAccountSession } from "@dohc/workspace-auth/session";
 import { isPhoneWriteOperation, parseMarkRead, parsePhoneWrite, runAccountMarkRead, runAccountWrite } from "./accountChatWrites";
 import { accountDisplayName, type LookupUserDisplayName } from "./accountDisplayName";
-import { readAccountFeed, type AccountFeedWaits } from "./accountFeed";
+import { currentAccountFeedCursor, readAccountFeed, type AccountFeedWaits } from "./accountFeed";
 import { isAccountOperation, runAccountOperation } from "./accountOperations";
 import { bearerAccountSession } from "./accountWorkspaceRoutes";
+import { runRetryWake } from "./chatWakeRoutes";
 import { badRequest, notFound, RelayError, relayError } from "./errors";
 import { parseWorkspaceId } from "./requestInputs";
 import type { ServerCopies } from "./serverCopies";
@@ -37,7 +38,7 @@ export function parseAccountOperationRoute(parts: readonly string[]): AccountOpe
 }
 
 /**
- * A signed-in account's reads, chat writes and read marks in a workspace it owns,
+ * A signed-in account's reads, chat writes, read marks, and wake retries in a workspace it owns,
  * through this server's copy of it, while it shows on the phone, and its
  * change feed, at `GET .../ops/changes?since=&hold=`. Only a Bearer session
  * reaches them, and the route checks the operation and the owner before it
@@ -74,14 +75,15 @@ export function createAccountOperationRoute(options: {
     if (!limiter.allow(caller.sessionId, options.nowMs())) {
       throw new RelayError("server_busy", "This sign-in is asking faster than your server answers. Try again shortly.");
     }
-    // The feed reads only the relay's log; every other operation needs a copy.
-    if (!feed && options.copies() === undefined) throw copiesUnavailable();
+    // The feed reads only the relay's log, and a wake retry only the relay's wakes; every other operation needs a copy.
+    const retry = route.operation === "retryWake";
+    if (!feed && !retry && options.copies() === undefined) throw copiesUnavailable();
     // The phone reaches a workspace its account owns while it shows on the phone.
     const reaches = (userId: string) =>
       storage.workspaceIsOwnedBy(route.workspaceId, userId) && storage.showsOnPhone(userId, route.workspaceId);
     const write = isPhoneWriteOperation(route.operation);
     const mark = route.operation === "markRead";
-    if (!(feed || write || mark || isAccountOperation(route.operation)) || !reaches(caller.userId)) throw notFound();
+    if (!(feed || write || mark || retry || isAccountOperation(route.operation)) || !reaches(caller.userId)) throw notFound();
     const authorize = async () => {
       const current = await session(request);
       if (current.sessionId !== caller.sessionId || current.userId !== caller.userId || !reaches(caller.userId)) throw notFound();
@@ -105,6 +107,11 @@ export function createAccountOperationRoute(options: {
     await authorize();
     // A Bearer session reaches what shows on the phone, whatever the request says.
     const visitor = { reason: "account", caller: caller.sessionId, signal: request.signal, phone: true } as const;
+    if (retry) {
+      const result = runRetryWake(storage, { accountId: caller.userId, workspaceId: route.workspaceId, args, nowMs: options.nowMs() });
+      await authorize();
+      return jsonResponse({ ok: true, result, cursor: currentAccountFeedCursor(storage, route.workspaceId) });
+    }
     if (write) {
       const parsed = parsePhoneWrite(route.operation, args);
       // The author is the session's account, by the name it has now.

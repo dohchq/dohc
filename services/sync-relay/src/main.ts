@@ -80,6 +80,7 @@ import {NOTICE_POST_BUCKET_CAPACITY, NOTICE_POST_MAX_SENDERS, NOTICE_POST_REFILL
 import {automationServerLabel, startAutomationServer} from "./automationServer";
 import {isPublicHttpsOrigin, removeAutomationReplicas} from "./automationReplicas";
 import {tombstoneSettledOperations} from "./operationPublication";
+import {sweepChatWakesInBatches} from "./chatWakes";
 import {startServerCopies, type ServerCopies} from "./serverCopies";
 import {AUTOMATION_REPLICA_BEARER_PREFIX, authorizeAutomationReplication} from "./automationReplicaCredential";
 
@@ -594,8 +595,8 @@ function presentsValidRelayExchangeKey(headers: Headers): boolean {
 }
 
 // Presses from shared views go when their retention ends, whether or not
-// more arrive or any host lists them. Settled phone writes become tombstones
-// on the same schedule.
+// more arrive or any host lists them. Settled phone writes become tombstones,
+// and chat wakes end and go, on the same schedule.
 const AUTOMATION_PRESS_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 setInterval(() => {
   try {
@@ -608,6 +609,9 @@ setInterval(() => {
   });
   tombstoneSettledOperations(storage, Date.now()).catch((error: unknown) => {
     console.error("[sync-relay] account operation tombstones failed:", error);
+  });
+  sweepChatWakesInBatches(storage, Date.now()).catch((error: unknown) => {
+    console.error("[sync-relay] chat wake sweep failed:", error);
   });
 }, AUTOMATION_PRESS_PRUNE_INTERVAL_MS).unref();
 

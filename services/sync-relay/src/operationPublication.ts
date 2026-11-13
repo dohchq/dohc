@@ -10,6 +10,7 @@ import {
 import { EngineRequestError } from "@dohc/workspace-engine-client/daemon";
 import type { AutomationReplica } from "./automationReplicas";
 import { stableJsonStringify } from "./canonicalJson";
+import { operationWakeChange } from "./chatWakes";
 import type { SyncRelayStorage } from "./storage";
 import { OPERATION_TOMBSTONE_BATCH, type OperationRecord } from "./storage/operationRecords";
 import { REFUSED_OP_KIND } from "./storage/relayAdmission";
@@ -91,7 +92,8 @@ export type ExpectedRecord = {
 export type OperationResult = { threadId: string | null; reason?: RefusalReason; winnerMessageId?: string };
 
 export type Verdict =
-  | { stage: "pending"; messagePublished: boolean }
+  /** `threadId`: the thread the first stage's receipt names, once there is one. */
+  | { stage: "pending"; messagePublished: boolean; threadId: string | null }
   | { stage: "saved" | "refused"; messagePublished: boolean; result: OperationResult };
 
 export type PublicationAnswer = { state: "saved" | "refused" | "pending"; record: OperationRecord | null };
@@ -187,7 +189,7 @@ export function judgeOperation(
     else if (accepted === "unresolved") unresolved = true;
     else if (stage.role === "post" || stage.role === "reply") messagePublished = true;
   }
-  if (unresolved && settling === null) return { stage: "pending", messagePublished };
+  if (unresolved && settling === null) return { stage: "pending", messagePublished, threadId };
   const refuse = (reason: RefusalReason, extra: { winnerMessageId?: string } = {}): Verdict =>
     ({ stage: "refused", messagePublished, result: { threadId, reason, ...extra } });
   if (lost !== null) return refuse(ALREADY_ANSWERED, lost);
@@ -268,8 +270,10 @@ function holds(payloadJson: string, expected: ExpectedRecord): boolean {
 
 /**
  * Records what a verdict settled, and a message published on its own. A
- * pending write past its active time is stalled. Answers the row as it is
- * now, or null once nothing but a tombstone is left.
+ * pending write past its active time is stalled. In the same transaction, a
+ * message published makes its wake rows, and an answer's decision outcome
+ * releases them. Answers the row as it is now, or null once nothing but a
+ * tombstone is left.
  */
 export function recordVerdict(
   storage: Pick<SyncRelayStorage, "advanceAccountOperation">,
@@ -278,9 +282,11 @@ export function recordVerdict(
   nowMs: number,
 ): OperationRecord | null {
   const stage = verdict.stage !== "pending" ? verdict.stage : nowMs >= record.activeUntilMs ? "stalled" : undefined;
+  const wakes = operationWakeChange(record.command, verdict);
   return storage.advanceAccountOperation({
     accountId: record.accountId, operationId: record.operationId, nowMs,
     ...(stage === undefined ? {} : { stage }),
+    ...(wakes === undefined ? {} : { wakes }),
     ...(verdict.messagePublished && record.messageState !== null ? { message: "published" as const } : {}),
     ...(verdict.stage === "pending" ? {} : { result: verdict.result }),
   })?.record ?? null;

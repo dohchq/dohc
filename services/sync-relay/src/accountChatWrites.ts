@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import { phoneMarkReadArgsSchema, phoneWriteArgsSchemas, type PhoneWriteOperation } from "@dohc/cli/protocol";
 import { createActorIssuer, deriveLocalActor, serializeActorKey } from "@dohc/workspace-contracts/actor-identity";
 import type { ChatMessage, ChatThread, ChatThreadLane } from "@dohc/workspace-contracts/engine";
-import { cutText } from "@dohc/workspace-contracts/names";
 import { asRecord } from "@dohc/workspace-core";
 import { ChatsLiveAdapter, DaemonRefusalError, type JsonValue } from "@dohc/workspace-engine-client";
 import { EngineRequestError } from "@dohc/workspace-engine-client/daemon";
@@ -15,6 +14,7 @@ import { currentAccountFeedCursor } from "./accountFeed";
 import { serverChats, type MissingResult } from "./accountOperations";
 import type { AutomationReplica } from "./automationReplicas";
 import { stableJsonStringify } from "./canonicalJson";
+import { frozenWakes, resolveWakeTargets, shownName, type FrozenWakes, type WakeSources } from "./chatWakes";
 import { badRequest, notFound, RelayError } from "./errors";
 import {
   COULD_NOT_SEND, PUBLICATION_DEADLINE_MS, TOO_OLD, WORKSPACE_CHANGED, commandStages, isRefusalReason, publishOperation, receiptReader,
@@ -31,9 +31,10 @@ import type { OperationRecord } from "./storage/operationRecords";
 // with its canonical command, is written before the engine's first stage, and
 // every stage carries its derived key and asks the engine for a receipt. A
 // stage that a crash or a lost answer left unwritten replays from that stored
-// command, when the copy opens or the phone retries. The account operations
-// route calls `runAccountWrite`, and `runAccountMarkRead` for a read mark,
-// which has no row: a repeat, or an older mark, moves nothing.
+// command, when the copy opens or the phone retries. The agents a message
+// wakes are resolved once, before the row, and frozen in its command. The
+// account operations route calls `runAccountWrite`, and `runAccountMarkRead`
+// for a read mark, which has no row: a repeat, or an older mark, moves nothing.
 
 /** The bounds of a phone write's operation ID, in UTF-16 code units, which storage's bound in characters admits. */
 export const OPERATION_ID_MIN_LENGTH = 1;
@@ -92,8 +93,8 @@ type ReactWrite = { kind: "react"; threadId: string; messageId: string; emoji: s
 /** A write's resolved targets and derived IDs. A start's thread is a proposal: a running conversation can take its message. */
 export type WriteCommand = StartWrite | ReplyWrite | AnswerWrite | ReactWrite;
 
-/** What a write's row keeps as its command: its publication, the write, and its author. */
-export type StoredWrite = { stages: PublicationStage[]; write: WriteCommand; author: AuthorSnapshot };
+/** What a write's row keeps as its command: its publication, the write, its author, and the agents its message wakes. */
+export type StoredWrite = { stages: PublicationStage[]; write: WriteCommand; author: AuthorSnapshot; wakes: FrozenWakes };
 
 /** The answer a phone write gives. A missing or hidden target answers exactly as reads answer one. */
 export type PhoneWriteAnswer =
@@ -175,12 +176,9 @@ function refusedByEngine(error: unknown): boolean {
 
 const toJson = (value: unknown): JsonValue => JSON.parse(JSON.stringify(value)) as JsonValue;
 
-// The characters the engine drops from a name (names.rs, shown_name), keeping ZWNJ, ZWJ, and variation selectors.
-const HIDDEN_IN_NAMES = /(?![\u200C\u200D\p{Variation_Selector}])[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/gu;
-
 // The name as the engine stores it, so the published row can be compared with it exactly.
 function authorName(name: string | null): string {
-  return cutText(name?.replace(HIDDEN_IN_NAMES, "").trim() || "Unnamed", 40);
+  return shownName(name ?? "") || "Unnamed";
 }
 
 function authorOf(writer: PhoneWriter, workspaceId: string): AuthorSnapshot {
@@ -273,7 +271,10 @@ export function storedWrite(command: JsonValue): StoredWrite | null {
   if (actorKey !== null && typeof actorKey !== "string") return null;
   // This module wrote it, so its kind and the IDs every kind has are enough to know its shape.
   if (!WRITE_KINDS.has(String(write.kind)) || typeof write.threadId !== "string" || typeof write.messageId !== "string") return null;
-  return { stages, write: value as WriteCommand, author: { accountId, displayName, actorKey: typeof actorKey === "string" ? actorKey : null } };
+  return {
+    stages, write: value as WriteCommand, author: { accountId, displayName, actorKey: typeof actorKey === "string" ? actorKey : null },
+    wakes: frozenWakes(command),
+  };
 }
 
 function stageKey(stored: StoredWrite, role: Role): string {
@@ -368,6 +369,16 @@ function visibleTargets(storage: SyncRelayStorage, copy: AutomationReplica) {
       const fits = lane === "posts" ? found.kind === "channel" && found.type !== "chat" : found.kind !== "channel" || found.type !== "posts";
       if (!fits) throw new WriteInvalid(lane === "posts" ? "This group takes no posts." : "This group has no chat.");
     },
+    // A visible thread's first message.
+    async opening(threadId: string): Promise<ChatMessage | null> {
+      return (await adapter.listMessagesPage({ workspaceId, threadId, limit: 1 })).messages[0] ?? null;
+    },
+    // An agent's DM, with its newest messages, or null for any other channel.
+    async dm(channelId: string): Promise<{ agentId: string; messages: ChatMessage[] } | null> {
+      const found = (await chats.store.listChannels({ workspaceId })).find((each) => each.id === channelId);
+      if (found?.kind !== "agent" || found.agentId === undefined) return null;
+      return { agentId: found.agentId, messages: (await chats.store.listGroupStream({ workspaceId, channelId })).items.map((item) => item.message) };
+    },
     // IDs a write would create. One a hidden row already holds answers as missing, so no engine conflict reveals it.
     async unclaimed(ids: { threadId?: string; messageId: string }): Promise<void> {
       if (ids.threadId !== undefined && (await adapter.listThreads({ workspaceId })).some((each) => each.id === ids.threadId) &&
@@ -379,6 +390,26 @@ function visibleTargets(storage: SyncRelayStorage, copy: AutomationReplica) {
 }
 
 type Targets = ReturnType<typeof visibleTargets>;
+
+// What wake resolution reads: the account's enabled agents, and the copy through the reads' filter, a hidden target
+// reading as a missing one. A failed read fails the write before its row.
+function wakeSources(storage: SyncRelayStorage, copy: AutomationReplica, targets: Targets, accountId: string): WakeSources {
+  const hidden = async <T>(read: () => Promise<T>): Promise<T | null> => {
+    try {
+      return await read();
+    } catch (error) {
+      if (error instanceof TargetMissing) return null;
+      throw error;
+    }
+  };
+  return {
+    runners: storage.enabledChatRunners({ accountId, workspaceId: copy.workspaceId }),
+    message: (messageId) => hidden(() => targets.message(messageId)),
+    thread: (threadId) => hidden(() => targets.thread(threadId)),
+    opening: (threadId) => targets.opening(threadId),
+    dm: (channelId) => targets.dm(channelId),
+  };
+}
 
 function advance(storage: SyncRelayStorage, record: OperationRecord, nowMs: number,
   change: { stage?: "reply-written" | "answer-written"; threadId?: string }): void {
@@ -832,7 +863,8 @@ export async function runPhoneWrite(input: PhoneWriteInput): Promise<PhoneWriteA
       try {
         const command = await canonicalWrite(write, ids, targets);
         const author = authorOf(writer, workspaceId);
-        stored = { stages: publicationStages(command, author, ids.key), write: command, author };
+        const wakes = await resolveWakeTargets(wakeSources(storage, copy, targets, writer.accountId), writer.accountId, command);
+        stored = { stages: publicationStages(command, author, ids.key), write: command, author, wakes };
       } catch (error) {
         return await failedBeforeRecord(error);
       }

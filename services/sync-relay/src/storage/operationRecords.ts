@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { JsonValue } from "@dohc/workspace-engine-client";
 import { stableJsonStringify } from "../canonicalJson";
+import { applyOperationWakesInTransaction, retryUsesOperationIdInTransaction, type OperationWakeChange } from "./chatWakes";
 import type { StorageContext } from "./context";
 import { rowToLogRow } from "./rows";
 import type { SqliteDb, SyncRelayLogRow } from "./types";
@@ -196,6 +197,8 @@ export interface AdvanceOperationInput {
   stage?: OperationStage;
   message?: "published";
   result?: JsonValue;
+  /** What the verdict does to the operation's chat wakes, applied in the same transaction when the row moves. */
+  wakes?: OperationWakeChange;
   nowMs: number;
 }
 
@@ -264,17 +267,20 @@ export function recordOperation(storage: StorageContext, input: RecordOperationI
        SELECT ?, ?, ?, 'recorded', ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, NULL,
          (SELECT COALESCE(MAX(relay_seq), 0) FROM sync_relay_log WHERE workspace_id = ?), NULL
        WHERE EXISTS (SELECT 1 FROM sync_relay_workspaces WHERE workspace_id = ? AND owner_user_id = ?)
+         AND NOT EXISTS (SELECT 1 FROM sync_relay_chat_wakes WHERE account_id = ? AND retry_operation_id = ?)
        ON CONFLICT (account_id, operation_id) DO NOTHING`,
     ).run(
       input.accountId, input.operationId, hash, input.binding.workspaceId, input.incarnation, input.replicationEpoch,
       input.streamIdentity, input.binding.operation, JSON.stringify(input.command), input.writesMessage ? "pending" : null,
       input.nowMs + OPERATION_ACTIVE_MS, input.nowMs, input.nowMs, input.binding.workspaceId, input.binding.workspaceId,
-      input.accountId,
+      input.accountId, input.accountId, input.operationId,
     );
     const row = readRow(storage, input.accountId, input.operationId);
     if (Number(inserted.changes) === 1) return { kind: "recorded", record: recordOf(row!) };
     const found = classify(row, hash);
-    return found.kind === "absent" ? { kind: "not-owner" } : found;
+    if (found.kind !== "absent") return found;
+    // A wake's Try again used the key, so it names another write.
+    return retryUsesOperationIdInTransaction(storage, input.accountId, input.operationId) ? { kind: "mismatch" } : { kind: "not-owner" };
   });
 }
 
@@ -310,6 +316,11 @@ export function advanceOperation(
       stage, messageState, resultJson, Math.max(input.nowMs, record.createdAtMs),
       isFinal(stage) ? Math.max(input.nowMs, record.createdAtMs) : null, input.accountId, input.operationId,
     );
+    if (input.wakes !== undefined) {
+      applyOperationWakesInTransaction(storage, {
+        accountId: input.accountId, operationId: input.operationId, workspaceId: record.workspaceId, messagePublished: messageState === "published",
+      }, input.wakes, input.nowMs);
+    }
     return { moved: true, record: recordOf(readRow(storage, input.accountId, input.operationId)!) };
   });
 }
