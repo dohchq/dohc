@@ -21,7 +21,7 @@ The agent alone decides what it posts back to dohc.
 - **A message wakes an agent under four conditions.** Its owner wrote it in dohc, not through the CLI or MCP. And it is in the agent's own chat, or mentions the agent, or replies under the agent's message, or is in a post or Comment the agent started (`answeredAgentIdOf` in `apps/desktop/src/workspaces/chatWrites.ts`). A Group's running conversation has no starter, so there only a mention or a reply under the agent's message wakes it.
 - **A connected agent must ask.** It reads its messages with `dohc chat inbox` and `dohc chat watch`, or with the MCP tool `dohc_wait_for_messages`. Settings shows Listening while it waits (`apps/desktop/src/agents/agentWaits.ts`). dohc never reaches out to it. A message for an agent that is not listening stays unread, and dohc shows no notice.
 - **An agent posts with dohc's tools.** `dohc chat reply` and `dohc_reply_to_chat` post a message. `--needs-decision` and `--option` ask the person to choose, and `--resolve` closes an open decision. `--work` and `--link` add a work report.
-- **An agent that signed in with a personal agent link can post less.** Its `dohc_post_channel` takes the message text, where to post it, and an idempotency key (`chatPostFields` in `services/share-web/src/remoteMcp.ts`). It has no field for a decision or a work report, so the agent cannot ask for a decision, close one, or report work.
+- **An agent that signed in with a personal agent link can post less.** Its `dohc_post_channel` takes the message text, where to post it, and an idempotency key (`chatPostFields` and `channelPostSchema` in `services/share-web/src/remoteMcp.ts`). It has no field for a decision or a work report, so the agent cannot ask for a decision, close one, or report work.
 - **The CLI finds its workspace from the folder it runs in** (`resolveCliWorkspace` in `apps/desktop/src/cli/cliServer.ts`). It has no flag that names a workspace. The Windows app does not put `dohc` on `PATH`.
 - **Chat shows when an agent works.** `AgentPresenceHint` in `apps/desktop/src/renderer/workbench/ChatsControls.tsx` draws the dot and "Running codex".
 - **A phone message can wake an agent on a computer, behind a switch that is off** (`CHAT_WAKES_ON` in `apps/desktop/src/chatWakes/chatWakeLifetime.ts`). #3857, #3872, #3879, #3887, and #3893 built it. Each computer declares the agents dohc can start there. "An agent the person runs on their own is left out" (`apps/desktop/src/chatWakes/chatRunnerDeclaration.ts`).
@@ -66,7 +66,7 @@ The agent alone decides what it posts back to dohc.
 
 ### Other people
 
-24. Another person's message that mentions your agent, or replies under its message, reaches you as a request, under their message and in Notices. You answer Allow or Decline. Until you allow, they see nothing. No other message of theirs reaches the agent.
+24. Another person's message that mentions your agent, or replies under its message, reaches you as a request, under their message and in Notices. You answer Allow or Decline. Until you allow, they see nothing. dohc forwards no other message of theirs.
 25. A request is for one revision of one message. Allow forwards that revision. A later message from the same person is a new request.
 26. The list of people who can ask without your approval lives on the agent's page, in a danger zone. An entry is one server account. A listed person's message that would make a request is forwarded without one. The entry applies in every chat you share with that person, in every workspace the agent serves.
 27. A link holder can ask. Because their name is unverified, Allow opens a second confirmation. A link holder can never join the list in decision 26.
@@ -100,7 +100,7 @@ From Ice in dohc. Workspace "dohc launch", Group "launch", chat thread "Windows 
 
 can you also check the Mac build?
 
-Files: plans/release.md
+Files: "plans/release.md"
 Note from Ice: Post decisions and a daily status here. Keep the rest in T3 Code.
 
 Reply in that chat thread: dohc chat reply <chat-thread> --workspace <workspace> --agent-id <agent> "<text>"
@@ -111,11 +111,11 @@ The reply commands carry the full path of dohc's CLI.
 `--workspace` is new. The CLI needs a way to name a workspace, because an agent thread works in another folder.
 
 A message from another person, which the owner allowed, differs in two ways.
-Its first line names both people: `From Sam Ortiz (sam@ridge.co) in dohc, allowed by Ice.`
+Its first line names both people: `From "Sam Ortiz" (sam@ridge.co) in dohc, allowed by Ice.`
 For a link holder it reads `From an unverified link holder who gave the name "Sam", allowed by Ice.`
 dohc quotes the other person's text line by line, so no line of it can pass for a line dohc adds, such as `Note from Ice:`.
 
-The same holds for every message, the owner's included. Other people can set a Group's name, a chat thread's title, a file's or an attachment's name, and their own display name. dohc puts each such value on one line as an escaped, quoted string, so it cannot start a new line or pass for a line dohc adds.
+The same holds for every message, the owner's included. dohc puts each value another person can set, such as a workspace's or a Group's name, a chat thread's title, a file's or an attachment's name, and a display name, on one line as an escaped, quoted string. It cannot start a new line or pass for a line dohc adds.
 
 ### The introduction
 
@@ -260,6 +260,7 @@ A sketch. Chat, settings, and the states above depend on this shape and on nothi
 
 - A message reaches an agent thread only when its owner wrote it in dohc, or when the owner allowed that revision, or when its sender is on the owner's list and it mentions the agent or replies under its message. The engine or the relay fixes each of those identities.
 - Every value another person can set reaches the agent as an escaped, quoted string on one line. Only dohc writes the other lines.
+- Allow controls forwarding only. An agent that reads a chat thread with dohc's tools sees every message its owner can see, including one the owner has not allowed or has declined. Interface text must not say that Decline keeps a message from the agent.
 - No post made through the CLI or MCP is forwarded, so an agent cannot wake an agent, itself included.
 - dohc states the limit it does not have. Interface text must never claim that dohc confines an agent thread.
 - A forwarded message can hold text from other people. The agent thread runs with the owner's access. Allow is the safeguard, so the request shows the exact text and dohc forwards exactly that.
@@ -272,7 +273,7 @@ A sketch. Chat, settings, and the states above depend on this shape and on nothi
 Each release ships when it is ready. Each needs its own proof on a real tool, not only on a stand-in.
 
 1. **T3 Code on one computer.** The T3 Code tool, Add agent and the agent's page, forwarding with the note, the states, the reminder, Answer here on that computer, `--workspace` in the CLI, and workspaces for an agent. Its first step is the trial this plan did not run. Forward from a prepared desktop to a scratch T3 Code thread and watch the reply arrive in chat.
-2. **T3 Code threads on linked machines.** The introduction for such a thread gives the agent its personal agent link. dohc ties the identity that link signs in to the agent in Settings. `dohc_post_channel` gains decisions, closing a decision, and work reports. The link is a credential that sits in the agent thread's transcript, so four rules hold. Its reach is that agent and the workspaces it serves. A post made with it is never forwarded. Remove on the agent's page revokes it. Pointing the agent at another thread, or turning off a workspace, replaces it.
+2. **T3 Code threads on linked machines.** The introduction for such a thread gives the agent its personal agent link. dohc ties the identity that link signs in to the agent in Settings. `dohc_post_channel` gains decisions, closing a decision, and work reports. The link is a credential that sits in the agent thread's transcript, so four rules hold. Its reach is that agent and the workspaces it serves. A post made with it is never forwarded. Remove on the agent's page revokes it. Turning off a workspace takes that workspace out of the link's reach, and the link stays. Pointing the agent at another thread replaces the link, and the new thread's introduction carries the new one.
 3. **Claude Code and Codex.** Agent threads resumed for each message, a new one or a pasted session id, the switch for Your command, and fresh runs kept for automations. It starts with the two-writers test.
 4. **Other devices.** A computer declares the agents whose threads it holds, so a phone message wakes it. Answer here on other devices. This changes who can be named as a wake target in `apps/desktop/src/chatWakes`, which is an authorization change to a contract the phone app work owns. Agree it with that work first.
 5. **Other people.** Requests with Allow and Decline, the list on the agent's page, and the second confirmation for link holders. It depends on release 4.

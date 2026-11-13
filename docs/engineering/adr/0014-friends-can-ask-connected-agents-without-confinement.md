@@ -14,7 +14,7 @@ We still let a friend ask a connected agent through the same Allow, Always allow
 
 Ice changed four parts of this plan while agreeing [agent threads and forwarding](../plans/agent-threads-and-forwarding.md). Where this section and the text above disagree, this section holds.
 
-- **A request starts in one way.** Another person's message mentions the agent or replies under its message. No other message of theirs reaches the agent, for a listed person either.
+- **A request starts in one way.** Another person's message mentions the agent or replies under its message. dohc forwards no other message of theirs, for a listed person either. Allow controls forwarding only: an agent that reads the chat with dohc's tools sees every message its owner can see.
 - **The request offers Allow and Decline only.** Always allow moves to the agent's page, in a danger zone that lists the people who can ask without approval. An entry is one server account, never a name or an email. It applies in every chat the owner shares with that person, in every workspace the agent serves. Adding a person opens a danger confirmation.
 - **Allow covers one revision of one message.** The request shows the exact text dohc will pass on. An edit or a delete before the owner answers cancels the request. A later message from the same person is a new request.
 - **An agent dohc starts gets the warning, not a limit.** The plan above limited such a run to what the asker can reach. dohc cannot build that limit, so it must not offer it. The request names the computer: "<agent> runs on <computer> as you. dohc can't limit what it does for <person>."
