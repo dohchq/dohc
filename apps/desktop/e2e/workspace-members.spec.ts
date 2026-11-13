@@ -35,6 +35,8 @@ const MEMBER = {
   email: "e2e-members-sam@dohc.test",
 };
 const JOINER = { token: "test:e2e-members-kai", email: "e2e-members-kai@dohc.test" };
+// The same account, in its own relay: the admin in the Group chat test.
+const ADMIN = { token: JOINER.token, user: "e2e-members-kai", email: JOINER.email };
 const VIEWER_ORIGIN = "https://viewer.example.com";
 
 interface MembersView {
@@ -467,6 +469,201 @@ test("@two-client a member opens the workspace from Sharing and keeps a readable
     expect(member.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
     expect(owner.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
   } finally {
+    await cleanupDesktopWorkspace(member, memberTemp);
+    await cleanupDesktopWorkspace(owner, ownerTemp);
+    await relay?.stop();
+  }
+});
+
+// Opens the membership from Sharing on a member's own desktop and waits
+// until the workspace is open.
+async function openMembership(
+  relay: SyncRelayHandle,
+  temp: Awaited<ReturnType<typeof createTempWorkspace>>,
+  account: { token: string; user: string; email: string },
+  workspaceName: string,
+  env: Record<string, string>,
+) {
+  await seedWorkspaceManifest(temp, `${account.user}-own`);
+  await seedWorkspaceRegistry(temp, [{ workspaceId: `${account.user}-own`, rootPath: temp.rootPath }]);
+  await seedCloudCredentials(temp, { serverUrl: relay.baseUrl, relayUrl: relay.baseUrl, email: account.email, userId: account.user, token: account.token });
+  const app = await launchDesktopApp({ workspace: temp, env });
+  await openWorkspaceFromFirstRun(app.page, temp);
+  await app.page.emulateMedia({ reducedMotion: "reduce" });
+  await showSharing(app.page);
+  const received = app.page.getByTestId("sharing-received-row").filter({ hasText: workspaceName });
+  await expect(received.getByTestId("sharing-row-who")).toContainText("·", { timeout: 60_000 });
+  await received.locator("[data-sharing-row-focus]").hover();
+  await received.getByRole("button", { name: "Share actions" }).click();
+  await app.page.getByRole("menuitem", { name: "Open", exact: true }).click();
+  await app.page.getByTestId("open-shared-view").getByTestId("open-share-start").click();
+  await expect(app.page.getByTestId("status-workspace")).toHaveText(workspaceName, { timeout: 120_000 });
+  return app;
+}
+
+// Group chat in a joined workspace. A member posts in a Group while the owner
+// reads it, and the owner's reply reaches the member as unread. The owner
+// moves members to View with the member's window open, and the composer goes
+// with a toast. An admin then creates a Group that the member sees.
+test("@two-client a member posts in a Group, follows a level change, and sees an admin's new Group", async () => {
+  test.setTimeout(600_000);
+  const ownerTemp = await createTempWorkspace();
+  const memberTemp = await createTempWorkspace();
+  const adminTemp = await createTempWorkspace();
+  const workspaceId = "members-chat";
+  const syncEnv = { DOHC_TEST_SYNC_DEBOUNCE_MS: "150", DOHC_TEST_SYNC_BACKOFF_MS: "250" };
+  let relay: SyncRelayHandle | null = null;
+  let owner: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  let member: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  let admin: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  const shot = (name: string) => test.info().outputPath(`${name}.png`);
+  const themed = async (page: Page, name: string, ready: () => Promise<void>) => {
+    for (const theme of ["Light", "Dark"] as const) {
+      await setTheme(page, theme);
+      await ready();
+      await page.screenshot({ path: shot(`${name}-${theme.toLowerCase()}`) });
+    }
+  };
+
+  try {
+    relay = await spawnSyncRelay({ dbPath: join(ownerTemp.baseDir, "relay", "relay.sqlite") });
+    await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: OWNER.token, workspaceId });
+    await seedWorkspaceManifest(ownerTemp, workspaceId);
+    await writeWorkspaceFiles(ownerTemp, [{ path: "notes/plan.md", contents: "# Plan\n" }]);
+    await seedWorkspaceRegistry(ownerTemp, [
+      { workspaceId, rootPath: ownerTemp.rootPath, remote: { serverUrl: relay.baseUrl, ownerUserId: OWNER.user } },
+    ]);
+    await seedCloudCredentials(ownerTemp, { serverUrl: relay.baseUrl, relayUrl: relay.baseUrl, email: OWNER.email, userId: OWNER.user, token: OWNER.token });
+    owner = await launchDesktopApp({ workspace: ownerTemp, env: syncEnv });
+    const { page } = owner;
+    await openWorkspaceFromFirstRun(page, ownerTemp);
+    await page.emulateMedia({ reducedMotion: "reduce" });
+
+    // --- The owner's Group, and two people: Sam a member, Kai an admin ----
+    await openChatsView(page);
+    await page.getByTestId("chats-new-channel").click();
+    await page.getByTestId("chats-new-channel-name").fill("Launch team");
+    await page.getByTestId("chats-new-channel-type-both").click();
+    await page.getByTestId("chats-new-channel-submit").click();
+    await expect(page.getByTestId("chats-channel-title")).toHaveText("Launch team");
+    await page.getByTestId("chats-new-thread-composer").fill("Kickoff: read the plan.");
+    await page.getByTestId("chats-new-thread-composer").press("Enter");
+    await expect(page.getByTestId("chats-message-body")).toContainText("Kickoff: read the plan.");
+    await page.getByTestId("chats-thread-back").click();
+    for (const account of [MEMBER, ADMIN]) {
+      const invited = await relayJson(relay.baseUrl, OWNER.token, `/sync/${workspaceId}/members/invites`, { method: "POST", body: JSON.stringify({ email: account.email }) });
+      expect(invited.status, invited.body).toBe(200);
+    }
+    const kaiId = (await membersView(relay, OWNER.token, workspaceId)).people.find((person) => person.email === ADMIN.email)!.memberId;
+    const promoted = await relayJson(relay.baseUrl, OWNER.token, `/sync/${workspaceId}/members/${kaiId}/role`, { method: "POST", body: JSON.stringify({ role: "admin" }) });
+    expect(promoted.status, promoted.body).toBe(200);
+    const workspaceName = (await membersView(relay, OWNER.token, workspaceId)).workspaceName;
+    const shares = await relayJson(relay.baseUrl, MEMBER.token, "/sync/shares");
+    const shareId = (JSON.parse(shares.body) as { received: { shareId: string; selector: { kind?: string } }[] })
+      .received.find((row) => row.selector.kind === "workspace")!.shareId;
+    await expect.poll(async () => {
+      const log = await relayJson(relay!.baseUrl, MEMBER.token, `/sync/shares/${shareId}/log?since=0&limit=500`);
+      return log.status === 200 && log.body.includes("Kickoff") ? "served" : `status:${log.status}`;
+    }, { timeout: 60_000, intervals: [1_000] }).toBe("served");
+
+    // --- Sam, at Comment, posts in the Group --------------------------------
+    member = await openMembership(relay, memberTemp, MEMBER, workspaceName, syncEnv);
+    const mine = member.page;
+    const samPanel = await openChatsView(mine);
+    const samGroup = samPanel.getByTestId("chats-channel").filter({ hasText: "Launch team" });
+    await expect(samGroup).toBeVisible({ timeout: 60_000 });
+    await expect(samPanel.getByTestId("chats-new-channel")).toHaveCount(0);
+    await samGroup.click();
+    // The owner's post shows the owner's name, never "You" or an email.
+    const kickoff = mine.getByTestId("chats-thread").filter({ hasText: "Kickoff: read the plan." });
+    await expect(kickoff).toBeVisible({ timeout: 60_000 });
+    await kickoff.click();
+    const ownerAuthor = mine.locator('article[data-testid="chats-message"]').first().getByTestId("chats-message-author");
+    await expect(ownerAuthor).toBeVisible();
+    await expect(ownerAuthor).not.toHaveText("You");
+    await expect(ownerAuthor).not.toContainText("@");
+    await mine.getByTestId("chats-thread-back").click();
+    const composer = mine.getByTestId("chats-new-thread-composer");
+    await themed(mine, "group-comment", () => expect(composer).toBeVisible());
+    await composer.fill("Sam here: the plan reads well.");
+    await composer.press("Enter");
+    const samPost = mine.locator('article[data-testid="chats-message"]').filter({ hasText: "Sam here: the plan reads well." });
+    await expect(samPost).toBeVisible();
+    await expect(samPost.getByTestId("chats-message-author")).toHaveText("You");
+    await mine.getByTestId("chats-thread-back").click();
+
+    // Home lists the Group's posts.
+    await samPanel.getByTestId("chats-feed-link").click();
+    const home = mine.getByTestId("chats-personal-feed");
+    await themed(mine, "home", () => expect(home.getByTestId("chats-feed-item").filter({ hasText: "Sam here" })).toBeVisible({ timeout: 30_000 }));
+    await expect(samGroup.getByTestId("chats-channel-unread")).toHaveCount(0, { timeout: 30_000 });
+
+    // --- The owner reads Sam's post and replies -----------------------------
+    await openChatsView(page);
+    const ownerGroup = page.getByTestId("chats-channel").filter({ hasText: "Launch team" });
+    const samThread = page.getByTestId("chats-thread").filter({ hasText: "Sam here: the plan reads well." });
+    await expect(async () => {
+      await ownerGroup.click();
+      await expect(samThread).toBeVisible({ timeout: 5_000 });
+    }).toPass({ timeout: 120_000, intervals: [2_000] });
+    await samThread.click();
+    await expect(page.locator('article[data-testid="chats-message"]').first().getByTestId("chats-message-author")).not.toHaveText("You");
+    await page.getByTestId("chats-composer").fill("Welcome, Sam.");
+    await page.getByTestId("chats-composer").press("Enter");
+    await expect(page.getByTestId("chats-message-body").filter({ hasText: "Welcome, Sam." })).toBeVisible();
+
+    // The reply reaches Sam as unread.
+    await expect(samGroup.getByTestId("chats-channel-unread")).toBeVisible({ timeout: 120_000 });
+    await themed(mine, "unread", () => expect(samGroup.getByTestId("chats-channel-unread")).toBeVisible());
+    await samGroup.click();
+    await mine.getByTestId("chats-thread").filter({ hasText: "Sam here" }).click();
+    await expect(mine.getByTestId("chats-message-body").filter({ hasText: "Welcome, Sam." })).toBeVisible({ timeout: 30_000 });
+    await mine.getByTestId("chats-thread-back").click();
+    await expect(composer).toBeVisible();
+
+    // --- The owner moves members to View while Sam's window is open ---------
+    const members = await openMembers(page);
+    await members.getByTestId("settings-members-level-control").getByRole("radio", { name: "View" }).click();
+    await expect.poll(async () => (await membersView(relay!, OWNER.token, workspaceId)).memberLevel).toBe("view");
+    await page.getByRole("button", { name: "Close settings", exact: true }).click();
+    const note = mine.getByTestId("chats-readonly-note");
+    await expect(note).toHaveText("Only people who can comment post here.", { timeout: 120_000 });
+    await expect(composer).toHaveCount(0);
+    const toast = mine.getByTestId("notice-toasts").getByTestId("workspace-shell-notice").filter({ hasText: "Members can now view." });
+    await expect(toast).toBeVisible({ timeout: 30_000 });
+    await mine.screenshot({ path: shot("level-toast-dark") });
+    for (const theme of ["Light", "Dark"] as const) {
+      await setTheme(mine, theme);
+      await mine.getByTestId("notice-center-toggle").click();
+      await expect(mine.getByTestId("notice-center").getByText("Members can now view.")).toBeVisible();
+      await mine.screenshot({ path: shot(`level-notices-${theme.toLowerCase()}`) });
+      await mine.keyboard.press("Escape");
+      await expect(note).toBeVisible();
+      await mine.screenshot({ path: shot(`group-view-${theme.toLowerCase()}`) });
+    }
+
+    expect(owner.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
+    await owner.close();
+    owner = null;
+
+    // --- Kai, an admin, creates a Group that Sam then sees ------------------
+    admin = await openMembership(relay, adminTemp, ADMIN, workspaceName, syncEnv);
+    const kai = admin.page;
+    const kaiPanel = await openChatsView(kai);
+    await expect(kaiPanel.getByTestId("chats-channel").filter({ hasText: "Launch team" })).toBeVisible({ timeout: 60_000 });
+    const newGroup = kaiPanel.getByTestId("chats-new-channel");
+    await themed(kai, "admin-new-group", () => expect(newGroup).toBeVisible({ timeout: 30_000 }));
+    await newGroup.click();
+    await kai.getByTestId("chats-new-channel-name").fill("Field notes");
+    await kai.getByTestId("chats-new-channel-submit").click();
+    await expect(kai.getByTestId("chats-channel-title")).toHaveText("Field notes", { timeout: 60_000 });
+    await expect(samPanel.getByTestId("chats-channel").filter({ hasText: "Field notes" })).toBeVisible({ timeout: 120_000 });
+    await expect(samPanel.getByTestId("chats-new-channel")).toHaveCount(0);
+
+    expect(member.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
+    expect(admin.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
+  } finally {
+    await cleanupDesktopWorkspace(admin, adminTemp);
     await cleanupDesktopWorkspace(member, memberTemp);
     await cleanupDesktopWorkspace(owner, ownerTemp);
     await relay?.stop();

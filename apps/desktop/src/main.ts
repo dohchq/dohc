@@ -7680,11 +7680,11 @@ function createShareViewFilesForOperation(operation: DesktopWorkspaceOperation):
           recordCollisions: input.recordCollisions,
           recordChangedPaths: input.recordChangedPaths,
         });
+      // A waiting New group hears of chat the pull brought.
+      if (pulled.applied > 0) signalChatWrite(target.workspaceId);
       // Each pull of a joined workspace also sends any post a failed send
       // left in its store. A refusal or outage keeps the post queued and
       // never fails the pull.
-      // Windows and a waiting New group hear of chat the pull brought.
-      if (pulled.applied > 0) signalChatWrite(target.workspaceId);
       if (target.kind === "standalone") {
         const workspace = currentWorkspace();
         await shareViewChatPush(
