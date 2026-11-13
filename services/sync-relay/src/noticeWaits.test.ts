@@ -253,6 +253,24 @@ it("decides a row in another account's workspace by a fixed rule that reads noth
   expect(ids(await page(after))).toEqual(["probe-plain"]);
 });
 
+it("never looks up a thread named through a share, even beside a path the share admits", async () => {
+  const { storage, read, full, post } = await relay();
+  shareNotesWithAna(storage);
+  // An admitted path paired with Ben's thread outside the share.
+  post("share-path-thread", { reach: { shareId: "share-ben" }, target: { path: "notes/list.md", thread: "thread-private" } });
+  const missing = await (await read("scope=phone")).text();
+  const write = logWriter(storage, "bens");
+  write("moment.append", { objectId: "object-payroll", path: "private/payroll.md" });
+  write("chat.thread.create", { threadId: "thread-private", linkedObjectId: "object-payroll", linkedPathHint: "private/payroll.md" });
+  const ordinary = await (await read("scope=phone")).text();
+  write("moment.append", { objectId: "object-payroll", path: ".env" });
+  const secret = await read("scope=phone");
+  expect(await secret.clone().text()).toBe(missing);
+  expect(ordinary).toBe(missing);
+  expect(ids(await page(secret))).toEqual([]);
+  expect(ids(await full())).toContain("share-path-thread");
+});
+
 it("leaves out a share-placed row whose target reach settlement removed, even after the whole list was read", async () => {
   const { storage, read, full, post } = await relay();
   shareNotesWithAna(storage);

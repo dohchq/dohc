@@ -614,9 +614,11 @@ function phoneNotices(storage: StorageContext, recipientUserId: string, notices:
       if (!owned(notice.workspaceId)) return false;
       workspaceId = notice.workspaceId;
     } else {
-      // Through a share, only a path it admits, and then that path's thread.
+      // Through a share, only a path it admits. A thread is never looked up there: an admitted path can't
+      // prove the thread is readable, and what the owner's thread holds must not decide what the phone shows.
       const share = notice.recipientShareId === null ? null : storage.getShare(notice.recipientShareId);
-      if (share === null || target.path === undefined || !admits(reach.sidesOn(share.shareId), target.path)) return false;
+      if (share === null || target.path === undefined || target.thread !== undefined ||
+        !admits(reach.sidesOn(share.shareId), target.path)) return false;
       workspaceId = share.workspaceId;
     }
     return (target.path === undefined || safePath(workspaceId, target.path)) &&
