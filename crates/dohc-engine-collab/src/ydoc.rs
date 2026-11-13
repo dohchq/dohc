@@ -6323,9 +6323,8 @@ fn leading_markdown_block_escape_index(markdown: &str) -> Option<(usize, bool)> 
 // the text the file holds, and reads them with marked 17's own rules. The
 // projector finds them by the same rules: it writes an empty link as it is,
 // and a definition as one tag span, whose exact bytes the importer reads back
-// as the same text. The importer's tests pin marked's readings of the cases
-// `marked_literal_source_readings` repeats here, and compare the importer's
-// own copy of `EmptyLinks` with marked on generated text.
+// as the same text. The importer's tests pin marked's readings and compare
+// the importer's own copy of `EmptyLinks` with marked on generated text.
 
 /// A run of bare destination text, which every candidate whose destination
 /// starts in it shares: where it stops, its last two `)`, and what the rule

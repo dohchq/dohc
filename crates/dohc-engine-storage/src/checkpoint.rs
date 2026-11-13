@@ -885,6 +885,38 @@ mod tests {
         assert!(s.checkpoint_work_for_test().1 <= MAX_WRITER_BACKFILL_FRAMES);
     }
 
+    /// Opus's r2c-3c-1 finding 2: while a held reader keeps the WAL from
+    /// restarting, the writer raises the store's pressure flag once the WAL
+    /// reaches half the length writes are refused at, every write before it
+    /// admitted.
+    #[test]
+    fn a_held_reader_sees_the_wal_press_before_writes_are_refused() {
+        let scratch = ScratchDir::new().unwrap();
+        let path = scratch.path().join("engine.db");
+        let mut s = store(&path);
+        let pressure = s.wal_pressure();
+        let reader = EngineStore::open_read_only(&path).unwrap();
+        reader
+            .read_with(|c| c.execute_batch("BEGIN; SELECT * FROM checkpoint_load"))
+            .unwrap();
+        let held = pressure.hold();
+        let mut n = 0;
+        while !pressure.raised() {
+            let (log, _) = s.read_with(frames).unwrap();
+            assert!(
+                log < MAX_PENDING_WAL_FRAMES,
+                "raised before writes are refused"
+            );
+            write(&mut s, n, 64 * 1024);
+            n += 1;
+        }
+        assert!(s.read_with(frames).unwrap().0 >= HELD_READER_WAL_FRAMES);
+        reader.read_with(|c| c.execute_batch("ROLLBACK")).unwrap();
+        drop(held);
+        drop(reader);
+        write_after_checkpoint(&mut s, n, 4096);
+    }
+
     #[test]
     fn stopped_worker_restarts_without_enabling_unbounded_autocheckpoint() {
         let scratch = ScratchDir::new().unwrap();

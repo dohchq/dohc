@@ -527,6 +527,81 @@ async fn a_reader_opening_past_the_close_bound_keeps_its_store() {
     desktop.close().await;
 }
 
+/// Sol's r2c-3c-2 finding 4 and Opus's "old finding 2": a proof held at its
+/// merge gives way when actor writes press the WAL. Callers retry only storage
+/// FileLocked after checkpoint completion, within the client's busy budget.
+/// A new proof is busy while the WAL presses; the held proof answers busy and
+/// closes its reader. Further writes succeed with the same bounded retries
+/// past the length the store refuses writes at while a reader holds the WAL.
+#[tokio::test]
+async fn a_proof_gives_way_when_the_wal_presses_and_writes_keep_succeeding() {
+    async fn write_with_checkpoint_retry(w: &RetainedWindow, sql: &'static str, budget: Duration) {
+        tokio::time::timeout(budget, async {
+            loop {
+                let completed = w
+                    .actor
+                    .checkpoints_completed_for_test()
+                    .await
+                    .expect("read the checkpoint sequence");
+                match w.actor.write_for_test(sql).await {
+                    Ok(()) => return,
+                    Err(RuntimeError::Storage(dohc_engine_storage::StorageError::FileLocked)) => {
+                        w.actor
+                            .wait_for_checkpoint_completion_for_test(completed)
+                            .await
+                            .expect("the checkpoint completes after write admission refuses");
+                    }
+                    Err(error) => panic!("write failed: {error:?}"),
+                }
+            }
+        })
+        .await
+        .expect("write admission resumes within the client's busy budget");
+    }
+
+    // Each write shares the desktop client's store-busy budget across all
+    // attempts and checkpoint waits, rather than restarting it on each refusal.
+    let budget = client_busy_budget();
+    const WRITE: &str = "INSERT INTO binary_blobs(sha256,byte_length,bytes)
+        SELECT lower(hex(randomblob(32))),65536,randomblob(65536)";
+    let (w, desktop, _client) = held_for_a_queued_fold().await;
+    let proofs = w.actor.held_proofs();
+    let resume = Resume(proofs.clone());
+    proofs.pause_proofs_at(ProofStage::Merge);
+    let request = inspection(&w, &CancellationToken::new());
+    reached("the proof merges", proofs.paused_proof()).await;
+    let mut writes = 0;
+    while !proofs.wal_pressed("workspace") {
+        assert!(writes < 1_000, "the WAL never pressed");
+        write_with_checkpoint_retry(&w, WRITE, budget).await;
+        writes += 1;
+    }
+    let refused = w
+        .actor
+        .held_document(
+            "elsewhere".into(),
+            "object".into(),
+            CancellationToken::new(),
+        )
+        .await;
+    assert!(
+        matches!(refused, Err(RuntimeError::HeldReadBusy)),
+        "{refused:?}"
+    );
+    drop(resume);
+    let gave_way = answered(request).await;
+    assert!(
+        matches!(gave_way, Err(RuntimeError::HeldReadBusy)),
+        "{gave_way:?}"
+    );
+    assert_eq!(proofs.open_readers(), 0, "its reader closed");
+    for _ in 0..2 * writes {
+        write_with_checkpoint_retry(&w, WRITE, budget).await;
+    }
+    desktop.close().await;
+    w.close().await;
+}
+
 /// Opus's r2c-3c-6 finding 1: a hold whose contribution artifact passes its
 /// cap still answers current, with the preservation, Markdown included, it
 /// answers within the cap, and names no artifact, which it says is too

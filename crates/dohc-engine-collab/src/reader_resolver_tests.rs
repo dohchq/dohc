@@ -405,7 +405,7 @@ fn pending_entries_are_bounded_and_restart_has_no_proofs() {
 }
 
 /// Failures that get every transient retry. A crash is transient too, but its
-/// second one ends the proof (`a_second_crash_ends_the_proof_then_allows_a_later_action`).
+/// second one ends the proof.
 const RETRIED: [Failure; 4] = [
     Failure::TimedOut,
     Failure::NotStarted,

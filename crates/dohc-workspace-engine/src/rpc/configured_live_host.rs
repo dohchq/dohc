@@ -1606,6 +1606,52 @@ mod tests {
         close(&service).await;
     }
 
+    #[tokio::test]
+    async fn owner_adoption_is_limited_to_the_configured_connection_and_attached_workspace() {
+        let attached = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let private = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let mut config = config(&[(attached.path(), "attached"), (private.path(), "private")]);
+        config.workspaces[0].relay = Some(
+            serde_json::from_value(
+                json!({"baseUrl":"https://relay.invalid","bearerToken":"owner"}),
+            )
+            .unwrap(),
+        );
+        config.adoption = Some(ConfiguredOwnerAdoption {
+            max_bytes: 1_000_000,
+            max_events: 10,
+            owner_outbox: dohc_engine_collab::OwnerOutboxLimits {
+                max_pending_bytes: 1_000_000,
+                max_pending_age_ms: 60_000,
+            },
+        });
+        let (service, owner, _ingress) = EngineService::configured_live_host(config).await.unwrap();
+        let (attached, private) = (handle(&service, 0), handle(&service, 1));
+        assert!(
+            service
+                .owner_adoption_config(&owner.handle(), Some(&attached))
+                .is_ok()
+        );
+        assert!(
+            service
+                .owner_adoption_config(&owner.handle(), Some(&private))
+                .is_err()
+        );
+        let other = ConnectionOwner::authenticated();
+        assert!(
+            service
+                .owner_adoption_config(&other.handle(), Some(&attached))
+                .is_err()
+        );
+        owner.retire();
+        assert!(
+            service
+                .owner_adoption_config(&owner.handle(), Some(&attached))
+                .is_err()
+        );
+        close(&service).await;
+    }
+
     fn host_request(method: &str, workspace: Option<WorkspaceHandle>, params: Value) -> Request {
         Request {
             id: 1,
@@ -1764,6 +1810,52 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(hosts(&ctx)["workspaces"], json!([]));
+        assert!(lock(&service.handles).is_empty());
+    }
+
+    #[tokio::test]
+    async fn attach_refuses_a_root_inside_or_around_an_attached_root() {
+        let tree = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let attached = tree.path().join("attached");
+        let nested = attached.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let (service, owner, _ingress) = EngineService::configured_live_host(config(&[]))
+            .await
+            .unwrap();
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        let attach = |root: &Path, id: &str| {
+            host_request(
+                "liveApplication.attachWorkspace",
+                None,
+                json!({"root": root, "workspaceId": id, "maxRegistrations": 4}),
+            )
+        };
+        let opened = service
+            .configured_attach_workspace(&ctx, attach(attached.as_path(), "attached"))
+            .await
+            .unwrap();
+        for (root, id) in [(nested.as_path(), "descendant"), (tree.path(), "ancestor")] {
+            assert_eq!(
+                service
+                    .configured_attach_workspace(&ctx, attach(root, id))
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidParams,
+                "{id}"
+            );
+            assert!(!root.join(".dohc").exists(), "{id}");
+        }
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspaceHandle"].clone()).unwrap();
+        service
+            .configured_detach_workspace(
+                &ctx,
+                host_request("liveApplication.detachWorkspace", Some(handle), json!({})),
+            )
+            .await
+            .unwrap();
         assert!(lock(&service.handles).is_empty());
     }
 
@@ -2190,6 +2282,43 @@ mod tests {
             .unwrap();
     }
 
+    #[tokio::test]
+    async fn a_store_reads_for_recovery_only_as_the_identity_it_holds() {
+        let store = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let copies = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let (service, owner, _ingress) =
+            EngineService::configured_live_host(recovering(copies.path()))
+                .await
+                .unwrap();
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        detached_store(&service, &ctx, store.path()).await;
+        host_identity(store.path(), "epoch");
+        // With no versioned state, only its identity says whose store it is.
+        rusqlite::Connection::open(database(store.path()))
+            .unwrap()
+            .execute_batch("PRAGMA foreign_keys=OFF; DELETE FROM versioned_workspaces;")
+            .unwrap();
+        for (id, epoch) in [("workspace", "later"), ("other", "epoch")] {
+            let handle = open_prepared(&service, ctx.clone(), recover(store.path(), id, epoch))
+                .await
+                .unwrap();
+            assert_eq!(
+                first_page(&service, ctx.clone(), &handle, "outbox")
+                    .await
+                    .unwrap_err()
+                    .message,
+                "recovery store belongs to another root or workspace",
+                "{id} {epoch}"
+            );
+            service
+                .dispatch(ctx.clone(), close_request(&handle))
+                .await
+                .unwrap();
+        }
+        assert!(lock(&service.handles).is_empty());
+    }
+
     /// Every file of the store at `root` with the digest of its bytes,
     /// sidecars and root marker included.
     fn store_files(root: &Path) -> Vec<(std::ffi::OsString, String)> {
@@ -2451,6 +2580,94 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    /// Every root is compared canonical, so a verbatim `\\?\` spelling or
+    /// another case names the same folder.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_root_spelled_another_way_still_overlaps() {
+        let (store, attached, copies) = (
+            dohc_engine_testkit::ScratchDir::new().unwrap(),
+            dohc_engine_testkit::ScratchDir::new().unwrap(),
+            dohc_engine_testkit::ScratchDir::new().unwrap(),
+        );
+        let (service, owner, _ingress) =
+            EngineService::configured_live_host(recovering(copies.path()))
+                .await
+                .unwrap();
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        let spellings = |path: &Path| {
+            let plain = path.display().to_string();
+            let plain = plain.strip_prefix(r"\\?\").unwrap_or(&plain).to_owned();
+            [
+                PathBuf::from(format!(r"\\?\{plain}")),
+                PathBuf::from(plain.to_uppercase()),
+            ]
+        };
+        let attach = |root: &Path, id: &str| {
+            host_request(
+                "liveApplication.attachWorkspace",
+                None,
+                json!({"root": root, "workspaceId": id, "maxRegistrations": 4}),
+            )
+        };
+        let kept: WorkspaceHandle = serde_json::from_value(
+            service
+                .configured_attach_workspace(&ctx, attach(attached.path(), "other"))
+                .await
+                .unwrap()["workspaceHandle"]
+                .clone(),
+        )
+        .unwrap();
+        detached_store(&service, &ctx, store.path()).await;
+        host_identity(store.path(), "epoch");
+        let handle = open_prepared(
+            &service,
+            ctx.clone(),
+            recover(store.path(), "workspace", "epoch"),
+        )
+        .await
+        .unwrap();
+        for root in spellings(attached.path())
+            .into_iter()
+            .chain(spellings(&copies.path().join(".recovery")))
+        {
+            assert_eq!(
+                service
+                    .dispatch(ctx.clone(), recover(&root, "other", "epoch"))
+                    .await
+                    .unwrap_err()
+                    .message,
+                "recovery store root is already open",
+                "{}",
+                root.display()
+            );
+        }
+        for root in spellings(store.path()) {
+            assert_eq!(
+                service
+                    .configured_attach_workspace(&ctx, attach(&root, "workspace"))
+                    .await
+                    .unwrap_err()
+                    .message,
+                "live host workspace root is open for recovery",
+                "{}",
+                root.display()
+            );
+        }
+        service
+            .dispatch(ctx.clone(), close_request(&handle))
+            .await
+            .unwrap();
+        service
+            .configured_detach_workspace(
+                &ctx,
+                host_request("liveApplication.detachWorkspace", Some(kept), json!({})),
+            )
+            .await
+            .unwrap();
     }
 
     /// Prepares an earlier store of `RECOVERY_LARGE_STORE_MB` megabytes, from

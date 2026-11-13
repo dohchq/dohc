@@ -680,4 +680,70 @@ mod tests {
         drop((source_conn, target));
         assert_eq!(contents(&store), before);
     }
+
+    #[test]
+    fn a_store_another_connection_holds_is_busy() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("recovery-busy").unwrap();
+        let store = scratch.path().join("store");
+        std::fs::create_dir(&store).unwrap();
+        let source = store.join("engine.db");
+        earlier_store(&source);
+        let holder = Connection::open(&source).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let refused = open(
+            &source,
+            &scratch.path().join("copy"),
+            &RealFreeSpace,
+            &Arc::default(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(refused, RecoveryError::Storage(StorageError::FileLocked)),
+            "{refused:?}"
+        );
+        assert!(!scratch.path().join("copy").exists());
+    }
+
+    /// The WAL another connection makes after the source's WAL was looked for,
+    /// as it opens the store first, stays: the busy open never held the store.
+    #[test]
+    fn a_busy_open_leaves_the_wal_another_connection_made() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("recovery-busy-wal").unwrap();
+        let store = scratch.path().join("store");
+        std::fs::create_dir(&store).unwrap();
+        let source = store.join("engine.db");
+        earlier_store(&source);
+        let wal = store.join("engine.db-wal");
+        assert!(!wal.exists());
+        let holder = std::rc::Rc::new(std::cell::RefCell::new(None));
+        AFTER_WAL_CHECK.with(|hook| {
+            let (holder, source, wal) = (holder.clone(), source.clone(), wal.clone());
+            *hook.borrow_mut() = Some(Box::new(move || {
+                // Out of WAL mode, its exclusive lock keeps every reader out,
+                // and the empty WAL it leaves is open nowhere, so even Windows
+                // would let it be removed.
+                let conn = Connection::open(&source).unwrap();
+                let mode: String = conn
+                    .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+                    .unwrap();
+                assert_eq!(mode, "delete");
+                conn.execute_batch("BEGIN EXCLUSIVE").unwrap();
+                std::fs::write(&wal, b"").unwrap();
+                *holder.borrow_mut() = Some(conn);
+            }));
+        });
+        let refused = open(
+            &source,
+            &scratch.path().join("copy"),
+            &RealFreeSpace,
+            &Arc::default(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(refused, RecoveryError::Storage(StorageError::FileLocked)),
+            "{refused:?}"
+        );
+        assert!(wal.exists());
+        drop(holder);
+    }
 }

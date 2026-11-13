@@ -474,6 +474,74 @@ fn bookmark_retry_queues_a_failed_projection_at_its_own_generation() {
 }
 
 #[test]
+fn list_threads_for_file_is_workspace_object_scoped_and_stably_ordered() {
+    let (_scratch, mut store) = open_store();
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            for (ws, id, object, at) in [
+                (WS, "b", "object", 10), (WS, "a", "object", 10),
+                (WS, "other", "other", 1), (OTHER_WS, "foreign", "object", 1),
+            ] {
+                tx.execute(
+                    "INSERT INTO chat_threads (workspace_id,thread_id,title,created_at_ms,updated_at_ms,linked_object_id,linked_at_ms) VALUES (?1,?2,'',?4,?4,?3,?4)",
+                    params![ws, id, object, at],
+                ).map_err(StorageError::persist_public)?;
+            }
+            Ok::<_, StorageError>(())
+        })
+        .expect("seed");
+    let chats = LinkedChatStore::new(&mut store);
+    let rows = chats
+        .list_threads_for_file(WS, "object", None, 10)
+        .expect("list");
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.thread_id.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b"],
+        "match path/foreign rows or omit the id tie-break -> ids differ.",
+    );
+}
+
+#[test]
+fn find_thread_channel_id_hides_foreign_and_file_threads() {
+    let (_scratch, mut store) = open_store();
+    base_chat(&mut store);
+    {
+        let mut chats = LinkedChatStore::new(&mut store);
+        start(
+            &mut chats,
+            "channel-thread",
+            "message",
+            ChatActorKind::Human,
+            10,
+        );
+    }
+    store.write_with(&NO_FAULTS, |tx| {
+        tx.execute("INSERT INTO chat_threads (workspace_id,thread_id,title,created_at_ms,updated_at_ms,linked_object_id,linked_at_ms) VALUES (?1,'file','',1,1,'object',1)", params![WS]).map_err(StorageError::persist_public)?;
+        Ok::<_, StorageError>(())
+    }).expect("file");
+    let chats = LinkedChatStore::new(&mut store);
+    assert_eq!(
+        chats
+            .find_thread_channel_id(WS, "channel-thread")
+            .expect("channel"),
+        Some("channel".to_owned()),
+        "drop workspace/owner semantics -> foreign or file threads return a channel.",
+    );
+    assert_eq!(
+        chats.find_thread_channel_id(WS, "file").expect("file"),
+        None
+    );
+    assert_eq!(
+        chats
+            .find_thread_channel_id(OTHER_WS, "channel-thread")
+            .expect("foreign"),
+        None
+    );
+}
+
+#[test]
 fn agent_read_cursor_rejects_stale_revision() {
     let (_scratch, mut store) = open_store();
     base_chat(&mut store);
@@ -660,6 +728,20 @@ fn cover_delivered_takes_only_the_running_runs_agents_pending_requests() {
     assert_eq!(
         next.dispatch.trigger_message_id, "later",
         "the next run skips the reply the first run already read"
+    );
+}
+
+#[test]
+fn record_run_message_rejects_foreign_workspace_run() {
+    let (_scratch, mut store) = open_store();
+    claimed_run(&mut store, "trigger", "thread", "run", 20);
+    let error = LinkedChatStore::new(&mut store)
+        .record_run_message(OTHER_WS, "message", "run", &NO_FAULTS)
+        .unwrap_err();
+    assert_eq!(
+        error.code(),
+        "run-not-found",
+        "trust globally unique run id without workspace check -> foreign link inserts."
     );
 }
 

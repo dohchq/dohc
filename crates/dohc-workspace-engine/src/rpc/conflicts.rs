@@ -127,9 +127,6 @@ const RESOLVE_REQUEST_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// What a fully withheld resolve answer spends on JSON keys, punctuation and
 /// every fixed-width field beside them — 64-hex digests, i64 counters, enum
 /// strings, the `inbandLimitBytes` numbers each withheld body leaves behind.
-/// `a_fully_withheld_resolve_answer_fits_its_scaffolding_allowance` measures
-/// the real figure against this, which is why it is public: a test carrying
-/// its own copy of the number would pass whatever this held.
 pub const RESOLVE_ANSWER_SCAFFOLDING_BYTES: usize = 64 * 1024;
 
 /// The one part of a resolve answer that no request supplies and no conflict
@@ -782,16 +779,9 @@ impl EngineService {
         // path, object and latest moment — so those identifiers are the
         // conflict row's, already counted in (1).
         //
-        // Healthy work cannot reach it, measured rather than assumed. Three
-        // UUID identifiers served twelve times cost under 600 bytes, and the
-        // sibling write paths cap a metadata field at
-        // `MAX_METADATA_FIELD_BYTES`. `a_worst_legitimate_resolve_is_admitted`
-        // runs the heaviest legitimate resolve there is — every free-form
-        // field at that cap, in its escaping-heaviest form, on the conflict
-        // and on the request — and its conflict measures 655,980 encoded
-        // bytes against a budget of about 8.13 MB, twelve times inside it.
-        // The only conflicts this can refuse carry metadata within a quarter
-        // megabyte of an entire control frame.
+        // Sibling write paths cap each metadata field at
+        // `MAX_METADATA_FIELD_BYTES`. The allowance above reserves their
+        // worst-case JSON encoding beside the conflict.
         let conflict_answer_budget_bytes = RESPONSE_FRAME_BYTES
             .saturating_sub(resolve_answer_beside_conflict_bytes(&local))
             .saturating_sub(RESOLVE_ANSWER_STRUCTURAL_BYTES);

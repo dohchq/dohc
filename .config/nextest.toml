@@ -38,6 +38,11 @@ retries = 1
 filter = 'test(many_members_bound_store_work_and_ydoc_wait)'
 threads-required = "num-test-threads"
 
+# Run the WAL-pressure held-proof test alone: it grows the WAL past the write limit, and other tests slow the checkpoints it waits for (#2960).
+[[profile.default.overrides]]
+filter = 'binary_id(=dohc-engine-runtime::integration) & test(=owner_publication::held_proof::a_proof_gives_way_when_the_wal_presses_and_writes_keep_succeeding)'
+threads-required = "num-test-threads"
+
 # PR checks select this profile on runners without Landlock, and run the app
 # compiler owner's tests, which apply Landlock, in their confinement job.
 [profile.without-confinement]

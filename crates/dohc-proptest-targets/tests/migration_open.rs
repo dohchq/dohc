@@ -1,7 +1,7 @@
 //! Fuzz coverage for corrupted database bytes at the open/migration boundary.
 //!
 //! Plain proptest keeps this target native-Windows compatible. The default is
-//! 16 cases per property.
+//! 256 cases per property and can be scaled with `PROPTEST_CASES`.
 
 use dohc_engine_storage::{
     CorruptionKind, ENGINE_SCHEMA_VERSION, EngineStore, SQLITE_DATABASE_HEADER_BYTES, classify,
@@ -73,7 +73,10 @@ fn assert_rejected_as_corruption(path: &Path) {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(16))]
+    // `ProptestConfig::default()` is 256 cases and honors the standard
+    // `PROPTEST_CASES` env var; `with_cases(256)` pinned it and silently
+    // ignored the env var, so evidence runs asking for a large corpus got 256.
+    #![proptest_config(ProptestConfig::default())]
 
     /// Non-empty arbitrary bytes are refused with the typed corruption
     /// classification and the rejected evidence remains byte-for-byte intact.

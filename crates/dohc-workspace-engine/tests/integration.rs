@@ -2,6 +2,8 @@ mod common;
 
 #[path = "busy_retry.rs"]
 mod busy_retry;
+#[path = "capture_differential.rs"]
+mod capture_differential;
 #[path = "capture_driver.rs"]
 mod capture_driver;
 #[path = "capture_file_holds.rs"]
