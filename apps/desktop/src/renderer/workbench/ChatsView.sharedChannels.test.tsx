@@ -635,12 +635,14 @@ describe("ChatsView shared channels (MU-C4)", () => {
         ],
       }),
     );
+    const options = () =>
+      screen
+        .queryAllByTestId("chats-new-thread-file-mention-option")
+        .map((option) => option.getAttribute("data-path"));
     const offered = async () => {
       await userEvent.type(await screen.findByTestId("chats-new-thread-composer"), "@");
       await screen.findByTestId("chats-new-thread-mention-menu");
-      return screen
-        .queryAllByTestId("chats-new-thread-file-mention-option")
-        .map((option) => option.getAttribute("data-path"));
+      return options();
     };
     renderView(vi.fn(), vi.fn(), { workspaceFiles, shareMounts });
     await userEvent.click(await screen.findByTestId("chats-channel"));
@@ -656,21 +658,20 @@ describe("ChatsView shared channels (MU-C4)", () => {
     expect(await offered()).toEqual([]);
     cleanup();
 
-    // A Group of this workspace's that only a link shares lists no person, and
-    // still offers only its folder.
-    bridgeMock.listChatChannelShares.mockResolvedValue(shareListing());
-    renderView(vi.fn(), vi.fn(), { workspaceFiles });
-    await userEvent.click(await screen.findByTestId("chats-channel"));
-    expect(await offered()).toEqual(["team/mine.md"]);
-    cleanup();
-
+    // A Group of this workspace's offers every file until a share covers it.
+    // Once a refreshed channel list says a link shares it, the open composer
+    // offers only its folder. The relay's grant listing names nobody for a link.
     listTeam({ kind: "any" });
-    renderView(vi.fn(), vi.fn(), { workspaceFiles });
+    bridgeMock.listChatChannelShares.mockResolvedValue(shareListing());
+    const view = render(navigatorView(0, { workspaceFiles }));
     await userEvent.click(await screen.findByTestId("chats-channel"));
     expect((await offered()).sort()).toEqual([
       "finance/budget.md",
       "shared-with-me/owner/team/plan.md",
       "team/mine.md",
     ]);
+    listTeam({ kind: "shared", shares: [["team"]] });
+    view.rerender(navigatorView(1, { workspaceFiles }));
+    await waitFor(() => expect(options()).toEqual(["team/mine.md"]));
   });
 });

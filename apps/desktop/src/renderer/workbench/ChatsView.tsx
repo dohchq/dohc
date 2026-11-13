@@ -3425,18 +3425,30 @@ export function ChatsView(props: {
   // and a workspace switch could briefly publish under the previous workspace's
   // scope. Gating on (channelShares loaded for this workspaceId) closes both.
   const scopeResolved = sharesWorkspaceId === workspaceId;
-  // The files the open Group's composers offer. Until this workspace's share
-  // listing answers, whether the Group is joined is unknown, so it offers every
-  // file.
+  // The files the open Group's composers offer, by the rule in the latest
+  // channel list, since the open Group's own record is the one it was opened
+  // with. Until this workspace's share listing answers, whether the Group is
+  // joined is unknown, so it offers every file.
   const shareMounts = props.shareMounts ?? EMPTY_SHARE_MOUNTS;
+  const listedChannels = overview.status === "ready" ? overview.channels : null;
   const channelFiles = useMemo(() => {
     if (!scopeResolved) return fileMentionCandidates;
-    const wireId = activeChannel?.wireId ?? null;
+    const listed = activeChannel
+      ? (listedChannels?.find((entry) => entry.id === activeChannel.id) ?? activeChannel)
+      : null;
+    const wireId = listed?.wireId ?? null;
     const share = wireId === null ? null : (joinedByWire.get(wireId) ?? null);
     const mounts = share ? shareMounts.filter((mount) => mount.shareId === share.shareId) : [];
     const joined = share ? { mountLabel: mounts.length === 1 ? mounts[0]!.label : null } : null;
-    return channelFileCandidates(fileMentionCandidates, activeChannel, joined);
-  }, [activeChannel, fileMentionCandidates, joinedByWire, scopeResolved, shareMounts]);
+    return channelFileCandidates(fileMentionCandidates, listed, joined);
+  }, [
+    activeChannel,
+    fileMentionCandidates,
+    joinedByWire,
+    listedChannels,
+    scopeResolved,
+    shareMounts,
+  ]);
   const presence = usePresence({
     enabled: collaboration !== null && presenceTopic !== "" && scopeResolved,
     transport: presenceTransport,
