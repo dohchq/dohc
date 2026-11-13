@@ -182,17 +182,19 @@ function savedMark(item: unknown): PendingMark | TakenMark | null {
 
 /**
  * The rows this phone may not keep, by the list as it stands, a change still on its way included: a row of an owned
- * workspace it hides, and a row naming a path, thread, or message in a workspace the list doesn't hold. The relay
- * serves that second kind only to the workspace's owner, and the list holds every workspace the account owns. Nothing
- * while the list isn't read.
+ * workspace it hides, and, with `unlisted`, a row naming a path, thread, or message in a workspace the list doesn't
+ * hold. The relay serves that second kind only to the workspace's owner, and the list holds every workspace the account
+ * owns. A row the relay serves after the list was read is the newer answer, as for a workspace made since, so a read
+ * doesn't apply `unlisted`. Nothing while the list isn't read.
  */
-function withheld(list: WorkspaceList): (row: NoticeRecord) => boolean {
+function withheld(list: WorkspaceList, unlisted: boolean): (row: NoticeRecord) => boolean {
   if (list.status !== "ready") return () => false;
   const shows = new Map(list.workspaces.map((entry) => [entry.workspaceId, entry.showOnPhone]));
   return (row) => {
     if (row.workspaceId === null) return false;
     const listed = shows.get(row.workspaceId);
     if (listed !== undefined) return !listed;
+    if (!unlisted) return false;
     const target = row.target;
     return (
       target !== null &&
@@ -485,7 +487,7 @@ export function createNoticeStore(options: {
       const unchanged =
         caughtUp && !page.replace && page.changes.length === 0 && page.nextCursor === cursor;
       if (page.replace || cursor === null) building = new Map();
-      const drop = withheld(list.state());
+      const drop = withheld(list.state(), false);
       for (const change of page.changes) take(building ?? rows, change, drop);
       if (building && !page.hasMore) {
         rows = building;
@@ -660,7 +662,7 @@ export function createNoticeStore(options: {
 
   function followList() {
     if (!live()) return;
-    const drop = withheld(list.state());
+    const drop = withheld(list.state(), true);
     let dropped = false;
     for (const target of [rows, building ?? new Map<string, NoticeRecord>()]) {
       for (const [id, row] of target) {

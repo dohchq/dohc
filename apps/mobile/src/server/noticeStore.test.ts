@@ -936,11 +936,20 @@ describe("a workspace that leaves the list and the account's Notices", () => {
     expect(files.lists.get(scope)).toMatchObject([{ noticeId: "a" }]);
     const restart = await server.read();
     expect(restart.path).toBe("/sync/notices?scope=phone&limit=100");
-    // A row the list rules out stays out, even if a read serves it.
+    // The relay checks ownership as it answers, so a row it serves after the list was read stays.
     await reply(server, restart, [relayRow("a"), relayRow("b", { workspaceId: "w2" })], {
       replace: true,
     });
-    expect(ids()).toEqual(["a"]);
+    expect(ids()).toEqual(["a", "b"]);
+  });
+
+  it("keeps a located row the relay serves in a workspace made since the list was read", async () => {
+    const { server, store, ids } = setup();
+    store.resume();
+    await reply(server, server.read(), [relayRow("a"), relayRow("n", { workspaceId: "w9" })], {
+      replace: true,
+    });
+    expect(ids()).toEqual(["a", "n"]);
   });
 
   it.each([
