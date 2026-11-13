@@ -34,6 +34,7 @@ import {
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
+import { engineGrantedSelector, type GrantedSelector } from "./shareViewRecords";
 import {
   DaemonRefusalError,
   decodeKeyEnvelopeResult,
@@ -559,11 +560,7 @@ export interface EngineRelayWorkspaceClient {
     // The selector the relay stated for this share, pinned on first read.
     // Required, because the engine has no unscoped pull: a caller that cannot
     // resolve a selector must skip its refresh, not widen it.
-    grantedSelector: {
-      paths: readonly string[];
-      versionId: string | null;
-      access: ShareAccess;
-    };
+    grantedSelector: GrantedSelector;
     // Called with each page's refusals BEFORE that page's cursor is
     // committed. A refusal is a durable fact — the commit moves permanently
     // past the op — so it has to be recorded first, or a later page that
@@ -594,11 +591,7 @@ export interface EngineRelayWorkspaceClient {
   // engine-side is also what makes a refresh safe: the durable row is the
   // record, so nothing here has to remember an id between calls.
   recordShareViewIdentity(input: {
-    grantedSelector: {
-      paths: readonly string[];
-      versionId: string | null;
-      access: ShareAccess;
-    };
+    grantedSelector: GrantedSelector;
   }): Promise<RecordShareViewIdentityResult>;
 
   // This replica's own edits of the shared files, offered to the
@@ -606,11 +599,7 @@ export interface EngineRelayWorkspaceClient {
   // same reason, and the engine offers nothing below `edit`.
   submitShareProposal(input: {
     shareId: string;
-    grantedSelector: {
-      paths: readonly string[];
-      versionId: string | null;
-      access: ShareAccess;
-    };
+    grantedSelector: GrantedSelector;
     // The idempotency key for one submit. The caller owns it so a retry of
     // the same intent answers with the proposal the relay already holds
     // instead of opening a second one.
@@ -622,11 +611,7 @@ export interface EngineRelayWorkspaceClient {
   // Send changes. The engine writes nothing below `edit`.
   pushDirectWrites(input: {
     shareId: string;
-    grantedSelector: {
-      paths: readonly string[];
-      versionId: string | null;
-      access: ShareAccess;
-    };
+    grantedSelector: GrantedSelector;
   }): Promise<PushDirectWritesResult>;
 }
 
@@ -1004,11 +989,7 @@ export class EngineRelayClient {
         const result = resultRecord(
           await request("share.view.recordIdentity", {
             workspaceId: workspace.workspaceId,
-            grantedSelector: {
-              paths: [...grantedSelector.paths],
-              versionId: grantedSelector.versionId,
-              access: grantedSelector.access,
-            },
+            grantedSelector: engineGrantedSelector(grantedSelector),
           }),
           "share.view.recordIdentity",
         );
@@ -1032,11 +1013,7 @@ export class EngineRelayClient {
           await request("share.proposal.submit", {
             workspaceId: workspace.workspaceId,
             shareId,
-            grantedSelector: {
-              paths: [...grantedSelector.paths],
-              versionId: grantedSelector.versionId,
-              access: grantedSelector.access,
-            },
+            grantedSelector: engineGrantedSelector(grantedSelector),
             submitId,
           }),
           "share.proposal.submit",
@@ -1066,11 +1043,7 @@ export class EngineRelayClient {
           await request(method, {
             workspaceId: workspace.workspaceId,
             shareId,
-            grantedSelector: {
-              paths: [...grantedSelector.paths],
-              versionId: grantedSelector.versionId,
-              access: grantedSelector.access,
-            },
+            grantedSelector: engineGrantedSelector(grantedSelector),
           }),
           method,
         );
@@ -1120,11 +1093,7 @@ export class EngineRelayClient {
               // that selects everything under a version; dropping the version
               // leaves one the engine refuses outright; dropping the level
               // leaves one the engine cannot read and refuses too.
-              grantedSelector: {
-                paths: [...grantedSelector.paths],
-                versionId: grantedSelector.versionId,
-                access: grantedSelector.access,
-              },
+              grantedSelector: engineGrantedSelector(grantedSelector),
             }),
             "share.view.pull",
           );

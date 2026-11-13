@@ -703,7 +703,7 @@ import { createServerOwnerConnection } from "./workspaces/serverOwnerConnection"
 import { createReceivedShareEngineAccess } from "./workspaces/receivedShareEngineAccess";
 import { shareRecordStatuses } from "./workspaces/shareRecordStatus";
 import { createReceivedShareRecord } from "./workspaces/receivedShareRecordCreation";
-import { recordedShareSelector } from "./workspaces/shareViewRecords";
+import { engineGrantedSelector, recordedShareSelector } from "./workspaces/shareViewRecords";
 import { WorkspaceDaemonRequester } from "@dohc/workspace-engine-client";
 import { createCaptureLiveStores } from "./workspaces/workspaceEngineCaptureLiveStore";
 import type { ActiveAgentRun } from "./agents/activeAgentRun";
@@ -7228,11 +7228,7 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
                 workspaceId: workspace.workspaceId,
                 shareId: marker.shareId,
                 paths: [path],
-                grantedSelector: {
-                  paths: marker.grantedSelector.paths,
-                  versionId: marker.grantedSelector.versionId,
-                  access: marker.grantedSelector.access,
-                },
+                grantedSelector: engineGrantedSelector(marker.grantedSelector),
               },
               { workspace: binding.workspace },
             );
@@ -9800,13 +9796,7 @@ function registerIpcHandlers(): void {
                       workspaceId: resolved.storeWorkspaceId,
                       shareId: resolved.shareId!,
                       paths: [path],
-                      grantedSelector: selector
-                        ? {
-                            paths: selector.paths,
-                            versionId: selector.versionId,
-                            access: selector.access,
-                          }
-                        : null,
+                      grantedSelector: selector ? engineGrantedSelector(selector) : null,
                     },
                     { workspace: binding.workspace },
                   );

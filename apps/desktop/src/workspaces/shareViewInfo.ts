@@ -20,7 +20,13 @@ export interface ShareViewSelector {
   // The level the relay states for this share. Required: it is pinned
   // with the rest of the selector and travels to the engine on every pull.
   access: ShareAccess;
+  // A membership: every tracked path on main and the workspace's Groups,
+  // with no paths and no version. The relay states it as
+  // `{kind: "workspace"}`.
+  wholeWorkspace?: true;
 }
+
+export type WorkspaceRole = "admin" | "member";
 
 // A restriction's display snapshot. Capture and pull must not use these paths.
 export interface ShareUnconfirmedChanges {
@@ -38,6 +44,8 @@ export interface ShareViewInfo {
   granterUserId: string;
   granterEmail: string | null;
   genericChatWritable: boolean;
+  /** The caller's role, for a membership only. */
+  role?: WorkspaceRole;
   /**
    * The effective selector composed from the relay's stored scope and grant
    * access, or null when the share grants a chat channel and has no file
@@ -99,6 +107,13 @@ function parseSelector(value: unknown, access: unknown, shareId: string): ShareV
     versionId?: unknown;
   };
   if (record.kind === "chat") return null;
+  if (record.kind === "workspace") {
+    if (readWorkspaceRole(value) === null || "paths" in record || "versionId" in record ||
+      !isShareAccessValue(access)) {
+      throw new ShareSelectorInvalidError(shareId);
+    }
+    return { paths: [], versionId: null, access, wholeWorkspace: true };
+  }
   if (record.kind === "group") {
     // A group's folder half. The relay states one access for the whole
     // group: read-write edits the folder, read-only views it. The channel
@@ -154,6 +169,11 @@ function parseSelector(value: unknown, access: unknown, shareId: string): ShareV
   };
 }
 
+function readWorkspaceRole(selector: unknown): WorkspaceRole | null {
+  if (!selector || typeof selector !== "object" || !("role" in selector)) return null;
+  return selector.role === "admin" || selector.role === "member" ? selector.role : null;
+}
+
 export async function fetchShareViewInfo(input: {
   relay: SyncRelayConnection;
   shareId: string;
@@ -168,6 +188,7 @@ export async function fetchShareViewInfo(input: {
   if (typeof body.genericChatWritable !== "boolean") {
     throw new ShareSelectorInvalidError(input.shareId);
   }
+  const selector = parseSelector(body.selector, body.access, input.shareId);
   return {
     receivedIdentity: receivedReferencePin(body),
     shareId: String(body.shareId ?? input.shareId),
@@ -176,7 +197,8 @@ export async function fetchShareViewInfo(input: {
     sharerName: normalizeShareLabel(body.sharerName, 320),
     granterEmail: typeof body.granterEmail === "string" ? body.granterEmail : null,
     genericChatWritable: body.genericChatWritable,
-    selector: parseSelector(body.selector, body.access, input.shareId),
+    ...(selector?.wholeWorkspace ? { role: readWorkspaceRole(body.selector)! } : {}),
+    selector,
     createdAtMs: Number(body.createdAtMs ?? 0),
   };
 }

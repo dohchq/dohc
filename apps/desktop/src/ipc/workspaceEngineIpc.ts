@@ -91,7 +91,7 @@ import {
 } from "../workspaces/receivedShareCollections";
 import { resolveRegisteredShareViewFilesTarget } from "../workspaces/shareViewFilesTarget";
 import { resolveOwnedWorkspaceSharePath } from "../workspaces/ownedWorkspaceFileReader";
-import { recordedShareSelector } from "../workspaces/shareViewRecords";
+import { engineGrantedSelector, recordedShareSelector } from "../workspaces/shareViewRecords";
 import { createHistoryPresentationRequest } from "../workspaces/actorPresentation";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import type { readSyncHistory } from "../workspaces/syncHistory";
@@ -425,11 +425,7 @@ export function createWorkspaceEngineIpc<
                     workspaceId: target.storeWorkspaceId,
                     shareId: target.shareId!,
                     paths,
-                    grantedSelector: {
-                      paths: grant.paths,
-                      versionId: grant.versionId,
-                      access: grant.access,
-                    },
+                    grantedSelector: engineGrantedSelector(grant),
                   },
                   { workspace: binding.workspace },
                 ),
