@@ -1814,6 +1814,60 @@ fn direct_write_author_and_collection_file_origin_travel_only_together() {
 }
 
 #[test]
+fn direct_write_authors_create_pages_outside_collections_and_datasets() {
+    let (_scratch, mut store) = test_store();
+    seed_trip_collection(&mut store);
+    seed_text_moment(
+        &mut store,
+        "notes-page",
+        "notes/page.md",
+        "Notes",
+        "notes-page-1",
+        None,
+        true,
+    );
+    let pages = [
+        ("top-page", "Ideas.md", "Ideas"),
+        ("notes-new", "notes/new.md", "New"),
+        ("plans-first", "plans/kickoff.md", "Kickoff"),
+        ("trip-days", "trip/days/one.md", "Day one"),
+    ];
+    hydrate_texts(&mut store, &["Ideas", "New", "Kickoff", "Day one"]);
+    // Each author writes its own copy of every page.
+    let cases = direct_write_authors("grant")
+        .into_iter()
+        .enumerate()
+        .flat_map(|(round, author)| {
+            pages.map(move |(object, path, text)| {
+                let object = format!("{object}-{round}");
+                let path = path.replace(".md", &format!("-{round}.md"));
+                with_author(
+                    absent_text_payload(&object, &object, &path, text),
+                    author.clone(),
+                )
+            })
+        });
+    for (seq, payload) in (0_i64..).zip(cases) {
+        let op = envelope(NAMED_ORIGIN, seq, "ws", payload);
+        assert_eq!(
+            apply_moment_envelope(&mut store, &op, &NoFaults).expect("apply page"),
+            ApplyOutcome::new(ApplyDisposition::Applied(0)),
+            "{} {}",
+            op.payload["path"],
+            op.payload["authors"][0]["kind"]
+        );
+    }
+    for (object, _, _) in pages {
+        for round in 0..2 {
+            assert!(
+                snapshot(&store, &format!("{object}-{round}")).is_some(),
+                "{object}"
+            );
+        }
+    }
+}
+
+#[test]
 fn direct_write_authors_are_refused_outside_a_collections_own_files() {
     let (_scratch, mut store) = test_store();
     seed_trip_collection(&mut store);
@@ -1916,13 +1970,6 @@ fn direct_write_authors_are_refused_outside_a_collections_own_files() {
             "plain-automations",
             "notes/automations.yaml",
             "version: 1\n",
-        ),
-        absent_text_payload("plain-record", "plain-record", "notes/new.md", "Changed"),
-        absent_text_payload(
-            "nested-record",
-            "nested-record",
-            "trip/days/one.md",
-            "Changed",
         ),
         absent_text_payload("code", "code", "trip/stamp.js", "code"),
         present_text_payload(
