@@ -27,7 +27,7 @@ const typeOnly = node => node.importKind === "type" || node.exportKind === "type
   || node.specifiers?.length > 0 && node.specifiers.every(specifier => specifier.importKind === "type" || specifier.exportKind === "type");
 
 // The modules a file loads when it runs, and whether it declares an operation family.
-export function readModule(path, source) {
+function readModule(path, source) {
   const program = parse(source, { sourceType: "module", plugins: path.endsWith(".tsx") ? ["typescript", "jsx"] : ["typescript"] }).program;
   const imports = [];
   let declares = false;
