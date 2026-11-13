@@ -177,6 +177,18 @@ it("retries a fenced recovery import after the target store reopens mid-install 
   }
 });
 
+it("restores a 100 MiB checkpoint in bounded durable chunks", async () => {
+  const f = await fixture(true); f.journal.fence({ expected: f.head(), authorize: f.authorize });
+  const valid = await validateDatasetRecovery({ staged: await f.stage(), authorize: f.authorize }), t = target(f);
+  try {
+    expect(valid.headCheckpoint.byteLength).toBeGreaterThan(100 * 1024 * 1024);
+    const manifestSha256 = recoveryManifestSha256(valid.manifest, { maxTotalBytes: 512 * 1024 * 1024 });
+    await t.installer.install({}, { transferId: "large-import", manifestSha256, recovery: valid, authorize: f.authorize });
+    t.installer.claim({}, { ...f.scope, transferId: "large-import", manifestSha256, sourceCursor: f.head(), authorize: f.authorize });
+    expect(t.db.prepare("SELECT MAX(length(bytes)) n FROM dohc_dataset_checkpoint_chunks").get()!.n).toBe(1024 * 1024);
+    expect(t.db.prepare("SELECT count(*) n FROM dohc_dataset_checkpoints WHERE state!=2").get()!.n).toBe(0);
+  } finally { await valid.dispose(); }
+}, 120_000);
 function changeHistory(bytes:Buffer,change:(record:any)=>void){
   const result:Buffer[]=[bytes.subarray(0,8)];let offset=8;
   while(offset<bytes.length){const size=bytes.readUInt32BE(offset);offset+=4;const record=JSON.parse(bytes.subarray(offset,offset+size).toString());offset+=size;

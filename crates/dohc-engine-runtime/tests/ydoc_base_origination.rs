@@ -231,8 +231,8 @@ fn capture_retire_state(db: &Path, key: &DocKey, path: &str) -> CaptureRetireSta
 }
 
 /// The workspace has an origin identity. This alone is not sync: ordinary
-/// local chat writes mint one (`local_replication_coordinate`), so
-/// [`chat_minted_identity`] is the shape a purely private workspace reaches.
+/// local chat writes mint one (`local_replication_coordinate`), so a purely
+/// private workspace reaches this shape too.
 fn seed_identity(db: &Path, workspace_id: &str) {
     let mut store = EngineStore::open(db, 9_103).expect("open store");
     store
