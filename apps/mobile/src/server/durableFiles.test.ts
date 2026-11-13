@@ -77,6 +77,7 @@ describe("a record", () => {
     disk.holdWrites();
     void launch(disk).write("op-1", "after, never finished");
     await vi.waitFor(() => expect(temporaries(disk)).toHaveLength(1));
+    disk.crash();
     const [temp] = temporaries(disk);
 
     const next = launch(disk);
@@ -89,6 +90,69 @@ describe("a record", () => {
     // Only an explicit call removes it.
     await next.removeLeftover(temp);
     expect(disk.names()).toEqual(["op-1"]);
+  });
+
+  it("can be written again after a crash, and the crashed run's write never lands", async () => {
+    const disk = durableDisk();
+    await launch(disk).write("op-1", "before");
+    disk.holdWrites();
+    let settled = false;
+    void launch(disk).write("op-1", "from the run that crashed").finally(() => { settled = true; });
+    await vi.waitFor(() => expect(temporaries(disk)).toHaveLength(1));
+    disk.crash();
+
+    const next = launch(disk);
+    const { leftovers } = await next.recover();
+    expect(leftovers).toHaveLength(1);
+    await next.removeLeftover(leftovers[0]!);
+    await next.write("op-1", "after the crash");
+    await next.write("op-2", "new");
+
+    await expect(launch(disk).read("op-1")).resolves.toBe("after the crash");
+    await expect(launch(disk).list()).resolves.toEqual(["op-1", "op-2"]);
+    expect(temporaries(disk)).toEqual([]);
+    expect(settled).toBe(false);
+  });
+});
+
+describe("the fake disk's other faults", () => {
+  it("fails a write at folder preparation before any temporary file, and the next write succeeds", async () => {
+    const disk = durableDisk();
+    const files = launch(disk);
+    await files.write("op-1", "before");
+    disk.failWrites = "prepare";
+    expect(await kindOf(files.write("op-1", "after"))).toBe("failed");
+    expect(disk.names()).toEqual(["op-1"]);
+    disk.failWrites = null;
+    await files.write("op-1", "after");
+    await expect(files.read("op-1")).resolves.toBe("after");
+  });
+
+  it("rejects reads and recovery as locked while the phone hasn't been unlocked, without calling records unreadable", async () => {
+    const disk = durableDisk();
+    await launch(disk).write("op-1", "one");
+    disk.locked = true;
+    const files = launch(disk);
+    expect(await kindOf(files.recover())).toBe("locked");
+    expect(await kindOf(files.read("op-1"))).toBe("locked");
+    expect(await kindOf(files.write("op-2", "two"))).toBe("failed");
+    await expect(files.list()).resolves.toEqual(["op-1"]);
+    disk.locked = false;
+    await expect(files.recover()).resolves.toEqual({ leftovers: [], unreadable: [] });
+    await expect(files.read("op-1")).resolves.toBe("one");
+  });
+
+  it("fails a delete at the unlink, keeping the record, or after it, at the folder sync", async () => {
+    const disk = durableDisk();
+    const files = launch(disk);
+    await files.write("op-1", "one");
+    disk.failRemoves = "unlink";
+    expect(await kindOf(files.remove("op-1"))).toBe("failed");
+    await expect(files.read("op-1")).resolves.toBe("one");
+    disk.failRemoves = "sync-folder";
+    // The delete may stand, but isn't known to survive power loss.
+    expect(await kindOf(files.remove("op-1"))).toBe("unsynced");
+    await expect(files.read("op-1")).resolves.toBeNull();
   });
 });
 
@@ -144,7 +208,9 @@ describe("recovery", () => {
     // A leftover that isn't one of the module's temporary files can't be removed.
     expect(await kindOf(files.removeLeftover("notes.txt"))).toBe("invalid");
     expect(await kindOf(files.removeLeftover("op-1"))).toBe("invalid");
+    expect(await kindOf(files.removeLeftover(`${temp}\n`))).toBe("invalid");
     expect(disk.names()).toContain("notes.txt");
+    expect(disk.names()).toContain(temp);
   });
 
   it("reads a record again once it is written over an unreadable one", async () => {
@@ -162,7 +228,8 @@ describe("names and sizes", () => {
   it("refuses a name outside letters, digits, \"-\" and \"_\", or longer than 100, before reaching the disk", async () => {
     const disk = durableDisk();
     const files = launch(disk);
-    for (const name of ["", "a/b", "../op", ".", "op.json", "op 1", "é", "op\u0000", "x".repeat(101)]) {
+    // "op-1\n" pins that the pattern's "$" doesn't match before a final newline.
+    for (const name of ["", "a/b", "../op", ".", "op.json", "op 1", "é", "op\u0000", "op-1\n", "x".repeat(101)]) {
       expect(await kindOf(files.write(name, "text")), name).toBe("invalid");
       expect(await kindOf(files.read(name)), name).toBe("invalid");
       expect(await kindOf(files.remove(name)), name).toBe("invalid");

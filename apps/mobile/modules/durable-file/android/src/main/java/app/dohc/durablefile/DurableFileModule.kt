@@ -55,6 +55,9 @@ class DurableFileModule : Module() {
 }
 
 internal class DurableFolder(private val dir: File) {
+  /** Set once this run has created the folder, if needed, and synced its parents. */
+  private var ready = false
+
   fun write(name: String, text: String) {
     if (!RECORD_NAME.matches(name)) throw invalid("The record name isn't valid.")
     val bytes = encode(text)
@@ -72,6 +75,7 @@ internal class DurableFolder(private val dir: File) {
       Os.rename(temp.path, File(dir, name).path)
     } catch (error: Exception) {
       temp.delete()
+      ready = false
       throw failed("write the record", error)
     }
     syncAfterChange()
@@ -119,17 +123,24 @@ internal class DurableFolder(private val dir: File) {
     return names.sorted()
   }
 
-  /** Creates the folder and syncs the folder that holds it, so the new entry survives power loss. */
+  /** Creates any missing folder, then syncs `noBackupFilesDir`, which holds the outbox folder's entry, and the app's
+   * data folder, which holds `noBackupFilesDir`'s. The syncs run once each run whether or not this run created the
+   * folders: an earlier run may have died, or failed, between a mkdir and its sync. `ready` is set only after every
+   * step succeeds, so a failure is retried by the next call. */
   private fun prepareFolder() {
-    if (dir.isDirectory) return
+    if (ready && dir.isDirectory) return
+    ready = false
     try {
       val parent = dir.parentFile ?: throw IOException("the folder has no parent")
+      val grandparent = parent.parentFile ?: throw IOException("the folder's parent has no parent")
       if (!parent.isDirectory && !parent.mkdirs()) throw IOException("its parent couldn't be created")
       if (!dir.mkdir() && !dir.isDirectory) throw IOException("mkdir failed")
+      syncDirectory(grandparent)
       syncDirectory(parent)
     } catch (error: Exception) {
-      throw failed("create the folder", error)
+      throw failed("prepare the folder", error)
     }
+    ready = true
   }
 
   /** A file that isn't a whole record of valid UTF-8 within the size bound is unreadable. */
