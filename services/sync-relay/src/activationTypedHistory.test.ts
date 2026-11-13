@@ -20,6 +20,8 @@ import {
   type OrdinaryFoldValidator,
 } from "./storage/ordinaryActivationFold.js";
 import { ServiceActivationStaleCut } from "./storage/ordinaryActivationSource.js";
+import { SERVICE_ACTIVATIONS } from "./storage/serviceActivationSchema.js";
+import { serverLogLine } from "./serverLogWords.js";
 import { createLiveMarkdownRegistrationValidator } from "../../../packages/ydoc-projection/src/liveDocumentValidation.js";
 import {
   markdownToYDoc,
@@ -331,6 +333,18 @@ it("a note typed within today's entry limit activates", async () => {
     replayed: false,
     completed: false,
   });
+});
+
+// The server log shows only fixed words, so the refusal must carry its reason as one.
+it("an activation refused for its baseline names why in the server log", async () => {
+  const note = await typedRelayNote(100);
+  const validate = validation();
+  expect((await activate(note, validate)).outcome).toMatchObject({ replayed: false });
+  // The relay keeps the registered baseline but forgets the activation that registered it.
+  note.raw.prepare(`DELETE FROM ${SERVICE_ACTIVATIONS}`).run();
+  expect(serverLogLine((await activate(note, validate)).outcome)).toBe(
+    "ServerLogError: Service activation requires a new live baseline: already-registered.",
+  );
 });
 
 // One keystroke past today's entry limit: the activation folds its rows into a checkpoint before its last read.
