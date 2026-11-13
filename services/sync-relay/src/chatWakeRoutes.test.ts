@@ -1,7 +1,8 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import { UnauthorizedError, type AccountSession, type ResolveAccountSession } from "@dohc/workspace-auth/session";
-import { CHAT_WAKE_WAIT_MAX_MS, CHAT_WAKE_WAITS_PER_INSTALL } from "./chatWakeRoutes";
+import { CHAT_WAKE_WAIT_MAX_MS } from "@dohc/workspace-contracts/chat-wakes";
+import { CHAT_WAKE_WAITS_PER_INSTALL } from "./chatWakeRoutes";
 import { DiscussionActivityHub } from "./discussionActivity";
 import { chatWakeId, type ChatWakeTarget } from "./storage/chatWakes";
 import { closeTestStorages, denialBytes, inspectDatabase, json, storagePath, testHandler, testStorage } from "./testing";

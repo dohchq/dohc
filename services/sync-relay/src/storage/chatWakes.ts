@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { CHAT_WAKE_PAGE_MAX, type ChatWakeCandidate, type ChatWakeState, type ChatWakeView, type WaitingChatWake } from "@dohc/workspace-contracts/chat-wakes";
 import { notifyChatWakeChange } from "../relayWriteChanges";
 import type { StorageContext } from "./context";
 import type { SqliteDb } from "./types";
@@ -134,14 +135,8 @@ export const CHAT_WAKE_CONFIRM_MS = 24 * 60 * 60 * 1000;
 export const CHAT_WAKE_KEEP_MS = 30 * 24 * 60 * 60 * 1000;
 /** The computers one account declares per workspace. A new one past this replaces the one heard from longest ago. */
 const CHAT_RUNNER_COMPUTERS = 32;
-/** The agents one computer declares per workspace. */
-export const CHAT_RUNNER_AGENTS = 64;
 /** The most rows one sweep call changes; the caller repeats until fewer come back. */
 const CHAT_WAKE_SWEEP_BATCH = 1_000;
-// The most waiting wakes one read answers.
-const WAITING_PAGE = 100;
-
-type ChatWakeState = "held" | "waiting" | "claimed" | "queued" | "unclaimed" | "unconfirmed";
 
 /** One computer's agent, as its owner declared it. */
 export interface ChatRunner {
@@ -154,14 +149,6 @@ export interface ChatRunner {
   enabled: boolean;
 }
 
-/** A computer that may claim a wake, and what of the message it matched. */
-export type ChatWakeCandidate = {
-  installId: string;
-  agentId: string;
-  label: string;
-  matched: { handle: string } | { displayName: string };
-};
-
 /** One wake target, frozen when its message was written. */
 export type ChatWakeTarget = { target: string; candidates: ChatWakeCandidate[] };
 
@@ -172,23 +159,6 @@ export interface OperationWakeChange {
   /** The decision has an outcome: held rows wait for a computer, syncing through the question's decision when it was accepted. */
   release?: { prerequisite: string | null };
 }
-
-/** A wake as its account's computers see it. */
-export interface ChatWakeView {
-  wakeId: string;
-  workspaceId: string;
-  messageId: string;
-  threadId: string;
-  generation: number;
-  state: ChatWakeState;
-  /** The question whose decision a computer syncs through first, for an answer. */
-  prerequisiteMessageId: string | null;
-  /** The winning computer's label once one claimed it. */
-  winnerLabel: string | null;
-}
-
-/** A waiting wake for one computer, with only that computer's candidate. */
-type WaitingChatWake = ChatWakeView & { candidate: ChatWakeCandidate };
 
 export type ChatWakeRetry =
   | { kind: "retried"; wake: ChatWakeView }
@@ -380,10 +350,10 @@ export function listWaitingChatWakes(storage: StorageContext, input: {
       `${OWNED} WHERE c.account_id = ? AND c.change_seq > ? AND c.state = 'waiting' AND c.waiting_since_ms > ?
          AND EXISTS (SELECT 1 FROM json_each(c.candidates_json) e WHERE json_extract(e.value, '$.installId') = ?)
        ORDER BY c.change_seq LIMIT ?`,
-    ).all(input.accountId, since, input.nowMs - CHAT_WAKE_CLAIM_MS, input.installId, WAITING_PAGE);
+    ).all(input.accountId, since, input.nowMs - CHAT_WAKE_CLAIM_MS, input.installId, CHAT_WAKE_PAGE_MAX);
     return {
-      cursor: rows.length === WAITING_PAGE ? Number(rows.at(-1)!.change_seq) : head,
-      wakes: rows.map((row) => ({ ...viewOf(row), candidate: candidatesOf(row).find((each) => each.installId === input.installId)! })),
+      cursor: rows.length === CHAT_WAKE_PAGE_MAX ? Number(rows.at(-1)!.change_seq) : head,
+      wakes: rows.map((row) => ({ ...viewOf(row), state: "waiting" as const, candidate: candidatesOf(row).find((each) => each.installId === input.installId)! })),
     };
   });
 }
