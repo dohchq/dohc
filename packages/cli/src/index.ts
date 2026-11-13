@@ -452,6 +452,8 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
     );
     // Every verb names the agent you run, so each reads and writes as it.
     if (command.agentId !== undefined) Object.assign(request.args, { agentId: command.agentId });
+    // The desktop runs the request from this workspace's folder in place of the caller's.
+    if (command.workspaceId !== undefined) Object.assign(request, { workspaceId: command.workspaceId });
     while (true) {
       if (options.signal?.aborted) return { exitCode: 0, stdout: "", stderr: "" };
       let result: CliResultByVerb[keyof CliResultByVerb];

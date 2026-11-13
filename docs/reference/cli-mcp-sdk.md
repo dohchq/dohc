@@ -870,6 +870,7 @@ dohc <command> <verb> [arguments] [options]
 
 - `--as-agent`: Post and read chat as an agent.
 - `--agent-id <id>`: Work as this agent you run, by its id in Settings › Agents. Implies --as-agent.
+- `--workspace <id>`: Work in this workspace, by its id, instead of the one this folder is in. Relative paths then start at the workspace's folder.
 - `--json`: Print the result as JSON.
 - `--help`: Show help. -h does the same.
 

@@ -1961,6 +1961,22 @@ describe("CLI socket server", () => {
     await expect(invoke("collectionSetFields", { cwd, actor: "agent", recordPath: "../tasks/a.md", fields: { status: "done" } })).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("../tasks/a.md") });
     await expect(invoke("documentRead", { cwd: tempRoot, actor: "agent", path: "notes.md" })).rejects.toThrow("not inside a dohc workspace");
     await expect(invoke("documentRead", { cwd: workspaceRoot, actor: "agent", path: "notes.md" })).resolves.toEqual({ ok: true, path: "notes.md", markdown: "Root" });
+    // A request that names its workspace runs from that workspace's folder,
+    // wherever the caller stands: outside every workspace, or in a subfolder.
+    const named = (workspaceId: string, from: string) => rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "documentRead", workspaceId, args: { cwd: from, actor: "agent", path: "notes.md" } });
+    for (const from of [tempRoot, cwd]) {
+      await expect(named(WORKSPACE_ID, from)).resolves.toMatchObject({ ok: true, result: { ok: true, path: "notes.md", markdown: "Root" } });
+    }
+    // Only an id the registry lists selects a workspace.
+    await expect(named("workspace-elsewhere", workspaceRoot)).resolves.toMatchObject({ ok: false, error: "dohc: No workspace on this computer has this id." });
+    // When two entries share a folder, a request runs only in the one it named.
+    serverOptions.listWorkspaces = () => [registryWorkspace, { workspaceId: "twin", rootPath: workspaceRoot }];
+    const answers = await Promise.all([WORKSPACE_ID, "twin"].map((id) => named(id, tempRoot)));
+    expect(answers.map((answer) => answer.ok).sort()).toEqual([false, true]);
+    expect(answers.find((answer) => !answer.ok)).toMatchObject({ error: "dohc: This workspace's folder belongs to another workspace on this computer." });
+    // A listed workspace whose folder is gone says so.
+    serverOptions.listWorkspaces = () => [registryWorkspace, { workspaceId: "gone", rootPath: join(tempRoot, "no-such-folder") }];
+    await expect(named("gone", tempRoot)).resolves.toMatchObject({ ok: false, error: "dohc: This workspace's folder is missing on this computer." });
   });
 
   it("writes an agent's collection and document changes at the depth of the run an automation started", async () => {
@@ -2053,6 +2069,9 @@ describe("CLI socket server", () => {
     serverOptions.listWorkspaces = () => [registryWorkspace, { workspaceId: "nested", rootPath: nestedRoot }];
     const opened = calls.openWorkspace;
     await expect(invoke("reply", { ...args, cwd: nestedRoot, attachments: [] })).rejects.toThrow("Agent runs cannot write in another workspace.");
+    // Naming the other workspace by id is refused the same way as standing in it.
+    await expect(rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "reply", workspaceId: "nested", runSecret: RUN_SECRET, args: { ...args, attachments: [] } }))
+      .resolves.toMatchObject({ ok: false, error: "dohc: Agent runs cannot write in another workspace." });
     expect(calls.openWorkspace).toBe(opened);
   });
 

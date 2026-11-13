@@ -4111,7 +4111,20 @@ export async function handleCliRequestLine(
   try {
     // The caller's door labels counting only; authority never receives it. The
     // run secret only proves the request is a run's; no verb receives it.
-    const { door: _door, runSecret, ...request } = parsed.data;
+    const { door: _door, runSecret, workspaceId, ...request } = parsed.data;
+    // A request that names its workspace runs from that workspace's folder, as
+    // if the caller stood there. Only an id this computer's registry lists
+    // selects one; a workspace's name never does, because other people can change it.
+    if (workspaceId !== undefined) {
+      const named = options.listWorkspaces().find((workspace) => workspace.workspaceId === workspaceId);
+      if (!named) throw new CliCommandError("No workspace on this computer has this id.");
+      // Two registry entries can share a folder. The request must run in the
+      // one it named, never in the other.
+      const resolved = await resolveCliWorkspace(named.rootPath, options.listWorkspaces());
+      if (!resolved) throw new CliCommandError("This workspace's folder is missing on this computer.");
+      if (resolved.workspaceId !== workspaceId) throw new CliCommandError("This workspace's folder belongs to another workspace on this computer.");
+      request.args.cwd = named.rootPath;
+    }
     const completion = { replayed: false };
     const refusal = await receivedShareRefusal(request, options);
     const unvalidated = refusal ? refusal.answer

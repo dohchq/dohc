@@ -35,6 +35,8 @@ export type CliActor = z.infer<typeof cliActorSchema>;
 // Who wrote a message the CLI reads back. Only the relay writes a link author.
 const cliAuthorKindSchema = z.enum(["human", "agent", "automation", "link"]);
 
+export const cliWorkspaceIdSchema = z.string().regex(/^[\x21-\x7e]{1,256}$/);
+
 const requestBase = {
   token: z.string().regex(/^[a-f0-9]{64}$/),
   protocolVersion: z.literal(CLI_PROTOCOL_VERSION),
@@ -43,6 +45,9 @@ const requestBase = {
   // The secret of the run dohc started this caller in (DOHC_RUN_SECRET). Only
   // a request that carries it is that run's.
   runSecret: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  // A workspace on this computer, by its id, in place of the one the caller's
+  // folder is in. Never a name: other people can change a workspace's name.
+  workspaceId: cliWorkspaceIdSchema.optional(),
 };
 
 // An agent you run, by its id in Settings › Agents. The desktop refuses an
