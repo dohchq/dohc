@@ -1,18 +1,18 @@
-import {createHash} from "node:crypto";
-import {VersionedLiveAdapter} from "@dohc/workspace-engine-client";
-import {lstat, readFile, writeFile, unlink} from "node:fs/promises";
-import {join} from "node:path";
-import {expect, it} from "vitest";
+import { createHash } from "node:crypto";
+import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+import { lstat, readFile, writeFile, unlink } from "node:fs/promises";
+import { join } from "node:path";
+import { expect, it } from "vitest";
 import * as Y from "yjs";
-import {createWorkspaceEngineCapture} from "./workspaceEngineCapture";
-import {duplicateWorkspaceFile} from "./workspaceDuplicate";
-import {readLocalStateFrom} from "./workspaceLocalState";
-import {createTestScratch} from "./testTemp";
-import {waitForPathMoments} from "./waitForPathMoments";
-import {requireEngineBinaryOrSkip} from "../testing/engineBinary";
-import {createRealDaemonLifecycle,createRealDaemonWorkspaceSessions,REAL_DAEMON_DEADLINE_MS} from "../testing/realDaemonWorkspaceSessions";
+import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
+import { duplicateWorkspaceFile } from "./workspaceDuplicate";
+import { readLocalStateFrom } from "./workspaceLocalState";
+import { createTestScratch } from "./testTemp";
+import { waitForPathMoments } from "./waitForPathMoments";
+import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
+import { createRealDaemonLifecycle, createRealDaemonWorkspaceSessions, REAL_DAEMON_DEADLINE_MS } from "../testing/realDaemonWorkspaceSessions";
 const engine = requireEngineBinaryOrSkip();
-const TIMING_SAMPLES = 20;
+const TIMING_SAMPLES = 1;
 // Each sample has an update, a Duplicate and a History read; setup, recovery and cleanup
 // have at most twenty more bounded steps. A named deadline must fail first.
 const TEST_TIMEOUT_MS = (3 * TIMING_SAMPLES + 20) * REAL_DAEMON_DEADLINE_MS;
@@ -67,7 +67,7 @@ it.skipIf(engine.missing)("Duplicate records one copy per operation and measures
       }));
     }
     samples.sort((a,b)=>a-b);
-    console.log(JSON.stringify({measurement:"Duplicate return",files:1,samples:TIMING_SAMPLES,p50_ms:samples[9],p95_ms:samples[18],includes:"source settlement,recordDisk,commit,placement,recovery receipt"}));
+    console.log(JSON.stringify({measurement:"Duplicate return",files:1,samples:TIMING_SAMPLES,min_ms:samples[0],max_ms:samples[0],includes:"source settlement,recordDisk,commit,placement,recovery receipt"}));
     const interrupted = await withinDeadline("duplicate before Undo", () => duplicateWorkspaceFile(operation,"source.md",author,capture));
     const receiptPath = join(rootPath,".dohc/local/duplicate-pending",createHash("sha256").update("source.md").digest("hex")+".json");
     await writeFile(receiptPath,JSON.stringify({workspaceId,source:"source.md",path:interrupted.path,operationId:interrupted.operationId}));

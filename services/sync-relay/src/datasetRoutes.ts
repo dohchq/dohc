@@ -306,7 +306,7 @@ export function createDatasetAppRoutes(host: RelayDatasetHost, storage: SyncRela
           signal.throwIfAborted();
           const current = host.publication(auth, route.publicationId);
           if (!current || current.authority.caller.kind !== "named") throw notFound();
-          return {...storage.getShareLabels(grant.shareId), sharerName, access: current.authority.caller.access};
+          return {...storage.getShareLabels(grant.shareId, "member"), sharerName, access: current.authority.caller.access};
         }
         if (route.action === "descriptor") {
           if (auth.kind !== "named") throw notFound();

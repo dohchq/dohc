@@ -31,7 +31,6 @@ import {
   ATTACHMENT_FOLDER_NAME_MAX_LENGTH,
   DEFAULT_WORKSPACE_SETTINGS,
   mergeWorkspaceSettings,
-  type WorkspaceSettings,
   type WorkspaceSettingsPatch,
   type WorkspaceSettingsResult,
 } from "../../workspaces/workspaceSettings";

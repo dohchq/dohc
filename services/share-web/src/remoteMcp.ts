@@ -13,7 +13,7 @@ import type { AgentChatClient } from "./agentChatClient";
 import type { NamedLiveBrowserLimits } from "@dohc/ydoc-projection/named-live-browser-transport";
 import {
   collectionWriteBody, collectionWriteContentBytes, COLLECTION_WRITES_PATH, MAX_COLLECTION_WRITE_CONTENT_BYTES,
-  MAX_COLLECTION_WRITE_ENVELOPE_BYTES, MAX_COLLECTION_WRITE_FILES, MAX_SUBMIT_ID_CHARS, parseCollectionWriteOutcome,
+  MAX_COLLECTION_WRITE_FILES, MAX_SUBMIT_ID_CHARS, parseCollectionWriteOutcome,
   type CollectionFileWrite,
 } from "./collectionWrites";
 

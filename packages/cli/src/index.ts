@@ -11,8 +11,10 @@ import {
   documentEditTextSchema,
   versionResolutionSchema,
   parseCliResult,
+  isDeclaredVerb,
   type CliRequestWithoutToken,
   type CliResultByVerb,
+  type DeclaredVerb,
 } from "./protocol";
 import { renderCliResult } from "./render";
 import { readPassword, readStdinText } from "./stdin";
@@ -74,6 +76,10 @@ async function bodyForCommand(
   return body;
 }
 
+function isDeclaredCommand(command: ParsedCliCommand): command is Extract<ParsedCliCommand, { verb: DeclaredVerb }> {
+  return isDeclaredVerb(command.verb);
+}
+
 function buildCliRequest(
   command: ParsedCliCommand,
   cwdInput: string,
@@ -86,17 +92,13 @@ function buildCliRequest(
     cwd: resolve(cwdInput),
     actor: command.actor,
   } as const;
+  if (isDeclaredCommand(command)) {
+    // A declared verb sends its parsed fields as they are. The cast pairs each
+    // verb with its fields, which TypeScript does not do across a union.
+    const { verb, actor: _actor, agentId: _agentId, json: _json, ...fields } = command;
+    return { protocolVersion: common.protocolVersion, verb, args: { cwd: common.cwd, actor: common.actor, ...fields } } as CliRequestWithoutToken;
+  }
   switch (command.verb) {
-    case "linksEdges":
-      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, cursor: command.cursor } };
-    case "chatLinks":
-      return {protocolVersion:common.protocolVersion,verb:command.verb,args:{cwd:common.cwd,actor:common.actor,group:command.group,cursor:command.cursor}};
-    case "chatFileMentions":
-      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, subject: command.subject, cursor: command.cursor } };
-    case "linksIn":
-      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, subject: command.subject, cursor: command.cursor } };
-    case "linksResolve":
-      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, source: command.source, literals: command.literals } };
     case "historyOperation":
       return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, operationId: command.operationId, ...(command.cursor ? { cursor: command.cursor } : {}) } };
     case "versionList":
@@ -450,6 +452,8 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
     );
     // Every verb names the agent you run, so each reads and writes as it.
     if (command.agentId !== undefined) Object.assign(request.args, { agentId: command.agentId });
+    // The desktop runs the request from this workspace's folder in place of the caller's.
+    if (command.workspaceId !== undefined) Object.assign(request, { workspaceId: command.workspaceId });
     while (true) {
       if (options.signal?.aborted) return { exitCode: 0, stdout: "", stderr: "" };
       let result: CliResultByVerb[keyof CliResultByVerb];

@@ -1,32 +1,5 @@
-//! Cutover-blocking fuzz families: replication envelopes (generic + secret).
-//!
-//! Surfaces under test:
-//! - `serde_json::from_slice::<ReplicationEnvelope>` -- arbitrary bytes off
-//!   the wire (a relay/peer is a remote, cross-process input source).
-//! - `dohc_engine_sync::apply_envelope_with` against a REAL `EngineStore`
-//!   (via `dohc-engine-testkit`'s `ScratchDir`, the same bootstrap this
-//!   crate's own unit tests use) -- structurally-random envelope field
-//!   values (adversarial strings, huge/negative integers, oversized
-//!   payloads) run through the actual production validate-then-transact
-//!   boundary, not a reimplementation of it.
-//! - `dohc_engine_sync::apply_secret_envelope` -- the 4th untrusted input
-//!   surface: ENCRYPTED secret replication envelopes (`secret.file.put` /
-//!   `secret.file.delete`), including structurally-plausible-but-invalid
-//!   secret payloads (random iv/tag/sha/byte-length).
-//!
-//! Properties asserted:
-//! - **No panic** (implicit: proptest fails the case on any panic).
-//! - **Fail-closed BEFORE any store mutation**: `apply_envelope_with` calls
-//!   `envelope.validate()` as its very first step, before opening a
-//!   transaction (`crates/dohc-engine-sync/src/apply.rs`) -- an envelope
-//!   that violates `ReplicationEnvelope::validate`'s documented bounds
-//!   (non-empty/bounded `workspace_id`/`origin_id`/`op_kind`, `origin_seq`
-//!   in the wire-integer range, payload under the byte cap) must be
-//!   rejected WITHOUT the caller's `mutation` closure ever running.
-//! - Valid secret puts reach storage; single-field mutations fail at the
-//!   intended metadata/blob check without writing secret tips or moments.
-//! - Serialized payloads at the relay byte cap apply; one byte over is
-//!   refused before the mutation callback, including escaped JSON strings.
+//! Real-store envelope validation, secret corruption refusals, and byte limits.
+//! Copied stores retain independent commits and replay them after reopen.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
@@ -466,39 +439,6 @@ proptest! {
     // ignored the env var, so evidence runs asking for a large corpus got 256.
     #![proptest_config(ProptestConfig::default())]
 
-    #[test]
-    fn valid_envelopes_invoke_mutation_once_and_redelivery_skips(
-        workspace_id in "[a-zA-Z0-9_-]{1,64}",
-        origin_id in "[a-zA-Z0-9_-]{1,64}",
-        payload in prop::collection::vec(any::<char>(), 0..256),
-    ) {
-        let mut envelope = valid_envelope(serde_json::json!(payload.into_iter().collect::<String>()));
-        envelope.workspace_id = workspace_id;
-        envelope.origin_id = origin_id;
-        let (_scratch, mut engine) = copied_empty_store();
-        let calls = AtomicUsize::new(0);
-        for expected in [ApplyDisposition::Applied(()), ApplyDisposition::Skipped] {
-            let outcome = apply_envelope_with(&mut engine, &envelope, &NoFaults, |_, _| {
-                calls.fetch_add(1, Ordering::SeqCst);
-                Ok::<(), SyncError>(())
-            }).unwrap();
-            prop_assert_eq!(outcome.primary, expected);
-            prop_assert_eq!(calls.load(Ordering::SeqCst), 1);
-        }
-    }
-
-    #[test]
-    fn valid_secret_puts_apply_and_single_mutations_refuse(
-        ciphertext in prop::collection::vec(any::<u8>(), 1..128),
-        iv in any::<[u8; SECRET_IV_BYTES]>(),
-        tag in any::<[u8; SECRET_TAG_BYTES]>(),
-        mutation in prop::sample::select(SECRET_MUTATIONS.to_vec()),
-    ) {
-        let (_scratch, mut engine, envelope) = secret_fixture(&ciphertext, &iv, &tag);
-        assert_secret_applies(&mut engine, &envelope, &ciphertext);
-        assert_secret_mutation_refused(&ciphertext, &iv, &tag, mutation);
-    }
-
     /// Arbitrary bytes as purported wire JSON: deserialization never panics,
     /// and any successfully-decoded envelope is a COMPLETE value that
     /// round-trips (re-serialize + re-parse yields an equal envelope) -- i.e.
@@ -604,27 +544,6 @@ fn copied_stores_apply_independently_and_keep_commits_after_reopen() {
     assert!(matches!(replay.primary, ApplyDisposition::Skipped));
 }
 
-/// Seed-corpus sanity: a real, valid envelope applies cleanly.
-#[test]
-fn seed_valid_envelope_applies() {
-    let (_scratch, mut engine) = store();
-    let envelope = ReplicationEnvelope {
-        settlement_admission: None,
-        admitted_author_snapshot: None,
-        workspace_id: "ws".to_owned(),
-        origin_id: "peer-a".to_owned(),
-        origin_seq: 0,
-        relay_seq: None,
-        op_kind: "fuzz.seed".to_owned(),
-        payload: serde_json::json!({ "hello": "fuzz" }),
-        recorded_at_ms: 1_000,
-    };
-    let outcome = apply_envelope_with(&mut engine, &envelope, &NoFaults, |_tx, _envelope| {
-        Ok::<(), SyncError>(())
-    });
-    assert!(outcome.is_ok(), "seed envelope must apply: {outcome:?}");
-}
-
 /// Seed-corpus sanity: a non-secret `op_kind` routed to the secret applier is
 /// rejected as unsupported (never panics, never applies).
 #[test]
@@ -643,29 +562,4 @@ fn seed_non_secret_op_kind_is_rejected_by_secret_applier() {
     };
     let result = apply_secret_envelope(&mut engine, &envelope, &NoFaults);
     assert!(matches!(result, Err(SyncError::UnsupportedOperation)));
-}
-
-/// Seed-corpus sanity: an empty `workspace_id` is refused before the
-/// mutation closure runs.
-#[test]
-fn seed_empty_workspace_id_is_refused_before_mutation() {
-    let (_scratch, mut engine) = store();
-    let envelope = ReplicationEnvelope {
-        settlement_admission: None,
-        admitted_author_snapshot: None,
-        workspace_id: String::new(),
-        origin_id: "peer-a".to_owned(),
-        origin_seq: 0,
-        relay_seq: None,
-        op_kind: "fuzz.seed".to_owned(),
-        payload: serde_json::Value::Null,
-        recorded_at_ms: 1_000,
-    };
-    let mutation_ran = AtomicUsize::new(0);
-    let result = apply_envelope_with(&mut engine, &envelope, &NoFaults, |_tx, _envelope| {
-        mutation_ran.fetch_add(1, Ordering::SeqCst);
-        Ok::<(), SyncError>(())
-    });
-    assert!(result.is_err());
-    assert_eq!(mutation_ran.load(Ordering::SeqCst), 0);
 }

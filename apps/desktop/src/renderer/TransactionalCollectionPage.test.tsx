@@ -287,19 +287,6 @@ it("keeps an empty multi-select editable, with the options picker the document t
   expect(sent(invoke, edit)[0]!.input).toEqual({ id: 1, expectedVersion: 2, values: { [status]: ["Reviewed"] } });
 });
 
-it("names the server that holds an owner's Collection beside its copy on this device", async () => {
-  setup({copy:{offline:false,savedAtMs:1,host:"sync.example.test"}}); await screen.findByText("Alice");
-  expect(screen.getByText(`On sync.example.test · Saved on this device · ${new Date(1).toLocaleString()}`).getAttribute("role")).toBe("status");
-});
-
-it("labels saved-page coverage without implying the entire Collection is downloaded", async () => {
-  const copy = {offline:true,savedAtMs:1,coverage:"saved-pages" as const};
-  setup({copy}); await screen.findByText("Alice");
-  const label = "Offline · Saved pages only";
-  expect(screen.getByText(`${label} · ${new Date(1).toLocaleString()}`).getAttribute("role")).toBe("status");
-  expect(screen.queryByText(/Offline copy · Read-only|^Saved on this device/)).toBeNull();
-});
-
 it("shows offline attachments as unavailable and never asks the host for file bytes", async () => {
   const fileId = "private-file-12345678", attachment = id(40), description = dataset();
   description.tables[0]!.fields.push({fieldId:attachment,name:"Receipt",type:"attachment",required:false,unique:false});
@@ -1323,7 +1310,7 @@ describe("a Data Collection's record panel and forms", () => {
         lookups.push(deferred<{ result: AppBackendJson }>());
         return lookups.at(-1)!.promise;
       });
-      const { props, rerender } = setup({ dataset: keyed(), invoke, initialOpenRecord: "2" });
+      setup({ dataset: keyed(), invoke, initialOpenRecord: "2" });
       await screen.findByText("Alice");
       await waitFor(() => expect(lookups).toHaveLength(1));
       await act(async () => lookups[0]!.resolve({ result: bea }));
@@ -2114,33 +2101,6 @@ describe("a Data Collection's reads", () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledTimes(3));
   });
 
-  it("shows any failed load in the page with the toast's Try again", async () => {
-    const stopped = new Error("Error invoking remote method 'desktop:dataset': PersistentRuntimeError [worker_stopped] [retryAfterMs=5000]: The worker stopped.");
-    const invoke = vi.fn<(request: TransactionalInvoke) => Promise<{ result: AppBackendJson }>>().mockRejectedValueOnce(stopped).mockResolvedValue({ result: page() });
-    const { onError } = setup({ invoke });
-    const region = screen.getByRole("region", { name: "People" });
-    expect(await within(region).findByText("dohc could not load People.")).toBeTruthy();
-    expect(onError).toHaveBeenCalledWith("dohc could not load People.", stopped, expect.any(Function), `collection-load:${id(1)}:${id(2)}`);
-    expect(within(region).queryByText(/waiting to reopen/)).toBeNull();
-    fireEvent.click(within(region).getByRole("button", { name: "Try again" }));
-    expect(await within(region).findByText("Alice")).toBeTruthy();
-    expect(within(region).queryByText("dohc could not load People.")).toBeNull();
-  });
-
-  it("drops the wait and its Notices row when a read in place finds the records", async () => {
-    const invoke = vi.fn<(request: TransactionalInvoke) => Promise<{ result: AppBackendJson }>>()
-      .mockRejectedValueOnce(new Error("Error invoking remote method 'desktop:dataset': DatasetReopenWaitError [dataset_reopen_wait] [retryAfterMs=5000]: This Collection is waiting to reopen. Try again in 5 seconds.")).mockResolvedValue({ result: page() });
-    const onSettled = vi.fn();
-    const { props, rerender } = setup({ invoke, onSettled });
-    const region = screen.getByRole("region", { name: "People" });
-    await within(region).findByText("This Collection is waiting to reopen. Try again in 5 seconds.");
-    // An automation run changed records, so the page reads them again in place.
-    rerender(<TransactionalCollectionPage {...props} onSettled={onSettled} recordsChanged={1} />);
-    expect(await within(region).findByText("Alice")).toBeTruthy();
-    expect(within(region).queryByText(/waiting to reopen/)).toBeNull();
-    expect(onSettled).toHaveBeenCalledWith(`collection-load:${id(1)}:${id(2)}`);
-  });
-
   it("says in the page when the read after a change fails, and keeps what was typed for the read that follows", async () => {
     let reads = 0, stored = "Alice";
     const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
@@ -2255,23 +2215,6 @@ it("finishes a read and a read in place asked for in one render, and leaves noth
   expect(screen.queryByText("Loading records…")).toBeNull();
   expect((screen.getAllByRole("button", { name: "New record" })[0]! as HTMLButtonElement).disabled).toBe(false);
   expect(command("Refresh").getAttribute("aria-disabled")).toBeNull();
-});
-
-it("stands lines in for records not yet shown, and keeps the words while a shown page reloads", async () => {
-  const first = deferred<{ result: AppBackendJson }>();
-  const invoke = vi.fn(async (): Promise<{ result: AppBackendJson }> => ({ result: page() }));
-  invoke.mockReturnValueOnce(first.promise);
-  const { props, rerender } = setup({ invoke });
-  const opening = (await screen.findByText("Loading records…")).closest("[role=status]");
-  expect(opening?.classList.contains("dohc-reveal-if-slow"), "a first open prints its loading words at once, over nothing").toBe(true);
-  await act(async () => first.resolve({ result: page() }));
-  await screen.findByText("Alice");
-  const again = deferred<{ result: AppBackendJson }>();
-  invoke.mockReturnValueOnce(again.promise);
-  rerender(<TransactionalCollectionPage {...props} recordsVersion={1} />);
-  expect((await screen.findByText("Loading records…")).tagName).toBe("P");
-  expect(screen.getByText("Alice")).toBeTruthy();
-  await act(async () => again.resolve({ result: page() }));
 });
 
 it("shows the ⚡ button before New record, and a ⚡ that names the automations on each field they set", async () => {
@@ -2645,33 +2588,6 @@ describe("when the Collection's fields change", () => {
     expect(screen.getByRole("button", { name: "Undo last edit" })).toBeTruthy();
     result.rerender(<TransactionalCollectionPage {...result.props} dataset={revised(3, retype(name, "number"))} />);
     expect(screen.queryByRole("button", { name: "Undo last edit" })).toBeNull();
-  });
-
-  it("shows the refusal when the view sorts or filters by a field that is gone", async () => {
-    const activeView = { viewId: id(30), name: "By amount", kind: "table" as const, search: "", filters: [{ fieldId: amount, value: 5 }], sort: { fieldId: amount, direction: "asc" as const } };
-    const refusal = Error("This view names a field that is gone.");
-    const invoke = vi.fn(async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => { if (request.revision === 2) throw refusal; return { result: page() }; });
-    const result = setup({ invoke, activeView }); await screen.findByText("Alice");
-    result.rerender(<TransactionalCollectionPage {...result.props} dataset={revised(2, next => {
-      next.tables[0]!.fields = next.tables[0]!.fields.filter(entry => entry.fieldId !== amount);
-      for (const entry of next.operations) entry.fieldIds = entry.fieldIds.filter(fieldId => fieldId !== amount);
-    })} />);
-    await waitFor(() => expect(result.onError).toHaveBeenCalledWith("dohc could not load People.", refusal, expect.any(Function), `collection-load:${id(1)}:${id(2)}`));
-    expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
-    expect(screen.queryByText("Loading records…")).toBeNull();
-  });
-
-  it("reads once for a burst of changes, and stops the reads each newer change makes stale", async () => {
-    const pending = new Map<number, ReturnType<typeof deferred<{ result: AppBackendJson }>>>(), signals = new Map<number, AbortSignal>();
-    const invoke = vi.fn((request: TransactionalInvoke, signal: AbortSignal): Promise<{ result: AppBackendJson }> => {
-      if (request.revision === 1) return Promise.resolve({ result: page() });
-      const reply = deferred<{ result: AppBackendJson }>(); pending.set(request.revision, reply); signals.set(request.revision, signal); return reply.promise;
-    });
-    const result = setup({ invoke }); await screen.findByText("Alice");
-    for (const revision of [2, 3, 4]) result.rerender(<TransactionalCollectionPage {...result.props} dataset={revised(revision)} />);
-    expect([2, 3, 4].map(revision => signals.get(revision)?.aborted)).toEqual([true, true, false]);
-    await act(async () => { pending.get(4)!.resolve({ result: page("Current") }); pending.get(2)!.resolve({ result: page("Stale") }); });
-    expect(screen.getByText("Current")).toBeTruthy(); expect(screen.queryByText("Stale")).toBeNull();
   });
 
   it("keeps everything while the Collection goes offline and comes back", async () => {

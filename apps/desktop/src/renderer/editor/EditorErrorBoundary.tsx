@@ -31,6 +31,7 @@ export class EditorErrorBoundary extends Component<
 
   componentDidUpdate(previousProps: EditorErrorBoundaryProps): void {
     if (this.state.failed && previousProps.resetKey !== this.props.resetKey) {
+      // oxlint-disable-next-line react/no-did-update-set-state -- resets the boundary once when its reset key changes
       this.setState({ failed: false });
     }
   }

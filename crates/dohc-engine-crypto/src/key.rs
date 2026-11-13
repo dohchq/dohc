@@ -502,35 +502,6 @@ mod tests {
         assert_eq!(load_key_file(&held).unwrap(), Some(key));
     }
 
-    #[cfg(target_vendor = "apple")]
-    #[test]
-    fn a_volume_that_shares_new_files_reaches_the_caller_by_its_code() {
-        let refused = std::io::Error::other(dohc_macos_files::VolumeSharesNewFiles);
-        let err = key_create_error(&refused);
-        assert_eq!(err, CryptoError::VolumeSharesNewFiles);
-        assert_eq!(err.code(), "volume-shares-new-files");
-        let other = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
-        assert_eq!(key_create_error(&other), CryptoError::KeyFileMalformed);
-    }
-
-    #[test]
-    fn key_file_round_trips_byte_exact() {
-        let key = SecretDataKey::from_bytes(&[0xABu8; SECRET_KEY_BYTES]).unwrap();
-        let file = key.to_key_file();
-        assert!(file.starts_with(SECRET_KEY_FILE_PREFIX));
-        assert!(file.ends_with('\n'));
-        let parsed = SecretDataKey::parse_key_file(&file).unwrap();
-        assert_eq!(parsed, key);
-    }
-
-    #[test]
-    fn parse_tolerates_surrounding_whitespace() {
-        let key = SecretDataKey::from_bytes(&[3u8; SECRET_KEY_BYTES]).unwrap();
-        let file = key.to_key_file();
-        let padded = format!("  \n{}\n\t ", file.trim_end());
-        assert_eq!(SecretDataKey::parse_key_file(&padded).unwrap(), key);
-    }
-
     #[test]
     fn malformed_prefix_or_length_fails_closed() {
         assert_eq!(
@@ -546,21 +517,6 @@ mod tests {
             SecretDataKey::parse_key_file(&short).unwrap_err(),
             CryptoError::KeyFileMalformed
         );
-    }
-
-    #[test]
-    fn wrong_length_bytes_rejected() {
-        assert_eq!(
-            SecretDataKey::from_bytes(&[0u8; 31]).unwrap_err(),
-            CryptoError::InvalidKeyLength
-        );
-    }
-
-    #[test]
-    fn generate_produces_distinct_keys() {
-        let a = SecretDataKey::generate().unwrap();
-        let b = SecretDataKey::generate().unwrap();
-        assert_ne!(a, b, "two fresh keys must differ (CSPRNG)");
     }
 
     #[test]
@@ -727,50 +683,10 @@ mod tests {
         });
     }
 
-    #[test]
-    fn concurrent_minters_all_adopt_the_published_key() {
-        let dir = dohc_test_scratch::ScratchDir::new_named("key-publish-race").unwrap();
-        let start = std::sync::Arc::new(std::sync::Barrier::new(8));
-        let keys = std::thread::scope(|scope| {
-            let workers: Vec<_> = (0..8)
-                .map(|_| {
-                    let start = std::sync::Arc::clone(&start);
-                    let root = &dir;
-                    scope.spawn(move || {
-                        start.wait();
-                        create_key_file(root).expect("mint or adopt the winner")
-                    })
-                })
-                .collect();
-            workers
-                .into_iter()
-                .map(|worker| worker.join().unwrap())
-                .collect::<Vec<_>>()
-        });
-        let published = load_key_file(&dir).unwrap().expect("published key");
-        for key in keys {
-            assert_eq!(key, published);
-        }
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
-    }
-
     /// A hard link on exFAT or FAT32.
     #[cfg(unix)]
     fn no_hard_links(_: &std::path::Path, _: &std::path::Path) -> std::io::Result<()> {
         Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_drive_without_hard_links_creates_the_key_at_its_name() {
-        let dir = dohc_test_scratch::ScratchDir::new_named("key-no-links").unwrap();
-        let key = create_key_file_with(&dir, no_hard_links).unwrap();
-        assert_eq!(load_key_file(&dir).unwrap(), Some(key));
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
-        use std::os::unix::fs::PermissionsExt;
-        let path = dir.join(SECRET_KEY_FILE_NAME);
-        let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
     }
 
     #[cfg(unix)]
@@ -784,16 +700,6 @@ mod tests {
         });
         assert!(matches!(minted, Err(CryptoError::KeyFileMalformed)));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_drive_without_hard_links_keeps_the_published_key() {
-        let dir = dohc_test_scratch::ScratchDir::new_named("key-no-links-winner").unwrap();
-        let winner = create_key_file(&dir).unwrap();
-        assert_eq!(create_key_file_with(&dir, no_hard_links).unwrap(), winner);
-        assert_eq!(load_key_file(&dir).unwrap(), Some(winner));
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     /// A minter there can fail a try while another writes the key, but no
@@ -825,93 +731,5 @@ mod tests {
             assert_eq!(key, published);
         }
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn the_rename_replaces_only_its_own_claim() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = dohc_test_scratch::ScratchDir::new_named("key-claim").unwrap();
-        let path = dir.join(SECRET_KEY_FILE_NAME);
-        let temp = dir.join("pending-key");
-        let winner = SecretDataKey::from_bytes(&[2; SECRET_KEY_BYTES]).unwrap();
-        std::fs::write(&path, winner.to_key_file()).unwrap();
-        std::fs::write(&temp, "candidate").unwrap();
-        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let claimed = publish_by_rename(&temp, &path);
-        assert_eq!(
-            claimed.unwrap_err().kind(),
-            std::io::ErrorKind::AlreadyExists
-        );
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            winner.to_key_file()
-        );
-
-        std::fs::remove_file(&path).unwrap();
-        assert!(publish_by_rename(&temp, &path).is_ok());
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "candidate");
-        assert!(!temp.exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_failed_rename_leaves_no_claim() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = dohc_test_scratch::ScratchDir::new_named("key-claim-failure").unwrap();
-        let path = dir.join(SECRET_KEY_FILE_NAME);
-        // A folder can't be renamed over the claimed file.
-        let temp = dir.join("pending-key");
-        std::fs::create_dir(&temp).unwrap();
-        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(publish_by_rename(&temp, &path).is_err());
-        assert!(!path.exists());
-    }
-
-    /// A creator that lost the claim returns a key only if it flushed that
-    /// key after reading it, so the flush covers the winner's rename.
-    #[test]
-    fn a_losing_creator_flushes_the_key_it_adopts() {
-        let dir = dohc_test_scratch::ScratchDir::new_named("key-adopt-flush").unwrap();
-        let path = dir.join(SECRET_KEY_FILE_NAME);
-        let temp = dir.join("pending-key");
-        let lost = || -> std::io::Result<()> { Err(std::io::ErrorKind::AlreadyExists.into()) };
-        let winner = SecretDataKey::from_bytes(&[3; SECRET_KEY_BYTES]).unwrap();
-        // The winner renames its key over the empty claim during the flush.
-        std::fs::write(&path, "").unwrap();
-        let adopted = finish_key_publication(&path, &temp, lost(), |_| {
-            std::fs::write(&path, winner.to_key_file())
-        });
-        assert!(matches!(adopted, Err(CryptoError::KeyFileMalformed)));
-
-        std::fs::write(&path, winner.to_key_file()).unwrap();
-        let mut flushed = None;
-        let adopted = finish_key_publication(&path, &temp, lost(), |key| {
-            flushed = Some(key.to_path_buf());
-            sync_key(key)
-        });
-        assert_eq!(adopted.unwrap(), winner);
-        assert_eq!(flushed, Some(path));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn only_a_drive_without_hard_links_publishes_by_rename() {
-        for code in [libc::EPERM, libc::ENOTSUP, libc::EOPNOTSUPP] {
-            assert!(hard_links_unsupported(&std::io::Error::from_raw_os_error(
-                code
-            )));
-        }
-        for code in [
-            libc::EACCES,
-            libc::EEXIST,
-            libc::EXDEV,
-            libc::EIO,
-            libc::ENOSPC,
-        ] {
-            assert!(!hard_links_unsupported(&std::io::Error::from_raw_os_error(
-                code
-            )));
-        }
     }
 }

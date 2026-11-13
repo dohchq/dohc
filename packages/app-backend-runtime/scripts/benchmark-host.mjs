@@ -212,6 +212,7 @@ try {
   evidence.storage={accountedBytes:Number(db.prepare('SELECT bytes FROM accounting').get().bytes),authorityBytes:(await stat(join(output,'authority.sqlite'))).size,walBytes:await stat(join(output,'authority.sqlite-wal')).then(s=>s.size,()=>0),history:db.prepare('SELECT count(*) AS events,sum(storage_bytes) AS bytes FROM dohc_dataset_events').get()};
 } catch(error) { evidence.errors.push({name:error.name,message:error.message,stack:error.stack});process.exitCode=1;console.error(error); }
 finally {
+  // oxlint-disable-next-line typescript/await-thenable -- await needed: open() assigns supervisor, which TypeScript's narrowing misses
   try {if(supervisor)await supervisor.close();}catch(error){evidence.errors.push({name:error.name,message:error.message,phase:'close'});}
   try {if(sampler)evidence.memorySampling={...await sampler.stop(),maxSampledWorkerWorkingSetBytes:maxSampledWorkerRss,peakWorkingSetByPid:[...peakByPid].map(([pid,bytes])=>({pid,bytes})),path:'memory-samples.jsonl'};}catch(error){evidence.errors.push({name:error.name,message:error.message,phase:'memory-sampler-close'});}
   try {db.close();}catch(error){evidence.errors.push({name:error.name,message:error.message,phase:'database-close'});}

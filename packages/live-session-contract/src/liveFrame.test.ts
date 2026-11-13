@@ -454,7 +454,7 @@ describe("live frame route ownership", () => {
     expect(() => server.receive(encodeLiveFrame(begin("submit-update"), 586))).toThrow();
   });
   it("requires completed sync and the exact applied-through cursor", () => {
-    const { client, server } = pair();
+    const { server } = pair();
     expect(() => server.receive(encodeLiveFrame({ kind: "sync-applied", appliedThroughJournalCursor: 0 }, 586))).toThrow();
     const ready = makeLive();
     expect(ready.client.usage().live).toBe(true); expect(ready.server.usage().live).toBe(true);

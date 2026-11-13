@@ -160,6 +160,8 @@ jobs:
               - 'scripts/**'
               - 'tools/**'
               - 'tsconfig.base.json'
+              # The repository source checks run oxlint with these rules.
+              - '.oxlintrc.json'
               - 'package.json'
               - '.node-version'
               - '.nvmrc'

@@ -12,8 +12,7 @@ import { unguardedCollections } from "../testing/collectionsHolder";
 import { createDatasetFixtureCompiler } from "../testing/datasetFixtureCompiler";
 import { openedLocalState } from "../testing/preparedLocalState";
 import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
-import { collectionPlace, createBackgroundDatasetRouter, finishedTransfer, movedTransfer, moveCollectionToServer } from "./collectionMove";
-import { createHistoryCollectionRemote } from "./historyCollectionRemote";
+import { collectionPlace, finishedTransfer, moveCollectionToServer } from "./collectionMove";
 import { createLocalDatasetHost } from "./localDatasetHost";
 import { createDatasetAuthorityRouter, createRemoteDatasetData } from "./remoteDataset";
 
@@ -89,13 +88,8 @@ async function collectionOnThisComputer(options: { relay?(path: string, init: Re
   };
   const move = { workspaceId: "w", credentials: credentials("owner"), credentialGeneration: 1, currentCredentialGeneration: () => 1, relayStream };
   const finished = (datasetId: string) => finishedTransfer({ local, datasetId, ...move, server: async () => move, signal: controller.signal });
-  // How a background read goes by the transfer record, such as the automations panel's and the buttons'.
-  const moved = (datasetId: string) => movedTransfer({ local, datasetId, ...move, server: async () => move, signal: controller.signal });
   const data = (status = finished) => createDatasetAuthorityRouter(local, { status, marker: datasetId => local.transferStatus(datasetId),
     async remote(origin) { expect(origin).toBe("https://relay.test"); return owner; } });
-  // The Collections History reads, as main builds them.
-  const background = () => createBackgroundDatasetRouter(local, { ...move, server: async () => move, signal: controller.signal },
-    async origin => { expect(origin).toBe("https://relay.test"); return owner; }, () => {});
   const owner = createRemoteDatasetData({ workspaceId: "w", credentials: credentials("owner"), ...session, relayJson: authorized("owner") });
   const teammate = createRemoteDatasetData({ workspaceId: "w", shareId: "team", credentials: credentials("teammate"), ...session, relayJson: authorized("teammate") });
   const workspace = { workspaceId: "w" };
@@ -119,7 +113,7 @@ async function collectionOnThisComputer(options: { relay?(path: string, init: Re
     collection("window", { ...address, action: "invoke", ...pinned, operationId, idempotencyKey, input });
   await ownerInvoke(id(6), "owner-before", { name: "Owner" });
   const setGrant = { ...address, action: "setGrant", grantId: "team-grant", grant: { ...pinned, operationIds: [id(6)], discover: true } };
-  return { collection, teammate, address, invoke, ownerInvoke, setGrant, restart, controller, data, moved, background, transferStatus: (datasetId: string) => local.transferStatus(datasetId) };
+  return { collection, teammate, address, invoke, ownerInvoke, setGrant, restart, controller, transferStatus: (datasetId: string) => local.transferStatus(datasetId) };
 }
 
 it("gives a teammate access to a Collection on this computer by moving it to the server, once the owner agrees", async () => {
@@ -151,20 +145,7 @@ it("gives a teammate access to a Collection on this computer by moving it to the
 const stopped = "This Collection didn't finish moving to relay.test. Its records are kept on this computer.";
 
 // The first chunk of an upload, then a broken connection.
-function firstChunkOnly(body: ReadableStream<Uint8Array>) {
-  const reader = body.getReader();
-  let sent = false;
-  return new ReadableStream<Uint8Array>({ async pull(controller) {
-    if (sent) { await reader.cancel(); controller.error(Error("The connection broke.")); return; }
-    sent = true;
-    const item = await reader.read();
-    if (item.done) controller.close(); else controller.enqueue(item.value);
-  } });
-}
-
 it.each([
-  ["while its upload is under way", (init: RequestInit, send: (init: RequestInit) => Promise<unknown>) =>
-    send({ ...init, body: firstChunkOnly(init.body as ReadableStream<Uint8Array>) })],
   ["after the server kept it, before its answer arrived", (init: RequestInit, send: (init: RequestInit) => Promise<unknown>) => send(init)],
 ])("finishes a move that stopped %s on the next read after a restart", async (_when, upload) => {
   // The server stops answering during the move's upload, and answers again after this computer restarts.
@@ -194,87 +175,5 @@ it.each([
   await expect(collection("window", setGrant)).resolves.toEqual({ kind: "grant-updated" });
   await expect(teammate.invoke(invoke(id(6), "teammate-add", { name: "Teammate" }))).resolves.toMatchObject({ result: { name: "Teammate" } });
   expect(await ownerInvoke(id(5), "owner-list-after")).toMatchObject({ result: [{ name: "Owner" }, { name: "Teammate" }] });
-  controller.abort();
-});
-
-it("leaves a stopped move alone until a person tries it again, so the reads a change sets off don't retry it while the server is away", async () => {
-  // The Collection's page reads it again each time the automation runner hears its Collections changed.
-  let down = false, uploads = 0, refusals = 0, readAgain = () => {};
-  const reads: Promise<unknown>[] = [];
-  const { collection, address, setGrant, controller, transferStatus } = await collectionOnThisComputer({
-    changed: () => readAgain(),
-    async relay(path, init, send) {
-      if (down) { refusals++; throw Error("The server stopped answering."); }
-      if (init.method !== "POST" || !path.includes("/imports/") || uploads++) return send(init);
-      down = true;
-      throw Error("The server stopped answering.");
-    } });
-  readAgain = () => { reads.push(collection("window", { ...address, action: "describe" }).catch(() => undefined)); };
-  await expect(collection("window", { ...setGrant, moveToServer: true })).rejects.toThrow(stopped);
-  expect(transferStatus(id(1))?.state).toBe("ready");
-
-  // The move's own check of its upload is the one refusal so far. Every read the move set off settles without trying it again.
-  for (let round = 0; round < 5 && reads.length > 0; round++) await Promise.all(reads.splice(0));
-  const pending = reads.length, afterStop = refusals;
-  readAgain = () => {};
-  await Promise.all(reads.splice(0));
-  expect({ pending, afterStop }).toEqual({ pending: 0, afterStop: 1 });
-
-  // A person's Try again tries the move once, and its stop sets off nothing either.
-  await expect(collection("window", { ...setGrant, moveToServer: true })).rejects.toThrow(stopped);
-  expect(refusals).toBe(2);
-  down = false;
-  await expect(collection("window", { ...setGrant, moveToServer: true })).resolves.toEqual({ kind: "grant-updated" });
-  expect(transferStatus(id(1))?.state).toBe("imported");
-  controller.abort();
-});
-
-it("lists a Collection whose move stopped from this computer, without trying the move again while the server is away", async () => {
-  let refusals = 0;
-  const { collection, setGrant, controller, transferStatus } = await collectionOnThisComputer({
-    async relay() { refusals++; throw Error("The server stopped answering."); } });
-  await expect(collection("window", { ...setGrant, moveToServer: true })).rejects.toThrow(stopped);
-  expect(transferStatus(id(1))).toMatchObject({ state: "ready", targetOrigin: "https://relay.test", receipt: null });
-  expect(refusals).toBe(1);
-
-  // The shell reads its Collections again after the access dialog has said the move stopped. The list has nothing to report.
-  expect(await collection("window", { workspaceId: "w", action: "list" })).toMatchObject({ kind: "list", datasets: [{ datasetId: id(1), name: "Items" }] });
-  expect(refusals).toBe(1);
-  expect(transferStatus(id(1))?.state).toBe("ready");
-  controller.abort();
-});
-
-it("reads a stopped move's automations and buttons from this computer, without trying the move again while the server is away", async () => {
-  let refusals = 0;
-  const { collection, setGrant, data, moved, controller, transferStatus } = await collectionOnThisComputer({
-    async relay() { refusals++; throw Error("The server stopped answering."); } });
-  await expect(collection("window", { ...setGrant, moveToServer: true })).rejects.toThrow(stopped);
-  expect(refusals).toBe(1);
-
-  // The automations panel asks whether the server holds the Collection. Its move didn't finish, so this computer still does.
-  await expect(moved(id(1))).resolves.toBeNull();
-  // The buttons describe the Collection from this computer.
-  await expect(data(moved).describe(id(1))).resolves.toMatchObject({ datasetId: id(1), name: "Items" });
-  expect(refusals).toBe(1);
-  expect(transferStatus(id(1))?.state).toBe("ready");
-  controller.abort();
-});
-
-it("reads a stopped move's History from this computer, without trying the move again while the server is away", async () => {
-  let refusals = 0;
-  const { collection, setGrant, background, controller, transferStatus } = await collectionOnThisComputer({
-    async relay() { refusals++; throw Error("The server stopped answering."); } });
-  await expect(collection("window", { ...setGrant, moveToServer: true })).rejects.toThrow(stopped);
-  expect(refusals).toBe(1);
-
-  // History reads each Collection with a transfer record as main does. This one keeps its records here, with the owner's change.
-  const operation = { state: {}, workspace: { attachmentId: Symbol("workspace") }, signal: controller.signal, assertCurrent() {} };
-  const history = createHistoryCollectionRemote({ expected: operation, generation: 1, currentGeneration: () => 1,
-    withOperation: work => work(operation), dataFor: background });
-  const page = await history(id(1), undefined, new AbortController().signal);
-  expect(page).toMatchObject({ datasetId: id(1), name: "Items" });
-  expect(page.entries.length).toBeGreaterThan(0);
-  expect(refusals).toBe(1);
-  expect(transferStatus(id(1))?.state).toBe("ready");
   controller.abort();
 });

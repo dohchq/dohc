@@ -33,6 +33,21 @@ describe("chat watch", () => {
     expect(cliRequestSchema.safeParse({ protocolVersion: CLI_PROTOCOL_VERSION, token: "a".repeat(64), verb: "inbox", args: { cwd: "/workspace", actor: "agent", agentId: "Terminal" } }).success).toBe(false);
   });
 
+  it("names a workspace by id on any request, in place of the caller's folder", async () => {
+    expect(parseCliArguments(["chat", "inbox", "--workspace", "ws-1"], {})).toMatchObject({ verb: "inbox", workspaceId: "ws-1" });
+    expect(parseCliArguments(["chat", "inbox"], {})).not.toHaveProperty("workspaceId");
+    expect(() => parseCliArguments(["chat", "inbox", "--workspace", "two words"], {})).toThrow("--workspace requires a workspace's id");
+    expect(() => parseCliArguments(["chat", "inbox", "--workspace"], {})).toThrow("--workspace requires a value");
+    expect(parseCliArguments(["chat", "grep", "--", "--workspace"], {})).toMatchObject({ pattern: "--workspace" });
+
+    const request = vi.fn(async () => ({ messages: [], cursor: "next" }));
+    await executeCli({ argv: ["chat", "watch", "--workspace", "ws-1", "--once", "--json"], env: {}, request });
+    expect(request.mock.calls[0]).toEqual([expect.objectContaining({ verb: "watch", workspaceId: "ws-1" })]);
+    const wire = (workspaceId: string) => cliRequestSchema.safeParse({ protocolVersion: CLI_PROTOCOL_VERSION, token: "a".repeat(64), verb: "inbox", workspaceId, args: { cwd: "/elsewhere", actor: "agent" } }).success;
+    expect(wire("ws-1")).toBe(true);
+    expect(wire("two words")).toBe(false);
+  });
+
   it("rejects a wire timeout past the request deadline", () => {
     expect(cliRequestSchema.safeParse({ protocolVersion: CLI_PROTOCOL_VERSION, token: "a".repeat(64), verb: "watch", args: { cwd: "/workspace", actor: "agent", timeoutMs: 25_001 } }).success).toBe(false);
   });

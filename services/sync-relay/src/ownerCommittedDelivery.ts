@@ -28,6 +28,9 @@ export class OwnerCommittedDelivery {
   // The adoption, per document, whose divergent seed a pass of this connection
   // proved the host applied. Empty on a new connection; cleared with the adoption.
   readonly #seedApplied = new Map<string,string>();
+  #settlesSent = 0;
+  /** How many settlements this consumer has asked the engine for, so a caller can tell a sent one from a reused one. */
+  get settlesSent(): number { return this.#settlesSent; }
   constructor(private readonly storage: SyncRelayStorage,history: LiveJournalHistoryAuthority,private readonly connection: {
     client: EngineClient; workspace: string; host: LiveHostConnectionCoordinate; deadlineMs: number; nextRequestId(): number;
     bounds: { maxBytes: number; maxEvents: number };
@@ -148,6 +151,7 @@ export class OwnerCommittedDelivery {
           !(next && this.#store.hasPendingActivationSeed(latest)) && !await ownerOutboxHeadIsSeed({client: c.client,workspace: c.workspace,
           registrationId,binding: adopted.binding,adoption: recorded,nextRequestId: c.nextRequestId,deadlineMs: c.deadlineMs,signal,
           assertCurrent: latest.assertCurrent})) {
+          this.#settlesSent++;
           const settled = await settlementResponse(c.client.sendRequest({...request(),method: "liveApplication.settle",params: {
             registrationId,terminalReceipt: {...progress.adoptionTerminal},
           }},signal),progress.adoptionTerminal);
@@ -189,6 +193,7 @@ export class OwnerCommittedDelivery {
           if (result.status === "pending" && result.reason === "settlement-required") {
             // The host's author coverage is full. Settle what it applied once, then offer the identical event again.
             if (settledSinceApply) throw new Error("The host still requires settlement after settling everything it applied.");
+            this.#settlesSent++;
             const settled = await settlementResponse(c.client.sendRequest({ ...request(),method: "liveApplication.settle",params: { registrationId,terminalReceipt: progress.terminal ? { ...progress.terminal } : null } },signal),progress.terminal);
             check(); latest.assertCurrent();
             adopted.settled = !settlementPending(settled) && settled.materialized ? settled : undefined;
@@ -230,6 +235,7 @@ export class OwnerCommittedDelivery {
       if (outbox.hasMore) throw new Error("Owner outbox delivery must finish before settlement.");
       if (this.#store.nextOwnerApplication(latest)) throw new Error("Owner application did not commit.");
       if (!wanted && adopted.settled && adopted.settled.terminalCursor === (progress.terminal?.journalCursor ?? 0)) return adopted.settled;
+      this.#settlesSent++;
       const settled = await settlementResponse(c.client.sendRequest({ ...request(),method: "liveApplication.settle",params: { registrationId,terminalReceipt: progress.terminal ? { ...progress.terminal } : null } },signal),progress.terminal);
       check(); latest.assertCurrent();
       adopted.settled = !settlementPending(settled) && settled.materialized ? settled : undefined;

@@ -4,7 +4,6 @@ import { Bookmark, CircleCheck, CircleHelp, FileText, MessageSquare, Reply, Zap 
 import { memo, type ReactNode, useEffect, useRef, useState } from "react";
 import type {
   ActorPresentation,
-  ChannelThreadRecord,
   ChatAttachmentRecord,
   ChatBookmarkRecord,
   ChatDecisionRecord,

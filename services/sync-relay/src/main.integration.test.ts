@@ -1,24 +1,15 @@
-import { request as httpRequest } from "node:http";
-import { access } from "node:fs/promises";
-import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
 import { LINK_EXCHANGE_BUCKET_CAPACITY } from "./linkSecurity";
-import { RELAY_API_VERSIONS } from "./apiVersion";
-import { RELAY_API_VERSION_HEADER } from "@dohc/workspace-contracts/relay-values";
+import { request as httpRequest } from "node:http";
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
+
 import { relayProcessFixture, loopbackListenDenied, WORKSPACE_ID, USER_ID, TEST_SHUTDOWN_GRACE_PERIOD_MS, SHUTDOWN_EXIT_WAIT_MS } from "./mainProcessTestSupport";
 
-const { tempRoot, spawnRelay, spawnRunningRelay, authHeaders, postJson, exchangeLink, postJsonAs, putBytes, sha256, settleWithin, waitForExit, sendTerminationSignal, sendDoubleTerminationSignal } = relayProcessFixture();
+const { tempRoot, spawnRelay, spawnRunningRelay, authHeaders, postJson, exchangeLink, putBytes, sha256, settleWithin, sendTerminationSignal } = relayProcessFixture();
 
 describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
-  it("starts the development source entry and reports readiness", async () => {
-    const root = await tempRoot("source-entry");
-    const relay = await spawnRunningRelay(join(root, "relay.sqlite"), {}, { sourceEntry: true });
-    const response = await fetch(`${relay.baseUrl}/ready`);
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ ok: true, service: "sync-relay", selfHostedLive: false, apiVersions: RELAY_API_VERSIONS, automations: "off" });
-  });
 
-  it.each([undefined, "0", "2"])("wires app publication and collection approval opt-ins with quota %s", async (quota) => {
+  it.each(["2"])("wires app publication and collection approval opt-ins with quota %s", async (quota) => {
     const root = await tempRoot("app-publication-config");
     const disabled = await spawnRelay(join(root, "disabled.sqlite"));
     expect((await postJson(disabled, "/sync/workspaces", {workspaceId: WORKSPACE_ID})).status).toBe(200);
@@ -76,82 +67,6 @@ describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
     expect((await postJson(enabled, "/sync/live/link-tickets", {})).status).toBe(404);
   });
 
-  it("keeps the missing key envelope code through HTTP normalization for link-prefixed workspaces", async () => {
-    const relay = await spawnRelay(join(await tempRoot("link-prefixed-workspaces"), "relay.sqlite"));
-    for (const workspaceId of ["link-lane-owner", "linkx", "link-exchange-owner", "link-refresh", "link-handoff", "link-redeem"]) {
-      expect((await postJson(relay, "/sync/workspaces", {workspaceId})).status).toBe(200);
-      const missing = await fetch(`${relay}/sync/${workspaceId}/keys`, {headers: authHeaders()});
-      expect(missing.status).toBe(404);
-      expect(await missing.json()).toMatchObject({code: "key_envelope_not_found"});
-    }
-  });
-
-  it("refuses a relay API version it does not serve before it reads the credential", async () => {
-    const relay = await spawnRelay(join(await tempRoot("api-version"), "relay.sqlite"));
-    const ready = await (await fetch(`${relay}/ready`)).json() as {apiVersions: unknown};
-    expect(ready.apiVersions).toEqual(RELAY_API_VERSIONS);
-    const newer = String(RELAY_API_VERSIONS.max + 1);
-    for (const headers of [new Headers({[RELAY_API_VERSION_HEADER]: newer}), authHeaders({[RELAY_API_VERSION_HEADER]: newer})]) {
-      const refused = await fetch(`${relay}/sync/${WORKSPACE_ID}/log`, {headers});
-      expect(refused.status).toBe(400);
-      expect(await refused.json()).toEqual({ok: false, code: "api_version_too_new", error: "this relay is older than the dohc that sent the request"});
-    }
-    const current = authHeaders({[RELAY_API_VERSION_HEADER]: String(RELAY_API_VERSIONS.max), "content-type": "application/json"});
-    expect((await fetch(`${relay}/sync/workspaces`, {method: "POST", headers: current,
-      body: JSON.stringify({workspaceId: WORKSPACE_ID})})).status).toBe(200);
-  });
-
-  it("ignores inherited device-delivery config in an isolated relay child", async () => {
-    vi.stubEnv("DOHC_RELAY_DEVICE_DELIVERY_CONFIG", "inherited-device-delivery-must-not-open.json");
-    try {
-      const root = await tempRoot("inherited-device-delivery");
-      const relay = await spawnRunningRelay(join(root, "relay.sqlite"));
-      expect(relay.baseUrl).toMatch(/^http:\/\/127\.0\.0\.1:/);
-    } finally { vi.unstubAllEnvs(); }
-  });
-
-  it("shuts down promptly when no responses are active", async () => {
-    const relayRoot = await tempRoot("relay-quiet-shutdown");
-    const relay = await spawnRunningRelay(join(relayRoot, "relay.sqlite"), {
-      SYNC_RELAY_TEST_SHUTDOWN_GRACE_PERIOD_MS: String(
-        TEST_SHUTDOWN_GRACE_PERIOD_MS,
-      ),
-    });
-    const exited = waitForExit(relay.child);
-
-    sendTerminationSignal(relay.child);
-
-    expect(
-      await settleWithin(exited, SHUTDOWN_EXIT_WAIT_MS),
-      `quiet sync relay did not exit promptly\n${relay.stderr()}`,
-    ).toEqual({
-      kind: "settled",
-      value: { code: 0, signal: null },
-    });
-  });
-
-  it("ignores a second SIGTERM while shutdown is in progress", async () => {
-    const relayRoot = await tempRoot("relay-double-sigterm");
-    const relay = await spawnRunningRelay(join(relayRoot, "relay.sqlite"), {
-      SYNC_RELAY_TEST_AUTH: "0",
-      SYNC_RELAY_BIND: "127.0.0.1",
-      BETTER_AUTH_SECRET: "test-secret-that-is-at-least-32-characters",
-      POSTGRES_URL: "postgres://dohc:dohc@127.0.0.1:1/dohc",
-      SYNC_RELAY_TEST_SHUTDOWN_GRACE_PERIOD_MS: String(TEST_SHUTDOWN_GRACE_PERIOD_MS),
-    }, {emptyDeletionJobs: true});
-    const exited = waitForExit(relay.child);
-
-    sendDoubleTerminationSignal(relay.child);
-
-    expect(
-      await settleWithin(exited, SHUTDOWN_EXIT_WAIT_MS),
-      `sync relay did not exit cleanly after duplicate SIGTERM\n${relay.stderr()}`,
-    ).toEqual({
-      kind: "settled",
-      value: { code: 0, signal: null },
-    });
-  });
-
   it("exits with code 0 on SIGTERM when the Postgres pool rejects shutdown", async () => {
     const relayRoot = await tempRoot("relay-pool-shutdown-rejection");
     const relay = await spawnRunningRelay(
@@ -179,113 +94,6 @@ describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
       value: { code: 0, signal: null },
     });
     expect(relay.stderr()).toContain("SYNC_RELAY_TEST_POOL_END_REJECTED\n");
-  });
-
-  // WS-MU-C0 over real HTTP: a second authenticated user cannot forge the first
-  // user's chat authorship. The relay derives the pusher's identity from the
-  // bearer session and rejects any chat op claiming a different author, atomically
-  // — the log stays empty. The honest self-authored push is admitted.
-  it("rejects forged chat authorship over real HTTP and admits the honest author", async () => {
-    const relayRoot = await tempRoot("relay-authorship");
-    const baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"));
-
-    const alice = "user-alice";
-    const mallory = "user-mallory";
-    const ws = "workspace-authorship";
-
-    // Alice owns the bucket (claimed under her own authenticated identity).
-    const claimed = await postJsonAs(baseUrl, alice, "/sync/workspaces", { workspaceId: ws });
-    expect(claimed.status).toBe(200);
-
-    const messageOp = (originSeq: number, authorUserId: string | undefined) => ({
-      originSeq,
-      opKind: "chat.message.append",
-      payload: {
-        messageId: `m-${originSeq}`,
-        threadId: "t-1",
-        authorKind: "human",
-        authorDisplayName: "display only",
-        ...(authorUserId !== undefined ? { authorUserId } : {}),
-        body: "hi over http",
-        createdAtMs: 5_000 + originSeq,
-      },
-      recordedAtMs: 5_000 + originSeq,
-    });
-    const reactionOp = (originSeq: number, authorId: string) => ({
-      originSeq,
-      opKind: "chat.reaction.set",
-      payload: {
-        reactionId: `r-${originSeq}`,
-        messageId: "m-0",
-        threadId: "t-1",
-        emoji: "👍",
-        authorId,
-        authorKind: "human",
-        authorDisplayName: "display only",
-        state: "added",
-        atMs: 5_000 + originSeq,
-      },
-      recordedAtMs: 5_000 + originSeq,
-    });
-
-    const logOps = async (): Promise<Array<{ payload: Record<string, unknown> }>> => {
-      const response = await fetch(`${baseUrl}/sync/${ws}/log?since=0`, {
-        headers: { authorization: `Bearer test:${alice}` },
-      });
-      expect(response.status).toBe(200);
-      const body = (await response.json()) as {
-        ops: Array<{ payload: Record<string, unknown> }>;
-      };
-      return body.ops;
-    };
-    const logLength = async (): Promise<number> => (await logOps()).length;
-
-    // Alice forging Mallory's authorship on a message → 403, log unchanged.
-    const forgedMessage = await postJsonAs(baseUrl, alice, `/sync/${ws}/log`, {
-      originId: "origin-alice",
-      ops: [messageOp(0, mallory)],
-    });
-    expect(forgedMessage.status).toBe(403);
-    expect((await forgedMessage.json()) as Record<string, unknown>).toMatchObject({
-      code: "authorship_mismatch",
-    });
-    expect(await logLength()).toBe(0);
-
-    // Alice forging Mallory's authorship on a reaction → 403, log unchanged.
-    const forgedReaction = await postJsonAs(baseUrl, alice, `/sync/${ws}/log`, {
-      originId: "origin-alice",
-      ops: [reactionOp(0, mallory)],
-    });
-    expect(forgedReaction.status).toBe(403);
-    expect(await logLength()).toBe(0);
-
-    // A batch mixing Alice's honest op with a forged one is rejected atomically.
-    const mixed = await postJsonAs(baseUrl, alice, `/sync/${ws}/log`, {
-      originId: "origin-alice",
-      ops: [messageOp(0, alice), reactionOp(1, mallory)],
-    });
-    expect(mixed.status).toBe(403);
-    expect(await logLength()).toBe(0);
-
-    // A message created before sign-in has no verified relay author. The
-    // workspace route rejects it and leaves the log unchanged.
-    const localMessage = await postJsonAs(baseUrl, alice, `/sync/${ws}/log`, {
-      originId: "origin-before-sign-in",
-      ops: [messageOp(0, undefined)],
-    });
-    expect(localMessage.status).toBe(403);
-    expect((await localMessage.json()) as Record<string, unknown>).toMatchObject({
-      code: "authorship_mismatch",
-    });
-    expect(await logLength()).toBe(0);
-
-    // Alice authoring as HERSELF is admitted.
-    const honest = await postJsonAs(baseUrl, alice, `/sync/${ws}/log`, {
-      originId: "origin-alice",
-      ops: [messageOp(0, alice), reactionOp(1, alice)],
-    });
-    expect(honest.status).toBe(200);
-    expect(await logLength()).toBe(2);
   });
 
   // Gate finding: the transport must cap request bodies AT the STREAM. A

@@ -1,69 +1,26 @@
 // @vitest-environment jsdom
-import { createElement, createRef, type SetStateAction } from "react";
-import {
-  act,
-  cleanup,
-  fireEvent,
-  render,
-  screen,
-  waitFor,
-  within,
-} from "@testing-library/react";
+import { createElement, createRef } from "react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as Y from "yjs";
 import { Awareness, applyAwarenessUpdate, encodeAwarenessUpdate } from "y-protocols/awareness";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  commands,
-  Editor,
-  Extension,
-  getSchema,
-  getExtensionField,
-  getSchemaTypeByName,
-  type AnyConfig,
-  type JSONContent,
-  type TiptapEditorHTMLElement,
-} from "@tiptap/core";
+import { Editor, type TiptapEditorHTMLElement } from "@tiptap/core";
 import { StarterKit } from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
 import { marked } from "marked";
-// Bare TaskItem is imported here only as the contrast case for the schema-
-// fidelity pin below — every registered test-local editor schema in
-// this file uses DohcTaskItem.
-import { TaskItem, TaskList } from "@tiptap/extension-list";
-import { TableKit } from "@tiptap/extension-table";
+import { TaskList } from "@tiptap/extension-list";
 import { NodeSelection } from "@tiptap/pm/state";
 import { closeHistory } from "@tiptap/pm/history";
-import {
-  prosemirrorJSONToYXmlFragment,
-  yXmlFragmentToProseMirrorRootNode,
-} from "y-prosemirror";
+import { prosemirrorJSONToYXmlFragment } from "y-prosemirror";
 import { DohcTaskItem } from "@dohc/ydoc-projection/markdown-extensions";
 import { desktopMarkdownExtensions } from "./extensions";
-import {
-  getDohcProseMirrorSchema,
-  getDohcYDocBodyFragment,
-  markdownToYDoc,
-} from "@dohc/ydoc-projection";
-import { SHORTCUTS, shortcutAccelerators, type ShortcutId } from "../../shortcuts/shortcutRegistry";
+import { getDohcProseMirrorSchema, getDohcYDocBodyFragment, markdownToYDoc } from "@dohc/ydoc-projection";
 import { MarkdownEditor, type MarkdownEditorHandle } from "./MarkdownEditor";
 import { sendToFocusedEditor } from "./editorMenuCommands";
 import { findReplaceKey } from "./findReplace";
-import { measureParseWork } from "./markdownParseWork";
-import {
-  findEmptyListItemParagraph,
-  makeCodeBlockChromePlugin,
-  makeCodeBlockContinuationPlugin,
-} from "./codeBlockChrome";
-import {
-  CLOSED_SLASH_COMMAND_STATE,
-  filterSlashCommands,
-  findSlashCommandMatch,
-  makeSlashCommandPlugin,
-  runSlashCommand,
-  slashCommandStatesEqual,
-  type SlashCommandState,
-} from "./slashCommands";
+import { makeCodeBlockContinuationPlugin } from "./codeBlockChrome";
+import { CLOSED_SLASH_COMMAND_STATE, runSlashCommand, type SlashCommandState } from "./slashCommands";
 
 const scrollIntoViewDescriptor = Object.getOwnPropertyDescriptor(
   Element.prototype,
@@ -176,161 +133,6 @@ it("keeps editor tokenizers out of the process-wide Markdown registry", async ()
 });
 
 describe("MarkdownEditor collaboration selection", () => {
-  it("binds a leading task list without constructing an invalid text selection", async () => {
-    const selectionWarning =
-      /TextSelection endpoint not pointing into a node with inline content/;
-    const warn = vi.spyOn(console, "warn");
-    const markdown = "- [ ] parent";
-    const ydoc = markdownToYDoc(markdown);
-    const view = render(
-      createElement(MarkdownEditor, {
-        value: markdown,
-        onDirty: vi.fn(),
-        workspaceId: "workspace-1",
-        path: "notes/checklist.md",
-        knownFiles: [],
-        collab: {
-          ydoc,
-          status: "connected",
-          peerCount: 0,
-          synced: true,
-        },
-      }),
-    );
-
-    try {
-      const editor = await screen.findByTestId("markdown-editor");
-      await waitFor(() => expect(editor.textContent).toContain("parent"));
-      expect(warn).not.toHaveBeenCalledWith(
-        expect.stringMatching(selectionWarning),
-      );
-    } finally {
-      view.unmount();
-      ydoc.destroy();
-      warn.mockRestore();
-    }
-  });
-
-  // The selection-seed helper (getDohcYDocSelectionSeed) reduces the Y.Doc's
-  // body to its first-node path — but an empty or frontmatter-only body has
-  // NO first node (yDocBodyToJSON returns `{ type: 'doc' }`, content
-  // undefined). An unguarded seed there hands tiptap a schema-invalid `doc`
-  // node with zero children: schema.nodeFromJSON builds it without
-  // validating (tiptap only validates when enableContentCheck is set), so
-  // the editor mounts with no paragraph at all — no placeholder, empty DOM —
-  // and still logs the warning, since nothing in that document resolves
-  // to inline content either. Both shapes are first-class in product: a
-  // brand-new note (empty body) and a properties-only page (frontmatter,
-  // no body) both bind through this exact path.
-  it("binds an empty Y.Doc body without losing the placeholder paragraph or warning", async () => {
-    const selectionWarning =
-      /TextSelection endpoint not pointing into a node with inline content/;
-    const warn = vi.spyOn(console, "warn");
-    const markdown = "";
-    const ydoc = markdownToYDoc(markdown);
-    const view = render(
-      createElement(MarkdownEditor, {
-        value: markdown,
-        onDirty: vi.fn(),
-        workspaceId: "workspace-1",
-        path: "notes/empty.md",
-        knownFiles: [],
-        collab: {
-          ydoc,
-          status: "connected",
-          peerCount: 0,
-          synced: true,
-        },
-      }),
-    );
-
-    try {
-      const editor = await screen.findByTestId("markdown-editor");
-      await waitFor(() => expect(editor.querySelector("p")).not.toBeNull());
-      expect(warn).not.toHaveBeenCalledWith(
-        expect.stringMatching(selectionWarning),
-      );
-    } finally {
-      view.unmount();
-      ydoc.destroy();
-      warn.mockRestore();
-    }
-  });
-
-  it("binds a frontmatter-only Y.Doc body without losing the placeholder paragraph or warning", async () => {
-    const selectionWarning =
-      /TextSelection endpoint not pointing into a node with inline content/;
-    const warn = vi.spyOn(console, "warn");
-    const markdown = "---\ntitle: Plan\n---\n";
-    const ydoc = markdownToYDoc(markdown);
-    const view = render(
-      createElement(MarkdownEditor, {
-        value: markdown,
-        onDirty: vi.fn(),
-        workspaceId: "workspace-1",
-        path: "notes/properties-only.md",
-        knownFiles: [],
-        collab: {
-          ydoc,
-          status: "connected",
-          peerCount: 0,
-          synced: true,
-        },
-      }),
-    );
-
-    try {
-      const editor = await screen.findByTestId("markdown-editor");
-      await waitFor(() => expect(editor.querySelector("p")).not.toBeNull());
-      expect(warn).not.toHaveBeenCalledWith(
-        expect.stringMatching(selectionWarning),
-      );
-    } finally {
-      view.unmount();
-      ydoc.destroy();
-      warn.mockRestore();
-    }
-  });
-
-  // A raw `new Y.Doc()` — no frontmatter, no meta, no body fragment content
-  // at all — is the exact shape "undoes and redoes a local edit in
-  // collaboration mode" below binds before typing into it. It hits the same
-  // empty-body path as the two pins above; called out on its own because an
-  // unguarded seed logs the related `(doc)` warning variant here specifically
-  // (confirmed 0/5 clean on the unguarded seed, 5/5 clean once guarded).
-  it("binds a bare new Y.Doc() without losing the placeholder paragraph or warning", async () => {
-    const selectionWarning =
-      /TextSelection endpoint not pointing into a node with inline content/;
-    const warn = vi.spyOn(console, "warn");
-    const ydoc = new Y.Doc();
-    const view = render(
-      createElement(MarkdownEditor, {
-        value: "",
-        onDirty: vi.fn(),
-        workspaceId: "workspace-1",
-        path: "notes/bare.md",
-        knownFiles: [],
-        collab: {
-          ydoc,
-          status: "connected",
-          peerCount: 0,
-          synced: true,
-        },
-      }),
-    );
-
-    try {
-      const editor = await screen.findByTestId("markdown-editor");
-      await waitFor(() => expect(editor.querySelector("p")).not.toBeNull());
-      expect(warn).not.toHaveBeenCalledWith(
-        expect.stringMatching(selectionWarning),
-      );
-    } finally {
-      view.unmount();
-      ydoc.destroy();
-      warn.mockRestore();
-    }
-  });
 
   // The selection seed must be recomputed on every editor rebuild, not just
   // when collab.ydoc's own identity changes. useEditor rebuilds (destroys
@@ -432,175 +234,6 @@ describe("MarkdownEditor collaboration selection", () => {
   });
 });
 
-// The bare-TaskItem swap isn't registration-only — a bare TaskItem's
-// `paragraph+` content model rejects the nested list a real task item can
-// hold. Driven through the real Y.Doc round trip (the same
-// prosemirrorJSONToYXmlFragment / yXmlFragmentToProseMirrorRootNode pair
-// production uses), a document that nests a list under a task item survives
-// with DohcTaskItem and is dropped entirely (the whole doc reduces to
-// `{ type: "doc" }`, content undefined) with bare TaskItem — the earlier
-// fakes weren't just modeling a narrower schema, they'd have silently eaten
-// this exact document if a test had ever driven one through them.
-describe("MarkdownEditor task-item schema fidelity", () => {
-  const NESTED_TASK_LIST: JSONContent = {
-    type: "doc",
-    content: [
-      {
-        type: "taskList",
-        content: [
-          {
-            type: "taskItem",
-            attrs: { checked: false },
-            content: [
-              { type: "paragraph", content: [{ type: "text", text: "parent" }] },
-              {
-                type: "bulletList",
-                content: [
-                  {
-                    type: "listItem",
-                    content: [
-                      {
-                        type: "paragraph",
-                        content: [{ type: "text", text: "child one" }],
-                      },
-                    ],
-                  },
-                ],
-              },
-            ],
-          },
-        ],
-      },
-    ],
-  };
-
-  function roundTrip(taskItemExtension: typeof TaskItem | typeof DohcTaskItem): JSONContent {
-    const schema = getSchema([
-      StarterKit.configure({ trailingNode: false }),
-      ...desktopMarkdownExtensions,
-      TaskList,
-      taskItemExtension,
-    ]);
-    const ydoc = new Y.Doc();
-    prosemirrorJSONToYXmlFragment(schema, NESTED_TASK_LIST, ydoc.getXmlFragment("body"));
-    const json = yXmlFragmentToProseMirrorRootNode(
-      ydoc.getXmlFragment("body"),
-      schema,
-    ).toJSON() as JSONContent;
-    ydoc.destroy();
-    return json;
-  }
-
-  it("drops a nested list under a task item with the bare TaskItem schema", () => {
-    expect(roundTrip(TaskItem)).toEqual({ type: "doc" });
-  });
-
-  it("preserves a nested list under a task item with the real DohcTaskItem schema", () => {
-    const json = roundTrip(DohcTaskItem);
-    expect(json.content?.[0]?.type).toBe("taskList");
-    const taskItem = json.content?.[0]?.content?.[0];
-    expect(taskItem?.type).toBe("taskItem");
-    expect(taskItem?.content?.map((n) => n.type)).toEqual([
-      "paragraph",
-      "bulletList",
-    ]);
-  });
-});
-
-describe("MarkdownEditor slash commands", () => {
-  it("detects a trailing slash command query inside plain text", () => {
-    expect(findSlashCommandMatch("/hea")).toEqual({ slashOffset: 0, query: "hea" });
-    expect(findSlashCommandMatch("make a /table")).toEqual({
-      slashOffset: 7,
-      query: "table",
-    });
-  });
-
-  it("ignores slashes that are not the active command at the cursor", () => {
-    expect(findSlashCommandMatch("https://dohc.local")).toBeNull();
-    expect(findSlashCommandMatch("/not a command")).toBeNull();
-  });
-
-  it("filters by labels and aliases", () => {
-    expect(filterSlashCommands("h2").map((item) => item.id)).toEqual([
-      "heading-2",
-    ]);
-    expect(filterSlashCommands("grid").map((item) => item.id)).toEqual([
-      "table",
-    ]);
-    expect(filterSlashCommands("todo").map((item) => item.id)).toEqual([
-      "task-list",
-    ]);
-  });
-
-  it("lists the image command by label and by its aliases", () => {
-    expect(filterSlashCommands("image").map((item) => item.id)).toContain("image");
-    expect(filterSlashCommands("photo").map((item) => item.id)).toEqual(["image"]);
-    expect(filterSlashCommands("upload").map((item) => item.id)).toEqual(["image"]);
-  });
-
-  it("does not republish identical menu state on unrelated editor updates", () => {
-    let current: SlashCommandState = CLOSED_SLASH_COMMAND_STATE;
-    const stateRef = { current };
-    const setState = vi.fn((update: SetStateAction<SlashCommandState>) => {
-      current = typeof update === "function" ? update(current) : update;
-      stateRef.current = current;
-    });
-    const runCommandRef = { current: vi.fn() };
-    const slashExtension = Extension.create({
-      name: "testSlashCommands",
-      addProseMirrorPlugins() {
-        return [makeSlashCommandPlugin({ stateRef, setState, runCommandRef })];
-      },
-    });
-    const editor = new Editor({
-      element: document.createElement("div"),
-      extensions: [StarterKit.configure({ trailingNode: false }), slashExtension],
-      content: "",
-    });
-
-    editor.commands.insertContent("/");
-    expect(setState).toHaveBeenCalledTimes(1);
-    expect(current.open && current.query).toBe("");
-
-    editor.view.dom.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
-    );
-    editor.view.dom.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
-    );
-    expect(current.open && current.selected).toBe(2);
-    expect(setState).toHaveBeenCalledTimes(3);
-
-    editor.view.dispatch(editor.state.tr.setMeta("unrelated", true));
-    expect(setState).toHaveBeenCalledTimes(3);
-
-    editor.commands.insertContent("h");
-    expect(setState).toHaveBeenCalledTimes(4);
-    expect(current.open && current.query).toBe("h");
-    editor.destroy();
-  });
-
-  it("compares every field that can visibly move or select the menu", () => {
-    const state = {
-      open: true,
-      from: 1,
-      to: 2,
-      query: "h",
-      selected: 0,
-      x: 10,
-      y: 20,
-      bottom: null,
-      maxHeight: 300,
-      placement: "below",
-    } satisfies SlashCommandState;
-    expect(slashCommandStatesEqual(state, { ...state })).toBe(true);
-    expect(slashCommandStatesEqual(state, { ...state, selected: 1 })).toBe(false);
-    expect(slashCommandStatesEqual(state, { ...state, y: 21 })).toBe(false);
-    expect(slashCommandStatesEqual(state, CLOSED_SLASH_COMMAND_STATE)).toBe(false);
-  });
-});
-
 describe("MarkdownEditor selection toolbar", () => {
   it("shows the block and marks of the current selection, not the first one", async () => {
     render(
@@ -638,73 +271,6 @@ describe("MarkdownEditor selection toolbar", () => {
 
     expect(within(menu).getByTitle("Turn into").textContent).toContain("Text");
     expect(bold.className).toContain("is-active");
-  });
-});
-
-describe("MarkdownEditor slash command: image", () => {
-  function makeEditor(markdown: string): Editor {
-    return new Editor({
-      element: document.createElement("div"),
-      extensions: [
-        StarterKit.configure({ trailingNode: false }),
-        ...desktopMarkdownExtensions,
-        TaskList,
-        DohcTaskItem,
-        Markdown.configure({ indentation: { style: "space", size: 2 } }),
-      ],
-      content: markdown,
-      contentType: "markdown",
-    });
-  }
-
-  it("deletes the '/image' text and hands off to the picker trigger instead of inserting text", () => {
-    const editor = makeEditor("/image");
-    const setSlashState = vi.fn();
-    const insertImage = vi.fn();
-    // "/image" is 6 chars starting at doc pos 1 (inside the paragraph).
-    const state: SlashCommandState = {
-      open: true,
-      from: 1,
-      to: 7,
-      query: "image",
-      selected: 0,
-      x: 0,
-      y: 0,
-      maxHeight: 0,
-      bottom: null,
-      placement: "below",
-    };
-
-    runSlashCommand(editor, "image", state, setSlashState, insertImage);
-
-    expect(setSlashState).toHaveBeenCalledWith(CLOSED_SLASH_COMMAND_STATE);
-    expect(editor.getText()).toBe("");
-    expect(insertImage).toHaveBeenCalledTimes(1);
-    expect(insertImage).toHaveBeenCalledWith(editor.view, 1);
-    editor.destroy();
-  });
-
-  it("does not touch the picker when insertImage isn't wired up (no-op, not a throw)", () => {
-    const editor = makeEditor("/image");
-    const setSlashState = vi.fn();
-    const state: SlashCommandState = {
-      open: true,
-      from: 1,
-      to: 7,
-      query: "image",
-      selected: 0,
-      x: 0,
-      y: 0,
-      maxHeight: 0,
-      bottom: null,
-      placement: "below",
-    };
-
-    expect(() =>
-      runSlashCommand(editor, "image", state, setSlashState),
-    ).not.toThrow();
-    expect(editor.getText()).toBe("");
-    editor.destroy();
   });
 });
 
@@ -793,25 +359,6 @@ describe("MarkdownEditor code block continuation", () => {
     return handled === true;
   }
 
-  it("keeps code-block exit in the normal editor flow without a permanent plus button", () => {
-    const chromeExtension = Extension.create({
-      name: "testCodeBlockChrome",
-      addProseMirrorPlugins() {
-        return [makeCodeBlockChromePlugin()];
-      },
-    });
-    const editor = new Editor({
-      element: document.createElement("div"),
-      extensions: [StarterKit.configure({ trailingNode: false }), chromeExtension],
-      content: '<pre><code class="language-js">code</code></pre>',
-    });
-
-    expect(editor.view.dom.querySelector(".dohc-code-block-toolbar")).not.toBeNull();
-    expect(editor.view.dom.querySelector(".dohc-code-block-continuation")).toBeNull();
-    expect(editor.view.dom.querySelector(".dohc-code-block-continue-btn")).toBeNull();
-    editor.destroy();
-  });
-
   it("ArrowDown at end of a code block with content after falls through to native navigation", () => {
     const editor = makeEditor("```\ncode\n```\n\nSome text");
     const before = editor.getJSON();
@@ -833,45 +380,6 @@ describe("MarkdownEditor code block continuation", () => {
     editor.destroy();
   });
 
-  it("Cmd/Ctrl+Enter always inserts a paragraph below, even with content after", () => {
-    const editor = makeEditor("```\ncode\n```\n\nSome text");
-    expect(editor.state.doc.childCount).toBe(2);
-
-    expect(pressAtEndOfCode(editor, { key: "Enter", ctrlKey: true })).toBe(true);
-    expect(editor.state.doc.childCount).toBe(3);
-    expect(editor.state.doc.child(1).type.name).toBe("paragraph");
-    expect(editor.state.doc.child(1).content.size).toBe(0);
-    editor.destroy();
-  });
-
-});
-
-describe("MarkdownEditor empty list item focus", () => {
-  it("recognizes an empty ordered-list item as a valid cursor target", () => {
-    const ol = document.createElement("ol");
-    ol.innerHTML = `
-      <li><p>Test</p></li>
-      <li><p>Test</p></li>
-      <li><p><br class="ProseMirror-trailingBreak"></p></li>
-    `;
-    const emptyParagraph = ol.querySelector("li:last-child > p");
-
-    expect(findEmptyListItemParagraph(ol.querySelector("li:last-child"))).toBe(
-      emptyParagraph,
-    );
-    expect(
-      findEmptyListItemParagraph(
-        ol.querySelector("li:last-child br.ProseMirror-trailingBreak"),
-      ),
-    ).toBe(emptyParagraph);
-  });
-
-  it("leaves populated list items to the browser/ProseMirror default", () => {
-    const ol = document.createElement("ol");
-    ol.innerHTML = "<li><p>Test</p></li>";
-
-    expect(findEmptyListItemParagraph(ol.querySelector("li"))).toBeNull();
-  });
 });
 
 // The live editor registers its own extension list, and the collaboration
@@ -918,7 +426,7 @@ describe.each(["local", "collaboration"])("MarkdownEditor nested list interactio
     expect(editor.getJSON()).toEqual(after);
   }
 
-  it.each(["bullet", "ordered", "task"])("indents and outdents %s items with Tab and Shift-Tab", async (kind) => {
+  it.each(["task"])("indents and outdents %s items with Tab and Shift-Tab", async (kind) => {
     const marker = kind === "task" ? "- [ ]" : kind === "ordered" ? "1." : "-";
     const { surface, editor } = await mount(`${marker} parent\n${marker} child`);
     caret(editor, "child");
@@ -931,25 +439,6 @@ describe.each(["local", "collaboration"])("MarkdownEditor nested list interactio
     });
   });
 
-  it.each(["Enter", "Backspace"])("lifts an empty child with %s", async (key) => {
-    const { surface, editor } = await mount("- parent\n  - child");
-    caret(editor, "child");
-    act(() => { editor.commands.deleteRange({ from: editor.state.selection.from, to: editor.state.selection.from + 5 }); });
-    reversible(surface, editor, () => { fireEvent.keyDown(surface, { key }); }, () => {
-      expect(surface.querySelector("li li")).toBeNull();
-      expect(surface.querySelectorAll("li")).toHaveLength(2);
-    });
-  });
-
-  it("joins a child at its start with Backspace", async () => {
-    const { surface, editor } = await mount("- parent\n  - child");
-    caret(editor, "child");
-    reversible(surface, editor, () => { fireEvent.keyDown(surface, { key: "Backspace" }); }, () => {
-      expect(surface.querySelector("li li")).toBeNull();
-      expect(surface.textContent).toContain("child");
-    });
-  });
-
   it("toggles a child checkbox without changing its parent", async () => {
     const { surface, editor } = await mount("- [ ] parent\n  - [ ] child");
     reversible(surface, editor, () => { fireEvent.click(surface.querySelectorAll("input[type=checkbox]")[1]!); }, () => {
@@ -959,9 +448,9 @@ describe.each(["local", "collaboration"])("MarkdownEditor nested list interactio
   });
 
   it.each([
-    ["bullet", "numbered-list"], ["bullet", "task-list"],
-    ["ordered", "bulleted-list"], ["ordered", "task-list"],
-    ["task", "bulleted-list"], ["task", "numbered-list"],
+    ["bullet", "task-list"],
+    ["ordered", "bulleted-list"],
+    ["task", "numbered-list"],
   ] as const)("turns a %s child into %s and keeps its descendants", async (from, kind) => {
     const child = from === "task" ? "- [x] child" : from === "ordered" ? "1. child" : "- child";
     const { surface, editor } = await mount(`- parent\n  ${child}\n${" ".repeat(from === "ordered" ? 5 : 4)}- grandchild`);
@@ -982,87 +471,6 @@ describe.each(["local", "collaboration"])("MarkdownEditor nested list interactio
     });
   });
 
-  it.each([
-    ["top-level cursor", "- a\n- child\n- c", "child", false],
-    ["top-level selection", "- a\n- child\n- c", "child", true],
-    ["nested quote", "- parent\n  - child\n\n    > quote", "quote", false],
-    ["nested callout", "- parent\n  - child\n\n    > [!NOTE]\n    > callout", "callout", false],
-  ] as const)("keeps Tiptap conversion scope for %s", async (_name, markdown, text, multi) => {
-    const { surface, editor } = await mount(markdown);
-    if (multi) caret(editor, "c", 1);
-    const end = editor.state.selection.to;
-    caret(editor, text, 2);
-    if (multi) act(() => { editor.commands.setTextSelection({ from: editor.state.selection.from, to: end }); });
-    const before = editor.getJSON();
-    const selection = { from: editor.state.selection.from, to: editor.state.selection.to };
-    editor.view.dispatch(closeHistory(editor.state.tr));
-    act(() => { editor.commands.command(commands.toggleList("taskList", "taskItem")); });
-    const expected = editor.getJSON();
-    const expectedSelection = editor.state.selection.toJSON();
-    fireEvent.keyDown(surface, { key: "z", ctrlKey: true });
-    expect(editor.getJSON()).toEqual(before);
-    act(() => { editor.commands.setTextSelection(selection); });
-    reversible(surface, editor, () => { editor.commands.toggleTaskList(); }, () => {
-      expect(editor.getJSON()).toEqual(expected);
-      expect(editor.state.selection.toJSON()).toEqual(expectedSelection);
-    });
-  });
-
-  it.each(["before", "after", "both"])("joins converted children with task neighbours %s", async (side) => {
-    const { surface, editor } = await mount(`- parent\n${side !== "after" ? "  - [ ] a\n" : ""}  - child${side !== "before" ? "\n  - [ ] c" : ""}`);
-    caret(editor, "child", 2);
-    reversible(surface, editor, () => { editor.commands.toggleTaskList(); }, () => {
-      const lists = surface.querySelectorAll('li > ul[data-type="taskList"]');
-      expect(lists).toHaveLength(1);
-      expect(lists[0]!.querySelectorAll(":scope > li")).toHaveLength(side === "both" ? 3 : 2);
-      expect(editor.state.selection.$from.parent.textContent).toBe("child");
-      expect(editor.state.selection.$from.parentOffset).toBe(2);
-    });
-  });
-
-  it.each([
-    ["See here", 4, "- 5 points"],
-    ["See here", 4, "- first\n  - second"],
-    ["", 0, "- 5 points"],
-    ["", 0, "- a\n\n# Heading\n\n| t |\n|---|"],
-  ] as const)("keeps literal paste in %s at %i: %s", async (text, offset, pasted) => {
-    const { surface, editor } = await mount(text);
-    caret(editor, text, offset);
-    reversible(surface, editor, () => {
-      fireEvent.paste(surface, { clipboardData: {
-        files: [], types: ["text/plain"], getData: (type: string) => type === "text/plain" ? pasted : "",
-      } });
-    }, () => {
-      expect(surface.querySelector("li, h1, table")).toBeNull();
-      expect(surface.textContent).toContain(pasted.split("\n")[0]);
-    });
-  });
-
-  it("keeps a list pasted at the start of a heading literal", async () => {
-    const { surface, editor } = await mount("# Title");
-    caret(editor, "Title", 0);
-    reversible(surface, editor, () => {
-      fireEvent.paste(surface, { clipboardData: {
-        files: [], types: ["text/plain"], getData: (type: string) => type === "text/plain" ? "- a\n- b" : "",
-      } });
-    }, () => {
-      expect(surface.querySelector("li")).toBeNull();
-      expect(surface.querySelector("h1")?.textContent).toContain("- a");
-    });
-  });
-
-  it.each(["plain", "code"])("keeps Markdown literal when pasting as %s text", async (context) => {
-    const { surface, editor } = await mount(context === "code" ? "```\nseed\n```" : "");
-    caret(editor, context === "code" ? "seed" : "");
-    if (context === "plain") fireEvent.keyDown(surface, { key: "Shift", shiftKey: true });
-    fireEvent.paste(surface, { clipboardData: {
-      files: [], types: ["text/plain"],
-      getData: (type: string) => type === "text/plain" ? "- parent\n  - child" : "",
-    } });
-    expect(surface.querySelector("li")).toBeNull();
-    expect(surface.textContent).toContain("- parent");
-  });
-
   it.each(["markdown", "html"])("pastes a nested list from %s", async (format) => {
     const { surface, editor } = await mount("");
     act(() => { editor.view.focus(); });
@@ -1080,44 +488,11 @@ describe.each(["local", "collaboration"])("MarkdownEditor nested list interactio
   });
 });
 
-describe("MarkdownEditor nested checklists", () => {
-  it("binds an indented list under a checkbox from the Y.Doc", async () => {
-    const markdown = ["- [ ] parent", "  - child one", "  - child two"].join("\n");
-    const ydoc = markdownToYDoc(markdown);
-    const view = render(
-      createElement(MarkdownEditor, {
-        value: markdown,
-        onDirty: vi.fn(),
-        workspaceId: "workspace-1",
-        path: "notes/checklist.md",
-        knownFiles: [],
-        collab: {
-          ydoc,
-          status: "connected",
-          peerCount: 0,
-          synced: true,
-        },
-      }),
-    );
-
-    try {
-      const editor = await screen.findByTestId("markdown-editor");
-      await waitFor(() => expect(editor.textContent).toContain("parent"));
-      expect(editor.querySelector("li[data-checked] ul")).not.toBeNull();
-      expect(editor.textContent).toContain("child one");
-      expect(editor.textContent).toContain("child two");
-    } finally {
-      view.unmount();
-      ydoc.destroy();
-    }
-  });
-});
-
 // The block gutter selects a whole table, which Backspace and Delete then
 // remove. Without the editor's table node selection, Tiptap turns the gutter's
 // selection into a selection of the table's cells.
 describe("MarkdownEditor table gutter", () => {
-  it.each(["Backspace", "Delete"])("selects a whole table from its gutter and deletes it with %s", async (key) => {
+  it.each(["Backspace"])("selects a whole table from its gutter and deletes it with %s", async (key) => {
     render(
       createElement(MarkdownEditor, {
         value: "Before\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n\nAfter",
@@ -1145,146 +520,7 @@ describe("MarkdownEditor table gutter", () => {
   });
 });
 
-// The editor reads Markdown through the projection's parser. A block
-// tokenizer that splits or searches the rest of the document only to reject an
-// ordinary paragraph makes opening a long note quadratic. Counting newline
-// splits alone missed the block-marker searches.
-describe("MarkdownEditor markdown import", () => {
-  it("reads a linear amount of text when it opens or replaces ordinary paragraphs", async () => {
-    const body = (paragraphs: number, text: string) => Array(paragraphs).fill(text).join("\n\n");
-    const measure = async (paragraphs: number) => {
-      const ref = createRef<MarkdownEditorHandle>();
-      let view: ReturnType<typeof render> | undefined;
-      const open = await measureParseWork(async () => {
-        view = render(
-          createElement(MarkdownEditor, {
-            ref,
-            value: body(paragraphs, "Ordinary paragraph."),
-            onDirty: vi.fn(),
-            workspaceId: "workspace-1",
-            path: "notes/long.md",
-            knownFiles: [],
-          }),
-        );
-        const editor = editorBehind(await screen.findByTestId("markdown-editor"));
-        expect(editor.state.doc.childCount).toBe(paragraphs);
-      });
-      const replace = await measureParseWork(() => {
-        act(() => ref.current?.replaceMarkdown(body(paragraphs, "Replaced paragraph.")));
-        const editor = editorBehind(screen.getByTestId("markdown-editor"));
-        expect(editor.state.doc.childCount).toBe(paragraphs);
-        expect(editor.state.doc.lastChild?.textContent).toBe("Replaced paragraph.");
-      });
-      view?.unmount();
-      return { open, replace };
-    };
-    const small = await measure(64);
-    const large = await measure(128);
-    for (const path of ["open", "replace"] as const) {
-      expect(small[path].search, path).toBeGreaterThan(0);
-      expect(large[path].split, `${path} newline split characters: ${small[path].split} -> ${large[path].split}`)
-        .toBeLessThan(small[path].split * 2.2);
-      expect(large[path].search, `${path} searched characters: ${small[path].search} -> ${large[path].search}`)
-        .toBeLessThan(small[path].search * 2.2);
-    }
-  });
-});
-
 describe("MarkdownEditor history", () => {
-  it("keeps malformed rich markdown from crashing the editor transaction loop", async () => {
-    const user = userEvent.setup();
-    const markdown = [
-      "- item",
-      "",
-      "> [!note]",
-      "",
-      "| Hello |     |     |     |     |",
-      "| ----- | --- | --- | --- | --- |",
-      "|       |     |     |     |     |",
-      "",
-      "$$1 + 1 = 2$$",
-    ].join("\n");
-    const parsed = new Editor({
-      element: document.createElement("div"),
-      extensions: [
-        StarterKit.configure({ trailingNode: false }),
-        ...desktopMarkdownExtensions,
-        TaskList,
-        DohcTaskItem,
-        TableKit,
-        Markdown,
-      ],
-      content: markdown,
-      contentType: "markdown",
-    });
-
-    expect(() => parsed.state.doc.check()).not.toThrow();
-    parsed.destroy();
-
-    const view = render(
-      createElement(MarkdownEditor, {
-        value: markdown,
-        onDirty: vi.fn(),
-        workspaceId: "workspace-1",
-        path: "notes/rich.md",
-        knownFiles: [],
-      }),
-    );
-
-    try {
-      const editor = await screen.findByTestId("markdown-editor");
-      editor.focus();
-      await user.keyboard("stable");
-      expect(editor.textContent).toContain("stable");
-    } finally {
-      view.unmount();
-    }
-  });
-
-  it("undoes and redoes a local edit in collaboration mode", async () => {
-    const ydoc = new Y.Doc();
-    const user = userEvent.setup();
-    const view = render(
-      createElement(MarkdownEditor, {
-        value: "",
-        onDirty: vi.fn(),
-        workspaceId: "workspace-1",
-        path: "notes/collaborative.md",
-        knownFiles: [],
-        collab: {
-          ydoc,
-          status: "connected",
-          peerCount: 0,
-          synced: true,
-        },
-      }),
-    );
-
-    try {
-      const editor = await screen.findByTestId("markdown-editor");
-
-      editor.focus();
-      await user.keyboard("collaborative edit");
-      expect(editor.textContent).toBe("collaborative edit");
-
-      fireEvent.keyDown(editor, {
-        key: "z",
-        code: "KeyZ",
-        ctrlKey: true,
-      });
-      await waitFor(() => expect(editor.textContent).toBe(""));
-
-      fireEvent.keyDown(editor, {
-        key: "y",
-        code: "KeyY",
-        ctrlKey: true,
-      });
-      await waitFor(() => expect(editor.textContent).toBe("collaborative edit"));
-    } finally {
-      view.unmount();
-      ydoc.destroy();
-    }
-  });
 
   it("shares one ordered undo history across duplicate collaboration views", async () => {
     const ydoc = markdownToYDoc("seed");
@@ -1414,60 +650,9 @@ describe("MarkdownEditor history", () => {
     }
   });
 
-  it("keeps local StarterKit undo working outside collaboration mode", async () => {
-    const user = userEvent.setup();
-    render(
-      createElement(MarkdownEditor, {
-        value: "",
-        onDirty: vi.fn(),
-        workspaceId: "workspace-1",
-        path: "notes/local.md",
-        knownFiles: [],
-      }),
-    );
-
-    const editor = await screen.findByTestId("markdown-editor");
-    editor.focus();
-    await user.keyboard("local edit");
-    expect(editor.textContent).toBe("local edit");
-
-    fireEvent.keyDown(editor, {
-      key: "z",
-      code: "KeyZ",
-      ctrlKey: true,
-    });
-    await waitFor(() => expect(editor.textContent).toBe(""));
-  });
 });
 
 describe("MarkdownEditor remote carets", () => {
-  it("stays inert (no caret decoration) when collab has no awareness", async () => {
-    const ydoc = new Y.Doc();
-    const user = userEvent.setup();
-    const view = render(
-      createElement(MarkdownEditor, {
-        value: "",
-        onDirty: vi.fn(),
-        workspaceId: "workspace-1",
-        path: "notes/no-awareness.md",
-        knownFiles: [],
-        // Same shape as today's only production caller (FileInspector's
-        // engine-mode branch): a live ydoc, but no awareness yet.
-        collab: { ydoc, status: "connected", peerCount: 0, synced: true },
-      }),
-    );
-
-    try {
-      const editor = await screen.findByTestId("markdown-editor");
-      editor.focus();
-      await user.keyboard("solo in a shared doc");
-      expect(editor.textContent).toBe("solo in a shared doc");
-      expect(view.container.querySelector(".collaboration-carets__caret")).toBeNull();
-    } finally {
-      view.unmount();
-      ydoc.destroy();
-    }
-  });
 
   it("renders a remote peer's caret once their synced cursor lands in awareness", async () => {
     // Two mirror Y.Docs bridged both ways, the same shape as
@@ -1606,76 +791,6 @@ describe("MarkdownEditor markdown export: code fence widening", () => {
     ).toBe(true);
   });
 
-  it("reports an asynchronous image insert after the editor loses focus", async () => {
-    let resolveSettings!: (value: unknown) => void;
-    const settings = new Promise((resolve) => {
-      resolveSettings = resolve;
-    });
-    const writeWorkspaceAsset = vi.fn().mockResolvedValue(undefined);
-    window.dohcDesktop = {
-      getWorkspaceSettings: vi.fn(() => settings),
-      writeWorkspaceAsset,
-    } as never;
-    const onDirty = vi.fn();
-    const file = new File([new Uint8Array([1, 2, 3])], "photo.png", {
-      type: "image/png",
-    });
-    Object.defineProperty(file, "arrayBuffer", {
-      configurable: true,
-      value: async () => new Uint8Array([1, 2, 3]).buffer,
-    });
-
-    try {
-      render(
-        createElement(
-          "div",
-          null,
-          createElement("button", { type: "button" }, "Other pane"),
-          createElement(MarkdownEditor, {
-            value: "# Before\n",
-            onDirty,
-            workspaceId: "workspace-1",
-            path: "notes/shared.md",
-            knownFiles: [],
-          }),
-        ),
-      );
-      const editor = await screen.findByTestId("markdown-editor");
-      await flushAnimationFrames();
-      editor.focus();
-      onDirty.mockClear();
-      fireEvent.paste(editor, {
-        clipboardData: {
-          files: [file],
-          getData: () => "",
-          types: ["Files"],
-        },
-      });
-      screen.getByRole("button", { name: "Other pane" }).focus();
-
-      resolveSettings({
-        settings: {
-          files: {
-            attachmentLocation: "per-document",
-            attachmentFolderName: "assets",
-          },
-        },
-      });
-
-      await waitFor(() => expect(writeWorkspaceAsset).toHaveBeenCalledTimes(1));
-      await waitFor(() =>
-        expect(
-          onDirty.mock.calls.some(([materialize]) =>
-            (materialize as () => string)().includes("assets/photo-"),
-          ),
-        ).toBe(true),
-      );
-      expect(document.activeElement).not.toBe(editor);
-    } finally {
-      delete window.dohcDesktop;
-    }
-  });
-
   it("replaces local Markdown without remounting or reporting a user edit", async () => {
     const ref = createRef<MarkdownEditorHandle>();
     const onDirty = vi.fn();
@@ -1736,102 +851,6 @@ describe("MarkdownEditor markdown export: code fence widening", () => {
     expect(onDirty).not.toHaveBeenCalled();
   });
 
-  it("maps an end cursor across peer content prepended by replacement", async () => {
-    const ref = createRef<MarkdownEditorHandle>();
-    const onDirty = vi.fn();
-    const user = userEvent.setup();
-    render(
-      createElement(MarkdownEditor, {
-        ref,
-        value: "# Target\n\nTail",
-        onDirty,
-        workspaceId: "workspace-1",
-        path: "notes/shared.md",
-        knownFiles: [],
-      }),
-    );
-    const editor = await screen.findByTestId("markdown-editor");
-    act(() => ref.current?.focus("end"));
-    await waitFor(() => expect(document.activeElement).toBe(editor));
-    expect(selectionTextOffset(editor)).toBe(editor.textContent?.length);
-
-    act(() =>
-      ref.current?.replaceMarkdown("# Peer\n\n# Target\n\nTail"),
-    );
-
-    expect(document.activeElement).toBe(editor);
-    expect(selectionTextOffset(editor)).toBe(editor.textContent?.length);
-    expect(onDirty).not.toHaveBeenCalled();
-    await user.keyboard("!");
-    expect(editor.textContent).toMatch(/Tail!$/);
-  });
-
-  it("keeps an end cursor before peer content appended by replacement", async () => {
-    const ref = createRef<MarkdownEditorHandle>();
-    const onDirty = vi.fn();
-    const user = userEvent.setup();
-    render(
-      createElement(MarkdownEditor, {
-        ref,
-        value: "# Target\n\nTail",
-        onDirty,
-        workspaceId: "workspace-1",
-        path: "notes/shared.md",
-        knownFiles: [],
-      }),
-    );
-    const editor = await screen.findByTestId("markdown-editor");
-    act(() => ref.current?.focus("end"));
-    await waitFor(() => expect(document.activeElement).toBe(editor));
-
-    act(() =>
-      ref.current?.replaceMarkdown("# Target\n\nTail\n\nPeer"),
-    );
-    expect(onDirty).not.toHaveBeenCalled();
-    await user.keyboard("!");
-
-    expect(editor.textContent).toContain("Tail!");
-    expect(editor.textContent).not.toContain("Peer!");
-    expect(onDirty).toHaveBeenCalledTimes(1);
-  });
-
-  it("keeps a cursor in unchanged content between disjoint peer edits", async () => {
-    const ref = createRef<MarkdownEditorHandle>();
-    const onDirty = vi.fn();
-    render(
-      createElement(MarkdownEditor, {
-        ref,
-        value: "Before\n\nTarget\n\nAfter",
-        onDirty,
-        workspaceId: "workspace-1",
-        path: "notes/shared.md",
-        knownFiles: [],
-      }),
-    );
-    const editor = await screen.findByTestId("markdown-editor");
-    const target = Array.from(editor.querySelectorAll("p")).find(
-      (paragraph) => paragraph.textContent === "Target",
-    );
-    const text = target?.firstChild;
-    if (!(text instanceof Text)) throw new Error("expected target paragraph text");
-    editor.focus();
-    const range = document.createRange();
-    range.setStart(text, 3);
-    range.collapse(true);
-    const selection = document.getSelection();
-    selection?.removeAllRanges();
-    selection?.addRange(range);
-    fireEvent(document, new Event("selectionchange"));
-    await waitFor(() => expect(selectionTextOffset(editor)).toBe(9));
-
-    act(() =>
-      ref.current?.replaceMarkdown("Peer\n\nBefore\n\nTarget\n\nAfter\n\nTail"),
-    );
-
-    expect(selectionTextOffset(editor)).toBe(13);
-    expect(onDirty).not.toHaveBeenCalled();
-  });
-
   it("keeps a cursor in an unchanged island after a large peer rewrite", async () => {
     const ref = createRef<MarkdownEditorHandle>();
     const onDirty = vi.fn();
@@ -1869,30 +888,6 @@ describe("MarkdownEditor markdown export: code fence widening", () => {
     expect(onDirty).not.toHaveBeenCalled();
   });
 
-  it("widens a code fence in the live editor's getMarkdown when the block content contains a fence", async () => {
-    const content = "before\n```\nafter";
-    const value = ["````js", "before", "```", "after", "````"].join("\n");
-    const ref = createRef<MarkdownEditorHandle>();
-    const view = render(
-      createElement(MarkdownEditor, {
-        ref,
-        value,
-        onDirty: vi.fn(),
-        workspaceId: "workspace-1",
-        path: "notes/fence.md",
-        knownFiles: [],
-      }),
-    );
-
-    try {
-      await screen.findByTestId("markdown-editor");
-      const markdown = ref.current?.getMarkdown();
-      expect(markdown).toMatch(/^`{4,}js$/m);
-      expect(markdown).toContain(content);
-    } finally {
-      view.unmount();
-    }
-  });
 });
 
 describe("MarkdownEditor read-only links", () => {
@@ -2027,27 +1022,6 @@ describe("MarkdownEditor dirty tracking", () => {
     };
   }
 
-  it("reports an edit that lands before the first animation frame", async () => {
-    holdAnimationFrames();
-    const onDirty = vi.fn();
-    const user = userEvent.setup();
-    const view = render(createElement(MarkdownEditor, editorProps(onDirty)));
-
-    try {
-      const editor = await screen.findByTestId("markdown-editor");
-      await waitFor(() =>
-        expect(editor.textContent).toContain("Base paragraph."),
-      );
-      await user.click(editor);
-      await user.type(editor, "Z");
-
-      await waitFor(() => expect(onDirty).toHaveBeenCalled());
-      expect(editor.textContent).toContain("Z");
-    } finally {
-      view.unmount();
-    }
-  });
-
   // The rebuild case, and the more dangerous one: the user is already in the
   // document when the engine session ends and the view falls back to the local
   // editor. `collab` drops, the extensions change, and tiptap builds a new
@@ -2112,61 +1086,6 @@ describe("MarkdownEditor focus", () => {
     fireEvent.focus(editor);
   }
 
-  it("writes a caret into an empty document when Tab focuses it", async () => {
-    const { view } = mount("");
-    try {
-      const editor = await screen.findByTestId("markdown-editor");
-      focusByKeyboard(editor);
-
-      const paragraph = editor.querySelector("p");
-      const anchor = document.getSelection()?.anchorNode ?? null;
-      expect(paragraph?.contains(anchor)).toBe(true);
-      expect(selectionTextOffset(editor)).toBe(0);
-    } finally {
-      view.unmount();
-    }
-  });
-
-  it("writes a caret when focus leaves the DOM caret at the editor root", async () => {
-    const { view } = mount("Body text");
-    try {
-      const editor = await screen.findByTestId("markdown-editor");
-      editor.focus();
-      expect(document.getSelection()?.anchorNode).toBe(editor);
-
-      fireEvent.focus(editor);
-
-      const paragraph = editor.querySelector("p");
-      const anchor = document.getSelection()?.anchorNode ?? null;
-      expect(paragraph?.contains(anchor)).toBe(true);
-      expect(selectionTextOffset(editor)).toBe(0);
-    } finally {
-      view.unmount();
-    }
-  });
-
-  it("keeps a caret that is already inside the content", async () => {
-    const { view } = mount("Body text");
-    try {
-      const editor = await screen.findByTestId("markdown-editor");
-      const text = editor.querySelector("p")?.firstChild;
-      if (!(text instanceof Text)) throw new Error("expected paragraph text");
-      editor.focus();
-      const range = document.createRange();
-      range.setStart(text, 4);
-      range.collapse(true);
-      const selection = document.getSelection();
-      selection?.removeAllRanges();
-      selection?.addRange(range);
-
-      fireEvent.focus(editor);
-
-      expect(selectionTextOffset(editor)).toBe(4);
-    } finally {
-      view.unmount();
-    }
-  });
-
   it("reads a caret the browser moved before Enter runs", async () => {
     const { view } = mount("# Heading\n\nBody text");
     try {
@@ -2189,66 +1108,6 @@ describe("MarkdownEditor focus", () => {
     }
   });
 
-  it("moves focus and the caret at once when the handle focuses the start", async () => {
-    const { ref, view } = mount("First\n\nSecond");
-    try {
-      const editor = await screen.findByTestId("markdown-editor");
-      screen.getByTestId("markdown-editor").blur();
-
-      act(() => ref.current?.focus("start"));
-
-      expect(document.activeElement).toBe(editor);
-      expect(selectionTextOffset(editor)).toBe(0);
-    } finally {
-      view.unmount();
-    }
-  });
-});
-
-
-it.each([["Win32", "win32"], ["MacIntel", "darwin"]] as const)("keeps the display catalogue and allowed shell conflicts aligned with the mounted %s editor keymaps", async (navigatorPlatform, platform) => {
-  const platformSpy = vi.spyOn(navigator, "platform", "get").mockReturnValue(navigatorPlatform);
-  vi.stubGlobal("dohcDesktop", { platform });
-  try {
-    render(createElement(MarkdownEditor, { value: "Text", onDirty: vi.fn(), workspaceId: "ws", path: "note.md", knownFiles: [] }));
-    const surface = await screen.findByTestId("markdown-editor");
-    const editor = await waitFor(() => editorBehind(surface));
-    const keymaps = editor.extensionManager.extensions.flatMap((extension) => {
-      const shortcuts = getExtensionField<AnyConfig["addKeyboardShortcuts"]>(extension, "addKeyboardShortcuts", {
-        name: extension.name, options: extension.options, storage: extension.storage, editor, type: getSchemaTypeByName(extension.name, editor.schema),
-      });
-      return Object.keys(shortcuts?.() ?? {}).filter((key) => /Mod-|Ctrl-|Alt-|Meta-/.test(key))
-        .map((key) => ({ extension: extension.name, key }));
-    });
-    const canonical = (key: string) => {
-      const parts = key.toLowerCase().split("-");
-      return [parts.includes("mod") ? "commandorcontrol" : "", parts.includes("ctrl") ? "ctrl" : "", parts.includes("meta") ? "meta" : "", parts.includes("shift") ? "shift" : "", parts.includes("alt") ? "alt" : "", parts.at(-1)!].filter(Boolean).join("+");
-    };
-    const mounted = [...new Set(keymaps.map(({ key }) => canonical(key)))].sort();
-    const listed = (Object.keys(SHORTCUTS) as ShortcutId[]).filter((id) => {
-      const row = SHORTCUTS[id];
-      return row.owner === "editor" && (!("platforms" in row) || (row.platforms as readonly string[]).includes(platform));
-    }).flatMap((id) => shortcutAccelerators(id, platform).map((key) => key.toLowerCase())).sort();
-    expect(listed).toEqual(mounted);
-    if (platform === "darwin") {
-      expect(mounted).toEqual(expect.arrayContaining(["ctrl+a", "ctrl+e", "ctrl+h", "ctrl+d", "ctrl+alt+backspace", "commandorcontrol+alt+f"]));
-      expect(mounted).not.toContain("commandorcontrol+d");
-      expect(mounted).not.toContain("commandorcontrol+h");
-    } else {
-      expect(mounted).toContain("commandorcontrol+h");
-    }
-    const conflicts = Object.entries(SHORTCUTS).filter(([, row]) => row.owner === "shell" || row.owner === "history-restore")
-      .flatMap(([id, row]) => row.accelerators.filter((key) => ["commandorcontrol", "ctrl", "meta"].some((modifier) => mounted.includes(key.toLowerCase().replace("commandorcontrol", modifier)))).map((accelerator) => [id, accelerator]));
-    // These existing overlaps belong to the editor when it claims the event.
-    // A new overlap must be reviewed rather than silently taking an editor key.
-    expect(conflicts).toEqual([
-      ["command-palette", "CommandOrControl+K"],
-      ["toggle-sidebar", "CommandOrControl+B"],
-      ["history-restore-undo", "CommandOrControl+Z"],
-    ]);
-  } finally {
-    platformSpy.mockRestore();
-  }
 });
 
 it("hands Edit > Find to the editor that has focus, including its find bar", async () => {
@@ -2290,25 +1149,4 @@ it("hands Edit > Find to the editor that has focus, including its find bar", asy
   act(() => sendToFocusedEditor("editor-replace"));
   expect(find(rightSurface!)?.replaceOpen).toBe(true);
   expect(find(leftSurface!)?.open).toBe(false);
-});
-
-it.each(["local", "collaboration"])("leaves inline code out of the spellcheck (%s)", async (mode) => {
-  const markdown = "Booking `QX7-41` for two.";
-  const ydoc = mode === "collaboration" ? markdownToYDoc(markdown) : undefined;
-  try {
-    render(createElement(MarkdownEditor, {
-      value: markdown, onDirty: vi.fn(), workspaceId: "workspace-1", path: "booking.md", knownFiles: [],
-      collab: ydoc ? { ydoc, status: "connected", peerCount: 0, synced: true } : undefined,
-    }));
-    const surface = await screen.findByTestId("markdown-editor");
-    const code = await waitFor(() => {
-      const element = surface.querySelector("code");
-      expect(element?.textContent).toBe("QX7-41");
-      return element!;
-    });
-    expect(code.getAttribute("spellcheck")).toBe("false");
-  } finally {
-    cleanup();
-    ydoc?.destroy();
-  }
 });

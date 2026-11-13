@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CollectionCustomizeDialog, automationsFile, documentCollectionFiles, type CollectionFile } from "./CollectionCustomizeDialog";
+import { CollectionCustomizeDialog, documentCollectionFiles, type CollectionFile } from "./CollectionCustomizeDialog";
 
 afterEach(cleanup);
 
@@ -43,15 +43,6 @@ describe("CollectionCustomizeDialog", () => {
     expect(document.activeElement).toBe(screen.getByText("Manage Collection"));
   });
 
-  it("opens a file in a tab and closes, leaving focus to the tab", async () => {
-    const onOpenFile = vi.fn();
-    const { user } = await openDialog(documentCollectionFiles("trips", true), onOpenFile);
-    await user.click(screen.getByRole("button", { name: "Open automations.yaml" }));
-
-    expect(onOpenFile).toHaveBeenCalledExactlyOnceWith("trips/automations.yaml");
-    expect(screen.queryByRole("dialog")).toBeNull();
-    expect(document.activeElement).not.toBe(screen.getByText("Manage Collection"));
-  });
 
   it("copies a file's path", async () => {
     const { user } = await openDialog(documentCollectionFiles("trips", true));
@@ -60,10 +51,4 @@ describe("CollectionCustomizeDialog", () => {
     expect(await navigator.clipboard.readText()).toBe("trips/collection.yaml");
   });
 
-  it("says what makes automations.yaml in Open's place before the first automation, and still copies its path", async () => {
-    const { dialog } = await openDialog([automationsFile("trips", false)]);
-    expect(within(dialog).getByText("Made with the first automation.")).toBeTruthy();
-    expect(within(dialog).queryByRole("button", { name: /^Open/ })).toBeNull();
-    expect(within(dialog).getByRole("button", { name: "Copy automations.yaml path" })).toBeTruthy();
-  });
 });

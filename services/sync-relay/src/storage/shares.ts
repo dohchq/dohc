@@ -21,6 +21,7 @@ import {
   type SyncRelayIndependentGrantInventoryPage,
 } from "./types";
 import { accountIsFenced } from "./accountDeletion";
+import { advanceNoticeHead } from "./notices";
 import { type StorageContext } from "./context";
 import { nextShareDiscussionRevision } from "./discussion";
 import { currentShareGrantSql, readCurrentShareGrant } from "./currentShareGrant";
@@ -74,6 +75,8 @@ export function createShare(storage: StorageContext, input: {
       storage.db.prepare(
         "INSERT INTO sync_relay_share_notice_deliveries (grant_id, created_at_ms) VALUES (?, ?)",
       ).run(input.grant.grantId, Math.trunc(input.grant.createdAtMs));
+      // Its person's list moves on with it, so a read waiting on the old head answers and the next read delivers it.
+      if (recipient !== null) advanceNoticeHead(storage, recipient);
       return true;
     });
   }

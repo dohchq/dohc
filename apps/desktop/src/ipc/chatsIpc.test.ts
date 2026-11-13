@@ -1,5 +1,5 @@
 import { createChatLinksReader } from "../workspaces/chatLinks";
-import { chatLinks as mcpChatLinks } from "@dohc/mcp/tools";
+import { requestDeclaredTool } from "@dohc/mcp/tools";
 import { executeCli } from "@dohc/cli";
 import { CLI_PROTOCOL_VERSION, type CliRequestWithoutToken } from "@dohc/cli/protocol";
 import { handleCliRequestLine, type CliServerOptions, type CliWorkspaceContext } from "../cli/cliServer";
@@ -1198,7 +1198,7 @@ it("IPC, CLI and MCP share Links, cursors, omissions and conversation admission"
   const options:CliServerOptions={
     chatWrites:h.chatWrites,localUserDisplayName:()=>"Sam",localPersonId:()=>"local",agentRunDepth:()=>0,dispatchedAgent:()=>null,dispatchedRunId:()=>null,dispatchedRunSecret:()=>null,agentWriteRunId:()=>null,agentRunWorkspace:()=>undefined,connectedAgent:async()=>null,
     stateDir:root,listWorkspaces:()=>[{workspaceId:"workspace",rootPath:root,readOnly:true}],
-    chatLinks:(workspace,input)=>h.chatLinks(workspace.workspaceId,input),
+    reads:{chatLinks:(workspace,input)=>h.chatLinks(workspace.workspaceId,input)},
     openWorkspace:async()=>{throw Error("CLI Links must use the shared reader");},
   };
   const request=async(value:CliRequestWithoutToken,serverOptions=options)=>{
@@ -1219,7 +1219,7 @@ it("IPC, CLI and MCP share Links, cursors, omissions and conversation admission"
   expect(cli.exitCode).toBe(0);
   const {schemaVersion:_,...groupPage}=JSON.parse(cli.stdout);
   expect(groupPage).toEqual(ipc);
-  const mcp=await mcpChatLinks({root,home:root,shareAccess:"view",request:value=>request(value)},{channelWireId:"wire",cursor:"sealed"});
+  const mcp=await requestDeclaredTool({root,home:root,shareAccess:"view",request:value=>request(value)},"dohc_chat_links",{channelWireId:"wire",cursor:"sealed"});
   expect(cliPage).toEqual(ipc);expect(mcp).toEqual(ipc);
   const calls=h.storeMethods.linksPage.mock.calls.map(([input])=>input);
   expect(calls).toHaveLength(4);
@@ -1227,7 +1227,7 @@ it("IPC, CLI and MCP share Links, cursors, omissions and conversation admission"
   expect(JSON.stringify(ipc)).not.toMatch(/secret|authorUserId|authorActorKey/);
   h.resolveEngineFiles.mockResolvedValue([{status:"absent"}]);
   const denied=await h.invoke("desktop:chat-links",{workspaceId:"workspace",channelWireId:"wire"});
-  expect(await mcpChatLinks({root,home:root,request:value=>request(value)},{channelWireId:"wire"})).toEqual(denied);
+  expect(await requestDeclaredTool({root,home:root,request:value=>request(value)},"dohc_chat_links",{channelWireId:"wire"})).toEqual(denied);
   h.storeMethods.listChannels.mockResolvedValue([]);
   expect(await h.invoke("desktop:chat-links",{workspaceId:"workspace",channelWireId:"wire"})).toBeNull();
   expect(await request({protocolVersion:CLI_PROTOCOL_VERSION,verb:"chatLinks",args:{cwd:root,actor:"agent",channelWireId:"wire"}})).toBeNull();

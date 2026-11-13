@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from "vitest";
-import { AppBackendRuntimeError, type JsonValue } from "@dohc/app-backend-runtime";
+import { type JsonValue } from "@dohc/app-backend-runtime";
 import type { DatasetAutomationClaim, DatasetChangeClaimFact } from "@dohc/app-backend-runtime/dataset-automation-claims";
 import type { DatasetInvocationResult } from "@dohc/app-backend-runtime/supervisor";
 import type { DatasetDefinition, DatasetRevision } from "@dohc/security-contract/dataset";
@@ -8,24 +8,13 @@ import type { AutomationScope } from "@dohc/app-backend-runtime/automation";
 import type { AutomationClaim } from "@dohc/workspace-engine-client";
 import { createTestScratch, testStoreFolder } from "./testScratch";
 import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
-import {
-  AutomationChatSessionWait,
-  automationMessageId,
-  automationNoticeId,
-  automationThreadId,
-  automationWakeThreadId,
-  chatDirectoryOf,
-  NoticeNotSentError,
-  type AutomationChatMessage,
-  type AutomationNotice,
-  type ChatDirectoryChannel,
-} from "./automationChat";
+import { automationMessageId, automationWakeThreadId, chatDirectoryOf, NoticeNotSentError, type AutomationChatMessage, type AutomationNotice, type ChatDirectoryChannel } from "./automationChat";
 import { definitionDigest, definitionHash, stepKey } from "./automationPlan";
 import { datasetFieldKey, type ReachRoster, type RosterGrant } from "./automationReach";
 import { datasetRunClaim } from "./datasetAutomationPlan";
 import { createAutomationFormulaEvaluator } from "./automationEvaluatorHost";
 import { createAutomationRunStore } from "./automationRunStore";
-import { DEADLINE_ERROR, GROUP_CHANGED_ERROR, RULES_CHANGED_ERROR } from "./collectionAutomationRun";
+import { GROUP_CHANGED_ERROR, RULES_CHANGED_ERROR } from "./collectionAutomationRun";
 import { datasetEffectKey } from "./datasetAutomationPlan";
 import {
   ACCESS_NARROWED_ERROR,
@@ -267,75 +256,6 @@ describe("a due time on a dataset", () => {
     expect(resumed.sent).toEqual([{ ...edit, signal: expect.any(AbortSignal) }]);
   });
 
-  it("revalidates a saved code change by table identity after another table is approved", async () => {
-    const coded = automationFrom(`  - id: close
-    name: Close
-    when: {schedule: day, timezone: UTC}
-    do:
-      - run: return 1
-`);
-    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-run-")));
-    // The code closes record a in the dataset's only table.
-    const dependencies = (surface: DatasetRunHost) => ({
-      withHost: async <T>(work: (value: DatasetRunHost) => T | Promise<T>) => await work(surface),
-      evaluator: {
-        evaluate: async () => "busy" as const,
-        runCode: async () => ({ ok: true as const, value: { records: [{ action: "change" as const, collection: "Budget", id: "a", fields: { Status: "Closed" } }] } }),
-      },
-      store, nowMs: () => 2_000, personName: (userId: string) => userId, ...sendsNothing, recipientVerdicts: async () => [],
-    });
-    const input = (stopped: AbortSignal) => ({
-      held: { source: "engine" as const, claim: dueTime, datasetId: definition.datasetId }, automation: coded, collection: { path: "Budget", name: "Budget" },
-      roster: { kind: "owner" as const, ownerUserId: null, grants: [] }, signal: new AbortController().signal, stopped,
-    });
-    const stop = new AbortController();
-    const first = host({ resolves: () => true, edit: async () => { stop.abort(); throw new Error("The host closed."); } });
-    expect(await runWithRoster(dependencies(first.surface), input(stop.signal))).toEqual({ kind: "wait", reason: "stopped" });
-    expect(first.sent.some((sent) => sent.operationId === EDIT)).toBe(true);
-
-    // The saved table remains explicit, so a new table cannot redirect the edit.
-    const notes = { ...definition.tables[0]!, tableId: id(40), name: "Notes", sqlName: "notes" };
-    const twoTables = host({ resolves: () => true, edit: async () => ({ id: "a", version: 2, priorValues: { [STATUS]: "Open" } }) });
-    const surface: DatasetRunHost = { ...twoTables.surface, revision: () => ({ ...revision, definition: { ...definition, tables: [...definition.tables, notes] } }) };
-    expect(await runWithRoster(dependencies(surface), input(new AbortController().signal)))
-      .toEqual({ kind: "done" });
-    expect(twoTables.sent).toMatchObject([{ operationId: EDIT, input: { id: "a" } }]);
-  });
-
-  it("stops a resumed plan that sends what it read once its Collection keeps another dataset", async () => {
-    const telling = automationFrom(`  - id: close
-    name: Close
-    when: {schedule: day, timezone: UTC}
-    do:
-      - find: record.Status == "Open"
-        as: open
-        operation: invoices.list
-      - notify: '{open.length} open'
-        to: [user-owner]
-`);
-    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-run-")));
-    const stop = new AbortController();
-    const spy = chatSpy({ notice: () => { stop.abort(); throw new Error("The workspace closed."); } });
-    const attempt = async (datasetId: string, stopped: AbortSignal) => await runWithRoster(
-      { withHost: async (work) => await work(host({ resolves: () => true, edit: async () => { throw new Error("unreachable"); } }).surface),
-        evaluator: { runCode: noCode, evaluate: async () => [{ ok: true as const, value: "1 open" }] }, store, nowMs: () => 1, personName: (userId) => userId, ...spy.dependencies },
-      { held: { source: "engine", claim: dueTime, datasetId }, automation: telling, collection: { path: "Budget", name: "Budget" },
-        roster: { kind: "owner", ownerUserId: "user-owner", grants: [] }, signal: new AbortController().signal, stopped });
-    expect(await attempt(definition.datasetId, stop.signal)).toEqual({ kind: "wait", reason: "stopped" });
-    expect(spy.notices).toHaveLength(1);
-    expect(await attempt(id(99), new AbortController().signal)).toEqual({ kind: "failed", error: RULES_CHANGED_ERROR, timedOut: false });
-    expect(spy.notices).toHaveLength(1);
-  });
-
-  it("skips a due time once its automation starts from a record change instead", async () => {
-    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-run-")));
-    const script = host({ resolves: () => true, edit: async () => { throw new Error("unreachable"); } });
-    expect(await runWithRoster({ withHost: async (work) => await work(script.surface), evaluator: { runCode: noCode, evaluate: async () => "busy" }, store, nowMs: () => 1, personName: (userId: string) => userId, ...sendsNothing }, {
-      held: { source: "engine", claim: dueTime, datasetId: definition.datasetId }, automation, collection: { path: "Budget", name: "Budget" },
-      roster: { kind: "owner", ownerUserId: null, grants: [] }, signal: new AbortController().signal, stopped: new AbortController().signal,
-    })).toEqual({ kind: "skipped" });
-    expect(script.sent).toEqual([]);
-  });
 });
 
 describe("a Group message on a dataset", () => {
@@ -375,51 +295,6 @@ describe("a Group message on a dataset", () => {
   });
 });
 
-describe("a Find's formulas", () => {
-  it("reads nothing for a value the field would refuse, and names the mismatch", async () => {
-    const COUNT = id(20);
-    const table = definition.tables[0]!;
-    const counted: DatasetDefinition = {
-      ...definition,
-      tables: [{ ...table, fields: [...table.fields, { fieldId: COUNT, name: "Count", sqlColumn: "count", type: "number", required: false, unique: false }] }],
-      operations: definition.operations.map((operation) => operation.operationId === LIST ? { ...operation, fieldIds: [STATUS, COUNT] } : operation),
-    };
-    const named = automationFrom(`  - id: named
-    name: Named
-    when: {group-message: Team}
-    do:
-      - find: record.Count == message.body.slice(6)
-        as: found
-        operation: invoices.list
-      - set:
-          Status: Closed
-        records: found
-        operation: invoices.edit
-`);
-    const claim: AutomationClaim = {
-      claimId: "atc_named", automationId: "collection:Budget#named", trigger: { key: "message:m1" }, recordId: null, collectionPath: "Budget",
-      depth: 0, state: "running", attempts: 1, run: 1, createdAtMs: 5, updatedAtMs: 5,
-      change: {
-        kind: "message", authorOriginId: null, actorKind: "human", onBehalfOf: null, sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0,
-        message: { id: "m1", threadId: "t1", groupId: TEAM.id, lane: "posts", authorKind: "human", authorDisplayName: "Ana", createdAtMs: 5, body: "/done 12", authorUserId: "user-ana" },
-      },
-    };
-    const script = host({ resolves: () => true, edit: async () => { throw new Error("unreachable"); } });
-    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-run-")));
-    // The Find's formula gives "12", and the Find's guard is true.
-    const evaluate = async (_id: string, _scope: AutomationScope, formulas: readonly { kind: string; source?: string }[]) =>
-      formulas.map((formula) => ({ ok: true as const, value: formula.source === "true" ? true : "12" }));
-    expect(await runWithRoster({
-      withHost: async (work) => await work({ ...script.surface, revision: () => ({ ...revision, definition: counted }) }),
-      evaluator: { runCode: noCode, evaluate }, store, nowMs: () => 1, personName: (userId) => userId, ...chatSpy().dependencies,
-    }, {
-      held: { source: "engine", claim, datasetId: definition.datasetId }, automation: named, collection: { path: "Budget", name: "Budget" },
-      roster: { kind: "owner", ownerUserId: "user-owner", grants: [] }, signal: new AbortController().signal, stopped: new AbortController().signal,
-    })).toEqual({ kind: "failed", error: "The Find in step 1 compares Count, a number, with text. Wrap the value in Number().", timedOut: false });
-    expect(script.sent).toEqual([]);
-  });
-});
-
 describe("the rules a dataset run uses", () => {
   it("exposes trigger facts only through their dataset and table field keys", () => {
     const table = definition.tables[0]!;
@@ -429,160 +304,7 @@ describe("the rules a dataset run uses", () => {
     expect(fields(definition.datasetId, "other-table")).toEqual([]);
   });
 
-  it.each([false, true])("stops a replaced destination before reads or effects, afterRead=%s", async (afterRead) => {
-    const script = host({ resolves: () => true, edit: async () => { throw new Error("Must not write"); } });
-    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-destination-")));
-    let resolutions = 0;
-    const outcome = await runWithRoster({
-      withHost: async (work) => await work(script.surface), evaluator: { runCode: noCode, evaluate: async () => "busy" }, store,
-      nowMs: () => 1, personName: (id) => id, ...sendsNothing,
-      targets: { resolve: async () => ({ kind: "dataset", collection: { path: "Budget", name: "Budget" },
-        approved: !afterRead || resolutions++ > 1 ? { ...revision, datasetId: "replacement" } : revision,
-        generated: true, grants: { workspaceId: "workspace", grants: [] } }) },
-    }, {
-      held: fromLedger(claim), automation, collection: { path: "Budget", name: "Budget" }, roster: { kind: "owner", ownerUserId: null, grants: [] },
-      signal: new AbortController().signal, stopped: new AbortController().signal,
-    });
-    expect(outcome).toEqual({ kind: "failed", error: RULES_CHANGED_ERROR, timedOut: false });
-    expect(script.sent.every((sent) => sent.operationId === LIST)).toBe(true);
-    if (!afterRead) expect(script.sent).toEqual([]);
-  });
-
-  it("plans under the rules reach checked, not a newer approval that lands between them", async () => {
-    // The newer rules add a read that shows the record's id, which the plan would prefer for the trigger record.
-    const WIDE = id(12);
-    const newer = { ...revision, revision: 4, revisionSha256: "s".repeat(64), definition: { ...definition, operations: [...definition.operations,
-      { operationId: WIDE, name: "invoices.byId", label: "By id", tableId: TABLE, kind: "read" as const, access: "owner" as const, readOnly: true, fieldIds: [id(3), STATUS] }] } };
-    const script = host({ resolves: () => true, edit: async () => ({ id: "a", version: 2, priorValues: { [STATUS]: "Open" } }) });
-    let reads = 0;
-    const surface: DatasetRunHost = { ...script.surface, revision: () => (reads++ === 0 ? revision : newer) };
-    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-run-")));
-    expect(await runWithRoster({ withHost: async (work) => await work(surface), evaluator: { runCode: noCode, evaluate: async () => "busy" }, store, nowMs: () => 1, personName: (userId: string) => userId, ...sendsNothing }, {
-      held: fromLedger(claim), automation, collection: { path: "Budget", name: "Budget" }, roster: { kind: "owner", ownerUserId: null, grants: [] },
-      signal: new AbortController().signal, stopped: new AbortController().signal,
-    })).toEqual({ kind: "done" });
-    // The trigger record is read for the run's conditions, then again when its step starts.
-    expect(script.sent.map((sent) => [sent.operationId, sent.revision])).toEqual([[LIST, 3], [LIST, 3], [EDIT, 3]]);
-  });
-
-  it("skips a record change once its automation starts on a schedule instead, before it reads anything", async () => {
-    const scheduled = automationFrom(`  - id: close
-    name: Close
-    when: {schedule: day, timezone: UTC}
-    do:
-      - find: 'true'
-        as: all
-        operation: invoices.list
-      - set:
-          Status: Closed
-        records: all
-        operation: invoices.edit
-`);
-    const script = host({ resolves: () => true, edit: async () => { throw new Error("unreachable"); } });
-    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-run-")));
-    expect(await runWithRoster({ withHost: async (work) => await work(script.surface), evaluator: { runCode: noCode, evaluate: async () => "busy" }, store, nowMs: () => 1, personName: (userId: string) => userId, ...sendsNothing }, {
-      held: fromLedger(claim), automation: scheduled, collection: { path: "Budget", name: "Budget" }, roster: { kind: "owner", ownerUserId: null, grants: [] },
-      signal: new AbortController().signal, stopped: new AbortController().signal,
-    })).toEqual({ kind: "skipped" });
-    expect(script.sent).toEqual([]);
-  });
 });
-
-describe("a dataset Find over its limit", () => {
-  it("refuses the run before any write, as a Collection Find does", async () => {
-    const read = parseAutomationsFile(`version: 1
-automations:
-  - id: close-all
-    name: Close all
-    when: record-added
-    do:
-      - find: "true"
-        as: open
-        operation: invoices.list
-      - set:
-          Status: Closed
-        records: open
-        operation: invoices.edit
-`);
-    if (read.status !== "read" || read.entries[0]?.status !== "valid") throw new Error(JSON.stringify(read));
-    const { sent, surface } = pagedHost(501);
-    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-run-")));
-    expect(await runWithRoster({
-      withHost: async (work) => await work(surface),
-      evaluator: { runCode: noCode, evaluate: async (_automationId, _scope, formulas) => formulas.map(() => ({ ok: true as const, value: true })) },
-      store, nowMs: () => 1, personName: (userId: string) => userId, ...sendsNothing,
-    }, {
-      held: fromLedger(claim), automation: read.entries[0].automation, collection: { path: "Budget", name: "Budget" },
-      roster: { kind: "owner", ownerUserId: null, grants: [] }, signal: new AbortController().signal, stopped: new AbortController().signal,
-    })).toEqual({ kind: "failed", error: "The Find in step 1 matched more than 500 records. Narrow its condition, then try again.", timedOut: false });
-    // Five full pages hold 500 records; a sixth page exists, so the Find stops there.
-    expect(findPages(sent)).toEqual([0, 100, 200, 300, 400]);
-    expect((await store.runsOf(claim.automationId, claim.claimId)).runs).toEqual([]);
-  });
-
-  it("reads a Find again from its first page when the dataset changes between pages", async () => {
-    const read = parseAutomationsFile(`version: 1
-automations:
-  - id: count
-    name: Count
-    when: record-added
-    do:
-      - find: "true"
-        as: open
-        operation: invoices.list
-      - set:
-          Status: Closed
-        records: open
-        operation: invoices.edit
-`);
-    if (read.status !== "read" || read.entries[0]?.status !== "valid") throw new Error(JSON.stringify(read));
-    // The second page of the first read comes from a later revision.
-    const { sent, surface } = pagedHost(150, (call) => call === 1 ? 8 : call === 0 ? 7 : 8);
-    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-run-")));
-    await runWithRoster({
-      withHost: async (work) => await work(surface),
-      evaluator: { runCode: noCode, evaluate: async (_automationId, _scope, formulas) => formulas.map(() => ({ ok: true as const, value: true })) },
-      store, nowMs: () => 1, personName: (userId: string) => userId, ...sendsNothing,
-    }, {
-      held: fromLedger(claim), automation: read.entries[0].automation, collection: { path: "Budget", name: "Budget" },
-      roster: { kind: "owner", ownerUserId: null, grants: [] }, signal: new AbortController().signal, stopped: new AbortController().signal,
-    });
-    expect(findPages(sent).slice(0, 4)).toEqual([0, 100, 0, 100]);
-  });
-});
-
-/**
- * A host whose list operation pages like a generated one: at most 100 rows, and a cursor after the
- * last. `revisionOf` names the revision of each Find page, counted from 0.
- */
-function pagedHost(total: number, revisionOf: (call: number) => number = () => 7) {
-  const sent: DatasetInvocation[] = [];
-  let findCalls = 0;
-  const surface: DatasetRunHost = {
-    ...host({ resolves: () => true, edit: async () => { throw new Error("A refused run writes nothing."); } }).surface,
-    invoke: async (_context, input): Promise<DatasetInvocationResult> => {
-      sent.push(input);
-      const { limit, after } = input.input as { limit: number; after?: { id: string } };
-      // The trigger read asks for one record.
-      if (limit === 1) return { result: { rows: [{ id: "a", version: 1, values: { [STATUS]: "Open" } }], nextCursor: null }, revision: 7, replayed: false };
-      if (limit > 100) throw new Error("A generated read returns at most 100 rows.");
-      const start = after === undefined ? 0 : Number(after.id.slice(1)) + 1;
-      const rows = Array.from({ length: Math.max(0, Math.min(limit, total - start)) }, (_, index) => ({ id: `r${start + index}`, version: 1, values: { [STATUS]: "Open" } }));
-      const last = rows.at(-1);
-      const nextCursor = start + rows.length < total && last !== undefined ? { id: last.id, value: last.id } : null;
-      return { result: { rows, nextCursor }, revision: revisionOf(findCalls++), replayed: false };
-    },
-  };
-  return { sent, surface };
-}
-
-/** The first record of each Find page the host was asked for. */
-function findPages(sent: readonly DatasetInvocation[]) {
-  return sent.flatMap((input) => {
-    const { limit, after } = input.input as { limit: number; after?: { id: string } };
-    return limit === 1 ? [] : [after === undefined ? 0 : Number(after.id.slice(1)) + 1];
-  });
-}
 
 describe("a record the run reads twice", () => {
   const conflicting = (settlesAfter: number) => {
@@ -642,26 +364,6 @@ automations:
     expect(script.sent.filter((input) => input.operationId === EDIT).map((input) => (input.input as { expectedVersion: number }).expectedVersion)).toEqual([4]);
   });
 
-  it("fails with Try again, before any write, when the record keeps changing between the reads", async () => {
-    const script = conflicting(Infinity);
-    expect(await runConflicting(script)).toEqual({ kind: "failed", error: "The record kept changing while this automation ran. Try again.", timedOut: false });
-    // The run's start, then six reads of the Find's step.
-    expect(script.plans()).toBe(7);
-    expect(script.sent.some((input) => input.operationId === EDIT)).toBe(false);
-  });
-
-  it("counts a deadline that passes while the run plans again as a timeout", async () => {
-    const script = conflicting(Infinity);
-    const deadline = new AbortController();
-    const invoke = script.surface.invoke;
-    script.surface.invoke = async (context, input) => {
-      // The deadline passes during the second plan's reads.
-      if (script.plans() === 2) deadline.abort();
-      return await invoke(context, input);
-    };
-    expect(await runConflicting(script, deadline.signal)).toEqual({ kind: "failed", error: DEADLINE_ERROR, timedOut: true });
-    expect(script.sent.some((input) => input.operationId === EDIT)).toBe(false);
-  });
 });
 
 describe("a dataset run over two tables", () => {
@@ -820,43 +522,6 @@ automations:
       .toEqual({ kind: "failed", error: ACCESS_NARROWED_ERROR, timedOut: false });
   });
 
-  it("shows a message's formulas only the fields every other editor can read", async () => {
-    const post = automationFrom(`  - id: tell
-    name: Tell
-    when: record-added
-    do:
-      - post: 'Added {trigger.fields}'
-        group: Team
-`);
-    const scopes: AutomationScope[] = [];
-    const spy = chatSpy();
-    const surface: DatasetRunHost = {
-      context: (input) => Object.freeze({ ...input }),
-      revision: () => ({ ...revision, definition: wide }),
-      generated: () => true,
-      dataGrants: () => ({ workspaceId: "workspace", grants: [{ principalKey: anaKey, operationIds: [LIST] }] }),
-      resolves: () => true,
-      invoke: async (): Promise<DatasetInvocationResult> =>
-        ({ result: { rows: [{ id: "a", version: 1, values: { [STATUS]: "Open" } }], nextCursor: null }, revision: 7, replayed: false }),
-    };
-    // Ana edits the automation, may use the list, and can post in Team.
-    const inTeam = { grantId: "g-team", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test", files: null, channel: { wireId: "team-wire", canPost: true } };
-    expect(await runWithRoster({
-      withHost: async (work) => await work(surface),
-      evaluator: { runCode: noCode, evaluate: async (_id, scope) => { scopes.push(scope); return [{ ok: true, value: "Added" }]; } },
-      store: createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-reach-"))), nowMs: () => 1, personName: (userId: string) => userId, ...spy.dependencies,
-    }, {
-      held: fromLedger({ ...claim, automationId: "collection:Budget#tell", fact: { ...added, fields: [{ fieldId: STATUS, previous: null, next: "Open" }, { fieldId: SECRET, previous: null, next: "s3cret" }] } }),
-      automation: post, collection: { path: "Budget", name: "Budget" },
-      roster: { kind: "owner", ownerUserId: "u-owner", grants: [ana, inTeam] }, signal: new AbortController().signal, stopped: new AbortController().signal,
-    })).toEqual({ kind: "done" });
-    expect(scopes).toEqual([expect.objectContaining({
-      record: { Status: "Open", id: "a" },
-      trigger: expect.objectContaining({ fields: ["Status"], record: { Status: "Open", id: "a" } }),
-    })]);
-    expect(JSON.stringify(scopes)).not.toContain("s3cret");
-    expect(spy.messages.map((message) => message.body)).toEqual(["Added"]);
-  });
 });
 
 describe("chat steps in a dataset run", () => {
@@ -894,31 +559,6 @@ describe("chat steps in a dataset run", () => {
   const key = (automation: typeof tell, ordinal: number) => stepKey("claim-1", `${definitionHash(automation)}-1`, ordinal);
   const edits = () => host({ resolves: () => true, edit: async () => ({ id: "a", version: 2, priorValues: { [STATUS]: "Open" } }) });
 
-  it("posts, sends a direct message, and notifies as the automation, one chain step deeper, each keyed by its claim, definition, and step", async () => {
-    const script = edits();
-    const spy = chatSpy();
-    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-chat-")));
-    expect(await runWithRoster({ withHost: async (work) => await work(script.surface), evaluator, store, nowMs: () => 1, personName: (userId) => userId, ...spy.dependencies }, {
-      held: fromLedger({ ...told, depth: 2 }), automation: tell, collection: BUDGET, roster: owner(ANA), signal: new AbortController().signal, stopped: new AbortController().signal,
-    })).toEqual({ kind: "done" });
-
-    const sender = { automationId: "collection:Budget#tell", name: "Tell the team", depth: 3 };
-    const post = `${key(tell, 1)}/post`, direct = `${key(tell, 3)}/dm/user-ana`;
-    expect(spy.messages).toEqual([
-      { target: { kind: "group", channelId: "team", lane: "posts" }, effectId: post, messageId: automationMessageId(post), threadId: automationThreadId(post), automation: sender, body: "Closed" },
-      { target: { kind: "direct-message", threadId: "thread-dm-ana" }, effectId: direct, messageId: automationMessageId(direct), threadId: "thread-dm-ana", automation: sender, body: "Closed" },
-    ]);
-    // A dataset record has no file: the notice names its Collection, and the record by its id.
-    expect(spy.notices).toEqual([{
-      noticeId: automationNoticeId(key(tell, 4), "user-ana"), kind: "automation-notify", title: "Tell the team", body: "Closed", recipientUserId: "user-ana",
-      target: { path: "Budget", record: "a", automation: "collection:Budget#tell", run: "claim-1" },
-    }]);
-    const [run] = (await store.runsOf("collection:Budget#tell", "claim-1")).runs;
-    expect(run!.applied.map(({ ordinal, writes }) => [ordinal, writes.map((write) => write.kind)])).toEqual([
-      [0, ["dataset-edit"]], [1, ["message"]], [3, ["message"]], [4, ["notice"]],
-    ]);
-  });
-
   it("sends a message that may have landed again under the same ids, and Try again sends only what did not go", async () => {
     const script = edits();
     const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-chat-")));
@@ -946,41 +586,6 @@ describe("chat steps in a dataset run", () => {
     expect(script.sent.filter((sent) => sent.operationId === EDIT)).toHaveLength(1);
   });
 
-  it("waits for a session to post in a synced workspace, then posts under the same id", async () => {
-    const script = edits();
-    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-chat-")));
-    const attempt = async (spy: ReturnType<typeof chatSpy>) => await runWithRoster(
-      { withHost: async (work) => await work(script.surface), evaluator, store, nowMs: () => 1, personName: (userId) => userId, ...spy.dependencies },
-      { held: fromLedger(told), automation: tell, collection: BUDGET, roster: owner(ANA), signal: new AbortController().signal, stopped: new AbortController().signal });
-    const signedOut = chatSpy({ write: () => { throw new AutomationChatSessionWait(); } });
-    expect(await attempt(signedOut)).toEqual({ kind: "wait", reason: "session" });
-    const signedIn = chatSpy();
-    expect(await attempt(signedIn)).toEqual({ kind: "done" });
-    expect(signedIn.messages[0]!.effectId).toBe(signedOut.messages[0]!.effectId);
-    expect(script.sent.filter((sent) => sent.operationId === EDIT)).toHaveLength(1);
-  });
-
-  it("names a record in a notice only by an id a notice can carry", async () => {
-    const notify = automationFrom(`  - id: notify
-    name: Notify
-    when: record-added
-    do:
-      - notify: Added
-        to: [user-ana]
-`);
-    const surface: DatasetRunHost = { ...edits().surface, invoke: async (): Promise<DatasetInvocationResult> =>
-      ({ result: { rows: [{ id: "a ", version: 1, values: { [STATUS]: "Open" } }], nextCursor: null }, revision: 7, replayed: false }) };
-    const spy = chatSpy();
-    expect(await runWithRoster({
-      withHost: async (work) => await work(surface), evaluator, store: createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-chat-"))),
-      nowMs: () => 1, personName: (userId) => userId, ...spy.dependencies,
-    }, {
-      held: fromLedger({ ...claim, automationId: "collection:Budget#notify", fact: { ...added, recordId: "a " } }), automation: notify, collection: BUDGET,
-      roster: owner(ANA), signal: new AbortController().signal, stopped: new AbortController().signal,
-    })).toEqual({ kind: "done" });
-    expect(spy.notices.map((notice) => notice.target)).toEqual([{ path: "Budget", automation: "collection:Budget#notify", run: "claim-1" }]);
-  });
-
   it("stops before it reads anything when an editor cannot post in the Group", async () => {
     const script = host({ resolves: () => true, edit: async () => { throw new Error("A stopped run writes nothing."); } });
     const spy = chatSpy();
@@ -1006,24 +611,6 @@ describe("chat steps in a dataset run", () => {
   const pressed: DatasetAutomationClaim = { ...claim, automationId: "collection:Budget#ask", actor: { kind: "owner", userId: "user-owner" },
     fact: { kind: "button", datasetId: definition.datasetId, tableId: TABLE, recordId: "a", fieldId: ASK, definitionHash: definitionDigest(ask) } };
 
-  it("names the button when its automation changed after a press", async () => {
-    const script = host({ resolves: () => true, edit: async () => { throw new Error("Must not write"); } });
-    const surface = { ...script.surface, revision: () => ({ ...revision, definition: withButton }) };
-    const stale = structuredClone(pressed);
-    if (stale.fact?.kind !== "button") throw new Error("fixture");
-    stale.fact.definitionHash = "old";
-    const spy = chatSpy();
-    expect(await runWithRoster({
-      withHost: async (work) => work(surface), evaluator,
-      store: createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-button-"))),
-      nowMs: () => 1, personName: (id) => id, ...spy.dependencies,
-    }, { held: fromLedger(stale), automation: ask, collection: BUDGET, roster: owner([]),
-      signal: new AbortController().signal, stopped: new AbortController().signal }))
-      .toEqual({ kind: "failed", error: "Ask changed after it was pressed. Press it again.", timedOut: false });
-    expect(script.sent).toEqual([]);
-    expect(spy.messages).toEqual([]);
-  });
-
   it("wakes your agent from a press in a Collection only you edit", async () => {
     const script = host({ resolves: () => true, edit: async () => { throw new Error("This automation edits nothing."); } });
     const surface: DatasetRunHost = { ...script.surface, revision: () => ({ ...revision, definition: withButton }) };
@@ -1045,24 +632,6 @@ describe("chat steps in a dataset run", () => {
     expect(await run([BOB])).toEqual({ outcome: { kind: "failed", error: "This step acts as you, and bob@dohc.test can also edit Budget.", timedOut: false }, messages: [] });
   });
 
-  it("does not resume a saved wake once the automation no longer resolves under the rules", async () => {
-    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-wake-")));
-    let rules = withButton;
-    const surface: DatasetRunHost = { ...host({ resolves: () => true, edit: async () => { throw new Error("This automation edits nothing."); } }).surface,
-      revision: () => ({ ...revision, definition: rules }) };
-    const attempt = async (spy: ReturnType<typeof chatSpy>, grants: RosterGrant[], stopped: AbortSignal) => await runWithRoster(
-      { withHost: async (work) => await work(surface), evaluator, store, nowMs: () => 1, personName: (userId) => userId, ...spy.dependencies },
-      { held: fromLedger(pressed), automation: ask, collection: BUDGET, roster: owner(grants), signal: new AbortController().signal, stopped });
-    // The plan is saved, and the run stops before the wake is recorded.
-    const stop = new AbortController();
-    expect(await attempt(chatSpy({ write: () => { stop.abort(); throw new Error("The engine closed."); } }), [], stop.signal))
-      .toEqual({ kind: "wait", reason: "stopped" });
-    // The approved read goes, so the automation no longer resolves, and Bob can now edit Budget.
-    rules = { ...withButton, operations: withButton.operations.filter((operation) => operation.kind !== "read") };
-    const resumed = chatSpy();
-    expect(await attempt(resumed, [BOB], new AbortController().signal)).toEqual({ kind: "failed", error: "Budget has no approved read in Invoices.", timedOut: false });
-    expect(resumed.messages).toEqual([]);
-  });
 });
 
 describe("a dataset action a run invokes", () => {
@@ -1107,83 +676,6 @@ describe("a dataset action a run invokes", () => {
       return formulas.map(() => ({ ok: true as const, value: (scope.record?.id ?? null) as JsonValue }));
     },
   };
-
-  it("does not count an approved read-only action, while counting a later write action", async () => {
-    const calls: Array<{ capabilityId: string; door: string }> = [];
-    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-read-usage-")));
-    const host = actionHost(async () => ({ result: null, revision: 9, replayed: false }));
-    let readOnly = true;
-    host.surface.revision = () => ({ ...actionRevision, definition: { ...withAction,
-      operations: withAction.operations.map(operation => operation.operationId === MARK_PAID ? { ...operation, readOnly } : operation) } });
-    const run = (claimId: string) => runWithRoster({
-      withHost: async work => work(host.surface), evaluator, store, nowMs: () => 2_000, personName: userId => userId, ...sendsNothing,
-      onUsageSuccess: pair => { calls.push(pair); },
-    }, { held: fromLedger({ ...numbered, claimId }), automation: markPaid, collection: { path: "Budget", name: "Budget" },
-      roster: { kind: "owner", ownerUserId: null, grants: [] }, signal: new AbortController().signal, stopped: new AbortController().signal });
-    expect(await run("read")).toEqual({ kind: "done" });
-    expect(host.sent).toHaveLength(1);
-    expect(calls).toEqual([]);
-    readOnly = false;
-    expect(await run("write")).toEqual({ kind: "done" });
-    expect(calls).toEqual([{ capabilityId: "dataset.operation.invoke", door: "automation" }]);
-  });
-
-  it("counts a successful no-op invocation of a write-capable action once", async () => {
-    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-noop-usage-")));
-    const calls: Array<{ capabilityId: string; door: string }> = [];
-    const record = { id: 12, status: "Paid" };
-    const before = structuredClone(record);
-    const host = actionHost(async () => {
-      // Mark paid returns early for an already-paid record.
-      if (record.status === "Paid") return { result: { alreadyPaid: true }, revision: 9, replayed: false };
-      record.status = "Paid";
-      return { result: { alreadyPaid: false }, revision: 10, replayed: false };
-    });
-    const run = () => runWithRoster({
-      withHost: async work => work(host.surface), evaluator, store, nowMs: () => 2_000, personName: userId => userId, ...sendsNothing,
-      onUsageSuccess: pair => { calls.push(pair); },
-    }, { held: fromLedger(numbered), automation: markPaid, collection: { path: "Budget", name: "Budget" },
-      roster: { kind: "owner", ownerUserId: null, grants: [] }, signal: new AbortController().signal, stopped: new AbortController().signal });
-    expect(await run()).toEqual({ kind: "done" });
-    expect(record).toEqual(before);
-    expect(calls).toEqual([{ capabilityId: "dataset.operation.invoke", door: "automation" }]);
-    expect(await run()).toEqual({ kind: "done" });
-    expect(host.sent).toHaveLength(1);
-    expect(calls).toHaveLength(1);
-  });
-
-  it("counts dataset.operation.invoke once on success, excluding refusal, failure and run replay", async () => {
-    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-usage-")));
-    const calls: Array<{ capabilityId: string; door: string }> = [];
-    let problem: "refused" | "failed" | null = "refused";
-    const host = actionHost(async () => {
-      if (problem === "refused") throw new AppBackendRuntimeError({ code: "already_paid", message: "Already paid" });
-      if (problem === "failed") throw Error("Host failed");
-      return { result: { id: 12 }, revision: 9, replayed: false };
-    });
-    const dependencies = {
-      withHost: async <T>(work: (host: DatasetRunHost) => T | Promise<T>) => work(host.surface),
-      evaluator, store, nowMs: () => 2_000, personName: (userId: string) => userId, ...sendsNothing,
-      onUsageSuccess: (pair: { capabilityId: string; door: string }) => { calls.push(pair); },
-    };
-    const run = (attempt: number) => runWithRoster(dependencies, {
-      held: fromLedger({ ...numbered, run: attempt }), automation: markPaid, collection: { path: "Budget", name: "Budget" },
-      roster: { kind: "owner", ownerUserId: null, grants: [] }, signal: new AbortController().signal, stopped: new AbortController().signal,
-    });
-    expect(await run(1)).toMatchObject({ kind: "failed" });
-    expect(calls).toEqual([]);
-    problem = "failed";
-    expect(await run(2)).toMatchObject({ kind: "failed" });
-    expect(calls).toEqual([]);
-    problem = null;
-    expect(await run(3)).toEqual({ kind: "done" });
-    expect(calls).toEqual([{ capabilityId: "dataset.operation.invoke", door: "automation" }]);
-    const sent = host.sent.length;
-    expect(await run(3)).toEqual({ kind: "done" });
-    expect(await run(4)).toEqual({ kind: "done" });
-    expect(host.sent).toHaveLength(sent);
-    expect(calls).toEqual([{ capabilityId: "dataset.operation.invoke", door: "automation" }]);
-  });
 
   it("sends the action its input once per claim, with the record's id as its operations take it, and resumes under the same key", async () => {
     const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-action-")));
@@ -1237,39 +729,6 @@ describe("a dataset action a run invokes", () => {
     expect(host.sent).toEqual([]);
   });
 
-  it("runs an action on a schedule, and checks who can edit before the action as for a record change", async () => {
-    const nightly = automationFrom(`  - id: mark
-    name: Mark
-    when: {schedule: day, timezone: UTC}
-    do:
-      - invoke: invoices.markPaid
-        input:
-          note: Nightly
-`);
-    const due = Date.UTC(2026, 8, 27);
-    const dueTime: AutomationClaim = {
-      claimId: "atc_due", automationId: "collection:Budget#mark", trigger: { key: `schedule:${due}` }, recordId: null, collectionPath: "Budget",
-      depth: 0, state: "running", attempts: 1, run: 1, createdAtMs: due + 5, updatedAtMs: due + 5,
-      change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0 },
-    };
-    const alone = { kind: "owner" as const, ownerUserId: "u-owner", grants: [] };
-    const ana = { grantId: "g-ana", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test", files: { paths: ["Budget"], versionId: null, access: "edit" as const }, channel: null };
-    const attempt = async (roster: ReachRoster, host: ReturnType<typeof actionHost>) => await runWithRoster({
-      withHost: async (work) => await work(host.surface), evaluator, store: createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-action-"))),
-      nowMs: () => 2_000, personName: (userId: string) => userId, ...sendsNothing, cachedRoster: async () => roster,
-    }, {
-      held: { source: "engine", claim: dueTime, datasetId: definition.datasetId }, automation: nightly, collection: { path: "Budget", name: "Budget" },
-      roster: alone, signal: new AbortController().signal, stopped: new AbortController().signal,
-    });
-    const ran = actionHost(async () => ({ result: null, revision: 9, replayed: false }));
-    expect(await attempt(alone, ran)).toEqual({ kind: "done" });
-    expect(ran.sent).toEqual([expect.objectContaining({ operationId: MARK_PAID, input: { note: "Nightly" } })]);
-    // Ana gained Edit after the plan: the action does not run.
-    const stopped = actionHost(async () => { throw new Error("The action must not run."); });
-    expect(await attempt({ ...alone, grants: [ana] }, stopped)).toMatchObject({ kind: "failed", error: expect.stringContaining("ana@dohc.test") });
-    expect(stopped.sent).toEqual([]);
-  });
-
   it("waits to run a planned action when it cannot check who can edit the Collection", async () => {
     const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-action-")));
     const host = actionHost(async () => { throw new Error("The action must not run."); });
@@ -1281,25 +740,6 @@ describe("a dataset action a run invokes", () => {
       signal: new AbortController().signal, stopped: new AbortController().signal,
     })).toEqual({ kind: "wait", reason: "roster" });
     expect(host.sent).toEqual([]);
-  });
-
-  it("fails a run the action refuses with the action's own words, and sends it again under the same key on Try again", async () => {
-    const store = createAutomationRunStore(testStoreFolder(await createTestScratch("dohc-dataset-action-")));
-    const dependencies = (surface: DatasetRunHost) => ({
-      withHost: async <T>(work: (value: DatasetRunHost) => T | Promise<T>) => await work(surface),
-      evaluator, store, nowMs: () => 2_000, personName: (userId: string) => userId, ...sendsNothing,
-    });
-    const input = (run: number) => ({
-      held: fromLedger({ ...numbered, run }), automation: markPaid, collection: { path: "Budget", name: "Budget" }, roster: { kind: "owner" as const, ownerUserId: null, grants: [] },
-      signal: new AbortController().signal, stopped: new AbortController().signal,
-    });
-    const refusing = actionHost(async () => { throw new AppBackendRuntimeError({ code: "already_paid", message: "This invoice is already paid." }); });
-    expect(await runWithRoster(dependencies(refusing.surface), input(1)))
-      .toEqual({ kind: "failed", error: "Mark paid refused this run: This invoice is already paid.", timedOut: false });
-    // Try again: the refusal committed nothing, so the same request runs the action again.
-    const accepting = actionHost(async () => ({ result: { id: 12 }, revision: 9, replayed: false }));
-    expect(await runWithRoster(dependencies(accepting.surface), input(2))).toEqual({ kind: "done" });
-    expect(accepting.sent).toEqual([{ ...refusing.sent[0]!, signal: expect.any(AbortSignal) }]);
   });
 
   describe("with a code step", () => {

@@ -144,7 +144,7 @@ it.each([undefined, null, 0, 1, "2", 2.5])("kills a child with invalid Landlock 
 });
 
 it("exposes child exit while idle so the supervisor can retire it", async () => {
-  const { child, childInput, replica } = await fixture();
+  const { child, replica } = await fixture();
   try {
     const exited = (replica as { exited?: Promise<void> }).exited;
     expect(exited).toBeInstanceOf(Promise);

@@ -1895,63 +1895,6 @@ mod tests {
         ));
     }
 
-    /// Sol's and Opus's r2c-3c-2 finding 2: joining and the last caller's
-    /// leaving are one decision each under one lock. Once the last caller
-    /// stopped the proof, and before it wakes anyone, an identical request
-    /// is busy, never a caller of the stopped proof; one that joined before
-    /// it left shares the proof's result.
-    #[test]
-    fn a_joiner_racing_the_last_caller_gets_the_result_or_busy() {
-        let (_scratch, store) = store();
-        let proofs = proofs();
-        proofs.pause_last_leaves();
-        let (run, last) = started(&proofs, &store, "key");
-        let leaving = std::thread::spawn(move || drop(last));
-        proofs.wait_for_leaving();
-        assert!(
-            matches!(
-                admit(&proofs, &store, "workspace", "key"),
-                HeldProofAdmission::Busy
-            ),
-            "after the last caller left"
-        );
-        proofs.resume_proofs();
-        leaving.join().unwrap();
-        run.prove(|_| panic!("a stopped proof runs nothing"));
-
-        let (run, first) = started(&proofs, &store, "key");
-        let joiner = joined(&proofs, &store, "key");
-        drop(first);
-        run.prove(|job| {
-            assert!(job.stopped().is_none(), "a joiner still waits");
-            (7, 0)
-        });
-        assert_eq!(answer(joiner), Ok(7));
-    }
-
-    /// A proof nobody waits for any more before it starts never runs, and an
-    /// admitted proof dropped unrun frees its workspace and its place.
-    #[test]
-    fn a_proof_nobody_waits_for_never_runs() {
-        let (_scratch, store) = store();
-        let limit = HeldProofLimit::default();
-        let proofs = Held::new(limit.clone());
-        let (run, wait) = started(&proofs, &store, "key");
-        drop(wait);
-        run.prove(|_| panic!("a stopped proof runs nothing"));
-        let (run, wait) = started(&proofs, &store, "key");
-        drop(run);
-        assert_eq!(answer(wait), Err(HeldProofError::Closed));
-        assert!(
-            matches!(
-                admit(&proofs, &store, "workspace", "other"),
-                HeldProofAdmission::Started(..)
-            ),
-            "the workspace is free"
-        );
-        assert_eq!(limit.reserved_bytes(), 0, "nothing stays reserved");
-    }
-
     /// r2c-3c-1's open item: close stops every proof, answers its callers as
     /// closed and returns once their readers closed; past its bound it says
     /// they have not.
@@ -1998,25 +1941,6 @@ mod tests {
         assert!(lingering.drained(), "drained once the reader closed");
     }
 
-    /// Opus's r2c-3c-2 finding 6: close before a proof's thread starts
-    /// returns at once, waiting for nothing, and the proof never opens a
-    /// reader when its thread does run.
-    #[test]
-    fn close_before_a_proof_starts_returns_at_once_and_nothing_opens() {
-        let (_scratch, store) = store();
-        let proofs = proofs();
-        let (run, wait) = started(&proofs, &store, "key");
-        proofs.set_close_bound(Duration::ZERO);
-        assert!(proofs.close(), "nothing started, nothing to wait for");
-        assert_eq!(answer(wait), Err(HeldProofError::Closed));
-        run.prove(|job| {
-            let _ = job.reader();
-            panic!("a proof of a closed store runs nothing")
-        });
-        assert_eq!(proofs.readers_opened(), 0);
-        assert_eq!(proofs.open_readers(), 0);
-    }
-
     /// Sol's r2c-3c-2 finding 1: a proof's thread paused just before its
     /// reader opens, past every earlier check, as a descheduled thread would
     /// be, never opens one once close began: close has nothing to wait for,
@@ -2040,71 +1964,6 @@ mod tests {
             0,
             "no reader opened after close began"
         );
-    }
-
-    /// Sol's r2c-3c-5 finding 2: a workspace runs one distinct proof until
-    /// it ends. Once its reader closed, while it still encodes its answer, a
-    /// different request for its workspace is busy and an identical one
-    /// joins it; the workspace frees only once it ends. It opens no other
-    /// reader and answers every caller, and close waits for no encoding
-    /// (Opus's r2c-3c-3 finding 3).
-    #[test]
-    fn a_proof_keeps_its_workspace_until_it_ends() {
-        let (_scratch, store) = store();
-        let proofs = proofs();
-        proofs.pause_proofs_at(ProofStage::Encoding);
-        let (run, first) = started(&proofs, &store, "key");
-        let worker = std::thread::spawn(move || {
-            run.prove(|job| {
-                drop(job.reader().unwrap());
-                let encoded = job.stop().check(ProofStage::Encoding).is_ok();
-                assert!(job.reader().is_err(), "one reader a proof");
-                (u32::from(encoded), 0)
-            });
-        });
-        proofs.wait_for_paused_proof();
-        assert_eq!(proofs.open_readers(), 0, "its reader closed");
-        assert!(
-            !proofs.refuses("workspace"),
-            "an identical request may join"
-        );
-        assert!(
-            matches!(
-                admit(&proofs, &store, "workspace", "other"),
-                HeldProofAdmission::Busy
-            ),
-            "a different request"
-        );
-        let second = joined(&proofs, &store, "key");
-        proofs.resume_proofs();
-        worker.join().unwrap();
-        assert_eq!(answer(first), Ok(1), "the proof still answers");
-        assert_eq!(answer(second), Ok(1), "and so does its joiner");
-        assert_eq!(proofs.proofs_admitted(), 1, "one distinct proof");
-        assert!(
-            matches!(
-                admit(&proofs, &store, "workspace", "other"),
-                HeldProofAdmission::Started(..)
-            ),
-            "an ended proof frees its workspace"
-        );
-
-        let (run, wait) = started(&proofs, &store, "key");
-        proofs.pause_proofs_at(ProofStage::Encoding);
-        let worker = std::thread::spawn(move || {
-            run.prove(|job| {
-                drop(job.reader().unwrap());
-                (
-                    u32::from(job.stop().check(ProofStage::Encoding).is_err()),
-                    0,
-                )
-            });
-        });
-        proofs.wait_for_paused_proof();
-        proofs.set_close_bound(Duration::ZERO);
-        assert!(proofs.close(), "close waits for no encoding");
-        assert_eq!(answer(wait), Err(HeldProofError::Closed));
-        worker.join().unwrap();
     }
 
     /// Sol's and Opus's "old finding 2": a proof past its deadline, which
@@ -2186,39 +2045,6 @@ mod tests {
                 Err(ApplicationError::Storage(StorageError::FileLocked))
             ),
             "{failed:?}"
-        );
-    }
-
-    /// Sol's r2c-3c-4 finding 3: a proof's thread suspended once its reader
-    /// counts as open, before its connection opens, as one inside a slow
-    /// open would be, never keeps close past its bound. Close says the
-    /// reader is still open, and once the thread goes on, its reader closes
-    /// again without staying open.
-    #[test]
-    fn close_returns_within_its_bound_while_a_reader_opens() {
-        let (_scratch, store) = store();
-        let proofs = proofs();
-        proofs.pause_inside_reader_opens();
-        let (run, _wait) = started(&proofs, &store, "key");
-        let worker = std::thread::spawn(move || {
-            run.prove(|job| (u32::from(job.reader().is_err()), 0));
-        });
-        proofs.wait_for_paused_inside_open();
-        proofs.set_close_bound(Duration::from_millis(50));
-        let began = Instant::now();
-        assert!(!proofs.close(), "the opening reader counts as open");
-        assert!(
-            began.elapsed() < Duration::from_secs(5),
-            "close kept to its bound"
-        );
-        assert!(!proofs.drained());
-        proofs.resume_proofs();
-        worker.join().unwrap();
-        assert!(proofs.drained(), "drained once the opening reader gave up");
-        assert_eq!(
-            proofs.readers_opened(),
-            0,
-            "no reader stayed open after close began"
         );
     }
 

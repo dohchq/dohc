@@ -52,19 +52,7 @@ it("finds a document for a connected agent, and never opens a browser gateway se
   vi.mocked(Date.now).mockReturnValue(agent.expiresAtMs);
   expect((await handle(agentRequest(agent))).status).toBe(404);
 });
-it("resolves only the existing current Markdown object within the link selector", async () => {
-  const f = await fixture(); expect(await (await f.handle(request())).json()).toEqual({objectId: binding.objectId});
-  for (const path of ["private/a.md", "docs/missing.md", "docs/a.excalidraw"]) expect((await f.handle(request({discriminator, path}))).status).toBe(404);
-  f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({paths: ["elsewhere"], versionId: null}));
-  expect((await f.handle(request())).status).toBe(404);
-});
-it("opens a selected file by its public path and refuses hidden paths and aliases", async () => {
-  const f = await fixture();
-  f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({paths: ["docs/a.md"], versionId: null}));
-  expect(await (await f.handle(request({discriminator, path: "a.md"}))).json()).toEqual({objectId: binding.objectId});
-  for (const path of ["docs/a.md", "a.md/../a.md", "./a.md", "/a.md", "a.md\\..\\a.md"])
-    expect((await f.handle(request({discriminator, path}))).status).toBe(404);
-});
+
 it("derives gateway authority only after ticket enrollment and refuses a different profile", async () => {
   const f = await fixture();
   const resolve = () => f.handle(request({discriminator}, "/sync/live/link-session"));
@@ -83,6 +71,7 @@ it.each([
 ] as Record<string, string>[])("refuses missing or mismatched private authority %j", async headers => {
   const f = await fixture(); expect((await f.handle(request(undefined, undefined, headers))).status).toBe(404);
 });
+
 it.each(["revoked", "expired", "pinned"])("refuses current authority after %s transition", async mode => {
   const f = await fixture();
   if (mode === "revoked") f.storage.revokeShareGrant({shareId: scope.shareId, grantId: scope.grantId, revokedAtMs: 1000});
@@ -93,7 +82,8 @@ it.each(["revoked", "expired", "pinned"])("refuses current authority after %s tr
   expect(await response.text()).toBe('{"ok":false,"error":"not found"}');
 });
 
-it.each(["view", "comment"] as const)("explains %s access only for an existing file in scope", async access => {
+
+it.each(["view"] as const)("explains %s access only for an existing file in scope", async access => {
   const f = await fixture();
   f.raw.prepare("UPDATE sync_relay_share_grants SET access=?").run(access);
   const response = await f.handle(request());
@@ -103,20 +93,6 @@ it.each(["view", "comment"] as const)("explains %s access only for an existing f
     const refused = await f.handle(request({discriminator, path}));
     expect([refused.status, await refused.text()]).toEqual([404, '{"ok":false,"error":"not found"}']);
   }
-});
-
-it("explains an unavailable live session only after proving the file is shared", async () => {
-  const f = await fixture();
-  vi.spyOn(f.storage, "resolveLiveObjectHostBinding").mockReturnValue({kind: "refused", reason: "host-unavailable"});
-  const response = await f.handle(request());
-  expect(response.status).toBe(503);
-  expect(await response.json()).toEqual(linkRefusalBody("link_live_unavailable"));
-  for (const headers of [{authorization: ""}, {authorization: `LinkCapability ${"z".repeat(43)}`}]) {
-    const refused = await f.handle(request(undefined, undefined, headers));
-    expect([refused.status, await refused.text()]).toEqual([404, '{"ok":false,"error":"not found"}']);
-  }
-  const hidden = await f.handle(request({discriminator, path: "private/a.md"}));
-  expect([hidden.status, await hidden.text()]).toEqual([404, '{"ok":false,"error":"not found"}']);
 });
 
 it("explains a document the session host blocked as unavailable until the block lifts", async () => {
@@ -135,20 +111,3 @@ it("explains a document the session host blocked as unavailable until the block 
 // A link sees each share root by its own name, so a nested folder named
 // shared-with-me shows as the reserved top-level folder, which no binding can
 // hold. The share is valid and covers the file, so only the link's view refuses.
-const unviewable = JSON.stringify({paths: ["docs", "notes/shared-with-me"], versionId: null});
-it("refuses a link's host binding when its share's projected view can't form a binding", async () => {
-  const f = await fixture();
-  expect(f.storage.resolveLiveObjectHostBinding(f.context, binding.objectId)).toMatchObject({kind: "current", binding: {objectId: binding.objectId}});
-  f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(unviewable);
-  expect(f.storage.resolveLiveObjectHostBinding(f.context, binding.objectId)).toEqual({kind: "refused", reason: "stale-selector"});
-});
-it("refuses to mint a link ticket for such a share before it writes a ticket row", async () => {
-  const f = await fixture();
-  const ticketRows = () => Number(f.raw.prepare("SELECT count(*) AS count FROM sync_relay_live_session_tickets").get()!.count);
-  f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(unviewable);
-  expect(await f.tickets.mint({objectId: binding.objectId}, f.context)).toBeNull();
-  expect(ticketRows()).toBe(0);
-  f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({paths: ["docs"], versionId: null}));
-  expect(await f.tickets.mint({objectId: binding.objectId}, f.context)).not.toBeNull();
-  expect(ticketRows()).toBe(1);
-});

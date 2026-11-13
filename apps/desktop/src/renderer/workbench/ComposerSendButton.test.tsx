@@ -2,7 +2,6 @@
 import { act, cleanup, render, screen } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ChatComposer } from "./chatMessages";
 import { MentionComposer } from "./MentionComposer";
 
 beforeEach(() => {
@@ -27,21 +26,7 @@ const composers: { name: string; render: (sending: boolean, value?: string) => R
         placeholder="Message" sendLabel="Send message" candidates={[]} onChange={noop} onSend={noop} />
     ),
   },
-  {
-    name: "a group's new post",
-    render: (sending, value = "Hello") => (
-      <MentionComposer testIdPrefix="chats" composerId="chats-composer" value={value} sending={sending}
-        surface="post" authorName="Ada" placeholder="What's happening?" sendLabel="Send message"
-        candidates={[]} onChange={noop} onSend={noop} />
-    ),
-  },
-  {
-    name: "a file's chat in About",
-    render: (sending, value = "Hello") => (
-      <ChatComposer testIdPrefix="chats" composerId="chats-composer" value={value} sending={sending}
-        placeholder="Message" sendLabel="Send message" onChange={noop} onSend={noop} />
-    ),
-  },
+
 ];
 
 const send = () => screen.getByRole("button", { name: "Send message" });
@@ -102,13 +87,6 @@ describe.each(composers)("the send control in $name", ({ render: composer }) => 
   });
 });
 
-it("spins the ring only when motion is allowed", () => {
-  render(composers[0]!.render(true));
-  act(() => vi.advanceTimersByTime(1000));
-  const ring = screen.getByTestId("chats-send-pending").getAttribute("class") ?? "";
-  expect(ring.split(" ")).toContain("motion-safe:animate-spin");
-  expect(ring.split(" ")).not.toContain("animate-spin");
-});
 
 it("does not show a composer that cannot send yet as sending", () => {
   render(
@@ -120,9 +98,4 @@ it("does not show a composer that cannot send yet as sending", () => {
   expect((screen.getByTestId("chats-composer") as HTMLTextAreaElement).disabled).toBe(true);
   expect(showsPending()).toBe(false);
   expect(look()).toBe("off");
-});
-
-it("sends a file's chat from inside its field", () => {
-  render(composers[2]!.render(false));
-  expect(screen.getByTestId("chats-composer").parentElement!.contains(send())).toBe(true);
 });

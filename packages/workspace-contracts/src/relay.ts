@@ -496,6 +496,12 @@ export const NOTICE_ID_MAX_CHARS = 1_024;
 export const NOTICE_FROM_PREFIX = "from:";
 export const NOTICE_MARKS_PER_REQUEST = 100;
 export const NOTICE_PAGE_MAX = 200;
+// GET /sync/notices?wait=<ms> holds a caught-up read at most this long.
+export const NOTICE_WAIT_MAX_MS = 25_000;
+// GET /sync/notices?scope=phone. The phone's display scope, not an access
+// boundary: any account session may read the whole list without it.
+export const NOTICE_SCOPES = ["phone"] as const;
+export type NoticeScope = (typeof NOTICE_SCOPES)[number];
 
 // A person's notice list keeps at most this many rows. A new notice past it
 // removes read and dismissed rows first, oldest first, then the oldest unread.
@@ -627,7 +633,7 @@ export function isAutomationWake(value: unknown): value is AutomationWake {
 // One row of GET /sync/notices?cursor=<nextCursor>. `changeSeq` rises on every
 // change to the row, including read and dismissed, and counts per person.
 export interface RelayNotice {
-  /** Only the relay creates wake payloads. */
+  /** Only the relay creates wake payloads. The phone's scope never carries one. */
   wake?: AutomationWake;
   noticeId: string;
   changeSeq: number;
@@ -653,6 +659,11 @@ export interface RelayNotice {
   removed: boolean;
 }
 
+// With `scope=phone`, a page leaves out rows in owned workspaces whose owner
+// turned off "Show on phone", and rows whose target is a secret or ignored
+// file or a thread on one; a removed row carries no title. The cursor still
+// moves past what it left out, so a page can be empty with `hasMore`. With
+// `wait`, a read whose cursor is caught up waits for the next change.
 export interface RelayNoticePage {
   notices: RelayNotice[];
   // Opaque. Pass it back as `cursor` for the changes after this page; no

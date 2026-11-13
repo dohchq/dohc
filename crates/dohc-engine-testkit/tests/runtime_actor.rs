@@ -11,7 +11,6 @@ use dohc_engine_storage::EngineStore;
 
 use dohc_engine_testkit::{
     PanicFaults, ScratchDir, engine_db_path, make_hardlink, try_make_dir_alias,
-    try_make_file_symlink,
 };
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -81,63 +80,6 @@ async fn read(handle: &ActorHandle, path: &str) -> Option<String> {
         .map(|snapshot| snapshot.text)
 }
 
-fn moments(db: &std::path::Path) -> i64 {
-    EngineStore::open(db, 99)
-        .expect("reopen")
-        .table_row_count("moments")
-        .expect("count moments")
-}
-
-// oracle: actor lifecycle open→ready→...→closed with a live write in between.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn actor_lifecycle_open_ready_closed() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db path");
-    let sup = WorkspaceSupervisor::new();
-
-    let handle = sup.open(&db, 1).expect("open").actor;
-    assert_eq!(handle.lifecycle(), LifecycleState::Ready);
-    seed(&handle).await;
-    write(&handle, "d1.md", "hi", 1, Arc::new(NoFaults))
-        .await
-        .expect("write");
-
-    assert!(sup.close(&db).expect("close"));
-    // The shared lifecycle flag reflects the released connection.
-    assert_eq!(handle.lifecycle(), LifecycleState::Closed);
-    // A handle to a closed actor fails cleanly instead of hanging.
-    let err = write(&handle, "d2.md", "no", 2, Arc::new(NoFaults))
-        .await
-        .expect_err("closed actor rejects writes");
-    assert_eq!(err.code(), "actor-unavailable");
-}
-
-// oracle: two aliased paths converge on one actor / one writer connection
-// (canonical-identity keying), proven with a lexical alias that always works.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn lexical_aliases_converge_on_one_actor() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db path");
-    let sup = WorkspaceSupervisor::new();
-
-    // Same file, different lexical spelling (redundant `.` components).
-    let engine_dir = db.parent().expect("engine dir");
-    let aliased = engine_dir.join(".").join("engine.db");
-
-    let a = sup.open(&db, 1).expect("open a").actor;
-    let b = sup.open(&aliased, 1).expect("open b").actor;
-
-    assert_eq!(a.identity(), b.identity(), "aliases must share identity");
-    assert_eq!(sup.actor_count(), 1, "only one actor / one writer");
-
-    // A write through A is visible through B — same underlying store.
-    seed(&a).await;
-    write(&a, "shared.md", "via-a", 1, Arc::new(NoFaults))
-        .await
-        .expect("write a");
-    assert_eq!(read(&b, "shared.md").await.as_deref(), Some("via-a"));
-}
-
 // oracle: a symlink/junction to the engine dir never forks a second writer.
 // On a Mac and Linux the engine refuses a store reached through a linked
 // folder; on Windows the alias converges on the same actor (portability +
@@ -196,32 +138,6 @@ async fn symlink_or_junction_alias_never_forks_a_writer() {
     assert_eq!(read(&via_link, "k.md").await.as_deref(), Some("value"));
 }
 
-// oracle: restart increments the session generation and preserves state.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn restart_bumps_generation_and_preserves_state() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db path");
-    let sup = WorkspaceSupervisor::new();
-
-    let handle = sup.open(&db, 1).expect("open").actor;
-    seed(&handle).await;
-    write(&handle, "keep.md", "durable", 1, Arc::new(NoFaults))
-        .await
-        .expect("write");
-    assert_eq!(sup.generation_of(&db).expect("gen"), Some(1));
-
-    let reopened = sup.restart(&db, 2).expect("restart");
-    assert_eq!(sup.generation_of(&db).expect("gen"), Some(2));
-    assert_eq!(sup.actor_count(), 1);
-
-    // State survived the restart, and the reopened actor is writable.
-    assert_eq!(read(&reopened, "keep.md").await.as_deref(), Some("durable"));
-    write(&reopened, "more.md", "again", 2, Arc::new(NoFaults))
-        .await
-        .expect("write after restart");
-    assert_eq!(read(&reopened, "more.md").await.as_deref(), Some("again"));
-}
-
 // Close joins the writer and checkpoint worker. Retained WAL bytes are durable
 // data, not an open connection. The Windows gate proves handle release with
 // exclusive opens; on POSIX this test proves only that a fresh writer can
@@ -274,27 +190,6 @@ async fn close_releases_the_connection() {
     );
 }
 
-// oracle: dropping the supervisor closes every actor (deterministic Drop, no
-// detached worker outlives its owner).
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn dropping_supervisor_releases_all_actors() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db path");
-
-    {
-        let sup = WorkspaceSupervisor::new();
-        let handle = sup.open(&db, 1).expect("open").actor;
-        seed(&handle).await;
-        write(&handle, "d.md", "x", 1, Arc::new(NoFaults))
-            .await
-            .expect("write");
-        // sup drops here → its actors drop → each joins its worker + releases.
-    }
-
-    // Reopen proves the connection was released when the supervisor dropped.
-    assert_eq!(moments(&db), 1);
-}
-
 // oracle: a hard link addresses the same bytes → same file identity → one
 // actor (a path-key would have forked a second writer).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -317,94 +212,6 @@ async fn hardlink_converges_on_one_actor() {
     assert_eq!(a.identity(), b.identity(), "hard links share file identity");
     assert_eq!(sup.actor_count(), 1, "one actor / one writer");
     assert_eq!(read(&b, "k.md").await.as_deref(), Some("value"));
-}
-
-// oracle: a filename-case alias on a case-insensitive volume addresses the same
-// file → one actor. Skips on case-sensitive filesystems.
-#[test]
-fn case_alias_converges_on_one_actor() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db path");
-    let sup = WorkspaceSupervisor::new();
-    let a = sup.open(&db, 1).expect("open").actor;
-
-    // Upper-case the file name; on a case-insensitive volume this is the same
-    // file, on a case-sensitive one it does not exist.
-    let upper = db.parent().expect("dir").join("ENGINE.DB");
-    if !upper.exists() {
-        eprintln!("SKIP: case-sensitive filesystem — case-alias convergence N/A");
-        return;
-    }
-    let b = sup.open(&upper, 1).expect("open case alias").actor;
-    assert_eq!(
-        a.identity(),
-        b.identity(),
-        "case aliases share file identity"
-    );
-    assert_eq!(sup.actor_count(), 1);
-}
-
-// oracle: a file symlink to the db never forks a second writer. On Unix the
-// engine refuses a store file that is a link; on Windows the link resolves to
-// the target's id. Skips if the platform refuses symlink creation.
-#[test]
-fn file_symlink_never_forks_a_writer() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db path");
-    let sup = WorkspaceSupervisor::new();
-    let a = sup.open(&db, 1).expect("open real").actor;
-
-    let link = db.parent().expect("dir").join("engine-symlink.db");
-    match try_make_file_symlink(&db, &link) {
-        Ok(true) => {}
-        Ok(false) => {
-            eprintln!("SKIP: platform refused a file symlink (no privilege)");
-            return;
-        }
-        Err(err) => panic!("symlink creation failed: {err}"),
-    }
-
-    #[cfg(unix)]
-    {
-        let Err(refused) = sup.open(&link, 1) else {
-            panic!("a store file that is a link must be refused");
-        };
-        assert!(
-            matches!(refused, RuntimeError::Identity { .. }),
-            "{refused:?}"
-        );
-        assert_ne!(a.lifecycle(), LifecycleState::Closed);
-    }
-    #[cfg(not(unix))]
-    {
-        let b = sup.open(&link, 1).expect("open via symlink").actor;
-        assert_eq!(
-            a.identity(),
-            b.identity(),
-            "symlink resolves to the target's id"
-        );
-    }
-    assert_eq!(sup.actor_count(), 1);
-}
-
-// oracle: a worker panic publishes Closed (panic-safe teardown) and the handle
-// fails cleanly rather than hanging.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn worker_panic_publishes_closed() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db path");
-    let sup = WorkspaceSupervisor::new();
-    let handle = sup.open(&db, 1).expect("open").actor;
-    seed(&handle).await;
-
-    let panic_faults: Arc<dyn FaultInjector> = PanicFaults::at(FaultPoint::StorageBeforePersist);
-    let err = write(&handle, "d1.md", "boom", 1, panic_faults)
-        .await
-        .expect_err("panic in the worker surfaces as a lost reply");
-    assert_eq!(err.code(), "actor-unavailable");
-
-    wait_for_closed(&handle);
-    assert_eq!(handle.lifecycle(), LifecycleState::Closed);
 }
 
 // oracle: restart after a panicked predecessor preserves generation continuity

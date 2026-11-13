@@ -1,11 +1,9 @@
-import { ChatLinksInput } from "@dohc/workspace-contracts/chat-links";
-import { ChatFileMentionsInput } from "@dohc/workspace-contracts/chat-file-mentions";
-import { LinksEdgesInput, LinksInInput, LinksResolveInput } from "@dohc/workspace-contracts/links";
 import { HistoryOperationId } from "@dohc/workspace-contracts/history-operation";
 import { WorkspaceSyncPause, workspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 import { ShareCopyInput } from "@dohc/workspace-contracts/share-copy";
 import { ShareLinkAgentDisconnectInput, ShareLinkAgentsInput } from "@dohc/workspace-contracts/share-link-agents";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
+import { byName, distinct, mapNamed } from "@dohc/workspace-contracts/operation-declaration";
 import {normalizeShareLabel, shareSubjectFallback, shareSenderLabel} from "@dohc/security-contract/share-labels";
 import { sha256Hex } from "@dohc/workspace-core/hash";
 import { generateAppSource } from "@dohc/workspace-core/app-source";
@@ -28,6 +26,7 @@ import { DATASET_CAPABILITIES, DatasetRequest } from "@dohc/cli/dataset";
 import {
   CLI_PROTOCOL_VERSION,
   APP_PUBLICATION_CAPABILITIES,
+  DECLARED_VERBS,
   collectionCreateFieldsSchema,
   collectionQueryCursorSchema,
   collectionQueryFilterSchema,
@@ -41,6 +40,7 @@ import {
   type CliResultByVerb,
   type CliStreamPosition,
   type CliVerb,
+  type DeclaredOperation,
   type VersionResolution,
 } from "@dohc/cli/protocol";
 import type { z } from "zod";
@@ -67,7 +67,11 @@ import {
 } from "node:fs/promises";
 import { basename, join } from "node:path";
 
-export const MCP_TOOL_CAPABILITIES = {
+type DeclaredTool = DeclaredOperation["mcp"]["tool"];
+// The tools of the operations declared in workspace-contracts, in declaration order.
+export const DECLARED_TOOLS = byName(Object.values<DeclaredOperation>(DECLARED_VERBS), operation => operation.mcp.tool);
+
+export const MCP_TOOL_CAPABILITIES = distinct(mapNamed(DECLARED_TOOLS, operation => [operation.capabilityId] as const), {
   dohc_read_share_copy: ["share.copy.read"],
   dohc_list_link_agents: ["share.link.agents.list"],
   dohc_disconnect_link_agent: ["share.link.agent.disconnect"],
@@ -92,12 +96,7 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_resume_live_editing: ["share.live.document.resume"],
   dohc_list_retained_copies: ["file.retained.list"],
   dohc_delete_retained_copies: ["file.retained.delete"],
-  dohc_chat_file_mentions: ["chat.read"],
-  dohc_chat_links: ["chat.read"],
   dohc_link: ["work.reference.make"],
-  dohc_links_edges: ["links.edges"],
-  dohc_links_in: ["links.in"],
-  dohc_links_resolve: ["links.resolve"],
   dohc_read_change: ["history.read"],
   dohc_list_files: ["file.list"],
   dohc_read_file: ["file.read"],
@@ -144,7 +143,7 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_retry_automation_run: ["automation.run.retry"],
   dohc_press_button: ["automation.button.press"],
   dohc_inspect_buttons: ["automation.buttons.inspect"],
-} as const satisfies Record<string, readonly CapabilityId[]>;
+} as const) satisfies Record<string, readonly CapabilityId[]>;
 
 export interface ToolContext {
   // Workspace root the server is scoped to (the --workspace arg). All file
@@ -454,7 +453,7 @@ export async function listWorkspaceFiles(
     let dirents;
     try {
       dirents = await readdir(absolute, { withFileTypes: true });
-    } catch (error) {
+    } catch {
       return;
     }
     for (const dirent of dirents) {
@@ -1967,8 +1966,11 @@ async function requestCli<Verb extends CliVerb>(
   }
 }
 
-export async function linksIn(ctx: ToolContext, input: LinksInInput) { return requestCli(ctx, "linksIn", LinksInInput.parse(input)); }
-export async function linksResolve(ctx: ToolContext, input: LinksResolveInput) { return requestCli(ctx, "linksResolve", LinksResolveInput.parse(input)); }
+// Sends a declared tool's arguments to the socket verb its operation names.
+export async function requestDeclaredTool(ctx: ToolContext, tool: DeclaredTool, input: unknown) {
+  const { cli, input: schema } = DECLARED_TOOLS[tool];
+  return requestCli(ctx, cli.verb, schema.parse(input));
+}
 
 export async function readOperation(ctx: ToolContext, args: { operationId: string; cursor?: string }) {
   if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "History operations require the owning workspace. Open it to continue." };
@@ -2641,9 +2643,3 @@ export async function startFileChat(
 }
 
 export { safeResolve };
-
-export async function linksEdges(ctx: ToolContext, input: LinksEdgesInput) { return requestCli(ctx, "linksEdges", LinksEdgesInput.parse(input)); }
-
-export async function chatFileMentions(ctx: ToolContext, input: ChatFileMentionsInput) { return requestCli(ctx, "chatFileMentions", ChatFileMentionsInput.parse(input)); }
-
-export async function chatLinks(ctx: ToolContext, input: ChatLinksInput) { return requestCli(ctx, "chatLinks", ChatLinksInput.parse(input)); }

@@ -57,7 +57,7 @@ async function ownerLog(relay: SyncRelayHandle, workspaceId: string): Promise<Lo
   // Once the owner's engine pushes, the relay answers only reads that carry
   // the identity it adopted.
   const identity = relayAdoptedIdentity(relay.dbPath, workspaceId);
-  const query = new URLSearchParams({ since: "0", limit: "1000", ...(identity ?? {}) });
+  const query = new URLSearchParams({ since: "0", limit: "1000", ...identity });
   const read = await relayJson(relay.baseUrl, OWNER_TOKEN, `/sync/${workspaceId}/log?${query.toString()}`);
   expect(read.status, read.body).toBe(200);
   return (JSON.parse(read.body) as { ops: LogOp[] }).ops;

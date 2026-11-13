@@ -85,7 +85,7 @@ export function pushMessageAccess(storage: StorageContext, message: PushMessage,
     AND g.principal_user_id = ? AND g.status = 'active'`).all(workspaceId, userId)) {
     const authority = authorizeShareAction({storage, actorUserId: userId, shareId: String(row.share_id), action: "read"});
     if (!authority.ok || !filterOpForShare(authority.effectiveSelector, "chat.message.append", message.payloadJson, resolver).allowed) continue;
-    return {place: pushPlainText(storage.getShareLabels(authority.share.shareId).subjectName, "a chat"),
+    return {place: pushPlainText(storage.getShareLabels(authority.share.shareId, "member").subjectName, "a chat"),
       dm: Boolean(channel && resolver.channelKind(channel) === "dm")};
   }
   return null;

@@ -1,6 +1,6 @@
 import { folderIdentityKey, type FolderIdentity } from "./workspaceRootIdentity";
 
-export interface WorkspaceAuthorityBinding<Workspace> {
+export interface WorkspaceAuthorityBinding<_Workspace> {
   readonly attachmentId: symbol;
   readonly workspaceId: string;
   readonly registeredRootPath: string;

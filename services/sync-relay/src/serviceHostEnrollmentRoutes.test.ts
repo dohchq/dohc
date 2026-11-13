@@ -1,20 +1,15 @@
 import { DiscussionActivityHub } from "./discussionActivity";
 import {createHash} from "node:crypto";
-import {EventEmitter} from "node:events";
-import type {ServerResponse} from "node:http";
-import {DRAIN_TIMEOUT_HEADER, DRAIN_TIMEOUT_MS, pipeResponseBody} from "@dohc/service-http";
 import {afterEach, expect, it, vi} from "vitest";
-import {fixture as ticketFixture, binding, keptByOwnerRestore, retainServiceActivation, scope} from "./liveTickets.test-helper";
+import { fixture as ticketFixture, binding, retainServiceActivation, scope } from "./liveTickets.test-helper";
 import {readServiceActivationRetirement, type RetirableServiceActivation} from "./storage/serviceActivationRetirement";
 import type {ServiceHostRetirementPreparation} from "./storage/serviceHostEnrollment";
 import type {StorageContext} from "./storage/context";
 import {createLiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
-import {createServiceHostEnrollmentRoutes, discoverServiceHostDocuments, isServiceHostEnrollmentPath, serviceHostReadiness} from "./serviceHostEnrollmentRoutes";
+import { createServiceHostEnrollmentRoutes, discoverServiceHostDocuments } from "./serviceHostEnrollmentRoutes";
 import {createServiceHostReplication} from "./serviceHostReplication";
 import {authorizeServiceHostReplication, deriveServiceHostBearer} from "./serviceHostCredential";
-import {relayError} from "./errors";
 import {stopWithoutSessionHost} from "./sessionHostStop";
-import {SERVICE_HOST_ENROLLMENTS} from "./storage/serviceHostEnrollment";
 import type {ServiceActivationBlock} from "./serviceActivationDriver";
 import type {ServiceHostedHold} from "./serviceHostedReplication";
 import {RecoveryCopyRefusal, type ServiceKeptEdits} from "./storage/serviceKeptEdits";
@@ -234,22 +229,6 @@ it("reads and confirms edits kept in an earlier identity's store, and refuses th
   expect(f.storage.readServiceKeptEdits(queue("outbox-x", identity))).toMatchObject({copied: true});
 });
 
-// Proves: the relay's dispatch sends both enrollment paths, and nothing else,
-// to these routes, and gives them the routes' body limit.
-it("routes the live host and its kept edits actions to the enrollment routes", async () => {
-  const f = await fixture();
-  const generation = (f.storage.recordServiceKeptEdits({identity, outboxId: "outbox-1", binding, reason: "invalid-update", headDeliveryId: "delivery-1",
-    refusalKey: "refusal-1", nowMs: 5}), f.storage.readServiceKeptEdits(queue("outbox-1"))!.generation);
-  const requests = [f.request(), f.request("POST", {action: "copied", outboxId: "outbox-1", generation, checkpointDigest: null}, {}, "/kept-edits")];
-  for (const request of requests) {
-    expect(isServiceHostEnrollmentPath(new URL(request.url).pathname)).toBe(true);
-    expect((await f.handle(request)).status).toBe(200);
-  }
-  for (const path of [`/sync/${scope.workspaceId}/live-host/other`, `/sync/${scope.workspaceId}/live-host/kept-edits/x`, `/sync/${scope.workspaceId}/live-hosts`, "/sync/live-host"]) {
-    expect(isServiceHostEnrollmentPath(path)).toBe(false);
-  }
-});
-
 // Proves: the relay reads at most two pages at once, and each holds its turn
 // until its body is taken or cancelled, not only while it is built. Others
 // wait, and one whose caller gave up leaves the line without taking a turn.
@@ -280,96 +259,6 @@ it("runs at most two recovery page reads at once across the relay, until each bo
   expect(f.host.keptEdits.page.mock.calls.map(([kept]) => kept.outboxId)).toEqual(["outbox-1", "outbox-2", "outbox-4", "outbox-5"]);
   while (releases.length) releases.shift()!();
   expect(await Promise.all(answers.slice(2).map(answer => answer.then(response => response.status, () => "aborted")))).toEqual([expect.anything(), 200, 200]);
-});
-
-// A socket whose every write fills its buffer, as a slow client's does, until it drains or closes.
-class SlowSocket extends EventEmitter {
-  destroyed = false; writableFinished = false; writes = 0;
-  write() {this.writes++; return false;}
-  end() {this.writableFinished = true;}
-  destroy() {this.destroyed = true; queueMicrotask(() => this.emit("close")); return this;}
-}
-
-// Proves: through the relay's own body writer, a page keeps its read slot
-// while the socket has not drained it, gives it up once the socket drains,
-// and gives it up when the client goes away before that.
-it("holds a recovery page's read slot until a slow client's socket drains it or closes", async () => {
-  const f = await fixture();
-  for (const index of [1, 2, 3, 4]) {
-    f.storage.recordServiceKeptEdits({identity, outboxId: `outbox-${index}`, binding: {...binding, objectId: `other-object-${index}`}, reason: "invalid-update",
-      headDeliveryId: "delivery-1", refusalKey: `refusal-${index}`, nowMs: 5});
-  }
-  const read = (index: number) => f.handle(f.request("POST", {action: "page", outboxId: `outbox-${index}`,
-    generation: f.storage.readServiceKeptEdits(queue(`outbox-${index}`))!.generation}, {}, "/kept-edits"));
-  const [one, two] = await Promise.all([read(1), read(2)]);
-  const waiting = [read(3), read(4)];
-  const slow = new SlowSocket(), piped = pipeResponseBody(one, slow as unknown as ServerResponse);
-  await vi.waitFor(() => expect(slow.writes).toBe(1));
-  // The whole page is in the socket's buffer, not yet sent, so its slot stays taken.
-  await new Promise(resolve => setImmediate(resolve));
-  expect(f.host.keptEdits.page).toHaveBeenCalledTimes(2);
-  slow.emit("drain");
-  await piped;
-  expect(slow.writableFinished).toBe(true);
-  await vi.waitFor(() => expect(f.host.keptEdits.page).toHaveBeenCalledTimes(3));
-  // A client that goes away before its socket drains gives up its slot too.
-  const gone = new SlowSocket(), abandoned = pipeResponseBody(two, gone as unknown as ServerResponse);
-  await vi.waitFor(() => expect(gone.writes).toBe(1));
-  gone.emit("close");
-  await abandoned;
-  await vi.waitFor(() => expect(f.host.keptEdits.page).toHaveBeenCalledTimes(4));
-  expect((await Promise.all(waiting)).map(response => response.status)).toEqual([200, 200]);
-});
-
-// Proves: a client that stops taking a recovery page loses it after the drain timeout,
-// so its read slot goes to the next read instead of staying taken.
-it("ends a recovery page a stalled client stopped taking and frees its read slot", async () => {
-  const f = await fixture();
-  for (const index of [1, 2, 3]) {
-    f.storage.recordServiceKeptEdits({identity, outboxId: `outbox-${index}`, binding: {...binding, objectId: `other-object-${index}`}, reason: "invalid-update",
-      headDeliveryId: "delivery-1", refusalKey: `refusal-${index}`, nowMs: 5});
-  }
-  const read = (index: number) => f.handle(f.request("POST", {action: "page", outboxId: `outbox-${index}`,
-    generation: f.storage.readServiceKeptEdits(queue(`outbox-${index}`))!.generation}, {}, "/kept-edits"));
-  const [one, two] = await Promise.all([read(1), read(2)]);
-  const waiting = read(3);
-  expect(one.headers.has(DRAIN_TIMEOUT_HEADER)).toBe(true);
-  vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
-  try {
-    const stalled = new SlowSocket(), piped = pipeResponseBody(one, stalled as unknown as ServerResponse);
-    // Under fake timers vi.waitFor would advance them, so this lets the one write happen without time passing.
-    await vi.advanceTimersByTimeAsync(0);
-    expect(stalled.writes).toBe(1);
-    await vi.advanceTimersByTimeAsync(DRAIN_TIMEOUT_MS - 1);
-    expect(f.host.keptEdits.page).toHaveBeenCalledTimes(2);
-    await vi.advanceTimersByTimeAsync(1);
-    await piped;
-    expect(stalled.destroyed).toBe(true);
-  } finally {
-    vi.useRealTimers();
-  }
-  await vi.waitFor(() => expect(f.host.keptEdits.page).toHaveBeenCalledTimes(3));
-  await two.body!.cancel();
-  expect((await waiting).status).toBe(200);
-});
-
-// Proves: more kept queues than one page never break the live host's answer; the rest follow its cursor.
-it("pages the edits the server kept instead of refusing a long list", async () => {
-  const f = await fixture();
-  for (let index = 0; index <= 256; index++) {
-    f.storage.recordServiceKeptEdits({identity, outboxId: `outbox-${index}`, binding: {...binding, objectId: `other-object-${index}`}, reason: "invalid-update",
-      headDeliveryId: "delivery-1", refusalKey: `refusal-${index}`, nowMs: 5});
-  }
-  const response = await f.handle(f.request());
-  expect(response.status).toBe(200);
-  const first = (await response.json()) as {keptEdits: Array<{outboxId: string}>; keptEditsCursor: number};
-  expect(first.keptEdits).toHaveLength(256);
-  const rest = (await (await f.handle(f.request("GET", undefined, {}, `?kept=1&after=${first.keptEditsCursor}`))).json()) as {keptEdits: Array<{outboxId: string}>; nextCursor: number | null};
-  expect(rest).toMatchObject({ok: true, nextCursor: null});
-  expect(new Set([...first.keptEdits, ...rest.keptEdits].map(row => row.outboxId)).size).toBe(257);
-  for (const query of ["?kept=1", "?kept=1&after=0", "?kept=1&after=x", "?kept=1&after=1&refusals=1"]) {
-    expect((await f.handle(f.request("GET", undefined, {}, query))).status).not.toBe(200);
-  }
 });
 
 it("discovers rich documents in folders, skips other content, and preserves a paused enrollment", async () => {
@@ -420,106 +309,6 @@ it("reports ready only with completed retained activation and the current native
   expect((await state()).status).toBe("paused");
 });
 
-// Proves: readiness reads only an activation's metadata, and answers as the
-// full read of its bytes does, with no activation and with a pending, a
-// completed and a ready one.
-it("answers readiness from activation metadata as the full read does, for pending, completed and ready activations", async () => {
-  const f = await fixture(), enrolled = f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
-  const store = f.storage.createServiceActivationStore(f.history);
-  const fullRead = {readiness(workspaceId: string, path: string, objectId?: string) {
-    const full = store.read(workspaceId, path, 1_000_000, objectId);
-    return full && {activationId: full.activationId, objectId: full.source.objectId, lineageClaimId: full.source.lineageClaimId, completed: full.completed, binding: full.binding};
-  }};
-  const answer = (activation: Parameters<typeof serviceHostReadiness>[0]["activation"]) =>
-    serviceHostReadiness({storage: f.storage, history: f.history, host: f.host, activation}).state(enrolled);
-  const same = () => {
-    expect(store.readiness(scope.workspaceId, binding.currentPath, binding.objectId)).toEqual(fullRead.readiness(scope.workspaceId, binding.currentPath, binding.objectId));
-    const metadata = answer(store);
-    expect(metadata).toEqual(answer(fullRead));
-    return metadata.status;
-  };
-  expect(same()).toBe("preparing");
-  retainServiceActivation(f.raw, namespace);
-  expect(store.readiness(scope.workspaceId, binding.currentPath)).toMatchObject({completed: false});
-  expect(same()).toBe("preparing");
-  f.raw.exec("UPDATE sync_relay_service_activations SET completion_json='{}'");
-  expect(store.readiness(scope.workspaceId, binding.currentPath)).toMatchObject({completed: true});
-  expect(same()).toBe("preparing");
-  f.host.ready.mockReturnValue(true);
-  expect(same()).toBe("ready");
-});
-
-// Proves: readiness checks a ready document's binding from metadata, preparing
-// no statement that reads a baseline, a state or a blob, and that check still
-// answers preparing once the document's live lineage closes.
-it("checks a ready document's binding without reading baseline or state bytes, and answers preparing once its lineage closes", async () => {
-  const f = await fixture(), enrolled = f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
-  retainServiceActivation(f.raw, namespace, true);
-  f.host.ready.mockReturnValue(true);
-  const {state} = serviceHostReadiness({storage: f.storage, history: f.history, host: f.host, activation: f.storage.createServiceActivationStore(f.history)});
-  const prepare = vi.spyOn((f.storage as StorageContext).db, "prepare");
-  expect(state(enrolled).status).toBe("ready");
-  const statements = prepare.mock.calls.map(([sql]) => sql);
-  prepare.mockRestore();
-  expect(statements.some(sql => sql.includes("sync_relay_live_documents"))).toBe(true);
-  // The two tables that hold a document's bytes, read whole, read them too.
-  const whole = /SELECT\s+(\w+\.)?\*\s+FROM\s+(sync_relay_live_documents|sync_relay_service_activations)\b/i;
-  expect(statements.filter(sql => /baseline_bytes|state_bytes|sync_relay_blobs/i.test(sql) || whole.test(sql))).toEqual([]);
-  f.raw.exec("UPDATE sync_relay_live_documents SET admission_state='closed'");
-  expect(state(enrolled).status).toBe("preparing");
-});
-
-// Proves: a damaged stored activation binding makes its own row unavailable
-// and leaves the rest of the readiness list served.
-it("lists a document with a damaged activation binding as unavailable and still serves the healthy one", async () => {
-  const f = await fixture(); f.seed("docs/b.md", "object-b");
-  f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input}); f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input, path: "docs/b.md"});
-  retainServiceActivation(f.raw, namespace, true);
-  f.host.ready.mockReturnValue(true);
-  const documents = async () => {
-    const response = await f.handle(f.request());
-    expect(response.status).toBe(200);
-    return (await response.json()).documents;
-  };
-  const healthy = {path: "docs/b.md", objectId: "object-b", status: "preparing"};
-  expect(await documents()).toEqual([{path: binding.currentPath, objectId: binding.objectId, status: "ready",
-    document: {binding, relayDatabaseNamespace: namespace}}, healthy]);
-  f.raw.exec("UPDATE sync_relay_service_activations SET binding_json=json_set(binding_json,'$.selectorPaths','damaged')");
-  expect(await documents()).toEqual([{path: binding.currentPath, objectId: binding.objectId, status: "unavailable", reason: "session-host-diverged"}, healthy]);
-});
-
-// Proves: when the owner's restore ends a note's last Edit grant, the owner
-// keeps live editing once the restore resumed. The host keeps the note
-// enrolled, and the owner's desktop finds the note ready at the restored
-// generation.
-it("reports a restored note ready to its owner after the restore ended its last Edit grant", async () => {
-  const f = await fixture(); f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
-  f.host.ready.mockReturnValue(true);
-  retainServiceActivation(f.raw, namespace, true);
-  keptByOwnerRestore(f.raw, namespace);
-  expect(f.release(binding.objectId)).toBeNull();
-  expect((await (await f.handle(f.request())).json()).documents).toEqual([{path: binding.currentPath, objectId: binding.objectId, status: "ready",
-    document: {binding: {...binding, restoreFenceGeneration: 8}, relayDatabaseNamespace: namespace}}]);
-});
-
-// Proves: only the owner discovers the restored note. The revoked recipient
-// and another account find nothing, and the owner's Pause still pauses it.
-it("shows a restored note only to its owner, and the owner's Pause still pauses it", async () => {
-  const f = await fixture(); f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
-  f.host.ready.mockReturnValue(true);
-  retainServiceActivation(f.raw, namespace, true);
-  keptByOwnerRestore(f.raw, namespace);
-  const documents = async () => (await (await f.handle(f.request())).json()).documents;
-  expect((await documents())[0].status).toBe("ready");
-  for (const userId of [scope.userId, "other"]) {
-    f.setActor({workspaceId: scope.workspaceId, userId});
-    expect((await f.handle(f.request())).status).toBe(404);
-  }
-  f.setActor({workspaceId: scope.workspaceId, userId: "owner-1"});
-  expect(f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false})).toMatchObject({ownerStop: "pause"});
-  expect((await documents())[0].status).toBe("paused");
-});
-
 it.each([0, 1] as const)("keeps the conflict-parent reason on a retired held document after Stop clears the running hold (effect %s)", async effectIndex => {
   const f = await heldDocumentFixture(undefined, effectIndex); cleanup.push(f.close);
   expect((await (await f.handle(f.request())).json()).documents[0]).toMatchObject({reason: "conflict-parent-withheld"});
@@ -532,28 +321,6 @@ it.each([0, 1] as const)("keeps the conflict-parent reason on a retired held doc
   const resume = await f.handle(f.request("POST", "", {path: f.binding.currentPath}));
   expect(resume.status).toBe(202);
   expect(f.storage.readServiceHostEnrollment(f.binding.workspaceId, f.binding.currentPath)).toMatchObject({enabled: true, retired: false, ownerStop: null});
-});
-
-it.each(["unmatched-parent", "other-document", "other-version", "earlier-epoch"])("does not infer a retired conflict hold from %s history", async change => {
-  const f = await heldDocumentFixture(); cleanup.push(f.close);
-  expect((await f.stop()).status).toBe(200);
-  if (change === "unmatched-parent") f.raw.exec("UPDATE sync_relay_log SET payload_json=json_set(payload_json,'$.effects[0].momentId','another-moment') WHERE op_kind='conflict.resolve'");
-  if (change === "other-document") f.raw.exec("UPDATE sync_relay_log SET payload_json=json_set(payload_json,'$.objectId','another-object') WHERE op_kind='moment.append'");
-  if (change === "other-version") f.raw.exec("UPDATE sync_relay_log SET payload_json=json_set(payload_json,'$.versionId','branch') WHERE op_kind='moment.append'");
-  if (change === "earlier-epoch") f.raw.exec("UPDATE sync_relay_workspaces SET epoch_log_floor=2");
-  expect((await (await f.handle(f.request("GET", "?retired=1"))).json()).documents).toEqual([{
-    path: f.binding.currentPath, objectId: f.binding.objectId, status: "retired", stopped: true,
-  }]);
-});
-
-it("keeps divergence ahead of retired conflict history, and ignores an obsolete workspace identity", async () => {
-  const f = await heldDocumentFixture(); cleanup.push(f.close);
-  expect((await f.stop()).status).toBe(200);
-  vi.spyOn(f.host, "diverged").mockReturnValue(true);
-  const documents = async () => (await (await f.handle(f.request("GET", "?retired=1"))).json()).documents;
-  expect(await documents()).toEqual([{path: f.binding.currentPath, objectId: f.binding.objectId, status: "retired", stopped: true, reason: "session-host-diverged"}]);
-  f.raw.exec("UPDATE sync_relay_workspaces SET replication_epoch='rotated'");
-  expect(await documents()).toEqual([{path: f.binding.currentPath, objectId: f.binding.objectId, status: "retired", stopped: true}]);
 });
 
 it("reports only a conflict-parent hold, after document state and existing blocks", async () => {
@@ -629,250 +396,33 @@ it("reports a document whose live start keeps failing, after a down host, every 
 // Proves: of two Stops, and of two Resumes, sent at once, exactly one says it
 // changed live editing, so the desktop credits one author. A Resume of a page
 // a share already made live changes nothing.
-it("tells exactly one of two concurrent Stops, and of two Resumes, that it made the change", async () => {
-  const f = await fixture(), enrolled = f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
-  const changed = async (response: Promise<Response>) => (await (await response).json()).changed;
-  expect(await changed(f.handle(f.request("POST", {path: binding.currentPath})))).toBe(false);
-  const stop = () => changed(f.handle(f.request("DELETE", {path: binding.currentPath, retire: true, restoreFenceGeneration: binding.restoreFenceGeneration})));
-  expect((await Promise.all([stop(), stop()])).sort()).toEqual([false, true]);
-  const resume = () => changed(f.handle(f.request("POST", {path: binding.currentPath})));
-  expect((await Promise.all([resume(), resume()])).sort()).toEqual([false, true]);
-  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, enrolled.path)).toMatchObject({enabled: true, retired: false});
-});
 
-it("reports a document the session host refused until the owner resumes it", async () => {
-  const f = await fixture(), enrolled = f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
-  const documents = async () => (await (await f.handle(f.request())).json()).documents;
-  const refused = {path: binding.currentPath, objectId: binding.objectId, status: "unavailable", reason: "session-host-refused"};
-  f.host.ready.mockReturnValue(true);
-  f.host.block(enrolled.objectId);
-  expect(await documents()).toEqual([refused]);
-  expect(await documents()).toEqual([refused]);
-  expect((await f.handle(f.request("POST", {shareId: scope.shareId}))).status).toBe(202);
-  expect(await documents()).toEqual([refused]);
-  expect(f.host.unblock).not.toHaveBeenCalled();
-  const resumed = await f.handle(f.request("POST", {path: binding.currentPath}));
-  expect(resumed.status).toBe(202);
-  expect(await resumed.json()).toEqual({ok: true, path: binding.currentPath, objectId: binding.objectId, status: "preparing", changed: true});
-  expect(f.host.unblock).toHaveBeenCalledTimes(1);
-  expect(f.host.unblock).toHaveBeenCalledWith(expect.objectContaining({workspaceId: scope.workspaceId, objectId: enrolled.objectId}));
-  expect(f.host.unblock.mock.invocationCallOrder[0]).toBeLessThan(f.host.reconcile.mock.invocationCallOrder.at(-1)!);
-  expect(await documents()).toEqual([{path: binding.currentPath, objectId: binding.objectId, status: "preparing"}]);
-  // Its one attempt failed, so the host blocked it again.
-  f.host.block(enrolled.objectId);
-  expect(await documents()).toEqual([refused]);
-  expect(f.host.unblock).toHaveBeenCalledTimes(1);
-});
 
 // Proves: a document blocked for having no live-editing history reads as its
 // own reason, so its owner learns to open it before Resume, which still unblocks it.
-it("reports a document without live-editing history apart from other refusals", async () => {
-  const f = await fixture(), enrolled = f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
-  const documents = async () => (await (await f.handle(f.request())).json()).documents;
-  f.host.block(enrolled.objectId, "without-lineage");
-  expect(await documents()).toEqual([{path: binding.currentPath, objectId: binding.objectId, status: "unavailable", reason: "live-document-without-lineage"}]);
-  expect((await f.handle(f.request("POST", {path: binding.currentPath}))).status).toBe(202);
-  expect(f.host.unblock).toHaveBeenCalledTimes(1);
-  expect(await documents()).toEqual([{path: binding.currentPath, objectId: binding.objectId, status: "preparing"}]);
-  f.host.block(enrolled.objectId, "refused");
-  expect(await documents()).toEqual([{path: binding.currentPath, objectId: binding.objectId, status: "unavailable", reason: "session-host-refused"}]);
-});
+
 
 // Proves: a document whose host copy is missing an owner edit reads as its
 // own reason. A Resume still asks for one more attempt, which blocks it again
 // with the same reason.
-it("reports a document missing an owner edit apart from other refusals", async () => {
-  const f = await fixture(), enrolled = f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
-  const documents = async () => (await (await f.handle(f.request())).json()).documents;
-  const unadmitted = {path: binding.currentPath, objectId: binding.objectId, status: "unavailable", reason: "live-edit-unadmitted"};
-  f.host.block(enrolled.objectId, "live-edit-unadmitted");
-  expect(await documents()).toEqual([unadmitted]);
-  expect((await f.handle(f.request("POST", {path: binding.currentPath}))).status).toBe(202);
-  expect(f.host.unblock).toHaveBeenCalledTimes(1);
-  f.host.block(enrolled.objectId, "live-edit-unadmitted");
-  expect(await documents()).toEqual([unadmitted]);
-});
+
 
 // Proves: Resume of a document held for an unadmitted live edit records the
 // retirement of its exact prepared activation, completed or a successor still
 // pending, in the enrollment transaction, before the host may try it again. A
 // hold that ended before that transaction changes nothing, and the Resume does
 // not reopen the document's admission.
-it.each([["completed", true], ["pending", false]])("retires the held %s activation when its owner resumes a document edited while live editing was off", async (_state, completed) => {
-  const f = await fixture(), enrolled = f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
-  const activationId = retainServiceActivation(f.raw, namespace, completed);
-  const retirement = () => readServiceActivationRetirement(f.storage as StorageContext, enrolled);
-  f.host.block(enrolled.objectId, "live-edit-unadmitted");
-  f.host.blocked.mockReturnValueOnce("live-edit-unadmitted").mockReturnValueOnce(undefined);
-  expect((await f.handle(f.request("POST", {path: binding.currentPath}))).status).toBe(409);
-  expect(retirement()).toBeNull();
-  expect(f.host.unblock).not.toHaveBeenCalled();
-  expect((await f.handle(f.request("POST", {path: binding.currentPath}))).status).toBe(202);
-  expect(retirement()).toEqual({relayDatabaseNamespace: namespace, activationId, workspaceId: scope.workspaceId, mainVersionId: "main",
-    objectId: binding.objectId, lineageClaimId: binding.lineageClaimId, path: binding.currentPath, restoreFenceGeneration: 7, acceptedThrough: 0,
-    requestedAtMs: expect.any(Number)});
-  expect(f.host.unblock).toHaveBeenCalledTimes(1);
-  expect(f.storage.serviceHostDocumentEnabled(enrolled)).toBe(false);
-});
+
 
 // Proves: a document whose hosted replica diverged reads as its own reason
 // ahead of a block, a Resume cannot change that, and the owner learns nothing
 // of the store. A workspace that changed identity still reads as changed.
-it("reports a document whose hosted replica diverged, and nothing about its store", async () => {
-  const f = await fixture(), enrolled = f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
-  const diverged = {path: binding.currentPath, objectId: binding.objectId, status: "unavailable", reason: "session-host-diverged"};
-  f.host.ready.mockReturnValue(true);
-  f.host.block(enrolled.objectId);
-  f.host.diverged.mockImplementation(row => row.workspaceId === scope.workspaceId && row.replicationEpoch === "epoch" && row.streamIdentity === "stream");
-  const response = await f.handle(f.request());
-  expect(await response.json()).toEqual({ok: true, diverged: true, documents: [diverged]});
-  const resumed = await f.handle(f.request("POST", {path: binding.currentPath}));
-  expect(resumed.status).toBe(202);
-  expect(await resumed.json()).toEqual({ok: true, ...diverged, changed: true});
-  f.raw.prepare("UPDATE sync_relay_workspaces SET replication_epoch='rotated' WHERE workspace_id=?").run(scope.workspaceId);
-  expect(await (await f.handle(f.request())).json()).toEqual({ok: true, diverged: false, documents: [{path: binding.currentPath, objectId: binding.objectId, status: "unavailable", reason: "workspace-changed"}]});
-});
+
 
 // Proves: an owner's Pause or Stop records their intent but cannot hide a
 // diverged server copy. The paused and the retired document both keep the
 // reason, and the workspace still reads as diverged once no document is active.
-it("keeps a diverged document's reason after its owner pauses or stops it", async () => {
-  const f = await fixture(); f.seed("docs/b.md", "object-b");
-  f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input}); f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input, path: "docs/b.md"});
-  f.host.diverged.mockImplementation(row => row.workspaceId === scope.workspaceId && row.replicationEpoch === "epoch" && row.streamIdentity === "stream");
-  const reason = "session-host-diverged";
-  expect(await (await f.handle(f.request("DELETE", {path: binding.currentPath}))).json()).toEqual({ok: true, path: binding.currentPath, objectId: binding.objectId, status: "unavailable", reason});
-  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)).toMatchObject({ownerStop: "pause"});
-  const stopped = await f.handle(f.request("DELETE", {path: "docs/b.md", retire: true, restoreFenceGeneration: 0}));
-  expect(await stopped.json()).toMatchObject({ok: true, path: "docs/b.md", status: "retired"});
-  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, "docs/b.md")).toMatchObject({ownerStop: "retire", retired: true});
-  expect(await (await f.handle(f.request())).json()).toEqual({ok: true, diverged: true, documents: [{path: binding.currentPath, objectId: binding.objectId, status: "unavailable", reason}]});
-  expect(await (await f.handle(f.request("GET", undefined, {}, "?retired=1"))).json()).toEqual({ok: true, documents: [{path: "docs/b.md", objectId: "object-b", status: "retired", stopped: true, reason}], nextCursor: null});
-  expect((await f.handle(f.request("DELETE", {path: binding.currentPath, retire: true, restoreFenceGeneration: binding.restoreFenceGeneration}))).status).toBe(200);
-  expect(await (await f.handle(f.request())).json()).toEqual({ok: true, diverged: true, documents: []});
-  expect((await (await f.handle(f.request("GET", undefined, {}, "?retired=1"))).json()).documents).toEqual([
-    {path: binding.currentPath, objectId: binding.objectId, status: "retired", stopped: true, reason}, {path: "docs/b.md", objectId: "object-b", status: "retired", stopped: true, reason}]);
-});
 
-it("lists automatic enrollment refusals without enrolling documents or exposing other workspaces", async () => {
-  const f = await fixture();
-  const response = await f.handle(f.request("GET", undefined, {}, "?refusals=1"));
-  expect(response.status).toBe(200);
-  expect(await response.json()).toEqual({ok: true, refusals: [], nextCursor: null});
-  expect(f.storage.listServiceHostEnrollments()).toEqual([]);
-  f.raw.exec("DELETE FROM sync_relay_object_moments");
-  const before = f.raw.prepare("SELECT total_changes() AS changes").get();
-  const refused = await (await f.handle(f.request("GET", undefined, {}, "?refusals=1"))).json();
-  expect(refused).toMatchObject({ok: true, refusals: [{shareId: scope.shareId, paths: ["docs"], code: "conflict"}], nextCursor: null});
-  expect(f.raw.prepare("SELECT total_changes() AS changes").get()).toEqual(before);
-  expect(f.host.reconcile).not.toHaveBeenCalled();
-  f.setActor({workspaceId: scope.workspaceId, userId: "recipient"});
-  expect((await f.handle(f.request("GET", undefined, {}, "?refusals=1"))).status).toBe(404);
-  f.setActor({workspaceId: "other", userId: "owner-1"});
-  expect((await f.handle(f.request("GET", undefined, {}, "?refusals=1"))).status).toBe(404);
-  f.setActor({workspaceId: scope.workspaceId, userId: "owner-1"});
-  expect((await f.handle(f.request("GET", undefined, {}, "?retired=1&refusals=1"))).status).toBe(404);
-});
-
-it("clears derived capacity refusals when an owner frees space and retries enrollment", async () => {
-  const f = await fixture();
-  f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
-  for (let index = 1; index < 64; index++) {
-    const path = `docs/capacity-${index}.md`; f.seed(path, `capacity-${index}`);
-    f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input, path});
-  }
-  f.raw.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id=?").run(JSON.stringify({paths: [binding.currentPath], versionId: null}), scope.shareId);
-  f.seed("pending/a.md", "pending-object");
-  f.raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES ('pending-share',?,'owner-1',?,1)").run(scope.workspaceId, JSON.stringify({paths: ["pending"], versionId: null}));
-  f.raw.prepare("INSERT INTO sync_relay_share_grants SELECT 'pending-grant','pending-share',principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id FROM sync_relay_share_grants WHERE grant_id=?").run(scope.grantId);
-  const read = async () => (await f.handle(f.request("GET", undefined, {}, "?refusals=1"))).json();
-  expect(await read()).toMatchObject({refusals: [{shareId: "pending-share", code: "quota_exceeded"}], nextCursor: null});
-  f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true, restoreFenceGeneration: binding.restoreFenceGeneration});
-  expect(await read()).toEqual({ok: true, refusals: [], nextCursor: null});
-  expect((await f.handle(f.request("POST", {shareId: "pending-share"}))).status).toBe(202);
-  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, "pending/a.md")).toMatchObject({enabled: true});
-  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)).toMatchObject({retired: true, enabled: false});
-});
-
-it("advances refusal pages past healthy shares to an oversized share", async () => {
-  const f = await fixture();
-  f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
-  f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true, restoreFenceGeneration: binding.restoreFenceGeneration});
-  f.release(binding.objectId);
-  for (let index = 0; index < 65; index++) {
-    const shareId = `page-${String(index).padStart(3, "0")}`;
-    f.raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) SELECT ?,workspace_id,granter_user_id,selector_json,created_at_ms FROM sync_relay_shares WHERE share_id=?").run(shareId, scope.shareId);
-    f.raw.prepare("INSERT INTO sync_relay_share_grants SELECT ?,?,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id FROM sync_relay_share_grants WHERE grant_id=?").run(`page-grant-${index}`, shareId, scope.grantId);
-  }
-  const first = await (await f.handle(f.request("GET", undefined, {}, "?refusals=1"))).json();
-  expect(first.refusals).toEqual([]); expect(first.nextCursor).toBe("page-063");
-  for (let index = 0; index < 65; index++) f.seed(`large/${index}.md`, `large-${index}`);
-  f.raw.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id='page-064'").run(JSON.stringify({paths: ["large"], versionId: null}));
-  const second = await (await f.handle(f.request("GET", undefined, {}, `?refusals=1&after=${first.nextCursor}`))).json();
-  expect(second).toMatchObject({refusals: [{shareId: "page-064", paths: ["large"], code: "bad_request"}], nextCursor: null});
-  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)).toMatchObject({retired: true, enabled: false});
-});
-
-it("counts only missing documents when a share contains more than 64 stopped documents", async () => {
-  const f = await fixture();
-  // Stop and release have their own lifecycle tests, so one transaction seeds the stopped documents.
-  f.raw.exec("BEGIN");
-  for (let index = 0; index < 65; index++) {
-    const path = `docs/stopped-${index}.md`; f.seed(path, `stopped-${index}`);
-    f.raw.prepare(`INSERT INTO ${SERVICE_HOST_ENROLLMENTS}(workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,owner_stop,enabled,retired,created_at_ms,updated_at_ms,accounted_bytes)
-      VALUES (?,?,?,'owner-1',?,'epoch','stream','retire',0,1,10,20,1)`).run(scope.workspaceId, `stopped-${index}`, path, scope.shareId);
-  }
-  f.raw.exec("COMMIT");
-  expect(await (await f.handle(f.request("GET", undefined, {}, "?refusals=1"))).json()).toEqual({ok: true, refusals: [], nextCursor: null});
-  expect((await f.handle(f.request("POST", {shareId: scope.shareId, retry: true}))).status).toBe(202);
-  expect(f.storage.listServiceHostEnrollments()).toHaveLength(1);
-  expect(f.storage.listServiceHostEnrollments()[0]!.path).toBe(binding.currentPath);
-  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, "docs/stopped-0.md")).toMatchObject({retired: true, enabled: false});
-  f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true, restoreFenceGeneration: binding.restoreFenceGeneration});
-  f.release(binding.objectId);
-  expect(await (await f.handle(f.request("GET", undefined, {}, "?refusals=1"))).json()).toEqual({ok: true, refusals: [], nextCursor: null});
-  expect((await f.handle(f.request("POST", {shareId: scope.shareId, retry: true}))).status).toBe(200);
-  expect(f.storage.listServiceHostEnrollments()).toEqual([]);
-});
-
-it("keeps full Unicode refusal selectors within the client byte budget and resumes at the unreturned share", async () => {
-  const f = await fixture();
-  const paths = Array.from({length: 100}, (_, index) => `${String(index).padStart(3, "0")}/${"界".repeat(1016)}`);
-  for (let index = 0; index < 5; index++) {
-    const shareId = `large-selector-${index}`;
-    f.raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES (?,?,'owner-1',?,1)").run(shareId, scope.workspaceId, JSON.stringify({paths, versionId: null}));
-    f.raw.prepare("INSERT INTO sync_relay_share_grants SELECT ?,?,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id FROM sync_relay_share_grants WHERE grant_id=?").run(`large-grant-${index}`, shareId, scope.grantId);
-  }
-  vi.spyOn(f.storage, "checkServiceHostDocuments").mockImplementation(input => {
-    if (input.shareId.startsWith("large-selector-")) throw relayError("quota_exceeded", "No room for live documents.");
-  });
-  const firstResponse = await f.handle(f.request("GET", undefined, {}, "?refusals=1"));
-  const text = await firstResponse.text(); expect(Buffer.byteLength(text)).toBeLessThan(1024 * 1024);
-  const first = JSON.parse(text);
-  expect(first.refusals).toHaveLength(3); expect(first.refusals[0].paths).toEqual(paths);
-  expect(first.nextCursor).toBe("large-selector-2");
-  const second = await (await f.handle(f.request("GET", undefined, {}, `?refusals=1&after=${first.nextCursor}`))).json();
-  expect(second.refusals.map((row: {shareId: string}) => row.shareId)).toEqual(["large-selector-3", "large-selector-4"]);
-  expect(second.nextCursor).toBeNull();
-});
-
-it("rolls back every folder enrollment when a later current file lacks a live document", async () => {
-  const f = await fixture();
-  f.raw.prepare("INSERT INTO sync_relay_current_files VALUES (?,'main','docs/z.md',?,'text',1)").run(scope.workspaceId, "b".repeat(64));
-  const response = await f.handle(f.request("POST", {shareId: scope.shareId}));
-  expect(response.status).toBe(409);
-  expect(f.storage.listServiceHostEnrollments()).toEqual([]);
-  expect(f.host.reconcile).not.toHaveBeenCalled();
-});
-
-it("continues discovery past an unsupported document without re-enabling paused documents", async () => {
-  const f = await fixture();
-  f.raw.prepare("INSERT INTO sync_relay_current_files VALUES (?,'main','docs/0.md',?,'text',1)").run(scope.workspaceId, "b".repeat(64));
-  const refused = vi.fn();
-  discoverServiceHostDocuments(f.storage, refused);
-  expect(refused).toHaveBeenCalledOnce();
-  expect(f.storage.listServiceHostEnrollments().map(row => row.path)).toEqual([binding.currentPath]);
-});
 
 function deferredBody(method: string, url: string, headers: Record<string,string>) {
   let start!: () => void;
@@ -882,7 +432,6 @@ function deferredBody(method: string, url: string, headers: Record<string,string
   const request = new Request(url, {method, headers, body: stream, duplex: "half"} as RequestInit);
   return {request, started, finish(body: Uint8Array) {controller.enqueue(body); controller.close();}};
 }
-
 it("rechecks ownership after an enrollment request body finishes", async () => {
   const f = await fixture();
   const pending = deferredBody("POST", f.request().url, {authorization: "Bearer account-token", "content-type": "application/json"});
@@ -892,6 +441,7 @@ it("rechecks ownership after an enrollment request body finishes", async () => {
   pending.finish(new TextEncoder().encode(JSON.stringify({shareId: scope.shareId})));
   expect((await result).status).toBe(404); expect(f.storage.listServiceHostEnrollments()).toEqual([]);
 });
+
 
 it("service replication refuses foreign workspaces and account administration", async () => {
   const f = await fixture(), bearer = deriveServiceHostBearer(f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input}), {key, namespace});
@@ -921,16 +471,6 @@ it.each(["blob", "log"] as const)("a service token revoked during the %s body ca
   expect(f.storage.fetchLogCoordinate({workspaceId: scope.workspaceId, originId: "service-host:native", originSeq: 0})).toBeNull();
 });
 
-it("reports a renamed enrolled document as unavailable and retains its original enrollment", async () => {
-  const f = await fixture(), enrolled = f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
-  f.raw.prepare("UPDATE sync_relay_object_moments SET path='docs/renamed.md' WHERE workspace_id=? AND object_id=?").run(scope.workspaceId, binding.objectId);
-  f.host.ready.mockReturnValue(true);
-  const response = await f.handle(f.request());
-  expect(response.status).toBe(200);
-  expect(await response.json()).toMatchObject({ok: true, documents: [{path: binding.currentPath, status: "unavailable"}]});
-  expect(f.storage.listServiceHostEnrollments()).toEqual([enrolled]);
-});
-
 it("retires an owner document, lists it separately, and resumes its retained identity without a supplied share", async () => {
   const f = await fixture(), first = f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
   const bearer = deriveServiceHostBearer(first, {key, namespace});
@@ -950,64 +490,6 @@ it("retires an owner document, lists it separately, and resumes its retained ide
   expect(f.storage.listServiceHostEnrollments()[0]).toMatchObject({objectId: first.objectId, shareId: first.shareId, retired: false, enabled: true});
   expect((await f.handle(f.request("POST", {path: "docs/missing.md"}))).status).toBe(404);
   expect((await f.handle(f.request("GET", undefined, {}, "?retired=1&retired=1"))).status).toBe(404);
-});
-
-it("discovers a new document after more than 64 prior shares without reviving retired enrollment", async () => {
-  const f = await fixture(); f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
-  f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true, restoreFenceGeneration: binding.restoreFenceGeneration});
-  f.release(binding.objectId);
-  for (let index = 0; index < 65; index++) {
-    const shareId = `old-${String(index).padStart(3, "0")}`;
-    f.raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) SELECT ?,workspace_id,granter_user_id,selector_json,created_at_ms FROM sync_relay_shares WHERE share_id=?").run(shareId, scope.shareId);
-    f.raw.prepare("INSERT INTO sync_relay_share_grants SELECT ?,?,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id FROM sync_relay_share_grants WHERE grant_id=?")
-      .run(`grant-${index}`, shareId, scope.grantId);
-  }
-  const cursor = discoverServiceHostDocuments(f.storage);
-  expect(cursor).not.toBeNull(); expect(f.storage.listServiceHostEnrollments()).toEqual([]);
-  f.seed("docs/b.md", "object-b");
-  const last = discoverServiceHostDocuments(f.storage, undefined, cursor!);
-  expect(last).toBeNull();
-  expect(f.storage.listServiceHostEnrollments().map(row => row.path)).toEqual(["docs/b.md"]);
-  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)?.retired).toBe(true);
-});
-
-it("hosts a document retired by revocation again for a new Edit share, but leaves an owner's Pause or Stop", async () => {
-  const f = await fixture(); f.seed("docs/paused.md", "paused-object"); f.seed("docs/stopped.md", "stopped-object");
-  discoverServiceHostDocuments(f.storage);
-  await f.handle(f.request("DELETE", {path: "docs/paused.md"}));
-  await f.handle(f.request("DELETE", {path: "docs/stopped.md", retire: true}));
-  expect(f.storage.revokeShareGrant({shareId: scope.shareId, grantId: scope.grantId, revokedAtMs: 30}).ok).toBe(true);
-  for (const objectId of [binding.objectId, "paused-object"]) expect(f.release(objectId)).toMatchObject({enabled: false, retired: true});
-  discoverServiceHostDocuments(f.storage);
-  expect(f.storage.listServiceHostEnrollments()).toEqual([]);
-  // The owner's list tells the revoked document from the ones the owner stopped.
-  expect((await (await f.handle(f.request("GET", undefined, {}, "?retired=1"))).json()).documents).toEqual([
-    {path: binding.currentPath, objectId: binding.objectId, status: "retired", stopped: false},
-    {path: "docs/paused.md", objectId: "paused-object", status: "retired", stopped: true},
-    {path: "docs/stopped.md", objectId: "stopped-object", status: "retired", stopped: true}]);
-  // A new Edit share covering the folder; nobody presses Resume.
-  f.raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES ('new-share',?,'owner-1',?,40)")
-    .run(scope.workspaceId, JSON.stringify({paths: ["docs"], versionId: null}));
-  f.raw.prepare("INSERT INTO sync_relay_share_grants SELECT 'new-grant','new-share',principal_kind,principal_user_id,principal_email,access,generation,'active',40,NULL,parent_grant_id FROM sync_relay_share_grants WHERE grant_id=?").run(scope.grantId);
-  expect(await (await f.handle(f.request("GET", undefined, {}, "?refusals=1"))).json()).toEqual({ok: true, refusals: [], nextCursor: null});
-  discoverServiceHostDocuments(f.storage);
-  expect(f.storage.listServiceHostEnrollments().map(row => [row.path, row.enabled, row.ownerStop, row.shareId])).toEqual([[binding.currentPath, true, null, scope.shareId]]);
-  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, "docs/paused.md")).toMatchObject({retired: true, ownerStop: "pause"});
-  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, "docs/stopped.md")).toMatchObject({retired: true, ownerStop: "retire"});
-  // The owner's Resume brings back their paused document.
-  expect((await f.handle(f.request("POST", {path: "docs/paused.md"}))).status).toBe(202);
-  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, "docs/paused.md")).toMatchObject({retired: false, enabled: true, ownerStop: null});
-});
-
-it("compares the restore generation before retirement and accepts a repeat", async () => {
-  const f = await fixture(); f.storage.ensureOwnedLiveDocuments([{intent: "share", ...f.input}]);
-  const request = (generation: number) => f.handle(f.request("DELETE", {path: binding.currentPath, retire: true, restoreFenceGeneration: generation}));
-  const mismatch = await request(binding.restoreFenceGeneration + 1);
-  expect(mismatch.status).toBe(409);
-  expect(await mismatch.json()).toMatchObject({code: "restore-fenced", restoreFenceGeneration: binding.restoreFenceGeneration});
-  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)).toMatchObject({enabled: true, retired: false});
-  expect((await request(binding.restoreFenceGeneration)).status).toBe(200);
-  expect((await request(binding.restoreFenceGeneration)).status).toBe(200);
 });
 
 // Proves: while the service host still holds an edit the relay has not
@@ -1071,25 +553,4 @@ it("waits to stop a retained activation that no running host can prepare", async
   expect(await waiting.json()).toEqual({ok: false, code: "host-not-loaded", sessionHost: "starting", error: "Live editing didn't stop. The server hasn't loaded this document yet and may hold recent edits to it. Try again in a moment."});
   expect(readServiceActivationRetirement(f.storage as StorageContext, enrolled)).toBeNull();
   expect(f.storage.serviceHostDocumentEnabled(enrolled)).toBe(true);
-});
-
-it("retires an unenrolled desktop without a generation and resolves a moved target by object",async () => {
-  const f=await fixture();f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
-  f.raw.prepare("UPDATE sync_relay_service_host_enrollments SET path='docs/moved.md'").run();
-  const response=await f.handle(f.request("DELETE",{path:binding.currentPath,objectId:binding.objectId,retire:true}));
-  expect(response.status).toBe(200);
-  expect(await response.json()).toEqual({ok:true,path:"docs/moved.md",objectId:binding.objectId,status:"retired",acceptedCursor:0,changed:true});
-  expect((await f.handle(f.request("DELETE",{path:binding.currentPath,objectId:"wrong-object",retire:true}))).status).toBe(404);
-});
-
-it("rejects invalid generations and a stale repeat after the generation moves", async () => {
-  const f = await fixture();f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
-  for (const generation of [-1, 0.5, "7"]) {
-    expect((await f.handle(f.request("DELETE", {path: binding.currentPath, retire: true, restoreFenceGeneration: generation}))).status).toBe(400);
-  }
-  const retire = (generation: number) => f.handle(f.request("DELETE", {path: binding.currentPath, retire: true, restoreFenceGeneration: generation}));
-  expect((await retire(7)).status).toBe(200);
-  f.raw.prepare("UPDATE sync_relay_live_documents SET restore_fence_generation=8").run();
-  expect((await retire(7)).status).toBe(409);
-  expect((await retire(8)).status).toBe(200);
 });

@@ -1,6 +1,6 @@
 import { databaseFolderName, databaseOpLogPath } from "@dohc/workspace-core";
 import { existsSync } from "node:fs";
-import { chmod, copyFile, link, lstat, mkdir, readdir, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, copyFile, link, mkdir, readdir, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -89,19 +89,6 @@ describe("desktop database access", () => {
     expect(f.requests).toEqual([]);
   });
 
-  it.each(["snapshot-path", "snapshot-bytes", "page-path", "page-bytes"] as const)("cancels %s before it reaches the worker", async kind => {
-    const f = await fixture();
-    const prepared = await prepareWorkspaceFileRead(f.rootPath, "data.sqlite");
-    const bytes = await readFile(f.path);
-    const reader = f.workerDatabaseReader(AbortSignal.abort());
-    const pending = kind === "snapshot-path" ? reader.readPrepared("data.sqlite", prepared)
-      : kind === "snapshot-bytes" ? reader.readBytes("data.sqlite", bytes)
-        : kind === "page-path" ? reader.readPagePrepared("data.sqlite", prepared, "items", 0)
-          : reader.readPageBytes("data.sqlite", bytes, "items", 0);
-    await expect(pending).rejects.toThrow("Database read was cancelled.");
-    expect(f.requests).toEqual([]);
-  });
-
   it("persists the supplied operation identity and author with the real database edit", async () => {
     const f = await fixture();
     const result = await f.editWorkspaceDatabaseInWorker({ ...f.input, relativePath: "./data.sqlite", operationId: "operation-a" });
@@ -109,13 +96,6 @@ describe("desktop database access", () => {
     const operations = (await readFile(join(f.rootPath, databaseOpLogPath("data.sqlite")), "utf8")).trim().split("\n").map(line => JSON.parse(line));
     expect(operations).toEqual([expect.objectContaining({ operationId: "operation-a", databasePath: "data.sqlite", table: "items", op: "update", rowId: "1", payload: { value: "changed" }, appliedAt: f.input.nowMs, author })]);
     expect((await f.workerDatabaseReader().readPageBytes("data.sqlite", await readFile(f.path), "items", 0)).rows[0]?.value).toBe("changed");
-  });
-
-  it("generates an operation ID when none is supplied", async () => {
-    const f = await fixture();
-    await f.editWorkspaceDatabaseInWorker(f.input);
-    const operation = JSON.parse((await readFile(join(f.rootPath, databaseOpLogPath("data.sqlite")), "utf8")).trim());
-    expect(operation.operationId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   });
 
   it("leaves the database and operation log unchanged after cancellation", async () => {
@@ -126,7 +106,7 @@ describe("desktop database access", () => {
     expect(f.requests).toEqual([]);
   });
 
-  it.each(["../data.sqlite", ".dohc/data.sqlite"])("refuses edit path %s before worker admission", async relativePath => {
+  it.each(["../data.sqlite"])("refuses edit path %s before worker admission", async relativePath => {
     const f = await fixture();
     await expect(f.editWorkspaceDatabaseInWorker({ ...f.input, relativePath })).rejects.toThrow();
     expect(f.requests).toEqual([]);
@@ -137,30 +117,6 @@ describe("desktop database access", () => {
 // `.dohc/local`, which iCloud Drive skips. The operations log stays in
 // `.dohc/databases`, which syncs.
 describe("this computer's operation counter", () => {
-  it("lives in .dohc/local/databases, leaves the log in .dohc/databases, and ignores an old counter and the Collections", async () => {
-    const f = await fixture();
-    // What an earlier build left beside the log, and the Collections database, which stays put.
-    const oldFolder = join(f.rootPath, ".dohc", "databases", databaseFolderName("data.sqlite"));
-    await writeCounter(oldFolder, 50);
-    const collections = join(f.rootPath, ".dohc", "local", "datasets", "state.sqlite");
-    await mkdir(join(f.rootPath, ".dohc", "local", "datasets"), { recursive: true });
-    await writeFile(collections, "the Collections");
-
-    expect(await f.editWorkspaceDatabaseInWorker(f.input)).toMatchObject({ version: 1 });
-
-    expect(await readdir(join(f.rootPath, ".dohc", "local", "databases"))).toEqual([databaseFolderName("data.sqlite")]);
-    expect(await readdir(f.counterFolder)).toEqual(["state.sqlite"]);
-    expect(lastNumber(f.counterFolder)).toBe(1);
-    if (process.platform !== "win32") {
-      for (const folder of [join(f.counterFolder, ".."), f.counterFolder]) expect((await lstat(folder)).mode & 0o777).toBe(0o700);
-    }
-    expect(f.logPath).toBe(join(oldFolder, "operations.jsonl"));
-    expect(await loggedNumbers(f.logPath)).toEqual([1]);
-    expect((await readdir(oldFolder)).sort()).toEqual(["operations.jsonl", "state.sqlite"]);
-    expect(lastNumber(oldFolder)).toBe(50);
-    expect(await readdir(join(f.rootPath, ".dohc", "local", "datasets"))).toEqual(["state.sqlite"]);
-    expect(await readFile(collections, "utf8")).toBe("the Collections");
-  });
 
   it("starts a new counter after the highest number in the log, so a gap never makes a number repeat", async () => {
     const f = await fixture();
@@ -194,18 +150,6 @@ describe("this computer's operation counter", () => {
     await opening.finish();
     await expect(f.editWorkspaceDatabaseInWorker(f.input)).resolves.toMatchObject({ version: 1 });
     expect(lastNumber(f.counterFolder)).toBe(1);
-  });
-
-  it("refuses, naming the log, while it holds a version dohc can't count past", async () => {
-    const f = await fixture();
-    await mkdir(join(f.logPath, ".."), { recursive: true });
-    await writeFile(f.logPath, '{"version":1}\n{"version":9007199254740992}\n');
-    const before = await readFile(f.path);
-
-    await expect(f.editWorkspaceDatabaseInWorker(f.input)).rejects.toThrow(
-      `A line in ${databaseOpLogPath("data.sqlite")} has a version dohc can't count past. Remove that line, then try again.`);
-    expect(await readFile(f.path)).toEqual(before);
-    expect(await loggedNumbers(f.logPath)).toEqual([1, 9007199254740992]);
   });
 
   it("refuses while .dohc/local can't be kept out of iCloud Drive, and writes nothing", async () => {

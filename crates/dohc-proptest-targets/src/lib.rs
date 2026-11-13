@@ -5,8 +5,10 @@
 //! both the generic apply boundary and the encrypted-secret apply boundary
 //! (`tests/replication_envelope.rs`).
 //!
-//! Every test in this crate asserts the same three properties against
-//! arbitrary and structurally-mutated input:
+//! `tests/document_lifecycle.rs` instead checks generated command histories
+//! for one note against a reference model. Every other test in this crate
+//! asserts the same three properties against arbitrary and
+//! structurally-mutated input:
 //!
 //! - **No panic.** `proptest` itself fails a case on any panic/unwind, so
 //!   this is implicit in every property below -- no explicit assertion

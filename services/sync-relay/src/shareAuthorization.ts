@@ -3,7 +3,6 @@ import {
   effectiveShareSelector,
   chatSideOf,
   fileSideOf,
-  isChatChannelSelector,
   isGroupSelector,
   isLiveEditShareSelector,
   parseStoredAnyShareSelectorJson,

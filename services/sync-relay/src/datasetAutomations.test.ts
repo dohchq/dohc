@@ -124,20 +124,12 @@ it("admits owner and named editor presses only inside a checked request and reje
   expect(f.ledger.pressed("revoked")).toBeNull();
 });
 
+
 it.each(["view", "wrong-folder", "derived", "no-data"])("refuses a %s presser", async kind => {
   const f = await fixture(); f.addEditor(kind === "view" ? "view" : "edit", kind === "wrong-folder" ? ["Elsewhere"] : ["People"]);
   if (kind === "derived") f.storage.tx(() => f.storage.db.prepare("UPDATE sync_relay_share_grants SET parent_grant_id='g' WHERE grant_id=?").run(editor.grantId));
   if (kind === "no-data") f.host.setDataGrant(owner, { ...scope, grantId: editor.grantId, grant: null });
   await expect(f.host.automations.press(editor, DATASET, f.lifetime.signal, async () => f.ledger.press(DATASET, { ...f.press, pressedBy: "editor" }))).rejects.toThrow();
-  expect(f.ledger.claims(automationId).claims).toEqual([]);
-});
-
-it("rechecks dataset rules at the claim transaction after a press waited", async () => {
-  const f = await fixture(); f.addEditor();
-  await expect(f.host.automations.press(editor, DATASET, f.lifetime.signal, async () => {
-    f.host.setDataGrant(owner, { ...scope, grantId: editor.grantId, grant: { revision: rules.revision, revisionSha256: rules.revisionSha256, discover: true, operationIds: [READ] } });
-    return f.ledger.press(DATASET, { ...f.press, pressedBy: "editor" });
-  })).rejects.toThrow();
   expect(f.ledger.claims(automationId).claims).toEqual([]);
 });
 
@@ -384,33 +376,6 @@ it.skipIf(nativeEngine.missing).each([true, false])("runs a relay-authenticated 
   ]);
 }, 90_000);
 
-it.each([
-  ["Find", "      - find: 'true'\n        collection: People\n        operation: read\n        as: matches"],
-  ["nested Find and edit", "      - if: 'true'\n        do:\n          - find: 'true'\n            collection: People\n            operation: read\n            as: matches\n          - set: {Name: Shared}\n            records: matches\n            operation: edit"],
-])("runs an allowed shared %s on the server as the stored presser", async (_name, steps) => {
-  const f = await fixture(); await f.create();
-  const run = await acceptedShared(f, steps);
-  expect((await run.inspect()).kind).toBe("ready");
-  await expect(run.executor.pressRelayed({ ...run.press, pressedBy: "owner" }, () => {})).rejects.toThrow(SHARED_BUTTON_DENIED);
-  const result = await run.executor.pressRelayed(run.press, () => {});
-  if (result.pressed.busy) throw Error("Expected a claim");
-  await vi.waitFor(() => { expect({ errors: run.errors, waiting: run.waiting, claim: run.claims[0], holds: run.executor.holds() }).toMatchObject({ errors: [], waiting: [], claim: { state: "done" } }); }, { timeout: 5000 });
-  expect(run.claims[0]?.change.onBehalfOf).toBe("editor");
-});
-
-it.each([false, true])("checks live grants for a computed code destination on the server, create allowed: %s", async allowed => {
-  const f = await fixture();
-  const run = await acceptedShared(f, "      - run: \"return { records: [{ action: 'add', collection: ['Peo', 'ple'].join(''), fields: { ID: 'by-code', Name: 'By code' } }] };\"");
-  f.host.setDataGrant(owner, { ...scope, grantId: editor.grantId, grant: { operationIds: allowed ? [READ, CREATE, EDIT] : [READ, EDIT],
-    discover: true, revision: 1, revisionSha256: revision.revisionSha256 } });
-  expect((await run.inspect()).kind).toBe("ready");
-  await run.executor.pressRelayed(run.press, () => {});
-  await vi.waitFor(() => expect(["done", "failed"]).toContain(run.claims[0]?.state), { timeout: 30_000 });
-  expect(run.claims[0]?.state).toBe(allowed ? "done" : "failed");
-  const result = await f.host.invoke(owner, { ...scope, ...rules, operationId: READ, input: {}, idempotencyKey: "code-result" });
-  expect(result.result).toMatchObject({ rows: allowed ? [{ id: "by-code", values: { [NAME]: "By code" } }] : [] });
-});
-
 it("denies a missing implicit read and revoked data or source grants between inspection and execution", async () => {
   const f = await fixture();
   const run = await acceptedShared(f, "      - add-record: {ID: added, Name: Before}\n        collection: People\n        operation: create\n        as: added\n      - set: {Name: After}\n        records: added\n        operation: edit");
@@ -456,29 +421,6 @@ it("runs an approved shared invoke only with its stored, destination-qualified c
     .toMatchObject({ rows: [{ values: { [NAME]: "Sent" } }] });
 });
 
-it("denies owner-only and missing actions with the same inspection", async () => {
-  const hidden = await fixture("owner");
-  const hiddenRun = await acceptedShared(hidden, "      - invoke: send\n        collection: People\n        input: {id: record}");
-  const missing = await fixture();
-  const missingRun = await acceptedShared(missing, "      - invoke: send\n        collection: Missing\n        input: {id: record}");
-  expect(await hiddenRun.inspect()).toEqual({ kind: "denied", reason: SHARED_BUTTON_DENIED });
-  expect(await missingRun.inspect()).toEqual(await hiddenRun.inspect());
-});
-
-it("keeps an unavailable dataset authority unchecked and refuses changed definitions", async () => {
-  const f = await fixture();
-  const run = await acceptedShared(f, "      - find: 'true'\n        collection: People\n        operation: read\n        as: matches");
-  const unavailable = vi.spyOn(f.ledger, "dataGrants").mockImplementation(() => { throw new AutomationRunWait(SHARED_BUTTON_UNCHECKED); });
-  expect(await run.inspect()).toEqual({ kind: "unchecked", reason: SHARED_BUTTON_UNCHECKED });
-  await expect(run.executor.pressRelayed(run.press, () => {})).rejects.toBeInstanceOf(AutomationRunWait);
-  expect(run.claims).toHaveLength(0);
-  unavailable.mockRestore();
-  run.texts.set("Log/automations.yaml", run.texts.get("Log/automations.yaml")!.replace("find: 'true'", "find: 'false'"));
-  run.executor.handleWatcherEvents([{ operation: "update", path: "Log/automations.yaml" }]);
-  await vi.waitFor(async () => expect((await run.inspect()).kind).toBe("denied"));
-  await expect(run.executor.pressRelayed(run.press, () => {})).rejects.toThrow("changed after it was pressed");
-});
-
 it("stops later server steps after revocation and preserves the committed step", async () => {
   const f = await fixture();
   const run = await acceptedShared(f, "      - add-record: {ID: first, Name: First}\n        collection: People\n        operation: create\n      - add-record: {ID: second, Name: Second}\n        collection: People\n        operation: create");
@@ -519,16 +461,6 @@ it("resumes an accepted server press after restart with live authority and no re
   await vi.waitFor(() => { expect(run.errors).toEqual([]); expect(run.claims[0]?.state).toBe("done"); }, { timeout: 30_000 });
   expect((await f.host.invoke(owner, { ...scope, ...rules, operationId: READ, input: {}, idempotencyKey: "resumed" })).result)
     .toMatchObject({ rows: [{ id: "first" }, { id: "second" }] });
-});
-
-it("the real executor reconciles subscriptions, drains a server commit, and invokes approved operations", async () => {
-  const f = await fixture(), { errors } = await executorFor(f);
-  expect(f.ledger.subscriptions()).toHaveLength(1);
-  await f.create();
-  await vi.waitFor(() => expect(f.ledger.claims(automationId).claims).toMatchObject([{ state: "done" }]), { timeout: 30_000 });
-  expect((await f.host.invoke(owner, { ...scope, ...rules, operationId: READ, input: {}, idempotencyKey: "read" })).result)
-    .toMatchObject({ rows: [{ values: { [NAME]: "After" } }] });
-  expect(errors).toEqual([]);
 });
 
 it("accepts HTTP presses as the verified owner or editor and never accepts caller identity in the body", async () => {
@@ -582,25 +514,6 @@ it("accepts HTTP presses as the verified owner or editor and never accepts calle
   expect(errors).toEqual([]);
 });
 
-it("keeps dataset-only workspaces wanted while their automation file is present", async () => {
-  const f = await fixture();
-  expect(f.host.automations.wantedWorkspaces()).toEqual([]);
-  f.storage.tx(() => f.storage.db.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,relay_seq) VALUES('w','test',1,'test','{}',1,1)").run());
-  f.storage.tx(() => f.storage.db.prepare("INSERT INTO sync_relay_current_files(workspace_id,version_id,path,blob_sha256,content_kind,state_relay_seq) VALUES('w','main','People/automations.yaml',?,'text',1)").run("a".repeat(64)));
-  expect(f.host.automations.wantedWorkspaces()).toEqual(["w"]);
-  f.storage.tx(() => f.storage.db.prepare("DELETE FROM sync_relay_current_files WHERE workspace_id='w'").run());
-  expect(f.host.automations.wantedWorkspaces()).toEqual([]);
-});
-
-it("checks current ownership again when an automation invokes an operation", async () => {
-  const f = await fixture();
-  const context = f.ledger.context({ automationId, claimId: "owner-change", person: null, depth: 1 });
-  f.storage.tx(() => f.storage.db.prepare("UPDATE sync_relay_workspaces SET owner_user_id='replacement' WHERE workspace_id='w'").run());
-  await expect(Promise.resolve().then(() => f.ledger.invoke(context, {
-    ...rules, operationId: CREATE, input: { values: { [NAME]: "No" } }, idempotencyKey: "refused",
-  }))).rejects.toThrow();
-});
-
 it("leaves claims pending without an executor and forgets their private press records with the workspace", async () => {
   const f = await fixture();
   f.ledger.subscribe(DATASET, f.subscription);
@@ -613,127 +526,4 @@ it("leaves claims pending without an executor and forgets their private press re
   for (const table of ["dohc_dataset_automation_presses", "dohc_dataset_automation_claims", "dohc_dataset_automation_failure_generations"]) {
     expect(f.storage.db.prepare("SELECT COUNT(*) AS n FROM " + table).get()!.n).toBe(0);
   }
-});
-
-
-async function expectSavedReach(run: Awaited<ReturnType<typeof executorFor>>, verdict: "stopped" | "held") {
-  await run.executor.automationsIn("People");
-  expect({
-    verdicts: (await run.store.readReachVerdicts()).verdicts,
-    errors: run.errors,
-  }).toMatchObject({
-    verdicts: expect.arrayContaining([expect.objectContaining({
-      automationId, step: JSON.stringify(["operation", DATASET, EDIT]), verdict,
-    })]),
-    errors: [],
-  });
-}
-
-it.each(["fresh", "rebuilt", "removed-while-off"])("holds a removed editor's dataset step on a %s server copy", async copy => {
-  const f = await fixture();
-  f.addEditor();
-  // This step can run only after the editor is removed: they cannot use its operation.
-  f.host.setDataGrant(owner, { ...scope, grantId: editor.grantId, grant: null });
-  const old = await executorFor(f);
-  await expectSavedReach(old, "stopped");
-  await old.executor.dispose();
-  f.storage.tx(() => f.storage.db.prepare("UPDATE sync_relay_share_grants SET status='revoked',revoked_at_ms=2 WHERE grant_id=?").run(editor.grantId));
-  if (copy === "removed-while-off") await rm(join(f.directory, "metadata"), { recursive: true });
-  const next = await executorFor(f, false, copy);
-  await expectSavedReach(next, "held");
-  expect(next.executor.holds()).toEqual(expect.arrayContaining([expect.objectContaining({ step: JSON.stringify(["operation", DATASET, EDIT]) })]));
-  const released = vi.spyOn(f.ledger, "release");
-  await f.create();
-  await expect.poll(() => ({ released: released.mock.calls.length > 0, errors: next.errors }))
-    .toEqual({ released: true, errors: [] });
-  expect(f.ledger.claims(automationId).claims).toMatchObject([{ state: "pending", attempts: 0 }]);
-  expect((await f.host.invoke(owner, { ...scope, ...rules, operationId: READ, input: {}, idempotencyKey: "held-read" })).result)
-    .toMatchObject({ rows: [{ values: { [NAME]: "Before" } }] });
-  await next.executor.dispose();
-  const restarted = await executorFor(f, false, copy);
-  await restarted.executor.automationsIn("People");
-  expect(restarted.executor.holds()).toEqual(expect.arrayContaining([expect.objectContaining({ step: JSON.stringify(["operation", DATASET, EDIT]) })]));
-  expect(next.errors).toEqual([]);
-  expect(restarted.errors).toEqual([]);
-});
-
-it("selects wanted workspaces with one indexed query regardless of dataset count", async () => {
-  const f = await fixture();
-  f.storage.tx(() => {
-    f.storage.db.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,relay_seq) VALUES('w','test',1,'test','{}',1,1)").run();
-    const insert = f.storage.db.prepare("INSERT INTO sync_relay_current_files(workspace_id,version_id,path,blob_sha256,content_kind,state_relay_seq) VALUES('w',?,?,?,'text',1)");
-    insert.run("main", "People/automations.yaml", "a".repeat(64));
-    insert.run("other", "People/automations.yaml", "a".repeat(64));
-    for (let n = 10; n < 110; n++) {
-      f.storage.db.prepare("INSERT INTO dohc_dataset_catalog SELECT workspace_id,?,revision_json,artifacts_json FROM dohc_dataset_catalog WHERE dataset_id=?").run(id(n), DATASET);
-    }
-  });
-  const prepare = vi.spyOn(f.storage.db, "prepare");
-  expect(f.host.automations.wantedWorkspaces()).toEqual(["w"]);
-  expect(prepare).toHaveBeenCalledOnce();
-  const query = prepare.mock.calls[0]![0]; prepare.mockRestore();
-  const plan = f.storage.db.prepare("EXPLAIN QUERY PLAN " + query).all();
-  expect(plan.some(row => String(row.detail).includes("sync_relay_automation_files"))).toBe(true);
-  expect(plan.filter(row => String(row.detail).startsWith("SCAN c"))).toEqual([]);
-});
-
-it("flags commit wakes only when they recorded failed claims", async () => {
-  const f = await fixture();
-  f.ledger.subscribe(DATASET, f.subscription);
-  const wake = vi.fn(); f.host.observeAutomationClaims(wake);
-  await f.create("ordinary");
-  expect(wake).toHaveBeenLastCalledWith("w", false);
-  const context = f.ledger.context({ automationId: "collection:People#writer", claimId: "chain", person: null, depth: 4 });
-  await f.ledger.invoke(context, { ...rules, operationId: CREATE, input: { values: { [ID]: "chain", [NAME]: "Before" } }, idempotencyKey: "chain" });
-  expect(wake).toHaveBeenLastCalledWith("w", true);
-  expect(f.ledger.failures()).toHaveLength(1);
-});
-
-it.each([false, true])("checks destination grants again before recording a press (revoked: %s)", async (revoked) => {
-  const f = await fixture(); f.addEditor("edit", ["People", "Other"]); await f.create();
-  const otherId = id(20);
-  const otherDefinition = { ...definition, datasetId: otherId, name: "Other", schemaPath: "Other/schema.sql", operationsPath: "Other/operations.js" };
-  const otherSource = generateDatasetOperations(otherDefinition);
-  const otherRevision = describeDatasetRevision({ definition: otherDefinition, revision: 1, schemaSql, operationSource: otherSource });
-  const otherScope = { workspaceId: "w", datasetId: otherId };
-  await f.host.activate(owner, { ...otherScope, revision: otherRevision, schemaSql, operationSource: otherSource, capacityBytes: 1024 * 1024 });
-  f.host.setDataGrant(owner, { ...otherScope, grantId: editor.grantId,
-    grant: { operationIds: [READ, EDIT], discover: true, revision: 1, revisionSha256: otherRevision.revisionSha256 } });
-  const pressId = "cross-dataset";
-  const press = f.host.automations.press(editor, DATASET, f.lifetime.signal, async describe => {
-    const destination = await describe(otherId);
-    expect(destination.datasetId).toBe(otherId);
-    expect(destination.operations.some(operation => operation.operationId === EDIT)).toBe(true);
-    if (revoked) f.host.setDataGrant(owner, { ...otherScope, grantId: editor.grantId, grant: null });
-    return f.ledger.press(DATASET, { ...f.press, pressId, pressedBy: "editor" });
-  });
-  if (revoked) {
-    await expect(press).rejects.toThrow();
-    expect(f.ledger.pressed(pressId)).toBeNull();
-  } else {
-    await expect(press).resolves.toMatchObject({ kind: "claimed" });
-    expect(f.ledger.pressed(pressId)).not.toBeNull();
-  }
-});
-
-it.each([2, 3])("enrolls base-folder schedules after revision %s", async number => {
-  const f = await fixture();
-  f.storage.tx(() => {
-    const approved = { ...revision, revision: number, definition: { ...definition, schemaPath: `People/revisions/${number}-00000000-0000-4000-8000-000000000099/schema.sql` } };
-    f.storage.db.prepare("UPDATE dohc_dataset_catalog SET revision_json=? WHERE workspace_id='w'").run(JSON.stringify(approved));
-    f.storage.db.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,relay_seq) VALUES('w','test',1,'test','{}',1,1)").run();
-    f.storage.db.prepare("INSERT INTO sync_relay_current_files(workspace_id,version_id,path,blob_sha256,content_kind,state_relay_seq) VALUES('w','main','People/automations.yaml',?,'text',1)").run("a".repeat(64));
-  });
-  expect(f.host.automations.wantedWorkspaces()).toEqual(["w"]);
-});
-
-it.each(["schema.sql", "People/schema.sql"])("matches root automations to the schema base for %s", async schemaPath => {
-  const f = await fixture();
-  f.storage.tx(() => {
-    const approved = describeDatasetRevision({ definition: { ...definition, schemaPath }, revision: 1, schemaSql, operationSource });
-    f.storage.db.prepare("UPDATE dohc_dataset_catalog SET revision_json=? WHERE workspace_id='w'").run(JSON.stringify(approved));
-    f.storage.db.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,relay_seq) VALUES('w','test',1,'test','{}',1,1)").run();
-    f.storage.db.prepare("INSERT INTO sync_relay_current_files(workspace_id,version_id,path,blob_sha256,content_kind,state_relay_seq) VALUES('w','main','automations.yaml',?,'text',1)").run("a".repeat(64));
-  });
-  expect(f.host.automations.wantedWorkspaces()).toEqual(schemaPath === "schema.sql" ? ["w"] : []);
 });

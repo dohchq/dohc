@@ -1,7 +1,7 @@
 import { lstat, mkdir, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect } from "vitest";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { EngineDaemonLifecycle, EngineWorkspace, EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";

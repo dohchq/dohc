@@ -239,6 +239,7 @@ it("refuses swapped histories and ignores caller-defined array iteration", () =>
   expect(() => compareLiveRestoreContent({...input, accepted: input.point, point: input.accepted} as never, policy, budget))
     .toThrow("history target differs");
   const updates = input.nativeSources;
+  // oxlint-disable-next-line eslint/require-yield -- the iterator must throw before it yields
   updates[Symbol.iterator] = function* () {throw Error("custom iterator must not run");};
   expect(compareLiveRestoreContent(input, policy, budget).candidateDigest).toBe(hash(input.candidate));
 });

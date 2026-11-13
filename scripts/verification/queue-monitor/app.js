@@ -237,7 +237,7 @@ async function act(action, body) {
 function switchLanesTo(event) {
   const button = event.target.closest("[data-lanes]");
   if (!button || ui.action || ui.offline || button.getAttribute("aria-pressed") === "true") return;
-  act("lanes", { lanes: Number(button.dataset.lanes) });
+  void act("lanes", { lanes: Number(button.dataset.lanes) });
 }
 
 function openPause() {
@@ -251,7 +251,7 @@ function openPause() {
 function confirmPause() {
   const reason = $("#pause-reason").value.trim();
   $("#pause-dialog").close();
-  act("pause", { reason: reason || null });
+  void act("pause", { reason: reason || null });
 }
 
 function renderStrip({ data, running, finished, starts }) {
@@ -401,7 +401,6 @@ const stepOfLog = (view, file) => [...(view.steps ?? []), ...(view.packages ?? [
 const stepState = (step, now) => !step ? "" : step.verdict === "RUNNING" ? `running for ${seconds(step.startedAt ? (now - Date.parse(step.startedAt)) / 1000 : 0)}`
   : step.verdict === "PASS" ? `passed in ${seconds(step.seconds)}` : step.verdict === "FAIL" ? `failed after ${seconds(step.seconds)}` : "not run";
 const sizeText = bytes => bytes == null ? "" : bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
-const verdictMark = verdict => verdict === "PASS" ? "passed" : verdict === "FAIL" ? "failed" : verdict === "RUNNING" ? "running" : "idle";
 
 // The test packages under the gate's steps: each as wide as its time, and selecting one shows its log.
 function packageTrack(view, now) {
@@ -476,7 +475,7 @@ async function refreshTerminalsOnce() {
       writeTerminal(pre, log?.text?.trim() ? log.text : empty, key, !log?.text?.trim());
     } catch (error) {
       // Keep what is on screen and say why it is not moving.
-      ui.logMeta.set(key, { ...(ui.logMeta.get(key) ?? {}), error: error.message });
+      ui.logMeta.set(key, { ...ui.logMeta.get(key), error: error.message });
     }
     renderConsoleStatus(el, view);
   }));
@@ -862,7 +861,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const open = event.target.closest(".term-open");
     if (open) { const [id, attempt] = open.closest(".lane").dataset.key.split("/"); return openRun(id, attempt, open); }
     const pane = event.target.closest("#drawer [data-pane]");
-    if (pane && ui.drawer) { ui.drawer.pane = pane.dataset.pane; renderDrawer(); if (ui.drawer.pane === "logs") loadDrawerLog(); return; }
+    if (pane && ui.drawer) { ui.drawer.pane = pane.dataset.pane; renderDrawer(); if (ui.drawer.pane === "logs") void loadDrawerLog(); return; }
     const drawerLog = event.target.closest("[data-drawer-log]");
     if (drawerLog && ui.drawer) { ui.drawer.file = drawerLog.dataset.drawerLog; renderDrawer(); return loadDrawerLog(); }
     if (event.target.closest("[data-more]")) { ui.shown += 25; return render(); }

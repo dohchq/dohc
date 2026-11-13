@@ -1,10 +1,7 @@
 import type { HeldNoteChangeInput, HeldNoteChangeResult } from "@dohc/workspace-engine-client";
 import { ChatMessageWaiters } from "./chatMessageWaiters";
 import { signalChatWrite, subscribeChatWrites } from "../workspaces/chatWriteSignals";
-import { ChatLinksInput, ChatLinksPage } from "@dohc/workspace-contracts/chat-links";
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
-import { ChatFileMentionsInput, ChatFileMentionsPage } from "@dohc/workspace-contracts/chat-file-mentions";
-import type { LinksEdgesInput, LinksEdgesResult, LinksInInput, LinksInResult, LinksResolveInput, LinksResolveResult } from "@dohc/workspace-contracts/links";
 import { HistoryOperationId } from "@dohc/workspace-contracts/history-operation";
 import { creationPartialMessage } from "@dohc/cli/creation";
 import type { AgentNotice } from "../notices/agentNotices";
@@ -70,6 +67,9 @@ import {
   type CliRequest,
   type CliVerb,
   type CliResultByVerb,
+  DECLARED_VERBS,
+  isDeclaredVerb,
+  type DeclaredVerb,
   type VersionResolution,
 } from "@dohc/cli/protocol";
 import { versionNameRefusal } from "../ipc/errorWords";
@@ -489,6 +489,14 @@ export interface CliRunMessageLink {
   messageId: string;
 }
 
+// A reader for each declared verb, given the request's workspace and input.
+export type DeclaredReaders<Workspace> = {
+  [Verb in DeclaredVerb]: (
+    workspace: Workspace,
+    input: z.output<(typeof DECLARED_VERBS)[Verb]["input"]>,
+  ) => Promise<z.output<(typeof DECLARED_VERBS)[Verb]["result"]>>;
+};
+
 export interface CliServerOptions {
   recordSuccess?(invocation: CliUsageInvocation): unknown;
   // The server account this computer is connected to. Its verbs need no
@@ -499,13 +507,8 @@ export interface CliServerOptions {
   openWorkspace(workspace: CliRegistryWorkspace): Promise<CliWorkspaceContext>;
   // The signed-in person's Notices rows that open in this workspace.
   notices?(workspaceId: string): Promise<AgentNotice[]>;
-  chatLinks?(workspace:CliRegistryWorkspace,input:ChatLinksInput):Promise<ChatLinksPage>;
-  chatFileMentions?(workspace: CliRegistryWorkspace, input: ChatFileMentionsInput): Promise<ChatFileMentionsPage>;
-  links?: {
-    edges(workspace: CliRegistryWorkspace, input: LinksEdgesInput): Promise<LinksEdgesResult>;
-    incoming(workspace: CliRegistryWorkspace, input: LinksInInput): Promise<LinksInResult>;
-    resolve(workspace: CliRegistryWorkspace, input: LinksResolveInput): Promise<LinksResolveResult>;
-  };
+  // The app's reader for each declared verb. A verb without one is unavailable.
+  reads?: Partial<DeclaredReaders<CliRegistryWorkspace>>;
   // Messages, reactions, and decisions go through the same module renderer
   // chat uses, so a CLI or MCP write gets the same checks and effects.
   chatWrites: ChatWrites;
@@ -3336,6 +3339,8 @@ async function dispatchWorkspace(
       await notifyWrite(options, context);
       return { ok: true as const, status: "queued" as const, threadId: cliThreadId(threadId) };
     }
+    default:
+      break;
   }
 
   const channels = request.verb === "reply" ? [] : await loadChannels(chats);
@@ -3773,39 +3778,36 @@ async function dispatchWorkspace(
       }
       return { files };
     }
+    default:
+      break;
   }
 }
 
-async function dispatchMentionAndLinkReads(
-  request: Extract<CliRequest, { verb: "chatLinks" | "chatFileMentions" | "linksIn" | "linksResolve" | "linksEdges" }>,
-  options: CliServerOptions,
-  runSecret: string | undefined,
-): Promise<unknown> {
+type DeclaredRequest = Extract<CliRequest, { verb: DeclaredVerb }>;
+
+function isDeclaredRequest(request: CliRequest): request is DeclaredRequest {
+  return isDeclaredVerb(request.verb);
+}
+
+// Reads one declared verb in the request's workspace. The received-share
+// rules have already run.
+async function dispatchDeclaredRead(request: DeclaredRequest, options: CliServerOptions, runSecret: string | undefined): Promise<unknown> {
   const workspace = await resolveCliWorkspace(request.args.cwd, options.listWorkspaces());
   if (!workspace) throw new CliCommandError("not inside a dohc workspace");
-  if (request.verb === "chatLinks") {
-    if (!options.chatLinks) throw new CliCommandError("Chat links are unavailable.");
-    let channelWireId: string | null;
-    if ("group" in request.args) {
-      const context = await workspaceContextForRequest(request, options, runSecret);
-      const channel = resolveChannel(request.args.group, await loadChannels(chatsHost(context, options)));
-      channelWireId = await context.store.getChannelWireId({
-        workspaceId: context.workspaceId, channelId: channel.engine.id,
-      }).catch(() => null);
-    } else {
-      channelWireId = request.args.channelWireId;
-    }
-    return channelWireId === null ? null : options.chatLinks(workspace, { channelWireId, cursor: request.args.cursor });
+  const read = options.reads?.[request.verb] as ((workspace: CliRegistryWorkspace, input: object) => Promise<unknown>) | undefined;
+  if (!read) throw new CliCommandError(DECLARED_VERBS[request.verb].cli.unavailable);
+  if (request.verb === "chatLinks" && "group" in request.args) {
+    // `dohc chat links` names a Group, read as the caller's chat. A Group
+    // without a wire id has no links to read.
+    const context = await workspaceContextForRequest(request, options, runSecret);
+    const channel = resolveChannel(request.args.group, await loadChannels(chatsHost(context, options)));
+    const channelWireId = await context.store.getChannelWireId({
+      workspaceId: context.workspaceId, channelId: channel.engine.id,
+    }).catch(() => null);
+    return channelWireId === null ? null : read(workspace, { channelWireId, cursor: request.args.cursor });
   }
-  if (request.verb === "chatFileMentions") {
-    if (!options.chatFileMentions) throw new CliCommandError("Chat mentions are unavailable.");
-    return options.chatFileMentions(workspace, { subject: request.args.subject, cursor: request.args.cursor });
-  }
-  if (!options.links) throw new CliCommandError("Workspace links are unavailable.");
-  if (request.verb === "linksEdges") return options.links.edges(workspace, { cursor: request.args.cursor });
-  return request.verb === "linksIn"
-    ? options.links.incoming(workspace, { subject: request.args.subject, cursor: request.args.cursor })
-    : options.links.resolve(workspace, { source: request.args.source, literals: request.args.literals });
+  const { cwd: _cwd, actor: _actor, agentId: _agentId, ...input } = request.args;
+  return read(workspace, input);
 }
 
 async function dispatchAccount(
@@ -4109,7 +4111,20 @@ export async function handleCliRequestLine(
   try {
     // The caller's door labels counting only; authority never receives it. The
     // run secret only proves the request is a run's; no verb receives it.
-    const { door: _door, runSecret, ...request } = parsed.data;
+    const { door: _door, runSecret, workspaceId, ...request } = parsed.data;
+    // A request that names its workspace runs from that workspace's folder, as
+    // if the caller stood there. Only an id this computer's registry lists
+    // selects one; a workspace's name never does, because other people can change it.
+    if (workspaceId !== undefined) {
+      const named = options.listWorkspaces().find((workspace) => workspace.workspaceId === workspaceId);
+      if (!named) throw new CliCommandError("No workspace on this computer has this id.");
+      // Two registry entries can share a folder. The request must run in the
+      // one it named, never in the other.
+      const resolved = await resolveCliWorkspace(named.rootPath, options.listWorkspaces());
+      if (!resolved) throw new CliCommandError("This workspace's folder is missing on this computer.");
+      if (resolved.workspaceId !== workspaceId) throw new CliCommandError("This workspace's folder belongs to another workspace on this computer.");
+      request.args.cwd = named.rootPath;
+    }
     const completion = { replayed: false };
     const refusal = await receivedShareRefusal(request, options);
     const unvalidated = refusal ? refusal.answer
@@ -4117,8 +4132,8 @@ export async function handleCliRequestLine(
       ? await watchMessages(request, options, runSecret, signal)
       : request.verb === "accountDeletePreview" || request.verb === "accountDelete"
       ? await dispatchAccount(request, options)
-      : request.verb === "chatLinks" || request.verb === "chatFileMentions" || request.verb === "linksEdges" || request.verb === "linksIn" || request.verb === "linksResolve"
-        ? await dispatchMentionAndLinkReads(request, options, runSecret)
+      : isDeclaredRequest(request)
+        ? await dispatchDeclaredRead(request, options, runSecret)
         : await dispatch(request, await workspaceContextForRequest(request, options, runSecret), options, completion);
     const result = parseCliResult(parsed.data.verb, unvalidated);
     const response = cliTransportResponseSchema.parse({

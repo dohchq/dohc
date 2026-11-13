@@ -340,19 +340,6 @@ impl Settled {
     }
 }
 
-/// The resumed restore that produced the registration's generation; None for
-/// a generation no restore produced, or one a cancelled restore did.
-#[cfg(test)]
-pub(super) fn generation(
-    conn: &Connection,
-    held: &Registration,
-) -> Result<Option<NativeRestoreResumeReceipt>, ApplicationError> {
-    Ok(match settled(conn, held)? {
-        Some(Settled::Resumed(receipt)) => Some(*receipt),
-        _ => None,
-    })
-}
-
 pub(super) fn settled(
     conn: &Connection,
     held: &Registration,

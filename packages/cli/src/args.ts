@@ -1,8 +1,8 @@
 import { ChatFileMentionsInput } from "@dohc/workspace-contracts/chat-file-mentions";
-import { LinksEdgesInput, type LinksEdgesInput as EdgesInput, LinksInInput, LinksResolveInput, type LinksInInput as InInput, type LinksResolveInput as ResolveInput } from "@dohc/workspace-contracts/links";
+import { LinksEdgesInput, LinksInInput, LinksResolveInput } from "@dohc/workspace-contracts/links";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import type { z } from "zod";
-import { CHAT_WATCH_TIMEOUT_MS, CHAT_WATCH_MAX_TIMEOUT_MS, cliAgentIdSchema, APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, chatLinksGroupInputSchema, type CliLinkTarget, chatWorkReportSchema, LIVE_DOCUMENT_REASON_STEPS, type CliActor, type CliStreamPosition, type CliWorkReport } from "./protocol";
+import { CHAT_WATCH_TIMEOUT_MS, CHAT_WATCH_MAX_TIMEOUT_MS, cliAgentIdSchema, cliWorkspaceIdSchema, APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, chatLinksGroupInputSchema, type CliLinkTarget, chatWorkReportSchema, LIVE_DOCUMENT_REASON_STEPS, type CliActor, type CliStreamPosition, type CliWorkReport, DECLARED_VERBS, type DeclaredOperation, type DeclaredRequestInput, type DeclaredVerb } from "./protocol";
 import { CHAT_WORK_STATUSES, isChatWorkStatus } from "@dohc/workspace-contracts/chat-work";
 import { DohcCliError } from "./errors";
 import { OwnerAppPublicationRequest } from "./appPublication";
@@ -14,6 +14,7 @@ import { AccessObjectRef } from "@dohc/workspace-contracts/access";
 interface ParsedCliBase {
   actor: CliActor;
   agentId?: string;
+  workspaceId?: string;
   json: boolean;
 }
 
@@ -24,11 +25,7 @@ type ExportScope =
 
 type CliCommandBody =
   | { verb: "link"; target: CliLinkTarget }
-  | ({ verb: "chatLinks" } & z.infer<typeof chatLinksGroupInputSchema>)
-  | ({ verb: "chatFileMentions" } & ChatFileMentionsInput)
-  | ({ verb: "linksEdges" } & EdgesInput)
-  | ({ verb: "linksIn" } & InInput)
-  | ({ verb: "linksResolve" } & ResolveInput)
+  | { [Verb in DeclaredVerb]: { verb: Verb } & DeclaredRequestInput<Verb> }[DeclaredVerb]
   | { verb: "stopSync"; agent?: string }
   | { verb: "shareCopy"; shareId: string; grantId: string }
   | { verb: "shareAgents"; shareId: string; grantId: string; cursor?: string }
@@ -1435,22 +1432,56 @@ const APP_VERBS: Record<string, CliVerbSpec> = Object.fromEntries([
   }),
 ]);
 
+// How the CLI reads each declared verb's arguments. command names the verb in refusals.
+const DECLARED_PARSERS: { readonly [Verb in DeclaredVerb]: (input: VerbInput, command: string) => DeclaredRequestInput<Verb> } = {
+  linksEdges: (input, command) => {
+    noExtraArgs(input.operands, command);
+    return LinksEdgesInput.parse({ cursor: lastValue(input, "--cursor") });
+  },
+  linksIn: (input, command) => {
+    const [subject, ...extra] = input.operands; noExtraArgs(extra, command);
+    try { return LinksInInput.parse({ subject: JSON.parse(subject ?? "null"), cursor: lastValue(input, "--cursor") }); } catch { return fail('Use a subject JSON object with path or objectId.'); }
+  },
+  linksResolve: (input, command) => {
+    const [source, literals, ...extra] = input.operands; noExtraArgs(extra, command);
+    try { return LinksResolveInput.parse({ source, literals: JSON.parse(literals ?? "null") }); } catch { return fail('Use a source path and a JSON array of kind and literal objects.'); }
+  },
+  chatLinks: (input, command) => {
+    const [group, ...extra] = input.operands;
+    if (!group) fail("links requires a group");
+    noExtraArgs(extra, command);
+    const parsed = chatLinksGroupInputSchema.parse({ group, cursor: lastValue(input, "--cursor") });
+    // The request names the Group before the cursor.
+    return { group: parsed.group, cursor: parsed.cursor };
+  },
+  chatFileMentions: (input, command) => {
+    noExtraArgs(input.operands, command);
+    const subject = lastValue(input, "--subject");
+    return ChatFileMentionsInput.parse({ ...(subject ? { subject: JSON.parse(subject) } : {}), cursor: lastValue(input, "--cursor") });
+  },
+};
+
+// Adds each declared operation's verb to the hand-written command it names.
+// A declaration that names no command, or a verb the command already has, fails at load.
+function withDeclaredVerbs(commands: Readonly<Record<string, CliCommandSpec>>): Readonly<Record<string, CliCommandSpec>> {
+  const joined = Object.fromEntries(Object.entries(commands).map(([group, command]) => [group, { ...command, verbs: { ...command.verbs } }]));
+  for (const { capabilityId, cli } of Object.values<DeclaredOperation>(DECLARED_VERBS)) {
+    const [group, name] = cli.command;
+    const command = lookup(joined, group);
+    if (!command) throw new Error(`dohc ${group} ${name} names no command.`);
+    if (Object.hasOwn(command.verbs, name)) throw new Error(`dohc ${group} ${name} is declared twice.`);
+    const parse = DECLARED_PARSERS[cli.verb] as (input: VerbInput, command: string) => object;
+    command.verbs[name] = {
+      capabilityId, summary: cli.summary, operands: cli.operands, ...("flags" in cli ? { flags: cli.flags } : {}),
+      parse: input => ({ verb: cli.verb, ...parse(input, cli.command.join(" ")) }) as CliCommandBody,
+    };
+  }
+  return joined;
+}
+
 /** Every command and verb the CLI dispatches. Help reads this table too. */
-export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
-  links: { summary: "Read and resolve document links.", notes: [], verbs: {
-    edges: { capabilityId: "links.edges", summary: "Read a bounded page of file links.", operands: "", flags: [{ name: "--cursor", value: "cursor", text: "Continue the previous page." }], parse: input => {
-      noExtraArgs(input.operands, "links edges");
-      return { verb: "linksEdges", ...LinksEdgesInput.parse({ cursor: lastValue(input, "--cursor") }) };
-    } },
-    in: { capabilityId: "links.in", summary: "Read documents that link to a file.", operands: "<subject-json>", flags: [{ name: "--cursor", value: "cursor", text: "Continue the previous page." }], parse: input => {
-      const [subject, ...extra] = input.operands; noExtraArgs(extra, "links in");
-      try { return { verb: "linksIn", ...LinksInInput.parse({ subject: JSON.parse(subject ?? "null"), cursor: lastValue(input, "--cursor") }) }; } catch { return fail('Use a subject JSON object with path or objectId.'); }
-    } },
-    resolve: { capabilityId: "links.resolve", summary: "Resolve links from one document.", operands: "<source> <literals-json>", parse: input => {
-      const [source, literals, ...extra] = input.operands; noExtraArgs(extra, "links resolve");
-      try { return { verb: "linksResolve", ...LinksResolveInput.parse({ source, literals: JSON.parse(literals ?? "null") }) }; } catch { return fail('Use a source path and a JSON array of kind and literal objects.'); }
-    } },
-  } },
+export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = withDeclaredVerbs({
+  links: { summary: "Read and resolve document links.", notes: [], verbs: {} },
   notices: {
     summary: "Read this workspace's Notices.",
     notes: ["Listing does not change whether rows are read."],
@@ -1564,28 +1595,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
       "Name a Group by its name or ID, and a thread or message by its ID. A unique ID prefix also works.",
       "DOHC_CHAT_ACTOR=agent in the environment does the same as --as-agent.",
     ],
-    verbs: { ...CHAT_VERBS, links: {
-      capabilityId: "chat.read", summary: "Read one page of files mentioned in a chat.", operands: "<group>",
-      flags: [{ name: "--cursor", value: "cursor", text: "Continue the previous page." }],
-      parse: input => {
-        const [group, ...extra] = input.operands;
-        if (!group) fail("links requires a group");
-        noExtraArgs(extra, "chat links");
-        return { verb: "chatLinks", ...chatLinksGroupInputSchema.parse({ group, cursor: lastValue(input, "--cursor") }) };
-      },
-    }, "file-mentions": {
-      capabilityId: "chat.read", summary: "Read one bounded page of file mentions.",
-      operands: "", flags: [
-        { name: "--subject", value: "subject", text: "A file path or objectId as JSON." },
-        { name: "--cursor", value: "cursor", text: "Continue the previous page." },
-      ], parse: input => {
-        noExtraArgs(input.operands, "chat file-mentions");
-        const subject = lastValue(input, "--subject");
-        return { verb: "chatFileMentions", ...ChatFileMentionsInput.parse({
-          ...(subject ? { subject: JSON.parse(subject) } : {}), cursor: lastValue(input, "--cursor"),
-        }) };
-      },
-    } },
+    verbs: CHAT_VERBS,
   },
   dataset: {
     summary: "Create, change, and use transactional Collections.",
@@ -1696,11 +1706,12 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
     notes: ["Unlike other commands, account verbs also work outside a workspace folder."],
     verbs: ACCOUNT_VERBS,
   },
-};
+});
 
 export const GLOBAL_FLAGS: readonly CliFlag[] = [
   { name: "--as-agent", text: "Post and read chat as an agent." },
   { name: "--agent-id", value: "id", text: "Work as this agent you run, by its id in Settings › Agents. Implies --as-agent." },
+  { name: "--workspace", value: "id", text: "Work in this workspace, by its id, instead of the one this folder is in. Relative paths then start at the workspace's folder." },
   { name: "--json", text: "Print the result as JSON." },
   { name: "--help", text: "Show help. -h does the same." },
 ];
@@ -1714,11 +1725,13 @@ const VALUE_FLAGS = new Set(
 function stripGlobalFlags(argv: readonly string[]): {
   actorFlag: boolean;
   agentId?: string;
+  workspaceId?: string;
   json: boolean;
   tokens: string[];
 } {
   let actorFlag = false;
   let agentId: string | undefined;
+  let workspaceId: string | undefined;
   let json = false;
   let optionsEnded = false;
   let expectsOptionValue = false;
@@ -1745,6 +1758,12 @@ function stripGlobalFlags(argv: readonly string[]): {
       index += 1;
       continue;
     }
+    if (!optionsEnded && token === "--workspace") {
+      workspaceId = takeValue(argv, index, token);
+      if (!cliWorkspaceIdSchema.safeParse(workspaceId).success) fail("--workspace requires a workspace's id");
+      index += 1;
+      continue;
+    }
     if (!optionsEnded && token === "--json") {
       json = true;
       continue;
@@ -1754,7 +1773,7 @@ function stripGlobalFlags(argv: readonly string[]): {
       expectsOptionValue = true;
     }
   }
-  return { actorFlag, ...(agentId === undefined ? {} : { agentId }), json, tokens };
+  return { actorFlag, ...(agentId === undefined ? {} : { agentId }), ...(workspaceId === undefined ? {} : { workspaceId }), json, tokens };
 }
 
 /** Leads into the help command for an unknown name, with the name it likely meant when there is one. */
@@ -1781,5 +1800,5 @@ export function parseCliArguments(
   if (help) return { help: [commandName, verbName] };
   const agent = (commandName === "history" && verbName === "undo") || commandName === "document" || commandName === "file" || global.actorFlag || global.agentId !== undefined || (commandName === "chat" && (verbName === "watch" || env.DOHC_CHAT_ACTOR === "agent"));
   const body = verb.parse(readVerbInput(`${commandName} ${verbName}`, verb, tokens));
-  return { actor: agent ? "agent" : "human", ...(global.agentId === undefined ? {} : { agentId: global.agentId }), json: global.json, ...body };
+  return { actor: agent ? "agent" : "human", ...(global.agentId === undefined ? {} : { agentId: global.agentId }), ...(global.workspaceId === undefined ? {} : { workspaceId: global.workspaceId }), json: global.json, ...body };
 }

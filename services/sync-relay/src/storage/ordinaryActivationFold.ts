@@ -141,6 +141,13 @@ export function readOrdinaryFoldPage(storage:StorageContext,scope:OrdinaryCheckp
   return {kind:"page",scope,prior,base,work,moments,rows,throughRelaySeq:through,currentPath:path,reachedCursor};
 }
 
+/** The page through its first `rows` Y.Doc rows. It ends before the cursor, so it keeps no projections of its last rows. */
+function shorterPage(page:Extract<OrdinaryFoldPage,{kind:"page"}>,rows:number):Extract<OrdinaryFoldPage,{kind:"page"}>{
+  const work=page.work!;
+  return {...page,rows:page.rows.slice(0,rows),throughRelaySeq:page.rows[rows-1]!.relaySeq,reachedCursor:false,
+    work:{...work,page:{...work.page,updates:work.page.updates.slice(0,rows),keepFrom:rows}}};
+}
+
 /** The checkpoint a validated page leaves. */
 export function foldedOrdinaryCheckpoint(page:Extract<OrdinaryFoldPage,{kind:"page"}>,result:Extract<OrdinaryFoldResult,{kind:"folded"}>|null):OrdinaryCheckpoint{
   const {prior,rows}=page;
@@ -184,12 +191,33 @@ export async function foldOrdinaryCheckpointPages(storage:StorageContext,input:{
   for(let pages=0;pages<input.pages&&!folded?.reachedCursor;pages++){
     await setImmediate();
     input.signal?.throwIfAborted();
-    const page=readOrdinaryFoldPage(storage,input.scope,input.bounds,checkpoint);
-    if(page.kind!=="page"){ended=page;break;}
-    let result:Extract<OrdinaryFoldResult,{kind:"folded"}>|null=null;
+    const read=readOrdinaryFoldPage(storage,input.scope,input.bounds,checkpoint);
+    if(read.kind!=="page"){ended=read;break;}
+    let page=read,result:Extract<OrdinaryFoldResult,{kind:"folded"}>|null=null;
     if(page.work){
-      const validated=await input.validate(page.work,input.signal);
-      if(validated.kind!=="folded"){ended=validated.kind==="capacity-refused"||validated.kind==="retry"?{kind:"busy"}:validated;break;}
+      let validated=await input.validate(page.work,input.signal);
+      if(validated.kind==="unprojected"){
+        // A page that ends at a state no live document has ends instead at an earlier row whose state is one. It tries
+        // ends 1, 2, 4 and more rows back until one folds, then halves the rows between the longest page known to fold
+        // and the shortest known not to. That costs at most about 20 more validations. A page whose last rows are such
+        // states ends at the row before them, unless an earlier run of such states holds every end it tries.
+        let folds=0,fails=read.rows.length,back=1,found:{page:typeof page;result:Extract<OrdinaryFoldResult,{kind:"folded"}>}|null=null;
+        while(fails-folds>1&&validated.kind==="unprojected"){
+          input.signal?.throwIfAborted();
+          const rows=found||back>=read.rows.length?(folds+fails)>>1:read.rows.length-back;
+          back*=2;
+          const shorter=shorterPage(read,rows),tried=await input.validate(shorter.work!,input.signal);
+          if(tried.kind==="folded"){folds=rows;found={page:shorter,result:tried};}
+          else if(tried.kind==="unprojected")fails=rows;
+          else validated=tried;
+        }
+        if(found&&validated.kind==="unprojected"){page=found.page;validated=found.result;}
+      }
+      if(validated.kind!=="folded"){
+        ended=validated.kind==="capacity-refused"||validated.kind==="retry"?{kind:"busy"}:
+          {kind:validated.kind==="over-budget"?"over-budget":"refused",message:validated.message};
+        break;
+      }
       result=validated;
     }
     checkpoint=foldedOrdinaryCheckpoint(page,result);

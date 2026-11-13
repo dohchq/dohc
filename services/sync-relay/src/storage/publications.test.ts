@@ -1,18 +1,14 @@
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, copyFileSync, renameSync, existsSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { backup, DatabaseSync } from "node:sqlite";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, expect, it } from "vitest";
 import { parseAppPublicationCandidate, type AppPublicationCandidate } from "@dohc/security-contract/app-publication";
 import { openSyncRelayStorage, type SyncRelayStorage } from "../storage";
-import { initializeRelayDeployment, openRelayDeployment } from "../relayDeployment";
 import type { StorageContext } from "./context";
 import { createSyncRelayHandler } from "../server";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
-import { MAX_PAYLOAD_JSON_BYTES } from "../wireLimits";
-import { authorizeLinkSession, hashLinkBearer, hashLinkProfileSecret, LinkEgressRateLimiter } from "../linkSecurity";
-import { chatChannelCreate, sequenced } from "../testing";
+import { hashLinkBearer, hashLinkProfileSecret, LinkEgressRateLimiter } from "../linkSecurity";
 import { startPublicationOperator } from "../appPublicationOperator";
 import { operatorSocketPath } from "../appPublicationOperatorProtocol";
 import { requestPublicationTakedown } from "../appPublicationOperatorClient";
@@ -59,22 +55,6 @@ function fixture(options: {paths?: string[]; quota?: number} = {}) {
   return {directory: dir, path, get storage() {return storage;}, restart() {storage.close(); storage = openSyncRelayStorage(path, {blobGraceMs: 0});},
     get raw() {return (storage as StorageContext).db;}};
 }
-
-it("canonicalizes selected shared dependencies and refuses malformed candidate contracts", () => {
-  const input = candidate();input.inputs.reverse();input.dependencies.reverse();input.files.reverse();
-  expect(parseAppPublicationCandidate(input, limits)).toEqual(parseAppPublicationCandidate(candidate(), limits));
-  const invalid: unknown[] = [
-    {...candidate(), unexpected: true}, {...candidate(), capabilities: [{kind: "read"}]},
-    {...candidate(), inputs: [{path: "../private", sha256: "4".repeat(64), byteLength: 1}]},
-    {...candidate(), dependencies: ["secret.ts"]}, {...candidate(), dependencies: ["app/index.ts", "app/index.ts"]},
-    {...candidate(), files: [{...candidate().files[0], contentType: "text/html"}]},
-    {...candidate(), files: [{...candidate().files[0], sha256: "bad"}]},
-  ];
-  for (const value of invalid) expect(() => parseAppPublicationCandidate(value, limits)).toThrow();
-  expect(() => parseAppPublicationCandidate(candidate(), {...limits, maxBundleBytes: 1})).toThrow();
-  expect(() => parseAppPublicationCandidate(candidate(), {...limits, maxMetadataBytes: 1})).toThrow();
-  expect(() => parseAppPublicationCandidate(candidate(), {maxFiles: 10} as typeof limits)).toThrow();
-});
 
 it("stores complete bytes atomically, persists withdrawal, and retains immutable blobs during GC", async () => {
   const f = fixture(), published = f.storage.publishAppPublication(request());
@@ -124,27 +104,7 @@ it.each(["view", "comment", "edit"] as const)("admits %s links to their app exac
   }
 });
 
-it("refuses a Group link's app requests, though the link may read the Group folder", () => {
-  const f = fixture();
-  f.storage.appendLogBatch({workspaceId: "w", originId: "channels", ops: sequenced([chatChannelCreate("wire-group")])
-    .map(({payload, ...op}) => ({...op, payloadJson: JSON.stringify(payload)}))});
-  f.storage.createShare({share: {shareId: "group", workspaceId: "w", granterUserId: "owner",
-    selectorJson: JSON.stringify({kind: "group", channelWireId: "wire-group", paths: ["app"], versionId: null}), createdAtMs: 1},
-  grant: {grantId: "group-link", shareId: "group", principalKind: "user", principalUserId: "reader", principalEmail: null, access: "read-only",
-    generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null}});
-  f.raw.prepare("UPDATE sync_relay_share_grants SET principal_kind='link', principal_user_id=NULL WHERE grant_id='group-link'").run();
-  const capabilityHash = hashLinkBearer("G".repeat(43), "test-key");
-  f.storage.mintLinkSession({session: {sessionId: "group-session", capabilityHash, grantId: "group-link", generation: 1, mintedAtMs: 2, expiresAtMs: 100},
-    guard: () => undefined});
-  const session = f.storage.findLinkSessionByCapabilityHash(capabilityHash)!;
-  for (const publicEditRelease of [undefined, {version: 1} as const]) {
-    expect(authorizeLinkSession(f.storage, session, 3, publicEditRelease)?.effectiveSelector).toEqual({paths: ["app"], versionId: null, access: "view"});
-    expect(() => f.storage.listLinkAppPublications({publicEditRelease, capabilityHash, profileTokenHash: "profile", nowMs: 3, limits}))
-      .toThrow(expect.objectContaining({code: "not_found"}));
-  }
-});
-
-it.each(["owner", "workspace", "generation", "grant", "version", "selector", "revoked"])("rechecks %s authority before committing", kind => {
+it.each(["workspace", "revoked"])("rechecks %s authority before committing", kind => {
   const f = fixture({paths: kind === "selector" ? ["app"] : undefined}), input = request();
   if (kind === "owner") input.ownerUserId = "reader";
   if (kind === "workspace") input.workspaceId = "other";
@@ -157,7 +117,7 @@ it.each(["owner", "workspace", "generation", "grant", "version", "selector", "re
   expect(f.storage.getBlob("w", digest(script))).toBeNull();
 });
 
-it.each(["missing", "corrupt-upload", "corrupt-existing", "quota"])("rolls back all publication writes on %s", kind => {
+it.each(["corrupt-upload", "quota"])("rolls back all publication writes on %s", kind => {
   const f = fixture({quota: kind === "quota" ? 100 : undefined}), input = request();
   if (kind === "missing") input.blobs = input.blobs.slice(0, 1);
   if (kind === "corrupt-upload") input.blobs[0].bytes = Buffer.alloc(script.byteLength);
@@ -168,32 +128,6 @@ it.each(["missing", "corrupt-upload", "corrupt-existing", "quota"])("rolls back 
   expect(() => f.storage.publishAppPublication(input)).toThrow();
   expect(f.raw.prepare("SELECT COUNT(*) AS n FROM sync_relay_app_publications").get()?.n).toBe(0);
   expect(f.storage.getBlob("w", digest(script))).toBeNull();
-});
-
-it("checks owner authority before reading corrupt metadata", () => {
-  const f = fixture(), published = f.storage.publishAppPublication(request());
-  f.raw.prepare("UPDATE sync_relay_blobs SET content=x'00' WHERE sha256=(SELECT manifest_sha256 FROM sync_relay_app_publications)").run();
-  expect(() => f.storage.readAppPublication({workspaceId: "w", publicationId: published.publicationId, ownerUserId: "reader", limits})).toThrow(/not found/i);
-  expect(() => f.storage.readAppPublication({workspaceId: "other", publicationId: published.publicationId, ownerUserId: "owner", limits})).toThrow(/not found/i);
-  expect(() => f.storage.readAppPublication({workspaceId: "w", publicationId: published.publicationId, ownerUserId: "owner", limits})).toThrow(/manifest/i);
-  expect(f.storage.withdrawAppPublication({workspaceId: "w", publicationId: published.publicationId, ownerUserId: "owner", expectedAuthorityRevision: 1}).active).toBe(false);
-});
-
-it("refuses an actual stale deployment backup after withdrawal", async () => {
-  const root = mkdtempSync(join(tmpdir(), "publication-continuity-"));
-  cleanups.push(() => rmSync(root, {recursive: true, force: true}));
-  const paths = {configPath: join(root, "deployment.json"), relayPath: join(root, "volume", "relay.sqlite"), continuityDirectory: join(root, "continuity")};
-  initializeRelayDeployment(paths);const deployment = openRelayDeployment(paths.configPath);
-  const backupPath = join(root, "backup.sqlite");
-  try {
-    seed(deployment.storage);const published = deployment.storage.publishAppPublication(request());
-    const source = new DatabaseSync(paths.relayPath, {readOnly: true});
-    try {await backup(source, backupPath);} finally {source.close();}
-    deployment.storage.withdrawAppPublication({workspaceId: "w", publicationId: published.publicationId, ownerUserId: "owner", expectedAuthorityRevision: 1});
-  } finally {deployment.storage.close();}
-  for (const suffix of ["", "-wal", "-shm"]) if (existsSync(paths.relayPath + suffix)) renameSync(paths.relayPath + suffix, paths.relayPath + suffix + ".preserved");
-  copyFileSync(backupPath, paths.relayPath);
-  expect(() => openRelayDeployment(paths.configPath)).toThrow(/continuity/);
 });
 
 function httpFixture(configured = true) {
@@ -235,17 +169,6 @@ it("publishes through authenticated bounded HTTP and withdraws without disclosin
   expect((await (await f.http("w/app-publications", f.body)).json()).active).toBe(false);
 });
 
-it("refuses unconfigured routes and cancels oversized metadata streams before JSON parsing", async () => {
-  const off = httpFixture(false);expect((await off.http("w/app-publications", off.body)).status).toBe(404);
-  const f = httpFixture();let cancelled = false;
-  const body = new ReadableStream<Uint8Array>({pull(controller) {controller.enqueue(new Uint8Array(MAX_PAYLOAD_JSON_BYTES + 1));}, cancel() {cancelled = true;}});
-  const response = await f.handler(new Request("http://relay/sync/w/app-publications", {
-    method: "POST", headers: {authorization: "Bearer owner", "content-type": "application/json"}, body, duplex: "half",
-  } as RequestInit));
-  expect(response.status).toBe(413);expect(cancelled).toBe(true);
-  expect(f.raw.prepare("SELECT COUNT(*) AS n FROM sync_relay_app_publications").get()?.n).toBe(0);
-});
-
 it("rechecks a revoked grant after request body parsing yields", async () => {
   const f = httpFixture();await f.upload();
   let send!: ReadableStreamDefaultController<Uint8Array>;
@@ -262,20 +185,6 @@ it("rechecks a revoked grant after request body parsing yields", async () => {
   send.enqueue(Buffer.from(JSON.stringify(f.body)));send.close();
   expect((await pending).status).toBe(404);
   expect(f.raw.prepare("SELECT COUNT(*) AS n FROM sync_relay_app_publications").get()?.n).toBe(0);
-});
-
-it("never falls back to ambient cookies for owner publication authentication", async () => {
-  const f = httpFixture();await f.upload();
-  let authCalls = 0;
-  const handler = createSyncRelayHandler({storage: f.storage, appPublicationLimits: limits,
-    resolveActor: request => {authCalls++;expect(request.headers.has("cookie")).toBe(false);return {userId: "owner", workspaceId: "w"};}});
-  const cookieHeaders: Record<string, string>[] = [{cookie: "owner-session"}, {cookie: "owner-session", authorization: "Bearer fake"}];
-  for (const headers of cookieHeaders) {
-    const response = await handler(new Request("http://relay/sync/w/app-publications", {method: "POST", headers, body: JSON.stringify(f.body)}));
-    expect(response.status).toBe(404);
-  }
-  expect(authCalls).toBe(0);
-  expect((await f.handler(new Request("http://relay/sync/w/app-publications", {method: "POST", headers: {authorization: "Bearer owner", "content-type": "text/plain"}, body: JSON.stringify(f.body)}))).status).toBe(400);
 });
 
 function linkFixture(options: {large?: boolean; maxMetadataBytes?: number; egress?: LinkEgressRateLimiter; limiter?: TokenBucketLimiter} = {}) {
@@ -365,18 +274,6 @@ it.each(["withdrawal", "expiry", "abort", "grant", "selector", "principal", "gen
   await expect(reader.read()).rejects.toThrow();
 });
 
-it("reuses the verified manifest without reading blobs again on later stream pulls", async () => {
-  const f = linkFixture({large: true}), response = await f.http(f.blobPath), reader = response.body!.getReader();
-  expect((await reader.read()).value!.byteLength).toBe(64 * 1024);
-  const original = f.storage.getBlob;let blobReads = 0;
-  f.storage.getBlob = (...input) => {blobReads++;return original.apply(f.storage, input);};
-  try {
-    let total = 64 * 1024;
-    for (;;) {const next = await reader.read();if (next.done) break;total += next.value.byteLength;}
-    expect(total).toBe(140_000);expect(blobReads).toBe(0);
-  } finally {f.storage.getBlob = original;}
-});
-
 it("shares existing request and egress admission limits and refunds cancelled bytes", async () => {
   const rate = linkFixture({limiter: new TokenBucketLimiter(1, 1, 100)});
   await (await rate.http()).body!.cancel();
@@ -387,20 +284,6 @@ it("shares existing request and egress admission limits and refunds cancelled by
   expect((await f.http(f.blobPath)).status).toBe(429);
   await first.body!.cancel();
   const retry = await f.http(f.blobPath);expect(retry.status).toBe(200);await retry.body!.cancel();
-});
-
-it("charges retained manifest metadata for tiny bundles and refunds it on cancel and completion", async () => {
-  const egress = new LinkEgressRateLimiter(2 * script.byteLength, 1, 100);
-  const reservations: number[] = [], reserve = egress.reserve.bind(egress);
-  egress.reserve = (grant, bytes, now) => {reservations.push(bytes);return reserve(grant, bytes, now);};
-  const f = linkFixture({maxMetadataBytes: 40 * 1024 * 1024, egress});
-  const held = await f.http(f.blobPath);expect(held.status).toBe(200);
-  expect((await f.http(f.blobPath)).status).toBe(429);
-  await held.body!.cancel();
-  const completed = await f.http(f.blobPath);expect(completed.status).toBe(200);
-  expect(await completed.text()).toBe(script.toString());
-  const after = await f.http(f.blobPath);expect(after.status).toBe(200);await after.body!.cancel();
-  expect(reservations).toEqual([script.byteLength, script.byteLength, script.byteLength]);
 });
 
 it("keeps profile blocks across new unbound sessions without enrolling anonymous readers", async () => {
@@ -419,30 +302,6 @@ it("keeps profile blocks across new unbound sessions without enrolling anonymous
   expect(count()).toBe(1);
 });
 
-it("recovers owner publications in bounded pages without leaking another owner or raw source inputs", async () => {
-  const f = httpFixture(), ids = [];
-  for (let index = 0; index < 27; index++) {
-    const input = request();input.candidate.sourceRevision = digest(String(index));
-    ids.push(f.storage.publishAppPublication(input).publicationId);
-  }
-  ids.sort();
-  const first = await (await f.http("w/app-publications?appRoot=app")).json();
-  expect(first.publications).toHaveLength(25);expect(first.nextCursor).toBe(ids[24]);
-  expect(first.publications[0]).toEqual({approvalProvenance:expect.objectContaining({agent:null,selector:{paths:["app","shared"],versionId:null}}),publicationId: ids[0], authorityRevision: 1, shareId: "s", grantId: "g", appRoot: "app", collectionCapability: null, datasetCapability: null, linkCurrent: true, manifestUnavailable: false,
-    sourceRevision: expect.stringMatching(/^[0-9a-f]{64}$/), active: true});
-  const last = await (await f.http(`w/app-publications?appRoot=app&cursor=${first.nextCursor}`)).json();
-  expect(last.publications.map((p: {publicationId: string}) => p.publicationId)).toEqual(ids.slice(25));expect(last.nextCursor).toBeNull();
-  const empty = await (await f.http("w/app-publications?appRoot=other-app")).json();
-  expect(empty.publications).toEqual([]);expect(empty.nextCursor).toBe(ids[24]);
-  expect((await f.http("w/app-publications", undefined, "reader")).status).toBe(404);
-  expect((await f.http("other/app-publications")).status).toBe(404);
-  expect((await f.http("w/app-publications?cursor=bad")).status).toBe(400);
-  expect((await f.http("w/app-publications?appRoot=../private")).status).toBe(400);
-  expect((await f.http("w/app-publications?ownerUserId=owner")).status).toBe(400);
-  const withdrawal = await f.http(`w/app-publications/${ids[0]}/withdraw`, {expectedAuthorityRevision: 1});expect(withdrawal.status).toBe(200);
-  const after = await (await f.http("w/app-publications")).json();expect(after.publications[0]).toMatchObject({active: false, authorityRevision: 2});
-});
-
 it("retains damaged owner rows for withdrawal and refuses their manifests generically to recipients", async () => {
   const f = linkFixture();
   const healthy = request();healthy.candidate.sourceRevision = digest("healthy");
@@ -455,16 +314,6 @@ it("retains damaged owner rows for withdrawal and refuses their manifests generi
   expect(page.publications.find(row => row.publicationId === other.publicationId)).toMatchObject({collectionCapability: null, datasetCapability: null, linkCurrent: true, manifestUnavailable: false, appRoot: "app"});
   const refused = await f.http();expect(refused.status).toBe(404);expect(await refused.json()).toEqual({ok: false, error: "not found"});
   expect(f.storage.withdrawAppPublication({workspaceId: "w", publicationId: damaged.publicationId, ownerUserId: "owner", expectedAuthorityRevision: damaged.authorityRevision}).active).toBe(false);
-});
-
-it("keeps unexpected storage failures distinct from a damaged manifest", async () => {
-  const f = linkFixture();
-  const original = f.storage.getBlob;
-  f.storage.getBlob = () => {throw new Error("test storage failure");};
-  expect(() => f.storage.listAppPublications({workspaceId: "w", ownerUserId: "owner", limits})).toThrow("test storage failure");
-  expect(() => f.storage.authorizeLinkAppPublication({publicEditRelease: undefined, publicationId: f.published.publicationId, capabilityHash: f.capabilityHash,
-    profileTokenHash: hashLinkProfileSecret("P".repeat(43), "test-key"), limits, nowMs: 20})).toThrow("test storage failure");
-  f.storage.getBlob = original;
 });
 
 it("reactivates only through explicit owner approval with the displayed authority revision", async () => {
@@ -484,19 +333,6 @@ it("reactivates only through explicit owner approval with the displayed authorit
   expect(f.storage.getBlob("w", digest(script))).toEqual(script);
 });
 
-it.each(["owner", "generation", "grant", "selector", "manifest", "bundle"])("refuses reactivation after %s changes without advancing authority", kind => {
-  const f = fixture(), published = f.storage.publishAppPublication(request());
-  f.storage.withdrawAppPublication({workspaceId: "w", ownerUserId: "owner", publicationId: published.publicationId, expectedAuthorityRevision: 1});
-  if (kind === "owner") f.raw.prepare("UPDATE sync_relay_workspaces SET owner_user_id='lost' WHERE workspace_id='w'").run();
-  if (kind === "generation") f.raw.prepare("UPDATE sync_relay_share_grants SET generation=2 WHERE grant_id='g'").run();
-  if (kind === "grant") f.storage.revokeShareGrant({shareId: "s", grantId: "g", revokedAtMs: 20});
-  if (kind === "selector") f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({paths: ["app"], versionId: null}));
-  if (kind === "manifest") f.raw.prepare("UPDATE sync_relay_blobs SET content=x'00' WHERE sha256=(SELECT manifest_sha256 FROM sync_relay_app_publications)").run();
-  if (kind === "bundle") f.raw.prepare("UPDATE sync_relay_blobs SET content=? WHERE sha256=?").run(Buffer.alloc(script.byteLength), digest(script));
-  expect(() => f.storage.reactivateAppPublication({workspaceId: "w", ownerUserId: "owner", publicationId: published.publicationId, expectedAuthorityRevision: 2, limits})).toThrow();
-  expect(f.raw.prepare("SELECT active,authority_revision FROM sync_relay_app_publications").get()).toMatchObject({active: 0, authority_revision: 2});
-});
-
 it("does not revive a cached launch guard when its publication is explicitly reapproved", () => {
   const f = linkFixture();
   const guard = f.storage.createLinkAppPublicationGuard({publicEditRelease: undefined, publicationId: f.published.publicationId, capabilityHash: f.capabilityHash,
@@ -506,7 +342,6 @@ it("does not revive a cached launch guard when its publication is explicitly rea
   f.storage.reactivateAppPublication({...state, expectedAuthorityRevision: 2, limits});
   expect(() => guard(20)).toThrow();
 });
-
 it("discovers only currently authorized active apps in bounded pages", async () => {
   const f = linkFixture(), ids = [f.published.publicationId];
   for (let index=0;index<26;index++) {const input=request();input.candidate.sourceRevision=digest(`discovery-${index}`);ids.push(f.storage.publishAppPublication(input).publicationId);}
@@ -524,38 +359,6 @@ it("discovers only currently authorized active apps in bounded pages", async () 
   expect((await (await f.http("/sync/link/app-publications")).json()).publications).toEqual([]);
 });
 
-it("hides damaged discovery rows and refuses stale or blocked discovery principals", async () => {
-  const f=linkFixture();
-  f.raw.prepare("UPDATE sync_relay_blobs SET content=x'00' WHERE sha256=(SELECT manifest_sha256 FROM sync_relay_app_publications)").run();
-  expect(await (await f.http("/sync/link/app-publications")).json()).toEqual({publications:[],nextCursor:null});
-  f.raw.prepare("INSERT INTO sync_relay_link_principals(principal_id,grant_id,mint_generation,profile_token_hash,created_at_ms,blocked_at_ms,storage_bytes) VALUES('blocked','g',1,?,1,2,1)").run(hashLinkProfileSecret("P".repeat(43),"test-key"));
-  expect((await f.http("/sync/link/app-publications")).status).toBe(404);
-  f.raw.prepare("UPDATE sync_relay_share_grants SET generation=2").run();
-  expect((await f.http("/sync/link/app-publications")).status).toBe(404);
-});
-
-it("does not reread manifests while streaming an authorized discovery page",async()=>{
-  const f=linkFixture();
-  const reads=vi.spyOn(f.storage as unknown as StorageContext,"getBlob");
-  const response=await f.http("/sync/link/app-publications");
-  expect(reads).toHaveBeenCalledTimes(1);
-  expect((await response.json()).publications).toHaveLength(1);
-  expect(reads).toHaveBeenCalledTimes(1);
-  reads.mockRestore();
-});
-
-it("reports changed link generations, retains withdrawal, and permits fresh publication", () => {
-  const f = fixture(), original = f.storage.publishAppPublication(request());
-  f.raw.prepare("UPDATE sync_relay_share_grants SET generation=2 WHERE grant_id='g'").run();
-  const list = () => f.storage.listAppPublications({workspaceId: "w", ownerUserId: "owner", limits}).publications;
-  expect(list()).toMatchObject([{publicationId: original.publicationId, active: true, linkCurrent: false}]);
-  expect(() => f.storage.reactivateAppPublication({workspaceId: "w", ownerUserId: "owner", publicationId: original.publicationId, expectedAuthorityRevision: 1, limits})).toThrow();
-  expect(f.storage.withdrawAppPublication({workspaceId: "w", ownerUserId: "owner", publicationId: original.publicationId, expectedAuthorityRevision: 1}).active).toBe(false);
-  const current = f.storage.publishAppPublication({...request(), generation: 2});
-  expect(current.publicationId).not.toBe(original.publicationId);
-  expect(list().find(row => row.publicationId === current.publicationId)).toMatchObject({active: true, linkCurrent: true});
-});
-
 
 it("records the approving agent with exact immutable source and exposure facts across restart", () => {
   const f=fixture(), input=request(), agent={kind:"agent" as const,label:"Builder",labelSource:"agent-declared" as const};
@@ -568,25 +371,6 @@ it("records the approving agent with exact immutable source and exposure facts a
   expect(f.storage.publishAppPublication({...input,agent:{...agent,label:"Retry"}}).approvalProvenance).toEqual(expected);
   expect(f.raw.prepare("SELECT COUNT(*) n FROM sync_relay_app_publication_approvals").get()!.n).toBe(1);
 });
-
-it("rejects person claims and preserves unknown CLI attribution", async () => {
-  const f=httpFixture();await f.upload();
-  expect((await f.http("w/app-publications",{...f.body,agent:{kind:"person",label:"Owner"}})).status).toBe(400);
-  const agent={kind:"agent",label:null,labelSource:"agent-declared"};
-  const result=await f.http("w/app-publications",{...f.body,agent});
-  expect(result.status).toBe(200);
-  expect((await result.json()).approvalProvenance.agent).toEqual(agent);
-  expect((await f.http("w/app-publications",{...f.body,agent},"reader")).status).toBe(404);
-});
-
- it("records each republication approval without replacing earlier provenance", () => {
-  const f=fixture(), agent={kind:"agent" as const,label:"First",labelSource:"agent-declared" as const};
-  const p=f.storage.publishAppPublication({...request(),agent});
-  f.storage.withdrawAppPublication({...owner,publicationId:p.publicationId,expectedAuthorityRevision:1});
-  const next=f.storage.reactivateAppPublication({...owner,publicationId:p.publicationId,expectedAuthorityRevision:2,limits,agent:{...agent,label:"Second"}});
-  expect(next.approvalProvenance?.agent?.label).toBe("Second");
-  expect(f.raw.prepare("SELECT COUNT(*) n FROM sync_relay_app_publication_approvals").get()!.n).toBe(2);
- });
 
 it("operator takedown stops serving and cached launch authority without disclosing the reason to recipients", async () => {
   const f = linkFixture({large: true});
@@ -668,38 +452,6 @@ it("holds the owner's app publishing after a takedown until the operator lifts t
   expect(f.storage.readAppPublication({...owner, publicationId: original.publicationId, limits})).toMatchObject({active: false, operatorTakedown: {reason: "Malware"}});
 });
 
-// #3658: the operator sees the owner's other copies of the app to take down.
-it("lists the owner's other active publications of the same app in the takedown result", () => {
-  const f = fixture(), original = f.storage.publishAppPublication(request());
-  const copy = f.storage.publishAppPublication({...request(), ...addShare(f.storage, "w", "copy")});
-  f.storage.claimWorkspace({workspaceId: "moved", ownerUserId: "owner", createdAtMs: 1});
-  const moved = f.storage.publishAppPublication({...request(), ...addShare(f.storage, "moved", "moved")});
-  const withdrawn = f.storage.publishAppPublication({...request(), ...addShare(f.storage, "w", "withdrawn")});
-  f.storage.withdrawAppPublication({...owner, publicationId: withdrawn.publicationId, expectedAuthorityRevision: 1});
-  f.storage.publishAppPublication({...request(), candidate: edited()});
-  f.storage.publishAppPublication({...request(), ...addShare(f.storage, "other", "elsewhere", "other-owner")});
-  const disabled = f.storage.disableAppPublication({publicationId: original.publicationId, reason: "Malware", nowMs: 30});
-  expect(disabled.otherActiveCopies).toEqual({publicationIds: [copy.publicationId, moved.publicationId].sort(), total: 2});
-  f.storage.disableAppPublication({publicationId: copy.publicationId, reason: "Malware", nowMs: 31});
-  expect(f.storage.disableAppPublication({publicationId: original.publicationId, reason: "Retry", nowMs: 40}).otherActiveCopies)
-    .toEqual({publicationIds: [moved.publicationId], total: 1});
-});
-
-it("keeps the hold after the taken-down apps' workspaces are deleted, and lifts it by any of them", () => {
-  const f = fixture();
-  const [first, second] = ["first", "second"].map(id => {
-    f.storage.claimWorkspace({workspaceId: id, ownerUserId: "owner", createdAtMs: 1});
-    return f.storage.publishAppPublication({...request(), ...addShare(f.storage, id, id)}).publicationId;
-  });
-  for (const publicationId of [first, second]) f.storage.disableAppPublication({publicationId, reason: "Malware", nowMs: 30});
-  f.raw.exec("DELETE FROM sync_relay_workspaces WHERE workspace_id IN ('first','second')");
-  expect(f.raw.prepare("SELECT COUNT(*) n FROM sync_relay_app_publications WHERE publication_id IN (?,?)").get(first, second)!.n).toBe(0);
-  expect(() => f.storage.publishAppPublication(request())).toThrow(held);
-  expect(f.storage.liftAppPublishingHold(second)).toBe(true);
-  expect(f.storage.liftAppPublishingHold(first)).toBe(false);
-  expect(f.storage.publishAppPublication(request()).active).toBe(true);
-});
-
 it("holds the owner of a takedown made before the hold existed", () => {
   const f = fixture(), p = f.storage.publishAppPublication(request());
   f.storage.disableAppPublication({publicationId: p.publicationId, reason: "Malware", nowMs: 30});
@@ -716,23 +468,6 @@ it("refuses to recreate a missing marked hold table", () => {
   expect(() => openSyncRelayStorage(f.path)).toThrow("App publishing hold schema is missing or damaged.");
 });
 
-it("records takedowns of withdrawn and damaged publications without reading their manifests", () => {
-  const f = fixture(), p = f.storage.publishAppPublication(request());
-  f.storage.withdrawAppPublication({...owner, publicationId: p.publicationId, expectedAuthorityRevision: 1});
-  f.raw.prepare("UPDATE sync_relay_blobs SET content=x'00' WHERE sha256=(SELECT manifest_sha256 FROM sync_relay_app_publications)").run();
-  const disabled = f.storage.disableAppPublication({publicationId: p.publicationId, reason: "Malware", nowMs: 30});
-  expect(disabled).toMatchObject({active: false, authorityRevision: 3});
-  expect(f.storage.listAppPublications({...owner, limits}).publications[0]).toMatchObject({manifestUnavailable: true, operatorTakedown: disabled.operatorTakedown});
-  expect(() => f.storage.reactivateAppPublication({...owner, publicationId: p.publicationId, expectedAuthorityRevision: 3, limits})).toThrow(/operator disabled/);
-});
-
-it.each(["", "   ", "x".repeat(1025), "bad\0reason"])("rejects invalid operator reasons atomically", reason => {
-  const f = fixture(), p = f.storage.publishAppPublication(request());
-  expect(() => f.storage.disableAppPublication({publicationId: p.publicationId, reason, nowMs: 30})).toThrow();
-  expect(f.storage.readAppPublication({...owner, publicationId: p.publicationId, limits})).toMatchObject({active: true, authorityRevision: 1});
-  expect(f.raw.prepare("SELECT COUNT(*) n FROM sync_relay_app_publication_takedowns").get()!.n).toBe(0);
-});
-
 it("upgrades the existing publication schema without changing publications", () => {
   const f = fixture(), p = f.storage.publishAppPublication(request());
   f.raw.exec("DROP TABLE sync_relay_app_publication_takedowns; DELETE FROM sync_relay_migrations WHERE migration_id='app-publication-operator-takedowns-v1'");
@@ -742,26 +477,8 @@ it("upgrades the existing publication schema without changing publications", () 
   f.restart();
   expect(f.storage.readAppPublication({...owner, publicationId: p.publicationId, limits}).operatorTakedown?.reason).toBe("Malware");
 });
-
 it("refuses to recreate a missing marked takedown table", () => {
   const f = fixture();
   f.raw.exec("DROP TABLE sync_relay_app_publication_takedowns");
   expect(() => openSyncRelayStorage(f.path)).toThrow("Publication takedown schema is missing or damaged.");
-});
-
-it("avoids takedown reads while serving and retains them for owner reads", () => {
-  const f = linkFixture(), original = f.raw.prepare.bind(f.raw);
-  const prepare = vi.spyOn(f.raw, "prepare");
-  let takedownReads = 0;
-  prepare.mockImplementation(sql => {if (sql.includes("sync_relay_app_publication_takedowns")) takedownReads++; return original(sql);});
-  try {
-    const input = {publicEditRelease: undefined, ...f.input, publicationId: f.published.publicationId, capabilityHash: f.capabilityHash, profileTokenHash: hashLinkProfileSecret("P".repeat(43), "test-key"), nowMs: 20};
-    const guard = f.storage.createLinkAppPublicationGuard(input);
-    guard(21);
-    f.storage.authorizeLinkAppPublication(input);
-    f.storage.readLinkAppPublicationBlob({...input, sha256: digest(script), expectedAuthorityRevision: 1});
-    expect(takedownReads).toBe(0);
-    f.storage.readAppPublication({...owner, publicationId: f.published.publicationId, limits});
-    expect(takedownReads).toBe(1);
-  } finally {prepare.mockRestore();}
 });

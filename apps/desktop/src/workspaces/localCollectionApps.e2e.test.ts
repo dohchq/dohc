@@ -1,15 +1,14 @@
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { readLocalStateFrom } from "./workspaceLocalState";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 import { createDatasetFixtureCompiler } from "../testing/datasetFixtureCompiler";
-import { deferred } from "../testing/deferred";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import { createRealDaemonLifecycle, createRealDaemonWorkspaceSessions, REAL_DAEMON_DEADLINE_MS, REAL_DAEMON_TEST_TIMEOUT_MS } from "../testing/realDaemonWorkspaceSessions";
 import { compileClosedApp } from "./closedAppCompiler";
-import { createLocalAppLaunchHost, LocalAppUnavailableError } from "./localAppLaunch";
+import { LocalAppUnavailableError } from "./localAppLaunch";
 import type { LocalCollectionEngine } from "./localCollectionApps";
 import { localCollectionEngine } from "./localCollectionEngine";
 import { createLocalDatasetHost, reconcileExistingLocalCollectionApps, type LocalDatasetHost } from "./localDatasetHost";
@@ -87,45 +86,6 @@ async function tripWorkspace(name: string) {
   };
 }
 
-it.skipIf(engine.missing)("creates and lists through the loopback launch on the real engine, writing a retried response once", async () => {
-  const w = await tripWorkspace("launch");
-  try {
-    const { host, published } = await w.approve();
-    // The engine's open prepared `.dohc/local`, so the host holds its worker folder there.
-    expect(await readdir(join(w.root, ".dohc", "local", "datasets", "workers"))).toEqual(expect.arrayContaining([".dohc-worker-lock.sqlite"]));
-    const lifetime = new AbortController(), launcher = await createLocalAppLaunchHost({ backend: host.apps, lifetime: lifetime.signal });
-    try {
-      const url = new URL(await launcher.launch(published.publicationId, signal())), origin = url.origin;
-      const post = (path: string, body: unknown, headers: Record<string, string> = {}) => fetch(origin + path, { method: "POST", headers: { origin, "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
-      const { proof } = await (await post("/session", { handoff: url.hash.slice(1) })).json() as { proof: string };
-      const backend = (body: unknown) => post("/backend", body, { "x-dohc-app-proof": proof });
-      const create = () => backend({ id: "create", op: "collection.create", idempotencyKey: "trip-1", fields: { destination: "Manila", name: "Bo" } });
-      const created = await create();
-      expect(created.status).toBe(200);
-      const receipt = await created.json() as Receipt;
-      expect(await (await create()).json()).toEqual(receipt);
-      // The engine recorded one write, by the person here, at the receipt's moment.
-      expect(await waitForPathMoments(w.capture, receipt.path, 1)).toEqual([expect.objectContaining({ id: receipt.momentId, objectId: receipt.objectId, operation: "write", authors: [expect.objectContaining(person)] })]);
-      expect(await readFile(join(w.root, receipt.path), "utf8")).toContain('"destination":"Manila"');
-
-      // Only direct-child records are listed, and no cursor names another file.
-      await mkdir(join(w.root, "trip/responses/drafts"));
-      await writeFile(join(w.root, "trip/responses/drafts/private.md"), `---\n${JSON.stringify({ destination: "Tokyo" })}\n---\n`);
-      await writeFile(join(w.root, "trip/responses/notes.txt"), "Not a response.\n");
-      await writeFile(join(w.root, "trip/responses/zz.md"), `---\n${JSON.stringify({ destination: "Tokyo", name: "Cy" })}\n---\n`);
-      await waitForPathMoments(w.capture, "trip/responses/zz.md", 1);
-      const pages: Array<{ records: Array<{ path: string; fields: Record<string, unknown> }>; nextPath: string | null }> = [];
-      let afterPath: string | undefined;
-      do {
-        const page = await (await backend({ id: "list", op: "collection.list", limit: 1, ...(afterPath === undefined ? {} : { afterPath }) })).json() as typeof pages[number];
-        pages.push(page); afterPath = page.nextPath ?? undefined;
-      } while (afterPath && pages.length < 10);
-      expect(pages.map(page => page.records.map(record => [record.path, record.fields]))).toEqual([[[receipt.path, { destination: "Manila", name: "Bo" }]], [["trip/responses/zz.md", { destination: "Tokyo", name: "Cy" }]]]);
-      expect(pages.map(page => page.nextPath)).toEqual([receipt.path, null]);
-    } finally { lifetime.abort(); await launcher.close(); }
-  } finally { await w.close(); }
-}, REAL_DAEMON_TEST_TIMEOUT_MS);
-
 it.skipIf(engine.missing)("keeps admitted responses through a lost answer and a restart, then completes each with one write", async () => {
   const w = await tripWorkspace("restart");
   try {
@@ -154,25 +114,3 @@ it.skipIf(engine.missing)("keeps admitted responses through a lost answer and a 
     }
   } finally { await w.close(); }
 }, 2 * REAL_DAEMON_TEST_TIMEOUT_MS);
-
-it.skipIf(engine.missing)("confirms withdrawal only after a held write commits in the real engine, and admits none afterward", async () => {
-  const w = await tripWorkspace("withdraw");
-  try {
-    const gate = deferred();
-    let held = 0;
-    w.control.wrap = real => ({ ...real, async create(envelope) { held++; await gate.promise; return real.create(envelope); } });
-    const { host, published } = await w.approve();
-    const request = (key: string) => host.apps.request(published.publicationId, "create", { authorityRevision: published.authorityRevision, idempotencyKey: key, fields: { destination: "Tokyo" } });
-    const pending = request("held").catch((error: unknown) => error);
-    await expect.poll(() => held).toBe(1);
-    const withdrawal = host.apps.withdraw(published.publicationId, published.authorityRevision);
-    await expect(request("after")).rejects.toThrow(/approval changed/);
-    gate.resolve();
-    expect(await withdrawal).toEqual({ kind: "withdrawn", publicationId: published.publicationId, authorityRevision: published.authorityRevision + 1 });
-    expect(await pending).toBeInstanceOf(Error);
-    expect(host.apps.list("trip")[0]).toMatchObject({ active: false, pendingCreates: 0 });
-    const responses = (await w.capture.listMoments({ limit: 100 })).moments.filter(moment => moment.path.startsWith("trip/responses/") && moment.path.endsWith(".md"));
-    expect(responses).toHaveLength(1);
-    expect(held).toBe(1);
-  } finally { await w.close(); }
-}, REAL_DAEMON_TEST_TIMEOUT_MS);

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  CHAT_FILE_LINK_WITHHELD,
   activeMentionQuery,
   applyMentionCompletion,
   codeCover,
@@ -9,7 +10,9 @@ import {
   findMentions,
   formatChatWorkReferenceToken,
   matchMentionCandidates,
+  projectChatFileLinks,
   scanMentionTokens,
+  withholdChatFileLinks,
   type MentionCandidate,
 } from "./chatMentions";
 
@@ -183,5 +186,29 @@ describe("work links", () => {
     const short = "@[work:abc]";
     expect(extractChatWorkReferenceTokens(`${short} \`@[work:${ref}]\``)).toEqual([]);
     expect(extractChatFileReferences(short)).toEqual([{ path: "work:abc" }]);
+  });
+});
+
+describe("withholding file links", () => {
+  const ref = "A".repeat(42) + "_";
+  const covers = (path: string) => path.startsWith("team/");
+  const out = CHAT_FILE_LINK_WITHHELD;
+
+  it("keeps work links and covered file links, and replaces every other link whole", () => {
+    expect(withholdChatFileLinks(`@[team/a.md#Goals] @[work:${ref}] @[other/b.md#Q3] \`@[other/c.md]\``, covers))
+      .toBe(`@[team/a.md#Goals] @[work:${ref}] ${out} \`${out}\``);
+  });
+
+  it("replaces a nested or unclosed link to its line end, and changes nothing a second time", () => {
+    const once = withholdChatFileLinks("a @[x @[team/a.md] b\n@[other/open\r\nnext @[]", covers);
+    expect(once).toBe(`a ${out} b\n${out}\r\nnext ${out}`);
+    expect(withholdChatFileLinks(once, () => false)).toBe(once);
+    expect(withholdChatFileLinks("no links here", () => false)).toBe("no links here");
+  });
+
+  it("names a kept file link by the path its reader knows, with its heading", () => {
+    const fromTeam = (path: string) => (path.startsWith("acme/team/") ? path.slice("acme/".length) : null);
+    expect(projectChatFileLinks(`@[acme/team/a.md#Goals] @[work:${ref}] @[acme/b.md]`, fromTeam))
+      .toBe(`@[team/a.md#Goals] @[work:${ref}] ${out}`);
   });
 });

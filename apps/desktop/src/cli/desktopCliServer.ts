@@ -28,8 +28,10 @@ import {
   type CliServerHandle,
   type CliServerOptions,
   type CliWorkspaceContext,
+  type DeclaredReaders,
   type startCliServer as startCliServerImplementation,
 } from "./cliServer";
+import { mapNamed } from "@dohc/workspace-contracts/operation-declaration";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import { agentHandle } from "../settings/userSettings";
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
@@ -105,9 +107,7 @@ async function settledMarkdown(rootPath: string, path: string): Promise<string> 
 }
 
 interface DesktopCliServerDependencies<State> {
-  chatLinks: NonNullable<CliServerOptions["chatLinks"]>;
-  chatFileMentions: NonNullable<CliServerOptions["chatFileMentions"]>;
-  links: ReturnType<typeof import("../workspaces/workspaceLinks").createWorkspaceLinksReader>;
+  reads: DeclaredReaders<RegistryEntry>;
   heldChanges: import("../workspaces/workspaceHeldChanges").WorkspaceHeldChanges;
   stopWorkspaceSync?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, author?: import("@dohc/workspace-contracts/change-author").ChangeAuthor): Promise<import("@dohc/cli/protocol").CliResultByVerb["stopSync"]>;
   shareCopy?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: import("@dohc/workspace-contracts/share-copy").ShareCopyInput): Promise<import("@dohc/workspace-contracts/share-copy").ShareCopyResult>;
@@ -795,13 +795,10 @@ export function createDesktopCliServer<State>(
           })),
       openWorkspace: openCliWorkspace,
       notices: dependencies.notices,
-      chatLinks: (workspace,input) => readLinks(workspace,current=>dependencies.chatLinks(current,input)),
-      chatFileMentions: (workspace, input) => readLinks(workspace, current => dependencies.chatFileMentions(current, input)),
-      links: {
-        edges: (workspace, input) => readLinks(workspace, current => dependencies.links.edges(current, input)),
-        incoming: (workspace, input) => readLinks(workspace, current => dependencies.links.incoming(current, input)),
-        resolve: (workspace, input) => readLinks(workspace, current => dependencies.links.resolve(current, input)),
-      },
+      // Each declared read runs in the workspace the request resolved to.
+      reads: mapNamed(dependencies.reads, (_read, verb) => (workspace: CliRegistryWorkspace, input: object) =>
+        readLinks(workspace, current => (dependencies.reads[verb] as (workspace: RegistryEntry, input: object) => Promise<unknown>)(current, input)),
+      ) as DeclaredReaders<CliRegistryWorkspace>,
       chatWrites,
       chatRuns: chatDispatchService,
       localUserDisplayName,

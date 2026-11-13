@@ -42,7 +42,7 @@ function visibleHeadingText(value: string): string {
     .replace(/\[([^\]\n]+)\]\([^)]*\)/g, "$1")
     .replace(/<[^>]+>/g, "")
     .replace(/[*_~]/g, "")
-    .replace(/\\([\\`*{}\[\]#+\-.!_>~|<])/g, "$1")
+    .replace(/\\([\\`*{}[\]#+\-.!_>~|<])/g, "$1")
     .trim();
 }
 

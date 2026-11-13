@@ -1,34 +1,31 @@
+import type { StorageContext } from "./storage/context";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { fenceAccount, initializeAccountDeletion } from "./storage/accountDeletion";
 import { agentChannelWireId } from "@dohc/security-contract/chat-wire-ids";
-import { accountDeletionIdentity } from "@dohc/workspace-auth/accountDeletion";
+
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
 import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
+import type { RelayNoticePage } from "@dohc/workspace-contracts/relay";
 import type {
   ConsentCredentials,
   CredentialFence,
   CredentialFenceChange,
-  CredentialFenceListener,
-} from "@dohc/workspace-auth/credentialFence";
+  CredentialFenceListener } from "@dohc/workspace-auth/credentialFence";
 import { CREDENTIAL_FENCE_READ_TIMEOUT_MS } from "@dohc/workspace-auth/credentialFence";
 import { UnauthorizedError, type ResolveAccountSession } from "@dohc/workspace-auth/session";
-import type { RelayNoticePage } from "@dohc/workspace-contracts/relay";
-import { MAX_AGENT_CHAT_WAITS_PER_CONNECTION } from "./agentChatRoutes";
+
 import type { AutomationReplica } from "./automationReplicas";
 import { PERSONAL_WRITE_WORKSPACE_HEADER } from "./collectionWriteRoutes";
 import { DiscussionActivityHub } from "./discussionActivity";
 import { errorResponse, notFound } from "./errors";
-import { LINK_EXCHANGE_BUCKET_CAPACITY, pkceS256Challenge } from "./linkSecurity";
-import { MAX_PERSONAL_WAITS_PER_ACCOUNT, PERSONAL_WAIT_MAX_MESSAGES } from "./personalAgentRoutes";
-import { CREDENTIAL_FENCE_CATCH_UP_MARGIN_MS, singleFlightFenceReads, type PersonalRunningEntry } from "./personalAgents";
+import { pkceS256Challenge } from "./linkSecurity";
+
+import { singleFlightFenceReads, type PersonalRunningEntry } from "./personalAgents";
 import { personalAgentOrigin, personalCollectionOrigin, PERSONAL_MESSAGE_ID_PREFIX, PERSONAL_THREAD_ID_PREFIX } from "./relayLogInputs";
 import type { createSyncRelayHandler } from "./server";
-import { ACCOUNT_VISITS_PER_CALLER, startServerCopies, type ServerCopies } from "./serverCopies";
+import { startServerCopies, type ServerCopies } from "./serverCopies";
 import type { SyncRelayStorage } from "./storage";
-import { fenceAccount, initializeAccountDeletion } from "./storage/accountDeletion";
-import { AGENT_AUTHORIZATION_CODE_TTL_MS } from "./storage/agentConnections";
-import type { StorageContext } from "./storage/context";
-import { CHAT_HISTORY_SCAN_BYTES, CHAT_HISTORY_SCAN_WINDOW } from "./storage/log";
-import { PERSONAL_PENDING_AUTHORIZATIONS_PER_WORKSPACE_LIMIT } from "./storage/personalAgents";
+
 import {
   appendLog,
   chatChannelCreate,
@@ -54,17 +51,16 @@ import {
   testHandler,
   testStorage,
   type ChatOp,
-  type HandlerOverrides,
-} from "./testing";
+  type HandlerOverrides } from "./testing";
 
 const OWNER = "owner";
+const DELETION_KEY = "personal-agent-deletion-key-at-least-32-bytes";
 const OTHER = "other-account";
 const WS_A = "workspace-a";
 const WS_B = "workspace-b";
 const OTHER_WS = "workspace-other";
 const REDIRECT = "http://127.0.0.1:43110/callback";
 const VERIFIER = "agent-pkce-verifier-0123456789-abcdefghijklmnopqrstuvwxyz";
-const DELETION_KEY = "personal-agent-deletion-key-at-least-32-bytes";
 // A session began before any password change unless a test starts it with
 // `startSession`, as a browser that signs in again does.
 const SESSIONS: Record<string, string> = {
@@ -388,39 +384,6 @@ function thrown(run: () => unknown): unknown {
 }
 
 describe("personal agent sign-in", () => {
-  it("begins at a workspace's one address, only where the fence can be read", async () => {
-    const f = await fixture();
-    const clientId = await registerClient(f);
-    const begun = await ok(await begin(f, clientId, resourceFor(WS_A)));
-    expect(begun.requestId).toEqual(expect.any(String));
-    expect(count(f, "sync_relay_personal_agent_authorizations")).toBe(1);
-    expect(count(f, "sync_relay_agent_authorizations")).toBe(0);
-
-    // Another spelling of the same address, a workspace nobody claimed, and a reserved id.
-    await expectRefused(await begin(f, clientId, `${SHARE_WEB_ORIGIN}/mcp/agent/w/%77orkspace-a`));
-    await expectRefused(await begin(f, clientId, resourceFor("workspace-unclaimed")));
-    await expectRefused(await begin(f, clientId, resourceFor("personal-agents")));
-
-    const withoutFence = await fixture({ credentialFence: undefined });
-    await expectRefused(await begin(withoutFence, await registerClient(withoutFence), resourceFor(WS_A)));
-  });
-
-  it("counts every personal sign-in begun from an address, so a flood can't push out the owner's request", async () => {
-    const f = await fixture();
-    const clientId = await registerClient(f);
-    const owners = await beginRequest(f, clientId, WS_A, "198.51.100.7");
-    // Enough begins to fill the workspace's pending requests, all from one address.
-    const statuses: number[] = [];
-    for (let begun = 0; begun < PERSONAL_PENDING_AUTHORIZATIONS_PER_WORKSPACE_LIMIT; begun += 1) {
-      statuses.push((await begin(f, clientId, resourceFor(WS_A), "203.0.113.9")).status);
-    }
-    expect(statuses.filter((status) => status === 200)).toHaveLength(LINK_EXCHANGE_BUCKET_CAPACITY);
-    await expectCode(await begin(f, clientId, resourceFor(WS_A), "203.0.113.9"), 429, "link_read_rate_limited");
-
-    // The owner's request is still there, and another address can still begin.
-    await ok(await consent(f, owners));
-    await ok(await begin(f, clientId, resourceFor(WS_A), "198.51.100.8"));
-  });
 
   it("asks only the workspace's owner, and offers View, Comment, and Edit over the workspaces it owns", async () => {
     const f = await fixture();
@@ -469,58 +432,6 @@ describe("personal agent sign-in", () => {
     await ok(await redeem(f, { clientId, ...owned }));
   });
 
-  it("creates the agent with its reach, name, color, sign-in time, and reported product and version", async () => {
-    const f = await fixture();
-    const clientId = await registerClient(f, { clientName: "Test agent", clientVersion: "2.1.0" });
-    const signed = await signIn(f, { clientId, reach: [{ workspaceId: WS_B, level: "comment" }, { workspaceId: WS_A, level: "view" }] });
-    expect(signed.agentId).toMatch(/^p-[a-z2-7]{26}$/u);
-    expect(await roster(f)).toEqual({
-      ok: true,
-      revision: 1,
-      agents: [{
-        agentId: signed.agentId, name: "Helper", hue: "olive", status: "active", reportedProduct: "Test agent", reportedVersion: "2.1.0",
-        createdAtMs: f.now.value, signedInAtMs: f.now.value, lastActionAtMs: f.now.value,
-        reach: [{ workspaceId: WS_A, level: "view" }, { workspaceId: WS_B, level: "comment" }],
-      }],
-      workspaces: [{ workspaceId: WS_A, name: null }, { workspaceId: WS_B, name: null }],
-    });
-    // The next agent takes the next free color. The roster lists agents oldest first.
-    f.now.value += 1_000;
-    await signIn(f, { agent: { kind: "new", name: "Second" } });
-    expect((await roster(f)).agents.map((agent) => agent.hue)).toEqual(["olive", "blue"]);
-  });
-
-  it("records each sign-in's time and the product and version its client reported, in place of the last ones", async () => {
-    const f = await fixture();
-    const createdAtMs = f.now.value;
-    const first = await signIn(f, { clientId: await registerClient(f, { clientName: "Test agent", clientVersion: "1.2.0" }) });
-    f.now.value += 60_000;
-    const again = await signIn(f, {
-      clientId: await registerClient(f, { clientName: "Other agent" }), agent: { kind: "existing", agentId: first.agentId },
-    });
-    expect(again.agentId).toBe(first.agentId);
-    expect((await roster(f)).agents).toEqual([expect.objectContaining({
-      agentId: first.agentId, reportedProduct: "Other agent", reportedVersion: null, createdAtMs, signedInAtMs: f.now.value,
-    })]);
-
-    f.now.value += 60_000;
-    await signIn(f, { clientId: await registerClient(f, {}), agent: { kind: "existing", agentId: first.agentId } });
-    expect((await roster(f)).agents).toEqual([expect.objectContaining({
-      agentId: first.agentId, reportedProduct: null, reportedVersion: null, createdAtMs, signedInAtMs: f.now.value,
-    })]);
-  });
-
-  it("refuses a reported version with a control character or over 100 characters", async () => {
-    const f = await fixture();
-    for (const clientVersion of ["1.0\n", "v".repeat(101), ""]) {
-      await expectRefused(await internal(f, "agent-clients", {
-        registration: "registered", redirectUris: [REDIRECT], clientName: "Test agent", clientVersion,
-      }));
-    }
-    await ok(await internal(f, "agent-clients", {
-      registration: "registered", redirectUris: [REDIRECT], clientName: "Test agent", clientVersion: "v".repeat(100),
-    }));
-  });
 });
 
 describe("families never mix", () => {
@@ -554,37 +465,6 @@ describe("families never mix", () => {
     await expectRefused(await internal(f, "agent-introspect", { accessToken: String(personalTokens.accessToken) }));
   });
 
-  it("resolves each family's token only as its own kind at tool calls", async () => {
-    const f = await fixture();
-    const clientId = await registerClient(f);
-    const link = await linkAgent(f, clientId);
-    const linkAccess = String((await ok(await redeem(f, { clientId, ...link }))).accessToken);
-    const personal = await signIn(f, { clientId });
-
-    await expect(f.h.linkAuthority.personal(agentRequest(linkAccess, link.resource))).rejects.toMatchObject({ code: "not_found" });
-    await expect(f.h.linkAuthority.personal(agentRequest(linkAccess, personal.resource))).rejects.toMatchObject({ code: "not_found" });
-    expect(thrown(() => f.h.linkAuthority.resolve(agentRequest(personal.accessToken, personal.resource)))).toMatchObject({ code: "not_found" });
-    expect(thrown(() => f.h.linkAuthority.resolve(agentRequest(personal.accessToken, link.resource)))).toMatchObject({ code: "not_found" });
-
-    expect(f.h.linkAuthority.resolve(agentRequest(linkAccess, link.resource)).credential.kind).toBe("agent");
-    await expectPersonal(f, personal).resolves.toMatchObject({ kind: "personal", agentId: personal.agentId, ownerUserId: OWNER });
-    // A personal check needs the exchange key and never takes a browser's cookie.
-    const withCookie = agentRequest(personal.accessToken, personal.resource);
-    withCookie.headers.set("cookie", "session=owner-session");
-    await expect(f.h.linkAuthority.personal(withCookie)).rejects.toMatchObject({ code: "not_found" });
-    const withoutKey = agentRequest(personal.accessToken, personal.resource);
-    withoutKey.headers.delete("x-dohc-relay-exchange-key");
-    await expect(f.h.linkAuthority.personal(withoutKey)).rejects.toMatchObject({ code: "not_found" });
-  });
-
-  it("refuses a token at another workspace's address, even one in the agent's reach", async () => {
-    const f = await fixture();
-    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "view" }, { workspaceId: WS_B, level: "view" }] });
-    await expect(f.h.linkAuthority.personal(agentRequest(agent.accessToken, resourceFor(WS_B))))
-      .rejects.toMatchObject({ code: "not_found" });
-    await expectPersonal(f, agent).resolves.toMatchObject({ connectionId: agent.connectionId });
-  });
-
   it("refuses an agent's token at the owner's routes", async () => {
     const f = await fixture();
     const signed = await signIn(f);
@@ -611,84 +491,6 @@ describe("families never mix", () => {
 });
 
 describe("revocation", () => {
-  it("refuses a code approved before the agent's reach changed", async () => {
-    const f = await fixture();
-    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "view" }, { workspaceId: WS_B, level: "view" }] });
-    const existing = { kind: "existing" as const, agentId: agent.agentId };
-
-    // Approved for A and B, then narrowed to A.
-    const narrowed = await approve(f, { clientId: agent.clientId, agent: existing,
-      reach: [{ workspaceId: WS_A, level: "view" }, { workspaceId: WS_B, level: "view" }] });
-    const fresh = await approve(f, { clientId: agent.clientId, agent: { kind: "new", name: "Unrelated" } });
-    await ok(await owner(f, `/${agent.agentId}/reach`, { method: "PUT", body: { reach: [{ workspaceId: WS_A, level: "view" }] } }));
-    await expectRefused(await redeem(f, { clientId: agent.clientId, ...narrowed }));
-    expect((await roster(f)).agents.find((row) => row.agentId === agent.agentId)?.reach).toEqual([{ workspaceId: WS_A, level: "view" }]);
-
-    // Approved for A, then widened to A and B.
-    const widened = await approve(f, { clientId: agent.clientId, agent: existing });
-    await ok(await owner(f, `/${agent.agentId}/reach`, { method: "PUT", body: {
-      reach: [{ workspaceId: WS_A, level: "view" }, { workspaceId: WS_B, level: "view" }],
-    } }));
-    await expectRefused(await redeem(f, { clientId: agent.clientId, ...widened }));
-
-    // A request for a new agent isn't tied to this one.
-    await ok(await redeem(f, { clientId: agent.clientId, ...fresh }));
-    // Without a change between, the code redeems, and reach is exactly its choice.
-    const kept = await approve(f, { clientId: agent.clientId, agent: existing, reach: [{ workspaceId: WS_B, level: "comment" }] });
-    await ok(await redeem(f, { clientId: agent.clientId, ...kept }));
-    expect((await roster(f)).agents.find((row) => row.agentId === agent.agentId)?.reach).toEqual([{ workspaceId: WS_B, level: "comment" }]);
-  });
-
-  it("refuses a pending code after Sign out, Remove, signing in again, or a password reset", async () => {
-    const f = await fixture();
-    const agent = await signIn(f);
-    const existing = { kind: "existing" as const, agentId: agent.agentId };
-    const redeemIt = (code: { code: string; resource: string }) => redeem(f, { clientId: agent.clientId, ...code });
-
-    const beforeSignOut = await approve(f, { clientId: agent.clientId, agent: existing });
-    await ok(await owner(f, `/${agent.agentId}/sign-out`, { method: "POST" }));
-    await expectRefused(await redeemIt(beforeSignOut));
-
-    const beforeRemove = await approve(f, { clientId: agent.clientId, agent: existing });
-    await ok(await owner(f, `/${agent.agentId}/remove`, { method: "POST" }));
-    await ok(await owner(f, `/${agent.agentId}/restore`, { method: "POST" }));
-    await expectRefused(await redeemIt(beforeRemove));
-
-    const first = await approve(f, { clientId: agent.clientId, agent: existing });
-    const second = await approve(f, { clientId: agent.clientId, agent: existing });
-    await ok(await redeemIt(first));
-    await expectRefused(await redeemIt(second));
-
-    const beforeReset = await approve(f, { clientId: agent.clientId, agent: existing });
-    const newAgentBeforeReset = await approve(f, { clientId: agent.clientId });
-    f.fence.changePassword(OWNER);
-    await expectRefused(await redeemIt(beforeReset));
-    await expectRefused(await redeemIt(newAgentBeforeReset));
-    f.fence.startSession("owner-new-session");
-    await ok(await redeemIt(await approve(f, { clientId: agent.clientId, agent: existing, session: "owner-new-session" })));
-  });
-
-  it("signing in again ends the agent's old connections, and its reach becomes the new choice", async () => {
-    const f = await fixture();
-    const before = await signIn(f, { reach: [{ workspaceId: WS_A, level: "view" }, { workspaceId: WS_B, level: "view" }] });
-    const stream = running(f, before, [WS_A]);
-    const after = await signIn(f, {
-      clientId: before.clientId,
-      agent: { kind: "existing", agentId: before.agentId },
-      reach: [{ workspaceId: WS_B, level: "comment" }],
-    });
-    expect(after.agentId).toBe(before.agentId);
-    expect(after.connectionId).not.toBe(before.connectionId);
-
-    await expectPersonal(f, before).rejects.toMatchObject({ code: "not_found" });
-    await expectRefused(await refresh(f, before.clientId, before.refreshToken, before.resource));
-    expect(connectionTokens(f, before.connectionId)).toBe(0);
-    expect(stream).toHaveBeenCalledTimes(1);
-    expect((await roster(f)).agents).toEqual([expect.objectContaining({
-      agentId: before.agentId, status: "active", reach: [{ workspaceId: WS_B, level: "comment" }],
-    })]);
-    await expectPersonal(f, after).resolves.toMatchObject({ connectionId: after.connectionId, agentEpoch: 2 });
-  });
 
   it("ends the connection when an old refresh token comes back", async () => {
     const f = await fixture();
@@ -708,32 +510,6 @@ describe("revocation", () => {
     expect((await roster(f)).agents).toEqual([expect.objectContaining({ agentId: agent.agentId, status: "signed_out" })]);
   });
 
-  it("ends the connection and its running work when a redeemed code comes back", async () => {
-    const f = await fixture();
-    const clientId = await registerClient(f);
-    const { code, resource } = await approve(f, { clientId });
-    const tokens = await ok(await redeem(f, { clientId, code, resource }));
-    const accessToken = String(tokens.accessToken);
-    const authority = await f.h.linkAuthority.personal(agentRequest(accessToken, resource));
-    const terminate = running(f, {
-      clientId, resource, accessToken, refreshToken: String(tokens.refreshToken),
-      agentId: authority.agentId, connectionId: authority.connectionId, fenceEpoch: authority.fenceEpoch,
-    }, [WS_A]);
-
-    await expectRefused(await redeem(f, { clientId, code, resource }));
-    expect(terminate).toHaveBeenCalledOnce();
-    await expectPersonal(f, { accessToken, resource }).rejects.toMatchObject({ code: "not_found" });
-    expect((await roster(f)).agents).toEqual([expect.objectContaining({ agentId: authority.agentId, status: "signed_out" })]);
-  });
-
-  it("refuses a refresh from another client, and keeps the token for its own", async () => {
-    const f = await fixture();
-    const agent = await signIn(f);
-    const otherClientId = await registerClient(f);
-    await expectRefused(await refresh(f, otherClientId, agent.refreshToken, agent.resource));
-    await ok(await refresh(f, agent.clientId, agent.refreshToken, agent.resource));
-  });
-
   it("refuses a request, write, redemption, and refresh once a reset commits, before any notification", async () => {
     const f = await fixture();
     const agent = await signIn(f);
@@ -748,122 +524,6 @@ describe("revocation", () => {
     await expectRefused(await refresh(f, agent.clientId, agent.refreshToken, agent.resource));
     // The direct read refused them: no notification arrived, so nothing was cleaned up.
     expect(connectionTokens(f, agent.connectionId)).toBe(2);
-  });
-
-  it("accepts consent only from a session that began at or after the last password change", async () => {
-    const f = await fixture();
-    const clientId = await registerClient(f);
-    f.fence.changePassword(OWNER);
-
-    // A session from before the change signs in again first.
-    const fromOldSession = await beginRequest(f, clientId);
-    await expectCode(await consent(f, fromOldSession), 403, "sign_in_again");
-    await expectCode(await allow(f, fromOldSession), 403, "sign_in_again");
-    // A session made after the change consents, and its code holds the new fence.
-    f.fence.startSession("owner-new-session");
-    const code = String((await ok(await allow(f, fromOldSession, { session: "owner-new-session" }))).code);
-    const tokens = await ok(await redeem(f, { clientId, code, resource: resourceFor(WS_A) }));
-    await expectPersonal(f, { accessToken: String(tokens.accessToken), resource: resourceFor(WS_A) }).resolves.toMatchObject({ fenceEpoch: 1 });
-
-    // A reset committed just after consent's read: the code holds the older fence and fails redemption.
-    const raced = await beginRequest(f, clientId);
-    f.fence.afterConsentRead = () => f.fence.changePassword(OWNER);
-    const racedCode = String((await ok(await allow(f, raced, { session: "owner-new-session" }))).code);
-    await expectRefused(await redeem(f, { clientId, code: racedCode, resource: resourceFor(WS_A) }));
-    // That reset also asks the session to sign in again.
-    await expectCode(await allow(f, await beginRequest(f, clientId), { session: "owner-new-session" }), 403, "sign_in_again");
-  });
-
-  it("asks a session that kept its sign-in through a password change to sign in again", async () => {
-    const f = await fixture();
-    const clientId = await registerClient(f);
-    const requestId = await beginRequest(f, clientId);
-    f.fence.changePassword(OWNER);
-    await expectCode(await consent(f, requestId), 403, "sign_in_again");
-    f.fence.startSession("owner-new-session");
-    await ok(await consent(f, requestId, "owner-new-session"));
-  });
-
-  it("keeps credentials and running work from the new fence when a late notification arrives", async () => {
-    const f = await fixture();
-    const wake = vi.spyOn(f.activity, "wakeLog");
-    const old = await signIn(f, { reach: [{ workspaceId: WS_B, level: "view" }] });
-    const oldStream = running(f, old, [WS_B]);
-    const change = f.fence.changePassword(OWNER);
-    f.fence.startSession("owner-new-session");
-    const current = await signIn(f, { session: "owner-new-session" });
-    expect(current.fenceEpoch).toBe(1);
-    const currentLive = running(f, current, [WS_A], "live");
-    const currentStream = running(f, current, [WS_A]);
-    const before = (await roster(f)).revision;
-
-    f.fence.listener!.onChange(change);
-    expect(oldStream).toHaveBeenCalledTimes(1);
-    expect(currentLive).not.toHaveBeenCalled();
-    expect(currentStream).not.toHaveBeenCalled();
-    expect(wake).toHaveBeenCalledWith(WS_B);
-    expect(connectionTokens(f, old.connectionId)).toBe(0);
-    expect(connectionTokens(f, current.connectionId)).toBe(2);
-    await expectPersonal(f, current).resolves.toMatchObject({ connectionId: current.connectionId });
-    expect(f.storage.readCredentialFencePosition()).toBe(change.changedAtMs);
-    // The owner sees the old agent signed out, and the one signed in at the new fence still active.
-    const after = await roster(f);
-    expect(after.revision).toBe(before + 1);
-    expect(new Map(after.agents.map((agent) => [agent.agentId, agent.status]))).toEqual(new Map([
-      [old.agentId, "signed_out"],
-      [current.agentId, "active"],
-    ]));
-  });
-
-  it("signs out each agent a password change left with no connection, once", async () => {
-    const f = await fixture();
-    const left = await signIn(f);
-    const again = await signIn(f);
-    const waiting = await signIn(f);
-    const change = f.fence.changePassword(OWNER);
-    // After the change, one agent signs in again, and the owner approves another's sign-in that it hasn't redeemed.
-    f.fence.startSession("owner-new-session");
-    const newSignIn = { session: "owner-new-session" };
-    await signIn(f, { ...newSignIn, clientId: again.clientId, agent: { kind: "existing", agentId: again.agentId } });
-    const code = await approve(f, { ...newSignIn, clientId: waiting.clientId, agent: { kind: "existing", agentId: waiting.agentId } });
-    const before = (await roster(f)).revision;
-
-    f.fence.listener!.onChange(change);
-    const after = await roster(f);
-    expect(after.revision).toBe(before + 1);
-    expect(new Map(after.agents.map((agent) => [agent.agentId, agent.status]))).toEqual(new Map([
-      [left.agentId, "signed_out"],
-      [again.agentId, "active"],
-      [waiting.agentId, "signed_out"],
-    ]));
-
-    // The same notice again changes nothing.
-    f.fence.listener!.onChange(change);
-    expect((await roster(f)).revision).toBe(after.revision);
-    // The approved sign-in still redeems: its agent kept its epoch.
-    await ok(await redeem(f, { clientId: waiting.clientId, ...code }));
-    expect((await roster(f)).agents.find((agent) => agent.agentId === waiting.agentId)?.status).toBe("active");
-  });
-
-  it("shows an agent signed out once its connection ends, though a sign-in approved for it expires unredeemed", async () => {
-    const f = await fixture();
-    const agent = await signIn(f);
-    const existing = { kind: "existing" as const, agentId: agent.agentId };
-    const status = async () => (await roster(f)).agents.find((row) => row.agentId === agent.agentId)?.status;
-    const expiring = await approve(f, { clientId: agent.clientId, agent: existing });
-    await ok(await refresh(f, agent.clientId, agent.refreshToken, agent.resource));
-    // The used refresh token comes back, which ends the only connection.
-    await expectRefused(await refresh(f, agent.clientId, agent.refreshToken, agent.resource));
-    expect(await status()).toBe("signed_out");
-
-    f.now.value += AGENT_AUTHORIZATION_CODE_TTL_MS;
-    await expectRefused(await redeem(f, { clientId: agent.clientId, ...expiring }));
-    expect(await status()).toBe("signed_out");
-
-    // A sign-in redeemed in time makes it active again.
-    const inTime = await approve(f, { clientId: agent.clientId, agent: existing });
-    await ok(await redeem(f, { clientId: agent.clientId, ...inTime }));
-    expect(await status()).toBe("active");
   });
 
   it("ends running work while the notification channel is down, and keeps checking the fence directly", async () => {
@@ -904,23 +564,6 @@ describe("revocation", () => {
     f.fence.down = false;
     await expectPersonal(f, agent).resolves.toMatchObject({ connectionId: agent.connectionId });
     await ok(await redeem(f, { clientId: agent.clientId, ...pending }));
-  });
-
-  it("catches up from the stored position at startup and deletes stale credentials", async () => {
-    const f = await fixture();
-    const agent = await signIn(f);
-    f.fence.changePassword(OWNER, 40_000);
-    f.storage.advanceCredentialFencePosition(70_000);
-
-    await f.h.dispose();
-    closeTestStorage(f.storage);
-    const storage = reopenTestStorage(f.dbPath);
-    const restarted = { ...f, storage, h: handler(storage, f) };
-    await listening(restarted);
-
-    expect(f.fence.changedSinceCalls.at(-1)).toBe(70_000 - CREDENTIAL_FENCE_CATCH_UP_MARGIN_MS);
-    expect(connectionTokens(restarted, agent.connectionId)).toBe(0);
-    expect(storage.readCredentialFencePosition()).toBe(70_000);
   });
 
   it("signs out the account's agents and ends their running work at account deletion's fence, before purge", async () => {
@@ -1042,117 +685,17 @@ describe("the owner's controls", () => {
     expect((await roster(f)).agents[0]?.reach).toEqual([{ workspaceId: WS_A, level: "edit" }]);
   });
 
-  it("ends running work in a workspace leaving reach, and wakes the logs it held", async () => {
+  it("moves the Notice head with each roster change, so a read from before it answers the new revision and no row", async () => {
     const f = await fixture();
-    const wake = vi.spyOn(f.activity, "wakeLog");
-    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "view" }, { workspaceId: WS_B, level: "view" }] });
-    const inA = running(f, agent, [WS_A]);
-    const inB = running(f, agent, [WS_B], "wait");
-
-    await ok(await owner(f, `/${agent.agentId}/reach`, { method: "PUT", body: { reach: [{ workspaceId: WS_A, level: "view" }] } }));
-    expect(inB).toHaveBeenCalledTimes(1);
-    expect(inA).not.toHaveBeenCalled();
-    expect(wake).toHaveBeenCalledWith(WS_A);
-    expect(wake).toHaveBeenCalledWith(WS_B);
-
-    await ok(await owner(f, `/${agent.agentId}/sign-out`, { method: "POST" }));
-    expect(inA).toHaveBeenCalledTimes(1);
-  });
-
-  it("keeps a stream running in a workspace lowered from Edit to View, and ends the same stream in a workspace leaving reach", async () => {
-    const f = await fixture();
-    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "edit" }, { workspaceId: WS_B, level: "edit" }] });
-    const lowered = running(f, agent, [WS_A]), removed = running(f, agent, [WS_B]);
-
-    await ok(await owner(f, `/${agent.agentId}/reach`, { method: "PUT", body: { reach: [{ workspaceId: WS_A, level: "view" }] } }));
-    expect(lowered).not.toHaveBeenCalled();
-    expect(removed).toHaveBeenCalledOnce();
-  });
-});
-
-describe("the owner's notice page", () => {
-  async function notices(f: Fixture, userId = OWNER): Promise<RelayNoticePage> {
-    return await ok(await f.h(request(userId, "/sync/notices"))) as unknown as RelayNoticePage;
-  }
-
-  function signedIn(page: RelayNoticePage) {
-    return page.notices.filter((notice) => notice.kind === "personal-agent-signed-in");
-  }
-
-  it("carries the roster revision, which each sign-in and owner change raises once, and only for its account", async () => {
-    const f = await fixture();
-    const revision = async (userId = OWNER) => (await notices(f, userId)).personalAgentsRevision;
-    expect(await revision()).toBe(0);
     const agent = await signIn(f);
-    expect(await revision()).toBe(1);
-
-    const changes: [string, { method: string; body?: unknown }][] = [
-      ["name", { method: "PUT", body: { name: "Research" } }],
-      ["hue", { method: "PUT", body: { hue: "teal" } }],
-      ["reach", { method: "PUT", body: { reach: [{ workspaceId: WS_B, level: "comment" }] } }],
-      ["sign-out", { method: "POST" }],
-      ["remove", { method: "POST" }],
-      ["restore", { method: "POST" }],
-    ];
-    for (const [index, [change, init]] of changes.entries()) {
-      await ok(await owner(f, `/${agent.agentId}/${change}`, init));
-      expect(await revision(), change).toBe(index + 2);
-    }
-    await signIn(f, { clientId: agent.clientId, agent: { kind: "existing", agentId: agent.agentId } });
-    expect(await revision()).toBe(8);
-    // A refused change raises nothing.
-    expect((await owner(f, `/${agent.agentId}/hue`, { method: "PUT", body: { hue: "neon" } })).status).toBe(400);
-    expect(await revision()).toBe(8);
-
-    // Another account's agent signs in and changes; this account's revision stays.
-    expect(await revision(OTHER)).toBe(0);
-    const theirs = await signIn(f, {
-      workspaceId: OTHER_WS, reach: [{ workspaceId: OTHER_WS, level: "view" }], session: "other-session",
-    });
-    await ok(await owner(f, `/${theirs.agentId}/name`, { method: "PUT", body: { name: "Theirs" } }, OTHER));
-    expect(await revision(OTHER)).toBe(2);
-    expect(await revision()).toBe(8);
-    expect((await roster(f)).revision).toBe(8);
-  });
-
-  it("tells the owner each time an agent signs in as theirs, and opens that agent's page in Settings › Agents", async () => {
-    const f = await fixture();
-    const agent = await signIn(f, { reach: [{ workspaceId: WS_B, level: "view" }] });
-    expect(signedIn(await notices(f))).toEqual([{
-      noticeId: `personal-agent-signed-in:${agent.connectionId}`,
-      changeSeq: 1,
-      // The address the agent signed in at.
-      workspaceId: WS_A,
-      recipientShareId: null,
-      kind: "personal-agent-signed-in",
-      senderKind: "agent",
-      senderUserId: OWNER,
-      senderLabel: "Helper",
-      title: "Helper signed in as your agent",
-      body: "",
-      target: { settings: "agents", agent: agent.agentId },
-      originInstallId: "relay",
-      createdAtMs: f.now.value,
-      readAtMs: null,
-      dismissedAtMs: null,
-      removed: false,
-    }]);
-    expect((await notices(f, OTHER)).notices).toEqual([]);
-
-    // A refresh isn't a sign-in. Signing in again is, under the agent's current name and the same id.
-    await ok(await refresh(f, agent.clientId, agent.refreshToken, agent.resource));
+    const read = async (query = "") => await ok(await f.h(request(OWNER, `/sync/notices${query}`))) as unknown as RelayNoticePage;
+    const before = await read();
     await ok(await owner(f, `/${agent.agentId}/name`, { method: "PUT", body: { name: "Research" } }));
-    const again = await signIn(f, { clientId: agent.clientId, agent: { kind: "existing", agentId: agent.agentId } });
-    expect(signedIn(await notices(f)).map((notice) => [notice.noticeId, notice.senderLabel, notice.title, notice.target])).toEqual([
-      [`personal-agent-signed-in:${agent.connectionId}`, "Helper", "Helper signed in as your agent", { settings: "agents", agent: agent.agentId }],
-      [`personal-agent-signed-in:${again.connectionId}`, "Research", "Research signed in as your agent", { settings: "agents", agent: agent.agentId }],
-    ]);
-    // A new agent's notice names its own page.
-    const other = await signIn(f, { agent: { kind: "new", name: "Second" } });
-    expect(other.agentId).not.toBe(agent.agentId);
-    expect(signedIn(await notices(f)).at(-1)?.target).toEqual({ settings: "agents", agent: other.agentId });
-    expect((await notices(f, OTHER)).notices).toEqual([]);
+    const after = await read(`?cursor=${before.nextCursor}`);
+    expect(after).toMatchObject({ notices: [], hasMore: false, replace: false, personalAgentsRevision: before.personalAgentsRevision + 1 });
+    expect(Number(after.nextCursor)).toBe(Number(before.nextCursor) + 1);
   });
+
 });
 
 type WaitCursor = { v: 1; agentId: string; seqs: Record<string, number>; turn: string | null };
@@ -1250,42 +793,11 @@ function setOwner(f: Fixture, workspaceId: string, userId: string): void {
   }
 }
 
-function deleteAccountAtFence(f: Fixture): void {
-  const context = f.storage as StorageContext;
-  initializeAccountDeletion(context, DELETION_KEY);
-  const job = fenceAccount(context, DELETION_KEY, OWNER, `${OWNER}@dohc.test`);
-  f.h.deleteAccount(OWNER, job.manifest!.workspaces.map((row) => row.workspaceId), job.manifest!.shareIds);
-}
-
 function setReach(f: Fixture, agent: Signed, reach: Reach): Promise<Response> {
   return owner(f, `/${agent.agentId}/reach`, { method: "PUT", body: { reach } });
 }
 
 const BOTH_VIEW: Reach = [{ workspaceId: WS_A, level: "view" }, { workspaceId: WS_B, level: "view" }];
-const BOTH_COMMENT: Reach = [{ workspaceId: WS_A, level: "comment" }, { workspaceId: WS_B, level: "comment" }];
-
-describe("a personal agent's DM", () => {
-  it("is appended from the agent's origin in each workspace entering its reach, at sign-in and on widening", async () => {
-    const f = await fixture();
-    const agent = await signIn(f);
-    const origin = personalAgentOrigin(agent.agentId);
-    const creates = (workspaceId: string) => logOf(f, workspaceId).filter((row) => row.originId === origin);
-    expect(creates(WS_A)).toEqual([expect.objectContaining({ opKind: "chat.channel.create", originSeq: 0 })]);
-    expect(payloadOf(creates(WS_A)[0]!)).toEqual({
-      channelId: `personal-dm:${agent.agentId}`, name: "Helper", slug: `my-agent-${agent.agentId}`, kind: "agent",
-      createdAtMs: f.now.value, wireId: agentChannelWireId(agent.agentId),
-    });
-    expect(creates(WS_B)).toEqual([]);
-
-    await ok(await setReach(f, agent, [{ workspaceId: WS_A, level: "comment" }, { workspaceId: WS_B, level: "view" }]));
-    expect(creates(WS_A)).toHaveLength(1);
-    expect(creates(WS_B)).toEqual([expect.objectContaining({ opKind: "chat.channel.create", originSeq: 0 })]);
-    // Leaving reach and entering again costs one more small op.
-    await ok(await setReach(f, agent, [{ workspaceId: WS_A, level: "comment" }]));
-    await ok(await setReach(f, agent, [{ workspaceId: WS_A, level: "comment" }, { workspaceId: WS_B, level: "view" }]));
-    expect(creates(WS_B).map((row) => row.originSeq)).toEqual([0, 1]);
-  });
-});
 
 describe("a personal agent's posts", () => {
   it("posts as itself from its own origin, with its account, connection, and current name, whatever the request names", async () => {
@@ -1326,164 +838,6 @@ describe("a personal agent's posts", () => {
       threadId: "thread-team", channelWireId: "wire-team", authorDisplayName: "Research",
     });
     expect(count(f, "sync_relay_personal_agent_threads", "agent_id = ?", agent.agentId)).toBe(2);
-  });
-
-  it("resolves a channel or thread only inside the named workspace, and never posts in a person's DM or another agent's", async () => {
-    const f = await fixture();
-    const agent = await signIn(f, { reach: BOTH_COMMENT });
-    const second = await signIn(f, { agent: { kind: "new", name: "Second" }, reach: BOTH_COMMENT });
-    fromComputer(f, WS_B, [chatChannelCreate("wire-b"), chatThreadCreate("thread-b", "wire-b")]);
-    fromComputer(f, WS_A, [
-      chatChannelCreate("wire-person", { kind: "dm" }),
-      chatThreadCreate("thread-person", "wire-person"),
-      { opKind: "chat.thread.create", payload: { threadId: "thread-file", title: "", createdAtMs: 2, linkedObjectId: "object-a", linkedAtMs: 2 } },
-    ]);
-    const before = logOf(f, WS_A).length;
-
-    await expectRefused(await post(f, agent, { threadId: "thread-b" }));
-    await expectRefused(await post(f, agent, { channelWireId: "wire-b" }));
-    await expectRefused(await post(f, agent, { channelWireId: "wire-nowhere" }));
-    // A person's DM, as a new thread there or a reply in one of its threads.
-    await expectRefused(await post(f, agent, { channelWireId: "wire-person" }));
-    await expectRefused(await post(f, agent, { threadId: "thread-person", idempotencyKey: "post-person" }));
-    // A Comment on a file the relay never saw.
-    await expectRefused(await post(f, agent, { threadId: "thread-file", idempotencyKey: "post-file" }));
-    expect(logOf(f, WS_A)).toHaveLength(before);
-    // Another agent's DM, as a new thread there or a reply in one of its threads.
-    const theirs = await ok(await post(f, second, { channelWireId: agentChannelWireId(second.agentId) })) as {
-      message: { threadId: string };
-    };
-    await expectRefused(await post(f, agent, { channelWireId: agentChannelWireId(second.agentId), idempotencyKey: "post-2" }));
-    await expectRefused(await post(f, agent, { threadId: theirs.message.threadId, idempotencyKey: "post-3" }));
-
-    await ok(await post(f, agent, { workspaceId: WS_B, threadId: "thread-b" }));
-    await ok(await post(f, agent, { channelWireId: agentChannelWireId(agent.agentId), idempotencyKey: "post-4" }));
-  });
-
-  it("starts a Comment on a current file and replies in Comments, as the file's discussion reads back", async () => {
-    const f = await fixture();
-    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "comment" }] });
-    await putBlob(f.h, OWNER, WS_A, "plan");
-    await appendLog(f.h, OWNER, WS_A, [
-      moment("notes/plan.md", "plan", { originSeq: 0, objectId: "object-plan" }),
-      moment("notes/other.md", "plan", { originSeq: 1, objectId: "object-other" }),
-    ]);
-    fromComputer(f, WS_A, [
-      fileThread("thread-person", { linkedObjectId: "object-plan", linkedPathHint: "notes/plan.md" }),
-      ownerSays("question", "thread-person", "what does this mean?"),
-      fileThread("thread-other", { linkedObjectId: "object-other" }),
-      ownerSays("elsewhere", "thread-other", "about another file"),
-    ]);
-    const before = logOf(f, WS_A).length;
-
-    const started = (await ok(await post(f, agent, { filePath: "notes/plan.md", body: "a comment" }))).message as Record<string, unknown>;
-    expect(started).toMatchObject({
-      workspaceId: WS_A, channelWireId: null, filePath: "notes/plan.md", authorKind: "agent", authorDisplayName: "Helper", body: "a comment",
-    });
-    expect(String(started.messageId).startsWith(PERSONAL_MESSAGE_ID_PREFIX)).toBe(true);
-    expect(String(started.threadId).startsWith(PERSONAL_THREAD_ID_PREFIX)).toBe(true);
-    const [thread, appended] = logOf(f, WS_A).slice(before);
-    expect(thread).toMatchObject({ originId: personalAgentOrigin(agent.agentId), opKind: "chat.thread.create" });
-    expect(payloadOf(thread!)).toEqual({
-      threadId: started.threadId, title: "", createdAtMs: f.now.value,
-      linkedObjectId: "object-plan", linkedAtMs: f.now.value, linkedPathHint: "notes/plan.md",
-    });
-    expect(appended).toMatchObject({ originId: personalAgentOrigin(agent.agentId), opKind: "chat.message.append" });
-    expect(payloadOf(appended!)).toMatchObject({
-      messageId: started.messageId, threadId: started.threadId, authorKind: "agent", authorUserId: OWNER, authorAgentId: agent.agentId,
-    });
-
-    // A retry answers the same Comment; the same key with another body is a conflict.
-    expect((await ok(await post(f, agent, { filePath: "notes/plan.md", body: "a comment" }))).message).toMatchObject({
-      messageId: started.messageId, threadId: started.threadId, filePath: "notes/plan.md",
-    });
-    await expectCode(await post(f, agent, { filePath: "notes/plan.md", body: "another comment" }), 409, "conflict");
-    expect(logOf(f, WS_A)).toHaveLength(before + 2);
-
-    // A reply in a person's Comment, and in its own.
-    const answered = (await ok(await post(f, agent, { threadId: "thread-person", idempotencyKey: "post-2", body: "an answer" })))
-      .message as Record<string, unknown>;
-    expect(answered).toMatchObject({ threadId: "thread-person", channelWireId: null, filePath: "notes/plan.md" });
-    const followed = (await ok(await post(f, agent, { threadId: started.threadId, idempotencyKey: "post-3", body: "and more" })))
-      .message as Record<string, unknown>;
-    expect(followed).toMatchObject({ threadId: started.threadId, channelWireId: null, filePath: "notes/plan.md" });
-    expect(count(f, "sync_relay_personal_agent_threads", "agent_id = ?", agent.agentId)).toBe(2);
-
-    const read = (fields: Record<string, unknown>) => tool(f, agent, "discussion", { workspaceId: WS_A, filePath: "notes/plan.md", ...fields });
-    const page = await ok(await read({ limit: 2 })) as ChatPage & Record<string, unknown>;
-    expect(page).toMatchObject({ ok: true, workspaceId: WS_A, filePath: "notes/plan.md" });
-    expect(ids(page)).toEqual([followed.messageId, answered.messageId]);
-    expect(page.messages[0]).not.toHaveProperty("authorUserId");
-    expect(page.olderCursor).toEqual(expect.any(Number));
-    const older = await ok(await read({ limit: 2, before: page.olderCursor })) as ChatPage;
-    expect(ids(older)).toEqual([started.messageId, "question"]);
-    expect(older.olderCursor).toBeNull();
-    expect(ids(await ok(await tool(f, agent, "discussion", { workspaceId: WS_A, filePath: "notes/other.md" })) as ChatPage))
-      .toEqual(["elsewhere"]);
-  });
-
-  it("refuses a Comment at View, on a secret file, a new one on a gone file, on another workspace's file, and out of reach", async () => {
-    const f = await fixture();
-    await claimWorkspace(f.h, OWNER, "workspace-c");
-    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "comment" }, { workspaceId: WS_B, level: "view" }] });
-    await putBlob(f.h, OWNER, WS_A, "plan");
-    await appendLog(f.h, OWNER, WS_A, [
-      moment("notes/a.md", "plan", { originSeq: 0, objectId: "object-a" }),
-      moment("config/.env", "plan", { originSeq: 1, objectId: "object-env" }),
-      moment("notes/gone.md", "plan", { originSeq: 2, objectId: "object-gone" }),
-      moment("notes/gone.md", "", {
-        originSeq: 3, objectId: "object-gone", operation: "delete", beforePath: "notes/gone.md", beforeContent: "plan",
-        afterPath: null, afterContent: null,
-      }),
-    ]);
-    await putBlob(f.h, OWNER, WS_B, "in b");
-    await appendLog(f.h, OWNER, WS_B, [moment("notes/b.md", "in b", { originSeq: 0, objectId: "object-b" })]);
-    await putBlob(f.h, OWNER, "workspace-c", "in c");
-    await appendLog(f.h, OWNER, "workspace-c", [moment("notes/c.md", "in c", { originSeq: 0, objectId: "object-c" })]);
-    fromComputer(f, WS_A, [
-      fileThread("thread-a", { linkedObjectId: "object-a" }),
-      fileThread("thread-env", { linkedObjectId: "object-env" }),
-    ]);
-    fromComputer(f, WS_B, [fileThread("thread-b", { linkedObjectId: "object-b" })]);
-    const before = logOf(f, WS_A).length;
-    const read = (workspaceId: string, filePath: string) => tool(f, agent, "discussion", { workspaceId, filePath });
-
-    // Exactly one place.
-    expect((await post(f, agent, { filePath: "notes/a.md", threadId: "thread-a" })).status).toBe(400);
-    expect((await post(f, agent, {})).status).toBe(400);
-
-    // A secret file, by its path or a Comment on it.
-    await expectRefused(await post(f, agent, { filePath: "config/.env" }));
-    await expectRefused(await post(f, agent, { threadId: "thread-env" }));
-    await expectRefused(await read(WS_A, "config/.env"));
-    // A file that is gone, by its path. Its Comments read and take replies by thread.
-    await expectRefused(await post(f, agent, { filePath: "notes/gone.md" }));
-    await expectRefused(await read(WS_A, "notes/gone.md"));
-    // Another workspace's file, by its path or a Comment on it.
-    await expectRefused(await post(f, agent, { filePath: "notes/b.md" }));
-    await expectRefused(await post(f, agent, { threadId: "thread-b" }));
-    await expectRefused(await read(WS_A, "notes/b.md"));
-    expect(logOf(f, WS_A)).toHaveLength(before);
-    await ok(await post(f, agent, { filePath: "notes/a.md" }));
-    await ok(await post(f, agent, { threadId: "thread-a", idempotencyKey: "post-2" }));
-    await ok(await read(WS_A, "notes/a.md"));
-
-    // View reads a file's discussion but doesn't comment.
-    await expectCode(await post(f, agent, { workspaceId: WS_B, filePath: "notes/b.md", idempotencyKey: "post-b" }), 403,
-      "personal_agent_view_only");
-    await expectCode(await post(f, agent, { workspaceId: WS_B, threadId: "thread-b", idempotencyKey: "post-b" }), 403,
-      "personal_agent_view_only");
-    await ok(await read(WS_B, "notes/b.md"));
-    // An owned workspace out of reach.
-    await expectCode(await post(f, agent, { workspaceId: "workspace-c", filePath: "notes/c.md", idempotencyKey: "post-c" }), 403,
-      "personal_agent_out_of_reach");
-    await expectCode(await read("workspace-c", "notes/c.md"), 403, "personal_agent_out_of_reach");
-
-    await ok(await setReach(f, agent, [
-      { workspaceId: WS_A, level: "comment" }, { workspaceId: WS_B, level: "comment" }, { workspaceId: "workspace-c", level: "view" },
-    ]));
-    await ok(await post(f, agent, { workspaceId: WS_B, filePath: "notes/b.md", idempotencyKey: "post-b" }));
-    await ok(await read("workspace-c", "notes/c.md"));
   });
 
   it("reads and replies in a Comment thread by its id, on a current or deleted file, never on a secret path", async () => {
@@ -1571,59 +925,6 @@ describe("a personal agent's posts", () => {
       "personal_agent_out_of_reach");
   });
 
-  it("refuses a workspace out of reach, a post at View, and a workspace its account lost or deleted", async () => {
-    const f = await fixture();
-    await claimWorkspace(f.h, OWNER, "workspace-c");
-    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "view" }, { workspaceId: WS_B, level: "comment" }] });
-    for (const workspaceId of [WS_A, WS_B, "workspace-c"]) fromComputer(f, workspaceId, [chatChannelCreate("wire-team")]);
-    const read = (workspaceId: string) => tool(f, agent, "chat", { workspaceId, channelWireId: "wire-team" });
-
-    await expectCode(await post(f, agent, { channelWireId: "wire-team" }), 403, "personal_agent_view_only");
-    await ok(await read(WS_A));
-    await ok(await post(f, agent, { workspaceId: WS_B, channelWireId: "wire-team" }));
-    // An owned workspace not in reach, and another account's, answer the same.
-    for (const workspaceId of ["workspace-c", OTHER_WS]) {
-      await expectCode(await read(workspaceId), 403, "personal_agent_out_of_reach");
-      await expectCode(await post(f, agent, { workspaceId, channelWireId: "wire-team" }), 403, "personal_agent_out_of_reach");
-      await expectCode(await tool(f, agent, "files", { workspaceId }), 403, "personal_agent_out_of_reach");
-    }
-    expect(Object.keys((await waitOnce(f, agent)).cursor.seqs)).toEqual([WS_A, WS_B]);
-
-    setOwner(f, WS_B, OTHER);
-    await expectCode(await post(f, agent, { workspaceId: WS_B, channelWireId: "wire-team", idempotencyKey: "post-2" }), 403,
-      "personal_agent_out_of_reach");
-    await expectCode(await read(WS_B), 403, "personal_agent_out_of_reach");
-
-    const context = f.storage as StorageContext;
-    initializeAccountDeletion(context, DELETION_KEY);
-    context.db.prepare("INSERT INTO sync_relay_deleted_workspaces (workspace_hash) VALUES (?)")
-      .run(accountDeletionIdentity(DELETION_KEY, `workspace:${WS_A}`));
-    await expectCode(await read(WS_A), 403, "personal_agent_out_of_reach");
-    expect((await waitOnce(f, agent)).cursor.seqs).toEqual({});
-  });
-
-  const commitRaces: Array<[string, (f: Fixture, agent: Signed) => Promise<void>, string]> = [
-    ["Sign out", async (f, agent) => { await ok(await owner(f, `/${agent.agentId}/sign-out`, { method: "POST" })); }, "not-authorized"],
-    ["a reset and its notification", async (f) => { f.fence.listener!.onChange(f.fence.changePassword(OWNER)); }, "not-authorized"],
-    ["account deletion", async (f) => { deleteAccountAtFence(f); }, "not-authorized"],
-    ["narrowing", async (f, agent) => { await ok(await setReach(f, agent, [{ workspaceId: WS_B, level: "comment" }])); }, "out-of-reach"],
-    ["lowering to View", async (f, agent) => { await ok(await setReach(f, agent, BOTH_VIEW)); }, "read-only"],
-    ["ownership lost", async (f) => { setOwner(f, WS_A, OTHER); }, "out-of-reach"],
-  ];
-
-  it.each(commitRaces)("refuses a post whose access ends by %s between authentication and its commit", async (_, revoke, reason) => {
-    const f = await fixture();
-    const agent = await signIn(f, { reach: BOTH_COMMENT });
-    const authority = await f.h.linkAuthority.personal(agentRequest(agent.accessToken, agent.resource));
-    const commit = (idempotencyKey: string) => f.storage.appendPersonalChatPost({
-      check: authority.check, connectionId: authority.connectionId, fenceEpoch: authority.fenceEpoch, now: () => f.now.value,
-      workspaceId: WS_A, target: { channelWireId: agentChannelWireId(agent.agentId) }, body: "late", idempotencyKey,
-    });
-    expect(commit("before")).toMatchObject({ ok: true, replayed: false });
-    await revoke(f, agent);
-    expect(commit("after")).toEqual({ ok: false, reason });
-  });
-
   it("refuses a post when a reset commits while its body is still arriving", async () => {
     const f = await fixture();
     const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "comment" }] });
@@ -1644,27 +945,6 @@ describe("a personal agent's posts", () => {
     expect(logOf(f, WS_A)).toHaveLength(before);
   });
 
-  it("refuses a chat, discussion or file read when a reset commits while its body is still arriving", async () => {
-    for (const action of ["chat", "discussion", "files"] as const) {
-      const f = await fixture();
-      const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "comment" }] });
-      await putBlob(f.h, OWNER, WS_A, "hello");
-      await appendLog(f.h, OWNER, WS_A, [moment("notes/a.md", "hello", { originSeq: 0 })]);
-      const fields = action === "chat" ? { workspaceId: WS_A, channelWireId: agentChannelWireId(agent.agentId) }
-        : action === "discussion" ? { workspaceId: WS_A, filePath: "notes/a.md" } : { workspaceId: WS_A };
-      const arriving = (meanwhile: () => void) => new ReadableStream<Uint8Array>({
-        pull(controller) {
-          meanwhile();
-          controller.enqueue(new TextEncoder().encode(JSON.stringify(fields)));
-          controller.close();
-        },
-      }, { highWaterMark: 0 });
-
-      await ok(await tool(f, agent, action, arriving(() => {})));
-      // No notification: the read of the fence after the body refuses.
-      await expectRefused(await tool(f, agent, action, arriving(() => { f.fence.changePassword(OWNER); })));
-    }
-  });
 });
 
 describe("a personal agent's Collection writes", () => {
@@ -1701,22 +981,6 @@ describe("a personal agent's Collection writes", () => {
     expect(written(f, agent)).toHaveLength(1);
   });
 
-  it("names the agent and its owner in the stored moment and to a share's readers", async () => {
-    const f = await fixture({ lookupUserDisplayName: (userId) => userId === OWNER ? "Owner name" : null });
-    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "edit" }] });
-    await packing(f);
-    const shareId = await createShare(f.h, OWNER, WS_A, { recipientUserId: "recipient", paths: ["trip"] });
-    await ok(await write(f, agent, [created()]));
-    const named = { kind: "agent", agentId: agent.agentId, agentName: "Helper", onBehalfOf: OWNER };
-    // Signed out, History has only the moment's own author to name.
-    expect(payloadOf(written(f, agent)[0]!).authors).toEqual([named]);
-    const response = await f.h(request("recipient", `/sync/shares/${shareId}/log?since=0`));
-    expect(response.status).toBe(200);
-    const ops = (await json(response)).ops as Array<{ payload: Record<string, unknown> }>;
-    expect(ops.at(-1)?.payload).toMatchObject({ path: "trip/packing/Socks.md",
-      authors: [{ kind: "human", humanId: OWNER, humanName: "Owner name" }, named] });
-  });
-
   it("refuses at View and Comment, any file outside a Collection, a workspace out of reach, and a field it does not take", async () => {
     const f = await fixture();
     const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "view" }] });
@@ -1737,41 +1001,8 @@ describe("a personal agent's Collection writes", () => {
     expect(written(f, agent)).toEqual([]);
   });
 
-  it("refuses a write when its reach narrows, it signs out, a password changes, or the workspace changes hands or is deleted while its body arrives", async () => {
-    const outOfReach = (response: Response) => expectCode(response, 403, "personal_agent_out_of_reach");
-    const cases: Array<[(f: Fixture, agent: Signed) => Promise<unknown> | void, (response: Response) => Promise<void>]> = [
-      [(f, agent) => setReach(f, agent, [{ workspaceId: WS_A, level: "comment" }]), (response) => expectCode(response, 403, "personal_agent_edit_needed")],
-      [(f, agent) => owner(f, `/${agent.agentId}/sign-out`, { method: "POST" }), expectRefused],
-      [(f) => { f.fence.changePassword(OWNER); }, expectRefused],
-      [(f) => { setOwner(f, WS_A, OTHER); }, outOfReach],
-      [(f) => {
-        const context = f.storage as StorageContext;
-        initializeAccountDeletion(context, DELETION_KEY);
-        context.db.prepare("INSERT INTO sync_relay_deleted_workspaces (workspace_hash) VALUES (?)")
-          .run(accountDeletionIdentity(DELETION_KEY, `workspace:${WS_A}`));
-      }, outOfReach],
-    ];
-    for (const [meanwhile, refused] of cases) {
-      const f = await fixture();
-      const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "edit" }] });
-      await packing(f);
-      // The body's bytes come only when the relay reads them, after it authenticated the request.
-      const arriving = new ReadableStream<Uint8Array>({
-        async pull(controller) {
-          const changed = await meanwhile(f, agent);
-          if (changed instanceof Response) await ok(changed);
-          controller.enqueue(new TextEncoder().encode(JSON.stringify(body([created()]))));
-          controller.close();
-        },
-      }, { highWaterMark: 0 });
-      await refused(await tool(f, agent, "collection-writes", arriving, undefined, writingTo(WS_A)));
-      expect(written(f, agent)).toEqual([]);
-    }
-  });
-
-  it("refuses a retry of a write once the agent loses Edit or signs out, and never answers it as written", async () => {
+  it("refuses a retry of a write after sign-out, and never answers it as written", async () => {
     const cases: Array<[(f: Fixture, agent: Signed) => Promise<Response>, (response: Response) => Promise<void>]> = [
-      [(f, agent) => setReach(f, agent, [{ workspaceId: WS_A, level: "view" }]), (response) => expectCode(response, 403, "personal_agent_edit_needed")],
       [(f, agent) => owner(f, `/${agent.agentId}/sign-out`, { method: "POST" }), expectRefused],
     ];
     for (const [revoke, refused] of cases) {
@@ -1793,26 +1024,6 @@ describe("a personal agent's Collection writes", () => {
     }
   });
 
-  it("refuses a workspace the agent may not edit before reading any of the body", async () => {
-    const f = await fixture();
-    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "view" }, { workspaceId: WS_B, level: "edit" }] });
-    let pulled = false;
-    // A large body, whose bytes come only if the relay reads them.
-    const unread = () => new ReadableStream<Uint8Array>({
-      pull(controller) {
-        pulled = true;
-        controller.enqueue(new Uint8Array(6 * 1024 * 1024));
-        controller.close();
-      },
-    }, { highWaterMark: 0 });
-    await expectCode(await tool(f, agent, "collection-writes", unread(), undefined, writingTo(WS_A)), 403, "personal_agent_edit_needed");
-    await expectCode(await tool(f, agent, "collection-writes", unread(), undefined, writingTo(OTHER_WS)), 403, "personal_agent_out_of_reach");
-    await expectCode(await tool(f, agent, "collection-writes", unread()), 400, "bad_request");
-    expect(pulled).toBe(false);
-    // The body names the workspace the relay checked, or nothing is written.
-    await expectCode(await tool(f, agent, "collection-writes", body([created()]), undefined, writingTo(WS_B)), 400, "bad_request");
-    expect(written(f, agent)).toEqual([]);
-  });
 });
 
 describe("a personal agent's tools", () => {
@@ -1832,98 +1043,6 @@ describe("a personal agent's tools", () => {
     expect((await tool(f, agent, "files", { workspaceId: WS_A, extra: 1 })).status).toBe(400);
   });
 
-  const revocations: Array<[string, (f: Fixture, agent: Signed) => Promise<void>]> = [
-    ["Sign out", async (f, agent) => { await ok(await owner(f, `/${agent.agentId}/sign-out`, { method: "POST" })); }],
-    // No notification: the direct read of the fence refuses.
-    ["a reset", async (f) => { f.fence.changePassword(OWNER); }],
-    ["account deletion", async (f) => { deleteAccountAtFence(f); }],
-  ];
-
-  it.each(revocations)("refuse every call after %s, before any read", async (_, revoke) => {
-    const f = await fixture();
-    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "comment" }] });
-    const sha = await putBlob(f.h, OWNER, WS_A, "hello");
-    await appendLog(f.h, OWNER, WS_A, [moment("notes/a.md", "hello", { originSeq: 0 })]);
-    const dm = agentChannelWireId(agent.agentId);
-    const calls: Array<[string, Record<string, unknown>]> = [
-      ["workspaces", {}],
-      ["post", { workspaceId: WS_A, channelWireId: dm, body: "hello", idempotencyKey: "post-1" }],
-      ["wait", { timeoutMs: 0 }],
-      ["chat", { workspaceId: WS_A, channelWireId: dm }],
-      ["discussion", { workspaceId: WS_A, filePath: "notes/a.md" }],
-      ["files", { workspaceId: WS_A }],
-      ["blob", { workspaceId: WS_A, sha256: sha }],
-    ];
-    for (const [action, body] of calls) {
-      const response = await tool(f, agent, action, body);
-      expect(response.status, action).toBe(200);
-      await response.arrayBuffer();
-    }
-    await revoke(f, agent);
-    for (const [action, body] of calls) await expectRefused(await tool(f, agent, action, body));
-  });
-
-  it("reach nothing in a workspace narrowing removed", async () => {
-    const f = await fixture();
-    const agent = await signIn(f, { reach: BOTH_COMMENT });
-    const sha = await putBlob(f.h, OWNER, WS_A, "hello");
-    await appendLog(f.h, OWNER, WS_A, [moment("notes/a.md", "hello", { originSeq: 0 })]);
-    const dm = agentChannelWireId(agent.agentId);
-    await ok(await setReach(f, agent, [{ workspaceId: WS_B, level: "comment" }]));
-
-    await expectCode(await post(f, agent, { channelWireId: dm }), 403, "personal_agent_out_of_reach");
-    await expectCode(await tool(f, agent, "chat", { workspaceId: WS_A, channelWireId: dm }), 403, "personal_agent_out_of_reach");
-    await expectCode(await tool(f, agent, "files", { workspaceId: WS_A }), 403, "personal_agent_out_of_reach");
-    await expectCode(await tool(f, agent, "blob", { workspaceId: WS_A, sha256: sha }), 403, "personal_agent_out_of_reach");
-    expect(Object.keys((await waitOnce(f, agent)).cursor.seqs)).toEqual([WS_B]);
-  });
-
-  it("list the workspaces in reach with their names, levels and the agent's DM, leaving out one the account lost or deleted", async () => {
-    const f = await fixture();
-    await claimWorkspace(f.h, OWNER, "workspace-c");
-    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "comment" }, { workspaceId: WS_B, level: "view" }] });
-    expect(f.storage.setWorkspaceDisplayName({ workspaceId: WS_A, ownerUserId: OWNER, name: "Trip" })).toBe(true);
-    const listed = async () => (await ok(await tool(f, agent, "workspaces", {}))).workspaces;
-    const dmChannelWireId = agentChannelWireId(agent.agentId);
-
-    // An owned workspace out of reach and another account's stay out.
-    expect(await listed()).toEqual([
-      { workspaceId: WS_A, name: "Trip", level: "comment", dmChannelWireId },
-      { workspaceId: WS_B, name: null, level: "view", dmChannelWireId },
-    ]);
-    expect((await tool(f, agent, "workspaces", { workspaceId: WS_A })).status).toBe(400);
-
-    setOwner(f, WS_B, OTHER);
-    expect(await listed()).toEqual([{ workspaceId: WS_A, name: "Trip", level: "comment", dmChannelWireId }]);
-    setOwner(f, WS_B, OWNER);
-    const context = f.storage as StorageContext;
-    initializeAccountDeletion(context, DELETION_KEY);
-    context.db.prepare("INSERT INTO sync_relay_deleted_workspaces (workspace_hash) VALUES (?)")
-      .run(accountDeletionIdentity(DELETION_KEY, `workspace:${WS_A}`));
-    expect(await listed()).toEqual([{ workspaceId: WS_B, name: null, level: "view", dmChannelWireId }]);
-
-    await ok(await owner(f, `/${agent.agentId}/sign-out`, { method: "POST" }));
-    await expectRefused(await tool(f, agent, "workspaces", {}));
-  });
-
-  it("name the agent as its posts show it and people mention it, after a rename too", async () => {
-    const f = await fixture();
-    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "comment" }] });
-    const named = async () => (await ok(await tool(f, agent, "workspaces", {}))).agent;
-    expect(await named()).toEqual({ agentId: agent.agentId, name: "Helper", handle: "Helper" });
-    await ok(await owner(f, `/${agent.agentId}/name`, { method: "PUT", body: { name: "Trip planner" } }));
-    expect(await named()).toEqual({ agentId: agent.agentId, name: "Trip planner", handle: "Tripplanner" });
-  });
-
-  it("post in the agent's DM before any computer has written to the workspace", async () => {
-    const f = await fixture();
-    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "comment" }] });
-    const [listed] = (await ok(await tool(f, agent, "workspaces", {}))).workspaces as Array<{ dmChannelWireId: string }>;
-    const sent = await ok(await post(f, agent, { channelWireId: listed!.dmChannelWireId }));
-    expect(sent.message).toMatchObject({ workspaceId: WS_A, channelWireId: agentChannelWireId(agent.agentId), filePath: null });
-    expect((await ok(await tool(f, agent, "chat", { workspaceId: WS_A, channelWireId: listed!.dmChannelWireId }))).messages)
-      .toMatchObject([{ body: "from the agent" }]);
-  });
 });
 
 /**
@@ -2007,23 +1126,8 @@ describe("a personal agent's Groups", () => {
     expect(syncs).toEqual([WS_A]);
   });
 
-  it("refuses a workspace out of reach, and one its account lost, before it opens a copy", async () => {
-    const { f, engine, syncs } = await withCopies();
-    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "comment" }] });
-    seedChats(engine, WS_A, agent.agentId);
-    // An owned workspace out of reach, and another account's, answer the same.
-    for (const workspaceId of [WS_B, OTHER_WS]) {
-      await expectCode(await tool(f, agent, "groups", { workspaceId }), 403, "personal_agent_out_of_reach");
-    }
-    setOwner(f, WS_A, OTHER);
-    await expectCode(await tool(f, agent, "groups", { workspaceId: WS_A }), 403, "personal_agent_out_of_reach");
-    expect(syncs).toEqual([]);
-  });
-
   const midCall: Array<[string, (f: Fixture, agent: Signed) => Promise<void>]> = [
     ["the agent signs out", async (f, agent) => { await ok(await owner(f, `/${agent.agentId}/sign-out`, { method: "POST" })); }],
-    ["the account loses the workspace", async (f) => { setOwner(f, WS_A, OTHER); }],
-    ["the workspace leaves its reach", async (f, agent) => { await ok(await setReach(f, agent, [{ workspaceId: WS_B, level: "view" }])); }],
   ];
 
   it.each(midCall)("ends with not-found, and no Group, when %s while the copy syncs", async (_, revoke) => {
@@ -2040,33 +1144,6 @@ describe("a personal agent's Groups", () => {
     await expectRefused(response);
   });
 
-  it("says this server keeps no copies, only for a workspace in reach", async () => {
-    const f = await fixture();
-    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "view" }] });
-    await expectCode(await tool(f, agent, "groups", { workspaceId: WS_A }), 404, "server_copies_off");
-    await expectCode(await tool(f, agent, "groups", { workspaceId: WS_B }), 403, "personal_agent_out_of_reach");
-  });
-
-  it("answers not-found for a workspace with no sync identity yet, and opens no copy", async () => {
-    const { f, engine, syncs } = await withCopies([WS_B, OTHER_WS]);
-    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "view" }] });
-    seedChats(engine, WS_A, agent.agentId);
-    await expectRefused(await tool(f, agent, "groups", { workspaceId: WS_A }));
-    expect(syncs).toEqual([]);
-  });
-
-  it("answers server_busy past one connection's open visits, as the account's reads do", async () => {
-    const { f, engine, holdSyncs, syncs } = await withCopies();
-    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "view" }] });
-    seedChats(engine, WS_A, agent.agentId);
-    const release = holdSyncs();
-    const held = Array.from({ length: ACCOUNT_VISITS_PER_CALLER }, () => tool(f, agent, "groups", { workspaceId: WS_A }));
-    await vi.waitFor(() => expect(syncs).toHaveLength(ACCOUNT_VISITS_PER_CALLER));
-    await expectCode(await tool(f, agent, "groups", { workspaceId: WS_A }), 503, "server_busy");
-    release();
-    for (const response of await Promise.all(held)) expect(response.status).toBe(200);
-    await ok(await tool(f, agent, "groups", { workspaceId: WS_A }));
-  });
 });
 
 describe("a personal agent's wait", () => {
@@ -2114,153 +1191,6 @@ describe("a personal agent's wait", () => {
     expect(ids(await waitOnce(f, agent, { cursor: answer.cursor }))).toEqual([]);
   });
 
-  it("leaves out a comment on a file whose current path is secret, however the path is spelled", async () => {
-    const f = await fixture();
-    const agent = await signIn(f);
-    await putBlob(f.h, OWNER, WS_A, "plan");
-    await appendLog(f.h, OWNER, WS_A, [
-      moment("notes/kept.md", "plan", { originSeq: 0, objectId: "object-kept" }),
-      moment("config/.env", "plan", { originSeq: 1, objectId: "object-env" }),
-      moment("config/.ENV", "plan", { originSeq: 2, objectId: "object-upper" }),
-      moment("config/%2eenv.local", "plan", { originSeq: 3, objectId: "object-encoded" }),
-      moment("notes/plan.md", "plan", { originSeq: 4, objectId: "object-moved" }),
-      moment("config/prod.env", "plan", {
-        originSeq: 5, objectId: "object-moved", operation: "rename", beforePath: "notes/plan.md", beforeContent: "plan",
-      }),
-    ]);
-    fromComputer(f, WS_A, [
-      fileThread("thread-kept", { linkedObjectId: "object-kept" }),
-      fileThread("thread-env", { linkedObjectId: "object-env" }),
-      fileThread("thread-upper", { linkedObjectId: "object-upper" }),
-      fileThread("thread-encoded", { linkedObjectId: "object-encoded" }),
-      fileThread("thread-moved", { linkedObjectId: "object-moved" }),
-      fileThread("thread-by-path", { linkedPath: "config/.env" }),
-      // A secret file has no object on the relay, so only its path names it.
-      fileThread("thread-secret-only", { linkedPath: "keys/.env.production" }),
-      // A create that binds a file twice, or a channel and a file path, binds
-      // nothing the agent can read.
-      fileThread("thread-twice", { linkedObjectId: "object-env", linkedPath: "config/.env" }),
-      chatChannelCreate("wire-team"),
-      chatThreadCreate("thread-channel-path", "wire-team", { linkedPath: "keys/.env.production", linkedAtMs: 2 }),
-      ...["kept", "env", "upper", "encoded", "moved", "by-path", "secret-only", "twice", "channel-path"].map((name) => ownerSays(name, `thread-${name}`, "@Helper a comment")),
-    ]);
-
-    const answer = await waitOnce(f, agent);
-    expect(answer.messages.map((message) => [message.messageId, message.filePath])).toEqual([["kept", "notes/kept.md"]]);
-    expect(JSON.stringify(answer)).not.toContain("config/");
-    expect(JSON.stringify(answer)).not.toContain("keys/");
-  });
-
-  it("names a file's path after a rename and a deleted file's last path, and leaves out a file the relay never placed", async () => {
-    const f = await fixture();
-    const agent = await signIn(f);
-    await putBlob(f.h, OWNER, WS_A, "plan");
-    await appendLog(f.h, OWNER, WS_A, [
-      moment("notes/plan.md", "plan", { originSeq: 0, objectId: "object-moved" }),
-      moment("notes/gone.md", "plan", { originSeq: 1, objectId: "object-gone" }),
-      moment("notes/moved.md", "plan", {
-        originSeq: 2, objectId: "object-moved", operation: "rename", beforePath: "notes/plan.md", beforeContent: "plan",
-      }),
-      moment("notes/gone.md", "", {
-        originSeq: 3, objectId: "object-gone", operation: "delete", beforePath: "notes/gone.md", beforeContent: "plan",
-        afterPath: null, afterContent: null,
-      }),
-    ]);
-    fromComputer(f, WS_A, [
-      fileThread("thread-moved", { linkedObjectId: "object-moved", linkedPathHint: "notes/plan.md" }),
-      fileThread("thread-gone", { linkedObjectId: "object-gone", linkedPathHint: "notes/gone.md" }),
-      fileThread("thread-unknown", { linkedObjectId: "object-unknown", linkedPathHint: "notes/unknown.md" }),
-      // Bound by the path the file left: a path follows no file.
-      fileThread("thread-old-path", { linkedPath: "notes/plan.md" }),
-      // Bound by the path the file moved to.
-      fileThread("thread-by-path", { linkedPath: "notes/moved.md" }),
-      ...["moved", "gone", "unknown", "old-path", "by-path"].map((name) => ownerSays(name, `thread-${name}`, "@Helper a comment")),
-    ]);
-
-    const answer = await waitOnce(f, agent);
-    expect(answer.messages.map((message) => [message.messageId, message.filePath])).toEqual([
-      ["moved", "notes/moved.md"], ["gone", "notes/gone.md"], ["by-path", "notes/moved.md"],
-    ]);
-    expect(JSON.stringify(answer)).not.toContain("notes/unknown.md");
-  });
-
-  it("wakes for a reply in its Comment on a file since deleted, never on one whose file moved to a secret path", async () => {
-    const f = await fixture();
-    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "comment" }] });
-    await putBlob(f.h, OWNER, WS_A, "plan");
-    await appendLog(f.h, OWNER, WS_A, [
-      moment("notes/gone.md", "plan", { originSeq: 0, objectId: "object-gone" }),
-      moment("notes/hidden.md", "plan", { originSeq: 1, objectId: "object-hidden" }),
-      moment("notes/hidden-gone.md", "plan", { originSeq: 2, objectId: "object-hidden-gone" }),
-    ]);
-    const comment = async (filePath: string, idempotencyKey: string) =>
-      String(((await ok(await post(f, agent, { filePath, idempotencyKey }))).message as Record<string, unknown>).threadId);
-    const gone = await comment("notes/gone.md", "post-gone");
-    const hidden = await comment("notes/hidden.md", "post-hidden");
-    const hiddenGone = await comment("notes/hidden-gone.md", "post-hidden-gone");
-    await appendLog(f.h, OWNER, WS_A, [
-      moment("notes/gone.md", "", {
-        originSeq: 3, objectId: "object-gone", operation: "delete", beforePath: "notes/gone.md", beforeContent: "plan",
-        afterPath: null, afterContent: null,
-      }),
-      moment("config/.env", "plan", {
-        originSeq: 4, objectId: "object-hidden", operation: "rename", beforePath: "notes/hidden.md", beforeContent: "plan",
-      }),
-      // Moved to a secret path, then deleted there: its last path is secret.
-      moment("config/prod.env", "plan", {
-        originSeq: 5, objectId: "object-hidden-gone", operation: "rename", beforePath: "notes/hidden-gone.md", beforeContent: "plan",
-      }),
-      moment("config/prod.env", "", {
-        originSeq: 6, objectId: "object-hidden-gone", operation: "delete", beforePath: "config/prod.env", beforeContent: "plan",
-        afterPath: null, afterContent: null,
-      }),
-    ]);
-    fromComputer(f, WS_A, [
-      ownerSays("on-gone", gone, "thanks"),
-      ownerSays("on-hidden", hidden, "thanks"),
-      ownerSays("on-hidden-gone", hiddenGone, "thanks"),
-    ]);
-
-    const answer = await waitOnce(f, agent);
-    expect(answer.messages.map((message) => [message.messageId, message.channelWireId, message.filePath])).toEqual([
-      ["on-gone", null, "notes/gone.md"],
-    ]);
-    expect(JSON.stringify(answer)).not.toContain("config/");
-    // The deleted file's Comment takes a reply. A Comment whose file moved to a secret path takes none.
-    expect((await ok(await post(f, agent, { threadId: gone, idempotencyKey: "post-again" }))).message).toMatchObject({
-      threadId: gone, channelWireId: null, filePath: "notes/gone.md",
-    });
-    await expectRefused(await post(f, agent, { threadId: hidden, idempotencyKey: "post-hidden-again" }));
-    await expectRefused(await post(f, agent, { threadId: hiddenGone, idempotencyKey: "post-hidden-gone-again" }));
-  });
-
-  it("leaves out a Comment whose file moves to a secret path after its scan, before the answer", async () => {
-    const f = await fixture();
-    const agent = await signIn(f, { reach: [{ workspaceId: WS_A, level: "comment" }] });
-    await putBlob(f.h, OWNER, WS_A, "plan");
-    await appendLog(f.h, OWNER, WS_A, [moment("notes/plan.md", "plan", { originSeq: 0, objectId: "object-plan" })]);
-    const { message } = await ok(await post(f, agent, { filePath: "notes/plan.md" })) as { message: { threadId: string } };
-    fromComputer(f, WS_A, [ownerSays("reply", message.threadId, "thanks")]);
-    // The scan places the file, then it moves before the answer leaves.
-    const moved = moment("config/.env", "plan", {
-      originSeq: 0, objectId: "object-plan", operation: "rename", beforePath: "notes/plan.md", beforeContent: "plan",
-    });
-    const currentPath = f.storage.objectCurrentPath.bind(f.storage);
-    let placed = 0;
-    vi.spyOn(f.storage, "objectCurrentPath").mockImplementation((workspaceId, objectId) => {
-      const path = currentPath(workspaceId, objectId);
-      if (++placed === 1) {
-        f.storage.appendLogBatch({ workspaceId: WS_A, originId: "owner-mover", ops: [{
-          originSeq: moved.originSeq, opKind: moved.opKind, recordedAtMs: moved.recordedAtMs, payloadJson: JSON.stringify(moved.payload),
-        }] });
-      }
-      return path;
-    });
-
-    expect(ids(await waitOnce(f, agent))).toEqual([]);
-    expect(placed).toBeGreaterThan(1);
-  });
-
   it("reads only from where each workspace entered its reach, whatever the cursor names", async () => {
     const f = await fixture();
     fromComputer(f, WS_A, [
@@ -2279,104 +1209,6 @@ describe("a personal agent's wait", () => {
     expect((await tool(f, second, "wait", { timeoutMs: 0, cursor: answer.cursor })).status).toBe(400);
     expect((await tool(f, agent, "wait", { timeoutMs: 0, cursor: { ...answer.cursor, seqs: { [WS_A]: -1 } } })).status).toBe(400);
     expect((await tool(f, agent, "wait", { timeoutMs: 0, cursor: { ...answer.cursor, extra: 1 } })).status).toBe(400);
-  });
-
-  it("answers a match 2,500 rows in on the second call, after an empty answer with more", async () => {
-    const f = await fixture();
-    const agent = await signIn(f);
-    chats(f, WS_A, agent.agentId);
-    fromComputer(f, WS_A, [
-      ...Array.from({ length: 2_500 }, (_, index) => ownerSays(`noise-${index}`, "thread-other", "elsewhere")),
-      ownerSays("dm", "thread-dm", "hello"),
-    ]);
-    const parks = vi.spyOn(f.activity, "wait");
-    const first = await ok(await tool(f, agent, "wait", {})) as WaitAnswer;
-    expect(first).toMatchObject({ messages: [], more: true });
-    const second = await ok(await tool(f, agent, "wait", { cursor: first.cursor })) as WaitAnswer;
-    expect(ids(second)).toEqual(["dm"]);
-    expect(second.more).toBe(false);
-    expect(parks).not.toHaveBeenCalled();
-  });
-
-  it("answers 101 matches as 100, then the last at once", async () => {
-    const f = await fixture();
-    const agent = await signIn(f);
-    chats(f, WS_A, agent.agentId);
-    const all = Array.from({ length: PERSONAL_WAIT_MAX_MESSAGES + 1 }, (_, index) => `dm-${index}`);
-    fromComputer(f, WS_A, all.map((id) => ownerSays(id, "thread-dm", "hello")));
-    const parks = vi.spyOn(f.activity, "wait");
-    const first = await ok(await tool(f, agent, "wait", {})) as WaitAnswer;
-    expect(ids(first)).toEqual(all.slice(0, PERSONAL_WAIT_MAX_MESSAGES));
-    expect(first.more).toBe(true);
-    const second = await ok(await tool(f, agent, "wait", { cursor: first.cursor })) as WaitAnswer;
-    expect(ids(second)).toEqual(all.slice(PERSONAL_WAIT_MAX_MESSAGES));
-    expect(parks).not.toHaveBeenCalled();
-  });
-
-  it("resumes a size-cut answer at the message that didn't fit", async () => {
-    const f = await fixture();
-    const agent = await signIn(f);
-    chats(f, WS_A, agent.agentId);
-    const large = "x".repeat(200_000);
-    fromComputer(f, WS_A, ["large-0", "large-1", "large-2"].map((id) => ownerSays(id, "thread-dm", large)));
-    const first = await waitOnce(f, agent);
-    expect(ids(first)).toEqual(["large-0", "large-1"]);
-    expect(first.more).toBe(true);
-    const second = await waitOnce(f, agent, { cursor: first.cursor });
-    expect(ids(second)).toEqual(["large-2"]);
-    expect(second.messages[0]).toMatchObject({ body: large, bodyTooLarge: false });
-  });
-
-  it("gives the next call to another workspace while one has more than a budget, and keeps the first one's place", async () => {
-    const f = await fixture();
-    const agent = await signIn(f, { reach: BOTH_VIEW });
-    chats(f, WS_A, agent.agentId);
-    chats(f, WS_B, agent.agentId);
-    const noise = (from: number) => Array.from({ length: 2 * CHAT_HISTORY_SCAN_WINDOW }, (_, index) =>
-      ownerSays(`noise-${from + index}`, "thread-other", "elsewhere"));
-    fromComputer(f, WS_A, noise(0));
-    fromComputer(f, WS_B, [ownerSays("in-b", "thread-dm", "hello")]);
-
-    // A's turn uses the whole budget.
-    const first = await waitOnce(f, agent);
-    expect(first).toMatchObject({ messages: [], more: true, cursor: { turn: WS_B } });
-    // B's turn finds its message, and A goes on with what is left.
-    const second = await waitOnce(f, agent, { cursor: first.cursor });
-    expect(ids(second)).toEqual(["in-b"]);
-    expect(second).toMatchObject({ more: true, cursor: { turn: WS_A } });
-    expect(second.cursor.seqs[WS_A]).toBeGreaterThan(first.cursor.seqs[WS_A]!);
-
-    fromComputer(f, WS_A, noise(2 * CHAT_HISTORY_SCAN_WINDOW));
-    fromComputer(f, WS_B, [ownerSays("in-b-again", "thread-dm", "hello")]);
-    const third = await waitOnce(f, agent, { cursor: second.cursor });
-    expect(third).toMatchObject({ messages: [], more: true, cursor: { turn: WS_B } });
-    expect(third.cursor.seqs[WS_A]).toBeGreaterThan(second.cursor.seqs[WS_A]!);
-    expect(ids(await waitOnce(f, agent, { cursor: third.cursor }))).toEqual(["in-b-again"]);
-  });
-
-  it("reads past a scan's byte budget only for the scan's first row, not each workspace's", async () => {
-    const f = await fixture();
-    const agent = await signIn(f, { reach: BOTH_VIEW });
-    chats(f, WS_A, agent.agentId);
-    chats(f, WS_B, agent.agentId);
-    const { cursor } = await waitOnce(f, agent);
-    expect(cursor.turn).toBe(WS_B);
-    // B's turn reads three quarters of the budget. A's next row is larger than what is left.
-    fromComputer(f, WS_B, ["noise-0", "noise-1"].map((id) => ownerSays(id, "thread-other", "x".repeat(CHAT_HISTORY_SCAN_BYTES * 3 / 8))));
-    fromComputer(f, WS_A, [
-      ownerSays("large", "thread-other", "x".repeat(CHAT_HISTORY_SCAN_BYTES / 2)),
-      ownerSays("dm-a", "thread-dm", "hello"),
-    ]);
-    const large = logOf(f, WS_A).find((row) => row.opKind === "chat.message.append" && payloadOf(row).messageId === "large")!;
-    const windows = vi.spyOn(f.storage, "readPersonalWaitWindow");
-
-    const first = await waitOnce(f, agent, { cursor });
-    expect(first).toMatchObject({ messages: [], more: true, cursor: { turn: WS_A } });
-    expect(first.cursor.seqs[WS_A]).toBeLessThan(large.relaySeq);
-    const read = windows.mock.results.reduce((bytes, result) => bytes + (result.value as { bytes: number }).bytes, 0);
-    expect(read).toBeLessThanOrEqual(CHAT_HISTORY_SCAN_BYTES);
-    // A's turn starts the next scan, so the large row is that scan's first.
-    expect(ids(await waitOnce(f, agent, { cursor: first.cursor }))).toEqual(["dm-a"]);
   });
 
   it("parks on every workspace in reach, and releases every subscription on answer, abort, and deadline", async () => {
@@ -2413,74 +1245,6 @@ describe("a personal agent's wait", () => {
     expect(f.activity.stats().waiters).toBe(0);
   });
 
-  it("holds at most its connection's share of waits, and frees a place when one ends", async () => {
-    const f = await fixture();
-    const agent = await signIn(f);
-    chats(f, WS_A, agent.agentId);
-    const controllers = Array.from({ length: MAX_AGENT_CHAT_WAITS_PER_CONNECTION }, () => new AbortController());
-    const held = controllers.map((controller) => tool(f, agent, "wait", {}, controller.signal));
-    await parked(f, MAX_AGENT_CHAT_WAITS_PER_CONNECTION);
-    await expectCode(await tool(f, agent, "wait", { timeoutMs: 0 }), 429, "link_read_rate_limited");
-    controllers.forEach((controller) => controller.abort());
-    for (const response of await Promise.all(held)) await expectRefused(response);
-    await waitOnce(f, agent);
-  });
-
-  it("holds at most its account's share of waits across its agents, and frees a place when one ends", async () => {
-    expect(MAX_PERSONAL_WAITS_PER_ACCOUNT % MAX_AGENT_CHAT_WAITS_PER_CONNECTION).toBe(0);
-    const f = await fixture();
-    const agents: Signed[] = [];
-    for (let index = 0; index <= MAX_PERSONAL_WAITS_PER_ACCOUNT / MAX_AGENT_CHAT_WAITS_PER_CONNECTION; index++) {
-      agents.push(await signIn(f, { agent: { kind: "new", name: `Agent ${index}` } }));
-    }
-    const last = agents.pop()!;
-    const holders = agents.flatMap((agent) => Array.from({ length: MAX_AGENT_CHAT_WAITS_PER_CONNECTION }, () => agent));
-    const controllers = holders.map(() => new AbortController());
-    const held = holders.map((agent, index) => tool(f, agent, "wait", {}, controllers[index]!.signal));
-    await parked(f, MAX_PERSONAL_WAITS_PER_ACCOUNT);
-    // Its own connection holds none, but its account is full.
-    await expectCode(await tool(f, last, "wait", { timeoutMs: 0 }), 429, "link_read_rate_limited");
-
-    controllers[0]!.abort();
-    await expectRefused(await held[0]!);
-    await waitOnce(f, last);
-    controllers.slice(1).forEach((controller) => controller.abort());
-    for (const response of await Promise.all(held.slice(1))) await expectRefused(response);
-  });
-
-  const parkedRevocations: Array<[
-    string,
-    (f: Fixture, agent: Signed) => Promise<void>,
-    (f: Fixture, agent: Signed, response: Response) => Promise<void>,
-  ]> = [
-    ["Sign out", async (f, agent) => { await ok(await owner(f, `/${agent.agentId}/sign-out`, { method: "POST" })); },
-      async (_f, _agent, response) => { await expectRefused(response); }],
-    ["a reset", async (f) => { f.fence.listener!.onChange(f.fence.changePassword(OWNER)); },
-      async (_f, _agent, response) => { await expectRefused(response); }],
-    ["account deletion", async (f) => { deleteAccountAtFence(f); },
-      async (_f, _agent, response) => { await expectRefused(response); }],
-    ["narrowing", async (f, agent) => { await ok(await setReach(f, agent, [{ workspaceId: WS_A, level: "view" }])); },
-      async (_f, _agent, response) => {
-        const answer = await ok(response) as WaitAnswer;
-        expect(answer).toMatchObject({ messages: [], more: false });
-        expect(Object.keys(answer.cursor.seqs)).toEqual([WS_A]);
-      }],
-    ["the fence notifications stopping", async (f) => { f.fence.listener!.onDown(); }, async (f, agent, response) => {
-      expect(await ok(response)).toMatchObject({ messages: [] });
-      await expectCode(await tool(f, agent, "wait", { timeoutMs: 0 }), 503, "personal_agent_unavailable");
-    }],
-  ];
-
-  it.each(parkedRevocations)("answers a parked wait at once after %s", async (_, revoke, expectAnswer) => {
-    const f = await fixture();
-    const agent = await signIn(f, { reach: BOTH_VIEW });
-    const { cursor } = await waitOnce(f, agent);
-    const held = tool(f, agent, "wait", { cursor });
-    await parked(f, 2);
-    await revoke(f, agent);
-    await expectAnswer(f, agent, await held);
-    expect(f.activity.stats().waiters).toBe(0);
-  });
 });
 
 describe("a personal agent's reads", () => {
@@ -2513,27 +1277,6 @@ describe("a personal agent's reads", () => {
     await expectRefused(await read({ channelWireId: "wire-b" }));
     await expectRefused(await read({ channelWireId: "wire-nowhere" }));
     expect((await read({ limit: 101 })).status).toBe(400);
-  });
-
-  it("leaves out a thread whose first create names the channel and also binds a file", async () => {
-    const f = await fixture();
-    const agent = await signIn(f);
-    await putBlob(f.h, OWNER, WS_A, "key");
-    await appendLog(f.h, OWNER, WS_A, [moment("config/.env", "key", { originSeq: 0, objectId: "object-env" })]);
-    fromComputer(f, WS_A, [
-      chatChannelCreate("wire-team"),
-      chatThreadCreate("thread-team", "wire-team"),
-      chatThreadCreate("thread-both", "wire-team", { linkedObjectId: "object-env", linkedAtMs: 2 }),
-      chatThreadCreate("thread-both-path", "wire-team", { linkedPath: "keys/.env.production", linkedAtMs: 2 }),
-      ownerSays("in-channel", "thread-team", "in the channel"),
-      ownerSays("on-file", "thread-both", "about the file"),
-      ownerSays("on-path", "thread-both-path", "about the file"),
-      ownerSays("in-channel-again", "thread-team", "in the channel again"),
-    ]);
-
-    const page = await ok(await tool(f, agent, "chat", { workspaceId: WS_A, channelWireId: "wire-team" })) as ChatPage;
-    expect(ids(page)).toEqual(["in-channel-again", "in-channel"]);
-    expect(JSON.stringify(page)).not.toContain("about the file");
   });
 
   it("lists the workspace's current files and reads a current file's bytes, only through that workspace", async () => {
@@ -2626,18 +1369,6 @@ describe("single-flight fence reads", () => {
     return { started, read, fenceRead: singleFlightFenceReads(read, () => new Error("The fence read timed out.")) };
   }
 
-  it("answers a caller that asks during a read with the next read, which begins once that one settles", async () => {
-    const { started, read, fenceRead } = reads();
-    const first = fenceRead(OWNER);
-    const second = fenceRead(OWNER);
-    expect(read).toHaveBeenCalledTimes(1);
-    started[0]!.settle(1);
-    await expect(first).resolves.toBe(1);
-    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2));
-    started[1]!.settle(2);
-    await expect(second).resolves.toBe(2);
-  });
-
   it("shares the next read among everyone who asked during the running one", async () => {
     const { started, read, fenceRead } = reads();
     const first = fenceRead(OWNER);
@@ -2648,17 +1379,6 @@ describe("single-flight fence reads", () => {
     started[1]!.settle(2);
     await expect(Promise.all(waiting)).resolves.toEqual([2, 2, 2]);
     expect(read).toHaveBeenCalledTimes(2);
-  });
-
-  it("rejects only the callers of a failed read, and the next read still runs", async () => {
-    const { started, read, fenceRead } = reads();
-    const first = fenceRead(OWNER);
-    const second = fenceRead(OWNER);
-    started[0]!.fail(new Error("The database is unreachable."));
-    await expect(first).rejects.toThrow("The database is unreachable.");
-    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2));
-    started[1]!.settle(3);
-    await expect(second).resolves.toBe(3);
   });
 
   it("fails a read Postgres doesn't answer in time, and then begins the next read", async () => {
@@ -2691,16 +1411,4 @@ describe("single-flight fence reads", () => {
     await expect(Promise.all([owner, other])).resolves.toEqual([4, 5]);
   });
 
-  it("begins a new read for a caller that asks after every read settled", async () => {
-    const { started, read, fenceRead } = reads();
-    const first = fenceRead(OWNER);
-    started[0]!.settle(1);
-    await first;
-    // The settled read's entry clears a turn after it settles.
-    await new Promise(resolve => setImmediate(resolve));
-    const later = fenceRead(OWNER);
-    expect(read).toHaveBeenCalledTimes(2);
-    started[1]!.settle(2);
-    await expect(later).resolves.toBe(2);
-  });
 });

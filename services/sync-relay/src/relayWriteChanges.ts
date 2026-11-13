@@ -67,6 +67,40 @@ export function notifyChatWakeChange(storage: object, accountId: string): void {
   });
 }
 
+const noticeObservers = new WeakMap<object, Set<(recipientUserId: string) => void>>();
+const pendingNoticeChanges = new WeakMap<object, Set<string>>();
+
+/** Hears each change to a person's Notice list, by its recipient. */
+export function observeNoticeChanges(storage: object, changed: (recipientUserId: string) => void): () => void {
+  let listeners = noticeObservers.get(storage);
+  if (!listeners) { listeners = new Set(); noticeObservers.set(storage, listeners); }
+  listeners.add(changed);
+  return () => {
+    listeners.delete(changed);
+    if (listeners.size === 0) noticeObservers.delete(storage);
+  };
+}
+
+/**
+ * Called where a Notice list's change sequence or floor moves. Listeners hear each recipient once, after the write
+ * leaves SQLite; one rolled back wakes them for nothing.
+ */
+export function notifyNoticeChange(storage: object, recipientUserId: string): void {
+  if (!noticeObservers.has(storage)) return;
+  const pending = pendingNoticeChanges.get(storage);
+  if (pending) { pending.add(recipientUserId); return; }
+  const recipients = new Set([recipientUserId]);
+  pendingNoticeChanges.set(storage, recipients);
+  queueMicrotask(() => {
+    pendingNoticeChanges.delete(storage);
+    for (const recipient of recipients) {
+      for (const listener of [...(noticeObservers.get(storage) ?? [])]) {
+        try { listener(recipient); } catch { /* One listener cannot suppress another's wake. */ }
+      }
+    }
+  });
+}
+
 /** Notify after leaving SQLite. Ambiguous failures also require a fresh authority check. */
 export function notifyRelayWrite(storage: object): void {
   if (!observers.has(storage) || queued.has(storage)) return;

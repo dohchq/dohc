@@ -1,6 +1,6 @@
-import { ChatLinksInput, ChatLinksPage } from "@dohc/workspace-contracts/chat-links";
-import { ChatFileMentionsInput, ChatFileMentionsPage } from "@dohc/workspace-contracts/chat-file-mentions";
-import { LinksEdgesInput, LinksEdgesResult, LinksInInput, LinksResolveInput, LinksInResult, LinksResolveResult } from "@dohc/workspace-contracts/links";
+import { ChatLinksInput } from "@dohc/workspace-contracts/chat-links";
+import { DECLARATION_FAMILIES } from "@dohc/workspace-contracts/all-declarations";
+import { byName, distinct, mapNamed, type EnvelopeField } from "@dohc/workspace-contracts/operation-declaration";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import { HeldChange } from "@dohc/workspace-contracts/held-changes";
 import {
@@ -35,6 +35,8 @@ export type CliActor = z.infer<typeof cliActorSchema>;
 // Who wrote a message the CLI reads back. Only the relay writes a link author.
 const cliAuthorKindSchema = z.enum(["human", "agent", "automation", "link"]);
 
+export const cliWorkspaceIdSchema = z.string().regex(/^[\x21-\x7e]{1,256}$/);
+
 const requestBase = {
   token: z.string().regex(/^[a-f0-9]{64}$/),
   protocolVersion: z.literal(CLI_PROTOCOL_VERSION),
@@ -43,6 +45,9 @@ const requestBase = {
   // The secret of the run dohc started this caller in (DOHC_RUN_SECRET). Only
   // a request that carries it is that run's.
   runSecret: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  // A workspace on this computer, by its id, in place of the one the caller's
+  // folder is in. Never a name: other people can change a workspace's name.
+  workspaceId: cliWorkspaceIdSchema.optional(),
 };
 
 // An agent you run, by its id in Settings › Agents. The desktop refuses an
@@ -54,6 +59,8 @@ const argsBase = {
   actor: cliActorSchema,
   agentId: cliAgentIdSchema.optional(),
 };
+// A declared input cannot name a request or args field. Fails the typecheck if ENVELOPE_FIELDS misses one.
+true satisfies [Exclude<keyof typeof requestBase | keyof typeof argsBase, EnvelopeField>] extends [never] ? true : never;
 
 const historyOperationArgsSchema = z.object({ ...argsBase, operationId: HistoryOperationId, cursor: z.string().optional() }).strict();
 // A name the calling agent gives itself, recorded as the author of its edits
@@ -240,9 +247,44 @@ const chatArgsSchema = z.union([
   z.object({ ...argsBase, group: z.string().min(1).max(500), ...streamPageArgs }).strict(),
 ]);
 const groupsFullArgsSchema = z.object(argsBase).strict();
+// `dohc chat links` names a Group. The desktop resolves it to the chat's wire id.
 export const chatLinksGroupInputSchema = ChatLinksInput.omit({ channelWireId: true }).extend({
   group: z.string().min(1).max(500),
 }).strict();
+
+// The operations declared in workspace-contracts, by the socket verb each answers.
+type Families = typeof DECLARATION_FAMILIES;
+export type DeclaredOperation = { [Family in keyof Families]: Families[Family][keyof Families[Family]] }[keyof Families];
+const declaredOperations = Object.values(DECLARATION_FAMILIES).flatMap(family => Object.values<DeclaredOperation>(family));
+export type DeclaredVerb = DeclaredOperation["cli"]["verb"];
+type DeclaredOperationOf<Verb extends DeclaredVerb> = Extract<DeclaredOperation, { readonly cli: { readonly verb: Verb } }>;
+export const DECLARED_VERBS = byName(declaredOperations, operation => operation.cli.verb) as {
+  readonly [Verb in DeclaredVerb]: DeclaredOperationOf<Verb>;
+};
+
+export function isDeclaredVerb(verb: string): verb is DeclaredVerb {
+  return Object.hasOwn(DECLARED_VERBS, verb);
+}
+
+// Requests a declared verb takes besides its input. The desktop resolves each
+// to the input before it reads.
+const DECLARED_ALTERNATE_INPUTS = { chatLinks: chatLinksGroupInputSchema } as const;
+export type DeclaredRequestInput<Verb extends DeclaredVerb> =
+  | z.output<DeclaredOperationOf<Verb>["input"]>
+  | (Verb extends keyof typeof DECLARED_ALTERNATE_INPUTS ? z.output<(typeof DECLARED_ALTERNATE_INPUTS)[Verb]> : never);
+type DeclaredArgs<Verb extends DeclaredVerb> = z.output<z.ZodObject<typeof argsBase>> & DeclaredRequestInput<Verb>;
+type DeclaredRequestSchema = { [Verb in DeclaredVerb]: z.ZodObject<
+  typeof requestBase & { verb: z.ZodLiteral<Verb>; args: z.ZodType<DeclaredArgs<Verb>> }, z.core.$strict
+> }[DeclaredVerb];
+
+const declaredRequestSchemas = declaredOperations.map(({ cli: { verb }, input }) => {
+  const args = input.extend(argsBase).strict();
+  const alternate: z.ZodObject | undefined = Object.hasOwn(DECLARED_ALTERNATE_INPUTS, verb)
+    ? DECLARED_ALTERNATE_INPUTS[verb as keyof typeof DECLARED_ALTERNATE_INPUTS] : undefined;
+  return z.object({
+    ...requestBase, verb: z.literal(verb), args: alternate ? z.union([args, alternate.extend(argsBase).strict()]) : args,
+  }).strict();
+}) as DeclaredRequestSchema[];
 
 const documentPathArg = z.string().min(1).max(4096);
 // Each side of an edit is at most 256 KiB as UTF-8. The socket still refuses a
@@ -669,14 +711,8 @@ const accountDeletePreviewArgsSchema = z.object(argsBase).strict();
 const accountDeleteArgsSchema = ServerAccountDeleteRequest.extend(argsBase).strict();
 
 export const cliRequestSchema = z.discriminatedUnion("verb", [
-  z.object({ ...requestBase, verb: z.literal("chatLinks"), args: z.union([
-    ChatLinksInput.extend(argsBase).strict(), chatLinksGroupInputSchema.extend(argsBase).strict(),
-  ]) }).strict(),
-  z.object({ ...requestBase, verb: z.literal("chatFileMentions"), args: ChatFileMentionsInput.extend(argsBase).strict() }).strict(),
-  z.object({ ...requestBase, verb: z.literal("linksEdges"), args: LinksEdgesInput.extend(argsBase).strict() }).strict(),
-  z.object({ ...requestBase, verb: z.literal("linksIn"), args: LinksInInput.extend(argsBase).strict() }).strict(),
-  z.object({ ...requestBase, verb: z.literal("linksResolve"), args: LinksResolveInput.extend(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("stopSync"), args: z.object({ ...argsBase, agent: documentAgentNameSchema.optional() }).strict() }).strict(),
+  ...declaredRequestSchemas,
   z.object({ ...requestBase, verb: z.literal("shareCopy"), args: ShareCopyInput.extend(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("shareAgents"), args: ShareLinkAgentsInput.extend(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("shareDisconnect"), args: ShareLinkAgentDisconnectInput.extend(argsBase).strict() }).strict(),
@@ -799,14 +835,9 @@ export const APP_RESPONSE_CAPABILITIES = {
   undo: "app.responses.undo",
 } as const satisfies Record<OwnerAppResponsesRequest["action"], CapabilityId>;
 
-export const CLI_CAPABILITIES = {
+export const CLI_CAPABILITIES = distinct(mapNamed(DECLARED_VERBS, operation => [operation.capabilityId]), {
   stopSync: ["workspace.sync.stop"],
   link: ["work.reference.make"],
-  chatLinks: ["chat.read"],
-  chatFileMentions: ["chat.read"],
-  linksEdges: ["links.edges"],
-  linksIn: ["links.in"],
-  linksResolve: ["links.resolve"],
   shareCopy: ["share.copy.read"],
   shareAgents: ["share.link.agents.list"],
   shareDisconnect: ["share.link.agent.disconnect"],
@@ -883,7 +914,7 @@ export const CLI_CAPABILITIES = {
   dataset: Object.values(DATASET_CAPABILITIES),
   appPublication: Object.values(APP_PUBLICATION_CAPABILITIES),
   ownerAppResponses: Object.values(APP_RESPONSE_CAPABILITIES),
-} as const satisfies Record<CliVerb, readonly CapabilityId[]>;
+} as const) satisfies Record<CliVerb, readonly CapabilityId[]>;
 
 export type CliRequestWithoutToken = CliRequest extends infer Request
   ? Request extends CliRequest
@@ -2053,14 +2084,14 @@ const automationPressResultSchema = z.union([
   rawFailureSchema,
 ]);
 
-export const cliResultSchemas = {
+export const cliResultSchemas = distinct(mapNamed(DECLARED_VERBS, operation => operation.result) as {
+  readonly [Verb in DeclaredVerb]: DeclaredOperationOf<Verb>["result"];
+}, {
   stopSync: z.union([
     z.object({ ok: z.literal(true), workspaceId: z.string().min(1), workspaceSynced: z.literal(false),
       syncPause: WorkspaceSyncPauseStatus.optional() }).strict(),
     rawFailureSchema,
   ]),
-  chatLinks: ChatLinksPage,
-  chatFileMentions: ChatFileMentionsPage,
   // `link` goes in a message body as it is, and shows as a chip that opens
   // what it names for anyone who can see it.
   link: z.object({
@@ -2068,9 +2099,6 @@ export const cliResultSchemas = {
     link: z.string().regex(/^@\[work:[A-Za-z0-9_-]{43}\]$/),
     kind: z.enum(["chat", "thread", "message", "file", "collection"]),
   }).strict(),
-  linksEdges: LinksEdgesResult,
-  linksIn: LinksInResult,
-  linksResolve: LinksResolveResult,
   shareCopy: ShareCopyResult,
   shareAgents: ListRelayShareLinkAgentsResult,
   shareDisconnect: DisconnectRelayShareLinkAgentResult,
@@ -2188,7 +2216,7 @@ export const cliResultSchemas = {
     rawFailureSchema,
   ]),
   automationPress: automationPressResultSchema,
-} as const;
+} as const);
 
 export type CliResultByVerb = {
   [Verb in keyof typeof cliResultSchemas]: z.infer<(typeof cliResultSchemas)[Verb]>;

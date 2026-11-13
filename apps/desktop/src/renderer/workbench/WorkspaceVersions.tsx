@@ -22,7 +22,6 @@ import type {
 } from "../../ipc/bridgeContract";
 import {
   exceedsUtf8Bytes,
-  utf8ByteLength,
 } from "../../workspaces/workspaceTextLimits";
 import { bridge } from "../bridge";
 import { Overlay } from "../Overlay";

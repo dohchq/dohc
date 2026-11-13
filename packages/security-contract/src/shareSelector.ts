@@ -28,6 +28,12 @@ export function visibleSharePath(selector: { paths: readonly string[]; versionId
   return selected ? normalized : null;
 }
 
+/** Whether a chat link's path names a file the scope covers, spelled exactly as the scope reads it. No scope covers nothing. */
+export function shareCoversLinkPath(selector: { paths: readonly string[]; versionId: string | null } | null, path: string): boolean {
+  const prepared = selector ? prepareSharePath(path) : null;
+  return prepared !== null && prepared.path === path && visibleSharePath(selector!, prepared) !== null;
+}
+
 // The share selector's VERSION and ACCESS dimensions, as one rule in one
 // place.
 //

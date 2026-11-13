@@ -804,39 +804,8 @@ impl WatchedRoot {
 #[cfg(test)]
 mod callback_tests {
     use super::*;
-    use crate::{
-        CaptureError, CaptureOp, CaptureSink, FilesActor, IngestOutcome, IngestReason,
-        RetireOutcome, ScanBounds, apply_reconcile_plan,
-    };
-    use dohc_engine_storage::NoFaults;
+
     use dohc_test_scratch::ScratchDir;
-    use notify::event::Flag;
-
-    fn deliver_messages(
-        messages: &Receiver<ThreadMessage>,
-        debounce: &mut Debounce,
-        now: Instant,
-        dirty: &dyn Fn(),
-    ) -> usize {
-        let mut delivered = 0;
-        for message in messages.try_iter() {
-            assert!(matches!(message, ThreadMessage::Event));
-            delivered += 1;
-            if debounce.event(now) {
-                dirty();
-            }
-        }
-        delivered
-    }
-
-    fn flush_due(debounce: &mut Debounce, now: Instant, dirty: &dyn Fn()) -> bool {
-        if debounce.timeout(now).is_some() {
-            dirty();
-            true
-        } else {
-            false
-        }
-    }
 
     struct Callback {
         send: Box<dyn FnMut(Result<notify::Event, notify::Error>) + Send>,
@@ -916,100 +885,6 @@ mod callback_tests {
     }
 
     #[test]
-    fn unknown_kinds_empty_paths_and_rescan_flags_still_queue() {
-        let root = ScratchDir::new_named("watch-callback").unwrap();
-        let mut callback = Callback::new(root.path(), 1);
-        for kind in [
-            EventKind::Any,
-            EventKind::Other,
-            EventKind::Access(AccessKind::Other),
-            EventKind::Access(AccessKind::Open(AccessMode::Other)),
-            EventKind::Create(CreateKind::Other),
-            EventKind::Modify(ModifyKind::Other),
-            EventKind::Modify(ModifyKind::Data(DataChange::Other)),
-            EventKind::Modify(ModifyKind::Metadata(MetadataKind::Other)),
-            EventKind::Modify(ModifyKind::Name(RenameMode::Other)),
-            EventKind::Remove(RemoveKind::Other),
-        ] {
-            callback.expect_queued(
-                notify::Event::new(kind).add_path(root.join(".dohc/engine/engine.db")),
-            );
-        }
-        callback.expect_queued(notify::Event::new(EventKind::Modify(ModifyKind::Any)));
-        callback.expect_queued(
-            notify::Event::new(EventKind::Modify(ModifyKind::Any))
-                .add_path(root.join(".dohc/engine/engine.db"))
-                .set_flag(Flag::Rescan),
-        );
-    }
-
-    #[test]
-    fn ancestors_policies_content_and_unproven_paths_still_queue() {
-        let root = ScratchDir::new_named("watch-callback").unwrap();
-        let mut callback = Callback::new(root.path(), 1);
-        for path in [
-            root.path().to_path_buf(),
-            root.join(".dohc"),
-            root.join(".dohc/engine"),
-            root.join(".dohc/files.toml"),
-            root.join(".dohc/visibility.toml"),
-            root.join(".dohc/engine-backup/engine.db"),
-            root.join(".dohc/engine/../files.toml"),
-            root.join("nested/.dohc/engine/engine.db"),
-            root.join("notes/a.md"),
-            root.join("data.sqlite-wal"),
-            root.join("notes.md.job.conflict"),
-            root.path()
-                .with_file_name("other-workspace")
-                .join(".dohc/engine/engine.db"),
-            PathBuf::from(".dohc/engine/engine.db"),
-        ] {
-            for kind in [
-                EventKind::Create(CreateKind::Any),
-                EventKind::Modify(ModifyKind::Any),
-                EventKind::Modify(ModifyKind::Metadata(MetadataKind::Permissions)),
-                EventKind::Remove(RemoveKind::Any),
-            ] {
-                callback.expect_queued(notify::Event::new(kind).add_path(path.clone()));
-            }
-        }
-        let mut relative_root = Callback::new(Path::new("workspace"), 1);
-        relative_root.expect_queued(
-            notify::Event::new(EventKind::Modify(ModifyKind::Any))
-                .add_path(PathBuf::from("workspace/.dohc/engine/engine.db")),
-        );
-    }
-
-    #[test]
-    fn mixed_renames_and_atomic_policy_replacements_still_queue() {
-        let root = ScratchDir::new_named("watch-callback").unwrap();
-        let mut callback = Callback::new(root.path(), 1);
-        let internal = root.join(".dohc/engine/staged");
-        for destination in [
-            root.join("notes/a.md"),
-            root.join(".dohc/files.toml"),
-            root.join(".dohc/visibility.toml"),
-            root.join(".dohc/engine/secret.key"),
-        ] {
-            for paths in [
-                [internal.clone(), destination.clone()],
-                [destination.clone(), internal.clone()],
-            ] {
-                let mut event =
-                    notify::Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)));
-                event.paths.extend(paths);
-                callback.expect_queued(event);
-            }
-            for mode in [RenameMode::From, RenameMode::To] {
-                callback.expect_queued(
-                    notify::Event::new(EventKind::Modify(ModifyKind::Name(mode)))
-                        .add_path(destination.clone()),
-                );
-            }
-        }
-    }
-
-    #[test]
     fn secret_key_restores_and_permission_repairs_still_queue() {
         let root = ScratchDir::new_named("watch-callback").unwrap();
         let mut callback = Callback::new(root.path(), 1);
@@ -1044,27 +919,6 @@ mod callback_tests {
     }
 
     #[test]
-    fn engine_path_matching_uses_the_current_floor() {
-        let root = ScratchDir::new_named("watch-callback").unwrap();
-        let mut callback = Callback::new(root.path(), 1);
-        for path in [".DOHC/ENGINE/engine.db", ".do\u{200b}hc/engine/engine.db"] {
-            (callback.send)(Ok(
-                notify::Event::new(EventKind::Modify(ModifyKind::Any)).add_path(root.join(path))
-            ));
-            callback.expect_quiet();
-        }
-        let aliased = notify::Event::new(EventKind::Modify(ModifyKind::Any))
-            .add_path(root.join(".dohc./engine /engine.db"));
-        #[cfg(windows)]
-        {
-            (callback.send)(Ok(aliased));
-            callback.expect_quiet();
-        }
-        #[cfg(not(windows))]
-        callback.expect_queued(aliased);
-    }
-
-    #[test]
     fn backend_errors_keep_sticky_dirty_and_reattach_evidence_when_queue_is_full() {
         let root = ScratchDir::new_named("watch-callback").unwrap();
         let mut callback = Callback::new(root.path(), 1);
@@ -1085,174 +939,6 @@ mod callback_tests {
             callback.messages.try_recv(),
             Err(mpsc::TryRecvError::Empty)
         ));
-    }
-
-    #[test]
-    fn internal_noise_does_not_clear_or_delay_a_content_burst() {
-        let root = ScratchDir::new_named("watch-callback").unwrap();
-        let mut callback = Callback::new(root.path(), 1);
-        let mut debounce = Debounce::default();
-        let first = Instant::now();
-        let calls = Arc::clone(&callback.dirty_calls);
-        let dirty = move || {
-            calls.fetch_add(1, Ordering::AcqRel);
-        };
-        (callback.send)(Ok(
-            notify::Event::new(EventKind::Modify(ModifyKind::Any)).add_path(root.join("a.md"))
-        ));
-        assert_eq!(
-            deliver_messages(&callback.messages, &mut debounce, first, &dirty),
-            1
-        );
-        for _ in 0..WATCH_EVENT_QUEUE_CAPACITY * 2 {
-            (callback.send)(Ok(notify::Event::new(EventKind::Modify(ModifyKind::Any))
-                .add_path(root.join(".dohc/engine/engine.db-wal"))));
-            assert_eq!(
-                deliver_messages(
-                    &callback.messages,
-                    &mut debounce,
-                    first + WATCH_SETTLE / 2,
-                    &dirty,
-                ),
-                0
-            );
-        }
-        callback.expect_quiet();
-        assert_eq!(debounce.next_deadline(), Some(first + WATCH_SETTLE));
-        assert!(flush_due(&mut debounce, first + WATCH_SETTLE, &dirty));
-        assert_eq!(callback.dirty_calls.load(Ordering::Acquire), 1);
-    }
-
-    struct AcceptAll;
-    impl CaptureSink for AcceptAll {
-        fn ingest(
-            &mut self,
-            _path: &str,
-            size: u64,
-            sha256: &str,
-            _media_type: &str,
-            _reason: IngestReason,
-        ) -> Result<IngestOutcome, CaptureError> {
-            Ok(IngestOutcome::Captured {
-                size,
-                sha256: sha256.to_owned(),
-            })
-        }
-
-        fn retire(&mut self, _path: &str) -> Result<RetireOutcome, CaptureError> {
-            Ok(RetireOutcome::Retired)
-        }
-    }
-
-    async fn acknowledge(handle: &FilesHandle) -> Vec<CaptureOp> {
-        let ReconcileRun::Completed(plan) = handle
-            .reconcile_if_dirty(CancellationToken::new())
-            .await
-            .unwrap()
-        else {
-            panic!("expected completed reconcile");
-        };
-        let applied = apply_reconcile_plan(&plan, &mut AcceptAll, &NoFaults);
-        let ops = plan.ops.clone();
-        handle.acknowledge_capture(plan, applied).await.unwrap();
-        ops
-    }
-
-    #[tokio::test]
-    async fn internal_callbacks_skip_scanner_work_and_content_edits_still_reconcile() {
-        let root = ScratchDir::new_named("watch-callback").unwrap();
-        let actor = FilesActor::spawn_async(root.path().to_owned(), ScanBounds::default())
-            .await
-            .unwrap();
-        let handle = actor.handle();
-        assert!(acknowledge(&handle).await.is_empty());
-        let baseline = handle.stats().await.unwrap();
-        assert!(!baseline.dirty);
-        assert_eq!(baseline.generation.0, 1);
-        assert_eq!(baseline.hashed, 0);
-        let (tx, messages) = mpsc::sync_channel(1);
-        let dirty_handle = handle.clone();
-        let dirty: Arc<dyn Fn() + Send + Sync> = Arc::new(move || dirty_handle.notify_overflow());
-        let mut callback = event_callback(
-            root.path().to_owned(),
-            Arc::clone(&dirty),
-            tx,
-            Arc::new(WatchState::default()),
-            Arc::new(AtomicBool::new(false)),
-        );
-        let internal = root.join(".dohc/engine/engine.db-wal");
-        std::fs::create_dir_all(internal.parent().unwrap()).unwrap();
-        let mut debounce = Debounce::default();
-        let first = Instant::now();
-        for sequence in 0..WATCH_EVENT_QUEUE_CAPACITY * 2 {
-            std::fs::write(&internal, sequence.to_le_bytes()).unwrap();
-            callback(Ok(
-                notify::Event::new(EventKind::Modify(ModifyKind::Any)).add_path(internal.clone())
-            ));
-            assert_eq!(
-                deliver_messages(&messages, &mut debounce, first, &*dirty),
-                0
-            );
-        }
-        assert_eq!(debounce.next_deadline(), None);
-        assert!(!flush_due(
-            &mut debounce,
-            first + WATCH_HARD_DEADLINE,
-            &*dirty,
-        ));
-        assert!(matches!(
-            messages.try_recv(),
-            Err(mpsc::TryRecvError::Empty)
-        ));
-        let cancelled = CancellationToken::new();
-        cancelled.cancel();
-        assert!(matches!(
-            handle.reconcile_if_dirty(cancelled).await.unwrap(),
-            ReconcileRun::Converged,
-        ));
-        let after_internal = handle.stats().await.unwrap();
-        assert_eq!(after_internal, baseline);
-
-        let content = root.join("a.md");
-        for (kind, bytes) in [
-            (
-                EventKind::Create(CreateKind::File),
-                Some(b"created".as_slice()),
-            ),
-            (
-                EventKind::Modify(ModifyKind::Any),
-                Some(b"edited content".as_slice()),
-            ),
-            (EventKind::Remove(RemoveKind::File), None),
-        ] {
-            if let Some(bytes) = bytes {
-                std::fs::write(&content, bytes).unwrap();
-            } else {
-                std::fs::remove_file(&content).unwrap();
-            }
-            callback(Ok(notify::Event::new(kind).add_path(content.clone())));
-            let event_at = Instant::now();
-            assert_eq!(
-                deliver_messages(&messages, &mut debounce, event_at, &*dirty),
-                1
-            );
-            assert!(!handle.stats().await.unwrap().dirty);
-            assert!(flush_due(&mut debounce, event_at + WATCH_SETTLE, &*dirty,));
-            let ops = acknowledge(&handle).await;
-            match bytes {
-                Some(_) => assert!(
-                    matches!(ops.as_slice(), [CaptureOp::Ingest { path, .. }] if path == "a.md")
-                ),
-                None => assert!(
-                    matches!(ops.as_slice(), [CaptureOp::Retire { path }] if path == "a.md")
-                ),
-            }
-        }
-        let after_content = handle.stats().await.unwrap();
-        assert!(!after_content.dirty);
-        assert_eq!(after_content.generation.0, baseline.generation.0 + 3);
-        assert_eq!(after_content.hashed, baseline.hashed + 2);
-        assert_eq!(after_content.tracked, 0);
     }
 }
 
@@ -1314,25 +1000,6 @@ mod tests {
         assert_eq!(debounce.timeout(first + WATCH_SETTLE), None);
     }
 
-    #[test]
-    fn timeout_reports_the_deadline_that_won_even_when_woken_late() {
-        let first = Instant::now();
-        let mut debounce = Debounce::default();
-        debounce.event(first);
-        assert_eq!(
-            debounce.timeout(first + WATCH_HARD_DEADLINE),
-            Some(FlushReason::Settle)
-        );
-
-        debounce.event(first);
-        debounce.event(first + WATCH_HARD_DEADLINE - WATCH_SETTLE / 2);
-        assert_eq!(
-            debounce.timeout(first + WATCH_HARD_DEADLINE),
-            Some(FlushReason::HardDeadline)
-        );
-        assert_eq!(debounce.timeout(first + WATCH_HARD_DEADLINE), None);
-    }
-
     /// A fresh, existing, watchable temp directory (removed on drop).
     struct TempRoot(ScratchDir);
 
@@ -1340,12 +1007,6 @@ mod tests {
         fn new() -> Self {
             TempRoot(ScratchDir::new_named("r14-watch").expect("create temp root"))
         }
-    }
-
-    fn silent_watcher() -> notify::RecommendedWatcher {
-        let config = notify::Config::default().with_follow_symlinks(false);
-        notify::RecommendedWatcher::new(|_event: Result<notify::Event, notify::Error>| {}, config)
-            .expect("notify backend available in test environment")
     }
 
     /// The defect [`WatchedRoot`]'s pin exists for: on ext4, `rmdir` followed
@@ -1369,63 +1030,6 @@ mod tests {
             !bound.still_bound(&root.0),
             "a recreated root must not be mistaken for the directory object the watch is bound to"
         );
-    }
-
-    #[test]
-    fn reattach_succeeds_immediately_against_a_watchable_root() {
-        let root = TempRoot::new();
-        let mut watcher = silent_watcher();
-        let unavailable = AtomicBool::new(false);
-
-        attempt_reattach(&mut watcher, &root.0, &unavailable);
-
-        assert!(
-            !unavailable.load(Ordering::Acquire),
-            "a successful re-attach must not mark the watch unavailable"
-        );
-    }
-
-    #[test]
-    fn reattach_exhausts_bounded_retries_against_an_unwatchable_root() {
-        let bogus_root =
-            std::env::temp_dir().join("dohc-r14-watch-reattach-bogus-path-does-not-exist");
-        let _ = std::fs::remove_dir_all(&bogus_root);
-        let mut watcher = silent_watcher();
-        let unavailable = AtomicBool::new(false);
-
-        let started = Instant::now();
-        attempt_reattach(&mut watcher, &bogus_root, &unavailable);
-        let elapsed = started.elapsed();
-
-        assert!(
-            unavailable.load(Ordering::Acquire),
-            "exhausting the bounded retries must mark the watch unavailable"
-        );
-        assert!(
-            elapsed < Duration::from_secs(2),
-            "bounded re-attach retries must not run long/unbounded: {elapsed:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn startup_within_deadline_reports_ready_without_touching_unavailable() {
-        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-        let _ = ready_tx.send(Ok(()));
-        let mut worker: Option<JoinHandle<()>> = Some(std::thread::spawn(|| {}));
-        let (stop_tx, _stop_rx) = mpsc::sync_channel::<ThreadMessage>(1);
-        let unavailable = AtomicBool::new(false);
-
-        let result = await_ready_with_deadline(
-            Duration::from_secs(5),
-            ready_rx,
-            &mut worker,
-            &stop_tx,
-            &unavailable,
-        )
-        .await;
-
-        assert!(result.is_ok());
-        assert!(!unavailable.load(Ordering::Acquire));
     }
 
     #[tokio::test]

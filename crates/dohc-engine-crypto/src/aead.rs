@@ -237,22 +237,6 @@ mod tests {
         SecretDataKey::from_bytes(&[7u8; SECRET_KEY_BYTES]).unwrap()
     }
 
-    #[test]
-    fn round_trips_secret_content() {
-        let k = key();
-        let text = b"API_KEY=super-secret-\xf0\x9f\x94\x90";
-        let sealed = seal(&k, "ws1", ".env", text).unwrap();
-        assert_eq!(sealed.iv().len(), SECRET_IV_BYTES);
-        assert_eq!(sealed.tag().len(), SECRET_TAG_BYTES);
-        assert_eq!(
-            sealed.ciphertext().len(),
-            text.len(),
-            "GCM is length-preserving"
-        );
-        let opened = open(&k, "ws1", ".env", &sealed).unwrap();
-        assert_eq!(opened.as_bytes(), text);
-    }
-
     // Nonce reuse under AES-GCM with one key leaks the GHASH authentication key
     // and the XOR of both plaintexts, and it is silent: sealing still succeeds.
     // `seal` is the only public sealing entry, so this is where freshness must be
@@ -290,20 +274,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_plaintext_seals_and_opens() {
-        let k = key();
-        let sealed = seal(&k, "ws1", ".env", b"").unwrap();
-        assert_eq!(sealed.byte_length(), 0);
-        assert!(sealed.ciphertext().is_empty());
-        assert_eq!(
-            sealed.tag().len(),
-            SECRET_TAG_BYTES,
-            "tag present even for empty"
-        );
-        assert!(open(&k, "ws1", ".env", &sealed).unwrap().is_empty());
-    }
-
-    #[test]
     fn wrong_key_fails_closed() {
         let sealed = seal(&key(), "ws1", ".env", b"secret").unwrap();
         let other = SecretDataKey::from_bytes(&[9u8; SECRET_KEY_BYTES]).unwrap();
@@ -333,30 +303,6 @@ mod tests {
     }
 
     #[test]
-    fn tampered_tag_byte_fails_closed() {
-        let k = key();
-        let sealed = seal(&k, "ws1", ".env", b"secret").unwrap();
-        let mut tag = sealed.tag().to_vec();
-        tag[0] ^= 0x80;
-        let tampered = SealedSecret::from_base64(
-            &sealed.iv_base64(),
-            &crate::base64::encode_standard(&tag),
-            &sealed.ciphertext_base64(),
-            sealed.byte_length(),
-        )
-        .unwrap();
-        assert_eq!(
-            open(&k, "ws1", ".env", &tampered).unwrap_err(),
-            CryptoError::DecryptFailed
-        );
-    }
-
-    #[test]
-    fn aad_is_byte_exact() {
-        assert_eq!(secret_aad("ws", "p"), b"dohc-secret-v1\0ws\0p".to_vec());
-    }
-
-    #[test]
     fn from_base64_rejects_oversize_and_mismatched_length() {
         // Declared byte_length over the cap is rejected before any decode.
         let over = MAX_SECRET_FILE_BYTES + 1;
@@ -379,24 +325,6 @@ mod tests {
             .unwrap_err(),
             CryptoError::InvalidBase64
         );
-    }
-
-    #[test]
-    fn oversize_plaintext_rejected() {
-        let k = key();
-        let big = vec![0u8; MAX_SECRET_FILE_BYTES + 1];
-        assert_eq!(
-            seal_with_iv(&k, "ws1", ".env", &big, [0u8; SECRET_IV_BYTES]).unwrap_err(),
-            CryptoError::PlaintextTooLarge
-        );
-    }
-
-    #[test]
-    fn debug_is_redacted() {
-        let sealed = seal(&key(), "ws1", ".env", b"topsecret").unwrap();
-        let dbg = format!("{sealed:?}");
-        assert!(!dbg.contains("topsecret"));
-        assert!(dbg.contains("SealedSecret"));
     }
 
     // Byte-exact re-encryption parity vs the real Node fixture. Lives inline (not

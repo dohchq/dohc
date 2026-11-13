@@ -93,11 +93,6 @@ const OWNED_OP_ROUTES: &[(&str, OwnedRoute)] = &[
     ("relay.refused", OwnedRoute::RelayRefused),
 ];
 
-#[cfg(test)]
-pub(crate) fn owned_op_kinds() -> impl Iterator<Item = &'static str> {
-    OWNED_OP_ROUTES.iter().map(|(kind, _)| *kind)
-}
-
 /// Whether this engine knows the op kind at all.
 ///
 /// The share boundary asks so it can tell two refusals apart: a known kind a

@@ -38,7 +38,8 @@ export function observeSurface({ trigger = null, triggerKey = null, target, minC
       for (const frame of frames) cancelAnimationFrame(frame);
       if (eventName) window.removeEventListener(eventName, onTrigger, true);
       window.removeEventListener('focusin', onFocus, true);
-      error ? reject(error) : resolve(result);
+      if (error) reject(error);
+      else resolve(result);
     };
     const firstOf = selector => document.querySelector(selector);
     const result = fullTimedOut => ({ timeOrigin: performance.timeOrigin, installedMs, triggerMs, triggerTrusted, matchedMs: first.matchedMs, matchedIn: first.matchedIn, paintedMs: first.paintedMs,
@@ -144,7 +145,8 @@ export function observeSearchSubmit({ timeoutMs = 120000 } = {}) {
       if (loop !== null) cancelAnimationFrame(loop);
       for (const frame of frames) cancelAnimationFrame(frame);
       window.removeEventListener('keydown', onKeydown, true);
-      error ? reject(error) : resolve(value);
+      if (error) reject(error);
+      else resolve(value);
     };
     const deadline = setTimeout(() => finish(Error(`Search did not settle within ${timeoutMs}ms`)), timeoutMs);
     const visible = element => {

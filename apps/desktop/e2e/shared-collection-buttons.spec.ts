@@ -67,7 +67,7 @@ test("@two-client shared Buttons use host identity and show the named presser in
     await owner.page.evaluate(async workspaceId => (window as unknown as { dohcDesktop: DohcDesktopBridge }).dohcDesktop.cloudEnableSync({ workspaceId }), workspaceId);
     await expect.poll(async () => {
       const identity = relayAdoptedIdentity(relay!.dbPath, workspaceId);
-      const query = new URLSearchParams({ since: "0", limit: "1000", ...(identity ?? {}) });
+      const query = new URLSearchParams({ since: "0", limit: "1000", ...identity });
       const response = await relayJson(relay!.baseUrl, OWNER, `/sync/${workspaceId}/log?${query}`);
       return response.status === 200 && [`${COLLECTION}/automations.yaml`, `${COLLECTION}/Shared first.md`].every(path => response.body.includes(path));
     }, { timeout: 120_000 }).toBe(true);
@@ -95,7 +95,7 @@ test("@two-client shared Buttons use host identity and show the named presser in
     }, { workspaceId: recipientWorkspaceId, relativePath: `${COLLECTION}/Shared first.md` });
     await test.info().attach("received-record-text", { body: JSON.stringify(receivedText), contentType: "application/json" });
     const identity = relayAdoptedIdentity(relay.dbPath, workspaceId);
-    const log = await relayJson(relay.baseUrl, OWNER, `/sync/${workspaceId}/log?${new URLSearchParams({ since: "0", limit: "1000", ...(identity ?? {}) })}`);
+    const log = await relayJson(relay.baseUrl, OWNER, `/sync/${workspaceId}/log?${new URLSearchParams({ since: "0", limit: "1000", ...identity })}`);
     await test.info().attach("record-sync-ops", { body: JSON.stringify((JSON.parse(log.body) as { ops: Array<{ payload: { path?: string } }> }).ops.filter(op => op.payload.path === `${COLLECTION}/Shared first.md`)), contentType: "application/json" });
     const relayDb = new DatabaseSync(relay.dbPath, { readOnly: true });
     try {

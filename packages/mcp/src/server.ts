@@ -1,5 +1,3 @@
-import { ChatLinksInput } from "@dohc/workspace-contracts/chat-links";
-import { ChatFileMentionsInput, ChatFileMentionsPage } from "@dohc/workspace-contracts/chat-file-mentions";
 // The dohc MCP server. The user's AI tool (Claude Code, Codex) is the client,
 // launching it as a stdio child via its own config:
 //   { mcpServers: { dohc: { command, args: ["--workspace", root, "--home", home] } } }
@@ -8,7 +6,6 @@ import { ChatFileMentionsInput, ChatFileMentionsPage } from "@dohc/workspace-con
 // need one). Every tool routes through src/tools.ts, which contains all path
 // validation; this file is only registration + transport.
 
-import { LinksEdgesInput, LinksInInput, LinksResolveInput } from "@dohc/workspace-contracts/links";
 import { McpServer, type ToolCallback } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { pathToFileURL } from "node:url";
@@ -28,7 +25,7 @@ import {
 import {
   MCP_TOOL_CAPABILITIES,
   heldNoteChange,
-  chatLinks, chatFileMentions, makeLink, linksEdges, linksIn, linksResolve, readOperation, undoOperation, listVersions, compareVersion, listVersionConflicts, createVersion, switchVersion, mergeVersion, resolveVersionConflict,
+  DECLARED_TOOLS, requestDeclaredTool, makeLink, readOperation, undoOperation, listVersions, compareVersion, listVersionConflicts, createVersion, switchVersion, mergeVersion, resolveVersionConflict,
   getShareCopyDetails,
   listLinkAgents,
   disconnectLinkAgent,
@@ -241,11 +238,9 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async () => text(await stopWorkspaceSync(ctx, agentName())),
   );
 
-  register("dohc_chat_links",{description:"Read one bounded page of accessible files mentioned in a chat. Use channelWireId from dohc_list_groups, and continue nextCursor until null. Coverage can be partial.",inputSchema:ChatLinksInput.shape},async args=>text(await chatLinks(ctx,args)));
-  register("dohc_chat_file_mentions", { description: "Read a bounded page of accessible chat mentions of files. Optional subject selects one file. Continue nextCursor until null; complete and sharedChannelRowsUncovered report coverage.", inputSchema: ChatFileMentionsInput.shape }, async args => text(await chatFileMentions(ctx, args)));
-  register("dohc_links_edges", { description: "Read a bounded page of file links and isolated Markdown files and drawings. Continue nextCursor until null. indexBuilding reports active indexing; unchecked names uncertified sources; mountsCovered reports mount coverage.", inputSchema: LinksEdgesInput.shape }, async args => text(await linksEdges(ctx, args)));
-  register("dohc_links_in", { description: "Read a bounded page of documents linking to a file. indexBuilding reports active indexing; unchecked names omitted sources. complete excludes mount coverage, reported by mountsCovered. Cursors carry index state across pages.", inputSchema: LinksInInput.shape }, async args => text(await linksIn(ctx, args)));
-  register("dohc_links_resolve", { description: "Resolve wikilink or Markdown literals from one source document using the engine's link rules.", inputSchema: LinksResolveInput.shape }, async args => text(await linksResolve(ctx, args)));
+  for (const { mcp, input } of Object.values(DECLARED_TOOLS)) {
+    register(mcp.tool, { description: mcp.description, inputSchema: input.shape }, async args => text(await requestDeclaredTool(ctx, mcp.tool, args)));
+  }
   register("dohc_duplicate_file", {description: "Duplicate one regular file beside its source with a fresh identity. Owner workspace only. Undo removes the copy while it is unchanged.", inputSchema: {path: z.string()}}, async args => text(await duplicateWorkspaceFile(ctx, args, agentName())));
   register("dohc_read_operation", {
     description: "List the paths changed by one operation, up to 50 per page. Returns change references and paths without retained contents, and a file move's link update state. Owner workspace only.",

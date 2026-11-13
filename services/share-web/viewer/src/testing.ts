@@ -2,7 +2,11 @@
 import { act } from "react";
 import { vi } from "vitest";
 
-const SETTLE_TURN_LIMIT = 300;
+// Read before any test fakes timers, so settle's limit is real time.
+const now = performance.now.bind(performance);
+// Work off the main thread, such as a save's hash, can outlast hundreds of act
+// turns on a loaded host, so settle waits by time. 10 s matches expect.poll's.
+const SETTLE_TIME_LIMIT_MS = 10_000;
 
 export function jsonResponse(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), {
@@ -43,17 +47,20 @@ export function requestPath(input: RequestInfo | URL): string {
   return `${url.pathname}${url.search}`;
 }
 
-/** Runs act turns until `condition` holds; fails after a bounded number of turns. */
+/** Runs act turns until `condition` holds; fails after 10 s without it. */
 export async function settle(condition: () => boolean): Promise<void> {
-  for (let turn = 0; turn < SETTLE_TURN_LIMIT; turn += 1) {
+  const started = now();
+  for (;;) {
     await act(async () => {
       await Promise.resolve();
     });
     if (condition()) return;
+    if (now() - started >= SETTLE_TIME_LIMIT_MS) {
+      throw new Error(
+        `Condition did not settle within ${String(SETTLE_TIME_LIMIT_MS)} ms`,
+      );
+    }
   }
-  throw new Error(
-    `Condition did not settle within ${String(SETTLE_TURN_LIMIT)} act turns`,
-  );
 }
 
 /** Sets a controlled input's value the way a user would, so React sees the change. */

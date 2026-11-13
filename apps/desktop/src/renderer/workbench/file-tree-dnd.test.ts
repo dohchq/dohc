@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { planDrop, type DragSource } from './file-tree-dnd'
+import { planDrop } from './file-tree-dnd'
 
 // file-org-v1 D4.7 — drop-planning unit tests. Pure function;
 // no DOM, no async. Locks the move semantics.

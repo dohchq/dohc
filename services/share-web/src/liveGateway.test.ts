@@ -482,6 +482,69 @@ describe("private named live gateway", () => {
     expect(await state.browser().status).toBe(404);
   });
 
+  // The gateway pings both legs every half idle period: 200 ms here, so ten pings
+  // (one session re-check) take about 2 s.
+  const keepaliveLimits = { ...limits, idleTimeoutMs: 400 };
+  /** Answers the first `rounds` of the gateway's pings; returns how many arrived. */
+  function answer(peer: WebSocket, rounds = Infinity) {
+    let seen = 0;
+    peer.on("ping", data => { if (++seen <= rounds) peer.pong(data); });
+    return () => seen;
+  }
+
+  it("keeps an idle editor open while both legs answer the gateway's pings", async () => {
+    const state = await fixture({ limits: keepaliveLimits });
+    const client = state.browser();
+    expect(await client.status).toBe(101);
+    const hostPeer = state.hosts[0]!;
+    answer(client.socket);
+    const hostPings = answer(hostPeer);
+    // Twelve rounds outlast the idle limit six times and include one session re-check.
+    await vi.waitFor(() => {
+      expect(hostPings()).toBeGreaterThanOrEqual(12);
+      expect(state.resolve).toHaveBeenCalledTimes(2);
+    }, { timeout: 10_000, interval: 50 });
+    expect(client.socket.readyState).toBe(WebSocket.OPEN);
+    const atHost = once(hostPeer, "message");
+    client.socket.send(Buffer.from("to-host"));
+    expect(Buffer.from((await atHost)[0] as Buffer)).toEqual(Buffer.from("to-host"));
+    const atBrowser = once(client.socket, "message");
+    hostPeer.send(Buffer.from("to-browser"));
+    expect(Buffer.from((await atBrowser)[0] as Buffer)).toEqual(Buffer.from("to-browser"));
+  });
+
+  it.each(["browser", "host"])("closes both legs once the %s stops answering the gateway's pings", async silent => {
+    const state = await fixture({ limits: keepaliveLimits });
+    const client = state.browser();
+    expect(await client.status).toBe(101);
+    const hostPeer = state.hosts[0]!, hostClosed = once(hostPeer, "close");
+    // Three answered rounds keep the pair open past one idle period first.
+    const quietPeer = silent === "browser" ? client.socket : hostPeer;
+    answer(silent === "browser" ? hostPeer : client.socket);
+    let seen = 0, firstUnanswered = 0;
+    quietPeer.on("ping", data => { if (++seen <= 3) quietPeer.pong(data); else firstUnanswered ||= performance.now(); });
+    await Promise.all([client.closed, hostClosed]);
+    expect(seen).toBeGreaterThanOrEqual(4);
+    // The last answered round restarted the idle timer at most one ping earlier,
+    // so the pair closes within one idle period, well inside two.
+    expect(performance.now() - firstUnanswered).toBeLessThan(2 * keepaliveLimits.idleTimeoutMs);
+  });
+
+  it.each([["signed out", null], ["now under another grant", { ...session, grantId: "other" }], ["still waiting at the next check", "never"]] as const)(
+    "closes an answering editor when its session re-check finds it %s", async (_case, current) => {
+      const state = await fixture({ limits: keepaliveLimits });
+      const client = state.browser();
+      expect(await client.status).toBe(101);
+      if (current === "never") state.resolve.mockReturnValue(new Promise(() => {}));
+      else state.resolve.mockResolvedValue(current);
+      const hostPeer = state.hosts[0]!, hostClosed = once(hostPeer, "close");
+      answer(client.socket);
+      const hostPings = answer(hostPeer);
+      await Promise.all([client.closed, hostClosed]);
+      expect(state.resolve).toHaveBeenCalledTimes(2);
+      expect(hostPings()).toBeGreaterThanOrEqual(current === "never" ? 19 : 9);
+    });
+
   it("bounds shutdown when both peers stop reading", async () => {
     const state = await fixture({ limits: { ...limits, drainTimeoutMs: 20 } });
     const client = state.browser();

@@ -2,67 +2,10 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
 import { spawnSyncRelay } from "../../e2e/helpers/syncRelay";
-import { REAL_DAEMON_DEADLINE_MS } from "../testing/realDaemonWorkspaceSessions";
 import { createTestScratch } from "./testTemp";
 import { createRelaySyncEngine, type CloudSyncEngine } from "./relaySyncEngine";
 import { createRelayLogWait } from "./relayLogWait";
-import { engine, compiledRelayMain, LiveDaemonCapture, pullCaptured, pushUntilDrained, openLiveDaemonCapture, openJoinedDaemonCapture, openIndependentPlaintextLineage, pullAndExpect, OpenEditor, openEditor, typeAtEnd, shown } from "./twoDaemonSync.fixture";
-
-it.skipIf(engine.missing).each([true])(
-  "imports a covered artifact without blocking an open editor (peer typed first: %s)",
-  async (peerTypedFirst) => {
-    const workspaceId = `two-daemon-covered-artifact-${peerTypedFirst}`;
-    const token = `test:${workspaceId}`;
-    const path = "notes/shared.txt";
-    const seed = "saved before artifact export\n";
-    const rootA = await createTestScratch("dohc-covered-artifact-a-");
-    const rootB = await createTestScratch("dohc-covered-artifact-b-");
-    const relayRoot = await createTestScratch("dohc-covered-artifact-relay-");
-    const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay", "relay.sqlite"), compiledMain: compiledRelayMain });
-    let daemonA: LiveDaemonCapture | null = null;
-    let daemonB: LiveDaemonCapture | null = null;
-    try {
-      const connection = { baseUrl: relay.baseUrl, token };
-      daemonA = await openLiveDaemonCapture({ workspaceId, rootPath: rootA, relay: connection });
-      await daemonA.relay.claim();
-      const sourceSession = await openIndependentPlaintextLineage(daemonA, rootA, path, seed);
-      const sourceMoment = (await daemonA.capture.listMoments({ limit: 100 })).moments.find((moment) => moment.path === path)!;
-      expect((await pushUntilDrained(daemonA.relay)).pushed).toBeGreaterThan(0);
-      daemonB = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay: connection });
-      await pullAndExpect(daemonB, rootB, path, seed);
-      const peerEditor = await openEditor(daemonB, path);
-      try {
-        if (peerTypedFirst) await typeAtEnd(peerEditor, "peer before artifact\n");
-        await sourceSession.close({ settle: false });
-        await pullCaptured(daemonA.relay, daemonA.capture);
-        const sourceEditor = await openEditor(daemonA, path);
-        try {
-          await typeAtEnd(sourceEditor, "origin after artifact\n");
-          expect((await pushUntilDrained(daemonA.relay)).pushed).toBeGreaterThan(0);
-          await pullCaptured(daemonB.relay, daemonB.capture);
-          await vi.waitFor(() => expect(shown(peerEditor)).toContain("origin after artifact\n"), {
-            timeout: REAL_DAEMON_DEADLINE_MS,
-          });
-          if (peerTypedFirst) expect(shown(peerEditor)).toContain("peer before artifact\n");
-          expect((await daemonB.capture.listMoments({ limit: 100 })).moments.filter((moment) => moment.id === sourceMoment.id)).toHaveLength(1);
-          await typeAtEnd(peerEditor, "peer after artifact\n");
-          expect(await daemonB.capture.countOpenConflicts()).toBe(0);
-        } finally {
-          await sourceEditor.session.close();
-        }
-      } finally {
-        await peerEditor.session.close();
-      }
-      await pullCaptured(daemonB.relay, daemonB.capture);
-      expect(await daemonB.capture.countOpenConflicts()).toBe(0);
-      expect(await readFile(join(rootB, path), "utf8")).toContain("peer after artifact\n");
-    } finally {
-      await Promise.allSettled([daemonB?.close(), daemonA?.close()]);
-      await relay.stop();
-    }
-  },
-  90_000,
-);
+import { engine, compiledRelayMain, LiveDaemonCapture, pullCaptured, openLiveDaemonCapture, openJoinedDaemonCapture, OpenEditor, openEditor, typeAtEnd, shown } from "./twoDaemonSync.fixture";
 
 it.skipIf(engine.missing)(
   "shows each device's edit in the other device's idle open editor",

@@ -330,21 +330,6 @@ type SearchEnsureIndexParams = JsonObject & {
 
 type FileObject = typeof FileObjectSchema.Type;
 
-type SnapshotMetadata = JsonObject & {
-  workspaceId: string;
-  versionId: string;
-  objectId: string;
-  path: string;
-  contentKind: VersionedContentKind;
-  sha256: string;
-  byteLength: number;
-  updatedAtMs: number;
-  latestMomentId: string;
-  metadataOrigin: string;
-  metadataSummary?: string | null;
-  metadataCorrelationId?: string | null;
-};
-
 type BinaryWriteSnapshot = JsonObject & {
   objectId: string;
   path: string;
@@ -359,10 +344,6 @@ type BinaryWriteSnapshot = JsonObject & {
 export type MomentRecord = typeof MomentRecordSchema.Type;
 
 type VersionedTextWriteResult = typeof TextWriteResultSchema.Type;
-
-type VersionedTextReadMetadata = SnapshotMetadata & {
-  blobSha256: string;
-};
 
 export type VersionedTextReadValue = typeof VersionedTextReadValueSchema.Type;
 
@@ -439,12 +420,6 @@ type VersionsListResult = typeof VersionsListResultSchema.Type;
 type VersionsSetActiveResult = VersionRecord;
 type VersionsEnsureMainResult = VersionRecord;
 type VersionsActiveResult = VersionRecord | null;
-
-type MergeMaterializationResult = {
-  materializeEnqueued: boolean;
-  materialized: boolean;
-  materializeOutcome: MaterializeOutcome;
-};
 
 type VersionsMergeResult = typeof VersionsMergeResultSchema.Type;
 

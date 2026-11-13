@@ -1,6 +1,8 @@
 import {createLiveBufferBudget, LIVE_CONNECTION_LIMIT_CLOSE_CODE, liveConnectionLimitMessage, type LiveConnectionLimitCode} from "@dohc/live-session-contract/live-connection";
+import { randomBytes } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
+import { isDeepStrictEqual } from "node:util";
 import { WebSocket, WebSocketServer } from "ws";
 import { createLiveGatewayRequestParser } from "./liveGatewayRequest.js";
 
@@ -103,6 +105,11 @@ function untilCancelled<T>(pending: Promise<T>, signal: AbortSignal, dispose?: (
   });
 }
 
+// A named editor's account session is read again every this many keepalive
+// pings, about every 5 minutes at a 60 s idle timeout, so a sign-out closes an
+// editor that stays open.
+const SESSION_CHECK_PINGS = 10;
+
 /** Private transport: no production listener or admission defaults. */
 export function createLiveGateway(options: LiveGatewayOptions) {
   const parseRequest = createLiveGatewayRequestParser(options);
@@ -162,6 +169,7 @@ export function createLiveGateway(options: LiveGatewayOptions) {
     let route: LiveGatewayHostRoute | undefined;
     let release: (() => void) | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let keepalive: ReturnType<typeof setInterval> | undefined;
     let done = false;
     let draining = false, closingForLimit = false;
     let refusalCode: LiveConnectionLimitCode | undefined;
@@ -179,7 +187,7 @@ export function createLiveGateway(options: LiveGatewayOptions) {
     function stop() {
       if (done) return;
       done = true;
-      clearTimeout(timer);
+      clearTimeout(timer); clearInterval(keepalive);
       abort.abort();
       route?.invalidated.removeEventListener("abort", stop);
       const releaseConnection = () => { release?.(); connections.delete(stop); scopes.delete(stop); };
@@ -197,7 +205,7 @@ export function createLiveGateway(options: LiveGatewayOptions) {
     connections.set(stop, () => {
       if (!browser) { stop(); return; }
       draining = true;
-      clearTimeout(timer);
+      clearTimeout(timer); clearInterval(keepalive);
       timer = setTimeout(stop, limits.drainTimeoutMs);
       timer.unref();
       browser.close(1001);
@@ -297,6 +305,33 @@ export function createLiveGateway(options: LiveGatewayOptions) {
         host.on("message", (data, binary) => { if (binary) toBrowser(data); else stop(); });
         accepted.on("ping", data => toBrowser(data, true));
         host.on("ping", data => toHost(data, true));
+        // An idle editor sends no frames, so the gateway pings both legs. A pong
+        // restarts the idle timer only once both legs return this round's nonce,
+        // so while no frames flow, a leg that stops answering closes the pair.
+        let round: Buffer | undefined, browserAnswered = false, hostAnswered = false, pings = 0, checking = false;
+        const answered = (leg: WebSocket) => (data: Buffer) => {
+          if (done || draining || !round || !data.equals(round)) return;
+          if (leg === accepted) browserAnswered = true; else hostAnswered = true;
+          if (browserAnswered && hostAnswered) { round = undefined; touch(); }
+        };
+        accepted.on("pong", answered(accepted));
+        host.on("pong", answered(host));
+        const checkSession = async () => {
+          checking = true;
+          try {
+            const current = await resolveSession(request, parsed.session, abort.signal);
+            if (!done && (current === null || !isDeepStrictEqual(copiedSession(current), session))) stop();
+          } catch { stop(); } finally { checking = false; }
+        };
+        keepalive = setInterval(() => {
+          if (done || draining) return;
+          // A check still waiting when the next is due counts as failed.
+          if (session.kind === "named" && ++pings % SESSION_CHECK_PINGS === 0) { if (checking) { stop(); return; } void checkSession(); }
+          round = randomBytes(8); browserAnswered = false; hostAnswered = false;
+          const sent = (error?: Error) => { if (error) stop(); };
+          try { accepted.ping(round, undefined, sent); host.ping(round, undefined, sent); } catch { stop(); }
+        }, limits.idleTimeoutMs / 2);
+        keepalive.unref();
         touch();
         host.resume();
         socket.resume();
