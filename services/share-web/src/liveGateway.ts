@@ -9,6 +9,10 @@ import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { isDeepStrictEqual } from "node:util";
 import { WebSocket, WebSocketServer } from "ws";
+import {
+  NAMED_SESSION_CHECK_MAX_INTERVAL_MS,
+  NAMED_SESSION_CHECK_MIN_INTERVAL_MS,
+} from "@dohc/live-session-contract/named-session-check";
 import { createLiveGatewayRequestParser } from "./liveGatewayRequest.js";
 
 interface LiveGatewayScope {
@@ -186,6 +190,12 @@ const SESSION_CHECK_PINGS = 10;
 export function namedSessionCheckIntervalMs(limits: Pick<LiveGatewayLimits, "idleTimeoutMs">) {
   return (SESSION_CHECK_PINGS * limits.idleTimeoutMs) / 2;
 }
+
+/** The named gateway idle timeouts whose check interval the relay accepts. */
+export const NAMED_GATEWAY_IDLE_TIMEOUT_RANGE_MS = {
+  min: (2 * NAMED_SESSION_CHECK_MIN_INTERVAL_MS) / SESSION_CHECK_PINGS,
+  max: (2 * NAMED_SESSION_CHECK_MAX_INTERVAL_MS) / SESSION_CHECK_PINGS,
+} as const;
 
 /** Private transport: no production listener or admission defaults. */
 export function createLiveGateway(options: LiveGatewayOptions) {
