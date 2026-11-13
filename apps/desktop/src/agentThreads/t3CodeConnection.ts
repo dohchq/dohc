@@ -53,8 +53,11 @@ export function createT3CodeConnection(dependencies: {
 }): T3CodeConnection {
   const { store } = dependencies;
   let opening: Promise<T3CodeSession> | null = null;
-  // Counts the sign-ins kept, so a refusal of an older one cannot drop a newer one.
-  let kept = 0;
+  // Each change to the kept sign-in: a new one saved, or the kept one dropped.
+  // The count moves when a change starts, so a call made before it cannot
+  // drop what it keeps. A session opens only after the changes before it end.
+  let changes = 0;
+  let changing: Promise<unknown> = Promise.resolve();
 
   const address = async () => {
     const found = await readT3CodeAddress(dependencies.home);
@@ -72,7 +75,16 @@ export function createT3CodeConnection(dependencies: {
     );
   };
 
+  const change = <T>(work: () => Promise<T>): Promise<T> => {
+    changes += 1;
+    drop();
+    const done = changing.then(work, work);
+    changing = done.catch(() => undefined);
+    return done;
+  };
+
   const open = async (): Promise<T3CodeSession> => {
+    await changing;
     const signIn = await store.load();
     if (signIn === null) throw new T3CodeError("not-allowed", "dohc is not allowed in T3 Code.");
     const { origin } = await address();
@@ -80,15 +92,15 @@ export function createT3CodeConnection(dependencies: {
   };
 
   async function use<T>(call: (session: T3CodeSession) => Promise<T>): Promise<T> {
+    const made = changes;
     const current = (opening ??= open());
-    const signedIn = kept;
     try {
       return await call(await current);
     } catch (error) {
       if (opening === current) drop();
       // T3 Code no longer takes this sign-in, so dohc keeps it no longer.
-      if (error instanceof T3CodeError && error.problem === "not-allowed" && signedIn === kept)
-        await store.clear();
+      if (error instanceof T3CodeError && error.problem === "not-allowed" && made === changes)
+        await change(() => store.clear());
       throw error;
     }
   }
@@ -107,16 +119,11 @@ export function createT3CodeConnection(dependencies: {
         signal: input.signal,
         fetch: dependencies.fetch,
       });
-      await store.save(signIn);
-      kept += 1;
-      drop();
+      await change(() => store.save(signIn));
     },
     projects: () => use(listT3CodeProjects),
     threads: (input) => use((session) => listT3CodeThreads(session, input)),
     thread: (threadId) => use((session) => readT3CodeThread(session, threadId)),
-    async forget() {
-      drop();
-      await store.clear();
-    },
+    forget: () => change(() => store.clear()),
   };
 }

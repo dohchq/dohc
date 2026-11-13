@@ -166,7 +166,13 @@ describe("cliForThread", () => {
     });
   });
 
-  it("falls back to the bare name for a path double quotes cannot hold whole", () => {
+  it("keeps a name with spaces, dots, an apostrophe, and letters of any script", () => {
+    expect(
+      cliForThread("C:\\Users\\José O'Brien-Smith.w\\cli-bin\\dohc.cmd", "win32").program,
+    ).toBe(`"C:/Users/José O'Brien-Smith.w/cli-bin/dohc.cmd"`);
+  });
+
+  it("gives no program for a path some shell would not read whole, and never a bare name", () => {
     for (const path of [
       '/home/a"b/dohc',
       "/home/$HOME/dohc",
@@ -175,12 +181,34 @@ describe("cliForThread", () => {
       "C:\\Users\\%USERNAME%\\dohc.cmd",
       "/home/a!b/dohc",
       `/home/a${at(0x0a)}b/dohc`,
+      // PowerShell reads curly quotes as double quotes.
+      `C:\\Users\\r${at(0x201d)};echo x;&${at(0x201c)}x\\dohc.cmd`,
+      `C:\\Users\\a${at(0x201e)}b\\dohc.cmd`,
+      // cmd.exe splits a line here when Git Bash hands it a .cmd path with no space.
+      "C:\\Users\\R&D\\dohc.cmd",
+      "C:\\Users\\a|b\\dohc.cmd",
+      "C:\\Users\\a^b\\dohc.cmd",
+      "C:\\Users\\a(b)\\dohc.cmd",
+      "C:\\Users\\a;b\\dohc.cmd",
+      "C:\\Users\\a,b\\dohc.cmd",
+      "C:\\Users\\a=b\\dohc.cmd",
+      "C:\\Users\\a<b>\\dohc.cmd",
+      `C:\\Users\\a${at(0xa0)}b\\dohc.cmd`,
     ]) {
       const cli = cliForThread(path, path.startsWith("C:") ? "win32" : "linux");
 
-      expect(cli.program).toBe("dohc");
-      expect(cli.notes).toEqual(["Do not install or download a program named dohc."]);
+      expect(cli, path).toEqual({ program: null, notes: [] });
     }
+  });
+
+  it("says the thread cannot reply when there is no program to name", () => {
+    const text = forwardedMessageText(message({ cli: { program: null, notes: [] } }));
+
+    expect(lines(text).at(-1)).toBe(
+      "dohc can't write its program's path in a command on this computer, so you can't reply there. Do not run another program named dohc.",
+    );
+    expect(text).not.toContain("chat reply");
+    expect(text).not.toContain("chat show");
   });
 
   it("puts the program in each command and its notes on one line after them", () => {

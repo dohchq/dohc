@@ -73,7 +73,12 @@ export function createForwarding(dependencies: ForwardingDependencies) {
   const { chats } = dependencies;
   const retryAfterMs = dependencies.retryAfterMs ?? RETRY_AFTER_MS;
   // A workspace's messages go out one at a time. A wake during that work runs it once more.
-  const working = new Map<string, { again: boolean; stale: boolean; done: Promise<void> }>();
+  // `left` ends work for a workspace that left this computer: it sends nothing
+  // more, reports nothing, and waits for no other try.
+  const working = new Map<
+    string,
+    { again: boolean; stale: boolean; left: boolean; done: Promise<void> }
+  >();
   const retries = new Map<string, { attempt: number; timer?: ReturnType<typeof setTimeout> }>();
   const stuck = new Set<string>();
   let stopped = false;
@@ -164,24 +169,28 @@ export function createForwarding(dependencies: ForwardingDependencies) {
   }
 
   /**
-   * Forwards what each agent has unread, while `live` holds. False when
+   * Forwards what each agent has unread, while `live` holds, and tells `say`
+   * what stopped an agent's messages or that they go again. False when
    * something stopped an agent's messages.
    */
-  async function forwardUnread(workspaceId: string, live: () => boolean): Promise<boolean> {
+  async function forwardUnread(
+    workspaceId: string,
+    live: () => boolean,
+    say: (agentId: string | null, problem: unknown) => void,
+  ): Promise<boolean> {
     let workspace: Awaited<ReturnType<ForwardingDependencies["workspace"]>>;
     try {
       workspace = await dependencies.workspace(workspaceId);
     } catch (error) {
-      report(workspaceId, null, error);
+      say(null, error);
       return false;
     }
-    report(workspaceId, null, null);
+    say(null, null);
     // An agent that no longer serves the workspace has nothing waiting there.
     const serving = new Set(workspace?.agents.map((agent) => agent.id));
     for (const key of [...stuck]) {
       const [stuckIn, agentId] = key.split("\n");
-      if (stuckIn === workspaceId && agentId && !serving.has(agentId))
-        report(workspaceId, agentId, null);
+      if (stuckIn === workspaceId && agentId && !serving.has(agentId)) say(agentId, null);
     }
     if (!workspace) return true;
     let reached = true;
@@ -191,10 +200,10 @@ export function createForwarding(dependencies: ForwardingDependencies) {
           forwardOne({ id: workspaceId, name: workspace.name }, agent, request, live),
         );
         if (!walked) return reached;
-        report(workspaceId, agent.id, null);
+        say(agent.id, null);
       } catch (error) {
         reached = false;
-        report(workspaceId, agent.id, error);
+        say(agent.id, error);
       }
     }
     return reached;
@@ -210,26 +219,30 @@ export function createForwarding(dependencies: ForwardingDependencies) {
       return current.done;
     }
     clearTimeout(retries.get(workspaceId)?.timer);
-    const work = { again: false, stale: false, done: Promise.resolve() };
+    const work = { again: false, stale: false, left: false, done: Promise.resolve() };
     working.set(workspaceId, work);
     // A change to an agent's settings ends the pass at its next message, and
     // the next pass reads the agents again. So an agent turned off, or
     // pointed at another thread, gets nothing more from a pass that started
     // before the change. A chat write lets the pass go on, so writes that
     // keep coming cannot hold a message back.
-    const live = () => !stopped && !work.stale;
+    const live = () => !stopped && !work.stale && !work.left;
+    const say = (agentId: string | null, problem: unknown) => {
+      if (!work.left) report(workspaceId, agentId, problem);
+    };
     work.done = (async () => {
       let reached = false;
       try {
         do {
           work.again = false;
           work.stale = false;
-          reached = await forwardUnread(workspaceId, live);
-        } while (work.again && !stopped);
+          reached = await forwardUnread(workspaceId, live, say);
+        } while (work.again && !stopped && !work.left);
       } finally {
-        working.delete(workspaceId);
+        // Work that began after this workspace left and came back is not this one's to end.
+        if (working.get(workspaceId) === work) working.delete(workspaceId);
       }
-      if (stopped) return;
+      if (stopped || work.left) return;
       if (reached) {
         retries.delete(workspaceId);
         return;
@@ -266,8 +279,17 @@ export function createForwarding(dependencies: ForwardingDependencies) {
       });
       for (const request of last.values()) await markRead(workspaceId, agent, request);
     },
-    /** Ends the wait to try a workspace again, and takes back its problems. Call it when the workspace leaves this computer. */
+    /**
+     * Ends a workspace's work and its wait to try again, and takes back its
+     * problems. A message already handed to the tool still arrives. Call it
+     * when the workspace leaves this computer.
+     */
     leave(workspaceId: string): void {
+      const work = working.get(workspaceId);
+      if (work) {
+        work.left = true;
+        working.delete(workspaceId);
+      }
       clearTimeout(retries.get(workspaceId)?.timer);
       retries.delete(workspaceId);
       for (const key of [...stuck]) {

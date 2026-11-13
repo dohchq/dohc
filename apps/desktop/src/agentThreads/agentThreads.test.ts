@@ -18,7 +18,13 @@ const { launch: _launch, ...unlaunched } = testAgent();
 const thread = { tool: "t3-code" as const, id: "t3-thread-1" };
 const chief = { ...unlaunched, name: "Chief", enabled: true, thread, workspaces: [WORKSPACE] };
 
-function setup(agents: Record<string, unknown>, unread: string[] = ["m1"]) {
+const otherThread = (id: string) => ({ ...thread, id });
+
+function setup(
+  agents: Record<string, unknown>,
+  unread: string[] = ["m1"],
+  cli: AgentThreadsDependencies["cli"] = { program: "dohc", notes: [] },
+) {
   let settings = AgentsSettings.parse(agents);
   const sent: Sent[] = [];
   const order: string[] = [];
@@ -51,7 +57,7 @@ function setup(agents: Record<string, unknown>, unread: string[] = ["m1"]) {
   });
   const forget = vi.fn(async () => {});
   const agentThreads = createAgentThreads({
-    cli: { program: "dohc", notes: [] },
+    cli,
     t3Code: { forward, forget } as unknown as T3CodeConnection,
     chats,
     readSettings: async () => ({ agents: settings }),
@@ -93,8 +99,13 @@ describe("agent threads", () => {
     const { agentThreads, sent, readers } = started(
       setup({
         chief,
-        elsewhere: { ...chief, name: "Elsewhere", workspaces: ["ws-2"] },
-        paused: { ...chief, name: "Paused", enabled: false },
+        elsewhere: {
+          ...chief,
+          name: "Elsewhere",
+          thread: otherThread("t3-thread-2"),
+          workspaces: ["ws-2"],
+        },
+        paused: { ...chief, name: "Paused", thread: otherThread("t3-thread-3"), enabled: false },
         started: testAgent({ name: "Started", enabled: true }),
       }),
     );
@@ -166,7 +177,7 @@ describe("agent threads", () => {
 
   it("drops dohc's sign-in when the last agent with a thread is removed", async () => {
     const { agentThreads, forget, save } = started(
-      setup({ chief, other: { ...chief, name: "Other" } }, []),
+      setup({ chief, other: { ...chief, name: "Other", thread: otherThread("t3-thread-2") } }, []),
     );
     agentThreads.watch(WORKSPACE);
     await settled();
@@ -197,6 +208,40 @@ describe("agent threads", () => {
     agentThreads.settingsChanged();
     await settled();
     expect(forget).toHaveBeenCalledTimes(1);
+  });
+
+  it("lets no older look at the agents overwrite a newer one", async () => {
+    const { agentThreads, forget, save } = started(setup({ chief }, []));
+    agentThreads.watch(WORKSPACE);
+    await settled();
+    // The drop for the removed agent is still going when the agent comes back.
+    let release!: () => void;
+    forget.mockImplementationOnce(() => new Promise<void>((resolve) => (release = resolve)));
+    save({});
+    agentThreads.settingsChanged();
+    await vi.waitFor(() => expect(forget).toHaveBeenCalledTimes(1));
+    save({ chief });
+    agentThreads.settingsChanged();
+    release();
+    await settled();
+
+    save({});
+    agentThreads.settingsChanged();
+
+    await vi.waitFor(() => expect(forget).toHaveBeenCalledTimes(2));
+  });
+
+  it("connects nothing when dohc cannot name its program in a command", async () => {
+    const { agentThreads, forward, order } = started(
+      setup({}, ["m1"], { program: null, notes: [] }),
+    );
+
+    await expect(
+      agentThreads.connect(WORKSPACE, { id: "chief", name: "Chief", thread }),
+    ).rejects.toThrow("Install dohc in another folder.");
+
+    expect(forward).not.toHaveBeenCalled();
+    expect(order).toEqual([]);
   });
 
   it("forwards nothing for a workspace that left this computer, and tries again only for one it watches", async () => {

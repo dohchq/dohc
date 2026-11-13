@@ -2904,6 +2904,11 @@ const removePhysicalWorkspace = createPhysicalWorkspaceRemoval({
     removeWorkspace(workspaceId);
     // The declarations ledger still names it under its account, so the next publish withdraws it there.
     void chatWakes.runnersChanged();
+    // Every removal comes through here, a forgotten workspace and a join that
+    // was undone alike. Forwarding lets the workspace go and files nothing after.
+    cachedAgentThreads?.unwatch(workspaceId);
+    forwardProblems.delete(workspaceId);
+    chatDispatchNotices.clear(workspaceId, "forward-stuck");
   },
   confirmDraftRemoval: async (workspaceId) => {
     await flushTypingCheckpoints(workspaceId);
@@ -2939,12 +2944,7 @@ const forgetWorkspace = createWorkspaceForget({
   removePhysicalWorkspace,
   trust: workspaceTrust,
   forgottenShareViews,
-  clearNotices: (workspaceId) => {
-    // The forwarder lets the workspace go first, so it files no row after this.
-    cachedAgentThreads?.unwatch(workspaceId);
-    forwardProblems.delete(workspaceId);
-    chatDispatchNotices.clearWorkspace(workspaceId);
-  },
+  clearNotices: (workspaceId) => chatDispatchNotices.clearWorkspace(workspaceId),
   notifyRenderer,
 });
 

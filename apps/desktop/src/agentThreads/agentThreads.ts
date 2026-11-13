@@ -100,13 +100,20 @@ export function createAgentThreads(dependencies: AgentThreadsDependencies) {
   let hadThreadAgent: boolean | null = null;
   // dohc drops its sign-in when the last agent that needs it is removed
   // (ADR 0016). At the first look nothing was there before, so a sign-in no
-  // agent needs is dropped then too. A drop that fails is tried at the next change.
-  async function keepOrDropSignIn(): Promise<void> {
-    const { agents } = await dependencies.readSettings();
-    const has = Object.values(agents).some((agent) => agent.thread !== undefined);
-    if (!has && hadThreadAgent !== false) await dependencies.t3Code.forget();
-    hadThreadAgent = has;
-  }
+  // agent needs is dropped then too. A drop that fails is tried at the next
+  // change. One look runs at a time, in order, so an older look cannot
+  // overwrite what a newer one saw.
+  let looking: Promise<void> = Promise.resolve();
+  const keepOrDropSignIn = (): void => {
+    looking = looking
+      .then(async () => {
+        const { agents } = await dependencies.readSettings();
+        const has = Object.values(agents).some((agent) => agent.thread !== undefined);
+        if (!has && hadThreadAgent !== false) await dependencies.t3Code.forget();
+        hadThreadAgent = has;
+      })
+      .catch(() => undefined);
+  };
 
   return {
     /** Forwards this workspace's messages from now on. Call it when the workspace opens. */
@@ -116,7 +123,7 @@ export function createAgentThreads(dependencies: AgentThreadsDependencies) {
           workspaceId,
           subscribeChatWrites(workspaceId, () => void forwarding.wake(workspaceId)),
         );
-      if (hadThreadAgent === null) void keepOrDropSignIn().catch(() => undefined);
+      if (hadThreadAgent === null) keepOrDropSignIn();
       void forwarding.wake(workspaceId);
     },
     /** Stops forwarding a workspace's messages. Call it when the workspace leaves this computer. */
@@ -131,7 +138,7 @@ export function createAgentThreads(dependencies: AgentThreadsDependencies) {
     },
     /** Call it after settings are saved, so work that started before the change stops. */
     settingsChanged(): void {
-      void keepOrDropSignIn().catch(() => undefined);
+      keepOrDropSignIn();
       for (const workspaceId of watched.keys()) void forwarding.wake(workspaceId, true);
     },
     /**
@@ -146,6 +153,12 @@ export function createAgentThreads(dependencies: AgentThreadsDependencies) {
     ): Promise<void> {
       const workspace = dependencies.workspace(workspaceId);
       if (!workspace) throw new Error("This computer no longer has this workspace.");
+      // The thread replies with a command that names dohc's program. Without
+      // one it could not reply, so dohc connects nothing.
+      if (dependencies.cli.program === null)
+        throw new Error(
+          "dohc can't connect a thread from the folder it is installed in. The folder's name has a character a command can't carry, such as & or $. Install dohc in another folder.",
+        );
       const reaching = served(agent, workspace);
       if (!reaching) throw new Error("Give this agent a name with a letter or digit.");
       await forwarding.setAside(workspaceId, reaching);

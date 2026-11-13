@@ -175,6 +175,17 @@ export const AgentsSettings = z
     {
       message: "Only the default agent keeps a name from before agents had ids.",
     },
+  )
+  // One thread is one agent. Two agents on it would put two workspaces'
+  // messages in one conversation with no warning (ADR 0016).
+  .refine(
+    (agents) => {
+      const threads = Object.values(agents).flatMap(({ thread }) =>
+        thread ? [`${thread.tool}\n${thread.id}`] : [],
+      );
+      return new Set(threads).size === threads.length;
+    },
+    { message: "Give each agent its own thread." },
   );
 export type AgentsSettings = z.infer<typeof AgentsSettings>;
 
@@ -418,7 +429,11 @@ export function agentProblem(id: string, entry: unknown): string {
   }
   const fields = entry as Record<string, unknown>;
   const alone = AgentsSettings.safeParse({ [id]: entry });
-  if (alone.success) return "Another agent has this name.";
+  // The entry is sound alone, so it clashes with an agent the file lists first.
+  if (alone.success)
+    return hasKey(fields, "thread")
+      ? "Another agent has this name or this thread."
+      : "Another agent has this name.";
   const issue = alone.error.issues[0]!;
   if (issue.code === "unrecognized_keys") return `dohc doesn't use \`${issue.keys[0]}\`.`;
   const key = issue.path[1];

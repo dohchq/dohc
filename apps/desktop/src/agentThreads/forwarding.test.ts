@@ -464,6 +464,35 @@ describe("forwarding", () => {
     ]);
   });
 
+  it("ends work for a workspace that leaves while a message is on its way", async () => {
+    vi.useFakeTimers();
+    const { forwarding, tool, problems, marks } = setup([request("m1", 10), request("m2", 20)]);
+    let fail!: (error: Error) => void;
+    let onItsWay!: () => void;
+    const sending = new Promise<void>((resolve) => (onItsWay = resolve));
+    tool.forward.mockImplementationOnce(() => {
+      onItsWay();
+      return new Promise<undefined>((_resolve, reject) => (fail = reject));
+    });
+
+    const work = forwarding.wake(WORKSPACE);
+    await sending;
+    forwarding.leave(WORKSPACE);
+    fail(new Error("down"));
+    await work;
+
+    // Nothing is reported, no other message goes out, and nothing waits to try again.
+    expect(problems).toEqual([]);
+    expect(tool.forward).toHaveBeenCalledTimes(1);
+    expect(marks).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+
+    // The workspace comes back: its messages go out as for any workspace.
+    await forwarding.wake(WORKSPACE);
+    expect(tool.forward).toHaveBeenCalledTimes(3);
+    expect(marks).toEqual(["m1", "m2"]);
+  });
+
   it("keeps each workspace's messages in that workspace", async () => {
     // Two workspaces hold a message with the same id, in a chat thread with
     // the same id, for an agent with the same id.

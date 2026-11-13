@@ -361,12 +361,30 @@ describe("desktop user settings model", () => {
 
   it("forwards a workspace's messages to each agent that is on, has a thread, and serves it", () => {
     const { launch: _launch, ...unlaunched } = testAgent();
-    const thread = { tool: "t3-code" as const, id: "thread-1" };
+    const thread = (id: string) => ({ thread: { tool: "t3-code" as const, id } });
     const agents = AgentsSettings.parse({
-      chief: { ...unlaunched, name: "Chief", enabled: true, thread, workspaces: ["ws-1", "ws-2"] },
-      paused: { ...unlaunched, name: "Paused", enabled: false, thread, workspaces: ["ws-1"] },
-      elsewhere: { ...unlaunched, name: "Elsewhere", enabled: true, thread, workspaces: ["ws-2"] },
-      nowhere: { ...unlaunched, name: "Nowhere", enabled: true, thread },
+      chief: {
+        ...unlaunched,
+        name: "Chief",
+        enabled: true,
+        ...thread("t-1"),
+        workspaces: ["ws-1", "ws-2"],
+      },
+      paused: {
+        ...unlaunched,
+        name: "Paused",
+        enabled: false,
+        ...thread("t-2"),
+        workspaces: ["ws-1"],
+      },
+      elsewhere: {
+        ...unlaunched,
+        name: "Elsewhere",
+        enabled: true,
+        ...thread("t-3"),
+        workspaces: ["ws-2"],
+      },
+      nowhere: { ...unlaunched, name: "Nowhere", enabled: true, ...thread("t-4") },
       started: testAgent({ name: "Started", enabled: true }),
       connected: { ...unlaunched, name: "Connected", enabled: false },
     });
@@ -379,6 +397,33 @@ describe("desktop user settings model", () => {
     // An agent with a thread posts as itself, like any agent dohc does not start.
     expect(agentYouRun({ agents }, "chief")?.name).toBe("Chief");
     expect(agentIdsToWake({ agents }, "@Chief hello", "chief")).toEqual([]);
+  });
+
+  it("gives each agent its own thread", () => {
+    const { launch: _launch, ...unlaunched } = testAgent();
+    const onThread = (name: string, id: string) => ({
+      ...unlaunched,
+      name,
+      enabled: true,
+      thread: { tool: "t3-code" as const, id },
+      workspaces: ["ws-1"],
+    });
+
+    expect(
+      AgentsSettings.safeParse({ chief: onThread("Chief", "t-1"), scout: onThread("Scout", "t-2") })
+        .success,
+    ).toBe(true);
+    const shared = AgentsSettings.safeParse({
+      chief: onThread("Chief", "t-1"),
+      scout: onThread("Scout", "t-1"),
+    });
+    expect(shared.success).toBe(false);
+    expect(shared.error?.issues[0]?.message).toBe("Give each agent its own thread.");
+    // Sound alone, so Settings says what it clashes with.
+    expect(agentProblem("scout", onThread("Scout", "t-1"))).toBe(
+      "Another agent has this name or this thread.",
+    );
+    expect(agentProblem("agent-b", testAgent())).toBe("Another agent has this name.");
   });
 
   it("says what is wrong with an agent entry in one sentence about its first problem", () => {

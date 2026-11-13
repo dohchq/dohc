@@ -119,7 +119,7 @@ export function T3CodeAllow(props: { access: T3CodeAccess; size?: "row" }) {
         T3 Code asks in your browser what dohc may do there.
       </p>
       <p className="m-0">
-        dohc can then message any of your threads in T3 Code that runs with the mode you pick, or
+        dohc can then message any of your threads in T3 Code that run with the mode you pick, or
         less. A thread with full access needs Full access. dohc messages only the threads you
         connect to agents.
       </p>

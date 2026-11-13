@@ -157,6 +157,42 @@ describe("dohc's connection to T3 Code", () => {
     await forward("f2");
   });
 
+  it("gives a call made while a new sign-in is being saved the new sign-in", async () => {
+    const { t3, home, store } = await setup();
+    await store.save({ origin: t3.origin, token: "revoked", expiresAtMs: Date.now() + 60_000 });
+    // A store whose save waits, as a slow disk does.
+    let saving!: () => void;
+    const savingStarted = new Promise<void>((resolve) => (saving = resolve));
+    let finishSave!: () => void;
+    const held = new Promise<void>((resolve) => (finishSave = resolve));
+    const connection = createT3CodeConnection({
+      home,
+      store: {
+        ...store,
+        save: async (signIn) => {
+          saving();
+          await held;
+          await store.save(signIn);
+        },
+      },
+    });
+
+    const allowed = connection.signIn({ open: browser });
+    await savingStarted;
+    const sent = connection.forward({
+      threadId: "t1",
+      message: "hello",
+      how: "line",
+      forwardId: "f1",
+    });
+    finishSave();
+    await allowed;
+
+    // The call waited for the save: it was not refused, and it dropped nothing.
+    await sent;
+    expect((await store.load())?.token).toBe("token-1");
+  });
+
   it("forgets the sign-in on request", async () => {
     const { connection, forward } = await setup();
     await connection.signIn({ open: browser });
