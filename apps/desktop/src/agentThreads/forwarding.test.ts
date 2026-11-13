@@ -45,44 +45,55 @@ const after = (
   row.createdAtMs > place.createdAtMs ||
   (row.createdAtMs === place.createdAtMs && row.messageId > place.messageId);
 
-/** Chats that keep each thread's read place the way the engine does: it only moves forward. */
+/** Chats that keep each agent's read place in a thread the way the engine does: it only moves forward. */
 function fakeChats(requests: Request[]) {
   const read = new Map<string, { createdAtMs: number; messageId: string }>();
+  const place = (reader: ServedAgent["reader"], threadId: string) =>
+    `${reader.agentId}
+${threadId}`;
   const marks: string[] = [];
   let failMark = false;
+  let beforeThread: () => Promise<void> = async () => {};
   const chats = {
     listAgentRequestsPage: async (input: Parameters<Chats["listAgentRequestsPage"]>[0]) => {
       const rows = requests
-        .filter((row) => after(row, read.get(row.threadId)) && after(row, input.after))
+        .filter(
+          (row) =>
+            after(row, read.get(place(input.reader as ServedAgent["reader"], row.threadId))) &&
+            after(row, input.after),
+        )
         .sort((a, b) => a.createdAtMs - b.createdAtMs || a.messageId.localeCompare(b.messageId));
       const limit = input.limit ?? 50;
       return { requests: rows.slice(0, limit), more: rows.length > limit };
     },
     markThreadReadByAgent: async (input: Parameters<Chats["markThreadReadByAgent"]>[0]) => {
       if (failMark) throw new Error("the engine is busy");
-      if (after(input.upTo, read.get(input.threadId))) read.set(input.threadId, input.upTo);
+      const key = place(input.reader as ServedAgent["reader"], input.threadId);
+      if (after(input.upTo, read.get(key))) read.set(key, input.upTo);
       marks.push(input.upTo.messageId);
     },
-    getThread: async (input: Parameters<Chats["getThread"]>[0]) => ({
-      thread: {
-        id: input.threadId,
-        title: `title of ${input.threadId}`,
-        ...(input.threadId === "thread-file"
-          ? { linkedFile: { pathHint: "plans/release.md" } }
-          : {}),
-      },
-    }),
-    listThreadAttachments: async () => [
-      { messageId: "m1", pathHint: "notes/build.md" },
-      { messageId: "m1" },
-      { messageId: "other", pathHint: "elsewhere.md" },
-    ],
+    getThread: async (input: Parameters<Chats["getThread"]>[0]) => {
+      await beforeThread();
+      return {
+        thread: {
+          id: input.threadId,
+          title: `title of ${input.threadId}`,
+          ...(input.threadId === "thread-file"
+            ? { linkedFile: { pathHint: "plans/release.md" } }
+            : {}),
+        },
+      };
+    },
   };
   return {
     chats: chats as unknown as Chats,
     marks,
     failMarks: (fail: boolean) => {
       failMark = fail;
+    },
+    /** Runs before each read of a chat thread settles. */
+    holdThread: (hold: () => Promise<void>) => {
+      beforeThread = hold;
     },
   };
 }
@@ -135,10 +146,8 @@ describe("forwarding", () => {
         "",
         "body of m1",
         "",
-        'Attached: "notes/build.md"',
-        "",
-        'Reply in that chat thread: dohc chat reply th_a --workspace ws-1 --agent-id chief "<text>"',
-        "Read it first when this message points at something you were not sent: dohc chat show th_a --workspace ws-1 --agent-id chief --peek",
+        "Reply in that chat thread, with your text on stdin: dohc chat reply th_a --workspace ws-1 --agent-id chief -",
+        "Read it first when this message points at something you were not sent, such as a file: dohc chat show th_a --workspace ws-1 --agent-id chief --peek",
       ].join("\n"),
     );
   });
@@ -164,6 +173,7 @@ describe("forwarding", () => {
     expect(sent[0]!.message).toContain('Group "launch", chat thread "title of thread-a".');
     expect(sent[1]!.message).toContain('the chat of file "plans/release.md", chat thread');
     expect(sent[0]!.message).toContain('Note from "Ice": Post decisions here.');
+    expect(sent[0]!.message).not.toContain("Attached");
     expect(sent.map((message) => message.how)).toEqual(["steer", "steer"]);
   });
 
@@ -252,6 +262,93 @@ describe("forwarding", () => {
       forwardIdOf(WORKSPACE, "chief", "m1"),
       forwardIdOf(WORKSPACE, "chief", "m2"),
     ]);
+  });
+
+  it("forwards messages written at the same moment, each once, across pages", async () => {
+    const sameMoment = Array.from({ length: 120 }, (_, index) =>
+      request(`m${String(index).padStart(3, "0")}`, 10),
+    );
+    const { forwarding, sent } = setup(sameMoment);
+
+    await forwarding.wake(WORKSPACE);
+
+    expect(sent.map((message) => message.forwardId)).toEqual(
+      sameMoment.map((row) => forwardIdOf(WORKSPACE, "chief", row.messageId)),
+    );
+  });
+
+  it("gives two agents the same message, each in its own thread", async () => {
+    const other: ServedAgent = {
+      ...agent,
+      id: "scout",
+      threadId: "t3-thread-2",
+      reader: { ...agent.reader, agentId: "scout", handle: "scout" },
+    };
+    const { forwarding, sent } = setup([request("m1", 10), request("m2", 20)], {
+      workspace: async () => ({ name: "Launch", agents: [agent, other] }),
+    });
+
+    await forwarding.wake(WORKSPACE);
+    await forwarding.wake(WORKSPACE);
+
+    expect(sent.map((message) => [message.threadId, message.forwardId])).toEqual([
+      ["t3-thread-1", forwardIdOf(WORKSPACE, "chief", "m1")],
+      ["t3-thread-1", forwardIdOf(WORKSPACE, "chief", "m2")],
+      ["t3-thread-2", forwardIdOf(WORKSPACE, "scout", "m1")],
+      ["t3-thread-2", forwardIdOf(WORKSPACE, "scout", "m2")],
+    ]);
+  });
+
+  it("goes on to the next agent and tries again when the problem cannot be reported", async () => {
+    vi.useFakeTimers();
+    const other: ServedAgent = {
+      ...agent,
+      id: "scout",
+      threadId: "t3-thread-2",
+      reader: { ...agent.reader, agentId: "scout", handle: "scout" },
+    };
+    const { forwarding, tool } = setup([request("m1", 10)], {
+      workspace: async () => ({ name: "Launch", agents: [agent, other] }),
+      onProblem: () => {
+        throw new Error("the window is gone");
+      },
+    });
+    tool.forward.mockRejectedValueOnce(new Error("down"));
+
+    await forwarding.wake(WORKSPACE);
+    expect(tool.forward.mock.calls.map(([input]) => input.threadId)).toEqual([
+      "t3-thread-1",
+      "t3-thread-2",
+    ]);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await forwarding.wake(WORKSPACE);
+    expect(tool.forward.mock.calls.map(([input]) => input.threadId)).toEqual([
+      "t3-thread-1",
+      "t3-thread-2",
+      "t3-thread-1",
+    ]);
+  });
+
+  it("sends nothing new when it is stopped while it reads the chat thread", async () => {
+    const { forwarding, tool, holdThread, marks } = setup([request("m1", 10)]);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let reading!: () => void;
+    const started = new Promise<void>((resolve) => (reading = resolve));
+    holdThread(() => {
+      reading();
+      return held;
+    });
+
+    const work = forwarding.wake(WORKSPACE);
+    await started;
+    forwarding.stop();
+    release();
+    await work;
+
+    expect(tool.forward).not.toHaveBeenCalled();
+    expect(marks).toEqual([]);
   });
 
   it("keeps one agent's failure from holding another agent's messages", async () => {

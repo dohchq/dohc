@@ -8,6 +8,11 @@ import { forwardedMessageText } from "./forwardedText";
 // agent's unread requests, read as `dohc chat inbox` reads them, so forwarding
 // reaches an agent under the conditions that reach it today. A message is read
 // once the tool took it, so what is unread is what still waits.
+//
+// An agent's read place in a chat thread is one point in time, as it is for
+// `dohc chat show` and a reply. A message that reaches this computer later
+// with an earlier time than one already forwarded in its chat thread is read
+// already, and is not forwarded.
 
 /** How dohc gives a message to a tool that holds agent threads. */
 export interface AgentThreadTool {
@@ -40,10 +45,7 @@ export interface ForwardingDependencies {
   cli: string;
   /** The workspace's name and its agents that have a thread and are on. Null when this computer no longer has the workspace. */
   workspace(workspaceId: string): Promise<{ name: string; agents: ServedAgent[] } | null>;
-  chats: Pick<
-    LinkedChatStore,
-    "listAgentRequestsPage" | "markThreadReadByAgent" | "getThread" | "listThreadAttachments"
-  >;
+  chats: Pick<LinkedChatStore, "listAgentRequestsPage" | "markThreadReadByAgent" | "getThread">;
   tool: AgentThreadTool;
   /**
    * What stopped an agent's messages in a workspace, and null once they reach
@@ -81,7 +83,10 @@ export function createForwarding(dependencies: ForwardingDependencies) {
     if (problem === null) {
       if (!stuck.delete(key)) return;
     } else stuck.add(key);
-    dependencies.onProblem(workspaceId, agentId, problem);
+    // A reporter that fails must not stop the next agent's messages or the next try.
+    try {
+      dependencies.onProblem(workspaceId, agentId, problem);
+    } catch {}
   };
 
   const markRead = (workspaceId: string, agent: ServedAgent, request: Request) =>
@@ -124,8 +129,9 @@ export function createForwarding(dependencies: ForwardingDependencies) {
       workspaceId: workspace.id,
       threadId: request.threadId,
     });
-    const attachments = await chats.listThreadAttachments(workspace.id, request.threadId);
     const { channel } = request;
+    // Stopped while it read the thread: nothing new goes out.
+    if (stopped) return;
     await dependencies.tool.forward({
       threadId: agent.threadId,
       how: agent.whileBusy,
@@ -143,11 +149,6 @@ export function createForwarding(dependencies: ForwardingDependencies) {
         thread: { id: cliThreadId(request.threadId), title: thread.title },
         author: request.author.displayName,
         body: request.body,
-        attachments: attachments.flatMap((attachment) =>
-          attachment.messageId === request.messageId && attachment.pathHint
-            ? [attachment.pathHint]
-            : [],
-        ),
         note: agent.note,
       }),
     });
@@ -224,7 +225,9 @@ export function createForwarding(dependencies: ForwardingDependencies) {
     wake,
     /**
      * Marks what an agent has unread in a workspace as read without forwarding
-     * it. A person connecting a thread means its messages from then on.
+     * it. A person connecting a thread means its messages from then on, and
+     * "then" is when this settles. Call it before the agent is on, so no wake
+     * forwards for the agent while it runs.
      */
     async setAside(workspaceId: string, agent: ServedAgent): Promise<void> {
       const last = new Map<string, Request>();
