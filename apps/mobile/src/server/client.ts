@@ -9,9 +9,9 @@ import type { ServerProblemKind } from "@dohc/interface-words/account";
  * Why a request gave no usable answer:
  * - `signed-out`: the server answered 401, so this sign-in has ended;
  * - `not-found`: 404, which the server also answers for something this account doesn't own;
- * - `server-busy`: 503 or 429;
+ * - `server-busy`: 429, or any 5xx: the server failed for now, and the same request may work later;
  * - `offline`: no answer, or none in time;
- * - `refused`: any other status;
+ * - `refused`: any other status, such as a 400 for a request the server won't take;
  * - `invalid`: an answer the phone could not read;
  * - `cancelled`: the sign-in or the request was superseded first.
  */
@@ -134,7 +134,7 @@ export function statusProblem(
 ): Exclude<ServerProblem, "offline" | "invalid" | "cancelled"> {
   if (status === 401) return "signed-out";
   if (status === 404) return "not-found";
-  if (status === 429 || status === 503) return "server-busy";
+  if (status === 429 || status >= 500) return "server-busy";
   return "refused";
 }
 

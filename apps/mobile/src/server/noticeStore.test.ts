@@ -11,6 +11,7 @@ import type { NoticeFiles } from "./noticeFiles";
 import {
   clearNoticesOnSignInChange,
   createNoticeStore,
+  NOTICE_FAILURES_SHOWN,
   noticeScope,
   type NoticeStore,
 } from "./noticeStore";
@@ -698,6 +699,78 @@ describe("marks on the account's Notices", () => {
       { noticeId: "a", mark: "dismissed", atMs: NOW, taken: 1, result: DONE_RESULT },
       { noticeId: "b", mark: "read", atMs: NOW },
     ]);
+  });
+
+  it("keeps marks a server error failed, and sends them again", async () => {
+    const { server, timers, store, ids, files } = setup();
+    store.resume();
+    await reply(server, server.read(), [relayRow("a")], { replace: true });
+    store.mark("a", "dismissed");
+    (await server.marks()).answer(500, { ok: false, code: "internal_error" });
+    // Dropping them would read the list again at once; keeping them waits for the next try.
+    const next = await Promise.race([timers.next(), server.read().then(() => null)]);
+    expect(next).not.toBeNull();
+    expect(ids()).toEqual([]);
+    expect(files.marks.get(scope)).toEqual([{ noticeId: "a", mark: "dismissed", atMs: NOW }]);
+    next?.done();
+    expect((await server.marks()).body).toEqual({ marks: [{ noticeId: "a", mark: "dismissed" }] });
+  });
+
+  it("drops marks only on a refusal the relay means, and reports it", async () => {
+    const { server, store, files } = setup();
+    store.resume();
+    await reply(server, server.read(), [relayRow("a")], { replace: true });
+    store.mark("a", "dismissed");
+    (await server.marks()).answer(400, { ok: false, code: "bad_request" });
+    // The list is read again, and the refusal shows.
+    await server.read();
+    expect(store.state().marks).toEqual({ problem: "refused", failures: 1 });
+    expect(files.marks.get(scope)).toEqual([]);
+  });
+
+  it("reports a failure again after a request in between succeeds", async () => {
+    const { server, timers, store } = setup();
+    store.resume();
+    await reply(server, server.read(), [relayRow("a"), relayRow("b")], { replace: true });
+    /** Fails the next requests until a failure is shown, and resolves with the wait after it. */
+    const failUntilShown = async () => {
+      for (let tries = 1; tries < NOTICE_FAILURES_SHOWN; tries += 1) {
+        (await server.marks()).offline();
+        (await timers.next()).done();
+      }
+      (await server.marks()).offline();
+      return timers.next();
+    };
+    store.mark("a", "read");
+    (await failUntilShown()).done();
+    expect(store.state().marks).toEqual({ problem: "offline", failures: 1 });
+    const success = await server.marks();
+    // Made while that request is on its way, so the same run of the sender sends it next.
+    store.mark("b", "read");
+    success.answer(200, OK);
+    await failUntilShown();
+    expect(store.state().marks).toEqual({ problem: "offline", failures: 2 });
+  });
+
+  it("keeps a taken Done when a whole list read before it landed arrives after its answer", async () => {
+    const { server, store, ids } = setup();
+    store.resume();
+    await reply(server, server.read(), [relayRow("a")], { replace: true });
+    store.refresh();
+    const whole = await server.read();
+    store.mark("a", "dismissed");
+    (await server.marks()).answer(200, { ok: true, dismissed: ["a"] });
+    // One request at a time: this one goes once Done's answer is taken.
+    store.mark("x", "read");
+    await server.marks();
+    // The whole list the server read before Done landed still has the row at sequence 1.
+    let call = await reply(server, whole, [relayRow("a")], { replace: true });
+    expect(ids()).toEqual([]);
+    // The row at a later sequence holds Done; then another device's restore shows.
+    call = await reply(server, call, [relayRow("a", { changeSeq: 2, dismissedAtMs: NOW })]);
+    expect(ids()).toEqual([]);
+    await reply(server, call, [relayRow("a", { changeSeq: 3 })]);
+    expect(ids()).toEqual(["a"]);
   });
 
   it("marks read only the rows shown unread", async () => {

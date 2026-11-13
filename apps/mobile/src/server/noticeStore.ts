@@ -244,6 +244,12 @@ export function createNoticeStore(options: {
   let settling: TakenMark[] = [];
   /** Taken marks a relaunch found whose row the list file lacks: they settle with the next whole list. */
   let unplaced: TakenMark[] = [];
+  /**
+   * What the marks the server took left each row as, and the row's sequence when sent. A read the server answered
+   * before a mark landed can arrive after its answer: its row, at that sequence or older, takes the result again. A row
+   * past that sequence holds the mark, or another device's later change, and ends the entry.
+   */
+  const acked = new Map<string, { readonly seq: number; readonly result: MarkResult }>();
   let known = false;
   let reads = NONE;
   let markFailure = NONE;
@@ -349,8 +355,11 @@ export function createNoticeStore(options: {
     const held = target.get(id);
     if (held && held.changeSeq >= seq) return;
     const record = change.gone ? null : change.record;
+    const mine = acked.get(id);
+    if (mine && (!record || record.changeSeq > mine.seq)) acked.delete(id);
     if (!record || (record.workspaceId !== null && hidden.has(record.workspaceId)))
       target.delete(id);
+    else if (mine && record.changeSeq <= mine.seq) target.set(id, { ...record, ...mine.result });
     else target.set(id, record);
   }
 
@@ -418,6 +427,7 @@ export function createNoticeStore(options: {
         rows = building;
         building = null;
         known = true;
+        for (const id of acked.keys()) if (!rows.has(id)) acked.delete(id);
         saveList();
         // A whole list read since the relaunch holds what the server took.
         if (unplaced.length > 0) {
@@ -515,11 +525,11 @@ export function createNoticeStore(options: {
           await sendNoticeMarks(signIn.client, batch, everything.signal);
         } catch (error) {
           if (!live() || ended(error)) return;
-          // A request the server refused is never taken by sending it again: it goes, and the list is read again.
-          refused =
-            error instanceof ServerError &&
-            (error.problem === "refused" || error.problem === "invalid");
-          if (!refused) {
+          // Only a refusal the relay means for good, a 4xx, drops the request's marks. It says so, and the list is
+          // read again. A server failure, an answer the phone can't read, or no answer keeps them for the next try.
+          refused = error instanceof ServerError && error.problem === "refused";
+          if (refused) markFailure = { problem: "refused", failures: markFailure.failures + 1 };
+          else {
             failures += 1;
             const delay = Math.min(NOTICE_RETRY_MS * 2 ** (failures - 1), NOTICE_RETRY_MAX_MS);
             const problem = shownProblem(error);
@@ -543,7 +553,11 @@ export function createNoticeStore(options: {
           }
         }
         if (!live()) return;
-        if (markFailure.problem !== null) markFailure = { ...markFailure, problem: null };
+        // A failure after this one is reported again.
+        failures = 0;
+        shown = false;
+        if (!refused && markFailure.problem !== null)
+          markFailure = { ...markFailure, problem: null };
         // The sent marks go. Marks made meanwhile wait for the next request.
         const sent = new Set(batch);
         marks = marks.filter((entry) => !sent.has(entry));
@@ -553,7 +567,10 @@ export function createNoticeStore(options: {
           for (const entry of batch) {
             const sent = sentRows.get(entry.noticeId);
             const mark = taken(entry, sent);
-            if (sent && mark.result) sentRows.set(entry.noticeId, { ...sent, ...mark.result });
+            if (sent && mark.result) {
+              sentRows.set(entry.noticeId, { ...sent, ...mark.result });
+              acked.set(entry.noticeId, { seq: sent.changeSeq, result: mark.result });
+            }
             if (known) settling.push(mark);
           }
         saveMarks();
