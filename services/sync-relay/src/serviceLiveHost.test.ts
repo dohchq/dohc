@@ -8387,6 +8387,32 @@ it("lets the pause grow to its idle interval while an idle desktop reconnects ev
   expect(o.host.isDocumentReady(o.document)).toBe(true);
 });
 
+// A document whose activation keeps returning without finishing names its reason in the log once it has waited a minute,
+// with its object ID and not its path, and not again while that reason stays. One that finishes and then waits again
+// waits a minute again before its next line.
+it("logs why a document's activation is still waiting after a minute, once", async () => {
+  const paced = pacedPasses(),
+    o = await enrolledServiceHost({ paced, frameChanges: true });
+  const errors = vi.spyOn(console, "error").mockImplementation(() => {}),
+    waits = () =>
+      errors.mock.calls
+        .map((call) => String(call[0]))
+        .filter((line) => line.startsWith("Live editing is waiting."));
+  const line = `Live editing is waiting. workspace workspace object ${o.document.objectId} paused`;
+  o.passes.deliver = false;
+  await paced.over(o.f, 55_000);
+  expect(waits()).toEqual([]);
+  await paced.over(o.f, 65_000);
+  expect(waits()).toEqual([line]);
+  o.passes.deliver = true;
+  await paced.over(o.f, 5_000);
+  o.passes.deliver = false;
+  await paced.over(o.f, 55_000);
+  expect(waits()).toEqual([line]);
+  await paced.over(o.f, 10_000);
+  expect(waits()).toEqual([line, line]);
+});
+
 // Proves: a connection whose drain applies an accepted edit still asks for a pass as that drain ends, so the edit
 // is settled and published at once. The edit's own relay write asked for a pass long before: passes left the
 // note's delivery to the connection, and the host went back to its idle interval with the edit unapplied.
