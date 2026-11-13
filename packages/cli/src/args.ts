@@ -3,7 +3,7 @@ import { LinksEdgesInput, LinksInInput, LinksResolveInput } from "@dohc/workspac
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import { byName, distinct } from "@dohc/workspace-contracts/operation-declaration";
 import type { z } from "zod";
-import { CHAT_WATCH_TIMEOUT_MS, CHAT_WATCH_MAX_TIMEOUT_MS, cliAgentIdSchema, APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, chatLinksGroupInputSchema, type CliLinkTarget, chatWorkReportSchema, LIVE_DOCUMENT_REASON_STEPS, type CliActor, type CliStreamPosition, type CliWorkReport, DECLARED_VERBS, type DeclaredRequestInput, type DeclaredVerb } from "./protocol";
+import { CHAT_WATCH_TIMEOUT_MS, CHAT_WATCH_MAX_TIMEOUT_MS, cliAgentIdSchema, APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, MAX_VERSION_NAME_LENGTH, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, chatLinksGroupInputSchema, type CliLinkTarget, chatWorkReportSchema, LIVE_DOCUMENT_REASON_STEPS, type CliActor, type CliStreamPosition, type CliWorkReport, DECLARED_VERBS, type DeclaredOperation, type DeclaredRequestInput, type DeclaredVerb } from "./protocol";
 import { CHAT_WORK_STATUSES, isChatWorkStatus } from "@dohc/workspace-contracts/chat-work";
 import { DohcCliError } from "./errors";
 import { OwnerAppPublicationRequest } from "./appPublication";
@@ -1459,7 +1459,6 @@ const DECLARED_PARSERS: { readonly [Verb in DeclaredVerb]: (input: VerbInput, co
   },
 };
 
-type DeclaredOperation = (typeof DECLARED_VERBS)[DeclaredVerb];
 type DeclaredCommandVerbs<Group extends string> = {
   readonly [Operation in DeclaredOperation as Operation["cli"]["command"][0] extends Group ? Operation["cli"]["command"][1] : never]: CliVerbSpec;
 };

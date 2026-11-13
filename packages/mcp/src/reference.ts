@@ -6,8 +6,10 @@ import { CLI_COMMANDS, DASH_RULE, GLOBAL_FLAGS, type CliCommandSpec, type CliFla
 import { DatasetResult, type DatasetRequest } from "@dohc/cli/dataset";
 import { OwnerAppPublicationResult, type OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
 import { OwnerAppResponsesResult, type OwnerAppResponsesRequest } from "@dohc/cli/app-responses";
-import { CLI_JSON_SCHEMA_VERSION, cliResultSchemas, type CliVerb as CliSocketVerb } from "@dohc/cli/protocol";
+import { CLI_JSON_SCHEMA_VERSION, cliResultSchemas, DECLARED_VERBS, type CliVerb as CliSocketVerb } from "@dohc/cli/protocol";
+import { distinct, mapNamed } from "@dohc/workspace-contracts/operation-declaration";
 import { createDohcMcpServer } from "./server";
+import { DECLARED_TOOLS } from "./tools";
 
 export const REFERENCE_PATH = "docs/reference/cli-mcp-sdk.md";
 
@@ -188,13 +190,8 @@ export const CHAT_EXAMPLES: Record<string, string[][]> = {
 
 // What each MCP tool returns. A CLI verb means the tool passes on that
 // verb's result schema; a string is written from the tool in tools.ts.
-export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
-  dohc_chat_links:{cli:"chatLinks"},
+export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = distinct(mapNamed(DECLARED_TOOLS, ({ cli }) => ({ cli: cli.verb })), {
   dohc_link:{cli:"link"},
-  dohc_chat_file_mentions: { cli: "chatFileMentions" },
-  dohc_links_edges: { cli: "linksEdges" },
-  dohc_links_in: { cli: "linksIn" },
-  dohc_links_resolve: { cli: "linksResolve" },
   dohc_read_share_copy: { cli: "shareCopy" },
   dohc_list_link_agents: { cli: "shareAgents" },
   dohc_disconnect_link_agent: { cli: "shareDisconnect" },
@@ -265,7 +262,7 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_retry_chat_run: { cli: "chatRetry" },
   dohc_press_button: { cli: "automationPress" },
   dohc_inspect_buttons: { cli: "automationButtons" },
-};
+} as const);
 
 // One request per operation an app page can send over its app channel. The
 // fields are the example's keys, and reference.test.ts sends each example
@@ -493,10 +490,14 @@ function shellBlock(line: string): string {
   return "```sh\n" + line + "\n```";
 }
 
+// The socket verb of each declared verb of one command, by the verb's name.
+function declaredSocketVerbs(command: string): Record<string, CliSocketVerb> {
+  return Object.fromEntries(Object.values(DECLARED_VERBS).filter(({ cli }) => cli.command[0] === command).map(({ cli }) => [cli.command[1], cli.verb]));
+}
+
 // The chat commands whose socket verb has another name.
 export const CHAT_SOCKET_VERBS: Record<string, CliSocketVerb> = {
-  links: "chatLinks",
-  "file-mentions": "chatFileMentions",
+  ...declaredSocketVerbs("chat"),
   "create-group": "groupCreate",
   retry: "chatRetry",
 };
@@ -506,7 +507,7 @@ export const CHAT_SOCKET_VERBS: Record<string, CliSocketVerb> = {
 // listed above.
 function verbReturns(command: string, name: string): string {
   const socketVerb = command === "file" && name === "duplicate" ? "fileDuplicate" : command === "links"
-    ? ({ edges: "linksEdges", in: "linksIn", resolve: "linksResolve" } as const)[name as "edges" | "in" | "resolve"]
+    ? declaredSocketVerbs("links")[name]
     : command === "chat"
     ? CHAT_SOCKET_VERBS[name] ?? name
     : command === "history"

@@ -2484,8 +2484,8 @@ it("gives CLI and MCP the IPC link answer in a share without Chats capture", asy
   const cli = await executeCli({ argv: ["links", "resolve", "source.md", JSON.stringify(input.literals), "--json"], cwd: f.workspace.rootPath, env: {}, request: send });
   expect(cli.exitCode).toBe(0);
   expect(JSON.parse(cli.stdout)).toMatchObject(resolved);
-  const { linksResolve } = await import("@dohc/mcp/tools");
-  expect(await linksResolve({ root: f.workspace.rootPath, home: "state", request: send }, input)).toEqual(resolved);
+  const { requestDeclaredTool } = await import("@dohc/mcp/tools");
+  expect(await requestDeclaredTool({ root: f.workspace.rootPath, home: "state", request: send }, "dohc_links_resolve", input)).toEqual(resolved);
   expect(f.dependencies.openWorkspaceActivity).not.toHaveBeenCalled();
   expect(f.dependencies.linkedChatStoreFor).not.toHaveBeenCalled();
   expect(f.dependencies.links.resolve).toHaveBeenCalledTimes(2);
@@ -2515,8 +2515,8 @@ it("returns an incoming page directly through CLI and MCP", async () => {
   const cli = await executeCli({ argv: ["links", "in", JSON.stringify(subject), "--json"], cwd: f.workspace.rootPath, env: {}, request: send });
   expect(cli.exitCode).toBe(0);
   expect(JSON.parse(cli.stdout)).toEqual({ schemaVersion: CLI_JSON_SCHEMA_VERSION, ...page });
-  const { linksIn } = await import("@dohc/mcp/tools");
-  expect(await linksIn({ root: f.workspace.rootPath, home: "state", request: send }, { subject })).toEqual(page);
+  const { requestDeclaredTool } = await import("@dohc/mcp/tools");
+  expect(await requestDeclaredTool({ root: f.workspace.rootPath, home: "state", request: send }, "dohc_links_in", { subject })).toEqual(page);
 });
 
 it("reads a held change through CLI and MCP from the caller's folder", async () => {
@@ -2601,6 +2601,6 @@ it("returns an edge page directly through CLI and MCP", async () => {
   const cli = await executeCli({ argv: ["links", "edges", "--json"], cwd: f.workspace.rootPath, env: {}, request: send });
   expect(cli.exitCode).toBe(0);
   expect(JSON.parse(cli.stdout)).toEqual({ schemaVersion: CLI_JSON_SCHEMA_VERSION, ...page });
-  const { linksEdges } = await import("@dohc/mcp/tools");
-  expect(await linksEdges({ root: f.workspace.rootPath, home: "state", request: send }, {})).toEqual(page);
+  const { requestDeclaredTool } = await import("@dohc/mcp/tools");
+  expect(await requestDeclaredTool({ root: f.workspace.rootPath, home: "state", request: send }, "dohc_links_edges", {})).toEqual(page);
 });

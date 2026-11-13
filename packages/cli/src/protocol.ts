@@ -1,7 +1,7 @@
 import { ChatLinksInput } from "@dohc/workspace-contracts/chat-links";
 import { CHAT_DECLARATIONS } from "@dohc/workspace-contracts/chat-declarations";
 import { LINKS_DECLARATIONS } from "@dohc/workspace-contracts/links-declarations";
-import { byName, distinct } from "@dohc/workspace-contracts/operation-declaration";
+import { byName, distinct, mapNamed } from "@dohc/workspace-contracts/operation-declaration";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import { HeldChange } from "@dohc/workspace-contracts/held-changes";
 import {
@@ -249,18 +249,12 @@ export const chatLinksGroupInputSchema = z.object({
 
 // The operations declared in workspace-contracts, by the socket verb each answers.
 const declaredOperations = [...Object.values(CHAT_DECLARATIONS), ...Object.values(LINKS_DECLARATIONS)];
-type DeclaredOperation = (typeof declaredOperations)[number];
+export type DeclaredOperation = (typeof declaredOperations)[number];
 export type DeclaredVerb = DeclaredOperation["cli"]["verb"];
 type DeclaredOperationOf<Verb extends DeclaredVerb> = Extract<DeclaredOperation, { readonly cli: { readonly verb: Verb } }>;
 export const DECLARED_VERBS = byName(declaredOperations, operation => operation.cli.verb) as {
   readonly [Verb in DeclaredVerb]: DeclaredOperationOf<Verb>;
 };
-
-function perDeclaredVerb<Value>(value: (operation: DeclaredOperation) => Value): Readonly<Record<DeclaredVerb, Value>> {
-  const entries: Partial<Record<DeclaredVerb, Value>> = {};
-  for (const operation of declaredOperations) entries[operation.cli.verb] = value(operation);
-  return entries as Record<DeclaredVerb, Value>;
-}
 
 export function isDeclaredVerb(verb: string): verb is DeclaredVerb {
   return Object.hasOwn(DECLARED_VERBS, verb);
@@ -835,7 +829,7 @@ export const APP_RESPONSE_CAPABILITIES = {
   undo: "app.responses.undo",
 } as const satisfies Record<OwnerAppResponsesRequest["action"], CapabilityId>;
 
-export const CLI_CAPABILITIES = distinct(perDeclaredVerb(operation => [operation.capabilityId]), {
+export const CLI_CAPABILITIES = distinct(mapNamed(DECLARED_VERBS, operation => [operation.capabilityId]), {
   stopSync: ["workspace.sync.stop"],
   link: ["work.reference.make"],
   shareCopy: ["share.copy.read"],
@@ -2084,7 +2078,7 @@ const automationPressResultSchema = z.union([
   rawFailureSchema,
 ]);
 
-export const cliResultSchemas = distinct(perDeclaredVerb(operation => operation.result) as {
+export const cliResultSchemas = distinct(mapNamed(DECLARED_VERBS, operation => operation.result) as {
   readonly [Verb in DeclaredVerb]: DeclaredOperationOf<Verb>["result"];
 }, {
   stopSync: z.union([

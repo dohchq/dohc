@@ -58,6 +58,16 @@ export function byName<Declaration, Name extends string>(
   return named as Record<Name, Declaration>;
 }
 
+// Gives each named declaration one value, under the same name.
+export function mapNamed<Name extends string, Declaration, Value>(
+  named: Readonly<Record<Name, Declaration>>,
+  value: (declaration: Declaration) => Value,
+): Readonly<Record<Name, Value>> {
+  const values: Partial<Record<Name, Value>> = {};
+  for (const name of Object.keys(named) as Name[]) values[name] = value(named[name]);
+  return values as Record<Name, Value>;
+}
+
 // Joins two tables that must not share a name. A shared name fails the
 // typecheck where both are known, and fails at load where they are not.
 export function distinct<A extends object, B extends object>(

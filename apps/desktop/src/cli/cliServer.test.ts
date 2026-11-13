@@ -1,4 +1,4 @@
-import { chatLinks as mcpChatLinks, createGroup as mcpCreateGroup, listGroups as mcpListGroups, makeLink as mcpMakeLink } from "@dohc/mcp/tools";
+import { requestDeclaredTool, createGroup as mcpCreateGroup, listGroups as mcpListGroups, makeLink as mcpMakeLink } from "@dohc/mcp/tools";
 import { createGroup } from "../workspaces/groupCreate";
 import { accessCliQueries, createAccessAcquisition, createAccessOwner } from "../access/accessOwner";
 import { createShareRosters } from "../automations/shareRoster";
@@ -1445,7 +1445,7 @@ describe("CLI socket server", () => {
       });
       expect(cli.exitCode).toBe(0);
     }
-    expect(await mcpChatLinks(ctx, { channelWireId: channelWireId! })).toBeNull();
+    expect(await requestDeclaredTool(ctx, "dohc_chat_links", { channelWireId: channelWireId! })).toBeNull();
     expect(read).toHaveBeenCalledTimes(4);
     for (const [, input] of read.mock.calls) expect(input.channelWireId).toBe(channelWireId);
   });
