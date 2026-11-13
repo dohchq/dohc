@@ -4,6 +4,7 @@ import {
   killProcessTreePosix,
   parseProcessTable,
   processDescendants,
+  processGroupDescendants,
   processTreePids,
   stopProcessTreePosix,
 } from "./posixSpawn";
@@ -57,6 +58,16 @@ describe("parseProcessTable", () => {
     ].join("\n");
 
     expect(parseProcessTable(output)).toEqual([tableEntry(842, 1), tableEntry(1200, 842)]);
+  });
+});
+
+describe("processGroupDescendants", () => {
+  it("finds what a group leader put in the background after init adopted it", async () => {
+    // 100 led its group and has exited. 200 was its background child, and
+    // 300 is 200's own child. 400 is another program's.
+    const table = ["  200     1   100", "  300   200   100", "  400     1   400", "ps: a warning", ""].join("\n");
+
+    expect(await processGroupDescendants(100, async () => table)).toEqual([300, 200]);
   });
 });
 

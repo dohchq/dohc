@@ -1388,18 +1388,12 @@ describe("buildSite", () => {
       // until that real snapshot has found the helper.
       const captureDescendants = async (pid: number): Promise<number[]> => {
         try {
-          descendantPid = await vi.waitFor(
-            async () => {
-              const value = Number(await readFile(pidFile, "utf8"));
-              expect(Number.isSafeInteger(value) && value > 0).toBe(true);
-              return value;
-            },
-            { timeout: BUILD_TIMEOUT_MS },
-          );
-          const descendants = await posixSpawn.processDescendants(
-            pid,
-            posixSpawn.readProcessTableWithPs,
-          );
+          descendantPid = await vi.waitFor(async () => {
+            const value = Number(await readFile(pidFile, "utf8"));
+            expect(Number.isSafeInteger(value) && value > 0).toBe(true);
+            return value;
+          }, { timeout: BUILD_TIMEOUT_MS });
+          const descendants = await posixSpawn.processGroupDescendants(pid);
           expect(descendants).toContain(descendantPid);
           await writeFile(capturedFile, "captured");
           return descendants;

@@ -6,12 +6,7 @@ import { constants } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import {
-  killProcessTreePosix,
-  parseProcessTable,
-  processDescendants,
-  readProcessTableWithPs,
-} from "../process/posixSpawn";
+import { killProcessTreePosix, parseProcessTable, processDescendants, processGroupDescendants } from "../process/posixSpawn";
 import {
   killChildTreeWin32,
   killProcessTreeWin32,
@@ -156,16 +151,19 @@ function isPidAlive(pid: number): boolean {
   }
 }
 
+// On POSIX an app command leads its own process group, so a snapshot that
+// lands after the command exits still finds what it put in the background.
+// Windows has no such group, and a detached child there gets its own console.
+const OWN_PROCESS_GROUP = process.platform !== "win32";
+
 // The periodic descendant capture below runs on every platform: a wrapper
 // that backgrounds its real server or build helper and exits leaves an
 // orphan behind on Windows exactly as it does on POSIX, and taskkill /T
 // needs a live root pid to walk — a snapshot taken while the wrapper was
 // still running is the only way to reach it once that wrapper is gone.
 export function defaultDescendantsReader(pid: number, spawnedAt: number): Promise<number[]> {
-  if (process.platform !== "win32") return processDescendants(pid, readProcessTableWithPs);
-  return processDescendants(pid, async () =>
-    withoutReusedParents(await readProcessTableWithPowershell(), pid, spawnedAt),
-  );
+  if (process.platform !== "win32") return processGroupDescendants(pid);
+  return processDescendants(pid, async () => withoutReusedParents(await readProcessTableWithPowershell(), pid, spawnedAt));
 }
 
 // Windows keeps a process's parent pid after that parent exits, and gives the
@@ -1110,6 +1108,7 @@ export async function startSiteDevServer(
     cwd,
     env,
     stdio: ["ignore", "pipe", "pipe"],
+    detached: OWN_PROCESS_GROUP,
     windowsVerbatimArguments: spawnSpec.windowsVerbatimArguments,
   });
   child.unref();
@@ -1414,6 +1413,7 @@ export async function buildSite(
     cwd,
     env,
     stdio: ["ignore", "pipe", "pipe"],
+    detached: OWN_PROCESS_GROUP,
     windowsVerbatimArguments: spawnSpec.windowsVerbatimArguments,
   });
 
