@@ -75,6 +75,17 @@ it("a refresh and a page read before a render send only the refresh",async()=>{
   await act(async()=>{refresh.resolve(page("fresh",null));await Promise.all([first,second]);});
   expect(h.result.current.pages.map(p=>p.subject.channelWireId)).toEqual(["fresh"]);
 });
+it("callbacks kept from an earlier render page from the pages shown now",async()=>{
+  const h=setup();
+  h.read.mockResolvedValueOnce(page("a","c1")).mockResolvedValueOnce(page("b","c2")).mockResolvedValueOnce(page("c",null));
+  const {load,loadMore}=h.result.current;
+  await act(()=>load());
+  await act(()=>loadMore());
+  expect(h.read).toHaveBeenLastCalledWith({workspaceId:"w",channelWireId:"a",cursor:"c1"});
+  await act(()=>loadMore());
+  expect(h.read).toHaveBeenLastCalledWith({workspaceId:"w",channelWireId:"a",cursor:"c2"});
+  expect(h.result.current.pages.map(p=>p.subject.channelWireId)).toEqual(["a","b","c"]);
+});
 it("pages again after a refresh that superseded a page read fails",async()=>{
   const h=setup(),older=deferred<ReturnType<typeof page>>();
   h.read.mockResolvedValueOnce(page()).mockReturnValueOnce(older.promise).mockRejectedValueOnce(Error("refresh")).mockResolvedValueOnce(page("a",null));
