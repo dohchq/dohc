@@ -8,7 +8,7 @@ fn share_view_and_shared_channel_fail_closed_outside_boundary() {
         surface: ShareSurface::ShareView,
         channel_wire_id: None,
         granted: Some(ShareGrant {
-            paths: vec!["shared/docs".to_owned()],
+            scope: crate::ShareScope::Paths(vec!["shared/docs".to_owned()]),
             version_id: None,
             access: ShareAccess::View,
         }),

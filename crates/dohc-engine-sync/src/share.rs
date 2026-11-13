@@ -118,6 +118,20 @@ pub struct ShareBoundary {
     pub granted: Option<ShareGrant>,
 }
 
+/// What a pinned grant covers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShareScope {
+    /// Granted paths. Each selects itself and everything beneath it. Empty
+    /// selects nothing on main, and every tracked path of a version share's
+    /// version. See `path_within_grant`.
+    Paths(Vec<String>),
+    /// Every tracked path on main, current and future, and the workspace's
+    /// Groups: a person's reach in a workspace they belong to. The relay's
+    /// `workspaceFileReach` and `workspaceGroupReach`
+    /// (`services/sync-relay/src/workspaceReach.ts`). It never names a version.
+    Workspace,
+}
+
 /// The selector the RELAY stated for a received share, pinned by the
 /// recipient the first time it read it and enforced against every later pull
 /// (trust on first use). The recipient never chooses or reviews this scope;
@@ -127,10 +141,7 @@ pub struct ShareBoundary {
 /// (`services/sync-relay/src/shareFilter.ts`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShareGrant {
-    /// Granted paths. Each selects itself and everything beneath it. Empty
-    /// selects every tracked path, but only together with a `version_id` —
-    /// see `path_within_grant`.
-    pub paths: Vec<String>,
+    pub scope: ShareScope,
     /// The granted version. `None` is a live-follow share of the workspace's
     /// main version, which is never entitled to a `version.create`; `Some(id)`
     /// is a version share, entitled to exactly that version's create.
@@ -170,8 +181,9 @@ pub fn apply_shared_envelope(
     // the SharedChannel path already solves by validating inside the write
     // transaction. File ops still need no store state and keep their
     // before-the-transaction check.
-    let share_view_chat =
-        boundary.surface == ShareSurface::ShareView && is_share_view_chat_kind(&envelope.op_kind);
+    let share_view_chat = boundary.surface == ShareSurface::ShareView
+        && (is_share_view_chat_kind(&envelope.op_kind)
+            || (envelope.op_kind == "chat.channel.create" && reaches_groups(boundary)));
     if boundary.surface == ShareSurface::ShareView && !share_view_chat {
         enforce_share_view_boundary(boundary, envelope)?;
         return Ok(ApplyOutcome::new(ApplyDisposition::Applied(Vec::new())));
@@ -353,7 +365,11 @@ pub(crate) fn tracked_path_within_grant(path: &str, granted: &ShareGrant) -> boo
 /// and `filterProposedChangeForShare` each return early on an empty path
 /// list), and this is the recipient's own answer to the same question.
 pub(crate) fn selected_path_within_grant(path: &str, granted: &ShareGrant) -> bool {
-    !granted.paths.is_empty() && tracked_path_within_grant(path, granted)
+    let selects = match &granted.scope {
+        ShareScope::Paths(paths) => !paths.is_empty(),
+        ShareScope::Workspace => true,
+    };
+    selects && tracked_path_within_grant(path, granted)
 }
 
 /// The BEFORE-the-transaction half of the ShareView chat boundary, for the one
@@ -372,6 +388,23 @@ fn enforce_share_view_thread_create(
         .granted
         .as_ref()
         .ok_or(SyncError::ShareBoundaryViolation)?;
+    if op.payload.get("channelWireId").is_some() {
+        // A Group's thread. Only a workspace grant reaches Groups, and the
+        // channel's kind is a fact this store holds, so the transaction
+        // decides. One thread binds to one place, never a Group and a file.
+        if granted.scope != ShareScope::Workspace {
+            return Err(SyncError::ShareBoundaryViolation);
+        }
+        if ["linkedObjectId", "linkedPath", "linkedPathHint"]
+            .iter()
+            .any(|field| op.payload.get(*field).is_some())
+        {
+            return Err(SyncError::InvalidInput {
+                reason: "share-view chat.thread.create must bind to a Group or a file, not both",
+            });
+        }
+        return Ok(());
+    }
     let token = op.payload.get("linkedObjectId").and_then(Value::as_str);
     if (token.is_some() && !token.is_some_and(super::relay::received_object_token))
         || (token.is_none() && op.payload.get("linkedPathHint").is_some())
@@ -415,9 +448,39 @@ fn enforce_share_view_chat_boundary(
         .as_ref()
         .ok_or(SyncError::ShareBoundaryViolation)?;
     match op.op_kind.as_str() {
-        // Decided before the transaction, against the path it carries itself.
-        // Re-running that rule here would restate it against the same bytes.
-        "chat.thread.create" => Ok(()),
+        // Only a workspace grant reaches it here. The create itself states
+        // the kind, so this is where a Group is told apart from General, a
+        // direct message, and an agent's chat.
+        "chat.channel.create" => {
+            // A create without a wire id is named by its channel id.
+            let wire = op
+                .payload
+                .get("wireId")
+                .or_else(|| op.payload.get("channelId"));
+            let is_group = op.payload.get("kind").and_then(Value::as_str) == Some("channel")
+                && wire.and_then(Value::as_str).is_some_and(is_group_wire_id);
+            if granted.scope == ShareScope::Workspace && is_group {
+                Ok(())
+            } else {
+                Err(SyncError::ShareBoundaryViolation)
+            }
+        }
+        // A Group's thread names its channel, and the channel's create must
+        // already be in this store. A file's thread was decided before the
+        // transaction, against the path it carries itself.
+        "chat.thread.create" => match op.payload.get("channelWireId") {
+            None => Ok(()),
+            Some(wire) => {
+                let wire = wire.as_str().ok_or(SyncError::ShareBoundaryViolation)?;
+                if granted.scope == ShareScope::Workspace
+                    && wire_is_group(tx, &op.workspace_id, wire)?
+                {
+                    Ok(())
+                } else {
+                    Err(SyncError::ShareBoundaryViolation)
+                }
+            }
+        },
         "chat.message.append"
         | "chat.reaction.set"
         | "chat.decision.set"
@@ -427,6 +490,15 @@ fn enforce_share_view_chat_boundary(
                 .get("threadId")
                 .and_then(Value::as_str)
                 .ok_or(SyncError::ShareBoundaryViolation)?;
+            if granted.scope == ShareScope::Workspace {
+                if let Some(channel_id) = thread_channel(tx, &op.workspace_id, thread_id)? {
+                    return if channel_is_group(tx, &op.workspace_id, &channel_id)? {
+                        Ok(())
+                    } else {
+                        Err(SyncError::ShareBoundaryViolation)
+                    };
+                }
+            }
             let path = thread_linked_path(tx, &op.workspace_id, thread_id)?
                 .ok_or(SyncError::ShareBoundaryViolation)?;
             if !selected_path_within_grant(&path, granted) {
@@ -436,6 +508,88 @@ fn enforce_share_view_chat_boundary(
         }
         _ => Err(SyncError::ShareBoundaryViolation),
     }
+}
+
+/// Whether a ShareView boundary's grant reaches the workspace's Groups.
+fn reaches_groups(boundary: &ShareBoundary) -> bool {
+    boundary
+        .granted
+        .as_ref()
+        .is_some_and(|granted| granted.scope == ShareScope::Workspace)
+}
+
+/// A wire id a Group can carry: never General's or an agent chat's, whose
+/// ids are fixed in advance.
+fn is_group_wire_id(wire: &str) -> bool {
+    wire != dohc_engine_domain::GENERAL_CHANNEL_WIRE_ID
+        && dohc_engine_domain::chats::agent_id_for_channel_wire_id(wire).is_none()
+}
+
+/// The channel a thread belongs to, or `None` for a file's thread or a
+/// thread this store does not have.
+fn thread_channel(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    thread_id: &str,
+) -> Result<Option<String>, SyncError> {
+    tx.query_row(
+        "SELECT channel_id FROM chat_threads WHERE workspace_id = ?1 AND thread_id = ?2",
+        params![workspace_id, thread_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .map(Option::flatten)
+    .map_err(SyncError::corrupt)
+}
+
+/// Whether the channel this wire id names in this store is a Group.
+fn wire_is_group(tx: &Transaction<'_>, workspace_id: &str, wire: &str) -> Result<bool, SyncError> {
+    let channel_id: Option<String> = tx
+        .query_row(
+            "SELECT channel_id FROM chat_channel_wire_ids WHERE workspace_id = ?1 AND wire_id = ?2",
+            params![workspace_id, wire],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    match channel_id {
+        Some(channel_id) => channel_is_group(tx, workspace_id, &channel_id),
+        None => Ok(false),
+    }
+}
+
+/// Whether a channel in this store is a Group: its create said
+/// `kind: channel`, and every wire id it carries is one a Group can carry.
+/// A channel with no wire id came from nowhere the relay serves.
+fn channel_is_group(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    channel_id: &str,
+) -> Result<bool, SyncError> {
+    let kind: Option<String> = tx
+        .query_row(
+            "SELECT kind FROM chat_channels WHERE workspace_id = ?1 AND channel_id = ?2",
+            params![workspace_id, channel_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    if kind.as_deref() != Some("channel") {
+        return Ok(false);
+    }
+    let mut statement = tx
+        .prepare(
+            "SELECT wire_id FROM chat_channel_wire_ids WHERE workspace_id = ?1 AND channel_id = ?2",
+        )
+        .map_err(SyncError::corrupt)?;
+    let wires = statement
+        .query_map(params![workspace_id, channel_id], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(SyncError::corrupt)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(SyncError::corrupt)?;
+    Ok(!wires.is_empty() && wires.iter().all(|wire| is_group_wire_id(wire)))
 }
 
 /// Where the file a thread is about sits right now, locally. The file sibling
@@ -650,10 +804,16 @@ fn enforce_share_view_boundary(
 /// workspace" regardless of version is exactly the divergence that would let a
 /// grant the relay serves nothing through admit everything here.
 pub(crate) fn path_within_grant(path: &str, grant: &ShareGrant) -> bool {
-    if grant.paths.is_empty() {
+    let paths = match &grant.scope {
+        // Main only. The relay never builds a workspace grant with a version,
+        // so one that names a version selects nothing.
+        ShareScope::Workspace => return grant.version_id.is_none(),
+        ShareScope::Paths(paths) => paths,
+    };
+    if paths.is_empty() {
         return grant.version_id.is_some();
     }
-    grant.paths.iter().any(|selected| {
+    paths.iter().any(|selected| {
         path == selected
             || path
                 .strip_prefix(selected.as_str())
@@ -723,11 +883,14 @@ fn enforce_granted_version(
 
 #[cfg(test)]
 mod granted_path_tests {
-    use super::{ShareAccess, ShareGrant, path_within_grant};
+    use super::{
+        ShareAccess, ShareGrant, ShareScope, path_within_grant, selected_path_within_grant,
+        tracked_path_within_grant,
+    };
 
     fn grant(paths: &[&str], version_id: Option<&str>) -> ShareGrant {
         ShareGrant {
-            paths: paths.iter().map(|path| (*path).to_owned()).collect(),
+            scope: super::ShareScope::Paths(paths.iter().map(|path| (*path).to_owned()).collect()),
             version_id: version_id.map(str::to_owned),
             access: ShareAccess::View,
         }
@@ -757,6 +920,39 @@ mod granted_path_tests {
         assert!(!path_within_grant("notes-private/plan.md", &granted));
         assert!(!path_within_grant("other/plan.md", &granted));
     }
+
+    #[test]
+    fn an_empty_path_list_admits_nothing_on_main() {
+        let empty = grant(&[], None);
+        for path in ["plan.md", "notes/plan.md"] {
+            assert!(!tracked_path_within_grant(path, &empty), "{path}");
+            assert!(!selected_path_within_grant(path, &empty), "{path}");
+        }
+    }
+
+    #[test]
+    fn a_workspace_grant_admits_every_tracked_path_on_main() {
+        let workspace = ShareGrant {
+            scope: ShareScope::Workspace,
+            version_id: None,
+            access: ShareAccess::Comment,
+        };
+        for path in ["plan.md", "notes/plan.md", "a/b/c/deep.txt"] {
+            assert!(tracked_path_within_grant(path, &workspace), "{path}");
+            assert!(selected_path_within_grant(path, &workspace), "{path}");
+        }
+        // Tracked is still the floor.
+        for path in ["../plan.md", "/plan.md", "notes//plan.md"] {
+            assert!(!tracked_path_within_grant(path, &workspace), "{path}");
+        }
+        // A workspace grant naming a version selects nothing: the relay never
+        // builds one.
+        let versioned = ShareGrant {
+            version_id: Some("v1".to_owned()),
+            ..workspace
+        };
+        assert!(!path_within_grant("plan.md", &versioned));
+    }
 }
 
 /// The checks `apply_shared_envelope` runs on a share-view file op before it
@@ -778,7 +974,7 @@ mod share_view_boundary_tests {
             surface: ShareSurface::ShareView,
             channel_wire_id: None,
             granted: Some(ShareGrant {
-                paths: vec!["shared/docs".to_owned()],
+                scope: super::ShareScope::Paths(vec!["shared/docs".to_owned()]),
                 version_id: version_id.map(str::to_owned),
                 access: ShareAccess::View,
             }),
@@ -890,6 +1086,39 @@ mod share_view_boundary_tests {
             ),
             Err(SyncError::ShareVersionMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn a_workspace_grant_admits_main_moments_and_never_a_version_create() {
+        let workspace = ShareBoundary {
+            granted: Some(ShareGrant {
+                scope: super::ShareScope::Workspace,
+                version_id: None,
+                access: ShareAccess::Edit,
+            }),
+            ..boundary(None)
+        };
+        for path in ["plan.md", "anywhere/else/a.md"] {
+            assert!(
+                check(
+                    &workspace,
+                    "moment.append",
+                    json!({"versionId": "main", "path": path})
+                )
+                .is_ok(),
+                "{path}"
+            );
+        }
+        for version in ["main", GRANTED] {
+            assert!(matches!(
+                check(
+                    &workspace,
+                    "version.create",
+                    json!({"versionId": version, "forkSnapshots": []}),
+                ),
+                Err(SyncError::ShareBoundaryViolation)
+            ));
+        }
     }
 
     #[test]

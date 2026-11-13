@@ -4104,7 +4104,7 @@ mod hosted_refusal_tests {
         .unwrap();
         let ws = || "ws".to_owned();
         let granted = || ShareGrant {
-            paths: Vec::new(),
+            scope: dohc_engine_sync::ShareScope::Paths(Vec::new()),
             version_id: None,
             access: ShareAccess::Edit,
         };

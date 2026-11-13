@@ -142,7 +142,7 @@ pub use relay::{
 pub use router::{RoutedApply, apply_replication_envelope};
 pub use secret_apply::apply_secret_envelope;
 pub use share::{
-    MAX_SHARE_VERSION_ID_CHARS, ShareAccess, ShareBoundary, ShareGrant, ShareSurface,
+    MAX_SHARE_VERSION_ID_CHARS, ShareAccess, ShareBoundary, ShareGrant, ShareScope, ShareSurface,
     apply_shared_envelope, is_valid_share_version_id,
 };
 pub use share_grant::GrantBinding;

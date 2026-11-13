@@ -314,6 +314,10 @@ struct GrantedSelectorParams {
     // a narrower grant, it is an unreadable one, and `share_view_pull` below
     // refuses it rather than substituting a default.
     access: String,
+    // A membership grant: every tracked path on main and the workspace's
+    // Groups. It carries no paths and no version.
+    #[serde(default)]
+    whole_workspace: bool,
 }
 
 fn direct_write_json(write: &dohc_engine_sync::DirectWriteReport) -> Value {
@@ -907,8 +911,19 @@ fn share_grant(selector: GrantedSelectorParams) -> Result<dohc_engine_sync::Shar
             r#"access must be "view", "comment", or "edit""#,
         )
     })?;
+    let scope = if selector.whole_workspace {
+        if !selector.paths.is_empty() || selector.version_id.is_some() {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "a whole-workspace grant names no paths and no version",
+            ));
+        }
+        dohc_engine_sync::ShareScope::Workspace
+    } else {
+        dohc_engine_sync::ShareScope::Paths(selector.paths)
+    };
     Ok(dohc_engine_sync::ShareGrant {
-        paths: selector.paths,
+        scope,
         version_id: selector.version_id,
         access,
     })
@@ -4244,4 +4259,30 @@ mod tests {
         drop(supervisor);
         f.close().await;
     }
+    #[test]
+    fn a_granted_selector_reads_a_whole_workspace_grant() {
+        let read = |value: Value| {
+            serde_json::from_value::<GrantedSelectorParams>(value)
+                .map_err(|_| ())
+                .and_then(|selector| share_grant(selector).map_err(|_| ()))
+        };
+        let workspace = read(json!({
+            "paths": [], "versionId": null, "access": "comment", "wholeWorkspace": true,
+        }))
+        .expect("a membership grant reads");
+        assert_eq!(workspace.scope, dohc_engine_sync::ShareScope::Workspace);
+        let paths = read(json!({ "paths": ["docs"], "versionId": null, "access": "view" }))
+            .expect("a path grant reads");
+        assert_eq!(
+            paths.scope,
+            dohc_engine_sync::ShareScope::Paths(vec!["docs".to_owned()])
+        );
+        for refused in [
+            json!({ "paths": ["docs"], "versionId": null, "access": "view", "wholeWorkspace": true }),
+            json!({ "paths": [], "versionId": "v1", "access": "view", "wholeWorkspace": true }),
+        ] {
+            assert!(read(refused.clone()).is_err(), "{refused}");
+        }
+    }
+
 }
