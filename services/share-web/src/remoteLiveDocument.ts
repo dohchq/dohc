@@ -5,6 +5,7 @@ import type {LinkLiveAgentAccess} from "./linkLiveClient";
 import type {PersonalLiveClient} from "./personalLiveClient";
 import {replaceLiveText} from "./liveTextEdit";
 import {LIVE_UPDATE_REFUSAL_VALUES, parseLiveUpdateIdentifier} from "@dohc/live-session-contract/live-update-admission";
+import {LIVE_CONNECTION_LIMIT_CLOSE_CODE, liveConnectionLimitMessage} from "@dohc/live-session-contract/live-connection";
 import {parseLiveTicketToken} from "@dohc/live-session-contract/live-ticket";
 import type {LiveAuthorContext} from "@dohc/live-session-contract/live-authorship";
 import {readBoundedJson} from "@dohc/service-http";
@@ -104,6 +105,8 @@ export async function remoteLiveDocument(options: {
   let provider: Provider | undefined;
   let route: ReturnType<Provider["connect"]> | undefined;
   let changed = false;
+  // The relay closed the socket because a connection limit is full. The agent gets its reason, not a timeout.
+  let limited: LiveDocumentRefusal | undefined;
   try {
     const maxBytes = options.limits.maxHttpResponseBytes;
     const ticket = "client" in options.live ? await personalTicket(options.live, path, maxBytes, signal) : await linkTicket(options.live, path, maxBytes, signal);
@@ -128,6 +131,11 @@ export async function remoteLiveDocument(options: {
       if (!binary || !(bytes instanceof Buffer)) {route!.disconnect(); return;}
       void route!.receive(bytes);
     });
+    host.socket.once("close", (code, reason) => {
+      const limit = reason.toString(), message = code === LIVE_CONNECTION_LIMIT_CLOSE_CODE ? liveConnectionLimitMessage(limit) : undefined;
+      if (message) limited = new LiveDocumentRefusal(limit, message);
+      route!.disconnect();
+    });
     host.invalidated.addEventListener("abort", () => route!.disconnect(), {once: true});
     if (host.invalidated.aborted) route.disconnect();
     host.socket.resume();
@@ -144,8 +152,9 @@ export async function remoteLiveDocument(options: {
     const state = provider?.state();
     const refused = state?.status === "quarantined" && LIVE_UPDATE_REFUSAL_VALUES.some(reason => reason === state.reason);
     const unknown = changed && !refused;
-    return {ok: false, path, outcome: unknown ? "unknown" : "not-applied", ...(error instanceof LiveDocumentRefusal ? {code: error.code} : {}),
-      error: unknown ? "The edit outcome is unknown. Read the live document before retrying." : error instanceof Error ? error.message : "Live document is unavailable."};
+    const refusal = error instanceof LiveDocumentRefusal ? error : changed ? undefined : limited, failure = refusal ?? error;
+    return {ok: false, path, outcome: unknown ? "unknown" : "not-applied", ...(refusal ? {code: refusal.code} : {}),
+      error: unknown ? "The edit outcome is unknown. Read the live document before retrying." : failure instanceof Error ? failure.message : "Live document is unavailable."};
   } finally {
     lifetime.abort();
     provider?.close();

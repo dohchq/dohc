@@ -7,6 +7,7 @@ import {Client, StreamableHTTPClientTransport} from "@modelcontextprotocol/clien
 import {markdownToYDoc, yDocToMarkdown} from "@dohc/ydoc-projection";
 import {createLiveFrameSession, encodeLiveFrameSync, type LiveFrame} from "@dohc/live-session-contract/live-frame";
 import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
+import {LIVE_CONNECTION_LIMIT_CLOSE_CODE, LIVE_CONNECTION_LIMIT_MESSAGES, type LiveConnectionLimitCode} from "@dohc/live-session-contract/live-connection";
 import {servePersonalMcp} from "./personalMcp";
 import {createPersonalLiveClient} from "./personalLiveClient";
 import {LIVE_DOCUMENT_PREPARING, remoteLiveDocument} from "./remoteLiveDocument";
@@ -33,7 +34,7 @@ type RelayCall = {path: string; authorization: string | null; body: unknown; sig
 type Answer = (call: RelayCall) => Response | Promise<Response>;
 const structured = (result: unknown) => (result as {structuredContent?: Record<string, unknown>}).structuredContent;
 
-async function fixture(relay: {document?: Answer; ticket?: Answer} = {}) {
+async function fixture(relay: {document?: Answer; ticket?: Answer; limit?: () => LiveConnectionLimitCode | undefined} = {}) {
   const doc = markdownToYDoc("Hello **world**.\n");
   const server = new WebSocketServer({port: 0, host: "127.0.0.1", perMessageDeflate: false, handleProtocols: () => "dohc-live-v1"});
   await once(server, "listening");
@@ -44,6 +45,9 @@ async function fixture(relay: {document?: Answer; ticket?: Answer} = {}) {
     // A personal session names its workspace and carries the agent's own token and MCP address.
     expect([request.url, request.headers.origin, request.headers["x-dohc-agent-resource"]]).toEqual(["/sync/live/personal?workspaceId=trip", origin, resource]);
     sockets.push(request.headers.authorization);
+    // The relay accepted the socket, then found a connection limit full.
+    const limit = relay.limit?.();
+    if (limit) {socket.close(LIVE_CONNECTION_LIMIT_CLOSE_CODE, limit); return;}
     const protocol = createLiveFrameSession("server", frames);
     socket.on("close", () => protocol.close());
     let chain = Promise.resolve();
@@ -161,7 +165,18 @@ it.each([["a refreshed token", TOKEN_B], ["an unchanged token", TOKEN_A]])("mint
   expect(await f.call("dohc_read_document")).toMatchObject({ok: true});
   f.refresh(next);
   expect(await f.call("dohc_read_document")).toMatchObject({ok: true});
-  // Each call mints with the token its request carries and opens its own socket, so no ticket or socket outlives its token.
+  // Each call mints with the token its request carries and opens its own socket.
   expect(f.calls.filter(call => call.path === "/sync/live/personal-tickets").map(call => call.authorization)).toEqual([`DohcAgent ${TOKEN_A}`, `DohcAgent ${next}`]);
   expect(f.sockets).toEqual([`DohcAgent ${TOKEN_A}`, `DohcAgent ${next}`]);
+});
+
+it("says a full connection limit at once when the relay closes the socket for it, and reads once there is room", async () => {
+  let full = true;
+  const f = await fixture({limit: () => full ? "live_person_limit" : undefined});
+  // Without the close handling, the call waits for its 30 s deadline and reads as a timeout.
+  expect(await f.call("dohc_edit_document", {find: "world", replacement: "friend"}))
+    .toEqual({ok: false, path: "doc.md", outcome: "not-applied", code: "live_person_limit", error: LIVE_CONNECTION_LIMIT_MESSAGES.live_person_limit});
+  expect(f.sockets).toHaveLength(1);
+  full = false;
+  expect(await f.call("dohc_read_document")).toEqual({ok: true, path: "doc.md", markdown: "Hello **world**.\n", source: "live"});
 });

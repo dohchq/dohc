@@ -105,8 +105,9 @@ releases each received update, and before it commits each edit. Each session
 registers as running work that needs Edit. Sign-out, removing the agent,
 narrowing its reach, lowering its level below Edit, and a newer fence each end
 the session at the commit that makes the change. An expired token ends it at
-the next update. Share-web opens a new session for each tool call, with the
-token that call carries, so no ticket or socket outlives its token.
+the next update. Share-web mints a ticket and opens a session for each tool
+call, with the token that call carries, so no ticket or socket serves more
+than one tool call.
 See the [personal live route tests](../../services/sync-relay/src/personalLiveRoutes.test.ts),
 the [held open tests](../../services/sync-relay/src/personalLiveDocumentRoutes.test.ts),
 and the [share-web tool tests](../../services/share-web/src/personalLiveDocument.test.ts).

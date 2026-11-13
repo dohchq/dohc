@@ -26,6 +26,14 @@ const ADA: TestAccount = { userId: "ada", name: "Ada", email: "ada@example.test"
 const BEN: TestAccount = { userId: "ben", name: "Ben", email: "ben@example.test", password: "ben password" };
 const TRIP = "trip", FUNDRAISER = "fundraiser", GARDEN = "garden";
 const TOOLS_LIST = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+// share-web's live limits, which the personal MCP's live document tools need.
+const LIVE_LIMITS = {
+  requests: { maxPendingRequests: 4, maxRequestBytes: 2048, maxResponseBytes: 8192, timeoutMs: 1000 },
+  editor: { provider: { frames: { receive: { maxFrameBytes: 1024, maxStateVectorBytes: 4096, maxUpdateBytes: 8192, maxSyncBytes: 16384 },
+    maxQueuedBytes: 16384, maxQueuedFrames: 64, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 16384 },
+    maxPendingUpdateBytes: 16384, maxPendingUpdates: 8, maxDeliveryAttempts: 4 },
+    maxHttpResponseBytes: 16384, maxSocketBufferedBytes: 16384, connectTimeoutMs: 2000, sendTimeoutMs: 500, drainPollMs: 10 },
+};
 
 const relays: Array<ReturnType<typeof testHandler>> = [];
 const clients: Client[] = [];
@@ -55,7 +63,7 @@ function reachOf(html: string): Record<string, { offered: string[]; selected: st
 
 const selected = (html: string) => Object.fromEntries(Object.entries(reachOf(html)).map(([workspaceId, choice]) => [workspaceId, choice.selected]));
 
-async function stack(options: { account?: boolean } = {}) {
+async function stack(options: { account?: boolean; live?: boolean } = {}) {
   const storage = await testStorage();
   const accounts = new TestAccounts(ORIGIN, [ADA, BEN]);
   const relay = testHandler(storage, {
@@ -68,6 +76,8 @@ async function stack(options: { account?: boolean } = {}) {
   await claimWorkspace(relay, ADA.userId, FUNDRAISER);
   await claimWorkspace(relay, BEN.userId, GARDEN);
   const relayCalls: string[] = [];
+  // The credential each live request sent the relay, by path.
+  const liveCalls: Array<{ path: string; authorization: string | null }> = [];
   let noWorkspaces = false;
   // The next origin sequence of the owner's computer in each workspace.
   const ownerSeqs = new Map<string, number>();
@@ -79,6 +89,7 @@ async function stack(options: { account?: boolean } = {}) {
   const fetchRelay = async (relayRequest: Request) => {
     const path = new URL(relayRequest.url).pathname;
     relayCalls.push(path);
+    if (path.startsWith("/sync/live/")) liveCalls.push({ path, authorization: relayRequest.headers.get("authorization") });
     const answer = await relay(relayRequest);
     if (!noWorkspaces || path !== "/sync/link/agent-authorizations/personal-consent" || answer.status !== 200) return answer;
     // The page's empty state: the relay's answer names no workspace.
@@ -87,6 +98,7 @@ async function stack(options: { account?: boolean } = {}) {
   const application = () => createShareWebApplication({
     relayUrl: "https://relay.example.test", publicRelayUrl: "https://relay.example.test", relayExchangeKey: RELAY_EXCHANGE_KEY,
     publicHosts: new Set([HOST]), nowMs: () => NOW, fetchRelay,
+    ...(options.live ? { linkLive: { publicOrigin: ORIGIN, ...LIVE_LIMITS } } : {}),
     ...(options.account === false ? {} : {
       accountAuth: { publicOrigin: ORIGIN, upstreamUrl: "https://accounts.example.test" }, fetchAuth: accounts.fetchAuth,
     }),
@@ -134,7 +146,7 @@ async function stack(options: { account?: boolean } = {}) {
   }
 
   return {
-    send, mcp, connect, open, choose, accounts, relayCalls,
+    send, mcp, connect, open, choose, accounts, relayCalls, liveCalls,
     answerNoWorkspaces() { noWorkspaces = true; },
     restart() { app = application(); },
     /** The owner's own posts, as their computer pushes them to `workspaceId`'s log. */
@@ -425,6 +437,25 @@ it("keeps a personal agent working after share-web restarts: it waits, replies, 
   const again = await s.connect(accessToken, agent.resource);
   expect((await again.callTool({ name: "dohc_list_workspaces", arguments: {} })).structuredContent)
     .toMatchObject({ ok: true, agent: { name: "Trip helper", handle: "Triphelper" }, workspaces: [{ workspace: TRIP, level: "comment", dmChannel: dm }] });
+});
+
+it("opens each live document call with the token that call carries, before and after a refresh", async () => {
+  const s = await stack({ live: true });
+  const agent = await signInPersonalAgent({ send: s.send, origin: ORIGIN, workspaceId: TRIP, account: ADA, choices: { [`w:${TRIP}`]: "edit" } });
+  const read = async (accessToken: string) => (await (await s.connect(accessToken, agent.resource))
+    .callTool({ name: "dohc_read_document", arguments: { workspace: TRIP, path: "plan.md" } })).structuredContent;
+  // This relay hosts no live document, so each call is refused, after it asks with its own token.
+  expect(await read(agent.accessToken)).toMatchObject({ ok: false, path: "plan.md", outcome: "not-applied" });
+  const refreshed = await tokenRequest(s.send, { grant_type: "refresh_token", client_id: agent.clientId, refresh_token: agent.refreshToken,
+    resource: agent.resource });
+  expect(refreshed.status).toBe(200);
+  const { access_token: accessToken } = await refreshed.json() as { access_token: string };
+  expect(accessToken).not.toBe(agent.accessToken);
+  expect(await read(accessToken)).toMatchObject({ ok: false, path: "plan.md", outcome: "not-applied" });
+  expect(s.liveCalls).toEqual([
+    { path: "/sync/live/personal-document", authorization: `DohcAgent ${agent.accessToken}` },
+    { path: "/sync/live/personal-document", authorization: `DohcAgent ${accessToken}` },
+  ]);
 });
 
 it("holds one large body per personal agent, whichever of its tokens sends it", async () => {

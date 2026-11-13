@@ -395,7 +395,7 @@ function buildServer(options: PersonalMcpOptions, reach: Reach): McpServer {
       if (response.status === 409 && typeof code === "string" && typeof error === "string") return {code: utf8Prefix(code, 64), error: utf8Prefix(error, 1024)};
       const known = typeof code === "string" && Object.hasOwn(liveRefusals, code) ? liveRefusals[code] : undefined;
       if (known?.status === response.status) return known;
-      if (response.status === 404) return {code: "not_found", error: "dohc could not open this document live. Use a Markdown path from dohc_list_files."};
+      if (response.status === 404) return {code: "not_found", error: "dohc could not open this document live. Check the path with dohc_list_files and try again."};
       if (response.status === 400) return {code: "bad_request", error: NO_WORKSPACE};
       return response.status === 429 ? RATE_LIMITED : UNAVAILABLE;
     };
