@@ -27,6 +27,16 @@ function editsLive(selector: ShareViewSelector, path: string): boolean {
   );
 }
 
+/**
+ * The relay's live host answered that it will not host the document now, as
+ * when it is full. The page opens read-only instead of waiting for the host.
+ */
+export class LiveHostRefusedError extends Error {
+  constructor(readonly code: string) {
+    super("The server did not host this document for live editing.");
+  }
+}
+
 interface Credentials {
   relayUrl: string;
   token: string;
@@ -67,6 +77,14 @@ export function createNamedDesktopLiveCapture(options: {
       body: JSON.stringify({ shareId: options.shareId, path }),
     });
     try {
+      if (response.status === 409 && !response.redirected) {
+        const refusal = await readBoundedJson(response, 1024, signal).catch(() => null);
+        const code =
+          refusal && typeof refusal === "object" && !Array.isArray(refusal)
+            ? (refusal as Record<string, unknown>).code
+            : undefined;
+        if (typeof code === "string") throw new LiveHostRefusedError(code);
+      }
       if (
         response.status !== 200 ||
         response.redirected ||
@@ -163,7 +181,8 @@ export function createNamedDesktopLiveCapture(options: {
       try {
         first = await admit(input.path, opening);
       } catch (error) {
-        if (error instanceof SharedDocumentWaitingError) throw error;
+        if (error instanceof SharedDocumentWaitingError || error instanceof LiveHostRefusedError)
+          throw error;
         throw new SharedDocumentWaitingError({
           state: "failed",
           message:

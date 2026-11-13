@@ -5,7 +5,12 @@ import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
-import { createNamedDesktopLiveCapture, waitForNamedDesktopAdmission } from "./namedDesktopLive";
+import {
+  createNamedDesktopLiveCapture,
+  LiveHostRefusedError,
+  waitForNamedDesktopAdmission,
+} from "./namedDesktopLive";
+import { SharedDocumentWaitingError } from "../ipc/sharedDocumentOpenState";
 import {
   LiveAuthorityUnavailableError,
   type NamedLiveSelection,
@@ -513,6 +518,40 @@ it("returns unavailable when the relay ends a readiness wait", async () => {
   );
   expect(await f.capture.waitForAdmission!("docs/a.md", new AbortController().signal)).toBe(false);
   expect(transport.factory).not.toHaveBeenCalled();
+});
+
+// The relay's host answered at once that it will not host the document, as
+// when it is full. The open ends with that answer instead of the waiting
+// state that waits for the host again.
+it.each(["live_host_full", "live_paused_by_owner"])(
+  "ends the open with the host's %s refusal instead of waiting",
+  async (code) => {
+    const f = fixture();
+    f.request.mockResolvedValueOnce(Response.json({ ok: false, code }, { status: 409 }));
+    const opened = f.capture.openYDocSession({
+      path: "docs/a.md",
+      contentKind: "richdoc",
+      onRemoteUpdate: vi.fn(),
+    });
+    await expect(opened).rejects.toBeInstanceOf(LiveHostRefusedError);
+    await expect(opened).rejects.toMatchObject({ code });
+    await expect(opened).rejects.not.toBeInstanceOf(SharedDocumentWaitingError);
+    expect(transport.factory).not.toHaveBeenCalled();
+  },
+);
+
+it("keeps waiting for the host after a refusal without a host answer", async () => {
+  const f = fixture();
+  f.request.mockResolvedValueOnce(Response.json({ ok: false }, { status: 404 }));
+  await expect(
+    f.capture.openYDocSession({
+      path: "docs/a.md",
+      contentKind: "richdoc",
+      onRemoteUpdate: vi.fn(),
+    }),
+  ).rejects.toMatchObject({
+    waiting: { state: "failed", message: "dohc could not open this file for editing." },
+  });
 });
 
 it.each(Object.entries(LIVE_CONNECTION_LIMIT_MESSAGES))(

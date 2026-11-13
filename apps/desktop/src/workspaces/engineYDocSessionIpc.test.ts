@@ -1,5 +1,6 @@
 import { registerTypingCheckpoint } from "./outageTypingRecovery";
 import { SharedDocumentWaitingError } from "../ipc/sharedDocumentOpenState";
+import { LiveHostRefusedError } from "./namedDesktopLive";
 import { engineSaveState } from "./engineYDocSaveState";
 import {
   DaemonRefusalError,
@@ -740,6 +741,12 @@ describe("engine Y.Doc IPC adapter", () => {
       liveHostUnavailable: true,
     });
     expect(h.capture.openYDocSession).not.toHaveBeenCalled();
+  });
+
+  it("keeps a named document read-only when the relay's host refuses to host it", async () => {
+    const h = harness(providerSession(), {sharedCaptureFor: async () => ({openYDocSession: async () => {throw new LiveHostRefusedError("live_host_full");}})});
+    h.setReadOnly(true);
+    expect(await h.ipc.open(new FakeSender(7), openPayload)).toEqual({available: false, liveHostUnavailable: true});
   });
 
   it("carries pending record delivery through a refused open", async () => {
