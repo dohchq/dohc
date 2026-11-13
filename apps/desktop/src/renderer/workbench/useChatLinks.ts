@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, useRef } from "react";
 import type { ChatLinksPage } from "@dohc/workspace-contracts/chat-links";
 import { bridge } from "../bridge";
 import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
@@ -29,9 +29,16 @@ export function useChatLinks({ workspaceId, channelWireId, onError }: {
   const { retry, pending: loading } = query;
   const pages = query.value?.pages ?? NO_PAGES;
   const load = useCallback(() => retry(), [retry]);
+  // The pages a page read extends. A second call before React renders again
+  // sees the same pages and sends nothing.
+  const extending = useRef<Page[] | null>(null);
   const loadMore = useCallback(() => {
     const cursor = pages.at(-1)?.nextCursor;
-    return cursor && !loading ? retry({ cursor, pages }) : Promise.resolve();
+    if (!cursor || loading || extending.current === pages) return Promise.resolve();
+    extending.current = pages;
+    return retry({ cursor, pages }).finally(() => {
+      if (extending.current === pages) extending.current = null;
+    });
   }, [loading, pages, retry]);
   const status = loading ? "loading" : query.error !== null ? "unavailable" : query.value?.status ?? "idle";
   return { pages, status, loading, load, loadMore };

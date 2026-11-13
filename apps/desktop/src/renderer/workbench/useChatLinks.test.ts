@@ -54,6 +54,16 @@ it("a refresh supersedes pagination and duplicate pagination does not consume th
   await act(async()=>{older.resolve(page("old"));await pending;});
   expect(h.result.current.pages.map(p=>p.subject.channelWireId)).toEqual(["refresh"]);
 });
+it("two page reads before a render send one request",async()=>{
+  const h=setup(),next=deferred<ReturnType<typeof page>>();
+  h.read.mockResolvedValueOnce(page()).mockReturnValueOnce(next.promise);
+  await act(()=>h.result.current.load());
+  let first!:Promise<void>,second!:Promise<void>;
+  act(()=>{first=h.result.current.loadMore();second=h.result.current.loadMore();});
+  expect(h.read).toHaveBeenCalledTimes(2);
+  await act(async()=>{next.resolve(page("a",null));await Promise.all([first,second]);});
+  expect(h.result.current.pages).toHaveLength(2);
+});
 it("reports current errors but suppresses errors after unmount",async()=>{
   const h=setup(),pending=deferred<never>();
   h.read.mockRejectedValueOnce(Error("current")).mockReturnValueOnce(pending.promise);
