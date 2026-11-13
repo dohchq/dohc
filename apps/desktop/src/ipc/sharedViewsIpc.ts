@@ -108,6 +108,9 @@ export function registerSharedViewsIpcHandlers<
   listWorkspaces(): readonly RegistryEntry[];
   notifyRenderer(scope?: WorkspaceActivityScope): void;
   syncNotices(isCurrent: () => boolean): Promise<void>;
+  // The role the relay last named for a joined workspace, or null for none,
+  // so main's own menus offer what the relay allows.
+  rememberMemberRole(workspaceId: string, shareId: string, role: "admin" | "member" | null): void;
   recordShareViewStoreRefusal(
     workspaceId: string,
     refusal: EngineStoreRefusal | null,
@@ -143,6 +146,7 @@ export function registerSharedViewsIpcHandlers<
     listWorkspaces,
     notifyRenderer,
     recordShareViewStoreRefusal,
+    rememberMemberRole,
     recheckRemovedShares,
   } = dependencies;
   // A shared view has no recorder, so its refresh is what meets a store only
@@ -977,6 +981,11 @@ export function registerSharedViewsIpcHandlers<
                 return { status: "unverified" };
               // Only a membership has a role, and a level that the owner changes
               // for everyone; the window says so when this check moved it.
+              rememberMemberRole(
+                workspace.workspaceId,
+                view.shareId,
+                committedPin.wholeWorkspace === true ? (stated.role ?? null) : null,
+              );
               return committedPin.wholeWorkspace === true
                 ? {
                     status: "current",

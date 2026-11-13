@@ -1086,6 +1086,16 @@ function sharedViewOf(workspaceId: string): ReturnType<typeof shareViewWriteScop
   return entry ? shareViewWriteScopeOf(entry.shareView) : null;
 }
 
+// The role the relay last named for each joined workspace, by share. It lives
+// only in this process; the next access check names it again.
+const memberRoles = new Map<string, { shareId: string; role: "admin" | "member" }>();
+function memberRoleOf(workspaceId: string): "admin" | "member" | undefined {
+  const named = memberRoles.get(workspaceId);
+  return named && findWorkspace(workspaceId)?.shareView?.shareId === named.shareId
+    ? named.role
+    : undefined;
+}
+
 // The workspace write boundary, over the rule in `shareWriteGate.ts`. It
 // refuses on the PRESENCE of a share view at every level, which is what the
 // 27 handlers behind it need: they write the workspace FOLDER, and a share
@@ -9144,7 +9154,13 @@ function registerIpcHandlers(): void {
       IpcMainInvokeEvent,
       DesktopRendererWorkspaceOperation["workspace"],
       DesktopRendererWorkspaceOperation
-    >({ sharedViewOf, ensureOwnedProjectionCurrent, shell, platform: process.platform }),
+    >({
+      sharedViewOf,
+      memberRoleOf,
+      ensureOwnedProjectionCurrent,
+      shell,
+      platform: process.platform,
+    }),
   );
 
   registerWorkspaceHeadingsIpcHandlers<
@@ -10541,6 +10557,10 @@ function registerIpcHandlers(): void {
     notifyRenderer,
     syncNotices: (isCurrent) => noticeStore().sync(isCurrent),
     recordShareViewStoreRefusal: activity.recordShareViewStoreRefusal,
+    rememberMemberRole: (workspaceId, shareId, role) => {
+      if (role) memberRoles.set(workspaceId, { shareId, role });
+      else memberRoles.delete(workspaceId);
+    },
     recheckRemovedShares,
   });
 

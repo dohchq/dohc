@@ -230,6 +230,7 @@ async function harness(history?: OperationHistory) {
     },
   }));
   let sharedScope: ShareViewWriteScope | null = null;
+  let memberRole: "admin" | "member" | undefined;
   let canInstall = false;
   registerNativeMenusIpcHandlers<Sender, Event, Workspace, Operation>({
     registerHandler,
@@ -250,6 +251,7 @@ async function harness(history?: OperationHistory) {
     explorerMenuOperations,
     createExplorerMenuIpc<Event, Workspace, Operation>({
       sharedViewOf: () => sharedScope,
+      memberRoleOf: () => memberRole,
       ensureOwnedProjectionCurrent: repair,
       shell: { showItemInFolder: reveal },
       platform: "linux",
@@ -294,6 +296,9 @@ async function harness(history?: OperationHistory) {
     },
     setSharedScope: (scope: ShareViewWriteScope | null) => {
       sharedScope = scope;
+    },
+    setMemberRole: (role: "admin" | "member" | undefined) => {
+      memberRole = role;
     },
     setCanInstall: (value: boolean) => {
       canInstall = value;
@@ -1088,6 +1093,24 @@ describe("registered native menu handlers", () => {
       }
     },
   );
+
+  it("offers New folder in a joined workspace only for the role main holds from the relay", async () => {
+    const h = await harness();
+    h.setSharedScope({ access: "edit", ended: false, membership: true });
+    const offersFolder = async () =>
+      ExplorerMenuEntries.parse(
+        await h.invoke(explorerMenuOperations.readExplorerMenu.channel, {
+          workspaceId: "workspace",
+          kind: "root",
+          pinned: false,
+        }),
+      ).some((entry) => entry.kind === "item" && entry.id === "new-folder");
+    expect(await offersFolder()).toBe(false);
+    h.setMemberRole("member");
+    expect(await offersFolder()).toBe(false);
+    h.setMemberRole("admin");
+    expect(await offersFolder()).toBe(true);
+  });
 
   it("reads the menu inside the sender's own workspace", async () => {
     const h = await harness();

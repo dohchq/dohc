@@ -392,12 +392,25 @@ describe("metadata-only access checks", () => {
   });
   it("names who changed a membership's level only when this check moved it", async () => {
     const h = await harness();
-    h.workspace.shareView!.grantedSelector = { paths: [], versionId: null, access: "edit", wholeWorkspace: true };
+    h.workspace.shareView!.grantedSelector = {
+      paths: [],
+      versionId: null,
+      access: "edit",
+      wholeWorkspace: true,
+    };
     h.fetchAccess.mockResolvedValue({ access: "view", role: "member", levelChangedBy: "Ana" });
-    expect(await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload))
-      .toEqual({ status: "current", access: "view", role: "member", levelChanged: true, levelChangedBy: "Ana" });
-    expect(await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload))
-      .toEqual({ status: "current", access: "view", role: "member" });
+    expect(
+      await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload),
+    ).toEqual({
+      status: "current",
+      access: "view",
+      role: "member",
+      levelChanged: true,
+      levelChangedBy: "Ana",
+    });
+    expect(
+      await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload),
+    ).toEqual({ status: "current", access: "view", role: "member" });
   });
   it("names a membership's role, and never a path share's", async () => {
     const h = await harness();
@@ -418,6 +431,24 @@ describe("metadata-only access checks", () => {
     expect(
       await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload),
     ).toEqual({ status: "current", access: "edit", role: "member" });
+  });
+  it("tells main the role the relay named, for main's own menus", async () => {
+    const h = await harness();
+    const { shareId } = h.workspace.shareView!;
+    h.fetchAccess.mockResolvedValue({ access: "edit", role: "admin" });
+    await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload);
+    expect(h.rememberRole).toHaveBeenLastCalledWith(h.workspace.workspaceId, shareId, null);
+    h.workspace.shareView!.grantedSelector = {
+      paths: [],
+      versionId: null,
+      access: "edit",
+      wholeWorkspace: true,
+    };
+    await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload);
+    expect(h.rememberRole).toHaveBeenLastCalledWith(h.workspace.workspaceId, shareId, "admin");
+    h.fetchAccess.mockResolvedValue({ access: "edit", role: "member" });
+    await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload);
+    expect(h.rememberRole).toHaveBeenLastCalledWith(h.workspace.workspaceId, shareId, "member");
   });
   it.each(["workspace", "credentials", "close"])(
     "discards a deferred 404 after %s changes",
