@@ -1623,8 +1623,8 @@ it('starts the wait from the first failure again once the document has gone live
     expect(capture).toHaveBeenCalledTimes(5)
   }finally{vi.restoreAllMocks();vi.useRealTimers();f.close()}
 })
-// Stop forgets the document, and a restart starts with nothing in memory, so either clears a block and the wait.
-it.each(['Stop','a restart'] as const)('captures a blocked or waiting document again after %s',async when=>{
+// A restart starts with nothing in memory, so it clears a block and the wait.
+it('captures a blocked or waiting document again after a restart',async()=>{
   const f=fixture();vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(0)
   try{
     const message='Ordinary activation history exceeds its configured validation budget.'
@@ -1633,7 +1633,7 @@ it.each(['Stop','a restart'] as const)('captures a blocked or waiting document a
     const capture=vi.fn(async()=>f.capture),signal=()=>new AbortController().signal,waiting={kind:'pending',reason:'Hosted document waits before it tries again.'}
     const start=()=>activationDriver(f,capture,undefined,undefined,undefined,{validateActivation})
     let d=start()
-    const again=()=>{if(when==='Stop'){d.driver.removeTarget(d.target);d.driver.addTarget(d.target,'object')}else d=start()}
+    const again=()=>{d=start()}
     expect(await d.driver.activate(d.target,signal())).toEqual({kind:'pending',reason:message})
     expect(d.driver.blocked(d.target)).toBe('history-over-budget')
     again()
@@ -1648,6 +1648,28 @@ it.each(['Stop','a restart'] as const)('captures a blocked or waiting document a
     for(let i=0;i<2;i++)await expect(d.driver.activate(d.target,signal())).rejects.toThrow('Validator crashed.')
     expect(await d.driver.activate(d.target,signal())).toEqual(waiting)
     expect(capture).toHaveBeenCalledTimes(6)
+  }finally{vi.useRealTimers();f.close()}
+})
+// Stop removes the document's target and adds it again. Its block and its wait stay with the document, and another
+// document taking the path starts with neither.
+it('keeps a blocked or waiting document's block and wait when its target is removed and added again',async()=>{
+  const f=fixture();vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(0)
+  try{
+    const message='Ordinary activation history exceeds its configured validation budget.'
+    const validateActivation:OrdinaryActivationValidator=async()=>({kind:'over-budget',message})
+    const capture=vi.fn(async()=>f.capture),signal=()=>new AbortController().signal,waiting={kind:'pending',reason:'Hosted document waits before it tries again.'}
+    const d=activationDriver(f,capture,undefined,undefined,undefined,{validateActivation})
+    const again=(objectId='object')=>{d.driver.removeTarget(d.target);d.driver.addTarget(d.target,objectId)}
+    expect(await d.driver.activate(d.target,signal())).toEqual({kind:'pending',reason:message})
+    expect(d.driver.blocked(d.target)).toBe('history-over-budget')
+    again()
+    expect(d.driver.blocked(d.target)).toBe('history-over-budget')
+    expect(await d.driver.activate(d.target,signal())).toEqual({kind:'pending',reason:message})
+    again()
+    expect(await d.driver.activate(d.target,signal())).toEqual(waiting)
+    expect(capture).toHaveBeenCalledTimes(2)
+    again('another-object')
+    expect(d.driver.blocked(d.target)).toBeUndefined()
   }finally{vi.useRealTimers();f.close()}
 })
 // A history past its budget counts as a failure, so a different failure after it waits as the next in the count.
