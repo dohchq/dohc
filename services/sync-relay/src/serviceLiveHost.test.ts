@@ -5334,19 +5334,16 @@ it("releases a departing document that already parked after a restart, capturing
   await expect(restarted.detachDrained("workspace")).resolves.toBe(true);
 });
 
-// Proves: a document held for a live edit its session never admitted cannot
-// become ready, so it gets one capture and then none. Its workspace keeps
-// pushing and pulling, and a sibling keeps its passes. Unblocking allows
-// exactly one more capture, which makes it ready once the hold clears.
 // Proves: a document whose fresh capture blocked keeps that block when the
-// engine unloads it while idle and when its target is forgotten and added
-// again. A refused one is not captured again until it is unblocked, which
-// allows exactly one more capture. A history past the read budget keeps
-// reporting it until it is unblocked.
+// engine unloads it while idle, and a refused one is not captured again until
+// it is unblocked, which allows exactly one more capture. A history past the
+// read budget keeps reporting it until it is unblocked. Forgetting its target
+// and adding it again, as a Stop does, clears the block, and the document is
+// captured again.
 it.each([
   ["refused", () => new ServiceActivationTooLarge()],
   ["history-over-budget", () => new ServiceActivationHistoryOverBudget("Ordinary activation history exceeds its configured entry budget.")],
-] as const)("keeps a %s block when its target is forgotten and added again", async (block, refusal) => {
+] as const)("keeps a %s block through an idle unload", async (block, refusal) => {
   let driver: ServiceActivationDriver | undefined;
   const addTarget = ServiceActivationDriver.prototype.addTarget;
   vi.spyOn(ServiceActivationDriver.prototype, "addTarget").mockImplementation(function (this: ServiceActivationDriver, ...args) {driver = this; return addTarget.apply(this, args);});
@@ -5361,15 +5358,17 @@ it.each([
   await vi.waitFor(() => expect(o.host.blocked(o.sibling)).toBe(block));
   driver!.sleep(o.sibling, o.document);
   expect(o.host.blocked(o.sibling)).toBe(block);
-  driver!.removeTarget(o.sibling);
-  driver!.addTarget(o.sibling, o.sibling.objectId);
-  expect(o.host.blocked(o.sibling)).toBe(block);
+  driver!.wake(o.sibling);
   const captured = captures(), visited = visits();
   await vi.waitFor(() => expect(visits()).toBeGreaterThan(visited + 2));
   expect(o.host.blocked(o.sibling)).toBe(block);
   if (block === "history-over-budget") {
     expect(o.host.unblock(o.sibling)).toBe(true);
     await vi.waitFor(() => expect(captures()).toBeGreaterThan(captured));
+    await vi.waitFor(() => expect(o.host.blocked(o.sibling)).toBe(block));
+    driver!.removeTarget(o.sibling);
+    driver!.addTarget(o.sibling, o.sibling.objectId);
+    expect(o.host.blocked(o.sibling)).toBeUndefined();
     return;
   }
   expect(captures()).toBe(captured);
@@ -5379,8 +5378,16 @@ it.each([
   await vi.waitFor(() => expect(visits()).toBeGreaterThan(retried + 2));
   expect(captures()).toBe(captured + 1);
   expect(o.host.blocked(o.sibling)).toBe("refused");
+  driver!.removeTarget(o.sibling);
+  driver!.addTarget(o.sibling, o.sibling.objectId);
+  expect(o.host.blocked(o.sibling)).toBeUndefined();
+  await vi.waitFor(() => expect(captures()).toBe(captured + 2));
 });
 
+// Proves: a document held for a live edit its session never admitted cannot
+// become ready, so it gets one capture and then none. Its workspace keeps
+// pushing and pulling, and a sibling keeps its passes. Unblocking allows
+// exactly one more capture, which makes it ready once the hold clears.
 it("captures a document held for an unadmitted live edit once, then not again until it is unblocked", async () => {
   const o = await emptyServiceHost(), workspaces = [o.workspace];
   await o.host.update({workspaces, documents: [o.sibling], ...stay});
