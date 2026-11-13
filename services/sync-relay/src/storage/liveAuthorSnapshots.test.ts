@@ -1,4 +1,5 @@
 import {afterEach, expect, it} from "vitest";
+import * as Y from "yjs";
 import type {AgentDeclaration} from "@dohc/live-session-contract/live-update-admission";
 import type {LiveAuthorSnapshot} from "@dohc/live-session-contract";
 import {cleanupLiveDeliveryFixtures, registered} from "../../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport.js";
@@ -44,6 +45,24 @@ it("binds server automation provenance to owner admission and exact retries", ()
     }
     const named = f.capture(f.update("more", "named"), "named", {kind: "named", userId: "reader", grantId: "grant"});
     expect(f.storage.commitLiveUpdateJournal({...named, trustedAutomation}).result).toEqual({kind: "refused", reason: "authority-refused"});
+  } finally {f.close();}
+});
+
+// A build without delivery groups sends each edit of a group the relay already
+// accepted again, under the edit's own delivery id. Each is a new row that
+// claims nothing first seen, so the group's row keeps the edits' authorship.
+it("accepts each edit of an accepted merged update again under its own id without claiming its structs", () => {
+  const f = registered({deployment: true});
+  try {
+    const edits = [f.update("title", "Lisbon"), f.update("subtitle", "Porto")];
+    const group = f.storage.commitLiveUpdateJournal(f.capture(Y.mergeUpdates(edits), "group"));
+    expect(group.result).toMatchObject({kind: "accepted", replayed: false});
+    expect(group.admitted!.metadata.firstSeen).not.toEqual([]);
+    for (const [index, edit] of edits.entries()) {
+      const again = f.storage.commitLiveUpdateJournal(f.capture(edit, `edit-${index}`));
+      expect(again.result).toMatchObject({kind: "accepted", replayed: false});
+      expect(again.admitted!.metadata.firstSeen).toEqual([]);
+    }
   } finally {f.close();}
 });
 

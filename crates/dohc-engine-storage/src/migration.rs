@@ -10195,6 +10195,56 @@ mod tests {
         );
     }
 
+    /// Rows waiting when the owner outbox gains delivery groups belong to no
+    /// group, so each is still delivered alone under the id it already had.
+    /// A rerun applies nothing.
+    #[test]
+    fn owner_delivery_group_migration_leaves_waiting_rows_ungrouped_and_reruns_as_a_no_op() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let ctx = MigrationContext::current(1_000);
+        let before = migration_index("v2-owner-outbox-delivery-group");
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 100);
+        assert_eq!(
+            BASELINE_MIGRATIONS[before - 1].id,
+            "v2-chat-account-thread-reads"
+        );
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch("INSERT INTO binary_blobs VALUES ('base',1,X'58'); \
+            INSERT INTO owner_ydoc_outboxes(outbox_id,workspace_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,base_update_digest,base_blob_digest,base_byte_length,state,pending_bytes,oldest_entry_at_ms,next_sequence,created_at_ms) \
+            VALUES ('outbox','ws','main','doc','base','doc.md','[\"doc.md\"]',0,'base','base',1,'active',3,1,4,1);").unwrap();
+        let entry = "INSERT INTO owner_ydoc_outbox_entries(outbox_id,sequence,append_key,delivery_id,update_digest,update_blob_digest,byte_length,created_at_ms,pending,result_pending_bytes,result_oldest_entry_at_ms,result_state) \
+            VALUES ('outbox',?1,?2,?3,'base','base',1,1,1,?1,1,'active')";
+        for sequence in 1..=3 {
+            let (key, delivery) = (format!("append-{sequence}"), format!("delivery-{sequence}"));
+            conn.execute(entry, rusqlite::params![sequence, key, delivery]).unwrap();
+        }
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        let waiting = |conn: &Connection| -> Vec<(i64, String, i64, Option<i64>)> {
+            let mut statement = conn
+                .prepare(
+                    "SELECT sequence,delivery_id,pending,delivery_group FROM owner_ydoc_outbox_entries ORDER BY sequence",
+                )
+                .unwrap();
+            statement
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        let expected: Vec<(i64, String, i64, Option<i64>)> = (1..=3)
+            .map(|sequence| (sequence, format!("delivery-{sequence}"), 1, None))
+            .collect();
+        assert_eq!(waiting(&conn), expected, "no waiting row joins a group");
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 0 }
+        );
+        assert_eq!(waiting(&conn), expected);
+    }
+
     #[test]
     fn owner_draft_run_migration_keeps_queued_entries_and_needs_a_declaration() {
         let dir = tempdir();
