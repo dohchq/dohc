@@ -876,12 +876,12 @@ it("tells the operator a document without lineage must be opened on a desktop fi
 });
 
 // Proves: a document whose history is past what the server reads or checks
-// tells the operator, once, that it waits for the document's next base.
-it("tells the operator a document whose history is past its budget waits for a new base", async () => {
+// tells the operator, once, that it tries again later or on its owner's Resume.
+it("tells the operator a document whose history is past its budget tries again later", async () => {
   const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
   f.block(binding.objectId, "history-over-budget");
   await vi.waitFor(() => {f.host.reconcile(); expect(f.onError).toHaveBeenCalled();}, {timeout: 10_000});
-  expect(f.onError.mock.calls).toEqual([[expect.objectContaining({message: `Live editing of docs/a.md in workspace ${scope.workspaceId} cannot start: its edit history is past what this server reads or checks. It tries again once the document has a new base. Its store is kept at ${join(f.data, storeName(scope.workspaceId))}.`})]]);
+  expect(f.onError.mock.calls).toEqual([[expect.objectContaining({message: `Live editing of docs/a.md in workspace ${scope.workspaceId} cannot start: its edit history is past what this server reads or checks. It tries again later, or when its owner resumes live editing in dohc. Its store is kept at ${join(f.data, storeName(scope.workspaceId))}.`})]]);
   expect(f.host.blocked(binding)).toBe("history-over-budget");
   await f.waitPasses();
   expect(f.onError).toHaveBeenCalledTimes(1);

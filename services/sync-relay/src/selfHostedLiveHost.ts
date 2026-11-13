@@ -286,7 +286,7 @@ export async function startSelfHostedLiveHost(options: {
           : block === "live-edit-unadmitted"
             ? `Live editing of ${row.path} in workspace ${row.workspaceId} is held: the session host hasn't applied an edit to the document. Its owner can resume live editing in dohc to try again. ${store}`
             : block === "history-over-budget"
-              ? `Live editing of ${row.path} in workspace ${row.workspaceId} cannot start: its edit history is past what this server reads or checks. It tries again once the document has a new base. ${store}`
+              ? `Live editing of ${row.path} in workspace ${row.workspaceId} cannot start: its edit history is past what this server reads or checks. It tries again later, or when its owner resumes live editing in dohc. ${store}`
               : `Live editing of ${row.path} in workspace ${row.workspaceId} stopped until its owner tries again. ${store}`));
       }
       // A workspace with no documents detaches once its replica drained, then

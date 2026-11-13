@@ -54,9 +54,9 @@ it("a note typed within today's entry limit activates", async () => {
   expect((await activate(note)).outcome).toEqual({document: note.document, replayed: false, completed: false});
 });
 
-// Fails on main: 200 keystrokes after the base is more history than the activation reads, and it refuses the note.
+// One keystroke past the most history one read takes: the activation folds the rest.
 it("a note typed past today's entry limit activates", async () => {
-  const note = await typedRelayNote(200);
+  const note = await typedRelayNote(ACTIVATION.maxActivationHistoryEntries + 1);
   expect((await activate(note)).outcome).toEqual({document: note.document, replayed: false, completed: false});
 });
 

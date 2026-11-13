@@ -65,8 +65,9 @@ export function parseServiceActivationConfig(value:unknown){
 }
 export type ServiceActivationConfig=NonNullable<ReturnType<typeof parseServiceActivationConfig>>;
 /**
- * Why a document waits for its owner: the engine refused it or its capture ran validation out of memory,
- * its copy here is missing an owner edit, it has no Y.Doc lineage to activate, or its history is past what the relay reads or checks.
+ * Why a document cannot go live: the engine refused it or its capture ran validation out of memory,
+ * its copy here is missing an owner edit, or it has no Y.Doc lineage to activate; each waits for its owner.
+ * One whose history is past what the relay reads or checks tries again on its own, waiting longer each time.
  */
 export type ServiceActivationBlock="refused"|"live-edit-unadmitted"|"without-lineage"|"history-over-budget";
 type Owner={consumer:OwnerCommittedDelivery;transport:ReturnType<typeof serviceOwnerTransport>;completed:boolean;activationPending:boolean;
@@ -129,13 +130,13 @@ export class ServiceActivationDriver {
   readonly #held=new Map<string,ServiceHostedHold["reason"]>();
   // Targets that cannot progress, with why. Each failed its one capture; passes skip it until `unblock` allows one more.
   // One without lineage also tries once more when the relay holds a Y.Doc update for its document newer than `update`, the latest before that capture's pull.
-  // One whose history is past its budget tries once more when the relay holds a new base for its document after `checked`.
   // One held for released retained work never captures: only the resolution of the binding whose digest it keeps clears it.
   readonly #blocked=new Map<string,{reason:"refused"|"live-edit-unadmitted"}|{reason:"without-lineage";update:number}|
-    {reason:"history-over-budget";checked:number}|{reason:"released-lineage-unsettled";digest:string}>();
-  // Targets whose activation failed, with how many times in a row and when the next try may start. `run` is the failures
-  // in that row that have a word: when the first came, how many, the latest one's word, and whether its owner sees them.
-  readonly #failures=new Map<string,{count:number;until:number;run?:{since:number;failures:number;word:KnownRefusalWord;shown:boolean}}>();
+    {reason:"released-lineage-unsettled";digest:string}>();
+  // Targets whose activation failed, with how many times in a row, when the next try may start, and whether the last
+  // failure was a history past the read budget. `run` is the failures in that row that have a word: when the first came,
+  // how many, the latest one's word, and whether its owner sees them.
+  readonly #failures=new Map<string,{count:number;until:number;overBudget:boolean;run?:{since:number;failures:number;word:KnownRefusalWord;shown:boolean}}>();
   // Each target's document, once known, so a hold applies before the target has an owner, as after a restart.
   readonly #objects=new Map<string,string>();
   // How often each target's activation began to retire. An activation that started before then never becomes ready.
@@ -232,10 +233,14 @@ export class ServiceActivationDriver {
     for(const [document,owner] of this.#owners)if(owner.target===key){owner.completed=false;this.#owners.delete(document);owned=true;}
     return owned;
   }
-  /** Why the target failed the one capture it gets while it cannot progress, if it did. Activation skips it. */
+  /**
+   * Why the target cannot go live, if it cannot. A blocked target failed the one capture it gets, and activation skips it
+   * until `unblock`. One whose last capture found its history past the read budget tries again after its wait.
+   */
   blocked(target:ServiceActivationTarget):ServiceActivationBlock|undefined{
-    const block=this.#blocked.get(targetKey(target));
-    return block?.reason==="released-lineage-unsettled"?undefined:block?.reason;
+    const key=targetKey(target),block=this.#blocked.get(key);
+    if(block)return block.reason==="released-lineage-unsettled"?undefined:block.reason;
+    return this.#failures.get(key)?.overBudget?"history-over-budget":undefined;
   }
   /** How many of the workspace's targets a hosted pass left held. A later pull's held list frees them. */
   heldIn(workspaceId:string){
@@ -259,13 +264,13 @@ export class ServiceActivationDriver {
     return run?.shown?{word:run.word,since:run.since}:undefined;
   }
   /**
-   * Allows a blocked target one more capture, and a failing one a capture now. Returns whether it was blocked or its owner
-   * saw it failing. A hold for released retained work stays.
+   * Allows a target that cannot go live one more capture, and a failing one a capture now, on the next pass. Returns whether
+   * `blocked` named a reason or its owner saw it failing. A hold for released retained work stays.
    */
   unblock(target:ServiceActivationTarget){
-    const key=targetKey(target),shown=this.#failures.get(key)?.run?.shown===true;
+    const key=targetKey(target),failure=this.#failures.get(key),named=failure?.overBudget===true||failure?.run?.shown===true;
     this.#failures.delete(key);
-    return this.#unblock(key) || shown;
+    return this.#unblock(key) || named;
   }
   #unblock(key:string){return this.#blocked.get(key)?.reason!=="released-lineage-unsettled" && this.#blocked.delete(key);}
   /** The digest of the binding the target is held with for released retained work, if it is. Activation skips it. */
@@ -304,16 +309,6 @@ export class ServiceActivationDriver {
   #latestUpdate(target:ServiceActivationTarget){
     const objectId=this.#objectId(target);
     return objectId===undefined?0:this.options.storage.latestServiceHostDocumentUpdate({workspaceId:target.workspaceId,objectId});
-  }
-  // Whether the relay holds a base for the target's document after `block.checked`: the one change that gives its history a new start.
-  // A call that finds none reads only the rows the last one did not. One that finds a base keeps `checked`, so a pass that ends
-  // before its capture finds the base again.
-  #newBase(target:ServiceActivationTarget,block:{checked:number}){
-    const objectId=this.#objectId(target),latest=this.#latestUpdate(target);
-    if(objectId===undefined || latest<=block.checked)return false;
-    const found=this.options.storage.serviceHostDocumentBaseAfter({workspaceId:target.workspaceId,objectId,afterRelaySeq:block.checked});
-    if(!found)block.checked=latest;
-    return found;
   }
   /**
    * Forgets a document the engine unloaded while it stays a target, and ends
@@ -659,8 +654,9 @@ export class ServiceActivationDriver {
       throw error;
     }
   }
-  // A failure with a word counts toward the run its owner sees. One without, a stale cut, only waits.
-  #fail(key:string,word?:KnownRefusalWord){
+  // A failure with a word counts toward the run its owner sees. One without, a stale cut or a history past the read budget,
+  // only waits.
+  #fail(key:string,word?:KnownRefusalWord,overBudget=false){
     const previous=this.#failures.get(key),count=(previous?.count ?? 0)+1,now=Date.now();
     let run=previous?.run;
     if(word!==undefined){
@@ -674,7 +670,7 @@ export class ServiceActivationDriver {
       }
     }
     // The first retry is the next pass. Each later one waits twice as long as the one before, up to five minutes.
-    this.#failures.set(key,{count,until:count<2?0:now+Math.min(300_000,1000*2**(count-2)),...(run?{run}:{})});
+    this.#failures.set(key,{count,until:count<2?0:now+Math.min(300_000,1000*2**(count-2)),overBudget,...(run?{run}:{})});
   }
   async #activate(target:ServiceActivationTarget,signal:AbortSignal,
     settle?:(consumer:OwnerCommittedDelivery,document:LiveDocumentKey,signal:AbortSignal)=>Promise<unknown>,catchUp?:ServiceCatchUp,objectId?:string){
@@ -699,8 +695,7 @@ export class ServiceActivationDriver {
     if(block?.reason==="released-lineage-unsettled"){
       return {kind:"pending" as const,reason:"Hosted document is held until its retained work is resolved."};
     }
-    if(block && !(block.reason==="without-lineage" && this.#latestUpdate(target)>block.update) &&
-      !(block.reason==="history-over-budget" && this.#newBase(target,block))){
+    if(block && !(block.reason==="without-lineage" && this.#latestUpdate(target)>block.update)){
       return {kind:"pending" as const,reason:"Hosted document is blocked until the owner tries again."};
     }
     let saved=this.#read(target,objectId);
@@ -757,16 +752,18 @@ export class ServiceActivationDriver {
           if(!(error instanceof ServiceActivationStaleCut) && !(error instanceof ServiceActivationBusy) && !tooLarge && !overBudget)throw error;
           // The same capture would run its validation out of memory again, so it waits for its owner.
           if(tooLarge)this.#blocked.set(key,{reason:"refused"});
-          // The same history refuses the same way until the document has a new base.
-          if(overBudget)this.#blocked.set(key,{reason:"history-over-budget",checked:capture.source.committedCursor});
           await releaseStale();
-          // A cut that keeps going stale would repeat the capture on every pass, so it waits as a failure does.
+          // A cut that keeps going stale would repeat the capture on every pass, and a history past the read budget refuses
+          // until it changes, so each waits as a failure does, longer each time. Only time or the owner's Resume ends the wait.
           // Only the capture lies between the slot check and validation, so a busy answer counts nothing.
-          if(error instanceof ServiceActivationStaleCut)this.#fail(key);
+          if(error instanceof ServiceActivationStaleCut || overBudget)this.#fail(key,undefined,overBudget);
           if(error instanceof ServiceActivationBusy)this.#awaitCapacity();
           return {kind:"pending" as const,reason:error instanceof ServiceActivationStaleCut?"Hosted replication advanced before activation.":error.message};
         }
         this.#staleLeases.delete(key);
+        // The history passed its check, so the document no longer reads as one past its budget.
+        const failure=this.#failures.get(key);
+        if(failure)failure.overBudget=false;
         o.registered();
         saved=this.#read(target,objectId)!;
       }

@@ -21,6 +21,7 @@ import {ServiceActivationCaptureOverBudget,ServiceActivationHistoryOverBudget,Se
 import {SyncRelayQuotaExceededError} from '../../../services/sync-relay/src/storage/errors.js'
 import {KNOWN_REFUSAL_WORDS} from '../../../services/sync-relay/src/serverLogWords.js'
 import {readOrdinaryActivationHistory,verifyOrdinaryActivationCut} from '../../../services/sync-relay/src/storage/ordinaryActivationSource.js'
+import {checkpointPolicySha256} from '../../../services/sync-relay/src/storage/ordinaryActivationCheckpoint.js'
 import {validateOrdinaryActivation,type OrdinaryActivationValidator} from '../../../services/sync-relay/src/storage/ordinaryActivationValidation.js'
 import {createLiveValidationExecutor} from '../../../services/sync-relay/src/liveValidation.js'
 import {selfHostLiveProfile} from '../../../services/sync-relay/src/selfHostLiveProfile.js'
@@ -1203,10 +1204,10 @@ it('refuses a capture whose validation runs out of heap, blocks it for its owner
     expect(await f.prepare(bounds,validate)).toEqual({document:f.document,replayed:false,completed:false})
   }finally{await pool.close();large.close();f.close()}
 },60_000)
-// A history past what the relay reads refuses the same way on every capture, so the document waits for a new
-// start rather than being captured on every pass. One within the same budget still goes live.
-it('captures a document whose history is past the self-host read budget once, then waits for a new base or its owner',async()=>{
-  const {maxActivationHistoryEntries}=selfHostLiveProfile().service.activation,f=fixture(),within=fixture()
+// A history past what the relay reads refuses until it changes, so the document waits as a failure does, longer before
+// each try, rather than being captured on every pass. One within the same budget still goes live.
+it('captures a document whose history is past the self-host read budget, then waits longer before each try or for its owner',async()=>{
+  const {maxActivationHistoryEntries}=selfHostLiveProfile().service.activation,f=fixture(),within=fixture();vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(0)
   try{
     const config={maxActivationHistoryEntries},signal=()=>new AbortController().signal,drained={kind:'pending' as const,reason:'transport interrupted',continueDrain:false}
     vi.spyOn(OwnerCommittedDelivery.prototype,'drain').mockResolvedValue(drained)
@@ -1214,44 +1215,102 @@ it('captures a document whose history is past the self-host read budget once, th
     expect(await live.driver.activate(live.target,signal())).toMatchObject({kind:'pending',reason:'transport interrupted'})
     expect(live.driver.blocked(live.target)).toBeUndefined()
     expect(within.raw.prepare('SELECT count(*) AS n FROM sync_relay_service_activations').get()!.n).toBe(1)
-    const edit=(seq:number)=>append(f,'origin',seq,'ydoc.update',ydocUpdate({isBaseState:false,lineageClaimId:f.document.lineageClaimId,updateBlobSha256:hash(Buffer.from(`edit-${seq}`))}))
-    f.raw.exec('BEGIN')
-    for(let seq=3;seq<=maxActivationHistoryEntries+1;seq++)edit(seq)
-    f.raw.exec('COMMIT')
+    typePastBudget(f,maxActivationHistoryEntries)
     const capture=vi.fn(async()=>f.capture),send=vi.fn(async()=>({result:{released:true}}))
     const d=activationDriver(f,capture,send,undefined,undefined,config)
-    expect(await d.driver.activate(d.target,signal())).toEqual({kind:'pending',reason:'Ordinary activation history exceeds its configured entry budget.'})
+    expect(await d.driver.activate(d.target,signal())).toEqual(pastBudget)
     expect(d.driver.blocked(d.target)).toBe('history-over-budget')
     expect(send).toHaveBeenCalledWith(expect.objectContaining({method:'liveApplication.releaseOwnerActivation',
       params:{activationId:f.capture.activationId,sessionId:'real-session'}}),expect.any(AbortSignal))
     expect(f.raw.prepare('SELECT * FROM sync_relay_service_activations').all()).toEqual([])
-    const blocked={kind:'pending',reason:'Hosted document is blocked until the owner tries again.'}
-    expect(await d.driver.activate(d.target,signal())).toEqual(blocked)
+    // The first retry is the next pass. The one after it waits a second.
+    expect(await d.driver.activate(d.target,signal())).toEqual(pastBudget)
+    expect(await d.driver.activate(d.target,signal())).toEqual(backingOff)
     // Another edit only lengthens the history.
-    edit(maxActivationHistoryEntries+2)
-    expect(await d.driver.activate(d.target,signal())).toEqual(blocked)
-    expect(capture).toHaveBeenCalledTimes(1)
-    // A new base gives the history a new start, so the next pass captures once more.
-    append(f,'rebased',1,'ydoc.update',ydocUpdate({isBaseState:true,lineageClaimId:hash(Buffer.from('rebased')),updateBlobSha256:hash(Buffer.from('rebased'))}))
-    // A pass that ends before its capture finds the same base on the next one.
-    d.pull.mockResolvedValueOnce({hasMore:true})
-    expect(await d.driver.activate(d.target,signal())).toEqual({kind:'pending',reason:'Hosted replication has more pages.'})
-    expect(capture).toHaveBeenCalledTimes(1)
-    expect(await d.driver.activate(d.target,signal())).toEqual({kind:'pending',reason:'Ordinary activation history exceeds its configured entry budget.'})
+    append(f,'origin',maxActivationHistoryEntries+2,'ydoc.update',ydocUpdate({isBaseState:false,lineageClaimId:f.document.lineageClaimId,updateBlobSha256:hash(Buffer.from('later'))}))
+    expect(await d.driver.activate(d.target,signal())).toEqual(backingOff)
     expect(capture).toHaveBeenCalledTimes(2)
-    expect(await d.driver.activate(d.target,signal())).toEqual(blocked)
-    // The owner's Resume allows one more capture.
+    vi.setSystemTime(1000)
+    expect(await d.driver.activate(d.target,signal())).toEqual(pastBudget)
+    expect(await d.driver.activate(d.target,signal())).toEqual(backingOff)
+    expect(capture).toHaveBeenCalledTimes(3)
+    // The owner's Resume allows one more capture at once.
     expect(d.driver.unblock(d.target)).toBe(true)
+    expect(d.driver.blocked(d.target)).toBeUndefined()
+    expect(await d.driver.activate(d.target,signal())).toEqual(pastBudget)
+    expect(capture).toHaveBeenCalledTimes(4)
+    expect(d.driver.blocked(d.target)).toBe('history-over-budget')
+  }finally{vi.restoreAllMocks();vi.useRealTimers();f.close();within.close()}
+})
+const pastBudget={kind:'pending',reason:'Ordinary activation history exceeds its configured entry budget.'}
+const backingOff={kind:'pending',reason:'Hosted document waits before it tries again.'}
+// Edits after the fixture's base until its history has one row more than `entries`.
+function typePastBudget(f:ReturnType<typeof fixture>,entries:number){
+  f.raw.exec('BEGIN')
+  for(let seq=3;seq<=entries+1;seq++)append(f,'origin',seq,'ydoc.update',ydocUpdate({isBaseState:false,lineageClaimId:f.document.lineageClaimId,updateBlobSha256:hash(Buffer.from(`edit-${seq}`))}))
+  f.raw.exec('COMMIT')
+}
+// The owner's device starts the note again from a new base, which names a new lineage. Its capture names that base.
+function rebaseOwner(f:ReturnType<typeof fixture>,originSeq:number){
+  const doc=markdownToYDoc('Started again'),baselineBytes=Buffer.from(Y.encodeStateAsUpdate(doc));doc.destroy()
+  const lineageClaimId=hash(baselineBytes),document={...f.document,lineageClaimId}
+  append(f,'origin',originSeq,'ydoc.update',ydocUpdate({isBaseState:true,lineageClaimId,updateBlobSha256:lineageClaimId}),baselineBytes)
+  const projected=validateBaseline({document,currentPath:'docs/a.md',checkpoint:baselineBytes})
+  if(projected.kind!=='accepted')throw new Error(JSON.stringify(projected))
+  Object.assign(f.document,{lineageClaimId})
+  Object.assign(f.capture,{baselineBytes,fullState:baselineBytes})
+  Object.assign(f.capture.source,{lineageClaimId,baseOriginSeq:originSeq,baseRelaySeq:f.capture.source.committedCursor,
+    sourceMomentId:`moment-ydoc-apply-${hash(Buffer.from(['workspace','main','object','docs/a.md','origin',String(originSeq)].join('\0')))}`,
+    sourceDigest:projected.evidence.projectedMarkdownSha256,sourceByteLength:projected.evidence.projectedMarkdownByteLength,
+    fullStateDigest:hash(baselineBytes),fullStateByteLength:baselineBytes.length})
+}
+// A document waiting after a history past its budget is captured again only once its wait ends or its owner resumes.
+it('captures a document waiting after a history past its budget only once its wait ends',async()=>{
+  const {maxActivationHistoryEntries}=selfHostLiveProfile().service.activation,f=fixture();vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(0)
+  const loser=losingDevice(f)
+  try{
+    typePastBudget(f,maxActivationHistoryEntries)
+    const prepare=vi.spyOn(ServiceActivationStore.prototype,'prepare'),capture=vi.fn(async()=>f.capture),signal=()=>new AbortController().signal
+    const d=activationDriver(f,capture,undefined,undefined,undefined,{maxActivationHistoryEntries})
+    for(let pass=0;pass<2;pass++)expect(await d.driver.activate(d.target,signal())).toEqual(pastBudget)
+    for(let seq=2;seq<=4;seq++){
+      append(f,'losing-device',seq,'ydoc.update',ydocUpdate({isBaseState:true,lineageClaimId:hash(Buffer.from(`other-${seq}`)),updateBlobSha256:hash(Buffer.from(`other-${seq}`))}))
+      expect(await d.driver.activate(d.target,signal())).toEqual(backingOff)
+    }
+    expect(d.driver.blocked(d.target)).toBe('history-over-budget')
+    expect(capture).toHaveBeenCalledTimes(2)
+    expect(prepare).toHaveBeenCalledTimes(2)
+    vi.setSystemTime(1000)
     await d.driver.activate(d.target,signal())
     expect(capture).toHaveBeenCalledTimes(3)
-    expect(d.driver.blocked(d.target)).toBe('history-over-budget')
-  }finally{vi.restoreAllMocks();f.close();within.close()}
+    expect(prepare).toHaveBeenCalledTimes(3)
+  }finally{vi.restoreAllMocks();vi.useRealTimers();loser.doc.destroy();f.close()}
 })
-// The self-host profile's activation limits as the relay parses them, checked in this process under the profile's own policy.
+it("captures and checks the owner's new base once the wait ends, and activates it",async()=>{
+  const {maxActivationHistoryEntries}=selfHostLiveProfile().service.activation,f=fixture();vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(0)
+  try{
+    typePastBudget(f,maxActivationHistoryEntries)
+    vi.spyOn(OwnerCommittedDelivery.prototype,'drain').mockResolvedValue({kind:'pending',reason:'transport interrupted',continueDrain:false})
+    const prepare=vi.spyOn(ServiceActivationStore.prototype,'prepare'),capture=vi.fn(async()=>f.capture),signal=()=>new AbortController().signal
+    const d=activationDriver(f,capture,undefined,undefined,undefined,{maxActivationHistoryEntries})
+    for(let pass=0;pass<2;pass++)expect(await d.driver.activate(d.target,signal())).toEqual(pastBudget)
+    rebaseOwner(f,maxActivationHistoryEntries+2)
+    expect(await d.driver.activate(d.target,signal())).toEqual(backingOff)
+    vi.setSystemTime(1000)
+    expect(await d.driver.activate(d.target,signal())).toMatchObject({kind:'pending',reason:'transport interrupted'})
+    expect(capture).toHaveBeenCalledTimes(3)
+    expect(prepare).toHaveBeenCalledTimes(3)
+    expect(d.driver.blocked(d.target)).toBeUndefined()
+    expect(f.raw.prepare('SELECT count(*) AS n FROM sync_relay_service_activations').get()!.n).toBe(1)
+  }finally{vi.restoreAllMocks();vi.useRealTimers();f.close()}
+})
+// The self-host profile's activation limits as the relay parses them, checked in this process under the profile's own
+// policy. The validator names that policy, as the relay's does, so activation folds a history longer than one read.
 function selfHostActivation(){
   const {validation,...limits}=selfHostLiveProfile().service.activation
   const {targets:_targets,...config}=parseServiceActivationConfig({validation,...limits,targets:[]})!
-  const validate:OrdinaryActivationValidator=async work=>validateOrdinaryActivation(work,validation)
+  const validate:OrdinaryActivationValidator=Object.assign(async(work:Parameters<OrdinaryActivationValidator>[0])=>validateOrdinaryActivation(work,validation),
+    {policySha256:checkpointPolicySha256(validation)})
   return {...config,validateActivation:validate,validation}
 }
 // Types after the fixture's edit, one keystroke per relay row as one person types, until the history since the
@@ -1278,8 +1337,10 @@ function typeNote(f:ReturnType<typeof fixture>,entries:number){
     sourceDigest:projected.evidence.projectedMarkdownSha256,sourceByteLength:projected.evidence.projectedMarkdownByteLength,
     fullStateDigest:hash(fullState),fullStateByteLength:fullState.length})
 }
-// 1,075 rows is the longest note on the real server; 2,000 rows is about 400 words typed before a note is first shared.
-it.each([1_075,2_000])('activates a typed note with %i rows since its base under the self-host limits',async entries=>{
+// 1,075 rows is the longest note on the real server; 2,000 rows is about 400 words typed before a note is first shared,
+// and the most one read takes. One row more is folded.
+const selfHostEntryLimit=selfHostLiveProfile().service.activation.maxActivationHistoryEntries
+it.each([1_075,selfHostEntryLimit,selfHostEntryLimit+1])('activates a typed note with %i rows since its base under the self-host limits',async entries=>{
   const config=selfHostActivation(),f=fixture();try{
     typeNote(f,entries)
     expect(f.raw.prepare('SELECT count(*) AS n FROM sync_relay_log WHERE relay_seq>=?').get(f.capture.source.baseRelaySeq)!.n).toBe(entries)
@@ -1289,17 +1350,6 @@ it.each([1_075,2_000])('activates a typed note with %i rows since its base under
     expect(d.driver.blocked(d.target)).toBeUndefined()
     expect(f.raw.prepare('SELECT count(*) AS n FROM sync_relay_service_activations').get()!.n).toBe(1)
   }finally{vi.restoreAllMocks();f.close()}
-},60_000)
-it('refuses a typed note one row past the self-host activation limit once, then waits for a new base or its owner',async()=>{
-  const config=selfHostActivation(),f=fixture();try{
-    typeNote(f,config.maxActivationHistoryEntries+1)
-    const capture=vi.fn(async()=>f.capture),d=activationDriver(f,capture,undefined,undefined,undefined,config),signal=()=>new AbortController().signal
-    expect(await d.driver.activate(d.target,signal())).toEqual({kind:'pending',reason:'Ordinary activation history exceeds its configured entry budget.'})
-    expect(d.driver.blocked(d.target)).toBe('history-over-budget')
-    expect(await d.driver.activate(d.target,signal())).toEqual({kind:'pending',reason:'Hosted document is blocked until the owner tries again.'})
-    expect(capture).toHaveBeenCalledTimes(1)
-    expect(f.raw.prepare('SELECT * FROM sync_relay_service_activations').all()).toEqual([])
-  }finally{f.close()}
 },60_000)
 // A real typed row carries about 490 bytes of operation JSON, more than these rows do.
 it('charges a typed note at the self-host activation limit well within the byte budget',async()=>{
@@ -1333,16 +1383,17 @@ it('pages the owner outbox drain at the self-host drain bound, not the activatio
     expect(page).toBe(128)
   }finally{vi.restoreAllMocks();f.close()}
 })
-it('blocks a capture whose history check runs out of its work budget, as one past the read budget',async()=>{
-  const f=fixture();try{
+it('waits longer before each capture of a history whose check runs out of its work budget, as one past the read budget',async()=>{
+  const f=fixture();vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(0)
+  try{
     const message='Ordinary activation history exceeds its configured validation budget.',capture=vi.fn(async()=>f.capture)
     const d=activationDriver(f,capture,undefined,undefined,undefined,{validateActivation:async()=>({kind:'over-budget',message})})
-    expect(await d.driver.activate(d.target,new AbortController().signal)).toEqual({kind:'pending',reason:message})
+    for(let pass=0;pass<2;pass++)expect(await d.driver.activate(d.target,new AbortController().signal)).toEqual({kind:'pending',reason:message})
     expect(d.driver.blocked(d.target)).toBe('history-over-budget')
-    await d.driver.activate(d.target,new AbortController().signal)
-    expect(capture).toHaveBeenCalledTimes(1)
+    expect(await d.driver.activate(d.target,new AbortController().signal)).toEqual(backingOff)
+    expect(capture).toHaveBeenCalledTimes(2)
     await expect(f.prepare(bounds,async()=>({kind:'over-budget',message}))).rejects.toBeInstanceOf(ServiceActivationHistoryOverBudget)
-  }finally{f.close()}
+  }finally{vi.useRealTimers();f.close()}
 })
 it('answers over-budget when a history check runs past its byte budget',async()=>{
   const f=fixture();try{
@@ -1599,32 +1650,19 @@ it.each(['Stop','a restart'] as const)('captures a blocked or waiting document a
     expect(capture).toHaveBeenCalledTimes(6)
   }finally{vi.useRealTimers();f.close()}
 })
-// A history past its budget is blocked, not counted: once a new base clears the block, the next failure is the first.
-it('adds nothing to the wait for a history past its budget',async()=>{
+// A history past its budget counts as a failure, so a different failure after it waits as the next in the count.
+it('counts a history past its budget in the wait before the next try',async()=>{
   const {maxActivationHistoryEntries}=selfHostLiveProfile().service.activation,f=fixture();vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(0)
   try{
-    const signal=()=>new AbortController().signal,waiting={kind:'pending',reason:'Hosted document waits before it tries again.'}
-    const overBudget={kind:'pending',reason:'Ordinary activation history exceeds its configured entry budget.'}
-    f.raw.exec('BEGIN')
-    for(let seq=3;seq<=maxActivationHistoryEntries+1;seq++)append(f,'origin',seq,'ydoc.update',ydocUpdate({isBaseState:false,lineageClaimId:f.document.lineageClaimId,updateBlobSha256:hash(Buffer.from(`edit-${seq}`))}))
-    f.raw.exec('COMMIT')
-    const rebase=(seq:number)=>append(f,'rebased',seq,'ydoc.update',ydocUpdate({isBaseState:true,lineageClaimId:hash(Buffer.from(`rebased-${seq}`)),updateBlobSha256:hash(Buffer.from(`rebased-${seq}`))}))
-    const capture=vi.fn(async()=>f.capture),d=activationDriver(f,capture,undefined,undefined,undefined,{maxActivationHistoryEntries})
-    expect(await d.driver.activate(d.target,signal())).toEqual(overBudget)
-    rebase(1)
-    // `append` moves the capture's cut to the new base, as a capture after a complete pull would be.
-    const based=f.capture.source.committedCursor
-    expect(await d.driver.activate(d.target,signal())).toEqual(overBudget)
-    expect(d.driver.blocked(d.target)).toBe('history-over-budget')
-    expect(f.capture.source.committedCursor).toBe(based)
-    // Blocked again past that base, so the next pass captures nothing.
-    expect(await d.driver.activate(d.target,signal())).toEqual({kind:'pending',reason:'Hosted document is blocked until the owner tries again.'})
-    expect(capture).toHaveBeenCalledTimes(2)
-    rebase(2)
+    typePastBudget(f,maxActivationHistoryEntries)
+    const capture=vi.fn(async()=>f.capture),d=activationDriver(f,capture,undefined,undefined,undefined,{maxActivationHistoryEntries}),signal=()=>new AbortController().signal
+    expect(await d.driver.activate(d.target,signal())).toEqual(pastBudget)
     capture.mockImplementation(async()=>{throw new Error('Engine is unavailable.')})
-    for(let i=0;i<2;i++)await expect(d.driver.activate(d.target,signal())).rejects.toThrow('Engine is unavailable.')
-    expect(await d.driver.activate(d.target,signal())).toEqual(waiting)
-    expect(capture).toHaveBeenCalledTimes(4)
+    await expect(d.driver.activate(d.target,signal())).rejects.toThrow('Engine is unavailable.')
+    // The failure that follows names no history, so the document no longer reads as one past its budget.
+    expect(d.driver.blocked(d.target)).toBeUndefined()
+    expect(await d.driver.activate(d.target,signal())).toEqual(backingOff)
+    expect(capture).toHaveBeenCalledTimes(2)
   }finally{vi.useRealTimers();f.close()}
 })
 // A document the engine has not readied is retried on every pass, and that adds nothing to a later wait.

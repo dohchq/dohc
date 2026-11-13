@@ -381,7 +381,7 @@ export class ServiceActivationStore {
     for(const limit of Object.values(input.bounds))if(!Number.isSafeInteger(limit)||limit<1)throw new Error("Invalid ordinary activation read budget.");
     const capturedBytes=input.capture.baselineBytes.byteLength+input.capture.fullState.byteLength+Buffer.byteLength(JSON.stringify(input.capture.source));
     if(capturedBytes>input.bounds.maxCaptureBytes)throw new ServiceActivationCaptureOverBudget();
-    // The history read charges the baseline to the same budget, so a baseline past it waits for a new base too.
+    // The history read charges the baseline to the same budget, so a baseline past it refuses as a history past it does.
     if(input.capture.baselineBytes.byteLength>input.bounds.maxBytesPerDrain){
       throw new ServiceActivationHistoryOverBudget("Ordinary activation history exceeds its configured byte budget.");
     }
