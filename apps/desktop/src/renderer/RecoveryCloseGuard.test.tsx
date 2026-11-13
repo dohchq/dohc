@@ -697,6 +697,11 @@ describe("RecoveryCloseGuard with working storage", () => {
 });
 
 describe("main.tsx composition", () => {
+  // Stops main.tsx's reduced-motion poll even when the test fails before it does.
+  afterEach(() => {
+    window.dispatchEvent(new Event("pagehide"));
+  });
+
   it("restores stored recoveries and keeps the close guard alive above a crashed root", async () => {
     let mountedRoot: Root | null = null;
     vi.doMock("react-dom/client", async (importOriginal) => {
@@ -771,8 +776,8 @@ describe("main.tsx composition", () => {
     );
     restored.unmount();
     // On Linux main.tsx polls the native reduced-motion setting every second
-    // until pagehide stops it. Left running, its timer fires after this
-    // file's jsdom is gone and fails the whole run.
+    // until pagehide stops it. Left running, its timer can fire after this
+    // file's jsdom is gone and fail the whole run.
     await waitFor(() => expect(document.documentElement.dataset.systemReducedMotion).toBe("false"));
     window.dispatchEvent(new Event("pagehide"));
     expect(document.documentElement.dataset.systemReducedMotion).toBeUndefined();
