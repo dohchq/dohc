@@ -122,8 +122,15 @@ Do not weaken authorization, ownership, isolation, or configured controls for co
 - Give reversible state changes a visible reverse path. Warn before irreversible actions.
 - Show a top bar only for whole-workspace degradation. Other errors belong in bottom-right toasts and durable Notices rows.
   Include Try again and copy. Put copy beside its text. Follow [dohc-interface](.agents/skills/dohc-interface/SKILL.md).
-- Guard async renderer responses with a workspace/request token, abort signal, or equivalent before changing workspace-scoped state.
-  A slow workspace A response must never repaint workspace B.
+- A slow workspace A response must never repaint workspace B.
+  In a renderer component or hook, read workspace data with `useWorkspaceQuery`.
+  Guard any other async result with a request token or abort signal before it changes workspace-scoped state.
+
+A check enforces some of these rules. Its limit says what it does not catch.
+
+| Rule | Check | Limit |
+| --- | --- | --- |
+| Read workspace data with `useWorkspaceQuery`. | `scripts/check-bridge-reads.mjs`. `scripts/bridge-reads.json` lists older reads and only shrinks. | A loader that calls a setter it captured can still write late. Keep loaders to reading and returning. |
 
 Within these boundaries, app authors choose frameworks and services and own app behavior, including where received data goes.
 
