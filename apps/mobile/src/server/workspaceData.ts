@@ -293,9 +293,10 @@ export interface WorkspaceData {
   /**
    * Marks the account's place in a thread at a message a screen shows. A mark the server took, or one on its way, is
    * not sent again; one that failed, including the server's "Couldn't send", says nothing, and the next showing sends
-   * it again.
+   * it again. A 404 that still counts means the workspace may be gone, as for a read. Resolves once the mark settles,
+   * at once for one it doesn't send; it never rejects.
    */
-  markRead(threadId: string, messageId: string): void;
+  markRead(threadId: string, messageId: string): Promise<void>;
 }
 
 export const FEED_RETRY_MS = 1000;
@@ -582,11 +583,14 @@ export function createWorkspaceData(options: {
       everything.abort();
     },
     markRead(threadId, messageId) {
-      if (!live() || sending.get(threadId) === messageId || marked.get(threadId) === messageId) return;
+      if (!live() || sending.get(threadId) === messageId || marked.get(threadId) === messageId) return Promise.resolve();
       sending.set(threadId, messageId);
-      void markThreadRead(signIn.client, workspaceId, threadId, messageId, everything.signal).then(
+      return markThreadRead(signIn.client, workspaceId, threadId, messageId, everything.signal).then(
         () => { marked.set(threadId, messageId); },
-        () => undefined,
+        (error: unknown) => {
+          // As a read's 404 does, one that still counts says the workspace may be gone from this phone.
+          if (live() && isGone(error)) gone();
+        },
       ).finally(() => {
         if (sending.get(threadId) === messageId) sending.delete(threadId);
       });

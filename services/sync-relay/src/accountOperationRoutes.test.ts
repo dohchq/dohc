@@ -1504,4 +1504,20 @@ describe("an account's chat writes through the server's copy", () => {
     expect(slow.engine.marks).toHaveLength(1);
     expect(markRows(slow)).toEqual([]);
   });
+
+  it("sends a read mark and a later write in the order the copy journaled them", async () => {
+    const f = await writeRelay();
+    f.failStep(new Error("The relay is unreachable."));
+    expect(await answer(await f.write("markRead", { threadId: "thread-stay", messageId: "message-poll" })))
+      .toEqual({ ok: false, reason: "Couldn't send" });
+    f.failStep(null);
+    expect(await answer(await f.write("reply", { operationId: "op-after", threadId: "thread-stay", body: "Hi" })))
+      .toMatchObject({ ok: true, state: "saved" });
+    const pushed = (f.storage as StorageContext).db.prepare(
+      "SELECT origin_seq, op_kind FROM sync_relay_log WHERE workspace_id = 'trip' AND origin_id = 'server-copy' ORDER BY relay_seq",
+    ).all().map((row) => ({ seq: Number(row.origin_seq), kind: String(row.op_kind) }));
+    expect(pushed[0]?.kind).toBe("chat.thread.read.set");
+    expect(pushed.map((row) => row.seq)).toEqual(pushed.map((row) => row.seq).sort((left, right) => left - right));
+    expect(pushed.length).toBeGreaterThan(1);
+  });
 });

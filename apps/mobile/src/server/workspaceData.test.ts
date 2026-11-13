@@ -593,14 +593,27 @@ describe("a read mark the server couldn't send", () => {
     const path = "/sync/ws-a/ops/markRead";
     server.on("POST", path, ops({ ok: false, reason: "Couldn't send" }, "0.1.1"), ops({ ok: true }, "0.1.1"));
     const { data } = open(server);
-    data.markRead("thread-1", "message-1");
-    await vi.waitFor(() => expect(count(server, path)).toBe(1));
-    await vi.waitFor(() => {
-      data.markRead("thread-1", "message-1");
-      expect(count(server, path)).toBe(2);
-    });
-    // A mark on its way, or one the server took, is not sent again.
-    data.markRead("thread-1", "message-1");
+    await data.markRead("thread-1", "message-1");
+    expect(count(server, path)).toBe(1);
+    // The next showing sends it again, and the server takes it.
+    await data.markRead("thread-1", "message-1");
     expect(count(server, path)).toBe(2);
+    // Once the server took it, a later showing sends nothing.
+    await data.markRead("thread-1", "message-1");
+    expect(count(server, path)).toBe(2);
+  });
+
+  it("stops and clears the store when a mark finds the workspace gone, and sends nothing after", async () => {
+    const server = testServer();
+    const path = "/sync/ws-a/ops/markRead";
+    server.on("POST", path, NOT_FOUND);
+    const onGone = vi.fn();
+    const data = createWorkspaceData({ signIn: signInTo(server), workspaceId: "ws-a", cache: createReadCache(), onGone });
+    data.resume();
+    await data.markRead("thread-1", "message-1");
+    expect(onGone).toHaveBeenCalledTimes(1);
+    expect(data.state(views.files)).toMatchObject({ value: null, problem: "refused" });
+    await data.markRead("thread-2", "message-2");
+    expect(count(server, path)).toBe(1);
   });
 });

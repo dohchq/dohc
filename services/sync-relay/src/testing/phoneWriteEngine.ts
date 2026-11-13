@@ -85,9 +85,10 @@ export class PhoneWriteEngine implements EngineTransport {
     return response;
   }
 
-  /** Pushes each row the receipts and read marks list that the relay hasn't had yet. */
+  /** Pushes each row the receipts and read marks list that the relay hasn't had yet, in the order the engine journaled them. */
   push(relay: (row: PhoneWriteRow) => void): void {
-    for (const row of [...this.receipts.values()].flatMap((receipt) => receipt.rows).concat(this.markRows)) {
+    const rows = [...this.receipts.values()].flatMap((receipt) => receipt.rows).concat(this.markRows);
+    for (const row of rows.sort((left, right) => left.originSeq - right.originSeq)) {
       if (row.pushed) continue;
       relay(row);
       row.pushed = true;
