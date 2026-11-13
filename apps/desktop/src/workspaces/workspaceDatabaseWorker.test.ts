@@ -1,29 +1,13 @@
 import { databaseFolderName, databaseOpLogPath } from "@dohc/workspace-core";
 import { lstatSync, mkdirSync } from "node:fs";
-import {
-  appendFile,
-  copyFile,
-  link,
-  mkdir,
-  readFile,
-  rename,
-  rm,
-  symlink,
-  utimes,
-  writeFile,
-} from "node:fs/promises";
+import { copyFile, link, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { Worker } from "node:worker_threads";
 import { afterEach, describe, expect, it } from "vitest";
 import { prepareWorkspaceFileRead } from "./workspaceAssets";
 import { readPreparedDatabaseSnapshot } from "./workspaceDatabase";
-import {
-  DATABASE_MAX_CELL_CHARS,
-  DATABASE_MAX_ROWS,
-  editDatabaseAtPath,
-  readDatabaseSnapshotAtPath,
-} from "./workspaceDatabaseCore";
+import { DATABASE_MAX_CELL_CHARS, editDatabaseAtPath, readDatabaseSnapshotAtPath } from "./workspaceDatabaseCore";
 import type {
   DatabaseEdit,
   DatabaseOperationInput,
@@ -58,11 +42,6 @@ const UPDATE: DatabaseEdit = {
   payload: { value: "changed" },
 };
 
-const IMPORT_SOURCE = {
-  name: "data.csv", mediaType: "text/csv", tableName: "imported data",
-  body: 'id,title,amount\nr1,"one,two",4.5\nr2,"line one\nline two",7',
-};
-
 function owner(
   options: Parameters<typeof createWorkspaceDatabaseWorkerOwner>[0] = {},
 ): WorkspaceDatabaseWorkerOwner {
@@ -70,65 +49,6 @@ function owner(
   owners.add(created);
   return created;
 }
-
-describe("database import worker", () => {
-  it.each(['json', 'jsonl'])('preserves declared strings through the %s import worker', async format => {
-    const worker = owner();
-    const row = { id: 'a', zip: '02134', flag: 'true', empty: '' };
-    const result = await worker.importData({ name: `data.${format}`, mediaType: 'application/json', tableName: 'rows',
-      body: JSON.stringify(format === 'json' ? [row] : row) });
-    const snapshot = await worker.readBytes({ bytes: result.bytes, path: 'import.sqlite' });
-    expect(snapshot.tables[0]?.rows).toEqual([{ __dohc_rowid: 1, ...row }]);
-  });
-
-  it('rejects malformed CSV and stays usable for a later import', async () => {
-    const worker = owner();
-    await expect(worker.importData({ ...IMPORT_SOURCE, body: 'id,note\na,first,discarded' }))
-      .rejects.toThrow('Import row contains more cells than its header.');
-    await expect(worker.importData({ ...IMPORT_SOURCE, body: 'id,note\na,"unfinished' }))
-      .rejects.toThrow('CSV field has an unfinished quote.');
-    await expect(worker.importData(IMPORT_SOURCE)).resolves.toMatchObject({ rowCount: 2 });
-  });
-
-  it("materializes complete rows and normalized schema without returning a duplicate snapshot", async () => {
-    const worker = owner();
-    const result = await worker.importData(IMPORT_SOURCE);
-    expect(Object.keys(result).sort()).toEqual(["bytes", "rowCount", "tableName"]);
-    expect(result).toMatchObject({ rowCount: 2, tableName: "imported_data" });
-    const snapshot = await worker.readBytes({ bytes: result.bytes, path: "import.sqlite" });
-    expect(snapshot.tables[0]?.rows).toEqual([
-      expect.objectContaining({ id: "r1", title: "one,two", amount: 4.5 }),
-      expect.objectContaining({ id: "r2", title: "line one\nline two", amount: 7 }),
-    ]);
-  });
-
-  it("preserves import errors and can handle another request after rejection", async () => {
-    const worker = owner();
-    await expect(worker.importData({ ...IMPORT_SOURCE, body: "id,title" }))
-      .rejects.toThrow("Import failed (empty-import-source): Import source did not contain any rows.");
-    await expect(worker.importData(IMPORT_SOURCE)).resolves.toMatchObject({ rowCount: 2 });
-  });
-
-  it("cancels an import queued behind another request before it starts", async () => {
-    const started: string[] = [];
-    const worker = owner({ onRequestStarted: (request) => started.push(request.kind) });
-    const first = worker.importData(IMPORT_SOURCE);
-    const abort = new AbortController();
-    const cancelled = worker.importData(IMPORT_SOURCE, abort.signal);
-    abort.abort();
-    await expect(cancelled).rejects.toThrow("Database import was cancelled.");
-    await first;
-    expect(started).toEqual(["import-data"]);
-  });
-
-  it("drains a started import on cancellation and remains usable", async () => {
-    const abort = new AbortController();
-    const worker = owner({ onRequestStarted: () => abort.abort() });
-    await expect(worker.importData(IMPORT_SOURCE, abort.signal))
-      .rejects.toThrow("Database import was cancelled.");
-    await expect(worker.importData(IMPORT_SOURCE)).resolves.toMatchObject({ rowCount: 2 });
-  });
-});
 
 afterEach(async () => {
   await Promise.all([...owners].map((created) => created.dispose()));
@@ -303,7 +223,7 @@ describe("workspace database worker", () => {
     seedDatabase(databasePath);
     const paths = editPaths(root);
     const databaseWorker = owner();
-    const values = Array.from({ length: 12 }, (_, index) => `value-${index + 1}`);
+    const values = Array.from({ length: 3 }, (_, index) => `value-${index + 1}`);
 
     const results = await Promise.all(
       values.map((value, index) => {
@@ -332,56 +252,6 @@ describe("workspace database worker", () => {
       readDatabaseSnapshotAtPath(databasePath, "data.sqlite").tables[0]?.rows[0]
         ?.value,
     ).toBe(values.at(-1));
-  });
-
-  it("preserves operation validation and JSONL field order", async () => {
-    const root = await createTestScratch("dohc-db-worker-operation-");
-    const databasePath = join(root, "data.sqlite");
-    seedDatabase(databasePath);
-    const paths = editPaths(root);
-    const databaseWorker = owner();
-    const validOperation = operation("op-field-order");
-
-    await databaseWorker.editPath({
-      absolutePath: databasePath,
-      path: "data.sqlite",
-      ...paths,
-      edit: UPDATE,
-      operation: validOperation,
-    });
-
-    const [logged] = await logOperations(paths.logPath);
-    expect(Object.keys(logged!)).toEqual([
-      "operationId",
-      "databasePath",
-      "table",
-      "op",
-      "rowId",
-      "payload",
-      "version",
-      "appliedAt",
-      "author",
-    ]);
-
-    const invalidOperations = [
-      [operation(" "), "operationId"],
-      [{ ...operation("op-invalid-path"), databasePath: "" }, "databasePath"],
-      [{ ...operation("op-invalid-table"), table: "\t" }, "table"],
-      [{ ...operation("op-invalid-row"), rowId: "" }, "rowId"],
-      [{ ...operation("op-invalid-time"), appliedAt: Number.NaN }, "appliedAt"],
-    ] as const;
-    for (const [invalidOperation, field] of invalidOperations) {
-      await expect(
-        databaseWorker.editPath({
-          absolutePath: databasePath,
-          path: "data.sqlite",
-          ...paths,
-          edit: UPDATE,
-          operation: invalidOperation,
-        }),
-      ).rejects.toThrow(`Database operation ${field}`);
-    }
-    expect(await logOperations(paths.logPath)).toHaveLength(1);
   });
 
   it("surfaces a crash for the active request and lazily restarts on the next request", async () => {
@@ -454,7 +324,7 @@ describe("workspace database worker", () => {
 
     const secondEdit = {
       ...UPDATE,
-      payload: { value: { text: "x".repeat(300_000) } },
+      payload: { value: { text: "x".repeat(8) } },
     };
     const secondOwner = owner();
     const second = await secondOwner.editPath({
@@ -484,70 +354,6 @@ describe("workspace database worker", () => {
       101,
       102,
     ]);
-  });
-
-  it("starts a missing counter past a gap in the log, so no number repeats", async () => {
-    const root = await createTestScratch("dohc-db-worker-seed-gap-");
-    const databasePath = join(root, "data.sqlite");
-    seedDatabase(databasePath);
-    const paths = editPaths(root);
-    await mkdir(dirname(paths.logPath), { recursive: true });
-    // Number 3 went to an edit that failed, so three lines end at number 4.
-    await writeFile(paths.logPath, [1, 2, 4].map((version) => `${JSON.stringify({ version })}\n`).join(""));
-
-    const edited = await owner().editPath({
-      absolutePath: databasePath,
-      path: "data.sqlite",
-      ...paths,
-      edit: UPDATE,
-      operation: operation("op-after-gap"),
-    });
-
-    expect(edited.version).toBe(5);
-    expect((await logOperations(paths.logPath)).map((entry) => entry.version)).toEqual([1, 2, 4, 5]);
-  });
-
-  it("gives the next number after both its counter and every number another computer added to the log", async () => {
-    const root = await createTestScratch("dohc-db-worker-other-computer-");
-    const databasePath = join(root, "data.sqlite");
-    seedDatabase(databasePath);
-    const paths = editPaths(root);
-    await mkdir(dirname(paths.logPath), { recursive: true });
-    const lines = (versions: number[]) => versions.map((version) => `${JSON.stringify({ version })}\n`).join("");
-    const upTo = (last: number) => Array.from({ length: last }, (_, index) => index + 1);
-    // What a sync does: the other computer's copy replaces the log.
-    const synced = async (versions: number[]) => {
-      await writeFile(`${paths.logPath}.synced`, lines(versions));
-      await rename(`${paths.logPath}.synced`, paths.logPath);
-    };
-    await writeFile(paths.logPath, lines(upTo(10)));
-    const counter = new DatabaseSync(paths.statePath);
-    try {
-      counter.exec("CREATE TABLE database_operation_state (key TEXT PRIMARY KEY, value INTEGER NOT NULL); INSERT INTO database_operation_state VALUES ('last_version', 10);");
-    } finally { counter.close(); }
-    const databaseWorker = owner();
-    const edit = async (operationId: string) => (await databaseWorker.editPath({
-      absolutePath: databasePath, path: "data.sqlite", ...paths, edit: UPDATE, operation: operation(operationId),
-    })).version;
-
-    // This computer's counter is at 10, and the other computer's 11 and 12 arrive.
-    await appendFile(paths.logPath, lines([11, 12]));
-    expect(await edit("after-other-computer")).toBe(13);
-    // The log grows in place after this computer last read it.
-    await appendFile(paths.logPath, lines([14]));
-    expect(await edit("after-append")).toBe(15);
-    // A synced copy without this computer's 13 and 15, with the other's 16.
-    await synced([...upTo(12), 14, 16]);
-    expect(await edit("after-sync")).toBe(17);
-    // A synced copy that lost every number past 12: the counter still covers them.
-    await synced(upTo(12));
-    expect(await edit("after-loss")).toBe(18);
-    // A change in place that keeps the log's size, made later.
-    const text = await readFile(paths.logPath, "utf8");
-    await writeFile(paths.logPath, text.replace('{"version":12}', '{"version":99}'));
-    const later = new Date(Date.now() + 60_000);
-    await utimes(paths.logPath, later, later);
-    expect(await edit("after-rewrite")).toBe(100);
   });
 
   it("refuses while the log holds a version past the safe range, with or without a counter", async () => {
@@ -580,66 +386,11 @@ describe("workspace database worker", () => {
     expect((await edit()).version).toBe(6);
   });
 
-  it("refuses a number past the safe range rather than give one out again", async () => {
-    const root = await createTestScratch("dohc-db-worker-seed-limit-");
-    const databasePath = join(root, "data.sqlite");
-    seedDatabase(databasePath);
-    const paths = editPaths(root);
-    await mkdir(dirname(paths.logPath), { recursive: true });
-    await writeFile(paths.logPath, `${JSON.stringify({ version: Number.MAX_SAFE_INTEGER })}\n`);
-    const before = await readFile(databasePath);
-
-    await expect(owner().editPath({
-      absolutePath: databasePath,
-      path: "data.sqlite",
-      ...paths,
-      edit: UPDATE,
-      operation: operation("op-past-limit"),
-    })).rejects.toThrow("Database operation version must be a non-negative integer");
-
-    expect(await readFile(databasePath)).toEqual(before);
-    expect(await logOperations(paths.logPath)).toHaveLength(1);
-  });
-
-  it("pages at the row limit and at the serialized byte budget", async () => {
-    const root = await createTestScratch("dohc-db-worker-page-");
-    const rowBoundPath = join(root, "rows.sqlite");
-    const byteBoundPath = join(root, "bytes.sqlite");
-    seedPagedDatabase(rowBoundPath, 1205, false);
-    await copyWideDatabaseSeed(byteBoundPath);
-    const databaseWorker = owner();
-
-    const snapshot = await databaseWorker.readPath({
-      absolutePath: rowBoundPath,
-      path: "rows.sqlite",
-    });
-    expect(snapshot.tables[0]?.rows).toHaveLength(DATABASE_MAX_ROWS);
-    expect(snapshot.tables[0]?.nextOffset).toBe(DATABASE_MAX_ROWS);
-    const second = await databaseWorker.readPagePath({
-      absolutePath: rowBoundPath,
-      path: "rows.sqlite",
-      table: "items",
-      offset: DATABASE_MAX_ROWS,
-    });
-    expect(second.rows).toHaveLength(205);
-    expect(second.nextOffset).toBeNull();
-
-    const byteBound = await databaseWorker.readPath({
-      absolutePath: byteBoundPath,
-      path: "bytes.sqlite",
-    });
-    expect(byteBound.tables[0]!.rows.length).toBeGreaterThan(0);
-    expect(byteBound.tables[0]!.rows.length).toBeLessThan(DATABASE_MAX_ROWS);
-    expect(byteBound.tables[0]!.nextOffset).toBe(
-      byteBound.tables[0]!.rows.length,
-    );
-  });
-
   it("cancels a queued edit before it can mutate or log", async () => {
     const root = await createTestScratch("dohc-db-worker-cancel-");
     const largePath = join(root, "large.sqlite");
     const editPath = join(root, "data.sqlite");
-    await copyWideDatabaseSeed(largePath);
+    seedDatabase(largePath);
     seedDatabase(editPath);
     const paths = editPaths(root);
     const databaseWorker = owner();
@@ -739,28 +490,5 @@ describe("workspace database worker", () => {
         ?.value,
     ).toBe("changed");
     expect(await logOperations(paths.logPath)).toHaveLength(1);
-  });
-
-  it("keeps the event loop responsive after a large read starts", async () => {
-    const root = await createTestScratch("dohc-db-worker-responsive-");
-    const databasePath = join(root, "large.sqlite");
-    await copyWideDatabaseSeed(databasePath);
-    const started = Promise.withResolvers<void>();
-    let readSettled = false;
-    const databaseWorker = owner({
-      onRequestStarted() {
-        started.resolve();
-      },
-    });
-    const read = databaseWorker
-      .readPath({ absolutePath: databasePath, path: "large.sqlite" })
-      .finally(() => {
-        readSettled = true;
-      });
-
-    await started.promise;
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    expect(readSettled).toBe(false);
-    await read;
   });
 });

@@ -308,8 +308,7 @@ describe("test scratch", () => {
   // The guard is only as good as its agreement with the name this module gives
   // its own run root. A run id that drifted out of the shape would leak every
   // run it named, silently — so the producer is checked through the sweep, not
-  // described in a comment. The Rust twin holds the same line in
-  // `every_run_root_this_repo_creates_is_run_shaped`.
+  // described in a comment.
   it("sweeps a run root named the way this module names its own", async () => {
     const harness = await createTestScratch("own-name-");
     const parent = join(harness, "runs");

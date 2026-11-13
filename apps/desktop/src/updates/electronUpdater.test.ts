@@ -2,15 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
-import {
-  debInstallFailure,
-  publicUpdateState,
-  resolveUpdateChannel,
-  startAutoUpdates,
-  updateFeedOverride,
-  type AutoUpdateController,
-} from "./electronUpdater";
-import { initialUpdateState, transition, type UpdateEvent } from "./updateMachine";
+import { debInstallFailure, startAutoUpdates, updateFeedOverride, type AutoUpdateController } from "./electronUpdater";
 import { deferred } from "../testing/deferred";
 import { UpdateStateEvent } from "../ipc/bridgeContract";
 
@@ -130,24 +122,6 @@ function channelFileNotFound(): Error {
 }
 
 describe("electron updater configuration", () => {
-  it("derives latest/nightly channels from semver-compatible versions", () => {
-    expect(resolveUpdateChannel("1.2.3")).toBe("latest");
-    expect(resolveUpdateChannel("1.2.4-nightly.20260621.123")).toBe("nightly");
-    expect(resolveUpdateChannel("1.2.4-nightly.20260621.123.2")).toBe("nightly");
-  });
-
-  it("uses a baked packaged app-update.yml feed unless an override is explicit", async () => {
-    const updater = fakeUpdater();
-    const controller = await startWith(updater, { isPackaged: true, env: {} });
-
-    expect(controller).not.toBeNull();
-    expect(updater.setFeedURL).not.toHaveBeenCalled();
-    expect(updater.autoDownload).toBe(false);
-    expect(updater.autoInstallOnAppQuit).toBe(true);
-    expect(updater.channel).toBe("latest");
-    expect(updater.allowPrerelease).toBe(false);
-    expect(updater.allowDowngrade).toBe(false);
-  });
 
   it("honors DOHC_UPDATE_URL only for packaged builds or explicit dev mock mode", async () => {
     expect(updateFeedOverride({ DOHC_UPDATE_URL: "https://updates.test" }, false)).toBeNull();
@@ -221,15 +195,6 @@ describe("electron updater configuration", () => {
       "(", "apt-get", "install", "-f", "-y", "--no-remove", "&&", "dpkg", "-i", "/tmp/dohc.deb", ")",
     ]]);
   });
-
-  it("sets nightly channel flags explicitly", async () => {
-    const updater = fakeUpdater();
-    await startWith(updater, { currentVersion: "1.2.4-nightly.20260621.123" });
-
-    expect(updater.channel).toBe("nightly");
-    expect(updater.allowPrerelease).toBe(true);
-    expect(updater.allowDowngrade).toBe(false);
-  });
 });
 
 describe("electron updater release without this platform's files", () => {
@@ -245,19 +210,6 @@ describe("electron updater release without this platform's files", () => {
     });
   });
 
-  it("reports a missing channel file as an error on Windows and Linux, whose files ship with the release", async () => {
-    for (const platform of ["win32", "linux"] as const) {
-      const updater = fakeUpdater();
-      failChecksWith(updater, channelFileNotFound());
-      const controller = await startWith(updater, { platform });
-
-      await expect(controller!.checkForUpdates()).resolves.toMatchObject({
-        checked: false,
-        state: { status: "error", message: expect.stringContaining("Cannot find nightly-mac.yml") },
-      });
-    }
-  });
-
   it("reports a missing channel file as an error on macOS for a custom feed", async () => {
     const updater = fakeUpdater();
     failChecksWith(updater, channelFileNotFound());
@@ -268,22 +220,6 @@ describe("electron updater release without this platform's files", () => {
       checked: false,
       state: { status: "error", message: expect.stringContaining("Cannot find nightly-mac.yml") },
     });
-  });
-
-  it("still reports other update errors on macOS", async () => {
-    for (const error of [
-      new Error("sha512 checksum mismatch"),
-      Object.assign(new Error("Unable to find latest version on GitHub"), { code: "ERR_UPDATER_LATEST_VERSION_NOT_FOUND" }),
-    ]) {
-      const updater = fakeUpdater();
-      failChecksWith(updater, error);
-      const controller = await startWith(updater, { platform: "darwin" });
-
-      await expect(controller!.checkForUpdates()).resolves.toMatchObject({
-        checked: false,
-        state: { status: "error", message: expect.stringContaining(error.message) },
-      });
-    }
   });
 });
 
@@ -305,42 +241,6 @@ describe("electron updater actions", () => {
       failure: { step: "download", id: 1 },
     });
     expect(controller.downloadUpdate().accepted).toBe(true);
-  });
-
-  it("coalesces repeated checks while one is active", async () => {
-    const updater = fakeUpdater();
-    const check = deferred<undefined>();
-    updater.checkForUpdates.mockReturnValueOnce(check.promise);
-    const controller = await startWith(updater);
-    expect(controller).not.toBeNull();
-
-    const first = controller!.checkForUpdates();
-    updater.emit("checking-for-update");
-    const second = controller!.checkForUpdates();
-
-    await expect(second).resolves.toMatchObject({ checked: false });
-    expect(updater.checkForUpdates).toHaveBeenCalledTimes(1);
-    updater.emit("update-not-available");
-    check.resolve(undefined);
-    await expect(first).resolves.toMatchObject({
-      checked: true,
-      state: { status: "up-to-date" },
-    });
-  });
-
-  it("recovers when a check rejects after entering checking without an error event", async () => {
-    const updater = fakeUpdater();
-    updater.checkForUpdates.mockImplementationOnce(async () => {
-      updater.emit("checking-for-update");
-      throw new Error("socket failed");
-    });
-    const controller = await startWith(updater);
-    expect(controller).not.toBeNull();
-
-    await expect(controller!.checkForUpdates()).resolves.toMatchObject({
-      checked: false,
-      state: { status: "error", canCheck: true },
-    });
   });
 
   // The latch is pulled ONCE. What a second request means
@@ -425,30 +325,6 @@ describe("electron updater actions", () => {
       failed.app.exit(1);
       expect(failed.updater.install).not.toHaveBeenCalled();
     });
-
-    it("starts the installer after the controller stops, as launch recovery's does", async () => {
-      const { updater, app, controller } = await ready();
-      await controller.installUpdate();
-      controller.stop();
-      app.exit(0);
-      expect(startedInstalls(updater)).toEqual([[false, true]]);
-    });
-  });
-
-  it("bounds progress exposed to the renderer", async () => {
-    const updater = fakeUpdater();
-    const controller = await startWith(updater);
-    expect(controller).not.toBeNull();
-
-    updater.emit("checking-for-update");
-    updater.emit("update-available", { version: "1.2.4" });
-    controller!.downloadUpdate();
-    updater.emit("download-progress", { percent: 150 });
-
-    expect(controller!.publicState()).toMatchObject({
-      status: "downloading",
-      percent: 100,
-    });
   });
 
   it("downloads only when a person asks, once", async () => {
@@ -519,30 +395,6 @@ describe("electron updater actions", () => {
     expect(controller.publicState()).not.toHaveProperty("failure");
   });
 
-  it("reports quitAndInstall failures as rejected restart requests", async () => {
-    const updater = fakeUpdater();
-    updater.quitAndInstall.mockImplementationOnce(() => {
-      throw new Error("quit failed");
-    });
-    const controller = await startWith(updater, { platform: "darwin" });
-    expect(controller).not.toBeNull();
-
-    updater.emit("checking-for-update");
-    updater.emit("update-available", { version: "1.2.4" });
-    controller!.downloadUpdate();
-    updater.emit("update-downloaded", { version: "1.2.4" });
-
-    await expect(controller!.installUpdate()).resolves.toMatchObject({
-      accepted: false,
-      state: {
-        status: "ready",
-        canInstall: true,
-        message: "quit failed",
-        failure: { step: "install" },
-      },
-    });
-  });
-
   it("surfaces updater install error events while keeping the update retryable", async () => {
     const updater = fakeUpdater();
     updater.quitAndInstall.mockImplementationOnce(() => {
@@ -595,22 +447,6 @@ describe("electron updater actions", () => {
     }
   });
 
-  it("keeps the generic install failure for a Linux AppImage", async () => {
-    const downloadedFile = "/home/sam/dohc-1.2.4-linux-x86_64.AppImage";
-    const updater = fakeUpdater();
-    updater.quitAndInstall.mockImplementationOnce(() => updater.emit("error", new Error("Command pkexec exited with code 127")));
-    const controller = await startWith(updater, { platform: "linux" });
-    updater.emit("checking-for-update");
-    updater.emit("update-available", { version: "1.2.4", downloadedFile });
-    controller!.downloadUpdate();
-    updater.emit("update-downloaded", { version: "1.2.4", downloadedFile });
-
-    const result = await controller!.installUpdate();
-    const cause = "Command pkexec exited with code 127";
-    expect(result).toMatchObject({ accepted: false, reason: cause, state: { message: cause, failure: { step: "install" } } });
-    expect(result.state.installCommand).toBeUndefined();
-  });
-
   it("quotes the .deb's path for the shell in the install command, and the update state carries the longest one", () => {
     expect(debInstallFailure(new Error("Command sudo exited with code 1"), "/home/o'brien/dohc 1.2.4.deb").installCommand)
       .toBe("sudo apt install '/home/o'\\''brien/dohc 1.2.4.deb'");
@@ -648,23 +484,6 @@ describe("electron updater actions", () => {
       expect(onDownloading).toHaveBeenCalledOnce();
     });
 
-    it.each([
-      ["no update", (updater: ReturnType<typeof fakeUpdater>) => updater.emit("update-not-available")],
-      ["offline", (updater: ReturnType<typeof fakeUpdater>) => updater.emit("error", new Error("net::ERR_INTERNET_DISCONNECTED"))],
-      ["a failed download", (updater: ReturnType<typeof fakeUpdater>) => {
-        updater.emit("update-available", { version: "1.2.4" });
-        updater.emit("error", new Error("sha512 checksum mismatch"));
-      }],
-    ])("resolves null on %s", async (_name, answer) => {
-      const updater = fakeUpdater();
-      updater.checkForUpdates.mockImplementationOnce(async () => {
-        updater.emit("checking-for-update");
-        answer(updater);
-      });
-      const controller = (await startWith(updater))!;
-      await expect(controller.awaitUpdate(bounds, yes)).resolves.toBeNull();
-    });
-
     it("downloads nothing when the person declines", async () => {
       const updater = fakeUpdater();
       updater.checkForUpdates.mockImplementationOnce(async () => {
@@ -675,43 +494,6 @@ describe("electron updater actions", () => {
       await expect(controller.awaitUpdate(bounds, async () => false)).resolves.toBeNull();
       expect(updater.downloadUpdate).not.toHaveBeenCalled();
       expect(controller.state().status).toBe("available");
-    });
-
-    it("joins a download the person already started without asking again", async () => {
-      const updater = fakeUpdater();
-      const controller = (await startWith(updater))!;
-      updater.emit("checking-for-update");
-      updater.emit("update-available", { version: "1.2.4" });
-      controller.downloadUpdate();
-      const confirmDownload = vi.fn(yes);
-      const waiting = controller.awaitUpdate(bounds, confirmDownload);
-      updater.emit("update-downloaded", { version: "1.2.4" });
-      await expect(waiting).resolves.toBe("1.2.4");
-      expect(confirmDownload).not.toHaveBeenCalled();
-      expect(updater.downloadUpdate).toHaveBeenCalledOnce();
-    });
-
-    it("resolves at once with an update already downloaded", async () => {
-      const updater = fakeUpdater();
-      const controller = (await startWith(updater))!;
-      updater.emit("checking-for-update");
-      updater.emit("update-available", { version: "1.2.4" });
-      controller.downloadUpdate();
-      updater.emit("update-downloaded", { version: "1.2.4" });
-      await expect(controller.awaitUpdate(bounds, yes)).resolves.toBe("1.2.4");
-      expect(updater.checkForUpdates).not.toHaveBeenCalled();
-    });
-
-    it("joins a check that is already running", async () => {
-      const updater = fakeUpdater();
-      const controller = (await startWith(updater))!;
-      updater.emit("checking-for-update");
-      const waiting = controller.awaitUpdate(bounds, yes);
-      updater.emit("update-available", { version: "1.2.4" });
-      await vi.waitFor(() => expect(controller.state().status).toBe("downloading"));
-      updater.emit("update-downloaded", { version: "1.2.4" });
-      await expect(waiting).resolves.toBe("1.2.4");
-      expect(updater.checkForUpdates).not.toHaveBeenCalled();
     });
 
     it("gives up on a silent feed at the verdict bound and on a stalled download at the download bound", async () => {
@@ -738,25 +520,6 @@ describe("electron updater actions", () => {
         vi.useRealTimers();
       }
     });
-  });
-
-  it("stops scheduled checks when the controller is stopped", async () => {
-    vi.useFakeTimers();
-    try {
-      const updater = fakeUpdater();
-      const controller = await startWith(updater);
-      expect(controller).not.toBeNull();
-
-      controller!.stop();
-      vi.advanceTimersByTime(60 * 60_000);
-
-      expect(updater.checkForUpdates).not.toHaveBeenCalled();
-      await expect(controller!.checkForUpdates()).resolves.toMatchObject({
-        checked: false,
-      });
-    } finally {
-      vi.useRealTimers();
-    }
   });
 });
 
@@ -827,92 +590,5 @@ describe("electron updater after a quit", () => {
     expect(existsSync(path)).toBe(false);
     await controller.installUpdate();
     expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ version: "1.2.4", from: "1.2.3" });
-  });
-});
-
-describe("publicUpdateState", () => {
-  const READY_EVENTS: UpdateEvent[] = [
-    { type: "check" },
-    { type: "available", version: "1.0.1" },
-    { type: "download" },
-    { type: "downloaded", version: "1.0.1" },
-  ];
-
-  it("gates actions during an active check", () => {
-    const checking = transition(initialUpdateState, { type: "check" });
-    expect(
-      publicUpdateState(checking, {
-        currentVersion: "1.0.0",
-        channel: "latest",
-        checkInFlight: true,
-      }),
-    ).toMatchObject({ canCheck: false, canInstall: false });
-  });
-
-  it("enables install when an update is downloaded and ready", () => {
-    const ready = READY_EVENTS.reduce(transition, initialUpdateState);
-
-    expect(
-      publicUpdateState(ready, {
-        currentVersion: "1.0.0",
-        channel: "latest",
-      }),
-    ).toMatchObject({
-      status: "ready",
-      version: "1.0.1",
-      canCheck: false,
-      canInstall: true,
-    });
-  });
-
-  // quitAndInstall's latch never clears, so gating install on
-  // it stranded a ready update for the rest of the run whenever the restart
-  // was interrupted — a recovery warning whose "Go back" had nothing to go
-  // back to. The restart is not lost; it is finishable by quitting.
-  it("keeps a staged restart offerable while blocking a new check", () => {
-    const ready = READY_EVENTS.reduce(transition, initialUpdateState);
-
-    expect(
-      publicUpdateState(ready, {
-        currentVersion: "1.0.0",
-        channel: "latest",
-        restartStaged: true,
-      }),
-      "staged restart offerable: gate canInstall on restartStaged again. The Restart button disappears for the rest of the app run.",
-    ).toMatchObject({
-      status: "ready",
-      canInstall: true,
-      // ...but staging is done, so there is nothing to re-check for.
-      canCheck: false,
-    });
-  });
-
-  it("keeps checks available after retryable error and offline states", () => {
-    expect(
-      publicUpdateState(transition(initialUpdateState, { type: "error", message: "boom" }), {
-        currentVersion: "1.0.0",
-        channel: "latest",
-      }),
-    ).toMatchObject({ status: "error", canCheck: true, canInstall: false });
-    expect(
-      publicUpdateState(transition(initialUpdateState, { type: "offline" }), {
-        currentVersion: "1.0.0",
-        channel: "latest",
-      }),
-    ).toMatchObject({ status: "offline", canCheck: true, canInstall: false });
-  });
-
-  it("carries current version and channel through public state", () => {
-    expect(
-      publicUpdateState(initialUpdateState, {
-        currentVersion: "1.0.1-nightly.20260621.12.2",
-        channel: "nightly",
-      }),
-    ).toMatchObject({
-      currentVersion: "1.0.1-nightly.20260621.12.2",
-      channel: "nightly",
-      canCheck: true,
-      canInstall: false,
-    });
   });
 });

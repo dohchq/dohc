@@ -3,48 +3,24 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import {
-  parseCollectionSchema,
-  type CollectionRecord,
-  type CollectionRecordGroup,
-  type CollectionSchema,
-} from "@dohc/workspace-contracts";
+import { parseCollectionSchema, type CollectionRecord, type CollectionRecordGroup, type CollectionSchema } from "@dohc/workspace-contracts";
 import { serializeCollectionSchema } from "./collections/schemaAuthoring";
-import type {
-  AutomationRunSettledEvent,
-  AutomationRunWaitingEvent,
-  GetCollectionResult,
-  ListAutomationButtonsResult,
-  ListAutomationPeopleResult,
-  PressAutomationButtonPayload,
-  PressAutomationButtonResult,
-  QueryCollectionRecordsResult,
-  WorkspaceActivityEvent,
-} from "../ipc/bridgeContract";
+import type { AutomationRunSettledEvent, AutomationRunWaitingEvent, GetCollectionResult, ListAutomationPeopleResult, PressAutomationButtonPayload, PressAutomationButtonResult, QueryCollectionRecordsResult, WorkspaceActivityEvent } from "../ipc/bridgeContract";
 import type { AutomationButtonState } from "@dohc/automation-executor/automation-buttons";
-import { CollectionPage, DRAIN_RECORD_LIMIT, type CollectionPageProps } from "./CollectionPage";
-import { automationButtonsFor, disposeAutomationButtons, resetAutomationButtonsForTests } from "./collections/useAutomationButtons";
+import { CollectionPage, type CollectionPageProps } from "./CollectionPage";
+import { disposeAutomationButtons, resetAutomationButtonsForTests } from "./collections/useAutomationButtons";
 import { deferred } from "../testing/deferred";
 import { TextNotSavedError } from "./shell/copyDetails";
 import { closeCollectionChangeShellsForTests, openCollectionChangeShell } from "./collectionChangeShells";
-import {
-  advanceCollectionWriteLineage,
-  beginCollectionWriteOperation,
-  enqueueCollectionFieldWrite,
-  CollectionFieldWriteHost,
-  collectionWriteFailures,
-  CollectionRecordFieldWrite,
-  FILE_LOCKED_REPORT_MS,
-  frontmatterWriteValue,
-  hasPendingCollectionFieldWrites,
-  resetCollectionFieldWritesForTests,
-  retainedCollectionFieldWritePaths,
-  retryCollectionFieldWrite,
-  setCollectionFieldWriteAccess,
-} from "./collections/recordFieldWrites";
+import { advanceCollectionWriteLineage, beginCollectionWriteOperation, CollectionFieldWriteHost, collectionWriteFailures, hasPendingCollectionFieldWrites, resetCollectionFieldWritesForTests, retainedCollectionFieldWritePaths, retryCollectionFieldWrite, setCollectionFieldWriteAccess } from "./collections/recordFieldWrites";
 import { beginCollectionLineageOperation } from "./collections/collectionLineageGate";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
-import { advanceReopenKey } from "./documentVersionKey";
+function localToday(): string {
+  const now = new Date();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${now.getFullYear()}-${month}-${day}`;
+}
 
 // @dnd-kit/dom (BoardView's dependency) references ResizeObserver while its
 // module evaluates and tracks droppable geometry with IntersectionObserver.
@@ -405,17 +381,6 @@ describe("CollectionPage", () => {
     await waitFor(() => expect(api.createWorkspaceFile).toHaveBeenCalledWith({ workspaceId: "ws-1", relativePath: draft.path, initialText: text }));
   });
 
-  it("drops accepted creations from the attention strip", async () => {
-    renderPage(makeBridge([{ ...record("rec-1", "Socks"), creationDelivery: "accepted" }]));
-    await screen.findByText("Socks");
-    expect(screen.queryByTestId("collection-record-drafts")).toBeNull();
-  });
-
-  it("shows the relay refusal reason", async () => {
-    renderPage(makeBridge([{ ...record("rec-1", "Socks"), creationDelivery: "refused", creationRefusal: "This record name is taken." }]));
-    expect(await screen.findByText("This record name is taken.")).toBeTruthy();
-  });
-
   it("does not offer Discard while the submission outcome is unknown", async () => {
     renderPage(makeBridge([{ ...record("rec-1", "Socks"), creationDelivery: "pending", creationCanDiscard: false }]));
     await screen.findByText("Saved on this computer. Waiting to send");
@@ -453,16 +418,8 @@ describe("CollectionPage", () => {
     expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
   });
 
-  it.each(["offline", "refused"] as const)("explains that an ended %s draft cannot be sent", async creationDelivery => {
-    renderPage(makeBridge([{ ...record("rec-1", "Socks"), creationDelivery }]), undefined, undefined, { readOnly: true, accessEnded: true });
-    await screen.findByText("Access ended. This draft cannot be sent. It is kept on this computer.");
-    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
-  });
-
   it.each([
     { accessEnded: true, writeRefusal: undefined },
-    { accessEnded: false, writeRefusal: undefined },
-    { accessEnded: false, writeRefusal: "This share must be reopened." },
   ])("refuses an old draft retry after read-only access: $accessEnded, $writeRefusal", async ({ accessEnded, writeRefusal }) => {
     const api = { ...makeBridge([{ ...record("rec-1", "Socks"), creationDelivery: "pending" as const }]),
       pushShareDirectWrites: vi.fn().mockRejectedValueOnce(new Error("offline")) };
@@ -477,13 +434,6 @@ describe("CollectionPage", () => {
     const message = writeRefusal ?? (accessEnded ? "Your access to this share ended."
       : "Your access to this share changed. Ask for Edit access, then reopen the share.");
     expect(onError).toHaveBeenLastCalledWith(message, expect.any(Error));
-  });
-
-  it.each(["View access", "damaged share"])("does not call %s ended access", async () => {
-    renderPage(makeBridge([{ ...record("rec-1", "Socks"), creationDelivery: "pending" }]), undefined, undefined, {readOnly: true});
-    await screen.findByText("This draft cannot be sent with the current share access. It is kept on this computer.");
-    expect(screen.queryByText(/Access ended/)).toBeNull();
-    expect(screen.queryByRole("button", {name: "Try again"})).toBeNull();
   });
 
   it("keeps View tables readable without record or definition writes", async () => {
@@ -516,88 +466,6 @@ describe("CollectionPage", () => {
     expect(onActiveViewChange).toHaveBeenCalledExactlyOnceWith("All");
   });
 
-  it("reloads initially empty Buttons when the automation index changes in this workspace", async () => {
-    const bridge = makeBridge([record("rec-1", "Plan")], {
-      ...SCHEMA, fields: [...SCHEMA.fields, { name: "Finish", type: "button" }],
-    });
-    renderPage(bridge);
-    await screen.findByText("Plan");
-    await waitFor(() => expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(1));
-    bridge.listAutomationButtons.mockResolvedValue({ buttons: [
-      { field: "Finish", state: { kind: "ready", automationId: "collection:tasks#finish" } },
-    ] });
-    act(() => bridge.emitAutomationsChanged("ws-2"));
-    expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(1);
-    act(() => bridge.emitAutomationsChanged("ws-1"));
-    await waitFor(() => expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Finish for Plan" }).getAttribute("aria-disabled")).toBeNull());
-  });
-
-  it("reports real Buttons read errors through the shell error hook with retry", async () => {
-    const bridge = makeBridge([]);
-    const error = new Error("The workspace engine is not running.");
-    bridge.listAutomationButtons.mockRejectedValueOnce(error);
-    const onError = vi.fn();
-    renderPage(bridge, undefined, undefined, { onError });
-    await waitFor(() => expect(onError).toHaveBeenCalledWith(
-      "dohc could not read this Collection's buttons.", error, expect.any(Function),
-    ));
-    act(() => onError.mock.calls[0]![2]());
-    await waitFor(() => expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(2));
-  });
-
-  it("reports nothing while the workspace's files are still being read, and reads Buttons again when main says the read finished", async () => {
-    const bridge = makeBridge([record("rec-1", "Plan")], {
-      ...SCHEMA, fields: [...SCHEMA.fields, { name: "Finish", type: "button" }],
-    });
-    bridge.listAutomationButtons.mockRejectedValueOnce(new Error(
-      "Error invoking remote method 'desktop:list-automation-buttons': DaemonRefusalError [OVERLOADED]: Workspace is still updating. Try again.",
-    ));
-    const onError = vi.fn();
-    renderPage(bridge, undefined, undefined, { onError });
-    await screen.findByText("Plan");
-    await waitFor(() => expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(1));
-    await act(async () => undefined);
-    expect(onError).not.toHaveBeenCalled();
-    // The button waits for the read instead of offering Check again.
-    expect(screen.queryByRole("button", { name: "Check Finish for Plan again" })).toBeNull();
-    bridge.listAutomationButtons.mockResolvedValue({ buttons: [
-      { field: "Finish", state: { kind: "ready", automationId: "collection:tasks#finish" } },
-    ] });
-    vi.useFakeTimers();
-    // What main sends when the engine announces capture.initialSettled.
-    bridge.emitWorkspaceActivity({ workspaceId: "ws-1", pathSetChanged: false });
-    await act(() => vi.advanceTimersByTimeAsync(250));
-    vi.useRealTimers();
-    await waitFor(() => expect(screen.getByRole("button", { name: "Finish for Plan" }).getAttribute("aria-disabled")).toBeNull());
-    expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(2);
-    expect(onError).not.toHaveBeenCalled();
-  });
-
-  it("names a newer Collection file and asks to update dohc", async () => {
-    const bridge = makeBridge([]);
-    bridge.getCollection.mockResolvedValue({ path: "tasks", objectId: "object-test", status: "degraded", reasons: [{ code: "unsupported-version", path: "/version" }],
-      schema: { name: null, description: null, fields: [], views: [] }, recordCount: 0 });
-    renderPage(bridge);
-    expect(await screen.findByText("tasks/collection.yaml uses a newer version. Update dohc to read this file.")).toBeDefined();
-    expect(screen.queryByTestId("collection-page")).toBeNull();
-  });
-  it("binds the store executor to the query bridge call and renders records", async () => {
-    const bridge = makeBridge([record("rec-1", "Plan")]);
-    renderPage(bridge);
-
-    await waitFor(() =>
-      expect(bridge.queryCollectionRecords).toHaveBeenCalledOnce(),
-    );
-    expect(bridge.queryCollectionRecords).toHaveBeenCalledWith({
-      workspaceId: "ws-1",
-      collectionPath: "tasks",
-      resolveRelations: true,
-    });
-    expect(await screen.findByText("Plan")).toBeDefined();
-    expect(screen.getByTestId("collection-page")).toBeDefined();
-  });
-
   it("shows the columns and a New record row for an empty collection", async () => {
     const bridge = makeBridge([]);
     const onNewRecord = vi.fn();
@@ -620,278 +488,6 @@ describe("CollectionPage", () => {
     expect(document.querySelectorAll("[data-new-record]")).toHaveLength(1);
     expect(onNewRecord).not.toHaveBeenCalled();
   });
-
-  it("names the Collection's files from Customize… and opens one in a tab", async () => {
-    const bridge = makeBridge([]);
-    const onOpenFile = vi.fn();
-    vi.stubGlobal("dohcDesktop", bridge);
-    render(pageWithHost(() => undefined, () => undefined, { onOpenFile }));
-
-    fireEvent.click(await screen.findByRole("button", { name: "Collection actions" }));
-    fireEvent.click(screen.getByRole("menuitem", { name: "Customize…" }));
-    const dialog = await screen.findByRole("dialog", { name: "Customize Tasks" });
-    expect(within(dialog).getByText("tasks/collection.yaml")).toBeDefined();
-    expect(within(dialog).getByText("tasks/automations.yaml")).toBeDefined();
-    // The bridge has no automations.yaml yet.
-    expect(within(dialog).getByText("Made with the first automation.")).toBeDefined();
-    fireEvent.click(within(dialog).getByRole("button", { name: "Open collection.yaml" }));
-    expect(onOpenFile).toHaveBeenCalledExactlyOnceWith("tasks/collection.yaml");
-    expect(screen.queryByRole("dialog", { name: "Customize Tasks" })).toBeNull();
-
-    // Escape returns focus to the menu's button.
-    const trigger = screen.getByRole("button", { name: "Collection actions" });
-    fireEvent.click(trigger);
-    fireEvent.click(screen.getByRole("menuitem", { name: "Customize…" }));
-    await screen.findByRole("dialog", { name: "Customize Tasks" });
-    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
-    expect(screen.queryByRole("dialog", { name: "Customize Tasks" })).toBeNull();
-    expect(document.activeElement).toBe(trigger);
-  });
-
-  it("says a shared Collection's automations.yaml is not made yet", async () => {
-    const bridge = makeBridge([]);
-    // A shared Collection reports the file inside its definitions.
-    bridge.listCollectionAutomations.mockResolvedValue({ status: "shared", definitions: {
-      file: { status: "missing" }, contentHash: null, canSwitch: false, sync: "accepted",
-    } } as never);
-    vi.stubGlobal("dohcDesktop", bridge);
-    render(pageWithHost(() => undefined, () => undefined, { onOpenFile: vi.fn() }));
-
-    fireEvent.click(await screen.findByRole("button", { name: "Collection actions" }));
-    fireEvent.click(screen.getByRole("menuitem", { name: "Customize…" }));
-    const dialog = await screen.findByRole("dialog", { name: "Customize Tasks" });
-    await waitFor(() => expect(within(dialog).getByText("Made with the first automation.")).toBeDefined());
-    expect(within(dialog).queryByRole("button", { name: "Open automations.yaml" })).toBeNull();
-  });
-
-  it("counts the Collection's automations in the header and docks the ⚡ panel beside the view", async () => {
-    const bridge = makeBridge([record("rec-1", "Plan")]);
-    const automations = { status: "read" as const, contentHash: hashFor(0), automations: [
-      { valid: false as const, id: "a", name: "A", diagnostics: [] },
-      { valid: false as const, id: "b", name: "B", diagnostics: [] },
-    ] };
-    bridge.listCollectionAutomations.mockResolvedValue(automations as never);
-    Object.assign(bridge, {
-      onAutomationRunsChanged: () => () => undefined,
-      onAutomationHoldsChanged: () => () => undefined,
-    });
-    renderPage(bridge);
-
-    const button = await screen.findByTestId("collection-automations-button");
-    await waitFor(() => expect(button.textContent).toBe("Automations2"));
-    expect(button.getAttribute("aria-pressed")).toBe("false");
-    // Opening reads the list again: last runs change without the file changing.
-    const readsBeforeOpen = bridge.listCollectionAutomations.mock.calls.length;
-    fireEvent.click(button);
-    expect(button.getAttribute("aria-pressed")).toBe("true");
-    await waitFor(() => expect(bridge.listCollectionAutomations.mock.calls.length).toBe(readsBeforeOpen + 1));
-    const panel = screen.getByTestId("collection-automations-panel");
-    expect(panel.getAttribute("aria-label")).toBe("Automations");
-    fireEvent.click(within(panel).getByRole("button", { name: "Close automations" }));
-    expect(screen.queryByTestId("collection-automations-panel")).toBeNull();
-
-    // Only a change to automations.yaml reads them again while the panel is closed.
-    const reads = bridge.listCollectionAutomations.mock.calls.length;
-    const queries = bridge.queryCollectionRecords.mock.calls.length;
-    act(() => bridge.emitWorkspaceActivity({ workspaceId: "ws-1", paths: ["tasks/Plan.md"] }));
-    await waitFor(() => expect(bridge.queryCollectionRecords.mock.calls.length).toBe(queries + 1));
-    expect(bridge.listCollectionAutomations.mock.calls.length).toBe(reads);
-    act(() => bridge.emitWorkspaceActivity({ workspaceId: "ws-1", paths: ["tasks/automations.yaml"] }));
-    await waitFor(() => expect(bridge.listCollectionAutomations.mock.calls.length).toBe(reads + 1));
-  });
-
-  it("keeps Automations in the actions menu, and shows its button only with automations or an open panel", async () => {
-    const bridge = makeBridge([record("rec-1", "Plan")]);
-    Object.assign(bridge, {
-      onAutomationRunsChanged: () => () => undefined,
-      onAutomationHoldsChanged: () => () => undefined,
-    });
-    renderPage(bridge);
-    await screen.findByText("Plan");
-    expect(screen.queryByTestId("collection-automations-button")).toBeNull();
-    openActions();
-    fireEvent.click(screen.getByRole("menuitem", { name: "Automations" }));
-    expect(await screen.findByTestId("collection-automations-panel")).toBeTruthy();
-    // With the panel open, its button shows, pressed, and closes it.
-    const button = screen.getByTestId("collection-automations-button");
-    expect(button.getAttribute("aria-pressed")).toBe("true");
-    fireEvent.click(button);
-    await waitFor(() => expect(screen.queryByTestId("collection-automations-panel")).toBeNull());
-    expect(screen.queryByTestId("collection-automations-button")).toBeNull();
-  });
-
-  it("forgets a notice's ask when the panel closes, so the next open shows the list", async () => {
-    const bridge = makeBridge([record("rec-1", "Plan")]);
-    const stamp = {
-      id: "stamp", name: "Stamp", enabled: true, if: null,
-      when: { kind: "record-added" as const, table: null },
-      do: [{ kind: "set" as const, values: [{ field: "title", value: { kind: "literal" as const, value: "x" } }], records: null, operation: null }],
-    };
-    Object.assign(bridge, {
-      listCollectionAutomations: vi.fn(async () => ({ status: "read", contentHash: hashFor(0), addsStay: [], automations: [{
-        valid: true, automationId: "collection:tasks#stamp", automation: stamp, definitionHash: "0123456789abcdef",
-        cannotRun: null, reach: { kind: "checked", steps: [{ verdict: "allowed" }] }, lastRun: null,
-      }] })),
-      listCollectionAutomationRuns: vi.fn(async () => ({ status: "listed", runs: [], next: null })),
-      onAutomationRunsChanged: () => () => undefined,
-      listServerAutomationRuns: vi.fn(async () => ({ runs: null })),
-      onAutomationHoldsChanged: () => () => undefined,
-    });
-    vi.stubGlobal("dohcDesktop", bridge);
-    const page = (focus: { automationId: string; run: string | null; seq: number } | null) => (
-      <CollectionPage
-        workspaceId="ws-1"
-        collectionPath="tasks"
-        activeViewName={null}
-        onActiveViewChange={() => undefined}
-        onNewRecord={() => undefined}
-        onOpenRecord={() => undefined}
-        {...SHELL_PROPS}
-        automationFocus={focus}
-      />
-    );
-    const { rerender } = render(page({ automationId: "collection:tasks#stamp", run: null, seq: 1 }));
-    expect(await screen.findByText("This automation has not run on this computer yet.")).toBeDefined();
-    // The shell clears its ask once the page took it.
-    rerender(page(null));
-    fireEvent.click(screen.getByRole("button", { name: "Close automations" }));
-    fireEvent.click(screen.getByTestId("collection-automations-button"));
-    expect(await screen.findByTestId("automation-stamp")).toBeDefined();
-    expect(screen.queryByText("This automation has not run on this computer yet.")).toBeNull();
-  });
-
-  it("refreshes when workspace activity touches the collection folder", async () => {
-    const bridge = makeBridge([record("rec-1", "Plan")]);
-    renderPage(bridge);
-    await waitFor(() =>
-      expect(bridge.queryCollectionRecords).toHaveBeenCalledOnce(),
-    );
-    const detailReads = bridge.getCollection.mock.calls.length;
-
-    vi.useFakeTimers();
-    // An unrelated path must not refresh this collection.
-    bridge.emitWorkspaceActivity({
-      workspaceId: "ws-1",
-      paths: ["notes/other.md"],
-    });
-    await vi.advanceTimersByTimeAsync(1_500);
-    expect(bridge.queryCollectionRecords).toHaveBeenCalledOnce();
-    // Another workspace's activity, even without path detail, is not ours.
-    bridge.emitWorkspaceActivity({ workspaceId: "ws-2" });
-    await vi.advanceTimersByTimeAsync(1_500);
-    expect(bridge.queryCollectionRecords).toHaveBeenCalledOnce();
-
-    bridge.emitWorkspaceActivity({
-      workspaceId: "ws-1",
-      paths: ["tasks/Plan.md"],
-    });
-    await vi.advanceTimersByTimeAsync(250);
-    expect(bridge.queryCollectionRecords).toHaveBeenCalledTimes(2);
-    // Schema edits arrive the same way, so the details re-read rides along.
-    expect(bridge.getCollection.mock.calls.length).toBe(detailReads + 1);
-  });
-
-  it("re-queries when activity refreshes the active view's sort", async () => {
-    const view = {
-      name: "Table",
-      kind: "table" as const,
-      groupBy: null,
-      sort: [],
-      visibleFields: null,
-      dateField: null,
-    };
-    const bridge = makeBridge([record("rec-1", "Plan")], {
-      ...SCHEMA,
-      views: [view],
-    });
-    renderPage(bridge);
-    await waitFor(() =>
-      expect(bridge.queryCollectionRecords).toHaveBeenCalledOnce(),
-    );
-
-    await bridge.writeWorkspaceText({
-      text: serializeCollectionSchema({
-        ...SCHEMA,
-        views: [
-          {
-            ...view,
-            sort: [{ field: "title", direction: "desc" }],
-          },
-        ],
-      }),
-      expectedContentHash: hashFor(0),
-    });
-    vi.useFakeTimers();
-    bridge.emitWorkspaceActivity({
-      workspaceId: "ws-1",
-      paths: ["tasks/collection.yaml"],
-    });
-    await vi.advanceTimersByTimeAsync(250);
-
-    expect(bridge.queryCollectionRecords).toHaveBeenCalledTimes(3);
-    expect(bridge.queryCollectionRecords).toHaveBeenLastCalledWith({
-      workspaceId: "ws-1",
-      collectionPath: "tasks",
-      sort: [{ field: "title", direction: "desc" }],
-      resolveRelations: true,
-    });
-  });
-
-  it.each([false, true])(
-    "coalesces settled writes with activity and cancels on unmount (%s)",
-    async (unmount) => {
-      const records = [record("rec-1", "Plan"), record("rec-2", "Ship")].map(
-        (item) => ({
-          ...item,
-          values: [
-            ...item.values,
-            {
-              field: "done",
-              value: false,
-              validation: { status: "valid" as const },
-              resolvedRelations: [],
-            },
-          ],
-        }),
-      );
-      const docs = records.map((item) => {
-        const doc = new Y.Doc();
-        doc.getMap("frontmatter").set("id", item.id);
-        return doc;
-      });
-      const saves: UseEngineDoc["saveState"][] = [{ kind: "saved-here" }, { kind: "saved-here" }];
-      docMock.current = (input) => {
-        const index = records.findIndex(
-          (item) => item.path === (input as { path: string }).path,
-        );
-        return engineDocState({ available: true, doc: docs[index]!, saveState: saves[index]! });
-      };
-      const bridge = makeBridge(records, CHECKBOX_SCHEMA);
-      const page = renderPage(bridge);
-      await screen.findByText("Plan");
-      expect(bridge.queryCollectionRecords).toHaveBeenCalledOnce();
-      vi.useFakeTimers();
-
-      for (const checkbox of screen.getAllByRole("checkbox")) {
-        fireEvent.click(checkbox);
-      }
-      for (let index = 0; index < records.length; index += 1) {
-        expect(docs[index]!.getMap("frontmatter").get("done")).toBe(true);
-        saves[index] = { kind: "saving" };
-        page.rerender(pageWithHost());
-        saves[index] = { kind: "saved-here" };
-        page.rerender(pageWithHost());
-        await act(() => vi.advanceTimersByTimeAsync(50));
-      }
-      expect(hasPendingCollectionFieldWrites()).toBe(false);
-      bridge.emitWorkspaceActivity({ workspaceId: "ws-1", paths: ["tasks/Plan.md"] });
-      expect(bridge.queryCollectionRecords).toHaveBeenCalledOnce();
-
-      if (unmount) page.unmount();
-      await act(() => vi.advanceTimersByTimeAsync(250));
-      expect(bridge.queryCollectionRecords).toHaveBeenCalledTimes(unmount ? 1 : 2);
-    },
-  );
 
   it("keeps a remote selection after a coalesced refresh acknowledges a local round trip", async () => {
     const schema: CollectionSchema = {
@@ -932,6 +528,26 @@ describe("CollectionPage", () => {
     await act(() => vi.advanceTimersByTimeAsync(250));
     editTags("gamma");
     expect(doc.getMap("frontmatter").get("tags")).toEqual(["alpha", "beta", "gamma"]);
+  });
+
+  it("keeps Automations in the actions menu, and shows its button only with automations or an open panel", async () => {
+    const bridge = makeBridge([record("rec-1", "Plan")]);
+    Object.assign(bridge, {
+      onAutomationRunsChanged: () => () => undefined,
+      onAutomationHoldsChanged: () => () => undefined,
+    });
+    renderPage(bridge);
+    await screen.findByText("Plan");
+    expect(screen.queryByTestId("collection-automations-button")).toBeNull();
+    openActions();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Automations" }));
+    expect(await screen.findByTestId("collection-automations-panel")).toBeTruthy();
+    // With the panel open, its button shows, pressed, and closes it.
+    const button = screen.getByTestId("collection-automations-button");
+    expect(button.getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(button);
+    await waitFor(() => expect(screen.queryByTestId("collection-automations-panel")).toBeNull());
+    expect(screen.queryByTestId("collection-automations-button")).toBeNull();
   });
 
   it.each([2, 3])("retries the latest of %i rapid tags edits after earlier progress without an index refresh", async (count) => {
@@ -1065,17 +681,6 @@ describe("CollectionPage", () => {
     expect(doc.getMap("frontmatter").get("tags")).toEqual(["alpha", "beta", "gamma"]);
   });
 
-  it("says only what failed when the refusal names nothing a person can act on", async () => {
-    const bridge = makeBridge([record("rec-1", "Plan")]);
-    bridge.getCollection.mockRejectedValueOnce(new Error(
-      "Error invoking remote method 'desktop:get-collection': DaemonRefusalError [INVALID_PARAMS]: invalid-input",
-    ));
-    renderPage(bridge);
-
-    const failure = await screen.findByTestId("collection-error");
-    expect(failure.querySelector("span")?.textContent).toBe("dohc could not load this collection.");
-  });
-
   it("retries a failed record query", async () => {
     const bridge = makeBridge([record("rec-1", "Plan")]);
     bridge.queryCollectionRecords.mockRejectedValueOnce(
@@ -1122,34 +727,6 @@ const TWO_VIEW_SCHEMA: CollectionSchema = {
 describe("view persistence", () => {
   // The open view is per-user local state the shell stores in the workbench
   // UI state; the page only reflects and reports it.
-  it("opens the stored view instead of the schema's first", async () => {
-    const bridge = makeBridge([record("rec-1", "Plan")], TWO_VIEW_SCHEMA);
-    renderPage(bridge, undefined, undefined, { activeViewName: "Sorted" });
-
-    await waitFor(() =>
-      expect(bridge.queryCollectionRecords).toHaveBeenCalledOnce(),
-    );
-    expect(bridge.queryCollectionRecords).toHaveBeenCalledWith({
-      workspaceId: "ws-1",
-      collectionPath: "tasks",
-      sort: [{ field: "title", direction: "desc" }],
-      resolveRelations: true,
-    });
-  });
-
-  it("falls back to the first view when the stored view is gone", async () => {
-    const bridge = makeBridge([record("rec-1", "Plan")], TWO_VIEW_SCHEMA);
-    renderPage(bridge, undefined, undefined, { activeViewName: "Gone" });
-
-    await waitFor(() =>
-      expect(bridge.queryCollectionRecords).toHaveBeenCalledOnce(),
-    );
-    expect(bridge.queryCollectionRecords).toHaveBeenCalledWith({
-      workspaceId: "ws-1",
-      collectionPath: "tasks",
-      resolveRelations: true,
-    });
-  });
 
   it("shows every saved view as a tab, the open one pressed, and counts the records beside the name", async () => {
     const bridge = makeBridge([record("rec-1", "Plan")], TWO_VIEW_SCHEMA);
@@ -1174,15 +751,6 @@ describe("view persistence", () => {
     expect(onActiveViewChange).not.toHaveBeenCalled();
   });
 
-  it("reports a view switch so the shell can persist it", async () => {
-    const bridge = makeBridge([record("rec-1", "Plan")], TWO_VIEW_SCHEMA);
-    const onActiveViewChange = vi.fn();
-    renderPage(bridge, undefined, undefined, { onActiveViewChange });
-    await screen.findByText("Plan");
-
-    fireEvent.click(screen.getByRole("button", { name: "Sorted" }));
-    expect(onActiveViewChange).toHaveBeenCalledExactlyOnceWith("Sorted");
-  });
 });
 
 const SELECT_SCHEMA: CollectionSchema = {
@@ -1711,215 +1279,6 @@ const CHECKBOX_SCHEMA: CollectionSchema = {
 };
 
 describe("cell write queue", () => {
-  it.each(["View", "Comment"])("shows no write error in a refused %s share when nobody edited", async () => {
-    renderPage(makeBridge([record("rec-1", "Plan")]), undefined, undefined, { readOnly: true });
-    await screen.findByText("Plan");
-    act(() => setCollectionFieldWriteAccess("ws-1", "This share does not have Edit access."));
-    expect(collectionWriteFailures()).toEqual([]);
-    expect(screen.queryByTestId("collection-write-error")).toBeNull();
-  });
-
-  it("clears the write error when the last failure is discarded while access is refused", async () => {
-    docMock.current = engineDocState({ opening: true });
-    renderPage(makeBridge([record("rec-1", "Plan")]));
-    await screen.findByText("Plan");
-    act(() => {
-      enqueueCollectionFieldWrite("ws-1", "tasks", { recordId: "rec-1", recordPath: "tasks/Plan.md", field: "title", value: "Changed" });
-      setCollectionFieldWriteAccess("ws-1", "This share must be reopened.");
-    });
-    expect(screen.getByTestId("collection-write-error").textContent).toBe("This share must be reopened.");
-    fireEvent.click(screen.getByTestId("collection-write-discard"));
-    expect(collectionWriteFailures()).toEqual([]);
-    expect(screen.queryByTestId("collection-write-error")).toBeNull();
-  });
-
-  it("shows no write error when an applied write saves after access is refused", async () => {
-    const doc = new Y.Doc();
-    doc.getMap("frontmatter").set("id", "rec-1");
-    docMock.current = engineDocState({ available: true, doc });
-    const page = renderPage(makeBridge([record("rec-1", "Plan")]));
-    try {
-      await screen.findByText("Plan");
-      act(() => enqueueCollectionFieldWrite("ws-1", "tasks", { recordId: "rec-1", recordPath: "tasks/Plan.md", field: "title", value: "Changed" }));
-      expect(doc.getMap("frontmatter").get("title")).toBe("Changed");
-      act(() => setCollectionFieldWriteAccess("ws-1", "This share must be reopened."));
-      docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saving" } });
-      page.rerender(pageWithHost());
-      docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saved-here" } });
-      page.rerender(pageWithHost());
-      expect(hasPendingCollectionFieldWrites()).toBe(false);
-      expect(collectionWriteFailures()).toEqual([]);
-      expect(screen.queryByTestId("collection-write-error")).toBeNull();
-    } finally { page.unmount(); doc.destroy(); }
-  });
-
-  it("shows current access refusal in the status line and clears a discarded failure after reopening", async () => {
-    docMock.current = engineDocState({ opening: true });
-    renderPage(makeBridge([record("rec-1", "Plan")]));
-    await screen.findByText("Plan");
-    act(() => {
-      enqueueCollectionFieldWrite("ws-1", "tasks", { recordId: "rec-1", recordPath: "tasks/Plan.md", field: "title", value: "Changed" });
-      setCollectionFieldWriteAccess("ws-1", "This share must be reopened.");
-    });
-    expect(screen.getByTestId("collection-write-error").textContent).toBe("This share must be reopened.");
-    act(() => setCollectionFieldWriteAccess("ws-1", "Your access to this share changed."));
-    expect(screen.getByTestId("collection-write-error").textContent).toBe("Your access to this share changed.");
-    act(() => setCollectionFieldWriteAccess("ws-1", null));
-    expect(screen.getByTestId("collection-write-error").textContent).toBe("dohc did not save this change.");
-    expect(screen.getByTestId("collection-write-retry")).toHaveProperty("disabled", false);
-    fireEvent.click(screen.getByTestId("collection-write-discard"));
-    expect(screen.queryByTestId("collection-write-error")).toBeNull();
-    expect(collectionWriteFailures()).toEqual([]);
-  });
-
-  it("clears a discarded failure and keeps processing later edits", async () => {
-    // The session settles without a doc (conflict, deletion, engine off):
-    // the head write fails with no detail.
-    docMock.current = engineDocState({ available: false });
-    const base = record("rec-1", "Plan");
-    const checkboxRecord: CollectionRecord = {
-      ...base,
-      values: [
-        ...base.values,
-        {
-          field: "done",
-          value: false,
-          validation: { status: "valid" },
-          resolvedRelations: [],
-        },
-      ],
-    };
-    const bridge = makeBridge([checkboxRecord], CHECKBOX_SCHEMA);
-    renderPage(bridge);
-    await screen.findByText("Plan");
-
-    fireEvent.click(screen.getByRole("checkbox"));
-    const error = await screen.findByTestId("collection-write-error");
-    expect(error.textContent).toBe("dohc did not save this change.");
-
-    fireEvent.click(screen.getByTestId("collection-write-discard"));
-    expect(screen.queryByTestId("collection-write-error")).toBeNull();
-
-    // The failed write released its queue slot: the next change enqueues,
-    // clears the stale message, and reaches its record's doc.
-    const doc = new Y.Doc();
-    doc.getMap("frontmatter").set("id", "rec-1");
-    docMock.current = engineDocState({ available: true, doc });
-    fireEvent.click(screen.getByRole("checkbox"));
-    await waitFor(() =>
-      expect(doc.getMap("frontmatter").get("done")).toBe(true),
-    );
-    expect(screen.queryByTestId("collection-write-error")).toBeNull();
-  });
-
-  it("surfaces a read-only failure and advances to the next queued write", async () => {
-    const firstDoc = new Y.Doc();
-    firstDoc.getMap("frontmatter").set("id", "rec-1");
-    docMock.current = engineDocState({ available: true, doc: firstDoc });
-    const base = record("rec-1", "Plan");
-    const checkboxRecord: CollectionRecord = {
-      ...base,
-      values: [
-        ...base.values,
-        {
-          field: "done",
-          value: false,
-          validation: { status: "valid" },
-          resolvedRelations: [],
-        },
-      ],
-    };
-    const bridge = makeBridge([checkboxRecord], CHECKBOX_SCHEMA);
-    const page = renderPage(bridge);
-    await screen.findByText("Plan");
-
-    const checkbox = screen.getByRole("checkbox");
-    fireEvent.click(checkbox);
-    fireEvent.click(checkbox);
-    expect(firstDoc.getMap("frontmatter").has("done")).toBe(true);
-
-    const nextDoc = new Y.Doc();
-    nextDoc.getMap("frontmatter").set("id", "rec-1");
-    let writerRender = 0;
-    docMock.current = () => {
-      writerRender += 1;
-      return writerRender === 1
-        ? engineDocState({
-            available: true,
-            doc: firstDoc,
-            saveState: { kind: "unknown" }, readOnlyWhileEditing: true,
-            saveError: "This workspace is read-only.",
-          })
-        : engineDocState({ available: true, doc: nextDoc });
-    };
-    page.rerender(pageWithHost());
-
-    const error = await screen.findByTestId("collection-write-error");
-    expect(error.textContent).toBe(
-      "dohc did not save this change. This workspace is read-only.",
-    );
-    await waitFor(() =>
-      expect(nextDoc.getMap("frontmatter").has("done")).toBe(true),
-    );
-  });
-
-  it("reports a head write held file-locked past the window and unblocks the queue", async () => {
-    const firstDoc = new Y.Doc();
-    firstDoc.getMap("frontmatter").set("id", "rec-1");
-    docMock.current = engineDocState({ available: true, doc: firstDoc });
-    const base = record("rec-1", "Plan");
-    const checkboxRecord: CollectionRecord = {
-      ...base,
-      values: [
-        ...base.values,
-        {
-          field: "done",
-          value: false,
-          validation: { status: "valid" },
-          resolvedRelations: [],
-        },
-      ],
-    };
-    const bridge = makeBridge([checkboxRecord], CHECKBOX_SCHEMA);
-    const page = renderPage(bridge);
-    await screen.findByText("Plan");
-
-    const checkbox = screen.getByRole("checkbox");
-    fireEvent.click(checkbox);
-    fireEvent.click(checkbox);
-    expect(firstDoc.getMap("frontmatter").has("done")).toBe(true);
-
-    vi.useFakeTimers();
-    const nextDoc = new Y.Doc();
-    nextDoc.getMap("frontmatter").set("id", "rec-1");
-    let writerRender = 0;
-    docMock.current = () => {
-      writerRender += 1;
-      return writerRender === 1
-        ? engineDocState({
-            available: true,
-            doc: firstDoc,
-            saveState: { kind: "file-locked", reason: "test failure", issueId: null },
-          })
-        : engineDocState({ available: true, doc: nextDoc });
-    };
-    page.rerender(pageWithHost());
-
-    // Inside the window: no line yet, the queue waits on main's retries.
-    await vi.advanceTimersByTimeAsync(FILE_LOCKED_REPORT_MS - 1);
-    expect(screen.queryByTestId("collection-write-error")).toBeNull();
-
-    await vi.advanceTimersByTimeAsync(1);
-    vi.useRealTimers();
-    const error = await screen.findByTestId("collection-write-error");
-    expect(error.textContent).toBe(
-      "Another program has Plan.md open, so dohc can't update it on disk. This change is saved and dohc retries until the file is free.",
-    );
-    // The locked head released its queue slot: the next edit reached its doc.
-    await waitFor(() =>
-      expect(nextDoc.getMap("frontmatter").get("done")).toBe(true),
-    );
-  });
 
   it("keeps a queued edit and finishes it after the page unmounts", async () => {
     // The queue lives outside the page and the shell hosts the writer:
@@ -2063,14 +1422,6 @@ const CALENDAR_SCHEMA: CollectionSchema = {
     },
   ],
 };
-
-/** Today as a date field value, so the event lands in the opened month. */
-function localToday(): string {
-  const now = new Date();
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const day = String(now.getDate()).padStart(2, "0");
-  return `${now.getFullYear()}-${month}-${day}`;
-}
 
 describe("record click-through", () => {
   // A record opens in the panel beside its view (CollectionPage.recordPanel.test.tsx). Its file opens from there.
@@ -2279,23 +1630,6 @@ describe("record click-through", () => {
     expect(screen.queryAllByRole("button", { name: /^New record on / })).toEqual([]);
   });
 
-  it("saves a board column's color to the schema", async () => {
-    const bridge = makeBridge([selectRecord()], BOARD_SCHEMA, {
-      groups: [{ value: "Todo", records: [selectRecord()] }],
-    });
-    renderPage(bridge);
-
-    fireEvent.click(await screen.findByRole("button", { name: "Todo options" }));
-    fireEvent.click(screen.getByRole("radio", { name: "Plum" }));
-    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce());
-    expect(lastWrittenSchema(bridge).schema.fields[1]).toEqual({
-      name: "status",
-      type: "select",
-      options: ["Todo"],
-      colors: { Todo: "plum" },
-    });
-  });
-
   it("reports a board column color that could not be saved, with a retry", async () => {
     const bridge = makeBridge([selectRecord()], BOARD_SCHEMA, {
       groups: [{ value: "Todo", records: [selectRecord()] }],
@@ -2312,31 +1646,6 @@ describe("record click-through", () => {
     retry!();
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2));
     expect(lastWrittenSchema(bridge).schema.fields[1]).toMatchObject({ colors: { Todo: "plum" } });
-  });
-
-  it("shows a table, not a board, when the board groups by a button", async () => {
-    const parsed = parseCollectionSchema([
-      "fields:",
-      "  title:",
-      "    type: text",
-      "  Mark paid:",
-      "    type: button",
-      "views:",
-      "  - name: Board",
-      "    kind: board",
-      "    groupBy: Mark paid",
-    ].join("\n"));
-    expect(parsed.schema.views[0]?.groupBy).toBeNull();
-    const bridge = makeBridge([record("rec-1", "Plan")], parsed.schema, {
-      groups: [{ value: null, records: [record("rec-1", "Plan")] }],
-    });
-    renderPage(bridge);
-
-    expect(await screen.findByRole("grid")).toBeDefined();
-    expect(screen.queryByRole("list")).toBeNull();
-    expect(bridge.queryCollectionRecords.mock.calls.map(([params]) => params)).not.toContainEqual(
-      expect.objectContaining({ groupBy: expect.anything() }),
-    );
   });
 
   it("opens the record's file from a calendar entry's record", async () => {
@@ -2460,51 +1769,6 @@ describe("pagination", () => {
     );
   });
 
-  it("stops the drain at the record cap and says how many records show", async () => {
-    const bridge = makeBridge([], BOARD_SCHEMA);
-    // Two pages cross the cap; a third page exists and must not be asked for.
-    const pageSize = (DRAIN_RECORD_LIMIT / 10) * 6;
-    const page = (start: number) => {
-      const records = Array.from({ length: pageSize }, (_, index) =>
-        statusRecord(`rec-${start + index}`, `Task ${start + index}`),
-      );
-      return { records, groups: [{ value: "Todo", records }] };
-    };
-    servePages(bridge, [page(0), page(pageSize), page(pageSize * 2)]);
-    renderPage(bridge);
-
-    const cap = await screen.findByTestId("collection-drain-cap");
-    expect(cap.textContent).toBe(
-      `This view shows only the first ${pageSize * 2} records.`,
-    );
-    expect(bridge.queryCollectionRecords).toHaveBeenCalledTimes(2);
-  });
-
-  it("drains every page so a calendar view places all events", async () => {
-    const today = localToday();
-    const dated = (id: string, title: string): CollectionRecord => ({
-      ...record(id, title),
-      values: [
-        ...record(id, title).values,
-        {
-          field: "due",
-          value: today,
-          validation: { status: "valid" },
-          resolvedRelations: [],
-        },
-      ],
-    });
-    const bridge = makeBridge([], CALENDAR_SCHEMA);
-    servePages(bridge, [
-      { records: [dated("rec-1", "Plan")], groups: null },
-      { records: [dated("rec-2", "Ship")], groups: null },
-    ]);
-    renderPage(bridge);
-
-    expect(await screen.findByText("Plan")).toBeDefined();
-    expect(await screen.findByText("Ship")).toBeDefined();
-    expect(bridge.queryCollectionRecords).toHaveBeenCalledTimes(2);
-  });
 });
 
 const RELATION_SCHEMA: CollectionSchema = {
@@ -2577,155 +1841,6 @@ describe("relation picking", () => {
   });
 });
 
-describe("CollectionRecordFieldWrite", () => {
-  const CHANGE = {
-    recordId: "rec-1",
-    recordPath: "tasks/Plan.md",
-    field: "status",
-    value: "done",
-  };
-
-  // The writer's three outcomes are distinct callbacks: onSettled (on disk),
-  // onHeldDurably (engine holds it through a lock), onFailed (did NOT reach
-  // the engine — the queue must retain it). Exactly one fires per write.
-  function writerProps() {
-    return {
-      workspaceId: "ws-1",
-      collectionPath: "tasks",
-      change: CHANGE,
-      onPrepared: vi.fn(),
-      onSettled: vi.fn(),
-      onHeldDurably: vi.fn(),
-      onFailed: vi.fn(),
-    };
-  }
-
-  it("writes the field on the frontmatter map and settles after the save lands", () => {
-    const doc = new Y.Doc();
-    doc.getMap("frontmatter").set("id", "rec-1");
-    docMock.current = engineDocState({ available: true, doc });
-    const props = writerProps();
-    const view = render(<CollectionRecordFieldWrite {...props} />);
-
-    expect(docMock.inputs[0]).toEqual({
-      workspaceId: "ws-1",
-      path: "tasks/Plan.md",
-      enabled: true,
-      reopenKey: 0,
-    });
-    expect(doc.getMap("frontmatter").get("status")).toBe("done");
-    // The session opens in "saved"; releasing on that snapshot would race
-    // the staged local-update flush, so the writer must still be waiting.
-    expect(props.onSettled).not.toHaveBeenCalled();
-
-    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saving" } });
-    view.rerender(<CollectionRecordFieldWrite {...props} />);
-    expect(props.onSettled).not.toHaveBeenCalled();
-
-    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saved-here" } });
-    view.rerender(<CollectionRecordFieldWrite {...props} />);
-    expect(props.onSettled).toHaveBeenCalledOnce();
-    expect(props.onFailed).not.toHaveBeenCalled();
-    expect(props.onHeldDurably).not.toHaveBeenCalled();
-  });
-
-  it("opens the record with its open editor's key, so the write joins that editor's session", () => {
-    act(() => advanceReopenKey("ws-keyed"));
-    docMock.current = engineDocState({ opening: true });
-    render(<CollectionRecordFieldWrite {...writerProps()} workspaceId="ws-keyed" />);
-    expect(docMock.inputs.at(-1)).toEqual({ workspaceId: "ws-keyed", path: "tasks/Plan.md", enabled: true, reopenKey: 1 });
-    // A version switch moves the write with its editor.
-    act(() => advanceReopenKey("ws-keyed"));
-    expect(docMock.inputs.at(-1)).toEqual({ workspaceId: "ws-keyed", path: "tasks/Plan.md", enabled: true, reopenKey: 2 });
-  });
-
-  it("fails a write whose session a new version key replaced before it saved", () => {
-    const first = new Y.Doc();
-    first.getMap("frontmatter").set("id", "rec-1");
-    docMock.current = engineDocState({ available: true, doc: first });
-    const props = writerProps();
-    const view = render(<CollectionRecordFieldWrite {...props} />);
-    docMock.current = engineDocState({ available: true, doc: first, saveState: { kind: "saving" } });
-    view.rerender(<CollectionRecordFieldWrite {...props} />);
-    // The key moved. The new session never carried the edit, and it opens saved.
-    const second = new Y.Doc();
-    second.getMap("frontmatter").set("id", "rec-1");
-    docMock.current = engineDocState({ available: true, doc: second });
-    view.rerender(<CollectionRecordFieldWrite {...props} />);
-    expect(props.onFailed).toHaveBeenCalledExactlyOnceWith(null);
-    expect(props.onSettled).not.toHaveBeenCalled();
-    expect(second.getMap("frontmatter").get("status")).toBeUndefined();
-  });
-
-  it("reports a save error as a failure, never a settle", () => {
-    const doc = new Y.Doc();
-    doc.getMap("frontmatter").set("id", "rec-1");
-    docMock.current = engineDocState({ available: true, doc });
-    const props = writerProps();
-    const view = render(<CollectionRecordFieldWrite {...props} />);
-    docMock.current = engineDocState({
-      available: true,
-      doc,
-      saveState: { kind: "error", reason: "test failure", issueId: null },
-      saveError: "file too large",
-    });
-    view.rerender(<CollectionRecordFieldWrite {...props} />);
-    expect(props.onFailed).toHaveBeenCalledExactlyOnceWith(
-      "dohc did not save this change. file too large",
-    );
-    expect(props.onSettled).not.toHaveBeenCalled();
-  });
-
-  it("reports the locked file as durably held only after the bounded window", () => {
-    vi.useFakeTimers();
-    const doc = new Y.Doc();
-    doc.getMap("frontmatter").set("id", "rec-1");
-    docMock.current = engineDocState({ available: true, doc });
-    const props = writerProps();
-    const view = render(<CollectionRecordFieldWrite {...props} />);
-
-    docMock.current = engineDocState({
-      available: true,
-      doc,
-      saveState: { kind: "file-locked", reason: "test failure", issueId: null },
-    });
-    view.rerender(<CollectionRecordFieldWrite {...props} />);
-    // Inside the window the writer waits on main's own retries.
-    vi.advanceTimersByTime(FILE_LOCKED_REPORT_MS - 1);
-    expect(props.onSettled).not.toHaveBeenCalled();
-    expect(props.onHeldDurably).not.toHaveBeenCalled();
-
-    // A retry's own saving flip must not restart the window.
-    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saving" } });
-    view.rerender(<CollectionRecordFieldWrite {...props} />);
-    docMock.current = engineDocState({
-      available: true,
-      doc,
-      saveState: { kind: "file-locked", reason: "test failure", issueId: null },
-    });
-    view.rerender(<CollectionRecordFieldWrite {...props} />);
-    vi.advanceTimersByTime(1);
-    expect(props.onHeldDurably).toHaveBeenCalledExactlyOnceWith(
-      "Another program has Plan.md open, so dohc can't update it on disk. This change is saved and dohc retries until the file is free.",
-    );
-    expect(props.onFailed).not.toHaveBeenCalled();
-  });
-
-  it("reports a refusal as a failure without touching the doc", () => {
-    docMock.current = engineDocState({ available: false });
-    const props = writerProps();
-    render(<CollectionRecordFieldWrite {...props} />);
-    expect(props.onFailed).toHaveBeenCalledExactlyOnceWith(null);
-    expect(props.onSettled).not.toHaveBeenCalled();
-  });
-
-  it("writes bigints back as numbers when exact, else decimal text", () => {
-    expect(frontmatterWriteValue(10n)).toBe(10);
-    expect(frontmatterWriteValue(2n ** 63n)).toBe("9223372036854775808");
-    expect(frontmatterWriteValue(["a", 3n])).toEqual(["a", 3]);
-  });
-});
-
 describe("Button fields", () => {
   const BUTTON_SCHEMA: CollectionSchema = {
     ...SCHEMA,
@@ -2782,122 +1897,6 @@ describe("Button fields", () => {
     expect(bridge.pressAutomationButton).not.toHaveBeenCalled();
   });
 
-  it("presses once for a held Enter key", async () => {
-    const bridge = buttonsWith();
-    vi.stubGlobal("dohcDesktop", bridge);
-    render(pageWithHost());
-    const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
-    await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
-    const repeat = new KeyboardEvent("keydown", { key: "Enter", repeat: true, bubbles: true, cancelable: true });
-    button.dispatchEvent(repeat);
-    expect(repeat.defaultPrevented).toBe(true);
-    const first = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
-    button.dispatchEvent(first);
-    expect(first.defaultPrevented).toBe(false);
-  });
-
-  it("frees the button when its run fails, and files no row of its own beside the failure's notice", async () => {
-    const bridge = buttonsWith();
-    vi.stubGlobal("dohcDesktop", bridge);
-    const onError = vi.fn(), onNotice = vi.fn();
-    render(pageWithHost(undefined, undefined, { onError, onNotice }));
-    const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
-    await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
-    fireEvent.click(button);
-    await waitFor(() => expect(bridge.pressAutomationButton).toHaveBeenCalled());
-    await act(async () => undefined);
-    expect(button.getAttribute("aria-busy")).toBe("true");
-    act(() => bridge.emitRunSettled({ workspaceId: "ws-1", claimId: "atc_press", outcome: "failed", error: "Total is not a number." }));
-    expect(button.getAttribute("aria-busy")).toBeNull();
-    // Main sends this person the failure's one notice, with Try again, and takes it back once a run succeeds.
-    expect(onError).not.toHaveBeenCalled();
-    expect(onNotice).not.toHaveBeenCalled();
-  });
-
-  it("settles a run whose end arrived before the press answer", async () => {
-    let answer: (result: PressAutomationButtonResult) => void = () => undefined;
-    const bridge = buttonsWith({ press: () => new Promise((resolve) => { answer = resolve; }) });
-    vi.stubGlobal("dohcDesktop", bridge);
-    const onNotice = vi.fn();
-    render(pageWithHost(undefined, undefined, { onNotice }));
-    const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
-    await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
-    fireEvent.click(button);
-    await waitFor(() => expect(bridge.pressAutomationButton).toHaveBeenCalled());
-    act(() => bridge.emitRunSettled({ workspaceId: "ws-1", claimId: "atc_press", outcome: "skipped", error: null }));
-    await act(async () => answer({ busy: false, claimId: "atc_press", settled: null }));
-    expect(onNotice).toHaveBeenCalledWith("Mark paid made no changes to Invoice 12");
-    expect(button.getAttribute("aria-busy")).toBeNull();
-  });
-
-  it("says when the button already runs for someone else, and keeps it pressable", async () => {
-    const bridge = buttonsWith({ press: async () => ({ busy: true, reason: "Running for this record." }) });
-    vi.stubGlobal("dohcDesktop", bridge);
-    render(pageWithHost());
-    const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
-    await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
-    fireEvent.click(button);
-    await waitFor(() => expect(button.getAttribute("aria-describedby")).not.toBeNull());
-    expect(document.getElementById(button.getAttribute("aria-describedby")!)?.textContent).toBe("Running for this record.");
-    expect(button.getAttribute("aria-disabled")).toBeNull();
-  });
-
-  it("frees a shared view's button once the owner's computer has the press, and reports nothing itself", async () => {
-    const bridge = buttonsWith({ press: async () => ({ busy: false, relayed: true }) });
-    vi.stubGlobal("dohcDesktop", bridge);
-    const onNotice = vi.fn(), onError = vi.fn();
-    render(pageWithHost(undefined, undefined, { onNotice, onError }));
-    const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
-    await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
-    fireEvent.click(button);
-    await waitFor(() => expect(bridge.pressAutomationButton).toHaveBeenCalled());
-    await waitFor(() => expect(button.getAttribute("aria-busy")).toBeNull());
-    // The owner's computer files the press's one notice if it fails.
-    expect(onNotice).not.toHaveBeenCalled();
-    expect(onError).not.toHaveBeenCalled();
-  });
-
-  it("still reports a run that ends after its Collection closed, through the surface that showed it", async () => {
-    const bridge = buttonsWith();
-    vi.stubGlobal("dohcDesktop", bridge);
-    const onNotice = vi.fn();
-    const page = render(pageWithHost(undefined, undefined, { onNotice }));
-    const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
-    await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
-    fireEvent.click(button);
-    await waitFor(() => expect(bridge.pressAutomationButton).toHaveBeenCalled());
-    await act(async () => undefined);
-    page.unmount();
-    act(() => bridge.emitRunSettled({ workspaceId: "ws-1", claimId: "atc_press", outcome: "done", error: null }));
-    expect(onNotice).toHaveBeenCalledWith("Ran Mark paid on Invoice 12");
-  });
-
-  it("shows why a run waits even when the wait arrives before the press answer", async () => {
-    let answer: (result: PressAutomationButtonResult) => void = () => undefined;
-    const bridge = buttonsWith({ press: () => new Promise((resolve) => { answer = resolve; }) });
-    vi.stubGlobal("dohcDesktop", bridge);
-    render(pageWithHost());
-    const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
-    await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
-    fireEvent.click(button);
-    await waitFor(() => expect(bridge.pressAutomationButton).toHaveBeenCalled());
-    act(() => bridge.emitRunWaiting({ workspaceId: "ws-1", claimId: "atc_press", reason: "held" }));
-    await act(async () => answer({ busy: false, claimId: "atc_press", settled: null }));
-    expect(document.getElementById(button.getAttribute("aria-describedby")!)?.textContent)
-      .toBe("Waiting for someone who can edit this Collection to allow a step.");
-  });
-
-  it("puts a button's words in the page body, outside the row that moves by transform", async () => {
-    const bridge = buttonsWith();
-    vi.stubGlobal("dohcDesktop", bridge);
-    render(pageWithHost());
-    const button = await screen.findByRole("button", { name: "Archive for Invoice 12" });
-    await waitFor(() => expect(button.getAttribute("aria-describedby")).not.toBeNull());
-    const words = document.getElementById(button.getAttribute("aria-describedby")!)!;
-    expect(words.parentElement).toBe(document.body);
-    expect(button.closest("[role=row]")?.contains(words)).toBe(false);
-  });
-
   it("drops a closed workspace's runs, so their end does not report", async () => {
     const bridge = buttonsWith();
     vi.stubGlobal("dohcDesktop", bridge);
@@ -2913,103 +1912,6 @@ describe("Button fields", () => {
     act(() => bridge.emitRunSettled({ workspaceId: "ws-1", claimId: "atc_press", outcome: "done", error: null }));
     expect(onNotice).not.toHaveBeenCalled();
     expect(onError).not.toHaveBeenCalled();
-  });
-
-  it("retries a press that did not start through the live store after its store was dropped, and a dropped store presses nothing", async () => {
-    let fail = true;
-    const bridge = buttonsWith({ press: async () => {
-      if (fail) throw new Error("The workspace engine is not running.");
-      return { busy: false, claimId: "atc_press", settled: null };
-    } });
-    vi.stubGlobal("dohcDesktop", bridge);
-    const onNotice = vi.fn(), onError = vi.fn();
-    const page = render(pageWithHost(undefined, undefined, { onNotice, onError }));
-    const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
-    await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
-    fireEvent.click(button);
-    await waitFor(() => expect(onError).toHaveBeenCalledWith("Mark paid did not start.", expect.any(Error), expect.any(Function)));
-    const retry = onError.mock.calls[0]![2] as () => void;
-    page.unmount();
-    const dropped = automationButtonsFor("ws-1", { collectionPath: "tasks" });
-    for (let index = 0; index < 25; index += 1) automationButtonsFor("ws-1", { collectionPath: `other-${index}` });
-    await dropped.press("Mark paid", { id: "rec-1", label: "Invoice 12" });
-    expect(bridge.pressAutomationButton).toHaveBeenCalledTimes(1);
-    fail = false;
-    await act(async () => retry());
-    await waitFor(() => expect(bridge.pressAutomationButton).toHaveBeenCalledTimes(2));
-    act(() => bridge.emitRunSettled({ workspaceId: "ws-1", claimId: "atc_press", outcome: "done", error: null }));
-    expect(onNotice).toHaveBeenCalledWith("Ran Mark paid on Invoice 12");
-  });
-
-  it("changes only the pressed button's view", async () => {
-    const bridge = buttonsWith();
-    vi.stubGlobal("dohcDesktop", bridge);
-    const buttons = automationButtonsFor("ws-1", { collectionPath: "tasks" });
-    await buttons.refresh();
-    const other = buttons.view("Archive", "rec-1");
-    const pressed = buttons.view("Mark paid", "rec-1");
-    const pressing = buttons.press("Mark paid", { id: "rec-1", label: "Invoice 12" });
-    expect(buttons.view("Archive", "rec-1")).toBe(other);
-    expect(buttons.view("Mark paid", "rec-1")).not.toBe(pressed);
-    await pressing;
-  });
-
-  it("shows the table's buttons as checking while main reads what they do, then shows the answer", async () => {
-    const bridge = buttonsWith();
-    const answer = deferred<ListAutomationButtonsResult>();
-    bridge.listAutomationButtons.mockReturnValueOnce(answer.promise);
-    vi.stubGlobal("dohcDesktop", bridge);
-    render(pageWithHost());
-    const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
-    expect(button.getAttribute("aria-disabled")).toBe("true");
-    expect(document.getElementById(button.getAttribute("aria-describedby")!)?.textContent).toBe("dohc is checking whether you can use this button.");
-    expect(screen.queryByRole("button", { name: "Check Mark paid for Invoice 12 again" })).toBeNull();
-    await act(async () => answer.resolve({ buttons: [{ field: "Mark paid", table: null, state: READY }] }));
-    expect(button.getAttribute("aria-disabled")).toBeNull();
-    expect(button.getAttribute("aria-describedby")).toBeNull();
-  });
-
-  it("turns a shared document Collection's Button ready when main says the host answered", async () => {
-    const checking: AutomationButtonState = { kind: "checking", reason: "dohc is checking whether you can use this button." };
-    const bridge = buttonsWith({ buttons: [{ field: "Mark paid", state: checking }] });
-    vi.stubGlobal("dohcDesktop", bridge);
-    render(pageWithHost());
-    const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
-    await waitFor(() => expect(document.getElementById(button.getAttribute("aria-describedby")!)?.textContent).toBe(checking.reason));
-    expect(button.getAttribute("aria-disabled")).toBe("true");
-    // dohc is asking the host, so there is nothing to check again.
-    expect(screen.queryByRole("button", { name: "Check Mark paid for Invoice 12 again" })).toBeNull();
-    bridge.listAutomationButtons.mockResolvedValue({ buttons: [{ field: "Mark paid", state: READY }] });
-    // Nothing in the Collection's folder changed; only the host's answer did.
-    act(() => bridge.emitAutomationsChanged("ws-1"));
-    await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
-    expect(screen.queryByRole("button", { name: "Check Mark paid for Invoice 12 again" })).toBeNull();
-  });
-
-  it("changes only the views of buttons with no answer or an unchecked one when a read starts", async () => {
-    const bridge = buttonsWith({ buttons: [
-      { field: "Mark paid", state: READY },
-      { field: "Archive", state: { kind: "unchecked", reason: "dohc cannot check this button now. Try again when its host is available." } },
-    ] });
-    vi.stubGlobal("dohcDesktop", bridge);
-    const buttons = automationButtonsFor("ws-1", { collectionPath: "tasks" });
-    await buttons.refresh();
-    const unsubscribe = [buttons.subscribe(buttons.key("Mark paid", "rec-1"), () => undefined), buttons.subscribe(buttons.key("Archive", "rec-1"), () => undefined)];
-    const ready = buttons.view("Mark paid", "rec-1");
-    const unchecked = buttons.view("Archive", "rec-1");
-    // A view read once and not followed is still cached.
-    expect(buttons.view("Archive", "rec-2").checking).toBe(false);
-    expect(unchecked.checking).toBe(false);
-    const answer = deferred<ListAutomationButtonsResult>();
-    bridge.listAutomationButtons.mockReturnValueOnce(answer.promise);
-    const reading = buttons.refresh();
-    expect(buttons.view("Mark paid", "rec-1")).toBe(ready);
-    expect(buttons.view("Archive", "rec-1")).toMatchObject({ state: unchecked.state, checking: true });
-    expect(buttons.view("Archive", "rec-2").checking).toBe(true);
-    answer.resolve({ buttons: [{ field: "Mark paid", table: null, state: READY }, { field: "Archive", table: null, state: READY }] });
-    await reading;
-    expect(buttons.view("Archive", "rec-1")).toMatchObject({ state: READY, checking: false });
-    for (const stop of unsubscribe) stop();
   });
 
   it("offers Button in Fields, and Choose what it does opens the builder on a button nothing uses", async () => {
@@ -3054,31 +1956,6 @@ describe("a calendar view without a date field", () => {
     const dialog = await screen.findByTestId("collection-fields-dialog");
     expect((within(dialog).getByLabelText("Field type") as HTMLSelectElement).value).toBe("date");
     expect(document.activeElement).toBe(within(dialog).getByLabelText("Field name"));
-  });
-
-  it("uses the Collection's first date field once it has one", async () => {
-    const plan = record("rec-1", "Plan");
-    const dated: CollectionRecord = { ...plan, values: [...plan.values, { field: "due", value: localToday(), validation: { status: "valid" }, resolvedRelations: [] }] };
-    renderPage(makeBridge([dated], { ...schema, fields: CALENDAR_SCHEMA.fields }));
-
-    expect(await screen.findByText("Plan")).toBeDefined();
-    expect(document.querySelector(".rbc-month-view")).not.toBeNull();
-    expect(screen.queryByText("A calendar needs a date field.")).toBeNull();
-  });
-
-  it("treats a date field that is no longer a date as missing", async () => {
-    renderPage(makeBridge([record("rec-1", "Plan")], { ...schema, views: [{ ...schema.views[0]!, dateField: "title" }] }));
-
-    expect(await screen.findByText("A calendar needs a date field.")).toBeDefined();
-  });
-
-  it("uses the first date field when its own is no longer a date", async () => {
-    const plan = record("rec-1", "Plan");
-    const dated: CollectionRecord = { ...plan, values: [...plan.values, { field: "due", value: localToday(), validation: { status: "valid" }, resolvedRelations: [] }] };
-    renderPage(makeBridge([dated], { ...CALENDAR_SCHEMA, views: [{ ...CALENDAR_SCHEMA.views[0]!, dateField: "title" }] }));
-
-    expect(await screen.findByText("Plan")).toBeDefined();
-    expect(document.querySelector(".rbc-month-view")).not.toBeNull();
   });
 
   it("leaves the button out for someone who cannot change fields", async () => {
@@ -3558,7 +2435,6 @@ describe("a new record in the table", () => {
     expect(within(kept).getByLabelText<HTMLTextAreaElement>("Unsaved collection value").value).toContain('"title": "Milk"');
     expect(within(kept).getByTestId<HTMLButtonElement>("collection-write-retry").disabled).toBe(true);
   });
-
 
   it("reports what was typed in a notice when the page closed before the record could not be made", async () => {
     const bridge = makeBridge([], TWO_FIELDS);

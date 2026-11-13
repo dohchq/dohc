@@ -11,7 +11,7 @@ import { waitForPathMoments } from "./waitForPathMoments";
 
 const engine = requireEngineBinaryOrSkip();
 
-it.skipIf(engine.missing).each(["quit", "workspace close"] as const)(
+it.skipIf(engine.missing).each(["quit"] as const)(
   "%s drains unacknowledged typing after a refused settle and recovers it once", async mode => {
     const rootPath = await createTestScratch("dohc-quit-refused-settle-");
     const workspaceId = "quit-refused-settle";

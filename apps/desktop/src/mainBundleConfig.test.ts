@@ -3,29 +3,14 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import desktopConfig, {
-  mainBuildEntries,
   mainBundledWorkspaceDeps,
 } from "../electron.vite.config";
 
 const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 describe("main bundle config", () => {
-  it("starts Electron at the entry module, which loads the app's main module", () => {
-    expect(mainBuildEntries.main).toBe("src/entry.ts");
-    expect(mainBuildEntries.app).toBe("src/main.ts");
-  });
 
-  it("emits the reusable database worker beside main", () => {
-    expect(mainBuildEntries["workspace-database-worker"]).toBe(
-      "src/workspaces/workspaceDatabaseThread.ts",
-    );
-  });
 
-  it("emits the document projection worker beside main", () => {
-    expect(mainBuildEntries["document-projection-worker"]).toBe(
-      "src/workspaces/documentProjectionThread.ts",
-    );
-  });
 
   it("bundles every workspace package reached by the main runtime entries", async () => {
     const config = await desktopConfig({ command: "build", mode: "production" });

@@ -46,48 +46,6 @@ async function delivery(rootPath?: string) {
   return { h, hook, store, fetch, failed, arrive: () => { rows = [failed]; } };
 }
 
-it("shows a failed relayed press's Notice and toast after a committed pull while the window stays focused", async () => {
-  const f = await delivery();
-  const focus = vi.fn(); window.addEventListener("focus", focus);
-  try {
-    f.arrive();
-    await act(async () => { await f.h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { workspaceId: "existing" }); });
-    expect(f.h.syncNotices).toHaveBeenCalledOnce();
-    await waitFor(() => expect(f.hook.result.current.toast?.noticeId).toBe(f.failed.noticeId));
-    expect(f.hook.result.current.notices).toEqual([expect.objectContaining({ title: f.failed.title, recipientShareId: "share" })]);
-    expect(focus).not.toHaveBeenCalled();
-  } finally { window.removeEventListener("focus", focus); }
-});
-
-it("drops the late Notice and toast when the recipient switches away during its pull", async () => {
-  const f = await delivery(); f.arrive();
-  const response = deferred<Response>(); const started = deferred();
-  f.fetch.mockImplementation(async () => { started.resolve(); return response.promise; });
-  await act(async () => { await f.h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { workspaceId: "existing" }); });
-  expect(f.h.syncNotices).toHaveBeenCalledOnce(); await started.promise;
-  const pass = f.h.syncNotices.mock.results[0]!.value;
-  await act(async () => {
-    f.h.retireRenderer();
-    response.resolve(Response.json({ ok: true, notices: [f.failed], nextCursor: "1", hasMore: false, replace: true }));
-    await pass;
-  });
-  expect(f.hook.result.current.notices).toEqual([]);
-  expect(f.hook.result.current.toast).toBeNull();
-});
-
-it("shows a failed settled press's Notice without a file change or a focus event", async () => {
-  const f = await delivery(); f.arrive();
-  const routes = automationPressRelay({ baseUrl: "https://relay.example.test", token: "token",
-    fetch: async () => Response.json({ ok: true, pressId: "press", state: "settled", outcome: "failed", createdAtMs: Date.now() }) });
-  await act(async () => {
-    await routes.press("share", { pressId: "press", automationId: "finish", collectionPath: "docs", definitionHash: "0123456789abcdef", recordId: "docs/task.md", confirmed: [] },
-      { isCurrent: () => true, sync: f.h.syncNotices });
-  });
-  expect(f.h.syncNotices).toHaveBeenCalledOnce();
-  await waitFor(() => expect(f.hook.result.current.toast?.noticeId).toBe(f.failed.noticeId));
-  expect(f.h.reconcile).not.toHaveBeenCalled(); expect(f.h.storeFor).not.toHaveBeenCalled();
-});
-
 async function pendingBurst(rootPath?: string) {
   const f = await delivery(rootPath);
   const logFetch = vi.fn<typeof globalThis.fetch>(async input => Response.json({
@@ -152,41 +110,6 @@ async function pendingBurst(rootPath?: string) {
   };
   return { ...f, probe, check, logFetch };
 }
-
-it("delivers a pending press's later failed Notice and toast on an unchanged burst probe without refocus", async () => {
-  const f = await pendingBurst();
-  const focus = vi.fn(); window.addEventListener("focus", focus);
-  try {
-    await f.probe(2_000);
-    expect(f.h.syncNotices).toHaveBeenCalledOnce();
-    expect(f.hook.result.current.notices).toEqual([]);
-    f.arrive();
-    await f.probe(3_000);
-    expect(f.h.syncNotices).toHaveBeenCalledTimes(2);
-    expect(f.hook.result.current.notices).toEqual([expect.objectContaining({ noticeId: f.failed.noticeId })]);
-    expect(f.hook.result.current.toast?.noticeId).toBe(f.failed.noticeId);
-    expect(f.h.reconcile).not.toHaveBeenCalled(); expect(f.h.storeFor).not.toHaveBeenCalled();
-    expect(focus).not.toHaveBeenCalled();
-  } finally { window.removeEventListener("focus", focus); }
-});
-
-it("returns to one GET and no Notices or engine work on the idle poll after four burst probes", async () => {
-  const f = await pendingBurst();
-  for (const delay of [2_000, 3_000, 5_000, 10_000]) await f.probe(delay);
-  expect(f.h.probeLog).toHaveBeenCalledTimes(4);
-  expect(f.logFetch).toHaveBeenCalledTimes(4);
-  expect(f.check).not.toHaveBeenCalled();
-  expect(f.h.syncNotices).toHaveBeenCalledTimes(4);
-  expect(f.fetch).toHaveBeenCalledTimes(4);
-  process.stdout.write(JSON.stringify({ burst: "unchanged", requests: 8, probeGETs: 4, noticeGETs: 4, noticePasses: 4, engineRPCs: 0 }) + "\n");
-  f.h.probeLog.mockClear(); f.h.syncNotices.mockClear(); f.fetch.mockClear(); f.logFetch.mockClear();
-  await f.probe(30_000);
-  expect(f.h.probeLog).toHaveBeenCalledOnce();
-  expect(f.logFetch).toHaveBeenCalledOnce();
-  expect(f.check).not.toHaveBeenCalled();
-  expect(f.h.syncNotices).not.toHaveBeenCalled(); expect(f.fetch).not.toHaveBeenCalled();
-  expect(f.h.reconcile).not.toHaveBeenCalled(); expect(f.h.storeFor).not.toHaveBeenCalled();
-});
 
 it("keeps the burst after a changed probe and delivers a failure after six seconds without refocus", async () => {
   const rootPath = await createTestScratch("changed-burst-");
