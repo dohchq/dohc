@@ -1073,8 +1073,13 @@ describe("owner live documents", () => {
       nextCursor: null,
     }));
     const failed = deferred<never>();
-    // The harness answers the second call with "notes/held - Copy.md".
-    bridge.duplicateWorkspaceFile.mockReturnValueOnce(failed.promise);
+    // The harness answers the third call with "notes/held - Copy.md", written.
+    bridge.duplicateWorkspaceFile.mockReturnValueOnce(failed.promise).mockResolvedValueOnce({
+      path: "notes/held - Copy.md",
+      materialized: false,
+      operationId: "dohc-operation:00000000-0000-4000-8000-000000000000",
+      undo: { available: true as const },
+    });
     const user = userEvent.setup();
     renderShell(bridge);
 
@@ -1095,9 +1100,23 @@ describe("owner live documents", () => {
     // A failed copy leaves the list open to try another row.
     expect(screen.getByTestId("live-documents-dialog")).toBeTruthy();
 
+    // History has the copy, but its file isn't written yet: nothing opens.
     await user.click(within(toast).getByRole("button", { name: "Try again" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell-error").textContent).toContain(
+        `dohc could not finish the copy of ${held.path}.`,
+      ),
+    );
+    expect(screen.getByTestId("live-documents-dialog")).toBeTruthy();
+    expect(screen.queryByTestId(editorTabTestId("notes/held - Copy.md"))).toBeNull();
+
+    await user.click(
+      within(screen.getByTestId("workspace-shell-error")).getByRole("button", {
+        name: "Try again",
+      }),
+    );
     await waitFor(() => expect(screen.queryByTestId("live-documents-dialog")).toBeNull());
-    expect(bridge.duplicateWorkspaceFile).toHaveBeenCalledTimes(2);
+    expect(bridge.duplicateWorkspaceFile).toHaveBeenCalledTimes(3);
     expect(await screen.findByTestId(editorTabTestId("notes/held - Copy.md"))).toBeTruthy();
     expect(screen.queryByTestId("settings-dialog")).toBeNull();
   });

@@ -3767,12 +3767,22 @@ export function DesktopWorkspaceShell(props: {
   // A held file can't go live again, so Live documents offers a copy beside
   // it. Opening the copy starts its live editing.
   const makeLiveCopy = useCallback(
-    (id: string, path: string): Promise<void> =>
-      bridge()
+    (id: string, path: string): Promise<void> => {
+      const retry = () => void makeLiveCopy(id, path);
+      return bridge()
         .duplicateWorkspaceFile({ workspaceId: id, relativePath: path })
         .then(
           (copy) => {
             if (workspaceIdRef.current !== id) return;
+            // History has the copy but its file isn't written yet; Duplicate again finishes it.
+            if (!copy.materialized) {
+              reportShellError(
+                `dohc could not finish the copy of ${path}.`,
+                new Error(`${copy.path} is in History but not yet in this folder.`),
+                retry,
+              );
+              return;
+            }
             // Live documents may sit over Settings; both close so the copy shows.
             setLiveDocumentsWorkspaceId(null);
             closeSettings();
@@ -3780,11 +3790,10 @@ export function DesktopWorkspaceShell(props: {
           },
           (error: unknown) => {
             if (workspaceIdRef.current !== id) return;
-            reportShellError(`dohc could not make a copy of ${path}.`, error, () => {
-              void makeLiveCopy(id, path);
-            });
+            reportShellError(`dohc could not make a copy of ${path}.`, error, retry);
           },
-        ),
+        );
+    },
     [closeSettings, openFile, reportShellError],
   );
   const reportKeptCopyFailure = useCallback(
