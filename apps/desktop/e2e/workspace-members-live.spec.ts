@@ -17,6 +17,12 @@ import { createTempWorkspace, explorerRow, openWorkspaceFromFirstRun, revealExpl
 // someone opens it, so the member's open starts hosting. Each person then
 // sees the other's typing. Text only: presence is not part of this proof.
 //
+// Then the owner writes a page on disk and quits dohc before opening it. The
+// member's open hears at once that editing starts once the owner's dohc is
+// online, and the page stays readable. The owner's dohc starts again and
+// starts the page's live history by itself, with no click, and the member's
+// page turns live where it is. Both write in it.
+//
 // Then the server's host is full, and the member opens another document. It
 // stays readable, says dohc could not open it for editing, and never waits.
 //
@@ -36,6 +42,10 @@ const PATH = "notes/plan.md";
 const LATER = "notes/later.md";
 const SEED = "# Fundraiser plan\n\nThe owner writes here.\n\nThe member writes here.\n";
 const LATER_SEED = "# Later\n\nIdeas for next year.\n";
+const FRESH = "notes/raffle.md";
+const FRESH_SEED = "# Raffle\n\nPrizes from local shops.\n";
+const OWNER_PRIZE = "The bakery gives a cake.";
+const MEMBER_PRIZE = "The bookshop gives vouchers.";
 const OWNER_TEXT = "Book the hall for Saturday.";
 const MEMBER_TEXT = "I will bring the tables.";
 // The server's live document cap, which step 5 may change. The test reads the server's refusal, not this number.
@@ -142,7 +152,7 @@ test("@members-live a member at Edit and the owner write in one document and eac
 
     // --- The owner syncs the workspace -------------------------------------
     await writeWorkspaceFiles(ownerTemp, [{ path: PATH, contents: SEED }, { path: LATER, contents: LATER_SEED }]);
-    const owner = await launchDesktopApp({ workspace: ownerTemp, env: stack.trustEnv });
+    let owner = await launchDesktopApp({ workspace: ownerTemp, env: stack.trustEnv });
     desktops.push(owner);
     const { workspaceId } = await openWorkspaceFromFirstRun(owner.page, ownerTemp);
     await owner.page.emulateMedia({ reducedMotion: "reduce" });
@@ -231,19 +241,79 @@ test("@members-live a member at Edit and the owner write in one document and eac
       }
     }
 
+    // --- Sam opens a page the owner never opened in dohc ---------------------
+    // The owner writes it on disk, and quits once Sam's dohc lists it.
+    await writeWorkspaceFiles(ownerTemp, [{ path: FRESH, contents: FRESH_SEED }]);
+    await waitForWorkspaceFile(owner.page, workspaceId, FRESH);
+    await revealExplorerPath(mine, PATH);
+    await expect(explorerRow(mine, FRESH)).toBeVisible({ timeout: 120_000 });
+    expect(owner.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
+    await owner.close();
+    const freshOpened = Date.now();
+    await clickDocument(mine, FRESH);
+    const notice = mine.getByTestId("engine-may-hold-document-notice");
+    const freshToast = mine.getByTestId("workspace-shell-error").filter({ hasText: 'dohc could not open "raffle.md" for editing' });
+    await expect(freshToast).toContainText("Editing starts once the owner's dohc is online. You can still read it.", { timeout: 60_000 });
+    testInfo.annotations.push({ type: "without-lineage answer ms", description: String(Date.now() - freshOpened) });
+    // The page names its state. The toast carries the reason.
+    await expect(notice).toHaveText(/^You can read this page\.\s*Try again$/);
+    const reader = mine.getByTestId("view-markdown");
+    await expect(reader).toContainText("Prizes from local shops.");
+    await expect(reader.locator('[contenteditable="true"]')).toHaveCount(0);
+    for (const theme of ["Light", "Dark"] as const) {
+      await setTheme(mine, theme);
+      await expect(freshToast).toBeVisible();
+      await mine.bringToFront();
+      await mine.screenshot({ path: shot(`without-lineage-toast-member-${theme.toLowerCase()}`), animations: "disabled" });
+    }
+    await freshToast.getByRole("button", { name: "Dismiss workspace error" }).click();
+    for (const theme of ["Light", "Dark"] as const) {
+      await setTheme(mine, theme);
+      await expect(notice).toBeVisible();
+      await mine.bringToFront();
+      await mine.screenshot({ path: shot(`without-lineage-waiting-member-${theme.toLowerCase()}`), animations: "disabled" });
+    }
+
+    // --- The owner's dohc starts again and starts the page by itself ---------
+    const ownerAgain = await launchDesktopApp({ workspace: ownerTemp, env: stack.trustEnv });
+    desktops[desktops.indexOf(owner)] = ownerAgain;
+    owner = ownerAgain;
+    await owner.page.emulateMedia({ reducedMotion: "reduce" });
+    await expect(owner.page.getByTestId("status-workspace")).toHaveText(workspaceName, { timeout: 120_000 });
+    const ownerBack = Date.now();
+    // Sam's page turns live where it is, with no click from either person.
+    await expect(editor(mine)).toHaveAttribute("contenteditable", "true", { timeout: 180_000 });
+    testInfo.annotations.push({ type: "live after owner start ms", description: String(Date.now() - ownerBack) });
+    await expect(notice).toHaveCount(0);
+    await expect(editor(mine)).toContainText("Prizes from local shops.");
+    await expect.poll(async () => {
+      const expected = stack!.ownerLiveBinding(workspaceId, FRESH);
+      const actual = expected && ownerEnrollment(ownerTemp.rootPath, expected.binding);
+      return await hostedStatus(owner.page, workspaceId, FRESH) === "ready" && !!actual && isDeepStrictEqual(actual.binding, expected!.binding);
+    }, { timeout: 120_000, intervals: [1_000] }).toBe(true);
+    await openLive(owner.page, FRESH);
+    await typeAfter(owner.page, "Prizes from local shops.", ` ${OWNER_PRIZE}`);
+    await expect(editor(mine)).toContainText(OWNER_PRIZE, { timeout: 60_000 });
+    await typeAfter(mine, "Prizes from local shops.", ` ${MEMBER_PRIZE}`);
+    await expect(editor(owner.page)).toContainText(MEMBER_PRIZE, { timeout: 60_000 });
+    for (const theme of ["Light", "Dark"] as const) {
+      await setTheme(mine, theme);
+      await expect(editor(mine)).toContainText(MEMBER_PRIZE);
+      await mine.bringToFront();
+      await mine.screenshot({ path: shot(`without-lineage-live-member-${theme.toLowerCase()}`), animations: "disabled" });
+    }
+
     // --- The host is full: Sam's next document opens read-only at once -----
     expect(fillHost(join(ownerTemp.baseDir, "relay-data", "relay.sqlite"), workspaceId)).toBeGreaterThan(0);
     const opened = Date.now();
     await clickDocument(mine, LATER);
-    const notice = mine.getByTestId("engine-may-hold-document-notice");
-    await expect(notice).toHaveText(/dohc could not open this page for editing\. The server is editing too many pages right now\.\s*Try again/, { timeout: 60_000 });
+    await expect(notice).toHaveText(/^You can read this page\.\s*Try again$/, { timeout: 60_000 });
     testInfo.annotations.push({ type: "host-full answer ms", description: String(Date.now() - opened) });
     // A toast says the same once, and its row stays in Notices.
     const toast = mine.getByTestId("workspace-shell-error").filter({ hasText: 'dohc could not open "later.md" for editing' });
     await expect(toast).toHaveCount(1);
     await expect(toast).toContainText("The server is editing too many pages right now. You can still read it.");
     // The page shows the file read-only, not the live editor.
-    const reader = mine.getByTestId("view-markdown");
     await expect(reader).toContainText("Ideas for next year.");
     await expect(reader.locator('[contenteditable="true"]')).toHaveCount(0);
     expect(await hostedStatus(owner.page, workspaceId, LATER)).toBe("not hosted");
