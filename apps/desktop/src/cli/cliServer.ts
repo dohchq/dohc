@@ -4111,7 +4111,15 @@ export async function handleCliRequestLine(
   try {
     // The caller's door labels counting only; authority never receives it. The
     // run secret only proves the request is a run's; no verb receives it.
-    const { door: _door, runSecret, ...request } = parsed.data;
+    const { door: _door, runSecret, workspaceId, ...request } = parsed.data;
+    // A request that names its workspace runs from that workspace's folder, as
+    // if the caller stood there. Only an id this computer's registry lists
+    // selects one; a workspace's name never does, because other people can change it.
+    if (workspaceId !== undefined) {
+      const named = options.listWorkspaces().find((workspace) => workspace.workspaceId === workspaceId);
+      if (!named) throw new CliCommandError("No workspace on this computer has this id.");
+      request.args.cwd = named.rootPath;
+    }
     const completion = { replayed: false };
     const refusal = await receivedShareRefusal(request, options);
     const unvalidated = refusal ? refusal.answer
