@@ -43,7 +43,6 @@ export function AgentToolPicker(props: {
   disabled: boolean;
   advancedOpen: boolean;
   onAdvancedToggle(open: boolean): void;
-  // The rest of Advanced, after the chosen tool's details.
   children?: ReactNode;
   onChange(profile: AgentLaunchProfile): void;
   onError(message: string, cause?: unknown): void;

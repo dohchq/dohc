@@ -144,7 +144,6 @@ export function SitePreviewPage(props: {
   focused?: boolean;
   // Changes each time the person presses this page's tab, which puts focus in the app.
   focusRequest?: number;
-  // The app's title, for its tab.
   onTitle?: (title: string) => void;
   // The workspace's server connection, for Review app's Share links.
   access?: ComponentProps<typeof OwnerAppPublication>["access"];
@@ -298,7 +297,6 @@ export function SitePreviewPage(props: {
     onClose: () => setOptionsOpen(false),
   });
 
-  // Shows one start of the app's preview, or nothing when none runs.
   const showPreview = useCallback((result: StartSitePreviewResult | null) => {
     logsRequestRef.current += 1;
     setActionError(null);

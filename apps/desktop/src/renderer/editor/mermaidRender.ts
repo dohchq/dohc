@@ -18,16 +18,12 @@ export const MERMAID_STARTER_SNIPPET = "graph TD;\n    A --> B;";
 const MAX_MERMAID_CHARS = 10_000;
 const RENDER_DEBOUNCE_MS = 400;
 
-// ---------------------------------------------------------------------------
-// Pure block detection.
-
 type MermaidBlock = {
   /** Doc position of the codeBlock's own start (before its content). */
   pos: number;
   /** Doc position immediately after the block — where the preview widget
    *  attaches. */
   end: number;
-  /** The fence's plain-text source. */
   text: string;
 };
 
@@ -471,7 +467,6 @@ function applyMermaidResult(container: HTMLElement, result: MermaidRenderResult)
     status.textContent = `Diagram error: ${result.message}`;
     return;
   }
-  // 'skipped'
   container.classList.add("dohc-mermaid-preview--skipped");
   status.hidden = false;
   status.textContent = "Diagram too large to preview (10,000+ characters).";
@@ -481,7 +476,6 @@ type MermaidPluginState = {
   /** Monotonic counter for minting fresh widget ids across the plugin's life. */
   seq: number;
   entries: readonly MermaidWidgetEntry[];
-  /** Ids of the fences drawn collapsed. */
   collapsed: ReadonlySet<string>;
   set: DecorationSet;
 };

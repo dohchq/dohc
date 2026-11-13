@@ -68,24 +68,18 @@ export interface CollectionFrameField {
 export interface NewCollectionView {
   name: string;
   kind: CollectionViewKind;
-  /** The field a board groups by. */
   groupBy?: string;
-  /** The date field a calendar places records by. */
   dateField?: string;
 }
 
 /** What someone who can save views does with them. Without it, the tabs only switch. */
 export interface CollectionFrameViews {
-  /** The fields a board can group by. */
   groupFields: readonly CollectionFrameField[];
-  /** The fields a calendar can place records by. */
   dateFields: readonly CollectionFrameField[];
-  /** Opens the way to add a date field, where this person can add one. */
   onAddDateField?: () => void;
   nameMaxLength?: number;
   /** Saves a new view and opens it. Answers what went wrong as a sentence, or null. */
   create: (view: NewCollectionView) => Promise<string | null>;
-  /** Answers what went wrong as a sentence, or null. */
   rename: (id: string, name: string) => Promise<string | null>;
   /** Deletes a view. The page reports a failure, and offers Undo where it has one. */
   remove: (id: string) => void;
@@ -99,7 +93,6 @@ export interface CollectionFrameViews {
 export interface CollectionFrameViewField {
   /** What the choice is, such as "Group board by": the menu's name and the control's tooltip. */
   label: string;
-  /** The words before the chosen field's name, such as "Group by". */
   prefix: string;
   value: string | undefined;
   options: readonly CollectionFrameField[];
@@ -111,7 +104,6 @@ export interface CollectionFrameCommand {
   id: string;
   label: string;
   icon?: ReactNode;
-  /** A count after the label, such as the Collection's automations. */
   count?: number;
   onSelect: () => void;
   disabled?: boolean;
@@ -153,7 +145,6 @@ export interface CollectionFrameProps extends Omit<HTMLAttributes<HTMLElement>, 
     onSubmit: () => void;
     disabled?: boolean;
   };
-  /** The page's own buttons, between the search and the Automations button. */
   actions?: readonly CollectionFrameAction[];
   /** `disabled`: what holds the side panel must end before the ⚡ panel can take it. */
   automations?: { open: boolean; count: number; onToggle: () => void; disabled?: boolean };

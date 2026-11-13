@@ -68,7 +68,6 @@ export type SkipView = ReadonlyMap<string, SkipState>;
 const LANE = {
   granted: {
     label: "Shared by me",
-    // What each list covers, stated beside when it was checked.
     scope: "for this workspace",
     empty: "Nothing shared from this workspace yet.",
     unexplained:
@@ -463,7 +462,6 @@ export type SharingActions = {
 
 function GrantedRow(props: {
   group: ShareGroup;
-  // The names its list shows more than once.
   repeated: ReadonlySet<string>;
   waiting: WaitingChanges | undefined;
   confirming: boolean;
@@ -699,7 +697,6 @@ function ReceivedRow(props: {
       : active || !row
         ? null
         : "ended";
-  // The level only while the share is live and dohc knows it; else the sender alone.
   const who: Who =
     access && !word
       ? {
@@ -708,7 +705,6 @@ function ReceivedRow(props: {
         }
       : fromWho(sender, parts.full);
   const where = mount ? `In this workspace as shared-with-me/${mount.label}` : null;
-  // A removal says it whole, in the relay's words, and what a copy still here does.
   const note = removed
     ? [row?.removalMessage, mount ? "Your copy stays readable but won't update." : null]
         .filter(Boolean)
@@ -902,7 +898,6 @@ export function SharingPanel(props: {
       ? received.answer.rows.filter((row): row is AccessShareRow => row.kind === "share")
       : [];
   const mountOf = (shareId: string) => mounts.find((mount) => mount.shareId === shareId);
-  // Mounts on this computer the listing does not name.
   const unlistedMounts = mounts.filter(
     (mount) => !receivedRows.some((row) => row.shareId === mount.shareId),
   );
@@ -1055,7 +1050,6 @@ export function SharingView(props: {
   onMountsChanged: () => void;
   onUnmount: (path: string) => Promise<void>;
   shareRemovals: ShareRemovalNotices;
-  // Counts the shell's share removals and Undos.
   sharesRevision: number;
   reportError: (fallback: string, error: unknown, retry: () => void) => void;
   // What to focus once its lane answers, as Settings search asked.

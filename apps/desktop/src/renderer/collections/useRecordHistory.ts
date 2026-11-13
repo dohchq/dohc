@@ -184,7 +184,6 @@ export function useRecordHistory(
     runsUnchecked: (until: number | null, error: unknown, runs: readonly string[]) => {
       if (shown) runsUnchecked(shown, until, error, runs);
     },
-    /** The dialog shown now placed these runs. */
     runsChecked: (runs: readonly string[]) => {
       if (shown) runsChecked(shown, runs);
     },

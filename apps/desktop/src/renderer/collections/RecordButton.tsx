@@ -26,7 +26,6 @@ export function RecordButton(props: {
   buttons: AutomationButtons;
   field: string;
   recordId: string;
-  /** The record's name, as in "Mark paid for Invoice 12". */
   recordLabel: string;
 }) {
   const { state, running, note, checking } = useButtonView(

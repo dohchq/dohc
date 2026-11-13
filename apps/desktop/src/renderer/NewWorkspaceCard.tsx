@@ -84,7 +84,6 @@ export function NewWorkspaceCard(props: { onWorkspaceReady: (workspace: Workspac
     // rootRequests is a stable ref holder.
   }, []);
 
-  // A new suggestion stays selected in the focused field.
   useLayoutEffect(() => {
     if (!nameTyped.current && document.activeElement === nameField.current)
       nameField.current?.select();
@@ -191,7 +190,6 @@ export function NewWorkspaceCard(props: { onWorkspaceReady: (workspace: Workspac
         <div
           className={`dohc-elevated relative ${pathShown ? "z-4" : "z-2"} flex flex-col gap-4 rounded-xl rounded-tl-none border border-line bg-panel p-5`}
         >
-          {/* The name's error sits right under its tab. */}
           {nameError ? (
             <FieldError id="new-workspace-name-error" className="-mb-2">
               {nameError}

@@ -181,7 +181,6 @@ export function EngineMayHoldDocumentNotice(props: {
   // content the user cannot see.
   contentShown: boolean;
   message?: string;
-  // Actions left of Try again.
   children?: ReactNode;
 }) {
   return (
@@ -260,7 +259,6 @@ export function OpenExternallyControl(props: {
   );
 }
 
-// The file Open externally opens, and where a failed open is reported.
 export type OpenExternallyTarget = {
   workspaceId: string;
   path: string;
@@ -363,7 +361,6 @@ export function LossyNoteNotice(props: {
   tooLarge?: boolean;
   onError?: ReportButtonError;
   onNotice?: (message: string, undo?: () => void) => void;
-  // Binds the editor for this open, after the person confirms the warning.
   onEditAnyway?: () => void;
 }) {
   const [confirming, setConfirming] = useState(false);
@@ -617,7 +614,6 @@ export function OrphanedDraftNotices(props: {
   );
 }
 
-// One set-aside edit above the page, with its Copy edits and Dismiss.
 export function SetAsideEditRow(props: {
   message: string;
   getText: ComponentProps<typeof CopyButton>["getText"];
@@ -639,7 +635,6 @@ export function SetAsideEditRow(props: {
   );
 }
 
-// The strip over the markdown source view, with the source's Copy.
 export function MarkdownSourceStrip(props: {
   words: string;
   getText: ComponentProps<typeof CopyButton>["getText"];

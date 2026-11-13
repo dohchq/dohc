@@ -63,8 +63,6 @@ export function switchModalRegion(event: KeyboardEvent, dialog: HTMLElement | nu
     return true;
   }
   if (event.key !== "F6") return false;
-  // The first toast with a control: its first worded action, or Details when
-  // it has no other, else its first control.
   const controls = [...document.querySelectorAll<HTMLElement>(TOASTS_SELECTOR)].flatMap(
     modalFocusableElements,
   );
@@ -112,7 +110,6 @@ export function hasBlockingModal() {
   return document.querySelector(BLOCKING_MODAL_SELECTOR) !== null;
 }
 
-// The panel of the dialog on top, if one is open.
 export function topModalPanel(): HTMLElement | null {
   const panels = document.querySelectorAll<HTMLElement>(
     "[data-dohc-modal='true'] > [data-focus-surface='dialog']",

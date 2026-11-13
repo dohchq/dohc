@@ -22,7 +22,6 @@ export function ShellTitlebar(props: {
   failedSaves: number;
   showWorkbenchMenu: (context: "status") => Promise<void>;
   agentActive: boolean;
-  // Present while the workspace is in Restricted Mode.
   restrictedMode?: { asking: boolean; onTrust: () => void };
   wb: WorkbenchState;
   toggleSidePanel: () => void;

@@ -303,7 +303,6 @@ export function LinkAgentsList(props: {
   );
 }
 
-// The name the agent's client reported, or "Agent", as the consent page shows it.
 export function agentName(agent: Pick<RelayShareLinkAgent, "reportedName">): string {
   return agent.reportedName ?? "Agent";
 }

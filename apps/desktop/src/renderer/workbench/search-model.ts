@@ -154,9 +154,7 @@ export function visibleFlatEntries(
 // ellipsis, and shift the offsets by the trim (still offset-based — the
 // pattern never re-executes here).
 
-// Matches starting at or before this column render untrimmed.
 export const PREVIEW_LEAD_TRIM_THRESHOLD = 24;
-// Context characters kept immediately before the match after a trim.
 export const PREVIEW_LEAD_CONTEXT_CHARS = 8;
 
 interface WindowedPreview {

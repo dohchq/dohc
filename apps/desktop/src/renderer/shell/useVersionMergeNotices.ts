@@ -93,7 +93,6 @@ export function useVersionMergeNotices(options: {
     clear,
     settle,
     onMergeOpenChange,
-    // Why a merge row's Try again can't run now.
     retryBlocked: !captureOn
       ? MERGE_RETRY_AFTER_STORE
       : mergeOpen

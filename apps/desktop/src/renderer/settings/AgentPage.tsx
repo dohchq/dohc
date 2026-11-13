@@ -39,7 +39,6 @@ import { HueControl, SwitchControl } from "./SettingRow";
 const LINK = "rounded text-[12px] text-ink underline underline-offset-2 hover:text-muted";
 const MIN_TIMEOUT = 1;
 const MAX_TIMEOUT = 1440;
-// An agent page's boxes, their rows, the headings over them and a row's value.
 export const BOX = "rounded-lg border border-line bg-panel";
 export const ROW =
   "flex min-h-11 items-center gap-3 border-b border-line px-3 py-2 last:border-b-0";

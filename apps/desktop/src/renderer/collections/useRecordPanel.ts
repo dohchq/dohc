@@ -17,7 +17,6 @@ export interface RecordPanelHost {
   initialOpenRecord?: string | null;
   /** The page opened a record in its panel, by the record's key, or closed the panel, for null. */
   onOpenRecordChange?(record: string | null): void;
-  /** The record panel's width when the page starts. */
   initialRecordPanelWidth?: number;
   /** A resize of the record panel ended. */
   onRecordPanelWidthChange?(width: number): void;

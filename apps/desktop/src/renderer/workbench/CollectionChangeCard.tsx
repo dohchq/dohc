@@ -101,7 +101,6 @@ export function CollectionChangeCard(props: {
   path: string;
   /** The reply that answered the message, which applied the change. */
   appliedBy?: ChatMessageRecord;
-  /** The later reply that undid it. */
   undoneBy?: ChatMessageRecord;
   locked: boolean;
   onOpenPath?: (path: string) => void;

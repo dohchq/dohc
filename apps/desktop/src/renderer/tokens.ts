@@ -49,7 +49,6 @@ export const palette: Record<"light" | "dark", ThemeTokens> = {
     // selection (see the contrast test).
     hover: "color-mix(in srgb, var(--dohc-ink) 7%, transparent)",
     selected: "color-mix(in srgb, var(--dohc-ink) 14%, transparent)",
-    // The fill of loading bars.
     skeleton: "color-mix(in srgb, var(--dohc-ink) 11%, transparent)",
     scrim: "rgba(0, 0, 0, 0.40)",
     muted: "#55524a",
@@ -77,7 +76,6 @@ export const palette: Record<"light" | "dark", ThemeTokens> = {
     // AA as text on a menu row's 14% fill, its tightest surface (see the
     // contrast test).
     danger: "#9d3c28",
-    // A danger confirm's fill and label.
     dangerFill: "#9d3c28",
     onDanger: "#faf9f5",
     // The tile behind a danger confirmation's glyph, and nothing else.

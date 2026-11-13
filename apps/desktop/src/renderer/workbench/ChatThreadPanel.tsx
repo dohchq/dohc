@@ -142,7 +142,6 @@ function RepliesLine(props: {
     const key = `${reply.authorKind}:${reply.presentation.group}:${reply.authorDisplayName}`;
     if (!faces.has(key) && faces.size < 3) faces.set(key, reply);
   }
-  // Today's time, "Yesterday", or a short date.
   const yesterday = new Date();
   yesterday.setDate(yesterday.getDate() - 1);
   const when = sameChatDay(last.createdAtMs, yesterday.getTime())

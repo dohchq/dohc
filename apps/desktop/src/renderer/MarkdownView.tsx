@@ -305,7 +305,6 @@ export function MarkdownView(props: {
   onOpenPath?: (path: string, headingTarget?: HeadingTarget) => void;
   onSharePath?: (path: string) => void;
   onSaveStateChange?: (state: SaveState) => void;
-  // A live document became read-only while it was open.
   onLiveReadOnly?: () => void;
   registerDraftFlush?: (flush: DraftFlush | null) => void;
   knownFiles?: ReadonlyArray<WikilinkFile>;
@@ -1209,7 +1208,6 @@ export function MarkdownView(props: {
   // The engine branch's scroller. It holds the top-matter (title, properties)
   // above the editor, which is where a frontmatter search hit actually lives.
   const engineDocPaneRef = useRef<HTMLDivElement | null>(null);
-  // The whole view: its actions where it draws them itself, its notices and its text.
   const viewRef = useRef<HTMLDivElement | null>(null);
   // Where the person is in the read view, as of its last scroll. The editor
   // that replaces it opens at the same place.

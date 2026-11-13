@@ -68,7 +68,6 @@ export function computeAttachmentPaths(
       relativeSrc: `${up}${folder}/${filename}`,
     };
   }
-  // per-document (default): a subfolder next to the document.
   return {
     writePath: `${docDir}${folder}/${filename}`,
     relativeSrc: `${folder}/${filename}`,
@@ -218,7 +217,6 @@ export function generateAssetFilename(name: string, mimeType: string, bytes: Uin
   return `${slugifyBaseName(name)}-${shortContentHash(bytes)}.${imageExtension(name, mimeType)}`;
 }
 
-// Collects image Files from a clipboard/drag DataTransfer.
 export function extractImageFiles(dataTransfer: DataTransfer | null): File[] {
   if (!dataTransfer) return [];
   const files: File[] = [];

@@ -53,7 +53,6 @@ export function useAutomationShareCheck(workspaceId: string, target: RelayShareT
       share.access,
       share.shareId ?? null,
     ]);
-  // What the last check found, for the share it checked.
   const [checked, setChecked] = useState<{
     key: string;
     warning: string | null;

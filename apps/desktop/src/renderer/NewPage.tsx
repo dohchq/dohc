@@ -26,7 +26,6 @@ export function NewPage(props: {
   onBodyChange: (body: string) => void;
   // Enter or Tab from the title, or a click into the body.
   onLeaveTitle: () => void;
-  // The page's file, once it exists.
   file: NewPageFile | null;
   // An earlier mount of this page already handed its body over.
   handedOff: boolean;

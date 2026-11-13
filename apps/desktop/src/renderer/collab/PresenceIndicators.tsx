@@ -10,7 +10,6 @@ import { resolvePeerDisplayName, type PresencePeer } from "./presenceChannel";
 
 const MAX_FACES = 3;
 
-// An agent publishes presence with `agent: true` in its state.
 function isAgentPeer(peer: PresencePeer): boolean {
   return (peer.state as { agent?: unknown } | null)?.agent === true;
 }

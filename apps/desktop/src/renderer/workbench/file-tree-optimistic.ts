@@ -32,7 +32,6 @@ export type PendingTreeChange =
   | { id: string; kind: "create-file" | "create-folder"; path: string }
   | { id: string; kind: "delete-file" | "delete-folder"; path: string };
 
-// The path a change starts from.
 export function sourcePath(change: PendingTreeChange): string {
   return "path" in change ? change.path : change.fromPath;
 }

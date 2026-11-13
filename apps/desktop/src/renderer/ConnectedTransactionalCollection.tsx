@@ -77,7 +77,6 @@ export interface ConnectedTransactionalCollectionProps {
   initialOpenRecord?: string | null;
   /** The page opened a record in its panel, or closed the panel, for null. The host keeps it with the tab. */
   onOpenRecordChange?(record: string | null): void;
-  /** The record panel's width when the page starts. */
   initialRecordPanelWidth?: number;
   /** A resize of the record panel ended. */
   onRecordPanelWidthChange?(width: number): void;
@@ -213,7 +212,6 @@ function ScopedCollection({
         away = refused ? null : readCollectionServerUnreachable(error);
       setRefusal(refused);
       setUnreachable(away);
-      // Collections this computer cannot use any more, or cannot reach, stop showing, in place.
       if (refused || away) setDataset(null);
       else
         onError(

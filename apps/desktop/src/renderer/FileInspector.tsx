@@ -1072,7 +1072,6 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
             contentReadTicket={contentReadTicket}
             latestContentRequestId={latestContentRequestId}
             refreshAfterConflict={refreshAfterConflict}
-            // Only a .json file claims JSON; the other data files keep the text view.
             testId={extensionOf(props.path) === "json" ? "view-json" : "view-text"}
             language={extensionOf(props.path) || "text"}
             workspaceId={props.workspaceId}

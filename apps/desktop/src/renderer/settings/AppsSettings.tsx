@@ -129,7 +129,6 @@ export function AppsSettings(props: {
         )
         ?.focus();
   });
-  // A page whose app left the workspace goes back to the list.
   useEffect(() => {
     if (opened !== null && current.status === "ready" && page === null) setOpened(null);
   }, [current.status, opened, page]);

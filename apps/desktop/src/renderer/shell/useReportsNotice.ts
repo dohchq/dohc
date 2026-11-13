@@ -27,7 +27,6 @@ export function reportsNoticeText(reports: ReportKinds): string {
 export function useReportsNotice(input: {
   workspaceId: string;
   privacy: PrivacySettings | null;
-  // The notice's row and the reports it names, while the window holds one.
   notice: { id: string; reports: ReportKinds } | null;
   show(reports: ReportKinds): void;
 }): (toastId: string) => void {

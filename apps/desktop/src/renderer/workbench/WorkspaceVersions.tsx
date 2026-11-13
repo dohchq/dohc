@@ -111,7 +111,6 @@ export function isVersionMergeIdentity(identity: string | undefined): boolean {
   return identity?.startsWith("version-merge:") === true;
 }
 
-// How a merge answered after its dialog closed.
 type MergeAnswer =
   // A null count: the merge left files to decide, and they were all decided
   // before the answer came.
@@ -259,7 +258,6 @@ export interface WorkspaceVersionsOptions {
   // same create or merge takes its notice back, whichever control ran it.
   onError: (message: string, cause: unknown, retry?: () => void, identity?: string) => void;
   clearError: (identity: string) => void;
-  // A merge that answered after its dialog closed.
   onMergeNotice: (notice: VersionMergeNotice) => void;
   // Whether a merge dialog is open, so a merge notice's Try again waits.
   onMergeOpenChange?: (open: boolean) => void;
@@ -281,7 +279,6 @@ export interface WorkspaceVersions {
   active: WorkspaceVersionRecord | null;
   onMain: boolean;
   busy: "switch" | "create" | null;
-  // Every load attempt failed, and reload tries again.
   loadFailed: boolean;
   reload(): void;
   requestSwitch(versionId: string): void;
@@ -549,7 +546,6 @@ export function useWorkspaceVersions(props: WorkspaceVersionsOptions): Workspace
         });
         if (!operationToken.isCurrent(token)) return;
         setSnapshot(result);
-        // Create-and-switch: the new version is the active one.
         props.onWorkspaceStateChanged(result.activeVersionId);
         props.clearError(identity);
         setDraft(null);
@@ -733,7 +729,6 @@ export function VersionMenu(props: {
         </>
       ),
       checked: version.id === snapshot.activeVersionId,
-      // With only Main, one line under it says what a version is for.
       ...(snapshot.versions.length === 1
         ? { description: "Try changes without touching Main." }
         : {}),
@@ -1781,7 +1776,6 @@ function ConflictList(props: {
   beginLineageOperation: () => Promise<() => void>;
   onWorkspaceStateChanged: () => void;
   conflicts: WorkspaceVersionConflict[];
-  // Whether a continuation exists past the loaded window.
   hasMore: boolean;
   onLoadMore: () => Promise<void>;
   sourceNameFor: (conflict: WorkspaceVersionConflict) => string;
@@ -1879,9 +1873,7 @@ export function openConflictId(
   chosenId: string | null | undefined,
 ): string | null {
   const firstId = conflicts[0]?.conflictId ?? null;
-  // Untouched: the first file to decide opens by itself.
   if (chosenId === undefined) return firstId;
-  // Collapsed on purpose: leave every card closed.
   if (chosenId === null) return null;
   // A resolved conflict leaves the list, so a chosen id that is no longer in
   // it hands the turn to the next file to decide.
@@ -1916,8 +1908,6 @@ export function VersionComparePage(props: { workspaceId: string; versionId: stri
     | {
         status: "ready";
         versionName: string;
-        // The loaded window of the comparison: one or more pages, and
-        // the continuation for the rest.
         files: WorkspaceVersionFileChange[];
         nextAfterPath: string | null;
       }
@@ -2178,7 +2168,6 @@ export function ConflictReviewDialog(props: {
       }
   >({ status: "loading" });
   const [versionNames, setVersionNames] = useState<Map<string, string>>(new Map());
-  // Bumped by Try again after a failed read.
   const [loadAttempt, setLoadAttempt] = useState(0);
   const liveToken = useRequestSequence();
   // Same rule as the merge dialog: a "Show more" answer may only append to

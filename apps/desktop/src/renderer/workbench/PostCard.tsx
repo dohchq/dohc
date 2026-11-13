@@ -84,7 +84,6 @@ export const HOME_TOOLBAR = "top-1 right-2";
 export const FEED_META =
   "mt-1.5 flex flex-wrap items-center gap-3 text-[11px] tabular-nums text-subtle";
 
-// One icon button in a row's toolbar.
 export function ActionButton(props: {
   testId?: string;
   label: string;
@@ -148,7 +147,6 @@ export function FeedReactionPill(props: {
   );
 }
 
-// Shared by the post card and Home.
 export function SaveAsFileActions(props: {
   testIdPrefix: string;
   bookmark?: ChatBookmarkRecord;

@@ -53,7 +53,6 @@ function isEditableShortcutTarget(target: EventTarget | null) {
 const STEP_ARROW =
   "size-7 aria-disabled:cursor-default aria-disabled:opacity-40 aria-disabled:hover:bg-transparent aria-disabled:hover:text-subtle";
 
-// The change's file, its folder quieter than its name.
 function MomentPath({ path }: { path: string }) {
   const slash = path.lastIndexOf("/");
   return (
@@ -110,7 +109,6 @@ export function EngineMomentDiffPage({
   // edit lands between the drain and the lineage change.
   onBeforeRestore: () => Promise<() => void>;
   onOpenFile: (path: string) => void;
-  // Opens a rules file that keeps this change hidden, to fix it.
   onOpenRulesFile: (file: WorkspacePolicyFile) => void;
   // The tab's title names the change's path, or nothing once History's rules
   // hide the change.
@@ -155,7 +153,6 @@ export function EngineMomentDiffPage({
     | { status: "untracked" }
     | { status: "error" }
   >({ status: "loading" });
-  // Bumped by Try again on a hidden or untracked page, to read the change again.
   const [readAttempt, setReadAttempt] = useState(0);
   useEffect(
     () =>
@@ -171,7 +168,6 @@ export function EngineMomentDiffPage({
     | { status: "restored"; restored: "text" | "deleted"; message: string; undoOffered: boolean }
   >({ status: "idle" });
   const [moreOpen, setMoreOpen] = useState(false);
-  // The forward restore moment to undo against; null = nothing to undo.
   const [undoMomentId, setUndoMomentId] = useState<string | null>(null);
   // Restore and Undo restore take each other's place when one finishes, so
   // a press on one hands the focus to the other, unless focus has moved on.
@@ -434,7 +430,6 @@ export function EngineMomentDiffPage({
     return () => registerActiveUndo(null);
   }, [moment, registerActiveUndo, restoreBusy, undoMomentId, undoRestore]);
 
-  // Try again shows that it is reading, as the History panel's does.
   const readAgain = () => {
     setState({ status: "loading" });
     setReadAttempt((attempt) => attempt + 1);
@@ -496,7 +491,6 @@ export function EngineMomentDiffPage({
       : directWrite && moment.linkAuthor
         ? { target: { kind: "link", grantId: moment.linkAuthor.grantId }, label: "Edit link" }
         : null;
-  // Each side presents by its own kind (see momentDiffSides).
   const {
     beforeIsBinary,
     afterIsBinary,

@@ -5,7 +5,6 @@ import type { PathMarks } from "./pendingShareMarks";
 // one copy for every version, so a change to it changes Main too. Each row
 // reads its own path, as the pending-share marks do.
 export interface NotVersionedPaths extends PathMarks {
-  // The marked files at or under any of `paths`.
   under(paths: readonly string[]): string[];
 }
 
@@ -36,7 +35,6 @@ export function createNotVersionedMarks(): NotVersionedPaths & {
   };
 }
 
-// A marked row's tag, and its tooltip.
 export const NOT_VERSIONED = "Not versioned";
 export const NOT_VERSIONED_TITLE =
   "Main and every version have the same copy, so changing it here changes it in Main too.";

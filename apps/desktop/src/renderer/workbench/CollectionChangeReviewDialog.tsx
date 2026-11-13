@@ -175,12 +175,10 @@ export function CollectionChangeReviewCard(props: {
   asked: CollectionChange;
   load: CollectionChangeReviewLoad;
   phase: CollectionChangeReviewPhase;
-  /** The rows whose file changes show. */
   open: ReadonlySet<string>;
   onToggle: (key: string) => void;
   onApply: (review: CollectionChangeReview) => void;
   onNotNow: () => void;
-  /** Prepares the change again after a failed preparation. */
   onRetry: () => void;
   locked: boolean;
   testIdPrefix: string;

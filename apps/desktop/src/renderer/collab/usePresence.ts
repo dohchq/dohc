@@ -22,7 +22,6 @@ interface UsePresenceInput {
   topic: string;
   // Stable per-tab/device id so this client's own entry is identifiable.
   clientId: string;
-  // How this user is shown to peers.
   displayName: string;
   // Auto-clear typing after this idle window even if the caller forgets to
   // clear it. Default 5s.
@@ -32,7 +31,6 @@ interface UsePresenceInput {
 export interface PresenceResult {
   // Peers other than this client (self is filtered out by clientId).
   others: PresencePeer[];
-  // Display names of others currently typing.
   typingNames: string[];
   // Report local typing state; publishes immediately and self-clears on idle.
   setTyping: (typing: boolean) => void;
@@ -75,7 +73,6 @@ export function usePresence(input: UsePresenceInput): PresenceResult {
 
   useEffect(() => {
     if (!active || !transport) {
-      // Solo/offline: build nothing, show nothing.
       setPeers(EMPTY_PEERS);
       return;
     }

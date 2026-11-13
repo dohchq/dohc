@@ -103,7 +103,6 @@ function snapshotsEqual(a: Uint8Array, b: Uint8Array): boolean {
   return true;
 }
 
-// Why a document left its path while it was open.
 export type DocumentGoneCause = "deleted" | "object-changed";
 
 // What one open answers: a workspace, a path, the gate, and the active-version
@@ -127,7 +126,6 @@ export function engineDocRequestKey(input: {
   ]);
 }
 
-// The settled result of one open.
 type EngineDocOpenOutcome =
   | {
       token: number;

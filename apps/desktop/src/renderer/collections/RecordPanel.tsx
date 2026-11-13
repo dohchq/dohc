@@ -90,7 +90,6 @@ export interface RecordPanelProps {
   loading?: boolean;
   /** Why the panel cannot show the record, in one line, as for a record deleted since it opened. It replaces what is under the top bar. */
   unavailable?: string;
-  /** The record's fields. */
   properties?: ReactNode;
   /**
    * What the record holds under its fields, such as a page's text. Escape

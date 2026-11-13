@@ -125,7 +125,6 @@ type TableControlsRuntime = {
   activeRowResize: TableRowResizeState | null;
   cancelPointer: (() => void) | null;
   closeMenu: (() => void) | null;
-  /** The grip or button whose menu is open. */
   menuAnchor: HTMLElement | null;
   menuSerial: number;
 };

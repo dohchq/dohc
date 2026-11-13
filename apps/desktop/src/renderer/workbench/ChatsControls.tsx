@@ -22,7 +22,6 @@ export type ShareReadFailure =
 export function AgentPresenceHint(props: {
   activity: AgentPresenceActivity | null;
   testId: string;
-  // The program the runner starts, when the view knows it.
   program?: string | null;
 }) {
   if (props.activity === null) return null;
@@ -105,7 +104,6 @@ export function ShareReadFailureNotice(props: {
   // they are just older than this failure.
   stale: boolean;
   onRetry: () => void;
-  // The frame, for a notice that is not a band across a panel.
   className?: string;
 }) {
   const staleLine = props.stale ? " This list may be out of date." : "";
@@ -141,12 +139,9 @@ export function ChatHeader(props: {
   testId: string;
   onBack?: () => void;
   icon?: React.ReactNode;
-  // One muted line after the title: a group's purpose, or what a view lists.
   description?: React.ReactNode;
-  // Optional calm trailing slot (e.g. presence faces of who else is here).
   trailing?: React.ReactNode;
   action?: React.ReactNode;
-  // A page's header: 48px, with the title at 15px.
   large?: boolean;
 }) {
   return (

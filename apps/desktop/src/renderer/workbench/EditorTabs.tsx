@@ -32,7 +32,6 @@ function tabTitle(path: string, label?: string): string {
   return TAB_KINDS[tab.kind].tooltip(tab, label);
 }
 
-// The drawing's tab glyph is 14px.
 const TAB_GLYPH_SIZE = 14;
 
 const CORNER_RADIUS = 8;

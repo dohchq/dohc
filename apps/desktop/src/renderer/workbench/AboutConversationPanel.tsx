@@ -81,8 +81,6 @@ export function AboutConversationPanel(props: {
   );
 }
 
-// ---- Links ----
-
 type Page = NonNullable<ChatLinksPage>;
 type Author = Page["entries"][number]["author"];
 

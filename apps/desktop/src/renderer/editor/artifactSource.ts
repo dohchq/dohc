@@ -26,7 +26,6 @@ function stop(error: Error): void {
   requests.clear();
 }
 
-/** Drops the worker's current work and sends what still waits to a new one. */
 function restart(): void {
   worker?.terminate();
   worker = null;

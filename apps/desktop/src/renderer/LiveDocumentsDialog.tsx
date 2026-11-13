@@ -133,7 +133,6 @@ export type LiveDocumentsDialogProps = {
   setAside?: readonly LiveDocumentRow[];
   /** One page of refused shares, from the share id the previous page ended on. */
   loadRefusals: (workspaceId: string, after?: string) => Promise<LiveRefusalPage>;
-  /** Asks the engine to enrol one refused share again. */
   retryRefusal: (workspaceId: string, shareId: string) => Promise<void>;
   onClose: () => void;
   /** Reported to the shell, which owns the toast and the Notices row. The
@@ -179,7 +178,6 @@ type Scope = { live: boolean };
 const readFailedMessage = "dohc could not load the live documents for this workspace.";
 const refusalsReadFailedMessage =
   "dohc could not load the shares that could not start live editing.";
-// What did not happen, in the words this dialog owns.
 const REFUSAL_SENTENCE = "This share could not start live editing automatically.";
 // Enough files to recognize the share without turning a row into a listing.
 const REFUSAL_PATHS_SHOWN = 5;
@@ -366,8 +364,6 @@ function failureMessage(work: Work, readFailed: boolean): string {
     : `dohc could not resume live editing for ${work.path}.`;
 }
 
-/** What to call a refused share: its first file, or the share itself when the
- * engine returned no paths for it. */
 function refusalLabel(row: LiveRefusalRow): string {
   return row.paths[0] ?? "this share";
 }
@@ -429,7 +425,6 @@ export function LiveDocumentsDialog({
     () => new Map(),
   );
   const focusStopRetry = useRef<string | null>(null);
-  // Rows whose Save recovery copy is running, keyed by workspace and path.
   const [savingCopies, setSavingCopies] = useState<ReadonlySet<string>>(() => new Set());
   const [shownWorkspaceId, setShownWorkspaceId] = useState(workspaceId);
   const request = useRequestSequence([workspaceId]);

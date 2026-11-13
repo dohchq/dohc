@@ -54,7 +54,6 @@ function RouteButton(props: {
   );
 }
 
-// Compact: "now", "5m", "3h", "4d", then a short date.
 export function openedLabel(thenMs: number, nowMs = Date.now()): string {
   const minutes = Math.floor(Math.max(0, nowMs - thenMs) / 60_000);
   if (minutes < 1) return "now";

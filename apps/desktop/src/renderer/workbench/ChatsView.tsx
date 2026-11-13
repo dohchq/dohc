@@ -174,7 +174,6 @@ export interface ChatPresenceCollaboration {
 }
 
 export interface AgentSetupSummary {
-  // The workspace whose agent run was read with these settings.
   workspaceId: string;
   agentName?: string;
   preferredName?: string;
@@ -235,7 +234,6 @@ export interface ChatsDrafts {
   dmDraft: string;
   replyTarget: ChatsComposerReplyTarget | null;
   resolveTargetMessageId: string | null;
-  // The poll choice taken with the answer, when the poll had choices.
   resolveChosenOption?: string | null;
   // The polls drafted in the comment and new-post composers, each with the
   // conversation it belongs to.
@@ -319,13 +317,9 @@ const EMPTY_SHARE_MOUNTS: readonly { shareId: string; label: string }[] = [];
 const DM_SYNC_HOLD_MS = 15_000;
 
 const DM_SYNC_CAUSES = {
-  // Chats or a conversation opened.
   open: { pull: true, asked: true },
-  // A poll timer.
   tick: { pull: true, asked: false },
-  // A workspace activity event.
   activity: { pull: false, asked: false },
-  // A person's action changed the list.
   person: { pull: false, asked: true },
 } as const;
 type DmSyncCause = keyof typeof DM_SYNC_CAUSES;
@@ -410,7 +404,6 @@ function grantedLaneIsOverLimit(failure: ShareReadFailure | null): boolean {
   return failure?.kind === "over-limit" && failure.lanes.some((entry) => entry.lane === "granted");
 }
 
-// An agent chat's mark beside its name, in its agent's hue.
 function AgentMark(props: { presentation: ActorPresentation; name: string }) {
   return (
     <span data-testid="chats-channel-agent-mark" className="inline-flex shrink-0">
@@ -579,7 +572,6 @@ export function ChatsView(props: {
   ) => void;
   // What a change card's Apply or Undo did, when it finishes after the chat closed.
   onNotice?: (message: string, undo?: () => void) => void;
-  // Takes back the toast and Notices row of this identity.
   onClearError?: (identity: string) => void;
   // A bookmark's page was archived, so an earlier refusal to archive it is over.
   onBookmarkArchived?: (path: string) => void;
@@ -725,7 +717,6 @@ export function ChatsView(props: {
   const [decisions, setDecisions] = useState<ChatDecisionRecord[]>([]);
   const [attachments, setAttachments] = useState<ChatAttachmentRecord[]>([]);
   const [runRecords, setRunRecords] = useState<Record<string, ChatRunRecord>>({});
-  // The open thread's dispatch, null until read.
   const [dispatchState, setDispatchState] = useState<ChatDispatchStateForThreadResult | null>(null);
   const computerDispatchPaused = useChatDispatchPaused((error) =>
     props.onError(

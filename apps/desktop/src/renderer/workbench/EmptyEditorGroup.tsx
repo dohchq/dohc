@@ -50,7 +50,6 @@ const START_KINDS: readonly {
 
 const RECENT_LIMIT = 5;
 
-// The recent paths that are still listed files, most recent first.
 function recentFiles(recent: readonly string[], files: readonly ListedFile[]): ListedFile[] {
   if (recent.length === 0) return [];
   const wanted = new Set(recent);
@@ -75,7 +74,6 @@ export function EmptyEditorGroup(props: {
   // The create action of each kind the workspace offers. A kind without one
   // has no tile.
   create: Partial<Record<StartKind, CreateAction>>;
-  // Opened paths, most recent first.
   recent: readonly string[];
   files: readonly ListedFile[] | null;
   onOpen: (path: string) => void;

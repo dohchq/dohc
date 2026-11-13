@@ -21,7 +21,6 @@ import { basenameOf } from "../path";
 // first overall, recent files are boosted within a tier (most recent wins),
 // then shorter paths, then alphabetical. Case-insensitive throughout.
 
-// Match-quality tiers, best first.
 const TIER_BASENAME_PREFIX = 0;
 const TIER_WORD_BOUNDARY = 1;
 const TIER_SUBSTRING = 2;
@@ -601,7 +600,6 @@ export class GoToIndex {
     const force = this.interrupted;
     const forceVerdicts = force && this.withholding;
     if (force && !forceVerdicts) {
-      // Repair positions and admission markers without sorting the completed order.
       for (let i = 0; i < this.completeRows.length; i++) {
         const row = this.completeRows[i];
         row.sourceIndex = i;

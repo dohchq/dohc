@@ -27,7 +27,6 @@ export interface CollectionFieldsDialogProps {
   onChooseButton?(field: string): void;
   /** A button named for an action was approved: the ⚡ builder opens on what it does. */
   onButtonAdded?(field: string): void;
-  /** The type a new field starts with. */
   addType?: FieldType;
   /** A change to prepare as the dialog opens: a failed one's Try again, after the page read the Collection again. */
   retry?: { change: DatasetSchemaChange } | null;
@@ -71,7 +70,6 @@ function ScopedFields(props: CollectionFieldsDialogProps) {
     preparation: DatasetMigrationPreparation;
     change: DatasetSchemaChange;
   } | null>(null);
-  // Each button and what it does, and each action no field is named for yet, which can become a button.
   const buttonFields = table?.fields.filter((field) => field.type === "button") ?? [];
   const actions = props.onButtonAdded
     ? props.dataset.operations.filter(

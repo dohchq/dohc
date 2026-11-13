@@ -350,7 +350,6 @@ type LineBlock = {
  *  last block. Returns index 0 for an empty body. */
 export function blockForLine(body: string, line: number): LineBlock {
   const lines = body.split(/\r?\n/);
-  // Blocks opened so far, and the one holding `line` with its first line.
   let blocks = 0;
   let holder = 0;
   let holderStart = 0;

@@ -103,7 +103,6 @@ function insertedClosingColonAtCursor(
       if (!inserted.endsWith(":")) continue;
       // Position just past the inserted content, in this step's output doc…
       let end = step.from + slice.size;
-      // …mapped through the rest of this transaction's steps…
       end = tr.mapping.slice(i + 1).map(end);
       // …then through every later transaction in the batch, landing in the
       // same coordinate space as `cursorPos` (newState).
