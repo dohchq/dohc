@@ -11,6 +11,7 @@ import {
   shellBootstrapProps,
 } from "./DesktopWorkspaceShell.testHarness";
 import { type Deferred, deferred } from "../testing/deferred";
+import { editorTabTestId } from "../testPins";
 import type {
   OwnerLiveDocumentsResult,
   ShareHandoffStatus,
@@ -1056,6 +1057,49 @@ describe("owner live documents", () => {
     await user.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByTestId("live-documents-dialog")).toBeNull());
     expect(screen.getByTestId("settings-section-cloud")).toBeTruthy();
+  });
+
+  it("makes a copy of a held file, with Try again when it fails, then opens the copy", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const held = {
+      path: "notes/held.md",
+      objectId: "object-held",
+      status: "unavailable" as const,
+      reason: "conflict-parent-withheld" as const,
+      canResume: false,
+    };
+    bridge.listOwnerLiveDocuments = vi.fn(async (): Promise<OwnerLiveDocumentsResult> => ({
+      documents: [held],
+      nextCursor: null,
+    }));
+    const failed = deferred<never>();
+    // The harness answers the second call with "notes/held - Copy.md".
+    bridge.duplicateWorkspaceFile.mockReturnValueOnce(failed.promise);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    const dialog = await openLiveDocumentsFromSettings(user);
+    await user.click(
+      await within(dialog).findByRole("button", { name: `Make a copy of ${held.path}` }),
+    );
+    expect(bridge.duplicateWorkspaceFile).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: WORKSPACE.workspaceId,
+      relativePath: held.path,
+    });
+    await act(async () => {
+      failed.reject(new Error("The source changed. Check the file, then try again."));
+      await failed.promise.catch(() => undefined);
+    });
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(`dohc could not make a copy of ${held.path}.`);
+    // A failed copy leaves the list open to try another row.
+    expect(screen.getByTestId("live-documents-dialog")).toBeTruthy();
+
+    await user.click(within(toast).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(screen.queryByTestId("live-documents-dialog")).toBeNull());
+    expect(bridge.duplicateWorkspaceFile).toHaveBeenCalledTimes(2);
+    expect(await screen.findByTestId(editorTabTestId("notes/held - Copy.md"))).toBeTruthy();
+    expect(screen.queryByTestId("settings-dialog")).toBeNull();
   });
 });
 

@@ -62,6 +62,7 @@ function harness() {
     ),
     saveRecoveryCopy: vi.fn(async (workspaceId: string, path: string, incident?: string) => {}),
     readKeptEdits: vi.fn(async (workspaceId: string, objectId: string, incident: string) => {}),
+    makeCopy: vi.fn(async (workspaceId: string, path: string) => {}),
   };
 }
 
@@ -477,10 +478,10 @@ describe("LiveDocumentsDialog", () => {
     expect(screen.getByTestId("live-document-row-docs/edited.md").textContent).toContain(edited);
     expect(actions("docs/edited.md")).toEqual(["Resume live editing", "Stop live editing"]);
     const held =
-      "A conflict in this file was resolved, so live editing can't resume for it. People with the link can still read the last shared version. You can keep editing it in dohc, but your edits may not reach them.";
+      "A conflict in this file was resolved, so live editing can't resume for it. People with the link can still read the last shared version. You can keep editing it in dohc, but your edits may not reach them. A copy of it can go live. If you shared only this file, share the copy too.";
     expect(screen.getAllByText(held)).toHaveLength(1);
     expect(screen.getByTestId("live-document-row-docs/held.md").textContent).toContain(held);
-    expect(actions("docs/held.md")).toEqual(["Stop live editing"]);
+    expect(actions("docs/held.md")).toEqual(["Stop live editing", "Make a copy"]);
     const operator =
       "The server's copy of this workspace no longer matches the synced one. Contact the server's operator.";
     expect(screen.getAllByText(operator)).toHaveLength(1);
@@ -505,6 +506,37 @@ describe("LiveDocumentsDialog", () => {
     expect(actions("docs/unopened.md")).toEqual(["Resume live editing", "Stop live editing"]);
     expect(actions("docs/stopped.md")).toEqual(["Resume live editing"]);
     expect(actions("docs/stopped-gone.md")).toEqual([]);
+  });
+
+  it("makes a copy of a held file, once at a time, and offers none once it stopped", async () => {
+    const h = harness();
+    const made = deferred<void>();
+    h.makeCopy.mockReturnValueOnce(made.promise);
+    h.load.mockResolvedValue(
+      page([
+        row("docs/held.md", {
+          status: "unavailable",
+          reason: "conflict-parent-withheld",
+          canResume: false,
+        }),
+        row("docs/held-stopped.md", { status: "retired", reason: "conflict-parent-withheld" }),
+      ]),
+    );
+    render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);
+    const copy = await screen.findByRole("button", { name: "Make a copy of docs/held.md" });
+
+    await userEvent.click(copy);
+    expect(h.makeCopy).toHaveBeenCalledExactlyOnceWith("ws-1", "docs/held.md");
+    expect(copy.textContent).toBe("Making a copy…");
+    expect((copy as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => made.resolve());
+    expect(copy.textContent).toBe("Make a copy");
+    expect((copy as HTMLButtonElement).disabled).toBe(false);
+
+    expect(actions("docs/held-stopped.md")).not.toContain("Make a copy");
+    expect(screen.getByTestId("live-document-row-docs/held-stopped.md").textContent).not.toContain(
+      "A copy of it can go live.",
+    );
   });
 
   it("loads the next stopped page and keeps the newest row for a repeated path", async () => {

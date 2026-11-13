@@ -3764,6 +3764,29 @@ export function DesktopWorkspaceShell(props: {
       return saving;
     };
   }, [openFile, showSuccessNotice, reportShellError]);
+  // A held file can't go live again, so Live documents offers a copy beside
+  // it. Opening the copy starts its live editing.
+  const makeLiveCopy = useCallback(
+    (id: string, path: string): Promise<void> =>
+      bridge()
+        .duplicateWorkspaceFile({ workspaceId: id, relativePath: path })
+        .then(
+          (copy) => {
+            if (workspaceIdRef.current !== id) return;
+            // Live documents may sit over Settings; both close so the copy shows.
+            setLiveDocumentsWorkspaceId(null);
+            closeSettings();
+            openFile(copy.path);
+          },
+          (error: unknown) => {
+            if (workspaceIdRef.current !== id) return;
+            reportShellError(`dohc could not make a copy of ${path}.`, error, () => {
+              void makeLiveCopy(id, path);
+            });
+          },
+        ),
+    [closeSettings, openFile, reportShellError],
+  );
   const reportKeptCopyFailure = useCallback(
     (message: string, retry: () => void) => reportShellFailure({ message, retry }),
     [reportShellFailure],
@@ -9729,6 +9752,7 @@ export function DesktopWorkspaceShell(props: {
                             stopRunning={liveStopRunning}
                             saveRecoveryCopy={saveLiveRecoveryCopyFromDialog}
                             readKeptEdits={readKeptEdits}
+                            makeCopy={makeLiveCopy}
                             setAside={saveOnlyLiveDocuments(syncStatus?.ownerLiveQuarantines ?? [])}
                             {...(liveDocumentsReveal === null
                               ? {}

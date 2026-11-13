@@ -437,7 +437,7 @@ describe("notice center", () => {
     {
       reason: "conflict-parent-withheld" as const,
       title: "Live editing can't resume",
-      body: "A conflict was resolved in a document in this workspace, so the server can't resume live editing for it. People with its link can still read the last shared version, but your edits in dohc may not reach them. Open Live documents to see which document.",
+      body: "A conflict was resolved in a document in this workspace, so the server can't resume live editing for it. People with its link can still read the last shared version, but your edits in dohc may not reach them. A copy of it can go live. Open Live documents to see which document and make a copy.",
     },
   ] as {
     reason: SyncStatusResult["ownerLiveDeliveryReason"];

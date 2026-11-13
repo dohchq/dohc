@@ -658,6 +658,12 @@ function makeBaseBridge(
     createWorkspaceFolder: vi.fn(async (payload: { relativePath: string }) => ({
       path: payload.relativePath,
     })),
+    duplicateWorkspaceFile: vi.fn(async (payload: { relativePath: string }) => ({
+      path: payload.relativePath.replace(/\.md$/u, " - Copy.md"),
+      materialized: true,
+      operationId: "dohc-operation:00000000-0000-4000-8000-000000000000",
+      undo: { available: true as const },
+    })),
     importWorkspaceFiles: vi.fn(async (): Promise<ImportWorkspaceFilesResult> => ({
       imported: ["imported.md"],
       skipped: 0,
