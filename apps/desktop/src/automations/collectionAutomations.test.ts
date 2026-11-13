@@ -23,7 +23,7 @@ import { fakeLocalStateOpens, preparedAutomationStoreFolder } from "../testing/p
 import { localAutomationStoreFolder } from "./localAutomationStore";
 import { automationHostGeneration, createAutomationHosts, HANDOVER_READ_FIRST_MS, HOST_FRESH_MS, type AutomationHosts } from "./automationHost";
 
-import { CollectionAutomations, UNREADABLE_REACH, type AutomationFailureReport, type AutomationSwitchedOff, type CollectionAutomationEngine, type CollectionAutomationsOptions } from "@dohc/automation-executor/collection-automations";
+import { CollectionAutomations, DIRECT_MESSAGE_TO_YOU, UNREADABLE_REACH, type AutomationFailureReport, type AutomationSwitchedOff, type CollectionAutomationEngine, type CollectionAutomationsOptions } from "@dohc/automation-executor/collection-automations";
 import { newRun, GROUP_CHANGED_ERROR, UNFINISHED_UNDO_ERROR, UNREADABLE_RUN_ERROR } from "@dohc/automation-executor/collection-automation-run";
 import { AutomationChatSessionWait, AutomationWakeSent, chatDirectoryOf, NoticeNotSentError, type AutomationChatMessage, type AutomationNotice, type ChatDirectoryChannel, type ChatNeeds } from "@dohc/automation-executor/automation-chat";
 
@@ -1472,6 +1472,31 @@ describe("Collection automations that post", () => {
     "    do:",
     ...steps,
   ].join("\n");
+
+  it("lists this computer's person by its own id when signed out in a workspace never shared, and waits for an unknown roster", async () => {
+    const w = await world({ channels: [DM_ANA], automations: {} });
+    w.setRoster({ kind: "owner", ownerUserId: null, localPersonId: "install-here", grants: [] });
+    await w.executor.open();
+    await expect(w.executor.peopleFor("Tasks")).resolves.toEqual({ status: "listed", people: [
+      { userId: "install-here", name: "you", you: true, dmStopped: DIRECT_MESSAGE_TO_YOU, noticeStopped: null },
+    ] });
+    // Signed out in a shared workspace, nobody names you, and the people who accepted a share still show.
+    w.setRoster({ kind: "owner", ownerUserId: null, grants: [ANA_IN_DM] });
+    await expect(w.executor.peopleFor("Tasks")).resolves.toEqual({ status: "listed", people: [
+      { userId: "user-ana", name: "ana@dohc.test", you: false, dmStopped: null, noticeStopped: "ana@dohc.test cannot view Tasks." },
+    ] });
+    // Without the engine a run waits, and so does the list.
+    const engineless = w.makeExecutor({ chat: { hasMessage: async () => false, directory: async () => null, write: async () => undefined } });
+    await engineless.open();
+    await expect(engineless.peopleFor("Tasks")).resolves.toEqual({ status: "waiting", reason: "dohc could not read this workspace's chats." });
+    const asked = w.directoryNeeds.length;
+    w.setRoster({ kind: "unknown", problem: { kind: "unusable-listing" } });
+    await expect(w.executor.peopleFor("Tasks")).resolves.toEqual({ status: "waiting", reason: expect.stringMatching(/\S/u) });
+    // A shared view lists nobody, and neither reads a chat.
+    w.setRoster({ kind: "shared-view" });
+    await expect(w.executor.peopleFor("Tasks")).resolves.toEqual({ status: "listed", people: [] });
+    expect(w.directoryNeeds).toHaveLength(asked);
+  });
 
   it("does not send a saved direct message after its people changed", async () => {
     const w = await world({
