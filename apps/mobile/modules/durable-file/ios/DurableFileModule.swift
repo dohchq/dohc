@@ -91,7 +91,7 @@ final class DurableFolder {
   private let protection: [FileAttributeKey: Any] = [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication]
   private let support: URL
   private let url: URL
-  /// Set once this run has created the folder or set its protection and backup exclusion.
+  /// Set only after this run has prepared the folder and every sync in that preparation succeeded.
   private var ready = false
 
   init() {
@@ -174,15 +174,17 @@ final class DurableFolder {
     return fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory) && isDirectory.boolValue
   }
 
-  /// Creates any missing folder, sets the outbox folder's protection and backup exclusion, then syncs Library, which
-  /// holds Application Support's entry, and Application Support, which holds the outbox folder's. The syncs run once
-  /// each run whether or not this run created the folders: an earlier run may have died, or failed, between a mkdir
-  /// and its sync. `ready` is set only after every step succeeds, so a failure is retried by the next call.
+  /// Creates Application Support and the outbox folder if missing, sets the outbox folder's protection and backup
+  /// exclusion, then syncs Library, which holds Application Support's entry, and Application Support, which holds the
+  /// outbox folder's. Library comes with the app's container, so it is never created here: every folder this code
+  /// creates has its parent synced. The syncs run once each run whether or not this run created the folders: an
+  /// earlier run may have died, or failed, between a mkdir and its sync. `ready` is set only after every step
+  /// succeeds, so a failure is retried by the next call.
   private func prepareFolder() throws {
     if ready && exists() { return }
     ready = false
     if !fileManager.fileExists(atPath: support.path) {
-      try fileManager.createDirectory(at: support, withIntermediateDirectories: true)
+      try fileManager.createDirectory(at: support, withIntermediateDirectories: false)
     }
     if !exists() {
       try fileManager.createDirectory(at: url, withIntermediateDirectories: false, attributes: protection)
@@ -270,15 +272,15 @@ final class DurableFolder {
   }
 
   /// Flushes the folder's entries, so a rename or delete in it survives power loss. F_FULLFSYNC also flushes the
-  /// drive's cache. Only when the file system refuses F_FULLFSYNC as unsupported, with ENOTSUP or ENOTTY (how XNU
-  /// file systems refuse an fcntl they don't implement), does plain fsync stand in. Any other error, EIO included,
-  /// means the flush failed, and throws.
+  /// drive's cache. Only when the file system refuses F_FULLFSYNC on a folder as unsupported, with ENOTSUP, ENOTTY,
+  /// or EINVAL (how XNU file systems refuse an fcntl they don't implement for a file type), does plain fsync stand
+  /// in. Any other error, EIO included, means the flush failed, and throws. Files never take this fallback.
   private func syncDirectory(_ directory: URL) throws {
     let fd = Darwin.open(directory.path, O_RDONLY | O_CLOEXEC)
     guard fd >= 0 else { throw DurableFileFailure.failed(posix("open the folder")) }
     defer { _ = Darwin.close(fd) }
     if Darwin.fcntl(fd, F_FULLFSYNC) != -1 { return }
-    guard errno == ENOTSUP || errno == ENOTTY else { throw DurableFileFailure.failed(posix("flush the folder")) }
+    guard errno == ENOTSUP || errno == ENOTTY || errno == EINVAL else { throw DurableFileFailure.failed(posix("flush the folder")) }
     guard fsync(fd) == 0 else { throw DurableFileFailure.failed(posix("sync the folder")) }
   }
 }
