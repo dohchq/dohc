@@ -27,6 +27,7 @@ import {
 import { rowToLogRow } from "./rows";
 import { notifyDesktopReadiness } from "../desktopReadinessChanges";
 import { forgetCollectionFilePresence } from "./collectionFilePresence";
+import { forgetDeletedOrdinaryCheckpoints } from "./ordinaryActivationCheckpoint";
 import { confirmLiveApplication } from "./liveApplicationAuthorship";
 import { REFUSED_OP_KIND } from "./relayAdmission";
 import {
@@ -377,6 +378,8 @@ export function appendLogBatchInTransaction(
         if (moment.versionId === "main" && moment.path !== null)
           notifyDesktopReadiness(storage, { workspaceId: input.workspaceId, path: moment.path });
         if (moment.versionId === "main") forgetCollectionFilePresence(storage, input.workspaceId);
+        if (moment.versionId === "main" && moment.deleted)
+          forgetDeletedOrdinaryCheckpoints(storage, input.workspaceId, moment.objectId);
         objectMomentStmt.run(
           input.workspaceId,
           moment.objectId,

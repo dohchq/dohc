@@ -3,6 +3,7 @@ import { afterAll, expect, it } from "vitest";
 import {
   closeTestStorage,
   closeTestStorages,
+  moment,
   reopenTestStorage,
   storagePath,
   testStorage,
@@ -98,8 +99,25 @@ async function relay(rows: number) {
     closeTestStorage(storage);
     return readOrdinaryCheckpoint(reopenTestStorage(path) as unknown as StorageContext, scope);
   };
-  return { context, usage, save, read, reopened };
+  const rotate = (replicationEpoch: string, streamIdentity: string) =>
+    storage.rotateWorkspaceIdentity({
+      workspaceId: "workspace",
+      ownerUserId: "owner",
+      replicationEpoch,
+      streamIdentity,
+      rotatedAtMs: 6,
+    });
+  const kept = () =>
+    context.db
+      .prepare(
+        "SELECT workspace_id,object_id FROM sync_relay_ordinary_checkpoints ORDER BY workspace_id,object_id",
+      )
+      .all()
+      .map((row) => `${row.workspace_id}/${row.object_id}`);
+  return { storage, context, usage, save, read, reopened, rotate, kept };
 }
+/** What a rotation away from the test's identity charges the workspace for recording it as superseded. */
+const SUPERSESSION = Buffer.byteLength("epoch") + Buffer.byteLength("stream");
 
 it("a lineage keeps one checkpoint, advanced only from the position it was folded from", async () => {
   const r = await relay(10),
@@ -205,4 +223,108 @@ it.each([
     r.save(null, { ...checkpoint(9, "nine"), ...change } as unknown as OrdinaryCheckpoint),
   ).toThrow("CHECK constraint failed");
   expect(r.read()).toBeNull();
+});
+
+it("rotating the workspace's identity deletes the checkpoints folded under the old one and returns exactly their charge", async () => {
+  const r = await relay(10);
+  expect(
+    r.storage.claimWorkspaceIdentity({
+      workspaceId: "workspace",
+      replicationEpoch: "epoch",
+      streamIdentity: "stream",
+    }),
+  ).toBe("claimed");
+  const before = r.usage();
+  expect(r.save(null, checkpoint(4, "four"))).toBe(true);
+  expect(
+    r.save(null, checkpoint(6, "six"), { ...scope, document: { ...document, objectId: "other" } }),
+  ).toBe(true);
+  expect(r.usage()).toBeGreaterThan(before);
+  expect(r.rotate("epoch-2", "stream-2")).toBe("rotated");
+  expect(r.kept()).toEqual([]);
+  expect(r.usage()).toBe(before + SUPERSESSION);
+});
+
+it("rotating the workspace's identity keeps the checkpoints of its new identity and of other workspaces", async () => {
+  const r = await relay(10);
+  expect(
+    r.storage.claimWorkspaceIdentity({
+      workspaceId: "workspace",
+      replicationEpoch: "epoch",
+      streamIdentity: "stream",
+    }),
+  ).toBe("claimed");
+  expect(
+    r.storage.claimWorkspace({ workspaceId: "neighbor", ownerUserId: "owner", createdAtMs: 1 }),
+  ).toBe("created");
+  r.context.db
+    .prepare(
+      "INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('neighbor','typist',0,'ydoc.update','{}',0)",
+    )
+    .run();
+  const current = {
+      ...scope,
+      replicationEpoch: "epoch-2",
+      streamIdentity: "stream-2",
+      document: { ...document, objectId: "current" },
+    },
+    neighbor = { ...scope, document: { ...document, workspaceId: "neighbor" } };
+  expect(r.save(null, checkpoint(4, "four"))).toBe(true);
+  expect(r.save(null, checkpoint(6, "six"), current)).toBe(true);
+  expect(r.save(null, checkpoint(1, "one"), neighbor)).toBe(true);
+  const usage = () =>
+    Object.fromEntries(
+      r.context.db
+        .prepare("SELECT workspace_id,usage_bytes FROM sync_relay_workspace_usage")
+        .all()
+        .map((row) => [String(row.workspace_id), Number(row.usage_bytes)]),
+    );
+  const before = usage(),
+    superseded = Number(
+      r.context.db
+        .prepare(
+          "SELECT accounted_bytes FROM sync_relay_ordinary_checkpoints WHERE workspace_id='workspace' AND object_id='object'",
+        )
+        .get()!.accounted_bytes,
+    );
+  expect(r.rotate("epoch-2", "stream-2")).toBe("rotated");
+  expect(r.kept()).toEqual(["neighbor/object", "workspace/current"]);
+  expect(usage()).toEqual({
+    ...before,
+    workspace: before.workspace! - superseded + SUPERSESSION,
+  });
+  expect(r.read(current)).toEqual(checkpoint(6, "six"));
+});
+
+it("appending a note's delete deletes every checkpoint of the note and returns exactly their charge", async () => {
+  const r = await relay(10),
+    other = { ...scope, document: { ...document, objectId: "other" } },
+    restored = { ...scope, document: { ...document, lineageClaimId: sha256("restored") } };
+  expect(r.save(null, checkpoint(4, "four"), other)).toBe(true);
+  const before = r.usage();
+  expect(r.save(null, checkpoint(4, "four"))).toBe(true);
+  expect(r.save(null, checkpoint(6, "six"), restored)).toBe(true);
+  const deleted = moment("notes/a.md", "", {
+    originSeq: 0,
+    objectId: "object",
+    operation: "delete",
+    afterContent: null,
+    afterPath: null,
+  });
+  const payloadJson = JSON.stringify(deleted.payload);
+  r.storage.appendLogBatch({
+    workspaceId: "workspace",
+    originId: "device",
+    ops: [
+      {
+        originSeq: deleted.originSeq,
+        opKind: deleted.opKind,
+        payloadJson,
+        recordedAtMs: deleted.recordedAtMs,
+      },
+    ],
+  });
+  expect(r.kept()).toEqual(["workspace/other"]);
+  // The delete's own row is charged as every log row is.
+  expect(r.usage()).toBe(before + Buffer.byteLength(payloadJson));
 });

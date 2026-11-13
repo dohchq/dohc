@@ -11,6 +11,7 @@ import { accountIsFenced, workspaceIsDeleted } from "./accountDeletion";
 import { SyncRelayQuotaExceededError } from "./errors";
 import { forgetReplicaCurrentViewCaches } from "../replicaCurrentViewReads";
 import { forgetCollectionFilePresence } from "./collectionFilePresence";
+import { forgetSupersededOrdinaryCheckpoints } from "./ordinaryActivationCheckpoint";
 
 function workspaceIdentityFromRow(row: Record<string, unknown>): WorkspaceSyncIdentity | null {
   const replicationEpoch = row.replication_epoch;
@@ -303,6 +304,7 @@ export function rotateWorkspaceIdentity(
            WHERE workspace_id = ?`,
       )
       .run(input.workspaceId);
+    forgetSupersededOrdinaryCheckpoints(storage, input.workspaceId, input);
     forgetReplicaCurrentViewCaches(storage, input.workspaceId);
     forgetCollectionFilePresence(storage, input.workspaceId);
     return "rotated";
