@@ -32,11 +32,12 @@ async function fixture(maxBytes?: number) {
   let registry = createNamedDatasetCacheRegistry({ directory: () => directory, maxBytes });
   await registry.credentialsChanged(owner);
   cleanups.push(async () => { await registry.close(); await rm(directory, { recursive: true, force: true }); });
-  let offline = false, status = 200, generation = 1;
+  let offline = false, status = 200, token = fingerprint, generation = 1, malformed = false;
   const relayResponse = vi.fn(async (_credentials: unknown, path: string) => {
     if (offline) throw new NamedDatasetOfflineError("fetch failed");
+    if (malformed) return new Response("not json", { headers: { "x-dohc-dataset-access": token } });
     return Response.json(status === 200 ? path.endsWith("/invoke") ? result : path.endsWith("/datasets") ? { datasets: [description], nextCursor: null } : description : { message: "refused" },
-      { status, headers: { "x-dohc-dataset-access": fingerprint } });
+      { status, headers: { "x-dohc-dataset-access": token } });
   });
   const saves: Promise<unknown>[] = [];
   const cache = (binding: unknown = ["workspace", "share"]) => {
@@ -51,7 +52,7 @@ async function fixture(maxBytes?: number) {
     relayJson: async () => { throw Error("unexpected transport"); }, offline: { cache: cache(binding), relayResponse } });
   return { directory, data, cache, relayResponse, registry: () => registry,
     async settled() { await Promise.all(saves.splice(0)); },
-    offline(value = true) { offline = value; }, status(value: number) { status = value; },
+    offline(value = true) { offline = value; }, status(value: number) { status = value; }, token(value: string) { token = value; }, malformed() { malformed = true; },
     accountChanged() { generation++; },
     async restart() { await registry.close(); registry = createNamedDatasetCacheRegistry({ directory: () => directory, maxBytes }); await registry.credentialsChanged(owner); },
   };
