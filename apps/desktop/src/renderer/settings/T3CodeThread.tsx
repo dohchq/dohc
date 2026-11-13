@@ -349,6 +349,9 @@ export function T3CodeThreadPicker(props: {
   const errorId = useId();
   const list = useRef<HTMLDivElement>(null);
   const { onPick } = props;
+  // A picker that goes away takes its choice with it. One that comes back
+  // starts on the first project, where the old choice may not be listed.
+  useEffect(() => () => onPick(null), [onPick]);
   useEffect(() => {
     const next = typed.trim();
     if (next === query) return;

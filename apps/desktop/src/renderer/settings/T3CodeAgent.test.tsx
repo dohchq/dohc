@@ -236,6 +236,24 @@ it("connects the picked thread, named after it unless the person typed a name", 
   await waitFor(() => expect(screen.queryByTestId("agent-add-sheet")).toBeNull());
 });
 
+it("forgets the picked thread when the person leaves T3 Code and comes back", async () => {
+  renderList();
+  await chooseT3Code();
+  await userEvent.click(await sheet().findByRole("radio", { name: /^Issue owner/ }));
+  expect(nameField().value).toBe("Issue owner");
+
+  // The list is gone, so no thread it showed can still be the choice.
+  await userEvent.click(screen.getByTestId("agent-runs-with-mcp"));
+  await userEvent.click(screen.getByTestId("agent-runs-with-t3-code"));
+  const row = await sheet().findByRole("radio", { name: /^Issue owner/ });
+  expect(row.getAttribute("aria-checked")).toBe("false");
+  expect(nameField().value).toBe("Agent");
+
+  await userEvent.click(screen.getByTestId("agent-add-confirm"));
+  expect(sheet().getByRole("alert").textContent).toBe("Choose a thread.");
+  expect(bridgeMock.readyAgentThread).not.toHaveBeenCalled();
+});
+
 it("saves nothing when the thread can't be readied, and says why in the sheet", async () => {
   const refusal =
     "T3 Code refused dohc because this thread runs with a broader mode than dohc was allowed.";
