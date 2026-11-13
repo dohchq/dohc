@@ -281,16 +281,16 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
   }
 
   private async finishReceipt(attempt: Attempt): Promise<void> {
-    if (!attempt.receipt) return;
+    const receipt = attempt.receipt;
+    if (!receipt) return;
     let backoffMs = 25;
     while (this.current(attempt)) {
       try {
-        const applied = await abortable(this.options.acceptedState.isReceiptApplied({binding: attempt.binding, receipt: attempt.receipt}, attempt.signal), attempt.signal); this.check(attempt);
+        const applied = await abortable(this.options.acceptedState.isReceiptApplied({binding: attempt.binding, receipt}, attempt.signal), attempt.signal); this.check(attempt);
         // The row is done, and the connection stays open for the next one.
         if (applied) {
-          const {receipt, delivered} = attempt;
           attempt.envelope = undefined; attempt.receipt = undefined; attempt.submitted = false;
-          delivered.resolve({kind: "receipt", receipt});
+          attempt.delivered.resolve({kind: "receipt", receipt});
         }
         return;
       } catch (error) {
