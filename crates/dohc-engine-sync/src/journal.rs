@@ -26,22 +26,6 @@ pub enum AdoptJoinIdentityOutcome {
     AlreadyMatched,
 }
 
-/// What [`record_share_view_identity`] did.
-///
-/// Two states, because this layer does two things: it writes the row or it
-/// finds one. Whether a share view should be recorded at all is the LEVEL's
-/// question, and the level is answered one layer up
-/// (`RelayOperation::RecordShareViewIdentity`) — a function that is never
-/// called cannot report a third state, and a variant it can never return is
-/// one every reader has to be told to ignore.
-///
-/// Deliberately not called "enrolment": in this crate that word already means
-/// the owner-lane backfill in `enrolment.rs`, and one name for one thing.
-/// The three components of a replica identity, which always travel together.
-///
-/// Grouped because they are one fact in three fields, not three arguments a
-/// caller chooses independently — and passing them separately made this
-/// function's parameter list long enough that the shape was the warning.
 #[derive(Debug, Clone, Copy)]
 pub struct ShareViewIdentity<'a> {
     pub origin_id: &'a str,
@@ -673,13 +657,6 @@ pub fn record_share_view_identity(
             )
             .map_err(SyncError::persist)?;
         }
-        // The lane fact, in the same transaction as the identity, which is
-        // what lets `workspace_journals_file_moments_in_tx` read this row
-        // alone and still know an identity is there for the append.
-        //
-        // `INSERT OR IGNORE`, not a second existence probe: repeated refresh
-        // must not fail, and an identity left by an interrupted older build
-        // still gains the lane when Edit opens it.
         tx.execute(
             "INSERT OR IGNORE INTO share_view_file_lane \
              (workspace_id, recorded_at_ms) VALUES (?1, ?2)",

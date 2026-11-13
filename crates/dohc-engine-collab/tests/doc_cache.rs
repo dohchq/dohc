@@ -453,11 +453,6 @@ fn frontier_delete_endpoints_canonicalize_across_pending_integration() {
 
 #[test]
 fn tuple_probe_rejects_a_hostile_candidate_after_raw_sql_injection() {
-    // T1: U2 lands behind the cache's back; a hostile candidate that
-    // redefines U2's clocks must be refused via the tuple-mismatch rebuild.
-    // Delete the in-tx tuple check and this test fails: the gate would judge
-    // the hostile bytes against the stale {U1} base, where U2's client is
-    // unknown, and admit them.
     let (mut ts, key) = setup("cache-t1-injection", Regime::LocalOnly);
     let u1 = independent_insert("a");
     committed(
@@ -608,11 +603,6 @@ fn tuple_probe_detects_a_replaced_head_row() {
 #[test]
 #[should_panic(expected = "CACHE-VALID")]
 fn differential_check_catches_a_prune_aba_that_matches_the_tuple() {
-    // A prune + re-append that reaches the same head coordinates with the
-    // same head bytes over different earlier history is invisible to the
-    // tuple — exactly why every prune path must call the remove hook. With
-    // the hook deliberately skipped, the debug differential check is the
-    // last line and must fire.
     let (mut ts, key) = setup("cache-t2-aba", Regime::LocalOnly);
     let u1a = independent_insert("a");
     let u2 = independent_insert("b");
@@ -1008,9 +998,6 @@ fn a_pruned_lineage_with_the_reset_hook_rejects_a_hostile_re_encode() {
 
 #[test]
 fn a_guarded_error_after_the_gate_evicts_only_the_mutated_scratch() {
-    // (a) The guarded closure fails after the gate passed: the transaction
-    // rolls back. The writer doc/frontier must not advance, while the scratch
-    // that already applied the candidate must be evicted.
     let (mut ts, key) = setup("cache-t3-guarded-err", Regime::LocalOnly);
     let u1 = independent_insert("a");
     committed(
@@ -1545,10 +1532,6 @@ fn the_byte_budget_charges_the_persistent_scratch() {
 
 #[test]
 fn a_warmed_cache_does_not_change_forced_close_corruption_detection() {
-    // Forced compaction (threshold 0 — the call close_session makes on a
-    // replicated lineage) must always fully reconstruct: close is the audit
-    // point where blob corruption surfaces. A warm cache entry for the same
-    // lineage must not change that verdict.
     let (mut ts, key) = setup("cache-forced-close-pin", Regime::Replicated);
     let u1 = independent_insert("x");
     committed(

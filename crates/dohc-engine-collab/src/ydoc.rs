@@ -5145,9 +5145,6 @@ fn unchanged_ends<T: ReadTxn, const WIRE_DEFAULTS: bool>(
     let scratch = yrs::Doc::new();
     let fresh = scratch.get_or_insert_xml_fragment(ROOT_BODY);
     let mut scratch_txn = scratch.transact_mut();
-    // Whether `old` is exactly the block `block` inserts. Each block is built
-    // alone at the front of the scratch body, and only until the first that
-    // differs.
     let mut kept = |old: &XmlOut, block: &MdBlock<'_>| {
         let before = fresh.len(&scratch_txn);
         count_fold_work!(built);
@@ -9863,13 +9860,6 @@ mod projection_tests {
         }));
         let doc = remote_doc_with_body([xml_element("table", &[], rows)]);
 
-        // The property under test is that the projection refuses before the
-        // amplifying allocation — 18 short rows padded to a 1 MiB column width
-        // would materialize ~18 MB. Either bound refusing is correct: the byte
-        // cap catches the padding, and the node/complexity budget catches the
-        // 1 MiB text run that produces the width. Pinning one variant made this
-        // test fail when the budget accounting tightened, even though the
-        // protection held.
         let error = doc
             .project(ContentKind::Richdoc)
             .expect_err("padding amplification must be refused");
@@ -10597,12 +10587,6 @@ mod projection_tests {
         );
     }
 
-    // Raw HTML the live document holds as text settles as inert text. The
-    // importer's test of the same document (RAW_HTML_SETTLED in
-    // packages/ydoc-projection/src/import-export.test.ts) reads these bytes
-    // back as the same document, and the cross-engine fixture
-    // richdocProjection-raw-html-literal-text pins them against the
-    // TypeScript projector.
     #[test]
     fn raw_html_text_settles_as_inert_text_the_importer_reopens() {
         const SETTLED: &str = concat!(
@@ -10778,11 +10762,6 @@ mod projection_tests {
         );
     }
 
-    // A table cell's `<br>` is a real tag in the file, which the importer reads
-    // as raw HTML, so it bounds no raw HTML span: the cell's literal reference
-    // before the `<b>` stays the text it spells. The importer's test of the same
-    // cell is "saves a table cell holding a real <br> beside raw HTML as the
-    // same document" in packages/ydoc-projection/src/import-export.test.ts.
     #[test]
     fn a_table_cell_br_bounds_no_raw_html_span() {
         let doc = remote_doc_with_body([xml_element(
@@ -10884,11 +10863,6 @@ mod projection_tests {
         TEXT_RUN_BYTES_CLONED.with(|count| assert_eq!(count.get(), text.len()));
     }
 
-    // A part's links with no text, and the text between them that holds no
-    // newline, `&`, `<`, or `>`, become one literal part when they hold a
-    // byte a later pass would rewrite. So a dense link, or a run of links,
-    // makes one part and one string, not one for each character or link.
-    // The counter counts the parts the projector actually makes.
     #[test]
     fn empty_links_become_one_literal_part() {
         const COUNT: usize = 1 << 16;
@@ -10938,9 +10912,6 @@ mod projection_tests {
         }
     }
 
-    // A link with no text keeps each line its title starts: no block opener,
-    // indent, or reference escape reads it. The Markdown after it still
-    // reads as Markdown, and a highlight's `=` keeps its escape.
     #[test]
     fn empty_link_lines_are_written_as_they_are() {
         for (text, expected) in [
@@ -11342,11 +11313,6 @@ mod projection_tests {
         refused(&lines(4, length, tail + 2));
     }
 
-    // The engine's reader resolves the references the projector writes inside
-    // raw HTML it wrote as text, as the importer reads them. A literal
-    // reference elsewhere, between two raw tags too, still reads as the text
-    // it spells, and a reference to a character a reader may not see is still
-    // syntax, inside raw HTML too.
     #[test]
     fn the_reader_resolves_projected_references_only_inside_raw_html_text() {
         let read = |text: &str| read_text(text, TextPlace::Inline);
@@ -11389,12 +11355,6 @@ mod projection_tests {
         );
     }
 
-    // A `<` or `>` a file holds as text opens and closes no encoded tag span,
-    // so a reference beside it reads as the text it spells, as the importer
-    // reads it (import-export.test.ts, "keeps the spelling of a reference").
-    // The fold keeps that text, which projects as the importer's save of it.
-    // A renderer decodes the source's reference, so the source still does not
-    // read as its projection, while the same text without one does.
     #[test]
     fn a_reference_beside_text_angles_keeps_its_spelling() {
         let read = |text: &str| read_text(text, TextPlace::Block);
@@ -12343,7 +12303,6 @@ mod projection_tests {
             "[WIP] fix\n",
             "Vec<T> and cmd <file>\n",
             "a &copy; b\n",
-            // Later numbers do not change a list.
             "1. one\n7. two\n",
             "1. a\n3. b\n",
             // A cell's `<br>`, however it is spelled.
@@ -13386,8 +13345,6 @@ fn main() {}
 
     #[test]
     fn resolution_fold_bounds_blockquote_depth() {
-        // An adversarial run of `> ` prefixes must not recurse without bound
-        // inside the resolve frame.
         let adversarial = Ydoc::wire();
         let hostile = format!("{}deep", "> ".repeat(1_000));
         adversarial
@@ -13408,13 +13365,6 @@ fn main() {}
 
     #[test]
     fn a_fold_past_the_quote_budget_is_detectably_lossy_not_silently_wrong() {
-        // The overflow is not lossless: the leftover `> ` markers become
-        // paragraph text, which the projector escapes to `&gt;`. The previous
-        // comment asserted losslessness and the fold trusted it, so a
-        // resolution past the budget would have been stored as bytes the user
-        // never chose. This pins the real behaviour — the divergence is
-        // observable — which is what `fold_resolution_into_ydoc_in_tx`
-        // re-projects to catch before it commits anything.
         let overflowed = Ydoc::wire();
         let hostile = format!("{}deep", "> ".repeat(QUOTE_FOLD_MAX_DEPTH + 5));
         overflowed

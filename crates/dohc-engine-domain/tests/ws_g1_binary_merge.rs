@@ -1,11 +1,3 @@
-//! WS-G1: what a version merge does with a path that holds BYTES.
-//!
-//! The contract: identical bytes on both sides are uncontested; bytes only the
-//! SOURCE moved fast-forward through the binary write seam; differing bytes
-//! open a conflict the user resolves by side. A binary head has no line merge
-//! and no TEXT fast-forward seam, so the merge decision tree must never route
-//! one through either.
-
 use dohc_engine_domain::{
     CompareTextFileVersions, ComparisonStatus, ConflictChoice, ConflictContentKind, ConflictStatus,
     CreateNamedVersion, DomainError, MergeTextFileFromVersion, MergeTextFileResult,
@@ -722,14 +714,6 @@ fn comparison_reports_a_binary_head_with_its_address_and_size() {
     assert_eq!(comparison.status, ComparisonStatus::IncomingChanged);
 }
 
-/// The source removed a binary asset the target still holds. Applying the
-/// incoming side must remove it from the target's head and from the folder.
-///
-/// A binary head's removal carries its own preimage and job id; the text
-/// enqueue seam hashes the deleted snapshot's TEXT, which for a binary head is
-/// the empty string, so it would queue a disk write guarded by the wrong
-/// preimage against the wrong content.
-///
 #[test]
 fn applying_an_absent_incoming_side_removes_the_binary_head_and_its_file() {
     let (_scratch, mut store) = open();

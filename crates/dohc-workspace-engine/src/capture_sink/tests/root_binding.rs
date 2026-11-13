@@ -200,8 +200,6 @@ fn symlinked_directory_never_carries_the_read_off_root() {
 
     let made = try_symlink_dir(&scratch.path().join("linkdir"), &outside_dir);
     if made {
-        // The parent resolves outside the root: refused as an escape, and
-        // nothing is captured or retired through it.
         assert_eq!(ingest(&mut sink, "linkdir/leak.md"), Err(ESCAPES_ROOT));
     } else {
         eprintln!("note: dir symlink unavailable on this host; asserting the absent path");

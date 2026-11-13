@@ -8540,9 +8540,6 @@ mod tests {
             .unwrap();
     }
 
-    /// Roll back the change `moment_id` to `doc.md` in `version` as the
-    /// runtime's rollback does: check that it may go back, then reconcile the
-    /// editor history with the text it brings back, if any.
     fn roll_back_doc_change(store: &mut EngineStore, version: &str, moment_id: &str) {
         VersionedTextStore::new(store)
             .rollback_text_file_mutation_with(

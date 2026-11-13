@@ -1,12 +1,3 @@
-//! #738/#739 follow-up: `cancel_pending_jobs_for_path`
-//! must not cancel a prior pending DELETE job for the same path -- only a
-//! superseded WRITE. A delete -> recreate -> delete sequence, each blocked
-//! from reaching disk, otherwise strands the original bytes: the old delete
-//! (the only one whose preimage matches disk) gets cancelled, and the newest
-//! delete's preimage no longer matches the untouched disk bytes, so replay
-//! conflicts instead of clearing the path -- the old file survives on disk at
-//! a path the user deleted twice.
-
 use dohc_engine_domain::{DeleteTextFile, WriteBinary};
 use dohc_engine_runtime::{CancellationToken, NoFaults, WorkspaceSupervisor};
 use dohc_engine_storage::FaultPoint;

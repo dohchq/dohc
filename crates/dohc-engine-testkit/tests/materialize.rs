@@ -1920,8 +1920,6 @@ fn a_known_staged_file_denies_writers_until_it_is_removed() {
             }
             if point == FaultPoint::MaterializeAfterKnownCopyDeletion {
                 self.2.store(true, Ordering::SeqCst);
-                // The name is gone. Its alias still identifies the same file,
-                // and must remain write-denied until inspection closes.
                 let err = std::fs::OpenOptions::new()
                     .write(true)
                     .open(self.0.with_extension("guard"))
@@ -2288,9 +2286,6 @@ fn crash_between_displace_and_place_returns_an_outside_change_to_its_path() {
     assert_outside_change_returned(&sc, &store);
 }
 
-/// A staged file has no row until its bytes turn out unknown, and a power
-/// failure can lose a row while the rename survives. Replay finds the staged
-/// file by its name and puts it back.
 #[test]
 fn a_displaced_file_whose_row_was_lost_is_found_and_returned() {
     let sc = Scratch::new("orphan");
@@ -3017,8 +3012,6 @@ impl AtomicReplacer for TwoSaves {
     }
 }
 
-/// After the newer save, the older outside change stays displaced under a
-/// kept row, and the job conflicts.
 fn assert_newer_save_shown(sc: &Scratch, store: &EngineStore) {
     assert_eq!(
         read(sc, "a.md").as_deref(),
@@ -3746,8 +3739,6 @@ fn a_linked_staging_directory_blocks_the_replace() {
     assert_eq!(job_status(&store), JobStatus::Pending);
 }
 
-/// Capture must not record a path as deleted while its file sits staged with
-/// no row. It counts as displaced until it goes back.
 #[test]
 fn a_rowless_staged_file_counts_as_displaced_until_it_goes_back() {
     let sc = Scratch::new("rowless-displaced");
@@ -3869,8 +3860,6 @@ fn newest_staged_copy_returns_first_after_a_crash_during_adoption() {
                 drain(&store, &sc, &StdReplacer, faults.as_ref())[..],
                 [JobOutcome::Crashed(_)]
             ));
-            // The older known preimage has no row. Only the newer outside
-            // bytes will be adopted, while the write sibling still exists.
             put_staged(&sc, "6a31.1", OUTSIDE);
             let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterDisplacementJournal);
             let options = MaterializeOptions {

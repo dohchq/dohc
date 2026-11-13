@@ -913,7 +913,6 @@ fn replay_materializations(
     } else {
         store.list_pending_materialization_jobs()?
     };
-    // Legacy unscoped intents remain replayable in each workspace.
     jobs.retain(|job| {
         job.status == JobStatus::Pending
             && !job.job_id.starts_with("restore-delete-mat_")
@@ -1392,8 +1391,6 @@ fn replay_materializations(
                         }
                         dohc_engine_files::MaterializeError::FileLocked => {}
                         _ => {
-                            // The errors `materialize_one` calls blocked: the
-                            // write stays pending until the path changes.
                             if matches!(
                                 error,
                                 dohc_engine_files::MaterializeError::SymlinkTarget

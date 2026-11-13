@@ -2546,10 +2546,6 @@ CREATE TABLE automation_group_state (
 ) STRICT;
 ";
 
-/// Files the materializer moved into its staging directory whose bytes the
-/// store does not hold. An `open` row names one until it goes back to its
-/// path, when the row is deleted. A `kept` row is the evidence of bytes
-/// another program wrote that could not go back.
 const V2_MATERIALIZATION_DISPLACEMENTS_DDL: &str = "\
 CREATE TABLE materialization_displacements (
     displacement_id INTEGER PRIMARY KEY,
@@ -4870,7 +4866,6 @@ fn ledger_status(conn: &Connection, id: &str) -> Result<LedgerStatus, StorageErr
     }
 }
 
-/// `PRAGMA quick_check` → true iff the sole result row is `ok`.
 fn quick_check_ok(conn: &Connection) -> Result<bool, StorageError> {
     let result: String = conn
         .pragma_query_value(None, "quick_check", |row| row.get(0))
@@ -5986,9 +5981,6 @@ mod tests {
         );
     }
 
-    /// Rows retained before migration 67 keep their fields and read as
-    /// unblocked until the sweep checks their volume. The summary reads only
-    /// the blocked rows' index.
     #[test]
     fn retained_release_blocked_upgrades_rows_from_main_66() {
         let dir = tempdir();
@@ -7322,8 +7314,6 @@ mod tests {
         hosted(&upgraded);
     }
 
-    /// A file retired before files named their document keeps its row, so
-    /// its path stays held until the file goes.
     #[test]
     fn hosted_retired_file_object_upgrade_keeps_files_retired_before_it() {
         let dir = tempdir();
@@ -7375,9 +7365,6 @@ mod tests {
         );
     }
 
-    /// Every hosted document keeps its state across the upgrade. After it, a
-    /// document can park, and one can be held for a live edit the host never
-    /// admitted, which names no path.
     #[test]
     fn hosted_parked_documents_upgrade_keeps_every_document() {
         let dir = tempdir();
@@ -8268,8 +8255,6 @@ mod tests {
         event(2, Some(3)).unwrap();
     }
 
-    /// A refused coordinate from before the upgrade can be held, and a held
-    /// audit keeps each blob it names until the hold ends.
     #[test]
     fn live_audit_held_records_upgrade_keeps_refused_coordinates() {
         let dir = tempdir();
@@ -9519,7 +9504,6 @@ mod tests {
         };
         insert(0, "link", true, Some("connection-1")).expect("an agent's link message");
         insert(1, "link", true, None).expect("a link holder's message");
-        // Each author kind's message saves until it names a connection.
         for (order, kind) in [(2, "human"), (4, "agent"), (6, "automation")] {
             insert(order, kind, false, None).expect("a message without a link");
             assert!(
@@ -11250,7 +11234,6 @@ mod tests {
         let mut conn = open_bare(&path);
         run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("run");
 
-        // Simulate a build whose baseline DDL differs from the recorded ledger.
         let tampered = &[Migration {
             sql: "CREATE TABLE engine_migrations_DIFFERENT (x INTEGER);",
             ..BASELINE_MIGRATIONS[0]
@@ -11741,11 +11724,6 @@ mod tests {
         step("UPDATE ydoc_updates SET seq=5 WHERE seq=7", &["a"]);
         step("DELETE FROM ydoc_updates WHERE seq=4", &[]);
         step("DELETE FROM ydoc_updates WHERE seq=5", &["a"]);
-        // The rows past it, which inspection loads the head from, move `a`
-        // however they change, unless appended at the top, which the head's
-        // coordinates name; so do the bytes of any blob a journal row, a
-        // snapshot or an archive names. A compaction's own snapshot, and
-        // pruning the rows it folded, move nothing.
         step(&journal(8), &[]);
         step(&journal(9), &[]);
         step(&journal(10), &[]);
@@ -11761,11 +11739,6 @@ mod tests {
             "DELETE FROM ydoc_updates WHERE object_id='a' AND seq<=9",
             &[],
         );
-        // Removing the latest snapshot once it folded rows moves `a`, so the
-        // folded rows cannot change unseen and the snapshot come back; so
-        // does moving it back or changing its digest. Pruning a snapshot a
-        // later one supersedes, or a compaction rewriting the latest as it
-        // was, moves nothing.
         step(
             "DELETE FROM ydoc_snapshots WHERE object_id='a' AND up_to_seq=9",
             &["a"],

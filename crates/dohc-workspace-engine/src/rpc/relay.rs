@@ -1532,14 +1532,6 @@ impl EngineService {
         Ok(result)
     }
 
-    /// A pull parks every Y.Doc update for a document an editor holds open,
-    /// and only that editor's resync, settle, or close drains it. Ask each open
-    /// editor of this workspace with parked updates it can take to resync, so
-    /// an idle editor shows another device's edits. The request is advisory
-    /// like every event, and the event queue drops it when full. The parked
-    /// updates stay durable until the resync drains them, so the next pull asks
-    /// again, including a pull that applies nothing. A failed check therefore
-    /// does not fail the committed pull.
     async fn notify_editors_behind(&self, ctx: &RequestContext, open: &Arc<OpenWorkspace>) {
         let handles: Vec<WorkspaceHandle> = lock(&self.handles)
             .iter()
@@ -4829,8 +4821,6 @@ mod tests {
             );
             assert_eq!(f.open.pulls_in_flight.load(Ordering::SeqCst), 1);
             drop(hold);
-            // The apply stays unpolled while the second hold enters after
-            // its hosted-replica read completes.
             let hold = f.service.hold_actor(&f.handle).await;
             assert!(
                 !poll_once(applying.as_mut()).await,
@@ -5210,8 +5200,6 @@ mod tests {
         })
         .await
         .expect("the pull asks for its first page");
-        // The update is admitted and its first step answered; its next step
-        // waits until this test polls it again.
         let hold = f.service.hold_actor(&f.handle).await;
         let mut update = Box::pin(f.service.settle_owed_collections(&ctx, &f.open));
         let ran = poll_once(update.as_mut()).await;

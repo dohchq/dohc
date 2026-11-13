@@ -344,8 +344,6 @@ const NOTES: CaseRename = CaseRename {
     after: "Notes.md",
 };
 
-/// Main has `from`; the draft edits it to `text` and renames it to `to`.
-/// The folder holds Main's file at `before`.
 fn seed_case_only_rename(root: &Path, db: &Path, rename: &CaseRename, text: &str) {
     let CaseRename { from, to, .. } = *rename;
     let mut store = EngineStore::open(db, 1).unwrap();

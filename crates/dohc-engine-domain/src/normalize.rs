@@ -91,9 +91,6 @@ pub struct NormalizedState {
     pub moments: Vec<MomentRow>,
 }
 
-/// Per-page size when sweeping the full moment history through the keyset
-/// cursor (bounded — the sweep follows pages until the cursor is exhausted, so
-/// a long-lived workspace is captured completely, not truncated).
 const MOMENT_PAGE: i64 = 512;
 
 pub fn capture(

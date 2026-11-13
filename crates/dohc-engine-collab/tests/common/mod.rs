@@ -82,7 +82,6 @@ fn sql_err(e: rusqlite::Error) -> CollabError {
     }
 }
 
-/// Count rows in a ydoc table for a key (test assertions on prune/no-prune).
 pub fn count(store: &EngineStore, table: &str, key: &DocKey) -> i64 {
     store
         .read_with(|conn| -> Result<i64, CollabError> {
@@ -149,7 +148,6 @@ pub fn load_all_fixtures() -> Vec<Fixture> {
         .collect()
 }
 
-/// Load one named fixture (`offsetProbe`, `nestedFrontmatter`, …).
 pub fn load_fixture(name: &str) -> Fixture {
     let path = fixtures_dir().join(format!("{name}.json"));
     serde_json::from_slice(&std::fs::read(&path).unwrap_or_else(|e| panic!("read {name}: {e}")))

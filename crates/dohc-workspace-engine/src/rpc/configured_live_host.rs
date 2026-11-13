@@ -294,7 +294,6 @@ enum Preparation {
         store: Arc<Mutex<dohc_engine_storage::PreparedRecovery>>,
         copy: Option<PathBuf>,
     },
-    /// Every page read answers this refusal until the handle closes.
     Failed(WireError),
 }
 
@@ -314,8 +313,6 @@ pub(super) struct RecoveryRead {
     pub(super) _lease: tokio::sync::OwnedRwLockReadGuard<()>,
 }
 
-/// Preparations of a root wait here, in tests, until their gate opens. They
-/// say when they start waiting for their turn and when they began.
 #[cfg(test)]
 struct PreparationGate {
     root: PathBuf,
@@ -2103,8 +2100,6 @@ mod tests {
         configured
     }
 
-    /// Waits until the preparation of the store open for recovery under
-    /// `handle` ended, as its worker's lease does.
     async fn prepared(service: &EngineService, handle: &WorkspaceHandle) {
         let reads = lock(&service.configured_live_host.get().unwrap().recovery)
             .iter()
@@ -2623,10 +2618,6 @@ mod tests {
         files
     }
 
-    /// Makes `earlier` the store an older build, which lacked this build's
-    /// last migration, would hold with the rows of the queues, blobs, root
-    /// binding and hosted identity of the detached store at `reference`. Its
-    /// schema comes from the genuine migration prefix.
     fn earlier_copy_of(reference: &Path, earlier: &Path) {
         older_copy_of(reference, earlier, |db| {
             dohc_engine_storage::recovery::create_earlier_store_for_test(db, 1).unwrap()

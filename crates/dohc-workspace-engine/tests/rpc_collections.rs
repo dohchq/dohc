@@ -3532,8 +3532,6 @@ async fn park_remote_status_update(
     }
 }
 
-/// Record events named `record.*` (plus any `automation.claimed`) until the
-/// first `record.updated`, panicking past the deadline.
 async fn wait_for_record_events(
     events: &mut tokio::sync::mpsc::Receiver<EngineEventNotice>,
 ) -> Vec<EngineEventNotice> {

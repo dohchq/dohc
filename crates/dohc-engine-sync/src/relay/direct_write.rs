@@ -445,7 +445,6 @@ struct PlannedWrite {
     /// Each file the write carries, with the last journal position it
     /// consolidates.
     objects: Vec<(String, i64)>,
-    /// `None` until the relay answers.
     result: Option<DirectWriteResult>,
 }
 

@@ -1240,11 +1240,6 @@ fn disk_driven_retire_owns_materialized_ydoc_heads() {
             )
         })
         .expect("ydoc head");
-    // The manifest seeds 'ydoc' rows into the baseline scanner, so its file
-    // deleted while the daemon was down must retire the head — a stale
-    // snapshot must not stay readable forever. Mutation check: drop the
-    // YDOC_ORIGIN arm from `capture_retire_in_tx`'s origin gate — this
-    // retire settles as a no-op and the assertion fails.
     let result = VersionedTextStore::new(&mut store)
         .capture_retire(
             &CaptureRetire {

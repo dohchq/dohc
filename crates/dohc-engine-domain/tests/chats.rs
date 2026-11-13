@@ -4497,12 +4497,6 @@ fn baseline_creates_the_chat_tables() {
         .expect("reads");
 }
 
-// =====================================================================
-// NON-TAUTOLOGICAL differentials — validated against REAL TS output.
-// Fixtures produced by running the exact TS algorithms under Node/V8
-// (channelSlugForName, linkedChatProjectionPath, encodeFeedCursor).
-// =====================================================================
-
 #[test]
 fn channel_slug_matches_ts_output() {
     // Node oracle (String.normalize NFC + the TS regex chain):

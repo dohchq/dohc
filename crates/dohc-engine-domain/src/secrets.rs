@@ -1721,13 +1721,6 @@ pub fn has_secret_state(store: &mut EngineStore, workspace_id: &str) -> Result<b
     })
 }
 
-/// The `metadata_origin` of the current secret tip, or `None` when no tip
-/// exists. One definition shared by the capture write and retire ownership
-/// checks — a schema change to the join must not need two edits.
-/// Whether the tip for `path` is one capture put on disk itself. `None` means
-/// there is no tip. Reads the engine-stamped `capture_owned` column rather
-/// than `metadata_origin`: the origin string is caller-supplied over RPC and
-/// replication, so keying disk ownership on it lets a remote writer claim it.
 fn secret_tip_capture_owned(
     conn: &Connection,
     workspace_id: &str,

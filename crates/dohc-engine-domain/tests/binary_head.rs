@@ -590,11 +590,6 @@ fn rollback_of_completed_binary_overwrite_restores_previous_content_on_disk() {
     assert_eq!(bin.as_deref(), Some(prev_sha.as_str()));
 }
 
-/// Finding 2 (hardening): a TEXT rollback must never touch a materialization job
-/// that merely shares the mutation moment id. The disk-reconciliation path runs
-/// only for a binary write moment (and only against a job whose content matches
-/// this write's bytes), so an unrelated same-id job survives untouched — a text
-/// mutation cannot cancel or compensate against it.
 #[test]
 fn text_rollback_does_not_touch_a_materialization_job_with_the_same_id() {
     let (_scratch, mut store) = open();

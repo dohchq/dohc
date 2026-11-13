@@ -541,9 +541,6 @@ impl ContributionLocator {
 }
 
 impl RetainedAuthors {
-    /// The authors `value` names, or none unless it is the list of exactly
-    /// one author a moment would record for the actor and attribution it
-    /// names, each field within its bounds, or of the unattributed marker.
     pub fn from_json(value: &Value) -> Option<Self> {
         let [author] = value.as_array()?.as_slice() else {
             return None;
@@ -1591,11 +1588,6 @@ mod tests {
         assert_eq!(stopped, None, "the proof goes on");
     }
 
-    /// Opus's r2c-3c-8 finding 5: an artifact whose contributions' text
-    /// alone passes its cap is too large before it encodes or reserves
-    /// anything; one whose text fits but whose JSON does not is encoded
-    /// until it passes. Finding 4: either way the merged list's commitment,
-    /// hashed as a stream, is the one a whole artifact names.
     #[test]
     fn an_artifact_whose_text_passes_its_cap_is_too_large_without_encoding() {
         let binding = listed();

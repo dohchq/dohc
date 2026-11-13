@@ -1215,7 +1215,6 @@ mod tests {
         service.workspace_close(Some(handle)).await.unwrap();
     }
 
-    /// Capture passes until the watcher status meets `done`.
     async fn status_once(
         service: &EngineService,
         handle: &WorkspaceHandle,

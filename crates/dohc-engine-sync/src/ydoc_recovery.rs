@@ -1019,11 +1019,6 @@ fn write_recovery_in_tx(
             search_policy,
         )?;
         enqueue_write(tx, &result, Preimage::Absent, "sync").map_err(map_domain_hard_error)?;
-        // A recovered moment is a FILE moment, so it reads the same lane
-        // question the ordinary moment journal reads: for an
-        // edit share view it is drainable through the proposal submit, and
-        // the two sites must agree or a recovery would strand a change the
-        // recipient can see but never send.
         if crate::journal::workspace_journals_file_moments_in_tx(tx, &key.workspace_id)? {
             crate::outbound::journal_moment_append_in_tx(
                 tx,

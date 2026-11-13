@@ -105,7 +105,6 @@ pub struct ScanBoundsBuilder {
 }
 
 impl ScanBoundsBuilder {
-    /// Set the max-files cap.
     pub fn max_files(mut self, cap: usize) -> Self {
         self.bounds.max_files = cap;
         self

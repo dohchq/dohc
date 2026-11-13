@@ -220,7 +220,6 @@ fn make_private_dir(base: &Path, relative: &Path, system: &System) -> io::Result
             }
         }
     }
-    // The folders above stay held until this returns the last one.
     let (path, shown) = (held.path.clone(), held.shown.clone());
     let folder = held.folders.pop().ok_or(io::ErrorKind::InvalidInput)?;
     let (Some(private), Some(security)) = (private, security) else {

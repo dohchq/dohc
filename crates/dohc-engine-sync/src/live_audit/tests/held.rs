@@ -872,10 +872,6 @@ fn hold_event(store: &mut EngineStore, binding: &LiveObjectBinding, origin: &str
         .unwrap();
 }
 
-/// A held audit of a later event does not hold an audit that waits on an
-/// earlier one: the edit's audit and the settlement stay retryable and
-/// unacknowledged. The settlement applies once the event it waits on
-/// arrives, and each holds once that event is held instead.
 #[test]
 fn early_work_stays_ready_while_a_later_change_waits() {
     let mut source = fixture(true);
@@ -1071,7 +1067,6 @@ fn a_waiting_document_does_not_slow_each_sync() {
     assert!(many < few * 2, "{few} steps, then {many}");
 }
 
-/// The history lookup is keyed by workspace and document.
 #[test]
 fn the_history_lookup_is_keyed_by_workspace_and_document() {
     let steps = |others: i64| {

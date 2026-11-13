@@ -1476,13 +1476,6 @@ fn merge_job_crash_then_external_edit_is_preserved_on_recovery() {
     );
 }
 
-/// M2 (BINHEAD) + WS-G1: the three-way text merge must never clobber a binary
-/// head. A fork forked before `a.md` existed (base absent) adds TEXT at `a.md`,
-/// while the target grows a binary head at `a.md`. The pre-fix merge read the
-/// binary head as absent (its `JOIN blobs` is binary-blind), saw
-/// current == base == absent, fast-forwarded, and overwrote the binary head
-/// with text. It must open a conflict instead, and the binary head must survive
-/// until the user picks a side.
 #[test]
 fn merge_opens_a_conflict_instead_of_clobbering_a_binary_head_at_the_target() {
     let (_scratch, mut store) = open();
@@ -1668,12 +1661,6 @@ fn exact_merge_retry_reconstructs_recorded_outcome_before_binary_head_comparison
     assert_eq!(live_binary_sha, binary_sha);
 }
 
-/// S2 (BINHEAD): the exact-head gate must not defer forever on a legacy binary
-/// side that carries no head identity. A recorded side built via
-/// `ConflictFileState::binary()` (or a v9-era row) has NULL object/latest-moment,
-/// so requiring `Some(..) == None` would always mismatch and strand the resolve
-/// as StaleHead. When the recorded side has NO identity, fall back to path+sha;
-/// a recorded side that does carry identity keeps the strict no-clobber check.
 #[test]
 fn exact_head_gate_falls_back_for_legacy_null_identity_binary_sides() {
     let live =

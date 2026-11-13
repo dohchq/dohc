@@ -731,7 +731,6 @@ async fn case_only_rename_keeps_its_file(text: &str, write_first: bool) {
     }
 }
 
-/// The files directly in `root`, with their bytes.
 fn files(root: &std::path::Path) -> Vec<(std::ffi::OsString, Vec<u8>)> {
     let mut files: Vec<_> = std::fs::read_dir(root)
         .unwrap()

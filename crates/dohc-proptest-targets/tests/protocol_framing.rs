@@ -202,11 +202,6 @@ proptest! {
         prop_assert_eq!(decode_schedule(schedule_chunks(&bytes, &widths)), expected);
     }
 
-    /// A single-byte flip anywhere in a real, valid encoded frame must never
-    /// panic. When the mutated frame still yields a decodable control
-    /// envelope, that envelope must be a COMPLETE, self-consistent value: its
-    /// JSON re-encoding decodes back to an equal envelope (no partially-
-    /// populated / lossy decode from adversarial-but-parseable input).
     #[test]
     fn single_byte_flip_of_a_valid_frame_never_panics(
         index in 0usize..200,

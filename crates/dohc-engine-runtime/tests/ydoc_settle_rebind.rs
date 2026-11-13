@@ -642,11 +642,6 @@ async fn a_retired_local_only_doc_reopens_as_absent() {
     .await
     .expect("retire");
 
-    // Reopen: the deleted document must not resurrect, and the fresh
-    // create-flow must settle cleanly. Mutation check: drop the
-    // retired-lineage clearing in ydoc_open_state_on_store — the open
-    // reports lineage existing and the settle below wedges
-    // ConflictStaleTarget on the retained last_settled_sha.
     let reopened = handle
         .ydoc_open_state(
             WS.to_owned(),

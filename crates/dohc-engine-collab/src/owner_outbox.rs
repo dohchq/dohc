@@ -2729,7 +2729,6 @@ pub(crate) fn stored_automation_declaration(
         .transpose()
 }
 
-/// The actor an outbox entry credits, and its attribution.
 pub(crate) type EntryCredit = (
     Option<String>,
     Option<dohc_engine_domain::ChangeAttribution>,

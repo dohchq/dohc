@@ -2932,12 +2932,6 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
         json!({ "versionId": "main", "path": "notes/live.md" }),
     )
     .await;
-    // The local-only close pruned the CRDT cache to the bare marker
-    // (the workspace file is the artifact), so the reopen must not claim an existing
-    // lineage — that would hand the client an empty doc with nothing to seed
-    // from, and its next settle would clobber the settled file. Instead the
-    // artifact re-seeds the cache: lineage absent + seedContent carrying the
-    // settled content.
     assert_eq!(reopened["lineage"], json!("absent"));
     assert_eq!(reopened["seedContent"], json!("settled text"));
     let reopened_session = reopened["sessionId"].as_str().expect("reopened session");
@@ -3536,20 +3530,6 @@ async fn a_settle_past_the_inband_cap_still_lands_on_disk_and_reports_no_content
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
-    // AUDIT-SILENTSAVE round 5. This is the race that made
-    // `a_settle_past_the_inband_cap…` fail under `cargo test --workspace`
-    // while passing in isolation — the capture pass only gets scheduled
-    // between the settle and the close under load.
-    //
-    // A settled Y.Doc at MAX_CAPTURE_TEXT_BYTES (10 MiB) remains
-    // engine-ownable and must not be retired by capture.
-    // Self-write suppression cannot help: it matches a write by sha, and this
-    // is a retire taken on a size classification. The next settle — including
-    // the one ydoc.close performs by default — then sees a changed target and
-    // fails ConflictStaleTarget.
-    //
-    // A captured sibling proves the watcher scan ran after the settle.
-    // Rebuilding the manifest would seed the settled head and skip its ingest.
     let scratch = ScratchDir::new().expect("scratch");
 
     let service = Arc::new(EngineService::new());
@@ -3743,23 +3723,6 @@ async fn a_zero_byte_precreated_file_settles_the_first_typed_edit_to_disk() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn capture_ingesting_a_new_files_empty_artifact_must_not_wedge_its_session() {
-    // The desktop's New File writes "" straight to disk with no
-    // engine write, so the artifact exists with NO head. The interleaving that
-    // wedges the document — which the file-already-on-disk-at-open test above
-    // cannot reach, because nothing ingests the artifact there:
-    //
-    //   1. workspace.open starts the capture driver and its watcher.
-    //   2. createFile writes a 0-byte artifact. The watcher queues the create.
-    //   3. ydoc.open runs before that batch's debounce elapses: no head yet,
-    //      so the session's open-time head expectation is None.
-    //   4. capture ingests the 0-byte artifact and mints a head at sha("").
-    //   5. The user types; settle expects None, probes sha("") — conflict.
-    //   6. The failed settle never sets last_settled_sha, so the expectation
-    //      stays None and every later settle conflicts. The document is
-    //      wedged for the life of the session.
-    //
-    // Driven deterministically (sleep past the debounce + capture.flush)
-    // rather than by hoping the scheduler interleaves.
     let scratch = ScratchDir::new().expect("scratch");
 
     let service = Arc::new(EngineService::new());
@@ -3892,8 +3855,6 @@ async fn capture_ingesting_content_under_a_headless_session_still_refuses() {
         stage_headless_session_over_an_empty_artifact(&transport, &handle, &scratch, "rival").await;
     let session_id = opened["sessionId"].as_str().expect("session id");
 
-    // Content the session never saw lands on the path. Capture observes it,
-    // but the live lease keeps the head unchanged until the session ends.
     write_file(scratch.path(), &path, b"written by something else\n");
     wait_for_capture_to_defer_under_live_session(&transport, &handle, &path, 100).await;
     let ingested = call(
@@ -4409,18 +4370,6 @@ async fn a_replacement_session_after_a_restart_does_not_recreate_a_deleted_file(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_replacement_after_a_restart_does_not_recreate_a_file_whose_write_went_unreported() {
-    // dohc#2311. Documents with no file. One's first save writes the file,
-    // and the engine dies before its answer reaches the desktop. Another's
-    // close writes it, and the close's answer is lost or says nothing. The
-    // desktop never learns either file existed. Both files are deleted
-    // outside dohc while the engine is down, and capture retires them. The
-    // replacements must not write them back: the engine's moments say they
-    // existed. A drawing's retire keeps its Y.Doc rows, so even a fresh
-    // open resumes it, as a close debt's payment or a reopen does, and must
-    // not write it back either. A document that never had a file still gets
-    // one from its replacement, and a fresh open at a path whose file was
-    // deleted and retired is a new document, whose first save creates the
-    // file.
     const WS: &str = "ws-rpc-ydoc-unreported-write";
     const SETTLED: &str = "notes/settled.md";
     const CLOSED: &str = "notes/closed.md";
@@ -5300,11 +5249,6 @@ async fn a_delete_cancels_the_paths_pending_job_so_replay_cannot_resurrect_it() 
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_inactive_versions_delete_does_not_cancel_the_active_versions_pending_job() {
-    // Follow-up: `cancel_pending_jobs_for_path` is path-keyed
-    // but materialization jobs carry no version identity — they mirror the
-    // active version's working tree only (the same gate `enqueue_binary_delete`
-    // applies to its own job). A delete in a named, inactive version must not
-    // touch `main`'s own pending job for a same-named path.
     use std::os::windows::fs::OpenOptionsExt;
 
     let scratch = ScratchDir::new().expect("scratch");
@@ -5469,15 +5413,6 @@ async fn an_inactive_versions_delete_does_not_cancel_the_active_versions_pending
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn deleting_a_committed_renames_locked_destination_still_lets_its_paired_source_delete_run() {
-    // Follow-up: a binary rename enqueues a paired job pair —
-    // a write for the new path, a delete for the old one — and startup replay
-    // (and the rollback post-commit path) refuses to run the paired delete
-    // until the write proves complete, so the old path is never removed
-    // before the new one is proven durable. Cancelling the write (this PR's
-    // #739 fix, when the new path is deleted before it ever materializes)
-    // must not read as the same "abandon the pair" signal `Conflict` is: the
-    // delete already resolved the destination, so the paired delete (the old
-    // path) must still run — or that path is stranded on disk forever.
     use std::os::windows::fs::OpenOptionsExt;
 
     let scratch = ScratchDir::new().expect("scratch");
@@ -5627,15 +5562,6 @@ async fn wait_for_captured_head(
     panic!("capture never ingested {path} as {text:?}; last head: {head}");
 }
 
-/// #665, part A: capture -> discharge -> open CONVERGES.
-///
-/// The probe on `probe/665-convergence` staged this exact sequence and recorded
-/// a closed loop: the prune guard read `last_settled_sha`, only a settle writes
-/// that column, and so a capture that put the document's own projection into
-/// the head still refused the discharge. Every lap answered the same refusals
-/// and the document stayed read-only until the daemon restarted.
-///
-/// This is the same sequence with the answers a working discharge gives.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_live_lease_defers_capture_until_the_dirty_session_settles() {
     const PATH: &str = "notes/converge.md";

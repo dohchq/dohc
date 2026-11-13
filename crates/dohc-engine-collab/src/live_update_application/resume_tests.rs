@@ -101,16 +101,6 @@ fn converged(f: &Fixture, moment: &str, through: i64) {
     assert!(crate::replay_parity::structurally_equal_v2(&accepted, &local).unwrap());
 }
 
-/// Sol's round 4b ruling, capture source rule: Release, a fresh capture and
-/// adoption, Carried application, the first settlement and a restart, with
-/// no rewrite aligning the file and the Y.Doc. The file holds what the
-/// released root settled at B and the Y.Doc also holds C1 and C2, so only
-/// the settled-B proof explains the capture. Resume finds that capture still
-/// current. A fresh registration holds every delivery until its activation
-/// adopts. Its seed's receipt is saved before anything applies. Each
-/// settlement holds only what applied, each Carried delivery applies once, a
-/// replay after a restart writes nothing, and the file, the Y.Doc and
-/// accepted history converge.
 #[test]
 fn resume_after_carried_edits_keeps_the_file_its_predecessor_settled() {
     let (mut f, covered, c1, c2) = released_at_b();
@@ -149,13 +139,6 @@ fn resume_after_carried_edits_keeps_the_file_its_predecessor_settled() {
     replays(&mut f, &last, |f| settled(f, Some(seed.clone()), "converged"));
 }
 
-/// Partial application, then a further Stop and Resume. S1 applies C1 alone,
-/// its seed accepted and never applied, settles at C1 and releases with C2
-/// and its seed Carried. S2 captures over the file S1 settled, with C2 and
-/// S1's seed explaining the rest of its Y.Doc, holds C2 until it adopts, and
-/// drains both before its own seed. Each applies once, and the file, the
-/// Y.Doc and accepted history converge, replayed after a restart with no
-/// writes.
 #[test]
 fn a_partly_applied_suffix_resumes_again_from_its_new_boundary() {
     let (mut f, covered, c1, c2) = released_at_b();

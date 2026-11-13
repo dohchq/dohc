@@ -93,7 +93,6 @@ async fn duplicate_undo_before_create_placement_cancels_copy_without_conflict() 
     let replay = undo_copy(&mut store, root.path(), Arc::new(NoFaults)).unwrap();
     assert!(replay.deduped && replay.materialized);
     assert_eq!(replay.moments, undone.moments);
-    // Startup replay must never publish the cancelled create.
     let db = store.database_path().to_path_buf();
     drop(store);
     let supervisor = crate::WorkspaceSupervisor::new();
@@ -161,7 +160,6 @@ async fn duplicate_source_edit_undo_and_same_request_replay() {
     let replay = undo_copy(&mut store, root.path(), Arc::new(NoFaults)).unwrap();
     assert!(replay.deduped && replay.materialized);
     assert_eq!(replay.moments, undone.moments);
-    // An old Duplicate reply must never resurrect the copy.
     duplicate(&mut store, root.path(), Arc::new(NoFaults))
         .await
         .unwrap();

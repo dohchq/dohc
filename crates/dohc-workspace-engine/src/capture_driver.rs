@@ -528,7 +528,6 @@ impl CaptureApplyProbe {
         #[cfg(any(test, feature = "harness"))]
         if self.open_install_armed.swap(false, Ordering::AcqRel) {
             self.open_install_reached.notify_one();
-            // The open guard must stay owned here after caller cancellation.
             tokio::runtime::Handle::current().block_on(self.open_install_release.notified());
         }
     }
@@ -851,7 +850,6 @@ enum TickObservation {
 /// What the loop does with its layer after a tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LayerAction {
-    /// Keep driving the current layer.
     Keep,
     /// Stop the layer; the next iteration rebuilds it after the backoff.
     Drop,
@@ -881,11 +879,6 @@ impl RestartTracker {
     /// rather than a graveyard.
     fn record_healthy_tick(&mut self, status: &DriverStatus, clean: bool) {
         self.consecutive_failures = 0;
-        // The healthy tick IS the proof the layer runs — running is claimed,
-        // terminal cleared, and (when the tick was fully clean) degradation
-        // cleared, all in one store. Degradation is sticky until the layer
-        // demonstrably works again; a tick whose own apply failed is not that
-        // demonstration.
         status.record_healthy_transition(clean);
     }
 
@@ -2127,11 +2120,6 @@ async fn drive_loop<E: DriverEnv>(
                     layer = Some(fresh);
                 }
                 Err(()) => {
-                    // Transient start failures (a momentarily unwatchable
-                    // root) must not be terminal: mark degraded and retry on
-                    // the backoff schedule, escalating only after
-                    // MAX_RESTART_ATTEMPTS consecutive failures. The failure
-                    // transition is one store; no manual pre-ordering needed.
                     restart.record_failure(&status);
                     status.mark_initial_degraded();
                 }

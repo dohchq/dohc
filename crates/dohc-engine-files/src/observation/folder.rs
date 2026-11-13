@@ -276,7 +276,6 @@ mod unix {
 #[cfg(not(unix))]
 pub(super) use by_path::{Child, Folder};
 
-/// Windows reads by path until it lists through handles too.
 #[cfg(not(unix))]
 mod by_path {
     use super::{Contents, Facts, Kind};

@@ -323,9 +323,6 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
         } else {
             let acked = read_ack_tx(tx, &envelope.workspace_id, &envelope.origin_id)?;
             if envelope.origin_seq <= acked {
-                // A redelivered coordinate at or below the ack must match the
-                // row already journaled after relay-compatible JSON
-                // canonicalization.
                 return redelivered(tx, envelope, journaled_coordinate(tx, envelope)?);
             }
             let expected = acked.checked_add(1).ok_or(SyncError::CoordinateDiverged)?;
@@ -862,8 +859,6 @@ struct DecisionSet {
     at_ms: i64,
     #[serde(default, deserialize_with = "deserialize_present_string")]
     resolved_by_message_id: Option<String>,
-    /// A poll's choices. Absent for a bare question and for ops written
-    /// before the groups migration.
     #[serde(default)]
     options: Option<Vec<String>>,
     #[serde(default, deserialize_with = "deserialize_present_string")]

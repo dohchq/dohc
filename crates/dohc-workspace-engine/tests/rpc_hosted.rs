@@ -146,8 +146,6 @@ impl TestResponse {
     }
 }
 
-/// The relay's scoped feed for one workspace: the documents it shares, under
-/// one token, and the log above the epoch floor.
 #[derive(Default)]
 struct HostedRelay {
     log: Vec<Value>,
@@ -252,7 +250,6 @@ impl HostedRelay {
         );
     }
 
-    /// A delete of `object_id`, holding `text`, at `path`.
     fn delete(
         &mut self,
         origin: &str,
@@ -1234,12 +1231,6 @@ async fn a_retired_file_leaves_no_folder_in_its_replacements_way() {
     assert_eq!(host.pull().await["departed"], json!([]));
 }
 
-/// Sol's retirement review: a file that could not go after its document
-/// retired stayed forever. `a.md` is locked when `doc-b` retires, and the
-/// host restarts. `doc-b`'s file keeps `a.md` held, so `doc-a`'s write
-/// waits; once the lock goes, a later pass removes the file and `doc-a`
-/// takes the path. Until then, every reply reports `doc-b` as departed, so
-/// the host does not release it while its file remains.
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_retired_file_that_could_not_go_holds_its_path_until_it_goes() {
@@ -1329,12 +1320,6 @@ async fn a_retired_file_that_could_not_go_holds_its_path_until_it_goes() {
     assert_eq!(host.pull().await["departed"], json!([]));
 }
 
-/// The durability review: `doc-b` left the scope at `a.md/x/c.md` and
-/// `doc-a` was created at `a.md`. When `a.md/x` could not go, its file was
-/// forgotten anyway, so `doc-a`'s write met the empty folder and hosted pull
-/// stalled for good. The file keeps `a.md` held while its empty folder
-/// stays, and once the folder can go, a later pass removes it and `doc-a`
-/// lands.
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_retired_file_holds_its_path_while_its_empty_folder_cannot_go() {

@@ -1641,7 +1641,6 @@ fn an_adopted_activation_releases_once_parked_and_reconciled() {
         .read_with(|conn| settlement_pending(conn, "namespace", &f.key, &f.binding.lineage_claim_id, None))
         .unwrap());
     assert_eq!(f.store.read_with(|conn| park_pending(conn, "workspace", "object")).unwrap(), None);
-    // Exact replay: the stored release, with no writes.
     let released = rows(&f, &RELEASE_WRITES);
     assert_eq!(
         release_through(&mut f, 10).unwrap(),
@@ -1934,11 +1933,6 @@ fn intents(f: &Fixture) -> Vec<(String, i64)> {
         .unwrap()
 }
 
-/// Sol's round 3b blocker: a restore moves the generation a retirement's key
-/// names. Its intent is written before Phase A ends any runtime, survives a
-/// restart that forgets Phase A, and refuses a restore fence, with no
-/// abandoned seed behind it, until the release clears it. An invalid key or
-/// a released replay records nothing.
 #[test]
 fn a_restore_waits_while_its_activation_retires() {
     let fence = |f: &mut Fixture| {
@@ -2632,13 +2626,6 @@ fn appended(f: &Fixture) -> (Vec<u8>, i64, Vec<EntryState>) {
     (full_state(f), f.store.table_row_count("ydoc_updates").unwrap(), native_entries(f))
 }
 
-/// Codex's P2 on round 5: Stop checked that nothing of the activation waited
-/// for delivery, then fenced it at the relay. A local edit appended between
-/// the two reached neither the relay nor any receipt, and retirement refused
-/// the activation forever. A preparation and an append run on one writer, so
-/// one commits first: an append first leaves the preparation pending, and a
-/// preparation first refuses the append until the retirement's intent, which
-/// refuses it from there.
 #[test]
 fn a_local_append_and_a_stop_preparation_never_interleave() {
     // The gap without a block: the check passed, the edit landed, and the

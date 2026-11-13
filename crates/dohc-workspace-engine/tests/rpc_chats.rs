@@ -4427,8 +4427,6 @@ async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
         ),
         (Some(10), Some("message"))
     );
-    // A run reader names a run, never an agent, and only a running run moves
-    // its agent's place.
     let up_to = json!({ "createdAtMs": 999, "messageId": "z" });
     let named_agent = call_error(
         &transport,

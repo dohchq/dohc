@@ -237,19 +237,9 @@ impl SyncError {
             SyncError::ProjectionTooLarge { .. } => "projection-too-large",
             SyncError::MarkdownReaderCapacity => "document-too-dense",
             SyncError::UnsupportedOperation => "invalid-input",
-            // The boundary class is "the share does not cover this op". The
-            // recipient's copy says so and names the granter, who is the one
-            // who can widen a share — so only a SCOPE decision belongs here.
-            // A mismatch is one: the grant names one version and the op is on
-            // another, which is outside what the share covers however it came
-            // to be served.
             SyncError::ShareBoundaryViolation | SyncError::ShareVersionMismatch { .. } => {
                 "share-boundary-violation"
             }
-            // Not a scope decision: the relay sent a version id that is not
-            // one it could have issued. The grant may well cover the update
-            // and the granter can repair nothing, so this must not reach the
-            // reader as "outside what this share covers — ask them".
             SyncError::ShareVersionUnusable { .. }
             | SyncError::BlobInvalid
             | SyncError::BlobTooLarge { .. } => "invalid-input",

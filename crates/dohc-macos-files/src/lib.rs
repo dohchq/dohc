@@ -328,7 +328,6 @@ struct System {
     /// Whether the folder is on a local volume.
     local: fn(BorrowedFd<'_>) -> io::Result<bool>,
     remove_acl: fn(BorrowedFd<'_>),
-    /// Runs on the folder's path just before it is made private.
     before_protect: fn(&Path) -> io::Result<()>,
 }
 

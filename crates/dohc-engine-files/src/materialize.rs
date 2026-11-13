@@ -5474,7 +5474,6 @@ impl Replaced {
         dohc_macos_files::copy_saved_xattrs(&self.file, temp);
         #[cfg(target_vendor = "apple")]
         let acl_kept = dohc_macos_files::copy_acl(&self.file, temp).is_ok();
-        // No check exists for another Unix's ACLs.
         #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
         let acl_kept = false;
         let mode = temp_mode(self.mode, group_kept, acl_kept, owner_kept);
@@ -6029,12 +6028,6 @@ enum Attempt<T> {
     Locked(std::io::Error),
 }
 
-/// Run `step` until it finishes, backing off between tries a transient lock
-/// stopped, for at most `attempts` tries (plus the one reattempt
-/// [`classify_exhaustion`] can grant). On exhaustion it fails closed with
-/// [`MaterializeError::FileLocked`] or terminal io, leaving the job pending
-/// for startup replay. `probe` is the file whose held handle would explain an
-/// ambiguous denial.
 fn retry_while_locked<T>(
     target: &Path,
     probe: &Path,

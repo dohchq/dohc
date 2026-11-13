@@ -3377,7 +3377,6 @@ fn ordinary_audit_evidence_cannot_credit_an_imported_moment() {
                 human_name: "Claimed person".into(),
             }]),
         );
-        // The owner and the agent working for them.
         let terminal = accept_authored(
             &mut f,
             3,
@@ -5488,14 +5487,6 @@ fn a_live_delivery_journals_its_update_and_then_its_audit_in_one_transaction() {
     assert_eq!(operations(&f.store), ops);
 }
 
-/// Two live notes share the relay's journal, so another note's events take
-/// cursors between this note's: its first event at cursor 3, its second at
-/// cursor 6. The service host journals each delivery's update and audit as
-/// the host in this test does, and its owner receives them by ordinary sync.
-/// The owner holds the second update until its feed reaches cursor 6, not
-/// until it passes the event's count of 2, and it then leaves as an echo.
-/// A host records no event at a cursor its previous event passed, so an
-/// event's cursor is never below its count.
 #[test]
 fn a_held_update_on_a_shared_journal_waits_for_its_events_cursor() {
     use dohc_engine_collab::live_update_application::{
@@ -5718,7 +5709,6 @@ fn a_held_update_on_a_shared_journal_waits_for_its_events_cursor() {
     };
     assert_eq!(second_audit.payload["eventCount"], json!(2));
 
-    // The first event: held through its audit until the feed reaches it.
     assert!(matches!(
         apply(&mut owner, &mut cache, first_update),
         ApplyDisposition::Applied(_)

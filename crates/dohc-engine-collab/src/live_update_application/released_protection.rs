@@ -366,7 +366,6 @@ const READER_STEP_OPS: std::ffi::c_int = 100;
 struct State {
     store: Option<CachedStore>,
     validated: HashMap<(DocKey, String), Validated>,
-    /// Requested validations, until their worker completes them.
     jobs: HashMap<JobKey, Arc<Job>>,
     queue: VecDeque<Arc<Job>>,
     /// The latest worker thread; it ends once the queue is empty.
@@ -616,7 +615,6 @@ impl Validation {
         Self(Waiting::Ready(Some(result)))
     }
 
-    /// Block this thread until the validation completes.
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn wait(mut self) -> Result<(), ValidationError> {
@@ -839,8 +837,6 @@ fn gate(shared: &Shared, conn: &Connection) -> Result<(), ValidationError> {
     Ok(())
 }
 
-/// A scan of `statements` statements, each of a few thousand VM steps,
-/// that waits between its first and second until the tails close.
 #[cfg(any(test, feature = "test-support"))]
 fn stall(shared: &Shared, conn: &Connection, statements: u64) -> Result<(), ValidationError> {
     for ran in 1..=statements {
@@ -1035,8 +1031,6 @@ impl ReleasedTails {
         }
     }
 
-    /// Have the next validation scan `statements` statements, waiting after
-    /// the first until these tails close.
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn stall_validation(&self, statements: u64) {

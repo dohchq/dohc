@@ -241,9 +241,6 @@ impl BackupManifest {
 }
 
 impl BackupManifest {
-    /// Parse a manifest from its JSON text. Returns `None` if the JSON is
-    /// malformed or a required field is missing/mistyped (a malformed manifest
-    /// is treated as no manifest — invalid-by-absence).
     fn from_json(text: &str) -> Option<Self> {
         let value: serde_json::Value = serde_json::from_str(text).ok()?;
         let obj = value.as_object()?;

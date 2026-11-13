@@ -4204,10 +4204,6 @@ mod hosted_refusal_tests {
         }
     }
 
-    /// The switch-over plan: a retired file holding anything but its head was
-    /// forgotten before it was named, so its document left `departed` while
-    /// the file stayed. Its path stays held now: every pass names the file,
-    /// across a restart, until it holds its head again and goes.
     #[test]
     fn a_retired_file_holding_anything_else_keeps_its_document_departed() {
         let scratch = ScratchDir::new().unwrap();

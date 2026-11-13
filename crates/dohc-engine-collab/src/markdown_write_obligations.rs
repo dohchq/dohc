@@ -436,7 +436,6 @@ mod tests {
         assert_eq!(rows.len(), 1);
         let held: AuditedRetry = serde_json::from_value(rows[0].retry_inputs.clone()).unwrap();
         assert_eq!((held.terminal_cursor, held.head_update_seq), (9, 14));
-        // An empty settlement covers the hold only once it reaches the held native head.
         conn.execute(
             "INSERT INTO live_empty_settlements VALUES ('relay','w','main','note','claim',13,?1)",
             [serde_json::to_string(&retry.binding).unwrap()],

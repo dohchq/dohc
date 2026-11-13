@@ -1,21 +1,3 @@
-//! A hosted replica: the session host's store for the documents the relay's
-//! scoped feed serves it. The feed serves each hosted document's rows with
-//! their original coordinates and withholds every other row, so one origin's
-//! sequence reaches this store with gaps, and a document that joins the scope
-//! backfills below coordinates already applied. Its journal is therefore the
-//! ledger of what applied; the contiguous origin ack never moves.
-//!
-//! The `hosted_replicas` row selects this mode. Nothing infers it.
-//!
-//! Its fetch position lives here too, never in `sync_relay_cursors`: one main
-//! cursor, frozen while any document backfills, and one backfill cursor per
-//! document. A document that is not ready reads its rows only through its
-//! own cursor, which stops at its first row that cannot apply yet; the main
-//! feed skips its rows, and nothing of it is retained, so a held document
-//! neither freezes the main cursor nor fills deferred work. A document is in
-//! scope while its row carries the replica's scope generation; one that left
-//! keeps its state until it parks, and keeps what its return needs after.
-
 mod held;
 mod park;
 
@@ -59,8 +41,6 @@ pub const PASSIVE_STORE_CANNOT_HOST: &str = "a passive store cannot host documen
 pub const HOSTED_REPLICA_NOT_PRISTINE: &str =
     "a hosted replica starts from a workspace with no files, history or chats";
 
-/// A conflict child whose `conflict.resolve` parent the feed withheld. Its
-/// document is held at the child until the relay serves what it needs.
 pub(crate) const CONFLICT_PARENT_WITHHELD: &str = "hosted-conflict-parent-withheld";
 
 /// A Y.Doc row that could destroy work a released chain's tail retains
@@ -1436,10 +1416,6 @@ pub fn commit_hosted_cursor(
             )
             .map_err(SyncError::persist)?;
         }
-        // A ready document's files are written through its read position:
-        // the pass that made it ready wrote its heads, and every committed
-        // pass since materialized what it read. One not ready keeps what
-        // it applied unwritten until then.
         tx.execute(
             "UPDATE hosted_documents SET unmaterialized_seq=NULL \
              WHERE workspace_id=?1 AND scope_generation=?2 AND state='ready' \

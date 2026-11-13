@@ -2234,13 +2234,6 @@ fn held_settlement_recovery(case: RecoveryBinding, later_generation: bool) {
     }
 }
 
-/// Sol's ruling 1 drain fixture: an owner observed at restore generation 0
-/// queues the restore's settlement ("host") and one the host never accepted
-/// ("later") until its feed reaches generation 1, with two more ("a-moved",
-/// "z-moved") whose queued binding the owner has since left. A capture of
-/// the lineage was released without adopting, its binding still the
-/// owner's, so no activation is current and the lineage's first decision
-/// waits for validation. The drain reads a-moved, host, later, z-moved.
 struct DrainWindow {
     owner: RestoreOwner,
     restore_id: String,
@@ -3045,8 +3038,6 @@ fn pending_field_settlement_case(case: PendingFieldSettlement) {
         PendingFieldSettlement::Quarantined | PendingFieldSettlement::QuarantinedRefusal
     ) {
         if case == PendingFieldSettlement::QuarantinedRefusal {
-            // Refuse a body-only entry while an independent field edit survives.
-            // It must not bring the frozen field edit back into the index.
             let independent = Ydoc::wire();
             independent.apply(&host.encode_full_state()).unwrap();
             owner

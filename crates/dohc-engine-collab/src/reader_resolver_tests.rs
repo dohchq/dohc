@@ -822,12 +822,6 @@ fn assert_terminal(failure: Failure) {
     }
 }
 
-// A reader asset that changed after it was checked: process.rs `check_assets`,
-// the hash cap in `file_sha`, and a runtime or bundle digest that no longer
-// matches. The reader answers Unavailable and closes
-// (`post_hello_asset_replacement_is_unavailable`,
-// `replacement_after_hash_is_blocked_or_refused_before_spawn`,
-// `identity_mismatch_stays_unavailable_without_rehashing`).
 #[test]
 fn changed_reader_assets_stay_terminal() {
     assert_terminal(Failure::Unavailable);
@@ -842,11 +836,6 @@ fn reader_permission_refusals_stay_terminal() {
     assert_terminal(Failure::Unavailable);
 }
 
-// A deleted runtime, bundle or manifest fails `open_asset` at start or in
-// `check_assets`; the reader answers Unavailable
-// (`closure_rejects_directory_and_missing_assets_before_spawn`, and the
-// "runtime", "bundle" and "manifest" cases of
-// `invalid_configuration_or_identity_is_unavailable`).
 #[test]
 fn deleted_reader_files_stay_terminal() {
     assert_terminal(Failure::Unavailable);

@@ -34,8 +34,6 @@ use std::path::Path;
 /// here, or search would silently pause on a policy both layers consider valid.
 pub const POLICY_FILE_MAX_BYTES: u64 = 256 * 1024;
 
-/// The shared-with-me projection root: a write reservation that classifies as
-/// non-tracked for the write-side floor search uses.
 const SHARED_WITH_ME_ROOT: &str = "shared-with-me";
 
 /// The path floor a search-visibility decision starts from.
@@ -516,7 +514,6 @@ fn validate_optional_bool(
 
 // -------------------------------------------------------------- effective policy
 
-/// The resolved effective policy for a path (`resolveEffectivePolicy`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectivePolicy {
     pub tracked: bool,
@@ -795,13 +792,6 @@ mod tests {
 
     #[test]
     fn search_floor_reads_the_shared_secret_rule() {
-        // Alias-free vectors (no trailing dots/spaces) inside both domains
-        // (relative, no reserved segments): there search's per-platform
-        // normalization reduces to lowercasing, the same as the shared
-        // predicate's, so the search floor and `normalized_path_is_secret`
-        // must agree exactly. A class added to either side alone fails here
-        // on the vectors that carry it (#543, the shape one surface
-        // over).
         for path in [
             ".env",
             "app/.env.local",

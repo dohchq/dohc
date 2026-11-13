@@ -504,8 +504,6 @@ impl Scanner {
                         }
                     },
                 };
-                // Never follow a symlink: leaf observed only, symlinked dir not
-                // descended.
                 if file_type.is_dir() {
                     if !floor::segment_is_ignored(&floor::normalize_segment(&name)) {
                         stack.push(path);

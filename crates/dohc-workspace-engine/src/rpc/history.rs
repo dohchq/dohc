@@ -556,10 +556,6 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: MomentsListParams = parse(params)?;
-        // The filter rejects only what the write path can never store
-        // (the empty string): every id versionedText.list or
-        // moments.list can return — whitespace/control-carrying
-        // included — must stay filterable verbatim.
         if params.object_id.as_deref() == Some("") {
             return Err(WireError::new(
                 ErrorCode::InvalidParams,

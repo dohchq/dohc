@@ -945,8 +945,6 @@ impl ReleaseAuthors {
 
 const UNATTRIBUTED: &str = r#"[{"kind":"unattributed"}]"#;
 
-/// Admits a held lineage's update by this identity, which keeps its author
-/// until the relay accepts it.
 fn admit_private_in(
     conn: &Connection,
     key: &DocKey,
@@ -1614,9 +1612,6 @@ mod tests {
         assert_eq!(covered.len(), 2);
     }
 
-    /// The store counts each identity an update still holds the author of
-    /// once, with the bytes admission counts for its entry, until its last
-    /// such update is forgotten, accepted or folded.
     #[test]
     fn private_authors_count_each_identity_with_its_admission_bytes() {
         fn totals(conn: &Connection) -> Result<(usize, usize), CollabError> {

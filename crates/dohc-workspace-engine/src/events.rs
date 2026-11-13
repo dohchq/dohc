@@ -93,10 +93,6 @@ pub struct EngineEvents {
     wakes: Arc<RetainedWakes>,
 }
 
-/// Wakes a full notice queue must not shed. Each is kept per key until the
-/// receiver takes it, and a newer wake for the same key replaces it, so they
-/// stay bounded by the file bindings open and the workspaces this engine
-/// opened.
 #[derive(Default)]
 struct RetainedWakes {
     files: Mutex<
@@ -722,8 +718,6 @@ mod tests {
         );
         assert_eq!(notices[1].payload["historyId"], 7);
         assert_eq!(notices[2].payload["field"], "beta");
-        // A value deeper than the wire leaves room for travels as the marker
-        // too: an unencodable event must never reach the transport.
         let deep = format!(
             "{}1{}",
             "[".repeat(dohc_engine_domain::MAX_FIELD_FACT_VALUE_DEPTH),

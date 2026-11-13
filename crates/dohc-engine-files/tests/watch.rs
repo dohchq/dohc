@@ -295,9 +295,6 @@ async fn probe_root_delete_recreate_race_is_not_silently_missed() {
     std::fs::remove_dir_all(&root).expect("delete root");
     std::fs::create_dir(&root).expect("recreate root");
 
-    // The identity-based health poll must notice the swap. Reattach to the
-    // recreated directory succeeds (it exists), so the change surfaces as a
-    // dirty generation rather than a permanently-dead watch.
     wait_dirty(&handle).await;
 
     // Prove the reattached watch is live on the new directory (not the dead

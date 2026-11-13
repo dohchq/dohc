@@ -1957,13 +1957,6 @@ impl EngineService {
                     }
                 })?
         };
-        // A lineage that could have started sharing and did not is the one
-        // origination outcome a person can act on, so it does not pass in
-        // silence. The wire result reports the append; stderr keeps the
-        // server-side trail, the same split the post-commit materialize path
-        // uses. The per-document sharing surface that will show this to the
-        // user arrives with #356 — until a workspace can replicate at all,
-        // there is nothing for it to sit beside.
         if let Some(declined) = &outcome.sharing_declined {
             eprintln!("engine: {declined}");
         }

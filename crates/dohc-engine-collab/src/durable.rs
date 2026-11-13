@@ -286,8 +286,6 @@ pub enum CloseOutcome {
     },
 }
 
-// ---- reads ------------------------------------------------------------------
-
 /// Read a doc's marker, or `None` if the object is not Y.Doc-driven.
 pub fn read_marker(store: &EngineStore, key: &DocKey) -> Result<Option<Marker>, CollabError> {
     #[cfg(test)]
@@ -383,8 +381,6 @@ pub fn load_persisted(
         up_to_seq: up_to,
     }))
 }
-
-// ---- writes -----------------------------------------------------------------
 
 /// Ensure a marker row exists for `key` (idempotent). Seeds `content_kind` and
 /// `regime` on first creation; an existing marker keeps its regime/kind. The
@@ -527,13 +523,6 @@ where
     // probe, the blob row, and the caller's post-append hook all reuse this
     // digest instead of re-walking the update bytes.
     let update_sha = crate::hex_sha256(update);
-    // The caller's idempotency key hashes over the DOC COORDINATES and the
-    // update bytes: content-addressed dedupe alone only holds while the
-    // original row survives compaction — a retry after the fold would
-    // re-append the edit (and re-journal an outbound op on a replicated
-    // lineage) instead of replaying the original result.
-    // The session guard can change when admission promotes this lineage.
-    // Validate it separately; it is not part of the immutable request.
     let request_hash = request_id.map(|_| {
         let path_identity = match path {
             Some(path) => format!("some:{}", crate::hex_sha256(path.as_bytes())),
@@ -1479,14 +1468,6 @@ fn claim_base_with_coordinate_in_tx(
     validate_update_bytes(base_bytes)?;
     let incoming_claim_id = crate::hex_sha256(base_bytes);
     (|| {
-        // Upsert the marker first (FK parent for the snapshot), stamping the
-        // replicated regime + content kind. In the INDIVIDUAL-FIRST flow the
-        // marker already exists as `local-only` (created by `ensure_marker`), so
-        // claiming a base must promote it to `replicated` — a `DO NOTHING` here
-        // would leave `regime = 'local-only'`, and the next `close_session`
-        // would take the prune branch and DELETE the just-claimed base
-        // (destroying the shared lineage). Promote-on-claim keeps "open when
-        // shared"; it also repairs a stale `content_kind`.
         tx.execute(
             "INSERT INTO ydoc_docs \
              (workspace_id, version_id, object_id, content_kind, regime, \
@@ -1509,11 +1490,6 @@ fn claim_base_with_coordinate_in_tx(
         )
         .map_err(map_sql)?;
 
-        // Atomic re-check: a base already claimed ⇒ resume the winner, emit no
-        // second base — but only when the incoming base IS the stored base.
-        // Silently resuming (and acking) a different base would drop a
-        // divergent lineage while the relay cursor advances past it, leaving
-        // that peer's later updates missing an unrecoverable dependency.
         let marker = read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
         match marker.lineage_claim_status {
             LineageClaimStatus::Unclaimed => {}
@@ -2800,11 +2776,6 @@ pub fn settle(
                 workspace_id: key.workspace_id.clone(),
                 target_path: target_path.to_string(),
                 content_sha256: content_sha.clone(),
-                // The preimage the materializer revalidates before replacing: the
-                // first settle expects the target absent; a later settle expects
-                // the previous settle's content still on disk (else an external
-                // editor wrote it — preserve-both). `Absent` on every settle would
-                // wrongly conflict-flag every edited doc after the first write.
                 preimage: match &last_sha {
                     Some(sha) => Preimage::Present(sha.clone()),
                     None => Preimage::Absent,
@@ -3048,8 +3019,6 @@ pub fn close_session(
         })
     })
 }
-
-// ---- shared internals (used here and by `replication`) ----------------------
 
 pub(crate) fn validate_update_bytes(update: &[u8]) -> Result<(), CollabError> {
     if update.is_empty() {

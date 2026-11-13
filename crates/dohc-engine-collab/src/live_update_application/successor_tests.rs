@@ -343,7 +343,6 @@ fn a_successor_adopts_its_released_prefix_without_touching_the_origin() {
             offline_edit(&mut f, "Edited while stopped", "offline");
         }
         let id = successor(&mut f);
-        // The owner state a successor's adoption starts from reads no current activation until it adopts.
         let current = f
             .store
             .read_with(|conn| {
@@ -662,9 +661,6 @@ fn a_successor_covers_its_chains_retained_entries() {
     }
 }
 
-/// An abandoned seed is covered as Abandoned, and only in its strict
-/// representation. The successor's own seed holds application; the
-/// predecessor's abandoned one never does.
 #[test]
 fn a_successor_covers_an_abandoned_seed_and_holds_only_its_own() {
     for intact in [true, false] {
@@ -1058,11 +1054,6 @@ type RefusalDamage = (&'static str, bool, bool, fn(&mut Fixture));
 /// A fixture whose one entry a host refused.
 type RefusedFixture = (&'static str, fn() -> Fixture);
 
-/// Each condition of the strict Refused representation, failing alone, keeps
-/// a refused native update or adoption seed from being Refused. Release
-/// refuses it, the shared predicate refuses it, and succession refuses it
-/// with no writes. Coverage also refuses a native source outside the
-/// released chain.
 #[test]
 fn only_the_strict_representation_is_refused() {
     const ENTRY: &str = "UPDATE owner_ydoc_outbox_entries SET";

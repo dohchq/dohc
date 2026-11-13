@@ -1543,7 +1543,6 @@ pub(crate) fn validate_path(path: &str) -> Result<(), DomainError> {
             reason: "path must not contain traversal segments",
         });
     }
-    // The engine's own directory is reserved; a file must never alias into it.
     if path.split('/').any(|segment| {
         dohc_engine_files::floor::segment_is_ignored(&dohc_engine_files::floor::reserved_key(
             segment,
@@ -1769,14 +1768,6 @@ fn latest_moment_order(
         .map_err(DomainError::sql_corrupt)
 }
 
-/// The fork point: the latest materialized moment **belonging to the source
-/// version** (`versionedTextStore.ts:4877-4884` — "it never touched this
-/// version's snapshots, so it must never become the fork point"). Scoping to
-/// `version_id` is load-bearing: the global-latest moment can belong to a
-/// sibling fork, and using it would record a merge base that never described
-/// this version's state. `sync_record_only` marker rows (a peer-divergence
-/// record) are excluded — a materialized moment is NULL or `0` (the `= 0`
-/// arm is latent until sync writes 0).
 fn latest_materialized_moment_id(
     conn: &Connection,
     workspace_id: &str,

@@ -117,7 +117,6 @@ impl<T: Table> Tree<T> {
                 .map(|identity| (identity.pid, Some(*identity))),
         );
         let mut found: HashMap<Pid, Identity> = HashMap::new();
-        // Known descendants this census could not inspect. They stay known.
         let mut unchecked: HashMap<Pid, Identity> = HashMap::new();
         let mut unreadable: Vec<Pid> = Vec::new();
         let mut unreaped: HashSet<Pid> = HashSet::new();

@@ -85,8 +85,6 @@ struct PendingMessageAppend {
     /// field parked it unchecked, so replay checks it.
     #[serde(default)]
     author_reported: Option<serde_json::Value>,
-    /// What an agent reported about its work, checked on replay for the same
-    /// reason.
     #[serde(default)]
     work: Option<serde_json::Value>,
 }

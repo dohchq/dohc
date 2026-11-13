@@ -105,8 +105,6 @@ fn a_policy_edit_neither_escalates_nor_forgives() {
     restart.observe(TickObservation::WatchLost, &status);
     let after_failure = restart.delay();
 
-    // A deliberate restart drops the layer but must not count as a
-    // failure...
     assert_eq!(
         restart.observe(TickObservation::PolicyChanged, &status),
         LayerAction::Drop
@@ -140,9 +138,6 @@ fn an_isolated_failure_between_healthy_ticks_never_escalates() {
 
 #[test]
 fn degradation_is_not_cleared_by_a_start_that_has_not_proven_itself() {
-    // The status triple must never read (degraded=false, terminal=true).
-    // It did, twice a second, while a watch flapped: a bare successful
-    // start cleared `degraded` but only a healthy TICK clears `terminal`.
     let status = DriverStatus::default();
     let mut restart = RestartTracker::default();
     for _ in 0..MAX_RESTART_ATTEMPTS {

@@ -633,7 +633,6 @@ fn load_valid_backup_enforces_manifest_presence_and_checksum() {
             .is_some()
     );
 
-    // (a) Missing manifest ⇒ invalid-by-absence ⇒ None.
     std::fs::remove_file(recovery.join("snap.manifest.json")).expect("rm manifest");
     assert!(
         load_valid_backup(&recovery, "snap")
@@ -954,10 +953,6 @@ fn a_genuinely_busy_database_is_reported_as_the_transient_lock() {
         .expect("the same write lands once the contention clears");
 }
 
-/// The narrowness guard. `is_busy` reads the SQLite result code, so an
-/// ordinary SQL failure must keep its terminal answer — otherwise every
-/// persist failure would advertise a retry that cannot help.
-///
 #[test]
 fn an_ordinary_sql_failure_is_still_terminal() {
     let scratch = Scratch::new("busy-narrowness");

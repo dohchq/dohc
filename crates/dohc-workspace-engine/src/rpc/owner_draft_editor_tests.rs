@@ -374,8 +374,6 @@ async fn accepted_frame_editor_case(case: EditorCase) {
                 .await
                 .unwrap(),
         );
-        // Older frame rows are pruned. Their refusal must leave the newer
-        // session position intact.
         assert_eq!(
             service
                 .owner_delivery_apply(ctx, request, input)

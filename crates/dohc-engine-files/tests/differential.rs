@@ -299,7 +299,6 @@ fn golden_is_sensitive_to_the_content_hash() {
     let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
     let listing = scan_completed(&scanner, ws.path());
 
-    // Manifest matches a.md exactly, but records b.md's old hash.
     let prior = ScanManifest::from_entries([
         (
             "a.md".to_owned(),
@@ -401,8 +400,6 @@ fn normalize_plan(plan: &dohc_engine_files::ReconcilePlan) -> Vec<NormOp> {
 #[test]
 fn extended_trace_covers_all_divergence_prone_paths() {
     let ws = Scratch::new();
-    // Baseline tree: two tracked files, one path-floor-excluded file, and one
-    // over-cap file that must never be tracked.
     ws.write("keep.md", b"steady\n");
     ws.write("rename-src.md", b"movable\n");
     ws.write(".dohc/engine/engine.db", b"floor-excluded");

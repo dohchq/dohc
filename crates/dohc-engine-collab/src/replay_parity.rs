@@ -1573,7 +1573,6 @@ fn content_parity_conflict(candidate: &WireStructure, established: &ClockIdentit
         // (tombstones live in `tombstone_ranges`, not here), so each entry is a
         // clock a conflicting candidate could diverge.
         if let Some(candidate_identity) = candidate.identities.identity_at(client, clock) {
-            // A candidate live identity at the same clock must match exactly.
             return candidate_identity != established_identity;
         }
         // No candidate live identity here. If the candidate instead
@@ -2924,13 +2923,6 @@ mod tests {
         let base = Ydoc::wire();
         let base_update = base.plaintext_insert(0, "a");
 
-        // A hostile candidate claims the same (client, clock) as `base_update`
-        // but with different content ("b" instead of "a"). Built by corrupting
-        // the original bytes' single-byte string payload directly (locating it
-        // by the fixed `plainText` root-name marker, since the preceding
-        // client-id varint's byte length varies with the doc's random client
-        // id): `...plainText<len=1><char>` — the content byte immediately
-        // follows the 1-byte string-length prefix after the marker.
         let marker = b"plainText";
         let marker_at = base_update
             .windows(marker.len())
@@ -2952,12 +2944,6 @@ mod tests {
     /// before any doc is touched, regardless of content.
     #[test]
     fn rejects_zero_length_structural_block() {
-        // A JSON content block (ref 4) with an explicit len of 0: one client,
-        // one block, info byte selects JSON content with no origin/right-origin
-        // (info low nibble = BLOCK_ITEM_JSON_REF_NUMBER = 4), no parent-sub,
-        // left-origin id, then a var len of 0.
-        // clients_len=1, blocks_len=1, client=9, clock=0, info=0x04,
-        // parent_info(false)=0, left_id(client=9,clock=0), len=0, deletes=empty.
         let bytes: Vec<u8> = vec![
             0x01, // clients_len
             0x01, // blocks_len

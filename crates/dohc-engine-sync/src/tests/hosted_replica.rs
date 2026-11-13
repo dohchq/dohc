@@ -1160,7 +1160,6 @@ fn commit(
     }
 }
 
-/// Pass and commit until the feed has nothing more.
 fn sync(client: &RelaySyncClient<HostedFeed>, store: &mut EngineStore) {
     for _ in 0..64 {
         let outcome = pass(client, store, &NoFaults).unwrap();
@@ -2207,7 +2206,6 @@ fn assert_conflict_child_hold_parity(
         [("owner".to_owned(), 2), ("peer".to_owned(), 1)]
     );
 
-    // The parent arrives (5b projects it); the held document resumes in order.
     apply_replication_envelope(
         store,
         &mut WriterDocCache::new(),
@@ -3216,9 +3214,6 @@ fn withheld_befores(store: &EngineStore) -> Vec<(String, String, String, String,
         .unwrap()
 }
 
-/// The owner's private file held `a.md` until the hosted document replaced
-/// it. The feed serves that moment but withholds the private file's row and
-/// bytes, so on the host the private file never existed.
 #[test]
 fn a_moment_that_replaced_a_withheld_object_applies_as_a_create() {
     let (_scratch, _path, mut store) = hosted_store();
@@ -3558,9 +3553,6 @@ fn a_departed_document_keeps_its_head_until_its_work_settles() {
     assert!(has_blob(&store, &update));
 }
 
-/// Part 5's lifecycle fact: the host releases a document only once it is
-/// gone. Parking releases its heads before its file, so the retired file
-/// keeps it departed, across a restart, until the file is forgotten.
 #[test]
 fn a_departed_document_is_reported_until_its_file_is_forgotten() {
     let (_scratch, path, mut store, client) = departing_b();
@@ -3799,10 +3791,6 @@ fn parking_is_all_or_nothing_and_idempotent() {
     assert!(!park(&mut store));
 }
 
-/// Sol's retirement review: a file that did not go after its document
-/// retired, because the process stopped or the file was locked, stayed
-/// forever. Its path now stays held, across a restart, until the file is
-/// gone and forgotten; only then does `doc-a`'s waiting write take it.
 #[test]
 fn a_retired_file_holds_its_path_until_it_is_forgotten() {
     let (_scratch, path, mut store, client) = departing_b();
@@ -5175,9 +5163,6 @@ impl LeaseProbe for LiveSession {
     }
 }
 
-/// Sol's third finding: a document became ready once its backfill was
-/// fetched, while its rename still waited behind a live session. Its read
-/// stops before the rename, and it is held until the rename applies.
 #[test]
 fn a_backfill_is_ready_only_once_its_waiting_work_applies() {
     let (_scratch, _path, mut store) = hosted_store();
@@ -5331,10 +5316,6 @@ fn a_pass_another_commit_overtook_cannot_commit() {
     );
 }
 
-/// Sol's held-backfill review, fourth finding: a ready document whose scope
-/// path changed kept its readiness at its old head. `doc-b` is held, naming
-/// both paths, and reads its own rows from where the main feed is until the
-/// rename that takes it to its new path applies.
 #[test]
 fn a_ready_document_the_scope_moves_is_held_until_it_arrives() {
     let (_scratch, _path, mut store, client) = departing_b();
@@ -5412,10 +5393,6 @@ fn a_returning_document_skips_its_applied_history_at_another_documents_path() {
     assert_eq!(count(&store, "SELECT COUNT(*) FROM conflicts"), 0);
 }
 
-/// Sol's held-backfill review, first finding: a Y.Doc base honored only the
-/// documents still in the scope, so it could take a path the file of a
-/// retired document still held, and that file's removal would then delete
-/// the new document's bytes. It waits like a moment until the file is gone.
 #[test]
 fn a_ydoc_base_waits_for_a_retired_file_at_its_path() {
     let (_scratch, _path, mut store, client) = departing_b();
@@ -5447,11 +5424,6 @@ fn a_ydoc_base_waits_for_a_retired_file_at_its_path() {
     assert_eq!(paths(&store).0, [("doc-a".to_owned(), "a.md".to_owned())]);
 }
 
-/// From engine merge 4: a departed document's path, and a retired file's,
-/// matched exactly, while capture holds match case aliases and descendants.
-/// The PR 4a durability review: nor did it hold the folders above it. Each
-/// incoming path waits for `doc-b`, departed and then retired, until its
-/// file is gone.
 #[test]
 fn a_departed_path_holds_its_case_aliases_descendants_and_ancestors() {
     for (at, path) in [
@@ -5732,10 +5704,6 @@ fn a_returning_document_rereads_from_zero_and_skips_what_it_applied() {
     );
 }
 
-/// Parking: `doc-b` returns at `b.md`, while its history leaves it at
-/// `a.md`, where it parked. Its head comes back there and it is held, naming
-/// both paths; each later pass reads one page and finishes, so nothing loops.
-/// The rename that takes it to `b.md` makes it ready.
 #[test]
 fn a_document_that_returns_at_another_path_is_held_without_looping() {
     let (_scratch, _path, mut store, client) = departing_b();
@@ -7379,10 +7347,6 @@ fn a_queued_echo_its_session_admitted_leaves_a_bound_document_ready() {
     );
 }
 
-/// An echo left queued behind `doc-b`'s unadmitted edit keeps its place.
-/// While the binding stands, `doc-b` stays held with both queued, its
-/// content as it was, and no pass's drain takes it up again. Once the
-/// binding goes, both apply in order, once.
 #[test]
 fn an_echo_queued_behind_an_unadmitted_edit_applies_once_after_release() {
     let (_scratch, _path, mut store, client, base, echo, lineage) = ready_bound_richdoc_b();

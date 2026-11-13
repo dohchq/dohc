@@ -163,8 +163,6 @@ async fn overflow_between_prepare_and_ack_is_not_cleared_by_the_older_receipt() 
     };
     let result = apply_reconcile_plan(&plan, &mut AcceptAll, &NoFaults);
 
-    // A real watcher callback can land while the downstream sink is applying.
-    // The ack command folds this newer epoch first and must not clear it.
     handle.notify_overflow();
     handle
         .acknowledge_capture(plan, result)

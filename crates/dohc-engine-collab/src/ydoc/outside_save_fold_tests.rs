@@ -451,7 +451,6 @@ fn where_the_comparisons_could_disagree_the_direct_one_keeps_nothing_json_would_
         ),
         (true, false)
     );
-    // An attribute set to nothing against one that's absent: both call it changed.
     assert_eq!(
         judged("# Kept.\n", attribute("extra", Any::Null), unchanged),
         (false, false)

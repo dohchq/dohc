@@ -145,8 +145,6 @@ async fn wait_for_text(
     }
 }
 
-/// Poll until the driver has started the files layer `count` times. A start
-/// is counted after its settle ends.
 async fn wait_for_layer_starts(probe: &CaptureApplyProbe, count: u64) {
     let deadline = tokio::time::Instant::now() + WAIT;
     while probe.layer_start_count() < count {
@@ -707,8 +705,6 @@ tracked = false
     wait_for_layer_starts(&probe, 2).await;
     let starts = probe.layer_start_count();
 
-    // Every apply fails until the widening rebuild has ended, so the rebuild
-    // never records the file.
     probe.fail_next_applies_before_worker(u32::MAX);
     write_file(scratch.path(), ".dohc/files.toml", b"");
     wait_for_layer_starts(&probe, starts + 1).await;
@@ -2459,11 +2455,6 @@ async fn existing_store_and_unreadable_policy_keep_the_strict_open_barrier() {
                 .expect("bounded degraded startup must release file reads");
             assert_eq!(files.result["files"], json!([]));
 
-            // Restore a readable policy, then make the admitted Degraded
-            // handle drive its own recovery. The renderer's fileObjectId
-            // path is flush-dependent; returning `settled: false` directly
-            // from the RPC gate until the background cadence happens to run
-            // makes an already-open workspace unusable for Linked Chats.
             std::fs::remove_dir(scratch.path().join(".dohc/files.toml"))
                 .expect("restore readable policy");
             let mut settled = false;

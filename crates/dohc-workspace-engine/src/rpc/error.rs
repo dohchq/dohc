@@ -437,8 +437,6 @@ fn map_runtime_inner(error: &RuntimeError) -> WireError {
         RuntimeError::HeldReadTooLarge => {
             return WireError::new(ErrorCode::PayloadTooLarge, "held-read-too-large");
         }
-        // The store closed with a held read's reader still open; its files
-        // stay as they are until it closes. Ask again.
         RuntimeError::StoreInUse => {
             return WireError::new(ErrorCode::Overloaded, "store-in-use");
         }
@@ -1455,9 +1453,6 @@ mod tests {
             ))),
             RuntimeError::Sync(SyncError::Storage(StorageError::FileLocked)),
             RuntimeError::Search(SearchError::Store(StorageError::FileLocked)),
-            // The search index's other carrier: a raw rusqlite failure that
-            // never passed through this taxonomy, so it has no variant to
-            // match and is asked about its result code directly.
             RuntimeError::Search(SearchError::Storage(rusqlite::Error::SqliteFailure(
                 rusqlite::ffi::Error::new(5), // SQLITE_BUSY
                 Some("database is locked".to_owned()),
@@ -1868,10 +1863,6 @@ mod tests {
             dohc_engine_protocol::Retryability::No,
             "a blob that exceeds a fixed ceiling never succeeds on retry"
         );
-        // One condition must not surface under two codes depending on which
-        // layer refused it. Latent today, because relay pulls convert the
-        // ingest refusal before it reaches here; pinned so a second caller
-        // cannot reintroduce the split.
         assert_eq!(
             map_sync_code(&SyncError::BlobTooLarge {
                 constraint: "MAX_CAPTURE_BINARY_FILE_BYTES",
