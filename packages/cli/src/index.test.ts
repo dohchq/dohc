@@ -33,7 +33,7 @@ it("lists live documents with each state and reason, and pages with the list's c
   const live = { ok: true, nextCursor: "notes/old.md", documents: [
     { path: "plan.md", objectId: "object-plan", status: "ready", canResume: false, quarantine: "stopping", storedOn: "this-computer", incident: "release:a:0" },
     { path: "held.md", objectId: "object-held", status: "unavailable", reason: "conflict-parent-withheld", canResume: false },
-    { path: "long.md", objectId: "object-long", status: "unavailable", reason: "live-history-over-budget", canResume: false },
+    { path: "long.md", objectId: "object-long", status: "unavailable", reason: "live-history-over-budget", canResume: true },
     { path: "failing.md", objectId: "object-failing", status: "unavailable", reason: "live-start-failing", failure: { word: "engine-refused", since: "2026-11-13T01:00:00.000Z" }, canResume: true },
     { path: "old.md", objectId: "object-old", status: "retired", canResume: true, deferredStop: { unsentEdits: 1, editable: false } },
   ] };
@@ -42,7 +42,7 @@ it("lists live documents with each state and reason, and pages with the list's c
     .toEqual({ exitCode: 0, stdout: [
       "plan.md · live · kept edits stopping",
       "held.md · can't resume",
-      "long.md · history too long",
+      "long.md · history too long · can resume",
       "failing.md · can't start · server's reason engine-refused since 2026-11-13T01:00:00.000Z · can resume",
       "old.md · stopped · can resume · Stop waits for 1 unsent edit",
       "More documents; use --cursor notes/old.md",

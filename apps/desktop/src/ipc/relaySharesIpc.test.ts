@@ -408,9 +408,9 @@ describe("owner live document enrollment", () => {
   });
 
   // Proves: a deferred Stop offers Resume on a document whose server copy
-  // is missing an owner edit, since a Resume retries it, but not on one whose
-  // conflict parent is withheld.
-  it.each([["live-edit-unadmitted", true], ["conflict-parent-withheld", false]] as const)("offers Resume for a deferred Stop with %s: %s",async (reason, canResume) => {
+  // is missing an owner edit, or whose history is too long to check, since a
+  // Resume tries it again, but not on one whose conflict parent is withheld.
+  it.each([["live-edit-unadmitted", true], ["live-history-over-budget", true], ["conflict-parent-withheld", false]] as const)("offers Resume for a deferred Stop with %s: %s",async (reason, canResume) => {
     const h=harness();
     h.localStops.mockResolvedValue([{state:"released",binding:null,document:{mainVersionId:"main",objectId:"object",currentPath:"edited.md"},retirementOwed:false,relayDatabaseNamespace:"relay",deferred:{unsentEdits:1,editable:true}}]);
     h.request.mockImplementation(async (_credentials,path)=>path.includes("retired=1")
@@ -504,9 +504,8 @@ describe("owner live document enrollment", () => {
         {path: "diverged.md", objectId: "diverged", status: "unavailable", reason: "session-host-diverged", canResume: false},
         // A Resume adds an edit made while live editing was off to the server's copy.
         {path: "edited.md", objectId: "edited", status: "unavailable", reason: "live-edit-unadmitted", canResume: true},
-        // A Resume fails the same way because ordinary edits never give the document a new base.
-        {path: "long.md", objectId: "long", status: "unavailable", reason: "live-history-over-budget", canResume: false},
-        // The server keeps trying; a Resume tries now.
+        // The server keeps trying both; a Resume tries now.
+        {path: "long.md", objectId: "long", status: "unavailable", reason: "live-history-over-budget", canResume: true},
         {path: "failing.md", objectId: "failing", status: "unavailable", reason: "live-start-failing", failure: {word: "engine-refused", since: "2026-11-13T01:00:00.000Z"}, canResume: true},
         // A newer server's reason this build doesn't know keeps the row, by its status alone.
         {path: "newer.md", objectId: "newer", status: "unavailable", canResume: false},

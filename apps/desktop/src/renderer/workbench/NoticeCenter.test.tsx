@@ -1543,11 +1543,12 @@ describe("notice center", () => {
       title: "Live editing stopped",
       body: "The server hasn't applied an edit to a document in this workspace. You can keep editing it in dohc. People you shared it with can't edit it live. Open Live documents to resume live editing.",
     },
-    // Resume fails the same way because ordinary edits never give the document a new base.
+    // The server keeps trying it too, so it shows the retry mark.
     {
       reason: "live-history-over-budget" as const,
       title: "Live editing can't start",
-      body: "A document in this workspace has too much edit history for the server to check, so live editing can't start for it. Your edits are saved and keep syncing. Open Live documents to see which document.",
+      body: "A document in this workspace has too much edit history for the server to check, so live editing can't start for it. The server keeps trying. Your edits are saved and keep syncing. Open Live documents to see which document.",
+      icon: "refresh-cw",
     },
     // The server keeps trying it, so it keeps the retry mark.
     {
