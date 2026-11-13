@@ -1375,7 +1375,7 @@ describe("server owner peer lifecycle", () => {
     }
   });
 
-  // The list's head lets a pass skip a note's connection; a head that missed an edit costs at most OWNER_FULL_PASS_MS.
+  // The list's head lets a pass skip a note's connection; a head that missed an edit lasts until the note's first turn after OWNER_FULL_PASS_MS.
   it("passes the list's head after a note's full pass, and opens the connection again every few minutes and after a failed pass", async () => {
     let head = 7;
     const { f, credentials } = await quarantinedOwner([
@@ -1417,7 +1417,7 @@ describe("server owner peer lifecycle", () => {
       expect(await nextPlanHead()).toBe(7);
       head = 9;
       expect(await nextPlanHead()).toBe(9);
-      // The head stayed put while an edit arrived: the note still opens within OWNER_FULL_PASS_MS.
+      // The head stayed put while an edit arrived: the note's first turn after OWNER_FULL_PASS_MS still opens.
       nowMs += OWNER_FULL_PASS_MS;
       expect(await nextPlanHead()).toBe("full");
       expect(await nextPlanHead()).toBe(9);

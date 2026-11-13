@@ -32,6 +32,8 @@ interface NativeOwnerDeliveryPassOptions {
   /**
    * The server list's `head` for this note. When this computer has applied exactly that far and
    * holds no edit for it, the pass returns "empty" without opening the note's connection.
+   * Equal numbers can still differ in content, as after the server restores an older backup;
+   * the caller's periodic full pass covers that.
    */
   serverHead?: number;
 }

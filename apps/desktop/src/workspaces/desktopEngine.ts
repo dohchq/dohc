@@ -842,8 +842,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                       if (!documents.some((listed) => listed.binding.objectId === objectId))
                         fullPasses.delete(objectId);
                     fullOwnerPasses.set(workspaceId, fullPasses);
-                    // A head the list got wrong costs at most OWNER_FULL_PASS_MS: each note still
-                    // opens its connection that often, and after any failed pass.
+                    // A head the list got wrong lasts until the note's first turn after
+                    // OWNER_FULL_PASS_MS: that turn, and any turn after a failed pass, opens the connection.
                     const passStartedMs = Date.now(),
                       sinceFullMs =
                         passStartedMs - (fullPasses.get(document.binding.objectId) ?? -Infinity);
