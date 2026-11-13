@@ -134,8 +134,8 @@ The line at the foot of the chat shows one state for each agent, with how long i
 
 | State | Words | Controls for the owner |
 | --- | --- | --- |
-| The computer is off or unreachable | `Waiting for ICE-PC` | |
-| T3 Code is not running there | `Waiting for T3 Code on ICE-PC` | |
+| The computer is off or unreachable | `Waiting for Mac mini` | |
+| T3 Code is not running there | `Waiting for T3 Code on Mac mini` | |
 | Agents are paused | `Paused` | Resume |
 | Forwarded, behind other work | `2 in line` | |
 | Working | `Working` | Open in T3 Code |
@@ -273,7 +273,7 @@ A sketch. Chat, settings, and the states above depend on this shape and on nothi
 Each release ships when it is ready. Each needs its own proof on a real tool, not only on a stand-in.
 
 1. **T3 Code on one computer.** The T3 Code tool, Add agent and the agent's page, forwarding with the note, the states, the reminder, Answer here on that computer, `--workspace` in the CLI, and workspaces for an agent. Its first step is the trial this plan did not run. Forward from a prepared desktop to a scratch T3 Code thread and watch the reply arrive in chat.
-2. **T3 Code threads on linked machines.** The introduction for such a thread gives the agent its personal agent link. dohc ties the identity that link signs in to the agent in Settings. `dohc_post_channel` gains decisions, closing a decision, and work reports. The link is a credential that sits in the agent thread's transcript, so four rules hold. Its reach is that agent and the workspaces it serves. A post made with it is never forwarded. Remove on the agent's page revokes it. Turning off a workspace takes that workspace out of the link's reach, and the link stays. Pointing the agent at another thread replaces the link, and the new thread's introduction carries the new one.
+2. **T3 Code threads on linked machines.** The introduction for such a thread gives the agent its personal agent link. dohc ties the identity that link signs in to the agent in Settings. `dohc_post_channel` gains decisions, closing a decision, and work reports. The link is a credential that sits in the agent thread's transcript, so four rules hold. Its reach is that agent and the workspaces it serves. A post made with it is never forwarded. Remove on the agent's page revokes it. Turning off a workspace takes that workspace out of the link's reach, and the link stays. Pointing the agent at another thread revokes the link and issues a new one, which the new thread's introduction carries.
 3. **Claude Code and Codex.** Agent threads resumed for each message, a new one or a pasted session id, the switch for Your command, and fresh runs kept for automations. It starts with the two-writers test.
 4. **Other devices.** A computer declares the agents whose threads it holds, so a phone message wakes it. Answer here on other devices. This changes who can be named as a wake target in `apps/desktop/src/chatWakes`, which is an authorization change to a contract the phone app work owns. Agree it with that work first.
 5. **Other people.** Requests with Allow and Decline, the list on the agent's page, and the second confirmation for link holders. It depends on release 4.
