@@ -579,6 +579,8 @@ export async function startServiceLiveHost(options: {
   // Attached workspaces and hosted documents, as `update` last left them.
   const members = new Map<string, { handle: string; workspace: ServiceWorkspace }>();
   const hosted = new Map<string, { target: ServiceActivationTarget; objectId: string }>();
+  // Hosted documents whose activation has not finished: since when, and the reason last logged and when.
+  const waiting = new Map<string, { since: number; shown?: string; shownAt?: number }>();
   // Hosted documents that left the hosted set. Passes settle, publish and unload them.
   const leaving = new Set<string>();
   // Leaving documents an earlier daemon may have left unsettled. Each resumes its retained activation before it unloads.
@@ -1432,6 +1434,7 @@ export async function startServiceLiveHost(options: {
         };
         const unhost = (key: string) => {
           hosted.delete(key);
+          waiting.delete(key);
           leaving.delete(key);
           recovering.delete(key);
           parking.delete(key);
@@ -3004,6 +3007,33 @@ export async function startServiceLiveHost(options: {
             lastError: string | undefined,
             lastIdleError: string | undefined,
             lastSlowPassAt: number | undefined;
+          // A document whose activation has not finished for a minute names its latest reason once, and again at most once a
+          // minute while that reason changes. A blocked document has its own line.
+          const noteWaiting = (
+            target: ServiceActivationTarget,
+            outcome: { kind: string; reason?: string },
+          ) => {
+            const key = JSON.stringify([target.workspaceId, target.path]);
+            if (outcome.kind === "done" || activation!.blocked(target) !== undefined) {
+              waiting.delete(key);
+              return;
+            }
+            const at = now(),
+              reason = outcome.reason ?? outcome.kind,
+              state = waiting.get(key) ?? { since: at };
+            waiting.set(key, state);
+            if (at - state.since < 60_000 || reason === state.shown) return;
+            if (state.shownAt !== undefined && at - state.shownAt < 60_000) return;
+            state.shown = reason;
+            state.shownAt = at;
+            try {
+              console.error(
+                `Live editing is waiting. workspace ${target.workspaceId} object ${hosted.get(key)?.objectId ?? "unknown"} ${reason}`,
+              );
+            } catch {
+              /* Reporting must not stop activation. */
+            }
+          };
           const pass = () =>
             withDeadline(signal, config.activation!.passDeadlineMs, async (passSignal) => {
               const bounds = config.activation!,
@@ -3155,6 +3185,7 @@ export async function startServiceLiveHost(options: {
                       catchUp,
                     );
                     timed.outcome = outcome.kind === "done" ? "done" : "pending";
+                    noteWaiting(target, outcome);
                   } finally {
                     timed.ms = Math.round(now() - startedAt);
                   }

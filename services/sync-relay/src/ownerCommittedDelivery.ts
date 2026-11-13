@@ -419,7 +419,8 @@ export class OwnerCommittedDelivery {
             continue;
           }
           if (result.status === "pending" && typeof result.reason === "string") {
-            pendingReason = "Owner application did not commit.";
+            // The engine's reason is one of its fixed words, so the log can name it.
+            pendingReason = `Owner application did not commit: ${result.reason}.`;
             break;
           }
           if (result.status !== "applied") throw new Error("Owner application did not commit.");
