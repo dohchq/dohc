@@ -6994,6 +6994,7 @@ it("retries an activation that keeps running past its pass deadline only after e
   const gaps = reads.slice(1).map((at, index) => at - reads[index]!);
   expect(gaps.length).toBeGreaterThanOrEqual(5);
   expect(gaps.length).toBeLessThanOrEqual(6);
+  expect(gaps[0]).toBeLessThanOrEqual(paced.poll);
   gaps.slice(1).forEach((gap, index) => {
     expect(gap).toBeGreaterThanOrEqual(1000 * 2 ** index);
     expect(gap).toBeLessThanOrEqual(1000 * 2 ** index + paced.poll);
