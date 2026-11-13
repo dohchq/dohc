@@ -26,8 +26,8 @@ export interface ServeFetchHandlerOptions {
 }
 
 /**
- * The request signal's abort reason when the client closed the connection.
- * A connection the server closes itself, as at shutdown, aborts without it.
+ * The request signal's abort reason when its connection closes while the server is listening, as when the client leaves.
+ * A connection closed at shutdown, after the server stops listening, aborts without it.
  */
 export class ClientClosedRequest extends DOMException {
   constructor() {
