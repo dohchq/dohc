@@ -8007,23 +8007,40 @@ it("serves an editor that opens a note on an idle host at once, and runs no pass
   expect(held()).toBe(true);
 });
 
-// What the host sees of an owner's desktop connection that delivers nothing: the owner route counts the connection,
-// captures the note, which drains it, the session drains it again as it opens its sync, and the connection closes.
-// The session's read of the applied state is left out: the test engine does not answer it.
-const idleOwnerConnection = async (o: Enrolled) => {
-  const close = liveEditors(o.f.storage).acquire(o.sibling);
+// Has the test engine answer a connection's two reads of what the host applied: its opening sync, and the read after
+// it, which finds nothing new.
+const answerConnectionReads = (o: Enrolled) => Object.assign(o.client(), {
+  openLiveAppliedSync: vi.fn(async () => ({binding: o.binding, position: {journalCursor: 0, eventCount: 0}, observedLocalYDocHeadSequence: 0,
+    hostVector: Buffer.from([0]), missingStateUpdate: Buffer.alloc(0)})),
+  readNextLiveApplied: vi.fn(async () => null)});
+// What the host sees of an owner's desktop connection that delivers nothing. The owner route counts the connection
+// and captures the note, which drains it. The session drains it again and reads its opening sync. It then reads what
+// was applied once now and once after each change notice for the note, as its feed does, until the returned close.
+// The reads go through the client the capture gave, with the host's request numbers, as a session's do.
+const openIdleOwnerConnection = async (o: Enrolled) => {
+  const release = liveEditors(o.f.storage).acquire(o.sibling);
   try {
-    const native = await o.host.captureNative(o.binding);
+    const native = await o.host.captureNative(o.binding), signal = new AbortController().signal;
+    const request = () => ({id: native.nextRequestId(), workspace: native.workspace, registrationId: native.registrationId, deadlineMs: native.deadlineMs});
     await native.drain(o.document);
-  } finally {close();}
+    const opened = await native.client.openLiveAppliedSync(request(), Buffer.from([0]), {maxInputBytes: 1_000, maxOutputBytes: 10_000}, signal);
+    const read = () => {void native.client.readNextLiveApplied(request(), opened.position, 10_000, signal).catch(() => {});};
+    const unsubscribe = native.changes.subscribe(read, o.document);
+    read();
+    return () => {unsubscribe(); release();};
+  } catch (error) {release(); throw error;}
 };
 
 // An idle desktop with a live note opens an owner connection about every 2 s and closes it. Each one counted as an
 // editor change and asked for a pass, so the pause between passes never grew on a server with one desktop connected.
-// Proves: with a desktop that reconnects every 2 s and delivers nothing, the pause grows to its idle interval and
-// stays there.
+// A connection also reads what the host applied when it opens and after every pass that visits its note, and each
+// read took a request number no idle pass takes, so a pass beside an open connection was never idle either.
+// Proves: with a desktop that reconnects every 2 s and delivers nothing, and whose connection stays open until the
+// next one, the pause grows to its idle interval and stays there.
 it("lets the pause grow to its idle interval while an idle desktop reconnects every two seconds", async () => {
-  const paced = pacedPasses(), o = await enrolledServiceHost({paced, frameChanges: true});
+  const paced = pacedPasses(), o = await enrolledServiceHost({paced, frameChanges: true}), engine = answerConnectionReads(o);
+  let close = () => {};
+  cleanup.push(async () => close());
   // How long the pause the host waits in has left, once it waits in one.
   const resting = () => vi.waitFor(() => {const left = paced.resting(); expect(left).toBeDefined(); return left!;}, {interval: 1, timeout: 5_000});
   const pauses: number[] = [];
@@ -8036,9 +8053,12 @@ it("lets the pause grow to its idle interval while an idle desktop reconnects ev
       continue;
     }
     paced.clock.advance(next);
-    await idleOwnerConnection(o);
+    close();
+    close = await openIdleOwnerConnection(o);
     connections++; next += 2_000;
   }
+  // Each pass visited the note beside an open connection, whose feed read after it.
+  expect(engine.readNextLiveApplied.mock.calls.length).toBeGreaterThan(connections);
   console.info(`Idle desktop reconnecting every 2 s: the pauses between passes were ${pauses.join(", ")} ms`);
   expect(pauses.slice(-5)).toEqual(Array.from({length: 5}, () => paced.ceiling));
   expect(o.host.isDocumentReady(o.document)).toBe(true);
@@ -8059,7 +8079,8 @@ it("settles an edit a connection applies on an idle host at once, with the fixed
   let passes = 0;
   o.f.passEnds.add(() => {passes++;});
   o.passes.deliver = true;
-  await idleOwnerConnection(o);
+  answerConnectionReads(o);
+  (await openIdleOwnerConnection(o))();
   expect(o.applied.has(edit.deliveryId)).toBe(true);
   await vi.waitFor(() => expect(engineParams(o, "liveApplication.settle").at(-1)).toMatchObject({terminalReceipt: edit}));
   expect(o.tip()).toEqual(edit);

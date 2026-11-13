@@ -219,6 +219,11 @@ interface HostedAttachment {
 }
 // The engine requests a pass sends when it finds nothing to do: it asks for each document's waiting owner edits and pushes each workspace.
 const IDLE_PASS_REQUESTS = new Set(["liveApplication.ownerState", "sync.push"]);
+// The two reads a live connection makes of what the host applied: its opening sync, and the read after each change
+// notice for its document, which every pass that visits the document raises. Each takes one request number and
+// changes nothing a pass acts on, so it counts with the requests an idle pass sends. Otherwise a pass that ran
+// beside an open connection would never be idle.
+const CONNECTION_READS = new Set<PropertyKey>(["openLiveAppliedSync", "readNextLiveApplied"]);
 // Whether the departed list of a pull numbered at least `required` reached the document; for `goneSince`, without listing it.
 const reachedSince = (attached: HostedAttachment, objectId: string, required: number) => (attached.reached.get(objectId)?.pull ?? 0) >= required;
 const goneSince = (attached: HostedAttachment, objectId: string, required: number) =>
@@ -514,7 +519,8 @@ export async function startServiceLiveHost(options: {
       deadlineMs: config.client.requestDeadlineMs, signal, retire: abort}) : native;
     // Counts each request sent through the client, and those an idle pass sends. A request the host numbers takes one of
     // its numbers whichever client method sends it. One a caller numbers itself, as the automation ledger's are, takes
-    // none and is counted here alone. A pass sent only idle requests when all three counts moved alike.
+    // none and is counted here alone. A pass sent only idle requests when all three counts moved alike. A connection's
+    // read is numbered by its caller and sent by its own client method, so it is counted as sent and as idle here.
     const sendRequest: EngineClient["sendRequest"] = (request, ...rest) => {
       sentRequests++;
       if (IDLE_PASS_REQUESTS.has(request.method)) idleRequests++;
@@ -523,7 +529,9 @@ export async function startServiceLiveHost(options: {
     const client = new Proxy(queued, {get(target, property) {
       if (property === "sendRequest") return sendRequest;
       const value: unknown = Reflect.get(target, property, target);
-      return typeof value === "function" ? value.bind(target) : value;
+      if (typeof value !== "function") return value;
+      if (!CONNECTION_READS.has(property)) return value.bind(target);
+      return (...args: unknown[]): unknown => {sentRequests++; idleRequests++; return value.apply(target, args);};
     }});
     if (signal.aborted) throw new Error("Service host startup cancelled.");
     const discovery = yield* Effect.promise(() => client.sendRequest({ id: nextRequestId(), method: "liveApplication.hosts", params: {}, deadlineMs: config.client.requestDeadlineMs }));
