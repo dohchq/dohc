@@ -1,4 +1,8 @@
-import { NOTICE_READ_RETENTION_MS, NOTICE_WAIT_MAX_MS } from "@dohc/workspace-contracts/relay";
+import {
+  NOTICE_DISMISSED_RETENTION_MS,
+  NOTICE_READ_RETENTION_MS,
+  NOTICE_WAIT_MAX_MS,
+} from "@dohc/workspace-contracts/relay";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AccountState } from "./account";
 import type { AccountWorkspace } from "./api";
@@ -129,6 +133,8 @@ type MemoryFiles = NoticeFiles & {
   hold: { beforeList?: ReturnType<typeof gate>; beforeMarks?: ReturnType<typeof gate> };
   /** An ordered save's list write fails. */
   failList: boolean;
+  /** A list save waits for its debounce, which a closed app never lets run. */
+  deferList: boolean;
 };
 
 /** Files in memory, where a write lands at once unless the test holds it. */
@@ -140,8 +146,11 @@ function memoryFiles(): MemoryFiles {
     marks,
     hold: {},
     failList: false,
+    deferList: false,
     readList: async (scope) => lists.get(scope) ?? null,
-    writeList: (scope, rows) => void lists.set(scope, rows()),
+    writeList(scope, rows) {
+      if (!files.deferList) lists.set(scope, rows());
+    },
     readMarks: async (scope) => marks.get(scope) ?? null,
     async writeMarks(scope, list) {
       marks.set(scope, list);
@@ -180,6 +189,12 @@ const OK = { ok: true, dismissed: [] };
 const scope = noticeScope({ origin: ORIGIN, userId: "u1" });
 /** The tests' clock: after the fixtures were made and before they expire (`relayRow`). */
 const NOW = 5_000_000;
+/** What Done, taken at NOW, left a fixture row as. */
+const DONE_RESULT = {
+  readAtMs: null,
+  dismissedAtMs: NOW,
+  expiresAtMs: NOW + NOTICE_DISMISSED_RETENTION_MS,
+};
 
 let stores: NoticeStore[] = [];
 afterEach(() => {
@@ -508,7 +523,7 @@ describe("marks on the account's Notices", () => {
       first.store.stop();
       files.hold = {};
       expect(files.marks.get(scope)).toEqual([
-        { noticeId: "a", mark: "dismissed", atMs: NOW, taken: 1 },
+        { noticeId: "a", mark: "dismissed", atMs: NOW, taken: 1, result: DONE_RESULT },
       ]);
 
       const second = setup({ files });
@@ -525,6 +540,80 @@ describe("marks on the account's Notices", () => {
     },
   );
 
+  it.each(["beforeList", "beforeMarks"] as const)(
+    "keeps a Done whose row the feed changed before its answer, across a relaunch stopped %s",
+    async (point) => {
+      const files = memoryFiles();
+      const first = setup({ files });
+      first.store.resume();
+      const held = await reply(first.server, first.server.read(), [relayRow("a")], {
+        replace: true,
+      });
+      files.deferList = true;
+      first.store.mark("a", "dismissed");
+      const done = await first.server.marks();
+      // The relay took Done, and the held read brings the row's new sequence before Done's answer.
+      await reply(first.server, held, [relayRow("a", { changeSeq: 2, dismissedAtMs: NOW })], {
+        nextCursor: "2",
+      });
+      expect(files.lists.get(scope)).toMatchObject([{ changeSeq: 1, dismissedAtMs: null }]);
+      const stop = gate();
+      files.hold[point] = stop;
+      done.answer(200, { ok: true, dismissed: ["a"] });
+      await stop.reached;
+      first.store.stop();
+      files.hold = {};
+      files.deferList = false;
+
+      // Offline: the relaunch's read is never answered.
+      const second = setup({ files });
+      second.store.resume();
+      await second.server.read();
+      expect(second.ids()).toEqual([]);
+      second.store.mark("b", "read");
+      expect((await second.server.marks()).body).toEqual({
+        marks: [{ noticeId: "b", mark: "read" }],
+      });
+    },
+  );
+
+  const replays = (["read", "dismissed"] as const).flatMap((mark) =>
+    (["beforeList", "beforeMarks"] as const).flatMap((point) =>
+      (["before", "after"] as const).map((when) => [mark, point, when] as const),
+    ),
+  );
+  it.each(replays)(
+    "replays a taken %s stopped %s with the expiry its answer set, relaunched %s it",
+    async (mark, point, when) => {
+      let clock = NOW;
+      const files = memoryFiles();
+      const first = setup({ files, now: () => clock });
+      first.store.resume();
+      await reply(first.server, first.server.read(), [relayRow("a")], { replace: true });
+      first.store.mark("a", mark);
+      const stop = gate();
+      files.hold[point] = stop;
+      (await first.server.marks()).answer(200, OK);
+      await stop.reached;
+      first.store.stop();
+      files.hold = {};
+
+      const retention = mark === "read" ? NOTICE_READ_RETENTION_MS : NOTICE_DISMISSED_RETENTION_MS;
+      const expires = NOW + retention;
+      clock = when === "before" ? expires - 1 : expires + 1;
+      const second = setup({ files, now: () => clock });
+      second.store.resume();
+      await second.server.read();
+      if (when === "after") {
+        expect(second.ids()).toEqual([]);
+        expect(files.lists.get(scope)).toEqual([]);
+      } else {
+        expect(second.ids()).toEqual(mark === "read" ? ["a"] : []);
+        expect(files.lists.get(scope)).toMatchObject([{ noticeId: "a", expiresAtMs: expires }]);
+      }
+    },
+  );
+
   it("keeps a taken mark in the marks file while the list can't be saved", async () => {
     const files = memoryFiles();
     const { server, store } = setup({ files });
@@ -536,7 +625,7 @@ describe("marks on the account's Notices", () => {
     store.mark("b", "read");
     await server.marks();
     expect(files.marks.get(scope)).toEqual([
-      { noticeId: "a", mark: "dismissed", atMs: NOW, taken: 1 },
+      { noticeId: "a", mark: "dismissed", atMs: NOW, taken: 1, result: DONE_RESULT },
       { noticeId: "b", mark: "read", atMs: NOW },
     ]);
   });

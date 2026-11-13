@@ -43,9 +43,10 @@ import type { WorkspaceList, WorkspaceListStore } from "./workspaceList";
 // Marks. Each mark waits in order, on disk, until the server takes it. One request is on its way at a time, and sends
 // the oldest waiting marks in the order they were made, so a later mark always lands after an earlier one, even when
 // the earlier one's answer was lost and both go again. The list shows each row with its waiting marks applied. A mark
-// the server took is applied to the row held then, unless a newer change to the row arrived meanwhile. It stays on
-// disk, marked taken, until the list file holding its effect has landed, so a relaunch in between applies it to the
-// list the file had and never sends it again.
+// the server took is applied to the row held then, unless a newer change to the row arrived meanwhile. Either way it
+// stays on disk, marked taken with what it left the row as sent (expiry included), until a list saved after it has
+// landed. A relaunch in between gives the list file's row that recorded result, if the row is still the one sent, and
+// never sends the mark again.
 
 export const NOTICE_RETRY_MS = 1000;
 export const NOTICE_RETRY_MAX_MS = 30_000;
@@ -59,9 +60,20 @@ export interface PendingMark {
   readonly atMs: number;
 }
 
-/** A mark the server took, kept until the list file holds its effect: the row's change sequence it applies to. */
+/** What a mark the server took left its row as, expiry included. */
+interface MarkResult {
+  readonly readAtMs: number | null;
+  readonly dismissedAtMs: number | null;
+  readonly expiresAtMs: number;
+}
+
+/**
+ * A mark the server took, kept until a list file saved after it has landed. `taken` is the change sequence of the row
+ * it applied to when sent, and `result` what it left that row as; both null when the phone held no such row.
+ */
 interface TakenMark extends PendingMark {
-  readonly taken: number;
+  readonly taken: number | null;
+  readonly result: MarkResult | null;
 }
 
 /** The longest wait a timer takes; a later expiry is checked again then. */
@@ -142,8 +154,22 @@ function savedMark(item: unknown): PendingMark | TakenMark | null {
     return null;
   const mark = { noticeId: item.noticeId, mark: item.mark, atMs: item.atMs };
   if (item.taken === undefined) return mark;
-  return typeof item.taken === "number" && Number.isSafeInteger(item.taken)
-    ? { ...mark, taken: item.taken }
+  const { taken, result } = item;
+  if (taken !== null && !(typeof taken === "number" && Number.isSafeInteger(taken))) return null;
+  if (result === null) return { ...mark, taken, result };
+  return isFields(result) &&
+    (result.readAtMs === null || typeof result.readAtMs === "number") &&
+    (result.dismissedAtMs === null || typeof result.dismissedAtMs === "number") &&
+    typeof result.expiresAtMs === "number"
+    ? {
+        ...mark,
+        taken,
+        result: {
+          readAtMs: result.readAtMs,
+          dismissedAtMs: result.dismissedAtMs,
+          expiresAtMs: result.expiresAtMs,
+        },
+      }
     : null;
 }
 
@@ -424,21 +450,40 @@ export function createNoticeStore(options: {
   }
 
   /**
-   * Applies a mark the server took to the row held, unless a newer change to it arrived after it was sent. Resolves
-   * whether `rows` held it then.
+   * Records what a mark the server took left its row as, from the row as it was sent, after any earlier mark of the
+   * same request. Applies that to the row held only if no newer change to it arrived after it was sent.
    */
-  function taken(mark: PendingMark, seqAtSend: number | undefined): boolean {
-    const held = rows.get(mark.noticeId)?.changeSeq === seqAtSend && seqAtSend !== undefined;
+  function taken(mark: PendingMark, sent: NoticeRecord | undefined): TakenMark {
+    if (!sent) return { ...mark, taken: null, result: null };
+    const next = applyMark(sent, mark.mark, mark.atMs);
+    const result: MarkResult = {
+      readAtMs: next.readAtMs,
+      dismissedAtMs: next.dismissedAtMs,
+      expiresAtMs: Math.max(next.expiresAtMs, now() + retention(next)),
+    };
     for (const target of [rows, building]) {
       const row = target?.get(mark.noticeId);
-      if (!target || !row || row.changeSeq !== seqAtSend) continue;
-      const next = applyMark(row, mark.mark, mark.atMs);
-      target.set(mark.noticeId, {
-        ...next,
-        expiresAtMs: Math.max(next.expiresAtMs, now() + retention(next)),
-      });
+      if (target && row && row.changeSeq === sent.changeSeq)
+        target.set(mark.noticeId, { ...row, ...result });
     }
-    return held;
+    return { ...mark, taken: sent.changeSeq, result };
+  }
+
+  /**
+   * After a relaunch, applies a taken mark's recorded result to the list file's row, if that row is still the one it
+   * applied to and doesn't already show it. Its expiry is the one the server's answer set, never one from now.
+   */
+  function replay(mark: TakenMark) {
+    const row = rows.get(mark.noticeId);
+    const result = mark.result;
+    if (!result || !row || row.changeSeq !== mark.taken) return;
+    if (
+      row.readAtMs === result.readAtMs &&
+      row.dismissedAtMs === result.dismissedAtMs &&
+      row.expiresAtMs === result.expiresAtMs
+    )
+      return;
+    rows.set(mark.noticeId, { ...row, ...result });
   }
 
   async function send() {
@@ -450,9 +495,8 @@ export function createNoticeStore(options: {
       while (marks.length > 0 && running && live()) {
         // In order, with nothing folded together: a Read after an Undo needs the Undo's restore to land first.
         const batch = marks.slice(0, NOTICE_MARKS_PER_REQUEST);
-        const seqs = new Map(
-          batch.map((entry) => [entry.noticeId, rows.get(entry.noticeId)?.changeSeq]),
-        );
+        // Each row as sent, so a taken mark's result never builds on a newer change.
+        const sentRows = new Map(batch.map((entry) => [entry.noticeId, rows.get(entry.noticeId)]));
         let refused = false;
         try {
           await sendNoticeMarks(signIn.client, batch, everything.signal);
@@ -490,13 +534,15 @@ export function createNoticeStore(options: {
         // The sent marks go. Marks made meanwhile wait for the next request.
         const sent = new Set(batch);
         marks = marks.filter((entry) => !sent.has(entry));
+        // Every taken mark settles, whether or not a newer change to its row came first: the marks file records it as
+        // taken, then the list as it is now lands, then it leaves the marks file.
         if (!refused)
           for (const entry of batch) {
-            const seq = seqs.get(entry.noticeId);
-            if (taken(entry, seq) && known && seq !== undefined)
-              settling.push({ ...entry, taken: seq });
+            const sent = sentRows.get(entry.noticeId);
+            const mark = taken(entry, sent);
+            if (sent && mark.result) sentRows.set(entry.noticeId, { ...sent, ...mark.result });
+            if (known) settling.push(mark);
           }
-        // First the marks file records them as taken, then the list lands, then they leave the marks file.
         saveMarks();
         settle();
         publish();
@@ -540,19 +586,23 @@ export function createNoticeStore(options: {
       rows = new Map(found.map((row) => [row.noticeId, row]));
       known = true;
     }
-    // Marks made meanwhile come after the file's. A taken mark applies to the row the list file held when it was
-    // taken; one the list file already holds changes nothing.
+    // Marks made meanwhile come after the file's. A taken mark's recorded result applies to the list file's row, and
+    // settles again so a list saved after it lands before it leaves the marks file.
     const saved = savedMarks === null ? null : each(savedMarks, savedMark);
     const waiting: PendingMark[] = [];
     for (const entry of saved ?? []) {
       if (!("taken" in entry)) waiting.push(entry);
-      else if (found && taken(entry, entry.taken)) settling.push(entry);
+      else if (found) {
+        replay(entry);
+        settling.push(entry);
+      }
     }
     marks = [...waiting, ...marks];
     loaded = true;
+    // Shown first, so a row past its expiry goes before the list is saved.
+    followList();
     if (settling.length > 0) settle();
     else if (waiting.length !== (saved?.length ?? 0)) saveMarks();
-    followList();
     startPull();
     void send();
   }
