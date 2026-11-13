@@ -1496,13 +1496,9 @@ pub(super) fn materialize_relay_page_on_store(
         .filter(|(_, _, head)| *head)
         .map(|(_, change, _)| change.path.as_str())
         .collect();
-    // The paths whose queued projection writes a hosted replica ends once
-    // the page has brought their files to their heads.
-    let projected_paths: Vec<String> = if hosted {
-        target_paths.iter().map(|path| (*path).to_owned()).collect()
-    } else {
-        Vec::new()
-    };
+    // The paths whose queued projection writes end once the page has brought
+    // their files to their heads.
+    let projected_paths: Vec<String> = target_paths.iter().map(|path| (*path).to_owned()).collect();
     let spelling_aliases = case_alias_targets(
         page.iter().map(|(_, change, _)| change.path.as_str()),
         &target_paths,
@@ -1753,32 +1749,35 @@ pub(super) fn materialize_relay_page_on_store(
         for path in &deleted {
             remove_emptied_folders(store, root_dir, path, None);
         }
-        end_page_projection_writes(
-            store,
-            root_dir,
-            workspace_id,
-            self_writes,
-            &holds,
-            &projected_paths,
-            now_ms,
-        )?;
     }
+    end_page_projection_writes(
+        store,
+        root_dir,
+        workspace_id,
+        self_writes,
+        &holds,
+        &projected_paths,
+        now_ms,
+    )?;
     Ok(())
 }
 
-/// End the file writes this page's Y.Doc projections queued, on a hosted
-/// replica. Each projection a pull applies queues a write of its document's
-/// file that expects the head before it, and the page then brings the file
-/// to the newest head through a job of its own. Nothing runs the queued
-/// writes while the replica is up, and each later replay kept one earlier
-/// state beside the file as a conflict file (#3804). So once a path's file
-/// holds its head, its writes of earlier states are cancelled and the write
-/// of the head is replayed, which marks it complete without writing.
+/// End the file writes this page's Y.Doc projections queued. Only a server's
+/// copies call this page: its hosted replica and its automations copy. Each
+/// projection a pull applies queues a write of its document's file that
+/// expects the head before it, and the page then brings the file to the
+/// newest head through a job of its own. Nothing runs the queued writes while
+/// the copy is up, and each later replay kept one earlier state beside the
+/// file as a conflict file (#3804). So once a path's file holds its head, its
+/// writes of earlier states are cancelled and the write of the head is
+/// replayed, which marks it complete without writing.
 ///
 /// This runs after the page's own writes, in transactions of its own. A stop
-/// between the two leaves the writes queued over a file that holds its head,
-/// which every later replay ends the same way. A file that does not hold its
-/// head keeps its writes.
+/// between the two leaves the writes queued over a file that holds its head.
+/// On a hosted replica every later replay ends them the same way. The
+/// automations copy replays them at its next start, before the page comes
+/// again, so each write of an earlier state leaves a conflict file. A file
+/// that does not hold its head keeps its writes.
 fn end_page_projection_writes(
     store: &mut EngineStore,
     root_dir: &std::path::Path,
