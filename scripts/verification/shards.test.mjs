@@ -977,6 +977,35 @@ test("Boat build comparison survives unsuccessful or incomplete receipts", async
     }
     writeFileSync(path, original);
   }
+  // A part that never built, or that reports another commit, shows as an empty row beside the others.
+  for (const [mutate, error] of [
+    [record => { delete record.build; }, /worker-2 has no valid engine build identity/u],
+    [record => { record.commit = "other"; }, /requested commit/u],
+  ]) {
+    const path = join(root, "worker-2/result.json"), original = readFileSync(path, "utf8"), record = JSON.parse(original);
+    mutate(record);
+    writeFileSync(path, JSON.stringify(record));
+    await assert.rejects(aggregateCloud("js", root.replaceAll("\\", "/"), {env, outputDirectory,
+      readJobs: async () => assert.fail("receipt validation must fail before reading jobs")}), error);
+    const report = JSON.parse(readFileSync(join(outputDirectory, "js-result.json"), "utf8"));
+    assert.equal(report.buildIdentity.matched, false);
+    for (const kind of ["engine", "desktop"]) {
+      const rows = Object.fromEntries(report.buildIdentity.outputs[kind].map(row => [row.part, row.sha256]));
+      assert.equal(Object.keys(rows).length, CLOUD_SHAPES.boat.js + 1);
+      assert.equal(rows["worker-2"], null);
+      assert.equal(rows["worker-1"], "c".repeat(64));
+      assert.equal(rows["prepare-0"], buildReceipt()[kind].artifact);
+    }
+    writeFileSync(path, original);
+  }
+  // With no copies to compare, the receipt reports no match and names no difference.
+  const empty = join(root, "empty");
+  mkdirSync(empty);
+  await assert.rejects(aggregateCloud("js", empty.replaceAll("\\", "/"), {env, outputDirectory,
+    readJobs: async () => assert.fail("receipt validation must fail before reading jobs")}), /preparation receipt/u);
+  const none = JSON.parse(readFileSync(join(outputDirectory, "js-result.json"), "utf8")).buildIdentity;
+  assert.equal(none.matched, false);
+  assert.deepEqual(none.differingOutputs, []);
 });
 
 for (const [shapeName, shape] of Object.entries(CLOUD_SHAPES)) {
@@ -1165,7 +1194,8 @@ test(`${shapeName} Rust-only scheduling ignores skipped needs but requires evide
   const node = cloudJobGraph(shape)["javascript-workers"];
   const names = node.names;
   const placeholderName = node.skippedName;
-  for (const mode of ["placeholder", "missing", "partial", "wrong head", "wrong prefix", "named skips", "one named skip"]) {
+  // A Rust-only Boat run skips both JavaScript matrices, so it lists the placeholder twice.
+  for (const mode of ["placeholder", "missing", "partial", "wrong head", "wrong prefix", "named skips", "one named skip", ...(shapeName === "boat" ? ["both matrices skipped"] : [])]) {
     const original = withoutWaits(shape), workers = original.filter(job => names.includes(job.name));
     // A standard run retains the inactive Boat matrix's skipped row.
     const jobs = original.filter(job => !names.includes(job.name) && (shapeName === "standard" || job.name !== placeholderName));
@@ -1174,6 +1204,7 @@ test(`${shapeName} Rust-only scheduling ignores skipped needs but requires evide
       ? { ...job, conclusion: "skipped", started_at: null, completed_at: null } : job));
     else if (mode !== "missing") jobs.push({ name: mode === "wrong prefix" ? "Other ${{ matrix.shard }}" : placeholderName,
       head_sha: mode === "wrong head" ? "other-head" : commit, conclusion: mode === "partial" && !names.length ? "failure" : "skipped", status: "completed" });
+    if (mode === "both matrices skipped") jobs.push({ ...jobs.at(-1) });
     if (mode === "partial" && workers.length) jobs.push(workers[0]);
     const dependencyReady = mode === "one named skip" ? Math.max(ready, ...workers.slice(0, -1).map(job => Date.parse(job.completed_at))) : ready;
     for (const job of jobs.filter(job => /^Rust tests \d+$/u.test(job.name) || job.name === "engine gate")) {
@@ -1183,7 +1214,7 @@ test(`${shapeName} Rust-only scheduling ignores skipped needs but requires evide
     }
     const end = Date.parse(jobs[0].started_at) + 750_000;
     jobs.find(job => job.name === "engine gate").completed_at = new Date(end).toISOString();
-    const ignored = (shapeName === "boat" ? ["placeholder"] : ["placeholder", "named skips", "one named skip"]).includes(mode);
+    const ignored = (shapeName === "boat" ? ["placeholder", "both matrices skipped"] : ["placeholder", "named skips", "one named skip"]).includes(mode);
     const aggregateRun = aggregateCloud("rust", root.replaceAll("\\", "/"), { env, outputDirectory, now: () => end, readJobs: async () => jobs });
     if (ignored) await aggregateRun; else await assert.rejects(aggregateRun, /exceeding/u);
     const finalRun = verifyCompletedCloud("rust", { env, outputDirectory, readJobs: async () => jobs });

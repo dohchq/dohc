@@ -7,14 +7,15 @@ import { assertTaskCoverage } from "./shards.mjs";
 import { RUST_ARCHIVE_PROOFS, RUST_POLICY_STEPS, RUST_TEST_PROOFS } from "./cloud-rust.mjs";
 import { CLOUD_SHAPES, cloudShape, rustReaderShard } from "./cloud-shape.mjs";
 
-function javascriptBuildIdentity(records) {
-  const outputs = Object.fromEntries(["engine", "desktop"].map(kind => [kind, records.map(record => {
-    const sha256 = record.build?.[kind]?.artifact;
-    if (!/^[a-f0-9]{64}$/u.test(sha256 ?? "")) throw new Error(`JavaScript ${record.part} has no valid ${kind} build identity.`);
-    return { part: record.part, sha256 };
+// Every expected part gets a row, so a failed receipt shows a copy that is absent as well as one that differs.
+function javascriptBuildIdentity(records, shape) {
+  const parts = ["prepare-0", ...Array.from({ length: shape.js }, (_, index) => `worker-${index}`)];
+  const outputs = Object.fromEntries(["engine", "desktop"].map(kind => [kind, parts.map(part => {
+    const rows = records.filter(record => record.part === part), sha256 = rows.length === 1 ? rows[0].build?.[kind]?.artifact : undefined;
+    return { part, sha256: /^[a-f0-9]{64}$/u.test(sha256 ?? "") ? sha256 : null };
   })]));
-  const differingOutputs = Object.keys(outputs).filter(kind => new Set(outputs[kind].map(row => row.sha256)).size !== 1);
-  return { matched: !differingOutputs.length, differingOutputs, outputs };
+  const differingOutputs = Object.keys(outputs).filter(kind => new Set(outputs[kind].map(row => row.sha256).filter(Boolean)).size > 1);
+  return { matched: !differingOutputs.length && Object.values(outputs).every(rows => rows.every(row => row.sha256)), differingOutputs, outputs };
 }
 
 export function aggregateJavascript(records, shape = cloudShape()) {
@@ -33,7 +34,10 @@ export function aggregateJavascript(records, shape = cloudShape()) {
   const expected = inventory.map(id => ({ id }));
   assertTaskCoverage(expected, shards);
   if (records.filter(record => record.selfHostNative).length !== 1) throw new Error("The native delivery and restart proof did not produce its evidence.");
-  const buildIdentity = shape === CLOUD_SHAPES.boat ? javascriptBuildIdentity(records) : undefined;
+  const buildIdentity = shape === CLOUD_SHAPES.boat ? javascriptBuildIdentity(records, shape) : undefined;
+  for (const [kind, rows] of Object.entries(buildIdentity?.outputs ?? {})) {
+    for (const row of rows) if (!row.sha256) throw new Error(`JavaScript ${row.part} has no valid ${kind} build identity.`);
+  }
   return { tasks: expected.length, flaky: shards.flatMap(record => record.flaky ?? []), tests: shards.flatMap(record => record.tests), parts: records.map(({ part, seconds }) => ({ part, seconds })),
     ...(buildIdentity ? { buildIdentity } : {}) };
 }
@@ -94,7 +98,7 @@ function jobReadyAt(job, metadata, graph) {
     // Inactive matrices can share a skipped dependency's placeholder name.
     const inactive = Object.values(graph).filter(other => other !== graph[id] && !other.names.length && other.skippedName === skippedName).length;
     const skipped = sameHead.filter(dependency => dependency.conclusion === "skipped" && dependency.name === skippedName).length;
-    if (!present.length && skipped === inactive + 1) return [];
+    if (!present.length && skipped > inactive) return [];
     if (!names.length) return [null];
     return names.flatMap(name => {
       const matches = present.filter(dependency => dependency.name === name);
@@ -246,7 +250,7 @@ export async function aggregateCloud(scope, directory = ".agent-artifacts/verifi
   try {
     const records = [...globSync(`${directory}/**/result.json`)].map(path => JSON.parse(readFileSync(path, "utf8"))).filter(record => record.scope === scope);
     if (!["js", "rust"].includes(scope)) throw new Error(`Unknown distributed gate ${scope}.`);
-    if (scope === "js" && shape === CLOUD_SHAPES.boat) report.buildIdentity = javascriptBuildIdentity(records);
+    if (scope === "js" && shape === CLOUD_SHAPES.boat) report.buildIdentity = javascriptBuildIdentity(records.filter(record => record.commit === env.GITHUB_SHA), shape);
     if (!env.GITHUB_SHA || records.some(record => record.commit !== env.GITHUB_SHA)) throw new Error("The gate evidence does not cover the requested commit.");
     report.commit = env.GITHUB_SHA;
     Object.assign(report, scope === "js" ? aggregateJavascript(records, shape) : aggregateRust(records, shape));

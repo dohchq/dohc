@@ -103,7 +103,7 @@ Each JavaScript worker builds its own engine and desktop outputs while tests tha
 The engine gate builds its own Rust archive and runs every Rust test and the reader tests from it in one partition.
 Boat runners download no shared JavaScript build or Rust archive. Shared preparation still supplies both confinement jobs.
 The JavaScript aggregate compares the copies' output hashes and fails the gate if any differ.
-Its receipt retains the differing output names and each part's hashes.
+Its receipt retains the differing output names and each part's hashes, with an empty hash for a part that reported none.
 The shape runs 7 Boat jobs and 11 jobs in total, with at most 9 concurrent jobs.
 Selection, final verification, and both confinement jobs stay on GitHub's `ubuntu-24.04` image.
 Boat's Landlock ABI 4 lacks the ABI 5 and 6 features that compiler confinement requires.
