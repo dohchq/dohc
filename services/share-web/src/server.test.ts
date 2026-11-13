@@ -3,7 +3,7 @@ import {
   ACCOUNT_DELETION_PATH,
   ACCOUNT_DELETION_KEY_HEADER,
 } from "@dohc/security-contract/account-deletion";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -218,6 +218,59 @@ describe("share-web sessions", () => {
       expect(valid.headers.get("x-robots-tag")).toBe("noindex, nofollow, noarchive");
       expect(garbage.headers.get("x-robots-tag")).toBe("noindex, nofollow, noarchive");
       expect(await valid.text()).toBe(await garbage.text());
+    } finally {
+      await rm(viewerAssetsDir, { recursive: true, force: true });
+    }
+  });
+
+  it("lets browsers keep the viewer's hashed files and nothing else", async () => {
+    const viewerAssetsDir = await mkdtemp(join(tmpdir(), "dohc-share-web-cache-"));
+    try {
+      await mkdir(join(viewerAssetsDir, "assets", "fonts", "Virgil"), { recursive: true });
+      await writeFile(join(viewerAssetsDir, "index.html"), "page");
+      await writeFile(join(viewerAssetsDir, "assets", "link-AbC12_-9.js"), "script");
+      await writeFile(join(viewerAssetsDir, "assets", "fonts", "Virgil", "Virgil-Regular.woff2"), "font");
+      const handler = createShareWebHandler({
+        relayUrl: "http://relay.test",
+        publicHosts: new Set([HOST]),
+        fetchRelay: vi.fn(),
+        viewerAssetsDir,
+      });
+      const kept = await handler(request("/s/assets/link-AbC12_-9.js"));
+      expect([kept.status, await kept.text()]).toEqual([200, "script"]);
+      expect(kept.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+
+      const uncached = await Promise.all(
+        [
+          "/s",
+          `/s/${SECRET_ALPHA}`,
+          "/s/assets",
+          "/s/assets/",
+          "/s/assets/fonts",
+          "/s/assets/fonts/Virgil/Virgil-Regular.woff2",
+          "/s/assets/missing-AbC12_-9.js",
+          "/s/assets/%2e%2e/index.html",
+          "/s/edit/assets/link-AbC12_-9.js",
+          "/s/assets%2Flink-AbC12_-9.js",
+          `/s/assets/${SECRET_ALPHA}`,
+        ].map(async (path) => {
+          const served = await handler(request(path));
+          return [path, served.status, served.headers.get("cache-control")];
+        }),
+      );
+      expect(uncached).toEqual([
+        ["/s", 200, "private, no-store"],
+        [`/s/${SECRET_ALPHA}`, 200, "private, no-store"],
+        ["/s/assets", 200, "private, no-store"],
+        ["/s/assets/", 404, "private, no-store"],
+        ["/s/assets/fonts", 404, "private, no-store"],
+        ["/s/assets/fonts/Virgil/Virgil-Regular.woff2", 200, "private, no-store"],
+        ["/s/assets/missing-AbC12_-9.js", 404, "private, no-store"],
+        ["/s/assets/%2e%2e/index.html", 200, "private, no-store"],
+        ["/s/edit/assets/link-AbC12_-9.js", 404, "private, no-store"],
+        ["/s/assets%2Flink-AbC12_-9.js", 200, "private, no-store"],
+        [`/s/assets/${SECRET_ALPHA}`, 404, "private, no-store"],
+      ]);
     } finally {
       await rm(viewerAssetsDir, { recursive: true, force: true });
     }
