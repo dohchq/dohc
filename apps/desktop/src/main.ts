@@ -376,7 +376,7 @@ import { createChatRunnerLedger } from "./chatWakes/chatRunnerLedger";
 import { createChatRunnerRoster } from "./chatWakes/chatRunnerRoster";
 import { CHAT_RUNNER_COMPUTER_LABEL_MAX_CHARS, isChatWakeLine } from "@dohc/workspace-contracts/chat-wakes";
 import {
-  CHAT_WAKES_ON, chatWakeBackoffMs, createChatWakeLifetime, sleepUnlessAborted, type ChatWakeSession,
+  chatWakeBackoffMs, createChatWakeLifetime, sleepUnlessAborted, type ChatWakeSession,
 } from "./chatWakes/chatWakeLifetime";
 import type { AutomationChatMessage } from "@dohc/automation-executor/automation-chat";
 import { createAutomationEvaluator } from "@dohc/app-backend-runtime/automation";
@@ -1223,7 +1223,6 @@ const chatRunners = createChatRunnerRoster({
   log: (error) => console.error("[desktop] chat runners:", error),
 });
 const chatWakes = createChatWakeLifetime({
-  on: CHAT_WAKES_ON,
   intents: createChatWakeIntents(chatWakeIntentsFile()),
   roster: chatRunners,
   client: (wakeSession) => createChatWakeClient({ relay: wakeSession.relay }),
@@ -6362,7 +6361,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       void automationWakeConsumer.resume();
       // Reads the account without waiting for a window, so wakes start at login on an idle computer.
       chatWakes.start();
-      if (CHAT_WAKES_ON) void warmCredentialCache().catch((error: unknown) => console.error("[desktop] chat wake sign-in:", error));
+      void warmCredentialCache().catch((error: unknown) => console.error("[desktop] chat wake sign-in:", error));
       app.on("browser-window-focus", () => { resumeRunNow(); void automationWakeConsumer.resume(); chatWakes.resume(); });
       powerMonitor.on("resume", () => { void automationWakeConsumer.resume(); chatWakes.resume(); });
       powerMonitor.on("suspend", () => automationScheduler.suspended());

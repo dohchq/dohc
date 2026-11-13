@@ -189,7 +189,6 @@ function setup(over: Partial<ChatWakeLifetimeDeps> = {}, rows: ChatWakeIntent[] 
   const intents = memoryIntents(rows);
   const roster = fakeRoster(relay);
   const deps: ChatWakeLifetimeDeps = {
-    on: true,
     intents: intents.store,
     roster: roster.roster,
     client: vi.fn(relay.client),
@@ -210,19 +209,6 @@ const NOTHING_NEW = { applied: false, recovered: false } as const;
 const APPLIED = { applied: true, recovered: false } as const;
 
 describe("the chat wake lifetime", () => {
-  it("starts nothing while chat wakes are off", async () => {
-    const w = setup({ on: false });
-    w.lifetime.credentialsChanged(session("A"), true);
-    w.lifetime.start();
-    // The start transition has run.
-    await turn();
-    expect(w.deps.client).not.toHaveBeenCalled();
-    expect(w.intents.state.lists).toBe(0);
-    await w.lifetime.runnersChanged();
-    await w.lifetime.stop();
-    expect(w.roster.calls).toEqual([]);
-  });
-
   it("reads only from startup, with no window or focus, and once per snapshot", async () => {
     const w = setup();
     const a = session("A");

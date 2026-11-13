@@ -24,12 +24,6 @@ import type { ChatRunnerRoster } from "./chatRunnerRoster";
 // claims and new triggers here; a run whose trigger was already recorded is
 // dispatch's, and goes on under dispatch's own checks.
 
-/**
- * Off until the development-server check passes. While off, nothing reads
- * wakes and nothing is published or withdrawn.
- */
-export const CHAT_WAKES_ON = false;
-
 const BACKOFF_FIRST_MS = 1_000;
 export const CHAT_WAKE_BACKOFF_MAX_MS = 5 * 60_000;
 
@@ -67,8 +61,6 @@ export interface ChatWakeSession {
 export type ChatWakeProblem = "unreadable" | ChatWakeStuck;
 
 export interface ChatWakeLifetimeDeps {
-  /** CHAT_WAKES_ON in production. */
-  on: boolean;
   /** The one store for the intent file, kept across lifetimes. */
   intents: ChatWakeIntents;
   /** This computer's declarations, kept across lifetimes. */
@@ -233,7 +225,7 @@ export function createChatWakeLifetime(deps: ChatWakeLifetimeDeps): ChatWakeLife
         clearRows();
         rowsScope = null;
       }
-      if (running || stopped || !started || !deps.on || next === null || !next.isCurrent()) return;
+      if (running || stopped || !started || next === null || !next.isCurrent()) return;
       if (!isChatWakeLine(next.account.installId, CHAT_RUNNER_INSTALL_ID_MAX_CHARS)) {
         deps.log(new Error("This computer's install ID can't be sent with chat wakes."));
         return;
