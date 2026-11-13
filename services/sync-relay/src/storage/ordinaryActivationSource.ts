@@ -110,7 +110,7 @@ export function readOrdinaryActivationHistory(storage:StorageContext,input:Histo
     (SELECT octet_length(payload_json)+length(CAST(json_array(relay_seq,origin_id,origin_seq,op_kind) AS BLOB)) AS bytes ${selected})`).get(...params);
   requireValue(size&&integer(size.entries)&&(checkpoint||size.entries>0),"Ordinary activation base history is unavailable.");
   requireValue(integer(size.bytes),"Ordinary activation metadata is damaged.");
-  // Past what one read takes, a lineage that may fold continues its checkpoint first, so its history is never refused for its length.
+  // Past what one read takes, a lineage that may fold continues its checkpoint first.
   if(input.checkpoint&&(size.entries>entryLimit||size.bytes>bounds.maxBytesPerDrain-start.length))return {kind:"fold"};
   requireWithinBudget(size.entries<=entryLimit,"Ordinary activation history exceeds its configured entry budget.");
   requireWithinBudget(size.bytes<=bounds.maxBytesPerDrain-baselineBytes.length,"Ordinary activation metadata exceeds its configured byte budget.");

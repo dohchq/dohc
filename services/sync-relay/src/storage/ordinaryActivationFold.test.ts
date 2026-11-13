@@ -236,8 +236,9 @@ it("a fold run lets the event loop turn before each page read and before its sav
 });
 
 // The plan's targets, 250 ms to validate a page and 10 ms of lock to save it, are reported rather than asserted. The
-// ceilings, four and five times looser, catch a gross regression without failing on a shared runner's noise. A slower
-// save makes every save slower, while a runner's disk can stall one, so the median save is held to its ceiling.
+// ceilings, four and five times looser, catch a gross regression without failing on a shared runner's noise. A runner's
+// disk can stall any one save, so the median save is held to its ceiling, which catches saves that grow slower in
+// general. The longest save is held only to the page ceiling.
 const PAGE_CEILING_MS = 1_000, LOCK_CEILING_MS = 50;
 it("a long note folds page by page to its replayed state within loose time ceilings, and reports its slowest page and longest save", {timeout: 600_000}, async () => {
   const note = await seed(10_000), timed: number[] = [], locks: number[] = [];
@@ -253,4 +254,5 @@ it("a long note folds page by page to its replayed state within loose time ceili
     `longest save ${Math.max(...locks).toFixed(1)} ms of lock (target 10)`);
   expect(Math.max(...timed), "slowest page").toBeLessThanOrEqual(PAGE_CEILING_MS);
   expect([...locks].sort((a, b) => a - b)[Math.floor(locks.length / 2)], "median save").toBeLessThanOrEqual(LOCK_CEILING_MS);
+  expect(Math.max(...locks), "longest save").toBeLessThanOrEqual(PAGE_CEILING_MS);
 });
