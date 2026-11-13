@@ -127,7 +127,7 @@ export function createCollectionWriteRoutes(input: {
     const submitId = parseString(body.submitId, "submitId", MAX_SUBMIT_ID_CHARS);
     const decision = filterCollectionWriteForShare(authorized.effectiveSelector, body.changes, {
       channelKind: (wireId) => storage.findChannelCreateKind(share.workspaceId, wireId),
-    });
+    }, storage.memberFolders(share.workspaceId, actorUserId));
     if (!decision.allowed) throw relayError("share_op_rejected");
     return commit(
       storage,

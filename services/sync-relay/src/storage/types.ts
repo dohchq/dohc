@@ -1,3 +1,4 @@
+import type { MemberFolders } from "../shareFilter";
 import type { ShareLabels } from "@dohc/security-contract/share-labels";
 import type { ShareLabelReader } from "../shareFilter";
 import type { LiveAuthorSnapshot } from "@dohc/live-session-contract/live-authorship";
@@ -1198,6 +1199,8 @@ export interface SyncRelayStorage {
   commitPersonalCollectionWrite(
     input: import("./collectionWrites").CommitPersonalCollectionWriteInput,
   ): import("./collectionWrites").CommittedCollectionWrite;
+  /** The folders a person in the workspace may write pages in, or null without a role. */
+  memberFolders(workspaceId: string, userId: string): MemberFolders | null;
   automationSwitchableFolder(workspaceId: string, folder: string): boolean;
   readOwnerCollectionWrites(
     input: import("./ownerCollectionWrites").OwnerCollectionWritesInput,

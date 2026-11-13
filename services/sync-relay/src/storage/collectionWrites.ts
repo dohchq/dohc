@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { parseLiveAuthorSnapshot, parseLiveUpdateIdentifier } from "@dohc/live-session-contract";
 import {
   datasetBaseFolder,
+  DATASET_DESCRIPTOR_FILENAME,
   DATASET_METADATA_MAX_BYTES,
   parseDatasetDefinition,
   parseDatasetRevision,
@@ -35,7 +36,9 @@ import {
   filterCollectionWriteForShare,
   filterPersonalCollectionWrite,
   MAIN_VERSION_ID,
+  MAX_COLLECTION_WRITE_BYTES,
   type CollectionWrite,
+  type MemberFolders,
   type ProposedChange,
 } from "../shareFilter";
 import type { StorageContext } from "./context";
@@ -63,6 +66,7 @@ import {
 } from "./personalAgents";
 import type { SqliteDb } from "./types";
 import { assertWorkspaceQuota } from "./workspaces";
+import { workspaceRoleOf } from "./workspaceMembers";
 
 // The same bound the relay puts on a schema it reads for an app Collection.
 const MAX_COLLECTION_SCHEMA_BYTES = 65_536;
@@ -287,6 +291,7 @@ export function commitCollectionWrite(
       {
         channelKind: (wireId) => storage.findChannelCreateKind(workspaceId, wireId),
       },
+      current.kind === "named" ? memberFolders(storage, workspaceId, current.userId) : null,
     );
     if (!decision.allowed || writeDigest(input.shareId, decision.write) !== payloadSha256) {
       throw relayError("share_op_rejected");
@@ -665,6 +670,57 @@ function collectionLinkPublicPrincipal(
   return publicId;
 }
 
+/**
+ * The owner's folders as a person in the workspace may write pages in them,
+ * with the role read from storage. Null for anyone without a role, a fenced
+ * account, or a workspace whose owner is fenced.
+ */
+export function memberFolders(
+  storage: StorageContext,
+  workspaceId: string,
+  userId: string,
+): MemberFolders | null {
+  const role = workspaceRoleOf(storage, workspaceId, userId);
+  if (role === null || role.role === "owner") return null;
+  return {
+    holdsFile: (folder) => folder === "" || filesUnder(storage, workspaceId, folder),
+    holdsSchema: (folder) =>
+      [COLLECTION_SCHEMA_FILE, DATASET_DESCRIPTOR_FILENAME].some(
+        (file) =>
+          currentFile(storage, workspaceId, folder === "" ? file : `${folder}/${file}`) !== null,
+      ),
+    createsFolders: role.role === "admin",
+  };
+}
+
+// A folder exists while it holds a current file at any depth. "/" sorts
+// just before "0", so the paths under `folder/` fall in [`folder/`, `folder0`).
+function filesUnder(storage: StorageContext, workspaceId: string, folder: string): boolean {
+  return (
+    storage.db
+      .prepare(`SELECT 1 FROM sync_relay_current_files
+    WHERE workspace_id = ? AND version_id = ? AND path >= ? AND path < ? LIMIT 1`)
+      .get(workspaceId, MAIN_VERSION_ID, `${folder}/`, `${folder}0`) !== undefined
+  );
+}
+
+// A folder spelled another way than the folder the owner has. Its files
+// would land in one folder on a disk that ignores case.
+function folderSpellingTaken(storage: StorageContext, workspaceId: string, path: string): boolean {
+  const parts = path.split("/").slice(0, -1);
+  return parts.some((_, index) => {
+    const folder = parts.slice(0, index + 1).join("/");
+    if (filesUnder(storage, workspaceId, folder)) return false;
+    const key = pathCollisionKey(folder);
+    return (
+      storage.db
+        .prepare(`SELECT 1 FROM sync_relay_current_file_keys
+      WHERE workspace_id = ? AND version_id = ? AND collision_key >= ? AND collision_key < ? LIMIT 1`)
+        .get(workspaceId, MAIN_VERSION_ID, `${key}/`, `${key}0`) !== undefined
+    );
+  });
+}
+
 function changesOf(write: CollectionWrite): ProposedChange[] {
   return write.kind === "new-collection" ? write.changes : [write.change];
 }
@@ -719,7 +775,7 @@ function writeDigest(shareId: string, write: CollectionWrite): string {
         "dohc-collection-write-v1",
         shareId,
         write.kind,
-        write.collectionPath,
+        write.kind === "new-page" ? write.folder : write.collectionPath,
         changes,
       ]),
     )
@@ -912,6 +968,20 @@ function currentFile(
 // spelling a disk would take for it. A new Collection's folder holds
 // nothing under any spelling either.
 function checkBases(storage: StorageContext, workspaceId: string, write: CollectionWrite): void {
+  if (write.kind === "new-page") {
+    const path = write.change.afterPath!;
+    if (
+      currentFile(storage, workspaceId, path) !== null ||
+      spellingTaken(storage, workspaceId, path) ||
+      folderSpellingTaken(storage, workspaceId, path)
+    ) {
+      throw new CollectionWriteStaleError(
+        path,
+        currentFile(storage, workspaceId, path)?.blobSha256 ?? null,
+      );
+    }
+    return;
+  }
   const schemaPath = `${write.collectionPath}/${COLLECTION_SCHEMA_FILE}`;
   if (write.kind === "new-collection") {
     if (spellingTaken(storage, workspaceId, write.collectionPath)) {
@@ -1177,6 +1247,11 @@ function validateContent(
     }
     return read.text;
   };
+  if (write.kind === "new-page") {
+    // A page is any UTF-8 Markdown; its frontmatter is the writer's own.
+    text(write.change, MAX_COLLECTION_WRITE_BYTES);
+    return unchecked;
+  }
   const records = new Set<string>();
   for (const change of changes) {
     const file = change.afterPath!.slice(change.afterPath!.lastIndexOf("/") + 1);

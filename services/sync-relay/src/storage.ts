@@ -1,3 +1,4 @@
+import type { MemberFolders } from "./shareFilter";
 import { accountIsFenced, workspaceIsDeleted } from "./storage/accountDeletion";
 import { reusePreparedStatements } from "./storage/preparedStatements";
 import * as workReferenceStorage from "./storage/workReferences";
@@ -1508,6 +1509,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   commitPersonalCollectionWrite(input: collectionWriteStorage.CommitPersonalCollectionWriteInput) {
     return collectionWriteStorage.commitPersonalCollectionWrite(this, input);
+  }
+
+  memberFolders(workspaceId: string, userId: string): MemberFolders | null {
+    return collectionWriteStorage.memberFolders(this, workspaceId, userId);
   }
 
   automationSwitchableFolder(workspaceId: string, folder: string): boolean {
