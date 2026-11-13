@@ -749,7 +749,7 @@ it.each([true, false])(
           recipientUserId: "editor",
           recipientEmail: null,
           files: { paths: ["Tasks"], versionId: null, access: "edit" as const },
-          channel: null,
+          chat: null,
         },
       ],
     };

@@ -332,7 +332,7 @@ describe("Collection automations on a dataset", () => {
       recipientUserId: "u-ana",
       recipientEmail: "ana@dohc.test",
       files: { paths: ["Budget"], versionId: null, access: "edit" as const },
-      channel: null,
+      chat: null,
     };
     const withAna: ReachRoster = { kind: "owner", ownerUserId: "user-owner", grants: [ana] };
     const f = await world({ roster: withAna });

@@ -229,7 +229,7 @@ describe("durable replay boundaries", () => {
           recipientUserId: "Alice",
           recipientEmail: "alice@example.com",
           files: { paths: ["Tasks"], versionId: null, access: "edit" as const },
-          channel: { wireId: "Alice", canPost: true },
+          chat: { kind: "channel" as const, wireId: "Alice", canPost: true },
         },
       ],
     };

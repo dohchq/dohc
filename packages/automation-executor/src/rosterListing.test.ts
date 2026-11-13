@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
 import { checkAutomationReach, type ReachStep } from "./automationReach";
 import {
   listRosterGrants,
@@ -433,7 +434,7 @@ describe("the owner's roster from a listing", () => {
           recipientUserId: "u-ana",
           recipientEmail: "ana@dohc.test",
           files: { paths: ["Trip"], versionId: null, access: "edit" },
-          channel: null,
+          chat: null,
         },
       ],
       formerEditors: [],
@@ -507,6 +508,51 @@ describe("workspace members on the roster", () => {
     ).toEqual([{ allowed: true }]);
   });
 
+  it("reaches every Group from a membership, posting at Comment and Edit only", async () => {
+    const roster = await rosterOf([membership("edit"), membership("comment"), membership("view")]);
+    if (roster.kind !== "owner") throw new Error("expected an owner roster");
+    expect(roster.grants.map((grant) => grant.chat)).toEqual([
+      { kind: "groups", canPost: true },
+      { kind: "groups", canPost: true },
+      { kind: "groups", canPost: false },
+    ]);
+  });
+
+  it("keeps an owner automation's Group step working once the workspace has an Edit member", async () => {
+    const steps: ReachStep[] = [
+      { kind: "read-group", group: { channelWireId: "wire-team", name: "Team" } },
+      { kind: "post", target: "group", group: { channelWireId: "wire-team", name: "Team" } },
+      {
+        kind: "post",
+        target: "group",
+        group: { channelWireId: GENERAL_CHANNEL_WIRE_ID, name: "General" },
+      },
+      {
+        kind: "post",
+        target: "dm",
+        group: { channelWireId: "dm-edit", name: "your direct message with Edit" },
+      },
+    ];
+    // An admin's grant is Edit even when the workspace's member level is View.
+    const roster = await rosterOf([membership("edit"), membership("view")]);
+    expect(
+      checkAutomationReach(roster, { id: "a", collection: trip, codeFiles: [], steps }),
+    ).toEqual([
+      { allowed: true },
+      { allowed: true },
+      {
+        allowed: false,
+        reason: "edit@dohc.test cannot post in General.",
+        person: "edit@dohc.test",
+      },
+      {
+        allowed: false,
+        reason: "edit@dohc.test cannot post in your direct message with Edit.",
+        person: "edit@dohc.test",
+      },
+    ]);
+  });
+
   it("keeps a member who wrote automations and dropped to View as a former editor of every file", async () => {
     const roster = await rosterOf([membership("view", { automationsGeneration: 2 })]);
     expect(
@@ -554,7 +600,7 @@ describe("Group scope on the saved roster", () => {
       expect(roster.kind).toBe("owner");
       if (roster.kind !== "owner") throw new Error("expected an owner roster");
       expect(roster.grants[0]?.files).toBeNull();
-      expect(roster.grants[0]?.channel).toBeNull();
+      expect(roster.grants[0]?.chat).toBeNull();
       expect(roster.formerEditors).toEqual(
         automationsGeneration === null
           ? []
@@ -621,7 +667,7 @@ it("keeps reach verdicts unchanged with View and Comment links in the stored ros
   const steps: ReachStep[] = [
     { kind: "change-records", collection: trip },
     { kind: "find-records", collection: { path: "Budget", name: "Budget" } },
-    { kind: "post", group: { channelWireId: "wire-trip", name: "Trip" } },
+    { kind: "post", target: "group", group: { channelWireId: "wire-trip", name: "Trip" } },
     { kind: "notify", person: { userId: "owner", name: "Owner" } },
     { kind: "personal", person: { userId: "owner", name: "Owner" } },
   ];

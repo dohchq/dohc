@@ -92,7 +92,7 @@ const editor = (email: string, paths: string[]): RosterGrant => ({
   recipientUserId: `user-${email}`,
   recipientEmail: email,
   files: { paths, versionId: null, access: "edit" },
-  channel: null,
+  chat: null,
 });
 
 interface FakeRecord {

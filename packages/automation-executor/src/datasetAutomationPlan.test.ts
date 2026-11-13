@@ -166,7 +166,7 @@ describe("dataset automation steps", () => {
             recipientUserId: "ana",
             recipientEmail: "ana@dohc.test",
             files: { paths: ["Source"], access: "edit", versionId: null },
-            channel: null,
+            chat: null,
           },
         ],
       },
@@ -828,7 +828,7 @@ describe("dataset automation steps", () => {
     )!;
     // A person a formula names is checked once the formula has run.
     expect(steps.slice(0, 3)).toEqual([
-      { kind: "post", group: { channelWireId: "team-wire", name: "Team" } },
+      { kind: "post", target: "group", group: { channelWireId: "team-wire", name: "Team" } },
       { kind: "notify", person: { userId: "user-owner", name: "you" } },
       { kind: "personal", person: { userId: "user-owner", name: "you" } },
     ]);

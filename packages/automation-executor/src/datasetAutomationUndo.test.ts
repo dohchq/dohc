@@ -180,7 +180,7 @@ const ANA = {
   recipientUserId: "user-ana",
   recipientEmail: "ana@example.com",
   files: { paths: ["Budget"], versionId: null, access: "edit" as const },
-  channel: null,
+  chat: null,
 };
 const withAna: DatasetUndoReach = { roster: { ...OWNER, grants: [ANA] }, collection };
 const anaMayDelete: ReachDatasetGrants = {

@@ -963,7 +963,7 @@ automations:
     recipientUserId: "u-ana",
     recipientEmail: "ana@dohc.test",
     files: { paths: ["Budget"], versionId: null, access: "edit" as const },
-    channel: null,
+    chat: null,
   };
   const anaKey = datasetPrincipalKey("workspace", "g-ana", "u-ana");
 
@@ -1135,14 +1135,14 @@ describe("chat steps in a dataset run", () => {
       recipientUserId: "user-ana",
       recipientEmail: "ana@dohc.test",
       files: null,
-      channel: { wireId: "dm-ana", canPost: true },
+      chat: { kind: "channel", wireId: "dm-ana", canPost: true },
     },
     {
       grantId: "g-view",
       recipientUserId: "user-ana",
       recipientEmail: "ana@dohc.test",
       files: { paths: ["Budget"], versionId: null, access: "view" },
-      channel: null,
+      chat: null,
     },
   ];
   const BOB: RosterGrant = {
@@ -1150,7 +1150,7 @@ describe("chat steps in a dataset run", () => {
     recipientUserId: "user-bob",
     recipientEmail: "bob@dohc.test",
     files: { paths: ["Budget"], versionId: null, access: "edit" },
-    channel: null,
+    chat: null,
   };
   const owner = (grants: RosterGrant[]) => ({
     kind: "owner" as const,
@@ -1537,7 +1537,7 @@ describe("a dataset action a run invokes", () => {
       recipientUserId: "u-ana",
       recipientEmail: "ana@dohc.test",
       files: { paths: ["Budget"], versionId: null, access: "edit" as const },
-      channel: null,
+      chat: null,
     };
     let roster: ReachRoster = alone;
     // The owner shares Budget with Ana while the run evaluates its formulas, after reach passed for the plan.
