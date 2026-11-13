@@ -1,4 +1,5 @@
 import { LIVE_CONNECTION_LIMIT_CLOSE_CODE } from "@dohc/live-session-contract/live-connection";
+import { LIVE_TICKET_LIFETIME_MS } from "@dohc/live-session-contract/live-ticket";
 import { selfHostLiveProfile } from "./selfHostLiveProfile";
 import { createNamedDesktopLive } from "./namedDesktopLive";
 import { createLiveConnectionAdmission } from "./liveConnectionAdmission";
@@ -1877,31 +1878,106 @@ it("keeps one account's new browser sessions coming and still gives another acco
   expect(other.status).toBe(200);
 });
 
-it("leaves the desktop's sessions as they were", async () => {
-  const f = await fixture(limits, false, undefined, false, true);
-  // Each open also mints a ticket; this test counts only sessions.
-  vi.spyOn(f.tickets, "mint").mockResolvedValue({
-    token: "ticket",
-    expiresAtMs: Date.now() + 60_000,
+describe("a desktop's session", () => {
+  const opening = async () => {
+    // The desktop's store reads the clock it was given when it was made.
+    const clock = { now: Date.now() };
+    vi.spyOn(Date, "now").mockImplementation(() => clock.now);
+    const f = await fixture(limits, false, undefined, false, true);
+    // Each open also mints a ticket; these tests count only sessions.
+    vi.spyOn(f.tickets, "mint").mockResolvedValue({
+      token: "ticket",
+      expiresAtMs: Date.now() + 60_000,
+    });
+    const open = async (shareId = scope.shareId, path = binding.currentPath) => {
+      const response = await f.post("/sync/live/desktop-open", { shareId, path });
+      expect(response.status).toBe(200);
+      return ((await response.json()) as { discriminator: string }).discriminator;
+    };
+    const resolve = (discriminator: string) =>
+      f.desktopAdmission!.resolve(
+        new Request(`https://${relayHost}/sync/live/desktop`, {
+          headers: { authorization: "Bearer reader-token" },
+        }),
+        discriminator,
+      );
+    return { f, open, resolve, clock };
+  };
+
+  it("ends once its socket opens, and one account keeps only its latest that haven't opened", async () => {
+    const { open, resolve } = await opening();
+    const opened: string[] = [];
+    for (let index = 0; index < 17; index++) opened.push(await open());
+    expect(await resolve(opened[0]!)).toBeNull();
+    for (const discriminator of opened.slice(1))
+      expect(await resolve(discriminator)).toMatchObject({ kind: "named", userId: scope.userId });
+    for (const discriminator of opened.slice(1)) expect(await resolve(discriminator)).toBeNull();
   });
-  const opened: string[] = [];
-  for (let index = 0; index < 17; index++) {
-    const response = await f.post("/sync/live/desktop-open", {
-      shareId: scope.shareId,
-      path: binding.currentPath,
+
+  // One account holds at most maxConnectionsPerPrincipal live sockets, and each socket's session
+  // ends as it opens, so a desktop never has more sessions waiting than it may hold sockets.
+  it("lets one account have as many notes in two shares waiting to open as it may hold sockets, and opens one more as before", async () => {
+    const { f, open, resolve } = await opening();
+    const sockets = selfHostLiveProfile().namedLive.transport.maxConnectionsPerPrincipal;
+    f.storage.createShare({
+      share: {
+        shareId: "desktop-second-share",
+        workspaceId: scope.workspaceId,
+        granterUserId: "owner-1",
+        selectorJson: JSON.stringify({ paths: ["docs"], versionId: null }),
+        createdAtMs: 1,
+      },
+      grant: {
+        grantId: "desktop-second-grant",
+        shareId: "desktop-second-share",
+        principalKind: "user",
+        principalUserId: scope.userId,
+        principalEmail: null,
+        access: "edit",
+        generation: 1,
+        status: "active",
+        revokedAtMs: null,
+        createdAtMs: 1,
+        parentGrantId: null,
+      },
     });
-    expect(response.status).toBe(200);
-    opened.push(((await response.json()) as { discriminator: string }).discriminator);
-  }
-  for (const discriminator of opened) {
-    const request = new Request(`https://${relayHost}/sync/live/desktop`, {
-      headers: { authorization: "Bearer reader-token" },
-    });
-    expect(await f.desktopAdmission!.resolve(request, discriminator)).toMatchObject({
-      kind: "named",
-      userId: scope.userId,
-    });
-  }
+    const notes = Array.from({ length: sockets + 1 }, (_, index) => ({
+      shareId: index % 2 ? "desktop-second-share" : scope.shareId,
+      path: `docs/note-${index}.md`,
+    }));
+    notes.forEach(({ path }, index) =>
+      f.raw
+        .prepare(
+          `INSERT INTO sync_relay_object_moments (workspace_id, object_id, relay_seq, moment_id, version_id, path, blob_sha256, content_kind, byte_length, recorded_at_ms)
+          VALUES (?, ?, ?, ?, 'main', ?, ?, 'text', 1, 1)`,
+        )
+        .run(
+          scope.workspaceId,
+          `note-${index}`,
+          100 + index,
+          `note-moment-${index}`,
+          path,
+          "b".repeat(64),
+        ),
+    );
+    const waiting: string[] = [];
+    for (const note of notes.slice(0, sockets)) waiting.push(await open(note.shareId, note.path));
+    const contexts = await Promise.all(waiting.map(resolve));
+    expect(new Set(contexts.map((context) => context?.grantId))).toEqual(
+      new Set([scope.grantId, "desktop-second-grant"]),
+    );
+    expect(contexts.every((context) => context?.userId === scope.userId)).toBe(true);
+    // The route's own connection limit, unchanged, decides whether this socket may join them.
+    const oneMore = await open(notes[sockets]!.shareId, notes[sockets]!.path);
+    expect(await resolve(oneMore)).toMatchObject({ kind: "named", userId: scope.userId });
+  });
+
+  it("lasts no longer than its ticket", async () => {
+    const { open, resolve, clock } = await opening();
+    const discriminator = await open();
+    clock.now += LIVE_TICKET_LIFETIME_MS;
+    expect(await resolve(discriminator)).toBeNull();
+  });
 });
 
 // A link page stops editing on a 404 and tries again on a 503. Each of these answered 404 before.

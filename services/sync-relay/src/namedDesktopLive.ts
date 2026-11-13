@@ -1,12 +1,16 @@
 import { readBoundedJson } from "@dohc/service-http";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
+import { LIVE_TICKET_LIFETIME_MS } from "@dohc/live-session-contract/live-ticket";
 import {
   parseNamedLiveBrowserLimits,
   type NamedLiveBrowserLimits,
 } from "@dohc/ydoc-projection/named-live-browser-transport";
 import type { ResolveActor } from "@dohc/workspace-auth/session";
-import { createNamedLiveBrowserSessions } from "./namedLiveBrowserSessions";
+import {
+  createNamedLiveBrowserSessions,
+  NAMED_SESSIONS_PER_ACCOUNT,
+} from "./namedLiveBrowserSessions";
 import {
   parseNamedLiveBrowserHttpLimits,
   type NamedLiveBrowserHttpLimits,
@@ -46,9 +50,13 @@ export function createNamedDesktopLive(options: {
       "Frame listener capacity cannot cover desktop admission and readiness requests.",
     );
   }
+  // A desktop session only opens its socket, and the desktop asks again before every connect,
+  // so it lasts as long as its ticket and ends once the socket opens.
   const sessions = createNamedLiveBrowserSessions({
     ...options,
     ...limits,
+    retentionMs: LIVE_TICKET_LIFETIME_MS,
+    maxSessionsPerAccount: NAMED_SESSIONS_PER_ACCOUNT,
     authentication: "bearer",
   });
   const refuse = () =>
@@ -291,5 +299,12 @@ export function createNamedDesktopLive(options: {
       signal.removeEventListener("abort", cancel);
     }
   }
-  return { handle, resolve: sessions.resolve.bind(sessions) };
+  return {
+    handle,
+    async resolve(request: Request, discriminator: string) {
+      const context = await sessions.resolve(request, discriminator);
+      if (context) sessions.remove(discriminator);
+      return context;
+    },
+  };
 }
