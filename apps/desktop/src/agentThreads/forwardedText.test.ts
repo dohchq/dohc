@@ -8,6 +8,7 @@ import {
 
 const message = (over: Partial<ForwardedMessage> = {}): ForwardedMessage => ({
   cli: "dohc",
+  cliFolder: null,
   workspace: { id: "ws-1", name: "Launch" },
   agentId: "chief",
   place: { kind: "group", name: "launch" },
@@ -148,9 +149,28 @@ describe("forwardedMessageText", () => {
   });
 });
 
+describe("where dohc's CLI is", () => {
+  it("names the folder on one line, in the message and in the introduction", () => {
+    const folder = `C:/Users/O'Brien "Ice"${at(0x0a)}/cli-bin`;
+    const line = `When your shell does not find dohc, run it from the folder ${JSON.stringify(folder)}.`;
+
+    const text = forwardedMessageText(message({ cliFolder: folder }));
+    expect(lines(text)).toContain(line);
+    expect(lines(text)).toHaveLength(lines(forwardedMessageText(message())).length + 1);
+    expect(
+      lines(introductionText({ cli: "dohc", cliFolder: folder, agentName: "Chief" })),
+    ).toContain(`- ${line}`);
+    expect(forwardedMessageText(message())).not.toContain("When your shell");
+  });
+});
+
 describe("introductionText", () => {
   it("names the agent on one line and the command that lists the reply options", () => {
-    const text = introductionText({ cli: "dohc", agentName: `Chief${at(0x0a)}"of Staff"` });
+    const text = introductionText({
+      cli: "dohc",
+      cliFolder: null,
+      agentName: `Chief${at(0x0a)}"of Staff"`,
+    });
 
     expect(text.split("\n")[0]).toContain(`their agent "Chief${"\\"}n${"\\"}"of Staff${"\\"}""`);
     expect(text).toContain("`dohc chat reply --help`");

@@ -43,6 +43,8 @@ export interface ServedAgent {
 export interface ForwardingDependencies {
   /** dohc's CLI as a shell runs it. */
   cli: string;
+  /** The folder that holds that program, for a shell that does not find it. */
+  cliFolder: string | null;
   /** The workspace's name and its agents that have a thread and are on. Null when this computer no longer has the workspace. */
   workspace(workspaceId: string): Promise<{ name: string; agents: ServedAgent[] } | null>;
   chats: Pick<LinkedChatStore, "listAgentRequestsPage" | "markThreadReadByAgent" | "getThread">;
@@ -143,6 +145,7 @@ export function createForwarding(dependencies: ForwardingDependencies) {
       forwardId: forwardIdOf(workspace.id, agent.id, request.messageId),
       message: forwardedMessageText({
         cli: dependencies.cli,
+        cliFolder: dependencies.cliFolder,
         workspace,
         agentId: agent.id,
         place:

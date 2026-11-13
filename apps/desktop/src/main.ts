@@ -1592,6 +1592,11 @@ function agentThreads(): ReturnType<typeof createAgentThreads> {
   ) => withWorkspaceAttachmentAsync({ workspaceId }, (lease) => read(linkedChatStoreFor(lease)));
   cachedAgentThreads ??= createAgentThreads({
     cli: "dohc",
+    cliFolder: resolveDohcCliBinDirectory({
+      appRoot: desktopPackageRootInDev(),
+      isPackaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+    }),
     t3Code: t3Code(),
     chats: {
       listAgentRequestsPage: (input) =>

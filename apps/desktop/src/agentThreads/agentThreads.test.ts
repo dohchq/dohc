@@ -51,6 +51,7 @@ function setup(agents: Record<string, unknown>, unread: string[] = ["m1"]) {
   });
   const agentThreads = createAgentThreads({
     cli: "dohc",
+    cliFolder: null,
     t3Code: { forward } as unknown as T3CodeConnection,
     chats,
     readSettings: async () => ({ agents: settings }),
