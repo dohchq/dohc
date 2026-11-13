@@ -601,13 +601,13 @@ const LISTED_CAPABILITIES = {
     "Connect one of your agents to its own thread in another tool.",
     { ipc: ["readyAgentThread"] },
   ),
-  "agent.thread.t3-code.allow": capability("Allow dohc in T3 Code on this computer.", {
+  "agent.thread.t3code.allow": capability("Allow dohc in T3 Code on this computer.", {
     ipc: ["allowDohcInT3Code", "cancelAllowDohcInT3Code"],
   }),
-  "agent.thread.t3-code.list": capability("List your projects and threads in T3 Code.", {
+  "agent.thread.t3code.list": capability("List your projects and threads in T3 Code.", {
     ipc: ["listT3CodeProjects", "listT3CodeThreads"],
   }),
-  "agent.thread.t3-code.read": capability(
+  "agent.thread.t3code.read": capability(
     "Read whether dohc is allowed in T3 Code on this computer.",
     { ipc: ["readT3CodeConnection"] },
   ),

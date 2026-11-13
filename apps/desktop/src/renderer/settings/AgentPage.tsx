@@ -45,6 +45,7 @@ import {
   T3_CODE,
   T3_CODE_CANNOT_KEEP,
   T3CodeAllow,
+  T3CodeAllowAgain,
   t3CodeAllowed,
   t3CodeAllowedUntil,
   useT3CodeAccess,
@@ -369,7 +370,11 @@ function ThreadAgentBoxes(props: {
             </span>
           )}
         </PageRow>
-        {state === undefined || allowed ? null : state.canKeep ? (
+        {state === undefined ? null : allowed ? (
+          <div className="px-3 py-1.5">
+            <T3CodeAllowAgain access={access} />
+          </div>
+        ) : state.canKeep ? (
           <div className="px-3 py-3">
             <T3CodeAllow access={access} size="row" />
           </div>

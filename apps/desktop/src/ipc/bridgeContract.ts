@@ -8061,6 +8061,8 @@ export const ChatDispatchNotice = z.object({
     "wake-unconfirmed",
     "wake-runners-refused",
     "wake-runners-unreadable",
+    // A message waits because dohc could not give it to an agent's own thread. dohc tries again by itself.
+    "forward-stuck",
   ]),
   // Absent only for wake-unreadable, which is about a file rather than a thread.
   threadId: z.string().min(1).optional(),
@@ -8189,7 +8191,7 @@ export const T3CodeThreadPage = z.strictObject({
 export type T3CodeThreadPage = z.infer<typeof T3CodeThreadPage>;
 export const agentThreadOperations = {
   readT3CodeConnection: {
-    capabilityId: "agent.thread.t3-code.read",
+    capabilityId: "agent.thread.t3code.read",
     scope: "device",
     channel: "desktop:read-t3-code-connection",
     payload: z.strictObject({}),
@@ -8199,7 +8201,7 @@ export const agentThreadOperations = {
   // Opens T3 Code's own page, where the person allows dohc. Settles when they
   // answer, when the wait is cancelled, or when time runs out.
   allowDohcInT3Code: {
-    capabilityId: "agent.thread.t3-code.allow",
+    capabilityId: "agent.thread.t3code.allow",
     scope: "device",
     channel: "desktop:allow-dohc-in-t3-code",
     payload: z.strictObject({}),
@@ -8207,14 +8209,14 @@ export const agentThreadOperations = {
     guard: "trusted-sender",
   },
   cancelAllowDohcInT3Code: {
-    capabilityId: "agent.thread.t3-code.allow",
+    capabilityId: "agent.thread.t3code.allow",
     scope: "device",
     channel: "desktop:cancel-allow-dohc-in-t3-code",
     payload: z.strictObject({}),
     guard: "trusted-sender",
   },
   listT3CodeProjects: {
-    capabilityId: "agent.thread.t3-code.list",
+    capabilityId: "agent.thread.t3code.list",
     scope: "device",
     channel: "desktop:list-t3-code-projects",
     payload: z.strictObject({}),
@@ -8222,7 +8224,7 @@ export const agentThreadOperations = {
     guard: "trusted-sender",
   },
   listT3CodeThreads: {
-    capabilityId: "agent.thread.t3-code.list",
+    capabilityId: "agent.thread.t3code.list",
     scope: "device",
     channel: "desktop:list-t3-code-threads",
     payload: z.strictObject({

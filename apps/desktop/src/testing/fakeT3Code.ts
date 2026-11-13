@@ -15,6 +15,8 @@ export interface FakeT3Code {
   calls: Array<{ tool: string; args: Record<string, unknown> }>;
   /** What each tool answers, keyed by name. */
   tools: Record<string, (args: Record<string, unknown>) => unknown>;
+  /** The words each tool refuses its calls with, keyed by name. */
+  refusals: Record<string, string>;
   decline: boolean;
   /** Answer tool calls as an event stream. */
   eventStream: boolean;
@@ -41,6 +43,7 @@ export async function startFakeT3Code(): Promise<FakeT3Code & { close(): Promise
     authorizations: [],
     calls: [],
     tools: {},
+    refusals: {},
     decline: false,
     eventStream: false,
     metadataOrigin: null,
@@ -134,9 +137,15 @@ export async function startFakeT3Code(): Promise<FakeT3Code & { close(): Promise
           const { name, arguments: args } = message.params!;
           fake.calls.push({ tool: name, args });
           const answer = fake.tools[name];
-          result = answer
-            ? { structuredContent: answer(args) }
-            : { isError: true, content: [{ type: "text", text: `No thread tool named ${name}.` }] };
+          const refusal = fake.refusals[name];
+          result = refusal
+            ? { isError: true, content: [{ type: "text", text: refusal }] }
+            : answer
+              ? { structuredContent: answer(args) }
+              : {
+                  isError: true,
+                  content: [{ type: "text", text: `No thread tool named ${name}.` }],
+                };
         }
         const envelope = { jsonrpc: "2.0", id: message.id, result };
         // One event's JSON spread over several data lines, as the event stream format allows.

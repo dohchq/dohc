@@ -427,6 +427,69 @@ describe("forwarding", () => {
     forwarding.stop();
   });
 
+  it("takes back an agent's problem once the agent no longer serves the workspace", async () => {
+    let agents: ServedAgent[] = [agent];
+    const { forwarding, tool, problems } = setup([request("m1", 10)], {
+      workspace: async () => ({ name: "Launch", agents }),
+      retryAfterMs: [60_000],
+    });
+    const down = new Error("down");
+    tool.forward.mockRejectedValue(down);
+
+    await forwarding.wake(WORKSPACE);
+    agents = [];
+    await forwarding.wake(WORKSPACE, true);
+
+    expect(problems).toEqual([
+      [WORKSPACE, "chief", down],
+      [WORKSPACE, "chief", null],
+    ]);
+    forwarding.stop();
+  });
+
+  it("keeps each workspace's messages in that workspace", async () => {
+    // Two workspaces hold a message with the same id, in a chat thread with
+    // the same id, for an agent with the same id.
+    const stores = {
+      "ws-1": fakeChats([request("m1", 10, { body: "from one" })]),
+      "ws-2": fakeChats([request("m1", 10, { body: "from two" })]),
+    };
+    const asked: string[] = [];
+    const store = (workspaceId: string) => {
+      asked.push(workspaceId);
+      return stores[workspaceId as keyof typeof stores].chats;
+    };
+    const sent: Sent[] = [];
+    const forwarding = createForwarding({
+      cli: "dohc",
+      workspace: async (workspaceId) => ({ name: workspaceId, agents: [agent] }),
+      chats: {
+        listAgentRequestsPage: (input) => store(input.workspaceId).listAgentRequestsPage(input),
+        markThreadReadByAgent: (input) => store(input.workspaceId).markThreadReadByAgent(input),
+        getThread: (input) => store(input.workspaceId).getThread(input),
+      },
+      tool: { forward: async (input) => void sent.push(input) },
+      onProblem: () => {},
+    });
+
+    await forwarding.wake("ws-1");
+
+    expect(new Set(asked)).toEqual(new Set(["ws-1"]));
+    expect(sent.map((message) => message.forwardId)).toEqual([forwardIdOf("ws-1", "chief", "m1")]);
+    expect(sent[0]!.message).toContain("from one");
+    expect(sent[0]!.message).toContain("--workspace ws-1 ");
+    expect(stores["ws-1"].marks).toEqual(["m1"]);
+    expect(stores["ws-2"].marks).toEqual([]);
+
+    await forwarding.wake("ws-2");
+
+    expect(sent[1]!.forwardId).toBe(forwardIdOf("ws-2", "chief", "m1"));
+    expect(sent[1]!.forwardId).not.toBe(sent[0]!.forwardId);
+    expect(sent[1]!.message).toContain("from two");
+    expect(sent[1]!.message).toContain("--workspace ws-2 ");
+    expect(stores["ws-2"].marks).toEqual(["m1"]);
+  });
+
   it("sets a backlog aside without forwarding it", async () => {
     const backlog = [
       ...Array.from({ length: 70 }, (_, index) => request(`m${index}`, index)),

@@ -172,6 +172,54 @@ export function T3CodeAllow(props: { access: T3CodeAccess; size?: "row" }) {
   );
 }
 
+/**
+ * The ask again, for a thread that runs with more than dohc was given. T3
+ * Code's page takes the mode, so allowing again is how a person changes it.
+ */
+export function T3CodeAllowAgain(props: { access: T3CodeAccess }) {
+  const { access } = props;
+  const errorId = useId();
+  return (
+    <div data-testid="t3-code-allow-again" className="flex flex-col gap-1 text-[12px] text-muted">
+      <div className="flex min-h-8 items-center gap-2">
+        {access.waiting ? (
+          <>
+            <span role="status" className="mr-auto inline-flex items-center gap-1.5">
+              <LoaderCircle size={12} aria-hidden className="animate-spin" />
+              Waiting for T3 Code
+            </span>
+            <SecondaryButton
+              size="row"
+              data-testid="t3-code-allow-cancel"
+              aria-label="Cancel waiting for T3 Code"
+              onClick={access.cancel}
+            >
+              Cancel
+            </SecondaryButton>
+          </>
+        ) : (
+          <>
+            <span className="mr-auto">To change what dohc may do in T3 Code, allow it again.</span>
+            <SecondaryButton
+              size="row"
+              data-testid="t3-code-allow-again-start"
+              aria-describedby={access.allowError ? errorId : undefined}
+              onClick={() => void access.allow()}
+            >
+              Allow again
+            </SecondaryButton>
+          </>
+        )}
+      </div>
+      {access.allowError ? (
+        <FieldError id={errorId} testId="t3-code-allow-error">
+          {access.allowError}
+        </FieldError>
+      ) : null}
+    </div>
+  );
+}
+
 export type T3CodeThreadChoice = { id: string; title: string };
 
 const THREAD_ROW =

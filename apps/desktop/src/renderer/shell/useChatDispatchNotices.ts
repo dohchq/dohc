@@ -14,6 +14,7 @@ const kinds = {
   "wake-unconfirmed": "chat-wake-unconfirmed",
   "wake-runners-refused": "chat-wake-runners-refused",
   "wake-runners-unreadable": "chat-wake-runners-unreadable",
+  "forward-stuck": "chat-forward-stuck",
 } as const satisfies Record<ChatDispatchNotice["reason"], ShellErrorKind>;
 
 // A message from your phone that this computer's agents can't take. Main's
@@ -139,6 +140,9 @@ export function useChatDispatchNotices(
               }
             : {}),
           ...(reason === "no-runner" ? { title: "No agent could take this request" } : {}),
+          ...(reason === "forward-stuck"
+            ? { tone: "warning" as const, title: "A message is waiting for an agent's thread" }
+            : {}),
           ...(reason === "budget-paused"
             ? {
                 tone: "warning" as const,

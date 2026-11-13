@@ -7,6 +7,7 @@ import {
 } from "../settings/userSettings";
 import { subscribeChatWrites } from "../workspaces/chatWriteSignals";
 import { introductionText } from "./forwardedText";
+import { T3CodeError } from "./t3Code";
 import { createForwarding, type ForwardingDependencies, type ServedAgent } from "./forwarding";
 import type { T3CodeConnection } from "./t3CodeConnection";
 
@@ -54,6 +55,26 @@ function served(
       unattributedCounts: workspace.unattributedCounts,
     },
   };
+}
+
+/**
+ * Why an agent's messages wait, for Notices. `name` is null when dohc could
+ * not read which agents the workspace has.
+ */
+export function forwardProblemWords(name: string | null, problem: unknown): string {
+  const waits =
+    name === null ? "Messages for your agents are waiting." : `Messages for ${name} are waiting.`;
+  const why =
+    problem instanceof T3CodeError
+      ? problem.message
+      : "dohc could not give them to the agent's thread.";
+  // What needs the person says so. For the rest, dohc tries again by itself.
+  const next =
+    problem instanceof T3CodeError &&
+    (problem.problem === "not-allowed" || problem.problem === "needs-more-access")
+      ? "Open the agent in Settings to allow dohc."
+      : "dohc tries again by itself.";
+  return `${waits} ${why} ${next}`;
 }
 
 export function createAgentThreads(dependencies: AgentThreadsDependencies) {

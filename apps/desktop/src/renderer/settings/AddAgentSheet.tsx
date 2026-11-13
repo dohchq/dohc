@@ -24,6 +24,7 @@ import {
   T3_CODE,
   T3_CODE_CANNOT_KEEP,
   T3CodeAllow,
+  T3CodeAllowAgain,
   T3CodeThreadPicker,
   t3CodeAllowed,
   useT3CodeAccess,
@@ -124,12 +125,15 @@ function T3CodeChoice(props: {
       </div>
     );
   return (
-    <T3CodeThreadPicker
-      picked={props.picked}
-      onPick={props.onPick}
-      error={props.error}
-      searchId={THREAD_SEARCH_ID}
-    />
+    <>
+      <T3CodeThreadPicker
+        picked={props.picked}
+        onPick={props.onPick}
+        error={props.error}
+        searchId={THREAD_SEARCH_ID}
+      />
+      <T3CodeAllowAgain access={access} />
+    </>
   );
 }
 

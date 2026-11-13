@@ -602,7 +602,7 @@ import { createWorkspaceRefusalNotices } from "./notices/workspaceRefusalNotices
 import { noticeReachFor } from "./notices/noticeReach";
 import { agentNotices } from "./notices/agentNotices";
 import { createCloudCredentialStore, mayUseKeychain } from "./workspaces/cloudCredentialStore";
-import { createAgentThreads } from "./agentThreads/agentThreads";
+import { createAgentThreads, forwardProblemWords } from "./agentThreads/agentThreads";
 import { createT3CodeConnection, type T3CodeConnection } from "./agentThreads/t3CodeConnection";
 import { createT3CodeSignInStore, encryptsWithSystemKey } from "./agentThreads/t3CodeSignInStore";
 import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
@@ -1558,6 +1558,33 @@ function t3Code(): T3CodeConnection {
   });
   return cachedT3Code;
 }
+// The agents whose messages wait in each workspace, with why. Notices shows
+// one row for the workspace: the first agent still waiting.
+const forwardProblems = new Map<string, Map<string, unknown>>();
+async function reportForwardProblem(
+  workspaceId: string,
+  agentId: string,
+  problem: unknown,
+): Promise<void> {
+  const waiting = forwardProblems.get(workspaceId) ?? new Map<string, unknown>();
+  if (problem === null) waiting.delete(agentId);
+  else waiting.set(agentId, problem);
+  if (waiting.size === 0) {
+    forwardProblems.delete(workspaceId);
+    chatDispatchNotices.clear(workspaceId, "forward-stuck");
+    return;
+  }
+  forwardProblems.set(workspaceId, waiting);
+  const [[firstId, first]] = waiting as unknown as [[string, unknown]];
+  const { agents } = (await readCachedUserSettingsFile(stateDir())).settings;
+  const name = agents[firstId]?.name;
+  chatDispatchNotices.report(workspaceId, {
+    reason: "forward-stuck",
+    ...(firstId ? { agentId: firstId } : {}),
+    message: forwardProblemWords(name ?? null, first),
+  });
+}
+
 function agentThreads(): ReturnType<typeof createAgentThreads> {
   const chats = <Result>(
     workspaceId: string,
@@ -1584,6 +1611,7 @@ function agentThreads(): ReturnType<typeof createAgentThreads> {
     onProblem: (workspaceId, agentId, problem) => {
       if (problem !== null)
         console.error(`[desktop] forwarding to ${agentId ?? "agents"} in ${workspaceId}:`, problem);
+      void reportForwardProblem(workspaceId, agentId ?? "", problem);
     },
   });
   return cachedAgentThreads;

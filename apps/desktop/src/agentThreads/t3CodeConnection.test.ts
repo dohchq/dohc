@@ -128,6 +128,22 @@ describe("dohc's connection to T3 Code", () => {
     expect(t3.registrations).toEqual([]);
   });
 
+  it("says a thread needs more access than dohc has, and keeps the sign-in", async () => {
+    const { t3, store, forward } = await setup();
+    await store.save({ origin: t3.origin, token: "token-1", expiresAtMs: Date.now() + 60_000 });
+    t3.refusals.t3_thread_send =
+      "runtime_mode_escalation_denied: Child runtime mode full-access is broader than parent mode approval-required.";
+
+    const refused = await forward("f1").catch((error: unknown) => error);
+
+    expect(refused).toBeInstanceOf(T3CodeError);
+    expect((refused as T3CodeError).problem).toBe("needs-more-access");
+    expect((refused as T3CodeError).message).toBe(
+      "This thread runs with more access than dohc has in T3 Code. Allow dohc again, and pick the thread's mode on T3 Code's page.",
+    );
+    expect(await store.load()).not.toBeNull();
+  });
+
   it("forgets the sign-in on request", async () => {
     const { connection, forward } = await setup();
     await connection.signIn({ open: browser });

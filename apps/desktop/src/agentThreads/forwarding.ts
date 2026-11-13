@@ -176,6 +176,13 @@ export function createForwarding(dependencies: ForwardingDependencies) {
       return false;
     }
     report(workspaceId, null, null);
+    // An agent that no longer serves the workspace has nothing waiting there.
+    const serving = new Set(workspace?.agents.map((agent) => agent.id));
+    for (const key of [...stuck]) {
+      const [stuckIn, agentId] = key.split("\n");
+      if (stuckIn === workspaceId && agentId && !serving.has(agentId))
+        report(workspaceId, agentId, null);
+    }
     if (!workspace) return true;
     let reached = true;
     for (const agent of workspace.agents) {
