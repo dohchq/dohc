@@ -256,7 +256,7 @@ export function workspaceMemberGrantIsCurrent(storage: StorageContext, shareId: 
      JOIN ${MEMBERSHIPS} AS ms ON ms.workspace_id = m.workspace_id
      JOIN sync_relay_share_grants AS g ON g.grant_id = m.grant_id
      WHERE ms.share_id = ? AND m.grant_id = ? AND m.state = 'active' AND g.share_id = ms.share_id
-       AND g.principal_kind = 'user' AND g.principal_user_id = m.user_id AND g.parent_grant_id IS NULL
+       AND g.status = 'active' AND g.principal_kind = 'user' AND g.principal_user_id = m.user_id AND g.parent_grant_id IS NULL
        AND g.access = CASE m.role WHEN 'admin' THEN 'edit' ELSE ms.member_level END`,
   ).get(shareId, grantId);
 }
@@ -265,7 +265,8 @@ export function workspaceMemberGrantIsCurrent(storage: StorageContext, shareId: 
 export function workspaceRoleOf(storage: StorageContext, workspaceId: string, userId: string): { role: WorkspaceRole; memberId: string } | null {
   if (accountIsFenced(storage, userId)) return null;
   const owner = ownerOf(storage, workspaceId);
-  if (owner === null) return null;
+  // A fenced owner's workspace gives nobody authority while it waits for purge.
+  if (owner === null || accountIsFenced(storage, owner)) return null;
   if (owner === userId) return { role: "owner", memberId: "owner" };
   const membership = getWorkspaceMembership(storage, workspaceId);
   const entry = membership && memberByAccount(storage, workspaceId, userId);
