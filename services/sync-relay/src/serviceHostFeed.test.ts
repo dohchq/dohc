@@ -532,6 +532,47 @@ it("cuts a paused document's reads at once and keeps its writes until the sessio
   expect((await f.request("GET", `log?${identity}`)).status).toBe(404);
 });
 
+it("keeps the hosted credential alive for an undrained Stop and then drops it, never granting ordinary routes", async () => {
+  const f = await fixture();
+  const ordinary = () => authorizeServiceHostReplication(f.storage, {key, namespace, workspaceId: ws, bearer: f.bearer,
+    method: "GET", pathname: `/sync/${ws}/log`});
+  const hosted = () => authorizeServiceHostReplication(f.storage, {key, namespace, workspaceId: ws, bearer: f.bearer,
+    method: "GET", pathname: `/sync/${ws}/hosted/log`});
+  expect(ordinary()).toBeNull();
+  expect(hosted()).toBe("owner-1");
+  expect(f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path: "docs/a.md", ownerUserId: "owner-1",
+    enabled: false, retire: true, nowMs: 20, guard() {}})).toMatchObject({retired: true, enabled: false, hostDrainedAtMs: null});
+  expect(ordinary()).toBeNull();
+  expect(hosted()).toBe("owner-1");
+  const undrained = f.storage.readServiceHostFeedScope(ws);
+  expect(undrained).toMatchObject({replicationEpoch: "epoch", streamIdentity: "stream"});
+  expect(undrained?.shared).toEqual(new Map());
+  const empty = await f.read();
+  expect(empty.scope.documents).toEqual([]);
+  expect(f.objects(empty)).toEqual(["workspace"]);
+  expect(await f.blobStatus(A.sha256)).toBe(404);
+  // The host's last accepted work asks to upload nothing, writes no bytes, and is refused like any op outside the scope.
+  const last = blob("last accepted edit");
+  expect(await (await f.request("POST", "blobs/have", JSON.stringify({sha256s: [A.sha256, last.sha256]}))).json()).toEqual({ok: true, missing: []});
+  expect((await f.request("PUT", `blobs/${last.sha256}`, last.content, "application/octet-stream")).status).toBe(404);
+  expect(f.uploads()).toBe(0);
+  expect(await (await f.push([["ydoc.update", ydoc(binding.objectId, "docs/a.md", last)]])).json())
+    .toMatchObject({refusals: [{originSeq: 0, reason: "outside-hosted-documents"}]});
+  expect(f.storage.getBlob(ws, last.sha256)).toBeNull();
+  expect(await f.blobStatus(last.sha256)).toBe(404);
+
+  expect(f.storage.releaseServiceHostEnrollment({workspaceId: ws, objectId: binding.objectId, nowMs: 21}))
+    .toMatchObject({retired: true, enabled: false, hostDrainedAtMs: 21});
+  expect(hosted()).toBeNull();
+  expect(f.storage.readServiceHostFeedScope(ws)).toBeNull();
+
+  f.storage.ensureOwnedLiveDocument({intent: "owner-resume", workspaceId: ws, path: "docs/a.md", ownerUserId: "owner-1", nowMs: 22, guard() {}});
+  f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path: "docs/a.md", ownerUserId: "owner-1", enabled: false, retire: true, nowMs: 23, guard() {}});
+  expect(f.storage.rotateWorkspaceIdentity({workspaceId: ws, ownerUserId: "owner-1", replicationEpoch: "epoch-2", streamIdentity: "stream-2", rotatedAtMs: 24})).toBe("rotated");
+  expect(hosted()).toBeNull();
+});
+
+
 it("keeps the read replica's routes and guards apart from the session host's", async () => {
   const f = await fixture();
   const principal = createReplicaReadPrincipal(f.storage);

@@ -25,6 +25,7 @@ import { createNamedFrameChanges, type NamedFrameNativeHost } from "./namedLiveF
 import { fixture as ticketFixture, audience, binding, host, key, scope, seedLinkAgent } from "./liveTickets.test-helper.js";
 import type { LiveUpdateJournalCut } from "./storage/types.js";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
+import { linkRefusalBody } from "@dohc/security-contract/link-refusal";
 
 const exchangeKey = "test-exchange-key-".repeat(3), relayHost = "relay.example.test";
 const frames = { receive: { maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096 },
@@ -274,6 +275,23 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
   const useCredentials = (headers = holderHeaders) => { linkHeaders = headers; };
   return { ...state, frames, binding, post, discriminator, mint, connect, peer, currentScope, bearer, profile, memberships, tickets, captureNative, native, changes, invalidated, actor, application, routes, desktopAdmission, sessionHostBlocked, useCredentials };
 }
+
+it.each([false, true])("refuses a ticket for a document the session host blocked until the block lifts; link=%s", async link => {
+  const f = await fixture(limits, link);
+  const mint = vi.spyOn(f.tickets, "mint");
+  f.sessionHostBlocked.mockReturnValue(true);
+  const refused = await f.post(`/sync/live/${link ? "link" : "named"}-tickets`, {discriminator: f.discriminator, objectId: binding.objectId});
+  expect([refused.status, await refused.json()]).toEqual(link ? [503, linkRefusalBody("link_live_unavailable")] : [404, {ok: false, error: "not found"}]);
+  expect(f.sessionHostBlocked).toHaveBeenCalledWith({workspaceId: binding.workspaceId, objectId: binding.objectId});
+  expect(mint).not.toHaveBeenCalled();
+  if (link) {
+    const hidden = await f.post("/sync/live/link-tickets", {discriminator: f.discriminator, objectId: "hidden-object"});
+    expect([hidden.status, await hidden.text()]).toEqual([404, '{"ok":false,"error":"not found"}']);
+  }
+  f.sessionHostBlocked.mockReturnValue(false);
+  expect(await f.connect((await f.mint()).token).status).toBe(101);
+});
+
 
 it.each([false, true])("mints through actual HTTP auth and redeems once before exposing only live frames; link=%s", async link => {
   const f = await fixture(limits, link), minted = await f.mint();
