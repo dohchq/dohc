@@ -1,4 +1,5 @@
 import { shareSenderLabel, shareAccessLabel } from "@dohc/security-contract/share-labels";
+import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
 import { ShareSender } from "../ShareSender";
 import { MessageReactions } from "./chatMessages";
 import { WorkLinkText } from "./workReferences";
@@ -600,9 +601,11 @@ export function ChatsView(props: {
   onSaveUserSettings?: (settings: DesktopUserSettings, base: DesktopUserSettings) => Promise<void>;
   // What the agent reaches: the workspace folder its runner is started in.
   workspacePath?: string;
-  // Set in a joined workspace, where no one posts from this view yet: every
-  // Group shows this line in place of a composer, and New group is absent.
-  postingClosed?: string;
+  // Set in a joined workspace. Members post in its Groups, never in General
+  // or an agent's chat. postingClosed, at View or once the membership ended,
+  // shows in place of every composer. createsGroups shows New group, for an
+  // admin; the relay decides either way.
+  joinedWorkspace?: { postingClosed?: string; createsGroups: boolean };
   // Ephemeral presence/typing transport, present only under collaboration.
   collaboration?: ChatPresenceCollaboration | null;
   // Where this view lives: the side panel (default) or a full editor tab.
@@ -673,7 +676,13 @@ export function ChatsView(props: {
   // id when it mounts, and again for each newer reveal.
   onShareRowMounted?: (shareId: string) => void;
 }) {
-  const { workspaceId, onNavChange, onDraftsChange, onThreadRead, onDmRead, postingClosed } = props;
+  const { workspaceId, onNavChange, onDraftsChange, onThreadRead, onDmRead } = props;
+  const inJoinedWorkspace = props.joinedWorkspace !== undefined;
+  const postingClosed = props.joinedWorkspace?.postingClosed;
+  const createsGroups = !inJoinedWorkspace || props.joinedWorkspace?.createsGroups === true;
+  const lockedLine =
+    postingClosed ??
+    (inJoinedWorkspace ? "Members post in Groups only." : "This group is read-only for you.");
   const collaboration = props.collaboration ?? null;
   // A stable fallback: a fresh [] per render would defeat the message-list
   // memo boundaries below for every roster-less host.
@@ -2025,7 +2034,15 @@ export function ChatsView(props: {
       // or joined. If that authority is unavailable, fail closed: treating an
       // unknown joined channel as local would re-enable writes and read-cursor
       // mutations across a permission boundary.
-      if (postingClosed !== undefined || channelShares === null) return true;
+      if (inJoinedWorkspace) {
+        return (
+          postingClosed !== undefined ||
+          channel.kind !== "channel" ||
+          !channel.wireId ||
+          channel.wireId === GENERAL_CHANNEL_WIRE_ID
+        );
+      }
+      if (channelShares === null) return true;
       // A channel with no wire identity cannot carry a grant at all.
       if (!channel.wireId) return false;
       const answer = joinedByWire.get(channel.wireId);
@@ -2037,7 +2054,7 @@ export function ChatsView(props: {
       if (answer === null) return false;
       return answer.access === "read-only" || answer.ended;
     },
-    [channelShares, joinedByWire, postingClosed],
+    [channelShares, joinedByWire, inJoinedWorkspace, postingClosed],
   );
 
   const applyThreadSnapshot = useCallback(
@@ -4113,7 +4130,13 @@ export function ChatsView(props: {
         resetGroupForm();
         setOverview((current) =>
           current.status === "ready"
-            ? { ...current, channels: [...current.channels, result.channel] }
+            ? {
+                ...current,
+                channels: [
+                  ...current.channels.filter((channel) => channel.id !== result.channel.id),
+                  result.channel,
+                ],
+              }
             : current,
         );
         // In the same update that shows the channel: a channel on screen with
@@ -5265,9 +5288,7 @@ export function ChatsView(props: {
           />
           {threadLocked ? (
             <ComposerNotice testId="chats-readonly-note">
-              {threadJoined?.ended
-                ? endedGroupNotice(threadJoined)
-                : (postingClosed ?? "This group is read-only for you.")}
+              {threadJoined?.ended ? endedGroupNotice(threadJoined) : lockedLine}
             </ComposerNotice>
           ) : (
             <div
@@ -5384,7 +5405,7 @@ export function ChatsView(props: {
     // work, not here.
     const shareGrantsBlocked = grantedLaneIsOverLimit(shareReadFailure);
     const canShare =
-      postingClosed === undefined &&
+      !inJoinedWorkspace &&
       nav.channel.kind !== "agent" &&
       channelShares !== null &&
       channelJoined === null &&
@@ -5723,9 +5744,7 @@ export function ChatsView(props: {
         )}
         {channelLocked && !showLane ? (
           <ComposerNotice testId="chats-readonly-note">
-            {channelJoined?.ended
-              ? endedGroupNotice(channelJoined)
-              : (postingClosed ?? "This group is read-only for you.")}
+            {channelJoined?.ended ? endedGroupNotice(channelJoined) : lockedLine}
           </ComposerNotice>
         ) : null}
       </div>
@@ -5846,7 +5865,8 @@ export function ChatsView(props: {
               kind: "group",
               unread,
               archived,
-              canAddPeople: channelShares !== null && joined === null && !!channel.wireId,
+              canAddPeople:
+                !inJoinedWorkspace && channelShares !== null && joined === null && !!channel.wireId,
               canLeave: joined !== null,
             },
           })}
@@ -6017,7 +6037,7 @@ export function ChatsView(props: {
             <SectionLabel as="p" data-testid="chats-channels-heading" className="min-w-0 flex-1">
               Groups
             </SectionLabel>
-            {postingClosed === undefined ? (
+            {createsGroups ? (
               <SectionActionButton
                 testId="chats-new-channel"
                 label="New group"

@@ -2469,6 +2469,13 @@ export function DesktopWorkspaceShell(props: {
     access: "view" | "comment" | "edit";
   } | null>(null);
   const shareAccess = accessFor?.view === shareView ? accessFor.access : shareView?.access;
+  // A membership's role, as the relay last named it. It is keyed by share, so
+  // a registry refresh after a level change keeps it.
+  const [roleFor, setRoleFor] = useState<{ shareId: string; role: "admin" | "member" } | null>(
+    null,
+  );
+  const membershipRole =
+    roleFor !== null && roleFor.shareId === shareView?.shareId ? roleFor.role : undefined;
   const shareViewWritable = !shareViewDamaged && !shareViewEnded && shareAccess === "edit";
   const shareViewEndedRef = useRef(shareViewEnded);
   shareViewEndedRef.current = shareViewEnded;
@@ -3138,6 +3145,11 @@ export function DesktopWorkspaceShell(props: {
       else if (result.status === "ended") setEndedFor(shareView);
       else if (result.access && result.access !== shareAccess)
         setAccessFor({ view: shareView, access: result.access });
+      if (shareView.membership && shareView.shareId && result.role)
+        setRoleFor({ shareId: shareView.shareId, role: result.role });
+      // The relay does not say who changed the level, so the words name none.
+      if (shareView.membership && result.levelChanged && result.access)
+        showSuccessNotice(`Members can now ${result.access}.`);
       if (result.status === "ended" || (result.access && result.access !== shareAccess)) {
         void props.refreshWorkspaceRegistry().catch(() => undefined);
       }
@@ -3398,14 +3410,18 @@ export function DesktopWorkspaceShell(props: {
   const captureDecided = captureDecidedFor === workspaceId;
   const captureAvailable = !shareView && captureDecided && !statusSaysNoRecorder(syncStatus);
   // A joined workspace lists its Groups from the view's own store, which
-  // needs no capture. No one posts from it yet.
+  // needs no capture. Members post in them at Comment and Edit.
   const chatsAvailable = captureAvailable || (membershipView && captureDecided);
-  const chatsPostingClosed = membershipView
+  const chatsJoinedWorkspace = membershipView
     ? {
-        postingClosed:
-          shareAccess === "view"
-            ? "Only people who can comment post here."
-            : "This group is read-only for you.",
+        joinedWorkspace: {
+          ...(shareViewEnded
+            ? { postingClosed: shareEndedRefusal }
+            : shareAccess === "view"
+              ? { postingClosed: "Only people who can comment post here." }
+              : {}),
+          createsGroups: !shareViewEnded && membershipRole === "admin",
+        },
       }
     : {};
   useEffect(() => {
@@ -7373,7 +7389,7 @@ export function DesktopWorkspaceShell(props: {
     onSaveUserSettings: saveUserSettingsFromChats,
     workspacePath: props.workspace.rootPath,
     onAgentWaitsForTrust: trustForHeldAgent,
-    ...chatsPostingClosed,
+    ...chatsJoinedWorkspace,
   } as const;
   // The Chats view intentionally stays on the overview and only selects editor
   // destinations. Active chat pages own the live conversations: disable the
@@ -7422,7 +7438,7 @@ export function DesktopWorkspaceShell(props: {
     onSaveUserSettings: saveUserSettingsFromChats,
     workspacePath: props.workspace.rootPath,
     onAgentWaitsForTrust: trustForHeldAgent,
-    ...chatsPostingClosed,
+    ...chatsJoinedWorkspace,
   } as const;
   // Chats shows that Restricted Mode holds this workspace's agent back.
   const agentsRestricted =

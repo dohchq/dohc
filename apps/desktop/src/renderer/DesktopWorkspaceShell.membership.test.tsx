@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { ObserverStub } from "./DesktopWorkspaceShell.testSupport";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { DesktopWorkspaceShell, SHARE_VIEW, makeShareBridge, shellBootstrapProps } from "./DesktopWorkspaceShell.testHarness";
@@ -39,21 +39,64 @@ describe("a joined workspace", () => {
     expect(screen.getAllByText("You can comment")).toHaveLength(1);
   });
 
-  it("lists the workspace's Groups in Chats with no way to post or add a Group", async () => {
+  function withGroup(access: "view" | "comment" | "edit", checked: Awaited<ReturnType<ReturnType<typeof makeShareBridge>["checkSharedViewAccess"]>>) {
     const bridge = makeShareBridge();
     bridge.listChatChannels.mockResolvedValue({ channels: [{
       id: "launch", name: "Launch team", slug: "launch-team", kind: "channel",
       createdAtMs: 1, updatedAtMs: 1, threadCount: 1, unreadCount: 0, wireId: "launch",
     }], fileThreads: [] });
     bridge.listChannelThreads.mockResolvedValue({ threads: [] });
+    bridge.checkSharedViewAccess.mockResolvedValue(checked);
     vi.stubGlobal("dohcDesktop", bridge);
-    render(shell(bridge, JOINED));
+    render(shell(bridge, { ...JOINED, shareView: { ...JOINED.shareView!, access } }));
+    return bridge;
+  }
+
+  it.each(["comment", "edit"] as const)("posts in a Group at %s, with no New group for a member", async (access) => {
+    const bridge = withGroup(access, { status: "current", access, role: "member" });
     fireEvent.click(await screen.findByTestId("activity-chats"));
     expect((await screen.findByTestId("chats-channel")).textContent).toContain("Launch team");
     expect(screen.queryByTestId("chats-off")).toBeNull();
+    await waitFor(() => expect(bridge.checkSharedViewAccess).toHaveBeenCalled());
     expect(screen.queryByTestId("chats-new-channel")).toBeNull();
     fireEvent.click(screen.getByTestId("chats-channel"));
-    expect((await screen.findByTestId("chats-readonly-note")).textContent).toBe("This group is read-only for you.");
+    expect(await screen.findByTestId("chats-new-thread-composer")).toBeTruthy();
+    expect(screen.queryByTestId("chats-readonly-note")).toBeNull();
+    expect(screen.queryByTestId("chats-share-channel")).toBeNull();
+  });
+
+  it("shows no composer at View, only the line that says who posts", async () => {
+    withGroup("view", { status: "current", access: "view", role: "member" });
+    fireEvent.click(await screen.findByTestId("activity-chats"));
+    fireEvent.click(await screen.findByTestId("chats-channel"));
+    expect((await screen.findByTestId("chats-readonly-note")).textContent).toBe("Only people who can comment post here.");
+    expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
+  });
+
+  it("offers New group to an admin once the relay names the role", async () => {
+    withGroup("view", { status: "current", access: "view", role: "admin" });
+    fireEvent.click(await screen.findByTestId("activity-chats"));
+    expect(await screen.findByTestId("chats-new-channel")).toBeTruthy();
+  });
+
+  it("applies a level change at once, with a toast and a Notices row", async () => {
+    const bridge = withGroup("comment", { status: "current", access: "view", role: "member", levelChanged: true });
+    const toast = await screen.findByTestId("workspace-shell-notice");
+    expect(toast.textContent).toContain("Members can now view.");
+    expect(screen.getByTestId("notice-toasts").contains(toast)).toBe(true);
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(await within(screen.getByTestId("notice-center")).findByText("Members can now view.")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("activity-chats"));
+    fireEvent.click(await screen.findByTestId("chats-channel"));
+    expect((await screen.findByTestId("chats-readonly-note")).textContent).toBe("Only people who can comment post here.");
+    expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
+    expect(bridge.checkSharedViewAccess).toHaveBeenCalled();
+  });
+
+  it("says nothing when the check finds the level it already had", async () => {
+    const bridge = withGroup("comment", { status: "current", access: "comment", role: "member" });
+    await waitFor(() => expect(bridge.checkSharedViewAccess).toHaveBeenCalled());
+    expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
   });
 
   it("shows the ended band and keeps the copy readable after the membership ends", async () => {
