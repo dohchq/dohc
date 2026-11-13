@@ -9,15 +9,24 @@ import {
   type ChatWakeWorkspace,
 } from "./chatWakeConsumer";
 import { ChatWakeIntentsUnreadableError, type ChatWakeIntent, type ChatWakeIntents } from "./chatWakeIntents";
+import type { ChatRunnerRoster } from "./chatRunnerRoster";
 
 // Runs one chat wake consumer for each credential lifetime, from startup
 // until quit, whether or not a window is open. A new lifetime starts only
 // after the one before it has stopped and drained, so two consumers never
 // share the intent file. A 401 ends the lifetime that received it.
+//
+// The running session also publishes this computer's agents for its
+// workspaces. When an account signs out, or another one signs in, its
+// declarations are withdrawn with its own token once its consumer has
+// stopped, and before the next account publishes. Quit withdraws nothing:
+// the wakes wait for this computer to come back. Signing out stops new
+// claims and new triggers here; a run whose trigger was already recorded is
+// dispatch's, and goes on under dispatch's own checks.
 
 /**
- * Off until this computer also publishes its runners: without a roster, the
- * relay never lists this computer, and a consumer would wait for nothing.
+ * Off until the development-server check passes. While off, nothing reads
+ * wakes and nothing is published or withdrawn.
  */
 export const CHAT_WAKES_ON = false;
 
@@ -62,6 +71,8 @@ export interface ChatWakeLifetimeDeps {
   on: boolean;
   /** The one store for the intent file, kept across lifetimes. */
   intents: ChatWakeIntents;
+  /** This computer's declarations, kept across lifetimes. */
+  roster: ChatRunnerRoster;
   client(session: ChatWakeSession): ChatWakeClient;
   openWorkspace(session: ChatWakeSession, workspaceId: string): Promise<ChatWakeWorkspace | null>;
   sleep(ms: number, signal: AbortSignal): Promise<void>;
@@ -89,9 +100,14 @@ export interface ChatWakeLifetime {
    * for a pull, so resuming on an empty one would ask for another, and another.
    */
   pulled(pull: { applied: boolean; recovered: boolean }): Promise<void>;
-  /** Try again: takes back the rows, and starts the current snapshot's consumer afresh. */
+  /** This computer's agents, or which workspaces sync here, may have changed: publishes again for the running session. */
+  runnersChanged(): Promise<void>;
+  /**
+   * Try again: takes back the rows a fresh start can fix, and starts the current snapshot's consumer afresh.
+   * Presses before that restart begins share it.
+   */
   retry(): void;
-  /** Quit: starts nothing more, and settles once the running consumer has drained. */
+  /** Quit: starts nothing more, and settles once the running consumer has drained. Declarations stay. */
   stop(): Promise<void>;
 }
 
@@ -103,6 +119,9 @@ export function createChatWakeLifetime(deps: ChatWakeLifetimeDeps): ChatWakeLife
   let stopped = false;
   let running: { session: ChatWakeSession; consumer: ChatWakeConsumer } | null = null;
   let transitions: Promise<void> = Promise.resolve();
+  // The last session that published and stopped, until a settled snapshot says whether its account stays.
+  let leaving: ChatWakeSession | null = null;
+  let retryQueued = false;
 
   // Shown rows, one per workspace and problem, with the wakes each stands for.
   // They belong to one account; another account's lifetime takes them back.
@@ -135,9 +154,12 @@ export function createChatWakeLifetime(deps: ChatWakeLifetimeDeps): ChatWakeLife
       takeBack(row);
     }
   }
-  function clearRows(): void {
-    for (const row of rows.values()) takeBack(row);
-    rows.clear();
+  function clearRows(problems?: readonly ChatWakeProblem[]): void {
+    for (const [key, row] of rows) {
+      if (problems && !problems.includes(row.problem)) continue;
+      rows.delete(key);
+      takeBack(row);
+    }
   }
 
   // Every lifetime reads and writes the same store. A read that succeeds takes back the unreadable row.
@@ -189,13 +211,24 @@ export function createChatWakeLifetime(deps: ChatWakeLifetimeDeps): ChatWakeLife
   // Stops the running consumer when it isn't the current snapshot's, or when `again`, then starts the current one.
   function cycle(again: boolean): void {
     transitions = transitions.then(async () => {
+      if (again) retryQueued = false;
       if (running && (again || stopped || running.session !== latest)) {
         const ended = running;
         running = null;
         await ended.consumer.stop();
+        leaving = ended.session;
       }
-      if (again) clearRows();
+      // A dropped wake's row is over, and a fresh start can't change it.
+      if (again) clearRows(["unreadable", "parked", "unconfirmed"]);
       const next = latest;
+      // Its account signed out, or another one signed in: withdraw with its own token, queued before the next publish.
+      // A credential load's placeholder decides nothing, and quit keeps the declarations.
+      if (leaving && !stopped && (next === null ? latestSettled : next.account.scope !== leaving.account.scope)) {
+        void deps.roster.withdraw(leaving);
+        leaving = null;
+      } else if (leaving && next !== null && next.account.scope === leaving.account.scope) {
+        leaving = null;
+      }
       if (next === null && latestSettled) {
         clearRows();
         rowsScope = null;
@@ -212,6 +245,7 @@ export function createChatWakeLifetime(deps: ChatWakeLifetimeDeps): ChatWakeLife
       const consumer = consumerFor(next);
       running = { session: next, consumer };
       consumer.start();
+      void deps.roster.reconcile(next);
     }).catch(deps.log);
   }
 
@@ -229,15 +263,23 @@ export function createChatWakeLifetime(deps: ChatWakeLifetimeDeps): ChatWakeLife
       void running?.consumer.resume();
     },
     pulled({ applied, recovered }) {
+      // Reaching the relay again is also when a declaration that failed can go out.
+      if (recovered && running) void deps.roster.reconcile(running.session);
       return applied || recovered ? running?.consumer.resume() ?? Promise.resolve() : Promise.resolve();
     },
+    runnersChanged() {
+      return running ? deps.roster.reconcile(running.session) : Promise.resolve();
+    },
     retry() {
+      if (retryQueued) return;
+      retryQueued = true;
       cycle(true);
     },
-    stop() {
+    async stop() {
       stopped = true;
       cycle(false);
-      return transitions;
+      await transitions;
+      await deps.roster.stop();
     },
   };
 }

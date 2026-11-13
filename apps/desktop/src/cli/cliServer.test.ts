@@ -830,6 +830,7 @@ describe("CLI socket server", () => {
         withWorkspaceAttachment: vi.fn(),
         withWorkspaceAttachmentAsync: async (_workspace: unknown, work: () => Promise<void>) => work(),
         projectPendingChatBookmarks: vi.fn(async () => undefined),
+        chatWakes: { pulled: vi.fn(async () => undefined) },
       };
       const callback = stripTypeScriptTypes(`({${source.slice(start, end)}})`);
       const afterSuccessfulPull = new Function("dependencies",
@@ -856,6 +857,9 @@ describe("CLI socket server", () => {
         await sync.start();
         expect(sync.snapshot().syncFailure).toBeNull();
         expect((await pending).messages.map(message => message.text)).toEqual([older.body]);
+        // The whole hook ran: a missing dependency would throw before its last step.
+        expect(dependencies.chatWakes.pulled).toHaveBeenCalledWith(expect.objectContaining({ applied: true }));
+        expect(dependencies.projectPendingChatBookmarks).toHaveBeenCalledWith(WORKSPACE_ID);
       } finally { await sync.stop(); }
     } finally { spy.mockRestore(); }
   });

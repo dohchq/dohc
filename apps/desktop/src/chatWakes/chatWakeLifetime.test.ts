@@ -10,6 +10,7 @@ import {
   type ChatWakeLifetimeDeps, type ChatWakeSession,
 } from "./chatWakeLifetime";
 import { createChatWakeNotices } from "./chatWakeNotices";
+import type { ChatRunnerRoster } from "./chatRunnerRoster";
 
 // The relay, the intent store, and the workspace are fakes. Each wait is on a
 // barrier: a read parking or ending, a report, a gate the test opens, or a
@@ -152,12 +153,44 @@ function readyWorkspace(over: Partial<ChatWakeWorkspace> = {}): ChatWakeWorkspac
   };
 }
 
+/** Records each publish and withdrawal, and whether that account's reader had stopped by then. */
+function fakeRoster(relay: ReturnType<typeof fakeRelay>) {
+  const calls: Array<{ kind: "reconcile" | "withdraw"; scope: string; readerStopped: boolean }> = [];
+  const watchers: Array<{ at: number; resolve: () => void }> = [];
+  let withdrawal: Promise<void> = Promise.resolve();
+  const record = (kind: "reconcile" | "withdraw", wakeSession: ChatWakeSession) => {
+    calls.push({ kind, scope: wakeSession.account.scope, readerStopped: relay.aborted.includes(wakeSession.account.scope) });
+    for (const watcher of [...watchers]) {
+      if (calls.length < watcher.at) continue;
+      watchers.splice(watchers.indexOf(watcher), 1);
+      watcher.resolve();
+    }
+  };
+  const roster = {
+    reconcile: async (wakeSession: ChatWakeSession) => { record("reconcile", wakeSession); },
+    withdraw: (wakeSession: ChatWakeSession) => {
+      record("withdraw", wakeSession);
+      return withdrawal;
+    },
+    stop: vi.fn(async () => undefined),
+  } satisfies ChatRunnerRoster;
+  return {
+    calls, roster,
+    untilCalls: (at: number) => calls.length >= at ? Promise.resolve()
+      : new Promise<void>((resolve) => { watchers.push({ at, resolve }); }),
+    /** Withdrawals from now on never answer, as when the server hangs. */
+    hangWithdrawals: () => { withdrawal = new Promise<void>(() => undefined); },
+  };
+}
+
 function setup(over: Partial<ChatWakeLifetimeDeps> = {}, rows: ChatWakeIntent[] = []) {
   const relay = fakeRelay();
   const intents = memoryIntents(rows);
+  const roster = fakeRoster(relay);
   const deps: ChatWakeLifetimeDeps = {
     on: true,
     intents: intents.store,
+    roster: roster.roster,
     client: vi.fn(relay.client),
     openWorkspace: vi.fn(async () => null),
     // A backoff parks until its consumer stops.
@@ -169,7 +202,7 @@ function setup(over: Partial<ChatWakeLifetimeDeps> = {}, rows: ChatWakeIntent[] 
     log: vi.fn(),
     ...over,
   };
-  return { relay, intents, deps, lifetime: createChatWakeLifetime(deps) };
+  return { relay, intents, roster, deps, lifetime: createChatWakeLifetime(deps) };
 }
 
 const NOTHING_NEW = { applied: false, recovered: false } as const;
@@ -184,7 +217,9 @@ describe("the chat wake lifetime", () => {
     await turn();
     expect(w.deps.client).not.toHaveBeenCalled();
     expect(w.intents.state.lists).toBe(0);
+    await w.lifetime.runnersChanged();
     await w.lifetime.stop();
+    expect(w.roster.calls).toEqual([]);
   });
 
   it("reads only from startup, with no window or focus, and once per snapshot", async () => {
@@ -446,6 +481,109 @@ describe("rows a person sees", () => {
     await lifetime.stop();
     expect(w.deps.log).not.toHaveBeenCalled();
     expect(w.deps.report).not.toHaveBeenCalled();
+  });
+});
+
+describe("publishing and withdrawing this computer's agents", () => {
+  const reconcile = (scope: string) => ({ kind: "reconcile", scope, readerStopped: false });
+  const withdraw = (scope: string) => ({ kind: "withdraw", scope, readerStopped: true });
+
+  it("publishes for the running session only, from startup and on each change", async () => {
+    const w = setup();
+    const a = session("A");
+    w.lifetime.credentialsChanged(a, true);
+    await w.lifetime.runnersChanged();
+    await turn();
+    expect(w.roster.calls).toEqual([]);
+    w.lifetime.start();
+    await w.roster.untilCalls(1);
+    await w.lifetime.runnersChanged();
+    // Reaching the relay again is when a declaration that failed can go out.
+    await w.lifetime.pulled({ applied: false, recovered: true });
+    await w.lifetime.pulled(APPLIED);
+    expect(w.roster.calls).toEqual([reconcile("A"), reconcile("A"), reconcile("A")]);
+    await w.lifetime.stop();
+  });
+
+  it("withdraws an account that another one replaced after its reader stops, and before the next account publishes", async () => {
+    const w = setup();
+    const a = session("A");
+    w.lifetime.credentialsChanged(a, true);
+    w.lifetime.start();
+    await w.relay.untilReads(1);
+    a.end();
+    w.lifetime.credentialsChanged(session("B"), true);
+    await w.roster.untilCalls(3);
+    expect(w.roster.calls).toEqual([reconcile("A"), withdraw("A"), reconcile("B")]);
+    await w.lifetime.stop();
+  });
+
+  it("stops the reader at once at sign-out, withdraws without holding up the next sign-in, and withdraws again for nobody", async () => {
+    const w = setup();
+    const a = session("A");
+    w.roster.hangWithdrawals();
+    w.lifetime.credentialsChanged(a, true);
+    w.lifetime.start();
+    await w.relay.untilReads(1);
+    a.end();
+    w.lifetime.credentialsChanged(null, true);
+    await w.roster.untilCalls(2);
+    expect(w.roster.calls).toEqual([reconcile("A"), withdraw("A")]);
+    expect(w.relay.aborted).toEqual(["A"]);
+    // The withdrawal never answers, and the next account still starts.
+    w.lifetime.credentialsChanged(session("B"), true);
+    await w.relay.untilReads(2);
+    await w.roster.untilCalls(3);
+    expect(w.roster.calls.at(-1)).toEqual(reconcile("B"));
+    await w.lifetime.stop();
+    expect(w.roster.calls.filter((call) => call.kind === "withdraw")).toHaveLength(1);
+  });
+
+  it("withdraws nothing for a credential load's placeholder, a new token for the same account, or quit", async () => {
+    const w = setup();
+    w.lifetime.credentialsChanged(session("A"), true);
+    w.lifetime.start();
+    await w.relay.untilReads(1);
+    w.lifetime.credentialsChanged(null, false);
+    await w.relay.untilAborted(1);
+    w.lifetime.credentialsChanged(session("A"), true);
+    await w.relay.untilReads(2);
+    w.lifetime.credentialsChanged(session("A"), true);
+    await w.relay.untilReads(3);
+    await w.lifetime.stop();
+    expect(w.roster.calls).toEqual([reconcile("A"), reconcile("A"), reconcile("A")]);
+    expect(w.roster.roster.stop).toHaveBeenCalled();
+  });
+
+  it("withdraws the account a placeholder ended once another account settles", async () => {
+    const w = setup();
+    w.lifetime.credentialsChanged(session("A"), true);
+    w.lifetime.start();
+    await w.relay.untilReads(1);
+    w.lifetime.credentialsChanged(null, false);
+    await w.relay.untilAborted(1);
+    w.lifetime.credentialsChanged(session("B"), true);
+    await w.roster.untilCalls(3);
+    expect(w.roster.calls).toEqual([reconcile("A"), withdraw("A"), reconcile("B")]);
+    await w.lifetime.stop();
+  });
+});
+
+describe("Try again", () => {
+  it("restarts once for presses made before the restart begins, and keeps a dropped wake's row", async () => {
+    const reported = deferred<void>();
+    const w = setup({ report: vi.fn(() => reported.resolve()), openWorkspace: vi.fn(async () => readyWorkspace()) }, [intentOf("claim-pending")]);
+    w.lifetime.credentialsChanged(session("A"), true);
+    w.lifetime.start();
+    await reported.promise;
+    await w.relay.untilReads(1);
+    w.lifetime.retry();
+    w.lifetime.retry();
+    await w.relay.untilReads(2);
+    await turn();
+    expect(w.deps.client).toHaveBeenCalledTimes(2);
+    expect(w.deps.clear).not.toHaveBeenCalled();
+    await w.lifetime.stop();
   });
 });
 

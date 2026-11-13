@@ -1,4 +1,5 @@
 import type { ChatDispatchNotice } from "../ipc/bridgeContract";
+import type { ChatRunnerRefusal } from "./chatRunnerDeclaration";
 import type { ChatWakeIntent } from "./chatWakeIntents";
 import type { ChatWakeProblem } from "./chatWakeLifetime";
 
@@ -15,6 +16,16 @@ const MESSAGES: Record<ChatWakeProblem, string> = {
   dropped: "The server no longer lists this computer for it, so nothing ran here.",
   parked: "Its workspace stopped syncing here with this account. dohc starts it once the workspace syncs here again.",
   unconfirmed: "Its request is queued on this computer, and the server no longer lists it.",
+};
+
+// Why the server can't take this computer's agents, and the one thing to do.
+const REFUSALS: Record<ChatRunnerRefusal["reason"], string> = {
+  "too-many-agents": "The server takes up to 64 agents from each computer, and this one has more. Remove some in Settings › Agents.",
+  "same-name": "Two agents' names read as one name in chat. Rename one in Settings › Agents.",
+  "agent-name": "The server cannot take one agent's name. Rename it in Settings › Agents.",
+  "agent-id": "The server cannot take one agent's ID. Change it in your settings file.",
+  "computer-label": "The server cannot take this computer's name. Rename this computer in your system settings.",
+  "install-id": "The server cannot take this computer's ID.",
 };
 
 /**
@@ -64,6 +75,17 @@ export function createChatWakeNotices(deps: {
       for (const id of workspaceIds) {
         if (!unreadableIn.has(id) && attempt(() => deps.report(id, notice))) unreadableIn.add(id);
       }
+    },
+    /** The server can't take this computer's agents as they are. One row per workspace; the lifetime calls it once per change. */
+    refused(workspaceId: string, refusal: ChatRunnerRefusal): void {
+      deps.report(workspaceId, {
+        reason: "wake-runners-refused",
+        message: REFUSALS[refusal.reason],
+        ...("agentId" in refusal ? { agentId: refusal.agentId } : {}),
+      });
+    },
+    accepted(workspaceId: string): void {
+      deps.clear(workspaceId, "wake-runners-refused");
     },
     clear(workspaceId: string | null, problem: ChatWakeProblem): void {
       const workspaceIds = workspaceId !== null ? [workspaceId] : [...unreadableIn];

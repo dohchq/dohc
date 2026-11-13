@@ -104,6 +104,7 @@ async function harness() {
   const applyThemeMode = vi.fn((value: ThemeMode) => { effects.push({ kind: "theme", value, persisted: persisted() }); });
   const setSpellCheckerEnabled = vi.fn<(enabled: boolean) => void>();
   const broadcastUserSettings = vi.fn();
+  const publishRunners = vi.fn();
   const broadcastAgentColor = vi.fn();
   const notifyRenderer = vi.fn();
   const refreshDispatchTray = vi.fn<() => Promise<unknown>>(async () => undefined);
@@ -115,7 +116,7 @@ async function harness() {
     stateDir: () => stateDirectory, setCachedNames,
     applyZoomLevelToWindows, applyThemeMode, setSpellCheckerEnabled, refreshDispatchTray, openDispatchWorkspaces,
     chatDispatchService: { scanWorkspace }, withRendererWorkspaceOperation,
-    broadcastUserSettings, broadcastAgentColor, notifyRenderer, openPath,
+    broadcastUserSettings, broadcastAgentColor, notifyRenderer, openPath, publishRunners,
     knownWorkspaceIds: () => [...entries.keys()],
   });
   registerOperations<typeof settingsOperations, Event, Operation>({
@@ -134,7 +135,7 @@ async function harness() {
     handlers, effects, entries, authorities, sessions, first, second, open,
     zoom: capability.stepWindowZoom, setCachedNames, applyZoomLevelToWindows, applyThemeMode, setSpellCheckerEnabled,
     refreshDispatchTray, openDispatchWorkspaces, scanWorkspace, broadcastUserSettings, broadcastAgentColor, notifyRenderer,
-    openPath, reload: capability.reloadUserSettings,
+    publishRunners, openPath, reload: capability.reloadUserSettings,
     preferredName: () => preferredName, stateDirectory: () => stateDirectory,
     setStateDirectory: (value: string) => { stateDirectory = value; },
     root: entries.get("workspace-a")!.rootPath, otherRoot: entries.get("workspace-b")!.rootPath,
@@ -353,6 +354,34 @@ describe("registered settings IPC", () => {
     const on = { ...off, agents: { ...off.agents, codex: testAgent({ name: "Codex" }) } };
     await h.invoke(settingsOperations.setUserSettings.channel, { settings: on, base: off });
     await vi.waitFor(() => expect(h.scanWorkspace.mock.calls).toEqual([["workspace-a"], ["workspace-b"]]));
+  });
+
+  it("publishes this computer's agents on a save, a last agent switched off, a reset, and a hand edit, before the tray", async () => {
+    const h = await harness();
+    const on = settingsWithAgent({ name: "Nova" });
+    await h.invoke(settingsOperations.setUserSettings.channel, { settings: on, base: DEFAULT_USER_SETTINGS });
+    expect(h.publishRunners).toHaveBeenCalledOnce();
+    expect(h.publishRunners.mock.invocationCallOrder[0]).toBeLessThan(h.refreshDispatchTray.mock.invocationCallOrder[0]!);
+    // Its last agent switched off leaves nothing dohc starts, and still publishes.
+    const off = settingsWithAgent({ name: "Nova", enabled: false });
+    await h.invoke(settingsOperations.setUserSettings.channel, { settings: off, base: on });
+    expect(h.publishRunners).toHaveBeenCalledTimes(2);
+    await h.invoke(settingsOperations.resetUserSettings.channel);
+    expect(h.publishRunners).toHaveBeenCalledTimes(3);
+    await writeFile(join(h.stateDirectory(), userSettingsStore.USER_SETTINGS_FILE), JSON.stringify(settingsWithAgent({ name: "Ada" })));
+    await h.reload();
+    expect(h.publishRunners).toHaveBeenCalledTimes(4);
+    // dohc's own save, read back by the watcher, changes nothing to publish.
+    await h.reload();
+    expect(h.publishRunners).toHaveBeenCalledTimes(4);
+  });
+
+  it("publishes even when the tray can't refresh", async () => {
+    const h = await harness();
+    h.refreshDispatchTray.mockRejectedValueOnce(new Error("tray unavailable"));
+    const settings = settingsWithAgent({ name: "Nova" });
+    await expect(h.invoke(settingsOperations.setUserSettings.channel, { settings, base: DEFAULT_USER_SETTINGS })).rejects.toThrow("tray unavailable");
+    expect(h.publishRunners).toHaveBeenCalledOnce();
   });
 
   it("tells every window and the tray when only the agents' order changes", async () => {

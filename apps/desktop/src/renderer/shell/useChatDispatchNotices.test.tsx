@@ -241,3 +241,15 @@ it("keeps a wake row that is still wrong until Try again or its end, and lets a 
   act(() => h.store.clear("a", "wake-parked"));
   expect(view.result.current.shellErrors.map((item) => item.kind)).toEqual(["chat-wake-unreadable"]);
 });
+
+it("shows a refusal of this computer's agents with no Try again and no dismiss, until main takes it back", async () => {
+  const h = setup();
+  h.store.report("a", { reason: "wake-runners-refused", message: "Rename one in Settings › Agents.", agentId: "codex" });
+  const view = h.mount();
+  await act(async () => {});
+  const row = view.result.current.shellErrors.find((item) => item.kind === "chat-wake-runners-refused")!;
+  expect(row).toMatchObject({ title: "Your phone cannot wake agents on this computer", noDismiss: true, retry: null, details: [["Agent", "codex"]] });
+  expect(row.onDismiss).toBeUndefined();
+  act(() => h.store.clear("a", "wake-runners-refused"));
+  expect(view.result.current.shellErrors).toEqual([]);
+});

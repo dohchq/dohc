@@ -372,6 +372,9 @@ import { createChatWakeClient } from "./chatWakes/chatWakeClient";
 import { chatWakeThreadVisibility, type ChatWakeAgent, type ChatWakeThreadVisibility, type ChatWakeWorkspace } from "./chatWakes/chatWakeConsumer";
 import { createChatWakeIntents } from "./chatWakes/chatWakeIntents";
 import { createChatWakeNotices } from "./chatWakes/chatWakeNotices";
+import { createChatRunnerLedger } from "./chatWakes/chatRunnerLedger";
+import { createChatRunnerRoster } from "./chatWakes/chatRunnerRoster";
+import { CHAT_RUNNER_COMPUTER_LABEL_MAX_CHARS, isChatWakeLine } from "@dohc/workspace-contracts/chat-wakes";
 import {
   CHAT_WAKES_ON, chatWakeBackoffMs, createChatWakeLifetime, sleepUnlessAborted, type ChatWakeSession,
 } from "./chatWakes/chatWakeLifetime";
@@ -1190,19 +1193,34 @@ const personalAgentRoster = createPersonalAgentRoster({
 // workspace of this account, read from the registry without opening any.
 const chatWakeNotices = createChatWakeNotices({
   file: chatWakeIntentsFile(),
-  workspaces: () => {
-    const credentials = cachedCredentials;
-    if (!credentials) return [];
-    return listWorkspaces().filter((workspace) => workspace.remote !== undefined && !sharedViewOf(workspace.workspaceId) &&
-      workspaceRemoteMatchesCredentials(workspace.remote, credentials)).map((workspace) => workspace.workspaceId);
-  },
+  workspaces: () => chatWakeWorkspaceIds(cachedCredentials),
   report: (workspaceId, notice) => chatDispatchNotices.report(workspaceId, notice),
   clear: (workspaceId, reason) => chatDispatchNotices.clear(workspaceId, reason),
   log: (error) => console.error("[desktop] chat wake notice:", error),
 });
+// Which of this computer's agents each synced workspace can wake here. The
+// session's workspaces are read with the cached credentials only while that
+// session is current, which is when the two agree.
+const chatRunners = createChatRunnerRoster({
+  ledger: createChatRunnerLedger(join(stateDir(), "chat-runners.json")),
+  client: (wakeSession) => createChatWakeClient({ relay: wakeSession.relay }),
+  workspaces: (wakeSession) => wakeSession.isCurrent() ? chatWakeWorkspaceIds(cachedCredentials) : [],
+  agents: async () => listAgents((await readCachedUserSettingsFile(stateDir())).settings),
+  computerLabel: () => {
+    const label = computerLabel(hostname());
+    return isChatWakeLine(label, CHAT_RUNNER_COMPUTER_LABEL_MAX_CHARS) ? label : "This computer";
+  },
+  sleep: sleepUnlessAborted,
+  backoffMs: chatWakeBackoffMs,
+  timeout: (ms) => AbortSignal.timeout(ms),
+  refused: (workspaceId, refusal) => chatWakeNotices.refused(workspaceId, refusal),
+  accepted: (workspaceId) => chatWakeNotices.accepted(workspaceId),
+  log: (error) => console.error("[desktop] chat runners:", error),
+});
 const chatWakes = createChatWakeLifetime({
   on: CHAT_WAKES_ON,
   intents: createChatWakeIntents(chatWakeIntentsFile()),
+  roster: chatRunners,
   client: (wakeSession) => createChatWakeClient({ relay: wakeSession.relay }),
   openWorkspace: openChatWakeWorkspace,
   sleep: sleepUnlessAborted,
@@ -1214,6 +1232,14 @@ const chatWakes = createChatWakeLifetime({
 });
 function chatWakeIntentsFile(): string {
   return join(stateDir(), "chat-wakes.json");
+}
+// The account's own synced workspaces on this computer, open in a window or
+// not: not shares, not paused, and not a folder inside dohc's own.
+function chatWakeWorkspaceIds(credentials: CloudSessionCredentials | null): string[] {
+  if (!credentials) return [];
+  return listWorkspaces().filter((workspace) => workspace.remote !== undefined && !sharedViewOf(workspace.workspaceId) &&
+    workspaceRemoteMatchesCredentials(workspace.remote, credentials) && !overlapsStateFolder(workspace.rootPath, stateDir()))
+    .map((workspace) => workspace.workspaceId);
 }
 // A URL with a user, query, or fragment never names an account scope.
 function plainUrl(url: string): boolean {
@@ -2275,7 +2301,11 @@ function registerReservedPhysicalWorkspace(
 const removePhysicalWorkspace = createPhysicalWorkspaceRemoval({
   retireBinding: (binding, retirement) => workspaceAuthorities.retireBinding(binding, retirement),
   findWorkspace,
-  removeWorkspace,
+  removeWorkspace: (workspaceId) => {
+    removeWorkspace(workspaceId);
+    // The declarations ledger still names it under its account, so the next publish withdraws it there.
+    void chatWakes.runnersChanged();
+  },
   confirmDraftRemoval: async workspaceId => {
     await flushTypingCheckpoints(workspaceId);
     if (!(await hasWorkspaceLiveDrafts(join(stateDir(), "live-draft-recovery"), workspaceId))) return true;
@@ -6739,6 +6769,7 @@ const settingsIpc = createSettingsIpc<WebContents, IpcMainInvokeEvent, DesktopRe
     void automationWakeConsumer.resume();
     chatWakes.resume();
   },
+  publishRunners: () => { void chatWakes.runnersChanged(); },
   openPath: (path) => shell.openPath(path),
   knownWorkspaceIds: () => workspaceSummaries().map((workspace) => workspace.workspaceId),
 });
@@ -6771,7 +6802,11 @@ const stopWorkspaceSync = createWorkspaceSyncStop({
   withOwnerHostPaused: work => desktopEngine.withOwnerHostPaused(work),
   prepare: workspace => activity.prepareSyncPause(workspace),
   resume: workspace => activity.enableCloud(workspace),
-  pauseRemote: pauseWorkspaceRemote,
+  pauseRemote: (workspaceId, pause) => {
+    pauseWorkspaceRemote(workspaceId, pause);
+    // A paused workspace takes no wakes here, so this computer's agents are withdrawn there.
+    void chatWakes.runnersChanged();
+  },
   status: workspaceId => activity.getStatus(workspaceId),
   cleanupFailed: (workspaceId, error) => console.error("[desktop] sync pause cleanup:", workspaceId, error),
   reopenFailed: workspace => activity.recordSyncPauseReopenFailed(workspace.workspaceId),
@@ -7069,8 +7104,9 @@ function registerIpcHandlers(): void {
     setWorkspaceRemote: async (workspaceId, remote) => {
       await setWorkspaceRemote(workspaceId, remote);
       retryStopAndRestoreReleases?.();
-      // A wake parked while this workspace didn't sync here can go on.
+      // A wake parked while this workspace didn't sync here can go on, and its agents can be declared.
       chatWakes.resume();
+      void chatWakes.runnersChanged();
     }, usableRoot, readdir, mkdir, probeRelayWorkspace,
     createJoinedWorkspace, bootstrapJoinedWorkspace, refreshNativeWorkspaceSurfaces,
     openWorkspaceActivity, completeWorkspaceJoinBootstrap, desktopMarks,

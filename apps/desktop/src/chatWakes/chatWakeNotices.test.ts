@@ -63,3 +63,19 @@ describe("wake rows in Notices", () => {
     expect(deps.log).toHaveBeenCalledWith(failure);
   });
 });
+
+describe("a refusal of this computer's agents", () => {
+  it("files one row in the workspace naming the agent and the next step, and takes it back", () => {
+    const { deps, notices } = setup(() => ["ws"]);
+    notices.refused("ws", { reason: "same-name", agentId: "codex" });
+    expect(deps.report).toHaveBeenCalledExactlyOnceWith("ws", {
+      reason: "wake-runners-refused",
+      message: "Two agents' names read as one name in chat. Rename one in Settings › Agents.",
+      agentId: "codex",
+    });
+    notices.refused("ws", { reason: "too-many-agents" });
+    expect(deps.report).toHaveBeenLastCalledWith("ws", expect.not.objectContaining({ agentId: expect.anything() }));
+    notices.accepted("ws");
+    expect(deps.clear).toHaveBeenCalledExactlyOnceWith("ws", "wake-runners-refused");
+  });
+});
