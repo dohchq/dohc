@@ -1,6 +1,8 @@
 // Writes the declared operations' entries in the main inventories from their
 // declarations. Run `pnpm write:operation-pins` after adding or changing a
 // declaration, then review the diff. Other entries stay as reviewed by hand.
+// A declared channel's admission row is replaced, with handlerCheck null. A
+// declared tool's pin is deleted at a level its declaration no longer lists.
 // channelKeys.main.json lists CHANNELS keys, which no declaration adds.
 // Removing a declaration leaves its entries for you to delete.
 import { readFileSync, writeFileSync } from "node:fs";

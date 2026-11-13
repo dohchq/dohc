@@ -2,13 +2,6 @@ import type { z } from "zod";
 
 export type McpAccessLevel = "owner" | "view" | "comment" | "edit";
 
-// One operation as each door offers it: the window's IPC row, the public CLI
-// command and its socket verb, and the desktop MCP tool. Those doors derive
-// their entries from it. It describes doors and grants nothing: the IPC row
-// always runs in the sending window's active workspace, the CLI socket keeps
-// its own workspace and received-share rules, and capabilityId stays
-// metadata. Declarations import only contract schemas, so the preload can
-// load them.
 // The fields a door sets around a declared input: the CLI request and its args
 // (requestBase and argsBase in packages/cli/src/protocol.ts), and the IPC row's
 // workspace. An input that named one could let a caller replace the value the
@@ -16,11 +9,18 @@ export type McpAccessLevel = "owner" | "view" | "comment" | "edit";
 export const ENVELOPE_FIELDS = ["token", "protocolVersion", "door", "runSecret", "cwd", "actor", "agentId", "workspaceId"] as const;
 export type EnvelopeField = (typeof ENVELOPE_FIELDS)[number];
 
+// One read as each door offers it: the window's IPC row, the public CLI
+// command and its socket verb, and the desktop MCP tool. Those entries derive
+// from it; the CLI parser, socket reader, and IPC handler stay hand-written.
+// The IPC row always runs in the sending window's active workspace, and the
+// CLI socket keeps its own workspace and received-share rules. mcp.levels
+// decides at which share levels the MCP server registers the tool, and a
+// socket request carries no share level. Declarations import only contract
+// schemas, so the preload can load them.
 export interface OperationDeclaration {
   readonly capabilityId: string;
-  // Only reads are declared. The CLI socket runs a declared verb without the
-  // agent, run, read-only, and path checks that other verbs get, and passes the
-  // reader no actor.
+  // Only reads are declared. The CLI socket gives a declared verb no write
+  // admission and its reader no actor.
   readonly access: "read";
   // What every caller sends. The IPC row adds the workspace. The type refuses a
   // shape that names an envelope field, and capabilities.ts refuses one at load.
