@@ -359,7 +359,6 @@ it.each([
   await sender.close();
   expect(transport).toHaveBeenCalledOnce();
   expect(rows(f.storage)[0]!.state).toBe("sent");
-
 });
 
 it.each(["rename", "delete"] as const)("drops a queued file-chat alert after the file %s", async operation => {

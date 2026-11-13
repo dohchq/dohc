@@ -243,7 +243,6 @@ it("blocks queued operations and receipt disclosure after binding or data grant 
   const read = f.invoke("helper", id(7));
   f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: null });
   await expect(read).rejects.toThrow("You do not have access to this Collection.");
-
 });
 
 it("intersects admin app operations with the explicit data grant and refuses stale views", async () => {
@@ -379,7 +378,6 @@ it("refuses file disclosure when a committed row change removes visibility after
   await expect(f.host.readOperation("owner",{...base,operationId:id(7),input:{},idempotencyKey:"read-visible"},()=>{disclosed=true;return "private receipt";})).rejects.toThrow("The Collection changed before dohc opened this file");
   expect(disclosed).toBe(false);
   expect((await invoke("owner",{...base,operationId:id(7),input:{},idempotencyKey:"check-hidden"})).result).toEqual([]);
-
 });
 
 it("lets only owners acknowledge an exact committed response without exposing participant retry secrets", async () => {
@@ -562,7 +560,6 @@ it("attributes an owner's write to its agent at any depth from 0, through an app
   agent = { depth: 0 }; named = true;
   await expect(invoke("named", "form")).rejects.toThrow("You do not have access to this Collection.");
   expect(f.host.automationClaims.next(scope.workspaceId)).toBeNull();
-
 });
 
 it("names the person a commit is made for from the host's context, never the owner key, and none for a link", async () => {

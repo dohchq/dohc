@@ -148,7 +148,6 @@ describe("the automation run store", () => {
     expect(loaded).toMatchObject({sharedSettlements, undoWrites});
     await restarted.updateState(loaded, {sharedSettlements: [{draft: undoWrites[0]!.draft, state: "not-accepted"}]});
     expect((await restarted.runsOf(AUTOMATION, "settlement")).runs[0]?.sharedSettlements).toHaveLength(2);
-
   });
 
   it.each([11, 12])("saves version 13 and refuses version %s without a compatibility reader", async version => {

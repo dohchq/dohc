@@ -433,7 +433,6 @@ it("waits for a late daemon start and its close before every concurrent close re
   await expect(readFile(f.starts[0]!.configPath)).rejects.toMatchObject({code: "ENOENT"});
   expect(f.host.current()).toBeUndefined();
   expect(hasRelayWriteObservers(f.storage)).toBe(false);
-
   expect(f.onError).not.toHaveBeenCalled();
 });
 

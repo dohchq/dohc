@@ -203,7 +203,6 @@ it("serializes concurrent retry acceptance on independent SQLite connections",as
   expect(first.kind).toBe("accepted");expect(second).toEqual(first);
   expect(f.raw.prepare("SELECT COUNT(*) AS n FROM sync_relay_app_collection_receipts").get()!.n).toBe(1);
   expect(f.storage.maxOriginSeq("w","relay:collection-create:g")).toBe(0);
-
 });
 
 it("refuses a worker request prepared before owner withdrawal",async()=>{

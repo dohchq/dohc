@@ -498,6 +498,11 @@ describe("file reads through the server's copy", () => {
     engine.listedHidden.push(".env", "docs/.env.local", "a/.env/b.md", "docs/.DS_Store.");
     engine.files.seedBinaryFile({ workspace: "trip", path: "photo.png", bytes: [1, 2, 3], objectId: "object-photo" });
   }
+  const paths = (result: Record<string, unknown>) => ({
+    files: (result.files as Array<{ path: string }>).map((file) => file.path), folders: result.folders,
+  });
+
+
   it("lists the copy's files in lexical order without hidden ones, and reads a text file", async () => {
     const { engine, h, syncs } = await relay();
     seedFiles(engine);

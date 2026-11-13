@@ -144,7 +144,6 @@ it("refuses a dependent Undo if the owner narrowed its parent link", async () =>
     expectedDependentGrantIds: [], guard: storage.captureStanding()})).toMatchObject({ok: true});
   expect(() => storage.undoShareRemoval({...removal, undoId: result.undo!.undoId})).toThrow("parent link no longer allows");
   expect(storage.getShareGrant("dependent")?.status).toBe("revoked");
-
 });
 
 it.each(["startup", "sweep", "failed removal", "failed guard"])("purges expired receipts on %s", async action => {

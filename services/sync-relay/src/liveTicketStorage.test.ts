@@ -37,7 +37,6 @@ it("replaces a v1 ticket table, whose tickets expire within 30 seconds, instead 
     expect(state.raw.prepare(`PRAGMA table_info(${table})`).all()).toHaveLength(21);
     expect(rows(state)).toEqual([]);
     expect(state.storage.mintLiveTicket(mint)).toEqual({ expiresAtMs: 31000 });
-
   } finally { await state.close(); }
 });
 
@@ -172,8 +171,6 @@ it.each([
     state.raw.prepare(`UPDATE ${table} SET ${column}=?`).run(value);
     expect(() => state.storage.readLiveTicketTarget({ tokenHash, scope, audience })).toThrow(/stored live ticket is damaged|too large to be represented/);
     expect(() => state.storage.redeemLiveTicket(redeem)).toThrow(/stored live ticket is damaged|too large to be represented/);
-
-
   } finally { await state.close(); }
 });
 
@@ -294,8 +291,6 @@ it("compares frozen binding with a fresh report after a fence change", async () 
     const fresh = { ...report, binding: { ...binding, restoreFenceGeneration: 8 } };
     expect(state.storage.redeemLiveTicket({ ...redeem, report: fresh })).toBeNull();
     expect(state.storage.mintLiveTicket({ ...another(2), report: fresh })).not.toBeNull();
-
-
   } finally { await state.close(); }
 });
 

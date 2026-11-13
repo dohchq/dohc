@@ -494,7 +494,6 @@ describe("the automation replicas", () => {
     running.reconcile();
     await running.settled();
     expect(engine.methods().filter((method) => method === "sync.applyPull")).toHaveLength(2);
-
   });
 
   it("closes a replica whose workspace was deleted, and removes every folder no row names", async () => {

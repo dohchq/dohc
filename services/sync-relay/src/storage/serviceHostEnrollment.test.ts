@@ -138,7 +138,6 @@ it("does not replace a retained object when its path is reused or follow its ren
   f.seed(scope.workspaceId, "replacement-object", binding.currentPath, "replacement-share");
   expect(() => f.enroll({shareId: "replacement-share"})).toThrow("another document");
   expect(f.storage.listServiceHostEnrollments()[0]!.objectId).toBe(binding.objectId);
-
 });
 
 it("refuses altered enrollment schema on reopen", async () => {

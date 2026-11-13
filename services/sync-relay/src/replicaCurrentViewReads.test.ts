@@ -146,7 +146,6 @@ it.each(["wrong-text"])("an unpersisted %s view cannot return text", async corru
   if (corruption === "wrong-text") view.texts[0]!.text="wrong text";
   const source = {currentReadView:() => ({view})};
   expect(f.storage.readReplicaCurrentViewFile({...f.input,path:"docs/a.md"},source)).toEqual({status:"updating"});
-
 });
 
 it("rejects a previous snapshot from another workspace", async () => {

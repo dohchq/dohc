@@ -443,7 +443,6 @@ it("holds the owner of a takedown made before the hold existed", () => {
   expect(() => f.storage.publishAppPublication({...request(), candidate: edited()})).toThrow(held);
   expect(f.raw.prepare("SELECT owner_user_id,publication_id,held_at_ms FROM sync_relay_app_publishing_holds").all())
     .toEqual([{owner_user_id: "owner", publication_id: p.publicationId, held_at_ms: 30}]);
-
 });
 
 it("refuses to recreate a missing marked hold table", () => {

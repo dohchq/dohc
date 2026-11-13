@@ -284,7 +284,6 @@ describeWithPostgres("closed sign-up", () => {
     expect(responses.map((response) => response.status)).toEqual([200, 200]);
     expect(await nameOf(first.user.id)).toBe("Ada");
     expect(await nameOf(second.user.id)).toBe("");
-
   });
 
   it("never renames a verified account from a password reset, even with a name in the request", async () => {

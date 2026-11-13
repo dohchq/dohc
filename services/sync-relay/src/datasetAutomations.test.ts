@@ -106,7 +106,6 @@ it("uses registered callers, scopes authority, and preserves chain depth and rec
   f.ledger.release(running);
   expect(f.ledger.claim(automationId, running.claimId)?.state).toBe("pending");
   await expect(Promise.resolve().then(() => f.ledger.invoke(context, input))).rejects.toThrow();
-
 });
 
 it.each(["view", "wrong-folder", "derived", "no-data"])("refuses a %s presser", async kind => {
