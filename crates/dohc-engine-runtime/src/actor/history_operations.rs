@@ -10,7 +10,8 @@ use crate::RuntimeError;
 use dohc_engine_domain::{
     DomainError, OperationMoment, VersionedTextStore, binary_rename_delete_job_id,
     binary_rename_write_job_id, binary_rollback_job_identity, operation_moments_in,
-    replayed_undo_operation_in, undo_correlation_id, validate_operation_id,
+    preflight_undo_operation_in, replayed_undo_operation_in, undo_correlation_id,
+    validate_operation_id,
 };
 use dohc_engine_storage::text;
 use dohc_engine_storage::{
