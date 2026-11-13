@@ -127,10 +127,17 @@ pub(super) fn pending_in(
     let mut groups: Vec<Vec<Row>> = Vec::new();
     while let Some(next) = rows.next().map_err(read_sql)? {
         let next = row(next).map_err(read_sql)?;
-        match groups.last_mut() {
-            Some(group) if group[0].group == next.group => group.push(next),
-            _ if groups.len() == limit => break,
-            _ => groups.push(vec![next]),
+        let joins = groups
+            .last()
+            .is_some_and(|group| group[0].group == next.group);
+        if !joins {
+            if groups.len() == limit {
+                break;
+            }
+            groups.push(Vec::new());
+        }
+        if let Some(group) = groups.last_mut() {
+            group.push(next);
         }
     }
     groups
