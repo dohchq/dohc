@@ -10,7 +10,7 @@ import {
   killProcessTreePosix,
   parseProcessTable,
   processDescendants,
-  readProcessTableWithPs,
+  processGroupDescendants,
 } from "../process/posixSpawn";
 import {
   killChildTreeWin32,
@@ -156,13 +156,18 @@ function isPidAlive(pid: number): boolean {
   }
 }
 
+// On POSIX an app command leads its own process group, so a snapshot that
+// lands after the command exits still finds what it put in the background.
+// Windows has no such group, and a detached child there gets its own console.
+const OWN_PROCESS_GROUP = process.platform !== "win32";
+
 // The periodic descendant capture below runs on every platform: a wrapper
 // that backgrounds its real server or build helper and exits leaves an
 // orphan behind on Windows exactly as it does on POSIX, and taskkill /T
 // needs a live root pid to walk — a snapshot taken while the wrapper was
 // still running is the only way to reach it once that wrapper is gone.
-function defaultDescendantsReader(pid: number, spawnedAt: number): Promise<number[]> {
-  if (process.platform !== "win32") return processDescendants(pid, readProcessTableWithPs);
+export function defaultDescendantsReader(pid: number, spawnedAt: number): Promise<number[]> {
+  if (process.platform !== "win32") return processGroupDescendants(pid);
   return processDescendants(pid, async () =>
     withoutReusedParents(await readProcessTableWithPowershell(), pid, spawnedAt),
   );
@@ -1110,6 +1115,7 @@ export async function startSiteDevServer(
     cwd,
     env,
     stdio: ["ignore", "pipe", "pipe"],
+    detached: OWN_PROCESS_GROUP,
     windowsVerbatimArguments: spawnSpec.windowsVerbatimArguments,
   });
   child.unref();
@@ -1414,6 +1420,7 @@ export async function buildSite(
     cwd,
     env,
     stdio: ["ignore", "pipe", "pipe"],
+    detached: OWN_PROCESS_GROUP,
     windowsVerbatimArguments: spawnSpec.windowsVerbatimArguments,
   });
 
