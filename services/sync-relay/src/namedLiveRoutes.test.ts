@@ -1891,6 +1891,20 @@ describe("a link ticket while the relay is busy", () => {
     },
   );
 
+  // An agent enrolls elsewhere, so only the record of its public principal is new here.
+  it("stops a link agent whose public principal a full workspace can't hold", async () => {
+    for (const quota of [undefined, 0]) {
+      const f = await fixture(limits, true);
+      f.useCredentials(linkAgent(f).headers);
+      if (quota !== undefined)
+        (
+          f.storage as unknown as { options: { workspaceQuotaBytes: number } }
+        ).options.workspaceQuotaBytes = quota;
+      const [status] = await ask(f);
+      expect(status).toBe(quota === undefined ? 200 : 404);
+    }
+  });
+
   it("tells a caller with neither a capability nor an agent token nothing", async () => {
     const f = await fixture(limits, true);
     f.routes.close();

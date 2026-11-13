@@ -1090,7 +1090,18 @@ export function mintLiveTicket(
   const objectId = parseLiveUpdateIdentifier(raw.objectId, "object ID");
   const ticketId = parseLiveUpdateIdentifier(raw.ticketId, "ticket ID");
   const report = snapshotTicketHostReport(raw.report);
+  // A full workspace refuses a ticket the way a full link does, whichever record would not fit.
   return storage.ticketTransaction((now, policy) => {
+    try {
+      return mintInTransaction(now, policy);
+    } catch (error) {
+      throw error instanceof SyncRelayQuotaExceededError ? LIVE_TICKET_REFUSED : error;
+    }
+  });
+  function mintInTransaction(
+    now: number,
+    policy: LiveTicketStoragePolicy,
+  ): { expiresAtMs: number; publicPrincipalId?: string } {
     if (now > Number.MAX_SAFE_INTEGER - LIVE_TICKET_LIFETIME_MS) throw LIVE_TICKET_REFUSED;
     if (owned.scope.kind === "link") {
       const actor = liveBrowserActor(owned.scope);
@@ -1106,21 +1117,16 @@ export function mintLiveTicket(
         const principalId =
           link.enrollment.principal?.principalId ??
           parseLiveUpdateIdentifier(storage.newDiscussionId(), "link principal ID");
-        // A full workspace refuses a new browser the way a full link does.
         if (!link.enrollment.principal)
-          try {
-            assertWorkspaceQuota(
-              storage,
-              owned.scope.workspaceId,
-              linkPrincipalStorageBytes(
-                principalId,
-                owned.scope.grantId,
-                owned.scope.profileTokenHash,
-              ),
-            );
-          } catch (error) {
-            throw error instanceof SyncRelayQuotaExceededError ? LIVE_TICKET_REFUSED : error;
-          }
+          assertWorkspaceQuota(
+            storage,
+            owned.scope.workspaceId,
+            linkPrincipalStorageBytes(
+              principalId,
+              owned.scope.grantId,
+              owned.scope.profileTokenHash,
+            ),
+          );
         commitLinkEnrollment(storage, {
           ...owned.scope,
           enrollment: link.enrollment,
@@ -1162,7 +1168,7 @@ export function mintLiveTicket(
         ? { publicPrincipalId: ensureLiveLinkPublicPrincipal(storage, current.authority) }
         : {}),
     };
-  });
+  }
 }
 
 /**
