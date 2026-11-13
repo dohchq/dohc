@@ -2,6 +2,7 @@ import { requireFinishedRestoreBinding } from "./liveRestoreLifecycleStorage";
 import { parseNativeOwnerActivationSource } from "@dohc/workspace-engine-client/daemon";
 import { registerLiveHostInTransaction } from "./hostControl";
 import { createHash } from "node:crypto";
+import { setImmediate } from "node:timers/promises";
 import { isDeepStrictEqual } from "node:util";
 import type { NativeOwnerActivation, NativeOwnerActivationSource, RetainedPrefixBody } from "@dohc/workspace-engine-client/daemon";
 import { parseLiveDocumentKey, parseLiveUpdateDigest, parseLiveUpdateIdentifier, parseLiveUpdateReceipt, type LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
@@ -18,7 +19,7 @@ import type { RetirementKey } from "./serviceActivationRetirement";
 import {readOrdinaryActivationHistory,verifyOrdinaryActivationCut,ServiceActivationBusy,ServiceActivationStaleCut,ServiceActivationTooLarge,
   type OrdinaryActivationBounds,type OrdinaryActivationRead} from "./ordinaryActivationSource";
 import {ServiceActivationHistoryOverBudget,type OrdinaryActivationValidator} from "./ordinaryActivationValidation";
-import {foldOrdinaryCheckpointPage,ORDINARY_FOLD_PAGE_ROWS,type OrdinaryFoldValidator} from "./ordinaryActivationFold";
+import {foldOrdinaryCheckpointPages,ORDINARY_FOLD_PAGE_ROWS,ORDINARY_FOLD_RUN_PAGES,type OrdinaryFoldValidator} from "./ordinaryActivationFold";
 import type {OrdinaryCheckpointScope} from "./ordinaryActivationCheckpoint";
 /** A retained activation whose stored record can't be read back. Only the operator can repair it. */
 export class ServiceActivationDamaged extends Error {
@@ -429,17 +430,18 @@ export class ServiceActivationStore {
       if (result.kind === "accepted") throw new Error("Ordinary fold validation answered for an activation.");
       return result;
     };
-    // More history after the checkpoint than one read takes folds into it a page at a time, so no history is refused for its length.
+    // More history after the checkpoint than one read takes folds into it a run of pages at a time, so no history is refused for its length.
     let checkpoint = lineage, found = read(checkpoint);
     while (found?.kind === "fold" && lineage) {
       input.signal?.throwIfAborted();
-      const folded = await foldOrdinaryCheckpointPage(this.storage, {scope: lineage, validate: foldPage, nowMs: () => input.registeredAtMs, signal: input.signal,
-        bounds: {pageRows: ORDINARY_FOLD_PAGE_ROWS, pageBytes: input.bounds.maxBytesPerDrain}});
+      const folded = await foldOrdinaryCheckpointPages(this.storage, {scope: lineage, validate: foldPage, nowMs: () => input.registeredAtMs, signal: input.signal,
+        bounds: {pageRows: ORDINARY_FOLD_PAGE_ROWS, pageBytes: input.bounds.maxBytesPerDrain}, pages: ORDINARY_FOLD_RUN_PAGES});
       if (folded.kind === "busy") throw new ServiceActivationBusy();
       if (folded.kind === "over-budget") throw new ServiceActivationHistoryOverBudget(folded.message);
       if (folded.kind === "refused") throw new Error(folded.message);
       // A fold that cannot go further leaves the read from the base to decide.
       if (folded.kind === "blocked" || folded.kind === "current") checkpoint = null;
+      await setImmediate();
       found = read(checkpoint);
     }
     if (found?.kind === "base") {checkpoint = null; found = read(checkpoint);}

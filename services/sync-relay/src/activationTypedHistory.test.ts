@@ -1,8 +1,10 @@
 // #3763: typing any amount must never stop a note from going live, and activation must cost what the note's size costs,
 // not what its edit count costs. These tests drive the activation itself (`prepare`) with production settings, assert
-// that it accepts the note, and report how long it took and the longest time it held the relay's event loop.
+// that it accepts the note, and report how long it took, the longest time it held the relay's event loop, and the work
+// on the main thread inside its longest holds.
 import { afterEach, expect, it } from "vitest";
 import { createLiveValidationExecutor } from "./liveValidation.js";
+import type { StorageContext } from "./storage/context.js";
 import { ACTIVATION, typedRelayNote as seedTypedRelayNote, type TypedRelayNote } from "./testing/typedNotes.js";
 
 const cleanup: (() => Promise<void>)[] = [];
@@ -17,29 +19,82 @@ function validation() {
 /** The relay's work for this note that runs off the request path, before anyone shares it. Main has none. */
 async function foldAhead(_note: TypedRelayNote) {}
 
+type Hold = {start: number; end: number};
 /**
  * The longest time the event loop went without running a timer while `run` worked, counting a hold still going when
- * `run` settles. A timer is due every `everyMs`, so a loop that is never held reads about `everyMs`. Promise callbacks
- * run before any timer, so work made only of them holds the loop for its whole length. `monitorEventLoopDelay` records
- * a delay only from its second timer on, so it reads 0 for such a hold.
+ * `run` settles, and the five longest holds. A timer is due every `everyMs`, so a loop that is never held reads about
+ * `everyMs`. Promise callbacks run before any timer, so work made only of them holds the loop for its whole length.
+ * `monitorEventLoopDelay` records a delay only from its second timer on, so it reads 0 for such a hold.
  */
 async function longestHold<T>(run: () => Promise<T>, everyMs = 5) {
-  let last = performance.now(), longestMs = 0;
-  const timer = setInterval(() => {const now = performance.now(); longestMs = Math.max(longestMs, now - last); last = now;}, everyMs);
+  let last = performance.now();
+  const holds: Hold[] = [];
+  const keep = (hold: Hold) => {holds.push(hold); holds.sort((a, b) => (b.end - b.start) - (a.end - a.start)); holds.splice(5);};
+  const timer = setInterval(() => {const now = performance.now(); keep({start: last, end: now}); last = now;}, everyMs);
   try {
     const value = await run();
-    return {value, longestMs: Math.max(longestMs, performance.now() - last)};
+    keep({start: last, end: performance.now()});
+    return {value, longestMs: holds[0]!.end - holds[0]!.start, holds};
   } finally {clearInterval(timer);}
 }
 
-/** One activation with the self-hosted profile's settings, timed, with the event loop watched. */
+type Validate = ReturnType<typeof validation>;
+type Span = {stage: string; start: number; end: number};
+/**
+ * Times the activation's work on the main thread: each history read, each write's body, the relay database's commit, the
+ * continuity sidecar's commit that follows it, and each validation's send to the child. The rest of the main thread's
+ * time is the fold's page reads and checkpoint builds.
+ */
+function staged(note: TypedRelayNote, validate: Validate) {
+  const storage = note.deployment.storage as unknown as StorageContext, spans: Span[] = [];
+  const span = <T>(stage: string, run: () => T) => {const start = performance.now(); try {return run();} finally {spans.push({stage, start, end: performance.now()});}};
+  const tx = storage.tx.bind(storage), readTx = storage.readTx.bind(storage), exec = storage.db.exec.bind(storage.db);
+  let writing = false, committed = 0;
+  storage.readTx = run => span("history read", () => readTx(run));
+  storage.db.exec = (sql: string) => {
+    if (!writing || sql !== "COMMIT") return exec(sql);
+    try {return span("relay database commit", () => exec(sql));} finally {committed = performance.now();}
+  };
+  storage.tx = run => {
+    writing = true; committed = 0;
+    try {
+      const value = tx(() => span("write body", run));
+      spans.push({stage: "continuity sidecar commit", start: committed, end: performance.now()});
+      return value;
+    } finally {writing = false;}
+  };
+  const sent: Validate = Object.assign((...args: Parameters<Validate>) => span("validation send", () => validate(...args)), validate);
+  return {validate: sent, spans};
+}
+
+/** One activation with the self-hosted profile's settings, timed, with the event loop watched and its work staged. */
 async function activate(note: TypedRelayNote, validate = validation()) {
   const store = note.deployment.storage.createServiceActivationStore(note.deployment.history);
+  const stages = staged(note, validate);
   const start = performance.now();
-  const {value: outcome, longestMs} = await longestHold(() => store.prepare({capture: note.capture, host: note.host, registeredAtMs: 3,
-    guard() {}, validate, bounds: {maxCaptureBytes: ACTIVATION.maxCaptureBytes, maxHistoryEntries: ACTIVATION.maxActivationHistoryEntries,
+  const {value: outcome, longestMs, holds} = await longestHold(() => store.prepare({capture: note.capture, host: note.host, registeredAtMs: 3,
+    guard() {}, validate: stages.validate, bounds: {maxCaptureBytes: ACTIVATION.maxCaptureBytes, maxHistoryEntries: ACTIVATION.maxActivationHistoryEntries,
       maxBytesPerDrain: ACTIVATION.maxBytesPerDrain}}).then(value => value, (error: unknown) => error));
-  return {outcome, elapsedMs: performance.now() - start, holdMs: longestMs};
+  return {outcome, elapsedMs: performance.now() - start, holdMs: longestMs, holds, spans: stages.spans};
+}
+
+const STAGES = ["history read", "write body", "relay database commit", "continuity sidecar commit", "validation send"];
+/** Each stage's count, longest span and total, then the five longest holds split by the stages inside them. */
+function stageReport(label: string, run: {holds: Hold[]; spans: Span[]}) {
+  const lines = STAGES.map(stage => {
+    const lengths = run.spans.filter(span => span.stage === stage).map(span => span.end - span.start);
+    return `[typed-activation] ${label} ${stage.padEnd(26)} x${String(lengths.length).padStart(4)}  longest ${Math.max(0, ...lengths).toFixed(1).padStart(7)} ms` +
+      `  total ${lengths.reduce((sum, ms) => sum + ms, 0).toFixed(0).padStart(6)} ms`;
+  });
+  for (const hold of run.holds) {
+    const parts = STAGES.map(stage => [stage, run.spans.filter(span => span.stage === stage)
+      .reduce((sum, span) => sum + Math.max(0, Math.min(span.end, hold.end) - Math.max(span.start, hold.start)), 0)] as const);
+    const other = hold.end - hold.start - parts.reduce((sum, [, ms]) => sum + ms, 0);
+    lines.push(`[typed-activation] ${label} hold ${(hold.end - hold.start).toFixed(0).padStart(5)} ms: ` +
+      [...parts, ["page reads and other work", Math.max(0, other)] as const].filter(([, ms]) => ms >= 0.5)
+        .sort((a, b) => b[1] - a[1]).map(([stage, ms]) => `${stage} ${ms.toFixed(0)}`).join(", "));
+  }
+  return lines.join("\n");
 }
 
 it("the hold probe sees work that holds the event loop, including work made only of promise callbacks", async () => {
@@ -69,9 +124,9 @@ it("a long typed note activates however many keystrokes it took, and reports its
   for (const keystrokes of [10_000, 100_000]) {
     const note = await typedRelayNote(keystrokes);
     await foldAhead(note);
-    const {outcome, elapsedMs, holdMs} = await activate(note, validate);
+    const run = await activate(note, validate), {outcome, elapsedMs, holdMs} = run;
     console.log(`[typed-activation] ${keystrokes} keystrokes: ${outcome instanceof Error ? `refused (${outcome.message})` : "activated"}, ` +
-      `${Math.round(elapsedMs)} ms (bar 1000), longest event-loop hold ${Math.round(holdMs)} ms (bar 100)`);
+      `${Math.round(elapsedMs)} ms (bar 1000), longest event-loop hold ${Math.round(holdMs)} ms (bar 100)\n${stageReport(String(keystrokes), run)}`);
     expect.soft(outcome, `${keystrokes} keystrokes`).toEqual({document: note.document, replayed: false, completed: false});
   }
 });

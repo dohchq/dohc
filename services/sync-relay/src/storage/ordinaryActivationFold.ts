@@ -1,4 +1,5 @@
 import {createHash} from "node:crypto";
+import {setImmediate} from "node:timers/promises";
 import type {StorageContext} from "./context";
 import {OTHER_LINEAGE_UPDATE} from "./otherLineageUpdate";
 import {CHECKPOINT_MOMENTS,CHECKPOINT_TAIL_ROWS,readOrdinaryCheckpoint,replaceOrdinaryCheckpoint,type OrdinaryCheckpoint,type OrdinaryCheckpointMoment,
@@ -15,6 +16,8 @@ import type {OrdinaryFoldResult,OrdinaryFoldWork} from "./ordinaryActivationVali
 export interface OrdinaryFoldBounds {readonly pageRows:number;readonly pageBytes:number}
 /** The rows one fold page takes. A page of typed keystrokes validates well within 250 ms. */
 export const ORDINARY_FOLD_PAGE_ROWS=1_024;
+/** The pages one fold run takes before it saves the checkpoint once. */
+export const ORDINARY_FOLD_RUN_PAGES=16;
 type PageMoment=Omit<OrdinaryCheckpointMoment,"projectedMarkdownSha256"|"projectedMarkdownByteLength">;
 type PageRow=Omit<OrdinaryCheckpointRow,"projection">;
 export type OrdinaryFoldPage={
@@ -34,10 +37,10 @@ const digest=(value:unknown):value is string=>typeof value==="string"&&/^[0-9a-f
 const bytesOf=(value:unknown)=>value instanceof Uint8Array?new Uint8Array(value):null;
 
 /**
- * Reads the next page to fold after the lineage's checkpoint, or after its base when it has none. The page is cut by
+ * Reads the next page to fold after `prior`, or after the lineage's base when it is null. The page is cut by
  * row count and bytes from each row's stored size first, so no payload or update past the page's bound is read.
  */
-export function readOrdinaryFoldPage(storage:StorageContext,scope:OrdinaryCheckpointScope,bounds:OrdinaryFoldBounds):OrdinaryFoldPage{
+export function readOrdinaryFoldPage(storage:StorageContext,scope:OrdinaryCheckpointScope,bounds:OrdinaryFoldBounds,prior:OrdinaryCheckpoint|null):OrdinaryFoldPage{
   const {document}=scope;
   for(const value of Object.values(bounds))if(!integer(value)||value<1)throw new Error("Invalid ordinary fold bounds.");
   const blocked=(relaySeq:number)=>({kind:"blocked",relaySeq}) as const;
@@ -59,7 +62,6 @@ export function readOrdinaryFoldPage(storage:StorageContext,scope:OrdinaryCheckp
   // Every Y.Doc row and write of an activatable lineage is at its base's path; moves between them must return there.
   const documentPath=String(basePayload.path);
   const base:PageRow={relaySeq:scope.base.relaySeq,originId:scope.base.originId,originSeq:scope.base.originSeq,ordinary:baseRow.relay_admission===null};
-  const prior=readOrdinaryCheckpoint(storage,scope);
   const after=prior?prior.throughRelaySeq:scope.base.relaySeq;
   let path=prior?prior.currentPath:documentPath;
   const cursor=Number(storage.db.prepare("SELECT COALESCE(MAX(relay_seq),0) AS cursor FROM sync_relay_log WHERE workspace_id=?").get(document.workspaceId)!.cursor);
@@ -161,21 +163,35 @@ export type OrdinaryFoldValidator=(work:OrdinaryFoldWork,signal?:AbortSignal)=>P
 export type OrdinaryFoldOutcome={kind:"folded";throughRelaySeq:number;reachedCursor:boolean}|{kind:"current"}|{kind:"blocked";relaySeq:number}|
   {kind:"refused";message:string}|{kind:"over-budget";message:string}|{kind:"busy"}|{kind:"lost"};
 /**
- * Folds the lineage's next page and saves it in one short transaction. Validation runs off the event loop and outside
- * any transaction. Another fold that saved first, or a relay that no longer holds the rows, leaves this one `lost`.
+ * Folds up to `pages` of the lineage's next pages and saves the checkpoint they leave in one short transaction. Each page
+ * reads from the checkpoint the page before it left, and the run ends early at the cursor, at a row the fold cannot take,
+ * or at a page validation that does not fold; the pages folded before that are saved. Validation runs off the event loop
+ * and outside any transaction, and the event loop takes a turn before each page read and before the save. Another fold
+ * that saved first, or a relay that no longer holds the rows, leaves this one `lost`.
  */
-export async function foldOrdinaryCheckpointPage(storage:StorageContext,input:{scope:OrdinaryCheckpointScope;bounds:OrdinaryFoldBounds;
+export async function foldOrdinaryCheckpointPages(storage:StorageContext,input:{scope:OrdinaryCheckpointScope;bounds:OrdinaryFoldBounds;pages:number;
   validate:OrdinaryFoldValidator;nowMs:()=>number;signal?:AbortSignal}):Promise<OrdinaryFoldOutcome>{
-  const page=readOrdinaryFoldPage(storage,input.scope,input.bounds);
-  if(page.kind!=="page")return page;
-  let result:Extract<OrdinaryFoldResult,{kind:"folded"}>|null=null;
-  if(page.work){
-    const validated=await input.validate(page.work,input.signal);
-    if(validated.kind==="capacity-refused"||validated.kind==="retry")return {kind:"busy"};
-    if(validated.kind!=="folded")return validated;
-    result=validated;
+  if(!integer(input.pages)||input.pages<1)throw new Error("Invalid ordinary fold run.");
+  const saved=readOrdinaryCheckpoint(storage,input.scope);
+  let checkpoint=saved,folded:Extract<OrdinaryFoldOutcome,{kind:"folded"}>|null=null,ended:OrdinaryFoldOutcome|null=null;
+  for(let pages=0;pages<input.pages&&!folded?.reachedCursor;pages++){
+    await setImmediate();
+    input.signal?.throwIfAborted();
+    const page=readOrdinaryFoldPage(storage,input.scope,input.bounds,checkpoint);
+    if(page.kind!=="page"){ended=page;break;}
+    let result:Extract<OrdinaryFoldResult,{kind:"folded"}>|null=null;
+    if(page.work){
+      const validated=await input.validate(page.work,input.signal);
+      if(validated.kind!=="folded"){ended=validated.kind==="capacity-refused"||validated.kind==="retry"?{kind:"busy"}:validated;break;}
+      result=validated;
+    }
+    checkpoint=foldedOrdinaryCheckpoint(page,result);
+    folded={kind:"folded",throughRelaySeq:page.throughRelaySeq,reachedCursor:page.reachedCursor};
   }
-  const checkpoint=foldedOrdinaryCheckpoint(page,result);
-  const saved=storage.tx(()=>replaceOrdinaryCheckpoint(storage,{scope:page.scope,expected:page.prior?page.prior.throughRelaySeq:null,checkpoint,nowMs:input.nowMs()}));
-  return saved?{kind:"folded",throughRelaySeq:page.throughRelaySeq,reachedCursor:page.reachedCursor}:{kind:"lost"};
+  if(!folded||!checkpoint)return ended!;
+  await setImmediate();
+  const kept=checkpoint;
+  if(!storage.tx(()=>replaceOrdinaryCheckpoint(storage,{scope:input.scope,expected:saved?saved.throughRelaySeq:null,checkpoint:kept,nowMs:input.nowMs()})))return {kind:"lost"};
+  // A run that stopped at the cursor or at a row it cannot take reports what it folded; the next run finds where it stopped.
+  return ended&&ended.kind!=="current"&&ended.kind!=="blocked"?ended:folded;
 }

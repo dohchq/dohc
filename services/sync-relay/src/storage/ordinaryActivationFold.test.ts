@@ -2,7 +2,7 @@ import { afterEach, expect, it } from "vitest";
 import * as Y from "yjs";
 import type { StorageContext } from "./context";
 import { checkpointPolicySha256, readOrdinaryCheckpoint, type OrdinaryCheckpointScope } from "./ordinaryActivationCheckpoint";
-import { foldOrdinaryCheckpointPage, type OrdinaryFoldBounds, type OrdinaryFoldValidator } from "./ordinaryActivationFold";
+import { foldOrdinaryCheckpointPages, type OrdinaryFoldBounds, type OrdinaryFoldValidator } from "./ordinaryActivationFold";
 import { validateOrdinaryActivation } from "./ordinaryActivationValidation";
 import { ACTIVATION, typedNote, typedRelayNote, type TypedRelayNote } from "../testing/typedNotes";
 import { createLiveMarkdownRegistrationValidator } from "../../../../packages/ydoc-projection/src/liveDocumentValidation";
@@ -17,10 +17,11 @@ function folding(note: TypedRelayNote, bounds: OrdinaryFoldBounds, check: Ordina
   const scope: OrdinaryCheckpointScope = {namespace: note.deployment.history.namespace, document: note.document, replicationEpoch: "epoch",
     streamIdentity: "stream", base: {relaySeq: note.capture.source.baseRelaySeq, originId: "typist", originSeq: 1},
     policySha256: checkpointPolicySha256(ACTIVATION.validation)};
-  const fold = () => foldOrdinaryCheckpointPage(storage, {scope, bounds, validate: check, nowMs: () => 7});
-  /** Folds until the checkpoint is current or the fold stops, and returns the last outcome. */
-  const all = async () => {
-    for (let pages = 0; pages < 1_000; pages++) {const outcome = await fold(); if (outcome.kind !== "folded") return outcome;}
+  /** Folds a run of up to `pages` pages; one page by default. */
+  const fold = (pages = 1) => foldOrdinaryCheckpointPages(storage, {scope, bounds, pages, validate: check, nowMs: () => 7});
+  /** Folds runs until the checkpoint is current or the fold stops, and returns the last outcome. */
+  const all = async (pages = 1) => {
+    for (let runs = 0; runs < 1_000; runs++) {const outcome = await fold(pages); if (outcome.kind !== "folded") return outcome;}
     throw new Error("The fold did not finish.");
   };
   return {storage, scope, fold, all, read: () => readOrdinaryCheckpoint(storage, scope)};
@@ -143,6 +144,75 @@ it("a fold another fold overtook saves nothing", async () => {
   expect(await first).toMatchObject({kind: "folded"});
   expect(await second).toEqual({kind: "lost"});
   expect(f.read()!.foldedEntries).toBe(65);
+});
+
+/** Counts the relay transactions the storage runs from now on. */
+function countSaves(storage: StorageContext) {
+  let saves = 0;
+  const tx = storage.tx.bind(storage);
+  storage.tx = run => {saves++; return tx(run);};
+  return () => saves;
+}
+
+it("a run of pages saves its checkpoint once, at the state one replay of the note has", async () => {
+  const note = await seed(600), f = folding(note, {pageRows: 128, pageBytes: ACTIVATION.maxBytesPerDrain});
+  const saves = countSaves(f.storage);
+  expect(await f.fold(16)).toEqual({kind: "folded", throughRelaySeq: note.capture.source.committedCursor, reachedCursor: true});
+  expect(saves()).toBe(1);
+  const checkpoint = f.read()!, end = replayed(note, 600);
+  expect(checkpoint.foldedEntries).toBe(601);
+  expect(checkpoint.stateSha256).toBe(end.stateUpdateSha256);
+  expect(checkpoint.tail.at(-1)).toMatchObject({relaySeq: note.capture.source.committedCursor, projection: projection(end)});
+  expect(await f.fold(16)).toEqual({kind: "current"});
+});
+
+it("a run ends after its pages, and the next run continues from the checkpoint it saved", async () => {
+  const note = await seed(600), f = folding(note, {pageRows: 128, pageBytes: ACTIVATION.maxBytesPerDrain});
+  const saves = countSaves(f.storage);
+  expect(await f.fold(2)).toMatchObject({kind: "folded", reachedCursor: false});
+  expect(f.read()!.foldedEntries).toBe(257);
+  expect(await f.all(2)).toEqual({kind: "current"});
+  expect(saves()).toBe(3);
+  expect(f.read()!.stateSha256).toBe(replayed(note, 600).stateUpdateSha256);
+});
+
+it("a run whose page validation refuses saves the pages before it, reports the refusal, and the next run starts from them", async () => {
+  let pages = 0;
+  const note = await seed(300), f = folding(note, {pageRows: 128, pageBytes: ACTIVATION.maxBytesPerDrain}, async work => {pages++; return validate(work);});
+  note.appendUpdate(new Uint8Array([1, 2, 3]));
+  const refused = {kind: "refused", message: "Ordinary activation history is not a valid live document."};
+  expect(await f.fold(16)).toEqual(refused);
+  expect(pages).toBe(3);
+  expect(f.read()!.foldedEntries).toBe(257);
+  // The next run validates only the page after the saved checkpoint.
+  expect(await f.fold(16)).toEqual(refused);
+  expect(pages).toBe(4);
+  expect(f.read()!.foldedEntries).toBe(257);
+});
+
+it("a run stopped at a row the fold cannot take saves the pages before it, and the next run reports the row", async () => {
+  const longer = typedNote(320), note = await seed(300), f = folding(note, {pageRows: 128, pageBytes: ACTIVATION.maxBytesPerDrain});
+  const moved = note.appendUpdate(longer.updates[300]!, {path: "notes/elsewhere.md"});
+  expect(await f.fold(16)).toMatchObject({kind: "folded", throughRelaySeq: moved - 1, reachedCursor: false});
+  expect(f.read()!.throughRelaySeq).toBe(moved - 1);
+  expect(await f.fold(16)).toEqual({kind: "blocked", relaySeq: moved});
+});
+
+it("a fold run lets the event loop turn before each page read and before its save", async () => {
+  const note = await seed(600), events: string[] = [];
+  const f = folding(note, {pageRows: 128, pageBytes: ACTIVATION.maxBytesPerDrain}, async work => {events.push("page"); return validate(work);});
+  const tx = f.storage.tx.bind(f.storage);
+  f.storage.tx = run => {events.push("save"); return tx(run);};
+  // One immediate per event-loop turn, for as long as the run lasts.
+  let running = true;
+  const turn = () => {events.push("turn"); if (running) setImmediate(turn);};
+  setImmediate(turn);
+  try {expect(await f.fold(16)).toMatchObject({kind: "folded", reachedCursor: true});} finally {running = false;}
+  const work = events.filter(event => event !== "turn");
+  expect(work).toEqual(["page", "page", "page", "page", "page", "save"]);
+  // Every page and the save start in a turn of their own.
+  const order = events.join(" ");
+  expect(order).not.toMatch(/(page|save) (page|save)/);
 });
 
 // The plan's targets, 250 ms to validate a page and 10 ms of lock to save it, are reported rather than asserted. The
