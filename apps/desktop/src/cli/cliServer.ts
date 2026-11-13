@@ -4120,9 +4120,9 @@ export async function handleCliRequestLine(
       if (!named) throw new CliCommandError("No workspace on this computer has this id.");
       // Two registry entries can share a folder. The request must run in the
       // one it named, never in the other.
-      if ((await resolveCliWorkspace(named.rootPath, options.listWorkspaces()))?.workspaceId !== workspaceId) {
-        throw new CliCommandError("This workspace's folder belongs to another workspace on this computer.");
-      }
+      const resolved = await resolveCliWorkspace(named.rootPath, options.listWorkspaces());
+      if (!resolved) throw new CliCommandError("This workspace's folder is missing on this computer.");
+      if (resolved.workspaceId !== workspaceId) throw new CliCommandError("This workspace's folder belongs to another workspace on this computer.");
       request.args.cwd = named.rootPath;
     }
     const completion = { replayed: false };

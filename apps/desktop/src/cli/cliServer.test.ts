@@ -1974,6 +1974,9 @@ describe("CLI socket server", () => {
     const answers = await Promise.all([WORKSPACE_ID, "twin"].map((id) => named(id, tempRoot)));
     expect(answers.map((answer) => answer.ok).sort()).toEqual([false, true]);
     expect(answers.find((answer) => !answer.ok)).toMatchObject({ error: "dohc: This workspace's folder belongs to another workspace on this computer." });
+    // A listed workspace whose folder is gone says so.
+    serverOptions.listWorkspaces = () => [registryWorkspace, { workspaceId: "gone", rootPath: join(tempRoot, "no-such-folder") }];
+    await expect(named("gone", tempRoot)).resolves.toMatchObject({ ok: false, error: "dohc: This workspace's folder is missing on this computer." });
   });
 
   it("writes an agent's collection and document changes at the depth of the run an automation started", async () => {
