@@ -173,6 +173,8 @@ export interface CreateSyncRelayHandlerOptions {
   pushVapidPublicKey?: string;
   pushHosts?: ReadonlySet<string>;
   nowMs?: () => number;
+  // A clock that only moves forward, for idle windows. Defaults to performance.now().
+  elapsedMs?: () => number;
   // Maps a verified email to its account id. An unknown or unverified address returns null.
   // Absent means email-addressed grants are unavailable; grants by user id still work.
   resolveUserIdByEmail?: (email: string) => Promise<string | null> | string | null;
@@ -259,6 +261,7 @@ export function createSyncRelayHandler({
   pushVapidPublicKey,
   pushHosts,
   nowMs = () => Date.now(),
+  elapsedMs,
   resolveUserIdByEmail,
   lookupVerifiedUserEmail,
   lookupUserEmail,
@@ -417,6 +420,7 @@ export function createSyncRelayHandler({
         exchangeKey: relayExchangeKey!,
         limits: namedBrowserSessionLimits,
         now: nowMs,
+        elapsedNow: elapsedMs,
         resolveActor: resolveNamedActor,
       })
     : undefined;

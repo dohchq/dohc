@@ -100,7 +100,9 @@ async function fixture(
     shareWebOrigin: origin,
     relayExchangeKey: exchangeKey,
     namedBrowserSessionLimits: { ...relayLimits, ...limits },
+    // One test clock stands for both the wall clock and the time that passed.
     nowMs,
+    elapsedMs: nowMs,
   };
   let relay = createSyncRelayHandler(relayOptions);
   const forwarded: Request[] = [];

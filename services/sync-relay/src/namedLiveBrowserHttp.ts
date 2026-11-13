@@ -68,6 +68,7 @@ export function createNamedLiveBrowserHttp(options: {
   exchangeKey: string;
   limits: NamedLiveBrowserHttpLimits;
   now?: () => number;
+  elapsedNow?: () => number;
 }) {
   const limits = parseNamedLiveBrowserHttpLimits(options.limits);
   const publicOrigin = options.publicOrigin;
@@ -86,6 +87,7 @@ export function createNamedLiveBrowserHttp(options: {
     storage: options.storage,
     resolveActor: options.resolveActor,
     now: options.now,
+    elapsedNow: options.elapsedNow,
   });
   const resolveBrowser = createNamedLiveBrowserResolver(options);
   const refusal = () =>

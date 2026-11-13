@@ -32,7 +32,8 @@ function fixture(
     now?: () => number;
   } = {},
 ) {
-  let time = 100;
+  let time = 100,
+    elapsed: number | undefined;
   const shares = new Map<string, SyncRelayShareRow>();
   const grants = new Map<string, SyncRelayShareGrantRow>();
   for (const context of [alice, bob]) {
@@ -76,6 +77,7 @@ function fixture(
     retentionMs: 1000,
     maxSessionsPerAccount: 16,
     now: () => time,
+    elapsedNow: () => elapsed ?? time,
     ...overrides,
   };
   return {
@@ -87,6 +89,10 @@ function fixture(
     shares,
     setTime(value: number) {
       time = value;
+    },
+    /** Lets elapsed time part from the wall clock, which otherwise stands for both. */
+    setElapsed(value: number) {
+      elapsed = value;
     },
   };
 }
@@ -492,6 +498,22 @@ describe("a session nobody uses", () => {
     expect(await state.sessions.resolve(request(), discriminator)).toEqual(alice);
     state.setTime(100 + policy.retentionMs);
     expect(await state.sessions.resolve(request(), discriminator)).toBeNull();
+  });
+
+  it("follows the time that passed, not a corrected wall clock", async () => {
+    const state = fixture(policy);
+    const { discriminator } = state.sessions.create(alice)!;
+    const window = 3 * 60 * 1000;
+    state.setElapsed(100);
+    expect(await state.sessions.check(request(), discriminator, window)).toEqual(alice);
+    // The wall clock jumps forward past the window while one interval passes.
+    state.setTime(100 + 4 * 60 * 1000);
+    state.setElapsed(100 + 60 * 1000);
+    expect(await state.sessions.check(request(), discriminator, window)).toEqual(alice);
+    // It jumps back, and the window still ends when its time has passed.
+    state.setTime(100);
+    state.setElapsed(100 + 60 * 1000 + window);
+    expect(await state.sessions.check(request(), discriminator, window)).toBeNull();
   });
 
   it("is not kept by a use that fails its checks", async () => {

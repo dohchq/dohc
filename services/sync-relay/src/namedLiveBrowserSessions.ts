@@ -13,7 +13,7 @@ interface NamedLiveBrowserSession {
   readonly expiresAtMs: number;
   readonly grantGeneration: number;
   readonly grantAccess: "edit";
-  /** A session unused until this time is removed. */
+  /** A session unused until this elapsed time is removed. */
   idleUntilMs: number;
   windowMs: number;
 }
@@ -34,9 +34,21 @@ export function createNamedLiveBrowserSessions(
      */
     idleMs?: number;
     now?: () => number;
+    /**
+     * A clock that only moves forward at the rate time passes, for idle windows, so a
+     * correction to the wall clock neither ends a session in use nor keeps an unused one.
+     */
+    elapsedNow?: () => number;
   },
 ) {
-  const { maxSessions, retentionMs, now = Date.now, storage, resolveActor } = options;
+  const {
+    maxSessions,
+    retentionMs,
+    now = Date.now,
+    elapsedNow = () => performance.now(),
+    storage,
+    resolveActor,
+  } = options;
   const perAccount = options.maxSessionsPerAccount ?? Infinity;
   const idleMs = options.idleMs ?? Infinity;
   for (const [name, value] of Object.entries({
@@ -62,7 +74,7 @@ export function createNamedLiveBrowserSessions(
     return value;
   }
   const live = (session: NamedLiveBrowserSession, time: number) =>
-    session.expiresAtMs > time && session.idleUntilMs > time;
+    session.expiresAtMs > time && session.idleUntilMs > elapsedNow();
   const grantChanged = (session: NamedLiveBrowserSession) => {
     const grant = storage.getShareGrant(session.context.grantId);
     return grant?.generation !== session.grantGeneration || grant.access !== session.grantAccess;
@@ -90,7 +102,7 @@ export function createNamedLiveBrowserSessions(
     if (context?.userId !== session.context.userId) return null;
     // Only a use that passed every check keeps the session.
     if (windowMs !== undefined) session.windowMs = windowMs;
-    session.idleUntilMs = Math.min(time + session.windowMs, session.expiresAtMs);
+    session.idleUntilMs = elapsedNow() + session.windowMs;
     // The map keeps insertion order, so moving a resolved session to the end keeps each
     // account's least recently used session first.
     sessions.delete(discriminator);
@@ -145,7 +157,7 @@ export function createNamedLiveBrowserSessions(
         expiresAtMs,
         grantGeneration,
         grantAccess,
-        idleUntilMs: Math.min(createdAtMs + idleMs, expiresAtMs),
+        idleUntilMs: elapsedNow() + idleMs,
         windowMs: idleMs,
       });
       return { discriminator, expiresAtMs };

@@ -237,6 +237,7 @@ async function fixture(options: { idleTimeoutMs?: number; retentionMs?: number }
     shareWebOrigin: audience,
     relayExchangeKey: exchangeKey,
     nowMs: () => clock.now,
+    elapsedMs: () => clock.now,
     namedBrowserSessionLimits: {
       ...browserLimits,
       maxSessions: 8,
