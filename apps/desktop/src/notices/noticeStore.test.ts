@@ -494,7 +494,11 @@ describe("notices on one person's computers", () => {
     const ref = { store: "account" as const, noticeId: "agent-run:1" };
     // The phone marks through the relay; nothing on this computer asks for it.
     const phone = (mark: "unread" | "restore" | "read") =>
-      server.storage.markNotices({ recipientUserId: "ana", marks: [{ noticeId: "agent-run:1", mark }], nowMs: clock });
+      server.storage.markNotices({
+        recipientUserId: "ana",
+        marks: [{ noticeId: "agent-run:1", mark }],
+        nowMs: clock,
+      });
     await laptop.store.postNotice(notice());
     await laptop.store.sync();
     await desktop.store.sync();
@@ -517,8 +521,12 @@ describe("notices on one person's computers", () => {
     expect(await titles(desktop)).toEqual(["account:Your agent finished"]);
 
     // A copy whose change is newer than the one the relay serves keeps what it holds.
-    const name = (await readdir(desktop.directory)).find((entry) => entry.startsWith("account-") && entry.endsWith(".json"))!;
-    const saved = JSON.parse(await readFile(join(desktop.directory, name), "utf8")) as { rows: Array<{ changeSeq: number; readAtMs: number | null }> };
+    const name = (await readdir(desktop.directory)).find(
+      (entry) => entry.startsWith("account-") && entry.endsWith(".json"),
+    )!;
+    const saved = JSON.parse(await readFile(join(desktop.directory, name), "utf8")) as {
+      rows: Array<{ changeSeq: number; readAtMs: number | null }>;
+    };
     saved.rows[0]!.changeSeq = 1_000_000;
     saved.rows[0]!.readAtMs = 13_500;
     await writeFile(join(desktop.directory, name), JSON.stringify(saved));
@@ -536,11 +544,19 @@ describe("notices on one person's computers", () => {
     await laptop.store.postNotice(notice());
     await laptop.store.sync();
     clock = 10_000 + 100 * DAY;
-    await laptop.store.mark([{ store: "account", noticeId: "agent-run:1" }], "read", laptop.signedIn?.key ?? null);
+    await laptop.store.mark(
+      [{ store: "account", noticeId: "agent-run:1" }],
+      "read",
+      laptop.signedIn?.key ?? null,
+    );
     await laptop.store.sync();
     // Unread at day 170 keeps the row on the relay until day 350.
     clock = 10_000 + 170 * DAY;
-    server.storage.markNotices({ recipientUserId: "ana", marks: [{ noticeId: "agent-run:1", mark: "unread" }], nowMs: clock });
+    server.storage.markNotices({
+      recipientUserId: "ana",
+      marks: [{ noticeId: "agent-run:1", mark: "unread" }],
+      nowMs: clock,
+    });
     await laptop.store.sync();
     clock = 10_000 + 185 * DAY;
     const restarted = await computer(laptop.signedIn, { directory: laptop.directory });

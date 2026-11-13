@@ -411,7 +411,10 @@ it("leaves hidden workspaces, secret targets, and wake payloads out of the phone
   // A wake names no Collection the relay can place, so its row stays off the phone too.
   const kept = ["plain", "deleted", "thread-plain", "thread-chat", "through-share"];
   expect(ids(phone)).toEqual(kept);
-  expect(phone.notices.find((notice) => notice.noticeId === "through-share")).toMatchObject({ workspaceId: null, recipientShareId: "share-ben" });
+  expect(phone.notices.find((notice) => notice.noticeId === "through-share")).toMatchObject({
+    workspaceId: null,
+    recipientShareId: "share-ben",
+  });
   // Title and body go with the row, not just its target.
   for (const left of [
     "API key rotated",
@@ -439,21 +442,37 @@ it("leaves hidden workspaces, secret targets, and wake payloads out of the phone
 
 it("leaves out an automation's rows whose Collection the relay can't place, and judges a skipped schedule by its file", async () => {
   const { storage, read, full, post } = await relay();
-  const skipped = (first: number, target: PostNoticeInput["target"]) => post(`schedule-skipped:trip:collection:c1#digest:${first}`, {
-    kind: "schedule-skipped", title: `Hidden digest ${first} skipped once`, target,
-  });
+  const skipped = (first: number, target: PostNoticeInput["target"]) =>
+    post(`schedule-skipped:trip:collection:c1#digest:${first}`, {
+      kind: "schedule-skipped",
+      title: `Hidden digest ${first} skipped once`,
+      target,
+    });
   skipped(1_000, { automation: "collection:c1#digest", path: "lists/automations.yaml" });
   skipped(1_001, { automation: "collection:c1#digest", path: ".env/automations.yaml" });
   // Its automations.yaml path was too long to send, so the relay can't place the Collection.
   skipped(1_002, { automation: "collection:c1#digest" });
   storage.postAutomationWake({
-    workspaceId: "trip", ownerUserId: "ana", effectId: "effect-1", claimId: "claim-1", keySeed: "seed-1", startedAtMs: NOW,
-    wake: { automationId: "collection:c1#digest", name: "Digest", depth: 1, body: "Summarize the day" }, senderLabel: "Digest", nowMs: NOW,
+    workspaceId: "trip",
+    ownerUserId: "ana",
+    effectId: "effect-1",
+    claimId: "claim-1",
+    keySeed: "seed-1",
+    startedAtMs: NOW,
+    wake: {
+      automationId: "collection:c1#digest",
+      name: "Digest",
+      depth: 1,
+      body: "Summarize the day",
+    },
+    senderLabel: "Digest",
+    nowMs: NOW,
   });
   const response = await read("scope=phone");
   const text = await response.clone().text();
   expect(ids(await page(response))).toEqual(["schedule-skipped:trip:collection:c1#digest:1000"]);
-  for (const left of ["Hidden digest 1001", "Hidden digest 1002", "Your agent has work waiting"]) expect(text).not.toContain(left);
+  for (const left of ["Hidden digest 1001", "Hidden digest 1002", "Your agent has work waiting"])
+    expect(text).not.toContain(left);
   expect((await full()).notices).toHaveLength(4);
 });
 

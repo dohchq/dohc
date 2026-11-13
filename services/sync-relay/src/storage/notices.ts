@@ -813,8 +813,17 @@ function phoneNotices(
   };
   return notices.flatMap((notice) => {
     if (notice.removed) return [{ ...notice, title: "" }];
-    if (notice.workspaceId !== null && owned(notice.workspaceId) && !storage.showsOnPhone(recipientUserId, notice.workspaceId)) return [];
-    if (notice.kind === "automation-wake" || (notice.kind === "schedule-skipped" && notice.target?.path === undefined)) return [];
+    if (
+      notice.workspaceId !== null &&
+      owned(notice.workspaceId) &&
+      !storage.showsOnPhone(recipientUserId, notice.workspaceId)
+    )
+      return [];
+    if (
+      notice.kind === "automation-wake" ||
+      (notice.kind === "schedule-skipped" && notice.target?.path === undefined)
+    )
+      return [];
     return safeTarget(notice) ? [notice] : [];
   });
 }
@@ -906,25 +915,43 @@ export function markNotices(storage: StorageContext, input: MarkNoticesInput): s
       );
     const markRead = markRow("read_at_ms");
     const markDismissed = markRow("dismissed_at_ms");
-    const clearRow = (column: string) => storage.db.prepare(
-      `UPDATE sync_relay_notices SET expires_at_ms = ?, change_seq = ?, ${column} = NULL
+    const clearRow = (column: string) =>
+      storage.db.prepare(
+        `UPDATE sync_relay_notices SET expires_at_ms = ?, change_seq = ?, ${column} = NULL
        WHERE recipient_user_id = ? AND notice_id = ?`,
-    );
+      );
     const clearRead = clearRow("read_at_ms");
     const clearDismissed = clearRow("dismissed_at_ms");
-    const removeWake = storage.db.prepare("DELETE FROM sync_relay_automation_wakes WHERE recipient_user_id = ? AND notice_id = ?");
+    const removeWake = storage.db.prepare(
+      "DELETE FROM sync_relay_automation_wakes WHERE recipient_user_id = ? AND notice_id = ?",
+    );
     for (const { noticeId, mark } of input.marks) {
       const wake = noticeId.startsWith(AUTOMATION_WAKE_PREFIX);
-      if (wake && (mark === "unread" || mark === "restore" || (mark === "dismissed" && input.installId === undefined))) continue;
+      if (
+        wake &&
+        (mark === "unread" ||
+          mark === "restore" ||
+          (mark === "dismissed" && input.installId === undefined))
+      )
+        continue;
       if (mark === "unread" || mark === "restore") {
         const row = read.get(input.recipientUserId, noticeId, input.nowMs);
         if (!row || row.kind === "automation-wake") continue;
         const readAt = mark === "unread" ? null : row.read_at_ms;
         const dismissedAt = mark === "restore" ? null : row.dismissed_at_ms;
         if (readAt === row.read_at_ms && dismissedAt === row.dismissed_at_ms) continue;
-        const retentionMs = dismissedAt !== null ? NOTICE_DISMISSED_RETENTION_MS
-          : readAt !== null ? NOTICE_READ_RETENTION_MS : NOTICE_UNREAD_RETENTION_MS;
-        (mark === "unread" ? clearRead : clearDismissed).run(input.nowMs + retentionMs, nextSeq(), input.recipientUserId, noticeId);
+        const retentionMs =
+          dismissedAt !== null
+            ? NOTICE_DISMISSED_RETENTION_MS
+            : readAt !== null
+              ? NOTICE_READ_RETENTION_MS
+              : NOTICE_UNREAD_RETENTION_MS;
+        (mark === "unread" ? clearRead : clearDismissed).run(
+          input.nowMs + retentionMs,
+          nextSeq(),
+          input.recipientUserId,
+          noticeId,
+        );
         continue;
       }
       if (wake && input.installId === "server") continue;

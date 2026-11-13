@@ -446,8 +446,8 @@ export function createNoticeStore(deps: {
 
   function pruneLocal(file: LocalFile): boolean {
     // Dismissed refusal rows also wait for the engine to acknowledge them on next open.
-    const pending = file.rows.filter(row => isRefusalNoticeKind(row.kind));
-    const rest = file.rows.filter(row => !isRefusalNoticeKind(row.kind));
+    const pending = file.rows.filter((row) => isRefusalNoticeKind(row.kind));
+    const rest = file.rows.filter((row) => !isRefusalNoticeKind(row.kind));
     const kept = [...pending, ...retained(rest, LOCAL_NOTICE_ROW_LIMIT, localRowLive(nowMs()))];
     if (kept.length === file.rows.length) return false;
     file.rows = kept;
@@ -459,7 +459,12 @@ export function createNoticeStore(deps: {
     let file = accountFiles.get(name);
     if (!file) {
       file = await load(name, AccountFile, {
-        version: 2, cursor: null, routesMissing: false, rows: [], posts: [], marks: [],
+        version: 2,
+        cursor: null,
+        routesMissing: false,
+        rows: [],
+        posts: [],
+        marks: [],
       });
       accountFiles.set(name, file);
       if (pruneAccount(file)) await saveAccount(account, file);
@@ -493,7 +498,12 @@ export function createNoticeStore(deps: {
 
   // One waiting mark per notice. Dismissed takes the place of read, and read
   // adds nothing to dismissed. Returns false when nothing changed.
-  function queueMark(file: AccountFile, noticeId: string, mark: ComputerNoticeMark, withdraw = false): boolean {
+  function queueMark(
+    file: AccountFile,
+    noticeId: string,
+    mark: ComputerNoticeMark,
+    withdraw = false,
+  ): boolean {
     const index = file.marks.findIndex((waiting) => waiting.noticeId === noticeId);
     const waiting = file.marks[index];
     if (
@@ -1189,7 +1199,11 @@ export function createNoticeStore(deps: {
 
   // Marks every named notice in one write per list, so marking a whole list
   // read costs one save and one pass.
-  async function mark(refs: readonly NoticeRef[], mark: ComputerNoticeMark, account: string | null): Promise<void> {
+  async function mark(
+    refs: readonly NoticeRef[],
+    mark: ComputerNoticeMark,
+    account: string | null,
+  ): Promise<void> {
     const session = refs.some((ref) => ref.store === "account") ? await deps.session() : null;
     const changed = await locked(async () => {
       const localRefs = new Map(
@@ -1503,19 +1517,24 @@ function merge(file: AccountFile, page: z.infer<typeof RelayPage>): boolean {
 // after arriving.
 function localRowLive(nowMs: number) {
   return (row: LocalRow) =>
-    row.dismissedAtMs !== null ? row.dismissedAtMs + NOTICE_DISMISSED_RETENTION_MS > nowMs
-    : row.readAtMs !== null ? row.readAtMs + NOTICE_READ_RETENTION_MS > nowMs
-    : row.createdAtMs + NOTICE_UNREAD_RETENTION_MS > nowMs;
+    row.dismissedAtMs !== null
+      ? row.dismissedAtMs + NOTICE_DISMISSED_RETENTION_MS > nowMs
+      : row.readAtMs !== null
+        ? row.readAtMs + NOTICE_READ_RETENTION_MS > nowMs
+        : row.createdAtMs + NOTICE_UNREAD_RETENTION_MS > nowMs;
 }
 
 // The rows `live` keeps, within the row limit. Past the limit, read and
 // dismissed rows go first, oldest first, then the oldest unread; a waiting
 // automation wake stays. Returns `rows` itself when nothing goes.
-function retained<Row extends { kind?: string; createdAtMs: number; readAtMs: number | null; dismissedAtMs: number | null }>(
-  rows: Row[],
-  limit: number,
-  isLive: (row: Row) => boolean,
-): Row[] {
+function retained<
+  Row extends {
+    kind?: string;
+    createdAtMs: number;
+    readAtMs: number | null;
+    dismissedAtMs: number | null;
+  },
+>(rows: Row[], limit: number, isLive: (row: Row) => boolean): Row[] {
   const parked = (row: Row) => row.kind === "automation-wake" && row.dismissedAtMs === null;
   const live = rows.filter(isLive);
   if (live.length === rows.length && rows.length <= limit) return rows;

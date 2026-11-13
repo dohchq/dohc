@@ -227,14 +227,23 @@ export function createNoticeRoutes(
     const session = () => bearerAccountSession(storage, resolveAccountSession, request);
     const caller = await session();
     if (!account.limiter.allow(caller.sessionId, nowMs())) {
-      throw new RelayError("server_busy", "This sign-in is asking faster than your server answers. Try again shortly.");
+      throw new RelayError(
+        "server_busy",
+        "This sign-in is asking faster than your server answers. Try again shortly.",
+      );
     }
     const body = await readMarksBody(request);
-    if (Object.keys(body).length !== 1 || !Object.hasOwn(body, "marks")) throw badRequest("the body must be exactly { marks }");
+    if (Object.keys(body).length !== 1 || !Object.hasOwn(body, "marks"))
+      throw badRequest("the body must be exactly { marks }");
     const marks = parseMarks(body.marks, PHONE_MARKS);
     const current = await session();
-    if (current.sessionId !== caller.sessionId || current.userId !== caller.userId) throw notFound();
-    const dismissed = storage.markNotices({ recipientUserId: caller.userId, marks, nowMs: nowMs() });
+    if (current.sessionId !== caller.sessionId || current.userId !== caller.userId)
+      throw notFound();
+    const dismissed = storage.markNotices({
+      recipientUserId: caller.userId,
+      marks,
+      nowMs: nowMs(),
+    });
     return jsonResponse({ ok: true, dismissed } satisfies NoticeMarksResponse, 200);
   }
 
@@ -295,8 +304,10 @@ export function createNoticeRoutes(
       // A computer's marks: read and dismissed, with `installId` and `withdraw`.
       const userId = await caller();
       const body = await readMarksBody(request);
-      if (!Object.keys(body).every((key) => key === "marks" || key === "installId")) throw badRequest("the body takes only marks and installId");
-      if (body.installId !== undefined && !isNoticeLine(body.installId, MAX_INSTALL_ID_CHARS)) throw badRequest("installId is invalid");
+      if (!Object.keys(body).every((key) => key === "marks" || key === "installId"))
+        throw badRequest("the body takes only marks and installId");
+      if (body.installId !== undefined && !isNoticeLine(body.installId, MAX_INSTALL_ID_CHARS))
+        throw badRequest("installId is invalid");
       const dismissed = storage.markNotices({
         recipientUserId: userId,
         marks: parseMarks(body.marks, COMPUTER_MARKS),
@@ -377,17 +388,31 @@ function parseReach(body: Record<string, unknown>): NoticeReach {
 }
 
 // What each sender may mark with, and the fields each of its marks takes.
-interface MarkSender { marks: readonly NoticeMark[]; fields: readonly string[] }
-const PHONE_MARKS: MarkSender = { marks: ["read", "dismissed", "unread", "restore"], fields: ["noticeId", "mark"] };
-const COMPUTER_MARKS: MarkSender = { marks: ["read", "dismissed"], fields: ["noticeId", "mark", "withdraw"] };
+interface MarkSender {
+  marks: readonly NoticeMark[];
+  fields: readonly string[];
+}
+const PHONE_MARKS: MarkSender = {
+  marks: ["read", "dismissed", "unread", "restore"],
+  fields: ["noticeId", "mark"],
+};
+const COMPUTER_MARKS: MarkSender = {
+  marks: ["read", "dismissed"],
+  fields: ["noticeId", "mark", "withdraw"],
+};
 
 async function readMarksBody(request: Request): Promise<Record<string, unknown>> {
   let body: unknown;
   try {
-    body = await readBoundedJson(request, NOTICE_MARKS_MAX_BODY_BYTES,
-      AbortSignal.any([request.signal, AbortSignal.timeout(NOTICE_MARKS_RECEIPT_MS)]));
+    body = await readBoundedJson(
+      request,
+      NOTICE_MARKS_MAX_BODY_BYTES,
+      AbortSignal.any([request.signal, AbortSignal.timeout(NOTICE_MARKS_RECEIPT_MS)]),
+    );
   } catch (error) {
-    throw error instanceof RangeError ? relayError("payload_too_large") : badRequest("request body must be valid JSON");
+    throw error instanceof RangeError
+      ? relayError("payload_too_large")
+      : badRequest("request body must be valid JSON");
   }
   const object = asRecord(body);
   if (object === null) throw badRequest("request body must be a JSON object");
@@ -411,8 +436,13 @@ function parseMarks(
     if (kind === undefined) throw badRequest(`mark must be ${sender.marks.join(", ")}`);
     if (!isNoticeLine(mark.noticeId, NOTICE_ID_MAX_CHARS)) throw badRequest("noticeId is invalid");
     // A withdrawal dismisses the copies the sender posted to others; nothing else reaches another list.
-    if (mark.withdraw !== undefined && (mark.withdraw !== true || kind !== "dismissed")) throw badRequest("withdraw requires a dismissal");
-    return { noticeId: mark.noticeId, mark: kind, ...(mark.withdraw === true ? { withdraw: true as const } : {}) };
+    if (mark.withdraw !== undefined && (mark.withdraw !== true || kind !== "dismissed"))
+      throw badRequest("withdraw requires a dismissal");
+    return {
+      noticeId: mark.noticeId,
+      mark: kind,
+      ...(mark.withdraw === true ? { withdraw: true as const } : {}),
+    };
   });
 }
 

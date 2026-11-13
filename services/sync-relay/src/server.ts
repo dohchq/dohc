@@ -1679,9 +1679,15 @@ export function createSyncRelayHandler({
 export function streamsRequestBody(url: URL, method: string): boolean {
   try {
     const route = parseRoute({ url: url.href });
-    return (route.route === "dataset" && route.action === "import" && method === "POST") ||
-      route.route === "share-collection-writes" || route.route === "link-collection-writes" || route.route === "account-operation" ||
+    return (
+      (route.route === "dataset" && route.action === "import" && method === "POST") ||
+      route.route === "share-collection-writes" ||
+      route.route === "link-collection-writes" ||
+      route.route === "account-operation" ||
       (route.route === "notice-marks" && method === "POST") ||
-      (route.route === "personal-agent-tools" && route.action === "collection-writes");
-  } catch { return false; }
+      (route.route === "personal-agent-tools" && route.action === "collection-writes")
+    );
+  } catch {
+    return false;
+  }
 }

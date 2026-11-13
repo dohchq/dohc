@@ -228,12 +228,30 @@ describe("relay-only agent wake notices", () => {
     const w = await world();
     const id = w.post();
     w.storage.postNotice({
-      noticeId: "other", recipientUserId: "owner", senderUserId: "owner", senderLabel: "Ice",
-      reach: { workspaceId }, kind: "mention", title: "Other", body: "", target: {}, originInstallId: "laptop", nowMs: 10_000,
+      noticeId: "other",
+      recipientUserId: "owner",
+      senderUserId: "owner",
+      senderLabel: "Ice",
+      reach: { workspaceId },
+      kind: "mention",
+      title: "Other",
+      body: "",
+      target: {},
+      originInstallId: "laptop",
+      nowMs: 10_000,
     });
-    const response = await w.handler(request("owner", "/sync/notices/marks", jsonBody({
-      marks: [{ noticeId: id, mark: "dismissed" }, { noticeId: "other", mark: "dismissed" }],
-    })));
+    const response = await w.handler(
+      request(
+        "owner",
+        "/sync/notices/marks",
+        jsonBody({
+          marks: [
+            { noticeId: id, mark: "dismissed" },
+            { noticeId: "other", mark: "dismissed" },
+          ],
+        }),
+      ),
+    );
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ ok: true, dismissed: ["other"] });
     const wakeRow = w.list().find((row) => row.noticeId === id);
