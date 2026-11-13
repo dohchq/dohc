@@ -12,6 +12,7 @@ import { SYNC_UNCONFIRMED_ACCOUNT } from "./cloudSyncWords";
 import { RelayShareDialog as ProductionRelayShareDialog, type RelayShareTarget } from "./RelayShareDialog";
 import { ShellErrorReporter, type ReportShellFailure } from "./shell/useShellError";
 import type { AccessContext, AccessFacts } from "./workbench/accessReason";
+import { WorkspaceSessionProvider } from "./workspace/workspaceSession";
 
 function accessContextFor(cloud: AccessFacts["cloud"]): AccessContext {
   return { facts: { cloud, shareView: false }, openSyncSettings: vi.fn(), connect: vi.fn() };
@@ -25,7 +26,12 @@ type DialogProps = ComponentProps<typeof ProductionRelayShareDialog>;
 function RelayShareDialog(
   props: Omit<DialogProps, "accessContext" | "server"> & Partial<Pick<DialogProps, "accessContext" | "server">>,
 ) {
-  return <ProductionRelayShareDialog accessContext={CAN_SHARE} server={null} {...props} />;
+  // The shell shows the dialog inside its workspace session.
+  return (
+    <WorkspaceSessionProvider workspaceId={props.workspaceId}>
+      <ProductionRelayShareDialog accessContext={CAN_SHARE} server={null} {...props} />
+    </WorkspaceSessionProvider>
+  );
 }
 
 const SHARE_CODE = "dohc-share:share-1:http://relay.test";

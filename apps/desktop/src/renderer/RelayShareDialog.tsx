@@ -1,5 +1,5 @@
 import { CloudOff, LogIn, Share2, X, type LucideIcon } from "lucide-react";
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { ShareAccess } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { SYNC_UNCONFIRMED_ACCOUNT } from "./cloudSyncWords";
@@ -9,9 +9,10 @@ import type { ShareRemovalNotices } from "./shell/useShareRemovalNotices";
 import { IconButton, PrimaryButton, RetryRow, SectionLabel } from "./ui/controls";
 import { MoreMenu } from "./ui/MoreMenu";
 import { rowMatchesTarget, useRelayShareLinkPane } from "./useRelayShareLinkPane";
-import { useRequestSequence } from "./useRequestSequence";
 import { accessReasonForLane, serverName, type AccessContext, type AccessReason } from "./workbench/accessReason";
 import type { SharingFocus } from "./workbench/SharingView";
+import { useWorkspaceQuery } from "./workspace/useWorkspaceQuery";
+import { useWorkspaceSession } from "./workspace/workspaceSession";
 
 export type RelayShareTarget =
   | { kind: "paths"; paths: [string, ...string[]]; label?: string }
@@ -22,32 +23,27 @@ export type RelayShareTarget =
 const DIALOG_HEIGHT_CLASS = "max-h-[calc(100vh_-_7rem_-_var(--dohc-toast-room,0px))]";
 
 type InvitedPerson = { shareId: string; grantId: string; name: string; access: ShareAccess | null };
-type Invited = { status: "loading" } | { status: "ready"; people: InvitedPerson[] } | { status: "failed" };
 
 const isShareAccess = (access: string | null): access is ShareAccess => access !== null && access in SHARE_ACCESS_WORDS;
 
 // The people this selection was shared with by email, from the listing the
-// Sharing view reads. It is read again whenever `revision` changes. `scope`
-// names the workspace and the selection.
+// Sharing view reads. `scope` names the workspace and the selection. The
+// list is read while sharing can work, and again whenever `revision` changes.
 function useInvitedPeople(input: { workspaceId: string; target: RelayShareTarget; scope: string; read: boolean; revision: number }) {
-  const { workspaceId, scope, read, revision } = input;
-  const [invited, setInvited] = useState<Invited>({ status: "loading" });
-  const requests = useRequestSequence([scope]);
-  const target = useRef(input.target);
-  target.current = input.target;
-  const load = useCallback(async () => {
-    const token = requests.next();
-    try {
+  const { workspaceId, target, scope, read, revision } = input;
+  const query = useWorkspaceQuery(useWorkspaceSession(), {
+    // Sharing that stops retires the read under way.
+    key: `${scope}\0${read ? "read" : "held"}`,
+    manual: true,
+    load: async (signal) => {
       // A share made a moment ago is already being listed; this waits for it.
       await bridge().requestAccessRefresh({ workspaceId, reason: "sharing-open" }).catch(() => undefined);
-      if (!requests.isCurrent(token)) return;
       const people: InvitedPerson[] = [];
       const seen = new Set<string>();
       let cursor: string | undefined;
       let restarted = false;
-      while (true) {
+      while (!signal.aborted) {
         const answer = await bridge().listSharingAccess({ workspaceId, lane: "granted", ...(cursor ? { cursor } : {}) });
-        if (!requests.isCurrent(token)) return;
         if (answer.coverage.kind === "unavailable") {
           // A page cursor belongs to the listing it came from. When that
           // listing changed, main refuses the cursor, so read from the start.
@@ -61,7 +57,7 @@ function useInvitedPeople(input: { workspaceId: string; target: RelayShareTarget
         for (const row of answer.rows) {
           const { selector } = row.kind === "share" ? row : { selector: null };
           if (row.kind !== "share" || row.via !== "named" || row.status !== "active" || selector === null || selector.kind !== undefined) continue;
-          if (!rowMatchesTarget({ selector: { paths: selector.paths, versionId: selector.versionId } }, target.current)) continue;
+          if (!rowMatchesTarget({ selector: { paths: selector.paths, versionId: selector.versionId } }, target)) continue;
           people.push({
             shareId: row.shareId,
             grantId: row.grantId,
@@ -74,20 +70,14 @@ function useInvitedPeople(input: { workspaceId: string; target: RelayShareTarget
         seen.add(answer.nextCursor);
         cursor = answer.nextCursor;
       }
-      setInvited({ status: "ready", people });
-    } catch {
-      if (requests.isCurrent(token)) setInvited({ status: "failed" });
-    }
-  }, [requests, workspaceId]);
+      return people;
+    },
+  });
+  const { retry } = query;
   useEffect(() => {
-    setInvited({ status: "loading" });
-  }, [scope]);
-  useEffect(() => {
-    if (read) void load();
-    // A read under way stops when sharing can no longer work.
-    else requests.next();
-  }, [load, read, requests, revision, scope]);
-  return { invited, load };
+    if (read) void retry();
+  }, [read, retry, revision]);
+  return { people: query.value ?? [], failed: query.error !== null, load: retry };
 }
 
 export function RelayShareDialog(props: {
@@ -122,21 +112,22 @@ export function RelayShareDialog(props: {
   // A person invited in this dialog shows at once, before the listing has them.
   const [invitedHere, setInvitedHere] = useState<{ scope: string; people: InvitedPerson[] }>({ scope: linkPane.scope, people: [] });
   const [invitedRevision, setInvitedRevision] = useState(0);
-  const { invited, load: loadInvited } = useInvitedPeople({
+  const invited = useInvitedPeople({
     workspaceId: props.workspaceId,
     target: props.target,
     scope: linkPane.scope,
     read: !held,
     revision: invitedRevision,
   });
-  const listed = !held && invited.status === "ready" ? invited.people : [];
+  const loadInvited = invited.load;
+  const listed = held ? [] : invited.people;
   const invitedPeople = [
     ...listed,
     ...(held || invitedHere.scope !== linkPane.scope ? [] : invitedHere.people)
       .filter((person) => !listed.some((known) => known.grantId === person.grantId)),
     // A share with links lists its people through its links.
   ].filter((person) => !linkPane.peopleShareIds.has(person.shareId));
-  const invitedFailed = !held && invited.status === "failed";
+  const invitedFailed = !held && invited.failed;
   const { onOpenSharing } = props;
 
   const subject =
