@@ -2220,7 +2220,18 @@ it("stops the engine for a held read it answers neither at the deadline nor on c
   await expect(o.host.heldDocument("workspace", "object", { markdown: false })).rejects.toThrow(
     "Held read deadline exceeded.",
   );
-  expect(deadlines).toEqual([1000 + 5000]);
+  expect(deadlines).toEqual([1000 + 15_000]);
+
+  // A caller that joins later does not keep the read past its deadline.
+  const first = o.host.heldDocument("workspace", "object", { markdown: false });
+  const firstFailed = expect(first).rejects.toThrow("Held read deadline exceeded.");
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  await expect(
+    o.host.heldDocument("workspace", "object", { markdown: false }),
+  ).rejects.toMatchObject({
+    wireError: { code: "CANCELLED" },
+  });
+  await firstFailed;
   expect(o.host.invalidated.aborted).toBe(false);
 
   answersCancel = false;
@@ -2232,7 +2243,7 @@ it("stops the engine for a held read it answers neither at the deadline nor on c
     log.mock.calls.filter(([message]) => String(message).startsWith("Live host")),
   ).toContainEqual([
     "Live host stopped an engine that did not answer in time.",
-    { method: "sync.heldDocument", deadlineMs: 6000 },
+    { method: "sync.heldDocument", deadlineMs: 16_000 },
   ]);
 });
 

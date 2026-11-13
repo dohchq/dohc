@@ -404,9 +404,10 @@ export function readServiceLiveHostConfig(
 
 // Held reads running at once, waiting, and sharing one engine request.
 const HELD_READS = { maxRunning: 2, maxQueued: 16, maxWaiters: 8 } as const;
-// A held read's last caller leaves at the request deadline and cancels it, and an engine answers a cancel at once, even
-// mid-proof. The engine is stopped only if it has not answered this much later.
-const HELD_READ_CANCEL_GRACE_MS = 5_000;
+// A held read is cancelled at the request deadline. The engine may take up to its HELD_PROOF_CLOSE_BOUND (10 s) to stop a
+// running proof and answer the cancel, and its actor may be busy before that. An engine that answers neither the read nor
+// its cancel this long after the deadline is stopped. Keep this above HELD_PROOF_CLOSE_BOUND.
+const HELD_READ_CANCEL_GRACE_MS = 15_000;
 const held = new WeakSet<SyncRelayStorage>();
 // An earlier store's recovery handle closes after this long without a page read.
 const RECOVERY_IDLE_MS = 60_000;
@@ -2238,7 +2239,12 @@ export async function startServiceLiveHost(options: {
                     },
                     undefined,
                     undefined,
-                    cancelled,
+                    // The read is cancelled at the request deadline from its start, even while a caller that joined
+                    // later still waits, so the grace counts from that cancel.
+                    AbortSignal.any([
+                      cancelled,
+                      AbortSignal.timeout(config.client.requestDeadlineMs),
+                    ]),
                   );
                   return {
                     result: decodeHostedSyncResult(method, response.result),
