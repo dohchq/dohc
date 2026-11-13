@@ -4,6 +4,7 @@
 // on the main thread inside its longest holds.
 import { createHash } from "node:crypto";
 import { afterEach, expect, it } from "vitest";
+import * as Y from "yjs";
 import { createLiveValidationExecutor } from "./liveValidation.js";
 import type { StorageContext } from "./storage/context.js";
 import { CHECKPOINT_MOMENTS, readOrdinaryCheckpoint, type OrdinaryCheckpointScope } from "./storage/ordinaryActivationCheckpoint.js";
@@ -20,9 +21,6 @@ function validation() {
   return pool.ordinaryActivation(ACTIVATION.validation);
 }
 
-/** The relay's work for this note that runs off the request path, before anyone shares it. Main has none. */
-async function foldAhead(_note: TypedRelayNote) {}
-
 /** The lineage the note's checkpoint belongs to under `validate`'s policy. */
 function lineageOf(note: TypedRelayNote, validate: Validate): OrdinaryCheckpointScope {
   const {source} = note.capture;
@@ -36,6 +34,16 @@ function rowsAfterCheckpoint(note: TypedRelayNote, validate: Validate) {
   const checkpoint = readOrdinaryCheckpoint(note.deployment.storage as unknown as StorageContext, lineageOf(note, validate));
   return Number(note.raw.prepare("SELECT count(*) AS rows FROM sync_relay_log WHERE relay_seq>? AND relay_seq<=?")
     .get(checkpoint ? checkpoint.throughRelaySeq : source.baseRelaySeq, source.committedCursor)!.rows);
+}
+/** Folds the note's next page into its lineage's checkpoint, as an activation's fold does. */
+function foldOnePage(note: TypedRelayNote, validate: Validate) {
+  const foldPage: OrdinaryFoldValidator = async (work, signal) => {
+    const result = await validate(work, signal);
+    if (result.kind === "accepted") throw new Error("A fold page was answered as an activation.");
+    return result;
+  };
+  return foldOrdinaryCheckpointPages(note.deployment.storage as unknown as StorageContext, {scope: lineageOf(note, validate), pages: 1, validate: foldPage,
+    nowMs: () => 3, bounds: {pageRows: ORDINARY_FOLD_PAGE_ROWS, pageBytes: ACTIVATION.maxBytesPerDrain}});
 }
 /** Keystrokes past the base that one fold run takes. */
 const RUN_ROWS = ORDINARY_FOLD_RUN_PAGES * ORDINARY_FOLD_PAGE_ROWS;
@@ -177,16 +185,7 @@ it("a typed note's final read walks at most one page of rows after its checkpoin
 });
 
 it("an activation whose lineage folds further between its read and its transaction is refused as stale, and the next one activates", {timeout: 120_000}, async () => {
-  const note = await typedRelayNote(2_000), validate = validation();
-  const storage = note.deployment.storage as unknown as StorageContext;
-  const scope = lineageOf(note, validate);
-  const foldPage: OrdinaryFoldValidator = async (work, signal) => {
-    const result = await validate(work, signal);
-    if (result.kind === "accepted") throw new Error("A fold page was answered as an activation.");
-    return result;
-  };
-  const foldOnce = () => foldOrdinaryCheckpointPages(storage, {scope, pages: 1, validate: foldPage, nowMs: () => 3,
-    bounds: {pageRows: ORDINARY_FOLD_PAGE_ROWS, pageBytes: ACTIVATION.maxBytesPerDrain}});
+  const note = await typedRelayNote(2_000), validate = validation(), foldOnce = () => foldOnePage(note, validate);
   // After one page, less than a page follows the checkpoint, so the activation reads from it without folding.
   expect(await foldOnce()).toMatchObject({kind: "folded", reachedCursor: false});
   let folded = false;
@@ -250,6 +249,36 @@ it("a note saved more often than its checkpoint keeps activates past a stale wri
   expect((await activate(note, validate, capture)).outcome).toEqual(activated(note));
 });
 
+/**
+ * A note typed until the row before `at`, whose typing then sets a metadata key no live document has, at row `at`, and
+ * removes it in the next row, with the owner's capture of the result.
+ */
+async function strayKey(at: number) {
+  // The relay keeps deleted content, so the capture does too.
+  const note = await typedRelayNote(at - 2), doc = new Y.Doc({gc: false});
+  doc.clientID = 3; Y.applyUpdate(doc, note.note.fullState);
+  doc.on("update", (update: Uint8Array) => {note.appendUpdate(update);});
+  doc.getMap("meta").set("stray", 1);
+  doc.getMap("meta").delete("stray");
+  const capture = note.captureAt(Y.encodeStateAsUpdate(doc));
+  doc.destroy();
+  return {note, capture};
+}
+
+// A read from the base projects only the prefixes its source's proof needs, so a history may pass through a state no
+// live document has. A fold page that ends at that state cannot refuse what the read from the base accepts.
+it("a note whose typing passes through a state no live document has, at the end of a fold page, activates as a read from the base does", {timeout: 120_000}, async () => {
+  const validate = validation(), probe = await typedRelayNote(2_000);
+  expect(await foldOnePage(probe, validate)).toMatchObject({kind: "folded", reachedCursor: false});
+  const end = readOrdinaryCheckpoint(storageOf(probe), lineageOf(probe, validate))!.throughRelaySeq;
+  const at = Number(probe.raw.prepare("SELECT origin_seq FROM sync_relay_log WHERE relay_seq=?").get(end)!.origin_seq);
+  // Without a validation policy to fold under, activation reads from the base.
+  const fromBase = await strayKey(at), unfolded = ((...args: Parameters<Validate>) => validate(...args)) as Validate;
+  expect((await activate(fromBase.note, unfolded, fromBase.capture)).outcome).toEqual(activated(fromBase.note));
+  const folding = await strayKey(at);
+  expect((await activate(folding.note, validate, folding.capture)).outcome).toEqual(activated(folding.note));
+});
+
 // The relay saves a fold's checkpoint before the activation registers. A relay that stops between the two, and starts
 // again, continues from that checkpoint and validates no fold page twice.
 it.each([false, true])("an activation that stopped after its fold saved continues from the saved checkpoint, restarted: %s", {timeout: 120_000}, async restarted => {
@@ -279,7 +308,6 @@ it("a long typed note activates however many keystrokes it took, and reports its
   await activate(await typedRelayNote(100), validate);
   for (const keystrokes of [10_000, 100_000, WORST_REMAINDER]) {
     const note = await typedRelayNote(keystrokes);
-    await foldAhead(note);
     const run = await activate(note, validate), {outcome, elapsedMs, holdMs} = run;
     console.log(`[typed-activation] ${keystrokes} keystrokes${keystrokes === WORST_REMAINDER ? " (worst remainder)" : ""}: ` +
       `${outcome instanceof Error ? `refused (${outcome.message})` : "activated"}, ${Math.round(elapsedMs)} ms (bar 1000), ` +
