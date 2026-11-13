@@ -10,11 +10,13 @@ import { isRendererSource } from "./check-ui-rules.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const inventoryPath = "scripts/bridge-reads.json";
-// The number of reads scripts/bridge-reads.json lists. Lower it when a read moves to useWorkspaceQuery; never raise it.
+// The number of reads scripts/bridge-reads.json lists. Lower it when a read moves to useWorkspaceQuery.
+// Raise it only with a new entry for a read that cannot use the query: see `unowned` below.
 const ceiling = 242;
 const queryModule = "apps/desktop/src/renderer/workspace/useWorkspaceQuery";
 const { parse } = createRequire(join(repoRoot, "package.json"))("@babel/parser");
 const fix = "Read it in the load of useWorkspaceQuery; apps/desktop/src/renderer/workspace/useWorkspaceQuery.ts says how a late or superseded answer is dropped.";
+const unowned = "A read with no workspace session, which runs above the shell's WorkspaceSessionProvider, or one that was in this file before the file gained a hook or component, is listed in " + inventoryPath + " with the ceiling in scripts/check-bridge-reads.mjs raised in the same reviewed change.";
 const functionTypes = new Set(["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression", "ObjectMethod", "ClassMethod", "ClassPrivateMethod"]);
 const wrapperTypes = new Set(["TSAsExpression", "TSSatisfiesExpression", "TSNonNullExpression", "TSTypeAssertion", "ParenthesizedExpression"]);
 const callTypes = new Set(["CallExpression", "OptionalCallExpression"]);
@@ -177,11 +179,11 @@ export function checkBridgeReads(root, inventory, limit = inventory?.sites?.leng
   }
   const listed = inventory.sites.length;
   if (listed > limit) {
-    return { failures: [inventoryPath + " lists " + listed + " reads, above the ceiling of " + limit + ". The inventory only shrinks. " + fix], sites: [] };
+    return { failures: [inventoryPath + " lists " + listed + " reads, above the ceiling of " + limit + ". The inventory only shrinks. " + fix + " " + unowned], sites: [] };
   }
   const sites = collectBridgeReads(root), allowed = new Set(inventory.sites), current = new Set(sites.map(site => site.fingerprint));
   const failures = sites.filter(site => !allowed.has(site.fingerprint)).map(site => site.fingerprint + " (line " + site.line
-    + "): new raw desktop-bridge read in a renderer component or hook. " + fix + " Adding its fingerprint to " + inventoryPath + " is not a fix.");
+    + "): new raw desktop-bridge read in a renderer component or hook. " + fix + " Adding its fingerprint to " + inventoryPath + " is not a fix. " + unowned);
   for (const site of allowed) {
     if (!current.has(site)) failures.push(site + ": stale entry. Remove it from " + inventoryPath + "; the inventory only shrinks.");
   }
