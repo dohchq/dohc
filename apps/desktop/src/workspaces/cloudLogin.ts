@@ -145,6 +145,12 @@ export interface CloudLogoutTransitionOptions {
 // the credential store and before engine cleanup, either of which can reject
 // or stall indefinitely behind an in-flight sync pass. Mounted views re-scope
 // on the signal, never on cleanup finishing.
+//
+// It never revokes the session on the server. Signing out's withdrawal of this
+// computer's chat runners goes out afterwards with the forgotten token
+// (chatWakeLifetime, chatRunnerRoster), so a revocation added here, or in
+// logout(), must wait for that withdrawal first. The relay's runner lease
+// bounds what a missed withdrawal leaves behind to 3 days.
 export async function runCloudLogoutTransition(
   options: CloudLogoutTransitionOptions,
 ): Promise<void> {

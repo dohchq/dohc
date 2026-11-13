@@ -93,7 +93,7 @@ export interface ChatWakeLifetime {
   credentialsChanged(session: ChatWakeSession | null, settled: boolean): void;
   /** Startup: runs the current snapshot's consumer. Snapshots before this are only remembered. */
   start(): void;
-  /** Something a deferred wake waits for may have arrived. */
+  /** Something a deferred wake waits for may have arrived, or the computer woke: also renews declarations that are due. */
   resume(): void;
   /**
    * A pull finished. Only one that brought changes or reached the relay again resumes: a deferred wake asks
@@ -261,6 +261,8 @@ export function createChatWakeLifetime(deps: ChatWakeLifetimeDeps): ChatWakeLife
     },
     resume() {
       void running?.consumer.resume();
+      // Power resume among them: the roster's hourly check stood still while the computer slept.
+      void deps.roster.check();
     },
     pulled({ applied, recovered }) {
       // Reaching the relay again is also when a declaration that failed can go out.

@@ -17,7 +17,7 @@ import type { AutomationReplica } from "./automationReplicas";
 import { ACCOUNT_VISITS_PER_CALLER, startServerCopies } from "./serverCopies";
 import { streamsRequestBody } from "./server";
 import type { SyncRelayStorage } from "./storage";
-import { CHAT_WAKE_CONFIRM_MS, CHAT_WAKE_KEEP_MS, chatWakeId } from "./storage/chatWakes";
+import { CHAT_RUNNER_LEASE_MS, CHAT_WAKE_CONFIRM_MS, CHAT_WAKE_KEEP_MS, chatWakeId } from "./storage/chatWakes";
 import type { StorageContext } from "./storage/context";
 import { closeTestStorages, denialBytes, json, testHandler, testStorage } from "./testing";
 import { PhoneWriteEngine, seedPhoneChats } from "./testing/phoneWriteEngine";
@@ -1406,6 +1406,30 @@ describe("an account's chat writes through the server's copy", () => {
     expect(await sendCounting(f, "op-wide", streamId)).toEqual({ wakes: { targets: [], unmatched: true }, reads: [2, 0] });
   });
 
+  it("wakes no computer whose declaration's lease ended, by mention or by DM, until it declares again", async () => {
+    let now = Date.now();
+    const f = await writeRelay({ nowMs: () => now });
+    const chats = new ChatsLiveAdapter(f.engine.chats, "trip", { workspaceId: "trip" });
+    await declare(f, "mac", [{ agentId: "default", displayName: "Claude" }]);
+    const dm = await chats.ensureAgentChannel({ workspaceId: "trip", agentId: "default", name: "Claude" });
+    await chats.startChannelThread({ workspaceId: "trip", channelId: dm.channelId, threadId: "thread-dm", messageId: "dm-hello", lane: "chat",
+      author: { kind: "human", displayName: "Ana" }, authorUserId: "ana", authorActorKey: null, body: "Hello" });
+    await chats.sendMessage({ workspaceId: "trip", threadId: "thread-dm", messageId: "dm-claude", ...agentAuthor("Claude"), body: "Here." });
+    const send = async (operationId: string, body: string) => {
+      expect(await answer(await f.write("send", { operationId, streamId: dm.channelId, body }))).toMatchObject({ ok: true, state: "saved" });
+      return frozenTargets(f, operationId).map((target) => target.target);
+    };
+    expect(await send("op-fresh", "@claude And?")).toEqual(["mention:claude"]);
+    expect(await send("op-dm-fresh", "And?")).toEqual(["implicit:mac:default"]);
+    // The Mac quit, and three days pass with no declaration from it.
+    now += CHAT_RUNNER_LEASE_MS;
+    expect(await send("op-expired", "@claude And?")).toEqual([]);
+    expect(await send("op-dm-expired", "And?")).toEqual([]);
+    // It comes back and declares the same list again.
+    await declare(f, "mac", [{ agentId: "default", displayName: "Claude" }]);
+    expect(await send("op-refreshed", "@claude And?")).toEqual(["mention:claude"]);
+  });
+
   it("takes a DM's agent by its message's time, not by when the message arrived", async () => {
     const f = await writeRelay();
     const chats = new ChatsLiveAdapter(f.engine.chats, "trip", { workspaceId: "trip" });
@@ -1501,6 +1525,9 @@ describe("an account's chat writes through the server's copy", () => {
       wakes: { publish: { messageId, threadId, held: false, targets: [claude] } } });
     const wakeId = chatWakeId("ana", "trip", messageId, "mention:claude", 1);
     f.storage.claimChatWake({ accountId: "ana", wakeId, installId: "mac", nowMs: RETRY_NOW });
+    // The laptop, where a retry goes, declared its agent then, so its lease holds a day later.
+    f.storage.replaceChatRunners({ accountId: "ana", workspaceId: "trip", installId: "laptop", computerLabel: "laptop",
+      runners: [{ agentId: "default", handle: "claude", displayName: "Claude", enabled: true }], nowMs: RETRY_NOW });
     return wakeId;
   };
   const count = (f: WriteRelay, sql: string) => Number((f.storage as StorageContext).db.prepare(sql).get()?.n);

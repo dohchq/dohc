@@ -75,7 +75,7 @@ it("declares a computer's agents only where its account owns the workspace, with
   const declaration = { installId: "mac", computerLabel: "Ana's Mac", runners: [{ agentId: "default", displayName: "Claude Code", enabled: true }] };
   expect(await json(await call("PUT", "/sync/workspaces/trip/runners", declaration)))
     .toEqual({ ok: true, workspaceId: "trip", installId: "mac", runners: 1 });
-  expect(storage.enabledChatRunners({ accountId: "ana", workspaceId: "trip" }))
+  expect(storage.enabledChatRunners({ accountId: "ana", workspaceId: "trip", nowMs: NOW }))
     .toEqual([{ installId: "mac", computerLabel: "Ana's Mac", agentId: "default", handle: "claudecode", displayName: "Claude Code", enabled: true }]);
 
   const missing = await denialBytes(await call("PUT", "/sync/workspaces/nowhere/runners", declaration));
@@ -94,7 +94,7 @@ it("declares a computer's agents only where its account owns the workspace, with
     expect(response.status, JSON.stringify(body)).toBe(400);
   }
   expect((await call("GET", "/sync/workspaces/trip/runners")).status).toBe(405);
-  expect(storage.enabledChatRunners({ accountId: "ana", workspaceId: "trip" })).toHaveLength(1);
+  expect(storage.enabledChatRunners({ accountId: "ana", workspaceId: "trip", nowMs: NOW })).toHaveLength(1);
 });
 
 it("answers a computer only the waiting wakes that list it, gives the first claim the wake, and takes queued only from the winner", async () => {
