@@ -10,6 +10,16 @@ import { agentIdForChannelWireId } from "@dohc/security-contract/chat-wire-ids";
 import { assertJoinedChannelWritable, joinedSharedChannelForWireId } from "./sharedChannels";
 import { shareViewIsPresent } from "./shareViewMarker";
 import { AutomationChatSessionWait } from "@dohc/automation-executor/automation-chat";
+import type {
+  AnswerOutcome,
+  AnswerStages,
+  Answered,
+  AnswerWithStages,
+  ChatMessageContent,
+  ChatMessageIds,
+  ChatWriteHost,
+  TargetCheck,
+} from "@dohc/workspace-operations/chat-writes";
 import {
   assertSharedChannelMessageIdentity,
   chatRelayAuthorId,
@@ -46,7 +56,8 @@ export type PersonWriter = Exclude<ChatWriter, { via: "automation" }>;
 
 export type ChatWriteStore = ChatRelayIdentityStore & Pick<LinkedChatStore,
   "createThread" | "sendMessage" | "startChannelThread" | "resolveChatDecision" |
-  "listReactions" | "setReaction" | "getMessage" | "listChannelThreads" | "getThread" | "listMessagesPage">;
+  "listReactions" | "setReaction" | "getMessage" | "listChannelThreads" | "getThread" | "listMessagesPage" |
+  "listThreadDecisions">;
 
 export interface ChatWritePlace {
   workspaceId: string;
@@ -88,6 +99,17 @@ interface ChatMessageInput {
   // Hears of the message once the store holds it, before the work that
   // follows the write, so a caller whose later step fails knows it saved.
   // An answer's `failure` says why its question stays open.
+  onSaved?(saved: { message: ChatMessage; failure?: unknown }): void;
+  // An answer's read of its question, run once the write is admitted.
+  checkTargets?: TargetCheck;
+}
+
+// What a person's write through the shared commands is bound to. The
+// commands name none of it.
+export interface ChatHostBinding {
+  writer: PersonWriter;
+  work?: ChatWorkReport;
+  resolveAttachments?(): Promise<ChatAttachments>;
   onSaved?(saved: { message: ChatMessage; failure?: unknown }): void;
 }
 
@@ -291,6 +313,7 @@ export function createChatWrites(dependencies: {
       (findWorkspace(place.workspaceId)?.remote ?? findWorkspace(place.workspaceId)?.pausedRemote) !== undefined) {
       throw new AutomationChatSessionWait();
     }
+    await input.checkTargets?.();
     const actor = await actorFor(input.writer);
     const wakeAgentIds = input.writer.via === "renderer"
       ? await agentIdsToWake(
@@ -441,15 +464,17 @@ export function createChatWrites(dependencies: {
     return started;
   }
 
-  // "toggle" removes the writer's reaction when one exists and adds it
-  // otherwise. A reaction made signed out lives under the local id; once
-  // signed in, removing it removes that alias too.
+  // "toggle", the CLI's convenience, removes the writer's reaction when one
+  // exists and adds it otherwise, under the same admission as the row. A
+  // reaction made signed out lives under the local id; once signed in,
+  // removing it removes that alias too.
   async function setReaction(place: ChatWritePlace, input: {
     writer: PersonWriter;
     threadId: string;
     messageId: string;
     emoji: string;
     state: "added" | "removed" | "toggle";
+    idempotencyKey?: string;
   }) {
     const { workspaceId, store } = place;
     const target = { threadId: input.threadId };
@@ -471,8 +496,8 @@ export function createChatWrites(dependencies: {
       ? input.state
       : hasLocalAlias || hasCurrent ? "removed" : "added";
     // Each row commits on its own, including the second row of an alias
-    // removal.
-    const write = (authorId: string, replicationAuthorId?: string) =>
+    // removal, and each author's cell has its own key.
+    const write = (authorId: string, replicationAuthorId?: string, idempotencyKey?: string) =>
       commit(place, admission, () => store.setReaction({
         workspaceId,
         threadId: input.threadId,
@@ -481,63 +506,56 @@ export function createChatWrites(dependencies: {
         author: { authorId, ...author },
         ...(replicationAuthorId ? { replicationAuthorId } : {}),
         state,
+        ...(idempotencyKey ? { idempotencyKey } : {}),
       }));
     let reaction: Awaited<ReturnType<typeof write>>;
     if (state === "removed" && aliased(authorUserId) && hasLocalAlias) {
-      reaction = await write(localAuthorId);
-      if (hasCurrent) reaction = await write(authorUserId, authorUserId);
+      reaction = await write(localAuthorId, undefined, input.idempotencyKey && `${input.idempotencyKey}:local`);
+      if (hasCurrent) reaction = await write(authorUserId, authorUserId, input.idempotencyKey);
     } else {
-      reaction = await write(authorUserId ?? localAuthorId, authorUserId);
+      reaction = await write(authorUserId ?? localAuthorId, authorUserId, input.idempotencyKey);
     }
     afterWrite(workspaceId, target, false);
     return reaction;
   }
 
-  // A reply that answers a question or poll. The reply and the answer land
-  // between dispatch scans, so no agent reads the reply while its question
-  // still looks open. When the answer fails after the reply landed, the
-  // question stays open and `failure` says why.
-  async function answer(place: ChatWritePlace, input: ReplyInput & {
-    resolves: { messageId: string; chosenOption?: string };
-  }): Promise<
-    | { message: ChatMessage; decision: Awaited<ReturnType<ChatWriteStore["resolveChatDecision"]>> }
-    | { message: ChatMessage; failure: unknown }
-  > {
+  // A reply that answers a question or poll, under one admission. The shared
+  // command orders its stages and judges who won. The reply and the answer
+  // land between dispatch scans, so no agent reads the reply while its
+  // question still looks open.
+  async function answer(place: ChatWritePlace, input: ReplyInput, use: (stages: AnswerStages) => Promise<AnswerOutcome>) {
     const target = { threadId: input.threadId };
     const prepared = await prepareMessage(place, target, input);
     const answered = await betweenDispatchScans(place.workspaceId, async () => {
-      const message = await commitReply(place, prepared, input);
-      const outcome = await commit(place, prepared.admission, () => place.store.resolveChatDecision({
-        workspaceId: place.workspaceId,
-        threadId: input.threadId,
-        messageId: input.resolves.messageId,
-        resolvedByMessageId: message.id,
-        ...(input.resolves.chosenOption !== undefined ? { chosenOption: input.resolves.chosenOption } : {}),
-      })).then((decision) => ({ message, decision }), (failure: unknown) => ({ message, failure }));
-      input.onSaved?.(outcome);
+      const outcome = await use({
+        reply: () => commitReply(place, prepared, input),
+        resolve: (command) => commit(place, prepared.admission, () => place.store.resolveChatDecision({
+          workspaceId: place.workspaceId,
+          ...command,
+        })),
+      });
+      input.onSaved?.(outcome.state === "failed" ? { message: outcome.message, failure: outcome.failure } : { message: outcome.message });
       return outcome;
     });
     afterWrite(place.workspaceId, target, true, input.writer);
     return answered;
   }
 
-  // Marks a question answered with a reply that already saved, when the
-  // answer failed after the reply landed. It posts nothing. The reply must be
-  // in the question's thread, written from a window rather than the CLI, and
-  // carry the key this session gives the writer, which only a reply this
-  // device wrote for them keeps. A question another reply answered stays as
-  // that reply left it, and this refuses.
+  // Answers a question with a reply that already saved, when the answer
+  // failed after the reply landed. It posts nothing. The reply must be in the
+  // question's thread, written from a window rather than the CLI, and carry
+  // the key this session gives the writer, which only a reply this device
+  // wrote for them keeps.
   async function answerWith(place: ChatWritePlace, input: {
     writer: PersonWriter;
     threadId: string;
-    messageId: string;
-    resolvedByMessageId: string;
-    chosenOption?: string;
-  }) {
+    questionId: string;
+    replyId: string;
+  }, use: (stages: AnswerWithStages) => Promise<Answered>) {
     const { workspaceId, store } = place;
     const target = { threadId: input.threadId };
     const admission = await admit(place, target);
-    const reply = await store.getMessage({ workspaceId, messageId: input.resolvedByMessageId });
+    const reply = await store.getMessage({ workspaceId, messageId: input.replyId });
     const { author } = await personActorFor(input.writer);
     const authorActorKey = deriveChatActorKey({
       credentials: admission.actorCredentials,
@@ -546,22 +564,54 @@ export function createChatWrites(dependencies: {
       writer: input.writer,
       displayName: author.displayName,
     });
-    if (reply.threadId !== input.threadId || reply.id === input.messageId || reply.origin !== undefined || authorActorKey === null ||
+    if (reply.threadId !== input.threadId || reply.id === input.questionId || reply.origin !== undefined || authorActorKey === null ||
       reply.authorActorKey !== authorActorKey || reply.authorUserId !== admission.authorUserId) {
       throw new Error("Only your own reply in this thread can answer its question.");
     }
-    const decision = await commit(place, admission, () => store.resolveChatDecision({
-      workspaceId,
-      threadId: input.threadId,
-      messageId: input.messageId,
-      resolvedByMessageId: reply.id,
-      ...(input.chosenOption !== undefined ? { chosenOption: input.chosenOption } : {}),
-    }));
-    if (decision.resolvedByMessageId !== reply.id) throw new Error("Another reply already answered this question.");
-    afterWrite(workspaceId, target, false);
-    // No new message reaches the other views, so they hear of the answer here.
-    notifyRenderer(workspaceId);
-    return decision;
+    const outcome = await use({
+      reply,
+      resolve: (command) => commit(place, admission, () => store.resolveChatDecision({ workspaceId, ...command })),
+    });
+    // A question another reply answered changed nothing here.
+    if (outcome.state === "resolved") {
+      afterWrite(workspaceId, target, false);
+      // No new message reaches the other views, so they hear of the answer here.
+      notifyRenderer(workspaceId);
+    }
+    return outcome;
+  }
+
+  // The shared commands' host for one place and one person or their agent.
+  // It gives no findMessage: the engine refuses a missing parent or message,
+  // and this store hides none from the person.
+  function host(place: ChatWritePlace, bound: ChatHostBinding): ChatWriteHost {
+    const message = (command: ChatMessageContent & ChatMessageIds, checkTargets?: TargetCheck): ChatMessageInput => ({
+      writer: bound.writer,
+      body: command.body,
+      needsDecision: command.needsDecision,
+      options: command.options,
+      work: bound.work,
+      resolveAttachments: bound.resolveAttachments ?? (async () => []),
+      messageId: command.messageId,
+      idempotencyKey: command.idempotencyKey,
+      onSaved: bound.onSaved,
+      checkTargets,
+    });
+    return {
+      workspaceId: place.workspaceId,
+      store: place.store,
+      start: (command) => startThread(place, {
+        ...message(command), channelId: command.channelId, lane: command.lane, title: command.title, threadId: command.threadId,
+      }),
+      reply: (command) => sendMessage(place, {
+        ...message(command), threadId: command.threadId, parentMessageId: command.parentMessageId,
+      }),
+      answer: (command, checkTargets, use) => answer(place, {
+        ...message(command, checkTargets), threadId: command.threadId, parentMessageId: command.parentMessageId,
+      }, use),
+      answerWith: (command, use) => answerWith(place, { writer: bound.writer, ...command }, use),
+      react: (command) => setReaction(place, { writer: bound.writer, ...command }),
+    };
   }
 
   // Throws unless a message to this thread would be admitted now: the checks
@@ -570,7 +620,7 @@ export function createChatWrites(dependencies: {
     await admit(place, { threadId });
   }
 
-  return { createFileThread, sendMessage, answer, answerWith, startThread, setReaction, assertMayPost };
+  return { createFileThread, sendMessage, startThread, setReaction, assertMayPost, host };
 }
 
 // Use captured admission credentials, including for a DM's opening message.

@@ -108,12 +108,12 @@ describe("StateMark", () => {
   // narrow row hides the chip's words, never Try again.
   it("keeps Try again whole beside a state mark", () => {
     const { container } = render(
-      <ViewActions status={<StateMark testId="mark" truncate state="read-only" shown="read-only-transition" onRetry={() => undefined} />} />,
+      <ViewActions status={<StateMark testId="mark" truncate state="read-only" shown="read-only-transition" action={{ label: "Try again", run: () => undefined }} />} />,
     );
     const status = container.querySelector<HTMLElement>("[data-view-status]")!;
     // Each column is as narrow as its item allows, so the button's own minimum counts.
     expect(status.className).toContain("auto-cols-[minmax(auto,max-content)]");
-    const retry = screen.getByTestId("mark-retry");
+    const retry = screen.getByTestId("mark-action");
     expect(retry.parentElement).toBe(status);
     expect(retry.className.split(" ")).toEqual(expect.arrayContaining(["shrink-0", "whitespace-nowrap"]));
     expect(retry.closest(".truncate")).toBeNull();

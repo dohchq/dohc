@@ -30,7 +30,16 @@ export type RefusalReason =
   | "too old";
 export const COULD_NOT_SEND: RefusalReason = "Couldn't send";
 export const WORKSPACE_CHANGED: RefusalReason = "This workspace changed on your server";
+export const TOO_OLD: RefusalReason = "too old";
 const ALREADY_ANSWERED: RefusalReason = "already answered";
+const REFUSAL_REASONS: ReadonlySet<string> = new Set<RefusalReason>([
+  ALREADY_ANSWERED, "The message it replies to wasn't sent", WORKSPACE_CHANGED, COULD_NOT_SEND, TOO_OLD,
+]);
+
+/** Whether `reason` is one of the answers a refused write may give the phone. */
+export function isRefusalReason(reason: string): reason is RefusalReason {
+  return REFUSAL_REASONS.has(reason);
+}
 
 /** How long a request waits for its write to publish before it answers pending. */
 export const PUBLICATION_DEADLINE_MS = 20_000;
@@ -53,17 +62,32 @@ export type PublicationStage = {
   /** A `post` or `reply` stage writes the operation's message. */
   role: "post" | "reply" | "decision" | "reaction";
   records: ExpectedRecord[];
+  /**
+   * The thread a stage proposed when the engine may write to a running
+   * conversation instead. Its records' thread references, `threadId` and a
+   * follow's `targetId`, are compared with the thread the stage's receipt
+   * names when they equal it. No other field is.
+   */
+  engineThread?: string;
 };
 export type ExpectedRecord = {
   /** The relay row's op kind, such as `chat.message.append`. */
   kind: string;
   /** Payload fields the accepted row holds, exactly. */
   fields: { [field: string]: JsonValue };
+  /** Fields the row holds only sometimes, such as a parent the engine exports only once it exported the parent; when held, exactly. */
+  whenPresent?: { [field: string]: JsonValue };
+  /** Fields the row must not hold, such as a choice for a question that had none. */
+  absent?: string[];
   /** A record the stage may not add, such as the follow a person's first message adds. */
   optional?: boolean;
 };
 
-/** What a settled write keeps as its result. */
+/**
+ * What a settled write keeps as its result. Before it settles, the row may
+ * hold its thread, and `refusedStage`: the key of a stage the engine refused
+ * before writing, which publication refuses the write by.
+ */
 export type OperationResult = { threadId: string | null; reason?: RefusalReason; winnerMessageId?: string };
 
 export type Verdict =
@@ -91,17 +115,27 @@ export function commandStages(command: JsonValue): PublicationStage[] | null {
   const decoded: PublicationStage[] = [];
   for (const value of stages as unknown[]) {
     const stage = asRecord(value);
-    const key = stage?.key, role = stage?.role, records = stage?.records;
+    const key = stage?.key, role = stage?.role, records = stage?.records, engineThread = stage?.engineThread;
     if (typeof key !== "string" || !key || typeof role !== "string" || !isRole(role) || !Array.isArray(records)) return null;
+    if (engineThread !== undefined && (typeof engineThread !== "string" || !engineThread)) return null;
     const expected: ExpectedRecord[] = [];
     for (const item of records as unknown[]) {
       const record = asRecord(item);
       const kind = record?.kind, fields = asRecord(record?.fields), optional = record?.optional;
+      const whenPresent = record?.whenPresent === undefined ? undefined : asRecord(record.whenPresent), absent = record?.absent;
       if (typeof kind !== "string" || fields === null || (optional !== undefined && typeof optional !== "boolean")) return null;
+      if (whenPresent === null || (absent !== undefined && !(Array.isArray(absent) && (absent as unknown[]).every((field) => typeof field === "string")))) {
+        return null;
+      }
       // Parsed from the stored JSON, so every field is JSON.
-      expected.push({ kind, fields: fields as { [field: string]: JsonValue }, ...(optional === true ? { optional } : {}) });
+      expected.push({
+        kind, fields: fields as { [field: string]: JsonValue },
+        ...(whenPresent === undefined ? {} : { whenPresent: whenPresent as { [field: string]: JsonValue } }),
+        ...(absent === undefined ? {} : { absent: absent as string[] }),
+        ...(optional === true ? { optional } : {}),
+      });
     }
-    decoded.push({ key, role, records: expected });
+    decoded.push({ key, role, records: expected, ...(engineThread === undefined ? {} : { engineThread }) });
   }
   return decoded;
 }
@@ -116,7 +150,9 @@ export function commandStages(command: JsonValue): PublicationStage[] | null {
  * row for a coordinate the copy never saw pushed too, since a push whose
  * answer was lost may still have reached the relay. A lost decision answers
  * "already answered", and a message whose own records were accepted is
- * published whatever the rest does.
+ * published whatever the rest does. A stage the row marks as refused by the
+ * engine, still without a receipt, refuses the write once the rest is
+ * resolved, so a published reply settles with its refused decision.
  */
 export function judgeOperation(
   storage: Pick<SyncRelayStorage, "fetchAccountOperationLogRow">,
@@ -125,10 +161,16 @@ export function judgeOperation(
   settling: RefusalReason | null,
 ): Verdict {
   const stages = commandStages(record.command);
+  // A stage the engine refused before it wrote, with no receipt then, which nothing asks of it again.
+  const refusedStage = asRecord(record.result)?.refusedStage;
   let threadId: string | null = null, unresolved = stages === null, refused = false, messagePublished = false;
   let lost: { winnerMessageId?: string } | null = null;
   for (const stage of stages ?? []) {
     const receipt = receipts.get(stage.key);
+    if (receipt?.state === "absent" && stage.key === refusedStage) {
+      refused = true;
+      continue;
+    }
     if (receipt === undefined || receipt.state === "absent") {
       unresolved = true;
       continue;
@@ -140,7 +182,7 @@ export function judgeOperation(
     }
     // A stage that wrote nothing has nothing to publish.
     if (receipt.outcome === "no-op") continue;
-    const accepted = accepts(storage, record, receipt.coordinates, stage.records, settling !== null);
+    const accepted = accepts(storage, record, receipt.coordinates, expectedRecords(stage, receipt.threadId), settling !== null);
     if (accepted === "refused") refused = true;
     else if (accepted === "unresolved") unresolved = true;
     else if (stage.role === "post" || stage.role === "reply") messagePublished = true;
@@ -152,6 +194,20 @@ export function judgeOperation(
   if (unresolved) return refuse(settling ?? COULD_NOT_SEND);
   if (refused) return refuse(COULD_NOT_SEND);
   return { stage: "saved", messagePublished, result: { threadId } };
+}
+
+// The records a stage must have made, with the thread its receipt names in
+// each thread reference to the thread it proposed. Literal content, such as a
+// body that happens to equal the proposal, stays as it is.
+function expectedRecords(stage: PublicationStage, threadId: string): readonly ExpectedRecord[] {
+  const proposed = stage.engineThread;
+  if (proposed === undefined || proposed === threadId) return stage.records;
+  return stage.records.map((record) => {
+    const fields = { ...record.fields };
+    if (fields.threadId === proposed) fields.threadId = threadId;
+    if (record.kind === "chat.follow.set" && fields.targetId === proposed) fields.targetId = threadId;
+    return { ...record, fields };
+  });
 }
 
 // Whether the relay accepted every record a stage's coordinates name, each
@@ -185,7 +241,7 @@ function accepts(
     }
     if (row.relayAdmission === "refused" || row.opKind === REFUSED_OP_KIND) return "refused";
     const expected = row.relayAdmission === undefined
-      ? records.find((record) => record.kind === row.opKind && holds(row.payloadJson, record.fields))
+      ? records.find((record) => record.kind === row.opKind && holds(row.payloadJson, record))
       : undefined;
     if (expected === undefined) unresolved = true;
     else matched.add(expected);
@@ -201,10 +257,13 @@ function parseObject(json: string): Record<string, unknown> | null {
   }
 }
 
-function holds(payloadJson: string, fields: { readonly [field: string]: JsonValue }): boolean {
+function holds(payloadJson: string, expected: ExpectedRecord): boolean {
   const payload = parseObject(payloadJson);
-  return payload !== null && Object.entries(fields).every(([field, value]) =>
-    Object.hasOwn(payload, field) && stableJsonStringify(payload[field]) === stableJsonStringify(value));
+  const same = (field: string, value: JsonValue) => stableJsonStringify(payload?.[field]) === stableJsonStringify(value);
+  return payload !== null &&
+    Object.entries(expected.fields).every(([field, value]) => Object.hasOwn(payload, field) && same(field, value)) &&
+    Object.entries(expected.whenPresent ?? {}).every(([field, value]) => !Object.hasOwn(payload, field) || same(field, value)) &&
+    (expected.absent ?? []).every((field) => !Object.hasOwn(payload, field));
 }
 
 /**
@@ -310,7 +369,8 @@ export async function inspectOperations(
  * One bounded attempt for unfinished writes on an open copy: one sync step,
  * queued behind any sync already running, then their receipts and the
  * relay's rows, read whether or not the step succeeded. `signal` ends the
- * attempt wherever it waits; the copy's own passes carry the sync on.
+ * attempt wherever it waits; the copy's own passes carry the sync on. A
+ * caller's `authorize` runs once the step ends, before anything is read.
  */
 export async function publishOnce(
   storage: PublicationStorage,
@@ -318,6 +378,7 @@ export async function publishOnce(
   records: readonly OperationRecord[],
   nowMs: () => number,
   signal?: AbortSignal,
+  authorize?: () => Promise<void>,
 ): Promise<Array<OperationRecord | null> | null> {
   let syncError: unknown;
   try {
@@ -327,6 +388,7 @@ export async function publishOnce(
     if (copy.signal.aborted) return null;
     syncError = error;
   }
+  await authorize?.();
   const inspected = await inspectOperations(storage, copy.workspaceId, receiptReader(copy, copy.workspace, signal), records, nowMs, syncError);
   signal?.throwIfAborted();
   return inspected;
@@ -343,18 +405,20 @@ const answerOf = (record: OperationRecord | null): PublicationAnswer => ({
  * so the lane is free between them, until the relay accepted or refused
  * every record the receipts list, or `deadlineMs` passes. The deadline ends
  * this request's attempt wherever it waits, in the lane, in an engine
- * request, or in a receipt read. Then `authorize` checks the caller again,
- * and the answer comes from the record: saved, refused, or pending, which
- * the copy's passes carry on. `signal` is the caller's: its abort rejects
- * instead. A sync that succeeds, or has more to do, is never taken as
- * acceptance. Never call it from a sync callback: it waits for the lane.
+ * request, or in a receipt read. `authorize` checks the caller again after
+ * each step and each wait between attempts, and once more before the answer,
+ * which comes from the record: saved, refused, or pending, which the copy's
+ * passes carry on. A caller who lost access gets its rejection, never a
+ * result. `signal` is the caller's: its abort rejects instead. A sync that
+ * succeeds, or has more to do, is never taken as acceptance. Never call it
+ * from a sync callback: it waits for the lane.
  */
 export async function publishOperation(input: {
   storage: PublicationStorage;
   copy: PublicationCopy;
   record: OperationRecord;
   signal?: AbortSignal;
-  /** Checks the caller's credential, ownership, and "Show on phone" again, right before the answer. */
+  /** Checks the caller's credential, ownership, and "Show on phone" again: after each wait, and right before the answer. */
   authorize?(): Promise<void>;
   deadlineMs?: number;
   nowMs?(): number;
@@ -364,6 +428,7 @@ export async function publishOperation(input: {
   const { storage, copy, signal } = input;
   const nowMs = input.nowMs ?? Date.now;
   const pause = input.pause ?? ((ms: number, abort?: AbortSignal) => sleep(ms, undefined, abort === undefined ? {} : { signal: abort }));
+  const authorize = input.authorize?.bind(input);
   // A write made on an earlier incarnation settles when that incarnation's folder goes.
   if (input.record.workspaceId !== copy.workspaceId || input.record.incarnation !== copy.incarnation) return answerOf(input.record);
   const { accountId, operationId } = input.record;
@@ -376,10 +441,11 @@ export async function publishOperation(input: {
   const attempt = signal === undefined ? expired.signal : AbortSignal.any([expired.signal, signal]);
   try {
     for (let wait = FIRST_POLL_MS; record !== null && record.stage !== "saved" && record.stage !== "refused"; wait = Math.min(wait * 2, MAX_POLL_MS)) {
-      const after = await publishOnce(storage, copy, [record], nowMs, attempt);
+      const after = await publishOnce(storage, copy, [record], nowMs, attempt, authorize);
       if (after !== null) record = after[0] ?? null;
       if (record === null || record.stage === "saved" || record.stage === "refused" || nowMs() + wait >= deadline) break;
       await pause(wait, attempt);
+      await authorize?.();
     }
   } catch (error) {
     // Only the deadline ends the attempt with an answer; the caller's abort, or a failure, rejects.
@@ -388,7 +454,7 @@ export async function publishOperation(input: {
   } finally {
     clearTimeout(timer);
   }
-  await input.authorize?.();
+  await authorize?.();
   return answerOf(record);
 }
 

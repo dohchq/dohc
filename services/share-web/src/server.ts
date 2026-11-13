@@ -28,8 +28,10 @@ import {serveRemoteMcp} from "./remoteMcp";
 import {createAgentChatClient} from "./agentChatClient";
 import {
   MCP_CORS_HEADERS, MCP_PATH_PREFIX, PERSONAL_MCP_PATH_PREFIX, type SignInPagePolicy, createMcpSignIn, isMcpCorsPath, mcpChallenge,
-  mcpLinkSecret, mcpPersonalWorkspace, signInPagePolicy,
+  mcpLinkSecret, mcpPersonalWorkspace, mcpRoutePattern, signInPagePolicy,
 } from "./mcpSignIn";
+import {SHARE_WEB_REQUEST_LOG} from "./requestLog";
+export {SHARE_WEB_REQUEST_LOG} from "./requestLog";
 import {servePersonalMcp} from "./personalMcp";
 import {createPersonalAgentClient} from "./personalAgentClient";
 import {COLLECTION_WRITES_PATH, MAX_COLLECTION_WRITE_ENVELOPE_BYTES} from "./collectionWrites";
@@ -1370,7 +1372,9 @@ export function createShareWebApplication({
   const discoverApps = createAppDiscovery({viewerOrigin: appLaunchConfig?.viewerOrigin, relayUrl, fetchRelay, resolveMaterial: resolveLinkBrowserMaterial});
   const viewerHost = appLaunchConfig ? new URL(appLaunchConfig.viewerOrigin).host : undefined;
   const route = async (request: Request): Promise<Response> => {
+    const mark = (pattern: Parameters<typeof SHARE_WEB_REQUEST_LOG.mark>[1]) => SHARE_WEB_REQUEST_LOG.mark(request, pattern);
     if (new URL(request.url).pathname === ACCOUNT_DELETION_PATH) {
+      mark(ACCOUNT_DELETION_PATH);
       if (!internalHosts?.has((request.headers.get("host") ?? "").toLowerCase()) || request.method !== "POST" || !relayExchangeKey || relayExchangeKey.length < 32 || !presentsAccountDeletionKey(request.headers.get(ACCOUNT_DELETION_KEY_HEADER),accountDeletionKey(relayExchangeKey))) return refused();
       const body: unknown = await request.json().catch(() => null);
       if (!body || typeof body !== "object" || !("userId" in body) || typeof body.userId !== "string" || body.userId.length > 1024) return refused();
@@ -1387,19 +1391,29 @@ export function createShareWebApplication({
     const appRequest = appLaunch?.matches(request) ?? false;
     if (!appRequest && !publicHosts.has(host)) return refused();
     const viewerAppRoute = pathname === "/api/apps/launch" || pathname === "/api/apps/summary";
-    if (viewerAppRoute ? viewerHost === undefined || request.headers.get("host") === viewerHost : !appRequest) {
+    const onViewer = viewerHost === undefined || request.headers.get("host") === viewerHost;
+    if (viewerAppRoute ? onViewer : !appRequest) {
       const refusal = shareWebApiVersionRefusal(request, apiVersions);
       if (refusal) return refusal;
     }
-    if (appRequest) return appLaunch!.handle(request);
+    if (appRequest) {
+      // A published app chooses its own paths, the viewer's two app routes included.
+      mark(onViewer && (pathname === "/api/apps/launch" || pathname === "/api/apps/summary") ? pathname : "app");
+      return appLaunch!.handle(request);
+    }
     const agentOrigin = linkLiveConfig?.publicOrigin ?? `https://${request.headers.get("host")}`;
+    const mcpRoute = mcpRoutePattern(pathname);
+    if (mcpRoute) mark(mcpRoute);
     if (isMcpCorsPath(pathname) && request.method === "OPTIONS") return response(null, {status: 204});
-    if (pathname === "/api/mcp" && request.method === "GET" && !search) return jsonResponse({
-      api: "share-web", apiVersions, versionHeader: SHARE_WEB_API_VERSION_HEADER, defaultVersion: 1, mcpApiVersions: mcpApiVersions(apiVersions),
-      endpoint: "/mcp/s/<secret>", transport: "streamable-http", authorizationServer: "/.well-known/oauth-authorization-server",
-      authentication: "Replace <secret> with the text after # in the share link. The endpoint uses the standard MCP sign-in: " +
-        "it answers 401 with its protected resource metadata, and a person allows the agent on the consent page.",
-    });
+    if (pathname === "/api/mcp" && request.method === "GET" && !search) {
+      mark("/api/mcp");
+      return jsonResponse({
+        api: "share-web", apiVersions, versionHeader: SHARE_WEB_API_VERSION_HEADER, defaultVersion: 1, mcpApiVersions: mcpApiVersions(apiVersions),
+        endpoint: "/mcp/s/<secret>", transport: "streamable-http", authorizationServer: "/.well-known/oauth-authorization-server",
+        authentication: "Replace <secret> with the text after # in the share link. The endpoint uses the standard MCP sign-in: " +
+          "it answers 401 with its protected resource metadata, and a person allows the agent on the consent page.",
+      });
+    }
     const signIn = await mcpSignIn.handle(request, agentOrigin);
     if (signIn) {
       const page = signInPagePolicy(signIn);
@@ -1488,45 +1502,55 @@ export function createShareWebApplication({
       }
       finally {mcpRequests--; release();}
     }
-    if (pathname === "/api/apps") return discoverApps(request);
+    if (pathname === "/api/apps") {
+      mark("/api/apps");
+      return discoverApps(request);
+    }
 
     if (pathname === "/api/live/link-document" || pathname === "/api/live/link-ticket") {
+      mark(pathname);
       if (!linkLive) return refused();
       const result = await linkLive.handle(request);
       return response(result.body, {status: result.status, headers: result.headers});
     }
 
     if (pathname === "/api/live/named-session") {
+      mark(pathname);
       if (!namedBrowser) return refused();
       const result = await namedBrowser.bootstrap(request);
       return response(result.body, { status: result.status, headers: result.headers });
     }
 
     if (pathname === "/api/live/named-ticket") {
+      mark(pathname);
       if (!namedTickets) return refused();
       const result = await namedTickets(request);
       return response(result.body, {status: result.status, headers: result.headers});
     }
 
     if (pathname === "/api/live/named-documents") {
+      mark(pathname);
       if (!namedDocuments) return refused();
       const result = await namedDocuments(request);
       return response(result.body, {status: result.status, headers: result.headers});
     }
 
     if (pathname.startsWith("/api/named-chat/")) {
+      mark("/api/named-chat/*");
       if (!namedChat) return refused();
       const result = await namedChat(request);
       return response(result.body, {status: result.status, headers: result.headers});
     }
 
     if (pathname.startsWith("/api/push/")) {
+      mark("/api/push/*");
       if (!push) return refused();
       const result = await push(request);
       return response(result.body, {status: result.status, headers: result.headers});
     }
 
     if (pathname.startsWith("/api/account/")) {
+      mark("/api/account/*");
       if (!accountHandler) return refused();
       const accountResponse = await accountHandler(request);
       return response(accountResponse.body, {
@@ -1536,14 +1560,20 @@ export function createShareWebApplication({
     }
 
     if (request.method === "GET" && (pathname === "/s" || pathname.startsWith("/s/"))) {
+      // What follows /s/ is a link's secret when its # was dropped.
+      mark(pathname === "/s" || pathname === "/s/" ? pathname : pathname.startsWith("/s/assets/") ? "/s/assets/*" : "/s/*");
       const viewer = await serveViewer(pathname);
       if (!pathname.startsWith("/s/assets/")) viewer.headers.set("link", '</api/mcp>; rel="service-desc"; type="application/json"');
       return viewer;
     }
 
-    if (pathname === "/l" || pathname.startsWith("/l/")) return serveWorkLinkPage(request, pathname, agentOrigin);
+    if (pathname === "/l" || pathname.startsWith("/l/")) {
+      mark(pathname === "/l" ? "/l" : "/l/*");
+      return serveWorkLinkPage(request, pathname, agentOrigin);
+    }
 
     if (pathname === "/api/exchange" && request.method === "POST") {
+      mark("/api/exchange");
       const clientIp = request.headers.get("x-dohc-share-web-client-ip") ?? "unknown";
       const addressPending = exchangeAddressInFlight.get(clientIp) ?? 0;
       if (addressPending >= 16 || exchangesInFlight >= MAX_EXCHANGES_IN_FLIGHT || !exchangeAddressProbes.allow(clientIp, nowMs()) ||
@@ -1624,6 +1654,7 @@ export function createShareWebApplication({
     }
 
     if (pathname === "/api/handoff" && request.method === "POST") {
+      mark("/api/handoff");
       if (!request.headers.has(LINK_SESSION_HEADER)) return refused();
       const authenticated = readSession(request);
       if (!authenticated) return refused();
@@ -1649,6 +1680,7 @@ export function createShareWebApplication({
     }
 
     if (pathname === COLLECTION_WRITES_PATH) {
+      mark(COLLECTION_WRITES_PATH);
       // Only the viewer page, or this server's own MCP tools: never another
       // site, and never a published app, whose origin differs and which never
       // holds the link's cookies.
@@ -1726,6 +1758,7 @@ export function createShareWebApplication({
     }
 
     if (pathname === "/api/view/chat/channels" || pathname === "/api/view/chat/messages") {
+      mark(pathname);
       const agent = agentCallers.get(request);
       const browser = agent ? null : readSession(request);
       const caller = agent ?? browser;
@@ -1774,6 +1807,7 @@ export function createShareWebApplication({
       pathname === "/api/view/discussion" ||
       pathname === "/api/view/discussion/activity"
     ) {
+      mark(pathname);
       const isActivity = pathname === "/api/view/discussion/activity";
       if (
         (isActivity && request.method !== "GET") ||
@@ -1836,6 +1870,8 @@ export function createShareWebApplication({
     }
 
     if (pathname.startsWith("/api/view/")) {
+      if (pathname === "/api/view/meta" || pathname === "/api/view/current" || pathname === "/api/view/log") mark(pathname);
+      else if (pathname.startsWith("/api/view/blob/")) mark("/api/view/blob/:sha256");
       const authenticated = agentCallers.get(request) ?? readSession(request);
       if (!authenticated || request.method !== "GET") return refused();
       if (pathname === "/api/view/meta") {

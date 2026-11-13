@@ -75,6 +75,21 @@ export function readChats(client: ServerClient, workspaceId: string, signal: Abo
   }), signal);
 }
 
+/** A file a message names, by its object, its path when sent, or both. */
+export interface ChatAttachment {
+  readonly objectId: string | null;
+  readonly pathHint: string | null;
+}
+
+/** One person's or agent's reaction to a message. */
+export interface ChatReaction {
+  readonly emoji: string;
+  readonly authorId: string;
+  readonly authorKind: "human" | "agent";
+  readonly authorName: string;
+  readonly atMs: number;
+}
+
 export interface ChatMessage {
   readonly id: string;
   readonly threadId: string;
@@ -82,15 +97,59 @@ export interface ChatMessage {
   readonly authorName: string;
   readonly body: string;
   readonly createdAtMs: number;
+  /** The message it replies to, or null for one at the top of its thread. */
+  readonly parentMessageId: string | null;
+  readonly attachments: readonly ChatAttachment[];
+  /** Whether it asks a question or a poll. The rest describe that decision, and are empty or null when it asks none. */
+  readonly needsDecision: boolean;
+  readonly decisionState: "open" | "resolved" | null;
+  /** A poll's choices. A question has none. */
+  readonly options: readonly string[];
+  readonly chosenOption: string | null;
+  /** The reply that answered it. */
+  readonly resolvedByMessageId: string | null;
+  readonly reactions: readonly ChatReaction[];
 }
 
 const isAuthorKind = (value: unknown): value is ChatMessage["authorKind"] =>
   value === "human" || value === "agent" || value === "automation" || value === "link";
+/** An optional field: null when absent, undefined when it fails `check`. */
+const optional = <T>(value: unknown, check: (value: unknown) => value is T): T | null | undefined =>
+  value === undefined ? null : check(value) ? value : undefined;
+const id = (value: unknown): value is string => text(value, 256);
+const nonEmpty = (value: unknown): value is string => text(value);
+const isDecisionState = (value: unknown): value is "open" | "resolved" => value === "open" || value === "resolved";
+
+const readAttachment = (item: unknown): ChatAttachment | null => {
+  if (!isFields(item)) return null;
+  const objectId = optional(item.objectId, id), pathHint = optional(item.pathHint, nonEmpty);
+  return objectId === undefined || pathHint === undefined ? null : { objectId, pathHint };
+};
+
+const readReaction = (item: unknown): ChatReaction | null =>
+  isFields(item) && text(item.emoji, 256) && id(item.authorId) && (item.authorKind === "human" || item.authorKind === "agent") &&
+    string(item.authorDisplayName, 256) && count(item.atMs)
+    ? { emoji: item.emoji, authorId: item.authorId, authorKind: item.authorKind, authorName: item.authorDisplayName, atMs: item.atMs }
+    : null;
 
 function readMessage(item: unknown): ChatMessage | null {
-  if (!isFields(item) || !text(item.id, 256) || !text(item.threadId, 256) || !isAuthorKind(item.authorKind) ||
-    !text(item.authorDisplayName, 256) || !string(item.body) || !count(item.createdAtMs)) return null;
-  return { id: item.id, threadId: item.threadId, authorKind: item.authorKind, authorName: item.authorDisplayName, body: item.body, createdAtMs: item.createdAtMs };
+  if (!isFields(item) || !id(item.id) || !id(item.threadId) || !isAuthorKind(item.authorKind) ||
+    !text(item.authorDisplayName, 256) || !string(item.body) || !count(item.createdAtMs) || typeof item.needsDecision !== "boolean") return null;
+  const parentMessageId = optional(item.parentMessageId, id);
+  const decisionState = optional(item.decisionState, isDecisionState);
+  const chosenOption = optional(item.chosenOption, nonEmpty);
+  const resolvedByMessageId = optional(item.resolvedByMessageId, id);
+  const attachments = each(item.attachments, readAttachment);
+  const options = item.options === undefined ? [] : each(item.options, value => nonEmpty(value) ? value : null);
+  const reactions = item.reactions === undefined ? [] : each(item.reactions, readReaction);
+  if (parentMessageId === undefined || decisionState === undefined || chosenOption === undefined || resolvedByMessageId === undefined ||
+    attachments === null || options === null || reactions === null) return null;
+  // A message asks a decision exactly when it has a decision's state.
+  if (item.needsDecision !== (decisionState !== null)) return null;
+  return {
+    id: item.id, threadId: item.threadId, authorKind: item.authorKind, authorName: item.authorDisplayName, body: item.body, createdAtMs: item.createdAtMs,
+    parentMessageId, attachments, needsDecision: item.needsDecision, decisionState, options, chosenOption, resolvedByMessageId, reactions,
+  };
 }
 
 export interface StreamItem {

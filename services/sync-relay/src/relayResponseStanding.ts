@@ -1,3 +1,4 @@
+import { carryRequestMark } from "@dohc/service-http";
 import type { SyncRelayStorage } from "./storage";
 
 /** No result or later chunk may outlive its owner. Callers must consume or cancel the returned body. */
@@ -22,7 +23,9 @@ export function guardRelayResponses(
       unavailable.addEventListener("abort", storageUnavailable, { once: true });
       if (request.signal.aborted) requestAborted();
       if (unavailable.aborted) storageUnavailable();
-      response = await handler(new Request(request, { signal }));
+      const inner = new Request(request, { signal });
+      try { response = await handler(inner); }
+      finally { carryRequestMark(inner, request); }
       check();
       if (!response.body) { releaseSignals(); return response; }
       const reader = response.body.getReader();

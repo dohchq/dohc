@@ -18,7 +18,7 @@ import type { LiveDocumentKey, LiveUpdateStructRange, ServerDerivedLiveUpdateAut
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import type { RedeemedLiveTicket } from "@dohc/live-session-contract/live-ticket";
 import type { DeviceHostCredential } from "../deviceHostCredential";
-import type { LiveBrowserContext } from "../liveBrowserContext";
+import type { LiveTicketScope } from "../liveBrowserContext";
 
 export type LiveHostControlRefusalReason =
   | "not-provisioned"
@@ -58,7 +58,10 @@ export interface CurrentLiveBindingRequest {
         readonly profileTokenHash: string; readonly grantId: string; readonly workspaceId: string }
     // An agent connected through its link edits as the link principal its connection holds.
     | { readonly kind: "link"; readonly agentConnectionId: string; readonly accessTokenHash: string;
-        readonly resourceHash: string; readonly grantId: string; readonly workspaceId: string };
+        readonly resourceHash: string; readonly grantId: string; readonly workspaceId: string }
+    // A personal agent edits in its owner's workspace, at the fence its last fresh read returned.
+    | { readonly kind: "personal"; readonly workspaceId: string; readonly agentId: string; readonly connectionId: string;
+        readonly accessTokenHash: string; readonly resourceHash: string; readonly fenceEpoch: number };
 }
 
 export interface LiveDocumentBaselineRegistrationInput {
@@ -639,6 +642,8 @@ export interface SyncRelayStorage {
   ensureOwnedLiveDocuments(inputs: readonly import("./serviceHostEnrollment").EnsureOwnedLiveDocumentInput[]): readonly import("./serviceHostEnrollment").ServiceHostEnrollment[];
   ensureOwnedLiveDocument(input: import("./serviceHostEnrollment").EnsureOwnedLiveDocumentInput): import("./serviceHostEnrollment").ServiceHostEnrollment;
   renewPersonalSessionDemand(input: {workspaceId: string; objectId: string; nowMs: number}): boolean;
+  /** Reclaims the documents only recorded demand keeps that went unused for the retention period. Returns those it reclaimed. */
+  reclaimIdleLiveDocuments(nowMs: number): readonly import("./serviceHostEnrollment").ServiceHostEnrollment[];
   listServiceHostEnrollments(workspaceId?: string): readonly import("./serviceHostEnrollment").ServiceHostEnrollment[];
   listUndrainedServiceHostEnrollments(after?: import("./serviceHostEnrollment").ServiceHostEnrollmentCursor): {
     documents: readonly import("./serviceHostEnrollment").ServiceHostEnrollment[]; nextCursor: import("./serviceHostEnrollment").ServiceHostEnrollmentCursor | null;
@@ -751,6 +756,8 @@ export interface SyncRelayStorage {
   advanceAccountOperation(input: import("./operationRecords").AdvanceOperationInput): { moved: boolean; record: import("./operationRecords").OperationRecord } | null;
   listUnfinishedAccountOperations(input: { workspaceId: string; incarnation?: number }): import("./operationRecords").OperationRecord[];
   listUnfinishedOperationCopies(): Array<{ workspaceId: string; incarnation: number }>;
+  /** Each workspace with phone writes still to finish, with the earliest end of their active time. */
+  unfinishedOperationActiveEnds(): Array<{ workspaceId: string; activeUntilMs: number }>;
   /** The relay's row at a phone write's coordinate, only within the log rows the write's own epoch and stream could make. */
   fetchAccountOperationLogRow(input: Parameters<typeof import("./operationRecords").operationLogRow>[1]): SyncRelayLogRow | null;
   /** The copies whose phone writes may still publish, those with a write not yet stalled first, then oldest write first. */
@@ -837,7 +844,7 @@ export interface SyncRelayStorage {
   automationRecordJournalCursor(binding: LiveObjectBinding): number;
   /** Groups synchronous authority checks in one current read snapshot. */
   readLiveAuthority<T>(run: () => T): T;
-  resolveLiveObjectHostBinding(scope: LiveBrowserContext, objectId: string): import("./liveDocumentAuthority").LiveObjectHostBindingResult;
+  resolveLiveObjectHostBinding(scope: LiveTicketScope, objectId: string): import("./liveDocumentAuthority").LiveObjectHostBindingResult;
   registerLiveDocumentBaseline(input: LiveDocumentBaselineRegistrationInput): RelayBaselineRegistrationResult;
   mintLiveTicket(input: LiveTicketMint): { expiresAtMs: number; publicPrincipalId?: string } | null;
   readLiveTicketTarget(input: LiveTicketLookup): { workspaceId: string; objectId: string } | null;
@@ -1447,7 +1454,7 @@ export interface TicketHostReport {
 
 export interface LiveTicketLookup {
   readonly tokenHash: string;
-  readonly scope: LiveBrowserContext;
+  readonly scope: LiveTicketScope;
   readonly audience: string;
 }
 

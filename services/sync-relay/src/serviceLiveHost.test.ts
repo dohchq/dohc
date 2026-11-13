@@ -401,7 +401,7 @@ async function configureActivation(f: Awaited<ReturnType<typeof fixture>>,limits
     identity:{replicationEpoch:"epoch",streamIdentity:"stream"},maxPagesPerPull:1}});
   Object.assign(f.config,{adoption:{maxBytes:1_000_000,maxEvents:10,ownerOutbox:{maxPendingBytes:1_000_000,maxPendingAgeMs:60_000}},
     settlement:{maxApplicationsPerSettlement:8},sync:{policy:{maxReadBytes:1_000_000,maxOutputBytes:1_000_000,maxClientVectorBytes:1000,maxHostVectorBytes:1000},workingReserveBytes:1_000_000},
-    activation:{targets:[{workspaceId:"workspace",path:"file.md"}],maxCaptureBytes:1_000_000,
+    activation:{targets:[{workspaceId:"workspace",path:"file.md"}],maxCaptureBytes:1_000_000,maxActivationHistoryEntries:10,
       maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000,maxDocumentsPerPass:1,pollIntervalMs:60_000,passDeadlineMs:1000,
       idleUnloadMs:600_000,idleRetryMs:30_000,
       validation:{maxStructVisits:1000,maxValueNodeVisits:1000,maxDecodedPayloadByteVisits:1000,maxStructClientGroupVisits:1000,
@@ -589,7 +589,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   const earlier = {mode: "service" as const, hostId: f.config.hostId, hostEpoch: f.storage.getLiveHostControl()!.hostEpoch, instanceId: "instance", connectionId: "earlier"};
   const actor = {kind: "owner" as const, userId: "owner"}, store = f.storage.createServiceActivationStore(f.history);
   await store.prepare({capture, host: earlier, registeredAtMs: 3, guard() {}, validate: async work => validateOrdinaryActivation(work, policy),
-    bounds: {maxCaptureBytes: 1_000_000, maxEntriesPerDrain: 10, maxBytesPerDrain: 1_000_000}});
+    bounds: {maxCaptureBytes: 1_000_000, maxHistoryEntries: 10, maxBytesPerDrain: 1_000_000}});
   const access = store.pending(document, earlier), delivery = f.storage.createLiveCommittedDeliveryStore(f.history, access);
   if (adopted) {
     const adoption = delivery.captureOwnerCut({host: earlier, document, actor, adoptionId: capture.activationId,
@@ -3948,7 +3948,7 @@ const replacementActivation = async (o: Enrolled, {name = "replacement", path = 
   const host = o.host.coordinate, actor = {kind: "owner" as const, userId: "owner"};
   const store = o.f.storage.createServiceActivationStore(o.f.history);
   await store.prepare({capture, host, registeredAtMs: 33, guard() {}, validate: async work => validateOrdinaryActivation(work, policy),
-    bounds: {maxCaptureBytes: 1_000_000, maxEntriesPerDrain: 10, maxBytesPerDrain: 1_000_000}});
+    bounds: {maxCaptureBytes: 1_000_000, maxHistoryEntries: 10, maxBytesPerDrain: 1_000_000}});
   const access = store.pending(document, host), delivery = o.f.storage.createLiveCommittedDeliveryStore(o.f.history, access);
   const adoption = delivery.captureOwnerCut({host, document, actor, adoptionId: activationId,
     expectedLocalSequence: 2, maxBytes: 1_000_000, maxEvents: 100, throughCursor: 0});
@@ -4305,7 +4305,7 @@ for (const c of [
     .get("workspace")!.cursor)};
   const read = () => readOrdinaryActivationHistory(o.f.storage as StorageContext, {source, document: o.document,
     baselineBytes: capture.baselineBytes, fullState: capture.fullState,
-    bounds: {maxCaptureBytes: 1_000_000, maxEntriesPerDrain: 100, maxBytesPerDrain: 1_000_000}});
+    bounds: {maxCaptureBytes: 1_000_000, maxHistoryEntries: 100, maxBytesPerDrain: 1_000_000}});
   if (c.changedText) {
     expect(read, "The returned document must refuse a move that changed its text.")
       .toThrow("Ordinary activation history replaced the live document.");
@@ -4487,7 +4487,7 @@ for (const c of [
   o.engine.adoption = {activationId: SUCCESSOR, throughCursor: null};
   const source = {...o.engine.capture.source, committedCursor: Number(o.raw.prepare("SELECT MAX(relay_seq) AS cursor FROM sync_relay_log WHERE workspace_id=?")
     .get("workspace")!.cursor)};
-  const bounds = {maxCaptureBytes: 1_000_000, maxEntriesPerDrain: 100, maxBytesPerDrain: 1_000_000};
+  const bounds = {maxCaptureBytes: 1_000_000, maxHistoryEntries: 100, maxBytesPerDrain: 1_000_000};
   const check = () => {
     const input = {source, document: o.document, baselineBytes: capture.baselineBytes, fullState: capture.fullState, bounds};
     const history = readOrdinaryActivationHistory(o.f.storage as StorageContext, input);
@@ -5782,14 +5782,15 @@ it.each(["sync.createHostedReplica", "sync.pullHosted", "sync.materializePending
     o.failDetach(new EngineRequestError(1, {code: "CONFLICT", message: "detach refused", retry: "no"} as never, "liveApplication.detachWorkspace"));
     await expect(update).rejects.toThrow("workspace operation failed");
   } else await update;
-  const first = `workspace operation failed (code INVALID_PARAMS, method ${method})`;
+  // Its message is a sentence, not a code word, so the line names it `unrecognized-message`, with the code and method.
+  const first = `unrecognized-message (code INVALID_PARAMS, method ${method})`;
   await vi.waitFor(() => expect(lines(first), JSON.stringify(log.mock.calls)).toBe(1), {timeout: 10_000});
   const seen = refused;
   await vi.waitFor(() => expect(refused).toBeGreaterThan(seen + 1), {timeout: 10_000});
   // A refused capture waits before it tries again, and a pass in between ends clean, so each try logs once.
   if (method !== "liveApplication.captureOwnerActivation") expect(lines(first)).toBe(1);
   code = "WORKSPACE_UNAVAILABLE";
-  await vi.waitFor(() => expect(lines(`workspace operation failed (code WORKSPACE_UNAVAILABLE, method ${method})`)).toBe(1), {timeout: 10_000});
+  await vi.waitFor(() => expect(lines(`unrecognized-message (code WORKSPACE_UNAVAILABLE, method ${method})`)).toBe(1), {timeout: 10_000});
 });
 
 it("keeps the daemon after a refused attach and retires it when the engine expires its connection", async () => {
@@ -6275,6 +6276,106 @@ it("frees an ended hold while another document keeps its workspace from being re
   expect(pushes()).toBe(pushed);
 });
 
+// A workspace pushed only once every document it hosts had gone live, so a
+// live document's settled edits reached nobody while another document kept
+// failing to go live, until that one went live or the live one unloaded idle.
+// Proves: a live document's edit, settled on the host, is pushed on the next
+// pass while another document in its workspace waits out a backoff after
+// failed activations. That document has not gone live or left, and the live
+// one has not unloaded.
+it("pushes a live document's settled edit on the next pass while another document in its workspace backs off", async () => {
+  const o = await emptyServiceHost({maxDocumentsPerPass: 2}), workspaces = [o.workspace];
+  // Both documents activate for real here, the other at a path the relay names it at.
+  vi.mocked(ServiceActivationDriver.prototype.activate).mockRestore();
+  vi.mocked(ServiceActivationDriver.prototype.loaded).mockRestore();
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await o.pushed.promise;
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  o.raw.prepare(`INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,
+    content_kind,byte_length,recorded_at_ms) SELECT 'workspace',?,MAX(relay_seq),'other-moment','main',?,?,'text',0,0
+    FROM sync_relay_log WHERE workspace_id='workspace'`).run(o.other.objectId, o.other.path, "e".repeat(64));
+  const captures = () => o.client().captureOwnerActivation.mock.calls.filter(call => call[1] === o.other.path).length;
+  const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+  o.refuseCaptureAt(o.other.path, new Error("Capture failed."));
+  await o.host.update({workspaces, documents: [o.sibling, o.other], ...stay});
+  // The first failure retries on the next pass; the second starts a wait before the next try.
+  await vi.waitFor(() => expect(captures()).toBeGreaterThanOrEqual(2));
+  expect(errors).toHaveBeenCalledWith("Service activation pass failed.", expect.stringContaining("Capture failed."));
+  const edit = o.acceptEdit("while-another-backs-off");
+  await vi.waitFor(() => expect(o.applied.has(edit.deliveryId)).toBe(true));
+  await o.host.settle(o.document);
+  const requests = () => o.client().sendRequest.mock.calls.map(call => (call as unknown[])[0] as
+    {method: string; params: {terminalReceipt?: {deliveryId?: string} | null}});
+  const settledAt = requests().findIndex(request => request.method === "liveApplication.settle" && request.params.terminalReceipt?.deliveryId === edit.deliveryId);
+  expect(settledAt).toBeGreaterThan(-1);
+  await o.nextPass();
+  const after = requests().slice(settledAt + 1).map(request => request.method);
+  expect(after, "The settled edit must be pushed on the next pass.").toContain("sync.push");
+  expect(after).not.toContain("liveApplication.unloadDocument");
+  expect(o.host.retains(o.other)).toBe(true);
+  expect(o.host.settled(o.other)).toBe(false);
+  // The other document still holds readiness, so the workspace keeps its pull every pass. A pass that tries
+  // the other document again catches up instead, at most once across these three passes since each wait is longer.
+  const unreadyPulls = () => o.host.hostedPulls(o.workspace.workspaceId).reasons.unready ?? 0, pulled = unreadyPulls();
+  await o.nextPass(); await o.nextPass(); await o.nextPass();
+  expect(unreadyPulls(), "The workspace must keep pulling every pass while the other document backs off.").toBeGreaterThanOrEqual(pulled + 2);
+});
+
+// Proves: while another document backs off, a push refused for pending owner
+// admission does not cost the workspace its pull, so held lists still page.
+it("keeps pulling a workspace whose push waits for owner admission while another document backs off", async () => {
+  const o = await emptyServiceHost({maxDocumentsPerPass: 2}), workspaces = [o.workspace];
+  vi.mocked(ServiceActivationDriver.prototype.activate).mockRestore();
+  vi.mocked(ServiceActivationDriver.prototype.loaded).mockRestore();
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await o.pushed.promise;
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  o.raw.prepare(`INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,
+    content_kind,byte_length,recorded_at_ms) SELECT 'workspace',?,MAX(relay_seq),'other-moment','main',?,?,'text',0,0
+    FROM sync_relay_log WHERE workspace_id='workspace'`).run(o.other.objectId, o.other.path, "e".repeat(64));
+  const captures = () => o.client().captureOwnerActivation.mock.calls.filter(call => call[1] === o.other.path).length;
+  const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+  o.refuseCaptureAt(o.other.path, new Error("Capture failed."));
+  await o.host.update({workspaces, documents: [o.sibling, o.other], ...stay});
+  await vi.waitFor(() => expect(captures()).toBeGreaterThanOrEqual(2));
+  const edit = o.acceptEdit("waits-for-admission");
+  await vi.waitFor(() => expect(o.applied.has(edit.deliveryId)).toBe(true));
+  await o.host.settle(o.document);
+  o.replies.push = {ownerAdmissionPending: [{workspaceId: "workspace", originId: "origin", originSeq: 3, versionId: "main", objectId: o.sibling.objectId, path: o.sibling.path}]};
+  await vi.waitFor(() => expect(errors).toHaveBeenCalledWith("Service activation pass failed.", expect.stringContaining("Hosted publication is waiting for owner admission.")));
+  const unreadyPulls = () => o.host.hostedPulls(o.workspace.workspaceId).reasons.unready ?? 0, pulled = unreadyPulls();
+  await o.nextPass(); await o.nextPass(); await o.nextPass();
+  expect(unreadyPulls(), "A refused push must not cost the workspace its pull.").toBeGreaterThanOrEqual(pulled + 2);
+  expect(o.host.retains(o.other)).toBe(true);
+});
+
+// A review of the fix above: one check served both "may this target capture
+// now" and "does it hold its workspace back", and its second half would let a
+// target that still holds an owner for another document capture on every pass.
+// No known path leaves such an owner; the test builds that state directly to
+// pin the rule that a capture's backoff depends on time alone.
+it("waits out its backoff before capturing again while it still holds an owner for another document", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace];
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  // Its stored activation no longer names the document its owner holds.
+  const read = ServiceActivationStore.prototype.read;
+  vi.spyOn(ServiceActivationStore.prototype, "read").mockImplementation(function (this: ServiceActivationStore, ...args) {
+    return args[1] === o.sibling.path ? null : read.apply(this, args);
+  });
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  // A frozen clock keeps the wait from lapsing during the check; passes still run on real timers.
+  const now = Date.now();
+  vi.spyOn(Date, "now").mockReturnValue(now);
+  o.refuseCapture(new Error("Capture failed."));
+  const captures = () => o.client().captureOwnerActivation.mock.calls.length, before = captures();
+  // The first failure retries on the next pass; the second waits a second before the next try.
+  await vi.waitFor(() => expect(captures()).toBeGreaterThanOrEqual(before + 2));
+  const waiting = captures();
+  await o.nextPass(); await o.nextPass();
+  expect(captures(), "A target waiting out its backoff must not capture again.").toBe(waiting);
+});
+
 // Sol's review: departed documents the engine cannot park, more than an
 // answer fits, filled every departed list from the first, so a document
 // after them was never named once the engine parked it, and the host kept
@@ -6525,6 +6626,15 @@ it("records an idle unload whose reply arrives after the sweep deadline and relo
   await expect(o.host.drain(o.document)).resolves.toMatchObject({kind: "done"});
 });
 
+it("logs only an engine refusal's code word when an idle unload waits on it", async () => {
+  const o = await idleHost(), log = vi.spyOn(console, "error").mockImplementation(() => {});
+  const refusal = () => new EngineRequestError(1, {code: "INTERNAL", message: "hosted-file-unexpected: notes/secret plan.md holds bytes other than its document's head", retry: "no"} as never, "live.unload");
+  o.unloads.push(refusal(), refusal());
+  o.advance(600_000);
+  await vi.waitFor(() => expect(log).toHaveBeenCalledWith("Idle live document unload is waiting.", "hosted-file-unexpected (code INTERNAL, method live.unload)"));
+  expect(JSON.stringify(log.mock.calls)).not.toContain("secret");
+});
+
 it("sends an unanswered idle unload again before settling it or reloading it on reconnect", async () => {
   const o = await idleHost(), log = vi.spyOn(console, "error").mockImplementation(() => {});
   o.unloads.push(new Error("Engine connection reset."), new Error("Engine connection reset."));
@@ -6571,7 +6681,7 @@ it("keeps an idle unload the engine stopped waiting for unanswered and sends it 
   // The engine's spawned unload runs on after its request deadline.
   o.unloads.push(new EngineRequestError(1, {code: "DEADLINE_EXCEEDED", message: "unload-deadline", retry: "afterBackoff"} as never));
   o.advance(600_000);
-  await vi.waitFor(() => expect(log).toHaveBeenCalledWith("Idle live document unload is waiting.", "unload-deadline"));
+  await vi.waitFor(() => expect(log).toHaveBeenCalledWith("Idle live document unload is waiting.", "unload-deadline (code DEADLINE_EXCEEDED)"));
   // Passes leave it alone: the engine may have ended its registration.
   const visits = o.visits(o.sibling.path);
   await o.passes();

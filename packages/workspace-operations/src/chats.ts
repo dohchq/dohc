@@ -11,6 +11,7 @@ import type {
   ChatAgentReader,
   ChatChannelSummary,
   ChatMessage,
+  ChatReaction,
   ChatStreamItem,
   ChatThread,
   LinkedChatStore,
@@ -52,6 +53,7 @@ export type ChatReadStore = Pick<
   | "listThreads"
   | "listMessages"
   | "listThreadDecisions"
+  | "listReactions"
   | "getThreadProjection"
   | "listGroupStream"
   | "listAgentUnreadThreads"
@@ -430,6 +432,7 @@ async function readGroupStream(
       threadId: threadId(item.message.threadId),
       message: item.message,
       decision: item.decision,
+      reactions: item.reactions,
       ...(item.post ? {
         post: {
           replyCount: item.post.replyCount,
@@ -578,7 +581,7 @@ export async function readChat(host: ChatsHost, args: Args<"chat">): Promise<Cli
         stream: {
           group: { id: channel.id, name: groupForCli(channel).name, kind: cliGroupKind(channel.kind) },
           ...page,
-          items: page.items.map(({ message, decision, ...item }) => ({ ...item, message: rawChatMessage(message, decision) })),
+          items: page.items.map(({ message, decision, reactions, ...item }) => ({ ...item, message: rawChatMessage(message, decision, reactions) })),
         },
       };
     } catch (error) {
@@ -616,11 +619,19 @@ export async function readChat(host: ChatsHost, args: Args<"chat">): Promise<Cli
     });
     const decisions = await host.store.listThreadDecisions(host.workspaceId, thread.id);
     const decisionByMessage = new Map(decisions.map((decision) => [decision.messageId, decision]));
+    // One read for the whole thread, never one per message.
+    const reactionsByMessage = new Map<string, ChatReaction[]>();
+    for (const reaction of await host.store.listReactions({ workspaceId: host.workspaceId, threadId: thread.id })) {
+      const cells = reactionsByMessage.get(reaction.messageId);
+      if (cells) cells.push(reaction);
+      else reactionsByMessage.set(reaction.messageId, [reaction]);
+    }
     return {
       ok: true as const,
       thread: rawChatThread(thread),
       dispatch: await host.dispatch(thread.id),
-      messages: messages.map((message) => rawChatMessage(message, decisionByMessage.get(message.id))),
+      messages: messages.map((message) =>
+        rawChatMessage(message, decisionByMessage.get(message.id), reactionsByMessage.get(message.id) ?? [])),
       projection: {
         path: projection.path,
         readOnly: projection.readOnly,
@@ -643,7 +654,8 @@ export async function showChat(host: ChatsHost, args: Args<"show">): Promise<Sho
       stream: {
         group: group.cli,
         ...page,
-        items: page.items.map(({ message, decision, ...item }) => ({
+        // `show` has no reactions in its output.
+        items: page.items.map(({ message, decision, reactions: _reactions, ...item }) => ({
           ...item,
           message: cliShowMessage(message, decision),
         })),

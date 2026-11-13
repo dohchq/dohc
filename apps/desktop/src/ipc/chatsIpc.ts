@@ -44,6 +44,14 @@ import {
 } from "../workspaces/chatRelayIdentity";
 import type { ChatWrites, PersonWriter } from "../workspaces/chatWrites";
 import {
+  answerDecision,
+  answerWithReply,
+  postToGroup,
+  reactToMessage,
+  replyInThread,
+  sendToStream,
+} from "@dohc/workspace-operations/chat-writes";
+import {
   chatViewerAuthorId,
   reactionsForViewer,
 } from "../mainChatIpcHandlers";
@@ -455,13 +463,8 @@ export function registerChatsIpcHandlers<
     // A share view resolves a scope instead of a capture so reads still work.
     // chatWrites refuses every received share before persistence.
     const scope = await requireChatScope(input.workspaceId);
-    const reply = {
+    const host = chatWrites.host(chatWritePlace(scope), {
       writer: RENDERER,
-      threadId: input.threadId,
-      ...(input.parentMessageId ? { parentMessageId: input.parentMessageId } : {}),
-      body: input.body,
-      ...(input.needsDecision !== undefined ? { needsDecision: input.needsDecision } : {}),
-      ...(input.options !== undefined ? { options: input.options } : {}),
       resolveAttachments: () =>
         resolveChatFileReferences(
           scope.workspace,
@@ -469,15 +472,23 @@ export function registerChatsIpcHandlers<
           input.fileReferences,
         ),
       onSaved,
+    });
+    const reply = {
+      threadId: input.threadId,
+      ...(input.parentMessageId ? { parentMessageId: input.parentMessageId } : {}),
+      body: input.body,
+      ...(input.needsDecision !== undefined ? { needsDecision: input.needsDecision } : {}),
+      ...(input.options !== undefined ? { options: input.options } : {}),
     };
     const sent = input.resolves
-      ? await chatWrites.answer(chatWritePlace(scope), { ...reply, resolves: input.resolves })
-      : { message: await chatWrites.sendMessage(chatWritePlace(scope), reply) };
+      ? await answerDecision(host, { ...reply, resolves: input.resolves })
+      : { message: await replyInThread(host, reply) };
     const { message } = sent;
     const presentation = await presentationRequest(scope.workspace, scope.store, operation.assertCurrent);
     return SendChatMessageResult.parse({
       message: chatMessageForIpc(message, automationCollectionOf(scope.workspace.workspaceId), await presentation(message, message.threadId)),
       ...await askedDecision(scope.store, scope.workspace.workspaceId, input, message),
+      // A question another reply answered first comes back as it left it.
       ...("decision" in sent ? { resolved: chatDecisionForIpc(sent.decision) } : {}),
       ...("failure" in sent ? { resolveFailure: String(ipcWireError(sent.failure)) } : {}),
       ...await waitsForTrust(scope.workspace.workspaceId, message.id),
@@ -488,14 +499,15 @@ export function registerChatsIpcHandlers<
   const resolveChatDecision: ChatHandler<"resolveChatDecision"> = (input, { event }) =>
     withRendererWorkspaceOperation(event.sender, input.workspaceId, CHATS_STOPPED, async () => {
       const scope = await requireChatScope(input.workspaceId);
-      const resolved = await chatWrites.answerWith(chatWritePlace(scope), {
-        writer: RENDERER,
+      const answered = await answerWithReply(chatWrites.host(chatWritePlace(scope), { writer: RENDERER }), {
         threadId: input.threadId,
         messageId: input.messageId,
-        resolvedByMessageId: input.resolvedByMessageId,
+        replyId: input.resolvedByMessageId,
         ...(input.chosenOption !== undefined ? { chosenOption: input.chosenOption } : {}),
       });
-      return ResolveChatDecisionResult.parse({ resolved: chatDecisionForIpc(resolved) });
+      // The question stays as the reply that answered it first left it.
+      if (answered.state === "lost") throw new Error("Another reply already answered this question.");
+      return ResolveChatDecisionResult.parse({ resolved: chatDecisionForIpc(answered.decision) });
     });
   const listChatThreadDecisions: ChatHandler<"listChatThreadDecisions"> = async (input) => {
     const { workspace } = await requireEngineCapture(
@@ -939,22 +951,21 @@ export function registerChatsIpcHandlers<
       input.workspaceId,
       "Chats",
     );
-    // No title, ever, on this path: the thread displays its first-message
-    // snippet.
-    const started = await chatWrites.startThread({
-      workspaceId: workspace.workspaceId,
-      store: linkedChatStoreFor(workspace),
-    }, {
+    const host = chatWrites.host({ workspaceId: workspace.workspaceId, store: linkedChatStoreFor(workspace) }, {
       writer: RENDERER,
-      channelId: input.channelId,
-      ...(input.lane ? { lane: input.lane } : {}),
-      body: input.body,
-      ...(input.needsDecision !== undefined ? { needsDecision: input.needsDecision } : {}),
-      ...(input.options !== undefined ? { options: input.options } : {}),
       resolveAttachments: () =>
         resolveChatFileReferences(workspace, capture.fileObjectIdForPath, input.fileReferences),
       onSaved,
     });
+    // No title, ever, on this path: the thread displays its first-message
+    // snippet.
+    const message = {
+      channelId: input.channelId,
+      body: input.body,
+      ...(input.needsDecision !== undefined ? { needsDecision: input.needsDecision } : {}),
+      ...(input.options !== undefined ? { options: input.options } : {}),
+    };
+    const started = input.lane === "chat" ? await sendToStream(host, message) : await postToGroup(host, message);
     const presentation = await presentationRequest(workspace, linkedChatStoreFor(workspace), operation.assertCurrent);
     return StartChannelThreadResult.parse({
       thread: channelThreadForIpc({
@@ -1031,8 +1042,7 @@ export function registerChatsIpcHandlers<
   const setChatReaction: ChatHandler<"setChatReaction"> = async (input) => {
     // Reads are reachable from a share view; this mutation is not.
     const scope = await requireChatScope(input.workspaceId);
-    const reaction = await chatWrites.setReaction(chatWritePlace(scope), {
-      writer: RENDERER,
+    const reaction = await reactToMessage(chatWrites.host(chatWritePlace(scope), { writer: RENDERER }), {
       threadId: input.threadId,
       messageId: input.messageId,
       emoji: input.emoji,

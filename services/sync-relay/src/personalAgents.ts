@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { jsonResponse, readBoundedJson } from "@dohc/service-http";
 import { isAgentHue } from "@dohc/workspace-contracts/agent-hues";
 import {
+  CREDENTIAL_FENCE_READ_TIMEOUT_MS,
   CREDENTIAL_FENCE_RETRY_MS,
   type CredentialFence,
   type CredentialFenceChange,
@@ -69,7 +70,11 @@ export interface PersonalRunningEntry {
 }
 
 export interface PersonalAgents {
-  /** The account's fence epoch, read by primary key. 503 while Postgres can't answer. */
+  /**
+   * The account's fence epoch, from a read by primary key that began after
+   * this call. Reads for one account are single-flight. 503 while Postgres
+   * can't answer.
+   */
   readFence(userId: string): Promise<number>;
   /** Present only when this relay can read fences and sessions, so personal sign-in can start. */
   readonly fence: CredentialFence | undefined;
@@ -134,6 +139,35 @@ export async function respondToWorkspaceName(
   }
   if (!storage.setWorkspaceDisplayName({ workspaceId, ownerUserId, name })) throw notFound();
   return jsonResponse({ ok: true });
+}
+
+/**
+ * Reads one account's fence one at a time. A read answers only callers that
+ * asked before it began, so every answer was read after its call: a caller
+ * that asks while a read runs waits for the next, which begins once that one
+ * settles and answers everyone who asked meanwhile. A read still running
+ * after `CREDENTIAL_FENCE_READ_TIMEOUT_MS`, waiting for a connection included,
+ * fails with `timedOut()`.
+ */
+export function singleFlightFenceReads(read: (userId: string) => Promise<number>, timedOut: () => Error): (userId: string) => Promise<number> {
+  const running = new Map<string, { settled: Promise<void>; next?: Promise<number> }>();
+  const begin = (userId: string): Promise<number> => {
+    // A read Postgres doesn't answer in time fails, so callers waiting for the next read aren't held behind it.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const epoch = Promise.race([read(userId), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(timedOut()), CREDENTIAL_FENCE_READ_TIMEOUT_MS); })])
+      .finally(() => clearTimeout(timer));
+    const flight: { settled: Promise<void>; next?: Promise<number> } = { settled: epoch.then(() => undefined, () => undefined) };
+    running.set(userId, flight);
+    void flight.settled.then(() => {
+      if (running.get(userId) === flight && flight.next === undefined) running.delete(userId);
+    });
+    return epoch;
+  };
+  return userId => {
+    const flight = running.get(userId);
+    if (!flight) return begin(userId);
+    return flight.next ??= flight.settled.then(() => begin(userId));
+  };
 }
 
 function toAgent(agent: PersonalAgentRow) {
@@ -226,6 +260,14 @@ export function createPersonalAgents(input: {
   });
 
   const unavailable = () => relayError("personal_agent_unavailable");
+  const readFence = singleFlightFenceReads(async userId => {
+    if (!fence) throw unavailable();
+    try {
+      return await fence.readEpoch(userId);
+    } catch {
+      throw unavailable();
+    }
+  }, unavailable);
 
   async function changeFor(request: Request, action: PersonalAgentAction): Promise<PersonalAgentChange> {
     if (action === "sign-out" || action === "remove" || action === "restore") {
@@ -247,14 +289,7 @@ export function createPersonalAgents(input: {
   return {
     fence,
 
-    async readFence(userId) {
-      if (!fence) throw unavailable();
-      try {
-        return await fence.readEpoch(userId);
-      } catch {
-        throw unavailable();
-      }
-    },
+    readFence,
 
     register(entry) {
       if (!ready) throw unavailable();

@@ -656,7 +656,17 @@ jobs:
           tool: cargo-nextest@0.9.143
       - name: Wait for the shared Rust archive
         run: node scripts/verification/wait-preparation.mjs rust
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      - id: rust-archive-download
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        timeout-minutes: 2
+        continue-on-error: true
+        with:
+          name: rust-tests-${{ github.run_attempt }}
+          path: .agent-artifacts/verification
+      - name: Download the shared Rust archive again after a stalled transfer
+        if: steps.rust-archive-download.outcome == 'failure'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        timeout-minutes: 3
         with:
           name: rust-tests-${{ github.run_attempt }}
           path: .agent-artifacts/verification
@@ -751,7 +761,17 @@ jobs:
           tool: cargo-nextest@0.9.143
       - name: Wait for the shared Rust archive
         run: node scripts/verification/wait-preparation.mjs rust
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      - id: rust-archive-download
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        timeout-minutes: 2
+        continue-on-error: true
+        with:
+          name: rust-tests-${{ github.run_attempt }}
+          path: .agent-artifacts/verification
+      - name: Download the shared Rust archive again after a stalled transfer
+        if: steps.rust-archive-download.outcome == 'failure'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        timeout-minutes: 3
         with:
           name: rust-tests-${{ github.run_attempt }}
           path: .agent-artifacts/verification

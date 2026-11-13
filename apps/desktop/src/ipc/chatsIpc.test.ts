@@ -79,7 +79,10 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
     resolveChatDecision: vi.fn<DesktopLinkedChatStore["resolveChatDecision"]>(async input => ({ ...input, state: "resolved", atMs: 4 })),
     setReaction: vi.fn<DesktopLinkedChatStore["setReaction"]>(async input => ({ ...input, reactionId: "reaction", atMs: 4 })),
     listReactions: vi.fn<DesktopLinkedChatStore["listReactions"]>(async () => []),
-    listThreadDecisions: vi.fn<DesktopLinkedChatStore["listThreadDecisions"]>(async () => []),
+    // The poll an answer resolves.
+    listThreadDecisions: vi.fn<DesktopLinkedChatStore["listThreadDecisions"]>(async () => [{
+      workspaceId: workspace.workspaceId, threadId: thread.id, messageId: "question", state: "open", atMs: 1, options: ["Monday", "Tuesday"],
+    }]),
     listThreadAttachments: vi.fn<DesktopLinkedChatStore["listThreadAttachments"]>(async () => []),
     listFollows: vi.fn<DesktopLinkedChatStore["listFollows"]>(async () => []),
     listChannelThreads: vi.fn<DesktopLinkedChatStore["listChannelThreads"]>(async () => []),
@@ -255,7 +258,7 @@ it("received file chats use tokens after a rename, so clicking the listed path f
 const mutations = [
   { name: "create", channel: chatOperations.createFileChat.channel, payload: { workspaceId: "workspace", path: "notes/a.md", title: "Notes" }, method: "createThread" },
   { name: "send", channel: chatOperations.sendChatMessage.channel, payload: { workspaceId: "workspace", threadId: "thread", body: "Hello" }, method: "sendMessage" },
-  { name: "answer", channel: chatOperations.sendChatMessage.channel, payload: { workspaceId: "workspace", threadId: "thread", body: "Monday", resolves: { messageId: "message", chosenOption: "Monday" } }, method: "resolveChatDecision" },
+  { name: "answer", channel: chatOperations.sendChatMessage.channel, payload: { workspaceId: "workspace", threadId: "thread", body: "Monday", resolves: { messageId: "question", chosenOption: "Monday" } }, method: "resolveChatDecision" },
   { name: "reaction", channel: chatOperations.setChatReaction.channel, payload: { workspaceId: "workspace", threadId: "thread", messageId: "message", emoji: "👍", state: "added" }, method: "setReaction" },
 ] as const;
 
@@ -615,7 +618,7 @@ describe("registered channels and personal chat projections", () => {
     expect(test.ensureGroupFolder.mock.invocationCallOrder[0]).toBeLessThan(test.storeMethods.createChannel.mock.invocationCallOrder[0]!);
     await test.invoke(chatOperations.startChannelThread.channel, { workspaceId: "workspace", channelId: "channel", body: "First message" });
     expect(test.storeMethods.startChannelThread).toHaveBeenCalledWith({
-      workspaceId: "workspace", channelId: "channel", body: "First message",
+      workspaceId: "workspace", channelId: "channel", lane: "posts", body: "First message",
       author: { kind: "human", displayName: "Sam" }, authorUserId: "verified-owner",
       authorActorKey: '{"kind":"account","issuer":"https://cloud.test","userId":"verified-owner"}',
     });
@@ -863,6 +866,13 @@ describe("poll IPC writes", () => {
     expect(result.resolved).toMatchObject({ messageId: "question", state: "resolved", chosenOption: "Monday" });
     expect(result).not.toHaveProperty("resolveFailure");
   });
+  it("refuses a choice the poll lacks before the reply", async () => {
+    const test = fixture();
+    await expect(test.invoke(chatOperations.sendChatMessage.channel, { ...answer, resolves: { messageId: "question", chosenOption: "Friday" } }))
+      .rejects.toThrow("Pick one of the poll's choices.");
+    expect(test.storeMethods.sendMessage).not.toHaveBeenCalled();
+    expect(test.storeMethods.resolveChatDecision).not.toHaveBeenCalled();
+  });
   it("returns the landed reply and why its answer failed", async () => {
     const test = fixture();
     test.storeMethods.resolveChatDecision.mockRejectedValueOnce(new Error("Pick one of the poll's choices."));
@@ -873,6 +883,42 @@ describe("poll IPC writes", () => {
   });
 });
 
+
+// A send joins the stream's running conversation, so its thread is the one
+// the engine names, in a Group's chat lane as in a DM.
+it("sends into a Group's chat lane and a DM through the shared send, each in its running conversation", async () => {
+  const workspace = { workspaceId: "workspace", rootPath: await createTestScratch("dohc-ipc-send-") };
+  const engine = new ChatsLoopbackEngine();
+  const client = { close() {}, async sendRequest(request: import("@dohc/workspace-engine-client").Request): Promise<import("@dohc/workspace-engine-client").Response> {
+    if (request.method === "workspace.open") return { id: request.id, result: { workspace: workspace.workspaceId } };
+    if (request.method === "workspace.close") return { id: request.id, result: { closed: true } };
+    return engine.sendRequest(request);
+  } };
+  const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
+  const store = createDesktopLinkedChatStore(workspace, { sessions });
+  try {
+    const group = await store.createChannel({ workspaceId: workspace.workspaceId, name: "Trip", kind: "channel", type: "both" });
+    const dm = await store.createChannel({ workspaceId: workspace.workspaceId, name: "Ada", kind: "dm" });
+    const test = fixture("local", store);
+    for (const channel of [group, dm]) {
+      const send = async (body: string) => shown(StartChannelThreadResult.parse(await test.invoke(chatOperations.startChannelThread.channel, {
+        workspaceId: workspace.workspaceId, channelId: channel.id, lane: "chat", body,
+      })));
+      const opened = await send("Who drives?");
+      const joined = await send("I can.");
+      expect(joined.thread.id).toBe(opened.thread.id);
+      expect(joined.message.threadId).toBe(opened.thread.id);
+      expect((await store.listMessages({ workspaceId: workspace.workspaceId, threadId: opened.thread.id })).map(message => message.body))
+        .toEqual(["Who drives?", "I can."]);
+    }
+    // A post in the same Group starts its own thread.
+    const post = shown(StartChannelThreadResult.parse(await test.invoke(chatOperations.startChannelThread.channel, {
+      workspaceId: workspace.workspaceId, channelId: group.id, body: "Plan the trip",
+    })));
+    expect((await store.listChannelThreads({ workspaceId: workspace.workspaceId, channelId: group.id, lane: "posts" }))
+      .map(entry => entry.thread.id)).toEqual([post.thread.id]);
+  } finally { await sessions.closeWorkspace(workspace); }
+});
 
 it("reads both IPC polls back with their decisions from the live chat store", async () => {
   const workspace = { workspaceId: "workspace", rootPath: await createTestScratch("dohc-ipc-poll-") };
@@ -994,6 +1040,21 @@ describe("marking a question answered with a reply that saved", () => {
         .rejects.toThrow("Only your own reply in this thread can answer its question.");
       expect(await decision()).toMatchObject({ state: "open" });
       expect(await messageIds(threadId)).toEqual([questionId, replyId, theirs.id]);
+    });
+  });
+
+  // A fresh answer to a question another reply answered still sends, and
+  // comes back with the question as that reply left it.
+  it("keeps a new answer's reply when another reply answered first", async () => {
+    await withPoll(async ({ test, threadId, questionId, replyId, resolve, messageIds, decision }) => {
+      ResolveChatDecisionResult.parse(await resolve({ resolvedByMessageId: replyId }));
+      const late = shown(SendChatMessageResult.parse(await test.invoke(chatOperations.sendChatMessage.channel, {
+        workspaceId: "workspace", threadId, body: "Tuesday", resolves: { messageId: questionId, chosenOption: "Tuesday" },
+      })));
+      expect(late.resolved).toMatchObject({ state: "resolved", resolvedByMessageId: replyId, chosenOption: "Monday" });
+      expect(late).not.toHaveProperty("resolveFailure");
+      expect(await decision()).toMatchObject({ state: "resolved", resolvedByMessageId: replyId });
+      expect(await messageIds(threadId)).toEqual([questionId, replyId, late.message.id]);
     });
   });
 

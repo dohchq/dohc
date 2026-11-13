@@ -572,6 +572,7 @@ fn corrupt(error: &CollabError) -> bool {
         error,
         CollabError::Corrupt { .. }
             | CollabError::MalformedUpdate { .. }
+            | CollabError::BaselineSchemaVersionMissing
             | CollabError::ReplayParityViolation { .. }
     )
 }

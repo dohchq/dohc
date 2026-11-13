@@ -116,6 +116,10 @@ export function initializeOperationRecordSchema(db: SqliteDb): void {
 export const OPERATION_ACTIVE_MS = 24 * 60 * 60 * 1000;
 // How long a settled row keeps its command and result before it becomes a tombstone.
 export const OPERATION_KEEP_SETTLED_MS = 30 * 24 * 60 * 60 * 1000;
+// How long after its active time an unfinished row may stay unknown. Then its copy's folder settles and goes, so the
+// row ends saved or refused and its text follows the settled rows' retention. Counted from the stored active time,
+// which no later update moves.
+export const OPERATION_STALLED_KEEP_MS = 30 * 24 * 60 * 60 * 1000;
 // The most rows one call turns into tombstones; the caller repeats until fewer come back.
 export const OPERATION_TOMBSTONE_BATCH = 1_000;
 
@@ -331,6 +335,14 @@ export function listUnfinishedOperationCopies(storage: StorageContext): Array<{ 
     `SELECT DISTINCT workspace_id, incarnation FROM sync_relay_account_operations
      WHERE ${UNFINISHED} ORDER BY workspace_id, incarnation`,
   ).all().map(row => ({ workspaceId: String(row.workspace_id), incarnation: Number(row.incarnation) })));
+}
+
+/** Each workspace with writes still to finish, with the earliest end of their active time. */
+export function unfinishedOperationActiveEnds(storage: StorageContext): Array<{ workspaceId: string; activeUntilMs: number }> {
+  return storage.readTx(() => storage.db.prepare(
+    `SELECT workspace_id, MIN(active_until_ms) AS active_until_ms FROM sync_relay_account_operations
+     WHERE ${UNFINISHED} GROUP BY workspace_id ORDER BY workspace_id`,
+  ).all().map(row => ({ workspaceId: String(row.workspace_id), activeUntilMs: Number(row.active_until_ms) })));
 }
 
 /**

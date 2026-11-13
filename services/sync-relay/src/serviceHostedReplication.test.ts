@@ -144,10 +144,11 @@ it("bounds a pass by its page limit", async () => {
 });
 
 it("tells the caller of a commit that stands before the retirement after it fails, and retries it on the next pull", async () => {
-  const f = fixture(), commits = [commit({retirement: {code: "INTERNAL", message: "hosted file unexpected: docs/a.md", retry: "no"}}), commit()];
+  const f = fixture(), commits = [commit({retirement: {code: "INTERNAL", message: "hosted-file-unexpected: docs/a.md holds bytes other than its document's head", retry: "no"}}), commit()];
   f.answers["sync.commitCursor"] = () => commits.shift();
   const heard = vi.fn();
-  await expect(f.driver.pull(undefined, heard)).rejects.toThrow("Hosted retirement failed: hosted file unexpected: docs/a.md");
+  // It names the engine's code word, never the path, so the server log never shows the file.
+  await expect(f.driver.pull(undefined, heard)).rejects.toThrow(new Error("Hosted retirement failed: hosted-file-unexpected (code INTERNAL, method sync.commitCursor)"));
   expect(heard).toHaveBeenCalledWith(expect.objectContaining({committed: true}));
   expect(await f.driver.pull()).toMatchObject({hasMore: false});
 });
@@ -156,14 +157,14 @@ it("keeps each departed document the engine still holds until a reply that read 
   const f = fixture();
   expect(f.driver.departedNone).toBe(false);
   const passes = [pass({pendingCursor: null, departed: ["doc-b"]}), pass({departed: ["doc-b"]}), pass({departed: ["doc-b"]}), pass()];
-  const failed = {code: "INTERNAL", message: "hosted file unexpected: docs/b.md", retry: "no"};
+  const failed = {code: "INTERNAL", message: "hosted-file-unexpected: docs/b.md holds bytes other than its document's head", retry: "no"};
   // The rows retired but the file did not go; then the departed list went unread; then the file went.
   const commits = [commit({hasMore: true, retirement: failed, departed: ["doc-b"]}), commit({hasMore: true, departed: null}), commit()];
   f.answers["sync.pullHosted"] = () => passes.shift();
   f.answers["sync.commitCursor"] = () => commits.shift();
   const seen: Array<boolean | undefined> = [];
   const record = (page: ServiceHostedPullPage) => seen.push(says(page, "doc-b"));
-  await expect(f.driver.pull(undefined, record)).rejects.toThrow("Hosted retirement failed");
+  await expect(f.driver.pull(undefined, record)).rejects.toThrow("Hosted retirement failed: hosted-file-unexpected (code INTERNAL, method sync.commitCursor)");
   await f.driver.pull(undefined, record);
   expect(seen).toEqual([true, true, true, false]);
   expect(f.driver.departedNone).toBe(true);

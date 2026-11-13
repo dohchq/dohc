@@ -1373,6 +1373,8 @@ export interface LinkedChatStore {
     resolvedByMessageId: ChatMessageId;
     // The choice, when the poll has choices. Must be one of them.
     chosenOption?: string;
+    // A retry with the same key replays instead of writing again.
+    idempotencyKey?: string;
   }): Promise<ChatDecisionRecord>;
   listThreadDecisions(
     workspaceId: WorkspaceId,
@@ -1425,6 +1427,8 @@ export interface LinkedChatStore {
     author: ChatReactionAuthor;
     replicationAuthorId?: string;
     state: ChatReactionState;
+    // A retry with the same key replays instead of writing again.
+    idempotencyKey?: string;
   }): Promise<ChatReaction>;
   // Every active ("added") reaction in a thread, oldest-first per cell. The UI
   // groups by (messageId, emoji). Tombstones are never returned.

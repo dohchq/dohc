@@ -12,6 +12,8 @@ import * as Result from "effect/Result";
 import type {Event, JsonValue} from "@dohc/workspace-engine-client";
 import {createEngineClient, EngineRequestError, type EngineClient} from "@dohc/workspace-engine-client/daemon";
 import type {SyncRelayStorage} from "./storage";
+import {replayUnfinishedWrites} from "./accountChatWrites";
+import {OPERATION_STALLED_KEEP_MS} from "./storage/operationRecords";
 import {
   AUTOMATION_WORKSPACE_KEEP_AFTER_LEAVING_MS,
   AUTOMATION_WORKSPACE_LEAVE_AFTER_MS,
@@ -88,6 +90,9 @@ const PUBLICATION_RETRY_MAX_MS = 5 * 60_000;
 const PUBLICATION_STALLED_RETRY_MS = 30 * 60_000;
 // A copy whose receipts can't be read this many times in a row stalls its writes.
 const PUBLICATION_QUERY_FAILURES = 5;
+// A copy whose overdue phone writes couldn't settle tries again this long after, doubling up to the most.
+const SETTLEMENT_RETRY_FIRST_MS = 60_000;
+const SETTLEMENT_RETRY_MAX_MS = 60 * 60_000;
 
 /**
  * Keeps one engine replica per workspace whose automations this server runs
@@ -137,6 +142,12 @@ export async function startAutomationReplicas(options: {
   const replicas = new Map<string, AutomationReplica & {
     close(): Promise<void>; pulledHead: number; reasons: readonly CopyReason[];
     busy(): boolean;
+    /**
+     * Replays the copy's unfinished phone writes once, after any step caught it up, whoever made the step.
+     * Answers `idle` with nothing to do, `replayed`, or `owed` when a replay failed and a later pass tries
+     * again. Call it outside the sync lane.
+     */
+    caughtUp(): Promise<"idle" | "replayed" | "owed">;
   }>();
   // Replicas an engine exit is closing, until their close settles. One that
   // failed stays for close() to report.
@@ -161,6 +172,9 @@ export async function startAutomationReplicas(options: {
   // When each copy with unsent phone writes tries next, on the same clock,
   // the wait before it, and how many reads of its receipts failed in a row.
   const publicationRetries = new Map<string, { at: number; delay: number; failures: number }>();
+  // When each copy whose overdue phone writes couldn't settle tries again, on nowMs's clock, and the wait before it.
+  // Only a settlement that succeeds clears it; a sync that succeeds doesn't.
+  const settlementRetries = new Map<string, { at: number; delay: number }>();
 
   const folderOf = (workspaceId: string) => replicaFolder(options.root, options.namespace, workspaceId);
   // The workspace ids whose folders the last sweep kept.
@@ -224,6 +238,10 @@ export async function startAutomationReplicas(options: {
 
   const unfinishedIncarnations = (workspaceId: string) =>
     new Set(storage.listUnfinishedAccountOperations({workspaceId}).map((record) => record.incarnation));
+
+  // The workspaces whose oldest unfinished phone write stayed unknown for OPERATION_STALLED_KEEP_MS past its active time.
+  const overdueCopies = () => storage.unfinishedOperationActiveEnds()
+    .filter(({activeUntilMs}) => nowMs() >= activeUntilMs + OPERATION_STALLED_KEEP_MS).map(({workspaceId}) => workspaceId);
 
   /**
    * Settles the phone's unfinished writes in one incarnation's folder before
@@ -378,11 +396,41 @@ export async function startAutomationReplicas(options: {
       return run;
     };
     let closing: Promise<void> | undefined;
+    // The phone's writes whose engine stages a crash or a lost answer left unwritten replay from their stored
+    // commands once, after a step caught the copy up: a target is judged by the relay's current state, not by
+    // what the folder held when it last closed. Any step or sync can catch it up: open's, the pass's, publication's,
+    // or a request's. Open replays at once; otherwise the next pass does, outside the sync lane, which a request
+    // holding a write's lock may be waiting on, and before that pass's publication pushes.
+    let pulledCurrent = false;
+    let replayAsked = false;
+    // Every sync or step adds one as it starts, so a replay can tell one started while it ran.
+    let syncGeneration = 0;
+    let replayed = false;
+    const caughtUp = async (): Promise<"idle" | "replayed" | "owed"> => {
+      if (replayed) return "idle";
+      // A copy behind the relay, syncing now and maybe not pulled yet, or with relay rows past what it pulled, waits:
+      // the next sync that catches it up asks for the pass that replays.
+      if (!pulledCurrent || running > 0 || logHead(row.workspaceId) > replica.pulledHead) {
+        replayAsked = false;
+        return "idle";
+      }
+      // Only a replay that finished is done; one that failed stays owed for a later pass. Just before each stage, the
+      // copy must be as current as now: no sync started since, none running, and nothing new at the relay.
+      const generation = syncGeneration;
+      const stillCurrent = () => generation === syncGeneration && running === 0 && logHead(row.workspaceId) <= replica.pulledHead;
+      replayed = await replayUnfinishedWrites({storage, copy: replica, nowMs, current: stillCurrent,
+        records: storage.listUnfinishedAccountOperations({workspaceId: row.workspaceId, incarnation: row.incarnation}),
+        onError: (error) => observe(() => options.onError?.(error, row.workspaceId))});
+      return replayed ? "replayed" : "owed";
+    };
     // Pushes, then pulls, each for at most `rounds`, so a copy that always
     // has more to push still pulls. Answers whether it caught up.
     let running = 0;
     const syncRounds = (rounds: number, callerSignal?: AbortSignal): Promise<boolean> => {
       running += 1;
+      syncGeneration += 1;
+      // Until this sync finishes caught up, the copy may be behind what the relay holds now.
+      pulledCurrent = false;
       const run = syncChain.then(async () => {
         replicaSignal.throwIfAborted(); callerSignal?.throwIfAborted(); current();
         // Live record refresh has its own retry lane; failure never skips sync.
@@ -399,8 +447,19 @@ export async function startAutomationReplicas(options: {
         syncRetries.delete(row.workspaceId);
         failedSyncs.delete(row.workspaceId);
         busyRefusals.delete(row.workspaceId);
-        if (pushMore || pullMore) return false;
+        // A copy left with more to pull is behind the relay, so it replays nothing until a sync catches it up.
+        if (pushMore || pullMore) {
+          replayAsked = false;
+          return false;
+        }
         replica.pulledHead = Math.max(replica.pulledHead, head);
+        // The first sync that catches a registered copy up since it fell behind, such as a request's, asks for the pass
+        // that replays its writes. A replay that fails after that waits for the pass's own retry.
+        if (!replayed && !replayAsked && replicas.get(row.workspaceId) === replica) {
+          replayAsked = true;
+          schedule();
+        }
+        pulledCurrent = true;
         return true;
       });
       // Writes that landed while it ran, and that a pass skipped for it, get
@@ -410,6 +469,8 @@ export async function startAutomationReplicas(options: {
         if (running === 0 && !closed.signal.aborted && logHead(row.workspaceId) > replica.pulledHead) schedule();
       }, () => { running -= 1; });
       syncChain = run.catch((error: unknown) => {
+        // So is one whose sync failed or was given up partway.
+        replayAsked = false;
         // A caller that gave up, as at a request's deadline, leaves the copy's sync as it was.
         if (!replicaSignal.aborted && !callerSignal?.aborted) {
           failedSyncs.set(row.workspaceId, error);
@@ -436,6 +497,7 @@ export async function startAutomationReplicas(options: {
       busy(): boolean {
         return running > 0;
       },
+      caughtUp,
       /** Every caller waits for the same close, which waits for the sync running in it. */
       close(): Promise<void> {
         return closing ??= (async () => {
@@ -454,8 +516,10 @@ export async function startAutomationReplicas(options: {
     try {
       // A pulled moment lands in the main version, as on a computer that joins.
       await request(engineClient, "versions.ensureMain", {workspaceId: row.workspaceId}, handle);
-      // A copy with a long history catches up over several passes, after the others.
-      if (!(await replica.step())) schedule();
+      // A copy with a long history catches up over several passes, after the others. Once caught up, before
+      // any request can use it, its phone writes' unwritten stages replay.
+      if (await replica.step()) await caughtUp();
+      else schedule();
     } catch (error) {
       // Its phone writes are looked at before the handle goes, as after any failed sync.
       if (!replicaSignal.aborted) await inspectAfterFailure(engineClient, handle, row.workspaceId, row.incarnation, error);
@@ -514,6 +578,28 @@ export async function startAutomationReplicas(options: {
     let ok = true;
     let passFailure: unknown = null;
     await engine();
+    // A phone write whose outcome stayed unknown this long past its active time ends with its copy's folder:
+    // the copy closes and the folder settles, so nothing in it publishes again, and its unfinished writes are
+    // refused. The marked folder then goes, as retirement or the next open removes a settled one, and a later
+    // visit gets a fresh copy.
+    // One whose settlement failed waits for its retry before its copy closes again.
+    const overdue = new Set(overdueCopies());
+    for (const workspaceId of [...settlementRetries.keys()]) if (!overdue.has(workspaceId)) settlementRetries.delete(workspaceId);
+    for (const workspaceId of overdue) {
+      const retry = settlementRetries.get(workspaceId);
+      if (retry !== undefined && retry.at > nowMs()) continue;
+      ok = await each(workspaceId, async () => {
+        try {
+          await replicas.get(workspaceId)?.close();
+          await settleWorkspace(workspaceId, COULD_NOT_SEND);
+          settlementRetries.delete(workspaceId);
+        } catch (error) {
+          const delay = retry === undefined ? SETTLEMENT_RETRY_FIRST_MS : Math.min(retry.delay * 2, SETTLEMENT_RETRY_MAX_MS);
+          settlementRetries.set(workspaceId, {at: nowMs() + delay, delay});
+          throw error;
+        }
+      }) && ok;
+    }
     // A copy keeps the phone's unsent writes' reason exactly while they may still publish from it.
     storage.restorePublicationReasons();
     const publishing = new Set(storage.publishingCopies().map((copy) => copy.workspaceId));
@@ -668,8 +754,22 @@ export async function startAutomationReplicas(options: {
     }
     // A copy with unsent phone writes pushes them and checks what the relay
     // accepted, even when nothing new reached the relay.
+    // A replay makes the copy's publication due at once, so what it wrote pushes in this pass or the next. One
+    // still owed fails the pass, whose retry, with its backoff, tries again.
+    const replay = async (replica: AutomationReplica & {caughtUp(): Promise<"idle" | "replayed" | "owed">}) => {
+      const state = await replica.caughtUp().catch((error: unknown) => {
+        observe(() => options.onError?.(error, replica.workspaceId));
+        return "owed" as const;
+      });
+      if (state === "owed") ok = false;
+      const retry = publicationRetries.get(replica.workspaceId);
+      if (state === "replayed" && retry) retry.at = performance.now();
+      return state;
+    };
     for (const replica of [...replicas.values()]) {
       const {workspaceId} = replica;
+      // Whichever step or sync caught the copy up, its owed replay runs here, outside the sync lane, before publication pushes.
+      await replay(replica);
       if (!publishing.has(workspaceId) || !wanted.has(workspaceId)) {
         publicationRetries.delete(workspaceId);
         continue;
@@ -686,6 +786,8 @@ export async function startAutomationReplicas(options: {
       }
       if ((retry?.at ?? 0) > now) continue;
       await publish(replica);
+      // Publication's own step may have finished catching the copy up. What that replays pushes in the next pass.
+      if ((await replay(replica)) === "replayed") schedule();
     }
     if (passFailure !== null) throw passFailure;
     return ok;
@@ -718,6 +820,13 @@ export async function startAutomationReplicas(options: {
       if (failedSyncs.has(row.workspaceId)) continue;
       if (row.leftAtMs !== null) next = Math.min(next, row.reasons.includes("automation") ? row.leftAtMs + AUTOMATION_WORKSPACE_KEEP_AFTER_LEAVING_MS : nowMs());
       else if (row.unwantedSinceMs !== null) next = Math.min(next, row.unwantedSinceMs + AUTOMATION_WORKSPACE_LEAVE_AFTER_MS);
+    }
+    // So is the end of the time a copy's oldest unfinished phone write may stay unknown.
+    // One whose settlement failed waits for its retry instead.
+    for (const {workspaceId, activeUntilMs} of storage.unfinishedOperationActiveEnds()) {
+      const retry = settlementRetries.get(workspaceId);
+      if (retry !== undefined) next = Math.min(next, retry.at);
+      else if (!failedSyncs.has(workspaceId)) next = Math.min(next, activeUntilMs + OPERATION_STALLED_KEEP_MS);
     }
     let wait = next === Number.POSITIVE_INFINITY ? next : Math.max(next - nowMs(), 0);
     // A copy's next attempt to publish the phone's writes is a deadline of its own.

@@ -3233,12 +3233,14 @@ it("names the pending queue limit and releases its byte budget after draining", 
   await session.close({ settle: false }); await capture.stop();
 });
 
+// The engine sends a collaboration refusal's code word as its message.
 it.each([
-  ["update-too-large", "LIMIT_EXCEEDED"],
-  ["content-kind-mismatch", "INVALID_PARAMS"],
-  ["future-update-refusal", "INVALID_PARAMS"],
-  ["future-limit-refusal", "LIMIT_EXCEEDED"],
-] as const)("keeps typing live after a %s refusal, including replay", async (reason, code) => {
+  ["update-too-large", "INVALID_PARAMS", "The edit is too large."],
+  ["content-kind-mismatch", "INVALID_PARAMS", "The edit does not match this file's format."],
+  ["workspace operation failed", "INVALID_PARAMS", "dohc refused this edit."],
+  ["future-update-refusal", "INVALID_PARAMS", "dohc refused this edit."],
+  ["future-limit-refusal", "LIMIT_EXCEEDED", "dohc refused this edit."],
+] as const)("keeps typing live after a %s refusal, including replay", async (reason, code, explanation) => {
   for (const confirmed of [false, true]) {
     for (const replay of [false, true]) {
       const fixture = await daemonDeathCapture("dohc-ydoc-refusal-", "ydoc-refusal");
@@ -3283,7 +3285,7 @@ it.each([
       await session.settleNow();
       expect(notices).toHaveLength(confirmed ? 0 : 1);
       if (!confirmed) {
-        expect(notices[0]).toContain('dohc could not save an edit to "note.md"');
+        expect(notices[0]).toContain(`dohc could not save an edit to "note.md". ${explanation} Open Notices.`);
         expect(notices[0]).not.toContain(reason);
       }
       expect(setAside.some(text => text.includes("refused"))).toBe(!confirmed);

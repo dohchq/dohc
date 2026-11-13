@@ -186,7 +186,7 @@ type Place = (objectIds: readonly string[]) => Promise<ReadonlyMap<string, Place
  * unavailable, as on the desktop. A thread on a secret file reads as missing,
  * and an attachment to one is left out.
  */
-function serverChats(storage: SyncRelayStorage, replica: AutomationReplica, workspaceId: string): ChatsHost {
+export function serverChats(storage: SyncRelayStorage, replica: AutomationReplica, workspaceId: string): ChatsHost {
   const files = new VersionedLiveAdapter(replica.client, replica.workspace, { workspaceId });
   const chats = replicaChatStore(replica);
   const known = new Map<string, Placement>();
@@ -232,13 +232,24 @@ function serverChats(storage: SyncRelayStorage, replica: AutomationReplica, work
   };
 }
 
-/** The store without the threads and attachments that name a secret file, by their hint or by where `place` puts their object. */
+/**
+ * The store without the threads and attachments that name a secret file, by their hint or by where `place` puts their
+ * object. A thread's own decisions and reactions answer only for a thread it lists.
+ */
 function withoutSecretFiles(store: ChatReadStore, place: Place): ChatReadStore {
   const hidden = (placed: ReadonlyMap<string, Placement>, objectId: string | undefined, hint: string | undefined) =>
     hiddenFile(hint) || (objectId !== undefined && placed.get(objectId)?.kind === "hidden");
-  const threads = async <Thread extends Pick<ChatThread, "linkedFile">>(rows: Thread[]): Promise<Thread[]> => {
+  // Threads this read already listed, placed as `place` placed them.
+  const listed = new Set<string>();
+  const threads = async <Thread extends Pick<ChatThread, "id" | "linkedFile">>(rows: Thread[]): Promise<Thread[]> => {
     const placed = await place(rows.flatMap((thread) => thread.linkedFile ? [thread.linkedFile.objectId] : []));
-    return rows.filter((thread) => !hidden(placed, thread.linkedFile?.objectId, thread.linkedFile?.pathHint));
+    const kept = rows.filter((thread) => !hidden(placed, thread.linkedFile?.objectId, thread.linkedFile?.pathHint));
+    for (const thread of kept) listed.add(thread.id);
+    return kept;
+  };
+  const admit = async (workspaceId: string, threadId: string): Promise<void> => {
+    if (listed.has(threadId) || (await threads(await store.listThreads({ workspaceId }))).some((thread) => thread.id === threadId)) return;
+    throw new OperationError(`chat thread not found: ${threadId}`);
   };
   const messages = async (rows: ChatMessage[]): Promise<ChatMessage[]> => {
     const placed = await place(rows.flatMap((row) => row.attachments.flatMap((attachment) => attachment.objectId ? [attachment.objectId] : [])));
@@ -255,6 +266,14 @@ function withoutSecretFiles(store: ChatReadStore, place: Place): ChatReadStore {
     },
     listAgentUnreadThreads: async (workspaceId, reader) => await threads(await store.listAgentUnreadThreads(workspaceId, reader)),
     listMessages: async (input) => await messages(await store.listMessages(input)),
+    listThreadDecisions: async (workspaceId, threadId) => {
+      await admit(workspaceId, threadId);
+      return await store.listThreadDecisions(workspaceId, threadId);
+    },
+    listReactions: async (input) => {
+      await admit(input.workspaceId, input.threadId);
+      return await store.listReactions(input);
+    },
     listGroupStream: async (input) => {
       const page = await store.listGroupStream(input);
       const shown = await messages(page.items.map((item) => item.message));

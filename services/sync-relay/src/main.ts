@@ -54,12 +54,13 @@ import { startEngineProjection } from "./engineProjection";
 import { parseNamedLiveConfig } from "./namedLiveConfig";
 import { readAppBackendParticipantLimit, readAppCollectionPolicy, readAppPublicationConfig } from "./appPublicationConfig";
 import { createNamedFrameChanges } from "./liveHostChanges";
-import { createOwnerLiveRoutes, createNamedLiveRoutes } from "./namedLiveRoutes";
+import { createOwnerLiveRoutes, createNamedLiveRoutes, createPersonalLiveRoutes } from "./namedLiveRoutes";
 import { createLiveTickets } from "./liveTickets";
 import { createLiveHostReports } from "./namedLiveHostReports";
 import {createLinkLiveResolver} from "./linkLiveBrowserAuth";
 import {normalizeLinkRefusal, opaqueLinkRefusal} from "./linkRefusal";
 import {isLinkEndpointPath, isLinkLivePath} from "./linkEndpointPath";
+import {relayEntryPattern, SYNC_RELAY_REQUEST_LOG} from "./requestLog";
 import {createLinkLiveHttp} from "./linkLiveHttp";
 import {createLiveMembershipRegistry} from "./liveMembership";
 import {createLiveConnectionAdmission} from "./liveConnectionAdmission";
@@ -306,6 +307,8 @@ const accountResolvers: {actor: ResolveActor; session?: ResolveAccountSession; s
       const { createWorkspaceAuth } = await import("@dohc/workspace-auth/betterAuth");
       pool = new Pool({
         connectionString: process.env.POSTGRES_URL ?? defaultPostgresUrl,
+        // A request waiting for a connection Postgres can't give fails instead of hanging.
+        connectionTimeoutMillis: 5_000,
       });
       // pg pools emit 'error' for idle-client failures (Postgres restart,
       // network partition). Without a listener that is an uncaught 'error'
@@ -447,6 +450,7 @@ const relayApplication = createSyncRelayHandler({
   appCollectionPolicy,
   noticePostRateLimiter,
   serverCopies: () => copies,
+  relayPublicOrigin: process.env.DOHC_RELAY_PUBLIC_ORIGIN,
   ...(automationServer ? {automationServer} : {}),
 });
 let ownerLive: ReturnType<typeof createOwnerLiveRoutes> | undefined;
@@ -457,12 +461,14 @@ let desktopLive: ReturnType<typeof createNamedLiveRoutes> | undefined;
 let desktopAdmission: ReturnType<typeof createNamedDesktopLive> | undefined;
 let serviceEnrollment: ReturnType<typeof createServiceHostEnrollmentRoutes> | undefined;
 let personalLiveDocument: ReturnType<typeof createPersonalLiveDocumentRoute> | undefined;
+let personalLive: ReturnType<typeof createPersonalLiveRoutes> | undefined;
 const relayHandler = guardRelayResponses(storage, request => {
   const path = new URL(request.url).pathname;
   if (request.headers.get("authorization")?.startsWith("Bearer dohc-service-v1.")) return serviceReplication?.(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   if (request.headers.get("authorization")?.startsWith(`Bearer ${AUTOMATION_REPLICA_BEARER_PREFIX}`)) return automationReplication?.(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   if (isServiceHostEnrollmentPath(path)) return serviceEnrollment?.(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   if (path === PERSONAL_LIVE_DOCUMENT_PATH) return personalLiveDocument?.(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
+  if (path === "/sync/live/personal-tickets") return personalLive?.handle(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   if (path === "/sync/live/named-tickets") return namedLive?.handle(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   if ((path === "/sync/live/desktop-open" || path === "/sync/live/desktop-ready")) return desktopAdmission?.handle(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   if (isLinkLivePath(path)) return (path === "/sync/live/link-tickets" ? linkLive?.handle(request) : linkLiveHttp?.(request)) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
@@ -472,7 +478,7 @@ const deletions = createAccountDeletionRoute({storage: storage as StorageContext
   invalidate(userId, manifest) {
     const ids = manifest.workspaces.map(row => row.workspaceId);
     relayApplication.deleteAccount(userId,ids,manifest.shareIds);
-    namedLive?.deleteAccount(userId,ids); linkLive?.deleteAccount(userId,ids); desktopLive?.deleteAccount(userId,ids); ownerLive?.deleteAccount(userId,ids);
+    namedLive?.deleteAccount(userId,ids); linkLive?.deleteAccount(userId,ids); personalLive?.deleteAccount(userId,ids); desktopLive?.deleteAccount(userId,ids); ownerLive?.deleteAccount(userId,ids);
     automations?.deleteAccount(userId);
   },
   async deleteRuntime(userId, manifest) {
@@ -500,15 +506,26 @@ const deletions = createAccountDeletionRoute({storage: storage as StorageContext
 const pendingDeletions = pool ? await fencePendingAccountDeletions(pool, deletions) : [];
 const signUpInvites = secret.length >= 32 ? createSignUpInviteRoute({storage, key: signUpInviteKey(secret)}) : undefined;
 const fetchHandler = async (request: Request): Promise<Response> => {
-  if (secret.length >= 32 && new URL(request.url).pathname === ACCOUNT_DELETION_PATH) return deletions.handle(request);
-  if (signUpInvites && new URL(request.url).pathname === SIGN_UP_INVITE_PATH) return signUpInvites(request);
+  const entry = relayEntryPattern(request.headers.get("authorization"), new URL(request.url).pathname);
+  if (entry) SYNC_RELAY_REQUEST_LOG.mark(request, entry);
+  // These four answer before relayHandler, whatever the bearer, so each marks its own route.
+  if (secret.length >= 32 && new URL(request.url).pathname === ACCOUNT_DELETION_PATH) {
+    SYNC_RELAY_REQUEST_LOG.mark(request, "/internal/account-deletion");
+    return deletions.handle(request);
+  }
+  if (signUpInvites && new URL(request.url).pathname === SIGN_UP_INVITE_PATH) {
+    SYNC_RELAY_REQUEST_LOG.mark(request, "/internal/sign-up-invite");
+    return signUpInvites(request);
+  }
   if (new URL(request.url).pathname === "/ready") {
+    SYNC_RELAY_REQUEST_LOG.mark(request, "/ready");
     const ready = !storage.unavailable.aborted && (!selfHostedLive || (!!selfHost && !selfHost.unavailable));
     return Response.json({ok: ready, service: "sync-relay", selfHostedLive: selfHostedLive && ready, apiVersions: RELAY_API_VERSIONS,
       automations: !automationsOn ? "off" : automations && !automations.unavailable ? "on" : "unavailable"},
       {status: ready ? 200 : 503, headers: {"cache-control": "no-store"}});
   }
   if (new URL(request.url).pathname === "/health") {
+    SYNC_RELAY_REQUEST_LOG.mark(request, "/health");
     // The presence hub footprint is exposed only under the dev/test seam so
     // integration tests can assert parked waiters are released on disconnect;
     // production health stays a bare liveness probe.
@@ -593,6 +610,7 @@ setInterval(() => {
 const server = serveFetchHandler({
   handler: fetchHandler,
   streamBody: streamsRequestBody,
+  requestLog: SYNC_RELAY_REQUEST_LOG,
   maxBodyBytes: (url) => automationHostMaxBodyBytes(url.pathname) ?? (
     isServiceHostEnrollmentPath(url.pathname) ? 16 * 1024 :
     url.pathname === PERSONAL_LIVE_DOCUMENT_PATH ? PERSONAL_LIVE_DOCUMENT_MAX_BODY_BYTES :
@@ -600,14 +618,14 @@ const server = serveFetchHandler({
     isAutomationServerPath(url.pathname) ? AUTOMATION_SERVER_MAX_BODY_BYTES :
     isAccountWorkspacePath(url.pathname) ? ACCOUNT_WORKSPACE_MAX_BODY_BYTES :
     (url.pathname === "/sync/live/desktop-open" || url.pathname === "/sync/live/desktop-ready") && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
-    (url.pathname === "/sync/live/named-tickets" || isLinkLivePath(url.pathname)) && namedLiveConfig ? namedLiveConfig.transport.maxRequestBytes :
+    (url.pathname === "/sync/live/named-tickets" || url.pathname === "/sync/live/personal-tickets" || isLinkLivePath(url.pathname)) && namedLiveConfig ? namedLiveConfig.transport.maxRequestBytes :
     (isNamedBrowserSessionPath(url.pathname) || url.pathname === "/sync/named-chat/messages") && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
     isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
       ? MAX_LINK_EXCHANGE_BODY_BYTES
       : MAX_BODY_BYTES),
   oversized: (url) =>
     isLinkEndpointPath(url.pathname) ? opaqueLinkRefusal() :
-    (url.pathname === "/sync/live/desktop-open" || url.pathname === "/sync/live/desktop-ready") || url.pathname === "/sync/live/named-tickets" || isLinkLivePath(url.pathname) || isNamedBrowserSessionPath(url.pathname) || isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
+    (url.pathname === "/sync/live/desktop-open" || url.pathname === "/sync/live/desktop-ready") || url.pathname === "/sync/live/named-tickets" || url.pathname === "/sync/live/personal-tickets" || isLinkLivePath(url.pathname) || isNamedBrowserSessionPath(url.pathname) || isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
       ? errorBody("not_found")
       : errorBody("payload_too_large"),
   // Never echo internal error details (or anything derived from the request)
@@ -652,7 +670,7 @@ if (process.env.DOHC_DEVICE_CONTROL_LIMITS !== undefined) {
 }
 if (deviceControl) {
   server.on("upgrade", (request, socket, head) => {
-    if (namedLiveConfig && (request.url?.startsWith("/sync/live/named?") || request.url?.startsWith("/sync/live/link?") || request.url?.startsWith("/sync/live/desktop?") || /^\/sync\/workspaces\/[^/]+\/live\/owner(?:\?|$)/.test(request.url ?? ""))) return;
+    if (namedLiveConfig && (request.url?.startsWith("/sync/live/named?") || request.url?.startsWith("/sync/live/link?") || request.url?.startsWith("/sync/live/personal?") || request.url?.startsWith("/sync/live/desktop?") || /^\/sync\/workspaces\/[^/]+\/live\/owner(?:\?|$)/.test(request.url ?? ""))) return;
     deviceControl!.handleUpgrade(request, socket, head);
   });
   process.once("SIGINT", deviceControl.close);
@@ -724,6 +742,16 @@ if (namedLiveConfig) {
       linkAuthority: relayApplication.linkAuthority});
     server.once("close", linkLive.close); process.once("SIGINT", linkLive.close); process.once("SIGTERM", linkLive.close);
   }
+  // A personal agent edits only through the self-hosted live host, and only while it is the configured host.
+  if (selfHost && deployment) {
+    const hostId = selfHostedLiveHostId(deployment.history.namespace);
+    personalLive = createPersonalLiveRoutes({storage, hosts: new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(",")), publicOrigin: shareWebOrigin!,
+      exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport, frames: namedLiveConfig.frames, bounds: namedLiveConfig.host,
+      validate: namedLiveConfig.validate, tickets, captureNative, admission, sessionHostBlocked, linkAuthority: relayApplication.linkAuthority,
+      personalAgents: relayApplication.personalAgents, limiter: relayApplication.personalLimiter,
+      supported: () => { const control = storage.getLiveHostControl(); return control?.configuredMode === "service" && control.configuredHostId === hostId; }});
+    server.once("close", personalLive.close); process.once("SIGINT", personalLive.close); process.once("SIGTERM", personalLive.close);
+  }
   if (desktopEditorLimits) {
     const hosts = new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(","));
     desktopAdmission = createNamedDesktopLive({storage, resolveActor, publicOrigin: shareWebOrigin!, hosts,
@@ -744,6 +772,7 @@ if (namedLiveConfig) {
     if (/^\/sync\/workspaces\/[^/]+\/live\/owner(?:\?|$)/.test(request.url ?? "")) void ownerLive!.handleUpgrade(request, socket, head).catch(() => socket.destroy());
     else if (request.url?.startsWith("/sync/live/named?")) void namedLive!.handleUpgrade(request, socket, head).catch(() => socket.destroy());
     else if (request.url?.startsWith("/sync/live/link?")) {if (linkLive) void linkLive!.handleUpgrade(request, socket, head).catch(() => socket.destroy()); else socket.destroy();}
+    else if (request.url?.startsWith("/sync/live/personal?")) {if (personalLive) void personalLive.handleUpgrade(request, socket, head).catch(() => socket.destroy()); else socket.destroy();}
     else if (request.url?.startsWith("/sync/live/desktop?")) {if (desktopLive) void desktopLive!.handleUpgrade(request, socket, head).catch(() => socket.destroy()); else socket.destroy();}
     else if (!deviceControl) socket.destroy();
   });

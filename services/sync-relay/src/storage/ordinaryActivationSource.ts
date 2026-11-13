@@ -25,7 +25,7 @@ export class ServiceActivationBusy extends Error {
 export class ServiceActivationTooLarge extends Error {
   constructor(){super("Native activation is too large to validate.");}
 }
-export interface OrdinaryActivationBounds {maxCaptureBytes:number;maxEntriesPerDrain:number;maxBytesPerDrain:number}
+export interface OrdinaryActivationBounds {maxCaptureBytes:number;maxHistoryEntries:number;maxBytesPerDrain:number}
 export interface VerifiedOrdinaryActivationCut {readonly verified:true}
 const cuts=new WeakMap<VerifiedOrdinaryActivationCut,{storage:StorageContext;source:NativeOwnerActivationSource;baseline:LiveDocumentBaselineRegistrationInput["evidence"]}>();
 const hash=(bytes:Uint8Array|string)=>createHash("sha256").update(bytes).digest("hex");
@@ -46,7 +46,7 @@ export function readOrdinaryActivationHistory(storage:StorageContext,input:Histo
   for(const value of Object.values(bounds))requireValue(integer(value)&&value>0,"Invalid ordinary activation read budget.");
   requireValue(baselineBytes.length+fullState.length+Buffer.byteLength(JSON.stringify(source))<=bounds.maxCaptureBytes,"Ordinary activation capture exceeds its configured byte budget.");
   currentCut(storage,source);
-  const entryLimit=Math.min(bounds.maxEntriesPerDrain,MAX_OLD_SUFFIX_ENTRIES+2);
+  const entryLimit=Math.min(bounds.maxHistoryEntries,MAX_OLD_SUFFIX_ENTRIES+2);
   // Another lineage's rows are neither read nor charged. The captured full state must still equal the rebuilt history.
   const selected=`FROM sync_relay_log INDEXED BY idx_sync_relay_log_document_page WHERE workspace_id=? AND relay_seq>=? AND relay_seq<=?
       AND json_extract(payload_json,'$.versionId')=? AND json_extract(payload_json,'$.objectId')=?

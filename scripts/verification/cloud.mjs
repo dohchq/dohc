@@ -130,11 +130,10 @@ export async function runJavascript(groups, record, save, availability, { execut
 }
 
 async function restoreNativePreparation() {
-  const { response } = await waitForPreparation("js", { download: true });
   const temporary = mkdtempSync(join(tmpdir(), "dohc-js-prepared-"));
   const zip = join(temporary, "artifact.zip"), archive = join(temporary, "javascript-prepared.tar.zst");
   try {
-    await pipeline(Readable.fromWeb(response.body), createWriteStream(zip));
+    await waitForPreparation("js", { download: response => pipeline(Readable.fromWeb(response.body), createWriteStream(zip)) });
     await run("unzip", ["-o", "-j", zip, "javascript-prepared.tar.zst", "-d", temporary], { log: join(output, "artifact-unzip.log") });
     await run("tar", ["-I", "zstd", "-xf", archive], { cwd: repoRoot, log: join(output, "artifact-restore.log") });
     return assertPrepared();

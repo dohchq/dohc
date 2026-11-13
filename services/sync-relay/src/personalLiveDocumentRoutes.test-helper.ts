@@ -52,7 +52,13 @@ function probe(): PersonalRunningEntry {
   return { agentId: "probe", ownerUserId: "probe", connectionId: "probe", fenceEpoch: 0, workspaceIds: [], kind: "wait", terminate: () => {} };
 }
 
-export type PersonalRouteFixtureOptions = { live?: false; control?: "device"; limits?: { maxMs?: number; perAgent?: number; waiters?: number } };
+export type PersonalRouteFixtureOptions = {
+  live?: false;
+  control?: "device";
+  limits?: { maxMs?: number; perAgent?: number; waiters?: number };
+  /** The route's clock. 2,000 when not given. */
+  nowMs?: () => number;
+};
 
 /**
  * The fixture's owner workspace with its rich document at docs/a.md, an
@@ -88,7 +94,7 @@ export async function personalRouteFixture(defer: (close: () => Promise<void> | 
   }
   await registryUp();
   const route = createPersonalLiveDocumentRoute({
-    storage: f.storage, linkAuthority: h.linkAuthority, personalAgents: h.personalAgents, limiter: h.personalLimiter, nowMs: () => 2_000,
+    storage: f.storage, linkAuthority: h.linkAuthority, personalAgents: h.personalAgents, limiter: h.personalLimiter, nowMs: options.nowMs ?? (() => 2_000),
     ...(options.live === false ? {} : { live: { host, history, hostId } }),
     ...(options.limits ? { limits: options.limits } : {}),
   });

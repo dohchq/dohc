@@ -1,8 +1,8 @@
 use super::ActorHandle;
 use super::journal::journal_version_create_outbound_in_tx;
 use super::materialization::{
-    MaterializationReplayScope, SelfWriteRecorder, replay_pending_materializations,
-    rollback_job_matches_active,
+    MaterializationReplayScope, SelfWriteRecorder, SupersededWrites, active_head_sha,
+    end_superseded_writes, replay_pending_materializations, rollback_job_matches_active,
 };
 use crate::error::RuntimeError;
 use crate::search::{read_engine_search_policy, resolve_effective_policy};
@@ -1496,6 +1496,13 @@ pub(super) fn materialize_relay_page_on_store(
         .filter(|(_, _, head)| *head)
         .map(|(_, change, _)| change.path.as_str())
         .collect();
+    // The paths whose queued projection writes a hosted replica ends once
+    // the page has brought their files to their heads.
+    let projected_paths: Vec<String> = if hosted {
+        target_paths.iter().map(|path| (*path).to_owned()).collect()
+    } else {
+        Vec::new()
+    };
     let spelling_aliases = case_alias_targets(
         page.iter().map(|(_, change, _)| change.path.as_str()),
         &target_paths,
@@ -1746,7 +1753,78 @@ pub(super) fn materialize_relay_page_on_store(
         for path in &deleted {
             remove_emptied_folders(store, root_dir, path, None);
         }
+        end_page_projection_writes(
+            store,
+            root_dir,
+            workspace_id,
+            self_writes,
+            &holds,
+            &projected_paths,
+            now_ms,
+        )?;
     }
+    Ok(())
+}
+
+/// End the file writes this page's Y.Doc projections queued, on a hosted
+/// replica. Each projection a pull applies queues a write of its document's
+/// file that expects the head before it, and the page then brings the file
+/// to the newest head through a job of its own. Nothing runs the queued
+/// writes while the replica is up, and each later replay kept one earlier
+/// state beside the file as a conflict file (#3804). So once a path's file
+/// holds its head, its writes of earlier states are cancelled and the write
+/// of the head is replayed, which marks it complete without writing.
+///
+/// This runs after the page's own writes, in transactions of its own. A stop
+/// between the two leaves the writes queued over a file that holds its head,
+/// which every later replay ends the same way. A file that does not hold its
+/// head keeps its writes.
+fn end_page_projection_writes(
+    store: &mut EngineStore,
+    root_dir: &std::path::Path,
+    workspace_id: &str,
+    self_writes: &dyn SelfWriteRecorder,
+    holds: &PlacementHolds,
+    paths: &[String],
+    now_ms: i64,
+) -> Result<(), RuntimeError> {
+    let mut head_writes = HashSet::new();
+    for path in paths {
+        let Some(head) = active_head_sha(store, workspace_id, path)? else {
+            continue;
+        };
+        if let Some(ended) = end_superseded_writes(
+            store,
+            root_dir,
+            workspace_id,
+            path,
+            &head,
+            SupersededWrites::Projections,
+            now_ms,
+        )? {
+            head_writes.extend(ended.head_writes);
+        }
+    }
+    if head_writes.is_empty() {
+        return Ok(());
+    }
+    replay_pending_materializations(
+        store,
+        root_dir,
+        MaterializationReplayScope {
+            holds: Some(holds),
+            workspace_id,
+            self_writes: Some(self_writes),
+            progress: None,
+            file_outcomes_settled: false,
+            released_hold_paths: None,
+            planned_against_active_heads: false,
+        },
+        now_ms,
+        &dohc_engine_storage::NoFaults,
+        Some(&head_writes),
+        false,
+    )?;
     Ok(())
 }
 
@@ -2621,5 +2699,206 @@ pub(super) mod tests {
         assert!(inside("X.md/child.md", "x.md"));
         assert!(!inside("Dog/a.md", "D"));
         assert!(!inside("D", "d"));
+    }
+
+    /// A note whose three projections each queued a write of `note.md` over
+    /// the one before, as a pull's applies do. Its head is "third\n".
+    fn three_queued_projection_writes(store: &mut dohc_engine_storage::EngineStore) {
+        use dohc_engine_storage::{Preimage, TxnOutcome};
+        let mut preimage = Preimage::Absent;
+        for (index, text) in [(0_i64, "first\n"), (1, "second\n"), (2, "third\n")] {
+            let queued = preimage.clone();
+            let outcome = store
+                .write_with(&NoFaults, |tx| {
+                    let result = dohc_engine_domain::write_text_in_tx(
+                        tx,
+                        &WriteText {
+                            workspace_id: "ws".to_owned(),
+                            version_id: "main".to_owned(),
+                            object_id: "doc".to_owned(),
+                            path: "note.md".to_owned(),
+                            text: text.to_owned(),
+                            moment_id: format!("moment-{index}"),
+                            metadata_origin: "ydoc".to_owned(),
+                            metadata_summary: None,
+                            metadata_correlation_id: None,
+                            author_json: None,
+                            now_ms: 2 + index,
+                            request_id: None,
+                        },
+                    )?;
+                    dohc_engine_domain::enqueue_write(tx, &result, queued, "ydoc")?;
+                    Ok::<_, crate::error::RuntimeError>(result.snapshot.blob_sha256)
+                })
+                .unwrap();
+            let TxnOutcome::Committed(sha) = outcome else {
+                panic!("the write commits");
+            };
+            preimage = Preimage::Present(sha);
+        }
+    }
+
+    fn projection_write_statuses(
+        store: &dohc_engine_storage::EngineStore,
+    ) -> Vec<dohc_engine_storage::JobStatus> {
+        (0..3)
+            .map(|index| {
+                store
+                    .load_materialization_job(&format!("ydoc-mat_moment-{index}"))
+                    .unwrap()
+                    .unwrap()
+                    .status
+            })
+            .collect()
+    }
+
+    fn note_page() -> Vec<MomentMaterializationChange> {
+        vec![MomentMaterializationChange {
+            version_id: "main".to_owned(),
+            path: "note.md".to_owned(),
+            operation: "write",
+            content_kind: "text",
+        }]
+    }
+
+    /// The names in the root that hold a conflict file's content.
+    fn conflict_files(root: &std::path::Path) -> Vec<String> {
+        std::fs::read_dir(root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("conflict"))
+            .collect()
+    }
+
+    /// #3804: on a hosted replica each projection a pull applies queues a
+    /// write of the note's file, and the page writes the file itself. Nothing
+    /// ran the queued writes, and each later replay kept one earlier state
+    /// beside the file. The page now ends them once the file holds the head.
+    #[test]
+    fn a_hosted_page_ends_the_writes_its_projections_queued() {
+        use dohc_engine_storage::JobStatus;
+        let (scratch, _, mut store) = dohc_engine_testkit::open_store();
+        dohc_engine_sync::create_hosted_replica(
+            &mut store,
+            "ws",
+            "service-host:host",
+            "epoch",
+            "stream",
+            1_000,
+            &NoFaults,
+        )
+        .unwrap();
+        ensure_mutation_version_on_store(&mut store, "ws", "main", 1, &NoFaults).unwrap();
+        three_queued_projection_writes(&mut store);
+        materialize_relay_page_on_store(
+            &mut store,
+            "ws",
+            &scratch,
+            note_page(),
+            &(),
+            20,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(scratch.join("note.md")).unwrap(),
+            "third\n"
+        );
+        assert_eq!(
+            projection_write_statuses(&store),
+            [
+                JobStatus::Cancelled,
+                JobStatus::Cancelled,
+                JobStatus::Complete
+            ]
+        );
+        assert_eq!(conflict_files(&scratch), Vec::<String>::new());
+
+        // A page that finds the file already at its head ends them too.
+        a_page_that_writes_nothing_ends_the_head_write(&mut store, &scratch);
+    }
+
+    /// A second pull applies a projection whose content the file already
+    /// holds, so its page writes nothing. Its queued write still ends.
+    fn a_page_that_writes_nothing_ends_the_head_write(
+        store: &mut dohc_engine_storage::EngineStore,
+        root: &std::path::Path,
+    ) {
+        use dohc_engine_storage::{JobStatus, Preimage, TxnOutcome};
+        let outcome = store
+            .write_with(&NoFaults, |tx| {
+                let result = dohc_engine_domain::write_text_in_tx(
+                    tx,
+                    &WriteText {
+                        workspace_id: "ws".to_owned(),
+                        version_id: "main".to_owned(),
+                        object_id: "doc".to_owned(),
+                        path: "note.md".to_owned(),
+                        text: "fourth\n".to_owned(),
+                        moment_id: "moment-3".to_owned(),
+                        metadata_origin: "ydoc".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 30,
+                        request_id: None,
+                    },
+                )?;
+                dohc_engine_domain::enqueue_write(
+                    tx,
+                    &result,
+                    Preimage::Present(dohc_engine_storage::hex_sha256(b"third\n")),
+                    "ydoc",
+                )?;
+                Ok::<_, crate::error::RuntimeError>(())
+            })
+            .unwrap();
+        assert!(matches!(outcome, TxnOutcome::Committed(())));
+        std::fs::write(root.join("note.md"), "fourth\n").unwrap();
+        materialize_relay_page_on_store(
+            store,
+            "ws",
+            root,
+            note_page(),
+            &(),
+            40,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .load_materialization_job("ydoc-mat_moment-3")
+                .unwrap()
+                .unwrap()
+                .status,
+            JobStatus::Complete
+        );
+        assert_eq!(conflict_files(root), Vec::<String>::new());
+    }
+
+    /// The page of a replica that is not hosted is unchanged: it writes the
+    /// file and leaves the projections' writes queued, as before (#3804). A
+    /// server's automation replica runs this page. A desktop does not.
+    #[test]
+    fn a_page_off_a_hosted_replica_leaves_its_projection_writes_queued() {
+        use dohc_engine_storage::JobStatus;
+        let (scratch, _, mut store) = dohc_engine_testkit::open_store();
+        ensure_mutation_version_on_store(&mut store, "ws", "main", 1, &NoFaults).unwrap();
+        three_queued_projection_writes(&mut store);
+        materialize_relay_page_on_store(
+            &mut store,
+            "ws",
+            &scratch,
+            note_page(),
+            &(),
+            20,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(scratch.join("note.md")).unwrap(),
+            "third\n"
+        );
+        assert_eq!(projection_write_statuses(&store), [JobStatus::Pending; 3]);
     }
 }

@@ -38,6 +38,7 @@ export function replicaChatStore(replica: Pick<AutomationReplica, "client" | "wo
     listThreads: (input) => adapter.listThreads(input),
     listMessages: (input) => adapter.listMessages(input),
     listThreadDecisions: (workspaceId, threadId) => adapter.listThreadDecisions(workspaceId, threadId),
+    listReactions: (input) => adapter.listReactions(input),
     getThreadProjection: (input) => adapter.getThreadProjection(input),
     listGroupStream: (input) => adapter.listGroupStream(input),
     listAgentUnreadThreads: (workspaceId, reader) => adapter.listAgentUnreadThreads(workspaceId, reader),

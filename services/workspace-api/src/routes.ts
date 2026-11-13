@@ -14,6 +14,7 @@ import {
 } from "./pages";
 import type { ReadinessReport } from "./readiness";
 import { readBodyAtMost, type BodyRead } from "./readBody";
+import { authPattern, PAGE_PATTERNS, WORKSPACE_API_REQUEST_LOG } from "./requestLog";
 
 // Every route this service answers. main.ts owns the process (env, Postgres,
 // sockets); this module owns request handling so the routes can be tested
@@ -62,6 +63,8 @@ const EMAIL_ROUTES = new Set([
   "/api/auth/send-verification-email",
 ]);
 
+const PAGE_ROUTES: ReadonlySet<string> = new Set(PAGE_PATTERNS);
+
 const PAGE_HEADERS: Record<string, string> = {
   "content-type": "text/html; charset=utf-8",
   "cache-control": "no-store",
@@ -89,7 +92,9 @@ export function createRouter(options: RouterOptions): (request: Request) => Prom
     const url = new URL(request.url);
     const path = url.pathname;
     const cors = corsHeaders(request.headers.get("origin"), allowed);
+    const mark = (pattern: Parameters<typeof WORKSPACE_API_REQUEST_LOG.mark>[1]) => WORKSPACE_API_REQUEST_LOG.mark(request, pattern);
 
+    if (path.startsWith("/api/auth/")) mark(authPattern(path));
     if (request.method === "OPTIONS" && path.startsWith("/api/auth/")) {
       return new Response(null, { status: 204, headers: cors });
     }
@@ -121,12 +126,15 @@ export function createRouter(options: RouterOptions): (request: Request) => Prom
     }
 
     if (path === CRASH_REPORT_PATH && options.crashReports) {
+      mark(CRASH_REPORT_PATH);
       if (request.method !== "POST") return json({ ok: false, error: "method not allowed" }, 405, { allow: "POST" });
       const answer = await options.crashReports(request);
       return json(answer.body, answer.status, answer.headers);
     }
 
     if (request.method === "GET" || request.method === "HEAD") {
+      if (path === ACCOUNT_CSS_PATH || path === ACCOUNT_JS_PATH) mark("/account/assets/:asset");
+      else if (PAGE_ROUTES.has(path)) mark(path as (typeof PAGE_PATTERNS)[number]);
       switch (path) {
         case "/health":
           return json({ ok: true, service: "workspace-api" });
@@ -174,11 +182,13 @@ export function createRouter(options: RouterOptions): (request: Request) => Prom
         }
       }
       if (options.seams?.sentEmails && path === "/test/email/messages") {
+        mark("/test/email/messages");
         return json({ messages: options.seams.sentEmails() });
       }
     }
 
     if (request.method === "POST" && path === "/test/device/approve" && options.seams?.deviceApprove) {
+      mark("/test/device/approve");
       return options.seams.deviceApprove(request);
     }
 

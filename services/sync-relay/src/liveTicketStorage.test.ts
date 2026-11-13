@@ -539,7 +539,8 @@ it("refuses same-name trigger collisions even when the reserved index exists", a
   } finally { await state.close(); }
 });
 
-// Nothing issues a personal agent's ticket yet, so these store and consume one directly.
+// These store and consume a personal agent's ticket in storage directly. personalLiveRoutes.test.ts
+// covers minting and redeeming one through its routes.
 const personalAgent = "p-agent-1";
 const personalHash = (id: number) => hashLiveTicketToken(id.toString(16).padStart(64, "f"), key);
 const personalClaims = (ticketId: string, mintedAtMs: number) => parseLiveTicketClaims({ ticketId, audience,

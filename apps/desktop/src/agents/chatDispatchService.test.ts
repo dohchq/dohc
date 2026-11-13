@@ -61,6 +61,7 @@ import {
 import { createLiveAgentDispatchStore } from "./liveAgentDispatchStore";
 import { createLiveLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import { createChatWrites, deriveChatActorKey, type ChatWriteStore } from "../workspaces/chatWrites";
+import { answerDecision } from "@dohc/workspace-operations/chat-writes";
 import { createActorIssuer, deriveMomentActor, parseActorKey } from "@dohc/workspace-contracts/actor-identity";
 import { AGENTS_RESTRICTED_MESSAGE } from "./agentToolCatalog";
 import { createWorkspaceTrust, type WorkspaceTrust } from "../workspaces/workspaceTrust";
@@ -4175,12 +4176,10 @@ describe("chatDispatchService", () => {
         },
         notifyRenderer: () => undefined,
       });
-      const answering = writes.answer({ workspaceId: WORKSPACE_ID, store }, {
-        writer: { via: "renderer" },
+      const answering = answerDecision(writes.host({ workspaceId: WORKSPACE_ID, store }, { writer: { via: "renderer" } }), {
         threadId: poll.thread.id,
         body: "Monday",
         resolves: { messageId: poll.message.id, chosenOption: "Monday" },
-        resolveAttachments: async () => [],
       });
       await Promise.race([replyLanded.promise, answerQueued.promise]);
       held.resolve();

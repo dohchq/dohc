@@ -9,6 +9,7 @@ import type {
   CredentialFenceChange,
   CredentialFenceListener,
 } from "@dohc/workspace-auth/credentialFence";
+import { CREDENTIAL_FENCE_READ_TIMEOUT_MS } from "@dohc/workspace-auth/credentialFence";
 import { UnauthorizedError, type ResolveAccountSession } from "@dohc/workspace-auth/session";
 import type { RelayNoticePage } from "@dohc/workspace-contracts/relay";
 import { MAX_AGENT_CHAT_WAITS_PER_CONNECTION } from "./agentChatRoutes";
@@ -18,7 +19,7 @@ import { DiscussionActivityHub } from "./discussionActivity";
 import { errorResponse, notFound } from "./errors";
 import { LINK_EXCHANGE_BUCKET_CAPACITY, pkceS256Challenge } from "./linkSecurity";
 import { MAX_PERSONAL_WAITS_PER_ACCOUNT, PERSONAL_WAIT_MAX_MESSAGES } from "./personalAgentRoutes";
-import { CREDENTIAL_FENCE_CATCH_UP_MARGIN_MS, type PersonalRunningEntry } from "./personalAgents";
+import { CREDENTIAL_FENCE_CATCH_UP_MARGIN_MS, singleFlightFenceReads, type PersonalRunningEntry } from "./personalAgents";
 import { personalAgentOrigin, personalCollectionOrigin, PERSONAL_MESSAGE_ID_PREFIX, PERSONAL_THREAD_ID_PREFIX } from "./relayLogInputs";
 import type { createSyncRelayHandler } from "./server";
 import { ACCOUNT_VISITS_PER_CALLER, startServerCopies, type ServerCopies } from "./serverCopies";
@@ -2610,5 +2611,96 @@ describe("a personal agent's reads", () => {
     const reset = await open();
     f.fence.changePassword(OWNER);
     await expect(reset.read()).rejects.toMatchObject({ code: "not_found" });
+  });
+});
+
+// Proves: every answer was read after its caller asked, so a fence change
+// committed before a fresh read is seen, and a burst of callers shares reads.
+describe("single-flight fence reads", () => {
+  /** A fence read the test settles. */
+  function reads() {
+    const started: { userId: string; settle(epoch: number): void; fail(error: Error): void }[] = [];
+    const read = vi.fn((userId: string) => new Promise<number>((resolve, reject) => {
+      started.push({ userId, settle: resolve, fail: reject });
+    }));
+    return { started, read, fenceRead: singleFlightFenceReads(read, () => new Error("The fence read timed out.")) };
+  }
+
+  it("answers a caller that asks during a read with the next read, which begins once that one settles", async () => {
+    const { started, read, fenceRead } = reads();
+    const first = fenceRead(OWNER);
+    const second = fenceRead(OWNER);
+    expect(read).toHaveBeenCalledTimes(1);
+    started[0]!.settle(1);
+    await expect(first).resolves.toBe(1);
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+    started[1]!.settle(2);
+    await expect(second).resolves.toBe(2);
+  });
+
+  it("shares the next read among everyone who asked during the running one", async () => {
+    const { started, read, fenceRead } = reads();
+    const first = fenceRead(OWNER);
+    const waiting = [fenceRead(OWNER), fenceRead(OWNER), fenceRead(OWNER)];
+    started[0]!.settle(1);
+    await first;
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+    started[1]!.settle(2);
+    await expect(Promise.all(waiting)).resolves.toEqual([2, 2, 2]);
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects only the callers of a failed read, and the next read still runs", async () => {
+    const { started, read, fenceRead } = reads();
+    const first = fenceRead(OWNER);
+    const second = fenceRead(OWNER);
+    started[0]!.fail(new Error("The database is unreachable."));
+    await expect(first).rejects.toThrow("The database is unreachable.");
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+    started[1]!.settle(3);
+    await expect(second).resolves.toBe(3);
+  });
+
+  it("fails a read Postgres doesn't answer in time, and then begins the next read", async () => {
+    vi.useFakeTimers();
+    try {
+      const { started, read, fenceRead } = reads();
+      const stalled = fenceRead(OWNER);
+      const waiting = fenceRead(OWNER);
+      const failed = expect(stalled).rejects.toThrow("The fence read timed out.");
+      await vi.advanceTimersByTimeAsync(CREDENTIAL_FENCE_READ_TIMEOUT_MS - 1);
+      expect(read).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      await failed;
+      await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+      started[1]!.settle(1);
+      await expect(waiting).resolves.toBe(1);
+      // The stalled read answering late changes nothing.
+      started[0]!.settle(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reads each account on its own", async () => {
+    const { started, read, fenceRead } = reads();
+    const owner = fenceRead(OWNER), other = fenceRead(OTHER);
+    expect(read.mock.calls).toEqual([[OWNER], [OTHER]]);
+    started[1]!.settle(5);
+    started[0]!.settle(4);
+    await expect(Promise.all([owner, other])).resolves.toEqual([4, 5]);
+  });
+
+  it("begins a new read for a caller that asks after every read settled", async () => {
+    const { started, read, fenceRead } = reads();
+    const first = fenceRead(OWNER);
+    started[0]!.settle(1);
+    await first;
+    // The settled read's entry clears a turn after it settles.
+    await new Promise(resolve => setImmediate(resolve));
+    const later = fenceRead(OWNER);
+    expect(read).toHaveBeenCalledTimes(2);
+    started[1]!.settle(2);
+    await expect(later).resolves.toBe(2);
   });
 });

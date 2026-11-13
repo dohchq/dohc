@@ -4,29 +4,33 @@ import type {
   ChatChannel,
   ChatChannelSummary,
   ChatMessage,
+  ChatReaction,
   ChatStreamItem,
   ChatThread,
 } from "@dohc/workspace-contracts/engine";
 import type { ChatReadStore, ChatsHost, DispatchFacts, ErrorDetail, ProvisionedChannel } from "../chats";
+import type { AnswerStages, ChatWriteHost, ChatWriteReadStore } from "../chatWrites";
 
 type Decision = Awaited<ReturnType<ChatReadStore["listThreadDecisions"]>>[number];
 type ProjectionInput = Parameters<ChatReadStore["getThreadProjection"]>[0];
 type StreamInput = Parameters<ChatReadStore["listGroupStream"]>[0];
 type StreamPosition = ChatStreamItem["position"];
-type StoreMethod = keyof ChatReadStore;
+type StoreMethod = keyof ChatReadStore | "getMessage";
 
 export const WORKSPACE_ID = "workspace-1";
 
 // One workspace's chats in memory, read through the same methods as the
 // linked chat store. `log` records each call, and the host's own effects, in
 // the order they ran; `failing` makes a method reject.
-export class MemoryChatStore implements ChatReadStore {
+export class MemoryChatStore implements ChatReadStore, ChatWriteReadStore {
   readonly log: string[] = [];
   readonly failing = new Map<StoreMethod, unknown>();
   readonly channels: ChatChannelSummary[] = [];
   readonly threads: ChatThread[] = [];
   readonly messages = new Map<string, ChatMessage[]>();
   readonly decisions = new Map<string, Decision[]>();
+  /** Active reactions, oldest first. */
+  readonly reactions: ChatReaction[] = [];
   readonly readSequence = new Map<string, number>();
   readonly wireIds = new Map<string, string>();
   readonly agentUnread = new Set<string>();
@@ -92,6 +96,19 @@ export class MemoryChatStore implements ChatReadStore {
     this.decisions.set(threadId, list);
   }
 
+  addReaction(message: Pick<ChatMessage, "id" | "threadId">, emoji: string, author: ChatReaction["author"]): ChatReaction {
+    const reaction: ChatReaction = {
+      reactionId: `${message.id}:${emoji}:${author.authorId}`, threadId: message.threadId, messageId: message.id, emoji, author,
+      state: "added", atMs: this.now(),
+    };
+    this.reactions.push(reaction);
+    return reaction;
+  }
+
+  private reactionsOn(messageId: string): ChatReaction[] {
+    return this.reactions.filter((reaction) => reaction.messageId === messageId);
+  }
+
   async ensureGeneralChannel(input: { workspaceId: string }): Promise<ChatChannel> {
     this.enter("ensureGeneralChannel", input.workspaceId);
     return this.channels.find((channel) => channel.slug === "general") ??
@@ -144,9 +161,21 @@ export class MemoryChatStore implements ChatReadStore {
     return [...messages];
   }
 
+  async getMessage(input: { workspaceId: string; messageId: string }): Promise<ChatMessage> {
+    this.enter("getMessage", input.workspaceId);
+    const message = [...this.messages.values()].flat().find((candidate) => candidate.id === input.messageId);
+    if (!message) throw new Error("message-not-found");
+    return message;
+  }
+
   async listThreadDecisions(workspaceId: string, threadId: string): Promise<Decision[]> {
     this.enter("listThreadDecisions", workspaceId);
     return [...(this.decisions.get(threadId) ?? [])];
+  }
+
+  async listReactions(input: { workspaceId: string; threadId: string }): Promise<ChatReaction[]> {
+    this.enter("listReactions", input.workspaceId);
+    return this.reactions.filter((reaction) => reaction.threadId === input.threadId);
   }
 
   async getThreadProjection(input: ProjectionInput) {
@@ -181,7 +210,7 @@ export class MemoryChatStore implements ChatReadStore {
           position: { createdAtMs: first.createdAtMs, lane: "posts", id: thread.id },
           message: first,
           ...decisionFor(first),
-          reactions: [],
+          reactions: this.reactionsOn(first.id),
           post: {
             replyCount: replies.length,
             repliers: replies.slice(-1).map((reply) => ({ author: reply.author, lastReplyAtMs: reply.createdAtMs })),
@@ -191,7 +220,7 @@ export class MemoryChatStore implements ChatReadStore {
         });
       } else {
         for (const message of messages.filter((candidate) => !candidate.parentMessageId)) {
-          items.push({ position: { createdAtMs: message.createdAtMs, lane: "chat", id: message.id }, message, ...decisionFor(message), reactions: [] });
+          items.push({ position: { createdAtMs: message.createdAtMs, lane: "chat", id: message.id }, message, ...decisionFor(message), reactions: this.reactionsOn(message.id) });
         }
       }
     }
@@ -244,4 +273,78 @@ export function memoryHost(
       provisions.push(change);
     },
   };
+}
+
+// A write host over the store that admits everyone. `log` records each stage
+// beside the store's reads; `commands` keeps what each stage was handed. Like
+// the engine, a chat lane start joins the channel's running conversation, and
+// a resolve of an answered question returns it as it was. `findMessage` gives
+// the host the hook a host with a filtered store provides.
+export function memoryWriteHost(store: MemoryChatStore, options: { findMessage?: boolean } = {}) {
+  const commands: unknown[] = [];
+  let next = 0;
+  const id = (prefix: string) => `${prefix}-${(next += 1)}`;
+  const write = (input: { threadId: string; body: string; messageId?: string; parentMessageId?: string }) =>
+    store.addMessage({
+      id: input.messageId ?? id("message"), threadId: input.threadId, body: input.body,
+      ...(input.parentMessageId ? { parentMessageId: input.parentMessageId } : {}),
+    });
+  const resolve: AnswerStages["resolve"] = async (command) => {
+    store.log.push("resolve");
+    commands.push({ resolve: command });
+    const decision = store.decisions.get(command.threadId)?.find((candidate) => candidate.messageId === command.messageId);
+    if (!decision) throw new Error("decision-not-found");
+    if (decision.state === "open") {
+      Object.assign(decision, { state: "resolved", resolvedByMessageId: command.resolvedByMessageId },
+        command.chosenOption === undefined ? {} : { chosenOption: command.chosenOption });
+    }
+    return { ...decision };
+  };
+  const host: ChatWriteHost = {
+    workspaceId: WORKSPACE_ID,
+    store,
+    ...(options.findMessage ? { findMessage: (messageId: string) => store.getMessage({ workspaceId: WORKSPACE_ID, messageId }) } : {}),
+    async start(command) {
+      store.log.push("admit", "start");
+      commands.push({ start: command });
+      const running = command.lane === "chat"
+        ? store.threads.find((thread) => thread.channelId === command.channelId && thread.lane === "chat")
+        : undefined;
+      const thread = running ?? store.addThread({
+        id: command.threadId ?? id("thread"), channelId: command.channelId, lane: command.lane, title: command.title ?? "",
+      });
+      return { thread, message: write({ ...command, threadId: thread.id }) };
+    },
+    async reply(command) {
+      store.log.push("admit", "reply");
+      commands.push({ reply: command });
+      return write(command);
+    },
+    async answer(command, checkTargets, use) {
+      store.log.push("admit");
+      await checkTargets();
+      return await use({
+        reply: async () => {
+          store.log.push("reply");
+          commands.push({ reply: command });
+          return write(command);
+        },
+        resolve,
+      });
+    },
+    async answerWith(command, use) {
+      store.log.push("admit");
+      return await use({ reply: await store.getMessage({ workspaceId: WORKSPACE_ID, messageId: command.replyId }), resolve });
+    },
+    async react(command) {
+      store.log.push("admit", "react");
+      commands.push({ react: command });
+      const reaction: ChatReaction = {
+        reactionId: `${command.messageId}:${command.emoji}`, threadId: command.threadId, messageId: command.messageId,
+        emoji: command.emoji, author: { authorId: "user-1", kind: "human", displayName: "Sam" }, state: command.state, atMs: store.now(),
+      };
+      return reaction;
+    },
+  };
+  return { host, commands };
 }

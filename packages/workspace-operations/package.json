@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     "./chats": "./src/chats.ts",
+    "./chat-writes": "./src/chatWrites.ts",
     "./documents": "./src/documents.ts"
   },
   "scripts": {

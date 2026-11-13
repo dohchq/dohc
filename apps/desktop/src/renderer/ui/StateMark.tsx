@@ -197,8 +197,8 @@ function Mark(props: { kind: StateMarkKind }) {
  * saving or saved-to-host chip for screen readers only: those pass on their
  * own, so typing never changes what the row draws. Words appear when the
  * file is held, a pending share has lasted (and then stay while the person
- * keeps typing), or the state needs the person. `onRetry` puts Try again
- * beside the chip, for a state the person can retry from the editor. */
+ * keeps typing), or the state needs the person. `action` puts one step
+ * beside the chip, such as Try again for a state the editor can retry. */
 export function StateMark(props: {
   state: string | SaveState;
   shown: SaveStateKey | AccessStateKey | SaveState;
@@ -207,7 +207,7 @@ export function StateMark(props: {
   className?: string;
   truncate?: boolean;
   quietWhenCalm?: boolean;
-  onRetry?: () => void;
+  action?: { label: string; run: () => void };
 }) {
   const storedKey = typeof props.shown === "string" ? props.shown : saveStatePresentationKey(props.shown);
   const quiet = props.quietWhenCalm === true;
@@ -302,18 +302,18 @@ export function StateMark(props: {
     </span>
   );
   // One line at its natural width: the chip beside it gives way instead.
-  const retry = props.onRetry ? (
-    <SecondaryButton size="compact" data-testid={`${props.testId}-retry`} onClick={props.onRetry} className="shrink-0 whitespace-nowrap">
-      Try again
+  const step = props.action ? (
+    <SecondaryButton size="compact" data-testid={`${props.testId}-action`} onClick={props.action.run} className="shrink-0 whitespace-nowrap">
+      {props.action.label}
     </SecondaryButton>
   ) : null;
-  if (!props.truncate) return <>{chip}{retry}</>;
+  if (!props.truncate) return <>{chip}{step}</>;
   // The tooltip sits beside the chip, not in it, so the chip's text stays its
-  // label while the tooltip is open. Beside Try again, the chip keeps the
+  // label while the tooltip is open. Beside its step, the chip keeps the
   // header's 28px for its mark and an ellipsis.
   const explained = (
     <span
-      className={`inline-flex max-w-full ${retry ? "min-w-[28px]" : "min-w-0"}`}
+      className={`inline-flex max-w-full ${step ? "min-w-[28px]" : "min-w-0"}`}
       onMouseEnter={() => setOpen(true)}
       onMouseLeave={(event) => {
         if (!event.currentTarget.contains(document.activeElement)) setOpen(false);
@@ -333,7 +333,7 @@ export function StateMark(props: {
       ) : null}
     </span>
   );
-  return <>{explained}{retry}</>;
+  return <>{explained}{step}</>;
 }
 
 // Between the chip and its tooltip, and between the tooltip and the window's edge.

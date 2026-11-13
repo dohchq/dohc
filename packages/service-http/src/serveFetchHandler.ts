@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 import { DRAIN_TIMEOUT_HEADER, pipeResponseBody } from "./pipeResponseBody";
+import type { RequestLog } from "./requestLog";
 
 export interface ServeFetchHandlerOptions {
   handler: (request: Request) => Promise<Response>;
@@ -20,6 +21,8 @@ export interface ServeFetchHandlerOptions {
   timedOut?: (url: URL) => Response;
   /** Sets request headers the handler trusts, such as the client address. */
   prepareHeaders?: (headers: Headers, incoming: IncomingMessage, url: URL) => void;
+  /** Gets one line for each answer, naming the route the handler marked. */
+  requestLog?: Pick<RequestLog, "write">;
 }
 
 /**
@@ -38,6 +41,16 @@ export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
       outgoing.destroy();
       return;
     }
+    const arrivedAtMs = Date.now();
+    const method = incoming.method ?? "GET";
+    let logged = false;
+    const answer = (response: Response, request?: Request, closeAfter?: IncomingMessage): Promise<void> => {
+      if (!logged) {
+        logged = true;
+        options.requestLog?.write(request, method, response.status, arrivedAtMs);
+      }
+      return writeResponse(response, outgoing, closeAfter);
+    };
     const maxBodyBytes = options.maxBodyBytes(url);
     const chunks: Buffer[] = [];
     let received = 0;
@@ -49,7 +62,6 @@ export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
       disconnect.abort();
       outgoing.destroy();
     });
-    const method = incoming.method ?? "GET";
     if (options.streamBody?.(url, method)) {
       const headers = new Headers(incoming.headers as Record<string, string>);
       options.prepareHeaders?.(headers, incoming, url);
@@ -63,9 +75,9 @@ export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
       // An admission refusal may leave the upload unread. Flush its response
       // before closing the connection; never drain an unauthenticated archive.
       void options.handler(request)
-        .then(response => writeResponse(response, outgoing, incoming.readableEnded ? undefined : incoming))
+        .then(response => answer(response, request, incoming.readableEnded ? undefined : incoming))
         .catch(() => {
-          if (!outgoing.destroyed) void writeResponse(options.failure(url), outgoing, incoming);
+          if (!outgoing.destroyed) void answer(options.failure(url), request, incoming);
         });
       return;
     }
@@ -74,7 +86,7 @@ export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
       rejected = true;
       chunks.length = 0;
       disconnect.abort(new DOMException("Request body timed out", "TimeoutError"));
-      void writeResponse(options.timedOut?.(url) ?? new Response(null, { status: 408 }), outgoing, incoming);
+      void answer(options.timedOut?.(url) ?? new Response(null, { status: 408 }), undefined, incoming);
     }, 300_000) : undefined;
     bodyTimer?.unref();
     const clearBodyTimer = () => clearTimeout(bodyTimer);
@@ -88,14 +100,13 @@ export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
         rejected = true;
         clearBodyTimer();
         chunks.length = 0;
-        void writeResponse(options.oversized(url), outgoing, incoming);
+        void answer(options.oversized(url), undefined, incoming);
         return;
       }
       chunks.push(Buffer.from(chunk));
     });
     incoming.on("end", () => {
       if (rejected) return;
-      const method = incoming.method ?? "GET";
       const headers = new Headers(incoming.headers as Record<string, string>);
       options.prepareHeaders?.(headers, incoming, url);
       let request: Request;
@@ -115,9 +126,9 @@ export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
       }
       void options
         .handler(request)
-        .then((response) => writeResponse(response, outgoing))
+        .then((response) => answer(response, request))
         .catch(() => {
-          if (!outgoing.destroyed) void writeResponse(options.failure(url), outgoing);
+          if (!outgoing.destroyed) void answer(options.failure(url), request);
         });
     });
   });

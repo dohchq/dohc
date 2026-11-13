@@ -5776,12 +5776,33 @@ mod pending_write_order_tests {
     /// Records each change to note.md in order, queueing a file write for
     /// those marked to write. The file starts as "base".
     fn note_changes(changes: &[(&str, &str, bool)]) -> (ScratchDir, EngineStore) {
+        note_changes_on(false, changes)
+    }
+
+    /// [`note_changes`] in a hosted replica, as a server keeps a live note.
+    fn hosted_note_changes(changes: &[(&str, &str, bool)]) -> (ScratchDir, EngineStore) {
+        note_changes_on(true, changes)
+    }
+
+    fn note_changes_on(hosted: bool, changes: &[(&str, &str, bool)]) -> (ScratchDir, EngineStore) {
         let scratch = ScratchDir::new().expect("scratch");
         let mut store = EngineStore::open(
             &dohc_engine_testkit::engine_db_path(&scratch).expect("database"),
             1,
         )
         .expect("store");
+        if hosted {
+            dohc_engine_sync::create_hosted_replica(
+                &mut store,
+                "workspace",
+                "service-host:host",
+                "epoch",
+                "stream",
+                1,
+                &NoFaults,
+            )
+            .expect("hosted replica");
+        }
         ensure_mutation_version_on_store(&mut store, "workspace", "main", 1, &NoFaults)
             .expect("version");
         let mut preimage = None;
@@ -5951,5 +5972,203 @@ mod pending_write_order_tests {
             [JobStatus::Conflict, JobStatus::Pending]
         );
         assert_eq!(state, YdocWriteState::Conflicted);
+    }
+
+    /// A hosted note whose file holds "base" and owes it two writes, the
+    /// second over the first.
+    fn two_hosted_writes() -> (ScratchDir, EngineStore, Vec<String>) {
+        let (scratch, store) = hosted_note_changes(&[
+            ("moment-base", "base", false),
+            ("moment-z", "first edit", true),
+            ("moment-a", "second edit", true),
+        ]);
+        let key = DocKey::new("workspace", "main", "object").expect("key");
+        let writes = store
+            .read_with(|conn| pending_ydoc_writes_in(conn, &key))
+            .expect("pending writes");
+        assert_eq!(writes, ["ydoc-mat_moment-z", "ydoc-mat_moment-a"]);
+        (scratch, store, writes)
+    }
+
+    /// The names beside the note that hold a conflict file's content.
+    fn conflict_files(scratch: &ScratchDir) -> Vec<String> {
+        std::fs::read_dir(scratch.path())
+            .expect("the root")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .filter(|name| name.contains("conflict"))
+            .collect()
+    }
+
+    /// #3804: a pull's page brings the file to the note's head through a job
+    /// of its own, while the writes its projections queued still wait. A
+    /// replay then cancels the write of the earlier state, which could only
+    /// conflict, and marks the write of the head complete. It writes nothing.
+    #[test]
+    fn a_replay_cancels_the_write_the_head_replaced_once_the_file_holds_the_head() {
+        let (scratch, mut store, _) = two_hosted_writes();
+        let note = scratch.path().join("note.md");
+        std::fs::write(&note, "second edit").expect("the page's write");
+        let replay = replay_pending_materializations(
+            &mut store,
+            scratch.path(),
+            SCOPE,
+            6,
+            &NoFaults,
+            None,
+            false,
+        )
+        .expect("replay");
+        assert_eq!((replay.parked, replay.failed), (0, 0));
+        assert_eq!(
+            [
+                job_status(&store, "ydoc-mat_moment-z"),
+                job_status(&store, "ydoc-mat_moment-a"),
+            ],
+            [JobStatus::Cancelled, JobStatus::Complete]
+        );
+        assert_eq!(std::fs::read_to_string(&note).expect("file"), "second edit");
+        assert_eq!(conflict_files(&scratch), Vec::<String>::new());
+    }
+
+    /// A settle replays the writes before the head's one at a time and stops
+    /// at the first that does not land. Once the file holds the head, the
+    /// first replay cancels every one of them, so none stops it (#3804).
+    #[test]
+    fn a_settle_passes_the_writes_the_head_replaced_once_the_file_holds_the_head() {
+        let (scratch, mut store) = hosted_note_changes(&[
+            ("moment-base", "base", false),
+            ("moment-z", "first edit", true),
+            ("moment-m", "second edit", true),
+            ("moment-a", "third edit", true),
+        ]);
+        std::fs::write(scratch.path().join("note.md"), "third edit").expect("the page's write");
+        let earlier = [
+            "ydoc-mat_moment-z".to_owned(),
+            "ydoc-mat_moment-m".to_owned(),
+        ];
+        let stopped = replay_materializations_in_order(
+            &mut store,
+            scratch.path(),
+            SCOPE,
+            6,
+            &NoFaults,
+            &earlier,
+        )
+        .expect("replay");
+        assert!(stopped.is_none());
+        assert_eq!(
+            [
+                job_status(&store, "ydoc-mat_moment-z"),
+                job_status(&store, "ydoc-mat_moment-m"),
+                job_status(&store, "ydoc-mat_moment-a"),
+            ],
+            [
+                JobStatus::Cancelled,
+                JobStatus::Cancelled,
+                JobStatus::Pending
+            ]
+        );
+        assert_eq!(conflict_files(&scratch), Vec::<String>::new());
+    }
+
+    /// A file that holds bytes the store does not know is a real conflict.
+    /// It is not the note's head, so its writes run as before: the first
+    /// conflicts, its content is kept beside the file, and the file stays.
+    #[test]
+    fn a_replay_keeps_the_conflict_of_a_file_changed_outside() {
+        let (scratch, mut store, writes) = two_hosted_writes();
+        with_document_row(&mut store);
+        let note = scratch.path().join("note.md");
+        std::fs::write(&note, "outside edit").expect("outside edit");
+        let stopped = replay_materializations_in_order(
+            &mut store,
+            scratch.path(),
+            SCOPE,
+            6,
+            &NoFaults,
+            &writes,
+        )
+        .expect("replay")
+        .expect("the first write stops the replay");
+        assert_eq!(stopped.unlanded, 2);
+        assert_eq!(
+            [
+                job_status(&store, "ydoc-mat_moment-z"),
+                job_status(&store, "ydoc-mat_moment-a"),
+            ],
+            [JobStatus::Conflict, JobStatus::Pending]
+        );
+        assert_eq!(
+            std::fs::read_to_string(&note).expect("file"),
+            "outside edit"
+        );
+        assert_eq!(conflict_files(&scratch).len(), 1);
+    }
+
+    /// A file that holds an earlier state of the note, not its head, is owed
+    /// its writes. They land in order, as before.
+    #[test]
+    fn a_replay_lands_the_writes_owed_to_a_file_behind_its_head() {
+        let (scratch, mut store, _) = two_hosted_writes();
+        let note = scratch.path().join("note.md");
+        std::fs::write(&note, "first edit").expect("an earlier state");
+        let replay = replay_pending_materializations(
+            &mut store,
+            scratch.path(),
+            SCOPE,
+            6,
+            &NoFaults,
+            None,
+            false,
+        )
+        .expect("replay");
+        assert_eq!((replay.parked, replay.failed), (0, 0));
+        assert_eq!(
+            [
+                job_status(&store, "ydoc-mat_moment-z"),
+                job_status(&store, "ydoc-mat_moment-a"),
+            ],
+            [JobStatus::Complete, JobStatus::Complete]
+        );
+        assert_eq!(std::fs::read_to_string(&note).expect("file"), "second edit");
+        assert_eq!(conflict_files(&scratch), Vec::<String>::new());
+    }
+
+    /// A store that is not a hosted replica is unchanged: it replays a write
+    /// the head replaced as before, which conflicts and keeps that earlier
+    /// state beside the file. Whether a desktop or a server's automation
+    /// replica reaches this state is not established (#3804). This test
+    /// changes with the decision to apply the rule to them too.
+    #[test]
+    fn a_store_off_a_hosted_replica_replays_a_write_the_head_replaced_as_before() {
+        let (scratch, mut store, _) = two_writes_that_tie_in_time();
+        with_document_row(&mut store);
+        let note = scratch.path().join("note.md");
+        std::fs::write(&note, "second edit").expect("the page's write");
+        replay_pending_materializations(
+            &mut store,
+            scratch.path(),
+            SCOPE,
+            6,
+            &NoFaults,
+            None,
+            false,
+        )
+        .expect("replay");
+        assert_eq!(
+            [
+                job_status(&store, "ydoc-mat_moment-z"),
+                job_status(&store, "ydoc-mat_moment-a"),
+            ],
+            [JobStatus::Conflict, JobStatus::Complete]
+        );
+        assert_eq!(std::fs::read_to_string(&note).expect("file"), "second edit");
+        assert_eq!(conflict_files(&scratch).len(), 1);
     }
 }

@@ -43,7 +43,7 @@ const movedKey=(target:ServiceActivationTarget,objectId:string)=>JSON.stringify(
 /** A host can start with no targets; the self-hosted supervisor adds them as documents are shared. */
 export function parseServiceActivationConfig(value:unknown){
   if(value===undefined)return undefined;
-  const row=configRecord(value,["targets","validation","maxCaptureBytes","maxEntriesPerDrain","maxBytesPerDrain","maxDocumentsPerPass","pollIntervalMs","passDeadlineMs","idleUnloadMs","idleRetryMs"]);
+  const row=configRecord(value,["targets","validation","maxCaptureBytes","maxActivationHistoryEntries","maxEntriesPerDrain","maxBytesPerDrain","maxDocumentsPerPass","pollIntervalMs","passDeadlineMs","idleUnloadMs","idleRetryMs"]);
   if(!Array.isArray(row.targets) || row.targets.length>64)throw new Error("Invalid service activation targets.");
   const targets=row.targets.map(parseServiceActivationTarget);
   if(new Set(targets.map(targetKey)).size!==targets.length)throw new Error("Duplicate service activation target.");
@@ -52,6 +52,7 @@ export function parseServiceActivationConfig(value:unknown){
   const validation=Object.freeze({...policy}) as unknown as OrderedLiveUpdateCutPolicy;
   return Object.freeze({targets:Object.freeze(targets),validateActivation:liveValidation.ordinaryActivation(validation),
     validateAdmission:liveValidation.validator(validation),maxCaptureBytes:positive(row.maxCaptureBytes),
+    maxActivationHistoryEntries:positive(row.maxActivationHistoryEntries),
     maxEntriesPerDrain:positive(row.maxEntriesPerDrain),maxBytesPerDrain:positive(row.maxBytesPerDrain),
     maxDocumentsPerPass:positive(row.maxDocumentsPerPass),pollIntervalMs:positive(row.pollIntervalMs),passDeadlineMs:positive(row.passDeadlineMs),
     idleUnloadMs:positive(row.idleUnloadMs),idleRetryMs:positive(row.idleRetryMs)});
@@ -373,6 +374,16 @@ export class ServiceActivationDriver {
     return this.#targets.filter(target=>target.workspaceId===workspaceId && !this.dormant(target) && !this.#held.has(targetKey(target)) &&
       !this.#blocked.has(targetKey(target))).every(target=>this.#completedTargets.has(targetKey(target)));
   }
+  // Whether an unready workspace may still push. A document with no owner that waits out a backoff after a failed
+  // activation does not hold the push back, so its siblings' settled edits still publish while it waits. It still
+  // holds readiness, so the workspace keeps pulling as an unready one does.
+  workspacePushes(workspaceId:string){
+    return this.#targets.filter(target=>target.workspaceId===workspaceId && !this.dormant(target) && !this.#held.has(targetKey(target)) &&
+      !this.#blocked.has(targetKey(target)) && !this.#backingOff(targetKey(target))).every(target=>this.#completedTargets.has(targetKey(target)));
+  }
+  #backingOff(key:string){return this.#waiting(key) && ![...this.#owners.values()].some(owner=>owner.target===key);}
+  // Whether a failed activation's wait before its next capture has not yet lapsed.
+  #waiting(key:string){return Date.now()<(this.#failures.get(key)?.until ?? 0);}
   consumer(value:LiveDocumentKey){
     const document=parseLiveDocumentKey(value),owner=this.#owners.get(JSON.stringify(document));
     if(!owner?.completed || this.#invalidated(owner,document))throw new Error("Service document activation is incomplete.");
@@ -657,7 +668,7 @@ export class ServiceActivationDriver {
     }
     if(!owner){
       // Waiting applies to capturing: a document already live keeps draining on every pass.
-      if(Date.now()<(this.#failures.get(key)?.until ?? 0))return backingOff;
+      if(this.#waiting(key))return backingOff;
       let update=this.#latestUpdate(target);
       if(catchUp || !saved){
         let pulling=catchUp?.get(target.workspaceId);
@@ -690,7 +701,7 @@ export class ServiceActivationDriver {
         try{
           await this.#store.prepare({capture,host:o.host,registeredAtMs:Date.now(),guard:check,signal,
             validate:c.validateActivation,bounds:{maxCaptureBytes:c.maxCaptureBytes,
-              maxEntriesPerDrain:c.maxEntriesPerDrain,maxBytesPerDrain:c.maxBytesPerDrain}});
+              maxHistoryEntries:c.maxActivationHistoryEntries,maxBytesPerDrain:c.maxBytesPerDrain}});
         }catch(error){
           const tooLarge=error instanceof ServiceActivationTooLarge,overBudget=error instanceof ServiceActivationHistoryOverBudget;
           if(!(error instanceof ServiceActivationStaleCut) && !(error instanceof ServiceActivationBusy) && !tooLarge && !overBudget)throw error;

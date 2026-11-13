@@ -408,6 +408,11 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   renewPersonalSessionDemand(input: {workspaceId: string; objectId: string; nowMs: number}) {
     return serviceHostEnrollmentStorage.renewPersonalSessionDemand(this, input);
   }
+  reclaimIdleLiveDocuments(nowMs: number) {
+    const result = serviceHostEnrollmentStorage.reclaimIdleLiveDocuments(this, nowMs);
+    for (const enrollment of result) notifyDesktopReadiness(this, {workspaceId: enrollment.workspaceId, path: enrollment.path});
+    return result;
+  }
   listServiceHostEnrollments(workspaceId?: string) {
     return serviceHostEnrollmentStorage.listServiceHostEnrollments(this, workspaceId);
   }
@@ -956,6 +961,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   listUnfinishedOperationCopies() {
     return operationRecordStorage.listUnfinishedOperationCopies(this);
+  }
+
+  unfinishedOperationActiveEnds() {
+    return operationRecordStorage.unfinishedOperationActiveEnds(this);
   }
 
   fetchAccountOperationLogRow(input: Parameters<typeof operationRecordStorage.operationLogRow>[1]) {

@@ -33,7 +33,7 @@ import {notFound} from "./errors";
 import {MAX_ORIGIN_ID_CHARS} from "./wireLimits";
 import {MAX_SHARE_PROPOSAL_OPS} from "@dohc/security-contract/share-proposal-bound";
 
-type SyncRelayRoute =
+export type SyncRelayRoute =
   | AccountOperationRoute
   | AccountSessionRoute
   | AccountWorkspaceRoute

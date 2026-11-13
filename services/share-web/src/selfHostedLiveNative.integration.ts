@@ -2,7 +2,7 @@ import { request as httpRequest } from "node:http";
 import { once } from "node:events";
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { basename, join, resolve, toNamespacedPath } from "node:path";
+import { basename, dirname, join, resolve, toNamespacedPath } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { WebSocket } from "ws";
 import { getCookies, parseSetCookieHeader } from "better-auth/cookies";
@@ -23,10 +23,13 @@ import {authorizeServiceHostReplication} from "../../sync-relay/src/serviceHostC
 import {createServiceHostReplication} from "../../sync-relay/src/serviceHostReplication.js";
 import {createServiceHostEnrollmentRoutes} from "../../sync-relay/src/serviceHostEnrollmentRoutes.js";
 import {selfHostLiveProfile} from "../../sync-relay/src/selfHostLiveProfile.js";
+import {RECLAIM_RETENTION_MS} from "../../sync-relay/src/liveHostingLimits.js";
 import { createSyncRelayHandler } from "../../sync-relay/src/server.js";
 import { createNamedLiveRoutes, createOwnerLiveRoutes } from "../../sync-relay/src/namedLiveRoutes.js";
 import { captureNamedLiveFrameHost, captureOwnerLiveFrameHost } from "../../sync-relay/src/namedLiveFrameHost.js";
-import { liveBrowserActor } from "../../sync-relay/src/liveBrowserContext.js";
+import { liveBrowserActor, type PersonalLiveContext } from "../../sync-relay/src/liveBrowserContext.js";
+import { agentAccessCheck } from "../../sync-relay/src/linkAuthority.js";
+import type { StorageContext } from "../../sync-relay/src/storage/context.js";
 import type { LiveAuthorContext } from "@dohc/live-session-contract/live-authorship";
 import {OwnerKnownRefusals, runNativeOwnerDeliveryPass} from "../../../apps/desktop/src/workspaces/nativeOwnerDelivery.js";
 import {readyOwnerDeliveryDocuments} from "../../../apps/desktop/src/workspaces/serverOwnerDelivery.js";
@@ -554,19 +557,74 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     const automationSettlement = await settlementOf(automationAck, agentAck.journalCursor, automationMarkdown);
     await publication(automationSettlement, [automationAdmitted]);
 
+    // The owner's personal agent, signed in and reaching the workspace at
+    // Edit, through the capture its live route makes. Its update declares
+    // another agent, and the relay credits it to the agent on behalf of its owner.
+    const personal = {kind: "agent", agentId: `p-${"proofpersonalagent".padEnd(26, "a")}`, agentName: "Proof personal agent", onBehalfOf: ownerUser.id, depth: 0};
+    const personalCheck = agentAccessCheck(createHash("sha256").update("proof-personal-token").digest("base64url"), `${audience}/mcp/agent/w/workspace`, ticketKey)!;
+    const relayWrite = storage as StorageContext;
+    relayWrite.tx(() => {
+      relayWrite.db.prepare("INSERT INTO sync_relay_personal_agents(agent_id,owner_user_id,name,hue,status,epoch,created_at_ms) VALUES (?,?,?,'olive','active',1,0)")
+        .run(personal.agentId, ownerUser.id, personal.agentName);
+      relayWrite.db.prepare("INSERT INTO sync_relay_personal_agent_reach(agent_id,workspace_id,level,start_seq) VALUES (?,'workspace','edit',0)").run(personal.agentId);
+      relayWrite.db.prepare(`INSERT INTO sync_relay_personal_agent_connections(connection_id,agent_id,owner_user_id,client_id,resource_hash,agent_epoch,
+        fence_epoch,connected_at_ms) VALUES ('proof-personal-connection',?,?,'client',?,1,0,0)`).run(personal.agentId, ownerUser.id, personalCheck.resourceHash);
+      relayWrite.db.prepare("INSERT INTO sync_relay_personal_agent_tokens(token_hash,connection_id,kind,issued_at_ms,expires_at_ms) VALUES (?,'proof-personal-connection','access',0,?)")
+        .run(personalCheck.accessTokenHash, 4_000_000_000_000);
+    });
+    const personalContext: PersonalLiveContext = {kind: "personal", workspaceId: "workspace", agentId: personal.agentId, connectionId: "proof-personal-connection",
+      accessTokenHash: personalCheck.accessTokenHash, resourceHash: personalCheck.resourceHash, fenceEpoch: 0};
+    const personalMinted = await tickets.mint({objectId}, personalContext);
+    const personalTicket = personalMinted && await tickets.redeem(personalMinted.token, personalContext);
+    if (!personalTicket) throw new Error("The personal agent's live ticket was refused.");
+    // The account's fence doesn't move here; the relay's tests cover the reads.
+    const personalHost = captureNamedLiveFrameHost({ticket: personalTicket, actor: liveBrowserActor(personalContext), storage,
+      native: await active!.captureNative(personalTicket.binding), bounds: profile.namedLive.host, validate, fresh: async () => undefined});
+    const {personalAck, personalMarkdown} = await (async () => {
+      const personalDoc = new Y.Doc();
+      try {
+        const sync = await personalHost.openSync(Y.encodeStateVector(personalDoc), AbortSignal.timeout(30_000));
+        try {Y.applyUpdate(personalDoc, sync.missingStateUpdate);} finally {sync.close();}
+        const beforePersonal = Y.encodeStateVector(personalDoc);
+        personalDoc.getMap("frontmatter").set("personalProof", "admitted");
+        const updateBytes = Y.encodeStateAsUpdate(personalDoc, beforePersonal);
+        const submitted = await personalHost.submit({deliveryId: "self-host-proof-personal", updateDigest: hash(updateBytes), updateBytes,
+          authorContext: {kind: "account", accountId: namedUser.id, agent: {agentId: agent.agentId, agentName: agent.agentName, onBehalfOf: agent.onBehalfOf, depth: agent.depth}}},
+          AbortSignal.timeout(30_000));
+        if (submitted.result !== "success") throw new Error(`Personal agent edit was not admitted: ${JSON.stringify(submitted)}`);
+        return {personalAck: submitted.ack, personalMarkdown: yDocToMarkdown(personalDoc)};
+      } finally {personalHost.close(); personalDoc.destroy();}
+    })();
+    expect(admittedSnapshot(personalAck.deliveryId)).toEqual([personal]);
+    expect(personalAck.journalCursor).toBeGreaterThan(automationAck.journalCursor);
+    await active!.settle(document);
+    expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe(personalMarkdown);
+    const personalSettlement = await settlementOf(personalAck, automationAck.journalCursor, personalMarkdown);
+    await publication(personalSettlement, [personal]);
+
     // Publication credits each interval with the relay-admitted authors in
     // History's flat form: the snapshot person and the declared agent, never
-    // the grant authority. The service keeps the same credit that owner
-    // devices import.
+    // the grant authority, and the personal agent on behalf of its owner. The
+    // service keeps the same credit that owner devices import.
     // Import marks the relay-admitted person confirmed; the admitted snapshot carries no marker.
     const importedHuman = {...human, relayConfirmed: true};
+    // Some copies keep an agent's depth 0 and others drop it, as History's
+    // flat form names none. History reads both as depth 0, so they compare
+    // without it.
+    const importedPersonal = {kind: personal.kind, agentId: personal.agentId, agentName: personal.agentName, onBehalfOf: personal.onBehalfOf};
     const declaredCredit = [
       {momentId: agentSettlement.record.momentId, imported: [agent, importedHuman]},
       {momentId: automationSettlement.record.momentId, imported: [automation]},
+      {momentId: personalSettlement.record.momentId, imported: [importedPersonal]},
     ] as const;
+    const withoutDepthZero = (author: unknown) => {
+      if (typeof author !== "object" || author === null || (author as {depth?: unknown}).depth !== 0) return author;
+      const {depth: _depth, ...rest} = author as Record<string, unknown>;
+      return rest;
+    };
     const expectAuthors = (actual: unknown, expected: readonly unknown[]) => {
       expect(actual).toHaveLength(expected.length);
-      expect(actual).toEqual(expect.arrayContaining([...expected]));
+      expect((actual as unknown[]).map(withoutDepthZero)).toEqual(expect.arrayContaining([...expected]));
     };
     const momentAuthors = async (call: typeof rpc, momentId: string) => {
       const moment = ((await call("moments.list", {versionId: mainVersionId})).moments as {momentId: string; authors?: unknown[] | null}[])
@@ -586,13 +644,13 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
       }
       throw new Error("Pull exceeded its eight-page bound.");
     };
-    // The enrolled owner first receives both admitted intervals through its
+    // The enrolled owner first receives the admitted intervals through its
     // authenticated native delivery, as after the baseline's idle edit.
     expect(await runOwnerPass()).toBe("empty");
-    expect((await owner!.ownerYDocReadState(nativeRequest(), target)).acceptedCursor).toBeGreaterThanOrEqual(automationAck.journalCursor);
+    expect((await owner!.ownerYDocReadState(nativeRequest(), target)).acceptedCursor).toBeGreaterThanOrEqual(personalAck.journalCursor);
     // Imported audit evidence adds no credit to the published moments.
     await pullAll(rpc);
-    expect((await rpc("versionedText.read", {versionId: mainVersionId, path: "docs/a.md"})).text).toBe(automationMarkdown);
+    expect((await rpc("versionedText.read", {versionId: mainVersionId, path: "docs/a.md"})).text).toBe(personalMarkdown);
     for (const {momentId, imported} of declaredCredit) expectAuthors(await momentAuthors(rpc, momentId), imported);
 
     // A fresh ordinary peer imports the same credit without any live feed.
@@ -611,14 +669,15 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     expect((await peerRpc("sync.adoptJoinIdentity", {workspaceId: "workspace", replicationEpoch: identity.replicationEpoch,
       streamIdentity: identity.streamIdentity})).adopted).toBe(true);
     await pullAll(peerRpc);
-    expect((await peerRpc("versionedText.read", {versionId: mainVersionId, path: "docs/a.md"})).text).toBe(automationMarkdown);
-    expect(readFileSync(join(peerRoot, "docs/a.md"), "utf8")).toBe(automationMarkdown);
+    expect((await peerRpc("versionedText.read", {versionId: mainVersionId, path: "docs/a.md"})).text).toBe(personalMarkdown);
+    expect(readFileSync(join(peerRoot, "docs/a.md"), "utf8")).toBe(personalMarkdown);
     for (const {momentId, imported} of declaredCredit) expectAuthors(await momentAuthors(peerRpc, momentId), imported);
     expect(await momentAuthors(peerRpc, settledMomentId)).toEqual(unattributed);
     peer.close(); await peer.waitForExit(); peer = undefined;
     results.declaredAuthors = {
       agent: {receipt: agentAck, settlement: agentSettlement, admitted: [human, agent], imported: [agent, importedHuman]},
       automation: {receipt: automationAck, settlement: automationSettlement, admitted: [automationAdmitted], imported: [automation]},
+      personal: {receipt: personalAck, settlement: personalSettlement, admitted: [personal], imported: [importedPersonal]},
     };
     // The service imports the admitted credit through its own background pull.
     // Poll its store until that credit lands. A missing row reads as undefined, not null.
@@ -651,7 +710,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     } finally {engine.close();}
     expect(hash(readFileSync(executable))).toBe(expectedHash);
     writeFileSync(join(root, "result.json"), JSON.stringify({verdict: "PASS", executable, sha256: expectedHash,
-      scope: "Default self-host profile, scoped replication credentials, automatic discovery, native cold import and adoption-reply-loss recovery, service restart, owner draft restart, concurrent named and owner edits, idle owner receive, native acknowledgements, settlement and ordinary publication, declared agent and trusted automation credit through service publication, owner and fresh peer import.",
+      scope: "Default self-host profile, scoped replication credentials, automatic discovery, native cold import and adoption-reply-loss recovery, service restart, owner draft restart, concurrent named and owner edits, idle owner receive, native acknowledgements, settlement and ordinary publication, declared agent, trusted automation and personal agent credit through service publication, owner and fresh peer import.",
       omitted: ["TLS transport", "browser UI", "restore cutover"], harness: {transforms: harness.transforms, captures: harness.captures}, results}, null, 2));
   } finally {
     for (const provider of providers) {provider.close(); provider.doc.destroy();}
@@ -757,11 +816,15 @@ async function openSelfHostProof(name: string) {
     await push();
     // A rich document the owner writes and edits ordinarily on their device, each change pushed to the relay.
     // Unless `seeded`, it is only written as text, as an agent writes it, until `open` opens it as the desktop does.
-    const ownerDocument = async (path: string, text: string, {seeded = true} = {}) => {
+    // `firstVersion` changes the Y.Doc before it becomes the document's first version.
+    const ownerDocument = async (path: string, text: string, {seeded = true, firstVersion}: {seeded?: boolean; firstVersion?: (doc: Y.Doc) => void} = {}) => {
+      mkdirSync(dirname(join(ownerRoot, path)), {recursive: true});
       writeFileSync(join(ownerRoot, path), text);
       const objectId = (await rpc("versionedText.write", {workspaceId: "workspace", versionId: mainVersionId, path, text, origin: "api"}, randomUUID())).object.id as string;
       // The owner's Y.Doc, as its engine holds it. It records no source, so `text` is in the engine's form, with its final newline.
-      const doc = markdownToYDoc(text), baseline = Y.encodeStateAsUpdate(doc);
+      const doc = markdownToYDoc(text);
+      firstVersion?.(doc);
+      const baseline = Y.encodeStateAsUpdate(doc);
       closes.push(async () => doc.destroy());
       const edit = async (change: (doc: Y.Doc) => void, seed?: Uint8Array) => {
         const editor = await rpc("ydoc.open", {versionId: mainVersionId, path, expectedObjectId: objectId, contentKind: "richdoc"});
@@ -841,6 +904,10 @@ async function openSelfHostProof(name: string) {
     const stopSupervisor = async () => {const stopping = supervisor; supervisor = undefined; await stopping?.close();};
     const proof = {root, hostRoot, store, executable, expectedHash, relayRead, reports, ownerDocument, ownerEdit: first.edit, objectId, ownerUserId: ownerUser.id,
       route, serviceRead, activation, live, startSupervisor, stopSupervisor,
+      /** Shares another folder with the named collaborator for Edit, so the host enrolls the notes already in it. */
+      shareFolder: (folder: string) => storage.createShare({
+        share: {shareId: `share-${folder}`, workspaceId: "workspace", granterUserId: ownerUser.id, selectorJson: JSON.stringify({paths: [folder], versionId: null}), createdAtMs: Date.now()},
+        grant: {grantId: `grant-${folder}`, shareId: `share-${folder}`, principalKind: "user", principalUserId: namedUser.id, principalEmail: null, access: "edit", generation: 1, status: "active", createdAtMs: Date.now(), revokedAtMs: null, parentGrantId: null}}),
       /** The relay storage the running relay opened. */
       get storage() {return storage;},
       /** Stops the running daemon, as when it loses an engine reply. The supervisor starts another. */
@@ -1438,6 +1505,102 @@ it("keeps a document retired without a Stop parked until an owner open reaches t
   return {attemptsBeforeOpen: before, reports: proof.reports};
 }), 120000);
 
+// Reclaim, as the host's sweep runs it once the retention period has passed.
+// After the share goes, only the owner's open keeps the document. With no live
+// connection and no edit for that period, the sweep retires its activation and
+// the document parks, keeping its store. An edit the owner makes afterwards
+// reaches the relay but no session host. Their next open enrolls it again, and
+// a successor holds the edit.
+it("reclaims a document only its owner's open keeps once idle past retention, and their next open starts a successor holding the edit made meanwhile", () => withSelfHostProof("self-host-reclaim", async proof => {
+  const saved = proof.activation()!;
+  expect(await proof.route("POST", {path: "docs/a.md", open: true}))
+    .toMatchObject({status: 200, body: {ok: true, path: "docs/a.md", objectId: proof.objectId, status: "ready", changed: false}});
+  expect(proof.storage.revokeShare("share", Date.now())).toBe(true);
+  // Within retention the sweep keeps it.
+  expect(proof.storage.reclaimIdleLiveDocuments(Date.now())).toEqual([]);
+  expect(proof.storage.readServiceHostEnrollment("workspace", "docs/a.md")).toMatchObject({enabled: true, retired: false, ownerDemand: true});
+  expect(proof.storage.reclaimIdleLiveDocuments(Date.now() + RECLAIM_RETENTION_MS + 1).map(row => row.path)).toEqual(["docs/a.md"]);
+  await vi.waitFor(() => {
+    expect(proof.hosted()?.state).toBe("parked");
+    expect(proof.storage.readServiceHostEnrollment("workspace", "docs/a.md"))
+      .toMatchObject({enabled: false, retired: true, ownerStop: null, ownerDemand: false, demandAtMs: null, hostDrainedAtMs: expect.any(Number)});
+    expect(proof.activations()).toEqual([expect.objectContaining({activation_id: saved.activationId, retired: 1})]);
+  }, {timeout: 30000});
+  // The owner keeps editing on their device, where no session host admits the edit.
+  await proof.ownerEdit(doc => doc.getMap("frontmatter").set("whileReclaimed", "ordinary-owner"));
+  const attempts = () => proof.started("captureOwnerActivation"), before = attempts();
+  // The desktop's owner open enrolls it again, as the owner's demand.
+  expect(await proof.route("POST", {path: "docs/a.md", open: true}))
+    .toMatchObject({status: 202, body: {ok: true, path: "docs/a.md", objectId: proof.objectId, status: "preparing", changed: true}});
+  expect(proof.storage.readServiceHostEnrollment("workspace", "docs/a.md")).toMatchObject({enabled: true, retired: false, ownerStop: null, ownerDemand: true});
+  await vi.waitFor(async () => expect(await proof.documents()).toEqual([proof.ready("docs/a.md")]), {timeout: 30000});
+  // One capture, in the store it parked in, starts a successor holding the edit.
+  expect(attempts()).toBe(before + 1);
+  expect(proof.activation()!.source.predecessorActivationId).toBe(saved.activationId);
+  const markdown = "---\nbeforeActivation: ordinary-owner\nwhileReclaimed: ordinary-owner\n---\n\nHello\n";
+  expect((await proof.hostState()).markdown).toBe(markdown);
+  // The settlement commits before the engine writes the file.
+  await vi.waitFor(() => expect(readFileSync(join(proof.store, "docs/a.md"), "utf8")).toBe(markdown), {timeout: 10000});
+  expect(proof.hosted()).toEqual({state: "ready", reason: null});
+  return {attemptsBeforeOpen: before, reports: proof.reports};
+}), 120000);
+
+// Reclaim, with the owner's open arriving while the document departs. Each
+// request to release its activation fails before it reaches the engine, so
+// its retirement stays open and the host cannot drain it. The replica still
+// parks it, and the host confirms it left before it asks for any release. The
+// owner's open enrolls it again before the drain, and it stays departing. Once
+// a release reaches the engine the activation retires, and a successor holds
+// the edit the owner made after the reclaim.
+it("keeps a reclaimed document departing when its owner's open enrolls it again before the host drains it, then starts a successor holding the edit made meanwhile", () => withSelfHostProof("self-host-reclaim-reopen", async proof => {
+  const saved = proof.activation()!;
+  expect(await proof.route("POST", {path: "docs/a.md", open: true}))
+    .toMatchObject({status: 200, body: {ok: true, path: "docs/a.md", objectId: proof.objectId, status: "ready", changed: false}});
+  expect(proof.storage.revokeShare("share", Date.now())).toBe(true);
+  harness.unreachable.add("liveApplication.releaseActivation");
+  const releases = () => proof.started("liveApplication.releaseActivation"), replies = harness.releases.length;
+  expect(proof.storage.reclaimIdleLiveDocuments(Date.now() + RECLAIM_RETENTION_MS + 1).map(row => row.path)).toEqual(["docs/a.md"]);
+  // The host asks to release the activation only once its replica confirmed the document left.
+  await vi.waitFor(() => {
+    expect(proof.hosted()?.state).toBe("parked");
+    expect(releases()).toBeGreaterThan(0);
+  }, {timeout: 30000});
+  // No release reached the engine, so the retirement is open and the host has not drained the document.
+  expect(harness.releases.length).toBe(replies);
+  const retiring = expect.objectContaining({activation_id: saved.activationId, retire_accepted_cursor: expect.any(Number), retired: 0});
+  expect(proof.activations()).toEqual([retiring]);
+  expect(proof.storage.readServiceHostEnrollment("workspace", "docs/a.md"))
+    .toMatchObject({enabled: false, retired: true, ownerStop: null, ownerDemand: false, demandAtMs: null, hostDrainedAtMs: null});
+  // The owner keeps editing on their device, where no session host admits the edit.
+  await proof.ownerEdit(doc => doc.getMap("frontmatter").set("whileReclaimed", "ordinary-owner"));
+  const attempts = () => proof.started("captureOwnerActivation"), before = attempts(), held = releases();
+  // The desktop's owner open enrolls it again before the drain, as the owner's demand. Its retirement stays open.
+  expect(await proof.route("POST", {path: "docs/a.md", open: true}))
+    .toMatchObject({status: 202, body: {ok: true, path: "docs/a.md", objectId: proof.objectId, status: "preparing", changed: true}});
+  expect(proof.storage.readServiceHostEnrollment("workspace", "docs/a.md"))
+    .toMatchObject({enabled: true, retired: false, ownerStop: null, ownerDemand: true, hostDrainedAtMs: null});
+  expect(proof.activations()).toEqual([retiring]);
+  expect(proof.hosted()?.state).toBe("parked");
+  // Releases reach the engine again. The activation retires, and the successor follows it.
+  harness.unreachable.delete("liveApplication.releaseActivation");
+  await vi.waitFor(async () => expect(await proof.documents()).toEqual([proof.ready("docs/a.md")]), {timeout: 30000});
+  expect(harness.releases.at(-1)).toMatchObject({status: "released"});
+  // One capture, in the store it parked in, starts a successor holding the edit.
+  expect(attempts()).toBe(before + 1);
+  expect(proof.activation()!.source.predecessorActivationId).toBe(saved.activationId);
+  expect(proof.activations()).toEqual([expect.objectContaining({activation_id: saved.activationId, retired: 1}),
+    expect.objectContaining({predecessor_activation_id: saved.activationId, completed: 1, retired: 0})]);
+  // The host never drained the document.
+  expect(proof.storage.readServiceHostEnrollment("workspace", "docs/a.md"))
+    .toMatchObject({enabled: true, retired: false, ownerStop: null, ownerDemand: true, hostDrainedAtMs: null});
+  const markdown = "---\nbeforeActivation: ordinary-owner\nwhileReclaimed: ordinary-owner\n---\n\nHello\n";
+  expect((await proof.hostState()).markdown).toBe(markdown);
+  // The settlement commits before the engine writes the file.
+  await vi.waitFor(() => expect(readFileSync(join(proof.store, "docs/a.md"), "utf8")).toBe(markdown), {timeout: 10000});
+  expect(proof.hosted()).toEqual({state: "ready", reason: null});
+  return {attemptsBeforeOpen: before, releasesHeld: held, releases: harness.releases, reports: proof.reports};
+}), 120000);
+
 // Pause fences live admission and retires the document's activation at once,
 // at its seed, before the document parks. Its owner's ordinary edit made while
 // paused then waits for no activation to admit it. Resume through the
@@ -1566,6 +1729,143 @@ it("blocks a document written only as text, and activates it once its owner open
   expect(proof.activation("docs/plain.md")?.source.lineageClaimId).toBe(claim!.id);
   return {attemptsBeforeOpen: blocked, failures: failures(), reports: proof.reports};
 }), 120000);
+
+// The file writes a note's Y.Doc projections queued in the host's replica, counted by status.
+const projectionWrites = (proof: SelfHostProof, path: string) => proof.serviceRead(engine =>
+  engine.prepare("SELECT status, COUNT(*) AS count FROM materialization_jobs WHERE target_path=? AND job_id GLOB 'ydoc-mat_*' GROUP BY status ORDER BY status")
+    .all(path) as {status: string; count: number}[]);
+// None of a note's queued writes waits and none conflicted: each is complete, or cancelled as a state the
+// note's head replaced. `count` is how many there are, when the case knows.
+function expectProjectionWritesEnded(proof: SelfHostProof, path: string, count?: number) {
+  const writes = projectionWrites(proof, path);
+  expect(writes.filter(row => row.status !== "complete" && row.status !== "cancelled")).toEqual([]);
+  const total = writes.reduce((sum, row) => sum + row.count, 0);
+  if (count === undefined) expect(total).toBeGreaterThan(0);
+  else expect(total).toBe(count);
+}
+// The names in a folder of the host's copy, or none when the folder is gone.
+const hostFolder = (proof: SelfHostProof, folder: string) => existsSync(join(proof.store, folder)) ? readdirSync(join(proof.store, folder)).sort() : [];
+// The name the engine gives the conflict file of a queued write: the file's name, then the job's id with
+// every character that is not a letter or a digit as a hyphen. An id of up to 96 characters is kept whole.
+const conflictFileName = (path: string, jobId: string) => `${basename(path)}.${jobId.replace(/[^A-Za-z0-9]/g, "-")}.conflict`;
+
+// #3804: a note with several past versions is shared for editing. The host pulls its history, and each
+// version's projection queues a write of the note's file while the pull's page writes the file itself.
+// The note's capture then settled it, and each settle replayed one queued write of a past version: the
+// write conflicted, left that version beside the file as a conflict file, and refused the settle with
+// conflict-stale-target. The note stayed at Preparing for one refused settle per past version.
+it("takes a note with several past versions live without replaying their file writes", () => withSelfHostProof("self-host-long-history", async proof => {
+  const from = harness.calls.length, path = "notes/long.md";
+  // Its owner types it before anyone shares it: five versions reach the relay.
+  const note = await proof.ownerDocument(path, "Typed\n");
+  for (const edit of ["second", "third", "fourth", "fifth"]) await note.edit(doc => doc.getMap("frontmatter").set(edit, "typed"));
+  proof.shareFolder("notes");
+  await vi.waitFor(async () => expect(await proof.documents()).toContainEqual(expect.objectContaining({path, status: "ready"})), {timeout: 60000});
+  // No settle of it was refused on the way.
+  const refusedSettles = harness.calls.slice(from).filter(call => call.method === "liveApplication.settle" && call.status === "failed").map(call => call.message);
+  expect(refusedSettles).toEqual([]);
+  // The host's copy holds the note as its owner typed it, and no past version beside it.
+  expect(hostFolder(proof, "notes")).toEqual(["long.md"]);
+  expect(readFileSync(join(proof.store, path), "utf8")).toContain("fifth: typed");
+  expectProjectionWritesEnded(proof, path);
+  // Live editing works: the host accepts an edit of the note and settles it into the file.
+  const accepted = await proof.liveEdit("live", "edit", note.document);
+  await vi.waitFor(() => expect(proof.settlement(note.objectId)).toEqual({applied: accepted.journalCursor, settled: accepted.journalCursor}), {timeout: 30000});
+  expect(readFileSync(join(proof.store, path), "utf8")).toContain("live: edit");
+  expect(hostFolder(proof, "notes")).toEqual(["long.md"]);
+  return {path, refusedSettles};
+}), 120000);
+
+// #3804: a store written before the fix holds a hosted note's queued writes. Opening it replayed every
+// one, and each write of a past version left a conflict file. Such a store also holds writes an earlier
+// replay already conflicted, each with its conflict file. The engine refuses this note's capture, as in
+// the case below, so nothing else ends its writes before the restart.
+it("writes no conflict file for a hosted note's queued writes when the engine restarts", () => withSelfHostProof("self-host-queued-restart", async proof => {
+  const from = harness.calls.length, path = "docs/queued.md";
+  const note = await proof.ownerDocument(path, "Typed\n", {firstVersion: doc => {doc.getMap("meta").set("schemaVersion", 2);}});
+  await vi.waitFor(() => expect(harness.calls.slice(from).filter(call => call.method === "captureOwnerActivation" && call.status === "failed").map(call => call.code)).toContain("INVALID_PARAMS"), {timeout: 30000});
+  // The note's first version in the host's copy, before any later edit is pulled: the one write queued so
+  // far is a write of these bytes.
+  let first: {job: string; bytes: Uint8Array} = {job: "", bytes: new Uint8Array()};
+  await vi.waitFor(() => {
+    const bytes = readFileSync(join(proof.store, path));
+    const writes = proof.serviceRead(engine => engine.prepare("SELECT job_id AS job, content_sha256 AS sha FROM materialization_jobs WHERE target_path=? AND job_id GLOB 'ydoc-mat_*'")
+      .all(path) as {job: string; sha: string}[]);
+    expect(writes.map(write => write.sha)).toEqual([hash(bytes)]);
+    first = {job: writes[0]!.job, bytes};
+  }, {timeout: 30000});
+  for (const edit of ["second", "third", "fourth", "fifth"]) {
+    await note.edit(doc => doc.getMap("frontmatter").set(edit, "pulled"));
+    await vi.waitFor(() => expect(readFileSync(join(proof.store, path), "utf8")).toContain(`${edit}: pulled`), {timeout: 30000});
+  }
+  const pulled = readFileSync(join(proof.store, path), "utf8");
+  // With the engine stopped, put the note's five writes in the state a store from before the fix holds them.
+  // The write of its first version already conflicted in an earlier replay: its job is `conflict` with the
+  // time that ended it, and its content stands beside the note as a conflict file. The four later writes wait.
+  await proof.stopSupervisor();
+  const conflictedAt = Date.now(), conflictFile = conflictFileName(path, first.job);
+  const engine = new DatabaseSync(toNamespacedPath(join(proof.store, ".dohc/engine/engine.db")));
+  try {
+    engine.prepare("UPDATE materialization_jobs SET status='pending', completed_at_ms=NULL WHERE target_path=? AND job_id GLOB 'ydoc-mat_*'").run(path);
+    engine.prepare("UPDATE materialization_jobs SET status='conflict', completed_at_ms=? WHERE job_id=?").run(conflictedAt, first.job);
+  } finally {engine.close();}
+  writeFileSync(join(proof.store, "docs", conflictFile), first.bytes);
+  const conflictRow = () => proof.serviceRead(engine => engine.prepare("SELECT status, completed_at_ms AS at FROM materialization_jobs WHERE job_id=?").get(first.job));
+  expect(projectionWrites(proof, path)).toEqual([{status: "conflict", count: 1}, {status: "pending", count: 4}]);
+  await proof.startSupervisor();
+  await vi.waitFor(() => expect(projectionWrites(proof, path).map(row => row.status)).not.toContain("pending"), {timeout: 30000});
+  // The three waiting writes of past versions are cancelled and the write of the newest is complete.
+  // The conflicted write and its file stand as they were. Nothing was written.
+  expect(projectionWrites(proof, path)).toEqual([{status: "cancelled", count: 3}, {status: "complete", count: 1}, {status: "conflict", count: 1}]);
+  expect(conflictRow()).toEqual({status: "conflict", at: conflictedAt});
+  expect(hostFolder(proof, "docs")).toEqual(["a.md", "queued.md", conflictFile]);
+  expect(readFileSync(join(proof.store, "docs", conflictFile)).equals(first.bytes)).toBe(true);
+  expect(readFileSync(join(proof.store, path), "utf8")).toBe(pulled);
+  return {path};
+}), 120000);
+
+// #3793: a note that never activated stayed in its host's replica after live editing ended for it. Its
+// enrollment was never released, and its workspace pulled on every pass until the server restarted.
+// The engine refuses this note's capture as it refuses a first version from before #3805, which names no
+// schema version. The owner's engine now writes that version, so this note stands in for one: its first
+// version names a schema version the engine does not support, which the capture refuses at the same check
+// with the same answer.
+for (const ending of ["its owner stops live editing", "its last link ends"] as const) {
+  it(`lets a note go whose capture the engine refuses, once ${ending}`, () => withSelfHostProof("self-host-refused-capture", async proof => {
+    const from = harness.calls.length, path = "docs/refused.md";
+    const note = await proof.ownerDocument(path, "Typed\n", {firstVersion: doc => {doc.getMap("meta").set("schemaVersion", 2);}});
+    const refusals = () => harness.calls.slice(from).filter(call => call.method === "captureOwnerActivation" && call.status === "failed").map(call => call.code);
+    await vi.waitFor(() => expect(refusals()).toContain("INVALID_PARAMS"), {timeout: 30000});
+    // While the note is enrolled, its owner sees that live editing has not started.
+    expect(await proof.documents()).toContainEqual(expect.objectContaining({path, status: "preparing"}));
+    // The host pulls four later edits of the owner's, one at a time. Each pull queues a write of the note's file
+    // in its replica and writes the file itself. The pull ends the write it queued (#3804), so none waits when
+    // live editing ends.
+    for (const edit of ["second", "third", "fourth", "fifth"]) {
+      await note.edit(doc => doc.getMap("frontmatter").set(edit, "pulled"));
+      await vi.waitFor(() => expect(readFileSync(join(proof.store, path), "utf8")).toContain(`${edit}: pulled`), {timeout: 30000});
+    }
+    expectProjectionWritesEnded(proof, path, 5);
+    if (ending === "its owner stops live editing") expect((await proof.route("DELETE", {path, retire: true})).body).toMatchObject({status: "retired"});
+    else expect(proof.storage.revokeShare("share", Date.now())).toBe(true);
+    await vi.waitFor(() => expect(proof.storage.readServiceHostEnrollment("workspace", path)).toMatchObject({retired: true, hostDrainedAtMs: expect.any(Number)}), {timeout: 30000});
+    // Its replica parked the note and removed its file, with no conflict file left beside it.
+    expect(proof.hosted(note.objectId)).toEqual({state: "parked", reason: null});
+    const folder = join(proof.store, "docs");
+    expect(existsSync(folder) ? readdirSync(folder) : []).toEqual(ending === "its owner stops live editing" ? ["a.md"] : []);
+    expectProjectionWritesEnded(proof, path, 5);
+    // The host accepted no live edit of it, and its owner's list no longer shows it.
+    expect(proof.journal(note.objectId)).toEqual([]);
+    expect(await proof.documents()).not.toContainEqual(expect.objectContaining({path}));
+    // Later passes do nothing more for it: no pull for unfinished work, no departure left waiting, no capture.
+    await twelvePasses(proof);
+    const work = () => ({pulls: proof.live().hostedPulls("workspace").reasons.pending ?? 0, waiting: proof.live().passCounts().lifecycleRetries, captures: proof.started("captureOwnerActivation")});
+    const settled = work();
+    await twelvePasses(proof);
+    expect(work()).toEqual(settled);
+    return {refusals: refusals(), ...settled};
+  }), 120000);
+}
 
 // #2088: the operator puts back an older copy of the session host's store,
 // which lost live edits the host already pushed. The next attach finds that
