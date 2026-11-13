@@ -287,6 +287,31 @@ export function scanChatLinks(body: string): { files: ChatFileReferenceToken[]; 
   return { files: tokens, works };
 }
 
+/** What a reader sees in place of a file link they may not read. It holds no "@[", so a second pass changes nothing. */
+export const CHAT_FILE_LINK_WITHHELD = "(a file not shared here)";
+
+// Keeps only the links a reader may follow: a work link, and a file link whose
+// path `covers` accepts. Every other "@[" span is replaced whole, inside code
+// or not: a malformed, nested or unclosed one too, which runs to its line's
+// end. So no path or heading the reader may not read survives.
+export function withholdChatFileLinks(text: string, covers: (path: string) => boolean): string {
+  if (!text.includes("@[")) return text;
+  let kept = "";
+  let at = 0;
+  for (let start = text.indexOf("@[", at); start >= 0; start = text.indexOf("@[", at)) {
+    let stop = start + 2;
+    while (stop < text.length && text[stop] !== "]" && text[stop] !== "\n" && text[stop] !== "\r") stop++;
+    const end = text[stop] === "]" ? stop + 1 : stop;
+    const span = text.slice(start, end);
+    const { files, works } = scanChatLinks(span);
+    const follows = files.length + works.length === 1 &&
+      (works[0]?.text === span || (files[0]?.text === span && covers(files[0].path)));
+    kept += text.slice(at, start) + (follows ? span : CHAT_FILE_LINK_WITHHELD);
+    at = end;
+  }
+  return kept + text.slice(at);
+}
+
 // Chat reads an @ name outside code and outside file links. A file link owns
 // its whole range, so a name inside a file's name names no one. The desktop's
 // send and the relay read names with chatMentionTokens, and chat views with
