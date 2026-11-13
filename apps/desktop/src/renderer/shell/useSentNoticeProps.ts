@@ -30,7 +30,7 @@ import {
   type NoticeTarget,
 } from "../../notices/noticeTarget";
 import { sentNoticeRef, type SentNotices } from "./useSentNotices";
-import { chatOnScreen, watchChatsOnScreen } from "../workbench/chatsOnScreen";
+import { chatOnScreen, messageOnScreen, watchChatsOnScreen } from "../workbench/chatsOnScreen";
 
 export const NOT_HERE_NOTE =
   "This workspace isn't on this computer. Join it from Manage workspaces, then choose Open again.";
@@ -265,19 +265,19 @@ export function useSentNoticeProps(input: {
     for (const ref of refs) askedRead.current.add(`${ref.store}:${ref.noticeId}`);
     if (refs.length > 0) readNotices(refs).catch(() => undefined);
   }, [here, readNotices, sentNotices?.notices]);
-  // "Sam mentioned you in #events" is about one message. Once its chat is on
-  // screen here, however the person got there, the row reads and its toast
-  // closes. The owner's row sits on this workspace; a member's on the share
+  // "Sam mentioned you in #events" is about one message. Once that message
+  // shows here, however the person got there, the row reads and its toast
+  // closes. A reply folded into a post's card does not show. The owner's row sits on this workspace; a member's on the share
   // this view joined it through.
   const viewShareId = here?.shareView?.shareId;
   const seenMessage = useCallback(
     (notice: NoticeRow): boolean => {
-      const thread = notice.kind === "chat-message" ? notice.target?.thread : undefined;
+      const message = notice.kind === "chat-message" ? notice.target?.message : undefined;
       const placed =
         notice.workspaceId === null
           ? notice.recipientShareId !== null && notice.recipientShareId === viewShareId
           : notice.workspaceId === workspaceId;
-      return thread !== undefined && placed && chatOnScreen(thread);
+      return message !== undefined && placed && messageOnScreen(message);
     },
     [viewShareId, workspaceId],
   );

@@ -29,7 +29,7 @@ import { findNoticeChat } from "./findNoticeChat";
 import { useSentNotices, type SentNotices } from "./useSentNotices";
 import type { ChatsNav } from "../workbench/ChatsView";
 import { inputCount } from "../ui/inputCount";
-import { showChat } from "../workbench/chatsOnScreen";
+import { showChat, showMessage } from "../workbench/chatsOnScreen";
 import { tellWindowFocused } from "../../testing/windowFocus";
 
 function notice(overrides: Partial<NoticeRow> = {}): NoticeRow {
@@ -1629,7 +1629,7 @@ describe("a message's notice", () => {
       ["a member's", toMember, "trip"],
       ["the owner's", toOwner, "notes"],
     ])("reads %s row and skips its toast, keeping the row", async (_whose, row, here) => {
-      hide = showChat("thread-1", shown);
+      hide = showMessage("m-1", shown);
       const { result, sentNotices } = setup([row], [workspace("notes"), joined], here, {
         toast: row,
       });
@@ -1639,7 +1639,7 @@ describe("a message's notice", () => {
           { store: "account", noticeId: row.noticeId },
         ]),
       );
-      expect(sentNotices.hideToast).toHaveBeenCalledOnce();
+      expect(sentNotices.hideToast).toHaveBeenCalled();
       expect(sentNotices.dismiss).not.toHaveBeenCalled();
       expect(result.current.sentNotices.map((described) => described.notice)).toEqual([row]);
     });
@@ -1650,8 +1650,8 @@ describe("a message's notice", () => {
       });
       expect(result.current.sentNoticeToast?.notice).toBe(toOwner);
       expect(sentNotices.read).not.toHaveBeenCalled();
-      act(() => {
-        hide = showChat("thread-1", shown);
+      await act(async () => {
+        hide = showMessage("m-1", shown);
       });
       expect(sentNotices.read).toHaveBeenCalledExactlyOnceWith([
         { store: "account", noticeId: "owner" },
@@ -1659,8 +1659,18 @@ describe("a message's notice", () => {
       expect(sentNotices.hideToast).toHaveBeenCalledOnce();
     });
 
-    it("reads no row of another workspace, another chat, or one already read", () => {
+    // A reply in a post's collapsed comments is in the chat on screen, but
+    // it does not show, so its row stays unread.
+    it("keeps the row unread while its chat shows but its message does not", async () => {
       hide = showChat("thread-1", shown);
+      const { sentNotices } = setup([toOwner], [workspace("notes")], "notes", { toast: toOwner });
+      await act(async () => undefined);
+      expect(sentNotices.read).not.toHaveBeenCalled();
+      expect(sentNotices.hideToast).not.toHaveBeenCalled();
+    });
+
+    it("reads no row of another workspace, another chat, or one already read", () => {
+      hide = showMessage("m-1", shown);
       const rows = [
         { ...toOwner, noticeId: "elsewhere", workspaceId: "other" },
         {

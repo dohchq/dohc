@@ -47,6 +47,7 @@ import {
   type MentionCandidate,
 } from "@dohc/workspace-contracts/chat-mentions";
 import { fileReferenceKey, resolveFileMentionNavigationTargets } from "./chatFileMentions";
+import { showMessage } from "./chatsOnScreen";
 import {
   isPersonalAgentId,
   personalAgentName,
@@ -992,6 +993,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
           role="listitem"
           aria-posinset={at + 1}
           aria-setsize={props.messages.length}
+          ref={(element) => (element ? showMessage(message.id, element) : undefined)}
           data-testid={`${props.testIdPrefix}-message`}
           data-message-id={message.id}
           data-continues={continues ? "true" : "false"}
