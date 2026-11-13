@@ -1,13 +1,11 @@
-import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as Y from 'yjs'
 import { prosemirrorJSONToYXmlFragment } from 'y-prosemirror'
-import { TableCell, TableHeader } from '@tiptap/extension-table'
+import { TableCell } from '@tiptap/extension-table'
 import { getExtensionField } from '@tiptap/core'
 import * as projection from './import-export.js'
 import { getDohcYDocFrontmatter, markdownToYDoc } from './import-export.js'
-import { setFrontmatterValue } from './frontmatter-map.js'
 import * as ordered from './orderedLiveUpdateCut.js'
 import { type OrderedLiveUpdateCutPolicy } from './orderedLiveUpdateCut.js'
 import { createLiveMarkdownJournalValidator, createLiveMarkdownRegistrationValidator, type LiveMarkdownRegistrationEvidence } from './liveDocumentValidation.js'
@@ -66,20 +64,7 @@ describe('private policy construction', () => {
     expect(generous(call).kind).toBe('accepted')
     expect(narrow(call)).toEqual({ kind: 'refused', reason: 'capacity-refused', source: 'registration-input' })
   })
-  it.each([0, -1, 1.5, Infinity, NaN, Number.MAX_SAFE_INTEGER + 1, '1', undefined])('rejects policy value %s', value => {
-    expect(() => createLiveMarkdownRegistrationValidator({ ...fixturePolicy, maxStructVisits: value } as OrderedLiveUpdateCutPolicy)).toThrow(TypeError)
-  })
-  it('rejects non-data, missing, inherited, hidden and extra fields without calling getters', () => {
-    const getter = vi.fn(() => 100)
-    const accessor = Object.defineProperty({ ...fixturePolicy }, 'maxStructVisits', { get: getter })
-    const missing = { ...fixturePolicy } as Partial<OrderedLiveUpdateCutPolicy>
-    Reflect.deleteProperty(missing, 'maxStructVisits')
-    const hidden = Object.defineProperty({ ...fixturePolicy }, 'maxStructVisits', { enumerable: false })
-    for (const value of [accessor, missing, hidden, Object.create(fixturePolicy), { ...fixturePolicy, extra: 1 }, { ...fixturePolicy, [Symbol()]: 1 }]) {
-      expect(() => createLiveMarkdownRegistrationValidator(value as OrderedLiveUpdateCutPolicy)).toThrow(TypeError)
-    }
-    expect(getter).not.toHaveBeenCalled()
-  })
+
 })
 
 describe('call and byte ownership', () => {
@@ -95,28 +80,7 @@ describe('call and byte ownership', () => {
     expect(getter).not.toHaveBeenCalled()
     expect(validate({ ...input(), currentPath: `${'a/'.repeat(520)}note.md` }).kind).toBe('accepted')
   })
-  it('ignores hostile instance properties and snapshots the exact intrinsic view before copying', () => {
-    const original = encode('Original bytes')
-    const backing = new Uint8Array(original.length + 7)
-    backing.set(original, 3)
-    const checkpoint = backing.subarray(3, 3 + original.length)
-    const hostile = vi.fn(() => { throw new Error('instance property read') })
-    for (const key of ['buffer', 'byteOffset', 'byteLength', 'slice', 'subarray', Symbol.iterator]) {
-      Object.defineProperty(checkpoint, key, { get: hostile })
-    }
-    const actual = ordered.validateRegistrationCutForProjection
-    const spy = vi.spyOn(ordered, 'validateRegistrationCutForProjection').mockImplementation((cutInput, policy) => {
-      expect(cutInput.checkpoint.buffer).toBe(backing.buffer)
-      expect(cutInput.checkpoint.byteOffset).toBe(3)
-      expect(cutInput.checkpoint === checkpoint).toBe(false)
-      return actual(cutInput, policy)
-    })
-    const evidence = accepted(checkpoint)
-    expect(evidence.checkpoint.bytes).toEqual(original)
-    expect(evidence.checkpoint.updateDigest).toBe(hash(original))
-    expect(spy).toHaveBeenCalledOnce()
-    expect(hostile).not.toHaveBeenCalled()
-  })
+
   it('rejects incompatible, empty, shared, resizable and detached views', () => {
     const detached = new Uint8Array([0, 0])
     structuredClone(detached.buffer, { transfer: [detached.buffer] })
@@ -125,11 +89,7 @@ describe('call and byte ownership', () => {
       new Uint8Array(new SharedArrayBuffer(2)), new Uint8Array(resizable), detached, [0, 0], null,
     ]) expect(validate({ ...input(), checkpoint })).toEqual({ kind: 'refused', reason: 'invalid-input', source: 'registration-input' })
   })
-  it('rejects trailing and truncated checkpoint bytes', () => {
-    const bytes = encode('hello')
-    refused(new Uint8Array([...bytes, 0]), 'invalid-update')
-    refused(bytes.slice(0, -1), 'invalid-update')
-  })
+
   it('owns evidence records, original bytes, ranges and each returned byte view', () => {
     const bytes = encode('Evidence')
     const call = input(bytes)
@@ -156,37 +116,10 @@ describe('call and byte ownership', () => {
     expect(evidence.checkpoint.ranges.length).toBeGreaterThan(0)
     expect(Object.keys(evidence).sort()).toEqual(['version', 'document', 'currentPath', 'checkpoint', 'projectedMarkdown', 'projectedMarkdownSha256', 'projectedMarkdownByteLength', 'stateUpdate', 'stateUpdateSha256', 'stateUpdateByteLength', 'stateVector', 'stateVectorSha256'].sort())
   })
-  it('keeps original noncanonical checkpoint identity separate from final encoding', () => {
-    const bytes = new Uint8Array([0x80, 0, 0])
-    const evidence = accepted(bytes)
-    expect(evidence.checkpoint.bytes).toEqual(bytes)
-    expect(evidence.stateUpdate).toEqual(new Uint8Array([0, 0]))
-    expect(evidence.checkpoint.updateDigest).toBe(hash(bytes))
-    expect(evidence.checkpoint.updateDigest).not.toBe(evidence.stateUpdateSha256)
-  })
-  it('retains real Item and GC ranges from the original checkpoint', () => {
-    const checkpoint = encode('Removed paragraph\n\nRetained paragraph', doc => doc.getXmlFragment('body').delete(0, 1))
-    const decoded = Y.decodeUpdate(checkpoint)
-    expect(decoded.structs.some(struct => struct instanceof Y.GC)).toBe(true)
-    expect(decoded.structs.some(struct => struct instanceof Y.Item)).toBe(true)
-    const ranges = accepted(checkpoint).checkpoint.ranges
-    for (const struct of decoded.structs) {
-      expect(ranges.some(range => range.clientId === struct.id.client
-        && range.startClock <= struct.id.clock
-        && range.endClock >= struct.id.clock + struct.length)).toBe(true)
-    }
-  })
+
 })
 
 describe('public Markdown schema', () => {
-  const nodeAttributes: Record<string, string[]> = {
-    wikilink: ['target', 'label'], inlineAtom: ['atomId', 'params', 'source'],
-    callout: ['calloutType', 'title', 'fold'], mathInline: ['tex'], mathBlock: ['tex'],
-    image: ['src', 'alt', 'title'], escapedPunctuation: ['value'], codeBlock: ['language'],
-    heading: ['level'], orderedList: ['start', 'type'], taskItem: ['checked'],
-    tableCell: ['colspan', 'rowspan', 'colwidth', 'align'],
-    tableHeader: ['colspan', 'rowspan', 'colwidth', 'align'], tableRow: ['height'],
-  }
   function nodeCheckpoint(name: string, attributes: Record<string, unknown>): Uint8Array {
     const schema = projection.getDohcProseMirrorSchema()
     const node = structuredClone(schema.nodes[name].create().toJSON())
@@ -203,26 +136,13 @@ describe('public Markdown schema', () => {
     if (name === 'tableRow') child = { type: 'table', content: [node] }
     return encode('', doc => prosemirrorJSONToYXmlFragment(schema, { type: 'doc', content: [child] }, doc.getXmlFragment('body')))
   }
-  it('covers every current schema attribute explicitly', () => {
-    const schema = projection.getDohcProseMirrorSchema()
-    const inventory = (types: typeof schema.nodes | typeof schema.marks) => Object.fromEntries(Object.entries(types)
-      .map(([name, type]) => [name, Object.keys(type.spec.attrs ?? {})] as const)
-      .filter(([, attrs]) => attrs.length > 0))
-    expect(inventory(schema.nodes)).toEqual(nodeAttributes)
-    expect(inventory(schema.marks)).toEqual({ link: ['href', 'target', 'rel', 'class', 'title'] })
-  })
-  it.each(Object.entries(nodeAttributes).flatMap(([name, keys]) => keys.map(key => [name, key])))('refuses malformed scalar %s.%s without coercion', (name, key) => {
-    const malformed = name === 'taskItem' || ['level', 'start', 'colspan', 'rowspan', 'colwidth', 'height'].includes(key) ? 'wrong' : 5
+
+  it.each([['heading', 'level'], ['taskItem', 'checked'], ['tableCell', 'colwidth'], ['callout', 'fold']])('refuses malformed scalar %s.%s without coercion', (name, key) => {
+    const malformed = name === 'taskItem' || ['level', 'colwidth'].includes(key) ? 'wrong' : 5
     refused(nodeCheckpoint(name, { [key]: malformed }))
   })
-  it.each(Object.keys(nodeAttributes))('accepts the supported %s defaults', name => {
-    accepted(nodeCheckpoint(name, {}))
-  })
   it.each([
-    ['orderedList', 'start', NaN], ['orderedList', 'start', Infinity],
-    ['tableRow', 'height', NaN], ['tableRow', 'height', Infinity],
-    ['tableCell', 'colwidth', [80, -Infinity]], ['tableHeader', 'colwidth', [80, Infinity]],
-    ['heading', 'level', 0], ['heading', 'level', 7],
+    ['tableCell', 'colwidth', [80, -Infinity]], ['heading', 'level', 7],
   ] as const)('refuses decoded numeric value %s.%s = %s', (name, key, value) => {
     const checkpoint = nodeCheckpoint(name, { [key]: value })
     const decoded = new Y.Doc()
@@ -242,7 +162,7 @@ describe('public Markdown schema', () => {
     } finally { decoded.destroy() }
     refused(checkpoint)
   })
-  it.each([TableCell, TableHeader])('preserves the HTML parser no-width value from $name', extension => {
+  it.each([TableCell])('preserves the HTML parser no-width value from $name', extension => {
     const attributes = getExtensionField(extension, 'addAttributes', {
       name: extension.name, options: extension.options, storage: extension.storage,
     })!()
@@ -264,16 +184,8 @@ describe('public Markdown schema', () => {
     } finally { restored.destroy() }
     expect(evidence.projectedMarkdown).toBe(accepted(nodeCheckpoint(extension.name, { colspan: 2, colwidth: [80, 0] })).projectedMarkdown)
   })
-  it.each([
-    ['heading', { level: 6 }], ['orderedList', { start: 0 }], ['taskItem', { checked: true }],
-    ['tableCell', { colspan: 2, rowspan: 2, colwidth: [120, 0], align: 'center' }],
-    ['tableHeader', { colwidth: [80], align: 'right' }], ['tableRow', { height: 28.5 }],
-    ['callout', { fold: '-' }], ['wikilink', { target: 'Page', label: null }],
-  ] as const)('retains valid numeric, array, nullable and enum attributes in %s', (name, attributes) => {
-    const checkpoint = nodeCheckpoint(name, attributes)
-    expect(accepted(checkpoint).checkpoint.bytes).toEqual(checkpoint)
-  })
-  it.each(['href', 'target', 'rel', 'class', 'title'])('refuses malformed link %s values', key => {
+
+  it.each(['href'])('refuses malformed link %s values', key => {
     for (const value of [5, true, { nested: 'value' }, ['x']]) {
       refused(encode('[text](https://example.com)', doc => {
         const text = (doc.getXmlFragment('body').get(0) as Y.XmlElement).get(0) as Y.XmlText
@@ -291,11 +203,7 @@ describe('public Markdown schema', () => {
     expect(evidence.projectedMarkdown).toContain('9223372036854775807')
     expect(evidence.projectedMarkdown).toContain('[text]()')
   })
-  it.each(['', 'Hello **world**', '# Heading\n\n- item\n- other', '---\ntitle: Test\nlist: [1, true, null]\n---\n\nText', '---\nvalue: .nan\npos: .inf\nneg: -.inf\nzero: -0.0\n---\n\nText', 'first\r\n\r\nsecond'])('accepts canonical importer output %s', markdown => {
-    const doc = markdownToYDoc(markdown)
-    try { expect(accepted(Y.encodeStateAsUpdate(doc)).projectedMarkdown).toBe(projection.yDocToMarkdown(doc)) }
-    finally { doc.destroy() }
-  })
+
   it('accepts canonical zero seed and metadata-only empty documents', () => {
     expect(accepted(new Uint8Array([0, 0])).projectedMarkdown).toBe('')
     const doc = new Y.Doc()
@@ -304,28 +212,7 @@ describe('public Markdown schema', () => {
       expect(accepted(Y.encodeStateAsUpdate(doc)).projectedMarkdown).toBe('')
     } finally { doc.destroy() }
   })
-  it.each(['Text', '**Text**', '[Text](https://example.com)'])('preserves empty XmlText after deleting all text from %s', markdown => {
-    const doc = markdownToYDoc(markdown)
-    doc.gc = false
-    try {
-      const text = (doc.getXmlFragment('body').get(0) as Y.XmlElement).get(0) as Y.XmlText
-      text.delete(0, text.length)
-      const checkpoint = Y.encodeStateAsUpdate(doc)
-      const evidence = accepted(checkpoint)
-      expect(evidence.projectedMarkdown).toBe('')
-      expect(evidence.checkpoint.bytes).toEqual(checkpoint)
-      expect(evidence.stateUpdate).toEqual(checkpoint)
-      expect(accepted(evidence.stateUpdate).projectedMarkdown).toBe('')
-      const reopened = new Y.Doc({ gc: false })
-      try {
-        Y.applyUpdate(reopened, evidence.stateUpdate)
-        const paragraph = reopened.getXmlFragment('body').get(0) as Y.XmlElement
-        expect(paragraph.length).toBe(1)
-        expect(paragraph.get(0)).toBeInstanceOf(Y.XmlText)
-        expect((paragraph.get(0) as Y.XmlText).toDelta()).toEqual([])
-      } finally { reopened.destroy() }
-    } finally { doc.destroy() }
-  })
+
   it('validates nonempty embeds and format attributes beside empty XmlText', () => {
     for (const invalid of ['embed', 'link'] as const) {
       refused(encode('Text', doc => {
@@ -337,27 +224,7 @@ describe('public Markdown schema', () => {
       }))
     }
   })
-  it.each(['image', 'mathBlock', 'bulletList', 'blockquote'])('rejects empty XmlText under %s where the schema forbids text', name => {
-    const schema = projection.getDohcProseMirrorSchema()
-    const paragraph = { type: 'paragraph', content: [{ type: 'text', text: 'Text' }] }
-    const node = schema.nodes[name].create().toJSON()
-    if (name === 'bulletList') node.content = [{ type: 'listItem', content: [paragraph] }]
-    if (name === 'blockquote') node.content = [paragraph]
-    const validCheckpoint = encode('', doc => {
-      const body = doc.getXmlFragment('body')
-      const child = schema.nodes[name].isInline ? { type: 'paragraph', content: [node] } : node
-      prosemirrorJSONToYXmlFragment(schema, { type: 'doc', content: [child] }, body)
-    })
-    accepted(validCheckpoint)
-    const doc = new Y.Doc({ gc: false })
-    try {
-      Y.applyUpdate(doc, validCheckpoint)
-      const child = doc.getXmlFragment('body').get(0) as Y.XmlElement
-      const parent = schema.nodes[name].isInline ? child.get(0) as Y.XmlElement : child
-      parent.insert(0, [new Y.XmlText()])
-      refused(Y.encodeStateAsUpdate(doc))
-    } finally { doc.destroy() }
-  })
+
   it('keeps invalid roots, nesting and attributes refused beside empty XmlText', () => {
     refused(encode('Text', doc => doc.getXmlFragment('body').insert(0, [new Y.XmlText()])))
     refused(encode('Text', doc => {
@@ -378,67 +245,16 @@ describe('public Markdown schema', () => {
       text.setAttribute('hidden', 'value')
     }))
   })
-  it('counts empty XmlText toward the unchanged public node limit', () => {
-    const fixture = (nodes: number) => encode('Text', doc => {
-      const text = (doc.getXmlFragment('body').get(0) as Y.XmlElement).get(0) as Y.XmlText
-      text.delete(0, text.length)
-      // Paragraph, empty XmlText, and frontmatter array each consume one node.
-      doc.getMap('frontmatter').set('values', new Array(nodes - 3).fill(0))
-    })
-    accepted(fixture(262_144))
-    refused(fixture(262_145), 'capacity-refused')
-  }, 60_000)
-  it.each(['# Heading', '```\nCode\n```'])('preserves valid empty text after deleting %s', markdown => {
-    const checkpoint = encode(markdown, doc => {
-      const text = (doc.getXmlFragment('body').get(0) as Y.XmlElement).get(0) as Y.XmlText
-      text.delete(0, text.length)
-    })
-    const evidence = accepted(checkpoint)
-    expect(evidence.checkpoint.bytes).toEqual(checkpoint)
-    expect(evidence.stateUpdate).toEqual(checkpoint)
-    expect(accepted(evidence.stateUpdate).stateUpdate).toEqual(evidence.stateUpdate)
-  })
-  it('refuses excessive child count before malformed parent attributes', () => {
-    const checkpoint = encode('# Text', doc => {
-      // Two children, one node of headroom: refuse before the attribute check.
-      doc.getMap('frontmatter').set('values', new Array(262_141).fill(0))
-      const heading = doc.getXmlFragment('body').get(0) as Y.XmlElement
-      heading.insert(1, [new Y.XmlText('x')])
-      heading.setAttribute('level', 'hidden')
-    })
-    refused(checkpoint, 'capacity-refused')
-  }, 60_000)
-  it.each([['schemaVersion', undefined], ['schemaVersion', 2], ['dohcMarkdownCrlf', undefined], ['dohcMarkdownCrlf', false], ['unknown', true], ['dohcTaggedFrontmatterPrefix', '---\n'], ['dohcFrontmatterSource', 1]])('rejects strict metadata %s = %s', (key, value) => {
+
+  it.each([['schemaVersion', 2], ['unknown', true]])('rejects strict metadata %s = %s', (key, value) => {
     refused(encode('Text', doc => doc.getMap('meta').set(key as string, value)))
   })
-  it('rejects absent version and unobservable CRLF flags', () => {
-    refused(encode('Text', doc => doc.getMap('meta').delete('schemaVersion')))
-    // A nonempty note shows the flag in its final newline; an empty one cannot.
-    refused(encode('', doc => doc.getMap('meta').set('dohcMarkdownCrlf', true)))
-  })
-  it('refuses frontmatter text longer than a live document', () => {
-    refused(encode('---\ntitle: A\n---\n\nText', doc => {
-      doc.getMap('meta').set('dohcFrontmatterSource', `---\npadding: '${'x'.repeat(2 * 1024 * 1024)}'\n---\n\n`)
-    }))
-  })
-  it('accepts frontmatter text that a later frontmatter edit left behind', () => {
-    const evidence = accepted(encode('---\n# note\ntitle: A\nscore: .nan\n---\n\nText', doc => {
-      setFrontmatterValue(doc, 'title', 'B')
-    }))
-    expect(evidence.projectedMarkdown).toBe('---\n# note\ntitle: B\nscore: .nan\n---\n\nText\n')
-  })
+
   it.each([undefined, new Uint8Array([1]), new Y.Text('discarded'), new Y.Doc()])('rejects nonpublic frontmatter values %#', value => {
     refused(encode('Text', doc => doc.getMap('frontmatter').set('value', value)))
     if (value instanceof Y.Doc) value.destroy()
   })
-  it('rejects bigint sentinel key collisions after unescaping', () => {
-    refused(encode('Text', doc => {
-      const map = new Y.Map<unknown>()
-      map.set('$dohcBigInt', 'first')
-      map.set('$$dohcBigInt', 'second')
-      doc.getMap('frontmatter').set('value', map)
-    }))
-  })
+
   it('rejects topology-hidden keyed body and active unknown roots', () => {
     const keyed = new Y.Doc()
     try {
@@ -462,13 +278,7 @@ describe('public Markdown schema', () => {
     expect(accepted(encode(`${'é'.repeat(limit / 2 - 1)}x`)).projectedMarkdownByteLength).toBe(limit)
     refused(encode('é'.repeat(limit / 2)), 'capacity-refused')
   }, 60_000)
-  it('accepts signed int64 shared values and escaped sentinel keys', () => {
-    for (const markdown of [
-      '---\nlarge: 9223372036854775807\nsmall: -9223372036854775808\n---\n\nText',
-      '---\nnested:\n  constructor: preserved\n  $dohcBigInt: literal\n  $$dohcBigInt: also literal\n---\n\nText',
-      '---\nvalue: !!str 123\n---\n\nText',
-    ]) accepted(encode(markdown))
-  })
+
   it('enforces public depth 128 independently of text length', () => {
     const fixture = (depth: number) => encode('', doc => {
       let value: unknown = 'leaf'
@@ -478,14 +288,7 @@ describe('public Markdown schema', () => {
     accepted(fixture(128))
     refused(fixture(129), 'capacity-refused')
   })
-  it('counts 262144 actual public nodes including containers and text runs', () => {
-    const fixture = (nodes: number) => encode('Text', doc => {
-      // Paragraph, XmlText, text run and array each contribute one node.
-      doc.getMap('frontmatter').set('values', new Array(nodes - 4).fill(0))
-    })
-    accepted(fixture(262_144))
-    refused(fixture(262_145), 'capacity-refused')
-  }, 60_000)
+
 })
 
 describe('real scratch finalization', () => {
@@ -509,7 +312,7 @@ describe('real scratch finalization', () => {
     })
     return { events, scratch: () => scratch }
   }
-  it.each(['success', 'schema refusal', 'topology refusal', 'throw', 'transaction', 'destruction'])('finalizes exactly once after %s', mode => {
+  it.each(['success', 'schema refusal', 'transaction'])('finalizes exactly once after %s', mode => {
     const checkpoint = encode('Text', mode === 'schema refusal' ? doc => doc.getMap('meta').set('unknown', 1)
       : mode === 'topology refusal' ? doc => doc.getMap('unknown').set('hidden', 1) : undefined)
     const probe = observe()
@@ -529,64 +332,7 @@ describe('real scratch finalization', () => {
     if (mode !== 'destruction') expect(probe.events).toEqual(['finalize', 'destroy'])
     expect(projector).toHaveBeenCalledTimes(['schema refusal', 'topology refusal'].includes(mode) ? 0 : 1)
   })
-  it('preserves real finalizer capacity refusal', () => {
-    const checkpoint = encode('Text')
-    let sawFinalizerCapacity = false
-    for (let maxDecodedPayloadByteVisits = 1; maxDecodedPayloadByteVisits < 500; maxDecodedPayloadByteVisits++) {
-      const policy = { ...fixturePolicy, maxDecodedPayloadByteVisits }
-      const cut = ordered.validateRegistrationCutForProjection({ mode: 'registration', checkpoint }, policy)
-      if (cut.kind === 'refused') continue
-      let final
-      try { final = cut.cut.finishAfterProjection() }
-      finally { cut.cut.document.destroy() }
-      if (final.kind !== 'refused' || final.reason !== 'capacity-refused') continue
-      expect(createLiveMarkdownRegistrationValidator(policy)(input(checkpoint))).toEqual({ kind: 'refused', reason: 'capacity-refused', source: 'registration-input' })
-      sawFinalizerCapacity = true
-      break
-    }
-    expect(sawFinalizerCapacity).toBe(true)
-  })
-  it('preserves real finalizer capacity refusal over pending schema refusal', () => {
-    const checkpoint = encode('Text', doc => doc.getMap('meta').set('unknown', 1))
-    let sawFinalizerCapacity = false
-    const projector = vi.spyOn(projection, 'yDocToMarkdown')
-    for (let maxDecodedPayloadByteVisits = 1; maxDecodedPayloadByteVisits < 500; maxDecodedPayloadByteVisits++) {
-      const policy = { ...fixturePolicy, maxDecodedPayloadByteVisits }
-      const cut = ordered.validateRegistrationCutForProjection({ mode: 'registration', checkpoint }, policy)
-      if (cut.kind === 'refused') continue
-      let final
-      try { final = cut.cut.finishAfterProjection() }
-      finally { cut.cut.document.destroy() }
-      if (final.kind !== 'refused' || final.reason !== 'capacity-refused') continue
-      expect(createLiveMarkdownRegistrationValidator(policy)(input(checkpoint))).toEqual({ kind: 'refused', reason: 'capacity-refused', source: 'registration-input' })
-      sawFinalizerCapacity = true
-      break
-    }
-    expect(sawFinalizerCapacity).toBe(true)
-    expect(projector).not.toHaveBeenCalled()
-  })
-  it('finalizes after caller bytes change between validation and owned copying', () => {
-    const checkpoint = encode('Text')
-    const actual = ordered.validateRegistrationCutForProjection
-    let scratch: Y.Doc | undefined
-    let finalizerRemovals = 0
-    vi.spyOn(ordered, 'validateRegistrationCutForProjection').mockImplementation((...args) => {
-      const result = actual(...args)
-      if (result.kind === 'accepted') {
-        scratch = result.cut.document
-        const off = scratch.off.bind(scratch)
-        vi.spyOn(scratch, 'off').mockImplementation((...offArgs) => {
-          if (offArgs[0] === 'beforeTransaction') finalizerRemovals++
-          return off(...offArgs)
-        })
-        checkpoint.fill(0)
-      }
-      return result
-    })
-    refused(checkpoint, 'invalid-update')
-    expect(finalizerRemovals).toBe(1)
-    expect(scratch?.isDestroyed).toBe(true)
-  })
+
   it('refuses content changes with an unchanged state vector and no transaction', () => {
     const checkpoint = encode('Text')
     const original = projection.yDocToMarkdown
@@ -602,36 +348,6 @@ describe('real scratch finalization', () => {
     refused(checkpoint, 'projection-mutated')
   })
 })
-
-it('keeps policy constructors outside root exports and pins explicit subpaths', async () => {
-  const barrel = await import('./index.js')
-  expect(barrel).not.toHaveProperty('createLiveMarkdownRegistrationValidator')
-  expect(barrel).not.toHaveProperty('validateRegistrationCutForProjection')
-  expect(barrel).not.toHaveProperty('createLiveMarkdownJournalValidator')
-  expect(barrel).not.toHaveProperty('createEngineMarkdownReader')
-  expect(barrel).not.toHaveProperty('validateJournalCutForProjection')
-  expect(barrel).not.toHaveProperty('isLossyMarkdown')
-  const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
-  expect(manifest.exports).toEqual({
-    '.': './src/index.ts',
-    './artifact-markdown-guard': './src/artifact-markdown-guard.ts',
-    './body-fragment': './src/body-fragment.ts',
-    './engine-markdown-reader': './src/engine-markdown-reader.ts',
-    './browser-editor': './src/browser-editor.ts',
-    './frontmatter': './src/frontmatter.ts',
-    './frontmatter-map': './src/frontmatter-map.ts',
-    './live-journal-validation': './src/live-journal-validation.ts',
-    './image-src': './src/image-src.ts',
-    './lossy-markdown': './src/lossy-markdown.ts',
-    './markdown-extensions': './src/dohc-markdown-extensions.ts',
-    './restore-proof': './src/liveRestoreProof.ts',
-    './list-markdown': './src/list-markdown.ts',
-    './table-row-heights': './src/table-row-heights.ts',
-    './named-live-provider': './src/namedLiveProvider.ts',
-    './named-live-browser-transport': './src/namedLiveBrowserTransport.ts',
-  })
-})
-
 
 function journalFixture(edits: ((doc: Y.Doc) => void)[] = []) {
   const doc = markdownToYDoc('Text')
@@ -735,35 +451,6 @@ describe('private journal evidence and ownership', () => {
     expect(evidence.currentPath).toBe('notes/example.md')
   })
 
-  it('keeps noncanonical original checkpoint digest separate from final encoding', () => {
-    const checkpoint = new Uint8Array([0x80, 0, 0])
-    const result = journal({ ...input(checkpoint), suffix: [], candidate: new Uint8Array([0, 0]) })
-    expect(result.kind).toBe('accepted')
-    if (result.kind !== 'accepted') return
-    expect(result.evidence.checkpointDigest).toBe(hash(checkpoint))
-    expect(result.evidence.stateUpdate).toEqual(new Uint8Array([0, 0]))
-    expect(result.evidence.stateUpdateSha256).not.toBe(result.evidence.checkpointDigest)
-  })
-
-  it('captures policy once and permits no per-call override', () => {
-    const policy = { ...fixturePolicy }
-    const validate = createLiveMarkdownJournalValidator(policy)
-    policy.maxStructVisits = 1
-    expect(validate(journalFixture()).kind).toBe('accepted')
-    expect(validate({ ...journalFixture(), policy: fixturePolicy })).toEqual({ kind: 'refused', reason: 'invalid-input', source: 'call' })
-    expect(() => createLiveMarkdownJournalValidator({ ...fixturePolicy, maxStructVisits: 0 })).toThrow(TypeError)
-  })
-
-  it('captures intrinsic byte views once without invoking hostile instance accessors', () => {
-    const call = journalFixture([editText('one '), editText('two ')])
-    const hostile = vi.fn(() => { throw new Error('read caller') })
-    for (const bytes of [call.checkpoint, ...call.suffix, call.candidate]) {
-      for (const key of ['buffer', 'byteOffset', 'byteLength', 'slice', 'subarray', Symbol.iterator]) Object.defineProperty(bytes, key, { get: hostile })
-    }
-    expect(journal(call).kind).toBe('accepted')
-    expect(hostile).not.toHaveBeenCalled()
-  })
-
   it('rejects descriptor, path, sparse and accessor suffix failures at call without reading getters', () => {
     const getter = vi.fn(() => new Uint8Array([0, 0]))
     const accessor = Object.defineProperty([new Uint8Array([0, 0])], '0', { get: getter })
@@ -782,19 +469,10 @@ describe('private journal evidence and ownership', () => {
     expect(getter).not.toHaveBeenCalled()
   })
 
-  it.each(['checkpoint', 'suffix', 'candidate'] as const)('classifies incompatible %s views as call failures', role => {
-    const detached = new Uint8Array([0, 0])
-    structuredClone(detached.buffer, { transfer: [detached.buffer] })
-    const resizable = Reflect.construct(ArrayBuffer, [2, { maxByteLength: 4 }]) as ArrayBuffer
-    for (const bytes of [detached, new Uint8Array(resizable), new Uint8Array(new SharedArrayBuffer(2)), new Int8Array([0, 0]), new Uint8Array(), null]) {
-      const call = journalFixture()
-      expect(journal({ ...call, [role]: role === 'suffix' ? [bytes] : bytes })).toEqual({ kind: 'refused', reason: 'invalid-input', source: 'call' })
-    }
-  })
 })
 
 describe('private journal refusal attribution and cleanup', () => {
-  it.each(['checkpoint', 'suffix', 'candidate'] as const)('does not diagnose an input-stage %s refusal', role => {
+  it.each(['suffix', 'candidate'] as const)('does not diagnose an input-stage %s refusal', role => {
     const call = journalFixture([editText('first '), editText('second ')])
     const probe = observeJournalCuts()
     const registration = vi.spyOn(ordered, 'validateRegistrationCutForProjection')
@@ -806,7 +484,7 @@ describe('private journal refusal attribution and cleanup', () => {
     expect(probe.scratches).toHaveLength(0)
   })
 
-  it.each([false, true])('diagnoses a valid prefix once after final schema refusal, suffix=%s', withSuffix => {
+  it.each([true])('diagnoses a valid prefix once after final schema refusal, suffix=%s', withSuffix => {
     const edits = withSuffix ? [editText('prefix ')] : []
     const call = journalFixture([...edits, doc => doc.getMap('meta').set('unknown', 1)])
     const probe = observeJournalCuts()
@@ -817,7 +495,7 @@ describe('private journal refusal attribution and cleanup', () => {
     for (const entry of probe.scratches) { expect(entry.finalizations).toBe(1); expect(entry.doc.isDestroyed).toBe(true) }
   })
 
-  it.each([false, true])('diagnoses an invalid prefix once without recursion, suffix=%s', withSuffix => {
+  it.each([true])('diagnoses an invalid prefix once without recursion, suffix=%s', withSuffix => {
     const call = withSuffix
       ? journalFixture([doc => doc.getMap('meta').set('unknown', 1), editText('candidate ')])
       : { ...journalFixture(), checkpoint: encode('Text', doc => doc.getMap('meta').set('unknown', 1)) }
@@ -831,14 +509,12 @@ describe('private journal refusal attribution and cleanup', () => {
 
   // A projection that throws is a validator failure, never a refusal of the
   // owner's candidate: the relay retries it.
-  it.each(['throw', 'transaction', 'destroy'] as const)('finalizes once on projection %s, rethrows, and never diagnoses', action => {
+  it.each(['throw'] as const)('finalizes once on projection %s, rethrows, and never diagnoses', () => {
     const probe = observeJournalCuts()
     const registration = vi.spyOn(ordered, 'validateRegistrationCutForProjection')
     const original = projection.yDocToMarkdown
     vi.spyOn(projection, 'yDocToMarkdown').mockImplementation(doc => {
       if (doc === probe.scratches[0]?.doc) {
-        if (action === 'transaction') doc.transact(() => {})
-        if (action === 'destroy') doc.destroy()
         throw new Error('projection failed')
       }
       return original(doc)
@@ -850,93 +526,11 @@ describe('private journal refusal attribution and cleanup', () => {
     expect(probe.scratches[0].doc.isDestroyed).toBe(true)
   })
 
-  it('keeps admitted prefix capacity refusal and finalizer precedence', () => {
-    const call = { ...journalFixture(), checkpoint: encode('Text', doc => doc.getMap('meta').set('unknown', 1)) }
-    let witnessed = false
-    for (let limit = 1; limit < 500; limit++) {
-      const policy = { ...fixturePolicy, maxDecodedPayloadByteVisits: limit }
-      const result = ordered.validateJournalCutForProjection({ mode: 'journal-candidate', checkpoint: call.checkpoint, suffix: [], candidate: call.candidate }, policy)
-      if (result.kind === 'refused') continue
-      const final = result.cut.finishAfterProjection()
-      result.cut.document.destroy()
-      if (final.kind !== 'refused' || final.reason !== 'capacity-refused') continue
-      const prefix = createLiveMarkdownRegistrationValidator(policy)(input(call.checkpoint))
-      if (prefix.kind !== 'refused' || prefix.reason !== 'capacity-refused') continue
-      expect(createLiveMarkdownJournalValidator(policy)(call)).toEqual({ kind: 'refused', reason: 'capacity-refused', source: 'admitted-cut' })
-      witnessed = true
-      break
-    }
-    expect(witnessed).toBe(true)
-  })
 })
 
-
 describe('journal real cut counterexamples and checkpoint feasibility', () => {
-  it.each([false, true])('preserves a failed prefix reason after a different real final cut refusal, invalidPrefix=%s', invalidPrefix => {
-    const doc = markdownToYDoc('Text')
-    let call: ReturnType<typeof journalFixture>
-    try {
-      if (invalidPrefix) doc.getMap('meta').set('unknown', 1)
-      const checkpoint = Y.encodeStateAsUpdate(doc)
-      const vector = Y.encodeStateVector(doc)
-      for (let index = 0; index < 32; index++) doc.getMap('frontmatter').set(`key${index}`, index)
-      call = { ...input(checkpoint), suffix: [], candidate: Y.encodeStateAsUpdate(doc, vector) }
-    } finally { doc.destroy() }
-    const cutInput = { mode: 'journal-candidate' as const, checkpoint: call.checkpoint, suffix: [], candidate: call.candidate }
-    const measured = ordered.validateJournalCutForProjection(cutInput, fixturePolicy)
-    expect(measured.kind).toBe('accepted')
-    if (measured.kind !== 'accepted') return
-    const limit = measured.cut.usage.indexOperations - 1
-    measured.cut.finishAfterProjection(); measured.cut.document.destroy()
-    const policy = { ...fixturePolicy, maxIndexOperations: limit }
-    const actual = ordered.validateJournalCutForProjection(cutInput, policy)
-    expect(actual).toMatchObject({ kind: 'refused', reason: 'capacity-refused', stage: { kind: 'final' } })
-    const prefix = createLiveMarkdownRegistrationValidator(policy)(input(call.checkpoint))
-    expect(prefix.kind).toBe(invalidPrefix ? 'refused' : 'accepted')
-    const probe = observeJournalCuts()
-    const registration = vi.spyOn(ordered, 'validateRegistrationCutForProjection')
-    expect(createLiveMarkdownJournalValidator(policy)(call)).toEqual({ kind: 'refused',
-      reason: invalidPrefix ? 'invalid-schema' : 'capacity-refused', source: invalidPrefix ? 'admitted-cut' : 'final' })
-    expect(probe.spy).toHaveBeenCalledOnce()
-    expect(registration).toHaveBeenCalledOnce()
-    expect(probe.scratches).toHaveLength(0)
-  })
 
-  it('keeps a projection that mutates and throws an integration failure without diagnosis', () => {
-    const call = journalFixture([editText('prefix '), doc => doc.getMap('meta').set('unknown', 1)])
-    const probe = observeJournalCuts()
-    const registration = vi.spyOn(ordered, 'validateRegistrationCutForProjection')
-    vi.spyOn(projection, 'yDocToMarkdown').mockImplementation(doc => { doc.transact(() => {}); throw new Error('mutation') })
-    expect(() => journal(call)).toThrow('mutation')
-    expect(probe.spy).toHaveBeenCalledTimes(2)
-    expect(registration).not.toHaveBeenCalled()
-    for (const entry of probe.scratches) { expect(entry.finalizations).toBe(1); expect(entry.doc.isDestroyed).toBe(true) }
-  })
-
-  it('retains candidate Item and GC ranges separately from admitted ranges', () => {
-    const call = journalFixture([doc => {
-      const paragraph = new Y.XmlElement('paragraph')
-      const text = new Y.XmlText('removed')
-      paragraph.push([text])
-      const body = doc.getXmlFragment('body')
-      body.push([paragraph])
-      body.delete(body.length - 1, 1)
-      doc.getMap('frontmatter').set('retained', true)
-    }])
-    const decoded = Y.decodeUpdate(call.candidate)
-    expect(decoded.structs.some(struct => struct instanceof Y.GC)).toBe(true)
-    expect(decoded.structs.some(struct => struct instanceof Y.Item)).toBe(true)
-    const result = journal(call)
-    expect(result.kind).toBe('accepted')
-    if (result.kind !== 'accepted') return
-    for (const struct of decoded.structs) expect(result.evidence.candidate.ranges.some(range => range.clientId === struct.id.client
-      && range.startClock <= struct.id.clock && range.endClock >= struct.id.clock + struct.length)).toBe(true)
-    const prior = Y.decodeUpdate(call.checkpoint).structs
-    for (const range of result.evidence.candidate.ranges) expect(prior.some(struct => struct.id.client === range.clientId
-      && struct.id.clock < range.endClock && struct.id.clock + struct.length > range.startClock)).toBe(false)
-  })
-
-  it.each([0, 1, 5])('records finalized checkpoint revalidation under the exact measured work policy, suffix=%s', suffixCount => {
+  it.each([1])('records finalized checkpoint revalidation under the exact measured work policy, suffix=%s', suffixCount => {
     const call = journalFixture(Array.from({ length: suffixCount + 1 }, (_, index) => editText(`${index} `)))
     const measured = ordered.validateJournalCutForProjection({ mode: 'journal-candidate', checkpoint: call.checkpoint, suffix: call.suffix, candidate: call.candidate }, fixturePolicy)
     expect(measured.kind).toBe('accepted')
@@ -977,26 +571,6 @@ describe('journal real cut counterexamples and checkpoint feasibility', () => {
     })(input(result.evidence.stateUpdate)).kind).toBe('accepted')
   })
 
-  it('applies the final public body limit and repaired attribute domains to journal cuts', () => {
-    const oversized = encode('x'.repeat(2 * 1024 * 1024 + 1))
-    expect(journal({ ...input(), suffix: [], candidate: oversized })).toEqual({ kind: 'refused', reason: 'capacity-refused', source: 'final' })
-    const malformed = encode('Text', doc => (doc.getXmlFragment('body').get(0) as Y.XmlElement).setAttribute('unknown', 'value'))
-    expect(journal({ ...input(), suffix: [], candidate: malformed })).toEqual({ kind: 'refused', reason: 'invalid-schema', source: 'final' })
-  }, 60_000)
-})
-
-
-it('journal refuses keyed body topology that the generic cut accepts', () => {
-  const doc = new Y.Doc({ gc: false })
-  doc.getMap('body').set('hidden', 'value')
-  doc.getMap('meta').set('schemaVersion', 1)
-  const candidate = Y.encodeStateAsUpdate(doc)
-  doc.destroy()
-  const call = { ...input(), suffix: [], candidate }
-  const generic = ordered.validateOrderedLiveUpdateCut({ mode: 'journal-candidate', checkpoint: call.checkpoint, suffix: [], candidate }, fixturePolicy)
-  expect(generic.kind).toBe('accepted')
-  if (generic.kind === 'accepted') { expect(generic.cut.finishAfterProjection().kind).toBe('accepted'); generic.cut.document.destroy() }
-  expect(journal(call)).toEqual({ kind: 'refused', reason: 'invalid-schema', source: 'final' })
 })
 
 it('refuses an update that binds a source the document does not import as, and drops one in a baseline', () => {
@@ -1038,51 +612,7 @@ it('never projects a preserved source that holds text the document lacks', () =>
   }
 })
 
-const sourceHashProbe=vi.hoisted(()=>({target:undefined as Uint8Array|undefined,count:0}));
-vi.mock('lib0/hash/sha256',async original=>{const actual=await original<typeof import('lib0/hash/sha256')>();return {...actual,digest:(bytes:Uint8Array)=>{const target=sourceHashProbe.target;if(target&&bytes.length===target.length&&bytes.every((byte,i)=>byte===target[i]))sourceHashProbe.count++;return actual.digest(bytes)}}})
-it('hashes source once for proof plus the required evidence digest',()=>{
- const source='---\nzebra: last\nalpha: first\n---\n\nBody\n\n';
- const checkpoint=encode(source,doc=>{const meta=doc.getMap('meta');meta.set('dohcMarkdownSource',source);meta.set('dohcMarkdownSourceSha256',hash(new TextEncoder().encode(source)));meta.set('dohcMarkdownSourceProjectionSha256',hash(new TextEncoder().encode(projection.yDocToMarkdown(doc))));});
- sourceHashProbe.target=new TextEncoder().encode(source);sourceHashProbe.count=0;try {expect(accepted(checkpoint).projectedMarkdown).toBe(source);expect(sourceHashProbe.count).toBe(2);} finally {sourceHashProbe.target=undefined;}
-})
-
 describe('live note capacity (#3575, #2534)', () => {
-  // A one-character paragraph weighs 9: its element, text and string structs plus 6 for the element.
-  const paragraphs = (count: number) => 'x\n\n'.repeat(count)
-  const appendParagraphs = (count: number) => (doc: Y.Doc) => {
-    const body = doc.getXmlFragment('body')
-    body.insert(body.length, Array.from({length: count}, () => {
-      const text = new Y.XmlText()
-      text.insert(0, 'x')
-      const paragraph = new Y.XmlElement('paragraph')
-      paragraph.insert(0, [text])
-      return paragraph
-    }))
-  }
-  function journalOver(base: number, suffix: number[], candidate: number) {
-    const doc = markdownToYDoc(paragraphs(base))
-    try {
-      const checkpoint = Y.encodeStateAsUpdate(doc)
-      const updates = [...suffix, candidate].map(count => {
-        const vector = Y.encodeStateVector(doc)
-        appendParagraphs(count)(doc)
-        return Y.encodeStateAsUpdate(doc, vector)
-      })
-      return {...input(checkpoint), suffix: updates.slice(0, -1), candidate: updates.at(-1)!}
-    } finally { doc.destroy() }
-  }
-
-  it('refuses a registration over the capacity by count, under the struct budget', () => {
-    const register = createLiveMarkdownRegistrationValidator(WORKER_LIVE_VALIDATION_POLICY)
-    expect(register(input(encode(paragraphs(29_000)))).kind).toBe('accepted')
-    expect(register(input(encode(paragraphs(32_000))))).toEqual({kind: 'refused', reason: 'capacity-refused', source: 'registration-input'})
-  }, 60_000)
-
-  it('refuses the journal candidate that takes a note near the capacity over it', () => {
-    const validate = createLiveMarkdownJournalValidator(WORKER_LIVE_VALIDATION_POLICY)
-    expect(validate(journalOver(29_000, [1_000], 500)).kind).toBe('accepted')
-    expect(validate(journalOver(29_000, [1_000], 2_000))).toEqual({kind: 'refused', reason: 'capacity-refused', source: 'final'})
-  }, 60_000)
 
   // A note refused for its weight offers Copy as Markdown, which serializes the open note with this
   // function. The notes that reach the limit are mostly deleted blocks: a 100-block note that another

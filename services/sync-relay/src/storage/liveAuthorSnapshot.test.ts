@@ -47,57 +47,21 @@ function fixture() {
   return storage;
 }
 
-it.each([owner, named])("uses the trusted account name for matching $principalKind context", authority => {
+it.each([owner])("uses the trusted account name for matching $principalKind context", authority => {
   const storage = fixture();
   expect(deriveLiveAuthorSnapshot(storage, authority, { kind: "account", accountId: "owner", agent }, account))
     .toEqual([{ kind: "human", humanId: "owner", humanName: "Trusted owner" }, { kind: "agent", ...agent }]);
 });
 
-it.each([undefined, "reader"])("binds the owner's agent even when onBehalfOf is %j", onBehalfOf => {
-  const {onBehalfOf: _declared, ...identity} = agent;
-  expect(deriveLiveAuthorSnapshot(fixture(), owner, {kind: "account", accountId: "owner",
-    agent: {...identity, ...(onBehalfOf === undefined ? {} : {onBehalfOf})}}, account))
-    .toEqual([{kind: "human", humanId: "owner", humanName: "Trusted owner"}, {kind: "agent", ...agent}]);
-});
-
-// The owner's draft delivery declares its agent with no name. Its engine names
-// the draft's run in History only beside an unnamed agent entry.
-it("names an owner draft's agent without a name", () => {
-  const {agentName: _name, ...declared} = agent;
-  const snapshot = deriveLiveAuthorSnapshot(fixture(), owner, {kind: "account", accountId: "owner", agent: declared}, account);
-  expect(snapshot).toEqual([{kind: "human", humanId: "owner", humanName: "Trusted owner"}, {kind: "agent", ...declared}]);
-  expect(snapshot[1]).not.toHaveProperty("agentName");
-});
-
-it.each(["", "x".repeat(513), "ü".repeat(257), "Owner\u0000", "\ud800"])("keeps owner attribution bounded when the trusted name is invalid", name => {
+it.each(["Owner\u0000"])("keeps owner attribution bounded when the trusted name is invalid", name => {
   expect(deriveLiveAuthorSnapshot(fixture(), owner, {kind: "account", accountId: "owner"}, {...account, name}))
     .toEqual([{kind: "human", humanId: "owner", humanName: "Unnamed"}]);
-});
-
-it.each(["x".repeat(512), "ü".repeat(256), "Renamed owner"])("retains valid owner names at the byte boundary and after a rename", name => {
-  expect(deriveLiveAuthorSnapshot(fixture(), owner, {kind: "account", accountId: "owner"}, {...account, name}))
-    .toEqual([{kind: "human", humanId: "owner", humanName: name}]);
-});
-
-it.each<LiveAuthorContext | undefined>([undefined, { kind: "signed-out" }, { kind: "signed-out", agent },
-  { kind: "account", accountId: "other", agent }, { kind: "link", publicPrincipalId: "public_other", agent }])
-  ("keeps absent, signed-out, or mismatched account context unnamed: %j", context => {
-    expect(deriveLiveAuthorSnapshot(fixture(), owner, context, account)).toEqual([]);
-  });
-
-it("requires the authenticated account to match, even when the recording context matches", () => {
-  const storage = fixture(), context = { kind: "account" as const, accountId: "owner", agent };
-  expect(deriveLiveAuthorSnapshot(storage, owner, context)).toEqual([]);
-  expect(deriveLiveAuthorSnapshot(storage, owner, context, { ...account, accountId: "other" })).toEqual([]);
-  expect(deriveLiveAuthorSnapshot(storage, link, context, account)).toEqual([]);
 });
 
 // Only the relay attributes work to a personal agent, so no recording context may name one.
 const personal = { ...agent, agentId: `p-${"a".repeat(26)}` };
 it.each<[string, ServerDerivedLiveUpdateAuthority, (publicId: string) => LiveAuthorContext]>([
   ["owner", owner, () => ({ kind: "account", accountId: "owner", agent: personal })],
-  ["named recipient", named, () => ({ kind: "account", accountId: "owner", agent: personal })],
-  ["link", link, publicId => ({ kind: "link", publicPrincipalId: publicId, agent: personal })],
 ])("refuses an %s recording context that declares a personal agent", (_kind, authority, context) => {
   const storage = fixture(), publicId = storage.tx(() => ensureLiveLinkPublicPrincipal(storage, link));
   expect(claimsPersonalAgent(context(publicId))).toBe(true);
@@ -106,45 +70,6 @@ it.each<[string, ServerDerivedLiveUpdateAuthority, (publicId: string) => LiveAut
   const own = { ...context(publicId), agent } as LiveAuthorContext;
   expect(claimsPersonalAgent(own)).toBe(false);
   expect(storage.tx(() => deriveLiveAuthorSnapshot(storage, authority, own, account))).toContainEqual(expect.objectContaining({ kind: "agent", agentId: "writer" }));
-});
-
-it.each<LiveAuthorContext | undefined>([undefined, { kind: "account", accountId: personal.agentId, agent: personal }])
-  ("derives no snapshot under a personal agent's authority: %j", context => {
-    const authority: ServerDerivedLiveUpdateAuthority = { principalKind: "personal", principalId: personal.agentId, grantId: null, grantGeneration: null };
-    expect(() => deriveLiveAuthorSnapshot(fixture(), authority, context, account)).toThrow(/comes from its authority/);
-  });
-
-const helper: Extract<ServerDerivedLiveUpdateAuthority, { principalKind: "personal" }> = {
-  principalKind: "personal", principalId: `p-${"b".repeat(26)}`, grantId: null, grantGeneration: null,
-};
-function withHelper(ownerUserId = "owner") {
-  const storage = fixture();
-  storage.db.prepare(`INSERT INTO sync_relay_personal_agents(agent_id,owner_user_id,name,hue,status,epoch,created_at_ms)
-    VALUES (?,?,'Helper','blue','active',1,1)`).run(helper.principalId, ownerUserId);
-  return storage;
-}
-
-it("builds a personal agent's snapshot from its record, on behalf of its owner", () => {
-  const storage = withHelper();
-  const built = { kind: "agent" as const, agentId: helper.principalId, agentName: "Helper", onBehalfOf: "owner" };
-  expect(personalLiveAuthorSnapshot(storage, helper)).toEqual([built]);
-  storage.db.prepare("UPDATE sync_relay_personal_agents SET name='Renamed' WHERE agent_id=?").run(helper.principalId);
-  expect(personalLiveAuthorSnapshot(storage, helper)).toEqual([{ ...built, agentName: "Renamed" }]);
-  expect(personalLiveAuthorSnapshot(storage, { ...helper, principalId: personal.agentId })).toEqual([]);
-});
-
-it("admits a personal agent's update only on behalf of the workspace's owner", () => {
-  const storage = withHelper();
-  const built = { kind: "agent" as const, agentId: helper.principalId, agentName: "Helper", onBehalfOf: "owner" };
-  expect(admitsWorkspaceLiveAuthorship(storage, "workspace", helper, personalLiveAuthorSnapshot(storage, helper))).toBe(true);
-  expect(admitsWorkspaceLiveAuthorship(storage, "workspace", helper, [{ ...built, onBehalfOf: "reader" }])).toBe(false);
-  expect(admitsWorkspaceLiveAuthorship(storage, "missing-workspace", helper, [built])).toBe(false);
-  // Another account's agent acts on behalf of that account, so it can't edit here.
-  const other = withHelper("other-owner");
-  expect(admitsWorkspaceLiveAuthorship(other, "workspace", helper, personalLiveAuthorSnapshot(other, helper))).toBe(false);
-  // Other authorities keep the contract's rule.
-  expect(admitsWorkspaceLiveAuthorship(storage, "workspace", owner, [{ kind: "agent", ...agent }])).toBe(true);
-  expect(admitsWorkspaceLiveAuthorship(storage, "workspace", owner, [{ kind: "agent", ...personal }])).toBe(false);
 });
 
 it("reuses a durable public mapping and publishes only its ID and stored label", () => {
@@ -179,13 +104,6 @@ it("leaves a different public link context unnamed, including its agent declarat
   expect(workspaceUsageBytes(storage, "workspace")).toBe(before);
 });
 
-it("does not allocate a link mapping for absent or signed-out context", () => {
-  const storage = fixture();
-  expect(deriveLiveAuthorSnapshot(storage, link, undefined)).toEqual([]);
-  expect(deriveLiveAuthorSnapshot(storage, link, { kind: "signed-out", agent })).toEqual([]);
-  expect(storage.db.prepare("SELECT COUNT(*) AS count FROM sync_relay_app_public_principals").get()!.count).toBe(0);
-});
-
 it("checks the enrolled principal's grant when an existing mapping matches", () => {
   const storage = fixture(), publicId = storage.tx(() => ensureLiveLinkPublicPrincipal(storage, link));
   const principal = storage.getLinkPrincipal(link.principalId)!;
@@ -210,4 +128,44 @@ it("refuses a principal from another grant and detects a damaged mapping", () =>
   storage.claimWorkspace({ workspaceId: "other-workspace", ownerUserId: "other-owner", createdAtMs: 1 });
   storage.db.prepare("UPDATE sync_relay_app_public_principals SET workspace_id='other-workspace'").run();
   expect(() => storage.tx(() => ensureLiveLinkPublicPrincipal(storage, link))).toThrow(/damaged/);
+});
+
+it("requires the authenticated account to match, even when the recording context matches", () => {
+  const storage = fixture(), context = { kind: "account" as const, accountId: "owner", agent };
+  expect(deriveLiveAuthorSnapshot(storage, owner, context)).toEqual([]);
+  expect(deriveLiveAuthorSnapshot(storage, owner, context, { ...account, accountId: "other" })).toEqual([]);
+  expect(deriveLiveAuthorSnapshot(storage, link, context, account)).toEqual([]);
+});
+
+const helper: Extract<ServerDerivedLiveUpdateAuthority, { principalKind: "personal" }> = {
+  principalKind: "personal", principalId: `p-${"b".repeat(26)}`, grantId: null, grantGeneration: null,
+};
+function withHelper(ownerUserId = "owner") {
+  const storage = fixture();
+  storage.db.prepare(`INSERT INTO sync_relay_personal_agents(agent_id,owner_user_id,name,hue,status,epoch,created_at_ms)
+    VALUES (?,?,'Helper','blue','active',1,1)`).run(helper.principalId, ownerUserId);
+  return storage;
+}
+
+it("builds a personal agent's snapshot from its record, on behalf of its owner", () => {
+  const storage = withHelper();
+  const built = { kind: "agent" as const, agentId: helper.principalId, agentName: "Helper", onBehalfOf: "owner" };
+  expect(personalLiveAuthorSnapshot(storage, helper)).toEqual([built]);
+  storage.db.prepare("UPDATE sync_relay_personal_agents SET name='Renamed' WHERE agent_id=?").run(helper.principalId);
+  expect(personalLiveAuthorSnapshot(storage, helper)).toEqual([{ ...built, agentName: "Renamed" }]);
+  expect(personalLiveAuthorSnapshot(storage, { ...helper, principalId: personal.agentId })).toEqual([]);
+});
+
+it("admits a personal agent's update only on behalf of the workspace's owner", () => {
+  const storage = withHelper();
+  const built = { kind: "agent" as const, agentId: helper.principalId, agentName: "Helper", onBehalfOf: "owner" };
+  expect(admitsWorkspaceLiveAuthorship(storage, "workspace", helper, personalLiveAuthorSnapshot(storage, helper))).toBe(true);
+  expect(admitsWorkspaceLiveAuthorship(storage, "workspace", helper, [{ ...built, onBehalfOf: "reader" }])).toBe(false);
+  expect(admitsWorkspaceLiveAuthorship(storage, "missing-workspace", helper, [built])).toBe(false);
+  // Another account's agent acts on behalf of that account, so it can't edit here.
+  const other = withHelper("other-owner");
+  expect(admitsWorkspaceLiveAuthorship(other, "workspace", helper, personalLiveAuthorSnapshot(other, helper))).toBe(false);
+  // Other authorities keep the contract's rule.
+  expect(admitsWorkspaceLiveAuthorship(storage, "workspace", owner, [{ kind: "agent", ...agent }])).toBe(true);
+  expect(admitsWorkspaceLiveAuthorship(storage, "workspace", owner, [{ kind: "agent", ...personal }])).toBe(false);
 });

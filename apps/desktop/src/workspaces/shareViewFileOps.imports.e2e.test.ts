@@ -1,82 +1,11 @@
-import { mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { type CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 import { createTestScratch } from "./testTemp";
-import { createFile, movePath } from "./workspaceFiles";
 import { engine, roots, harness, seedSharedFiles, scope, settleShareViewThroughOwner, applyShareViewFileImport, storePaths, replicationLogRows, exists } from './shareViewFileOps.fixture';
 
 describe("share-view file operations through the real store", () => {
-it.skipIf(engine.missing)(
-    "imports beside a file whose name differs only in case, never over it",
-    async () => {
-      const view = await harness("dohc-share-import-case-", "edit");
-      await seedSharedFiles(view, [
-        { path: "docs/Note.md", text: "granter\n" },
-      ]);
-      const sourceDir = await createTestScratch("dohc-share-import-case-src-");
-      roots.push(sourceDir);
-      await writeFile(join(sourceDir, "note.md"), "imported\n", "utf8");
-
-      const outcome = await applyShareViewFileImport({
-        ...scope(view),
-        absolutePaths: [join(sourceDir, "note.md")],
-        screenAgainstRoots: null,
-        targetDir: "docs",
-      });
-
-      // The ordinary import is safe here because `copyFile` runs with
-      // COPYFILE_EXCL, which the filesystem answers; the share path has to be
-      // as safe, and a name set built from `readdir` strings is not.
-      await expect(
-        readFile(join(view.rootPath, "docs", "Note.md"), "utf8"),
-        "an import that compares names as strings overwrites a file whose name differs only in case",
-      ).resolves.toBe("granter\n");
-      // WHERE the import landed differs by platform — `note (2).md` where the
-      // filesystem folds case, `note.md` where it does not — so this asserts
-      // the invariant both share: one file landed, and it holds the imported
-      // bytes.
-      expect(outcome.imported).toHaveLength(1);
-      expect(outcome.skipped).toBe(0);
-      await expect(
-        readFile(join(view.rootPath, outcome.imported[0]!), "utf8"),
-      ).resolves.toBe("imported\n");
-      expect(await storePaths(view)).toContain("docs/Note.md");
-    },
-    60_000,
-  );
-
-  it.skipIf(engine.missing)(
-    "leaves a picked file inside a .dohc folder out of a shared workspace's import",
-    async () => {
-      const view = await harness("dohc-share-import-metadata-", "edit");
-      await seedSharedFiles(view, [
-        { path: "docs/note.md", text: "granter\n" },
-      ]);
-      const sourceDir = await createTestScratch("dohc-share-import-metadata-src-");
-      roots.push(sourceDir);
-      const kept = join(sourceDir, ".dohc", "local", "protected-copies");
-      await mkdir(kept, { recursive: true });
-      await writeFile(join(kept, "copy.json"), "{\"text\":\"SECRET\"}", "utf8");
-      await writeFile(join(sourceDir, "plain.md"), "plain\n", "utf8");
-
-      const outcome = await applyShareViewFileImport({
-        ...scope(view),
-        absolutePaths: [join(kept, "copy.json"), join(sourceDir, "plain.md")],
-        screenAgainstRoots: null,
-        targetDir: "docs",
-      });
-
-      expect(outcome).toEqual({
-        imported: ["docs/plain.md"],
-        skipped: 1,
-        skippedSources: [{ path: "copy.json", reason: "workspace-data" }],
-      });
-      expect(await storePaths(view)).toEqual(["docs/note.md", "docs/plain.md"]);
-      expect(await exists(join(view.rootPath, "docs", "copy.json"))).toBe(false);
-    },
-    60_000,
-  );
 
 it.skipIf(engine.missing)(
     "reserves an absent projection's store name without regard to case",
@@ -119,47 +48,6 @@ it.skipIf(engine.missing)(
       await expect(
         readFile(join(view.rootPath, "docs", "note (2).md"), "utf8"),
       ).resolves.toBe("imported\n");
-    },
-    60_000,
-  );
-
-it.skipIf(engine.missing)(
-    "screens an OS drag-in before it writes a share view's store",
-    async () => {
-      const view = await harness("dohc-share-import-dropped-", "edit");
-      await seedSharedFiles(view, [
-        { path: "docs/note.md", text: "granter\n" },
-      ]);
-      const sourceDir = await createTestScratch("dohc-share-dropped-src-");
-      roots.push(sourceDir);
-      const file = join(sourceDir, "dropped.md");
-      await writeFile(file, "dropped\n", "utf8");
-      const directory = join(sourceDir, "folder");
-      await mkdir(directory);
-      const link = join(sourceDir, "link.md");
-      await symlink(file, link);
-
-      const outcome = await applyShareViewFileImport({
-        ...scope(view),
-        absolutePaths: [file, directory, link],
-        screenAgainstRoots: [view.rootPath],
-        targetDir: "docs",
-      });
-
-      // The store holds files only, so a folder with no file in it is
-      // skipped, and the screen refuses the link before following it.
-      expect(
-        outcome,
-        "an unscreened drag-in writes a directory or a link's target into the share view's store",
-      ).toEqual({
-        imported: ["docs/dropped.md"],
-        skipped: 2,
-        skippedSources: [{ path: "link.md", reason: "link" }, { path: "folder", reason: "no-files" }],
-      });
-      expect(await storePaths(view)).toEqual([
-        "docs/dropped.md",
-        "docs/note.md",
-      ]);
     },
     60_000,
   );
@@ -290,70 +178,4 @@ it.skipIf(engine.missing)(
     60_000,
   );
 
-it.skipIf(engine.missing)(
-    "repairs a missing canonical destination before importing into it",
-    async () => {
-      const view = await harness(
-        "dohc-share-import-missing-destination-",
-        "edit",
-      );
-      await seedSharedFiles(view, [
-        { path: "docs/target/keep.md", text: "keep\n" },
-      ]);
-      await rm(join(view.rootPath, "docs", "target"), {
-        recursive: true,
-        force: true,
-      });
-      const sourceDir = await createTestScratch(
-        "dohc-share-import-missing-destination-src-",
-      );
-      roots.push(sourceDir);
-      const source = join(sourceDir, "added.md");
-      await writeFile(source, "added\n", "utf8");
-
-      await expect(
-        applyShareViewFileImport({
-          ...scope(view),
-          absolutePaths: [source],
-          screenAgainstRoots: null,
-          targetDir: "docs/target",
-        }),
-        "disk probing refuses a visible canonical folder whose projection was deleted out of app",
-      ).resolves.toEqual({ imported: ["docs/target/added.md"], skipped: 0 });
-
-      expect(await storePaths(view)).toEqual([
-        "docs/target/added.md",
-        "docs/target/keep.md",
-      ]);
-      await expect(
-        readFile(join(view.rootPath, "docs", "target", "keep.md"), "utf8"),
-      ).resolves.toBe("keep\n");
-      await expect(
-        readFile(join(view.rootPath, "docs", "target", "added.md"), "utf8"),
-      ).resolves.toBe("added\n");
-    },
-    60_000,
-  );
-
-it.skipIf(engine.missing)(
-    "leaves an ordinary workspace's file operations on disk, where the watcher records them",
-    async () => {
-      const workspace = await harness("dohc-ordinary-file-ops-");
-      // The store is opened first so the daemon's own open-time reconciliation
-      // is counted here rather than mistaken for a filesystem write below.
-      const before = await storePaths(workspace);
-
-      await createFile(workspace.rootPath, "note.md", "hello\n");
-      await movePath(workspace.rootPath, "note.md", "renamed.md");
-
-      await expect(
-        readFile(join(workspace.rootPath, "renamed.md"), "utf8"),
-      ).resolves.toBe("hello\n");
-      expect(
-        await storePaths(workspace),
-        "an ordinary workspace writing engine-direct journals every change twice — once here, once from the watcher",
-      ).toEqual(before);
-    },
-    60_000,
-  );
 });

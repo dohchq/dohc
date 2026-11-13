@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, configure, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, configure, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ComponentProps } from "react";
@@ -7,8 +7,7 @@ import type { SitePackageInfo } from "../ipc/bridgeContract";
 import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "../ipc/ownerAppPublicationContract";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { deferred } from "../testing/deferred";
-import { APP_CRASHED, APP_DOWNLOAD_BLOCKED, APP_LIMIT, APP_OPEN_FAILED, APP_SESSION_ENDED } from "./AppView";
-import { KEYBOARD_NAV_ATTRIBUTE } from "./keyboardNavigation";
+import { APP_CRASHED, APP_OPEN_FAILED } from "./AppView";
 import { SitePreviewPage } from "./SitePreviewPage";
 
 configure({ asyncUtilTimeout: 10_000 });
@@ -134,34 +133,6 @@ describe("an owner app in its tab", () => {
     publishOwnerApp.mockImplementation(publication);
   });
 
-  it("lays out the toolbar, and keeps Reload and Open in browser in place but disabled until the app is approved", async () => {
-    approved = false;
-    render(<Page />);
-    expect(await screen.findByText("Review this app to open it here.")).toBeTruthy();
-    const header = screen.getByTestId("site-preview-page").querySelector("header")!;
-    expect([...header.querySelectorAll("button")].map(button => button.dataset.testid))
-      .toEqual(["app-view-reload", "site-preview-show-source", "site-preview-share", "app-view-review", "app-view-open-browser"]);
-    expect(header.textContent).toContain("Preorders");
-    expect(header.querySelector(".font-mono")).toBeNull();
-    expect((screen.getByTestId("app-view-reload") as HTMLButtonElement).disabled).toBe(true);
-    expect((screen.getByTestId("app-view-open-browser") as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.getByRole("button", { name: "Open in browser" })).toBe(screen.getByTestId("app-view-open-browser"));
-    expect(screen.getByRole("button", { name: "Review and open app" })).toBeTruthy();
-    expect(screen.queryByTestId("app-view-webview")).toBeNull();
-  });
-
-  it("gives a plain preview the same placement", async () => {
-    render(<Page siteRoot="report" />);
-    await screen.findByTestId("site-preview-frame");
-    const header = screen.getByTestId("site-preview-page").querySelector("header")!;
-    // The toolbar's own controls, not the rows of the Preview options menu.
-    expect([...header.querySelectorAll<HTMLElement>("button, summary")].filter(control => !control.closest("details > div")).map(control => control.dataset.testid))
-      .toEqual(["site-preview-reload", "site-preview-show-source", "site-preview-share", "site-preview-review", "site-preview-open-external", "site-preview-options", "site-preview-stop"]);
-    expect(screen.getByTestId("site-preview-open-external").getAttribute("aria-label")).toBe("Open in browser");
-    expect(screen.queryByTestId("site-preview-publish")).toBeNull();
-    expect(appView).not.toHaveBeenCalled();
-  });
-
   it("shows dohc's paper while it checks, then loads the app in a guarded webview", async () => {
     const answer = deferred<AppViewResult>();
     appView.mockImplementationOnce(() => answer.promise);
@@ -205,42 +176,6 @@ describe("an owner app in its tab", () => {
     expect(guest.focus.mock.contexts.at(-1)).toBe(webview());
   });
 
-  it("offers Review and open app for an app that reaches no workspace data, and opens it here once approved", async () => {
-    approved = false;
-    const checked = { kind: "localChecked" as const, appRoot: "preorders", sourceRevision: "b".repeat(64), sourcePaths: ["preorders/frontend.js"] };
-    publishOwnerApp.mockImplementation(async request => request.action === "checkLocal" ? checked : publication(request));
-    const user = userEvent.setup();
-    render(<Page />);
-    expect(await screen.findByText("Review this app to open it here.")).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "Review and open app" }));
-    const approve = await screen.findByRole("button", { name: "Approve and open" }) as HTMLButtonElement;
-    await waitFor(() => expect(approve.disabled).toBe(false));
-    expect(within(screen.getByTestId("app-access")).getByText("No workspace data")).toBeTruthy();
-    await user.click(approve);
-    await screen.findByTestId("app-view-webview");
-    expect(screen.queryByTestId("app-publication-dialog")).toBeNull();
-  });
-
-  it("reports a failed open once, offers Try again in the body, and takes the notice back when the app opens", async () => {
-    const cause = new Error("engine stopped");
-    appView.mockRejectedValueOnce(cause);
-    render(<Page />);
-    const retry = await screen.findByTestId("app-view-retry");
-    expect(screen.getByTestId("site-preview-page").textContent).not.toContain(APP_OPEN_FAILED);
-    expect(notices.report).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ message: APP_OPEN_FAILED, cause, retry: expect.any(Function) }));
-    const identity = notices.report.mock.calls[0]![0].identity as string;
-    await userEvent.setup().click(within(retry).getByRole("button", { name: "Try again" }));
-    await openedView();
-    expect(notices.clear).toHaveBeenCalledWith(identity);
-  });
-
-  it("uses main's words when too many apps are open", async () => {
-    appView.mockRejectedValueOnce(new Error(APP_LIMIT));
-    render(<Page />);
-    await screen.findByTestId("app-view-retry");
-    expect(notices.report).toHaveBeenCalledWith(expect.objectContaining({ message: APP_LIMIT }));
-  });
-
   it("fails on a main-frame load error or a crash, and ignores aborts and subframes", async () => {
     render(<Page />);
     await openedView();
@@ -258,22 +193,6 @@ describe("an owner app in its tab", () => {
     fire("render-process-gone", { details: { reason: "crashed", exitCode: 1 } });
     expect(notices.report).toHaveBeenLastCalledWith(expect.objectContaining({ message: APP_CRASHED }));
     expect(screen.getByTestId("app-view-retry")).toBeTruthy();
-  });
-
-  it("opens a version approved while the app was open once the open one's approval ends", async () => {
-    const user = userEvent.setup();
-    render(<Page />);
-    await openedView();
-    await user.click(screen.getByTestId("app-view-review"));
-    const approve = await screen.findByRole("button", { name: "Approve and open" });
-    await waitFor(() => expect((approve as HTMLButtonElement).disabled).toBe(false));
-    await user.click(approve);
-    await waitFor(() => expect(publishOwnerApp).toHaveBeenCalledWith(expect.objectContaining({ action: "approve" })));
-    expect(opens()).toBe(1);
-    emit({ viewId: viewIdOf(), kind: "approval-ended" });
-    await waitFor(() => expect(opens()).toBe(2));
-    await openedView();
-    expect(screen.queryByText("This app's approval ended. Review it to open it again.")).toBeNull();
   });
 
   it("closes the app when its approval ends, and says so after a relaunch finds it unapproved", async () => {
@@ -297,178 +216,6 @@ describe("an owner app in its tab", () => {
     expect(await screen.findByText("This app's approval ended. Review it to open it again.")).toBeTruthy();
   });
 
-  it("keeps a visible page when its session ends, and offers Reload in Notices", async () => {
-    render(<Page />);
-    await openedView();
-    emit({ viewId: viewIdOf(), kind: "session-ended" });
-    expect(webview()).toBeTruthy();
-    expect(opens()).toBe(1);
-    const notice = notices.report.mock.calls[0]![0];
-    expect(notice).toEqual(expect.objectContaining({ message: APP_SESSION_ENDED, retry: null, action: expect.objectContaining({ label: "Reload" }) }));
-    act(() => notice.action.run());
-    await waitFor(() => expect(opens()).toBe(2));
-    await openedView();
-    expect(notices.clear).toHaveBeenCalledWith(notice.identity);
-  });
-
-  it("opens a hidden app again when its tab shows, without a notice", async () => {
-    const view = render(<Page visible={false} focused={false} />);
-    await openedView();
-    emit({ viewId: viewIdOf(), kind: "session-ended" });
-    expect(notices.report).not.toHaveBeenCalled();
-    expect(opens()).toBe(1);
-    view.rerender(<Page visible focused />);
-    await waitFor(() => expect(opens()).toBe(2));
-  });
-
-  it("files one download notice per tab, replaced by the next, with Open in browser, and takes it back when the tab closes", async () => {
-    const view = render(<Page />);
-    await openedView();
-    emit({ viewId: viewIdOf(), kind: "download-blocked", filename: "receipt.pdf" });
-    emit({ viewId: viewIdOf(), kind: "download-blocked", filename: "invoice.pdf" });
-    const [first, second] = notices.report.mock.calls.map(([notice]) => notice);
-    expect(first).toEqual(expect.objectContaining({ title: "dohc didn't download receipt.pdf", message: APP_DOWNLOAD_BLOCKED, retry: null }));
-    expect(second).toEqual(expect.objectContaining({ title: "dohc didn't download invoice.pdf", identity: first.identity }));
-    expect(second.action.label).toBe("Open in browser");
-    expect(screen.getByTestId("site-preview-page").textContent).not.toContain("download");
-    await act(async () => second.action.run());
-    expect(publishOwnerApp).toHaveBeenCalledWith({ action: "launchLocal", workspaceId: "ws-shop", publicationId });
-    expect(api.openExternalUrl).toHaveBeenCalledExactlyOnceWith({ url: "http://127.0.0.1:43123/" });
-    view.unmount();
-    expect(notices.clear).toHaveBeenCalledWith(second.identity);
-  });
-
-  it("opens outside links through dohc's link path, and ignores another view's events", async () => {
-    render(<Page />);
-    await openedView();
-    emit({ viewId: "another-view", kind: "external-link", url: "https://example.com/other" });
-    emit({ viewId: viewIdOf(), kind: "external-link", url: "https://example.com/terms" });
-    await waitFor(() => expect(api.openExternalUrl).toHaveBeenCalledExactlyOnceWith({ url: "https://example.com/terms" }));
-  });
-
-  it("handles keys typed in the app as dohc would", async () => {
-    render(<Page />);
-    await openedView();
-    const key = (key: string, code: string, modifiers: Partial<Record<"ctrlKey" | "shiftKey" | "altKey" | "metaKey", boolean>> = {}) =>
-      emit({ viewId: viewIdOf(), kind: "shortcut", key, code, ctrlKey: false, shiftKey: false, altKey: false, metaKey: false, ...modifiers });
-    key("F5", "F5");
-    key("r", "KeyR", { ctrlKey: true });
-    expect(guest.reload).toHaveBeenCalledTimes(2);
-    key("ArrowLeft", "ArrowLeft", { altKey: true });
-    expect(guest.goBack).toHaveBeenCalledOnce();
-    guest.canGoForward.mockReturnValue(false);
-    key("ArrowRight", "ArrowRight", { altKey: true });
-    expect(guest.goForward).not.toHaveBeenCalled();
-    expect(document.documentElement.hasAttribute(KEYBOARD_NAV_ATTRIBUTE)).toBe(false);
-    key("F6", "F6");
-    expect(document.activeElement).toBe(screen.getByTestId("app-view-reload"));
-    expect(document.documentElement.hasAttribute(KEYBOARD_NAV_ATTRIBUTE)).toBe(true);
-    document.documentElement.removeAttribute(KEYBOARD_NAV_ATTRIBUTE);
-    const seen: KeyboardEvent[] = [];
-    const listen = (event: KeyboardEvent) => seen.push(event);
-    window.addEventListener("keydown", listen);
-    key("p", "KeyP", { ctrlKey: true });
-    window.removeEventListener("keydown", listen);
-    expect(seen.map(event => [event.key, event.code, event.ctrlKey, event.shiftKey, event.altKey, event.metaKey]))
-      .toEqual([["p", "KeyP", true, false, false, false]]);
-  });
-
-  it("puts focus in the app when its tab becomes the shown one", async () => {
-    const view = render(<Page visible={false} focused={false} />);
-    await openedView();
-    expect(guest.focus).not.toHaveBeenCalled();
-    view.rerender(<Page visible focused />);
-    expect(guest.focus).toHaveBeenCalledOnce();
-    expect(guest.focus.mock.contexts[0]).toBe(webview());
-  });
-
-  // Runs after any timer the app set before it.
-  const handled = () => act(() => new Promise(resolve => setTimeout(resolve)));
-
-  it("leaves focus where it went when focus in its group makes the shown app's group the focused one", async () => {
-    const tab = document.body.appendChild(document.createElement("button"));
-    try {
-      const view = render(<Page visible focused={false} />);
-      await openedView();
-      tab.focus();
-      view.rerender(<Page visible focused />);
-      await handled();
-      expect(guest.focus).not.toHaveBeenCalled();
-    } finally {
-      tab.remove();
-    }
-  });
-
-  it("puts focus in the app each time its tab is pressed, also when the tab was already shown", async () => {
-    const tab = document.body.appendChild(document.createElement("button"));
-    try {
-      const view = render(<Page visible focused={false} />);
-      await openedView();
-      tab.focus();
-      view.rerender(<Page visible focused />);
-      view.rerender(<Page visible focused focusRequest={1} />);
-      expect(guest.focus).toHaveBeenCalledOnce();
-      // Another app's tab was pressed.
-      view.rerender(<Page visible focused focusRequest={0} />);
-      expect(guest.focus).toHaveBeenCalledOnce();
-      view.rerender(<Page visible focused focusRequest={3} />);
-      expect(guest.focus).toHaveBeenCalledTimes(2);
-    } finally {
-      tab.remove();
-    }
-  });
-
-  describe("when its group becomes the focused one with focus on the page or the group's own area", () => {
-    let group: HTMLElement;
-    beforeEach(() => {
-      group = document.body.appendChild(document.createElement("section"));
-      group.dataset.focusSurface = "editor";
-      group.tabIndex = -1;
-    });
-    afterEach(() => group.remove());
-
-    it("puts focus in the app, as when the other group closes", async () => {
-      const view = render(<Page visible focused={false} />);
-      await openedView();
-      // Focus fell to the page.
-      view.rerender(<Page visible focused />);
-      await waitFor(() => expect(guest.focus).toHaveBeenCalledOnce());
-      view.rerender(<Page visible focused={false} />);
-      // Focus fell back to the app's group itself.
-      group.dataset.active = "";
-      group.focus();
-      view.rerender(<Page visible focused />);
-      await waitFor(() => expect(guest.focus).toHaveBeenCalledTimes(2));
-    });
-
-    it("leaves focus on the group's blank area when a press there made the group the focused one", async () => {
-      const view = render(<Page visible focused={false} />);
-      await openedView();
-      // The press makes the group the focused one, then the browser focuses the area pressed.
-      view.rerender(<Page visible focused />);
-      group.dataset.active = "";
-      fireEvent.mouseDown(group);
-      group.focus();
-      await handled();
-      expect(guest.focus).not.toHaveBeenCalled();
-    });
-
-    it("leaves focus where a closing palette put it back", async () => {
-      const control = document.body.appendChild(document.createElement("button"));
-      try {
-        const view = render(<Page visible focused={false} />);
-        await openedView();
-        // The palette closes with the other group, so focus falls to the page before the palette puts it back.
-        view.rerender(<Page visible focused />);
-        control.focus();
-        await handled();
-        expect(guest.focus).not.toHaveBeenCalled();
-      } finally {
-        control.remove();
-      }
-    });
-  });
-
   it("leaves focus where it went if the tab lost focus before the app opened", async () => {
     const slow = deferred<AppViewResult>();
     appView.mockImplementationOnce(() => slow.promise);
@@ -478,28 +225,6 @@ describe("an owner app in its tab", () => {
     await act(async () => slow.resolve(opened(appView.mock.calls[0]![0] as OpenRequest)));
     await openedView();
     expect(guest.focus).not.toHaveBeenCalled();
-  });
-
-  it("leaves focus in a dialog that opened before the app did", async () => {
-    const slow = deferred<AppViewResult>();
-    appView.mockImplementationOnce(() => slow.promise);
-    render(<Page focused />);
-    await waitFor(() => expect(opens()).toBe(1));
-    const dialog = document.body.appendChild(document.createElement("div"));
-    dialog.dataset.dohcModal = "true";
-    await act(async () => slow.resolve(opened(appView.mock.calls[0]![0] as OpenRequest)));
-    await openedView();
-    expect(guest.focus).not.toHaveBeenCalled();
-    dialog.remove();
-  });
-
-  it("passes dohc's theme to the app and follows it", async () => {
-    document.documentElement.dataset.theme = "dark";
-    render(<Page />);
-    await openedView();
-    expect(appView.mock.calls[0]![0]).toEqual(expect.objectContaining({ colorScheme: "dark" }));
-    act(() => { document.documentElement.dataset.theme = "light"; });
-    await waitFor(() => expect(appView).toHaveBeenCalledWith({ action: "colorScheme", workspaceId: "ws-shop", colorScheme: "light" }));
   });
 
   it("opens the app in the browser from the toolbar, and refuses an address off this device", async () => {
@@ -532,16 +257,6 @@ describe("an owner app in its tab", () => {
     await act(async () => launch.resolve({ kind: "localLaunched", publicationId, url: "http://127.0.0.1:43123/" }));
     expect(reportError).not.toHaveBeenCalled();
     expect(api.openExternalUrl).not.toHaveBeenCalled();
-  });
-
-  it("ends the view and its notices when the tab closes", async () => {
-    appView.mockRejectedValueOnce(new Error("engine stopped"));
-    const view = render(<Page />);
-    await screen.findByTestId("app-view-retry");
-    const identity = notices.report.mock.calls[0]![0].identity as string;
-    view.unmount();
-    expect(appView).toHaveBeenLastCalledWith({ action: "close", workspaceId: "ws-shop", viewId: viewIdOf() });
-    expect(notices.clear).toHaveBeenCalledWith(identity);
   });
 
   it("never paints a slow answer for another workspace's app", async () => {

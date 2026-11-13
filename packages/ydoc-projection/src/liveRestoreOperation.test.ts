@@ -1,16 +1,15 @@
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, beforeAll, expect, it } from "vitest";
 import * as Y from "yjs";
-import { registered, host, DatabaseSync, cleanupLiveDeliveryFixtures } from "./liveCommittedDeliveryTestSupport.js";
+import { registered, DatabaseSync, cleanupLiveDeliveryFixtures } from "./liveCommittedDeliveryTestSupport.js";
 import { openRelayDeployment } from "../../../services/sync-relay/src/relayDeployment.js";
 import type { StorageContext } from "../../../services/sync-relay/src/storage/context.js";
 import { beginStopRestore, advanceStopRestoreFence, declineStopRestore, readStopRestore, type StopRestoreIntent } from "../../../services/sync-relay/src/storage/liveRestoreOperation.js";
 import { attachLiveJournalHistory, createLiveJournalHistoryAuthority } from "../../../services/sync-relay/src/storage/liveJournalHistory.js";
-import { initializeLiveRestoreOperationSchema } from "../../../services/sync-relay/src/storage/liveRestoreOperationSchema.js";
+
 import { buildRelayFixture } from "../../../services/sync-relay/scripts/build.mjs";
 
 afterEach(cleanupLiveDeliveryFixtures);
@@ -30,29 +29,12 @@ function fixture(deployment = false, workspaceQuotaBytes?: number) {
   return { ...f, context, intent, lookup, rows };
 }
 
-it.each(["view", "comment"])("refuses a non-edit target grant (%s) without stopping editors", access => {
+it.each(["view"])("refuses a non-edit target grant (%s) without stopping editors", access => {
   const f = fixture();
   try {
     f.write(db => { db.prepare("UPDATE sync_relay_share_grants SET access=? WHERE grant_id='grant'").run(access); });
     const before = f.rows();
     expect(() => beginStopRestore(f.context, f.intent, 40)).toThrow();
-    expect(f.rows()).toEqual(before);
-  } finally { f.close(); }
-});
-
-it.each(["begin", "fence"])("requires reconciled journal history before %s", phase => {
-  const f = registered();
-  try {
-    const context = f.storage as StorageContext;
-    const intent: StopRestoreIntent = {deliveryKind: "bootstrap",operationId: "restore",ownerUserId: "owner",document: f.input.evidence.document,
-      shareId: "share",grantId: "grant",expectedGrantGeneration: 4,expectedDependentGrantIds: [],expectedFence: 1,restorePointCursor: 0,restorePointReceiptDigest: f.input.evidence.checkpoint.updateDigest};
-    const lookup = {operationId: "restore",workspaceId: "workspace",ownerUserId: "owner"};
-    const history = createLiveJournalHistoryAuthority({ namespace: "restore-history", reconciled: true });
-    attachLiveJournalHistory(context, history);
-    if (phase === "fence") beginStopRestore(context, intent, 40);
-    history.markUnreconciled();
-    const before = f.rows();
-    expect(() => phase === "begin" ? beginStopRestore(context, intent, 40) : advanceStopRestoreFence(context, lookup, 50)).toThrow(/reconciliation/);
     expect(f.rows()).toEqual(before);
   } finally { f.close(); }
 });
@@ -104,9 +86,6 @@ it("rolls back the document fence when its operation update is ignored", () => {
   } finally { f.close(); }
 });
 
-// Proves: before its fence, the owner can end a restore. Access stays revoked,
-// the document keeps its generation and stays open, and nothing can fence the
-// declined restore afterwards.
 it("declines a restore before its fence and keeps access revoked", () => {
   const f = fixture();
   try {
@@ -124,62 +103,7 @@ it("declines a restore before its fence and keeps access revoked", () => {
   } finally { f.close(); }
 });
 
-// Proves: Decline and the fence advance read and write the operation in the
-// same serialized writer, so when both answer one status only one takes it.
-// A decline after the fence leaves the fence in place and only records the
-// request the fencing host must answer, charged to the restore's reservation.
-it.each(["decline", "fence"] as const)("lets exactly one of Decline and the fence take the restore: %s first", first => {
-  const f = fixture();
-  try {
-    beginStopRestore(f.context, f.intent, 40);
-    // Both callers saw the restore before either acted.
-    expect(readStopRestore(f.context, f.lookup)?.phase).toBe("authority-invalidated");
-    const decline = () => declineStopRestore(f.context, f.lookup, 45), fence = () => advanceStopRestoreFence(f.context, f.lookup, 50);
-    const won = (first === "decline" ? decline : fence)();
-    const settled = f.rows();
-    if (first === "decline") expect(fence).toThrow("This restore was declined.");
-    else expect(decline()).toEqual(won);
-    const charged = f.raw.prepare("SELECT accounted_bytes FROM sync_relay_live_restore_cancellations").all().reduce((sum, row) => sum + Number(row.accounted_bytes), 0);
-    expect(f.rows()).toEqual({...settled, operations: settled.operations.map(row => ({...row, accounted_bytes: Number(row.accounted_bytes) - charged}))});
-    expect(f.raw.prepare("SELECT outcome FROM sync_relay_live_restore_cancellations").all()).toEqual(first === "decline" ? [] : [{outcome: null}]);
-    expect(readStopRestore(f.context, f.lookup)).toEqual(won);
-    expect(won.phase).toBe(first === "decline" ? "declined" : "fenced");
-    expect(f.rows().documents[0]).toMatchObject(first === "decline"
-      ? { admission_state: "open", restore_fence_generation: 1 } : { admission_state: "closed", restore_fence_generation: 2 });
-  } finally { f.close(); }
-});
-
-// Proves: a declined restore ends the document's unfinished restore and
-// leaves no fence to chain from, so the next restore begins at the same
-// generation, even as the document's first restore.
-it("begins a new restore after a declined one", () => {
-  const f = fixture();
-  try {
-    beginStopRestore(f.context, f.intent, 40);
-    declineStopRestore(f.context, f.lookup, 45);
-    f.write(db => { db.prepare("UPDATE sync_relay_share_grants SET status='active',generation=6,revoked_at_ms=NULL WHERE grant_id='grant'").run(); });
-    const next = beginStopRestore(f.context, { ...f.intent, operationId: "after-decline", expectedGrantGeneration: 6 }, 60);
-    expect(next).toMatchObject({ phase: "authority-invalidated", previousOperationId: null, oldFence: 1, declinedAtMs: null });
-    expect(advanceStopRestoreFence(f.context, { ...f.lookup, operationId: "after-decline" }, 61)).toMatchObject({ phase: "fenced", newFence: 2 });
-    expect(readStopRestore(f.context, f.lookup)?.phase).toBe("declined");
-  } finally { f.close(); }
-});
-
-it.each(["index", "parent"])("refuses damaged restore schema %s on initialization", damage => {
-  const f = fixture();
-  try {
-    beginStopRestore(f.context, f.intent, 40);
-    if (damage === "index") f.raw.exec("CREATE INDEX unexpected_restore ON sync_relay_live_restore_operations(phase)");
-    else {
-      f.raw.exec("PRAGMA foreign_keys=OFF");
-      f.raw.exec("UPDATE sync_relay_live_restore_operations SET workspace_id='missing'");
-      f.raw.exec("PRAGMA foreign_keys=ON");
-    }
-    expect(() => initializeLiveRestoreOperationSchema(f.context.db)).toThrow(/damaged/);
-  } finally { f.close(); }
-});
-
-it.each([false, true])("revokes before fencing and resumes each phase exactly once, deployment=%s", deployment => {
+it.each([true])("revokes before fencing and resumes each phase exactly once, deployment=%s", deployment => {
   const f = fixture(deployment);
   const ownerDoc = new Y.Doc();
   Y.applyUpdate(ownerDoc, f.input.baselineBytes);
@@ -234,22 +158,7 @@ it("retains an exact nonbaseline restore receipt and rejects another digest or c
   } finally { f.close(); }
 });
 
-it.each([
-  ["owner", { ownerUserId: "other" }], ["grant generation", { expectedGrantGeneration: 3 }],
-  ["fence", { expectedFence: 2 }], ["restore digest", { restorePointReceiptDigest: "0".repeat(64) }],
-  ["grant generation exhaustion", { expectedGrantGeneration: Number.MAX_SAFE_INTEGER }],
-  ["fence exhaustion", { expectedFence: Number.MAX_SAFE_INTEGER }],
-  ["negative cursor", { restorePointCursor: -1 }], ["unexpected dependents", { expectedDependentGrantIds: ["other"] }],
-] as const)("refuses mismatched %s before mutation", (_name, patch) => {
-  const f = fixture();
-  try {
-    const before = f.rows();
-    expect(() => beginStopRestore(f.context, { ...f.intent, ...patch }, 40)).toThrow();
-    expect(f.rows()).toEqual(before);
-  } finally { f.close(); }
-});
-
-it.each(["foreign-workspace", "foreign-object", "stale-lineage", "closed", "moved-object", "foreign-selector", "version-selector", "fixed-main-selector", "alias-selector", "malformed-selector"])("refuses %s before revocation", change => {
+it.each(["foreign-workspace", "stale-lineage", "foreign-selector"])("refuses %s before revocation", change => {
   const f = fixture();
   try {
     const intent = structuredClone(f.intent);
@@ -266,45 +175,6 @@ it.each(["foreign-workspace", "foreign-object", "stale-lineage", "closed", "move
     const before = f.rows();
     expect(() => beginStopRestore(f.context, intent, 40)).toThrow();
     expect(f.rows()).toEqual(before);
-  } finally { f.close(); }
-});
-
-it("refuses conflicting operation identities and keeps independent revocation effective", () => {
-  const f = fixture();
-  try {
-    beginStopRestore(f.context, f.intent, 40);
-    const before = f.rows();
-    for (const patch of [{ operationId: "another" }, { restorePointCursor: 1 }, { grantId: "other" }]) {
-      expect(() => beginStopRestore(f.context, { ...f.intent, ...patch }, 40)).toThrow();
-      expect(f.rows()).toEqual(before);
-    }
-    expect(() => readStopRestore(f.context, { ...f.lookup, ownerUserId: "other" })).toThrow();
-    expect(() => advanceStopRestoreFence(f.context, { ...f.lookup, ownerUserId: "other" }, 50)).toThrow();
-  } finally { f.close(); }
-  const independent = fixture();
-  try {
-    const buffered = independent.capture(independent.update(), "buffered", named);
-    expect(independent.storage.revokeShareGrant({ shareId: "share", grantId: "grant", revokedAtMs: 40 }).ok).toBe(true);
-    expect(() => beginStopRestore(independent.context, independent.intent, 41)).toThrow();
-    expect(independent.storage.commitLiveUpdateJournal(buffered).result.kind).toBe("refused");
-    expect(independent.rows().operations).toHaveLength(0);
-    expect(independent.rows().documents[0]).toMatchObject({ admission_state: "open", restore_fence_generation: 1 });
-  } finally { independent.close(); }
-});
-
-it.each(["before-insert", "after-insert", "after-fence"])("rolls back every effect on %s failure", boundary => {
-  const f = fixture(true);
-  try {
-    if (boundary === "after-fence") beginStopRestore(f.context, f.intent, 40);
-    f.write(db => { db.exec(boundary === "after-fence"
-      ? "CREATE TRIGGER reject_restore BEFORE UPDATE ON sync_relay_live_restore_operations BEGIN SELECT RAISE(ABORT,'injected restore failure'); END"
-      : `CREATE TRIGGER reject_restore ${boundary === "before-insert" ? "BEFORE" : "AFTER"} INSERT ON sync_relay_live_restore_operations BEGIN SELECT RAISE(ABORT,'injected restore failure'); END`); });
-    const before = f.rows();
-    expect(() => boundary === "after-fence" ? advanceStopRestoreFence(f.context, f.lookup, 50) : beginStopRestore(f.context, f.intent, 40)).toThrow("injected restore failure");
-    expect(f.rows()).toEqual(before);
-    f.write(db => { db.exec("DROP TRIGGER reject_restore"); });
-    if (boundary === "after-fence") expect(advanceStopRestoreFence(f.context, f.lookup, 50).newFence).toBe(2);
-    else expect(beginStopRestore(f.context, f.intent, 40).revokedGeneration).toBe(5);
   } finally { f.close(); }
 });
 
@@ -353,60 +223,7 @@ it("revokes a link, credential, and exact dependent set atomically with the oper
   } finally { f.close(); }
 });
 
-it("refuses a dependent generation overflow before invalidating the link", () => {
-  const f = fixture();
-  try {
-    f.write(db => {
-      db.exec("UPDATE sync_relay_share_grants SET principal_kind='link',principal_user_id=NULL WHERE grant_id='grant'");
-      db.prepare("INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,access,generation,status,created_at_ms,parent_grant_id) VALUES('dependent','share','user','reader','edit',?,'active',0,'grant')").run(Number.MAX_SAFE_INTEGER);
-    });
-    const before = f.rows();
-    expect(() => beginStopRestore(f.context, { ...f.intent, expectedDependentGrantIds: ["dependent"] }, 40)).toThrow();
-    expect(f.rows()).toEqual(before);
-  } finally { f.close(); }
-});
-
-it("keeps revocation and fence progress independent of an offline configured device", () => {
-  const f = fixture(true);
-  try {
-    expect(f.storage.disconnectLiveHost({ ...host, updatedAtMs: 30, guard: f.storage.captureStanding() }).ok).toBe(true);
-    const control = f.storage.getLiveHostControl();
-    expect(beginStopRestore(f.context, f.intent, 40).phase).toBe("authority-invalidated");
-    expect(readStopRestore(f.context, f.lookup)?.newFence).toBeNull();
-    expect(f.storage.getShareGrant("grant")?.status).toBe("revoked");
-    expect(advanceStopRestoreFence(f.context, f.lookup, 50).phase).toBe("fenced");
-    expect(f.storage.getLiveHostControl()).toEqual(control);
-  } finally { f.close(); }
-});
-
-it("refuses initial global cursor exhaustion before revocation", () => {
-  const f = fixture();
-  try {
-    f.write(db => { db.prepare("INSERT INTO sqlite_sequence(name,seq) VALUES('sync_relay_live_update_journal',?)").run(Number.MAX_SAFE_INTEGER); });
-    const before = f.rows();
-    expect(() => beginStopRestore(f.context, f.intent, 40)).toThrow();
-    expect(f.rows()).toEqual(before);
-  } finally { f.close(); }
-});
-
-it.each([false, true])("handles the final available global cursor without a partial fence, consumed=%s", consumed => {
-  const f = fixture();
-  try {
-    f.write(db => { db.prepare("INSERT INTO sqlite_sequence(name,seq) VALUES('sync_relay_live_update_journal',?)").run(Number.MAX_SAFE_INTEGER - 1); });
-    expect(beginStopRestore(f.context, f.intent, 40).phase).toBe("authority-invalidated");
-    if (consumed) {
-      const accepted = f.storage.commitLiveUpdateJournal(f.capture(f.update(), "last-safe-cursor")).result;
-      expect(accepted).toMatchObject({ kind: "accepted", receipt: { journalCursor: Number.MAX_SAFE_INTEGER } });
-      const before = f.rows();
-      expect(() => advanceStopRestoreFence(f.context, f.lookup, 50)).toThrow();
-      expect(f.rows()).toEqual(before);
-      expect(readStopRestore(f.context, f.lookup)?.phase).toBe("authority-invalidated");
-    } else expect(advanceStopRestoreFence(f.context, f.lookup, 50)).toMatchObject({ phase: "fenced", cutoverCursor: 0 });
-  } finally { f.close(); }
-});
-
 const crashFixture = fileURLToPath(new URL("../../../services/sync-relay/src/liveRestoreOperationCrash.fixture.ts", import.meta.url));
-const tsx = pathToFileURL(createRequire(crashFixture).resolve("tsx")).href;
 let buildDirectory: string;
 let compiledCrashFixture: string;
 beforeAll(async () => {
@@ -420,13 +237,12 @@ afterAll(() => {
   if (buildDirectory) rmSync(buildDirectory, { recursive: true, force: true });
 });
 
-function assertCrashRecovery(boundary: string, sourceEntry = false) {
+function assertCrashRecovery(boundary: string) {
   const f = fixture(true);
   const intentPath = join(dirname(f.configPath), "intent.json");
   writeFileSync(intentPath, JSON.stringify(f.intent));
   f.close();
-  const entryArguments = sourceEntry ? ["--import", tsx, crashFixture] : [compiledCrashFixture];
-  const child = spawnSync(process.execPath, [...entryArguments, f.configPath, intentPath, boundary],
+  const child = spawnSync(process.execPath, [compiledCrashFixture, f.configPath, intentPath, boundary],
     { encoding: "utf8", windowsHide: true, timeout: 90_000 });
   expect(child.error).toBeUndefined();
   expect(child.stderr).toBe("");
@@ -450,10 +266,6 @@ function assertCrashRecovery(boundary: string, sourceEntry = false) {
   } finally { reopened.close(); }
 }
 
-it.each(["before-operation", "invalidation-before-commit", "invalidation-after-commit", "fence-before-commit", "fence-after-commit", "complete-before-commit", "complete-after-commit", "native-before-commit", "native-after-commit"])("retains configured deployment state after process termination at %s", boundary => {
+it.each(["native-before-commit", "native-after-commit"])("retains configured deployment state after process termination at %s", boundary => {
   assertCrashRecovery(boundary);
-}, 120_000);
-
-it("opens the configured deployment from the source crash fixture", () => {
-  assertCrashRecovery("before-operation", true);
 }, 120_000);

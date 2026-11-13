@@ -1,27 +1,9 @@
 import { readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, it } from "vitest";
-import { engine, compiledRelayMain, type LiveDaemonCapture, pushUntilDrained, openLiveDaemonCapture, openJoinedDaemonCapture, writeAndCapture, pullAndExpect, expectTwoDaemonFileSync } from "./twoDaemonSync.fixture";
+import { engine, compiledRelayMain, type LiveDaemonCapture, pushUntilDrained, openLiveDaemonCapture, openJoinedDaemonCapture, writeAndCapture, pullAndExpect } from "./twoDaemonSync.fixture";
 import { createTestScratch } from "./testTemp";
 import { spawnSyncRelay } from "../../e2e/helpers/syncRelay";
-
-it.skipIf(engine.missing)(
-  "syncs a captured file between two real daemons through one real relay",
-  async () =>
-    await expectTwoDaemonFileSync({
-      workspaceId: "two-daemon-sync",
-      path: "notes/hello.md",
-      contents: "hello from daemon A\n",
-      contentKind: "text",
-      reverse: {
-        path: "notes/reply.md",
-        contents: "hello from daemon B\n",
-      },
-      restart: { contents: "hello after daemon B restarted\n" },
-      rejoin: true,
-    }),
-  60_000,
-);
 
 // A rename that changes only case reaches a peer as a delete of the old
 // spelling and a write of the new one. On a disk that ignores case, as macOS

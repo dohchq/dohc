@@ -1,10 +1,9 @@
 use super::*;
 use dohc_engine_collab::{ContentKind, Ydoc};
 use dohc_engine_domain::{
-    CollectionQuery, CollectionQueryResult, CollectionRecordDetails, MAX_TEXT_BYTES,
-    RECORD_ID_FRONTMATTER_KEY, SecretDiskIntent, SecretFileStore, SecretWrite, VersionedTextStore,
-    decline_oversized_collection_adoption_in_tx, get_collection_record, is_record_id,
-    query_collection_records,
+    CollectionQuery, CollectionQueryResult, CollectionRecordDetails, RECORD_ID_FRONTMATTER_KEY,
+    SecretDiskIntent, SecretFileStore, SecretWrite, VersionedTextStore, get_collection_record,
+    is_record_id, query_collection_records,
 };
 use dohc_engine_files::{
     CancellationToken, CaptureOp, ReconcilePlan, ScanGeneration, apply_reconcile_plan,

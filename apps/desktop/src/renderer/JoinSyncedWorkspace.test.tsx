@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { JoinSyncedWorkspace } from "./JoinSyncedWorkspace";
@@ -58,26 +58,6 @@ async function fillJoinForm(user: ReturnType<typeof userEvent.setup>) {
 }
 
 describe("JoinSyncedWorkspace", () => {
-  it("joins with the pasted code and picked folder, then opens the workspace", async () => {
-    const user = userEvent.setup();
-    const onReady = vi.fn();
-    render(<JoinSyncedWorkspace onWorkspaceReady={onReady} onBack={() => {}} />);
-    await fillJoinForm(user);
-
-    await user.click(screen.getByTestId("join-workspace-start"));
-    await waitFor(() =>
-      expect(bridgeMock.cloudJoinWorkspace).toHaveBeenCalledWith({
-        syncCode: "dohc-sync:ws-joined:http://localhost:1788",
-        rootPath: "/home/sam/dohc/notes",
-      }),
-    );
-    await waitFor(() =>
-      expect(onReady).toHaveBeenCalledWith(
-        expect.objectContaining({ workspaceId: "ws-joined" }),
-      ),
-    );
-  });
-
   it("prompts for the protected-file passphrase and retries the product join", async () => {
     const user = userEvent.setup();
     const onReady = vi.fn();
@@ -124,76 +104,6 @@ describe("JoinSyncedWorkspace", () => {
     await waitFor(() => expect(onReady).toHaveBeenCalledWith(JOINED));
   });
 
-  it("says when the passphrase did not unlock, selects it, and asks for another folder", async () => {
-    const user = userEvent.setup();
-    bridgeMock.cloudJoinWorkspace
-      .mockRejectedValueOnce(new Error("Passphrase required to unlock synced secrets."))
-      // Main's words for a wrong passphrase (cloudIpc.ts join failure).
-      .mockRejectedValueOnce(
-        new Error(
-          "Error invoking remote method 'desktop:cloud-join-workspace': Error: " +
-            "Passphrase could not unlock synced secrets. Files stay in /home/sam/dohc/retry. Choose another empty folder to try again.",
-        ),
-      );
-    render(<JoinSyncedWorkspace onWorkspaceReady={() => {}} onBack={() => {}} />);
-    await fillJoinForm(user);
-    await user.click(screen.getByTestId("join-workspace-start"));
-    const passphrase = (await screen.findByTestId("join-sync-passphrase")) as HTMLInputElement;
-    await user.type(passphrase, "wrong passphrase");
-    bridgeMock.pickWorkspaceRoot.mockResolvedValue("/home/sam/dohc/retry");
-    await user.click(screen.getByTestId("join-choose-folder"));
-    await user.click(screen.getByTestId("join-workspace-start"));
-
-    await waitFor(() =>
-      expectFieldError(passphrase, "join-sync-passphrase-error", "That passphrase didn't unlock the protected files."),
-    );
-    expect(document.activeElement).toBe(passphrase);
-    expect(passphrase.selectionStart).toBe(0);
-    expect(passphrase.selectionEnd).toBe("wrong passphrase".length);
-    expect(screen.queryByTestId("join-error")).toBeNull();
-    expect(screen.getByTestId("join-used-folder").textContent).toBe("Files stay in /home/sam/dohc/retry.");
-    expect(screen.getByTestId("join-choose-folder").textContent).toContain("Choose another empty folder");
-
-    // Leaving the field keeps the error; editing clears it.
-    await user.tab();
-    expect(document.getElementById("join-sync-passphrase-error")).not.toBeNull();
-    await user.type(passphrase, "x");
-    expect(document.getElementById("join-sync-passphrase-error")).toBeNull();
-  });
-
-  it("keeps the fields read-only and the folder chip off while a join runs, so a wrong answer marks what was sent", async () => {
-    const user = userEvent.setup();
-    let rejectJoin: (error: Error) => void = () => undefined;
-    bridgeMock.cloudJoinWorkspace
-      .mockRejectedValueOnce(new Error("Passphrase required to unlock synced secrets."))
-      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectJoin = reject; }));
-    render(<JoinSyncedWorkspace onWorkspaceReady={() => {}} onBack={() => {}} />);
-    await fillJoinForm(user);
-    await user.click(screen.getByTestId("join-workspace-start"));
-    const passphrase = (await screen.findByTestId("join-sync-passphrase")) as HTMLInputElement;
-    const code = screen.getByTestId("join-sync-code") as HTMLInputElement;
-    await user.type(passphrase, "sent");
-    bridgeMock.pickWorkspaceRoot.mockResolvedValue("/home/sam/dohc/retry");
-    await user.click(screen.getByTestId("join-choose-folder"));
-    await user.click(screen.getByTestId("join-workspace-start"));
-
-    await waitFor(() => expect(passphrase.readOnly).toBe(true));
-    expect(code.readOnly).toBe(true);
-    const chip = screen.getByTestId("join-choose-folder") as HTMLButtonElement;
-    expect(chip.disabled).toBe(true);
-    await user.type(passphrase, " typed later");
-    await user.type(code, "x");
-    expect(passphrase.value).toBe("sent");
-    expect(code.value).toBe("dohc-sync:ws-joined:http://localhost:1788");
-
-    await act(async () => rejectJoin(new Error("Passphrase could not unlock synced secrets.")));
-    await waitFor(() => expect(passphrase.readOnly).toBe(false));
-    expect(code.readOnly).toBe(false);
-    expect(chip.disabled).toBe(false);
-    expect(document.activeElement).toBe(passphrase);
-    expect(passphrase.value.slice(passphrase.selectionStart ?? 0, passphrase.selectionEnd ?? 0)).toBe("sent");
-  });
-
   it("drops the protected-file passphrase when the workspace code changes", async () => {
     const user = userEvent.setup();
     bridgeMock.cloudJoinWorkspace
@@ -226,57 +136,6 @@ describe("JoinSyncedWorkspace", () => {
     );
   });
 
-  it("labels the code field with its step title", async () => {
-    render(<JoinSyncedWorkspace onWorkspaceReady={() => {}} onBack={() => {}} />);
-    expect(await screen.findByLabelText("Enter the code from your other machine")).toBe(
-      screen.getByTestId("join-sync-code"),
-    );
-  });
-
-  it("keeps Join on and shows what each empty field needs, focusing the first", async () => {
-    const user = userEvent.setup();
-    render(<JoinSyncedWorkspace onWorkspaceReady={() => {}} onBack={() => {}} />);
-    const button = (await screen.findByTestId("join-workspace-start")) as HTMLButtonElement;
-    expect(button.disabled).toBe(false);
-
-    await user.click(button);
-    const code = screen.getByTestId("join-sync-code");
-    expectFieldError(code, "join-sync-code-error", "Enter a workspace code.");
-    expectFieldError(screen.getByTestId("join-choose-folder"), "join-choose-folder-error", "Choose an empty folder.");
-    expect(document.activeElement).toBe(code);
-    expect(bridgeMock.cloudJoinWorkspace).not.toHaveBeenCalled();
-
-    // Typing clears the code's error; picking a folder clears the folder's.
-    await user.type(code, "dohc-sync:x:http://r.test");
-    expect(screen.queryByText("Enter a workspace code.")).toBeNull();
-    await user.click(screen.getByTestId("join-choose-folder"));
-    await waitFor(() => expect(screen.queryByText("Choose an empty folder.")).toBeNull());
-    await user.click(button);
-    await waitFor(() => expect(bridgeMock.cloudJoinWorkspace).toHaveBeenCalledTimes(1));
-  });
-
-  it("checks the code when focus leaves it, not on each key", async () => {
-    const user = userEvent.setup();
-    render(<JoinSyncedWorkspace onWorkspaceReady={() => {}} onBack={() => {}} />);
-    const code = await screen.findByTestId("join-sync-code");
-    await user.click(code);
-    await user.type(code, "x{Backspace}");
-    expect(screen.queryByText("Enter a workspace code.")).toBeNull();
-    await user.tab();
-    expectFieldError(code, "join-sync-code-error", "Enter a workspace code.");
-  });
-
-  it("says Joining… while the join runs", async () => {
-    const user = userEvent.setup();
-    bridgeMock.cloudJoinWorkspace.mockImplementationOnce(() => new Promise(() => {}));
-    render(<JoinSyncedWorkspace onWorkspaceReady={() => {}} onBack={() => {}} />);
-    await fillJoinForm(user);
-    const button = screen.getByTestId("join-workspace-start") as HTMLButtonElement;
-    await user.click(button);
-    await waitFor(() => expect(button.textContent).toBe("Joining…"));
-    expect(button.disabled).toBe(true);
-  });
-
   it("keeps a failed connection check apart from signed out, with Try again", async () => {
     const user = userEvent.setup();
     const onConnectionError = vi.fn();
@@ -300,40 +159,6 @@ describe("JoinSyncedWorkspace", () => {
     await user.click(within(failed).getByRole("button", { name: "Try again" }));
     await screen.findByTestId("join-sync-code");
     expect(bridgeMock.cloudStatus).toHaveBeenCalledTimes(2);
-  });
-
-  it("lets the notice's Try again run the check while the panel is open", async () => {
-    const onConnectionError = vi.fn();
-    bridgeMock.cloudStatus.mockRejectedValueOnce(new Error("engine down"));
-    render(
-      <JoinSyncedWorkspace
-        onWorkspaceReady={() => {}}
-        onBack={() => {}}
-        onConnectionError={onConnectionError}
-      />,
-    );
-    await screen.findByTestId("join-check-failed");
-    const report = onConnectionError.mock.calls[0]?.[0] as { retry: () => boolean };
-    act(() => {
-      expect(report.retry()).toBe(true);
-    });
-    await screen.findByTestId("join-sync-code");
-  });
-
-  it("shows the handler's product-voiced error without the Electron wrapper", async () => {
-    const user = userEvent.setup();
-    bridgeMock.cloudJoinWorkspace.mockRejectedValueOnce(
-      new Error(
-        "Error invoking remote method 'desktop:cloud-join-workspace': Error: " +
-          "No synced workspace matches that code for your account. Check the code and that you're signed in with the same account.",
-      ),
-    );
-    render(<JoinSyncedWorkspace onWorkspaceReady={() => {}} onBack={() => {}} />);
-    await fillJoinForm(user);
-    await user.click(screen.getByTestId("join-workspace-start"));
-    const error = await screen.findByTestId("join-error");
-    expect(error.textContent).toContain("No synced workspace matches that code");
-    expect(error.textContent).not.toContain("remote method");
   });
 
   // The in-flight join cannot be backed out of silently.

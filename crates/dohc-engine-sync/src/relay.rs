@@ -6159,25 +6159,9 @@ pub(crate) fn replication_payloads_match(
 }
 
 pub(crate) fn canonical_json_bytes(value: &serde_json::Value) -> Result<Vec<u8>, SyncError> {
-    #[cfg(test)]
-    CANONICAL_JSON_CALLS.with(|calls| calls.set(calls.get() + 1));
     dohc_engine_collab::canonical_json::canonical_json_string(value)
         .map(String::into_bytes)
         .ok_or(SyncError::CoordinateDiverged)
-}
-
-#[cfg(test)]
-thread_local! {
-    static CANONICAL_JSON_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(crate) fn take_canonical_json_call_count() -> usize {
-    CANONICAL_JSON_CALLS.with(|calls| {
-        let count = calls.get();
-        calls.set(0);
-        count
-    })
 }
 
 /// Whether a held op is retained across passes, so the cursor can move past

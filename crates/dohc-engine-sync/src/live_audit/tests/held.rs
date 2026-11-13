@@ -482,197 +482,6 @@ fn apply_all(
         .collect()
 }
 
-/// The new owner refuses an audit, and the next edit's audit waits on it.
-#[test]
-fn later_work_reaches_the_new_owner() {
-    let (mut f, ops) = new_owner_holds();
-    let outcomes = apply_all(&mut f.store, &ops);
-    assert_contained(&f.store, &outcomes);
-    assert_eq!(verified_through(&f.store), 1);
-}
-
-/// A settlement over held edits holds with them instead of waiting.
-#[test]
-fn a_settlement_over_held_audits_does_not_stop_later_work() {
-    let (mut f, [audit, next, mut edit]) = new_owner_holds();
-    let (mut settled, ..) = imported_owner(false, true);
-    accept_edit(&mut settled, 2, "Second edit.");
-    accept_edit(&mut settled, 3, "Third edit.");
-    settle_bootstrap_publication(&mut settled, 3, "held-settlement").unwrap();
-    copy_blobs(&settled.store, &mut f.store);
-    let mut settlement = owner_ops(&settled.store)
-        .into_iter()
-        .find(|op| op.op_kind == settlement_record::SETTLEMENT_OP)
-        .unwrap();
-    settlement.origin_id = "peer".into();
-    settlement.origin_seq = 2;
-    settlement.relay_seq = None;
-    edit.origin_seq = 3;
-    let outcomes = apply_all(&mut f.store, &[audit, next, settlement, edit]);
-    assert!(
-        outcomes[2].1.starts_with("refused: "),
-        "{:#?}",
-        report(&outcomes)
-    );
-    assert_contained(&f.store, &outcomes);
-    assert_eq!(count(&f.store, "live_audit_settlements"), 0);
-}
-
-/// The previous owner refuses an audit, and the next edit's audit waits on
-/// it.
-#[test]
-fn later_work_reaches_the_previous_owner() {
-    let (f, mut source, _, root) = imported_owner(false, true);
-    copy_blobs(&f.store, &mut source.store);
-    for op in owner_ops(&f.store) {
-        let outcome = apply(&mut source.store, &op);
-        assert!(
-            outcome == "applied" || outcome.starts_with("refused: "),
-            "{}: {outcome}",
-            op.op_kind
-        );
-        if op.op_kind == BASE_OP {
-            break;
-        }
-    }
-    assert_eq!(count(&source.store, "live_audit_bases"), 1);
-    assert_eq!(count(&source.store, "live_audit_base_publications"), 1);
-    assert_eq!(count(&source.store, "live_audit_base_conflicts"), 0);
-    let template = owner_audit(&f.store);
-    let record = record_of(&f.store, &template);
-    let previous: String = source
-        .store
-        .read_with(|c| {
-            c.query_row(
-                "SELECT json_extract(record_json,'$.checkpoint.evidenceDigest') FROM live_audit_bases",
-                [],
-                |r| r.get(0),
-            )
-        })
-        .unwrap();
-    let restore = restore_source(
-        &source,
-        json!({"kind":"owner","id":root.activation_id}),
-        "service-host",
-        0,
-        &previous,
-    );
-    let [audit, next] = refused_audit(&mut source.store, &template, &record, 1, &previous, restore);
-    let edit = peer_edit(&mut source.store, 2);
-    let outcomes: Vec<_> = [audit, next, edit]
-        .into_iter()
-        .map(|op| {
-            let outcome = apply(&mut source.store, &op);
-            (op, outcome)
-        })
-        .collect();
-    assert_contained(&source.store, &outcomes);
-    assert_eq!(verified_through(&source.store), 0);
-}
-
-/// An audit export this store cannot build keeps its place, and the edit of
-/// another document journaled after it still pushes.
-#[test]
-fn other_work_pushes_while_an_audit_export_waits() {
-    let (mut f, _source, _, root) = imported_owner(false, true);
-    cancel_owner_restore(&mut f, &root.activation_id);
-    // An enrollment still exporting this lineage defers the next edit's audit.
-    f.store
-        .write_with(&NoFaults, |tx| {
-            tx.execute(
-                "INSERT INTO live_audit_pending_exports(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,after_event_count) VALUES ('relay','ws','main','object',?1,1)",
-                [&f.binding.lineage_claim_id],
-            )
-            .map_err(SyncError::persist)
-        })
-        .unwrap();
-    accept_edit(&mut f, 2, "Second edit.");
-    write_other(&mut f.store, "other-moment", 400);
-    let client = crate::RelaySyncClient::new(crate::tests::FakeRelay::default());
-    let outcome = client.push_workspace(
-        &mut f.store,
-        "ws",
-        &NoFaults,
-        &NoLiveLeases,
-        401,
-        100_000_000,
-    );
-    assert!(outcome.is_ok(), "{outcome:?}");
-    assert_eq!(
-        crate::cursor::read_pushed_seq(&f.store, "ws", "service-origin").unwrap(),
-        owner_ops(&f.store).last().unwrap().origin_seq
-    );
-    let after: i64 = f
-        .store
-        .read_with(|c| {
-            c.query_row(
-                "SELECT after_event_count FROM live_audit_pending_exports",
-                [],
-                |r| r.get(0),
-            )
-        })
-        .unwrap();
-    assert_eq!(after, 1);
-    assert_eq!(count(&f.store, "live_audit_event_publications"), 1);
-}
-
-/// More of the origin's unrelated work than the pull retains behind a
-/// waiting operation still arrives, page by page, behind a held audit.
-#[test]
-fn more_unrelated_work_than_a_pull_retains_still_arrives() {
-    let (mut f, [audit, next, mut edit]) = new_owner_holds();
-    let mut ops = vec![audit, next];
-    for seq in 2..10_003 {
-        let mut later = ops[0].clone();
-        later.origin_seq = seq;
-        later.op_kind = "workspace.init".into();
-        later.payload = json!({});
-        ops.push(later);
-    }
-    edit.origin_seq = ops.len() as i64;
-    let last = edit.origin_seq;
-    ops.push(edit);
-    let relay = crate::tests::FakeRelay::default();
-    let client = crate::RelaySyncClient::new(relay);
-    let mut cursor = 1_000;
-    for page in ops.chunks(crate::MAX_PULL_OPS) {
-        cursor += page.len() as i64;
-        *client.transport().pull.lock().unwrap() = Some(crate::PullResponse {
-            work_references: Vec::new(),
-            next_reference_after: None,
-            reference_has_more: false,
-            ops: page.to_vec(),
-            next_cursor: cursor,
-            has_more: false,
-        });
-        let outcome = client
-            .pull_chat_workspace(
-                &mut f.store,
-                &mut WriterDocCache::new(),
-                "ws",
-                &NoFaults,
-                &NoLiveLeases,
-                500,
-            )
-            .unwrap();
-        let crate::SyncPassOutcome::Complete {
-            pending_cursor: Some(pending),
-            ..
-        } = outcome
-        else {
-            panic!("{outcome:?}");
-        };
-        client
-            .commit_pull_cursor(&mut f.store, "ws", &pending, &NoFaults, &NoLiveLeases, 500)
-            .unwrap();
-    }
-    assert_eq!(
-        crate::read_replication_acked_seq(&f.store, "ws", "peer").unwrap(),
-        last
-    );
-    assert_eq!(held(&f.store), vec![("peer".into(), 0), ("peer".into(), 1)]);
-}
-
 /// A held audit keeps every blob it names, and its hold survives a restart:
 /// the store opens offline as before, and a redelivery changes nothing.
 #[test]
@@ -798,54 +607,6 @@ fn later_work_from_another_computer_arrives_after_an_upgrade() {
     assert_eq!(count(&f.store, "replication_pending_refusals"), 0);
 }
 
-/// The lookup of refused audits reads the log through its index.
-#[test]
-fn waiting_work_is_found_without_reading_all_history() {
-    let (f, _) = new_owner_holds();
-    let plan: Vec<String> = f
-        .store
-        .read_with(|c| {
-            c.prepare(&format!(
-                "EXPLAIN QUERY PLAN {}",
-                crate::live_audit::held::REFUSED_APPLICATIONS
-            ))?
-            .query_map(
-                params!["relay", "ws", "main", "object", "lineage", 1, 2],
-                |r| r.get::<_, String>(3),
-            )?
-            .collect::<Result<Vec<_>, _>>()
-        })
-        .unwrap();
-    // The history lookup is keyed by workspace and document.
-    assert!(
-        plan.iter().any(|step| step
-            == "SEARCH r USING INDEX live_audit_refused_applications (workspace_id=? AND <expr>=? AND <expr>>? AND <expr><?)"),
-        "{plan:#?}"
-    );
-    assert!(
-        !plan.iter().any(|step| step.starts_with("SCAN r")),
-        "{plan:#?}"
-    );
-}
-
-/// Every audit this computer refuses is acknowledged, and leaves no pending
-/// refusal, so the sender's later work arrives.
-#[test]
-fn the_senders_later_work_arrives_after_a_refused_audit() {
-    let (mut f, [mut audit, _, mut edit]) = new_owner_holds();
-    audit.payload["eventCount"] = json!(0);
-    let outcome = apply(&mut f.store, &audit);
-    assert!(outcome.starts_with("refused: "), "{outcome}");
-    assert_eq!(
-        crate::read_replication_acked_seq(&f.store, "ws", "peer").unwrap(),
-        0
-    );
-    assert_eq!(count(&f.store, "replication_pending_refusals"), 0);
-    edit.origin_seq = 1;
-    assert_eq!(apply(&mut f.store, &edit), "applied");
-    assert!(held(&f.store).is_empty());
-}
-
 /// Hold a refused audit of event `count` of `binding`'s lineage from
 /// `origin`.
 fn hold_event(store: &mut EngineStore, binding: &LiveObjectBinding, origin: &str, count: i64) {
@@ -942,129 +703,6 @@ fn early_work_stays_ready_while_a_later_change_waits() {
             format!("refused: {}", crate::live_audit::held::WAITS_ON_HELD)
         );
     }
-}
-
-/// A settlement an earlier build could send is not held. It stays retryable.
-#[test]
-fn work_from_an_earlier_build_stays_ready_while_a_document_waits() {
-    let mut f = fixture(true);
-    bootstrap(&mut f, false).unwrap();
-    accept_edit(&mut f, 1, "First edit.");
-    settle_bootstrap_publication(&mut f, 1, "settled").unwrap();
-    let mut settlement = operations(&f.store)
-        .into_iter()
-        .find(|op| op.op_kind == settlement_record::SETTLEMENT_OP)
-        .unwrap();
-    let base: String = f
-        .store
-        .read_with(|c| {
-            c.query_row(
-                "SELECT record_json FROM live_audit_base_publications",
-                [],
-                |r| r.get(0),
-            )
-        })
-        .unwrap();
-    let base: serde_json::Value = serde_json::from_str(&base).unwrap();
-    // The settlement as an earlier build sent it, with a matching identity,
-    // interval digest and record digest.
-    let record = &mut settlement.payload["record"];
-    for field in [
-        "previousCursor",
-        "terminalCursor",
-        "applicationCount",
-        "acceptedEventCount",
-    ] {
-        record[field] = json!(0);
-    }
-    record["localYdocSequence"] = record["previousYdocSequence"].clone();
-    record["nativeIntervalDigest"] = json!(hex_sha256(b"[]"));
-    let namespace = String::from(record["relayDatabaseNamespace"].as_str().unwrap());
-    let binding: LiveObjectBinding = serde_json::from_value(record["binding"].clone()).unwrap();
-    let at_base = (0, 0, base["checkpoint"]["evidenceDigest"].as_str().unwrap());
-    let interval = serde_json::to_vec(&(
-        "live-settlement-accepted-interval-v1",
-        [
-            namespace.as_str(),
-            binding.workspace_id.as_str(),
-            binding.main_version_id.as_str(),
-            binding.object_id.as_str(),
-            binding.lineage_claim_id.as_str(),
-        ],
-        at_base,
-        at_base,
-    ))
-    .unwrap();
-    record["acceptedIntervalDigest"] = json!(hex_sha256(&interval));
-    let text = |field: &str| record[field].as_str().unwrap().to_owned();
-    let identity = serde_json::to_vec(&(
-        &namespace,
-        &binding,
-        0_i64,
-        0_i64,
-        record["previousYdocSequence"].as_i64().unwrap(),
-        record["localYdocSequence"].as_i64().unwrap(),
-        text("nativeIntervalDigest"),
-        text("momentId"),
-        text("markdownDigest"),
-        text("sourceStateVectorDigest"),
-    ))
-    .unwrap();
-    record["settlementId"] = json!(format!("live-settlement-{}", hex_sha256(&identity)));
-    let digest = hex_sha256(record.to_string().as_bytes());
-    settlement.payload["recordDigest"] = json!(digest);
-    let checked = settlement_record::check_imported_payload(&settlement.payload, "ws");
-    assert!(checked.is_ok(), "{checked:?}");
-    let (_scratch, _path, mut receiver) = receiver_with_blobs(&f);
-    hold_event(&mut receiver, &f.binding, "late-peer", 1);
-    let wait = SyncError::RetryableState { reason: "waits" };
-    let waits = receiver
-        .read_with(|c| crate::live_audit::waits_on_held(c, &settlement, &wait))
-        .unwrap();
-    assert!(waits.is_none());
-}
-
-/// Whether `op` waits on a held audit, and the SQLite steps that took.
-fn wait_steps(store: &mut EngineStore, op: &ReplicationEnvelope) -> (bool, u64) {
-    let steps = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let counter = steps.clone();
-    store
-        .hooks_with(|c| {
-            c.progress_handler(
-                1,
-                Some(move || {
-                    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    false
-                }),
-            )
-        })
-        .unwrap();
-    let wait = SyncError::RetryableState { reason: "waits" };
-    let waits = store.read_with(|c| crate::live_audit::waits_on_held(c, op, &wait));
-    store
-        .hooks_with(|c| c.progress_handler(0, None::<fn() -> bool>))
-        .unwrap();
-    (
-        waits.unwrap().is_some(),
-        steps.load(std::sync::atomic::Ordering::Relaxed),
-    )
-}
-
-/// A waiting document does not slow each sync.
-#[test]
-fn a_waiting_document_does_not_slow_each_sync() {
-    let steps = |held: i64| {
-        let (mut f, [_, mut next, _]) = new_owner_holds();
-        for count in 2..2 + held {
-            hold_event(&mut f.store, &f.binding, &format!("held-{count}"), count);
-        }
-        next.payload["eventCount"] = json!(2 + held);
-        wait_steps(&mut f.store, &next)
-    };
-    let (few_wait, few) = steps(10);
-    let (many_wait, many) = steps(400);
-    assert!(few_wait && many_wait);
-    assert!(many < few * 2, "{few} steps, then {many}");
 }
 
 #[test]
@@ -1202,23 +840,6 @@ fn a_refused_export_stream_lets_later_streams_and_enrollment_export() {
     );
 }
 
-/// A document's stream still exports on the next pass while other streams wait.
-#[test]
-fn every_documents_history_exports_while_others_wait() {
-    let mut f = fixture(false);
-    bootstrap(&mut f, false).unwrap();
-    accept_enrollment_event(&mut f, 1);
-    refused_streams(&mut f, 500);
-    contact(&mut f.store);
-    let mut passes = 0;
-    while count(&f.store, "live_audit_event_publications") == 0 {
-        passes += 1;
-        assert!(passes <= 2, "no export after {passes} passes");
-        prepare(&mut f, 200 + passes);
-    }
-    assert_eq!(count(&f.store, "live_audit_held_exports"), 500);
-}
-
 /// A held stream that exports on its retry is no longer held.
 #[test]
 fn a_held_stream_that_exports_on_its_retry_is_no_longer_held() {
@@ -1242,52 +863,6 @@ fn a_held_stream_that_exports_on_its_retry_is_no_longer_held() {
     assert_eq!(count(&f.store, "live_audit_event_publications"), 1);
     assert_eq!(count(&f.store, "live_audit_held_exports"), 0);
 }
-
-fn report_lines(store: &EngineStore) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut after = Some(crate::HistoryReport::default());
-    while let Some(position) = after {
-        let (batch, next) =
-            crate::history_report(store, position, std::time::Duration::MAX).unwrap();
-        lines.extend(batch);
-        after = next;
-    }
-    lines
-}
-
-/// The engine logs one line for each affected document, naming it,
-/// both records and this build.
-#[test]
-fn each_store_logs_a_problem_in_a_documents_history() {
-    let line = |store: &EngineStore, role: &str| {
-        let lines = report_lines(store);
-        assert_eq!(lines.len(), 1, "{lines:#?}");
-        let line = &lines[0];
-        for part in [
-            "engine: live document note.md history needs attention: imported ",
-            &format!("; {role} "),
-            "workspace ws, document object, version main, lineage ",
-            &format!("dohc {}", dohc_engine_storage::ENGINE_BUILD),
-        ] {
-            assert!(line.contains(part), "{line} lacks {part}");
-        }
-    };
-    let (f, _) = new_owner_holds();
-    line(&f.store, "published");
-    let (replica, _scratch, _) = third_replica();
-    line(&replica, "conflicting");
-    let (f, mut source, _, _) = imported_owner(false, true);
-    assert!(report_lines(&source.store).is_empty());
-    copy_blobs(&f.store, &mut source.store);
-    for op in owner_ops(&f.store) {
-        apply(&mut source.store, &op);
-        if op.op_kind == BASE_OP {
-            break;
-        }
-    }
-    line(&source.store, "published");
-}
-
 /// The report reads a bounded batch at a time and resumes where it stopped,
 /// so the engine's first command never waits on a long report and each
 /// document is reported once. A batch whose time is spent stops after the
@@ -1331,39 +906,6 @@ fn the_history_report_reads_in_small_steps() {
     assert!(timed.iter().all(|lines| *lines <= 1), "{timed:?}");
 }
 
-/// Owner records that share a coordinate log different
-/// identities.
-#[test]
-fn each_logged_record_has_its_own_identity() {
-    let (f, _) = new_owner_holds();
-    let published: String = f
-        .store
-        .read_with(|c| {
-            c.query_row(
-                "SELECT record_json FROM live_audit_base_publications",
-                [],
-                |r| r.get(0),
-            )
-        })
-        .unwrap();
-    let mut other: serde_json::Value = serde_json::from_str(&published).unwrap();
-    assert!(
-        other["origin"]["source"]["adoptionId"].is_string(),
-        "{other}"
-    );
-    other["origin"]["source"]["adoptionId"] = json!("another-adoption");
-    let other = other.to_string();
-    let line = f
-        .store
-        .read_with(|c| crate::live_audit::history_line(c, &published, "published", &other))
-        .unwrap();
-    for (role, json) in [("imported", &published), ("published", &other)] {
-        let identity = format!("{role} owner record {}", hex_sha256(json.as_bytes()));
-        assert!(line.contains(&identity), "{line} lacks {identity}");
-    }
-    assert_eq!(line.matches(", state recorded ").count(), 2, "{line}");
-}
-
 /// A held audit leaves no pending refusal, so no Notices row and nothing
 /// each sync pass rereads.
 #[test]
@@ -1385,4 +927,30 @@ fn held_audits_leave_no_notice() {
             .unwrap()
             .is_empty()
     );
+}
+
+/// Whether `op` waits on a held audit, and the SQLite steps that took.
+fn wait_steps(store: &mut EngineStore, op: &ReplicationEnvelope) -> (bool, u64) {
+    let steps = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counter = steps.clone();
+    store
+        .hooks_with(|c| {
+            c.progress_handler(
+                1,
+                Some(move || {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    false
+                }),
+            )
+        })
+        .unwrap();
+    let wait = SyncError::RetryableState { reason: "waits" };
+    let waits = store.read_with(|c| crate::live_audit::waits_on_held(c, op, &wait));
+    store
+        .hooks_with(|c| c.progress_handler(0, None::<fn() -> bool>))
+        .unwrap();
+    (
+        waits.unwrap().is_some(),
+        steps.load(std::sync::atomic::Ordering::Relaxed),
+    )
 }

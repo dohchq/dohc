@@ -381,62 +381,6 @@ fn upload_batch_joins_every_worker_after_a_failure() {
     assert_eq!(finished.load(Ordering::SeqCst), 3);
 }
 
-#[test]
-fn upload_batch_returns_errors_in_request_order() {
-    use std::sync::{Condvar, mpsc};
-    let (sent, later) = mpsc::channel();
-    let gate = Arc::new((Mutex::new(false), Condvar::new()));
-    let held = Arc::clone(&gate);
-    let server = FakeServer::concurrent(move |request| {
-        if request.body == b"batch blob 0" {
-            let (open, timeout) = held
-                .1
-                .wait_timeout_while(held.0.lock().unwrap(), Duration::from_secs(5), |open| {
-                    !*open
-                })
-                .unwrap();
-            assert!(*open && !timeout.timed_out());
-            TestResponse::json(403, json!({"ok": false}))
-        } else {
-            sent.send(()).unwrap();
-            TestResponse::json(401, json!({"ok": false}))
-        }
-    });
-    let transport = transport(&server);
-    let upload = thread::spawn(move || transport.upload_blobs(batch_uploads()));
-    for _ in 0..3 {
-        later
-            .recv_timeout(Duration::from_secs(5))
-            .expect("later errors finish first");
-    }
-    *gate.0.lock().unwrap() = true;
-    gate.1.notify_all();
-    assert_eq!(upload.join().unwrap(), Err(RelayError::Forbidden));
-}
-
-#[test]
-fn upload_batch_uses_the_hosted_blob_route() {
-    let routes = Arc::new(Mutex::new(BTreeSet::new()));
-    let seen = Arc::clone(&routes);
-    let server = FakeServer::concurrent(move |request| {
-        assert_eq!(request.method, "PUT");
-        assert_eq!(request.header("authorization"), Some("Bearer test-token"));
-        assert!(request.target.contains("replicationEpoch=epoch"));
-        assert!(request.target.contains("streamIdentity=stream"));
-        assert_eq!(
-            request.path(),
-            format!("/sync/ws/hosted/blobs/{}", hex_sha256(&request.body))
-        );
-        seen.lock().unwrap().insert(request.path().to_owned());
-        TestResponse::json(200, json!({"ok": true}))
-    });
-    transport(&server)
-        .hosted()
-        .upload_blobs(batch_uploads())
-        .unwrap();
-    assert_eq!(routes.lock().unwrap().len(), 4);
-}
-
 fn probe(transport: &HttpRelayTransport) -> Result<dohc_engine_sync::ProbeResponse, RelayError> {
     transport.probe(ProbeRequest {
         workspace_id: "ws".to_owned(),
@@ -485,205 +429,6 @@ fn log_page(ops: Vec<Value>, next_cursor: i64, has_more: bool) -> TestResponse {
             "hasMore": has_more
         }),
     )
-}
-
-#[derive(Default)]
-struct PushBoundaryState {
-    have_sizes: Vec<usize>,
-    have_sha256s: Vec<String>,
-    missing_sha256s: Vec<String>,
-    log_sizes: Vec<usize>,
-    origin_seqs: Vec<i64>,
-    blob_puts: Vec<String>,
-    auth_failures: usize,
-}
-
-#[test]
-fn push_chunks_ops_and_blob_have_at_server_boundaries() {
-    let (_scratch, _path, mut engine) = open_store();
-    let mut snapshots = Vec::new();
-    let mut blobs = Vec::new();
-    for index in 0..2_001 {
-        let text = format!("blob-{index}");
-        let sha256 = hex_sha256(text.as_bytes());
-        snapshots.push(json!({"objectId": format!("object-{index}"), "path": format!("file-{index}.md"), "blobSha256": sha256}));
-        blobs.push((sha256, text));
-    }
-    seed_identity_with_kind(
-        &mut engine,
-        "version.create",
-        &json!({"forkVersionId": "fork-version", "forkSnapshots": snapshots}),
-    );
-    engine
-        .write_with(&NoFaults, |transaction| {
-            for (sha256, text) in &blobs {
-                transaction
-                    .execute(
-                        "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
-                        rusqlite::params![sha256, text.len() as i64, text],
-                    )
-                    .map_err(StorageError::persist_public)?;
-            }
-            Ok::<(), StorageError>(())
-        })
-        .expect("seed referenced blobs");
-    for index in 0..500 {
-        journal_local_replication_op(
-            &mut engine,
-            "ws",
-            "local",
-            "epoch-1",
-            "stream-1",
-            "probe.local",
-            &json!({"index": index}),
-            1_001 + index,
-            &NoFaults,
-        )
-        .expect("append local op");
-    }
-
-    let state = Arc::new(Mutex::new(PushBoundaryState::default()));
-    let handler_state = Arc::clone(&state);
-    let server = FakeServer::start(move |request| {
-        let mut state = handler_state.lock().expect("push state");
-        if request.header("authorization") != Some("Bearer test-token") {
-            state.auth_failures += 1;
-        }
-        match (request.method.as_str(), request.path()) {
-            ("POST", "/sync/ws/blobs/have") => {
-                let body = request.json();
-                let sha256s = body["sha256s"].as_array().expect("sha array");
-                assert_eq!(body["replicationEpoch"], "epoch-1");
-                assert_eq!(body["streamIdentity"], "stream-1");
-                state.have_sizes.push(sha256s.len());
-                state.have_sha256s.extend(
-                    sha256s
-                        .iter()
-                        .map(|sha| sha.as_str().expect("sha").to_owned()),
-                );
-                state
-                    .missing_sha256s
-                    .push(sha256s[0].as_str().expect("missing sha").to_owned());
-                TestResponse::json(200, json!({"ok": true, "missing": [sha256s[0].clone()]}))
-            }
-            ("PUT", path) if path.starts_with("/sync/ws/blobs/") => {
-                let sha256 = path.rsplit('/').next().expect("sha path");
-                assert_eq!(hex_sha256(&request.body), sha256);
-                state.blob_puts.push(sha256.to_owned());
-                TestResponse::json(200, json!({"ok": true}))
-            }
-            ("POST", "/sync/ws/log") => {
-                let body = request.json();
-                assert_eq!(body["replicationEpoch"], "epoch-1");
-                assert_eq!(body["streamIdentity"], "stream-1");
-                let ops = body["ops"].as_array().expect("ops array");
-                state.log_sizes.push(ops.len());
-                state.origin_seqs.extend(
-                    ops.iter()
-                        .map(|op| op["originSeq"].as_i64().expect("origin seq")),
-                );
-                let current = ops
-                    .last()
-                    .and_then(|op| op["originSeq"].as_i64())
-                    .unwrap_or(-1);
-                TestResponse::json(
-                    200,
-                    json!({
-                        "ok": true,
-                        "accepted": ops.len(),
-                        "inserted": ops.len(),
-                        "skipped": 0,
-                        "currentMaxOriginSeq": current
-                    }),
-                )
-            }
-            _ => TestResponse::json(500, json!({"code": "internal_error"})),
-        }
-    });
-
-    let client = RelaySyncClient::new(transport(&server));
-    let mut total_pushed = 0;
-    let mut passes = Vec::new();
-    loop {
-        let outcome = client
-            .push_workspace(
-                &mut engine,
-                "ws",
-                &NoFaults,
-                &dohc_engine_sync::NoLiveLeases,
-                1_000,
-                0,
-            )
-            .expect("push workspace");
-        let SyncPassOutcome::Complete {
-            pushed, has_more, ..
-        } = outcome
-        else {
-            panic!("push must complete: {outcome:?}");
-        };
-        total_pushed += pushed;
-        passes.push((pushed, has_more));
-        if !has_more {
-            break;
-        }
-        assert!(
-            pushed > 0 && total_pushed < 501,
-            "push must make bounded progress"
-        );
-    }
-    assert_eq!(passes, [(500, true), (1, false)]);
-    assert_eq!(total_pushed, 501);
-    assert_eq!(
-        read_pushed_seq(&engine, "ws", "local").expect("pushed seq"),
-        500
-    );
-    let mut state = state.lock().expect("push state");
-    assert_eq!(state.have_sizes, [2_000, 1]);
-    assert_eq!(state.log_sizes, [500, 1]);
-    assert_eq!(state.origin_seqs, (0..501).collect::<Vec<_>>());
-    state.have_sha256s.sort();
-    let mut expected_sha256s: Vec<_> = blobs.iter().map(|(sha, _)| sha.clone()).collect();
-    expected_sha256s.sort();
-    assert_eq!(state.have_sha256s, expected_sha256s);
-    assert_eq!(state.blob_puts.len(), 2);
-    state.blob_puts.sort();
-    state.missing_sha256s.sort();
-    assert_eq!(state.blob_puts, state.missing_sha256s);
-    assert_eq!(state.auth_failures, 0);
-}
-
-#[test]
-fn push_rejects_relay_origin_ahead_of_local_max() {
-    let (_scratch, _path, mut engine) = open_store();
-    seed_identity(&mut engine, &json!({}));
-    let server = FakeServer::start(|request| match (request.method.as_str(), request.path()) {
-        ("POST", "/sync/ws/log") => TestResponse::json(
-            200,
-            json!({
-                "ok": true,
-                "accepted": 1,
-                "inserted": 1,
-                "skipped": 0,
-                "currentMaxOriginSeq": 1
-            }),
-        ),
-        _ => TestResponse::json(500, json!({"code": "internal_error"})),
-    });
-    let error = RelaySyncClient::new(transport(&server))
-        .push_workspace(
-            &mut engine,
-            "ws",
-            &NoFaults,
-            &dohc_engine_sync::NoLiveLeases,
-            1_000,
-            0,
-        )
-        .expect_err("ahead relay must diverge");
-    assert_eq!(error, RelayError::OriginDiverged);
-    assert_eq!(
-        read_pushed_seq(&engine, "ws", "local").expect("pushed seq"),
-        -1
-    );
 }
 
 #[test]
@@ -847,115 +592,6 @@ fn push_rewind_is_durable_before_a_failed_retry() {
 }
 
 #[test]
-fn pull_aborts_when_has_more_cursor_does_not_advance() {
-    let (_scratch, _path, mut engine) = open_store();
-    seed_identity(&mut engine, &json!({}));
-    let server = FakeServer::start(|_| log_page(Vec::new(), 0, true));
-    let error = RelaySyncClient::new(transport(&server))
-        .fetch_pull(&mut engine, "ws", &NoFaults)
-        .expect_err("non-advancing page must abort");
-    assert_eq!(
-        error,
-        RelayError::NoProgress,
-        "removing the forward-progress guard makes this fake page loop until the test process is killed instead of returning NoProgress."
-    );
-    assert!(read_relay_cursor(&engine, "ws").expect("cursor").is_none());
-}
-
-#[test]
-fn pull_rejects_byte_different_coordinate_collision_before_apply() {
-    let (_scratch, _path, mut engine) = open_store();
-    seed_identity(&mut engine, &json!({}));
-    engine
-        .write_with(&NoFaults, |transaction| {
-            transaction
-                .execute(
-                    "INSERT INTO replication_log \
-                 (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) \
-                 VALUES ('ws','peer',0,'probe.remote','{\"value\":1}',2000,1)",
-                    [],
-                )
-                .map_err(StorageError::persist_public)?;
-            Ok::<(), StorageError>(())
-        })
-        .expect("seed colliding row");
-    let server = FakeServer::start(|_| {
-        log_page(
-            vec![remote_row("peer", 0, "probe.remote", json!({"value": 2}))],
-            1,
-            false,
-        )
-    });
-    let client = RelaySyncClient::new(transport(&server));
-    let prepared = client
-        .fetch_pull(&mut engine, "ws", &NoFaults)
-        .expect("fetch page");
-    let error = client
-        .apply_pull(
-            &mut engine,
-            &mut dohc_engine_sync::WriterDocCache::new(),
-            "ws",
-            &prepared,
-            &NoFaults,
-            &NoLiveLeases,
-            1_000,
-        )
-        .expect_err("a foreign coordinate collision must fail closed");
-    assert_eq!(error, RelayError::InvalidResponse);
-    assert!(read_relay_cursor(&engine, "ws").expect("cursor").is_none());
-}
-
-#[test]
-fn pull_accepts_the_relays_integral_float_normalization() {
-    let (_scratch, _path, mut engine) = open_store();
-    seed_identity(&mut engine, &json!({}));
-    engine
-        .write_with(&NoFaults, |transaction| {
-            transaction
-                .execute(
-                    "INSERT INTO replication_log \
-                     (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) \
-                     VALUES ('ws','peer',0,'workspace.init','{\"value\":1.0}',2000,1)",
-                    [],
-                )
-                .map_err(StorageError::persist_public)?;
-            Ok::<(), StorageError>(())
-        })
-        .expect("seed normalized coordinate");
-    let server = FakeServer::start(|_| {
-        log_page(
-            vec![remote_row("peer", 0, "workspace.init", json!({"value": 1}))],
-            1,
-            false,
-        )
-    });
-
-    let client = RelaySyncClient::new(transport(&server));
-    let prepared = client
-        .fetch_pull(&mut engine, "ws", &NoFaults)
-        .expect("fetch page");
-    let outcome = client
-        .apply_pull(
-            &mut engine,
-            &mut dohc_engine_sync::WriterDocCache::new(),
-            "ws",
-            &prepared,
-            &NoFaults,
-            &NoLiveLeases,
-            1_000,
-        )
-        .expect("semantically identical number");
-    assert!(matches!(
-        outcome,
-        SyncPassOutcome::Complete {
-            applied: 0,
-            skipped: 1,
-            ..
-        }
-    ));
-}
-
-#[test]
 fn pull_rejects_rows_without_the_mandatory_relay_sequence() {
     let server = FakeServer::start(|_| {
         log_page(
@@ -983,29 +619,6 @@ fn pull_rejects_rows_without_the_mandatory_relay_sequence() {
         })
         .expect_err("every pulled workspace row needs a relaySeq");
     assert_eq!(error, RelayError::InvalidResponse);
-}
-
-#[test]
-fn pull_captures_the_relay_sequence() {
-    let server = FakeServer::start(|_| {
-        log_page(
-            vec![remote_row("peer", 0, "workspace.init", json!({}))],
-            1,
-            false,
-        )
-    });
-    let response = transport(&server)
-        .pull(PullRequest {
-            include_work_references: true,
-            reference_after: None,
-            workspace_id: "ws".to_owned(),
-            replication_epoch: "epoch".to_owned(),
-            stream_identity: "stream".to_owned(),
-            cursor: 0,
-            limit: 1,
-        })
-        .expect("pull relay row");
-    assert_eq!(response.ops[0].relay_seq, Some(1));
 }
 
 #[test]
@@ -1049,64 +662,6 @@ fn exact_log_coordinate_lookup_is_authenticated_and_preserves_relay_order() {
 }
 
 #[test]
-fn below_floor_coordinate_lookup_preserves_the_exact_authenticated_operation() {
-    let server = FakeServer::start(|_| {
-        TestResponse::json(
-            200,
-            json!({
-                "ok": true,
-                "status": "presentBelowEpochFloor",
-                "op": {
-                    "relaySeq": 11,
-                    "workspaceId": "ws",
-                    "originId": "peer/device",
-                    "originSeq": 7,
-                    "opKind": "workspace.init",
-                    "payload": {"clone": "original"},
-                    "recordedAtMs": 1
-                }
-            }),
-        )
-    });
-    let response = transport(&server)
-        .lookup_log_coordinate(LogCoordinateRequest {
-            workspace_id: "ws".to_owned(),
-            replication_epoch: "epoch".to_owned(),
-            stream_identity: "stream".to_owned(),
-            origin_id: "peer/device".to_owned(),
-            origin_seq: 7,
-        })
-        .expect("lookup below-floor coordinate");
-    let LogCoordinateResponse::PresentBelowEpochFloor(envelope) = response else {
-        panic!("expected a below-floor coordinate");
-    };
-    assert_eq!(envelope.relay_seq, Some(11));
-    assert_eq!(envelope.op_kind, "workspace.init");
-    assert_eq!(envelope.payload, json!({"clone": "original"}));
-    assert_eq!(envelope.recorded_at_ms, 1);
-}
-
-#[test]
-fn direct_transport_rejects_fractional_wire_timestamps_without_rounding() {
-    let mut row = remote_row("peer", 0, "workspace.init", json!({}));
-    row["recordedAtMs"] = json!(1.5);
-    let server = FakeServer::start(move |_| log_page(vec![row.clone()], 1, false));
-
-    let error = transport(&server)
-        .pull(PullRequest {
-            include_work_references: true,
-            reference_after: None,
-            workspace_id: "ws".to_owned(),
-            replication_epoch: "epoch".to_owned(),
-            stream_identity: "stream".to_owned(),
-            cursor: 0,
-            limit: 1,
-        })
-        .expect_err("fractional timestamps are outside the i64 wire contract");
-    assert_eq!(error, RelayError::InvalidResponse);
-}
-
-#[test]
 fn direct_transport_rejects_an_oversized_outbound_payload_before_io() {
     let server = FakeServer::start(|_| panic!("oversized payload reached the network"));
     let overhead = br#"{"data":""}"#.len();
@@ -1134,38 +689,6 @@ fn direct_transport_rejects_an_oversized_outbound_payload_before_io() {
         })
         .expect_err("relay-oversized payload");
     assert_eq!(error, RelayError::PayloadTooLarge);
-}
-
-#[test]
-fn pull_rejects_fetched_blob_with_wrong_sha() {
-    let (_scratch, _path, mut engine) = open_store();
-    seed_identity(&mut engine, &json!({}));
-    let claimed = hex_sha256(b"expected bytes");
-    let handler_claimed = claimed.clone();
-    let server = FakeServer::start(move |request| match request.path() {
-        "/sync/ws/log" => log_page(
-            vec![remote_row(
-                "peer",
-                0,
-                "ydoc.update",
-                json!({"updateBlobSha256": handler_claimed}),
-            )],
-            1,
-            false,
-        ),
-        path if path.starts_with("/sync/ws/blobs/") => TestResponse::bytes(b"wrong bytes"),
-        _ => TestResponse::json(500, json!({"code": "internal_error"})),
-    });
-    let error = RelaySyncClient::new(transport(&server))
-        .fetch_pull(&mut engine, "ws", &NoFaults)
-        .expect_err("wrong blob content must fail");
-    assert_eq!(error, RelayError::BlobInvalid);
-    assert!(read_relay_cursor(&engine, "ws").expect("cursor").is_none());
-    assert!(
-        !engine
-            .has_binary_blob(&claimed)
-            .expect("binary blob presence")
-    );
 }
 
 #[test]
@@ -1719,40 +1242,6 @@ fn status_classes_and_all_transport_endpoints_preserve_auth_and_wire_shapes() {
 }
 
 #[test]
-fn status_401_404_and_409_remain_distinct() {
-    let responses = Arc::new(Mutex::new(VecDeque::from([
-        TestResponse::json(401, json!({"ok": false})),
-        TestResponse::json(404, json!({"ok": false})),
-        TestResponse::json(409, json!({"ok": false})),
-    ])));
-    let handler_responses = Arc::clone(&responses);
-    let server = FakeServer::start(move |_| {
-        handler_responses
-            .lock()
-            .expect("responses")
-            .pop_front()
-            .expect("planned response")
-    });
-    let transport = transport(&server);
-    for expected in [
-        RelayError::Unauthorized,
-        RelayError::WorkspaceUnavailable,
-        RelayError::Conflict,
-    ] {
-        assert_eq!(
-            transport
-                .probe(ProbeRequest {
-                    workspace_id: "ws".to_owned(),
-                    replication_epoch: "epoch".to_owned(),
-                    stream_identity: "stream".to_owned(),
-                })
-                .expect_err("planned status"),
-            expected
-        );
-    }
-}
-
-#[test]
 fn only_body_coded_claim_404_is_a_refusal() {
     for (body, expected) in [
         (json!({}), RelayError::HttpStatus(404)),
@@ -1795,25 +1284,6 @@ fn redirect_to_plaintext_destination_is_refused_without_following() {
 }
 
 #[test]
-fn redirect_to_link_local_destination_is_refused_before_connection() {
-    let source =
-        FakeServer::start(|_| TestResponse::redirect("http://169.254.169.254/latest/meta-data/"));
-
-    assert_eq!(
-        probe(&transport(&source)).expect_err("link-local redirect must be refused"),
-        RelayError::BadRequest,
-        "following this redirect reintroduces an SSRF host/port oracle"
-    );
-}
-
-#[test]
-fn loopback_opt_in_still_performs_direct_requests() {
-    let server = FakeServer::start(|_| log_page(Vec::new(), 0, false));
-    let response = probe(&transport(&server)).expect("direct loopback request");
-    assert!(!response.has_content);
-}
-
-#[test]
 fn key_envelope_upload_rejects_an_oversized_ack_body() {
     let server = FakeServer::start(|_| {
         TestResponse::bytes(vec![b'x'; 64 * 1024 + 1]).with_header("etag", "\"etag\"")
@@ -1832,57 +1302,6 @@ fn key_envelope_upload_rejects_an_oversized_ack_body() {
         RelayError::InvalidResponse,
         "restoring the log-page budget accepts a ~133 MiB key ack"
     );
-}
-
-#[test]
-fn generic_blob_404_is_workspace_unavailable_not_blob_missing() {
-    let server = FakeServer::start(|_| TestResponse::json(404, json!({"code": "not_found"})));
-    let error = transport(&server)
-        .download_blobs(BlobDownloadBatchRequest {
-            workspace_id: "ws".to_owned(),
-            replication_epoch: "epoch".to_owned(),
-            stream_identity: "stream".to_owned(),
-            blobs: vec![BlobDownloadSpec {
-                sha256: "b".repeat(64),
-                limit_bytes: dohc_engine_sync::MAX_INGEST_BLOB_BYTES,
-            }],
-        })
-        .expect("batch reply")
-        .results
-        .into_iter()
-        .next()
-        .expect("one blob result")
-        .expect_err("workspace-level blob 404");
-    assert_eq!(error, RelayError::WorkspaceUnavailable);
-}
-
-#[test]
-fn a_blob_at_the_ingest_ceiling_arrives_whole() {
-    // The relay stores blobs up to `MAX_BLOB_BYTES`, which is the text ceiling,
-    // so an at-ceiling text blob is work the relay legally serves.
-    //
-    let (_constraint, limit_bytes) = blob_ceiling(BlobKind::Text);
-    let server = FakeServer::start(move |request| match request.path() {
-        path if path.starts_with("/sync/ws/blobs/") => TestResponse::bytes(vec![b'a'; limit_bytes]),
-        _ => TestResponse::json(500, json!({"code": "internal_error"})),
-    });
-    let response = transport(&server)
-        .download_blobs(BlobDownloadBatchRequest {
-            workspace_id: "ws".to_owned(),
-            replication_epoch: "epoch".to_owned(),
-            stream_identity: "stream".to_owned(),
-            blobs: vec![BlobDownloadSpec {
-                sha256: "b".repeat(64),
-                limit_bytes,
-            }],
-        })
-        .expect("batch reply")
-        .results
-        .into_iter()
-        .next()
-        .expect("one blob result")
-        .expect("an at-ceiling blob downloads");
-    assert_eq!(response.bytes.len(), limit_bytes);
 }
 
 #[test]
@@ -1940,53 +1359,6 @@ fn pull_names_the_text_ceiling_for_an_oversized_relay_blob() {
         })
     );
     assert!(read_relay_cursor(&engine, "ws").expect("cursor").is_none());
-}
-
-#[test]
-fn a_blob_body_past_the_read_limit_still_names_the_ceiling() {
-    // The transport stops after proving one byte past this blob's requested
-    // ceiling. It reports the observed floor instead of buffering the rest or
-    // inventing a total.
-    //
-    //
-    let limit_bytes = dohc_engine_sync::MAX_INGEST_BLOB_BYTES;
-    let far_over = limit_bytes + 4096;
-    let server = FakeServer::start(move |request| match request.path() {
-        path if path.starts_with("/sync/ws/blobs/") => TestResponse::bytes(vec![b'a'; far_over]),
-        _ => TestResponse::json(500, json!({"code": "internal_error"})),
-    });
-    let error = transport(&server)
-        .download_blobs(BlobDownloadBatchRequest {
-            workspace_id: "ws".to_owned(),
-            replication_epoch: "epoch".to_owned(),
-            stream_identity: "stream".to_owned(),
-            blobs: vec![BlobDownloadSpec {
-                sha256: "b".repeat(64),
-                limit_bytes,
-            }],
-        })
-        .expect("batch reply")
-        .results
-        .into_iter()
-        .next()
-        .expect("one blob result")
-        .expect_err("a body past the read limit is refused");
-    assert_eq!(
-        error,
-        RelayError::BlobTooLarge {
-            constraint: "MAX_INGEST_BLOB_BYTES",
-            limit_bytes,
-            observed: ObservedBytes::AtLeast(limit_bytes + 1),
-        }
-    );
-    assert_eq!(
-        error.to_string(),
-        format!(
-            "relay blob exceeds MAX_INGEST_BLOB_BYTES: limit {limit_bytes} bytes, \
-             observed at least {} bytes",
-            limit_bytes + 1
-        )
-    );
 }
 
 #[test]

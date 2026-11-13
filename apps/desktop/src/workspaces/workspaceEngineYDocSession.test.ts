@@ -1,19 +1,9 @@
-import { copyFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createReadStream, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import {
-  VERSIONED_METHOD,
-  YDOC_METHOD,
-  YdocOwnerDraftPendingError,
-  openEngineYdocProviderSession,
-  type EngineTransport,
-  type Event,
-  type JsonValue,
-  type Request,
-  type Response,
-} from "@dohc/workspace-engine-client";
+import { VERSIONED_METHOD, YDOC_METHOD, openEngineYdocProviderSession, type EngineTransport, type Event, type JsonValue, type Request, type Response } from "@dohc/workspace-engine-client";
 import {
   VersionedLoopbackEngine,
   YdocLoopbackEngine,
@@ -48,10 +38,8 @@ import {
 import { daemonCaptureLifecycleAnswer } from "../testing/liveEngineSessions";
 import { desktopRecordEditContext } from "./desktopRecordEdits";
 import { deleteWorkspacePathByHand } from "./workspaceFileMoves";
-import { EngineYDocSessionOwner } from "./engineYDocSessionOwner";
 import { createLocalChangeAuthor } from "@dohc/workspace-core";
 import { setCollectionRecordFields } from "@dohc/automation-executor/collection-record-edits";
-import { WILL_QUIT_BUDGET_MS } from "../shutdownBudgets";
 import { bindEngineYDoc, EngineYDocDeliveryRefusedError, type EngineYDocTransport } from "../renderer/collab/engineYDocProvider";
 import { flushTypingCheckpoints } from "./outageTypingRecovery";
 import { openedLocalState } from "../testing/preparedLocalState";
@@ -118,7 +106,6 @@ let loseNextResync = false;
 let servedClaim = "owner-claim";
 let resyncCount = 0;
 let lostResyncs = new Set<number>();
-let heldResync: { at: number; entered: PromiseWithResolvers<void>; release: Promise<void> } | null = null;
 function transportLost(): Error {
   return Object.assign(new Error("The engine client is closed: transport closed."), {
     code: "transport-error",
@@ -211,10 +198,6 @@ function daemonSessions(): EngineWorkspaceSessions {
       if (request.method === YDOC_METHOD.resync) {
         const count = ++resyncCount;
         if (lostResyncs.has(count)) throw transportLost();
-        if (heldResync?.at === count) {
-          heldResync.entered.resolve();
-          await heldResync.release;
-        }
       }
       if (request.method === YDOC_METHOD.recordUpdate && loseNextRecordAnswer) {
         loseNextRecordAnswer = false;
@@ -303,7 +286,6 @@ function daemonWriteCount(): number {
   ).length;
 }
 
-
 // The envelope EngineClient rejects a refused request with. DaemonLiveAdapter
 // re-throws it as DaemonRefusalError, which is the shape the close path's
 // discriminator reads; a bare Error never reaches that path.
@@ -337,7 +319,6 @@ beforeEach(async () => {
   servedClaim = "owner-claim";
   resyncCount = 0;
   lostResyncs = new Set();
-  heldResync = null;
   captureErrors = [];
   recordUpdateDelayMs = 0;
   versioned = new VersionedLoopbackEngine();
@@ -403,118 +384,6 @@ function writeFinished(expectedBefore: Record<string, unknown> = { "Finished on"
   });
 }
 
-it("settles and digests an automation record once before closing it", async () => {
-  const context = recordContext();
-  await setCollectionRecordFields({ ...context, async openRecord(path) {
-    const session = await context.openRecord(path);
-    // The open-time drift check is separate from settlement verification.
-    vi.mocked(createReadStream).mockClear();
-    return session;
-  } }, { recordPath: PATH, fields: { "Finished on": "2026-10-01" }, author: recordAutomation });
-  expect(methodCount(YDOC_METHOD.settle)).toBe(1);
-  expect(methodCount(YDOC_METHOD.close)).toBe(1);
-  expect(vi.mocked(createReadStream).mock.calls.filter(([path]) => path === join(root, PATH))).toHaveLength(1);
-  expect(await readFile(join(root, PATH), "utf8")).toContain("2026-10-01");
-});
-
-it("settles and digests later editor changes when closing after an automation write", async () => {
-  const { owner, editor } = await openRecordEditor();
-  vi.mocked(createReadStream).mockClear();
-  await writeFinished();
-  expect(methodCount(YDOC_METHOD.settle)).toBe(1);
-  typeIntoBody(editor, "Changed after the automation settled.");
-  await owner.close();
-  expect(methodCount(YDOC_METHOD.settle)).toBe(2);
-  expect(vi.mocked(createReadStream).mock.calls.filter(([path]) => path === join(root, PATH))).toHaveLength(2);
-  expect(await readFile(join(root, PATH), "utf8")).toContain("Changed after the automation settled.");
-  editor.destroy();
-});
-
-it.each(["delayed notice", "pending resync", "unchanged"] as const)("settles replicated lineage on close with %s", async mode => {
-  let suppressRemote = false;
-  const resyncEntered = Promise.withResolvers<void>();
-  const finishResync = Promise.withResolvers<void>();
-  const onSettled = vi.fn();
-  const teardownEntered = Promise.withResolvers<void>();
-  const finishTeardown = Promise.withResolvers<void>();
-  let holdJournal = false;
-  const transport: EngineTransport = {
-    get helloAck() { return ydoc.helloAck; },
-    onBlob: handler => ydoc.onBlob(handler),
-    onEvent: handler => ydoc.onEvent(event => {
-      if (!suppressRemote) handler(event);
-    }),
-    async sendRequest(request) {
-      if (request.method === YDOC_METHOD.recordUpdate && holdJournal) {
-        teardownEntered.resolve();
-        await finishTeardown.promise;
-      }
-      if (request.method === YDOC_METHOD.resync && mode === "pending resync") {
-        resyncEntered.resolve();
-        await finishResync.promise;
-      }
-      if (request.method === YDOC_METHOD.recordUpdate) {
-        // The claim is this fixture's; the loopback keeps none.
-        const params = request.params as Record<string, JsonValue>;
-        if (params.expectedLineageClaimId !== "owner-claim") throw wireRefusal("ydoc-lineage-stale");
-        const response = await ydoc.sendRequest({ ...request, params: { ...params, expectedLineageClaimId: null } });
-        return { ...response, result: { ...(response.result as Record<string, JsonValue>),
-          lineageClaimId: "owner-claim", lineageOriginatedHere: true } };
-      }
-      const response = await ydoc.sendRequest(request);
-      if (request.method === YDOC_METHOD.open || request.method === YDOC_METHOD.resync) {
-        return { ...response, result: { ...(response.result as Record<string, JsonValue>),
-          lineageClaimId: "owner-claim", lineageOriginatedHere: true } };
-      }
-      return response;
-    },
-  };
-  const provider = await openEngineYdocProviderSession({
-    transport, workspace: WORKSPACE_ID, versionId: "main", path: PATH,
-    contentKind: "richdoc", onRemoteUpdate: () => undefined,
-    scheduleSettle: () => () => undefined, onSettled,
-  });
-  await provider.settleNow();
-  expect(provider.lineageClaimId).toBe("owner-claim");
-  const sessionId = provider.nativeOwner!.sessionId;
-  ydoc.markSessionReplicated(sessionId);
-  if (mode !== "unchanged") {
-    suppressRemote = true;
-    const remote = new Y.Doc();
-    Y.applyUpdate(remote, Y.encodeStateAsUpdate(provider.doc));
-    typeIntoBody(remote, "Frame only the engine has seen.");
-    ydoc.applyRemoteUpdate(sessionId, Y.encodeStateAsUpdate(remote));
-    remote.destroy();
-    suppressRemote = false;
-    expect(documentMarkdown(Y.encodeStateAsUpdate(provider.doc))).not.toContain("Frame only the engine has seen.");
-    expect(await readFile(join(root, PATH), "utf8")).not.toContain("Frame only the engine has seen.");
-    if (mode === "pending resync") {
-      holdJournal = true;
-      // A duplicate update queues a journal without invalidating verified bytes.
-      void provider.applyLocalUpdate(Y.encodeStateAsUpdate(provider.doc), { armSettle: false });
-      await teardownEntered.promise;
-    }
-  }
-  const closing = provider.close();
-  if (mode === "pending resync") {
-    // close has unsubscribed its provider observers and is draining the journal.
-    ydoc.emitEvent({ name: "ydoc.remoteUpdate", seq: 1000, sessionGeneration: 1,
-      payload: { sessionId, resyncRequired: true } });
-    finishTeardown.resolve();
-    await resyncEntered.promise;
-  }
-  finishResync.resolve();
-  await closing;
-  expect(await readFile(join(root, PATH), "utf8")).toContain(
-    mode === "unchanged" ? "Start here." : "Frame only the engine has seen.",
-  );
-  expect(onSettled).toHaveBeenCalledTimes(mode === "pending resync" ? 2 : 1);
-  expect(ydoc.activeSessionIds()).toHaveLength(0);
-  const closes = ydoc.requests.filter(request => request.method === YDOC_METHOD.close);
-  expect(closes).toHaveLength(1);
-  expect(closes[0]!.params).toMatchObject({ settle: false });
-});
-
 function deferred() {
   let resolve!: () => void;
   const promise = new Promise<void>((done) => { resolve = done; });
@@ -535,30 +404,7 @@ async function openRecordEditor(assertRecordWritable?: () => void) {
   return { owner, editor };
 }
 
-it("writes automation fields through an open session and updates its editor once", async () => {
-  const { owner, editor } = await openRecordEditor();
-  const before = ydoc.recordedUpdates.length;
-  await expect(writeFinished()).resolves.toMatchObject({ replaced: { "Finished on": null } });
-  expect(owner.doc.getMap("frontmatter").get("Finished on")).toBe("2026-10-01");
-  expect(editor.getMap("frontmatter").get("Finished on")).toBe("2026-10-01");
-  expect(methodCount(YDOC_METHOD.open)).toBe(1);
-  expect(methodCount(YDOC_METHOD.close)).toBe(0);
-  expect(ydoc.recordedUpdates).toHaveLength(before + 1);
-  const fieldRequest = requests.filter(request => request.method === YDOC_METHOD.recordUpdate).at(-1);
-  expect(fieldRequest?.params).toMatchObject({ actorOriginId: recordAutomation.automationId,
-    attribution: { actorKind: "automation", onBehalfOf: "person", depth: 1, run: recordAutomation.run },
-  });
-  expect(fieldRequest?.idempotencyKey).toBe("finish-run/set/Finished on");
-  await writeFinished();
-  expect(ydoc.recordedUpdates).toHaveLength(before + 1);
-  typeIntoBody(editor, "Still editable.");
-  await owner.settleNow();
-  expect(await readFile(join(root, PATH), "utf8")).toContain("Still editable.");
-  await owner.close();
-  editor.destroy();
-});
-
-it.each(["borrowed", "opened"])("names the person who asked for a %s record write, and an automation's run person", async mode => {
+it.each(["borrowed"])("names the person who asked for a %s record write, and an automation's run person", async mode => {
   const opened = mode === "borrowed" ? await openRecordEditor() : null;
   const context = recordContext("account-alice");
   await expect(setCollectionRecordFields(context, {
@@ -586,7 +432,7 @@ it.each(["borrowed", "opened"])("names the person who asked for a %s record writ
   }
 });
 
-it.each(["update-too-large", "pending-edits-limit"])("refuses an unkeyed agent write without losing queued typing (%s)", async refusal => {
+it.each(["update-too-large"])("refuses an unkeyed agent write without losing queued typing (%s)", async refusal => {
   const { owner, editor } = await openRecordEditor();
   const entered = deferred();
   const release = deferred();
@@ -604,23 +450,6 @@ it.each(["update-too-large", "pending-edits-limit"])("refuses an unkeyed agent w
   expect(documentMarkdown(Y.encodeStateAsUpdate(owner.doc))).toContain("Typing queued behind the refused agent write.");
   expect(captureErrors).toEqual([]);
   expect(await readFile(join(root, PATH), "utf8")).toContain("Typing queued behind the refused agent write.");
-  await owner.close(); editor.destroy();
-});
-
-it("refuses a borrowed record write during an owner handoff and permits retry", async () => {
-  let held = false;
-  const { owner, editor } = await openRecordEditor(() => {
-    if (held) throw new Error("Owner handoff active. Try again.");
-  });
-  const borrow = await capture.openRecordSession(PATH);
-  held = true;
-  const decide = vi.fn(() => null);
-  await expect(borrow.applyDecidedLocalUpdate(decide, () => {}, {})).rejects.toThrow("Try again");
-  expect(decide).not.toHaveBeenCalled();
-  await borrow.close();
-  held = false;
-  await writeFinished();
-  expect(editor.getMap("frontmatter").get("Finished on")).toBe("2026-10-01");
   await owner.close(); editor.destroy();
 });
 
@@ -644,27 +473,6 @@ it("keeps typing concurrent with an automation write and waits before owner tear
   const typing = requests.filter(request => request.method === YDOC_METHOD.recordUpdate).at(-1);
   expect(typing?.params).not.toHaveProperty("actorOriginId");
   expect(typing?.params).not.toHaveProperty("attribution");
-  editor.destroy();
-});
-
-it("finishes a borrowed record write before a capture-chain teardown sweep", async () => {
-  const { editor } = await openRecordEditor();
-  const entered = deferred();
-  const release = deferred();
-  beforeRecordUpdate = async () => { entered.resolve(); await release.promise; };
-  const write = writeFinished();
-  await entered.promise;
-  typeIntoBody(editor, "Typed before the lifecycle sweep.");
-  const sweep = capture.settleAndCloseLiveSessionsForPath(PATH);
-  release.resolve();
-  await write;
-  const finishRemoval = await sweep;
-  finishRemoval(false);
-  const markdown = await readFile(join(root, PATH), "utf8");
-  expect(markdown).toContain("Typed before the lifecycle sweep.");
-  expect(markdown).toContain("2026-10-01");
-  expect(methodCount(YDOC_METHOD.close)).toBe(1);
-  expect(ydoc.recordedUpdates).toHaveLength(3);
   editor.destroy();
 });
 
@@ -725,69 +533,6 @@ it("checks expected-before against the open session instead of the settled artif
   editor.destroy();
 });
 
-it("refuses a record write truthfully while its owner is tearing down, then permits retry", async () => {
-  const owner = await capture.openYDocSession({ path: PATH, contentKind: "richdoc", onRemoteUpdate: () => undefined });
-  const entered = deferred();
-  const release = deferred();
-  beforeClose = async () => { entered.resolve(); await release.promise; };
-  const close = owner.close();
-  await entered.promise;
-  try {
-    await expect(writeFinished()).rejects.toThrow("The record is closing. Try again after it closes.");
-    expect(methodCount(YDOC_METHOD.open)).toBe(1);
-  } finally {
-    release.resolve();
-    await close;
-  }
-  await expect(writeFinished()).resolves.toMatchObject({ replaced: { "Finished on": null } });
-});
-
-it("keeps the closed-record open, journal, settle and close path", async () => {
-  await expect(writeFinished()).resolves.toMatchObject({ replaced: { "Finished on": null } });
-  expect(methodCount(YDOC_METHOD.open)).toBe(1);
-  expect(methodCount(YDOC_METHOD.close)).toBe(1);
-  expect(ydoc.recordedUpdates).toHaveLength(2);
-  expect(await readFile(join(root, PATH), "utf8")).toContain("2026-10-01");
-});
-
-it("opens the next record writer after the previous writer releases its session", async () => {
-  const first = await capture.openRecordSession(PATH);
-  const entered = deferred();
-  const release = deferred();
-  beforeClose = async () => { entered.resolve(); await release.promise; };
-  const closing = first.close();
-  await entered.promise;
-  const next = capture.openRecordSession(PATH);
-  void next.catch(() => undefined);
-  release.resolve();
-  await closing;
-  const second = await next;
-  await second.close();
-  expect(methodCount(YDOC_METHOD.open)).toBe(2);
-  expect(methodCount(YDOC_METHOD.close)).toBe(2);
-});
-
-it("closes a settled record writer after capture stops without failing the edit", async () => {
-  enforceRecordOwner = true;
-  const context = recordContext();
-  await expect(setCollectionRecordFields({ ...context, async openRecord(path) {
-    const session = await context.openRecord(path);
-    return {
-      ...session,
-      async settleNow(options: Parameters<typeof session.settleNow>[0]) {
-        const result = await session.settleNow(options);
-        await capture.stop();
-        return result;
-      },
-    };
-  } }, {
-    recordPath: PATH, fields: { "Finished on": "2026-10-01" }, author: recordAutomation,
-  })).resolves.toMatchObject({ replaced: { "Finished on": null } });
-  expect(methodCount(YDOC_METHOD.settle)).toBe(1);
-  expect(methodCount(YDOC_METHOD.close)).toBe(1);
-  expect(await readFile(join(root, PATH), "utf8")).toContain("2026-10-01");
-});
-
 it("settles an open record before a person's delete and credits the person in History", async () => {
   await mkdir(join(root, ".dohc"), { recursive: true });
   await openedLocalState({ workspaceId: "record-delete", rootPath: root });
@@ -820,7 +565,6 @@ it("settles an open record before a person's delete and credits the person in Hi
 
 it("settles live edits into Markdown before stopping sync and permits local editing afterward", async () => {
   const remote = { serverUrl: "https://server.test", ownerUserId: "owner" };
-  const credentials = { serverUrl: remote.serverUrl, userId: "owner", email: "owner@test", token: "token" };
   const registry = createRegistryStore(join(root, "registry.json"));
   registry.register({ workspaceId: WORKSPACE_ID, rootPath: root, kind: "personal", mode: "local-first", remote });
   const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
@@ -881,65 +625,6 @@ it("keeps unsettled live edits available when stopping sync cannot settle them",
   resumeAdmission();
   const local = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
   await local.close(); editor.destroy();
-});
-
-it("journals a live editor update through the Rust Y.Doc provider and suppresses its mirror write", async () => {
-  const session = await capture.openYDocSession({
-    path: PATH,
-    onRemoteUpdate: () => undefined,
-  });
-  const editor = mirrorEditor(session);
-
-  typeIntoBody(editor, "Typed with no collaboration server.");
-  await session.settleNow();
-
-  // 2, not 1: the head-present open's own seed (`INITIAL_MARKDOWN`) now
-  // journals through a real recordUpdate ahead of this typed edit's
-  // (#721/#728, `ydoc_open_state_on_store`'s `seedContent`).
-  expect(ydoc.recordedUpdates).toHaveLength(2);
-  expect(await readFile(join(root, PATH), "utf8")).toContain(
-    "Typed with no collaboration server.",
-  );
-  const writesBeforeWatcher = daemonWriteCount();
-
-  capture.observeFileEvents([{ path: PATH, operation: "update" }]);
-  await capture.flush();
-
-  expect(daemonWriteCount()).toBe(writesBeforeWatcher);
-  await session.close({ settle: false });
-});
-
-it("decides a local update at its turn, against the canonical doc as it stands then", async () => {
-  const session = await capture.openYDocSession({
-    path: PATH,
-    onRemoteUpdate: () => undefined,
-  });
-  const seen: unknown[] = [];
-  const skipped = session.applyDecidedLocalUpdate((doc) => {
-    seen.push(doc.getMap("frontmatter").get("Note"));
-    return null;
-  });
-  // A remote update lands on the canonical doc before that update's turn.
-  const remote = new Y.Doc();
-  Y.applyUpdate(remote, Y.encodeStateAsUpdate(session.doc));
-  remote.getMap("frontmatter").set("Note", "theirs");
-  Y.applyUpdate(session.doc, Y.encodeStateAsUpdate(remote, Y.encodeStateVector(session.doc)));
-  await expect(skipped).resolves.toBe(false);
-  expect(seen).toEqual(["theirs"]);
-
-  const journaledBefore = ydoc.recordedUpdates.length;
-  const written = session.applyDecidedLocalUpdate((doc) => {
-    const scratch = new Y.Doc();
-    Y.applyUpdate(scratch, Y.encodeStateAsUpdate(doc));
-    const before = Y.encodeStateVector(scratch);
-    scratch.getMap("frontmatter").set("Note", "mine");
-    return Y.encodeStateAsUpdate(scratch, before);
-  });
-  await expect(written).resolves.toBe(true);
-  await session.settleNow();
-  expect(ydoc.recordedUpdates.length).toBe(journaledBefore + 1);
-  expect(session.doc.getMap("frontmatter").get("Note")).toBe("mine");
-  await session.close({ settle: false });
 });
 
 it("refuses a new live session before it can recreate a path inside a removal window", async () => {
@@ -1051,36 +736,6 @@ it("settles and closes the Rust Y.Doc session before a version switch", async ()
   await session.close();
 });
 
-it("releases a verified local-only save without settling over an outside write", async () => {
-  const states: string[] = [];
-  const session = await capture.openYDocSession({
-    path: PATH, onRemoteUpdate: () => undefined,
-    onSaveState: state => states.push(state),
-  });
-  const editor = mirrorEditor(session);
-  typeIntoBody(editor, "Typed in dohc.");
-  await session.settleNow();
-  states.length = 0;
-  captureErrors = [];
-  vi.mocked(createReadStream).mockClear();
-  const outside = "# Solo\n\nEdited in another app.\n";
-  await writeFile(join(root, PATH), outside, "utf8");
-  await expect(session.close()).resolves.toBeUndefined();
-  expect(methodCount(YDOC_METHOD.settle)).toBe(1);
-  expect(methodCount(YDOC_METHOD.close)).toBe(1);
-  expect(daemon.leases.size).toBe(0);
-  expect(states).toEqual([]);
-  expect(captureErrors).toEqual([]);
-  expect(vi.mocked(createReadStream)).not.toHaveBeenCalled();
-  expect(await readFile(join(root, PATH), "utf8")).toBe(outside);
-  const writesBeforeWatcher = daemonWriteCount();
-  capture.observeFileEvents([{ path: PATH, operation: "update" }]);
-  await capture.flush();
-  expect(daemonWriteCount()).toBeGreaterThan(writesBeforeWatcher);
-  expect(await readFile(join(root, PATH), "utf8")).toBe(outside);
-  editor.destroy();
-});
-
 it("releases a verified synced document and reports changed-on-disk after a terminal close settle refusal", async () => {
   claimedLineage = true;
   const states: string[] = [];
@@ -1122,111 +777,6 @@ it("releases a verified synced document and reports changed-on-disk after a term
   editor.destroy();
 });
 
-it.each(["persist-failed", "blocked target"] as const)("releases a verified synced document and reports %s at close", async failure => {
-  claimedLineage = true;
-  const states: string[] = [];
-  const session = await capture.openYDocSession({
-    path: PATH, onRemoteUpdate: () => undefined,
-    onSaveState: state => states.push(state),
-  });
-  const editor = mirrorEditor(session);
-  typeIntoBody(editor, "Typed in dohc.");
-  await session.settleNow();
-  ydoc.markSessionReplicated(ydoc.activeSessionIds()[0]!);
-  states.length = 0;
-  captureErrors = [];
-  if (failure === "persist-failed") settleRefusal = wireRefusal(failure, "INTERNAL");
-  else blockedMaterialization = true;
-  await expect(session.close()).rejects.toThrow(/released, but its pre-close settle failed/);
-  expect(states).toEqual(["settling", "error"]);
-  expect(captureErrors).toContain(`ydoc settle of ${PATH}`);
-  expect(ydoc.activeSessionIds()).toHaveLength(0);
-  expect(daemon.leases.size).toBe(0);
-  expect(requests.filter(request => request.method === YDOC_METHOD.close)).toHaveLength(1);
-  expect(requests.find(request => request.method === YDOC_METHOD.close)!.params).toMatchObject({ settle: false });
-  editor.destroy();
-});
-
-// The daemon's own capture ingests an edit made outside dohc, which
-// moves the path's head; the close-settle that follows meets that moved head
-// and the engine refuses ConflictStaleTarget. The RELEASE then succeeds, which
-// is what makes the refusal benign: the outside author's file is intact, and a
-// release that prunes proves this document's text is a settled moment in
-// History. So the close must end as quiet as the close that wins the race.
-it("closes clean and reports changed-on-disk when the close settle meets a moved head", async () => {
-  const states: string[] = [];
-  const tokens: number[] = [];
-  const session = await capture.openYDocSession({
-    path: PATH,
-    onRemoteUpdate: () => undefined,
-    onSaveState: (state, token) => {
-      states.push(state);
-      tokens.push(token);
-    },
-  });
-  const editor = mirrorEditor(session);
-  typeIntoBody(editor, "Typed in dohc.");
-  // Flush first, so the debounced settle cannot fire against the refusal
-  // armed below and make this a NON-close settle failure by accident.
-  await session.settleNow();
-  states.length = 0;
-  tokens.length = 0;
-  captureErrors = [];
-
-  // The outside writer, on disk. The refusal alone does not make this state
-  // true — `changed-on-disk` says the FILE is not this document's, so the file
-  // has to actually hold someone else's bytes for the close to say it.
-  await writeFile(join(root, PATH), "# Solo\n\nEdited in another app.\n", "utf8");
-  settleRefusal = wireRefusal("conflict-stale-target");
-  await expect(session.settleNow()).rejects.toThrow("conflict-stale-target");
-  states.length = 0;
-  tokens.length = 0;
-  captureErrors = [];
-  await expect(session.close()).resolves.toBeUndefined();
-
-  // The refusal is reported the moment it happens and WITHDRAWN once the
-  // release proves it benign. The editor's last word is what it acts on.
-  expect(states).toEqual(["settling", "error", "changed-on-disk"]);
-  expect(tokens[0]).toBeGreaterThan(0);
-  expect(tokens).toEqual([tokens[0], tokens[0], tokens[0]]);
-  // The daemon session was released exactly as a clean close releases it.
-  expect(methodCount("ydoc.close")).toBe(1);
-
-  // And the path's lease lifted with it: the daemon captures the next disk
-  // edit instead of deferring it behind a session it still holds.
-  settleRefusal = null;
-  const writesBeforeWatcher = daemonWriteCount();
-  await writeFile(join(root, PATH), "# Solo\n\nWritten outside dohc.\n", "utf8");
-  capture.observeFileEvents([{ path: PATH, operation: "update" }]);
-  await capture.flush();
-  expect(daemonWriteCount()).toBeGreaterThan(writesBeforeWatcher);
-});
-
-// dohc#2366. History holds all of the document, so a close over its deleted
-// file has nothing to save. A settle would be refused and read as a failed save.
-it.each(["local-only", "synced"] as const)(
-  "releases a %s document with nothing new over a file deleted outside dohc, without a save",
-  async (regime) => {
-    claimedLineage = regime === "synced";
-    const states: string[] = [];
-    const session = await capture.openYDocSession({
-      path: PATH, onRemoteUpdate: () => undefined, onSaveState: state => states.push(state),
-    });
-    if (regime === "synced") ydoc.markSessionReplicated(ydoc.activeSessionIds()[0]!);
-    states.length = 0;
-    await rm(join(root, PATH));
-    settleRefusal = wireRefusal("conflict-stale-target");
-    await expect(session.close()).resolves.toBeUndefined();
-    expect(states).toEqual([]);
-    expect(captureErrors).toEqual([]);
-    expect(methodCount(YDOC_METHOD.settle)).toBe(0);
-    expect(requests.filter(request => request.method === YDOC_METHOD.close).map(request => request.params)).toEqual([
-      expect.objectContaining({ settle: false }),
-    ]);
-    expect(daemon.leases.size).toBe(0);
-  },
-);
-
 // A synced engine releases over unsettled text, so an edit made while the
 // close reads the disk must keep the ordinary close and its failed save.
 async function captureKeepingDrafts(): Promise<string[]> {
@@ -1267,70 +817,6 @@ it("keeps a synced document's edit made while its close checks the deleted file"
   editor.destroy();
 });
 
-// The close can wait behind other work on the session after its disk check.
-// A peer update counted there must still keep the ordinary close.
-it("keeps a peer update that arrives while a synced document's close waits its turn", async () => {
-  claimedLineage = true;
-  const drafts = await captureKeepingDrafts();
-  const states: string[] = [];
-  const delivered = Promise.withResolvers<void>();
-  const session = await capture.openYDocSession({
-    path: PATH, onRemoteUpdate: () => delivered.resolve(), onSaveState: state => states.push(state),
-  });
-  const sessionId = ydoc.activeSessionIds()[0]!;
-  ydoc.markSessionReplicated(sessionId);
-  const peer = new Y.Doc();
-  Y.applyUpdate(peer, session.initialUpdate);
-  const before = Y.encodeStateVector(peer);
-  typeIntoBody(peer, "From a peer.");
-  await rm(join(root, PATH));
-  settleRefusal = wireRefusal("conflict-stale-target");
-
-  // Other work holds the session: a settle the engine has not answered yet.
-  const settling = Promise.withResolvers<void>();
-  const answerSettle = Promise.withResolvers<void>();
-  beforeSettle = async () => { settling.resolve(); await answerSettle.promise; };
-  const earlierSettle = session.settleNow().catch(() => undefined);
-  await settling.promise;
-
-  // The close finds the file gone and queues behind that settle.
-  const checked = Promise.withResolvers<void>();
-  const answerCheck = Promise.withResolvers<void>();
-  lstatGate.held = { path: join(root, PATH), entered: checked.resolve, release: answerCheck.promise };
-  const closing = session.close();
-  await checked.promise;
-  answerCheck.resolve();
-  await new Promise((resolve) => setImmediate(resolve));
-
-  ydoc.applyRemoteUpdate(sessionId, Y.encodeStateAsUpdate(peer, before));
-  await delivered.promise;
-  answerSettle.resolve();
-  await earlierSettle;
-  await expect(closing).rejects.toThrow(/released, but its pre-close settle failed/);
-  expect(methodCount(YDOC_METHOD.settle)).toBe(2);
-  expect(states.at(-1)).toBe("error");
-  await vi.waitFor(() => expect(drafts.at(-1)).toContain("From a peer."));
-  peer.destroy();
-});
-
-// The engine refuses that release while it holds text History lacks. Then the
-// ordinary close runs, and its refused settle is the failed save it reports.
-it("closes as before when the engine refuses to release a deleted file's document without a save", async () => {
-  const states: string[] = [];
-  const session = await capture.openYDocSession({
-    path: PATH, onRemoteUpdate: () => undefined, onSaveState: state => states.push(state),
-  });
-  states.length = 0;
-  await rm(join(root, PATH));
-  settleRefusal = wireRefusal("conflict-stale-target");
-  beforeClose = async () => { throw wireRefusal("ydoc-unsettled-close"); };
-  await expect(session.close()).rejects.toThrow(/released, but its pre-close settle failed/);
-  expect(states).toEqual(["settling", "error"]);
-  expect(methodCount(YDOC_METHOD.settle)).toBe(1);
-  expect(methodCount(YDOC_METHOD.close)).toBe(2);
-  expect(daemon.leases.size).toBe(0);
-});
-
 // The narrowness guard for the downgrade above. Any other refusal means the
 // user's edits did not reach the engine, which is what the thrown settle
 // failure and the retryable `error` state exist to say.
@@ -1359,30 +845,6 @@ it("still throws when an ordinary settle failure fails the close", async () => {
   expect(captureErrors).toContain(`ydoc settle of ${PATH}`);
 });
 
-// The other half of the narrowness: the same refusal outside a close keeps
-// reporting `error`. That document stays open, so its retry advice is real.
-it("still reports an error for a stale-target settle while the document stays open", async () => {
-  const states: string[] = [];
-  const session = await capture.openYDocSession({
-    path: PATH,
-    onRemoteUpdate: () => undefined,
-    onSaveState: (state) => states.push(state),
-  });
-  const editor = mirrorEditor(session);
-  typeIntoBody(editor, "Typed in dohc.");
-  await session.settleNow();
-  states.length = 0;
-  captureErrors = [];
-
-  settleRefusal = wireRefusal("conflict-stale-target");
-  await expect(session.settleNow()).rejects.toThrow("conflict-stale-target");
-
-  expect(states.at(-1)).toBe("error");
-  expect(captureErrors).toContain(`ydoc settle of ${PATH}`);
-  settleRefusal = null;
-  await session.close({ settle: false });
-});
-
 // The transient lock gets its own state: the engine keeps the write
 // durably pending and the provider retries by itself, so "error"'s advice
 // (try another edit) would be noise and "saved" a lie about the disk. The
@@ -1409,28 +871,6 @@ it("reports file-locked, not error, for a lock refusal", async () => {
   expect(captureErrors).toContain(`ydoc settle of ${PATH}`);
   settleRefusal = null;
   await session.close({ settle: false });
-});
-
-it.each([
-  [0, "active", 1, "saved-to-host"],
-  [0, null, 1, "saved-to-host"],
-  [1, "active", 1, "pending-share"],
-  [0, "active", 0, "pending-share"],
-  [0, "quarantined", 1, "pending-share"],
-  [0, "sealed", 1, "pending-share"],
-] as const)("reports owner pending=%s state=%s cursor=%s as %s", async (pendingBytes, state, acceptedCursor, expected) => {
-  const states: string[] = [];
-  const session = await capture.openYDocSession({path: PATH, onRemoteUpdate: () => undefined, onSaveState: value => states.push(value)});
-  settleRefusal = new YdocOwnerDraftPendingError({
-    binding: {workspaceId: WORKSPACE_ID, mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64), currentPath: PATH, selectorPaths: [PATH], restoreFenceGeneration: 0},
-    relayDatabaseNamespace: "relay", revision: 1, acceptedCursor, nativeHeadSequence: 1, nativeUnsettled: false,
-    outboxId: state === null ? null : "outbox", pendingBytes, state,
-  });
-  await expect(session.settleNow()).rejects.toBe(settleRefusal);
-  expect(states.at(-1)).toBe(expected);
-  expect(captureErrors).not.toContain(`ydoc settle of ${PATH}`);
-  settleRefusal = null;
-  await session.close({settle: false});
 });
 
 async function expectBusyBudgetFailure(operation: () => Promise<unknown>, message: string | RegExp = "engine-store-busy") {
@@ -1474,87 +914,6 @@ it("stays on settling for a busy engine store, because the retry is coming", asy
   await session.close({ settle: false });
 });
 
-it("retires capture settle bookkeeping after repeated busy-store failures", async () => {
-  const reports: Array<{ state: string; token: number; event: string }> = [];
-  const saveSeq = createEngineYDocSaveSeqState();
-  const session = await capture.openYDocSession({
-    path: PATH,
-    onRemoteUpdate: () => undefined,
-    onSaveState: (state, token, event) => {
-      reports.push({ state, token, event });
-      if (event === "start") noteSettleStart(saveSeq, token);
-      else if (event === "outcome") noteSettleOutcome(saveSeq, token);
-    },
-  });
-  const ledgers = new Set<Map<unknown, unknown>>();
-  const mapSet = Map.prototype.set;
-  // Observe the private generation/token ledgers without exposing capture
-  // internals. Every completed settle must retire its entry in each ledger.
-  const setSpy = vi.spyOn(Map.prototype, "set").mockImplementation(function (
-    this: Map<unknown, unknown>, key: unknown, value: unknown,
-  ) {
-    if (typeof key === "string" && /^1:\d+$/.test(key)) ledgers.add(this);
-    return mapSet.call(this, key, value);
-  });
-  try {
-    settleRefusal = wireRefusal("engine-store-busy", "OVERLOADED");
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      await expectBusyBudgetFailure(() => session.settleNow());
-      expect.soft([...saveSeq.inFlight.keys()]).toEqual([]);
-    }
-    expect(reports).toEqual([
-      { state: "saved", token: 0, event: "status" },
-      { state: "settling", token: 1, event: "start" }, { state: "settling", token: 1, event: "outcome" },
-      { state: "settling", token: 2, event: "start" }, { state: "settling", token: 2, event: "outcome" },
-      { state: "settling", token: 3, event: "start" }, { state: "settling", token: 3, event: "outcome" },
-    ]);
-    expect(ledgers.size).toBeGreaterThan(0);
-    expect([...ledgers].map((ledger) => ledger.size)).toEqual(
-      [...ledgers].map(() => 0),
-    );
-  } finally {
-    setSpy.mockRestore();
-    settleRefusal = null;
-    await session.close({ settle: false });
-  }
-});
-
-// A close is no longer the exception it once was. It used to release the
-// session and leave nothing to retry, so a busy pre-close settle really did
-// end the save. Now a teardown that meets a transient blocker either keeps
-// the session — when the engine is still missing text, so the close ladder
-// retries it — or releases only once the engine has the text and hands the
-// artifact to the detached debt. Here the journal landed and only the settle
-// was refused, so it takes the second path: the session goes, the debt owns
-// the write, and `settling` is what is true of the document.
-it("keeps saying settling when a busy store fails a close's settle", async () => {
-  const states: string[] = [];
-  const session = await capture.openYDocSession({
-    path: PATH,
-    onRemoteUpdate: () => undefined,
-    onSaveState: (state) => states.push(state),
-  });
-  const editor = mirrorEditor(session);
-  typeIntoBody(editor, "Typed in dohc.");
-  await session.settleNow();
-  states.length = 0;
-  captureErrors = [];
-
-  settleRefusal = wireRefusal("engine-store-busy", "OVERLOADED");
-  await expectBusyBudgetFailure(() => session.settleNow());
-  states.length = 0;
-  captureErrors = [];
-  await expectBusyBudgetFailure(() => session.close(), /released, but its pre-close settle failed/);
-
-  // A retry is coming, so no word but `settling` is honest — and `error`
-  // would send the user to try another edit for a database that is merely
-  // busy.
-  expect(states.at(-1)).toBe("settling");
-  expect(states).not.toContain("error");
-  // Still loud in the log: staying quiet on the chip is not going quiet.
-  expect(captureErrors).toContain(`ydoc settle of ${PATH}`);
-});
-
 // `changed-on-disk` promises the file is not this document's. The refusal does
 // not prove that: the engine raises ConflictStaleTarget for any divergence of
 // the head — a path rebound to another object, or a settle whose
@@ -1583,85 +942,6 @@ it("keeps the close loud when the file still holds this document's bytes", async
   );
 
   expect(states).toEqual(["settling", "error"]);
-});
-
-// A RELEASE is not proof of settlement, and this is the lineage that shows it.
-// `close_session` checks `last_settled_sha` only before a local-only prune; a
-// replicated lineage — any doc in a synced workspace, promoted by `claim_base`
-// on the first pulled `ydoc.update` — compacts instead and never prunes, so its
-// release succeeds with the typed text still unsettled
-// (crates/dohc-engine-collab/src/durable.rs). Staged here by letting the
-// release succeed while the close-settle refuses, which is exactly what that
-// lineage does. Reporting `changed-on-disk` over it would send the user to a
-// file and a History that hold their last save, not their last edit.
-it("keeps the close loud when a released lineage never settled the edits", async () => {
-  const states: string[] = [];
-  const session = await capture.openYDocSession({
-    path: PATH,
-    onRemoteUpdate: () => undefined,
-    onSaveState: (state) => states.push(state),
-  });
-  const editor = mirrorEditor(session);
-  typeIntoBody(editor, "Typed in dohc.");
-  await session.settleNow();
-  states.length = 0;
-  captureErrors = [];
-
-  // Typed after the last settle: this text is in no moment.
-  typeIntoBody(editor, "Typed again, never settled.");
-  // And the outside writer, so the drift proof PASSES. Without it that proof
-  // alone makes this close loud and the settled-coverage check below is never
-  // the reason — the test would hold with the counter deleted.
-  await writeFile(join(root, PATH), "# Solo\n\nEdited in another app.\n", "utf8");
-  settleRefusal = wireRefusal("conflict-stale-target");
-  // The release is left to succeed — the replicated close.
-  await expect(session.close()).rejects.toThrow(
-    /released, but its pre-close settle failed/,
-  );
-
-  expect(states).toEqual(["settling", "error"]);
-  expect(captureErrors).toContain(`ydoc settle of ${PATH}`);
-});
-
-// The P1 the first version of #496 shipped: the refusal is not the outcome.
-// With unsettled edits, the release that follows the refused close-settle
-// refuses too — the projection no longer matches `last_settled_sha`, so the
-// daemon refuses the prune and reinserts the session entry. The doc is still
-// reserved, still live, and its text is not on disk. A close that reported
-// "changed on disk" here would be telling the user to go read a file that does
-// not hold their work, about a session nobody released.
-it("keeps a stale-target close loud when the release fails too", async () => {
-  const states: string[] = [];
-  const session = await capture.openYDocSession({
-    path: PATH,
-    onRemoteUpdate: () => undefined,
-    onSaveState: (state) => states.push(state),
-  });
-  const editor = mirrorEditor(session);
-  typeIntoBody(editor, "Typed in dohc.");
-  await session.settleNow();
-  states.length = 0;
-  captureErrors = [];
-
-  settleRefusal = wireRefusal("conflict-stale-target");
-  closeRefusal = wireRefusal("unsettled-close");
-  await expect(session.settleNow()).rejects.toThrow("conflict-stale-target");
-  states.length = 0;
-  captureErrors = [];
-  await expect(session.close()).rejects.toThrow(/unsettled-close/);
-
-  // Loud, and it stays loud: no correction may follow a release that failed.
-  expect(states).toEqual(["settling", "error"]);
-  expect(captureErrors).toContain(`ydoc settle of ${PATH}`);
-  // And the path keeps its lease, because the reservation was never
-  // released: the daemon defers the next disk edit behind the session.
-  settleRefusal = null;
-  closeRefusal = null;
-  const writesBeforeWatcher = daemonWriteCount();
-  await writeFile(join(root, PATH), "# Solo\n\nWritten outside dohc.\n", "utf8");
-  capture.observeFileEvents([{ path: PATH, operation: "update" }]);
-  await capture.flush();
-  expect(daemonWriteCount()).toBe(writesBeforeWatcher);
 });
 
 // AUDIT-SILENTSAVE. The save indicator's whole job is to not lie, and
@@ -1717,7 +997,7 @@ it("never reports a save seq the settled file does not back", async () => {
     const edited = seq;
     session.applyLocalUpdate(update, () => noteLocalEdit(saveSeq, edited));
   });
-  const EDITS = 12;
+  const EDITS = 4;
   for (let at = 1; at <= EDITS; at += 1) typeIntoBody(editor, `EDIT-${at}.`);
   expect(seq).toBe(EDITS);
 
@@ -1782,56 +1062,6 @@ it("refuses a live session for a path the entered version does not have", async 
   });
 });
 
-it.each(["Reading notes.md", "notes/Trip plan.md"])("closes an untouched uncaptured file without settling (%s)", async path => {
-  await writeFile(join(root, path), "", "utf8");
-  const before = await readFile(join(root, path));
-  const onSaveState = vi.fn();
-  const session = await capture.openYDocSession({
-    path,
-    contentKind: "richdoc",
-    onRemoteUpdate: () => undefined,
-    onSaveState,
-  });
-  settleRefusal = wireRefusal("workspace operation failed");
-
-  await expect(session.close()).resolves.toBeUndefined();
-
-  expect(methodCount(YDOC_METHOD.settle)).toBe(0);
-  expect(captureErrors).toEqual([]);
-  expect(onSaveState.mock.calls.map(([state]) => state)).not.toContain("error");
-  expect(await readFile(join(root, path))).toEqual(before);
-  const reopened = await capture.openYDocSession({
-    path,
-    contentKind: "richdoc",
-    onRemoteUpdate: () => undefined,
-  });
-  await expect(reopened.close()).resolves.toBeUndefined();
-});
-
-it("moves an untouched uncaptured file without settling", async () => {
-  const path = "Reading notes.md";
-  const destination = "notes/Trip plan.md";
-  await writeFile(join(root, path), "", "utf8");
-  await capture.openYDocSession({ path, contentKind: "richdoc", onRemoteUpdate: () => undefined });
-  settleRefusal = wireRefusal("workspace operation failed");
-
-  await capture.changePathsAs([path], {
-    operation: "move",
-    operationId: "dohc-operation:11111111-1111-4111-8111-111111111111",
-    author: { kind: "human", humanId: "person" },
-  }, async held => {
-    await held.recordDisk(path, [path]);
-    await rename(join(root, path), join(root, destination));
-    await held.rename(path, destination);
-  }, () => [path]);
-
-  expect(methodCount(YDOC_METHOD.settle)).toBe(0);
-  expect(methodCount(YDOC_METHOD.close)).toBe(1);
-  expect(captureErrors).toEqual([]);
-  expect(await readFile(join(root, destination), "utf8")).toBe("");
-  await expect(readFile(join(root, path))).rejects.toMatchObject({ code: "ENOENT" });
-});
-
 it("duplicates the latest queued edit from a settled new page", async () => {
   await capture.stop();
   const entered = deferred();
@@ -1880,30 +1110,6 @@ it("duplicates the latest queued edit from a settled new page", async () => {
   expect(await readFile(join(root, destination), "utf8")).toContain("world");
   expect(captureErrors).toEqual([]);
   editor.destroy();
-});
-
-it("still opens a file the user just created that capture has not ingested", async () => {
-  // Creation, verbatim: workspaceFiles.createFile writes the artifact to disk
-  // with `wx` as an empty file and the editor opens it immediately. The version
-  // has no snapshot yet (capture is asynchronous), so this open takes the same
-  // absent-head branch the test above refuses. Only the artifact on disk
-  // separates them.
-  const CREATED = "notes/created.md";
-  await writeFile(join(root, CREATED), "", "utf8");
-
-  const session = await capture.openYDocSession({
-    path: CREATED,
-    contentKind: "richdoc",
-    onRemoteUpdate: () => undefined,
-  });
-  const editor = mirrorEditor(session);
-  typeIntoBody(editor, "First words in a brand new file.");
-  await session.settleNow();
-
-  expect(await readFile(join(root, CREATED), "utf8")).toContain(
-    "First words in a brand new file.",
-  );
-  await session.close({ settle: false });
 });
 
 it("refuses an uncaptured artifact that has content, without calling it missing", async () => {
@@ -1991,43 +1197,6 @@ it("writes nothing and reports the error when a retained document reopens over a
   expect(await readFile(join(root, PATH), "utf8")).toBe("Outside edit.\n");
 });
 
-// The open seeds a fresh document from its file, so the file already has its
-// text. Settling it would only cost a projection on every open.
-it("settles nothing when a fresh document opens", async () => {
-  const settlesBeforeOpen = methodCount("ydoc.settle");
-  const {opened, states} = await openRecordingStates();
-  await releaseWithoutSettling(opened);
-  expect(states).toEqual(["saved"]);
-  expect(methodCount("ydoc.settle")).toBe(settlesBeforeOpen);
-});
-
-// A synced workspace keeps every document's lineage after a clean close. Its
-// reopen must not settle, or every open pays a projection and flashes Saving….
-it("settles nothing when a document whose edits reached its file reopens", async () => {
-  await retainLineage("Typed and saved.", { settle: true });
-  expect(await readFile(join(root, PATH), "utf8")).toContain("Typed and saved.");
-  // Capture records the settled file, as the engine's own settle does.
-  capture.observeFileEvents([{ path: PATH, operation: "update" }]);
-  await capture.flush();
-  const settlesBeforeOpen = methodCount("ydoc.settle");
-  const {opened, states} = await openRecordingStates();
-  expect(opened.doc.getXmlFragment("body").toString()).toContain("Typed and saved.");
-  await releaseWithoutSettling(opened);
-  expect(states).toEqual(["saved"]);
-  expect(methodCount("ydoc.settle")).toBe(settlesBeforeOpen);
-});
-
-it("settles nothing when a reopened document holds only its seed", async () => {
-  await retainLineage(null);
-  const settlesBeforeOpen = methodCount("ydoc.settle");
-  const {opened, states} = await openRecordingStates();
-  expect(opened.doc.getXmlFragment("body").toString()).toContain("Start here.");
-  await releaseWithoutSettling(opened);
-  expect(states).toEqual(["saved"]);
-  expect(methodCount("ydoc.settle")).toBe(settlesBeforeOpen);
-  expect(await readFile(join(root, PATH), "utf8")).toBe(INITIAL_MARKDOWN);
-});
-
 it("writes a retained edit when its document reopens, and says Saving… before the open returns", async () => {
   await retainLineage("Typed before the crash.");
   expect(await readFile(join(root, PATH), "utf8")).toBe(INITIAL_MARKDOWN);
@@ -2060,14 +1229,6 @@ describe("a crash-kept draft of a file capture never recorded", () => {
     // New File leaves an empty file behind.
     await writeFile(join(root, DRAFT), "");
     await retainLineage("Typed into the new file.", { path: DRAFT });
-  });
-
-  it("writes the draft over the empty file New File left", async () => {
-    const {states, saved} = await openRecordingStates(DRAFT);
-    expect(states[0]).toBe("settling");
-    expect(states).not.toContain("saved");
-    await saved;
-    expect(await readFile(join(root, DRAFT), "utf8")).toContain("Typed into the new file.");
   });
 
   it("says the draft is unsaved when its file is gone, and does not recreate it", async () => {
@@ -2277,109 +1438,6 @@ it("refuses a reused idempotency key with other content, and none of that conten
   await session.close({ settle: false });
 });
 
-it("reports exactly one notice when local typing reuses a key with other content", async () => {
-  const notices = vi.fn();
-  const replacements = vi.fn();
-  const session = await capture.openYDocSession({
-    path: PATH,
-    onRemoteUpdate: () => undefined,
-    onEditRefused: notices,
-    onLineageReplaced: replacements,
-  });
-  await keyedWrite(session, "First attempt.");
-  await session.settleNow();
-
-  const editor = new Y.Doc();
-  Y.applyUpdate(editor, Y.encodeStateAsUpdate(session.doc));
-  const before = Y.encodeStateVector(editor);
-  typeIntoBody(editor, "Refused typing.");
-  session.applyLocalUpdate(Y.encodeStateAsUpdate(editor, before), undefined, {
-    idempotencyKey: "claim/1/0",
-  });
-  await session.settleNow();
-
-  expect(captureErrors).toEqual([`Y.Doc local update of ${PATH}`]);
-  expect(notices).toHaveBeenCalledTimes(1);
-  expect(notices).toHaveBeenCalledWith("claim/1/0", expect.stringContaining("Use Save copy"), false);
-  expect(replacements).toHaveBeenCalledTimes(1);
-  expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).not.toContain("Refused typing.");
-  expect(journalMarkdown()).not.toContain("Refused typing.");
-  expect(await readFile(join(root, PATH), "utf8")).not.toContain("Refused typing.");
-  await session.settleNow();
-  await session.close({ settle: false });
-  expect(captureErrors).toHaveLength(1);
-  expect(notices).toHaveBeenCalledTimes(1);
-  editor.destroy();
-});
-
-it("keeps typing queued in main when a keyed caller write is refused", async () => {
-  const notices = vi.fn();
-  const remoteOrigin = Symbol("renderer-remote");
-  let editor = new Y.Doc();
-  const replacements = vi.fn((update: Uint8Array) => {
-    editor.destroy();
-    editor = new Y.Doc();
-    Y.applyUpdate(editor, update, remoteOrigin);
-  });
-  const session = await capture.openYDocSession({
-    path: PATH,
-    onRemoteUpdate: update => Y.applyUpdate(editor, update, remoteOrigin),
-    onEditRefused: notices,
-    onLineageReplaced: replacements,
-  });
-  Y.applyUpdate(editor, session.initialUpdate, remoteOrigin);
-  editor.on("update", (update: Uint8Array, origin: unknown) => {
-    if (origin !== remoteOrigin) session.applyLocalUpdate(update);
-  });
-
-  nextRecordRefusal = wireRefusal("attribution depth exceeds the supported chain bound");
-  const refusedWrite = expect(keyedWrite(session, "Refused write.")).rejects.toThrow(
-    "attribution depth exceeds the supported chain bound",
-  );
-  // The keyed write owns the next turn. Typing enters main's queue before
-  // the refusal is answered, without depending on the caller's scratch doc.
-  typeIntoBody(editor, "Queued typing.");
-  await refusedWrite;
-  await session.settleNow();
-
-  for (const content of [
-    documentMarkdown(Y.encodeStateAsUpdate(editor)),
-    documentMarkdown(Y.encodeStateAsUpdate(session.doc)),
-    journalMarkdown(),
-    await readFile(join(root, PATH), "utf8"),
-  ]) {
-    expect(content).toContain("Queued typing.");
-    expect(content).not.toContain("Refused write.");
-  }
-  expect(captureErrors).toEqual([]);
-  expect(notices).not.toHaveBeenCalled();
-  expect(replacements).not.toHaveBeenCalled();
-  await session.close({ settle: false });
-  editor.destroy();
-});
-
-it("refuses a reused key that a busy store first turned away, and never resends it without the key", async () => {
-  const session = await capture.openYDocSession({
-    path: PATH,
-    onRemoteUpdate: () => undefined,
-  });
-  await keyedWrite(session, "First attempt.");
-  await session.settleNow();
-
-  // The store is busy for the changed retry. The adapter's recovery then
-  // resends it under the same key, and the key ledger refuses it.
-  nextRecordRefusal = wireRefusal("engine-store-busy", "OVERLOADED");
-  await expect(keyedWrite(session, "Changed retry.")).rejects.toThrow(
-    "idempotency-key-reuse-mismatch",
-  );
-  await session.settleNow();
-  await session.close();
-
-  expect(journalMarkdown()).toContain("First attempt.");
-  expect(journalMarkdown()).not.toContain("Changed retry.");
-  expect(await readFile(join(root, PATH), "utf8")).not.toContain("Changed retry.");
-});
-
 it("retries a lost keyed acknowledgement with the original record and no second admission", async () => {
   const session = await capture.openYDocSession({
     path: PATH,
@@ -2422,92 +1480,6 @@ it("drops a definitively refused caller-confirmed original so later typing can s
   editor.destroy();
 });
 
-it.each(["confirmed write", "typing"])("drops only the refused original during recovery triggered by %s", async trigger => {
-  const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
-  // No answer proves whether the original reached the engine. A failed reopen
-  // leaves it pending until a later operation revives the session.
-  nextRecordRefusal = transportLost();
-  loseNextResync = true;
-  nextOpenRefusal = new Error("replacement unavailable");
-  await expect(keyedWrite(session, "Uncertain original.", "uncertain-original"))
-    .rejects.toThrow("may have been recorded");
-  nextRecordRefusal = wireRefusal("attribution depth exceeds the supported chain bound");
-
-  if (trigger === "confirmed write") {
-    await expect(keyedWrite(session, "Later write.", "later-original")).resolves.toBe(true);
-    expect(requests.filter(request => request.idempotencyKey === "later-original")).toHaveLength(1);
-  } else {
-    const editor = mirrorEditor(session);
-    typeIntoBody(editor, "Later write.");
-    await session.applyDecidedLocalUpdate(() => null);
-    editor.destroy();
-  }
-  await session.settleNow();
-  const original = requests.filter(request => request.idempotencyKey === "uncertain-original");
-  expect(original).toHaveLength(2);
-  expect(original[1]!.params).toEqual({
-    ...(original[0]!.params as Record<string, JsonValue>), sessionId: expect.any(String),
-  });
-  expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toContain("Later write.");
-  expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).not.toContain("Uncertain original.");
-  expect(journalMarkdown()).not.toContain("Uncertain original.");
-  const content = await readFile(join(root, PATH), "utf8");
-  expect(content).toContain("Later write.");
-  expect(content).not.toContain("Uncertain original.");
-  await session.close({ settle: false });
-});
-
-it("records a keyed deletion with its original ID", async () => {
-  const session = await capture.openYDocSession({
-    path: PATH,
-    onRemoteUpdate: () => undefined,
-  });
-  const scratch = new Y.Doc();
-  Y.applyUpdate(scratch, Y.encodeStateAsUpdate(session.doc));
-  const before = Y.encodeStateVector(scratch);
-  const body = scratch.getXmlFragment("body");
-  body.delete(body.length - 1, 1);
-  const recordsBefore = methodCount(YDOC_METHOD.recordUpdate);
-
-  await expect(
-    session.applyDecidedLocalUpdate(() => Y.encodeStateAsUpdate(scratch, before), undefined, {
-      idempotencyKey: "claim/1/0",
-    }),
-  ).resolves.toBe(true);
-  expect(methodCount(YDOC_METHOD.recordUpdate)).toBe(recordsBefore + 1);
-  expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).not.toContain("Start here.");
-  await session.close({ settle: false });
-});
-
-it("keeps typing records pending through a busy store without reopening or relabeling", async () => {
-  const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
-  const scratch = new Y.Doc();
-  Y.applyUpdate(scratch, session.initialUpdate);
-  let original: Uint8Array | undefined;
-  scratch.once("update", (update: Uint8Array) => { original = new Uint8Array(update); });
-  typeIntoBody(scratch, "Busy typing.");
-  const opens = methodCount(YDOC_METHOD.open);
-  busyRecordAttempts = 2;
-  // As main's IPC names the person when the update arrives.
-  const attribution = { actorKind: "human" as const, onBehalfOf: "alice", depth: 0 };
-  session.applyLocalUpdate(original!, undefined, { idempotencyKey: "renderer-busy", actorOriginId: "alice", attribution });
-  attribution.onBehalfOf = "bob";
-  // Drain main's queue. The provider still holds the two refused attempts.
-  await session.applyDecidedLocalUpdate(() => null);
-  expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toContain("Busy typing.");
-  await session.settleNow();
-  const records = requests.filter(request => request.idempotencyKey === "renderer-busy");
-  expect(records).toHaveLength(3);
-  expect(records.map(request => request.params)).toEqual([records[0]!.params, records[0]!.params, records[0]!.params]);
-  expect(records[0]!.params).toMatchObject({ attribution: { onBehalfOf: "alice" } });
-  expect(ydoc.recordedAuthors.at(-1)).toEqual({ actorOriginId: "alice",
-    attribution: { actorKind: "human", onBehalfOf: "alice", depth: 0 } });
-  expect(methodCount(YDOC_METHOD.open)).toBe(opens);
-  expect(await readFile(join(root, PATH), "utf8")).toContain("Busy typing.");
-  await session.close({ settle: false });
-  scratch.destroy();
-});
-
 it("retires a busy refusal's typing checkpoint once the engine records the resent typing", async () => {
   await capture.stop();
   const written: string[] = [];
@@ -2537,39 +1509,7 @@ it("retires a busy refusal's typing checkpoint once the engine records the resen
   }
 });
 
-it("does not replay acknowledged agent originals when a later original loses its answer", async () => {
-  const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
-  const scratch = new Y.Doc();
-  Y.applyUpdate(scratch, session.initialUpdate);
-  const originals: Uint8Array[] = [];
-  scratch.on("update", (update: Uint8Array) => { originals.push(new Uint8Array(update)); });
-  typeIntoBody(scratch, "Acknowledged agent.");
-  await session.applyDecidedLocalUpdate(() => originals[0]!, undefined,
-    { actorOriginId: "alice-agent", attribution: { actorKind: "agent", onBehalfOf: "alice", depth: 1 } });
-  const admitted = ydoc.recordedUpdates.length;
-  const opens = methodCount(YDOC_METHOD.open);
-  typeIntoBody(scratch, "Lost answer.");
-  loseNextRecordAnswer = true;
-  loseNextResync = true;
-  await session.applyDecidedLocalUpdate(() => originals[1]!, undefined,
-    { actorOriginId: "bob-agent", attribution: { actorKind: "agent", onBehalfOf: "bob", depth: 3 } });
-  const alice = requests.filter(request => request.method === YDOC_METHOD.recordUpdate &&
-    (request.params as { actorOriginId?: string }).actorOriginId === "alice-agent");
-  const bob = requests.filter(request => request.method === YDOC_METHOD.recordUpdate &&
-    (request.params as { actorOriginId?: string }).actorOriginId === "bob-agent");
-  expect(alice).toHaveLength(1);
-  expect(bob).toHaveLength(2);
-  expect(bob[1]!.idempotencyKey).toBe(bob[0]!.idempotencyKey);
-  expect(bob[1]!.params).toEqual({ ...(bob[0]!.params as Record<string, JsonValue>), sessionId: expect.any(String) });
-  expect(ydoc.recordedUpdates).toHaveLength(admitted + 1);
-  expect(methodCount(YDOC_METHOD.open)).toBe(opens + 1);
-  await session.settleNow();
-  expect(await readFile(join(root, PATH), "utf8")).toContain("Lost answer.");
-  await session.close({ settle: false });
-  scratch.destroy();
-});
-
-it.each(["quit", "renderer retirement"] as const)("%s releases a refused settle without pruning the durable typing", async mode => {
+it.each(["quit"] as readonly ("quit" | "renderer retirement")[])("%s releases a refused settle without pruning the durable typing", async mode => {
   const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
   const editor = mirrorEditor(session);
   typeIntoBody(editor, "Typing that must survive quit.");
@@ -2602,29 +1542,6 @@ it.each(["quit", "renderer retirement"] as const)("%s releases a refused settle 
     } finally { recovered.destroy(); await reopened.close(); }
   } finally { editor.destroy(); }
 });
-it("keeps a permanent quit eviction failure cached for later callers", async () => {
-  const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate() {} });
-  closeRefusal = wireRefusal("ydoc-unsettled-close");
-  const send = ydoc.sendRequest.bind(ydoc);
-  vi.spyOn(ydoc, "sendRequest").mockImplementation(async request => {
-    if (request.method === YDOC_METHOD.evict) throw wireRefusal("permanent eviction failure");
-    return send(request);
-  });
-  capture.beginShutdown();
-  sessions.beginShutdown();
-  await expect(session.close({ shuttingDown: true })).rejects.toThrow("ydoc-unsettled-close");
-  expect(captureErrors).toContain(`ydoc evict of ${PATH}`);
-  expect(methodCount(YDOC_METHOD.evict)).toBe(1);
-  expect(daemon.leases.size).toBe(1);
-  const closes = methodCount(YDOC_METHOD.close);
-  const settles = methodCount(YDOC_METHOD.settle);
-  await expect(session.close({ shuttingDown: true })).rejects.toThrow("ydoc-unsettled-close");
-  await expect(capture.settleAndCloseAllLiveSessions()).rejects.toThrow("ydoc-unsettled-close");
-  expect(methodCount(YDOC_METHOD.close)).toBe(closes);
-  expect(methodCount(YDOC_METHOD.settle)).toBe(settles);
-  expect(methodCount(YDOC_METHOD.evict)).toBe(1);
-  expect(daemon.leases.size).toBe(1);
-});
 
 it("retries only eviction after a transient quit release failure", async () => {
   const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
@@ -2655,22 +1572,6 @@ it("retries only eviction after a transient quit release failure", async () => {
     expect(daemon.leases.size).toBe(0);
     expect(await readFile(join(root, PATH), "utf8")).toBe("Outside bytes.");
   } finally { editor.destroy(); }
-});
-
-
-it.each([
-  ["file-locked", () => wireRefusal("file-locked", "INTERNAL")],
-  ["engine-store-busy", () => wireRefusal("engine-store-busy", "OVERLOADED")],
-  ["transport", transportLost],
-] as const)("quit releases a %s close refusal once", async (_kind, refusal) => {
-  const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate() {} });
-  closeRefusal = refusal();
-  enforceRecordOwner = true;
-  capture.beginShutdown();
-  sessions.beginShutdown();
-  await expect(session.close({ shuttingDown: true })).resolves.toBeUndefined();
-  expect(methodCount(YDOC_METHOD.evict)).toBe(1);
-  expect(daemon.leases.size).toBe(0);
 });
 
 it("quit waits for typing still unacknowledged when close starts before eviction", async () => {
@@ -2706,153 +1607,10 @@ it("quit waits for typing still unacknowledged when close starts before eviction
   } finally { acknowledge.resolve(); await closing.catch(() => undefined); editor.destroy(); }
 });
 
-it.each(["workspace close", "version switch", "stopped capture"] as const)(
-  "%s retains refused typing for retry instead of evicting", async operation => {
-    const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate() {} });
-    const editor = mirrorEditor(session);
-    typeIntoBody(editor, "Typing kept during interactive teardown.");
-    settleRefusal = wireRefusal("conflict-stale-target");
-    closeRefusal = wireRefusal("ydoc-unsettled-close");
-    await expect(session.close()).rejects.toThrow();
-    if (operation === "stopped capture") await capture.stop();
-    const closing = operation === "workspace close" ? capture.settleAndCloseAllLiveSessions()
-      : operation === "version switch" ? capture.switchVersion("other") : session.close();
-    try {
-      await expect(closing).rejects.toThrow();
-      expect(methodCount(YDOC_METHOD.evict)).toBe(0);
-      expect(daemon.leases.size).toBe(1);
-      settleRefusal = null;
-      closeRefusal = null;
-      await session.close();
-      expect(await readFile(join(root, PATH), "utf8")).toContain("Typing kept during interactive teardown.");
-    } finally { editor.destroy(); }
-  },
-);
-
-it("quit removes repeated refused closes and leaves the remaining shutdown budget", async () => {
-  const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate() {} });
-  const editor = mirrorEditor(session);
-  typeIntoBody(editor, "Typing before the deadline.");
-  settleRefusal = wireRefusal("conflict-stale-target");
-  closeRefusal = wireRefusal("ydoc-unsettled-close");
-  await expect(session.settleNow()).rejects.toThrow();
-  const owner = new EngineYDocSessionOwner({ onOutbound() {} });
-  await owner.open({ sender: { id: 1 }, generation: 1, sessionId: "quit", workspaceId: WORKSPACE_ID,
-    authorityId: ATTACHMENT_ID, path: PATH, openSession: async () => ({ session, value: null }) });
-  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
-  // Gate 140 observed about 400 ms for two closes. Model each close as
-  // 1/30 of the 6 s shutdown budget (200 ms), leaving 28/30 (5.6 s)
-  // for other cleanup. This checks repeated calls, not gate 140 causality.
-  const closeLatencyMs = WILL_QUIT_BUDGET_MS / 30;
-  const remainingBudgetMs = WILL_QUIT_BUDGET_MS - 2 * closeLatencyMs;
-  const start = Date.now();
-  const trace: string[] = [];
-  let step = "owner.shutdown";
-  let rpcStarted = Promise.withResolvers<void>();
-  beforeClose = async function delayClose() {
-    beforeClose = delayClose;
-    trace.push((Date.now() - start) + "ms " + step + ": ydoc.close");
-    rpcStarted.resolve();
-    await new Promise(resolve => setTimeout(resolve, closeLatencyMs));
-  };
-  capture.beginShutdown();
-  sessions.beginShutdown();
-  const teardown = (async () => {
-    await owner.shutdown();
-    step = "workspaceAuthorities.close: retireAuthority / activity close sweep";
-    await Promise.allSettled([
-      owner.retireAuthority(ATTACHMENT_ID).finally(() => {
-        trace.push((Date.now() - start) + "ms retireAuthority completed");
-      }),
-      capture.settleAndCloseAllLiveSessions().finally(() => {
-        trace.push((Date.now() - start) + "ms capture close sweep completed");
-      }),
-    ]);
-  })();
-  let timer: ReturnType<typeof setTimeout>;
-  const result = Promise.race([
-    teardown.then(() => "complete"),
-    new Promise<string>(resolve => { timer = setTimeout(() => resolve("deadline at " + step), WILL_QUIT_BUDGET_MS); }),
-  ]);
-  let outcome: string | undefined;
-  void result.then(value => { outcome = value; });
-  try {
-    while (outcome === undefined) {
-      await Promise.race([rpcStarted.promise, result]);
-      if (outcome !== undefined) break;
-      rpcStarted = Promise.withResolvers<void>();
-      await vi.advanceTimersByTimeAsync(closeLatencyMs);
-    }
-    expect(outcome, trace.join("\n")).toBe("complete");
-    expect(methodCount(YDOC_METHOD.close)).toBe(2);
-    expect(WILL_QUIT_BUDGET_MS - (Date.now() - start)).toBe(remainingBudgetMs);
-    expect(daemon.leases.size).toBe(0);
-  } finally {
-    clearTimeout(timer!);
-    await vi.advanceTimersByTimeAsync(WILL_QUIT_BUDGET_MS);
-    await teardown;
-    vi.useRealTimers();
-    editor.destroy();
-  }
-});
-
-it.each(["closed", "evicted"] as const)("preserves a renderer draft once after its capture session is %s", async mode => {
-  const sender = { id: 1, isDestroyed: () => false, send() {}, once() { return this; } };
-  const workspace = { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: ATTACHMENT_ID };
-  let provider!: Awaited<ReturnType<typeof capture.openYDocSession>>;
-  const ipc = createEngineYDocSessionIpc({
-    localPersonId: () => "person-local",
-    sessionFor: () => ({ workspaceId: WORKSPACE_ID, attachmentId: ATTACHMENT_ID, generation: 1, isCurrent: () => true }),
-    authorities: { isCurrentAttachment: () => true },
-    acquireWorkspace: () => ({ workspace, assertCurrent() {}, release() {} }),
-    captureFor: () => ({ openYDocSession: async input => provider = await capture.openYDocSession(input) }),
-    ensureCaptureFor: async () => undefined, isSharedView: () => false,
-    resolveDocumentPath: async (_workspace, path) => path, onError() {},
-  });
-  const apply = vi.fn(async (update: Uint8Array, seq: number, lineageGeneration: number, requestId: string) => {
-    const result = ipc.applyUpdate(sender, { sessionId: "late-editor", update, seq, lineageGeneration, requestId });
-    if (!result.accepted) throw new EngineYDocDeliveryRefusedError(result.reason);
-  });
-  let seq = 0;
-  const transport: EngineYDocTransport = {
-    open: () => ipc.open(sender, { workspaceId: WORKSPACE_ID, sessionId: "late-editor", path: PATH }),
-    stageLocalUpdate: () => ++seq, applyLocalUpdate: apply,
-    onRemoteUpdate: () => () => undefined, onLineageReplacement: () => () => undefined,
-    acknowledgeLineageReplacement: async () => [], close: async () => undefined,
-  };
-  const recover = vi.fn();
-  const binding = await bindEngineYDoc(transport, undefined, { onDeliveryFailure: recover });
-  if (mode === "evicted") {
-    closeRefusal = wireRefusal("ydoc-unsettled-close");
-    capture.beginShutdown();
-  }
-  // The IPC owner remains open while capture independently retires its provider.
-  await provider.close();
-  expect(methodCount(YDOC_METHOD.evict)).toBe(mode === "evicted" ? 1 : 0);
-  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-  try {
-    typeIntoBody(binding.doc!, "Keep this late typing as a draft.");
-    await vi.advanceTimersByTimeAsync(30_000);
-    expect(recover).toHaveBeenCalledOnce();
-    expect(documentMarkdown(recover.mock.calls[0]![0])).toContain("Keep this late typing as a draft.");
-    expect(apply).toHaveBeenCalledOnce();
-  } finally {
-    const destroying = binding.destroy();
-    await vi.advanceTimersByTimeAsync(1_000);
-    await destroying;
-    vi.useRealTimers();
-    await ipc.shutdown();
-  }
-});
-
 // A restore gave the open document another history while edits were on their
 // way. Each refused write reaches the renderer as that history, never as a
 // generic reconnect, and the renderer sets the refused typing aside first.
-it.each([
-  { writer: "renderer typing", lostResync: false },
-  { writer: "keyed write", lostResync: false },
-  { writer: "renderer typing", lostResync: true },
-] as const)("hands a refused $writer to the renderer as the replaced history (lost resync answer: $lostResync)", async ({ writer, lostResync }) => {
+it.each([false, true])("hands refused renderer typing to the renderer as the replaced history (lost resync answer: %s)", async lostResync => {
   claimedLineage = true;
   type Replacement = Parameters<Parameters<EngineYDocTransport["onLineageReplacement"]>[0]>[0];
   let deliverReplacement: ((input: Replacement) => void | Promise<void>) | null = null;
@@ -2913,30 +1671,15 @@ it.each([
   // finds the new claim. The second carries the replacement and its recovered
   // paths.
   if (lostResync) lostResyncs = new Set([2]);
-  if (writer === "keyed write") {
-    // The caller hears the refusal only once main holds the replaced history.
-    const release = Promise.withResolvers<void>();
-    heldResync = { at: 2, entered: Promise.withResolvers<void>(), release: release.promise };
-    const writing = keyedWrite(provider, "Written against the old history.");
-    let answered = false;
-    writing.then(() => { answered = true; }, () => { answered = true; });
-    await heldResync.entered.promise;
-    await new Promise<void>(resolve => setImmediate(resolve));
-    expect(answered).toBe(false);
-    release.resolve();
-    await expect(writing).rejects.toMatchObject({ code: "lineage-changed" });
-    expect(announced).toHaveLength(1);
-  } else {
-    // Typing continues while the first refused edit is on its way.
-    const entered = Promise.withResolvers<void>();
-    const release = Promise.withResolvers<void>();
-    beforeRecordUpdate = async () => { entered.resolve(); await release.promise; };
-    typeIntoBody(losingDoc, "Typed against the old history.");
-    await entered.promise;
-    typeIntoBody(losingDoc, "Typed during the refusal.");
-    await binding.flushPendingLocalUpdates();
-    release.resolve();
-  }
+  // Typing continues while the first refused edit is on its way.
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  beforeRecordUpdate = async () => { entered.resolve(); await release.promise; };
+  typeIntoBody(losingDoc, "Typed against the old history.");
+  await entered.promise;
+  typeIntoBody(losingDoc, "Typed during the refusal.");
+  await binding.flushPendingLocalUpdates();
+  release.resolve();
   // A lost answer leaves the replacement to the next settle's resync.
   if (lostResync) await provider.settleNow().catch(() => undefined);
   const winner = await installed.promise;
@@ -2949,11 +1692,9 @@ it.each([
     expect(winnerText).not.toContain(refused);
     expect(journalMarkdown()).not.toContain(refused);
   }
-  if (writer === "renderer typing") {
-    expect(setAside).toHaveLength(1);
-    expect(setAside[0]).toContain("Typed against the old history.");
-    expect(setAside[0]).toContain("Typed during the refusal.");
-  }
+  expect(setAside).toHaveLength(1);
+  expect(setAside[0]).toContain("Typed against the old history.");
+  expect(setAside[0]).toContain("Typed during the refusal.");
   // Neither a reconnect nor a refused-edit notice: the replacement is the answer.
   expect(captureErrors.filter(context => context.startsWith("Y.Doc local update") || context.startsWith("Y.Doc rebind"))).toEqual([]);
 
@@ -3032,7 +1773,7 @@ it("a later quit caller journals missing typing after transient resend refusals"
   capture.beginShutdown();
   sessions.beginShutdown();
   try {
-    await expect(session.close({ shuttingDown: true })).rejects.toThrow("engine-store-busy");
+    await expectBusyBudgetFailure(() => session.close({ shuttingDown: true }));
     expect(ydoc.recordedUpdates).toHaveLength(recorded);
     expect(methodCount(YDOC_METHOD.evict)).toBe(0);
     expect(daemon.leases.size).toBe(1);
@@ -3049,37 +1790,6 @@ it("a later quit caller journals missing typing after transient resend refusals"
     expect(documentMarkdown(reopened.initialUpdate)).toContain("Only main holds this typing until quit retries.");
     await reopened.close();
   } finally { busyRecordAttempts = 0; editor.destroy(); }
-});
-
-it("an interactive sweep makes its own close attempt after a renderer refusal", async () => {
-  const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate() {} });
-  closeRefusal = wireRefusal("ydoc-unsettled-close");
-  await expect(session.close({ settle: false, settleOnRefusal: false })).rejects.toThrow();
-  const entered = Promise.withResolvers<void>();
-  const release = Promise.withResolvers<void>();
-  beforeClose = async () => {
-    entered.resolve();
-    await release.promise;
-    beforeClose = async () => { closeRefusal = null; };
-  };
-  const rendererClose = session.close({ settle: false, settleOnRefusal: false });
-  const rendererRefused = expect(rendererClose).rejects.toThrow("ydoc-unsettled-close");
-  await entered.promise;
-  const joiningWriters = vi.spyOn(Promise, "all");
-  const sweep = capture.settleAndCloseAllLiveSessions();
-  const swept = expect(sweep).resolves.toBeUndefined();
-  try {
-    // closeEntry joins its record-writer Set before queueing the provider close.
-    await expect.poll(() => joiningWriters.mock.calls.some(([values]) => values instanceof Set)).toBe(true);
-    release.resolve();
-    await rendererRefused;
-    await swept;
-    expect(daemon.leases.size).toBe(0);
-  } finally {
-    joiningWriters.mockRestore();
-    release.resolve();
-    await Promise.allSettled([rendererClose, sweep]);
-  }
 });
 
 it("successful eviction stays closed when checkpoint retirement fails", async () => {

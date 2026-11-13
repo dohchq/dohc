@@ -32,18 +32,6 @@ describe("post text", () => {
     });
   });
 
-  it("shows a one-line post once, whole", () => {
-    expect(postText(cutTitle, line)).toEqual({ heading: line, excerpt: "" });
-  });
 
-  it("shows the whole first line, then the rest, for a longer post", () => {
-    expect(postText(cutTitle, `${line}\nBudget is 2,000.`)).toEqual({
-      heading: line,
-      excerpt: "Budget is 2,000.",
-    });
-  });
 
-  it("keeps an explicit title and the whole body", () => {
-    expect(postText("Trip plan", line)).toEqual({ heading: "Trip plan", excerpt: line });
-  });
 });

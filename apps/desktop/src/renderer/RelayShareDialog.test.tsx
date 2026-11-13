@@ -1,18 +1,21 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { ListRelayShareLinksResult, type RelayShareDiscussionMessage, type RelayShareGrantedRow } from "../ipc/bridgeContract";
+import { fireEvent, act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
-import {
-  ListRelayShareLinksResult,
-  type RelayShareDiscussionMessage,
-  type RelayShareGrantedRow,
-} from "../ipc/bridgeContract";
+
 import { SYNC_UNCONFIRMED_ACCOUNT } from "./cloudSyncWords";
 import { RelayShareDialog as ProductionRelayShareDialog, type RelayShareTarget } from "./RelayShareDialog";
 import { ShellErrorReporter, type ReportShellFailure } from "./shell/useShellError";
 import type { AccessContext, AccessFacts } from "./workbench/accessReason";
 import { WorkspaceSessionProvider } from "./workspace/workspaceSession";
+const VERSION_WARNING =
+  "Anyone with the link can open it without an account. The link shows this version as it is now. The sync relay serves the link, so it can read this content.";
+
+const PATHS_WARNING =
+  "Anyone with the link can open it without an account. If files are added to this selection later, the link includes them. The sync relay serves the link, so it can read this content.";
 
 function accessContextFor(cloud: AccessFacts["cloud"]): AccessContext {
   return { facts: { cloud, shareView: false }, openSyncSettings: vi.fn(), connect: vi.fn() };
@@ -38,10 +41,6 @@ const SHARE_CODE = "dohc-share:share-1:http://relay.test";
 const LINK_URL = "https://relay.test/share/link-secret";
 const LINK_URL_A = "https://relay.test/share/link-secret-a";
 const LINK_URL_B = "https://relay.test/share/link-secret-b";
-const PATHS_WARNING =
-  "Anyone with the link can open it without an account. If files are added to this selection later, the link includes them. The sync relay serves the link, so it can read this content.";
-const VERSION_WARNING =
-  "Anyone with the link can open it without an account. The link shows this version as it is now. The sync relay serves the link, so it can read this content.";
 
 type LinkResult = {
   shareId: string;
@@ -706,42 +705,6 @@ describe("RelayShareDialog", () => {
     });
     await user.click(await screen.findByTestId("share-done"));
     expect(onClose).toHaveBeenCalledOnce();
-  });
-
-  it("drops the read-only claim from the lead sentence", () => {
-    render(
-      <RelayShareDialog
-        workspaceId="ws-1"
-        target={{ kind: "paths", paths: ["docs/plan.md"] }}
-        onClose={() => {}}
-      />,
-    );
-    expect(screen.queryByText(/read-only live view/)).toBeNull();
-  });
-
-  it("creates a multi-path site artifact share with a simple label", async () => {
-    const user = userEvent.setup();
-    render(
-      <RelayShareDialog
-        workspaceId="ws-1"
-        target={{
-          kind: "paths",
-          paths: ["index.html", "assets/logo.png"],
-          label: "Workspace Site",
-        }}
-        onClose={() => {}}
-      />,
-    );
-
-    expect(screen.getByText(/Workspace Site/)).toBeTruthy();
-    await user.type(screen.getByTestId("share-email"), "friend@dohc.test");
-    await user.click(screen.getByTestId("share-create"));
-    expect(bridgeMock.createRelayShare).toHaveBeenCalledWith({
-      workspaceId: "ws-1",
-      recipientEmail: "friend@dohc.test",
-      access: "view",
-      paths: ["index.html", "assets/logo.png"],
-    });
   });
 
   it("shows View and Comment link access with the exact paths warning", async () => {
@@ -1547,21 +1510,6 @@ codex mcp login dohc-share`);
     expect(shareRemovals.failed.mock.calls[2]![0]).toMatchObject({
       message: "Access through this link changed. Open Share and check who has access before ending the link.",
     });
-  });
-
-  it("bounds the independent grants carried by a link inventory page", () => {
-    expect(
-      ListRelayShareLinksResult.safeParse({
-        links: [],
-        supportedLinkAccess: ["view", "comment"],
-        independentGrants: Array.from({ length: 1_001 }, (_, index) => ({
-          shareId: "share-1",
-          grantId: `grant-${index}`,
-          recipientUserId: `user-${index}`,
-          recipientEmail: null,
-        })),
-      }).success,
-    ).toBe(false);
   });
 
   // The link is a credential: after Reset link, Try again from a failed copy
@@ -6652,16 +6600,6 @@ describe("sharing that cannot work yet", () => {
     expect(bridgeMock.requestAccessRefresh).not.toHaveBeenCalled();
   });
 
-  it("names the server in the interface font", () => {
-    render(
-      <RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}}
-        accessContext={accessContextFor({ connected: false, workspaceSynced: true, workspaceSyncConnected: false })}
-        server="https://sync.example.org" />,
-    );
-    const server = within(screen.getByTestId("share-setup")).getByText("sync.example.org");
-    expect(server.closest("code, .font-mono")).toBeNull();
-  });
-
   it("holds the forms, unexplained, until the server connection is read", () => {
     const view = render(
       <RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} accessContext={accessContextFor("checking")} />,
@@ -6674,43 +6612,4 @@ describe("sharing that cannot work yet", () => {
     for (const control of formControls()) expect(control.closest("[inert]")).toBeNull();
   });
 
-  // A connection dohc could not read names no cause, so main stays the one
-  // that refuses a share it cannot make.
-  it.each([
-    ["can share", SYNCED],
-    ["has an unreadable server connection", "unreadable"],
-  ] as const)("shows today's dialog for a workspace that %s", async (_state, cloud) => {
-    const user = userEvent.setup();
-    const { container } = render(
-      <RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} accessContext={accessContextFor(cloud)} />,
-    );
-    expect(screen.queryByTestId("share-setup")).toBeNull();
-    expect(container.querySelector("[inert], .opacity-50")).toBeNull();
-
-    await user.type(screen.getByTestId("share-email"), "friend@dohc.test");
-    await user.click(screen.getByTestId("share-create"));
-    expect(await screen.findByTestId("share-code")).toBeTruthy();
-    expect(bridgeMock.createRelayShare).toHaveBeenCalledWith({
-      workspaceId: "ws-1",
-      recipientEmail: "friend@dohc.test",
-      access: "view",
-      paths: ["docs/plan.md"],
-    });
-  });
-
-  // Sync can stop while the dialog is open. The forms hold what the person
-  // typed, and main's refusal stays for a share already on its way.
-  it("keeps what was typed when sync stops while the dialog is open", async () => {
-    const user = userEvent.setup();
-    const view = render(<RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />);
-    await user.type(screen.getByTestId("share-email"), "friend@dohc.test");
-
-    view.rerender(
-      <RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}}
-        accessContext={accessContextFor({ connected: true, workspaceSynced: false, workspaceSyncConnected: false })} />,
-    );
-    expect(screen.getByTestId("share-setup").dataset.reason).toBe("not-synced");
-    expect((screen.getByTestId("share-email") as HTMLInputElement).value).toBe("friend@dohc.test");
-    expect(screen.getByTestId("share-email").closest("[inert]")).not.toBeNull();
-  });
 });

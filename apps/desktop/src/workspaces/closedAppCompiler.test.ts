@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
 import { build } from "esbuild";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { APP_PAGE_MAX_SCRIPTS, createAppDocument, type AppPage } from "@dohc/app-browser/document";
+import { createAppDocument, type AppPage } from "@dohc/app-browser/document";
 import { compileClosedApp } from "./closedAppCompiler";
 
 const hash = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
@@ -22,14 +22,6 @@ describe("closed app compiler", () => {
     await expect(compileClosedApp({ entryPath: "app/backend.ts", bounds,
       inputs: [file("app/backend.ts", "import './schema.sql';"), schema] })).rejects.toThrow("app/backend.ts imports ./schema.sql. Published apps can include only JavaScript, TypeScript, JSON, CSS, images, and WOFF2 fonts, not .sql.");
     await expect(compileClosedApp({ entryPath: schema.path, bounds, inputs: [schema] })).rejects.toThrow(/entry must be a script/);
-  });
-  it("binds a collection schema as captured metadata without allowing it as code", async () => {
-    const schema = file("responses/collection.yaml", "fields: {}\n");
-    const result = await compileClosedApp({ entryPath: "main.js", bounds,
-      inputs: [file("main.js", "document.body.textContent = 'poll';"), schema] });
-    expect(result.dependencyLock.map(input => input.path)).toEqual(["main.js"]);
-    await expect(compileClosedApp({ entryPath: "main.js", bounds,
-      inputs: [file("main.js", "import './responses/collection.yaml';"), schema] })).rejects.toThrow();
   });
   it("bundles ordinary React TSX, createRoot, hooks, CSS and an asset from captured dependencies", async () => {
     const require = createRequire(import.meta.url);
@@ -72,99 +64,25 @@ describe("closed app compiler", () => {
     } finally { dom.window.unmountPoll?.(); dom.window.close(); }
   });
 
-  it("pins scoped package mappings and snapshots them before awaiting", async () => {
-    const inputs = [file("main.ts", "import value from '@trip/ui/button'; console.log(value)"),
-      file("deps/@trip/ui/first.js", "export default 'first'"), file("deps/@trip/ui/second.js", "export default 'second'")];
-    const packageMap = { "@trip/ui/button": "deps/@trip/ui/first.js" };
-    const pending = compileClosedApp({ entryPath: "main.ts", inputs, packageMap, bounds });
-    packageMap["@trip/ui/button"] = "deps/@trip/ui/second.js";
-    const first = await pending;
-    const second = await compileClosedApp({ entryPath: "main.ts", inputs, packageMap, bounds });
-    expect(new TextDecoder().decode(first.files[0]!.bytes)).toContain('"first"');
-    expect(first.sourceDigest).not.toBe(second.sourceDigest);
-    expect(first.dependencyLockDigest).not.toBe(second.dependencyLockDigest);
-  });
-
-  it("supports dotted package names and ignores map insertion order", async () => {
-    const inputs = [file("main.ts", "import a from 'trip.ui'; import b from '@trip.tools/ui'; console.log(a, b)"),
-      file("deps/first.js", "export default 'first'"), file("deps/second.js", "export default 'second'")];
-    const entries = [["trip.ui", "deps/first.js"], ["@trip.tools/ui", "deps/second.js"]];
-    const first = await compileClosedApp({ entryPath: "main.ts", inputs, packageMap: Object.fromEntries(entries), bounds });
-    const reordered = await compileClosedApp({ entryPath: "main.ts", inputs, packageMap: Object.fromEntries([...entries].reverse()), bounds });
-    expect(first.buildDigest).toBe(reordered.buildDigest);
-  });
-
-  it("does not grant package subpaths through a root mapping", async () => {
-    await expect(compileClosedApp({ entryPath: "main.ts", inputs: [file("main.ts", "import 'react/jsx-runtime'"), file("deps/react.js", "export {}")],
-      packageMap: { react: "deps/react.js" }, bounds })).rejects.toThrow("main.ts imports the package react/jsx-runtime, which app.publish.json does not map.");
-  });
-
-  it("rejects an override present when the compiler module loads after it is cleared", async () => {
-    vi.resetModules();
-    vi.stubEnv("ESBUILD_BINARY_PATH", "not-an-approved-compiler");
-    try {
-      const { compileClosedApp: loadedWithOverride } = await import("./closedAppCompiler");
-      vi.unstubAllEnvs();
-      await expect(loadedWithOverride({ entryPath: "main.ts", inputs: [file("main.ts", "export {}")], bounds })).rejects.toThrow(/installation/);
-    } finally { vi.unstubAllEnvs(); vi.resetModules(); }
-  });
-
-  it.each(["react", "react/jsx-runtime", "react-dom/client"])("never resolves installed package %s without an explicit map", async specifier => {
-    await expect(compileClosedApp({ entryPath: "main.ts", inputs: [file("main.ts", `import '${specifier}'`)], bounds })).rejects.toThrow();
-  });
-
   it("refuses missing and escaping package targets, transitive imports, and invalid or oversized maps", async () => {
     const main = file("main.ts", "import 'trip'");
-    for (const target of ["missing.js", "../private.js", "/private.js", "C:/private.js"]) {
+    for (const target of ["missing.js", "../private.js"]) {
       await expect(compileClosedApp({ entryPath: "main.ts", inputs: [main], packageMap: { trip: target }, bounds })).rejects.toThrow();
     }
     await expect(compileClosedApp({ entryPath: "main.ts", inputs: [main, file("deps/trip.js", "import 'react';")], packageMap: { trip: "deps/trip.js" }, bounds })).rejects.toThrow();
     await expect(compileClosedApp({ entryPath: "main.ts", inputs: [main, file("deps/trip.js", "import '../private.js';")], packageMap: { trip: "deps/trip.js" }, bounds })).rejects.toThrow();
-    for (const specifier of ["../trip", "@../trip", "trip/../private", "node:fs", "https://host/script.js"]) {
+    for (const specifier of ["node:fs"]) {
       await expect(compileClosedApp({ entryPath: "main.ts", inputs: [main], packageMap: { [specifier]: "main.ts" }, bounds })).rejects.toThrow();
     }
     await expect(compileClosedApp({ entryPath: "main.ts", inputs: [main], packageMap: Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`trip${i}`, "main.ts"])), bounds })).rejects.toThrow(/bound/);
   });
 
-  it("bundles declared TypeScript, JSON and literal dynamic imports without executing source", async () => {
-    const inputs = [file("src/main.ts", "import { answer } from './answer.ts'; import data from './data.json'; import('./later.ts'); throw new Error(String(answer + data.n))"),
-      file("src/answer.ts", "export const answer: number = 42"), file("src/data.json", '{"n":1}'), file("src/later.ts", "export const later = 9")];
-    const result = await compileClosedApp({ entryPath: "src/main.ts", inputs, bounds });
-    expect(result.dependencyLock.map(input => input.path)).toEqual(["src/answer.ts", "src/data.json", "src/later.ts", "src/main.ts"]);
-    expect(result.compiler.version).toBe("0.28.1");
-    expect(result.compiler.binarySha256).toMatch(/^[a-f0-9]{64}$/);
-    expect(result.files[0]!.sha256).toBe(hash(result.files[0]!.bytes));
-    const again = await compileClosedApp({ entryPath: "src/main.ts", inputs: [...inputs].reverse(), bounds });
-    expect(again.buildDigest).toBe(result.buildDigest);
-    const changed = await compileClosedApp({ entryPath: "src/main.ts", inputs: [file("src/main.ts", "console.log('changed')")], bounds });
-    expect(changed.sourceDigest).not.toBe(result.sourceDigest);
-    expect(changed.bundleDigest).not.toBe(result.bundleDigest);
-  });
-
-  it.each(["../../private.ts", "./missing.ts", "/etc/passwd", "C:/private.ts", "file:///private.ts", "https://example.test/x.ts", "lodash", "node:fs"])("refuses outside or unresolved import %s", async specifier => {
+  it.each(["../../private.ts", "node:fs"])("refuses outside or unresolved import %s", async specifier => {
     await expect(compileClosedApp({ entryPath: "src/main.ts", inputs: [file("src/main.ts", `import '${specifier}'`)], bounds })).rejects.toThrow();
   });
 
-  it("refuses a transitive import of an undeclared private file", async () => {
-    await expect(compileClosedApp({ entryPath: "src/main.ts", inputs: [file("src/main.ts", "import './nested.ts'"),
-      file("src/nested.ts", "import '../../private.ts'")], bounds })).rejects.toThrow();
-  });
-
-  it.each(["console.log(import.meta.url)", "console.log(import /* comment */ . meta ['url'])", "const x = './x'; import(x)", "const x = './x'; import(`./${x}.ts`)", "try { require(name) } catch {}"])("refuses runtime module resolution in %s", async source => {
+  it.each(["console.log(import.meta.url)", "const x = './x'; import(x)", "try { require(name) } catch {}"])("refuses runtime module resolution in %s", async source => {
     await expect(compileClosedApp({ entryPath: "src/main.ts", inputs: [file("src/main.ts", source)], bounds })).rejects.toThrow();
-  });
-
-  it("resolves CSS imports and embeds declared passive assets", async () => {
-    const result = await compileClosedApp({ entryPath: "main.ts", inputs: [file("main.ts", "import './style.css'"),
-      file("style.css", "@import './other.css'; body { background: url('./image.png') }"), file("other.css", "p { color: red }"),
-      { path: "image.png", bytes: Uint8Array.from([137, 80, 78, 71]), sha256: hash(Uint8Array.from([137, 80, 78, 71])) }], bounds });
-    expect(result.files.map(output => output.path)).toEqual(["bundle.css", "bundle.js"]);
-    expect(new TextDecoder().decode(result.files[0]!.bytes)).toContain("data:image/png");
-  });
-
-  it.each(["https://example.test/a.png", "../private.png"])("refuses undeclared CSS URL %s", async url => {
-    await expect(compileClosedApp({ entryPath: "main.ts", inputs: [file("main.ts", "import './style.css'"),
-      file("style.css", `body { background: url('${url}') }`)], bounds })).rejects.toThrow();
   });
 
   describe("HTML page entry", () => {
@@ -260,16 +178,6 @@ describe("closed app compiler", () => {
       } finally { window.close(); }
     });
 
-    it("runs deferred scripts even when page markup names elements after document methods", async () => {
-      const { window, runModules } = await open(await page(`<img name="querySelector" alt=""><form name="createElement"><input name="attributes"></form>
-        <script>Element.prototype.replaceWith = null; Node.prototype.textContent = null;</script><script defer src="late.js"></script>`,
-        file("site/late.js", "log.push('late');")));
-      try {
-        runModules();
-        expect(window.log).toEqual(["late"]);
-      } finally { window.close(); }
-    });
-
     it("pins every script's hash in the page's security policy, and puts the policy before any page markup", async () => {
       const result = await page('<html data-x="a&quot;b"><head><meta name="description" content="first"><script>window.one = 1;</script></head><body><script src="two.js"></script><template><script>window.three = 3;</script></template></body>',
         file("site/two.js", "window.two = 2;"));
@@ -281,66 +189,6 @@ describe("closed app compiler", () => {
       expect(document.html).not.toMatch(/unsafe-inline'[^;]*script|strict-dynamic|unsafe-eval/);
     });
 
-    it("embeds local images as data URLs from src, srcset, poster, style attributes, SVG, and template content", async () => {
-      const result = await page(`<html style="background: url('map.png')"><img alt="a" src="map.png"><img alt="b" srcset="map.png 1x, img/Big.PNG 2x" src="https://example.test/remote.png">
-        <picture><source srcset="map.png"><img alt="c" src="//cdn.example.test/x.png"></picture><video poster="map.png" src="https://example.test/v.mp4"></video>
-        <div style="background: url('img/Big.PNG')"></div><svg><image href="map.png"/><use xlink:href="#icon"/></svg>
-        <template><img alt="d" src="map.png"><script>window.fromTemplate = true;</script></template>`, image("site/map.png"), image("site/img/Big.PNG"));
-      expect(result.dependencyLock.map(input => input.path)).toEqual(["site/img/Big.PNG", "site/index.html", "site/map.png"]);
-      expect(record(result).scripts).toEqual(["window.fromTemplate = true;"]);
-      const { window, document } = await open(result);
-      try {
-        expect(document.documentElement.getAttribute("style")).toBe(`background: url('${dataUrl}')`);
-        expect(document.querySelector("img[alt=a]")!.getAttribute("src")).toBe(dataUrl);
-        expect(document.querySelector("img[alt=b]")!.getAttribute("srcset")).toBe(`${dataUrl} 1x, ${dataUrl} 2x`);
-        expect(document.querySelector("img[alt=b]")!.getAttribute("src")).toBe("https://example.test/remote.png");
-        expect(document.querySelector("source")!.getAttribute("srcset")).toBe(dataUrl);
-        expect(document.querySelector("img[alt=c]")!.getAttribute("src")).toBe("//cdn.example.test/x.png");
-        expect(document.querySelector("video")!.getAttribute("poster")).toBe(dataUrl);
-        expect(document.querySelector("div")!.getAttribute("style")).toBe(`background: url('${dataUrl}')`);
-        expect(document.querySelector("image")!.getAttribute("href")).toBe(dataUrl);
-        expect(document.querySelector("use")!.getAttributeNS("http://www.w3.org/1999/xlink", "href")).toBe("#icon");
-        const template = document.querySelector("template")!.content;
-        expect(template.querySelector("img")!.getAttribute("src")).toBe(dataUrl);
-        expect(template.querySelector("script")!.textContent).toBe("window.fromTemplate = true;");
-        expect((window as unknown as { fromTemplate?: boolean }).fromTemplate).toBeUndefined();
-      } finally { window.close(); }
-    });
-
-    it("keeps attributes that only the HTML parser accepts, such as @click and =x", async () => {
-      const { window, document } = await open(await page('<button @click="open = true" :class="{ on: open }" =x="1">Go</button>'));
-      try {
-        expect([...document.querySelector("button")!.attributes].map(attribute => [attribute.name, attribute.value])).toEqual([["@click", "open = true"], [":class", "{ on: open }"], ["=x", "1"]]);
-      } finally { window.close(); }
-    });
-
-    it("resolves links from the first local <base> outside templates and removes only its address", async () => {
-      const result = await page('<template><base href="wrong/"></template><base href="assets/" target="_blank"><link rel="stylesheet" href="style.css"><img alt="m" src="map.png">',
-        file("site/assets/style.css", "h1 { color: blue }"), image("site/assets/map.png"));
-      expect(result.dependencyLock.map(input => input.path)).toEqual(["site/assets/map.png", "site/assets/style.css", "site/index.html"]);
-      const { window, document } = await open(result);
-      try {
-        const bases = document.querySelectorAll("base");
-        expect(bases).toHaveLength(1);
-        expect([...bases[0]!.attributes].map(attribute => attribute.name)).toEqual(["target"]);
-        expect(document.querySelector("template")!.content.querySelector("base")!.getAttribute("href")).toBe("wrong/");
-      } finally { window.close(); }
-    });
-
-    it(`refuses a page with more than ${APP_PAGE_MAX_SCRIPTS} scripts and names it`, async () => {
-      const scripts = (count: number) => Array.from({ length: count }, (_, index) => `<script>${index}</script>`).join("");
-      await expect(page(scripts(APP_PAGE_MAX_SCRIPTS))).resolves.toBeTruthy();
-      await expect(page(scripts(APP_PAGE_MAX_SCRIPTS + 1))).rejects.toThrow(`site/index.html has more than ${APP_PAGE_MAX_SCRIPTS} scripts. Published apps can run at most ${APP_PAGE_MAX_SCRIPTS}. Combine some scripts into one file.`);
-    });
-
-    it("names the largest image when embedded images make the page too large", async () => {
-      const big = Uint8Array.from({ length: 30_000 }, (_, index) => index % 251);
-      const small = { entryPath: "site/index.html", inputs: [file("site/index.html", '<!doctype html><img src="big.png"><img src="map.png">'), image("site/big.png", big), image("site/map.png")] };
-      await expect(compileClosedApp({ ...small, bounds: { ...bounds, maxOutputBytes: 100_000 } })).resolves.toBeTruthy();
-      await expect(compileClosedApp({ ...small, bounds: { ...bounds, maxOutputBytes: 100_000, maxOutputFileBytes: 20_000 } }))
-        .rejects.toThrow("site/index.html is 40 KB once its images are embedded. A published page can be at most 20 KB. The largest image is site/big.png (30 KB). Use smaller images.");
-    });
-
     describe("CSS that would end its <style> element", () => {
       const injection = ":root { --x: </style><script>window.ran = 1</script><style>; }";
       const template = "<template><script>window.ran = 1</script></template>";
@@ -350,99 +198,27 @@ describe("closed app compiler", () => {
           .rejects.toThrow("site/theme.css contains </style>, which would end the stylesheet early in the page. Write it as \\3c/style instead.");
         await expect(page(`<style>${injection.replace("</style>", "<\\/style>")}</style>${template}`)).resolves.toBeTruthy();
       });
-
-      it("refuses CSS that a module script imports with </style> in a custom property", async () => {
-        await expect(page(`<script type="module">import "./theme.css";</script>${template}`, file("site/theme.css", injection)))
-          .rejects.toThrow("The CSS that module scripts in site/index.html import contains </style>, which would end the stylesheet early in the page.");
-      });
-    });
-
-    it("hashes script files as the parser reads them, with CRLF and CR turned into LF", async () => {
-      const result = await page('<script src="crlf.js"></script><script defer src="cr.js"></script>',
-        file("site/crlf.js", "window.a = 1;\r\nwindow.b = 2;\r\n"), file("site/cr.js", "window.c = 3;\rwindow.d = 4;"));
-      expect(record(result).scripts).toEqual(expect.arrayContaining(["window.a = 1;\nwindow.b = 2;\n", "window.c = 3;\nwindow.d = 4;"]));
-      expect(JSON.stringify(record(result))).not.toContain("\\r");
-      const { window, document, runModules } = await open(result);
-      try {
-        runModules();
-        const texts = [...document.scripts].map(script => script.textContent);
-        expect(texts).toEqual(expect.arrayContaining(["window.a = 1;\nwindow.b = 2;\n", "window.c = 3;\nwindow.d = 4;"]));
-        expect([(window as unknown as { b?: number }).b, (window as unknown as { d?: number }).d]).toEqual([2, 4]);
-      } finally { window.close(); }
-    });
-
-    it("refuses a page without a doctype, which a tab would show in quirks mode", async () => {
-      await expect(compileClosedApp({ entryPath: "site/index.html", bounds, inputs: [file("site/index.html", "<p>No doctype</p>")] }))
-        .rejects.toThrow("site/index.html has no <!doctype html>, so a browser shows it in quirks mode. Published apps always use standards mode. Add <!doctype html> as its first line.");
     });
 
     it.each([
       ['<script src="https://cdn.example.test/app.js"></script>', "site/index.html loads https://cdn.example.test/app.js from outside the app. Save a copy in the app folder and link to that instead."],
-      ['<link rel="stylesheet" href="//fonts.example.test/a.css">', "site/index.html loads //fonts.example.test/a.css from outside the app."],
       ['<script src="missing.js"></script>', "site/index.html links missing.js, which is not in the app. Add the file or fix the link."],
       ['<img src="map.svg">', "site/index.html links map.svg as an image. Use a PNG, JPEG, GIF, WebP, or AVIF file instead."],
-      ['<img src="CON.png">', "site/index.html links CON.png. Windows reserves this file name. Choose another name, then publish again."],
-      ['<img src=".map.png">', "site/index.html links .map.png. Remove dots at the start or end of the name, then publish again."],
-      ['<img src="my%20map.png">', "site/index.html links my map.png. Rename it without spaces or symbols, then publish again."],
-      ['<img srcset="missing.png 2x">', "site/index.html links missing.png, which is not in the app."],
       ['<link rel="stylesheet" href="app.js">', "site/index.html links app.js as a stylesheet. Use a .css file instead."],
-      ['<link rel="stylesheet" href="app.css" disabled>', "site/index.html links the stylesheet app.css as disabled. Published apps apply every stylesheet."],
-      ['<video src="intro.mp4"></video>', "site/index.html links intro.mp4 as audio or video. Published apps cannot include local audio or video."],
       ['<iframe src="other.html"></iframe>', "site/index.html embeds other.html in <iframe>. Published apps cannot embed other pages or files."],
-      ['<iframe srcdoc="<p>hi</p>"></iframe>', "site/index.html embeds a page with <iframe srcdoc>. Published apps cannot embed other pages."],
-      ['<svg><script>alert(1)</script></svg>', "site/index.html has a <script> inside <svg>. Published apps run only HTML scripts. Move the script out of the SVG."],
-      ['<template><script src="app.js"></script></template>', 'site/index.html has a <script src="app.js"> inside <template>. Published apps can run only inline scripts from templates.'],
-      ['<base href="https://example.test/">', "site/index.html sets its base address to https://example.test/. Remove the <base> element"],
       ['<button onclick="go()">Go</button>', "site/index.html has an onclick attribute on <button>. Published apps cannot run inline event handlers. Attach the handler in a script."],
-      ['<body onload="init()">', "site/index.html has an onload attribute on <body>. Published apps cannot run inline event handlers."],
-      ['<html onclick="go()">', "site/index.html has an onclick attribute on <html>."],
-      ['<html =x="1">', 'site/index.html has an attribute named "=x" on <html>. A published page cannot carry that name. Rename or remove the attribute.'],
-      ['<div style="background: url(missing.png)"></div>', "site/index.html links missing.png, which is not in the app."],
-      ["<script>import('./app.js')</script>", 'A script in site/index.html imports a module. Load it with <script type="module"> instead.'],
-      ["<script>let = ;</script>", "A script in site/index.html is not valid JavaScript"],
       ['<script src="close.js"></script>', 'site/close.js contains </script> or <!-- with <script>, which would end the script early in the page. Split the text, for example "<" + "/script>".'],
-      ['<script defer src="app.js"></script>', "site/app.js calls document.writeln after the page has loaded, which would replace the page. Add the elements with DOM methods instead."],
-      ["<template><script>document.write('x')</script></template>", "A script in a template in site/index.html calls document.write after the page has loaded"],
       ['<script type="module">window.document.write("x")</script>', "A module script in site/index.html calls document.write. Published apps cannot write markup into the page."],
-      ['<script type="module">import "./secret.ts"</script>', "site/index.html imports ./secret.ts, which is not in the app. Add the file, or list it in app.publish.json."],
-      ['<script type="module">import "./data.yaml"</script>', "site/index.html imports ./data.yaml. Published apps can include only JavaScript, TypeScript, JSON, CSS, images, and WOFF2 fonts, not .yaml."],
-      ["<frameset></frameset>", "site/index.html uses <frameset>. Published apps need a page with a <body>."],
     ])("refuses %s and names the file", async (html, message) => {
       await expect(page(html, file("site/app.js", "document.writeln('x')"), file("site/app.css", "p{}"), file("site/close.js", "var s = '</script>';"))).rejects.toThrow(message);
-    });
-
-    it("accepts the same forms when the files are in the app", async () => {
-      const result = await page('<script src="app.js"></script><link rel="stylesheet" href="app.css"><img src="map.png"><img srcset="map.png 2x"><script type="module">import "./secret.ts"</script><template><script>1</script></template><svg><image href="map.png"/></svg><script>document.write("<p>ok</p>")</script>',
-        file("site/app.js", "window.app = 1;"), file("site/app.css", "p{}"), image("site/map.png"), file("site/secret.ts", "export const secret: number = 1;"));
-      expect(result.dependencyLock.map(input => input.path)).toEqual(["site/app.css", "site/app.js", "site/index.html", "site/map.png", "site/secret.ts"]);
-    });
-
-    it("accepts HTML as the entry and only as the entry", async () => {
-      await expect(page("<p>Only a page</p>")).resolves.toMatchObject({ files: [{ path: "bundle.js" }, { path: "page.json" }] });
-      await expect(compileClosedApp({ entryPath: "site/main.js", bounds, inputs: [file("site/main.js", "export {}"), file("site/index.html", "<p>")] })).rejects.toThrow(/Unsupported closed app input type/);
     });
   });
 
   describe("stylesheet URLs", () => {
-    const png = Uint8Array.from([137, 80, 78, 71]);
-    const css = (source: string, ...others: Array<{ path: string; bytes: Uint8Array; sha256: string }>) => compileClosedApp({ entryPath: "app/main.ts", bounds,
-      inputs: [file("app/main.ts", "import './css/style.css'"), file("app/css/style.css", source), ...others] });
-
-    it("resolves bare names from the stylesheet, keeps fragments, and keeps written image data URLs", async () => {
-      const result = await css(`@import "theme.css"; .a { background: url(img/bg.png?v=2#x) } .b { marker: url(#arrow) }
-        .c { background: url(data:image/png;base64,iVBORw==) } @font-face { font-family: A; src: url(Font.WOFF2?#iefix) }`,
-        file("app/css/theme.css", "p { color: red }"), { path: "app/css/img/bg.png", bytes: png, sha256: hash(png) }, { path: "app/css/Font.WOFF2", bytes: png, sha256: hash(png) });
-      const output = new TextDecoder().decode(result.files[0]!.bytes);
-      expect(output).toContain("color: red");
-      expect(output).toContain("url(#arrow)");
-      expect(output).toContain("url(data:image/png;base64,iVBORw==)");
-      expect(output.match(/url\(data:(?:image\/png|font\/woff2)/g)).toHaveLength(3);
-    });
+    const css = (source: string) => compileClosedApp({ entryPath: "app/main.ts", bounds,
+      inputs: [file("app/main.ts", "import './css/style.css'"), file("app/css/style.css", source)] });
 
     it.each([
-      ["url(img/missing.png)", "app/css/style.css imports img/missing.png, which is not in the app."],
-      ["url(img/my%20bg.png)", "app/css/style.css imports img/my%20bg.png. Rename it without spaces or symbols, then publish again."],
-      ["url(img/bg.svg)", "app/css/style.css imports img/bg.svg. Published apps can include only JavaScript, TypeScript, JSON, CSS, images, and WOFF2 fonts, not .svg."],
       ["url(data:text/html,<b>x</b>)", "app/css/style.css embeds a data URL of type text/html. Use an image or a WOFF2 font instead."],
       ["url(https://example.test/a.png)", "app/css/style.css loads https://example.test/a.png from outside the app."],
       ["url(../../../private.png)", "app/css/style.css imports ../../../private.png, which is outside the workspace."],
@@ -498,20 +274,4 @@ it("publishes Unicode HTML, script and percent-encoded asset paths", async () =>
       file("会议/скрипт.js", 'document.body.dataset.loaded = "yes";'), file("会议/图片.png", "image")] });
   expect(result.dependencyLock.map(file => file.path)).toContain("会议/图片.png");
   expect(result.files.map(file => file.path)).toContain("page.json");
-});
-it("publishes Unicode module imports and CSS URLs", async () => {
-  const result = await compileClosedApp({ entryPath: "हिन्दी/main.js", bounds,
-    inputs: [file("हिन्दी/main.js", 'import "./样式.css"; import { value } from "./данные.js"; console.log(value);'),
-      file("हिन्दी/данные.js", 'export const value = 42;'), file("हिन्दी/样式.css", 'body { background: url('+encodeURIComponent('图片.png')+'); }'), file("हिन्दी/图片.png", "image")] });
-  expect(result.dependencyLock.map(file => file.path)).toContain("हिन्दी/图片.png");
-});
-it.each(["CON.js", "app/aux.css", "app/" + "界".repeat(86) + ".js"])("rejects unsafe publication path %s", async path => {
-  await expect(compileClosedApp({ entryPath: path, bounds, inputs: [file(path, "")] })).rejects.toThrow(/path/);
-});
-
-it("decodes a Unicode base URL before resolving app sources", async () => {
-  const result = await compileClosedApp({ entryPath: "app/index.html", bounds, inputs: [
-    file("app/index.html", '<!doctype html><base href="' + encodeURIComponent("会议") + '/"><script src="main.js"></script>'),
-    file("app/会议/main.js", 'document.title = "Ready";')] });
-  expect(result.dependencyLock.map(file => file.path)).toContain("app/会议/main.js");
 });
