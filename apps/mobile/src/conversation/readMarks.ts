@@ -20,6 +20,24 @@ export function markShown(
 }
 
 /**
+ * The messages of a thread opened at `anchor` that the person has had on screen: those through the newest of the
+ * anchor and the messages in `onScreen`. Without an anchor, or with one these messages lack, the list opens at the
+ * end and shows the newest, so this is all of them.
+ */
+export function shownMessages(
+  messages: readonly ChatMessage[],
+  anchor: string | null,
+  onScreen: ReadonlySet<string>,
+): readonly ChatMessage[] {
+  const opened = messages.find((message) => message.id === anchor);
+  if (!opened) return messages;
+  let newest = opened;
+  for (const message of messages)
+    if (onScreen.has(message.id) && compareMessageOrder(message, newest) > 0) newest = message;
+  return messages.filter((message) => compareMessageOrder(message, newest) <= 0);
+}
+
+/**
  * Marks each post shown read up to its own message, while `visible`, for a post whose thread has an unread message by
  * the counts the chat list read. A post's replies stay as they were.
  */
