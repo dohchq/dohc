@@ -111,9 +111,9 @@ export const GhostButton = forwardRef<
 });
 
 /** Ghost icon affordance for toolbars and row actions. Pass the icon as
- * children. The size is 24px. A larger `size-*` class, such as `size-7`,
- * overrides it. A smaller one does not: the class names are joined, not
- * merged, and Tailwind emits `size-6` after `size-4`. Forwards its ref so
+ * children. The size is 24px. The class names are joined, not merged, so a
+ * `size-*` class overrides it only if Tailwind emits that class after
+ * `size-6`: `size-7` does, `size-4` does not. Forwards its ref so
  * callers can restore focus to the trigger (e.g. a menu returning focus on
  * Escape/dismiss). */
 export const IconButton = forwardRef<HTMLButtonElement, NativeButtonProps>(function IconButton(
