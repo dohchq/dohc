@@ -2453,6 +2453,38 @@ describe("private application v2 metadata transport", () => {
       await pending.catch(() => undefined);
     }
   });
+
+  it("fails a private read the writer reaches after its deadline as unsent", async () => {
+    const f = await recorder();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    f.peer.backpressured = true;
+    const earlier = f.transport.sendRequest({
+      id: 1,
+      method: "earlier",
+      params: {},
+      deadlineMs: 60_000,
+    });
+    const position = { eventCount: 0, journalCursor: 0, evidenceDigest: "ab".repeat(32) };
+    const read = f.transport.readNextLiveApplied(
+      { ...uploadRequest, deadlineMs: 50 },
+      position,
+      32,
+    );
+    try {
+      // The deadline timer fires, and the earlier write drains before its deferred expiry runs.
+      vi.advanceTimersByTime(50);
+      f.peer.drain();
+      await expect(read).rejects.toMatchObject({
+        name: "EngineRequestDeadlineError",
+        unsent: true,
+      });
+      expect(f.headers.map((header) => header.method)).toEqual(["earlier"]);
+    } finally {
+      vi.useRealTimers();
+      f.transport.close();
+      await earlier.catch(() => undefined);
+    }
+  });
 });
 
 describe("private baseline upload", () => {

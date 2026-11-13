@@ -2100,7 +2100,8 @@ export class EngineClient implements EngineTransport {
           Buffer.from(payload, "utf8"),
           this.maxFrameBytes,
         );
-        if (ordinary && expiresAt !== null && performance.now() >= expiresAt) {
+        // A request with streamed input keeps its frame and is settled by its input path.
+        if ((ordinary || !writeInput) && expiresAt !== null && performance.now() >= expiresAt) {
           expire(true);
           throw new EngineRequestDeadlineError(wireId, request.method, deadlineMs!, true);
         }
