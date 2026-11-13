@@ -34,6 +34,7 @@ import {SHARE_WEB_REQUEST_LOG} from "./requestLog";
 export {SHARE_WEB_REQUEST_LOG} from "./requestLog";
 import {servePersonalMcp} from "./personalMcp";
 import {createPersonalAgentClient} from "./personalAgentClient";
+import {createPersonalLiveClient} from "./personalLiveClient";
 import {COLLECTION_WRITES_PATH, MAX_COLLECTION_WRITE_ENVELOPE_BYTES} from "./collectionWrites";
 import { viewerPage } from "../viewer/src/pages";
 import { serveWorkLinkPage } from "./workLinkPage";
@@ -1080,6 +1081,9 @@ export function createShareWebApplication({
   if (linkLiveConfig &&(!relayExchangeKey || !publicHosts.has(new URL(linkLiveConfig.publicOrigin).host))) throw new TypeError("Link editing requires configured relay exchange and public Host.");
   const linkLive = linkLiveConfig && publicEditRelease ? createLinkLiveClient({relayUrl, publicOrigin: linkLiveConfig.publicOrigin, exchangeKey: relayExchangeKey!,
     limits: linkLiveConfig.requests, browserLimits: linkLiveConfig.editor, fetchRelay, resolveMaterial: resolveLinkBrowserMaterial}) : undefined;
+  // A personal agent edits live documents through the relay, which hosts them only on a self-hosted live host and refuses elsewhere.
+  const personalLive = linkLiveConfig ? createPersonalLiveClient({relayUrl, publicOrigin: linkLiveConfig.publicOrigin, exchangeKey: relayExchangeKey!,
+    limits: linkLiveConfig.requests, fetchRelay}) : undefined;
 
   function readBrowserSession(discriminator: string, cookies: Map<string, string>): BrowserSession | null {
     if (!isSessionDiscriminator(discriminator)) return null;
@@ -1462,7 +1466,9 @@ export function createShareWebApplication({
               const key = `personal:${agentId}`;
               return collectionWriteRateLimiter.allow(key, nowMs()) ? admitLargeBody(key) : null;
             },
-            client: createPersonalAgentClient({relayUrl, exchangeKey: relayExchangeKey, accessToken: bearer, resource, fetchRelay})});
+            client: createPersonalAgentClient({relayUrl, exchangeKey: relayExchangeKey, accessToken: bearer, resource, fetchRelay}),
+            // The bearer this request carries, so a refreshed token opens its sessions with the new one.
+            ...(personalLive && linkLiveConfig ? {live: {client: personalLive.agent({accessToken: bearer, resource}), limits: linkLiveConfig.editor}} : {})});
           // The token expired or was revoked, or names another address: the client refreshes or signs in again.
           if (!result) {
             mcpFailedSignIns.allow(clientIp, nowMs());

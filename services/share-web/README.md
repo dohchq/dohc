@@ -100,10 +100,10 @@ Settings › Agents shows when the agent last signed in, and the `client_name` a
 
 A share link agent's token never works at a personal address, nor the reverse. A personal token works only at the address it signed in at.
 Every tool but `dohc_list_workspaces` and `dohc_wait_for_messages` names a workspace, and the relay checks the agent's reach and level there on every call.
-View reads files, channels, and file discussions. Comment also posts in channels and on files. Edit also changes Collections, and no other files.
+View reads files, channels, and file discussions. Comment also posts in channels and on files. Edit also changes Collections and [live documents](#live-documents), and no other files.
 At Edit, `dohc_write_collection_files` takes the same files as an Edit link's write, plus the workspace it goes to.
 It edits a Collection's `collection.yaml`, creates or replaces its `automations.yaml`, adds new records, or creates a Collection.
-The relay refuses any other file, including a change to an existing record, and says the agent can't write other files. Personal agents have no live document tools yet.
+The relay refuses any other file, including a change to an existing record, and says the agent can't write other files.
 The relay names the agent, on behalf of its owner, as the author. It checks the agent's sign-in and level again when it commits, so a write that arrives after the owner narrows the reach or signs the agent out is refused.
 A large write body is admitted only while some workspace in reach is at Edit. share-web holds one per agent, whichever of its tokens sends it, within the four in all, and the write goes in an MCP request of its own.
 `dohc_read_discussion` reads every thread on a current file by its path, or one thread by its id. A thread on a file since deleted still reads and takes replies, with the path the file last had. A thread whose file's current or last path is secret is not found.
@@ -114,6 +114,30 @@ While the relay cannot check the agent's sign-in, an MCP request gets 503.
 
 The body posted to `/oauth/authorize/sign-in` carries the account's email and password. Do not log it.
 Do not log paths under `/mcp/agent/w/` either. They name the account's workspaces.
+
+### Live documents
+
+At Edit, `dohc_read_document` and `dohc_edit_document` read and edit a live document in the workspace each call names. They take an Edit link's input, plus `workspace`.
+They work only on a self-hosted server that runs its own session host, with `DOHC_SELF_HOST_LIVE=1`. Elsewhere the relay refuses them with `live_hosting_unsupported`.
+Share-web lists them only when `DOHC_SHARE_WEB_LINK_LIVE_LIMITS` is set. `DOHC_SELF_HOST_LIVE=1` sets it.
+The owner must open the document in dohc on a desktop first. The server needs the document's history from that desktop.
+Each call asks the relay to host the document, and the relay holds the call for up to 20 s until the document is ready.
+The relay credits each edit to the agent on behalf of its owner.
+Each call opens its own live session with the token it carries, so a refreshed token takes effect at the next call.
+At View or Comment, `dohc_read_file` returns the settled Markdown, which lags live edits until the next settlement.
+
+A call the relay refuses answers `{ok: false, outcome: "not-applied", code, error}`.
+If `code` is `preparing`, the document is still starting. Call again shortly.
+For these codes, a retry does not help. Give `error` to the owner:
+- `live_paused_by_owner`: the owner stopped live editing of the document.
+- `live_host_full`: the server hosts as many documents for agents as it can.
+- `live_hosting_unsupported`: the server does not host live documents for agents.
+- `live-document-without-lineage`: the owner has not opened the document in dohc on a desktop yet.
+- `edit_needed`: the agent has View or Comment in the workspace. The owner can change that in Settings › Agents.
+
+A code ending in `_limit`, such as `live_person_limit`, means a live connection limit is full. `error` says what to do. A call can succeed once another live document closes.
+
+The relay's other hosting refusals, such as `document-unavailable`, pass on with the relay's words. Other codes, such as `unavailable` and `rate_limited`, mean what they mean for the agent's other tools.
 
 ## App publication storage
 

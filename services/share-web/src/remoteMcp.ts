@@ -355,19 +355,37 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>, 
   });
   const selector = metadata.effectiveSelector as {versionId?: string | null} | undefined;
   if (metadata.access === "edit" && selector?.versionId === null && options.live && options.liveLimits) {
-  const liveOptions = {live: options.live, limits: options.liveLimits, signal: options.signal};
-  server.registerTool("dohc_read_document", {
-    description: "Read the current live Markdown document before editing. Requires an online document host and an Edit link.",
-    inputSchema: z.object({path: z.string().max(1024).regex(/\.md$/i)}),
-  }, async ({path}) => text(await remoteLiveDocument(liveOptions, path)));
-  server.registerTool("dohc_edit_document", {
-    description: "Replace text in an existing live Markdown document. Read it first. Supply find as document text without Markdown syntax: use world for **world**. Text must occur once within one formatting run. On outcome unknown, re-read before retrying. Applied means durable host acknowledgement, not Markdown settlement.",
-    inputSchema: z.object({ path: z.string().max(1024).regex(/\.md$/i), find: z.string().min(1).max(8_000), replacement: z.string().max(8_000) }),
-  }, async ({ path, find, replacement }) => {
-    return text(await remoteLiveDocument(liveOptions, path, {find, replacement}));
-  });
+    registerLiveDocumentTools(server, "Read the current live Markdown document before editing. Requires an online document host and an Edit link.",
+      {options: {live: options.live, limits: options.liveLimits, signal: options.signal}});
   }
   return server;
+}
+
+type LiveDocumentOptions = Parameters<typeof remoteLiveDocument>[0];
+const livePath = () => z.string().max(1024).regex(/\.md$/i);
+const liveEdit = () => ({find: z.string().min(1).max(8_000), replacement: z.string().max(8_000)});
+const LIVE_EDIT_DESCRIPTION = "Replace text in an existing live Markdown document. Read it first. Supply find as document text without Markdown syntax: use world for **world**. Text must occur once within one formatting run. On outcome unknown, re-read before retrying. Applied means durable host acknowledgement, not Markdown settlement.";
+
+/**
+ * Registers dohc_read_document and dohc_edit_document. A personal agent's
+ * tools also take the workspace each call names.
+ */
+export function registerLiveDocumentTools(server: McpServer, readDescription: string,
+  scope: {options: LiveDocumentOptions} | {workspace: z.ZodString; options(workspace: string): LiveDocumentOptions}): void {
+  const run = async (options: LiveDocumentOptions, path: string, edit?: {find: string; replacement: string}) => text(await remoteLiveDocument(options, path, edit));
+  if ("workspace" in scope) {
+    const {workspace: workspaceArg, options} = scope;
+    server.registerTool("dohc_read_document", {description: readDescription, inputSchema: z.object({workspace: workspaceArg, path: livePath()})},
+      async ({workspace, path}) => run(options(workspace), path));
+    server.registerTool("dohc_edit_document", {description: LIVE_EDIT_DESCRIPTION, inputSchema: z.object({workspace: workspaceArg, path: livePath(), ...liveEdit()})},
+      async ({workspace, path, find, replacement}) => run(options(workspace), path, {find, replacement}));
+    return;
+  }
+  const {options} = scope;
+  server.registerTool("dohc_read_document", {description: readDescription, inputSchema: z.object({path: livePath()})},
+    async ({path}) => run(options, path));
+  server.registerTool("dohc_edit_document", {description: LIVE_EDIT_DESCRIPTION, inputSchema: z.object({path: livePath(), ...liveEdit()})},
+    async ({path, find, replacement}) => run(options, path, {find, replacement}));
 }
 
 export async function serveRemoteMcp(request: Request, options: RemoteOptions): Promise<{ body: BodyInit | null; status: number; headers: Headers }> {

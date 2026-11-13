@@ -1,5 +1,40 @@
 [
   {
+    "name": "dohc_edit_document",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspace": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "A workspace id from dohc_list_workspaces."
+        },
+        "path": {
+          "type": "string",
+          "maxLength": 1024,
+          "pattern": "\\.md$"
+        },
+        "find": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8000
+        },
+        "replacement": {
+          "type": "string",
+          "maxLength": 8000
+        }
+      },
+      "required": [
+        "workspace",
+        "path",
+        "find",
+        "replacement"
+      ],
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    }
+  },
+  {
     "name": "dohc_list_files",
     "inputSchema": {
       "type": "object",
@@ -200,6 +235,30 @@
       },
       "required": [
         "workspace"
+      ],
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    }
+  },
+  {
+    "name": "dohc_read_document",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspace": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "A workspace id from dohc_list_workspaces."
+        },
+        "path": {
+          "type": "string",
+          "maxLength": 1024,
+          "pattern": "\\.md$"
+        }
+      },
+      "required": [
+        "workspace",
+        "path"
       ],
       "$schema": "https://json-schema.org/draft/2020-12/schema"
     }

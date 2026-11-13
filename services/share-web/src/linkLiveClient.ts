@@ -12,7 +12,7 @@ import {parseNamedLiveBrowserLimits, type NamedLiveBrowserLimits} from "@dohc/yd
 import {isSessionDiscriminator} from "./sessionDiscriminator";
 import {linkRefusalBody, parseLinkRefusal} from "@dohc/security-contract/link-refusal";
 
-type HostReceive = Parameters<LiveGatewayOptions["openHostRoute"]>[2];
+export type HostReceive = Parameters<LiveGatewayOptions["openHostRoute"]>[2];
 /** The credential headers one relay call carries, and a renewed viewer cookie to pass on. */
 type RelayCredential = {headers: Record<string, string>; setCookie: string | null};
 
@@ -35,6 +35,25 @@ function browserRequest(request: IncomingMessage, origin: string, signal: AbortS
   const cookies: string[] = [];
   for (let i = 0; i < request.rawHeaders.length; i += 2) if (request.rawHeaders[i]!.toLowerCase() === "cookie") cookies.push(request.rawHeaders[i + 1]!);
   return cookies.length === 1 ? new Request(new URL("/api/live/link", origin), {signal, headers: {cookie: cookies[0]!, host: new URL(origin).host, origin}}) : null;
+}
+/** Opens a live socket at the relay's `url` with a ticket, paused once open, or null when refused or cancelled. */
+export function openLiveSocket(url: URL, ticketToken: string, headers: Record<string, string>, handshakeTimeout: number,
+  signal: AbortSignal, receive: HostReceive): Promise<LiveGatewayHostRoute | null> {
+  if (signal.aborted) return Promise.resolve(null);
+  return new Promise<LiveGatewayHostRoute | null>(done => {
+    const target = new URL(url); target.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    const invalidated = new AbortController(); let socket: WebSocket | undefined, settled = false;
+    const finish = (value: LiveGatewayHostRoute | null) => {if (!settled) {settled = true; done(value);}};
+    const stop = () => {invalidated.abort(); socket?.terminate(); finish(null);};
+    try {
+      socket = new WebSocket(target, ["dohc-live-v1", `dohc-live-ticket.${ticketToken}`], {...receive, followRedirects: false, handshakeTimeout, headers});
+      socket.on("error", stop); socket.once("close", (code, reason) => {if (code !== LIVE_CONNECTION_LIMIT_CLOSE_CODE || !liveConnectionLimitMessage(reason.toString())) invalidated.abort(); signal.removeEventListener("abort", stop); finish(null);});
+      socket.once("unexpected-response", (_request, response) => {response.destroy(); stop();});
+      signal.addEventListener("abort", stop, {once: true}); if (signal.aborted) {stop(); return;}
+      socket.once("open", () => {socket!.pause(); if (signal.aborted || socket!.protocol !== "dohc-live-v1" || socket!.extensions) {stop(); return;}
+        finish({socket: socket!, invalidated: invalidated.signal});});
+    } catch {stop();}
+  });
 }
 // Only what a live request is: its session, and a document path or an object.
 const liveInput = (document: boolean, body: unknown): body is Record<string, unknown> =>
@@ -141,22 +160,10 @@ export function createLinkLiveClient(options: {relayUrl: string; publicOrigin: s
     return openRoute(await holder(input.discriminator, request.headers.get("cookie"), signal).catch(() => null), input.discriminator, input.ticketToken, signal, receive);
   };
   function openRoute(credential: RelayCredential | null, discriminator: string, ticketToken: string, signal: AbortSignal, receive: HostReceive) {
-    if (!credential || signal.aborted) return Promise.resolve(null);
-    return new Promise<LiveGatewayHostRoute | null>(done => {
-      const url = new URL("/sync/live/link", relay); url.protocol = relay.protocol === "https:" ? "wss:" : "ws:"; url.searchParams.set("session", discriminator);
-      const invalidated = new AbortController(); let socket: WebSocket | undefined, settled = false;
-      const finish = (value: LiveGatewayHostRoute | null) => {if (!settled) {settled = true; done(value);}};
-      const stop = () => {invalidated.abort(); socket?.terminate(); finish(null);};
-      try {
-        socket = new WebSocket(url, ["dohc-live-v1", `dohc-live-ticket.${ticketToken}`], {...receive, followRedirects: false, handshakeTimeout: limits.timeoutMs,
-          headers: {origin: options.publicOrigin, ...credential.headers, "x-dohc-relay-exchange-key": options.exchangeKey}});
-        socket.on("error", stop); socket.once("close", (code, reason) => {if (code !== LIVE_CONNECTION_LIMIT_CLOSE_CODE || !liveConnectionLimitMessage(reason.toString())) invalidated.abort(); signal.removeEventListener("abort", stop); finish(null);});
-        socket.once("unexpected-response", (_request, response) => {response.destroy(); stop();});
-        signal.addEventListener("abort", stop, {once: true}); if (signal.aborted) {stop(); return;}
-        socket.once("open", () => {socket!.pause(); if (signal.aborted || socket!.protocol !== "dohc-live-v1" || socket!.extensions) {stop(); return;}
-          finish({socket: socket!, invalidated: invalidated.signal});});
-      } catch {stop();}
-    });
+    if (!credential) return Promise.resolve(null);
+    const url = new URL("/sync/live/link", relay); url.searchParams.set("session", discriminator);
+    return openLiveSocket(url, ticketToken, {origin: options.publicOrigin, ...credential.headers, "x-dohc-relay-exchange-key": options.exchangeKey},
+      limits.timeoutMs, signal, receive);
   }
   /**
    * An agent's live access through its MCP request. The token and address go
