@@ -118,7 +118,8 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
   const kind = options.kind;
   const desktop = options.kind === "named" && options.desktopBearer === true;
   const routeKind = desktop ? "desktop" : kind;
-  // Named (not desktop) and link editors reach the relay only through the share page's gateway.
+  // Browsers reach named (not desktop) and link routes through the share page's
+  // gateway, which pings them; share-web's agent client opens link routes directly and does not ping.
   const gatewayFronted = !desktop && (kind === "named" || kind === "link");
   if (kind !== "named" && kind !== "link" && kind !== "owner" && kind !== "personal") throw new TypeError("Explicit live route kind required.");
   const origin = parseLiveTicketAudience(options.publicOrigin), keyHash = hashRelayExchangeKey(options.exchangeKey);

@@ -305,9 +305,9 @@ export function createLiveGateway(options: LiveGatewayOptions) {
         host.on("message", (data, binary) => { if (binary) toBrowser(data); else stop(); });
         accepted.on("ping", data => toBrowser(data, true));
         host.on("ping", data => toHost(data, true));
-        // An idle editor sends no frames, so the gateway pings both legs. The idle
-        // timer restarts only once both return this round's nonce, so a leg that
-        // stops answering still closes the pair.
+        // An idle editor sends no frames, so the gateway pings both legs. A pong
+        // restarts the idle timer only once both legs return this round's nonce,
+        // so while no frames flow, a leg that stops answering closes the pair.
         let round: Buffer | undefined, browserAnswered = false, hostAnswered = false, pings = 0, checking = false;
         const answered = (leg: WebSocket) => (data: Buffer) => {
           if (done || draining || !round || !data.equals(round)) return;

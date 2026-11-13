@@ -519,10 +519,15 @@ describe("private named live gateway", () => {
     expect(await client.status).toBe(101);
     const hostPeer = state.hosts[0]!, hostClosed = once(hostPeer, "close");
     // Three answered rounds keep the pair open past one idle period first.
-    const browserPings = answer(client.socket, silent === "browser" ? 3 : Infinity);
-    const hostPings = answer(hostPeer, silent === "host" ? 3 : Infinity);
+    const quietPeer = silent === "browser" ? client.socket : hostPeer;
+    answer(silent === "browser" ? hostPeer : client.socket);
+    let seen = 0, firstUnanswered = 0;
+    quietPeer.on("ping", data => { if (++seen <= 3) quietPeer.pong(data); else firstUnanswered ||= performance.now(); });
     await Promise.all([client.closed, hostClosed]);
-    expect((silent === "browser" ? browserPings : hostPings)()).toBeGreaterThanOrEqual(4);
+    expect(seen).toBeGreaterThanOrEqual(4);
+    // The last answered round restarted the idle timer at most one ping earlier,
+    // so the pair closes within one idle period, well inside two.
+    expect(performance.now() - firstUnanswered).toBeLessThan(2 * keepaliveLimits.idleTimeoutMs);
   });
 
   it.each([["signed out", null], ["now under another grant", { ...session, grantId: "other" }], ["still waiting at the next check", "never"]] as const)(
