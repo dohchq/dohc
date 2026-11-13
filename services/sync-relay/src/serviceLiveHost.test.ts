@@ -6958,7 +6958,7 @@ it("pushes a live document's settled edit on the next pass while another documen
 });
 
 // An activation whose drain runs past every pass deadline fails each time it runs, as one does on an engine whose owner
-// reads stop answering. Each owner state or outbox read opens the engine's store again. The activation tries again once
+// reads stop answering. The activation tries again once
 // its back-off has passed, within one poll of it, and sends none of those reads while it waits. While the host holds
 // its owner, no wait is longer than 30 s.
 it("retries an activation that keeps running past its pass deadline only after each back-off", async () => {
