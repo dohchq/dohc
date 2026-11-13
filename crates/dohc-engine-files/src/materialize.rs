@@ -9237,6 +9237,43 @@ mod tests {
         );
     }
 
+    /// A text file larger than 5 MiB read as untracked, though capture owns
+    /// text up to 10 MiB, so nothing could confirm it held its head. The probe
+    /// reads each file up to the cap capture owns it under.
+    #[test]
+    fn projection_probe_reads_each_file_up_to_the_cap_capture_owns_it_under() {
+        let scratch = Scratch::new("projection-size-caps");
+        let text = MAX_CAPTURE_TEXT_BYTES as usize;
+        let binary = MAX_CAPTURE_BINARY_BYTES as usize;
+        let disguised = |len: usize| {
+            let mut bytes = vec![b'x'; len];
+            bytes[0] = 0xff;
+            bytes
+        };
+        for (path, bytes, read) in [
+            ("past-binary-cap.md", vec![b'x'; binary + 95], true),
+            ("at-text-cap.md", vec![b'x'; text], true),
+            ("past-text-cap.md", vec![b'x'; text + 1], false),
+            ("at-binary-cap.png", vec![b'x'; binary], true),
+            ("past-binary-cap.png", vec![b'x'; binary + 1], false),
+            ("invalid-at-binary-cap.md", disguised(binary), true),
+            ("invalid-past-binary-cap.md", disguised(binary + 1), false),
+        ] {
+            std::fs::write(scratch.root.join(path), &bytes).unwrap();
+            let sha256 = hex_sha256(&bytes);
+            let expected = match (read, path.ends_with(".md") && bytes[0] == b'x') {
+                (false, _) => ProjectionTargetState::UntrackedContent,
+                (true, true) => ProjectionTargetState::Text { sha256 },
+                (true, false) => ProjectionTargetState::Binary { sha256 },
+            };
+            assert_eq!(
+                probe_projection_target(&scratch.root, path, ProjectionTargetKind::Plaintext),
+                expected,
+                "{path}"
+            );
+        }
+    }
+
     #[test]
     fn projection_probe_rejects_an_in_workspace_symlinked_ancestor() {
         let scratch = Scratch::new("projection-ancestor-alias");

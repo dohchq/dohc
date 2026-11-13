@@ -4654,6 +4654,100 @@ mod hosted_refusal_tests {
         );
         assert!(!file.exists());
     }
+
+    /// A hosted text file larger than 5 MiB that stopped being hosted made
+    /// every pass repeat a refusal: the file probe read no text past 5 MiB,
+    /// so the file never seemed to hold its head. It now parks and its file
+    /// goes, as a smaller one does, up to the largest text a head can hold.
+    #[test]
+    fn a_departed_text_file_past_five_mebibytes_parks_and_goes() {
+        let scratch = ScratchDir::new().unwrap();
+        let root = ScratchDir::new().unwrap();
+        let path = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&path, 1_000).unwrap();
+        create_hosted_replica(
+            &mut store,
+            "ws",
+            "service-host:host",
+            "epoch",
+            "stream",
+            1_000,
+            &NoFaults,
+        )
+        .unwrap();
+        dohc_engine_domain::VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 0, &NoFaults)
+            .unwrap();
+        let files = [
+            (
+                "past-binary-cap.md",
+                dohc_engine_files::MAX_CAPTURE_BINARY_BYTES as usize + 95,
+            ),
+            (
+                "at-text-cap.md",
+                dohc_engine_files::MAX_CAPTURE_TEXT_BYTES as usize,
+            ),
+        ];
+        for (seq, (file, len)) in (1..).zip(files) {
+            let text = "x".repeat(len);
+            dohc_engine_domain::VersionedTextStore::new(&mut store)
+                .write_text(
+                    &dohc_engine_domain::WriteText {
+                        workspace_id: "ws".to_owned(),
+                        version_id: "main".to_owned(),
+                        object_id: format!("doc-{seq}"),
+                        path: file.to_owned(),
+                        text: text.clone(),
+                        moment_id: format!("moment-{seq}"),
+                        metadata_origin: "sync".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 1_000 + seq,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+            std::fs::write(root.path().join(file), text).unwrap();
+        }
+        // Both were ready, then left the scope.
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO hosted_documents \
+                     (workspace_id,object_id,path,state,scope_generation) \
+                     VALUES ('ws','doc-1','past-binary-cap.md','ready',1),\
+                     ('ws','doc-2','at-text-cap.md','ready',1)",
+                    [],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)
+            })
+            .unwrap();
+
+        let parked = park_departed_hosted(
+            &mut store,
+            &mut WriterDocCache::new(),
+            &LeaseRegistry::default(),
+            "ws",
+            root.path(),
+            2_000,
+        );
+        assert!(matches!(parked, Ok(true)), "{parked:?}");
+        assert!(
+            dohc_engine_sync::departed_hosted_object_ids(&store, "ws")
+                .unwrap()
+                .is_empty()
+        );
+        for (file, _) in files {
+            assert!(!root.path().join(file).exists(), "{file}");
+        }
+        assert!(
+            dohc_engine_sync::retired_hosted_files(&store, "ws")
+                .unwrap()
+                .is_empty()
+        );
+    }
 }
 
 #[cfg(all(test, debug_assertions))]
