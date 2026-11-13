@@ -22,16 +22,20 @@ export type WorkspaceQuery<T, A> = {
   error: unknown;
   // Reads again. Resolves when that read settles or is dropped; never rejects.
   retry: (argument?: A) => Promise<void>;
+  // Reads again unless a read is in flight. It checks when called, not at the
+  // last render, so two calls before React renders again send one read.
+  retryIfIdle: (argument?: A) => Promise<void>;
 };
 
 type Owner<T, A> = {
   session: WorkspaceSession;
   key: string;
   options: WorkspaceQueryOptions<T, A>;
-  state: Omit<WorkspaceQuery<T, A>, "retry">;
+  state: Omit<WorkspaceQuery<T, A>, "retry" | "retryIfIdle">;
   start: () => void;
   retire: () => void;
   retry: (argument?: A) => Promise<void>;
+  retryIfIdle: (argument?: A) => Promise<void>;
 };
 
 function createOwner<T, A>(
@@ -84,6 +88,7 @@ function createOwner<T, A>(
         owner.options.report?.(answer.error);
       }
     },
+    retryIfIdle: (argument) => newest ? Promise.resolve() : owner.retry(argument),
   };
   return owner;
 }
@@ -111,5 +116,5 @@ export function useWorkspaceQuery<T, A = never>(
     owner.start();
     return owner.retire;
   }, [owner]);
-  return { ...owner.state, retry: owner.retry };
+  return { ...owner.state, retry: owner.retry, retryIfIdle: owner.retryIfIdle };
 }

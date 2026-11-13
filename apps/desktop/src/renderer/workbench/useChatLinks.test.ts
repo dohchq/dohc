@@ -64,6 +64,17 @@ it("two page reads before a render send one request",async()=>{
   await act(async()=>{next.resolve(page("a",null));await Promise.all([first,second]);});
   expect(h.result.current.pages).toHaveLength(2);
 });
+it("a refresh and a page read before a render send only the refresh",async()=>{
+  const h=setup(),refresh=deferred<ReturnType<typeof page>>();
+  h.read.mockResolvedValueOnce(page()).mockReturnValueOnce(refresh.promise);
+  await act(()=>h.result.current.load());
+  let first!:Promise<void>,second!:Promise<void>;
+  act(()=>{first=h.result.current.load();second=h.result.current.loadMore();});
+  expect(h.read).toHaveBeenCalledTimes(2);
+  expect(h.read).toHaveBeenLastCalledWith({workspaceId:"w",channelWireId:"a"});
+  await act(async()=>{refresh.resolve(page("fresh",null));await Promise.all([first,second]);});
+  expect(h.result.current.pages.map(p=>p.subject.channelWireId)).toEqual(["fresh"]);
+});
 it("pages again after a refresh that superseded a page read fails",async()=>{
   const h=setup(),older=deferred<ReturnType<typeof page>>();
   h.read.mockResolvedValueOnce(page()).mockReturnValueOnce(older.promise).mockRejectedValueOnce(Error("refresh")).mockResolvedValueOnce(page("a",null));

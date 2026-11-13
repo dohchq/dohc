@@ -95,6 +95,18 @@ describe("useWorkspaceQuery", () => {
     expect(hook.result.current).toMatchObject({ value: "newer", pending: false });
   });
 
+  it("retryIfIdle sends nothing while a read is in flight, even before a render", async () => {
+    const answers = [deferred<string>(), deferred<string>()];
+    const load = vi.fn(() => answers[load.mock.calls.length - 1]!.promise);
+    const hook = renderHook(() => useWorkspaceQuery(useWorkspaceSession(), { key: "files", manual: true, load }), { wrapper });
+    act(() => { void hook.result.current.retry(); void hook.result.current.retryIfIdle(); });
+    expect(load).toHaveBeenCalledTimes(1);
+    await act(async () => { answers[0]!.resolve("first"); });
+    await act(() => { void hook.result.current.retryIfIdle(); void hook.result.current.retryIfIdle(); answers[1]!.resolve("second"); return Promise.resolve(); });
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(hook.result.current).toMatchObject({ value: "second", pending: false });
+  });
+
   it("needs the shell's session", () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     expect(() => renderHook(() => useWorkspaceSession())).toThrow(/WorkspaceSessionProvider/);

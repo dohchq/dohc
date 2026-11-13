@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback } from "react";
 import type { ChatLinksPage } from "@dohc/workspace-contracts/chat-links";
 import { bridge } from "../bridge";
 import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
@@ -9,7 +9,7 @@ type More = { cursor: string; pages: Page[] };
 const NO_PAGES: Page[] = [];
 
 // Reads only when opened or paged by the caller. A refresh supersedes a page
-// still loading.
+// still loading, and a page read waits for any read in flight.
 export function useChatLinks({ workspaceId, channelWireId, onError }: {
   workspaceId: string;
   channelWireId: string;
@@ -26,26 +26,13 @@ export function useChatLinks({ workspaceId, channelWireId, onError }: {
         : { pages: [], status: "unavailable" as const };
     },
   });
-  const { retry, pending: loading } = query;
+  const { retry, retryIfIdle, pending: loading } = query;
   const pages = query.value?.pages ?? NO_PAGES;
   const load = useCallback(() => retry(), [retry]);
-  // The page read in flight and the pages it extends. A second call before
-  // React renders again sees the same pages and sends nothing. The guard ends
-  // with loading, so a page read that a refresh superseded does not hold the
-  // next one back.
-  const extending = useRef<{ pages: Page[] } | null>(null);
-  useEffect(() => {
-    if (!loading) extending.current = null;
-  }, [loading]);
   const loadMore = useCallback(() => {
     const cursor = pages.at(-1)?.nextCursor;
-    if (!cursor || loading || extending.current?.pages === pages) return Promise.resolve();
-    const attempt = { pages };
-    extending.current = attempt;
-    return retry({ cursor, pages }).finally(() => {
-      if (extending.current === attempt) extending.current = null;
-    });
-  }, [loading, pages, retry]);
+    return cursor ? retryIfIdle({ cursor, pages }) : Promise.resolve();
+  }, [pages, retryIfIdle]);
   const status = loading ? "loading" : query.error !== null ? "unavailable" : query.value?.status ?? "idle";
   return { pages, status, loading, load, loadMore };
 }
