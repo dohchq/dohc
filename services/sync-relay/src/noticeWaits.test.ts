@@ -291,6 +291,20 @@ it("shows a shared file's Notice only while the file stays in the share, whateve
   expect(ids(await page(deleted))).toEqual([]);
 });
 
+it("reads a shared file deleted inside the share the same as one moved out of it", async () => {
+  const { storage, read, post } = await relay();
+  shareNotesWithAna(storage);
+  const write = logWriter(storage, "bens");
+  write("moment.append", { objectId: "object-gone", path: "notes/gone.md" });
+  write("moment.append", { objectId: "object-left", path: "notes/left.md" });
+  post("share-gone", { reach: { shareId: "share-ben" }, target: { path: "notes/gone.md" } });
+  post("share-left", { reach: { shareId: "share-ben" }, target: { path: "notes/left.md" } });
+  expect(ids(await page(await read("scope=phone")))).toEqual(["share-gone", "share-left"]);
+  write("moment.append", { objectId: "object-gone", path: null });
+  write("moment.append", { objectId: "object-left", path: "private/left.md" });
+  expect(ids(await page(await read("scope=phone")))).toEqual([]);
+});
+
 it("keeps a shared file's Notice whatever a version the share doesn't cover does with the file", async () => {
   const { storage, read, post } = await relay();
   shareNotesWithAna(storage);
