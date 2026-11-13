@@ -108,7 +108,6 @@ let servedClaim = "owner-claim";
 // Resyncs counted from zero, and which of them lose their answer.
 let resyncCount = 0;
 let lostResyncs = new Set<number>();
-let heldResync: { at: number; entered: PromiseWithResolvers<void>; release: Promise<void> } | null = null;
 function transportLost(): Error {
   return Object.assign(new Error("The engine client is closed: transport closed."), {
     code: "transport-error",
@@ -201,10 +200,6 @@ function daemonSessions(): EngineWorkspaceSessions {
       if (request.method === YDOC_METHOD.resync) {
         const count = ++resyncCount;
         if (lostResyncs.has(count)) throw transportLost();
-        if (heldResync?.at === count) {
-          heldResync.entered.resolve();
-          await heldResync.release;
-        }
       }
       if (request.method === YDOC_METHOD.recordUpdate && loseNextRecordAnswer) {
         loseNextRecordAnswer = false;
@@ -326,7 +321,6 @@ beforeEach(async () => {
   servedClaim = "owner-claim";
   resyncCount = 0;
   lostResyncs = new Set();
-  heldResync = null;
   captureErrors = [];
   recordUpdateDelayMs = 0;
   versioned = new VersionedLoopbackEngine();
@@ -1625,10 +1619,7 @@ it("quit waits for typing still unacknowledged when close starts before eviction
 // A restore gave the open document another history while edits were on their
 // way. Each refused write reaches the renderer as that history, never as a
 // generic reconnect, and the renderer sets the refused typing aside first.
-it.each([
-  { writer: "renderer typing", lostResync: false },
-  { writer: "renderer typing", lostResync: true },
-] as const)("hands a refused $writer to the renderer as the replaced history (lost resync answer: $lostResync)", async ({ writer, lostResync }) => {
+it.each([false, true])("hands refused renderer typing to the renderer as the replaced history (lost resync answer: %s)", async lostResync => {
   claimedLineage = true;
   type Replacement = Parameters<Parameters<EngineYDocTransport["onLineageReplacement"]>[0]>[0];
   let deliverReplacement: ((input: Replacement) => void | Promise<void>) | null = null;
@@ -1689,30 +1680,15 @@ it.each([
   // finds the new claim. The second carries the replacement and its recovered
   // paths.
   if (lostResync) lostResyncs = new Set([2]);
-  if (writer === "keyed write") {
-    // The caller hears the refusal only once main holds the replaced history.
-    const release = Promise.withResolvers<void>();
-    heldResync = { at: 2, entered: Promise.withResolvers<void>(), release: release.promise };
-    const writing = keyedWrite(provider, "Written against the old history.");
-    let answered = false;
-    writing.then(() => { answered = true; }, () => { answered = true; });
-    await heldResync.entered.promise;
-    await new Promise<void>(resolve => setImmediate(resolve));
-    expect(answered).toBe(false);
-    release.resolve();
-    await expect(writing).rejects.toMatchObject({ code: "lineage-changed" });
-    expect(announced).toHaveLength(1);
-  } else {
-    // Typing continues while the first refused edit is on its way.
-    const entered = Promise.withResolvers<void>();
-    const release = Promise.withResolvers<void>();
-    beforeRecordUpdate = async () => { entered.resolve(); await release.promise; };
-    typeIntoBody(losingDoc, "Typed against the old history.");
-    await entered.promise;
-    typeIntoBody(losingDoc, "Typed during the refusal.");
-    await binding.flushPendingLocalUpdates();
-    release.resolve();
-  }
+  // Typing continues while the first refused edit is on its way.
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  beforeRecordUpdate = async () => { entered.resolve(); await release.promise; };
+  typeIntoBody(losingDoc, "Typed against the old history.");
+  await entered.promise;
+  typeIntoBody(losingDoc, "Typed during the refusal.");
+  await binding.flushPendingLocalUpdates();
+  release.resolve();
   // A lost answer leaves the replacement to the next settle's resync.
   if (lostResync) await provider.settleNow().catch(() => undefined);
   const winner = await installed.promise;
@@ -1725,11 +1701,9 @@ it.each([
     expect(winnerText).not.toContain(refused);
     expect(journalMarkdown()).not.toContain(refused);
   }
-  if (writer === "renderer typing") {
-    expect(setAside).toHaveLength(1);
-    expect(setAside[0]).toContain("Typed against the old history.");
-    expect(setAside[0]).toContain("Typed during the refusal.");
-  }
+  expect(setAside).toHaveLength(1);
+  expect(setAside[0]).toContain("Typed against the old history.");
+  expect(setAside[0]).toContain("Typed during the refusal.");
   // Neither a reconnect nor a refused-edit notice: the replacement is the answer.
   expect(captureErrors.filter(context => context.startsWith("Y.Doc local update") || context.startsWith("Y.Doc rebind"))).toEqual([]);
 

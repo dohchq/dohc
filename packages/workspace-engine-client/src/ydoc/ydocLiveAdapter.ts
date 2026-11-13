@@ -139,9 +139,6 @@ export class YdocOwnerDraftPendingError extends Error {
 // ordinary: the settle debounce is 800 ms, so a lineage that deep means the
 // daemon never settled once across 10,000 keystrokes.
 //
-// ydocOpenMeasurement.e2e.test.ts runs these cases again on whatever machine it
-// is on, and fails when the bound stops clearing them.
-//
 // 5,000 ms is 41x the widest of those, past the headroom this repo usually
 // gives a measured limit, and deliberately so. The table is one fast machine's
 // debug build and the population is every machine dohc runs on. The costs are

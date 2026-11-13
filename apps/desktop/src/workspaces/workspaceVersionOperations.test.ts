@@ -612,10 +612,6 @@ describe("active-version capture routing", () => {
   });
 });
 
-describe("createVersion", () => {
-
-});
-
 describe("switchVersion", () => {
   it("swaps disk content between versions and loses nothing from either side", async () => {
     const root = await createTestScratch("dohc-version-ops-");
@@ -650,9 +646,6 @@ describe("switchVersion", () => {
     await engine.stop();
   });
 
-});
-
-describe("compareVersions", () => {
 });
 
 describe("mergeVersionIntoMain", () => {

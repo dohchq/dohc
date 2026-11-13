@@ -560,24 +560,6 @@ describe("history page", () => {
 
 });
 
-// A shared view's open deliberately installed no capture, and main refuses
-// every version call.
-// The selector retried five times and then raised a danger-tone shell error
-// naming a Settings toggle nobody touched, and it came back on every share
-// refresh (the selector re-keys on versionEpoch).
-
-// The same error loop from the other cause, on a workspace that is not
-// a shared view. After a failed capture build main has no capture, so every
-// version call is refused — while the renderer's own settings read still says
-// engine-on. History has carried main's status override since #601; versions
-// did not, so the selector rendered, retried, and raised the danger banner.
-describe("versions surface after a failed capture build", () => {
-  const FAILED_STATUS = {
-    ...SYNC_STATUS,
-    historyRecordingUnavailable: true,
-  };
-});
-
 // Virtual tabs survive restore, so a moment-diff tab outlives the History
 // surface that opened it. A shared view opens the change its share imported,
 // read-only: it has no recorder, so it offers no restore.

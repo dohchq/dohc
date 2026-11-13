@@ -384,10 +384,6 @@ describe("DesktopRoot", () => {
 
 });
 
-describe("a settings file save", () => {
-
-});
-
 describe("startup selection", () => {
   it("lets an activity refresh that beats the mount read open the first workspace", async () => {
     const startupRead = deferred<{ workspaces: Workspace[] }>();

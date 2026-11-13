@@ -18,6 +18,14 @@ vi.mock("../workspaces/workspaceTextLimits", async (importOriginal) => ({
   WYSIWYG_MARKDOWN_THRESHOLD_BYTES: 256,
   WORKSPACE_TEXT_EDITOR_MAX_BYTES: 2048,
 }));
+vi.mock("@dohc/live-session-contract/limits", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@dohc/live-session-contract/limits")>();
+  return {
+    ...actual,
+    LIVE_MARKDOWN_MAX_BYTES: 2048,
+    exceedsLiveMarkdownLimit: (text: string) => actual.exceedsUtf8Bytes(text, 2048),
+  };
+});
 
 setupFileInspectorTests();
 

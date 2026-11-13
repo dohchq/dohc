@@ -320,8 +320,7 @@ describe("share skip records", () => {
 
     // What the collision costs, stated as its own case: with one coordinate
     // the merge is right to read the second as a retry, and the warning stays
-    // hidden. The separation has to come from the engine, which is where it
-    // is proved — `a_relay_origin_named_like_a_page_position_stays_a_separate_refusal`.
+    // hidden. The engine must give these sources separate coordinates.
     const colliding = afterAcknowledgingTheRelayOrigin({
       ...pagePosition,
       originId: relayOrigin.originId,

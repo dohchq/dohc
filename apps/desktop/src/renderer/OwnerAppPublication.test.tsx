@@ -404,8 +404,8 @@ describe("owner app publication", () => {
       await waitFor(() => expect(actions("list")).toHaveLength(1));
       view.rerender(<Control {...props} {...next} />);
       expect(await screen.findByRole("button", { name: "Publish on a link" })).toBeTruthy();
-      await act(async () => stale.reject(listFailure("Error: Sharing failed (503).")));
-      expect(screen.queryByText(linksLine)).toBeNull();
+      await act(async () => stale.reject(new Error("Error invoking remote method 'desktop:publish-owner-app': Error: Sharing failed (503).")));
+      expect(screen.queryByText("The server didn't return this app's links.")).toBeNull();
       expect(screen.getByRole("button", { name: "Publish on a link" })).toBeTruthy();
       expect(api.getSyncStatus).not.toHaveBeenCalled();
     });

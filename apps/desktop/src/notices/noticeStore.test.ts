@@ -409,10 +409,6 @@ describe("notices on one person's computers", () => {
 
 });
 
-describe("a notice whose sender stopped", () => {
-
-});
-
 describe("notices that stay on this computer", () => {
   it("keeps notices local with nobody signed in or for a workspace the account does not sync", async () => {
     const server = await relay();
@@ -638,14 +634,14 @@ it("does not let a dismissed absent-head hold hide a later head for the same not
   expect(dismissRefusal).toHaveBeenCalledOnce();
 });
 
-it.each([[]])("rejects a refusal dismissal without shown coordinates: %s", async (refusalCoordinates) => {
+it("rejects a refusal dismissal without shown coordinates", async () => {
   const dismissRefusal = vi.fn(async () => {});
   const first = await computer(null, { dismissRefusal, refusalNotices: async () => [{ workspaceId: WORKSPACE, notices: [{
     noticeId: "refusal", originId: "peer", originSeq: 1, refusalCoordinates: [{ originId: "peer", originSeq: 1 }],
     reason: "Review this file", document: null,
   }] }] });
   const [shown] = (await first.store.list()).notices;
-  await expect(first.store.mark([{ ...shown!, refusalCoordinates }], "dismissed", null))
+  await expect(first.store.mark([{ ...shown!, refusalCoordinates: [] }], "dismissed", null))
     .rejects.toThrow("The engine could not dismiss this Notice. Try again.");
   expect(dismissRefusal).not.toHaveBeenCalled();
   expect((await first.store.list()).notices).toHaveLength(1);

@@ -2233,14 +2233,9 @@ describe("Collection automations that a Group message starts", () => {
       let hash = "";
       const authority = () => ({ workspaceId: "workspace", userId: "user-ana", grantId: "g-ana", grantGeneration: 1, hostGeneration: 1,
         principals: [], confirmed: [], automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash: hash, recordId: invoice.id });
-      let relayReads = 0;
       const executor = w.makeExecutor({
-        resolveRelayedPress: async () => {
-          relayReads++;
-          if (boundary === "new press" && relayReads === 2 || boundary.startsWith("presser") && [...w.claims.values()].some(c => c.state === "running")) await pause();
-          return authority();
-        },
-        roster: async () => { if (boundary === "inspection") await pause(); return OWNER; },
+        resolveRelayedPress: async () => authority(),
+        roster: async () => OWNER,
         groupHost: async () => { if (boundary === "admission") await pause(); return 0; },
       });
       onTestFinished(async () => { resume.resolve(); await executor.dispose(); });
@@ -2252,29 +2247,22 @@ describe("Collection automations that a Group message starts", () => {
       // Admission failures are observed immediately, including before the barrier resumes.
       const answered = pressing.then(value => ({ value }), error => ({ error }));
       await reached.promise;
-      const deleted = boundary === "presser delete";
-      if (deleted) await w.removeCollection("Tasks");
-      else await w.renameCollection("Tasks", "Shared/Tasks", false);
+      await w.renameCollection("Tasks", "Shared/Tasks", false);
       executor.handleWatcherEvents(["collection.yaml", "automations.yaml"].flatMap(name => [
         { operation: "delete" as const, path: `Tasks/${name}` },
-        ...(deleted ? [] : [{ operation: "update" as const, path: `Shared/Tasks/${name}` }]),
+        { operation: "update" as const, path: `Shared/Tasks/${name}` },
       ]));
-      await executor.automationsIn(deleted ? "Tasks" : "Shared/Tasks");
+      await executor.automationsIn("Shared/Tasks");
       resume.resolve();
       const answer = await answered;
       const moved = "This Collection moved after the button was pressed. Press it again.";
-      if (boundary === "new press" || boundary === "inspection" || boundary === "admission") {
+      if (boundary === "admission") {
         expect(answer).toEqual({ error: new Error(moved) });
       } else {
         if ("error" in answer) throw answer.error;
         if (answer.value.pressed.busy) throw new Error("Expected a claim");
         const claim = await w.settledClaim(w.claims.get(answer.value.pressed.claimId)!);
-        if (deleted) {
-          expect(claim.state).toBe("done");
-          await expect(executor.relayedClaim({ automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash: hash, pressId: "boundary" }))
-            .resolves.toMatchObject({ settled: { outcome: "ended", error: null } });
-        }
-        else expect(claim).toMatchObject({ state: "failed", error: moved });
+        expect(claim).toMatchObject({ state: "failed", error: moved });
       }
       expect(w.fieldsOf(invoice)).toEqual({});
       expect(w.journaled).toEqual([]);
