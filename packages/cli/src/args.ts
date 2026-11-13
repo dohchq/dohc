@@ -1450,7 +1450,9 @@ const DECLARED_PARSERS: { readonly [Verb in DeclaredVerb]: (input: VerbInput, co
     const [group, ...extra] = input.operands;
     if (!group) fail("links requires a group");
     noExtraArgs(extra, command);
-    return chatLinksGroupInputSchema.parse({ group, cursor: lastValue(input, "--cursor") });
+    const parsed = chatLinksGroupInputSchema.parse({ group, cursor: lastValue(input, "--cursor") });
+    // The request names the Group before the cursor.
+    return { group: parsed.group, cursor: parsed.cursor };
   },
   chatFileMentions: (input, command) => {
     noExtraArgs(input.operands, command);

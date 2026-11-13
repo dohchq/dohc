@@ -53,6 +53,7 @@ const MENTIONS_PAGE = {
 const MENTIONS_EMPTY = { ...MENTIONS_PAGE, subject: null, entries: [], complete: true, sharedChannelRowsUncovered: 0, nextCursor: null };
 const NOT_A_PAGE = { versionId: "v1" };
 const STALE = "dohc: This cursor belongs to another index. Start again without it.";
+const LONG = "x".repeat(32_769);
 
 type Answer = () => unknown;
 const page = (value: unknown): Answer => () => value;
@@ -89,6 +90,9 @@ async function call(name: string, args: Record<string, unknown>, reply: Answer =
   const context = Object.fromEntries(Object.entries(extra).map(([key, value]) => [key, value instanceof Set ? [...value] : value]));
   return { name, args, ...(Object.keys(context).length ? { context } : {}), ...outcome, sent };
 }
+
+// A long cursor records as its length, so the recording stays readable.
+const longCursor = (entry: Awaited<ReturnType<typeof call>>) => ({ ...entry, args: { ...entry.args, cursor: `<${LONG.length} characters>` } });
 
 async function listed() {
   const levels: unknown[] = [];
@@ -137,6 +141,7 @@ it("keeps the MCP door of the five link reads as recorded", async () => {
       await call("dohc_links_edges", { cursor: 5 }, page(EDGES_PAGE)),
       await call("dohc_links_edges", { cursor: "x".repeat(32_769) }, page(EDGES_PAGE)).then(entry => ({ ...entry, args: { cursor: "<32769 characters>" } })),
       ...await refusals("dohc_links_edges", {}, page(EDGES_PAGE)),
+      await call("dohc_links_edges", { cursor: 5, extra: true }, page(EDGES_PAGE)),
     ],
     dohc_links_in: [
       await call("dohc_links_in", { subject: { path: "b.md" } }, page(IN_PAGE)),
@@ -146,6 +151,7 @@ it("keeps the MCP door of the five link reads as recorded", async () => {
       await call("dohc_links_in", {}, page(IN_PAGE)),
       await call("dohc_links_in", { subject: { path: "b.md", objectId: "obj-b" } }, page(IN_PAGE)),
       ...await refusals("dohc_links_in", { subject: { path: "b.md" } }, page(IN_PAGE)),
+      await call("dohc_links_in", { subject: { path: "" }, cursor: LONG }, page(IN_PAGE)).then(longCursor),
     ],
     dohc_links_resolve: [
       await call("dohc_links_resolve", { source: "a.md", literals: [{ kind: "wikilink", literal: "b" }, { kind: "markdown", literal: "new.md#top" }, { kind: "wikilink", literal: "" }] }, page(RESOLVED)),
@@ -154,6 +160,7 @@ it("keeps the MCP door of the five link reads as recorded", async () => {
       await call("dohc_links_resolve", { source: "a.md" }, page(RESOLVED)),
       await call("dohc_links_resolve", { source: "a.md", literals: [{ kind: "other", literal: "b" }] }, page(RESOLVED)),
       ...await refusals("dohc_links_resolve", { source: "a.md", literals: [] }, page(RESOLVED)),
+      await call("dohc_links_resolve", { source: 5, literals: "x" }, page(RESOLVED)),
     ],
     dohc_chat_links: [
       await call("dohc_chat_links", { channelWireId: "wire-general" }, page(CHAT_LINKS_PAGE)),
@@ -164,6 +171,7 @@ it("keeps the MCP door of the five link reads as recorded", async () => {
       await call("dohc_chat_links", {}, page(CHAT_LINKS_PAGE)),
       await call("dohc_chat_links", { channelWireId: "" }, page(CHAT_LINKS_PAGE)),
       ...await refusals("dohc_chat_links", { channelWireId: "wire-general" }, page(CHAT_LINKS_PAGE)),
+      await call("dohc_chat_links", { channelWireId: "", cursor: LONG }, page(CHAT_LINKS_PAGE)).then(longCursor),
     ],
     dohc_chat_file_mentions: [
       await call("dohc_chat_file_mentions", {}, page(MENTIONS_PAGE)),
@@ -173,6 +181,7 @@ it("keeps the MCP door of the five link reads as recorded", async () => {
       await call("dohc_chat_file_mentions", { subject: { path: "a.md", objectId: "obj-a" } }, page(MENTIONS_PAGE)),
       await call("dohc_chat_file_mentions", { subject: "a.md" }, page(MENTIONS_PAGE)),
       ...await refusals("dohc_chat_file_mentions", {}, page(MENTIONS_PAGE)),
+      await call("dohc_chat_file_mentions", { subject: "a.md", cursor: LONG }, page(MENTIONS_PAGE)).then(longCursor),
     ],
   };
   await expect(recorded(sections)).toMatchFileSnapshot("./linkReadTools.expected.txt");

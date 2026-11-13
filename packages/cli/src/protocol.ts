@@ -242,9 +242,8 @@ const chatArgsSchema = z.union([
 ]);
 const groupsFullArgsSchema = z.object(argsBase).strict();
 // `dohc chat links` names a Group. The desktop resolves it to the chat's wire id.
-export const chatLinksGroupInputSchema = z.object({
+export const chatLinksGroupInputSchema = ChatLinksInput.omit({ channelWireId: true }).extend({
   group: z.string().min(1).max(500),
-  cursor: ChatLinksInput.shape.cursor,
 }).strict();
 
 // The operations declared in workspace-contracts, by the socket verb each answers.

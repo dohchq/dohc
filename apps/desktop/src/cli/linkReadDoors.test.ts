@@ -128,6 +128,7 @@ async function recordIpc() {
       await call("linksEdges", {}, page(EDGES_PAGE)),
       await call("linksEdges", ws, page(EDGES_PAGE), foreign),
       await call("linksEdges", ws, page(EDGES_PAGE), untrusted),
+      await call("linksEdges", { workspaceId: "", cursor: LONG }, page(EDGES_PAGE)),
     ],
     linksIn: [
       await call("linksIn", { ...ws, subject: { path: "b.md" } }, page(IN_PAGE)),
@@ -141,6 +142,7 @@ async function recordIpc() {
       await call("linksIn", { ...ws, subject: { path: "b.md" }, extra: true }, page(IN_PAGE)),
       await call("linksIn", { ...ws, subject: { path: "b.md" } }, page(IN_PAGE), foreign),
       await call("linksIn", { ...ws, subject: { path: "b.md" } }, page(IN_PAGE), untrusted),
+      await call("linksIn", { workspaceId: "", subject: { path: "" }, cursor: LONG }, page(IN_PAGE)),
     ],
     linksResolve: [
       await call("linksResolve", { ...ws, source: "a.md", literals: [{ kind: "wikilink", literal: "b" }, { kind: "markdown", literal: "new.md#top" }, { kind: "wikilink", literal: "" }] }, page(RESOLVED)),
@@ -153,6 +155,7 @@ async function recordIpc() {
       await call("linksResolve", { ...ws, source: "a.md", literals: [], cursor: "c" }, page(RESOLVED)),
       await call("linksResolve", { ...ws, source: "a.md", literals: [] }, page(RESOLVED), foreign),
       await call("linksResolve", { ...ws, source: "a.md", literals: [] }, page(RESOLVED), untrusted),
+      await call("linksResolve", { workspaceId: "", source: 5, literals: "x" }, page(RESOLVED)),
     ],
     chatLinks: [
       await call("chatLinks", { ...ws, channelWireId: "wire-general" }, page(CHAT_LINKS_PAGE)),
@@ -167,6 +170,7 @@ async function recordIpc() {
       await call("chatLinks", { channelWireId: "wire-general" }, page(CHAT_LINKS_PAGE)),
       await call("chatLinks", { ...ws, channelWireId: "wire-general" }, page(CHAT_LINKS_PAGE), foreign),
       await call("chatLinks", { ...ws, channelWireId: "wire-general" }, page(CHAT_LINKS_PAGE), untrusted),
+      await call("chatLinks", { workspaceId: "", channelWireId: "", cursor: LONG }, page(CHAT_LINKS_PAGE)),
     ],
     chatFileMentionsPage: [
       await call("chatFileMentionsPage", ws, page(MENTIONS_PAGE)),
@@ -180,6 +184,7 @@ async function recordIpc() {
       await call("chatFileMentionsPage", {}, page(MENTIONS_PAGE)),
       await call("chatFileMentionsPage", ws, page(MENTIONS_PAGE), foreign),
       await call("chatFileMentionsPage", ws, page(MENTIONS_PAGE), untrusted),
+      await call("chatFileMentionsPage", { workspaceId: "", subject: "a.md", cursor: LONG }, page(MENTIONS_PAGE)),
     ],
   };
 }
@@ -234,6 +239,7 @@ async function recordCli() {
       await cli(["links", "edges", "--cursor"]),
       await cli(["links", "edges", "--cursr", "a"]),
       await cli(["links", "edges", "--cursor", LONG]),
+      await cli(["links", "edges", "extra", "--cursor", LONG]),
     ],
     linksIn: [
       await cli(["links", "in", '{"path":"b.md"}'], page(IN_PAGE)),
@@ -248,6 +254,7 @@ async function recordCli() {
       await cli(["links", "in", '{"path":"b.md","objectId":"obj-b"}']),
       await cli(["links", "in", '{"path":"b.md"}', "extra"]),
       await cli(["links", "in", '{"path":"b.md"}', "--subject", "x"]),
+      await cli(["links", "in", '{"path":""}', "--cursor", LONG]),
     ],
     linksResolve: [
       await cli(["links", "resolve", "a.md", '[{"kind":"wikilink","literal":"b"},{"kind":"markdown","literal":"new.md#top"},{"kind":"wikilink","literal":""}]'], page(RESOLVED)),
@@ -260,6 +267,7 @@ async function recordCli() {
       await cli(["links", "resolve", "a.md", '[{"kind":"other","literal":"b"}]']),
       await cli(["links", "resolve", "a.md", "[]", "extra"]),
       await cli(["links", "resolve", "a.md", "[]", "--cursor", "c"]),
+      await cli(["links", "resolve", "", "{}"]),
     ],
     chatLinks: [
       await cli(["chat", "links", "general"], page(CHAT_LINKS_PAGE)),
@@ -277,6 +285,7 @@ async function recordCli() {
       await cli(["chat", "links", "general", "extra"]),
       await cli(["chat", "links", "g".repeat(501)]),
       await cli(["chat", "links", "general", "--cursor", LONG]),
+      await cli(["chat", "links", "g".repeat(501), "--cursor", LONG]),
     ],
     chatFileMentions: [
       await cli(["chat", "file-mentions"], page(MENTIONS_PAGE)),
@@ -291,6 +300,7 @@ async function recordCli() {
       await cli(["chat", "file-mentions", "--subject", ""], page(MENTIONS_PAGE)),
       await cli(["chat", "file-mentions", "extra"]),
       await cli(["chat", "file-mentions", "--path", "a.md"]),
+      await cli(["chat", "file-mentions", "--subject", '{"path":""}', "--cursor", LONG]),
     ],
   };
 }
@@ -439,6 +449,7 @@ async function recordSocket() {
       await socket("linksEdges", { args: { ...human, cursor: 5 }, reply: page(EDGES_PAGE) }),
       await socket("linksEdges", { args: { ...human, cursor: LONG }, reply: page(EDGES_PAGE) }),
       await socket("linksEdges", { args: {}, reply: page(EDGES_PAGE) }),
+      await socket("linksEdges", { args: { actor: "robot", cursor: LONG }, reply: page(EDGES_PAGE) }),
       ...await refusals("linksEdges", human, page(EDGES_PAGE)),
     ],
     linksIn: [
@@ -448,6 +459,7 @@ async function recordSocket() {
       await socket("linksIn", { args: { ...human, subject: { path: "b.md" }, cursor: "stale" }, reply: failing(STALE) }),
       await socket("linksIn", { args: human, reply: page(IN_PAGE) }),
       await socket("linksIn", { args: { ...human, subject: { path: "b.md", objectId: "obj-b" } }, reply: page(IN_PAGE) }),
+      await socket("linksIn", { args: { actor: "robot", subject: { path: "" }, cursor: LONG }, reply: page(IN_PAGE) }),
       ...await refusals("linksIn", { ...human, subject: { path: "b.md" } }, page(IN_PAGE)),
     ],
     linksResolve: [
@@ -457,6 +469,7 @@ async function recordSocket() {
       await socket("linksResolve", { args: { ...human, source: "a.md", literals: [] }, reply: failing("Workspace engine is unavailable.") }),
       await socket("linksResolve", { args: { ...human, source: "a.md" }, reply: page(RESOLVED) }),
       await socket("linksResolve", { args: { ...human, source: "a.md", literals: [{ kind: "other", literal: "b" }] }, reply: page(RESOLVED) }),
+      await socket("linksResolve", { args: { actor: "robot", source: 5, literals: "x" }, reply: page(RESOLVED) }),
       ...await refusals("linksResolve", { ...human, source: "a.md", literals: [] }, page(RESOLVED)),
     ],
     chatLinks: [
@@ -480,6 +493,9 @@ async function recordSocket() {
       await socket("chatLinks", { args: { ...human, group: "general", channelWireId: "wire-general" }, reply: page(CHAT_LINKS_PAGE) }),
       await socket("chatLinks", { args: { ...human, group: "" }, reply: page(CHAT_LINKS_PAGE) }),
       await socket("chatLinks", { args: human, reply: page(CHAT_LINKS_PAGE) }),
+      await socket("chatLinks", { args: { ...human, group: "g".repeat(501), cursor: LONG }, reply: page(CHAT_LINKS_PAGE) }),
+      await socket("chatLinks", { args: { actor: "robot", group: "g".repeat(501), cursor: LONG }, reply: page(CHAT_LINKS_PAGE) }),
+      await socket("chatLinks", { args: { actor: "robot", channelWireId: "", cursor: LONG }, reply: page(CHAT_LINKS_PAGE) }),
       ...await refusals("chatLinks", { ...human, group: "general" }, page(CHAT_LINKS_PAGE)),
       ...await refusals("chatLinks", { ...human, channelWireId: "wire-general" }, page(CHAT_LINKS_PAGE)),
     ],
@@ -489,6 +505,7 @@ async function recordSocket() {
       await socket("chatFileMentions", { args: { ...human, subject: { objectId: "obj-a" } }, reply: page(null) }),
       await socket("chatFileMentions", { args: { ...human, cursor: "stale" }, reply: failing("chat-mention-access-changed") }),
       await socket("chatFileMentions", { args: { ...human, subject: { path: "a.md", objectId: "obj-a" } }, reply: page(MENTIONS_PAGE) }),
+      await socket("chatFileMentions", { args: { actor: "robot", subject: "a.md", cursor: LONG }, reply: page(MENTIONS_PAGE) }),
       ...await refusals("chatFileMentions", human, page(MENTIONS_PAGE)),
     ],
   };
