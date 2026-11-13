@@ -2861,4 +2861,32 @@ mod tests {
             .unwrap();
         assert!(lock(&service.handles).is_empty());
     }
+    #[tokio::test]
+    async fn settlement_requires_an_explicit_valid_operator_budget() {
+        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let (service, owner, _ingress) =
+            EngineService::configured_live_host(config(&[(scratch.path(), "workspace")]))
+                .await
+                .unwrap();
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        assert!(matches!(
+            service.configured_settlement_admission(&ctx),
+            Err(WireError {
+                code: ErrorCode::Forbidden,
+                ..
+            })
+        ));
+        close(&service).await;
+        for max in [0, usize::MAX] {
+            let root = dohc_engine_testkit::ScratchDir::new().unwrap();
+            let mut invalid = config(&[(root.path(), "workspace")]);
+            invalid.settlement = Some(SettlementConfig {
+                max_applications_per_settlement: max,
+            });
+            assert!(EngineService::configured_live_host(invalid).await.is_err());
+            assert!(!root.path().join(".dohc/engine/engine.db").exists());
+        }
+    }
+
 }

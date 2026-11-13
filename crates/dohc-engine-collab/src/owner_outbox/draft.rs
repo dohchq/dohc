@@ -2278,4 +2278,79 @@ mod tests {
         assert_eq!(after.native_head_sequence, final_state.native_head_sequence);
         assert_eq!(after.revision, final_state.revision);
     }
+    #[test]
+    fn rejects_divergent_checkpoint_and_stale_native_head_without_installing() {
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        let doc = Ydoc::wire();
+        doc.apply(&checkpoint).unwrap();
+        doc.richdoc_append_paragraph("remote edit");
+        let changed = bounded(&doc).unwrap();
+        let mut wrong = observed.clone();
+        wrong.checkpoint_digest = hex_sha256(&changed);
+        assert!(store
+            .write_with(&NoFaults, |tx| install_observed_binding_in_tx(
+                tx,
+                "workspace",
+                &wrong,
+                &changed
+            ))
+            .is_err());
+        wrong = observed;
+        wrong.native_head_sequence += 1;
+        assert!(store
+            .write_with(&NoFaults, |tx| install_observed_binding_in_tx(
+                tx,
+                "workspace",
+                &wrong,
+                &checkpoint
+            ))
+            .is_err());
+        assert_eq!(store.table_row_count("ydoc_owner_bindings").unwrap(), 0);
+    }
+
+    #[test]
+    fn stale_revision_and_invalid_delta_leave_the_queue_empty() {
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        for (revision, update) in [(2, vec![0, 0]), (1, vec![255])] {
+            assert!(store
+                .write_with(&NoFaults, |tx| append_draft_in_tx(
+                    tx,
+                    "workspace",
+                    &observed.binding,
+                    revision,
+                    "edit".into(),
+                    update,
+                    3
+                ))
+                .is_err());
+        }
+        assert_eq!(
+            store.table_row_count("owner_ydoc_outbox_entries").unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn draft_open_refuses_marker_kind_or_regime_drift_without_a_head_change() {
+        for assignment in [
+            "content_kind='plaintext'",
+            "regime='local-only', lineage_claim_status='unclaimed', lineage_claim_id=NULL, lineage_parent_claim_id=NULL, lineage_epoch_tag=NULL",
+        ] {
+            let (_dir, mut store, observed, checkpoint) = fixture();
+            install(&mut store, &observed, &checkpoint);
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(&format!("UPDATE ydoc_docs SET {assignment}"), [])
+                        .unwrap();
+                    assert!(matches!(
+                        open_draft_in(tx, &observed.binding, 1),
+                        Err(OwnerOutboxError::ParentMismatch)
+                    ));
+                    Ok::<_, OwnerOutboxError>(())
+                })
+                .unwrap();
+        }
+    }
+
 }

@@ -2593,3 +2593,30 @@ async fn read_blob_requires_a_reference_from_the_handle_workspace() {
         "B holds both payloads without a reference to either"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn secrets_apply_rejects_non_secret_path_before_key_handling() {
+    let (scratch, transport, handle) = fixture("secret-apply-path-gate").await;
+    let params = json!({
+        "workspaceId": "ws-rpcd-secret-apply-path-gate",
+        "path": "plain.txt",
+        "sourceVersionId": "feature",
+        "targetVersionId": "main",
+        "momentId": "secret-non-secret-apply",
+        "origin": "sync",
+    });
+    for (id, key_present) in [(2, false), (3, true)] {
+        if key_present {
+            dohc_engine_crypto::create_key_file(&scratch.path().join(".dohc/engine"))
+                .expect("create key file");
+        }
+        let error = transport
+            .call(
+                RequestContext::unbounded(),
+                request(id, "secrets.apply", Some(handle.clone()), params.clone()),
+            )
+            .await
+            .expect_err("non-secret path must be refused");
+        assert_eq!(error.message, "not-secret-path");
+    }
+}

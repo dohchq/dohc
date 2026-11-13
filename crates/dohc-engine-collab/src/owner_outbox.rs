@@ -3213,4 +3213,36 @@ mod tests {
             None
         );
     }
+    fn durable_write_counts(store: &EngineStore) -> (i64, i64, i64) {
+        store
+            .read_with(|conn| {
+                Ok::<_, rusqlite::Error>((
+                    conn.query_row("SELECT COUNT(*) FROM owner_ydoc_outboxes", [], |row| {
+                        row.get(0)
+                    })?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM owner_ydoc_outbox_entries",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row("SELECT COUNT(*) FROM binary_blobs", [], |row| row.get(0))?,
+                ))
+            })
+            .expect("durable write counts")
+    }
+
+    #[test]
+    fn mismatched_durable_main_version_refuses_without_writes() {
+        let (_dir, mut store) = store("owner-outbox-main-version-mismatch");
+        let before = durable_write_counts(&store);
+        let mut mismatched = input("key-1", b"one", 10);
+        mismatched.binding.main_version_id = "other-main".to_owned();
+
+        assert!(matches!(
+            append(&mut store, "workspace-1", mismatched),
+            Err(OwnerOutboxError::MainVersionMismatch)
+        ));
+        assert_eq!(durable_write_counts(&store), before);
+    }
+
 }

@@ -3591,3 +3591,27 @@ fn received_fallback_rename_commits_write_and_delete_together() {
         }).unwrap();
     }
 }
+
+#[test]
+fn share_view_refuses_a_thread_create_carrying_a_shape_a_share_never_carries() {
+    // `linkedObjectId` and `linkedPathHint` are the granter's own fields. A
+    // relay offering one is offering something this boundary must not place —
+    // malformed, not out of scope, because no grant admits it and widening the
+    // share changes nothing.
+    for extra in [
+        json!({ "linkedObjectId": "object-in" }),
+        json!({ "linkedPath": "shared/docs/in.md", "linkedObjectId": "object-in" }),
+        json!({ "linkedPath": "shared/docs/in.md", "linkedPathHint": "shared/docs/in.md" }),
+    ] {
+        let (_scratch, _path, mut engine, boundary) = share_view_chat_fixture();
+        let create = thread_create(0, "thread-in", extra.clone());
+        assert!(
+            matches!(
+                apply_shared_envelope(&mut engine, &boundary, &create, &NoFaults),
+                Err(SyncError::InvalidInput { .. })
+            ),
+            "{extra} must be refused outright",
+        );
+        assert_eq!(thread_row_path(&engine, "thread-in"), None);
+    }
+}
