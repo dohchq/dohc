@@ -1045,6 +1045,28 @@ describe("background share pulls", () => {
     expect(reads).not.toHaveBeenCalled();
     noLocalWork(h);
   });
+  it("holds a membership's pull at the relay and says when its level changed", async () => {
+    const h = await primed();
+    const bodies = [{ ops: [], hasMore: false, nextCursor: 42 }, { ops: [], hasMore: false, nextCursor: 42, levelChanged: true }];
+    const fetch = vi.fn<typeof globalThis.fetch>(async () => Response.json(bodies.shift()));
+    h.probeLog.mockImplementation(input => probeShareViewLog({ ...input, relay: { ...input.relay, fetch } }));
+    await expect(h.invoke(channel, { ...payload, trigger: "held" }))
+      .resolves.toMatchObject({ ok: true, status: "unchanged", probed: true, held: true });
+    expect(fetch).toHaveBeenLastCalledWith("https://relay.example.test/sync/shares/share/log?since=42&hold=25000", expect.anything());
+    const changed = await h.invoke(channel, { ...payload, trigger: "held" });
+    expect(changed).toMatchObject({ ok: true, status: "unchanged", probed: true, held: true, levelChanged: true });
+    noLocalWork(h);
+    // A plain background pull neither holds nor asks to be held again.
+    bodies.push({ ops: [], hasMore: false, nextCursor: 42 });
+    const plain = await h.invoke(channel, payload);
+    expect(plain).not.toHaveProperty("held");
+    expect(fetch).toHaveBeenLastCalledWith("https://relay.example.test/sync/shares/share/log?since=42", expect.anything());
+  });
+  it("asks for the next held pull after a held pull brought changes", async () => {
+    const h = await primed(); h.probeLog.mockResolvedValue({ unchanged: false });
+    await expect(h.invoke(channel, { ...payload, trigger: "held" })).resolves.toMatchObject({ ok: true, status: "updated", held: true });
+    expect(h.reconcile).toHaveBeenCalledOnce();
+  });
   it("runs the full path once for new ops, keeps its committed cursor and skips metadata and identity", async () => {
     const h = await primed();
     h.probeLog.mockResolvedValue({ unchanged: false });

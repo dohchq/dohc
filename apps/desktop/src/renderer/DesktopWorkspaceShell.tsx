@@ -179,7 +179,7 @@ import {
 import { useTabTitles } from "./shell/useTabTitles";
 import { useWorkspaceListing } from "./shell/useWorkspaceListing";
 import { readNewestMomentOrder, useHistoryPage } from "./shell/useHistoryPage";
-import type { SearchResultsEventEntry } from "../ipc/bridgeContract";
+import type { RefreshSharedViewPayload, SearchResultsEventEntry } from "../ipc/bridgeContract";
 import {
   fileOpenStartMark,
   rendererMarks,
@@ -261,6 +261,7 @@ import {
   type LiveStopRefusal,
 } from "../ipc/liveEditingStop";
 import { OpenSharedView, opensForLiveEditing } from "./OpenSharedView";
+import { youCan } from "./workbench/membershipWords";
 import { Overlay } from "./Overlay";
 import { ShareHandoffSurface, type HandoffChatsOutcome } from "./ShareHandoffSurface";
 import { DEFAULT_SETTINGS_SECTION, type SettingsSectionId } from "./settings/settingsRegistry";
@@ -536,6 +537,7 @@ const SHARE_RELAY_POLL_MS = 5 * 60 * 1000;
 
 // The Notices row of a shared view whose refresh can't read its collision record.
 const SHARE_COLLISION_RECORD_ROW = "share-collision-record";
+type ShareViewRefreshTrigger = NonNullable<RefreshSharedViewPayload["trigger"]>;
 
 // What a refresh that set a shared view's collision record aside tells the
 // person, whether the refresh then completed or failed.
@@ -1042,7 +1044,7 @@ export function DesktopWorkspaceShell(props: {
     };
   }
   const refreshShareViewRef = useRef<
-    (trigger?: "manual" | "background" | "press-burst") => Promise<ShareViewRefresh>
+    (trigger?: ShareViewRefreshTrigger) => Promise<ShareViewRefresh>
   >(async () => "current");
   const retryRefusedSharedView = useCallback(() => {
     void refreshShareViewRef.current();
@@ -2454,6 +2456,12 @@ export function DesktopWorkspaceShell(props: {
   // A registry update replaces this snapshot, including when access returns.
   const [endedFor, setEndedFor] = useState<NonNullable<Workspace["shareView"]> | null>(null);
   const shareViewEnded = !!shareView && (shareView.ended || endedFor === shareView);
+  // A workspace this account joined. Inside, it looks like an owned one: no
+  // share banner while it lasts, and its level said once, in the workspace menu.
+  const membershipView = shareView?.membership === true;
+  const shareEndedRefusal = membershipView
+    ? "Your membership ended."
+    : "Your access to this share ended.";
   const [accessFor, setAccessFor] = useState<{
     view: NonNullable<Workspace["shareView"]>;
     access: "view" | "comment" | "edit";
@@ -2469,7 +2477,7 @@ export function DesktopWorkspaceShell(props: {
   const shareReopenMessage =
     "This share must be reopened. In Manage workspaces, choose Remove from list on its row, then open the share code again. Its folder stays.";
   const shareWriteRefusal = shareViewEnded
-    ? "Your access to this share ended."
+    ? shareEndedRefusal
     : shareViewDamaged
       ? !shareView?.recipientUserId || needsReopenFor === shareView
         ? shareReopenMessage
@@ -3082,7 +3090,7 @@ export function DesktopWorkspaceShell(props: {
   const shareRefreshFlight = useRef<{
     admission: typeof workspaceAdmission;
     promise: Promise<ShareViewRefresh>;
-    trigger: "manual" | "background" | "press-burst";
+    trigger: ShareViewRefreshTrigger;
     followUp?: Promise<ShareViewRefresh>;
   } | null>(null);
   const checkShareAccess = useSharedViewAccess({
@@ -3093,8 +3101,13 @@ export function DesktopWorkspaceShell(props: {
       captureDecidedFor !== workspaceId || syncStatus === null
         ? undefined
         : !!syncStatus.syncFailure,
-    pull: async (pressBurst) =>
-      (await refreshShareViewRef.current(pressBurst ? "press-burst" : "background")) === "changed",
+    // An open membership keeps one held pull at the relay in place of the poll.
+    pull: async (pressBurst) => {
+      const pulled = await refreshShareViewRef.current(
+        pressBurst ? "press-burst" : shareView?.membership ? "held" : "background",
+      );
+      return pulled === "held" || pulled === "level-changed" ? pulled : "other";
+    },
     onPersistentFailure: (error) =>
       reportShellError("Couldn't refresh the shared view.", error, () => {
         if (!workspaceAdmission.superseded) void refreshShareViewRef.current();
@@ -3108,7 +3121,7 @@ export function DesktopWorkspaceShell(props: {
       ) {
         const message =
           result.status === "ended"
-            ? "Your access to this share ended."
+            ? shareEndedRefusal
             : result.status === "needs-reopen"
               ? shareReopenMessage
               : shareHadEditRef.current
@@ -6510,18 +6523,22 @@ export function DesktopWorkspaceShell(props: {
   const shareBannerText = !shareView
     ? ""
     : shareViewEnded
-      ? `This share was ended${shareView.granterEmail ? ` by ${shareView.granterEmail}` : ""}. Your copy stays readable but won't update anymore.`
+      ? membershipView
+        ? "Your membership ended. This copy stays on this computer."
+        : `This share was ended${shareView.granterEmail ? ` by ${shareView.granterEmail}` : ""}. Your copy stays readable but won't update anymore.`
       : shareViewDamaged
         ? !shareView.recipientUserId || needsReopenFor === shareView
           ? "This share must be reopened. In Manage workspaces, choose Remove from list on its row, then open the share code again. Its folder stays."
           : "dohc can't read what this share grants. Open the share again to restore it."
-        : shareViewWritable
-          ? `Shared view from ${shareGranterName}. Markdown edits save to the live host. Other file changes need their acceptance.`
-          : shareViewHasIndependentChat
-            ? `Shared view from ${shareGranterName}. Files and Chats are read-only here. Ask ${shareGranterName} where to continue the conversation.`
-            : shareAccess === "comment"
-              ? `Shared view from ${shareGranterName}. Files are read-only here. Continue commenting in the browser where you opened the link.`
-              : `Shared view from ${shareGranterName} — read-only. Ask ${shareView.granterEmail ?? "them"} for changes.`;
+        : membershipView
+          ? ""
+          : shareViewWritable
+            ? `Shared view from ${shareGranterName}. Markdown edits save to the live host. Other file changes need their acceptance.`
+            : shareViewHasIndependentChat
+              ? `Shared view from ${shareGranterName}. Files and Chats are read-only here. Ask ${shareGranterName} where to continue the conversation.`
+              : shareAccess === "comment"
+                ? `Shared view from ${shareGranterName}. Files are read-only here. Continue commenting in the browser where you opened the link.`
+                : `Shared view from ${shareGranterName} — read-only. Ask ${shareView.granterEmail ?? "them"} for changes.`;
   const [shareRefreshing, setShareRefreshing] = useState(false);
   const [shareExclusions, setShareExclusions] = useState<{
     workspaceId: string;
@@ -6587,8 +6604,11 @@ export function DesktopWorkspaceShell(props: {
   });
 
   const refreshShareView = useCallback(
-    (trigger: "manual" | "background" | "press-burst" = "manual"): Promise<ShareViewRefresh> => {
-      const active = shareRefreshFlight.current;
+    (trigger: ShareViewRefreshTrigger = "manual"): Promise<ShareViewRefresh> => {
+      // A held pull waits at the relay for up to 25 s, so it runs beside other
+      // refreshes instead of making them wait. The access hook runs one at a time.
+      const held = trigger === "held";
+      const active = held ? null : shareRefreshFlight.current;
       if (active?.admission === workspaceAdmission) {
         if (trigger !== active.trigger) {
           active.followUp ??= active.promise
@@ -6605,9 +6625,9 @@ export function DesktopWorkspaceShell(props: {
         if (!shareView) return "current";
         if (!workspaceIsReady || workspaceAdmission.superseded || shareViewDamaged) return "stale";
         if (shareViewEnded) return "ended";
-        const token = ++shareRefreshToken.current;
+        const token = held ? null : ++shareRefreshToken.current;
         const isCurrent = () =>
-          !workspaceAdmission.superseded && token === shareRefreshToken.current;
+          !workspaceAdmission.superseded && (token === null || token === shareRefreshToken.current);
         let readShareRecords = !background;
         let probeFailure = false;
         if (!background) setShareRefreshing(true);
@@ -6663,7 +6683,8 @@ export function DesktopWorkspaceShell(props: {
             );
             return "stale";
           }
-          if (outcome.probed) return "current";
+          if (outcome.probed)
+            return outcome.levelChanged ? "level-changed" : outcome.held ? "held" : "current";
           clearIdentity(SHARE_COLLISION_RECORD_ROW);
           if (outcome.collisionRecordQuarantined) {
             reportShellFailure({ message: collisionRecordSetAsideMessage(), tone: "warning" });
@@ -6671,7 +6692,7 @@ export function DesktopWorkspaceShell(props: {
           if (outcome.status === "ended") {
             shareViewEndedRef.current = true;
             shareViewWritableRef.current = false;
-            shareWriteRefusalRef.current = "Your access to this share ended.";
+            shareWriteRefusalRef.current = shareEndedRefusal;
             setCollectionFieldWriteAccess(workspaceId, shareWriteRefusalRef.current);
             setShareExclusions({ workspaceId, paths: [] });
             setEndedFor(shareViewRef.current);
@@ -6684,9 +6705,11 @@ export function DesktopWorkspaceShell(props: {
           if (!isCurrent()) return "stale";
           return outcome.status === "ended"
             ? "ended"
-            : background && outcome.changedPaths > 0
-              ? "changed"
-              : "current";
+            : outcome.held
+              ? "held"
+              : background && outcome.changedPaths > 0
+                ? "changed"
+                : "current";
         } catch (error) {
           if (!isCurrent()) return "stale";
           if (background) {
@@ -6724,6 +6747,7 @@ export function DesktopWorkspaceShell(props: {
           }
         }
       };
+      if (held) return refresh();
       const promise = refresh().finally(() => {
         if (shareRefreshFlight.current?.promise === promise) shareRefreshFlight.current = null;
       });
@@ -8048,7 +8072,11 @@ export function DesktopWorkspaceShell(props: {
                             ) : undefined
                           }
                         />
-                        {shareView ? (
+                        {shareView &&
+                        (!membershipView ||
+                          shareBannerText ||
+                          shareExcludedPaths.length > 0 ||
+                          shareSkipped) ? (
                           <div
                             data-testid="shared-view-banner"
                             data-ended={shareViewEnded || undefined}
@@ -8056,17 +8084,21 @@ export function DesktopWorkspaceShell(props: {
                               shareViewEnded ? "bg-warning/10 text-warning" : "bg-panel text-muted"
                             }`}
                           >
-                            <Eye size={12} aria-hidden className="shrink-0" />
-                            {shareView.subjectName && (
-                              <span className="max-w-64 truncate font-medium">
-                                {shareView.subjectName}
-                              </span>
+                            {membershipView ? null : (
+                              <>
+                                <Eye size={12} aria-hidden className="shrink-0" />
+                                {shareView.subjectName && (
+                                  <span className="max-w-64 truncate font-medium">
+                                    {shareView.subjectName}
+                                  </span>
+                                )}
+                                {shareView.granterEmail && (
+                                  <span className="shrink-0 font-mono text-[11px]">
+                                    {shareView.granterEmail}
+                                  </span>
+                                )}{" "}
+                              </>
                             )}
-                            {shareView.granterEmail && (
-                              <span className="shrink-0 font-mono text-[11px]">
-                                {shareView.granterEmail}
-                              </span>
-                            )}{" "}
                             <span className="min-w-0 flex-1 truncate" title={shareBannerText}>
                               {shareBannerText}
                             </span>
@@ -8177,7 +8209,7 @@ export function DesktopWorkspaceShell(props: {
                             {/* Sending. Edit level only, and only while the share is live: an
               ended or damaged grant carries no way to send, so offering one
               would be an affordance the grant does not have. */}
-                            {shareViewWritable ? (
+                            {shareViewWritable && !membershipView ? (
                               <>
                                 {shareChangesEmpty ? (
                                   <span
@@ -8225,7 +8257,7 @@ export function DesktopWorkspaceShell(props: {
                                 </button>
                               </>
                             ) : null}
-                            {!shareViewEnded && !shareViewDamaged ? (
+                            {!shareViewEnded && !shareViewDamaged && !membershipView ? (
                               <button
                                 type="button"
                                 data-testid="shared-view-refresh"

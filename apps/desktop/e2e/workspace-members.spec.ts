@@ -8,10 +8,14 @@ import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
+  explorerRow,
+  openChatsView,
   openWorkspaceFromFirstRun,
+  revealExplorerPath,
   seedCloudCredentials,
   seedWorkspaceManifest,
   seedWorkspaceRegistry,
+  writeWorkspaceFiles,
 } from "./helpers/workspace";
 
 // Workspace members against a real relay. The owner invites one account by
@@ -242,5 +246,172 @@ test("@two-client an owner invites, opens the link, and sets roles; members see 
     await relay?.stop();
     await cleanupDesktopWorkspace(member, memberTemp);
     await cleanupDesktopWorkspace(owner, ownerTemp);
+  }
+});
+
+async function showSharing(page: Page) {
+  if (!(await page.getByTestId("sharing-view").isVisible())) await page.getByTestId(activityPin("sharing")).click();
+  await expect(page.getByTestId("sharing-view")).toBeVisible();
+}
+
+async function setTheme(page: Page, theme: "Light" | "Dark") {
+  await page.getByTestId(activityPin("settings")).click();
+  await page.getByTestId(settingsNavPin("appearance")).click();
+  await page.getByRole("radio", { name: theme, exact: true }).click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme.toLowerCase());
+  await page.getByRole("button", { name: "Close settings", exact: true }).click();
+}
+
+// A member opens the whole workspace from Sharing on their own desktop. It
+// arrives with its files, History, search, and a Group message posted before
+// they joined. When the owner removes them, the copy stays readable under the
+// ended band.
+test("@two-client a member opens the workspace from Sharing and keeps a readable copy after removal", async () => {
+  test.setTimeout(420_000);
+  const ownerTemp = await createTempWorkspace();
+  const memberTemp = await createTempWorkspace();
+  const workspaceId = "members-open";
+  const syncEnv = { DOHC_TEST_SYNC_DEBOUNCE_MS: "150", DOHC_TEST_SYNC_BACKOFF_MS: "250" };
+  let relay: SyncRelayHandle | null = null;
+  let owner: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  let member: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  const shot = (name: string) => test.info().outputPath(`${name}.png`);
+
+  try {
+    relay = await spawnSyncRelay({ dbPath: join(ownerTemp.baseDir, "relay", "relay.sqlite") });
+    await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: OWNER.token, workspaceId });
+    await seedWorkspaceManifest(ownerTemp, workspaceId);
+    await writeWorkspaceFiles(ownerTemp, [{ path: "notes/plan.md", contents: "# Plan\n\nThe lighthouse memo.\n" }]);
+    await seedWorkspaceRegistry(ownerTemp, [
+      { workspaceId, rootPath: ownerTemp.rootPath, remote: { serverUrl: relay.baseUrl, ownerUserId: OWNER.user } },
+    ]);
+    await seedCloudCredentials(ownerTemp, { serverUrl: relay.baseUrl, relayUrl: relay.baseUrl, email: OWNER.email, userId: OWNER.user, token: OWNER.token });
+
+    owner = await launchDesktopApp({ workspace: ownerTemp, env: syncEnv });
+    const { page } = owner;
+    await openWorkspaceFromFirstRun(page, ownerTemp);
+    await page.emulateMedia({ reducedMotion: "reduce" });
+
+    // --- Before anyone joins: a Group with a message ---------------------
+    await openChatsView(page);
+    await page.getByTestId("chats-new-channel").click();
+    await page.getByTestId("chats-new-channel-name").fill("Launch team");
+    await page.getByTestId("chats-new-channel-type-both").click();
+    await page.getByTestId("chats-new-channel-submit").click();
+    await expect(page.getByTestId("chats-channel-title")).toHaveText("Launch team");
+    await page.getByTestId("chats-new-thread-composer").fill("Kickoff: read the plan.");
+    await page.getByTestId("chats-new-thread-composer").press("Enter");
+    await expect(page.getByTestId("chats-message-body")).toContainText("Kickoff: read the plan.");
+    await page.getByTestId("chats-thread-back").click();
+
+    // --- The owner invites Sam, who has an account, so Sam joins at once ---
+    const members = await openMembers(page);
+    await members.getByTestId("settings-members-invite-email").fill(MEMBER.email);
+    await members.getByTestId("settings-members-invite-send").click();
+    await expect(members.getByTestId("settings-members-row").filter({ hasText: MEMBER.email })).toHaveAttribute("data-state", "active");
+    await page.getByRole("button", { name: "Close settings", exact: true }).click();
+    const workspaceName = (await membersView(relay, OWNER.token, workspaceId)).workspaceName;
+
+    // The relay serves the owner's file through Sam's membership.
+    const shares = await relayJson(relay.baseUrl, MEMBER.token, "/sync/shares");
+    expect(shares.status, shares.body).toBe(200);
+    const shareId = (JSON.parse(shares.body) as { received: { shareId: string; selector: { kind?: string } }[] })
+      .received.find((row) => row.selector.kind === "workspace")!.shareId;
+    await expect.poll(async () => {
+      const log = await relayJson(relay!.baseUrl, MEMBER.token, `/sync/shares/${shareId}/log?since=0&limit=500`);
+      return log.status === 200 && log.body.includes("notes/plan.md") ? "served" : `status:${log.status}`;
+    }, { timeout: 60_000, intervals: [1_000] }).toBe("served");
+
+    // --- Sam opens it from Sharing ----------------------------------------
+    await seedWorkspaceManifest(memberTemp, "members-open-sam");
+    await seedWorkspaceRegistry(memberTemp, [{ workspaceId: "members-open-sam", rootPath: memberTemp.rootPath }]);
+    await seedCloudCredentials(memberTemp, { serverUrl: relay.baseUrl, relayUrl: relay.baseUrl, email: MEMBER.email, userId: MEMBER.user, token: MEMBER.token });
+    member = await launchDesktopApp({ workspace: memberTemp, env: syncEnv });
+    const mine = member.page;
+    await openWorkspaceFromFirstRun(mine, memberTemp);
+    await mine.emulateMedia({ reducedMotion: "reduce" });
+    await showSharing(mine);
+    const received = mine.getByTestId("sharing-received-row").filter({ hasText: workspaceName });
+    await expect(received.getByTestId("sharing-row-who")).toContainText("Member ·", { timeout: 60_000 });
+    await expect(received.getByTestId("sharing-row-who")).toContainText("lets members comment");
+    for (const theme of ["Light", "Dark"] as const) {
+      await setTheme(mine, theme);
+      await showSharing(mine);
+      await expect(received).toBeVisible();
+      await mine.getByTestId("sharing-view").screenshot({ path: shot(`sharing-row-${theme.toLowerCase()}`) });
+    }
+    const dialog = mine.getByTestId("open-shared-view");
+    for (const theme of ["Dark", "Light"] as const) {
+      if (theme === "Light") {
+        await mine.keyboard.press("Escape");
+        await expect(dialog).toHaveCount(0);
+        await setTheme(mine, theme);
+      }
+      await showSharing(mine);
+      await expect(received).toBeVisible();
+      await received.locator("[data-sharing-row-focus]").hover();
+      await received.getByRole("button", { name: "Share actions" }).click();
+      await mine.getByRole("menuitem", { name: "Open", exact: true }).click();
+      await expect(dialog.getByTestId("open-share-choose-folder")).toContainText(workspaceName);
+      await expect(dialog.getByTestId("open-share-start")).toHaveText("Open workspace");
+      await dialog.screenshot({ path: shot(`open-dialog-${theme.toLowerCase()}`) });
+    }
+    await dialog.getByTestId("open-share-start").click();
+    // The first pull counts files in the button while it reads. It can finish
+    // before a frame shows the count, so the picture is taken when it does.
+    await expect(dialog.getByTestId("open-share-start")).toContainText(/Reading \d+ files?/, { timeout: 5_000 })
+      .then(() => dialog.screenshot({ path: shot("first-pull-light") }))
+      .catch(() => undefined);
+
+    // --- Inside: like an owned workspace -----------------------------------
+    await expect(mine.getByTestId("status-workspace")).toHaveText(workspaceName, { timeout: 120_000 });
+    await expect(mine.getByTestId("shared-view-banner")).toHaveCount(0);
+    await revealExplorerPath(mine, "notes/plan.md");
+    await mine.getByTestId(activityPin("history")).click();
+    await expect(mine.locator('[data-testid="engine-moment-open"][data-moment-path="notes/plan.md"]').first()).toBeVisible({ timeout: 60_000 });
+    await mine.getByTestId(activityPin("search")).click();
+    await mine.getByTestId("search-input").fill("lighthouse");
+    await expect(mine.locator('[data-testid="search-result-group"][data-path="notes/plan.md"]')).toBeVisible({ timeout: 30_000 });
+    await openChatsView(mine);
+    const group = mine.getByTestId("chats-channel").filter({ hasText: "Launch team" });
+    await expect(group).toBeVisible({ timeout: 60_000 });
+    await group.click();
+    await expect(mine.getByTestId("chats-thread").first()).toContainText("Kickoff: read the plan.", { timeout: 60_000 });
+    for (const theme of ["Light", "Dark"] as const) {
+      await setTheme(mine, theme);
+      await mine.getByTestId("workspace-switcher").click();
+      await expect(mine.getByTestId("workspace-switcher-level")).toHaveText("You can comment");
+      await mine.screenshot({ path: shot(`opened-menu-${theme.toLowerCase()}`) });
+      await mine.keyboard.press("Escape");
+    }
+
+    // --- The owner removes Sam ---------------------------------------------
+    const again = await openMembers(page);
+    const row = again.getByTestId("settings-members-row").filter({ hasText: MEMBER.email });
+    await row.getByTestId("settings-members-row-menu").click();
+    await page.getByRole("menuitem", { name: "Remove from workspace" }).click();
+    await page.getByTestId("settings-members-confirm").click();
+    await expect(again.getByTestId("settings-members-removed")).toContainText(MEMBER.email);
+
+    // The held pull hears it: the ended band, and the copy stays readable.
+    const band = mine.getByTestId("shared-view-banner");
+    await expect(band).toHaveText("Your membership ended. This copy stays on this computer.", { timeout: 60_000 });
+    await expect(band).toHaveAttribute("data-ended", "true");
+    await revealExplorerPath(mine, "notes/plan.md");
+    await explorerRow(mine, "notes/plan.md").click();
+    await expect(mine.getByText("The lighthouse memo.")).toBeVisible({ timeout: 30_000 });
+    await openChatsView(mine);
+    await expect(mine.getByTestId("chats-channel").filter({ hasText: "Launch team" })).toBeVisible();
+    for (const theme of ["Light", "Dark"] as const) {
+      await setTheme(mine, theme);
+      await mine.screenshot({ path: shot(`ended-band-${theme.toLowerCase()}`) });
+    }
+
+    expect(member.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
+    expect(owner.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
+  } finally {
+    await cleanupDesktopWorkspace(member, memberTemp);
+    await cleanupDesktopWorkspace(owner, ownerTemp);
+    await relay?.stop();
   }
 });

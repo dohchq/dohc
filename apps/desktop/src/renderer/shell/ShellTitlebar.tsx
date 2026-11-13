@@ -17,6 +17,8 @@ export function ShellTitlebar(props: {
   onManageWorkspaces?: () => void | Promise<void>;
   manageWorkspaces: () => void;
   setOpenShare: (share: "blank") => void;
+  // A joined workspace's level, for the workspace menu.
+  level?: string;
   setQuickOpenOpen: (open: boolean) => void;
   syncStatus: SyncStatusResult | null;
   failedSaves: number;
@@ -45,6 +47,7 @@ export function ShellTitlebar(props: {
       workspaces={props.workspaces}
       onSwitchWorkspace={props.onSwitchWorkspace}
       onOpenShare={() => setOpenShare("blank")}
+      level={props.level}
       onManageWorkspaces={props.onManageWorkspaces ? manageWorkspaces : undefined}
       onQuickOpen={() => setQuickOpenOpen(true)}
       version={props.version}

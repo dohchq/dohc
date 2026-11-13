@@ -339,6 +339,21 @@ describe("Titlebar", () => {
     expect(sharedRow!.textContent).toBe("tripShared");
   });
 
+  it("marks a joined workspace with the Users icon and says the level once, at the top of the menu", () => {
+    const joined: Workspace = { ...workspace, workspaceId: "ws-2", rootPath: "/dohc/Community",
+      shareView: { shareId: "s", granterEmail: null, access: "comment", subjectName: "Community", membership: true } };
+    render(
+      <Titlebar workspace={joined} workspaces={[workspace, joined]} level="You can comment" onSwitchWorkspace={() => undefined} />,
+    );
+
+    fireEvent.click(screen.getByTestId("workspace-switcher"));
+    expect(screen.getByTestId("workspace-switcher-level").textContent).toBe("You can comment");
+    expect(screen.getAllByText("You can comment")).toHaveLength(1);
+    const [personalRow, joinedRow] = screen.getAllByTestId("workspace-switcher-option");
+    expect(within(personalRow!).queryByTestId("workspace-joined-mark")).toBeNull();
+    expect(within(joinedRow!).getByTestId("workspace-joined-mark").getAttribute("aria-label")).toBe("Joined workspace");
+  });
+
   it("closes the workspace switcher on a press outside it, not inside it", () => {
     render(
       <div>

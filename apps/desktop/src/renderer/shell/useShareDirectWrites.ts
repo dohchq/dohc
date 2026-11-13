@@ -14,7 +14,8 @@ export type DirectWriteNoticeKind =
 
 // How a shared-view refresh left the view: refreshed (or not a shared view),
 // found the share ended, or failed, was damaged, or was overtaken.
-export type ShareViewRefresh = "current" | "ended" | "changed" | "stale";
+// "held" and "level-changed" come only from a held pull; see SharedViewPulled.
+export type ShareViewRefresh = "current" | "ended" | "changed" | "stale" | "held" | "level-changed";
 
 export interface DirectWriteNotice {
   kind: DirectWriteNoticeKind;

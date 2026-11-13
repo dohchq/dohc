@@ -177,13 +177,13 @@ async function pendingBurst(rootPath?: string) {
         throw error;
       },
       pull: async (pressBurst) => {
-        const outcome = await f.h.invoke(sharedViewAccessOperations.refreshSharedView.channel, {
+        await f.h.invoke(sharedViewAccessOperations.refreshSharedView.channel, {
           workspaceId: "existing",
           trigger: pressBurst ? "press-burst" : "background",
         });
         opened.resolve();
         pulled.resolve();
-        return (outcome as { changedPaths: number }).changedPaths > 0;
+        return "other" as const;
       },
     }),
   );

@@ -4,6 +4,10 @@ import { bridge } from "../bridge";
 import { onAutomationButtonResult } from "../collections/useAutomationButtons";
 
 const unverified = (): CheckSharedViewAccessResult => ({ status: "unverified" });
+// What a pull says about the next one. "held" waited at the relay for news,
+// so the next pull can start at once instead of in 30 s. "level-changed"
+// ended a hold because the account's level changed: access is checked again.
+export type SharedViewPulled = "held" | "level-changed" | "other";
 export type SharedViewAccessScheduler = (() => Promise<CheckSharedViewAccessResult>) & {
   pull(): Promise<CheckSharedViewAccessResult>;
 };
@@ -14,7 +18,7 @@ export function useSharedViewAccess(input: {
   relayFailed?: boolean;
   admission: { readonly superseded: boolean };
   onVerified(result: CheckSharedViewAccessResult): void;
-  pull(pressBurst?: boolean): Promise<boolean>;
+  pull(pressBurst?: boolean): Promise<SharedViewPulled>;
   onPersistentFailure(error: unknown): void;
 }): SharedViewAccessScheduler {
   const latest = useRef(input);
@@ -73,22 +77,27 @@ export function useSharedViewAccess(input: {
       inFlight = (async (): Promise<CheckSharedViewAccessResult> => {
         let result = unverified();
         try {
-          const accessCheck = async () => {
-            if (!access) return;
+          let levelChanged = false;
+          const accessCheck = async (run = access) => {
+            if (!run) return;
             result = await bridge().checkSharedViewAccess({ workspaceId: input.workspaceId });
             if (!isCurrent() || startedEpoch !== epoch) return unverified();
             if (result.status !== "unverified") latest.current.onVerified(result);
           };
           const pullShare = async () => {
             if (!pull) return;
-            lastPullAt = Date.now();
-            await latest.current.pull(pressBurst);
+            const startedAt = lastPullAt = Date.now();
+            const pulled = await latest.current.pull(pressBurst);
             if (!isCurrent() || startedEpoch !== epoch) return unverified();
             failures = 0;
-            nextPullAt = Date.now() + 30_000;
+            // A pull that answers at once still waits a second before the next.
+            nextPullAt = pulled === "other" ? Date.now() + 30_000 : Math.max(Date.now(), startedAt + 1_000);
+            levelChanged = pulled === "level-changed";
           };
           // Access verification must not delay the opening pull.
           const completed = await Promise.allSettled([accessCheck(), pullShare()]);
+          if (!isCurrent() || startedEpoch !== epoch) return unverified();
+          if (levelChanged && !access) completed.push(...await Promise.allSettled([accessCheck(true)]));
           if (!isCurrent() || startedEpoch !== epoch) return unverified();
           if (result.status === "needs-reopen") {
             paused = true;

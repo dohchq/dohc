@@ -5899,7 +5899,9 @@ export type SharedViewPullProgressEvent = z.infer<typeof SharedViewPullProgressE
 
 export const RefreshSharedViewPayload = z.object({
   workspaceId: WORKSPACE_ID,
-  trigger: z.enum(["manual", "background", "press-burst"]).optional(),
+  // "held" is a background pull that waits at the relay for news. An open
+  // membership keeps one running in place of the 30 s poll.
+  trigger: z.enum(["manual", "background", "press-burst", "held"]).optional(),
 });
 export type RefreshSharedViewPayload = z.infer<typeof RefreshSharedViewPayload>;
 
@@ -6631,6 +6633,11 @@ const RefreshSharedViewSuccessResult = z.object({
   // The first refusal's engine message, for the banner's title attribute and
   // the log. Null when nothing was refused.
   refusedDetail: z.string().nullable(),
+  // A held pull that finished: the next one can start now.
+  held: z.literal(true).optional(),
+  // The relay ended the hold because this account's level changed. The
+  // renderer checks access again.
+  levelChanged: z.literal(true).optional(),
 });
 
 const RefreshSharedViewFailureResult = z.object({

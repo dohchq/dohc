@@ -52,6 +52,9 @@ import type { createReceivedShareEngineAccess } from "../workspaces/receivedShar
 import type { setWorkspaceShareView } from "../workspaces/WorkspaceRegistry";
 import type { WorkspaceActivityScope } from "./workspaceActivityBroadcast";
 
+// How long a held pull waits at the relay, under its 30 s limit.
+const SHARE_VIEW_HOLD_MS = 25_000;
+
 export function registerSharedViewsIpcHandlers<
   Sender,
   Event extends { sender: Sender },
@@ -448,7 +451,9 @@ export function registerSharedViewsIpcHandlers<
     event: Event,
     input: RefreshSharedViewPayload,
     pressBurst: boolean,
+    held: boolean,
   ): Promise<RefreshSharedViewResult> {
+    const heldResult = held ? { held: true as const } : {};
     const session = dependencies.currentRendererSession(event.sender);
     const retirement =
       session &&
@@ -537,23 +542,29 @@ export function registerSharedViewsIpcHandlers<
           closed = true;
           controller.abort();
         });
-        const timeout = setTimeout(() => controller.abort(), 10_000);
+        const timeout = setTimeout(
+          () => controller.abort(),
+          held ? SHARE_VIEW_HOLD_MS + 10_000 : 10_000,
+        );
         try {
           const probe = await dependencies.probeShareViewLog({
             relay: { baseUrl: credentials.relayUrl, token: credentials.token },
             shareId: cached.shareId,
             since: cached.nextCursor,
             signal: AbortSignal.any([controller.signal, retirement!]),
+            ...(held ? { hold: SHARE_VIEW_HOLD_MS } : {}),
           });
           controller.signal.throwIfAborted();
           scoped.assertCurrent();
-          if (probe.unchanged) {
+          if (probe.unchanged || probe.levelChanged) {
             if (pressBurst)
               syncSharedViewNotices(session!, retirement!, credentialGeneration, cached);
             return {
               ok: true,
               status: "unchanged",
               probed: true,
+              ...heldResult,
+              ...(probe.levelChanged ? { levelChanged: true } : {}),
               changedPaths: 0,
               excludedPaths: [],
               unjournalablePaths: [],
@@ -784,7 +795,9 @@ export function registerSharedViewsIpcHandlers<
             syncPullNotices();
           }
           notifyPull(changedSummary);
-          return RefreshSharedViewResult.parse(outcome);
+          return RefreshSharedViewResult.parse(
+            outcome.status === "ended" ? outcome : { ...outcome, ...heldResult },
+          );
         }),
     );
   }
@@ -802,9 +815,10 @@ export function registerSharedViewsIpcHandlers<
       openSharedView,
       refreshSharedView: async (input, { event }) => {
         const pressBurst = input.trigger === "press-burst";
-        if (pressBurst) input = { ...input, trigger: "background" };
+        const held = input.trigger === "held";
+        if (pressBurst || held) input = { ...input, trigger: "background" };
         try {
-          return await refreshSharedView(event, input, pressBurst);
+          return await refreshSharedView(event, input, pressBurst, held);
         } catch (error) {
           if (input.trigger !== "background" || !(error instanceof RelayUnauthorizedError))
             throw error;

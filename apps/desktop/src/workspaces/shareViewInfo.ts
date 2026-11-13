@@ -108,8 +108,12 @@ function parseSelector(value: unknown, access: unknown, shareId: string): ShareV
   };
   if (record.kind === "chat") return null;
   if (record.kind === "workspace") {
-    if (readWorkspaceRole(value) === null || "paths" in record || "versionId" in record ||
-      !isShareAccessValue(access)) {
+    if (
+      readWorkspaceRole(value) === null ||
+      "paths" in record ||
+      "versionId" in record ||
+      !isShareAccessValue(access)
+    ) {
       throw new ShareSelectorInvalidError(shareId);
     }
     return { paths: [], versionId: null, access, wholeWorkspace: true };
@@ -243,13 +247,15 @@ export async function probeShareViewLog(input: {
   relay: SyncRelayConnection;
   shareId: string;
   since: number;
+  // How long the relay may wait for news before answering an empty page.
+  hold?: number;
   signal?: AbortSignal;
-}): Promise<{ unchanged: boolean }> {
+}): Promise<{ unchanged: boolean; levelChanged?: true }> {
   // Standalone share.view.pull reads the whole share log without channelWireId,
   // including group shares. Only shared-channel pulls pass a channel filter.
   const response = await shareFetch(
     input.relay,
-    `/sync/shares/${encodeURIComponent(input.shareId)}/log?since=${input.since}`,
+    `/sync/shares/${encodeURIComponent(input.shareId)}/log?since=${input.since}${input.hold ? `&hold=${input.hold}` : ""}`,
     { signal: input.signal },
   );
   const body: unknown = await response.json();
@@ -269,7 +275,10 @@ export async function probeShareViewLog(input: {
   }
   // This cursor is only a probe. The engine commits the next cursor after
   // applying changes and recording refusals through the full refresh path.
-  return { unchanged: body.ops.length === 0 && !body.hasMore };
+  const unchanged = body.ops.length === 0 && !body.hasMore;
+  return "levelChanged" in body && body.levelChanged === true
+    ? { unchanged, levelChanged: true }
+    : { unchanged };
 }
 
 export async function fetchShareAutomationSwitchable(input: {
