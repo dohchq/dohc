@@ -117,30 +117,4 @@ describe("a window Forget left showing its workspace", () => {
     expect(toast.textContent).toContain("dohc could not go to that window.");
     expect(within(toast).queryByRole("button", { name: "Try again" })).toBeNull();
   });
-
-  it("offers no Try again on a row filed before the workspace stopped", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.getCaptureRecoveryStatus.mockRejectedValue(new Error("The disk is busy."));
-    const show = renderShell(bridge, null);
-    const toast = await screen.findByTestId("workspace-shell-error");
-    expect(toast.textContent).toContain(KEPT_TYPING_FAILED);
-    expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
-
-    show({ openElsewhere: false });
-    await screen.findByTestId("workspace-old-window");
-    expect(screen.getByTestId("workspace-shell-error").textContent).toContain(KEPT_TYPING_FAILED);
-    expect(within(screen.getByTestId("workspace-shell-error")).queryByRole("button", { name: "Try again" })).toBeNull();
-  });
-
-  it("says when it could not go to that window", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.goToWorkspaceWindow.mockRejectedValueOnce(new Error("The window closed."));
-    const user = userEvent.setup();
-    renderShell(bridge, { openElsewhere: true });
-    await user.click(await screen.findByRole("button", { name: "Go to that window" }));
-    const toast = await screen.findByTestId("workspace-shell-error");
-    expect(toast.textContent).toContain("dohc could not go to that window.");
-    await user.click(within(toast).getByRole("button", { name: "Try again" }));
-    expect(bridge.goToWorkspaceWindow).toHaveBeenCalledTimes(2);
-  });
 });

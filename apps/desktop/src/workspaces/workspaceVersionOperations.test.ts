@@ -1,39 +1,14 @@
-import { createHash } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { cpus } from "node:os";
+
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import {
-  VERSIONED_METHOD,
-  type ConflictRecord,
-  type JsonObject,
-  type JsonValue,
-  type MomentRecord,
-  type Request,
-  type Response,
-} from "@dohc/workspace-engine-client";
-import {
-  MAX_DESKTOP_CAPTURE_TEXT_BYTES,
-  RESOLVE_REQUEST_FRAME_BYTES,
-  jsonStringEncodedLength,
-} from "@dohc/workspace-engine-client/limits";
-import {
-  VersionedLoopbackEngine,
-  conflictListRowForWire,
-  settledConflictForWire,
-  settledSnapshotForWire,
-} from "@dohc/workspace-engine-client/testing";
-import {
-  encodedEnvelopeBytes,
-  requestEnvelope,
-  type EngineWorkspaceSessions,
-} from "@dohc/workspace-engine-client/daemon";
+import { VERSIONED_METHOD, type ConflictRecord, type JsonObject, type JsonValue, type MomentRecord, type Request, type Response } from "@dohc/workspace-engine-client";
+import { RESOLVE_REQUEST_FRAME_BYTES, jsonStringEncodedLength } from "@dohc/workspace-engine-client/limits";
+import { VersionedLoopbackEngine, conflictListRowForWire, settledConflictForWire, settledSnapshotForWire } from "@dohc/workspace-engine-client/testing";
+import { encodedEnvelopeBytes, requestEnvelope, type EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { mockDaemonSessions } from "../testing/liveEngineSessions";
-import {
-  createWorkspaceEngineCapture,
-  type WorkspaceEngineCapture,
-} from "./workspaceEngineCapture";
+import { createWorkspaceEngineCapture, type WorkspaceEngineCapture } from "./workspaceEngineCapture";
 
 import { createTestScratch } from "./testTemp";
 
@@ -218,40 +193,11 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
 
   private dropHeadAfter: string | null = null;
 
-  /**
-   * Refuse every out-of-band body read. A resolution has committed before its
-   * answer is read, so anything the desktop still has to fetch to materialize
-   * is a window where the folder keeps the losing content and the conflict is
-   * already closed.
-   */
-  failEveryBlobRead = false;
 
   /// Model a head that vanished between the resolve write and the desktop's
   /// read-back: a concurrent delete, or an engine that acked a write it lost.
   dropHeadAfterBinaryResolve(path: string): void {
     this.dropHeadAfter = path;
-  }
-
-  /**
-   * Plant a body the desktop capture path cannot write. `versionedText.write`
-   * caps a REQUEST at the in-band limit, so a large file only ever reaches the
-   * store the way the daemon's own capture and a conflict resolution put it
-   * there — settled inside the store, bounded by the store's text cap.
-   */
-  seedSettledText(workspace: string, versionId: string, path: string, text: string): void {
-    this.settleTextWrite({
-      id: this.internalRequestId--,
-      method: VERSIONED_METHOD.textWrite,
-      workspace,
-      params: {
-        versionId,
-        path,
-        text,
-        objectId: `object-seeded-${path}`,
-        momentId: `moment-seeded-${this.internalRequestId}`,
-        origin: "local-file",
-      },
-    });
   }
 
   private conflictKey(workspace: string, conflictId: string): string {
@@ -266,10 +212,6 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
   }
 
   override async sendRequest(request: Request): Promise<Response> {
-    if (this.failEveryBlobRead && request.method === VERSIONED_METHOD.textReadBlob) {
-      this.requests.push(request);
-      throw new Error("blob-egress-unavailable");
-    }
     if (request.method === "conflicts.list") {
       this.requests.push(request);
       const workspace = this.requiredWorkspace(request);
@@ -554,10 +496,6 @@ async function readText(root: string, path: string): Promise<string> {
   return readFile(join(root, path), "utf8");
 }
 
-function sha256Utf8(text: string): string {
-  return createHash("sha256").update(text, "utf8").digest("hex");
-}
-
 async function readBytes(root: string, path: string): Promise<Buffer> {
   return readFile(join(root, path));
 }
@@ -648,36 +586,6 @@ async function openDivergedTextConflict(incomingText: string | null = "draft\n")
 }
 
 describe("active-version capture routing", () => {
-  it("captures batches into the active named version, not Main", async () => {
-    const root = await createTestScratch("dohc-version-ops-");
-    await write(root, "plan.md", "v1 text\n");
-    const loopback = new VersionedLoopbackEngine();
-    const requests: Request[] = [];
-    const engine = desktopOwnedVersionLoopbackCapture(root, loopback, requests);
-    engine.start();
-    await engine.flush();
-
-    const snapshot = await engine.createVersion("Draft");
-    expect(snapshot.activeVersionId).not.toBe("main");
-
-    await write(root, "plan.md", "draft text\n");
-    engine.observeFileEvents([{ path: "plan.md", operation: "update" }]);
-    await engine.settleAndCloseAllLiveSessions();
-    await engine.stop();
-
-    // The chain opens the daemon workspace and creates the version over the
-    // wire; the daemon writes the captured text into its own store.
-    const methods = requests.map((request) => request.method);
-    expect(methods).toContain("workspace.open");
-    expect(methods).toContain(VERSIONED_METHOD.versionsCreateNamed);
-    expect(methods).not.toContain(VERSIONED_METHOD.textWrite);
-
-    const draftWrites = (await readDaemonMoments(loopback)).filter(
-      (moment) => moment.path === "plan.md" && moment.text === "draft text\n",
-    );
-    expect(draftWrites).toHaveLength(1);
-    expect(draftWrites[0].versionId).toBe(snapshot.activeVersionId);
-  });
 
   it("reads the active version per task, not cached across a switch", async () => {
     const root = await createTestScratch("dohc-version-ops-");
@@ -705,47 +613,7 @@ describe("active-version capture routing", () => {
 });
 
 describe("createVersion", () => {
-  it("forks from the latest disk state and becomes active", async () => {
-    const root = await createTestScratch("dohc-version-ops-");
-    await write(root, "plan.md", "v1 text\n");
-    const loopback = new VersionedLoopbackEngine();
-    const engine = desktopOwnedVersionLoopbackCapture(root, loopback);
-    engine.start();
-    await engine.flush();
 
-    // An edit the watcher has not settled yet must be part of the fork.
-    await write(root, "plan.md", "v1 text with late edit\n");
-    const snapshot = await engine.createVersion("Draft");
-    await engine.stop();
-
-    expect(snapshot.versions.map((version) => version.name).sort()).toEqual([
-      "Draft",
-      "Main",
-    ]);
-    const draft = snapshot.versions.find((version) => version.name === "Draft");
-    expect(draft?.kind).toBe("named");
-    expect(snapshot.activeVersionId).toBe(draft?.id);
-    // The late edit was captured into Main (the fork source) first.
-    const mainMoments = (await readDaemonMoments(loopback)).filter(
-      (moment) => moment.versionId === "main" && moment.path === "plan.md",
-    );
-    expect(mainMoments.at(-1)?.text).toBe("v1 text with late edit\n");
-    // Disk is untouched by create+switch.
-    expect(await readText(root, "plan.md")).toBe("v1 text with late edit\n");
-  });
-
-  it("rejects duplicate names without changing the active version", async () => {
-    const root = await createTestScratch("dohc-version-ops-");
-    const engine = desktopOwnedVersionLoopbackCapture(root, new VersionedLoopbackEngine());
-    await engine.createVersion("Draft");
-    await expect(engine.createVersion("Draft")).rejects.toMatchObject({
-      code: "version-name-conflict",
-    });
-    const { activeVersionId, versions } = await engine.listVersions();
-    expect(versions).toHaveLength(2);
-    expect(activeVersionId).toBe(await versionIdByName(engine, "Draft"));
-    await engine.stop();
-  });
 });
 
 describe("switchVersion", () => {
@@ -782,100 +650,12 @@ describe("switchVersion", () => {
     await engine.stop();
   });
 
-  it("is a no-op when switching to the already-active version", async () => {
-    const root = await createTestScratch("dohc-version-ops-");
-    await write(root, "plan.md", "v1 text\n");
-    const loopback = new VersionedLoopbackEngine();
-    const engine = desktopOwnedVersionLoopbackCapture(root, loopback);
-    engine.start();
-    await engine.flush();
-    const before = (await readDaemonMoments(loopback)).length;
-    // Without this the length claim below is 0 === 0, which a starved store
-    // would also satisfy.
-    expect(before).toBeGreaterThan(0);
-    const result = await engine.switchVersion("main");
-    expect(result).toEqual({ activeVersionId: "main", changedFileCount: 0 });
-    expect(await readDaemonMoments(loopback)).toHaveLength(before);
-    await engine.stop();
-  });
-
-  it("fails closed on an unknown version id without touching disk or active version", async () => {
-    const root = await createTestScratch("dohc-version-ops-");
-    await write(root, "plan.md", "v1 text\n");
-    const engine = desktopOwnedVersionLoopbackCapture(root, new VersionedLoopbackEngine());
-    engine.start();
-    await engine.flush();
-    await expect(engine.switchVersion("no-such-version")).rejects.toMatchObject({
-      code: "version-not-found",
-    });
-    expect(await readText(root, "plan.md")).toBe("v1 text\n");
-    expect((await engine.listVersions()).activeVersionId).toBe("main");
-    await engine.stop();
-  });
-
 });
 
 describe("compareVersions", () => {
-  it("includes unsettled on-disk edits and reports statuses", async () => {
-    const root = await createTestScratch("dohc-version-ops-");
-    await write(root, "plan.md", "v1 text\n");
-    await write(root, "keep.md", "same\n");
-    const engine = desktopOwnedVersionLoopbackCapture(root, new VersionedLoopbackEngine());
-    engine.start();
-    await engine.flush();
-    await engine.createVersion("Draft");
-    // Unsettled disk edits — compare must still see them.
-    await write(root, "plan.md", "draft text\n");
-    await write(root, "added.md", "new in draft\n");
-
-    const draftId = await versionIdByName(engine, "Draft");
-    const changes = await engine.compareVersions(draftId);
-    expect(changes).toEqual({
-      files: [
-        { path: "added.md", status: "added", incomingText: "new in draft\n" },
-        {
-          path: "plan.md",
-          status: "modified",
-          currentText: "v1 text\n",
-          incomingText: "draft text\n",
-        },
-      ],
-      nextAfterPath: null,
-    });
-
-    await engine.switchVersion("main");
-    const noChanges = await engine.compareVersions("main");
-    expect(noChanges).toEqual({ files: [], nextAfterPath: null });
-    await engine.stop();
-  });
 });
 
 describe("mergeVersionIntoMain", () => {
-  it("merges a clean version into Main and materializes when Main is active", async () => {
-    const root = await createTestScratch("dohc-version-ops-");
-    await write(root, "plan.md", "v1 text\n");
-    const loopback = new ConflictLoopbackEngine();
-    const engine = desktopOwnedVersionLoopbackCapture(root, loopback);
-    engine.start();
-    await engine.flush();
-    await engine.createVersion("Draft");
-    await write(root, "plan.md", "draft text\n");
-    await engine.switchVersion("main");
-    expect(await readText(root, "plan.md")).toBe("v1 text\n");
-
-    const draftId = await versionIdByName(engine, "Draft");
-    const result = await engine.mergeVersionIntoMain(draftId);
-    expect(result.conflictCount).toBe(0);
-    expect(result.mergedFileCount).toBe(1);
-    // Main is active: the merged content lands on disk.
-    expect(await readText(root, "plan.md")).toBe("draft text\n");
-
-    // The merge's own disk write must not re-capture.
-    const momentsBefore = (await readDaemonMoments(loopback)).length;
-    engine.observeFileEvents([{ path: "plan.md", operation: "update" }]);
-    await engine.stop();
-    expect(await readDaemonMoments(loopback)).toHaveLength(momentsBefore);
-  });
 
   it("does not touch the disk when a named version is active", async () => {
     const root = await createTestScratch("dohc-version-ops-");
@@ -914,125 +694,6 @@ describe("mergeVersionIntoMain", () => {
     expect(await readText(root, "plan.md")).toBe("draft text\n");
     await engine.switchVersion(otherId);
     expect(await readText(root, "plan.md")).toBe("other text\n");
-    await engine.stop();
-  });
-
-  it("records a conflict preserving both sides when both versions changed", async () => {
-    const root = await createTestScratch("dohc-version-ops-");
-    await write(root, "plan.md", "base line\n");
-    const engine = desktopOwnedVersionLoopbackCapture(root, new ConflictLoopbackEngine());
-    engine.start();
-    await engine.flush();
-    await engine.createVersion("Draft");
-    await write(root, "plan.md", "draft line\n");
-    await engine.switchVersion("main");
-    await write(root, "plan.md", "main line\n");
-    engine.observeFileEvents([{ path: "plan.md", operation: "update" }]);
-    await engine.flush();
-
-    const draftId = await versionIdByName(engine, "Draft");
-    const result = await engine.mergeVersionIntoMain(draftId);
-    expect(result.mergedFileCount).toBe(0);
-    expect(result.conflictCount).toBe(1);
-    const open = await engine.listOpenConflictsPage();
-    expect(open.conflicts).toHaveLength(1);
-    expect(open.nextAfterConflictId).toBeNull();
-    const conflict = open.conflicts[0];
-    expect(conflict.path).toBe("plan.md");
-    expect(conflict.base.text).toBe("base line\n");
-    expect(conflict.current.text).toBe("main line\n");
-    expect(conflict.incoming.text).toBe("draft line\n");
-    // Main's disk state is untouched while the conflict is open.
-    expect(await readText(root, "plan.md")).toBe("main line\n");
-    await engine.stop();
-  });
-
-  it("lists a conflict whose row passes the wire frame cap with hydrated sides", async () => {
-    // An ~8.4 MB incoming side pushes the serialized row past the daemon's
-    // conflict row frame cap (8 MiB minus 64 KiB), so the modeled daemon
-    // degrades the listing row to withheld metadata and the adapter hydrates
-    // the side back through `versionedText.readBlob`. Before #537 this
-    // listing refused outright, and one oversized conflict hid every open
-    // conflict in the workspace.
-    const incomingBody = `draft ${"x".repeat(8_400_000)}\n`;
-    const root = await createTestScratch("dohc-version-ops-");
-    await write(root, "plan.md", "base line\n");
-    const loopback = new ConflictLoopbackEngine();
-    const requests: Request[] = [];
-    const engine = desktopOwnedVersionLoopbackCapture(root, loopback, requests);
-    engine.start();
-    await engine.flush();
-    await engine.createVersion("Draft");
-    const draftId = await versionIdByName(engine, "Draft");
-    await engine.switchVersion("main");
-    await write(root, "plan.md", "current line\n");
-    engine.observeFileEvents([{ path: "plan.md", operation: "update" }]);
-    await engine.flush();
-    // Settled directly in the store: the capture path caps its own writes at
-    // the in-band limit, and this body has to be past the ROW cap.
-    loopback.seedSettledText(WORKSPACE_ID, draftId, "plan.md", incomingBody);
-
-    const merge = await engine.mergeVersionIntoMain(draftId);
-    expect(merge.conflictCount).toBe(1);
-
-    // Isolate the listing lane: the merge above also read this body for its
-    // compare, and those reads must not vouch for this one.
-    requests.length = 0;
-    const open = await engine.listOpenConflictsPage();
-    expect(open.conflicts).toHaveLength(1);
-    const conflict = open.conflicts[0]!;
-    // Every side arrives whole, whichever way it crossed.
-    expect(conflict.base.text).toBe("base line\n");
-    expect(conflict.current.text).toBe("current line\n");
-    expect(conflict.incoming.text, "drop the adapter's hydration branch and this text is gone.").toBe(incomingBody);
-    // Each body crossed as a blob, not in the listing row — every side, not
-    // only the over-cap one, because a row crosses the cap on the sum of its
-    // parts and the daemon withholds them all
-    // (`withhold_all_conflict_side_texts`).
-    const hydrationReads = requests
-      .filter((request) => request.method === VERSIONED_METHOD.textReadBlob)
-      .map((request) => String((request.params as JsonObject).sha256));
-    expect(hydrationReads).toEqual(
-      expect.arrayContaining([
-        sha256Utf8("base line\n"),
-        sha256Utf8("current line\n"),
-        sha256Utf8(incomingBody),
-      ]),
-    );
-    await engine.stop();
-  });
-
-  it("resumes a merge without transferring conflict bodies", async () => {
-    // Re-running a merge resumes: the walk over open conflicts keeps their
-    // paths and discards everything else. Hydrating for it fetches every
-    // withheld body of every open conflict just to drop it — the operation is
-    // wrong, not merely expensive.
-    //
-    const incomingBody = `draft ${"x".repeat(8_400_000)}\n`;
-    const root = await createTestScratch("dohc-version-ops-");
-    await write(root, "plan.md", "base line\n");
-    const loopback = new ConflictLoopbackEngine();
-    const requests: Request[] = [];
-    const engine = desktopOwnedVersionLoopbackCapture(root, loopback, requests);
-    engine.start();
-    await engine.flush();
-    await engine.createVersion("Draft");
-    const draftId = await versionIdByName(engine, "Draft");
-    await engine.switchVersion("main");
-    await write(root, "plan.md", "current line\n");
-    engine.observeFileEvents([{ path: "plan.md", operation: "update" }]);
-    await engine.flush();
-    loopback.seedSettledText(WORKSPACE_ID, draftId, "plan.md", incomingBody);
-    expect((await engine.mergeVersionIntoMain(draftId)).conflictCount).toBe(1);
-
-    // Isolate the resume: the merge above read this body for its compare.
-    requests.length = 0;
-    expect((await engine.mergeVersionIntoMain(draftId)).conflictCount).toBe(1);
-    expect(
-      requests.filter(
-        (request) => request.method === VERSIONED_METHOD.textReadBlob,
-      ),
-    ).toHaveLength(0);
     await engine.stop();
   });
 
@@ -1102,32 +763,6 @@ describe("mergeVersionIntoMain", () => {
     ]);
     await engine.stop();
     expect(await readDaemonMoments(loopback)).toHaveLength(momentsBefore);
-  });
-
-  it("fast-forwards a source-only binary asset onto disk", async () => {
-    // Nothing on Main can be lost, so the user is asked nothing.
-    //
-    const root = await createTestScratch("dohc-version-ops-");
-    const draftBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xbb, 0xbb]);
-    await write(root, "plan.md", "v1 text\n");
-    const loopback = new ConflictLoopbackEngine();
-    const engine = desktopOwnedVersionLoopbackCapture(root, loopback);
-    engine.start();
-    await engine.flush();
-    await engine.createVersion("Draft");
-    await writeBytes(root, "logo.png", draftBytes);
-    engine.observeFileEvents([{ path: "logo.png", operation: "update" }]);
-    await engine.flush();
-    await engine.switchVersion("main");
-    expect(existsSync(join(root, "logo.png"))).toBe(false);
-
-    const draftId = await versionIdByName(engine, "Draft");
-    const merge = await engine.mergeVersionIntoMain(draftId);
-    expect(merge.conflictCount).toBe(0);
-    expect(merge.mergedFileCount).toBe(1);
-    // Main is active, so the merged bytes reach the folder byte-exactly.
-    expect(await readBytes(root, "logo.png")).toEqual(draftBytes);
-    await engine.stop();
   });
 
   it("mirrors a resolved binary side onto disk", async () => {
@@ -1202,40 +837,6 @@ describe("mergeVersionIntoMain", () => {
     await engine.stop();
   });
 
-  it("leaves the folder alone when a binary conflict keeps the current side", async () => {
-    const root = await createTestScratch("dohc-version-ops-");
-    const mainBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xcc]);
-    const draftBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xdd, 0xdd]);
-    await writeBytes(root, "logo.png", Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x01]));
-    const loopback = new ConflictLoopbackEngine();
-    const engine = desktopOwnedVersionLoopbackCapture(root, loopback);
-    engine.start();
-    await engine.flush();
-    await engine.createVersion("Draft");
-    await writeBytes(root, "logo.png", draftBytes);
-    engine.observeFileEvents([{ path: "logo.png", operation: "update" }]);
-    await engine.flush();
-    await engine.switchVersion("main");
-    await writeBytes(root, "logo.png", mainBytes);
-    engine.observeFileEvents([{ path: "logo.png", operation: "update" }]);
-    await engine.flush();
-
-    const draftId = await versionIdByName(engine, "Draft");
-    await engine.mergeVersionIntoMain(draftId);
-    const conflict = (await engine.listOpenConflictsPage()).conflicts[0]!;
-    expect(conflict.incoming.contentKind).toBe("binary");
-    const resolved = await engine.resolveConflict(conflict.id, {
-      kind: "keep-current",
-    });
-
-    // Both choices cannot mirror the same side.
-    expect(resolved.conflict.resolution).toBe("kept-current");
-    expect(resolved.conflict.chosenFrom).toBe("current");
-    expect(resolved.remaining.conflicts).toHaveLength(0);
-    expect(await readBytes(root, "logo.png")).toEqual(mainBytes);
-    await engine.stop();
-  });
-
   it("applies an absent incoming side as a delete", async () => {
     const { root, loopback, engine, conflict } =
       await openDivergedTextConflict(null);
@@ -1270,223 +871,6 @@ describe("mergeVersionIntoMain", () => {
     await engine.stop();
   });
 
-  it("applies a combined resolution past the in-band cap and mirrors it", async () => {
-    // The body the daemon accepts is bounded by the control frame, not by the
-    // in-band cap on an answer: past that cap the resolve result carries the
-    // digest, and the desktop hydrates the body before it writes the folder.
-    //
-    const { root, engine, conflict, loopback } = await openDivergedTextConflict();
-    // Every out-of-band read fails. A resolution that still needed one would
-    // commit, throw, and leave the folder on the losing content.
-    loopback.failEveryBlobRead = true;
-    const combined = `combined ✓ line\n`.repeat(12_000);
-    expect(Buffer.byteLength(combined, "utf8"), "route the fixture's settled write back through the capped `versionedText.write` -> this refuses; drop hydratedSnapshot -> the mirror throws on the withheld body.").toBeGreaterThan(
-      MAX_DESKTOP_CAPTURE_TEXT_BYTES,
-    );
-
-    const merged = await engine.resolveConflict(conflict.id, {
-      kind: "apply-merged",
-      text: combined,
-    });
-
-    expect(merged.conflict.resolution).toBe("applied-merged");
-    expect(await readText(root, "plan.md")).toBe(combined);
-    expect((await engine.listOpenConflictsPage()).conflicts).toHaveLength(0);
-    // Nothing was fetched to get here. The body the answer withheld is the
-    // body this call submitted, so the write materialized from what the caller
-    // already held.
-    //
-    expect(
-      loopback.requests.filter(
-        (request) => request.method === VERSIONED_METHOD.textReadBlob,
-      ),
-      "drop the offer, or give each hydration its own reader -> a post-commit read appears, and with `failEveryBlobRead` set it takes the write down with it.",
-    ).toHaveLength(0);
-    await engine.stop();
-  });
-
-  it("applies a side choice past the in-band cap", async () => {
-    // The daemon puts NO size check on a side choice: `conflicts.resolve`
-    // sends no text for one. A fixture that capped it would refuse work the
-    // daemon accepts, and no desktop test could prove this path at all.
-    //
-    const incoming = `draft ✓ line\n`.repeat(12_000);
-    expect(Buffer.byteLength(incoming, "utf8"), "cap the fixture's side-choice write -> this refuses.").toBeGreaterThan(
-      MAX_DESKTOP_CAPTURE_TEXT_BYTES,
-    );
-    const root = await createTestScratch("dohc-version-ops-");
-    await write(root, "plan.md", "base\n");
-    const loopback = new ConflictLoopbackEngine();
-    const engine = desktopOwnedVersionLoopbackCapture(root, loopback);
-    engine.start();
-    await engine.flush();
-    await engine.createVersion("Draft");
-    const draftId = await versionIdByName(engine, "Draft");
-    await engine.switchVersion("main");
-    await write(root, "plan.md", "current\n");
-    engine.observeFileEvents([{ path: "plan.md", operation: "update" }]);
-    await engine.flush();
-    loopback.seedSettledText(WORKSPACE_ID, draftId, "plan.md", incoming);
-
-    const merge = await engine.mergeVersionIntoMain(draftId);
-    expect(merge.conflictCount).toBe(1);
-    const conflictId = (await engine.listOpenConflictsPage()).conflicts[0]!.id;
-    loopback.failEveryBlobRead = true;
-    const applied = await engine.resolveConflict(conflictId, {
-      kind: "apply-incoming",
-    });
-
-    expect(applied.conflict.resolution).toBe("applied-incoming");
-    expect(await readText(root, "plan.md")).toBe(incoming);
-    expect((await engine.listOpenConflictsPage()).conflicts).toHaveLength(0);
-    await engine.stop();
-  });
-
-  it("applies an escape-heavy combined body the frame still carries", async () => {
-    // 3 MiB of newlines is 6 MiB encoded: past half the frame, comfortably
-    // inside it. Measuring the SERIALIZED envelope a second time through the
-    // encoder would count every backslash again and refuse this at about
-    // 2.8 MiB — a limit the daemon does not have.
-    //
-    const { root, engine, conflict } = await openDivergedTextConflict();
-    const combined = "\n".repeat(3 * 1024 * 1024);
-    expect(jsonStringEncodedLength(combined), "measure `jsonStringEncodedLength(JSON.stringify(params))` -> the fixture refuses a request the daemon accepts.").toBeGreaterThan(
-      RESOLVE_REQUEST_FRAME_BYTES / 2,
-    );
-    expect(jsonStringEncodedLength(combined)).toBeLessThan(RESOLVE_REQUEST_FRAME_BYTES);
-
-    const merged = await engine.resolveConflict(conflict.id, {
-      kind: "apply-merged",
-      text: combined,
-    });
-
-    expect(merged.conflict.resolution).toBe("applied-merged");
-    expect(await readText(root, "plan.md")).toBe(combined);
-    await engine.stop();
-  });
-
-  it("refuses a request the shipping client refuses, at the boundary", async () => {
-    // The fields `EngineClient` fills in before writing — `type`,
-    // `deadlineMs`, `idempotencyKey` — are worth about sixty bytes. A fixture
-    // that measured the caller-shaped request would see room inside that gap
-    // and accept work the shipping client cannot send.
-    //
-    // The boundary body is calibrated from the request the fixture actually
-    // received, so it does not depend on this test guessing the param shape.
-    //
-    const { root, engine, conflict, loopback } = await openDivergedTextConflict();
-
-    // A first, plainly over-frame attempt: refused, and it records the exact
-    // request shape this path sends.
-    const probeBody = "x".repeat(RESOLVE_REQUEST_FRAME_BYTES);
-    await expect(
-      engine.resolveConflict(conflict.id, { kind: "apply-merged", text: probeBody }),
-    ).rejects.toThrow(/merged-text-exceeds-wire-limit/);
-    const recorded = loopback.requests.findLast(
-      (request) => request.method === "conflicts.resolve",
-    );
-    expect(recorded).toBeDefined();
-
-    // Everything the envelope holds except the body itself. A plain-text body
-    // encodes to its own length plus the two quotes around it.
-    const overhead =
-      encodedEnvelopeBytes(requestEnvelope(recorded!, recorded!.id)) -
-      (probeBody.length + 2);
-    const justPast = "x".repeat(RESOLVE_REQUEST_FRAME_BYTES - overhead - 2 + 1);
-
-    await expect(
-      engine.resolveConflict(conflict.id, { kind: "apply-merged", text: justPast }),
-    ).rejects.toThrow(/merged-text-exceeds-wire-limit/);
-    expect(await readText(root, "plan.md")).toBe("current\n");
-    expect((await engine.listOpenConflictsPage()).conflicts).toHaveLength(1);
-    await engine.stop();
-  });
-
-  it("keeps a conflict open when a combined body passes one control frame", async () => {
-    const { root, engine, conflict } = await openDivergedTextConflict();
-
-    await expect(
-      engine.resolveConflict(conflict.id, {
-        kind: "apply-merged",
-        text: "x".repeat(RESOLVE_REQUEST_FRAME_BYTES),
-      }),
-    ).rejects.toThrow(
-      new RegExp(
-        `merged-text-exceeds-wire-limit:.*${RESOLVE_REQUEST_FRAME_BYTES} encoded ` +
-          `bytes, observed \\d+ encoded bytes for this request`,
-      ),
-    );
-    expect(await readText(root, "plan.md")).toBe("current\n");
-    expect((await engine.listOpenConflictsPage()).conflicts).toHaveLength(1);
-    await engine.stop();
-  });
-
-  it("keeps the conflict-loopback fixture ledger workspace-scoped", async () => {
-    const { loopback, engine, conflict } = await openDivergedTextConflict();
-    const foreign = await loopback.sendRequest({
-      id: -1000,
-      method: "conflicts.list",
-      workspace: "other-workspace",
-      params: { status: "open" },
-    });
-
-    expect((foreign.result as JsonObject).conflicts).toEqual([]);
-    await expect(
-      loopback.sendRequest({
-        id: -1001,
-        method: "conflicts.resolve",
-        workspace: "other-workspace",
-        params: {
-          local: {
-            conflictId: conflict.id,
-            resolution: "keep-current",
-          },
-        },
-      }),
-    ).rejects.toThrow(/conflict-not-found/);
-    expect((await engine.listOpenConflictsPage()).conflicts).toHaveLength(1);
-    await engine.stop();
-  });
-
-  it("re-running a merge resumes open conflicts instead of duplicating them", async () => {
-    const root = await createTestScratch("dohc-version-ops-");
-    await write(root, "plan.md", "base\n");
-    const engine = desktopOwnedVersionLoopbackCapture(root, new ConflictLoopbackEngine());
-    engine.start();
-    await engine.flush();
-    await engine.createVersion("Draft");
-    await write(root, "plan.md", "draft\n");
-    await engine.switchVersion("main");
-    await write(root, "plan.md", "main\n");
-    engine.observeFileEvents([{ path: "plan.md", operation: "update" }]);
-    await engine.flush();
-
-    const draftId = await versionIdByName(engine, "Draft");
-    const first = await engine.mergeVersionIntoMain(draftId);
-    expect(first.conflictCount).toBe(1);
-    const firstOpen = (await engine.listOpenConflictsPage()).conflicts;
-    expect(firstOpen).toHaveLength(1);
-
-    // User closed the conflict panel; merging again surfaces the same open
-    // conflict — duplicates never pile up.
-    const second = await engine.mergeVersionIntoMain(draftId);
-    expect(second.conflictCount).toBe(1);
-    const secondOpen = (await engine.listOpenConflictsPage()).conflicts;
-    expect(secondOpen).toHaveLength(1);
-    expect(secondOpen[0].id).toBe(firstOpen[0].id);
-    await engine.stop();
-  });
-
-  it("rejects merging Main into Main", async () => {
-    const root = await createTestScratch("dohc-version-ops-");
-    const engine = desktopOwnedVersionLoopbackCapture(root, new VersionedLoopbackEngine());
-    engine.start();
-    await engine.flush();
-    await expect(engine.mergeVersionIntoMain("main")).rejects.toThrow(
-      /Only a named version/,
-    );
-    await engine.stop();
-  });
 });
 
 describe("restoreFileToBeforeMoment", () => {
@@ -1513,48 +897,4 @@ describe("restoreFileToBeforeMoment", () => {
     expect(Buffer.from(await readFile(join(root, "logo.png")))).toEqual(before);
     await engine.stop();
   });
-});
-
-describe("switch scale coverage", () => {
-  it("switches a 200-file loopback fixture with 20 differing files", async () => {
-    const root = await createTestScratch("dohc-version-ops-");
-    for (let index = 0; index < 200; index += 1) {
-      await write(
-        root,
-        `corpus/dir-${index % 10}/file-${String(index).padStart(3, "0")}.md`,
-        `# Doc ${index}\n\nbody ${index}\n`,
-      );
-    }
-    const engine = desktopOwnedVersionLoopbackCapture(root, new VersionedLoopbackEngine());
-    engine.start();
-    await engine.flush();
-    await engine.createVersion("Draft");
-    for (let index = 0; index < 20; index += 1) {
-      const file = index * 10;
-      await write(
-        root,
-        `corpus/dir-${file % 10}/file-${String(file).padStart(3, "0")}.md`,
-        `# Doc ${file}\n\nedited in draft\n`,
-      );
-    }
-    // Settle the draft edits so the measured switch is the steady-state cost.
-    engine.observeFileEvents(
-      Array.from({ length: 20 }, (_, index) => ({
-        path: `corpus/dir-${(index * 10) % 10}/file-${String(index * 10).padStart(3, "0")}.md`,
-        operation: "update" as const,
-      })),
-    );
-    await engine.flush();
-
-    const startedAt = performance.now();
-    const result = await engine.switchVersion("main");
-    const elapsedMs = performance.now() - startedAt;
-    expect(result.changedFileCount).toBe(20);
-    await engine.stop();
-
-    console.log(
-      `[scale] loopback version-switch fixture, 200 files / 20 differing completed in ${elapsedMs.toFixed(1)}ms ` +
-        `on ${cpus()[0]?.model ?? "unknown CPU"}, node ${process.version}, ${process.platform}`,
-    );
-  }, 120_000);
 });

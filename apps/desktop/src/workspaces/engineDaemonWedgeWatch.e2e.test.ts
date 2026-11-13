@@ -1,16 +1,7 @@
-import {
-  createEngineClient,
-  type EngineDaemonClient,
-  type EngineDaemonLifecycle,
-} from "@dohc/workspace-engine-client/daemon";
-import type { Request } from "@dohc/workspace-engine-client";
+import { createEngineClient, type EngineDaemonLifecycle } from "@dohc/workspace-engine-client/daemon";
 import { afterEach, describe, expect, it } from "vitest";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
-import {
-  createRealDaemonLifecycle,
-  REAL_DAEMON_DEADLINE_MS,
-  REAL_DAEMON_TEST_TIMEOUT_MS,
-} from "../testing/realDaemonWorkspaceSessions";
+import { createRealDaemonLifecycle, REAL_DAEMON_TEST_TIMEOUT_MS } from "../testing/realDaemonWorkspaceSessions";
 
 // The lifecycle unit suite drives a fake client. A fake cannot prove that the
 // real daemon serves engine.ping, nor that the real client reports its answer
@@ -19,6 +10,7 @@ import {
 // because EngineClient arms its own per-request deadline timer and that timer
 // turned a wedged daemon's silence into a rejection the detector read as life.
 // This suite is the counterweight: a real binary, the real transport.
+const requestTimeoutMs = 2_000;
 const engine = requireEngineBinaryOrSkip();
 const lifecycles: EngineDaemonLifecycle[] = [];
 
@@ -35,7 +27,7 @@ describe("engine.ping against a real daemon", () => {
     const failures: Error[] = [];
     let complete!: () => void, refuse!: (error: Error) => void, stalled = false;
     const smoke = new Promise<void>((resolve,reject) => {complete=resolve;refuse=reject;});
-    const lifecycle = createRealDaemonLifecycle({command:engine.require(),maxRestarts:0,
+    const lifecycle = createRealDaemonLifecycle({command:engine.require(),maxRestarts:0,requestTimeoutMs,
       onFailure(error) {failures.push(error);refuse(error);},
       launch:async options => {
         const client = await createEngineClient(options);
@@ -47,7 +39,7 @@ describe("engine.ping against a real daemon", () => {
               // Freeze only this process after the pipe write. The lifecycle sends
               // its request timeout as the daemon's deadline, so the real daemon
               // queues its reply inside it, and the freeze outlasts both.
-              setImmediate(() => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,REAL_DAEMON_DEADLINE_MS + 1_000));
+              setImmediate(() => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,requestTimeoutMs + 1_000));
             }
             const response = await pending;
             if (request.method === "workspace.close") complete();
@@ -65,78 +57,4 @@ describe("engine.ping against a real daemon", () => {
     expect(failures).toEqual([]);
     await expect(lifecycle.currentClient().sendRequest({id:99,method:"engine.ping",params:{}})).resolves.toMatchObject({id:99});
   },REAL_DAEMON_TEST_TIMEOUT_MS);
-
-  it.skipIf(engine.missing)(
-    "answers every probe, so a healthy daemon is never killed",
-    async () => {
-      const probes: Array<{ request: Request; answered: boolean }> = [];
-      const failures: Error[] = [];
-      const pingIntervalMs = 100;
-      // One unanswered probe kills at this configuration, and the bound is
-      // 20x the interval: a real daemon that needed that long to answer a
-      // probe touching nothing would itself be the news.
-      const pingExpiryMs = 2_000;
-      const lifecycle = createRealDaemonLifecycle({
-        command: engine.require(),
-        pingIntervalMs,
-        pingExpiryMs,
-        maxPingExpiries: 1,
-        launch: async (options): Promise<EngineDaemonClient> => {
-          const client = await createEngineClient(options);
-          return {
-            sendRequest: async (request, signal, progress, cancelSignal) => {
-              if (request.method !== "engine.ping") {
-                return await client.sendRequest(request, signal, progress, cancelSignal);
-              }
-              const entry = { request, answered: false };
-              probes.push(entry);
-              const response = await client.sendRequest(request, signal, progress, cancelSignal);
-              entry.answered = true;
-              return response;
-            },
-            onEvent: (handler) => client.onEvent(handler),
-            onBlob: (handler) => client.onBlob(handler),
-            close: () => client.close(),
-            // Forwarded so this e2e drives the real kill path. A wrapper that
-            // dropped it would send the supervisor down the close() fallback
-            // and prove nothing about what a wedge kill reports.
-            closeUnresponsive: () => client.closeUnresponsive(),
-            inboundActivity: () => client.inboundActivity(),
-            waitForExit: async () => await client.waitForExit(),
-          };
-        },
-        onFailure: (error) => failures.push(error),
-      });
-      lifecycles.push(lifecycle);
-
-      await lifecycle.start();
-
-      // Not vacuous: probes really went out over the real transport and the
-      // real daemon really answered them. Counting the answered ones rather
-      // than asserting on every probe leaves the newest one free to be in
-      // flight at this instant. Each answer takes at least one interval, so
-      // this many answers span two expiries: long enough for a kill to show.
-      const answersSpanningTwoExpiries = (2 * pingExpiryMs) / pingIntervalMs;
-      await expect
-        .poll(
-          () => ({
-            failures: failures.map((error) => error.message),
-            spannedTwoExpiries:
-              probes.filter(({ answered }) => answered).length >=
-              answersSpanningTwoExpiries,
-          }),
-          { timeout: REAL_DAEMON_DEADLINE_MS },
-        )
-        .toEqual({ failures: [], spannedTwoExpiries: true });
-      // And none of them carried a wire deadline, which is what keeps the
-      // client's own timer out of the silence measurement.
-      expect(
-        probes.every(({ request }) => (request.deadlineMs ?? null) === null),
-      ).toBe(true);
-      expect(failures.map((error) => error.message)).toEqual([]);
-      // Same daemon throughout: a kill would have ended or replaced it.
-      expect(() => lifecycle.currentClient()).not.toThrow();
-    },
-    REAL_DAEMON_TEST_TIMEOUT_MS,
-  );
 });

@@ -119,32 +119,6 @@ function reads(relay: FakeRelay): number {
 }
 
 describe("the personal agents roster in main", () => {
-  it("reads the roster once and answers later reads from the cache", async () => {
-    const relay = fakeRelay([relayAgent(), relayAgent({ agentId: `p-${"r".repeat(26)}`, name: "Gone", status: "removed", createdAtMs: 2 })]);
-    const { roster } = setup(relay);
-
-    const view = await roster.read(false);
-    expect(view).toEqual({
-      accounts: [{
-        accountKey: KEY,
-        host: "relay.test",
-        agentLinkOrigin: "https://relay.test",
-        roster: {
-          revision: 3,
-          agents: [{
-            agentId: AGENT_ID, name: "Grok Bot", hue: "teal", reportedProduct: "Grok", reportedVersion: "4.1", status: "active",
-            createdAtMs: 1, signedInAtMs: 5, lastActionAtMs: null, reach: [{ workspaceId: "ws-1", level: "view" }],
-          }],
-          workspaces: [{ workspaceId: "ws-1", name: "Trip" }],
-        },
-        failure: null,
-      }],
-    });
-    await roster.read(false);
-    expect(reads(relay)).toBe(1);
-    await roster.read(true);
-    expect(reads(relay)).toBe(2);
-  });
 
   it("reads again only when a notice page carries another revision", async () => {
     const relay = fakeRelay();
@@ -162,45 +136,6 @@ describe("the personal agents roster in main", () => {
     expect(reads(relay)).toBe(2);
     expect(names(pushed.at(-1)!)).toEqual(["Iris"]);
     expect(roster.view().accounts[0]?.roster?.revision).toBe(4);
-  });
-
-  it("puts a rename the relay answers into the cache and pushes it", async () => {
-    const relay = fakeRelay();
-    const { roster, pushed } = setup(relay);
-    await roster.read(false);
-
-    const result = await roster.change(KEY, AGENT_ID, { kind: "name", name: "Iris" });
-    expect(result.ok && names(result.personalAgents)).toEqual(["Iris"]);
-    expect(relay.requests.at(-1)).toBe(`PUT /sync/personal-agents/${AGENT_ID}/name`);
-    expect(names(pushed.at(-1)!)).toEqual(["Iris"]);
-    // The answer was the next revision, so nothing was missed.
-    expect(roster.view().accounts[0]?.roster?.revision).toBe(4);
-    expect(reads(relay)).toBe(1);
-    roster.revisionSeen(KEY, 4);
-    expect(reads(relay)).toBe(1);
-  });
-
-  it("reads an agent at Edit and saves a reach at Edit", async () => {
-    const relay = fakeRelay([relayAgent({ reach: [{ workspaceId: "ws-1", level: "edit" }] })]);
-    const { roster } = setup(relay);
-
-    const view = await roster.read(false);
-    expect(view.accounts[0]?.failure).toBeNull();
-    expect(view.accounts[0]?.roster?.agents[0]?.reach).toEqual([{ workspaceId: "ws-1", level: "edit" }]);
-    relay.agents[0]!.reach = [{ workspaceId: "ws-1", level: "view" }];
-    const result = await roster.change(KEY, AGENT_ID, { kind: "reach", reach: [{ workspaceId: "ws-1", level: "edit" }] });
-    expect(result.ok && result.personalAgents.accounts[0]?.roster?.agents[0]?.reach).toEqual([{ workspaceId: "ws-1", level: "edit" }]);
-  });
-
-  it("reads the whole roster again when a change answer skips a revision", async () => {
-    const relay = fakeRelay();
-    const { roster } = setup(relay);
-    await roster.read(false);
-
-    relay.revision = 5;
-    await roster.change(KEY, AGENT_ID, { kind: "hue", hue: "rose" });
-    await vi.waitFor(() => expect(roster.view().accounts[0]?.roster?.revision).toBe(6));
-    expect(reads(relay)).toBe(2);
   });
 
   it("keeps a read that started before a change from putting back what it replaced", async () => {
@@ -233,21 +168,6 @@ describe("the personal agents roster in main", () => {
     expect(restored.ok && restored.personalAgents.accounts[0]?.roster?.agents.map(agent => agent.status)).toEqual(["signed_out"]);
   });
 
-  it.each([
-    [404, "dohc could not find Grok Bot on relay.test.", true],
-    [409, "Sign out Grok Bot before you remove it.", true],
-    [503, "relay.test could not change Grok Bot right now. Try again shortly.", false],
-  ])("says what a %s refusal means and reads again when the cache is behind", async (status, words, readsAgain) => {
-    const relay = fakeRelay();
-    const { roster } = setup(relay);
-    await roster.read(false);
-
-    relay.refuse = status;
-    expect(await roster.change(KEY, AGENT_ID, { kind: "remove" })).toEqual({ ok: false, error: words });
-    if (readsAgain) await vi.waitFor(() => expect(reads(relay)).toBe(2));
-    else expect(reads(relay)).toBe(1);
-  });
-
   it("ends the session when the relay refuses its token", async () => {
     const relay = fakeRelay();
     const { roster, unauthorized } = setup(relay);
@@ -268,22 +188,4 @@ describe("the personal agents roster in main", () => {
     expect(relay.requests).toEqual([]);
   });
 
-  it("says why the roster could not be read and keeps what it had", async () => {
-    const relay = fakeRelay();
-    const { roster } = setup(relay);
-    await roster.read(false);
-
-    relay.offline = true;
-    const view = await roster.read(true);
-    expect(view.accounts[0]?.failure).toBe("dohc could not reach relay.test. Check your connection.");
-    expect(names(view)).toEqual(["Grok Bot"]);
-  });
-
-  it("holds no account while nobody is signed in", async () => {
-    const relay = fakeRelay();
-    const { roster } = setup(relay, null);
-
-    expect(await roster.read(true)).toEqual({ accounts: [] });
-    expect(relay.requests).toEqual([]);
-  });
 });

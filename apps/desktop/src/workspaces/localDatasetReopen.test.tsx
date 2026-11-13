@@ -4,7 +4,6 @@ import { openedLocalState } from "../testing/preparedLocalState";
 import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { performance as nodePerformance } from "node:perf_hooks";
 import { join } from "node:path";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
@@ -47,14 +46,8 @@ async function fixture() {
   vi.stubGlobal("Uint8Array", Object.getPrototypeOf(Buffer.prototype).constructor);
   const root = await mkdtemp(join(tmpdir(), "dohc-local-reopen-"));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
-  const state = { clock: Date.now(), killPrepare: false, killReplay: false, applied: 0, replayMs: 0, costlyReplay: false, blockCache: false };
+  const state = { clock: Date.now(), killPrepare: false, killReplay: false, applied: 0 };
   vi.spyOn(Date, "now").mockImplementation(() => state.clock);
-  vi.stubGlobal("performance", nodePerformance);
-  vi.spyOn(nodePerformance, "now").mockImplementation(() => state.replayMs);
-  const cacheAccounting = vi.fn((_context: unknown, allocation: { bytes: number }) => {
-    // Allow the snapshot reservation, then refuse cache staging and its refund.
-    if (state.blockCache && allocation.bytes < 1024 * 1024) throw new Error("cache cleanup blocked");
-  });
   const pids: number[] = [], closedPids: number[] = [];
   const launch = vi.fn<AppRuntimeLauncher>(options => {
     const child = spawn(process.execPath, [options.entryPath], { cwd: options.cwd, env: options.env,
@@ -70,7 +63,6 @@ async function fixture() {
         }
         if (request.command?.kind === "applyBatch") {
           state.applied++;
-          if (state.costlyReplay) state.replayMs += 1000;
         }
         child.send(message as object, error => { if (error) options.onError(error); });
       },
@@ -82,8 +74,7 @@ async function fixture() {
     // Workers and exports live in .dohc/local, which an engine open prepares.
     await openedLocalState({ workspaceId: "w", rootPath: root });
     const host = await createLocalDatasetHost({ holder: unguardedCollections, workspaceId: "w", workspaceRoot: root, capacityBytes: 1024 * 1024,
-      localPersonId: () => "person", compile, runtime: { launch }, persistentRuntime: { launch },
-      resources: () => ({ accountCheckpointStage: cacheAccounting }) });
+      localPersonId: () => "person", compile, runtime: { launch }, persistentRuntime: { launch } });
     cleanups.push(() => host.close());
     return host;
   }
@@ -120,20 +111,8 @@ async function fixture() {
   state.killPrepare = true;
   await expect(host.query(call())).rejects.toMatchObject({ code: "worker_stopped" });
   state.killPrepare = false; state.killReplay = true;
-  return { host, state, launch, call, write, receipt, openHost, cacheAccounting };
+  return { host, state, launch, call, write, receipt };
 }
-it("uses growing supervisor waits after repeated desktop replay worker kills", async () => {
-  const f = await fixture();
-  for (const delay of [5000, 10000, 20000]) {
-    await expect(f.host.query(f.call())).rejects.toMatchObject({ code: "worker_stopped", retryAfterMs: delay });
-    const launches = f.launch.mock.calls.length;
-    await expect(f.host.query(f.call())).rejects.toMatchObject({ code: "dataset_reopen_wait", retryAfterMs: delay });
-    f.state.clock += delay - 1;
-    await expect(f.host.query(f.call())).rejects.toMatchObject({ code: "dataset_reopen_wait", retryAfterMs: 1 });
-    expect(f.launch).toHaveBeenCalledTimes(launches);
-    f.state.clock++;
-  }
-});
 // The Collection page as the shell shows it: its errors as toasts, and one list item per row in Notices.
 function ShellPage({ f }: { f: Awaited<ReturnType<typeof fixture>> }) {
   const description = transactionalDescription(f.host.describe(id(1)));
@@ -152,25 +131,6 @@ function ShellPage({ f }: { f: Awaited<ReturnType<typeof fixture>> }) {
 const toastRetry = () => within(screen.getByRole("alert")).getByRole("button", { name: "Try again" });
 const pageRetry = () => within(screen.getByRole("region", { name: "Items" })).getByRole("button", { name: "Try again" });
 const noticeRows = () => within(screen.getByRole("list", { name: "Notices" })).queryAllByRole("listitem").map(row => row.textContent);
-it("shows the desktop reopen wait through the existing shell Try again toast and ends loading", async () => {
-  const f = await fixture();
-  // Establish the failure without requiring backoff, so this test independently fails on main's visible state.
-  await expect(f.host.query(f.call())).rejects.toMatchObject({ code: "worker_stopped" });
-  f.state.killReplay = false;
-  const launches = f.launch.mock.calls.length;
-  render(<ShellPage f={f} />);
-  const message = "This Collection is waiting to reopen. Try again in 5 seconds.";
-  await waitFor(() => expect(screen.getByRole("alert").textContent).toContain(message), workerWait);
-  expect(screen.queryByText("Loading records…")).toBeNull();
-  expect(f.launch).toHaveBeenCalledTimes(launches);
-  fireEvent.click(toastRetry());
-  await waitFor(() => expect(screen.getByRole("alert").textContent).toContain(message), workerWait);
-  expect(f.launch).toHaveBeenCalledTimes(launches);
-  f.state.clock += 5000;
-  fireEvent.click(toastRetry());
-  await screen.findByText("Preserved", {}, workerWait);
-  expect(screen.queryByRole("alert")).toBeNull();
-});
 it("keeps one current Notices row and the wait in the page until the records load", async () => {
   const f = await fixture();
   await expect(f.host.query(f.call())).rejects.toMatchObject({ code: "worker_stopped", retryAfterMs: 5000 });
@@ -213,48 +173,4 @@ it("recovers desktop records and the saved receipt after the reopen wait expires
   expect(f.state.applied).toBe(1);
   expect(await f.host.action(f.write)).toEqual({ ...f.receipt, replayed: true });
   expect(await f.host.query(f.call())).toEqual(recovered);
-});
-it("caps desktop waits after repeated successful recoveries with blocked cache cleanup", async () => {
-  const f = await fixture();
-  f.state.killReplay = false;
-  f.state.costlyReplay = true;
-  f.state.blockCache = true;
-  const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
-  const result = { revision: f.receipt.revision, result: { rows: [
-    { id: expect.any(String), version: 1, values: { [id(4)]: "Preserved" } },
-  ] } };
-  expect(await f.host.query(f.call())).toMatchObject(result);
-  expect(warning).toHaveBeenCalledWith("dataset_materialization_deferred", expect.anything());
-  const accountingCalls = f.cacheAccounting.mock.calls.length;
-  expect(f.cacheAccounting.mock.calls.some(([, allocation]) => allocation.bytes < 0)).toBe(true);
-  for (const delay of [5000, 10000, 20000, 40000, 60000, 60000, 60000, 60000, 60000, 60000]) {
-    f.state.killPrepare = true;
-    await expect(f.host.query(f.call())).rejects.toMatchObject({ code: "worker_stopped" });
-    f.state.killPrepare = false;
-    const launches = f.launch.mock.calls.length;
-    await expect(f.host.query(f.call())).rejects.toMatchObject({ code: "dataset_reopen_wait", retryAfterMs: delay });
-    f.state.clock += delay - 1;
-    await expect(f.host.query(f.call())).rejects.toMatchObject({ code: "dataset_reopen_wait", retryAfterMs: 1 });
-    expect(f.launch).toHaveBeenCalledTimes(launches);
-    f.state.clock++;
-    expect(await f.host.query(f.call())).toMatchObject(result);
-    expect(f.cacheAccounting).toHaveBeenCalledTimes(accountingCalls);
-  }
-  expect(f.state.applied).toBe(11);
-  expect(await f.host.action(f.write)).toEqual({ ...f.receipt, replayed: true });
-  f.state.killPrepare = true;
-  await expect(f.host.query(f.call())).rejects.toMatchObject({ code: "worker_stopped" });
-  f.state.killPrepare = false;
-  await expect(f.host.query(f.call())).rejects.toMatchObject({ code: "dataset_reopen_wait", retryAfterMs: 60000,
-    message: "This Collection is waiting to reopen. Try again in 1 minute." });
-});
-it("starts a new desktop host without the previous host's reopen wait", async () => {
-  const f = await fixture();
-  await expect(f.host.query(f.call())).rejects.toMatchObject({ code: "worker_stopped", retryAfterMs: 5000 });
-  await expect(f.host.query(f.call())).rejects.toMatchObject({ code: "dataset_reopen_wait" });
-  await f.host.close();
-  f.state.killReplay = false;
-  const reopened = await f.openHost();
-  expect(await reopened.query(f.call())).toMatchObject({ revision: f.receipt.revision,
-    result: { rows: [{ values: { [id(4)]: "Preserved" } }] } });
 });

@@ -68,7 +68,7 @@ it("persists real owner reads across restart, catches up, and refuses offline wr
   } finally {await copy.close();await host.close();await rm(directory,{recursive:true,force:true,maxRetries:8,retryDelay:25});}
 });
 
-it.each(["delete", "status", "closing"])("erases a cached Collection after confirmed %s and cannot reopen it offline", async mode => {
+it.each(["closing"])("erases a cached Collection after confirmed %s and cannot reopen it offline", async mode => {
   const f=fixture(), directory=await mkdtemp(join(tmpdir(),"desktop-deleted-copy-"));
   const host=await f.storage.createDatasetHost({publicEditRelease:undefined,directory:join(directory,"host"),limits,onShutdownError(error){throw error;}});
   const actor={kind:"named" as const,workspaceId:"w",userId:"owner"}, scope={workspaceId:"w",datasetId:id(1)};

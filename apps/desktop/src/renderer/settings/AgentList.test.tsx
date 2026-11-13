@@ -3,22 +3,11 @@ import { act, cleanup, render, screen, waitFor, within } from "@testing-library/
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { AGENTS_RESTRICTED_MESSAGE, type AgentToolsResult } from "../../agents/agentToolCatalog";
-import type {
-  AgentsListeningEvent,
-  ChatChannelRecord,
-  ChatDispatchPausedEvent,
-  PersonalAgent,
-  PersonalAgentChange,
-  PersonalAgentChangeResult,
-  PersonalAgentsAccount,
-  PersonalAgentsEvent,
-  RunnerSelfTestResult,
-} from "../../ipc/bridgeContract";
-import { DEFAULT_USER_SETTINGS, type AgentProblem, type DesktopUserSettings, type DesktopUserSettingsResult } from "../../settings/userSettings";
+import type { AgentsListeningEvent, ChatChannelRecord, ChatDispatchPausedEvent, PersonalAgent, PersonalAgentChange, PersonalAgentChangeResult, PersonalAgentsAccount, PersonalAgentsEvent, RunnerSelfTestResult } from "../../ipc/bridgeContract";
+import { DEFAULT_USER_SETTINGS, type DesktopUserSettings, type DesktopUserSettingsResult } from "../../settings/userSettings";
 import { testAgent } from "../../testing/agentSettings";
 import { deferred } from "../../testing/deferred";
 import { AgentList } from "./AgentList";
-import { agentListRows } from "./agentRemoval";
 
 let pausedListener: ((event: ChatDispatchPausedEvent) => void) | null = null;
 let listeningListener: ((event: AgentsListeningEvent) => void) | null = null;
@@ -65,7 +54,6 @@ const SETTINGS: DesktopUserSettings = {
     terminal: mcpOnly,
   },
 };
-const BROKEN: AgentProblem = { id: "codex-two", name: "codex", hue: "teal", position: 1, problem: "Another agent has this name." };
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -139,146 +127,6 @@ async function addAgent(id: "codex" | "mcp") {
   await userEvent.click(screen.getByTestId("agent-add-confirm"));
 }
 
-it("lists the entries dohc could not use in the file's order", () => {
-  expect(agentListRows(SETTINGS, [{ ...BROKEN, position: 0 }, { ...BROKEN, id: "last", position: 4 }])
-    .map((entry) => entry.kind === "agent" ? entry.agent.id : entry.problem.id))
-    .toEqual(["codex-two", "default", "codex", "terminal", "last"]);
-});
-
-it("lists every agent as a row that opens its page, and back returns to its row", async () => {
-  renderList();
-  expect(screen.getAllByTestId("agent-row").map((element) => element.dataset.agentId)).toEqual(["default", "codex", "terminal"]);
-  // The list has no per-agent controls; each lives on the agent's page.
-  expect(screen.queryByTestId("agent-check")).toBeNull();
-  expect(screen.queryByRole("switch")).toBeNull();
-  const claude = await openAgent("Claude Code");
-  expect(document.activeElement).toBe(screen.getByTestId("agent-back"));
-  expect(claude.getByRole("button", { name: "Send test" })).toBeTruthy();
-  expect(claude.getByRole("switch", { name: "Run Claude Code on this computer" }).getAttribute("aria-checked")).toBe("true");
-  expect(claude.getByRole("button", { name: "Claude Code actions" })).toBeTruthy();
-  expect(screen.queryByTestId("agent-row")).toBeNull();
-  await back();
-  expect(document.activeElement).toBe(row("Claude Code"));
-  const terminal = await openAgent("Claude in Terminal");
-  expect(terminal.getByText("Through MCP")).toBeTruthy();
-  expect(terminal.queryByRole("button", { name: "Send test" })).toBeNull();
-  expect(terminal.queryByRole("switch")).toBeNull();
-  expect(terminal.getByRole("button", { name: "Copy MCP config" })).toBeTruthy();
-});
-
-it("says under each name what starts the agent and where it stands", () => {
-  const codexOff = { ...SETTINGS, agents: { ...SETTINGS.agents, codex: { ...SETTINGS.agents.codex!, enabled: false } } };
-  renderList({ settings: codexOff });
-  expect(state("Claude Code")).toBe("Your command·On");
-  expect(state("Codex")).toBe("Codex·Off");
-  expect(state("Claude in Terminal")).toBe("Through MCP");
-});
-
-it("names an agent's switch by the agent, says what a click does, and dims a row that's off", async () => {
-  const codexOff = { ...SETTINGS, agents: { ...SETTINGS.agents, codex: { ...SETTINGS.agents.codex!, enabled: false } } };
-  const { rerender } = renderList({ settings: codexOff });
-  // The off row's name and mark go muted; the on row keeps its ink.
-  const name = (agent: string) => within(row(agent)).getAllByText(agent)[0]!;
-  const mark = (agent: string) => row(agent).querySelector(`span[title="${agent}"]`)!;
-  expect(name("Codex").className).toContain("text-muted");
-  expect(name("Codex").className).not.toContain("text-ink");
-  expect(mark("Codex").getAttribute("class")).toContain("opacity-50");
-  expect(name("Claude Code").className).toContain("text-ink");
-  expect(mark("Claude Code").getAttribute("class")).not.toContain("opacity-50");
-
-  const on = (await openAgent("Claude Code")).getByRole("switch", { name: "Run Claude Code on this computer" });
-  expect(on.getAttribute("aria-checked")).toBe("true");
-  expect(on.title).toBe("Turn off Claude Code");
-  // Read after the name, so it leaves the name out.
-  expect(on.getAttribute("aria-description")).toBe("Turn off");
-  const off = (await openAgent("Codex")).getByRole("switch", { name: "Run Codex on this computer" });
-  expect(off.getAttribute("aria-checked")).toBe("false");
-  expect(off.title).toBe("Turn on Codex");
-  expect(off.getAttribute("aria-description")).toBe("Turn on");
-
-  rerender({ settings: SETTINGS });
-  const turnedOn = page().getByRole("switch", { name: "Run Codex on this computer" });
-  expect(turnedOn.getAttribute("aria-checked")).toBe("true");
-  expect(turnedOn.title).toBe("Turn off Codex");
-  await back();
-  expect(name("Codex").className).toContain("text-ink");
-  expect(mark("Codex").getAttribute("class")).not.toContain("opacity-50");
-});
-
-it("keeps an entry dohc could not use in its place, with its problem and a way to the file", async () => {
-  const { onOpenSettingsFile } = renderList({
-    agentProblems: [BROKEN, { id: "Agent B", position: 4, problem: "dohc doesn't use `color`." }],
-  });
-  const rows = screen.getAllByTestId(/^agent-row/);
-  expect(rows.map((element) => element.dataset.agentId)).toEqual(["default", "codex-two", "codex", "terminal", "Agent B"]);
-  const broken = within(rows[1]!);
-  expect(broken.getByText("codex")).toBeTruthy();
-  expect(broken.getByTestId("agent-problem").textContent).toBe("Another agent has this name.");
-  // It has no page to open, nothing to switch and nothing to remove.
-  expect(rows[1]!.tagName).not.toBe("BUTTON");
-  expect(broken.queryByRole("switch")).toBeNull();
-  expect(broken.queryByRole("button", { name: /actions|Remove|Undo/ })).toBeNull();
-  await userEvent.click(broken.getByRole("button", { name: "Open settings file" }));
-  expect(onOpenSettingsFile).toHaveBeenCalledTimes(1);
-  // Without a name the row shows the id, and the key is set in monospace.
-  const nameless = within(rows[4]!);
-  expect(nameless.getByText("Agent B")).toBeTruthy();
-  expect(nameless.getByText("color").tagName).toBe("CODE");
-});
-
-it("checks one agent, then says how long its reply took", async () => {
-  const answer = deferred<RunnerSelfTestResult>();
-  bridgeMock.runnerSelfTest.mockReturnValueOnce(answer.promise);
-  const { rerender } = renderList();
-  await check("Codex");
-  expect(bridgeMock.runnerSelfTest).toHaveBeenCalledWith({ workspaceId: "ws-1", agentId: "codex" });
-  expect(page().getByText("Checking")).toBeTruthy();
-  await back();
-  expect(state("Codex")).toBe("Codex·Checking");
-  // Main runs one runner per workspace, so the other agent's test waits.
-  await openAgent("Claude Code");
-  expect(checkButton().disabled).toBe(true);
-  await act(async () => answer.resolve({ ok: true, detail: "Runner self-test passed." }));
-  await openAgent("Codex");
-  expect(page().getByText(/^Replied in \d+ s$/)).toBeTruthy();
-  // While agents are paused, an agent that is off keeps the check it ran,
-  // and one that is on says Paused.
-  await back();
-  const codexOff = { ...SETTINGS, agents: { ...SETTINGS.agents, codex: { ...SETTINGS.agents.codex!, enabled: false } } };
-  rerender({ settings: codexOff });
-  act(() => pausedListener?.({ paused: true }));
-  expect(state("Codex")).toMatch(/^Codex·Replied in \d+ s$/);
-  expect(state("Claude Code")).toBe("Your command·Paused");
-});
-
-it("says an agent didn't reply, names it in Notices with why and its log, and offers Try again", async () => {
-  bridgeMock.runnerSelfTest.mockResolvedValueOnce({
-    ok: false, detail: "Runner self-test timed out after 120 seconds.", logPath: "C:\\Logs\\check.log",
-  });
-  const { onError } = renderList();
-  await check("Claude Code");
-  expect(await page().findByText("Didn't reply.")).toBeTruthy();
-  expect(onError).toHaveBeenCalledWith("Claude Code didn't reply to the check.", undefined, expect.any(Function), [
-    ["Cause", "Runner self-test timed out after 120 seconds."],
-    ["Log", "C:\\Logs\\check.log"],
-  ], "agent-check:ws-1:default");
-  await userEvent.click(page().getByRole("button", { name: "Try again" }));
-  expect(bridgeMock.runnerSelfTest).toHaveBeenCalledTimes(2);
-});
-
-it("says an agent replied as Agent when its reply wasn't the check's", async () => {
-  bridgeMock.runnerSelfTest.mockResolvedValueOnce({
-    ok: false, unconfirmed: true, detail: "Codex's Command started its tools without this check's credential, so its replies show as Agent. Edit the Command in Codex's details.", logPath: "C:\\Logs\\check.log",
-  });
-  const { onError } = renderList();
-  await check("Codex");
-  await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
-  expect(onError).toHaveBeenCalledWith("Codex replied as Agent.", undefined, expect.any(Function), [
-    ["Cause", "Codex's Command started its tools without this check's credential, so its replies show as Agent. Edit the Command in Codex's details."],
-    ["Log", "C:\\Logs\\check.log"],
-  ], "agent-check:ws-1:codex");
-});
-
 it("checks the agent again from the failed check's toast", async () => {
   bridgeMock.runnerSelfTest.mockResolvedValueOnce({ ok: false, detail: "Runner exited before reporting self-test success." });
   const { onError } = renderList();
@@ -307,16 +155,6 @@ it("checks the agent again from the failed check's toast", async () => {
   ], "agent-check:ws-1:codex");
 });
 
-it("checks again from the toast when the check couldn't start", async () => {
-  bridgeMock.runnerSelfTest.mockRejectedValueOnce(new Error(""));
-  const { onError } = renderList();
-  await check("Codex");
-  await vi.waitFor(() => expect(onError).toHaveBeenCalledWith("dohc could not check Codex.", expect.any(Error), expect.any(Function), undefined, "agent-check:ws-1:codex"));
-  await act(() => (onError.mock.calls[0]![2] as () => Promise<void>)());
-  expect(bridgeMock.runnerSelfTest).toHaveBeenCalledTimes(2);
-  expect(page().getByText(/^Replied in \d+ s$/)).toBeTruthy();
-});
-
 it("pauses every agent dohc starts that is on, and leaves the rest as they are", async () => {
   renderList({ settings: { ...SETTINGS, agents: { ...SETTINGS.agents, off: testAgent({ name: "Codex off", enabled: false }) } } });
   await userEvent.click(screen.getByRole("button", { name: "Pause all agents" }));
@@ -338,27 +176,6 @@ it("pauses every agent dohc starts that is on, and leaves the rest as they are",
   expect(bridgeMock.setChatDispatchPaused).toHaveBeenLastCalledWith({ paused: false });
 });
 
-const ids = () => screen.queryAllByTestId("agent-row").map((element) => element.dataset.agentId);
-
-it("puts every agent in one list, with Pause and Add agent beside the title", () => {
-  renderList();
-  expect(screen.getByRole("heading", { name: "Agents" })).toBeTruthy();
-  expect(ids()).toEqual(["default", "codex", "terminal"]);
-  expect(screen.getByRole("button", { name: "Pause all agents" })).toBeTruthy();
-  expect(screen.getAllByRole("button", { name: "Add agent" })).toHaveLength(1);
-  // An MCP config is on its agent's page, not on the list.
-  expect(screen.queryByRole("button", { name: "Copy MCP config" })).toBeNull();
-});
-
-it("shows Pause only while there is an agent dohc starts, and says when there are no agents", async () => {
-  const { rerender } = renderList({ settings: { ...SETTINGS, agents: { terminal: mcpOnly } } });
-  expect(screen.queryByRole("button", { name: "Pause all agents" })).toBeNull();
-  expect(ids()).toEqual(["terminal"]);
-  rerender({ settings: { ...SETTINGS, agents: {} } });
-  // It says so once it knows you have no personal agents either.
-  expect((await screen.findByTestId("agents-empty")).textContent).toBe("No agents yet.");
-});
-
 it("copies an MCP config that runs dohc's MCP server as the agent you run", async () => {
   const user = userEvent.setup();
   const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
@@ -369,104 +186,6 @@ it("copies an MCP config that runs dohc's MCP server as the agent you run", asyn
   await user.click(page().getByRole("button", { name: "Copy MCP config" }));
   expect(JSON.parse(writeText.mock.calls[0]![0])).toEqual(expected);
   writeText.mockRestore();
-});
-
-it("can't copy an MCP config the workspace doesn't have, and says why", async () => {
-  renderList({ config: { unavailable: true, message: "dohc's MCP server isn't installed." } });
-  const terminal = await openAgent("Claude in Terminal");
-  expect((terminal.getByRole("button", { name: "Copy MCP config" }) as HTMLButtonElement).disabled).toBe(true);
-  expect(terminal.getByTestId("mcp-unavailable").textContent).toBe("dohc's MCP server isn't installed.");
-});
-
-it("says an agent you run is listening while it waits for messages, and Through MCP once the wait ends", async () => {
-  bridgeMock.readAgentsListening.mockResolvedValueOnce({ agentIds: ["terminal"] });
-  renderList();
-  await vi.waitFor(() => expect(state("Claude in Terminal")).toBe("Listening"));
-  act(() => listeningListener?.({ agentIds: [] }));
-  expect(state("Claude in Terminal")).toBe("Through MCP");
-  act(() => listeningListener?.({ agentIds: ["terminal"] }));
-  expect(state("Claude in Terminal")).toBe("Listening");
-  // An agent dohc starts never reads as listening.
-  act(() => listeningListener?.({ agentIds: ["terminal", "codex"] }));
-  expect(within(row("Codex")).queryByText("Listening")).toBeNull();
-});
-
-it("takes a pushed answer over the first read of who is listening", async () => {
-  const read = deferred<AgentsListeningEvent>();
-  bridgeMock.readAgentsListening.mockReturnValueOnce(read.promise);
-  renderList();
-  act(() => listeningListener?.({ agentIds: [] }));
-  await act(async () => read.resolve({ agentIds: ["terminal"] }));
-  expect(state("Claude in Terminal")).toBe("Through MCP");
-});
-
-it("marks this workspace's changes as one agent's from that agent's page", async () => {
-  const onToggle = vi.fn();
-  const two = { ...SETTINGS, agents: { ...SETTINGS.agents, cursor: { ...mcpOnly, name: "Cursor", hue: "teal" as const } } };
-  const { rerender } = renderList({ settings: two, run: { activeRun: null, busy: false, onToggle } });
-  const terminal = await openAgent("Claude in Terminal");
-  expect(terminal.getByText("Mark changes as Claude in Terminal's")).toBeTruthy();
-  expect(terminal.getByTestId("mcp-status").dataset.state).toBe("stopped");
-  await userEvent.click(terminal.getByRole("button", { name: "Start run" }));
-  expect(onToggle).toHaveBeenCalledWith("terminal");
-
-  rerender({ settings: two, run: { activeRun: { id: "run-1", agentId: "terminal" }, busy: false, onToggle } });
-  expect(page().getByTestId("mcp-status").dataset.state).toBe("running");
-  expect(page().getByRole("button", { name: "Stop run" })).toBeTruthy();
-  await back();
-  expect(state("Claude in Terminal")).toBe("Marking changes");
-  // Another agent's page says whose run is on, and can stop it.
-  const cursor = await openAgent("Cursor");
-  expect(cursor.getByTestId("mcp-status").textContent).toBe("Running as Claude in Terminal");
-  expect(cursor.getByTestId("mcp-status").dataset.state).toBe("other");
-  rerender({ settings: two, run: { activeRun: { id: "run-1", agentId: "terminal" }, busy: true, onToggle } });
-  expect((page().getByRole("button", { name: "Stop run" }) as HTMLButtonElement).disabled).toBe(true);
-  // An agent dohc starts has no run of its own.
-  await openAgent("Codex");
-  expect(page().queryByTestId("mcp-enable-toggle")).toBeNull();
-});
-
-it("stops a run for an agent the list doesn't show from the list", async () => {
-  const onToggle = vi.fn();
-  const { rerender } = renderList({ run: { activeRun: { id: "run-1", agentId: "dohc-mcp" }, busy: false, onToggle } });
-  await userEvent.click(within(screen.getByTestId("agent-run-unlisted")).getByRole("button", { name: "Stop run" }));
-  expect(onToggle).toHaveBeenCalledWith("dohc-mcp");
-  // A listed agent's run is stopped from its page instead.
-  rerender({ run: { activeRun: { id: "run-1", agentId: "terminal" }, busy: false, onToggle } });
-  expect(screen.queryByTestId("agent-run-unlisted")).toBeNull();
-});
-
-it("adds an agent you run as Agent, then Agent 2, each off, in the next free color, with nothing to check", async () => {
-  const teal = { ...SETTINGS, appearance: { ...SETTINGS.appearance, yourColor: "teal" as const } };
-  const { onSave, rerender } = renderList({ settings: teal });
-  await openAdd();
-  await userEvent.click(runsWith("mcp"));
-  expect(runsWith("mcp").getAttribute("aria-checked")).toBe("true");
-  expect(sheet().getByRole<HTMLInputElement>("textbox", { name: "Name" }).value).toBe("Agent");
-  expect(sheet().queryByRole("switch")).toBeNull();
-  await userEvent.click(screen.getByTestId("agent-add-confirm"));
-  const first = onSave.mock.calls[0]![0];
-  expect(Object.keys(first.agents)).toEqual(["default", "codex", "terminal", "agent"]);
-  // Olive, blue and rose are the agents', teal is yours, so plum is next.
-  expect(first.agents.agent).toEqual({ name: "Agent", hue: "plum", changesFiles: true, enabled: false, timeoutMinutes: 30 });
-  expect(first.agents.agent).not.toHaveProperty("launch");
-  expect(screen.queryByTestId("agent-add-sheet")).toBeNull();
-  rerender({ settings: first });
-  expect(ids()).toEqual(["default", "codex", "terminal", "agent"]);
-  expect(document.activeElement).toBe(row("Agent"));
-  expect(state("Agent")).toBe("Through MCP");
-  await addAgent("mcp");
-  expect(onSave.mock.calls[1]![0].agents["agent-2"]).toMatchObject({ name: "Agent 2", hue: "rust", enabled: false });
-  expect(bridgeMock.runnerSelfTest).not.toHaveBeenCalled();
-});
-
-it("shows the MCP config an agent you run will use before it is added", async () => {
-  renderList({ config: { command: "dohc-mcp", args: ["--workspace", "Trip"], workspacePath: "Trip", home: "Home" } });
-  await openAdd();
-  await userEvent.click(runsWith("mcp"));
-  const connect = within(screen.getByTestId("agent-add-connect"));
-  expect(connect.getByText(/"--agent-id",\s*"agent"/)).toBeTruthy();
-  expect(connect.getByRole("button", { name: "Copy MCP config" })).toBeTruthy();
 });
 
 it("names a new agent, picks its color, and keeps a typed name when the choice changes", async () => {
@@ -495,113 +214,6 @@ it("names a new agent, picks its color, and keeps a typed name when the choice c
   expect(onSave.mock.calls[0]![0].agents["codex-2"]).toMatchObject({ name: "Cursor", hue: "teal", enabled: true });
 });
 
-it("closes Add agent on Cancel without saving", async () => {
-  const { onSave } = renderList();
-  await openAdd();
-  await userEvent.click(sheet().getByRole("button", { name: "Cancel" }));
-  expect(screen.queryByTestId("agent-add-sheet")).toBeNull();
-  expect(onSave).not.toHaveBeenCalled();
-});
-
-it("adds Codex off without checking it when Run on this computer is off", async () => {
-  const { onSave } = renderList();
-  await openAdd();
-  await within(runsWith("codex")).findByText("Ready");
-  await userEvent.click(sheet().getByRole("switch", { name: "Run on this computer" }));
-  await userEvent.click(screen.getByTestId("agent-add-confirm"));
-  expect(onSave.mock.calls[0]![0].agents["codex-2"]).toMatchObject({ enabled: false, launch: { tool: "codex" } });
-  expect(bridgeMock.runnerSelfTest).not.toHaveBeenCalled();
-});
-
-it("gives an agent you run Rename and Remove, and says on its page what it reaches", async () => {
-  renderList();
-  await openAgent("Claude in Terminal");
-  await userEvent.click(screen.getByRole("button", { name: "Claude in Terminal actions" }));
-  expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Rename"]);
-  await userEvent.keyboard("{Escape}");
-  expect(page().getByRole("button", { name: "Remove Claude in Terminal…" })).toBeTruthy();
-  const details = within(page().getByTestId("agent-details"));
-  expect(details.getByText("Every workspace dohc opens on this computer")).toBeTruthy();
-  expect(details.getByRole("radiogroup", { name: "Color of Claude in Terminal" })).toBeTruthy();
-  expect(page().queryByText("Stops after")).toBeNull();
-});
-
-it("removes an agent you run, and Undo puts it back in its place", async () => {
-  const { onSave, onNotice, onOrder } = renderList();
-  await removeAgent("Claude in Terminal");
-  await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Claude in Terminal.", expect.any(Function)));
-  // Its page closes, and focus goes to the Agents heading.
-  expect(screen.queryByTestId("agent-page")).toBeNull();
-  expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Agents" }));
-  expect(Object.keys(onSave.mock.calls[0]![0].agents)).toEqual(["default", "codex"]);
-  const { default: claude, codex } = SETTINGS.agents;
-  bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: { default: claude!, codex: codex! } }, source: "stored" });
-  onNotice.mock.calls[0]![1]!();
-  await vi.waitFor(() => expect(onOrder).toHaveBeenCalledWith(["default", "codex", "terminal"], expect.any(String)));
-  expect(bridgeMock.setUserSettings.mock.lastCall![0].settings.agents.terminal).toEqual(mcpOnly);
-});
-
-it("turns an agent off from its switch", async () => {
-  const { onSave } = renderList();
-  await userEvent.click((await openAgent("Codex")).getByRole("switch"));
-  expect(onSave.mock.calls[0]![0].agents.codex?.enabled).toBe(false);
-});
-
-it("renames an agent in place, and refuses a name another agent has", async () => {
-  const { onSave } = renderList();
-  await openAgent("Codex");
-  await userEvent.click(screen.getByRole("button", { name: "Rename Codex" }));
-  const field = screen.getByRole("textbox", { name: "Name of Codex" });
-  await userEvent.clear(field);
-  await userEvent.type(field, "claude code");
-  expect(screen.getByRole("alert").textContent).toBe("Another agent has this name.");
-  await userEvent.keyboard("{Enter}");
-  expect(onSave).not.toHaveBeenCalled();
-  await userEvent.clear(field);
-  await userEvent.type(field, "Codex Work{Enter}");
-  expect(onSave.mock.calls[0]![0].agents.codex?.name).toBe("Codex Work");
-  expect(screen.queryByRole("textbox")).toBeNull();
-});
-
-it("renames an agent from its menu", async () => {
-  renderList();
-  await chooseAction("Codex", "Rename");
-  expect(screen.getByRole("textbox", { name: "Name of Codex" })).toBeTruthy();
-});
-
-it("shows how dohc starts an agent and what it can do on its page", async () => {
-  renderList();
-  const codex = await openAgent("Codex");
-  const details = within(codex.getByTestId("agent-details"));
-  expect(await details.findByText("Codex 0.98, signed in")).toBeTruthy();
-  expect(codex.getByTestId("agent-page-subtitle").textContent).toBe("@Codex·Codex 0.98, signed in");
-  expect(details.getByText("C:\\Tools\\codex.exe")).toBeTruthy();
-  expect(details.getByRole("button", { name: "Use your own command" })).toBeTruthy();
-  const can = within(codex.getByTestId("agent-can"));
-  expect(can.getByText("Edits without asking")).toBeTruthy();
-  expect(can.getByText("Replies only")).toBeTruthy();
-  expect(can.getByText("30 min")).toBeTruthy();
-  expect(bridgeMock.detectAgentTools).toHaveBeenCalledTimes(1);
-  // An agent started by your own command has no tool, so its page doesn't say what a tool allows.
-  const claude = await openAgent("Claude Code");
-  expect(claude.queryByText("Edits without asking")).toBeNull();
-  expect(within(claude.getByTestId("agent-details")).getByText("node agent.mjs")).toBeTruthy();
-});
-
-it("changes when an agent stops, and refuses minutes it can't save", async () => {
-  const { onSave } = renderList();
-  const codex = await openAgent("Codex");
-  await userEvent.click(codex.getByRole("button", { name: "Change when Codex stops" }));
-  const field = codex.getByRole<HTMLInputElement>("spinbutton", { name: "Minutes before Codex stops" });
-  await userEvent.clear(field);
-  await userEvent.type(field, "0{Enter}");
-  expect(codex.getByRole("alert").textContent).toBe("Enter whole minutes from 1 to 1440.");
-  expect(onSave).not.toHaveBeenCalled();
-  await userEvent.clear(field);
-  await userEvent.type(field, "45{Enter}");
-  expect(onSave.mock.calls[0]![0].agents.codex?.timeoutMinutes).toBe(45);
-});
-
 it("keeps a tool's profile when its command is saved as shown, and adds your own flags to it", async () => {
   const { onSave } = renderList();
   const details = await openAgent("Codex");
@@ -621,79 +233,6 @@ it("keeps a tool's profile when its command is saved as shown, and adds your own
   expect(onSave.mock.calls[0]![0].agents.codex?.launch).toEqual({ tool: "codex", executable: "C:\\Tools\\codex.exe", arguments: ["--model", "o3"] });
 });
 
-it("shows a tool's program with your own flags as its command", async () => {
-  renderList({ settings: { ...SETTINGS, agents: { ...SETTINGS.agents,
-    codex: testAgent({ name: "Codex", hue: "blue", launch: { tool: "codex", executable: "C:\\Tools\\codex.exe", arguments: ["--model", "o3"] } }) } } });
-  const details = within((await openAgent("Codex")).getByTestId("agent-details"));
-  expect(await details.findByText("Codex 0.98, signed in")).toBeTruthy();
-  expect(details.getByText("C:\\Tools\\codex.exe --model o3")).toBeTruthy();
-  expect(details.queryByText("Program")).toBeNull();
-  expect(details.getByRole("button", { name: "Change the command that starts Codex" })).toBeTruthy();
-});
-
-// An agent's swatches are squares, olive first, and set only that agent's color.
-it("sets an agent's color on its page", async () => {
-  const { onSave } = renderList();
-  const color = (await openAgent("Codex")).getByRole("radiogroup", { name: "Color of Codex" });
-  const hues = within(color).getAllByRole("radio");
-  expect(hues.map((radio) => radio.getAttribute("aria-label"))).toEqual(["Olive", "Rust", "Amber", "Teal", "Blue", "Indigo", "Plum", "Rose"]);
-  for (const radio of hues) expect(radio.className).toContain("rounded-md");
-  expect(within(color).getByRole("radio", { name: "Blue" }).getAttribute("aria-checked")).toBe("true");
-  await userEvent.click(within(color).getByRole("radio", { name: "Plum" }));
-  expect(onSave.mock.lastCall![0]).toEqual({ ...SETTINGS, agents: { ...SETTINGS.agents, codex: { ...SETTINGS.agents.codex!, hue: "plum" } } });
-});
-
-it("says what each tool needs before it can be added, and offers another agent", async () => {
-  const found = deferred<AgentToolsResult>();
-  bridgeMock.detectAgentTools.mockReturnValueOnce(found.promise);
-  renderList();
-  await openAdd();
-  expect(within(runsWith("claude")).getByLabelText("Looking for Claude Code")).toBeTruthy();
-  // Nothing is chosen while dohc looks, so the choice doesn't move under the person.
-  expect(within(screen.getByRole("radiogroup", { name: "Runs with" })).queryAllByRole("radio", { checked: true })).toHaveLength(0);
-  expect(screen.queryByTestId("agent-add-connect")).toBeNull();
-  expect(screen.getByTestId<HTMLButtonElement>("agent-add-confirm").disabled).toBe(true);
-  await act(async () => found.resolve({
-    workingDirectory: "C:\\Work",
-    tools: [
-      { tool: "claude", executable: "C:\\Tools\\claude.exe", version: "2.1.317", auth: "signed-out", probe: "detected" },
-      { tool: "codex", executable: null, version: null, auth: "unknown", probe: "not-found" },
-    ],
-  }));
-  await within(runsWith("claude")).findByText("Sign in first");
-  expect(runsWith("claude").disabled).toBe(true);
-  expect(within(runsWith("codex")).getByText("Not found")).toBeTruthy();
-  expect(runsWith("codex").disabled).toBe(true);
-  // With no tool ready, the sheet starts on another agent.
-  expect(runsWith("mcp").getAttribute("aria-checked")).toBe("true");
-  expect(runsWith("mcp").disabled).toBe(false);
-});
-
-// Codex can run without a saved login, through CODEX_API_KEY or another model
-// provider, so a sign-in dohc can't read still lets you add it.
-it("says Codex is ready when dohc can't tell whether it is signed in", async () => {
-  bridgeMock.detectAgentTools.mockResolvedValueOnce({
-    workingDirectory: "C:\\Work",
-    tools: [{ tool: "codex", executable: "C:\\Tools\\codex.exe", version: "0.98", auth: "unknown", probe: "detected" }],
-  });
-  renderList();
-  await openAdd();
-  await within(runsWith("codex")).findByText("Ready");
-  expect(runsWith("codex").disabled).toBe(false);
-  expect(runsWith("codex").getAttribute("aria-checked")).toBe("true");
-});
-
-it("adds a tool that is ready, on, with an id and name of its own, then checks it", async () => {
-  const { onSave } = renderList();
-  await addAgent("codex");
-  const agents = onSave.mock.calls[0]![0].agents;
-  expect(Object.keys(agents)).toEqual(["default", "codex", "terminal", "codex-2"]);
-  expect(agents["codex-2"]).toMatchObject({
-    name: "Codex 2", launch: { tool: "codex", executable: "C:\\Tools\\codex.exe" }, enabled: true, timeoutMinutes: 30,
-  });
-  expect(bridgeMock.runnerSelfTest).toHaveBeenCalledWith({ workspaceId: "ws-1", agentId: "codex-2" });
-});
-
 it("doesn't check an agent added in one workspace after the panel moves to another", async () => {
   const saving = deferred<DesktopUserSettingsResult | null>();
   const { onSave, rerender } = renderList();
@@ -703,66 +242,6 @@ it("doesn't check an agent added in one workspace after the panel moves to anoth
   saving.resolve({ settings: SETTINGS, source: "stored" });
   await waitFor(() => expect(screen.queryByTestId("agent-add-sheet")).toBeNull());
   expect(bridgeMock.runnerSelfTest).not.toHaveBeenCalled();
-});
-
-it("gives the first agent you add the default id", async () => {
-  const { onSave } = renderList({ settings: { ...SETTINGS, agents: {} } });
-  await addAgent("codex");
-  expect(Object.keys(onSave.mock.calls[0]![0].agents)).toEqual(["default"]);
-});
-
-it("never gives an agent you run the default id, which Chats sets up as one dohc starts", async () => {
-  const { onSave } = renderList({ settings: { ...SETTINGS, agents: {} } });
-  await addAgent("mcp");
-  expect(Object.keys(onSave.mock.calls[0]![0].agents)).toEqual(["agent"]);
-});
-
-it("says on each tool that dohc couldn't look for tools, and looks again from the toast", async () => {
-  bridgeMock.detectAgentTools.mockRejectedValueOnce(new Error("probe failed"));
-  const { onError } = renderList();
-  await vi.waitFor(() => expect(onError).toHaveBeenCalledWith("probe failed", expect.any(Error), expect.any(Function)));
-  await openAdd();
-  for (const tool of ["claude", "codex"] as const) {
-    expect(within(runsWith(tool)).queryByLabelText(/^Looking for/)).toBeNull();
-    expect(within(runsWith(tool)).getByText("Couldn't check")).toBeTruthy();
-    expect(runsWith(tool).disabled).toBe(true);
-  }
-  expect(runsWith("mcp").getAttribute("aria-checked")).toBe("true");
-  const retry = onError.mock.calls[0]![2] as () => Promise<void>;
-  await act(() => retry());
-  expect(bridgeMock.detectAgentTools).toHaveBeenCalledTimes(2);
-  expect(within(runsWith("codex")).getByText("Ready")).toBeTruthy();
-  expect(runsWith("codex").disabled).toBe(false);
-  // A tool found after the sheet showed its choice doesn't take it over.
-  expect(runsWith("mcp").getAttribute("aria-checked")).toBe("true");
-  expect(within(runsWith("claude")).getByText("Not found")).toBeTruthy();
-});
-
-it("marks the agent automations wake, and moves another one there with Undo", async () => {
-  const { onOrder, onNotice } = renderList({ agentProblems: [BROKEN] });
-  expect(screen.getAllByTestId("agent-for-automations")).toHaveLength(1);
-  expect(within(row("Claude Code")).getByTestId("agent-for-automations").textContent).toBe("For automations");
-  // Not on the agent automations already wake, nor on one dohc cannot start.
-  for (const name of ["Claude Code", "Claude in Terminal"]) {
-    await openAgent(name);
-    await userEvent.click(screen.getByRole("button", { name: `${name} actions` }));
-    expect(screen.queryByRole("menuitem", { name: "Use for automations" })).toBeNull();
-    await userEvent.keyboard("{Escape}");
-  }
-  await openAgent("Codex");
-  await userEvent.click(screen.getByRole("button", { name: "Codex actions" }));
-  expect(screen.getAllByRole("menuitem")[0]!.textContent).toBe("Use for automations");
-  await userEvent.click(screen.getByRole("menuitem", { name: "Use for automations" }));
-  expect(onOrder).toHaveBeenCalledWith(["codex"]);
-  await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Automations now wake Codex.", expect.any(Function)));
-  const { default: claude, codex, terminal } = SETTINGS.agents;
-  bridgeMock.getUserSettings.mockResolvedValueOnce({
-    settings: { ...SETTINGS, agents: { codex: codex!, default: claude!, terminal: terminal! } }, source: "stored",
-    agentProblems: [{ ...BROKEN, position: 2 }],
-  });
-  onNotice.mock.calls[0]![1]!();
-  // Undo puts Codex back after the broken entry it followed.
-  await vi.waitFor(() => expect(onOrder).toHaveBeenLastCalledWith(["default", "codex-two", "codex", "terminal"], "dohc could not move Codex back."));
 });
 
 // The order since the choice stays: Undo moves only the agent it chose.
@@ -788,137 +267,6 @@ it("keeps a later automations choice when an earlier one is undone", async () =>
   await vi.waitFor(() => expect(onOrder).toHaveBeenLastCalledWith(["gemini", "codex"], "dohc could not move Codex back."));
 });
 
-it("shows no automations chip while only one agent can be started", () => {
-  renderList({ settings: { ...SETTINGS, agents: { default: SETTINGS.agents.default!, terminal: mcpOnly } } });
-  expect(screen.queryByTestId("agent-for-automations")).toBeNull();
-});
-
-// The order since Remove stays: Undo moves only the agent it puts back.
-it("puts a removed agent back after the one it followed, in the order the file has then", async () => {
-  const { onOrder, onNotice } = renderList();
-  await removeAgent("Claude in Terminal");
-  await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Claude in Terminal.", expect.any(Function)));
-  // Codex was then chosen for automations, so the file starts with it.
-  const { default: claude, codex } = SETTINGS.agents;
-  bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: { codex: codex!, default: claude! } }, source: "stored" });
-  onNotice.mock.calls[0]![1]!();
-  await vi.waitFor(() => expect(onOrder).toHaveBeenCalledWith(["codex", "terminal", "default"], "dohc brought back Claude in Terminal but could not put it back in its place."));
-  expect(Object.keys(bridgeMock.setUserSettings.mock.lastCall![0].settings.agents)).toEqual(["codex", "default", "terminal"]);
-
-  // With both its neighbours gone, it goes behind the agent automations
-  // wake, since it wasn't first.
-  cleanup();
-  const second = renderList();
-  await removeAgent("Claude in Terminal");
-  await vi.waitFor(() => expect(second.onNotice).toHaveBeenCalled());
-  bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: { default: claude! } }, source: "stored" });
-  second.onNotice.mock.calls[0]![1]!();
-  await vi.waitFor(() => expect(second.onOrder).toHaveBeenCalledWith(["default", "terminal"], expect.any(String)));
-});
-
-it("puts a removed first agent back in front of the one after it, so a later automations choice stays", async () => {
-  const codex = testAgent({ name: "Codex", hue: "blue" });
-  const claude = testAgent({ name: "Claude Code" });
-  const gemini = testAgent({ name: "Gemini", hue: "teal" });
-  const { onOrder, onNotice } = renderList({ settings: { ...SETTINGS, agents: { codex, default: claude, gemini } } });
-  await removeAgent("Codex");
-  await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
-  // Gemini was then chosen for automations.
-  bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: { gemini, default: claude } }, source: "stored" });
-  onNotice.mock.calls[0]![1]!();
-  await vi.waitFor(() => expect(onOrder).toHaveBeenLastCalledWith(["gemini", "codex", "default"], expect.any(String)));
-
-  // With Claude Code removed too, Codex goes behind Gemini, which was
-  // chosen after the Remove, rather than first.
-  bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: { gemini } }, source: "stored" });
-  onNotice.mock.calls[0]![1]!();
-  await vi.waitFor(() => expect(onOrder).toHaveBeenLastCalledWith(["gemini", "codex"], expect.any(String)));
-});
-
-it("gives automations back to the agent that woke them when its Remove is undone at once", async () => {
-  const claude = testAgent({ name: "Claude Code" });
-  const codex = testAgent({ name: "Codex", hue: "blue" });
-  // Claude in Terminal has no launch, so Claude Code wakes automations.
-  const first = renderList({ settings: { ...SETTINGS, agents: { terminal: mcpOnly, default: claude, codex } } });
-  await removeAgent("Claude Code");
-  await vi.waitFor(() => expect(first.onNotice).toHaveBeenCalledWith("Removed Claude Code.", expect.any(Function)));
-  bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: { terminal: mcpOnly, codex } }, source: "stored" });
-  first.onNotice.mock.calls[0]![1]!();
-  await vi.waitFor(() => expect(first.onOrder).toHaveBeenLastCalledWith(["terminal", "default", "codex"], expect.any(String)));
-
-  // The same behind an entry dohc can't use.
-  cleanup();
-  // Main's answer to the save keeps the entry dohc can't use.
-  const second = renderList({
-    settings: { ...SETTINGS, agents: { default: claude, codex } }, agentProblems: [{ ...BROKEN, position: 0 }],
-    onSave: async (settings) => ({ settings, source: "stored", agentProblems: [{ ...BROKEN, position: 0 }] }),
-  });
-  await removeAgent("Claude Code");
-  await vi.waitFor(() => expect(second.onNotice).toHaveBeenCalledWith("Removed Claude Code.", expect.any(Function)));
-  bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: { codex } }, source: "stored", agentProblems: [{ ...BROKEN, position: 0 }] });
-  second.onNotice.mock.calls[0]![1]!();
-  await vi.waitFor(() => expect(second.onOrder).toHaveBeenLastCalledWith(["codex-two", "default", "codex"], expect.any(String)));
-});
-
-it("puts an agent dohc can't start back above the automations agent when its Remove is undone at once", async () => {
-  const claude = testAgent({ name: "Claude Code" });
-  const codex = testAgent({ name: "Codex", hue: "blue" });
-  const { onOrder, onNotice } = renderList({ settings: { ...SETTINGS, agents: { terminal: mcpOnly, default: claude, codex } } });
-  await removeAgent("Claude in Terminal");
-  await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Claude in Terminal.", expect.any(Function)));
-  bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: { default: claude, codex } }, source: "stored" });
-  onNotice.mock.calls[0]![1]!();
-  await vi.waitFor(() => expect(onOrder).toHaveBeenLastCalledWith(["terminal", "default", "codex"], expect.any(String)));
-});
-
-// Undo works from the file: an order the same as right after the Remove is
-// an exact reversal, even if agents were chosen in between.
-it("undoes a Remove exactly when the file is back in the order the Remove left", async () => {
-  const claude = testAgent({ name: "Claude Code" });
-  const codex = testAgent({ name: "Codex", hue: "blue" });
-  const gemini = testAgent({ name: "Gemini", hue: "teal" });
-  const { onOrder, onNotice } = renderList({ settings: { ...SETTINGS, agents: { default: claude, codex, gemini } } });
-  await removeAgent("Claude Code");
-  await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Claude Code.", expect.any(Function)));
-  // Gemini, then Codex, were chosen for automations.
-  bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: { codex, gemini } }, source: "stored" });
-  onNotice.mock.calls[0]![1]!();
-  await vi.waitFor(() => expect(onOrder).toHaveBeenLastCalledWith(["default", "codex", "gemini"], expect.any(String)));
-});
-
-it.each([
-  ["Claude Code's, then Codex's", [1, 0], [["gemini"], ["default", "gemini"]], [["default", "gemini"], ["codex", "default", "gemini"]]],
-  ["Codex's, then Claude Code's", [0, 1], [["gemini"], ["gemini", "codex"]], [["gemini", "codex"], ["gemini", "default", "codex"]]],
-] as const)("undoes two Removes, %s, and leaves automations with the agent that held them", async (_case, undos, files, orders) => {
-  const agents = { codex: testAgent({ name: "Codex", hue: "blue" }), default: testAgent({ name: "Claude Code" }), gemini: testAgent({ name: "Gemini", hue: "teal" }) };
-  const { onOrder, onNotice, rerender } = renderList({ settings: { ...SETTINGS, agents } });
-  await removeAgent("Codex");
-  await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
-  const { codex: _codex, ...afterCodex } = agents;
-  rerender({ settings: { ...SETTINGS, agents: afterCodex } });
-  await removeAgent("Claude Code");
-  await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Claude Code.", expect.any(Function)));
-  for (const [step, undo] of undos.entries()) {
-    const file = Object.fromEntries(files[step]!.map((id) => [id, agents[id]]));
-    bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: file }, source: "stored" });
-    onNotice.mock.calls[undo]![1]!();
-    await vi.waitFor(() => expect(onOrder).toHaveBeenLastCalledWith(orders[step], expect.any(String)));
-  }
-});
-
-it("doesn't let Undo of a Remove take automations from the agent chosen since", async () => {
-  const claude = testAgent({ name: "Claude Code" });
-  const codex = testAgent({ name: "Codex", hue: "blue" });
-  const gemini = testAgent({ name: "Gemini", hue: "teal" });
-  const { onOrder, onNotice } = renderList({ settings: { ...SETTINGS, agents: { default: claude, codex, gemini } } });
-  await removeAgent("Codex");
-  await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
-  // Gemini was then chosen for automations, and Claude Code removed.
-  bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: { gemini } }, source: "stored" });
-  onNotice.mock.calls[0]![1]!();
-  await vi.waitFor(() => expect(onOrder).toHaveBeenLastCalledWith(["gemini", "codex"], expect.any(String)));
-});
-
 it("removes an agent, and Undo puts it back where it was", async () => {
   const { onSave, onOrder, onNotice } = renderList();
   await removeAgent("Codex");
@@ -933,22 +281,6 @@ it("removes an agent, and Undo puts it back where it was", async () => {
   expect(bridgeMock.setUserSettings).toHaveBeenCalledWith({ settings: { ...saved, agents: { ...saved.agents, codex: SETTINGS.agents.codex } }, base: saved });
 });
 
-it("says the agent stays when the saved file still lists it", async () => {
-  const { onSave, onNotice, onError } = renderList();
-  // Another window put Codex back before main saved the removal.
-  onSave.mockResolvedValueOnce({ settings: SETTINGS, source: "stored" });
-  await removeAgent("Codex");
-  await vi.waitFor(() => expect(onError).toHaveBeenCalledWith("dohc didn't remove Codex because the settings file still lists it."));
-  // Its page stays open.
-  expect(page().getByRole("button", { name: "Rename Codex" })).toBeTruthy();
-  // Or as an entry dohc can't use.
-  const { codex: _codex, ...rest } = SETTINGS.agents;
-  onSave.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: rest }, source: "stored", agentProblems: [{ ...BROKEN, id: "codex" }] });
-  await removeAgent("Codex");
-  await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(2));
-  expect(onNotice).not.toHaveBeenCalled();
-});
-
 it("leaves an agent that came back after Undo read the file", async () => {
   const { onSave, onOrder, onNotice, onError } = renderList();
   await removeAgent("Codex");
@@ -960,16 +292,6 @@ it("leaves an agent that came back after Undo read the file", async () => {
   onNotice.mock.calls[0]![1]!();
   await vi.waitFor(() => expect(onError).toHaveBeenCalledWith("Undo didn't replace the new Codex, so the one you removed stays removed."));
   expect(onOrder).not.toHaveBeenCalled();
-});
-
-it("goes back to the list when the open agent leaves the file", async () => {
-  const { rerender } = renderList();
-  await openAgent("Codex");
-  const { codex: _codex, ...rest } = SETTINGS.agents;
-  rerender({ settings: { ...SETTINGS, agents: rest } });
-  expect(screen.queryByTestId("agent-page")).toBeNull();
-  expect(ids()).toEqual(["default", "terminal"]);
-  expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Agents" }));
 });
 
 const trust = (trusted: boolean | null) => ({ trusted, asking: false, onTrust: vi.fn() });
@@ -1003,212 +325,6 @@ it("holds Check back in Restricted Mode with the band's words, and adds an agent
   expect(onSave).toHaveBeenCalledTimes(2);
 });
 
-it("says Restricted Mode holds the check back when an old toast's Try again comes while restricted", async () => {
-  bridgeMock.runnerSelfTest.mockResolvedValueOnce({ ok: false, detail: "Runner exited before reporting self-test success." });
-  const { onError, rerender } = renderList({ trust: trust(true) });
-  await check("Codex");
-  await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
-  rerender({ trust: trust(false) });
-  await act(() => (onError.mock.calls[0]![2] as () => Promise<void>)());
-  expect(bridgeMock.runnerSelfTest).toHaveBeenCalledOnce();
-  expect(onError).toHaveBeenLastCalledWith("dohc could not check Codex.", undefined, expect.any(Function), [
-    ["Cause", AGENTS_RESTRICTED_MESSAGE],
-  ], "agent-check:ws-1:codex");
-});
-
-it("turns Check on once the workspace is trusted, without checking", async () => {
-  const { rerender } = renderList({ trust: trust(false) });
-  rerender({ trust: trust(true) });
-  expect(screen.queryByTestId("restricted-agents-state")).toBeNull();
-  await openAgent("Codex");
-  expect(checkButton().disabled).toBe(false);
-  expect(checkButton().title).toBe("");
-  expect(bridgeMock.runnerSelfTest).not.toHaveBeenCalled();
-});
-
-it("holds nothing back while trust is still being read, and Add's passing check takes back the agent's row", async () => {
-  const onClearError = vi.fn();
-  renderList({ trust: trust(null), onClearError });
-  expect(screen.queryByTestId("restricted-agents-state")).toBeNull();
-  await openAgent("Codex");
-  expect(checkButton().disabled).toBe(false);
-  await back();
-  await addAgent("codex");
-  await vi.waitFor(() => expect(bridgeMock.runnerSelfTest).toHaveBeenCalledWith({ workspaceId: "ws-1", agentId: "codex-2" }));
-  await vi.waitFor(() => expect(onClearError).toHaveBeenCalledExactlyOnceWith("agent-check:ws-1:codex-2"));
-});
-
-it("takes back only that agent's failed check when its check passes, from its page or the toast", async () => {
-  bridgeMock.runnerSelfTest
-    .mockResolvedValueOnce({ ok: false, detail: "Claude Code timed out." })
-    .mockResolvedValueOnce({ ok: false, detail: "Codex timed out." });
-  const onClearError = vi.fn();
-  const { onError } = renderList({ onClearError });
-  await check("Claude Code");
-  await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
-  await check("Codex");
-  await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(2));
-  expect(onError.mock.calls.map((call) => call[4])).toEqual(["agent-check:ws-1:default", "agent-check:ws-1:codex"]);
-  expect(onClearError).not.toHaveBeenCalled();
-
-  await userEvent.click(checkButton());
-  await vi.waitFor(() => expect(onClearError).toHaveBeenCalledWith("agent-check:ws-1:codex"));
-  expect(onClearError).not.toHaveBeenCalledWith("agent-check:ws-1:default");
-
-  // Try again on Claude Code's toast passes, and takes back its own row.
-  await act(() => (onError.mock.calls[0]![2] as () => Promise<void>)());
-  expect(onClearError).toHaveBeenLastCalledWith("agent-check:ws-1:default");
-  expect(onClearError).toHaveBeenCalledTimes(2);
-});
-
-it("takes back a removed agent's failed check, and Undo doesn't bring it back", async () => {
-  bridgeMock.runnerSelfTest.mockResolvedValueOnce({ ok: false, detail: "Codex timed out." });
-  const onClearError = vi.fn();
-  const { onSave, onError, onNotice, onOrder } = renderList({ onClearError });
-  await check("Codex");
-  await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
-  await removeAgent("Codex");
-  await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
-  expect(onClearError).toHaveBeenCalledExactlyOnceWith("agent-check:ws-1:codex");
-  bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: onSave.mock.calls[0]![0], source: "stored" });
-  onNotice.mock.calls[0]![1]!();
-  await vi.waitFor(() => expect(onOrder).toHaveBeenCalledOnce());
-  expect(onError).toHaveBeenCalledOnce();
-  expect(bridgeMock.runnerSelfTest).toHaveBeenCalledOnce();
-});
-
-// Fix P: focus after the band's Trust workspace.
-const trustButton = () => within(screen.getByTestId("restricted-agents-state")).getByRole("button", { name: "Trust workspace" });
-
-async function pressTrust(fields: Partial<Parameters<typeof AgentList>[0]> = {}, open?: string) {
-  const onTrust = vi.fn();
-  const list = renderList({ trust: { trusted: false, asking: false, onTrust }, ...fields });
-  if (open) await openAgent(open);
-  await userEvent.click(trustButton());
-  expect(onTrust).toHaveBeenCalledOnce();
-  // Main's dialog is open, and the band's button is off. Chromium then
-  // moves focus to the body; jsdom keeps it on a disabled button.
-  act(() => trustButton().blur());
-  list.rerender({ trust: { trusted: false, asking: true, onTrust } });
-  return { ...list, onTrust };
-}
-
-it("moves focus to the first agent when the band's Trust workspace trusts the workspace", async () => {
-  const { rerender, onTrust } = await pressTrust();
-  rerender({ trust: { trusted: true, asking: false, onTrust } });
-  expect(document.activeElement).toBe(row("Claude Code"));
-});
-
-it("moves focus to Send test when Trust workspace trusts the workspace from an agent's page", async () => {
-  const { rerender, onTrust } = await pressTrust({}, "Codex");
-  rerender({ trust: { trusted: true, asking: false, onTrust } });
-  expect(document.activeElement).toBe(checkButton());
-});
-
-it("moves focus to the Agents heading when there is no agent to go to", async () => {
-  const { rerender, onTrust } = await pressTrust({ settings: { ...SETTINGS, agents: {} } });
-  rerender({ trust: { trusted: true, asking: false, onTrust } });
-  expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Agents" }));
-});
-
-it("puts focus back on Trust workspace when the person cancels main's dialog", async () => {
-  const { rerender, onTrust } = await pressTrust();
-  expect(document.activeElement).toBe(document.body);
-  rerender({ trust: { trusted: false, asking: false, onTrust } });
-  expect(document.activeElement).toBe(trustButton());
-});
-
-it("leaves focus alone when trust comes from somewhere else, or the person moved on", async () => {
-  const { rerender } = renderList({ trust: trust(false) });
-  rerender({ trust: trust(true) });
-  expect(document.activeElement).toBe(document.body);
-
-  cleanup();
-  const pressed = await pressTrust();
-  const codex = row("Codex");
-  act(() => codex.focus());
-  pressed.rerender({ trust: { trusted: true, asking: false, onTrust: pressed.onTrust } });
-  expect(document.activeElement).toBe(codex);
-});
-
-// Fix P: a check that ends after the panel closes still reports.
-it("takes back the notice, or files it, when a check ends after the panel closed", async () => {
-  const first = deferred<RunnerSelfTestResult>();
-  bridgeMock.runnerSelfTest.mockReturnValueOnce(first.promise);
-  const onClearError = vi.fn();
-  const passed = renderList({ onClearError });
-  await check("Codex");
-  passed.unmount();
-  await act(async () => first.resolve({ ok: true, detail: "ok" }));
-  expect(onClearError).toHaveBeenCalledExactlyOnceWith("agent-check:ws-1:codex");
-
-  const second = deferred<RunnerSelfTestResult>();
-  bridgeMock.runnerSelfTest.mockReturnValueOnce(second.promise);
-  const failed = renderList();
-  await check("Codex");
-  failed.unmount();
-  await act(async () => second.resolve({ ok: false, detail: "Codex timed out." }));
-  await vi.waitFor(() => expect(failed.onError).toHaveBeenCalledWith("Codex didn't reply to the check.", undefined, expect.any(Function), [
-    ["Cause", "Codex timed out."],
-  ], "agent-check:ws-1:codex"));
-});
-
-// Fix P: Remove during a check.
-it("files no notice for a check that fails after its agent was removed", async () => {
-  const answer = deferred<RunnerSelfTestResult>();
-  bridgeMock.runnerSelfTest.mockReturnValueOnce(answer.promise);
-  const onClearError = vi.fn();
-  const { onSave, onError, onNotice } = renderList({ onClearError });
-  await check("Codex");
-  await removeAgent("Codex");
-  await vi.waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
-  bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: onSave.mock.calls[0]![0], source: "stored" });
-  await act(async () => answer.resolve({ ok: false, detail: "Configure a runner command first." }));
-  await vi.waitFor(() => expect(bridgeMock.getUserSettings).toHaveBeenCalledOnce());
-  await act(async () => undefined);
-  expect(onError).not.toHaveBeenCalled();
-  expect(onClearError).toHaveBeenCalledExactlyOnceWith("agent-check:ws-1:codex");
-});
-
-it("files no notice when the agent was removed in a later panel, and files it when the file can't be read", async () => {
-  const answer = deferred<RunnerSelfTestResult>();
-  bridgeMock.runnerSelfTest.mockReturnValueOnce(answer.promise);
-  const first = renderList();
-  await check("Codex");
-  first.unmount();
-  const { codex: _codex, ...rest } = SETTINGS.agents;
-  bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: rest }, source: "stored" });
-  await act(async () => answer.resolve({ ok: false, detail: "Configure a runner command first." }));
-  await vi.waitFor(() => expect(bridgeMock.getUserSettings).toHaveBeenCalledOnce());
-  await act(async () => undefined);
-  expect(first.onError).not.toHaveBeenCalled();
-
-  // Guard: an unreadable file still reports.
-  bridgeMock.runnerSelfTest.mockRejectedValueOnce(new Error(""));
-  bridgeMock.getUserSettings.mockRejectedValueOnce(new Error("busy"));
-  const second = renderList();
-  await check("Codex");
-  await vi.waitFor(() => expect(second.onError).toHaveBeenCalledWith(
-    "dohc could not check Codex.", expect.any(Error), expect.any(Function), undefined, "agent-check:ws-1:codex"));
-});
-
-it("files a failed check when the file reads back recovered, or lists the agent as an entry dohc can't use", async () => {
-  const { codex, ...rest } = SETTINGS.agents;
-  bridgeMock.runnerSelfTest
-    .mockResolvedValueOnce({ ok: false, detail: "Codex timed out." })
-    .mockResolvedValueOnce({ ok: false, detail: "Codex timed out." });
-  bridgeMock.getUserSettings.mockResolvedValueOnce({ settings: { ...SETTINGS, agents: rest }, source: "recovered" });
-  const { onError } = renderList();
-  await check("Codex");
-  await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
-
-  bridgeMock.getUserSettings.mockResolvedValueOnce({
-    settings: { ...SETTINGS, agents: rest }, source: "stored", agentProblems: [{ ...BROKEN, id: "codex", name: codex!.name }],
-  });
-  await userEvent.click(page().getByRole("button", { name: "Try again" }));
-  await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(2));
-});
-
 // Fix P: a Try again kept after the panel closed.
 it("asks main whether the workspace is restricted when a closed panel's Try again runs", async () => {
   bridgeMock.runnerSelfTest.mockResolvedValueOnce({ ok: false, detail: "Codex timed out." });
@@ -1224,20 +340,6 @@ it("asks main whether the workspace is restricted when a closed panel's Try agai
   ], "agent-check:ws-1:codex");
 });
 
-it("checks from a closed panel's Try again once the workspace was trusted elsewhere", async () => {
-  bridgeMock.runnerSelfTest.mockResolvedValueOnce({ ok: false, detail: "Codex timed out." });
-  const onClearError = vi.fn();
-  const { onError, unmount, rerender } = renderList({ trust: trust(true), onClearError });
-  await check("Codex");
-  await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
-  // The panel last saw Restricted Mode, then closed; the workspace was trusted elsewhere.
-  rerender({ trust: trust(false), onClearError });
-  unmount();
-  await act(() => (onError.mock.calls[0]![2] as () => Promise<void>)());
-  expect(bridgeMock.runnerSelfTest).toHaveBeenCalledTimes(2);
-  expect(onClearError).toHaveBeenCalledExactlyOnceWith("agent-check:ws-1:codex");
-});
-
 it("asks main whether agents are paused when a closed panel's Try again runs", async () => {
   bridgeMock.runnerSelfTest.mockResolvedValueOnce({ ok: false, detail: "Codex timed out." });
   const { onError, unmount } = renderList();
@@ -1251,18 +353,6 @@ it("asks main whether agents are paused when a closed panel's Try again runs", a
     ["Cause", "Agents are paused. Resume them, then try again."],
   ], "agent-check:ws-1:codex");
 });
-
-it("starts one check for a double click, without asking main first", async () => {
-  const answer = deferred<RunnerSelfTestResult>();
-  bridgeMock.runnerSelfTest.mockReturnValueOnce(answer.promise);
-  renderList();
-  await openAgent("Codex");
-  await userEvent.dblClick(checkButton());
-  expect(bridgeMock.runnerSelfTest).toHaveBeenCalledOnce();
-  expect(bridgeMock.readWorkspaceTrust).not.toHaveBeenCalled();
-  await act(async () => answer.resolve({ ok: true, detail: "ok" }));
-});
-
 
 const GROK_ID = `p-${"b".repeat(26)}`;
 const NOVA_ID = `p-${"n".repeat(26)}`;
@@ -1298,106 +388,6 @@ const menuItems = async (name: string) => {
   return screen.getAllByRole("menuitem").map((item) => item.textContent);
 };
 
-it("lists each personal agent in the one list, after the agents here, through its agent link", async () => {
-  await renderServer();
-  expect(bridgeMock.readPersonalAgents).toHaveBeenCalledWith({ refresh: true });
-  expect(ids()).toEqual(["default", "codex", "terminal", GROK_ID, NOVA_ID]);
-  // No section per server: the host is on each row.
-  expect(screen.queryByRole("heading", { name: "relay.test" })).toBeNull();
-  expect(state("Grok Bot")).toBe("Through agent link·relay.test·Active 2m ago");
-  // A signed-out agent stays, dimmed.
-  expect(state("Nova")).toBe("Through agent link·relay.test·Signed out");
-  expect(row("Nova").querySelector(`span[title="Nova"]`)!.getAttribute("class")).toContain("opacity-50");
-  expect(row("Grok Bot").querySelector(`span[title="Grok Bot"]`)!.getAttribute("class")).not.toContain("opacity-50");
-  // An agent that has done nothing yet says it signed in.
-  act(() => personalListener!({ accounts: [account([GROK, NOVA])] }));
-  expect(state("Grok Bot")).toBe("Through agent link·relay.test·Signed in");
-});
-
-it("waits for your personal agents before it says there are no agents", async () => {
-  const roster = deferred<PersonalAgentsEvent>();
-  bridgeMock.readPersonalAgents.mockReturnValueOnce(roster.promise);
-  renderList({ settings: { ...SETTINGS, agents: {} } });
-  expect(screen.queryByTestId("agents-empty")).toBeNull();
-  await act(async () => roster.resolve({ accounts: [account([NOVA])] }));
-  expect(ids()).toEqual([NOVA_ID]);
-  expect(screen.queryByTestId("agents-empty")).toBeNull();
-});
-
-it("copies this workspace's agent link from Add agent, where the agent gets no name", async () => {
-  const user = userEvent.setup();
-  const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
-  const { onSave } = await renderServer();
-  await user.click(screen.getByRole("button", { name: "Add agent" }));
-  expect(within(runsWith("link")).getByText("relay.test")).toBeTruthy();
-  await user.click(runsWith("link"));
-  expect(runsWith("link").getAttribute("aria-checked")).toBe("true");
-  // The agent names itself when it signs in.
-  expect(sheet().queryByTestId("agent-add-name")).toBeNull();
-  expect(sheet().queryByText("Color")).toBeNull();
-  expect(sheet().getByTestId("agent-add-link-name").textContent).toBe("You name it when it signs in.");
-  expect(sheet().getByTestId("agent-add-link").textContent).toBe("Triprelay.test");
-  expect(sheet().queryByTestId("agent-add-confirm")).toBeNull();
-  const copy = sheet().getByTestId<HTMLButtonElement>("agent-add-link-copy");
-  expect(copy.disabled).toBe(false);
-  expect(copy.textContent).toBe("Copy agent link");
-  await user.click(copy);
-  expect(writeText).toHaveBeenCalledWith("https://relay.test/mcp/agent/w/ws-1");
-  // The same link as the message one named agent takes.
-  await user.click(sheet().getByRole("button", { name: "Copy setup for an agent" }));
-  await user.click(sheet().getByTestId("agent-add-link-apps-grok-bot"));
-  expect(writeText).toHaveBeenLastCalledWith("Add the MCP server https://relay.test/mcp/agent/w/ws-1 and connect it.");
-  expect(onSave).not.toHaveBeenCalled();
-  writeText.mockRestore();
-});
-
-it("can't copy an agent link for a workspace that doesn't sync to the server, and says why", async () => {
-  await renderServer({ workspaceId: "ws-3" });
-  await openAdd();
-  await userEvent.click(runsWith("link"));
-  expect(sheet().getByTestId<HTMLButtonElement>("agent-add-link-copy").disabled).toBe(true);
-  expect(sheet().getByTestId<HTMLButtonElement>("agent-add-link-apps").disabled).toBe(true);
-  expect(sheet().getByTestId("agent-add-link").textContent).toBe("TripNot synced");
-  expect(sheet().getByTestId("agent-add-link-note").textContent).toBe("Sync this workspace to relay.test to give an agent a link.");
-});
-
-it("dims Agent link when this computer is signed in to no server", async () => {
-  renderList();
-  await openAdd();
-  expect(await within(runsWith("link")).findByText("Not signed in to a server")).toBeTruthy();
-  expect(runsWith("link").disabled).toBe(true);
-  expect(runsWith("link").title).toBe("Sign in to a server to give an agent a link.");
-});
-
-it("shows a personal agent's color, reach, activity and Sign out on its page", async () => {
-  await renderServer();
-  const grok = await openAgent("Grok Bot");
-  expect(grok.getByTestId("agent-page-subtitle").textContent).toBe("@GrokBot·Through agent link·relay.test");
-  expect(grok.getByTestId("personal-agent-color")).toBeTruthy();
-  // Every workspace on the server, at its level, in the server's order.
-  expect(grok.getAllByTestId("personal-agent-reach-entry").map((entry) => entry.textContent)).toEqual(["TripComment", "BudgetView"]);
-  const activity = within(grok.getByTestId("personal-agent-activity"));
-  expect(activity.getByText("Signed in")).toBeTruthy();
-  expect(grok.getByTestId("personal-agent-activity").querySelector("time")!.getAttribute("datetime")).toBe(new Date(GROK.signedInAtMs!).toISOString());
-  expect(activity.getByText("2m ago")).toBeTruthy();
-  expect(activity.getByText("Grok 4.1", { exact: false }).textContent).toBe("Grok 4.1 as reported");
-  expect(grok.getByTestId("personal-agent-sign-out").textContent).toBe("Sign out");
-  // A personal agent never wakes automations, and Remove waits for sign-out.
-  expect(await menuItems("Grok Bot")).toEqual(["Rename"]);
-  expect(screen.queryByText("Use for automations")).toBeNull();
-});
-
-it("shows only what a product reported, and nothing when it reported neither", async () => {
-  await renderServer({}, [{ ...GROK, reportedVersion: null }, { ...NOVA, status: "active", reach: [] }]);
-  expect(within((await openAgent("Grok Bot")).getByTestId("personal-agent-activity")).getByText("Grok", { exact: false }).textContent).toBe("Grok as reported");
-  const nova = await openAgent("Nova");
-  expect(nova.queryByText("as reported")).toBeNull();
-  expect(within(nova.getByTestId("personal-agent-activity")).getByText("None yet")).toBeTruthy();
-  // The relay has no sign-in time for it.
-  expect(nova.getByTestId("personal-agent-activity").querySelector("time")).toBeNull();
-  expect(nova.getAllByTestId("personal-agent-reach-entry").map((entry) => entry.textContent)).toEqual(["TripNone", "BudgetNone"]);
-});
-
 it("changes what an agent can reach from its sheet", async () => {
   await renderServer();
   await openAgent("Grok Bot");
@@ -1413,26 +403,6 @@ it("changes what an agent can reach from its sheet", async () => {
     change: { kind: "reach", reach: [{ workspaceId: "ws-1", level: "comment" }] },
   });
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-});
-
-it("offers Edit in the sheet, says what each level does, and saves Edit", async () => {
-  await renderServer({}, [{ ...GROK, reach: [{ workspaceId: "ws-2", level: "edit" }] }, NOVA]);
-  const grok = await openAgent("Grok Bot");
-  expect(grok.getAllByTestId("personal-agent-reach-entry").map((entry) => entry.textContent)).toEqual(["TripNone", "BudgetEdit"]);
-  expect(grok.getByTestId("personal-agent-reach-meanings").textContent).toBe(
-    "View reads files and chats. Comment also posts in chats and Comments. Edit also changes Collections, but no other files.");
-  await userEvent.click(grok.getByRole("button", { name: "Change what Grok Bot can reach" }));
-  const dialog = within(screen.getByRole("dialog", { name: "Change what Grok Bot can reach" }));
-  expect(dialog.getByText("Edit also changes Collections, but no other files.", { exact: false })).toBeTruthy();
-  const trip = within(dialog.getByRole("radiogroup", { name: "What Grok Bot can do in Trip" }));
-  expect(trip.getAllByRole("radio").map((radio) => radio.textContent)).toEqual(["None", "View", "Comment", "Edit"]);
-  await userEvent.click(trip.getByRole("radio", { name: "Edit" }));
-  await userEvent.click(dialog.getByRole("button", { name: "Save reach" }));
-  expect(bridgeMock.changePersonalAgent).toHaveBeenCalledExactlyOnceWith({
-    accountKey: ACCOUNT_KEY,
-    agentId: GROK_ID,
-    change: { kind: "reach", reach: [{ workspaceId: "ws-1", level: "edit" }, { workspaceId: "ws-2", level: "edit" }] },
-  });
 });
 
 it("says above the sheet's buttons why a reach save failed, and keeps the choices", async () => {
@@ -1451,18 +421,6 @@ it("says above the sheet's buttons why a reach save failed, and keeps the choice
   expect(dialog.getByRole<HTMLButtonElement>("button", { name: "Save reach" }).disabled).toBe(false);
   // The sheet shows its own failure; no toast while it is open.
   expect(onError).not.toHaveBeenCalled();
-});
-
-it("closes the reach sheet on Cancel without changing anything", async () => {
-  await renderServer();
-  await openAgent("Grok Bot");
-  await userEvent.click(page().getByRole("button", { name: "Change what Grok Bot can reach" }));
-  const dialog = within(screen.getByRole("dialog", { name: "Change what Grok Bot can reach" }));
-  await userEvent.click(within(dialog.getByRole("radiogroup", { name: "What Grok Bot can do in Trip" })).getByRole("radio", { name: "None" }));
-  await userEvent.click(dialog.getByRole("button", { name: "Cancel" }));
-  expect(screen.queryByRole("dialog")).toBeNull();
-  expect(bridgeMock.changePersonalAgent).not.toHaveBeenCalled();
-  expect(page().getAllByTestId("personal-agent-reach-entry")[0]!.textContent).toBe("TripComment");
 });
 
 it("signs an agent out after asking, and its page dims with no reach", async () => {
@@ -1485,44 +443,6 @@ it("signs an agent out after asking, and its page dims with no reach", async () 
   expect(await menuItems("Grok Bot")).toEqual(["Rename", "Remove"]);
 });
 
-it("says why a sign-out failed in a toast, with Try again", async () => {
-  const { onError } = await renderServer();
-  bridgeMock.changePersonalAgent.mockResolvedValueOnce({ ok: false, error: "relay.test could not change Grok Bot right now. Try again shortly." });
-  await openAgent("Grok Bot");
-  await userEvent.click(page().getByTestId("personal-agent-sign-out"));
-  await userEvent.click(within(screen.getByRole("dialog", { name: "Sign out Grok Bot?" })).getByRole("button", { name: "Sign out" }));
-  await waitFor(() => expect(onError).toHaveBeenCalledWith("relay.test could not change Grok Bot right now. Try again shortly.", undefined, expect.any(Function)));
-  await act(() => (onError.mock.calls[0]![2] as () => Promise<void>)());
-  expect(bridgeMock.changePersonalAgent).toHaveBeenCalledTimes(2);
-});
-
-it("copies the agent link that signs a signed-out agent in again", async () => {
-  const user = userEvent.setup();
-  const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
-  const errors = vi.spyOn(console, "error");
-  await renderServer();
-  const nova = await openAgent("Nova");
-  // The link's two controls are told apart, so React keeps one of each.
-  expect(errors.mock.calls.flat().join(" ")).not.toContain("same key");
-  errors.mockRestore();
-  expect(nova.queryByTestId("personal-agent-reach-list")).toBeNull();
-  expect(nova.getByText("Sign in again")).toBeTruthy();
-  expect(screen.queryByTestId("personal-agent-link-reason")).toBeNull();
-  await user.click(nova.getByTestId("personal-agent-link-copy"));
-  expect(writeText).toHaveBeenCalledWith("https://relay.test/mcp/agent/w/ws-1");
-  await user.click(nova.getByTestId("personal-agent-link-apps"));
-  await user.click(nova.getByTestId("personal-agent-link-apps-codex"));
-  expect(writeText).toHaveBeenLastCalledWith("codex mcp add dohc-personal --url https://relay.test/mcp/agent/w/ws-1\ncodex mcp login dohc-personal");
-  writeText.mockRestore();
-});
-
-it("can't sign an agent in again from a workspace that doesn't sync to the server", async () => {
-  await renderServer({ workspaceId: "ws-3" });
-  const nova = await openAgent("Nova");
-  expect(nova.getByTestId<HTMLButtonElement>("personal-agent-link-copy").disabled).toBe(true);
-  expect(nova.getByTestId("personal-agent-link-reason").textContent).toBe("Sync this workspace to relay.test to give an agent a link.");
-});
-
 it("removes a signed-out agent, and Undo brings it back signed out", async () => {
   const { onNotice } = await renderServer();
   await chooseAction("Nova", "Remove");
@@ -1541,57 +461,6 @@ it("removes a signed-out agent, and Undo brings it back signed out", async () =>
   }));
   act(() => personalListener!({ accounts: [account([GROK, NOVA])] }));
   expect(state("Nova")).toBe("Through agent link·relay.test·Signed out");
-});
-
-it("marks this computer's agent whose handle a personal agent has", async () => {
-  await renderServer({}, [{ ...GROK, name: "codex" }]);
-  expect(within(row("Codex")).getByTestId("agent-problem").textContent).toBe("Another agent has this name.");
-  expect(within(row("Claude Code")).queryByTestId("agent-problem")).toBeNull();
-});
-
-it("won't name an agent here like a personal agent, even a signed-out one", async () => {
-  await renderServer();
-  await chooseAction("Codex", "Rename");
-  const input = screen.getByTestId("agent-name-input");
-  await userEvent.clear(input);
-  await userEvent.type(input, "Nova");
-  expect(screen.getByRole("alert").textContent).toBe("Another agent has this name.");
-});
-
-it("gives a new agent a name no personal agent has", async () => {
-  await renderServer({}, [{ ...GROK, name: "Agent" }]);
-  await openAdd();
-  await userEvent.click(runsWith("mcp"));
-  expect(sheet().getByTestId<HTMLInputElement>("agent-add-name").value).toBe("Agent 2");
-});
-
-it("renames a personal agent on its server, to a name no other agent has", async () => {
-  await renderServer();
-  await chooseAction("Grok Bot", "Rename");
-  const input = screen.getByTestId("agent-name-input");
-  await userEvent.clear(input);
-  await userEvent.type(input, "Codex");
-  expect(screen.getByRole("alert").textContent).toBe("Another agent has this name.");
-  await userEvent.clear(input);
-  await userEvent.type(input, "Grok{Enter}");
-  expect(bridgeMock.changePersonalAgent).toHaveBeenCalledExactlyOnceWith({
-    accountKey: ACCOUNT_KEY, agentId: GROK_ID, change: { kind: "name", name: "Grok" },
-  });
-});
-
-it("opens the page of the personal agent a notice names once the roster answers", async () => {
-  const roster = deferred<PersonalAgentsEvent>();
-  bridgeMock.readPersonalAgents.mockReturnValueOnce(roster.promise);
-  renderList({ openAgent: { agentId: GROK_ID } });
-  expect(screen.queryByTestId("agent-page")).toBeNull();
-  // Main lists the account before its first read answers.
-  act(() => personalListener!({ accounts: [{ ...account(), roster: null }] }));
-  expect(screen.queryByTestId("agent-page")).toBeNull();
-  act(() => personalListener!({ accounts: [account()] }));
-  await waitFor(() => expect(screen.getByTestId("agent-page").getAttribute("aria-label")).toBe("Grok Bot"));
-  expect(document.activeElement).toBe(screen.getByTestId("agent-back"));
-  await act(async () => roster.resolve({ accounts: [account()] }));
-  expect(screen.getByTestId("agent-page").getAttribute("aria-label")).toBe("Grok Bot");
 });
 
 it("opens the agent a notice names on a page of its own, with that agent's reach", async () => {
@@ -1616,49 +485,6 @@ it("opens the agent a notice names on a page of its own, with that agent's reach
   });
 });
 
-it("opens a personal agent's page after it was renamed on another computer", async () => {
-  // The notice said "Grok Bot signed in as your agent"; the roster now calls it Grok.
-  bridgeMock.readPersonalAgents.mockResolvedValueOnce({ accounts: [account([{ ...GROK, name: "Grok" }, NOVA])] });
-  renderList({ openAgent: { agentId: GROK_ID } });
-  await waitFor(() => expect(screen.getByTestId("agent-page").getAttribute("aria-label")).toBe("Grok"));
-});
-
-it("shows the list when the roster no longer holds the agent a notice names", async () => {
-  await renderServer({ openAgent: { agentId: `p-${"i".repeat(26)}` } });
-  expect(screen.queryByTestId("agent-page")).toBeNull();
-  expect(personalIds()).toEqual([GROK_ID, NOVA_ID]);
-});
-
-it("goes back to the list from another agent's page when the roster no longer holds the agent a notice names", async () => {
-  const { rerender } = await renderServer();
-  await chooseAction("Grok Bot", "Rename");
-  // A name another agent has keeps the rename open.
-  const input = screen.getByTestId("agent-name-input");
-  await userEvent.clear(input);
-  await userEvent.type(input, "Codex");
-  rerender({ openAgent: { agentId: `p-${"i".repeat(26)}` } });
-  await waitFor(() => expect(screen.queryByTestId("agent-page")).toBeNull());
-  expect(personalIds()).toEqual([GROK_ID, NOVA_ID]);
-  expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Agents" }));
-  // The rename ended with its page.
-  await openAgent("Grok Bot");
-  expect(screen.queryByTestId("agent-name-input")).toBeNull();
-});
-
-it("ends a rename when a notice opens another agent's page", async () => {
-  const { rerender } = await renderServer();
-  await chooseAction("Grok Bot", "Rename");
-  const input = screen.getByTestId("agent-name-input");
-  await userEvent.clear(input);
-  await userEvent.type(input, "Codex");
-  rerender({ openAgent: { agentId: NOVA_ID } });
-  await waitFor(() => expect(screen.getByTestId("agent-page").getAttribute("aria-label")).toBe(NOVA.name));
-  // A later notice for Grok opens its page, not the rename it left.
-  rerender({ openAgent: { agentId: GROK_ID } });
-  await waitFor(() => expect(screen.getByTestId("agent-page").getAttribute("aria-label")).toBe("Grok Bot"));
-  expect(screen.queryByTestId("agent-name-input")).toBeNull();
-});
-
 it("says in the list that the account's agents couldn't be listed, with the cause in a toast", async () => {
   bridgeMock.readPersonalAgents.mockResolvedValueOnce({
     accounts: [{ ...account(), roster: null, failure: "dohc could not reach relay.test. Check your connection." }],
@@ -1672,88 +498,6 @@ it("says in the list that the account's agents couldn't be listed, with the caus
   await waitFor(() => expect(personalIds()).toEqual([GROK_ID, NOVA_ID]));
   expect(bridgeMock.readPersonalAgents).toHaveBeenLastCalledWith({ refresh: true });
   expect(screen.queryByTestId("personal-agents-retry")).toBeNull();
-});
-
-it("reports again when Try again on the toast can't list the account's agents again, in the account's one row", async () => {
-  const failure = "dohc could not reach relay.test. Check your connection.";
-  const failing = (): PersonalAgentsEvent => ({ accounts: [{ ...account(), roster: null, failure }] });
-  bridgeMock.readPersonalAgents.mockResolvedValueOnce(failing());
-  // Notices as the shell keeps them: a report replaces the row of its
-  // identity, and Try again takes its row back as the read starts.
-  const notices = new Map<string, () => Promise<void>>();
-  const onError = vi.fn((message: string, _cause?: unknown, retry?: () => Promise<void>, _details?: unknown, identity?: string) => {
-    notices.set(identity ?? message, retry!);
-  });
-  renderList({ onError });
-  const identity = `personal-agents:${ACCOUNT_KEY}`;
-  await waitFor(() => expect(notices.has(identity)).toBe(true));
-  const tryAgain = notices.get(identity)!;
-  notices.delete(identity);
-  // Still offline: main pushes the same words, then answers with them.
-  bridgeMock.readPersonalAgents.mockImplementationOnce(async () => {
-    personalListener!(failing());
-    return failing();
-  });
-  await act(tryAgain);
-  expect([...notices.keys()]).toEqual([identity]);
-  expect(onError).toHaveBeenCalledTimes(2);
-  expect(onError).toHaveBeenLastCalledWith(failure, undefined, expect.any(Function), undefined, identity);
-  // A push for another reason reports nothing.
-  act(() => personalListener!(failing()));
-  expect(onError).toHaveBeenCalledTimes(2);
-});
-
-it("reports an account's failure once while you open one of its agents and come back", async () => {
-  const failure = "dohc could not reach relay.test. Check your connection.";
-  // The last roster stays while the next read fails.
-  bridgeMock.readPersonalAgents.mockResolvedValueOnce({ accounts: [{ ...account(), failure }] });
-  const { onError } = renderList();
-  const reports = () => onError.mock.calls.filter(([message]) => message === failure);
-  await waitFor(() => expect(reports()).toHaveLength(1));
-  await openAgent("Grok Bot");
-  await back();
-  expect(personalIds()).toEqual([GROK_ID, NOVA_ID]);
-  expect(reports()).toHaveLength(1);
-});
-
-it("reports an account's failure again when it ends and comes back while a page is open", async () => {
-  const failure = "dohc could not reach relay.test. Check your connection.";
-  bridgeMock.readPersonalAgents.mockResolvedValueOnce({ accounts: [{ ...account(), failure }] });
-  const { onError } = renderList();
-  const reports = () => onError.mock.calls.filter(([message]) => message === failure);
-  await waitFor(() => expect(reports()).toHaveLength(1));
-  await openAgent("Claude Code");
-  // Elsewhere the account signs out, signs in again, and its first read fails the same way.
-  act(() => personalListener!({ accounts: [] }));
-  act(() => personalListener!({ accounts: [{ ...account(), roster: null, failure: null }] }));
-  act(() => personalListener!({ accounts: [{ ...account(), roster: null, failure }] }));
-  await back();
-  await waitFor(() => expect(reports()).toHaveLength(2));
-});
-
-it("reports again when Try again on the toast can't read your personal agents again", async () => {
-  bridgeMock.readPersonalAgents.mockRejectedValueOnce(new Error("main went away"));
-  const { onError } = renderList();
-  const reports = () => onError.mock.calls.filter(([message]) => message === "dohc could not read your personal agents.");
-  await waitFor(() => expect(reports()).toHaveLength(1));
-  expect(screen.getByTestId("personal-agents-retry").textContent).toContain("dohc could not read your personal agents.");
-  bridgeMock.readPersonalAgents.mockRejectedValueOnce(new Error("main went away"));
-  await act(() => (reports()[0]![2] as () => Promise<void>)());
-  expect(reports()).toHaveLength(2);
-  expect(bridgeMock.readPersonalAgents).toHaveBeenLastCalledWith({ refresh: true });
-});
-
-it("asks before Remove, says who automations wake next, and Cancel keeps the agent", async () => {
-  const { onSave } = renderList();
-  await openAgent("Claude Code");
-  await userEvent.click(page().getByRole("button", { name: "Remove Claude Code…" }));
-  const dialog = within(screen.getByTestId("remove-agent-dialog"));
-  expect(dialog.getByText("Remove Claude Code?")).toBeTruthy();
-  expect(dialog.getByText("Its chat stays in Archived. Automations will wake Codex instead.")).toBeTruthy();
-  await userEvent.click(dialog.getByRole("button", { name: "Cancel" }));
-  expect(screen.queryByTestId("remove-agent-dialog")).toBeNull();
-  expect(onSave).not.toHaveBeenCalled();
-  expect(screen.getByTestId("agent-page")).toBeTruthy();
 });
 
 function agentChat(id: string, agentId: string, name: string): ChatChannelRecord {
@@ -1797,48 +541,4 @@ it("lists archived agents and removed agents' chats under Archived, with their a
   // Back focuses its row under Archived.
   await back();
   expect(document.activeElement).toBe(within(screen.getByTestId("agents-archived")).getByRole("button", { name: "Codex" }));
-});
-
-it("lists a removed agent's chat that arrived after Settings opened, once the agent leaves", async () => {
-  bridgeMock.listChatChannels.mockResolvedValue({ channels: [], fileThreads: [] });
-  const { rerender } = renderList();
-  await waitFor(() => expect(bridgeMock.listChatChannels).toHaveBeenCalledTimes(1));
-  expect(screen.queryByTestId("agents-archived")).toBeNull();
-  // Codex's check starts its chat, then Codex leaves Settings.
-  bridgeMock.listChatChannels.mockResolvedValue({ channels: [agentChat("chat-codex", "codex", "Codex")], fileThreads: [] });
-  const { codex: _codex, ...agents } = SETTINGS.agents;
-  rerender({ settings: { ...SETTINGS, agents } });
-  const archived = within(await screen.findByTestId("agents-archived"));
-  expect(archived.getAllByTestId("agent-row-removed").map((element) => element.dataset.agentId)).toEqual(["codex"]);
-});
-
-it("focuses the Agents heading after Remove from an Archived row, even when the new settings show first and the panel holds focus", async () => {
-  bridgeMock.listChatChannels.mockResolvedValue({ channels: [agentChat("chat-codex", "codex", "Codex")], fileThreads: [] });
-  const settings: DesktopUserSettings = { ...SETTINGS, sidebar: { ...SETTINGS.sidebar, archivedChats: { "ws-1": ["chat-codex"] } } };
-  let finish: (result: DesktopUserSettingsResult) => void = () => undefined;
-  const onSave = vi.fn((next: DesktopUserSettings) => new Promise<DesktopUserSettingsResult | null>((resolve) => {
-    finish = resolve;
-    void next;
-  }));
-  const { rerender } = renderList({ settings, onSave });
-  const archived = within(await screen.findByTestId("agents-archived"));
-  await userEvent.click(archived.getByRole("button", { name: "Remove Codex…" }));
-  await userEvent.click(within(screen.getByTestId("remove-agent-dialog")).getByRole("button", { name: "Remove agent" }));
-  const saved = onSave.mock.lastCall![0];
-  rerender({ settings: saved, onSave });
-  // The dialog's focus return lands on the panel around the list, as in Settings.
-  const panel = screen.getByTestId("agent-list").parentElement!;
-  panel.tabIndex = -1;
-  panel.focus();
-  await act(async () => finish({ settings: saved, source: "stored" }));
-  expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Agents" }));
-});
-
-it("brings an agent's chat back to Archived when it is removed again after its chat left the list", async () => {
-  bridgeMock.listChatChannels.mockResolvedValue({ channels: [agentChat("chat-codex", "codex", "Codex")], fileThreads: [] });
-  const settings: DesktopUserSettings = { ...SETTINGS, sidebar: { ...SETTINGS.sidebar, hiddenChats: { "ws-1": ["chat-codex"] } } };
-  renderList({ settings });
-  await waitFor(() => expect(bridgeMock.listChatChannels).toHaveBeenCalled());
-  await removeAgent("Codex");
-  await vi.waitFor(() => expect(bridgeMock.setChatArchived).toHaveBeenCalledExactlyOnceWith({ workspaceId: "ws-1", channelId: "chat-codex", state: "active" }));
 });

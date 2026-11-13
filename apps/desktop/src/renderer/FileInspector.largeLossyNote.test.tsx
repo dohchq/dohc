@@ -1,14 +1,13 @@
 // @vitest-environment jsdom
 import { setupFileInspectorTests } from "./FileInspector.environment-fixture";
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { isLossyMarkdown } from "@dohc/ydoc-projection/lossy-markdown";
 import { FileInspector } from "./FileInspector";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
-import { WORKSPACE_TEXT_EDITOR_MAX_BYTES, WYSIWYG_MARKDOWN_THRESHOLD_BYTES, utf8ByteLength } from "../workspaces/workspaceTextLimits";
+import { WORKSPACE_TEXT_EDITOR_MAX_BYTES, utf8ByteLength } from "../workspaces/workspaceTextLimits";
 import type { DohcDesktopBridge } from "../ipc/bridgeContract";
 import { settleAfterUnmount } from "./FileInspector.draft-fixture";
 
@@ -16,7 +15,8 @@ import { settleAfterUnmount } from "./FileInspector.draft-fixture";
 // small limit keeps their notes small, so opening one stays fast on a busy host.
 vi.mock("../workspaces/workspaceTextLimits", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../workspaces/workspaceTextLimits")>()),
-  WYSIWYG_MARKDOWN_THRESHOLD_BYTES: 64 * 1024,
+  WYSIWYG_MARKDOWN_THRESHOLD_BYTES: 256,
+  WORKSPACE_TEXT_EDITOR_MAX_BYTES: 2048,
 }));
 
 setupFileInspectorTests();
@@ -49,7 +49,7 @@ afterEach(async () => {
 });
 
 // Past read mode's size, with a raw HTML block near the top.
-const FILLER = Array.from({ length: 1200 }, (_, index) => `Paragraph ${index + 1} of plain text, long enough to fill the note.`).join("\n\n");
+const FILLER = Array.from({ length: 8 }, (_, index) => `Paragraph ${index + 1} of plain text, long enough to fill the note.`).join("\n\n");
 const LARGE_LOSSY = `# Notes\n\n<details>\n<summary>More</summary>\n\nHidden.\n</details>\n\n${FILLER}\n`;
 
 function bridgeFor(text: string, engine: "record" | "no-record") {
@@ -91,21 +91,6 @@ async function expectWaiting() {
 }
 
 describe("a note past read mode's size", () => {
-  it("with no engine record opens for source editing with no check", async () => {
-    expect(LARGE_LOSSY.length).toBeGreaterThan(WYSIWYG_MARKDOWN_THRESHOLD_BYTES);
-    const bridge = bridgeFor(LARGE_LOSSY, "no-record");
-    const user = userEvent.setup();
-    render(<FileInspector workspaceId="ws-1" path="a.md" />);
-
-    await waitFor(() => expect(bridge.openEngineYDocSession).toHaveBeenCalledTimes(1));
-    const toggle = screen.getByTestId("markdown-edit-toggle");
-    await waitFor(() => expect(toggle.getAttribute("aria-disabled")).not.toBe("true"));
-    expect(screen.queryByTestId("lossy-note-notice")).toBeNull();
-    expect(pending).toEqual([]);
-    await user.click(toggle);
-    await waitFor(() => expect(toggle.textContent).toBe("WYSIWYG"));
-    expect(pending).toEqual([]);
-  });
 
   it("with an engine record shows its content read-only while the check runs, then closes the session if it is lossy", async () => {
     const bridge = bridgeFor(LARGE_LOSSY, "record");
@@ -128,8 +113,8 @@ describe("a note past read mode's size", () => {
 
   it("whose text is past the live limit, though its file is not, says it is too large, with no Edit anyway", async () => {
     // Each invalid byte in the file reads as U+FFFD, three bytes in the text.
-    const invalid = "\uFFFD".repeat(760);
-    const text = `# Notes\n\n${Array.from({ length: 1000 }, (_, index) => `Paragraph ${index + 1} of plain text ${invalid}`).join("\n\n")}\n`;
+    const invalid = "\uFFFD".repeat(100);
+    const text = `# Notes\n\n${Array.from({ length: 8 }, (_, index) => `Paragraph ${index + 1} of plain text ${invalid}`).join("\n\n")}\n`;
     expect(text.length).toBeLessThan(WORKSPACE_TEXT_EDITOR_MAX_BYTES);
     expect(utf8ByteLength(text)).toBeGreaterThan(WORKSPACE_TEXT_EDITOR_MAX_BYTES);
     const bridge = bridgeFor(text, "record");

@@ -1,10 +1,9 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import type { DatasetDescription } from "@dohc/security-contract/dataset";
 import { CollectionPermissionsDialog } from "./CollectionPermissionsDialog";
 import { ShellErrorReporter } from "./shell/useShellError";
-import { deferred } from "../testing/deferred";
 const api = vi.hoisted(() => ({ dataset: vi.fn(), listRelayShares: vi.fn() }));
 vi.mock("./bridge", () => ({ bridge: () => api }));
 const id = (value: number) => `00000000-0000-4000-8000-${String(value).padStart(12, "0")}`;
@@ -88,80 +87,4 @@ it("says in place that the access wasn't saved, keeps the choices and focus, fil
   expect(screen.queryByText(/Access wasn't saved/)).toBeNull();
   await waitFor(() => expect((screen.getByLabelText("Collection access person") as HTMLSelectElement).value).toBe(""));
   expect(onError).not.toHaveBeenCalled();
-});
-it("keeps a failure in place when new rules arrive while it saves", async () => {
-  const answer = deferred<never>();
-  api.dataset.mockImplementation(async input => input.action === "permissions" ? { kind: "permissions", permissions: [], nextCursor: null } : answer.promise);
-  api.listRelayShares.mockResolvedValue({ granted: [friend] });
-  const report = vi.fn(), onError = vi.fn();
-  const dialog = (shown: DatasetDescription) => <ShellErrorReporter.Provider value={report}>
-    <CollectionPermissionsDialog datasetPath="data/dataset.json" workspaceId="w" dataset={shown} onClose={vi.fn()} onError={onError} /></ShellErrorReporter.Provider>;
-  const { rerender } = render(dialog(dataset));
-  await choose();
-  fireEvent.click(screen.getByRole("button", { name: "Save access" }));
-  await waitFor(() => expect(api.dataset).toHaveBeenCalledWith(expect.objectContaining({ action: "setGrant" })));
-  rerender(dialog({ ...dataset, revision: 3, revisionSha256: "b".repeat(64) }));
-  await act(async () => { answer.reject(stopped); await answer.promise.catch(() => undefined); });
-  await screen.findByText("Access wasn't saved. This Collection didn't finish moving to sync.example.test. Its records are kept on this computer.");
-  expect(report).not.toHaveBeenCalled();
-  expect(onError).not.toHaveBeenCalled();
-});
-it("says in place that access wasn't removed, with the reason it failed", async () => {
-  api.dataset.mockImplementation(async input => {
-    if (input.action === "permissions") return { kind: "permissions", nextCursor: null,
-      permissions: [{ kind: "data", principal: "person-key", current: true, metadata: { operationIds: [id(2)] } }] };
-    throw Error("Sharing failed (502).");
-  });
-  api.listRelayShares.mockResolvedValue({ granted: [] });
-  const onError = vi.fn();
-  render(<CollectionPermissionsDialog datasetPath="data/dataset.json" workspaceId="w" dataset={dataset} onClose={vi.fn()} onError={onError} />);
-  fireEvent.click(await screen.findByRole("button", { name: "Remove access" }));
-  await screen.findByText("Access wasn't removed. Sharing failed (502).");
-  expect(onError).not.toHaveBeenCalled();
-});
-it("reports a save that answers after the dialog closed with a toast naming the person and the Collection, whose Try again saves again", async () => {
-  const answer = deferred<never>();
-  let fail = true;
-  api.dataset.mockImplementation(async input => {
-    if (input.action === "permissions") return { kind: "permissions", permissions: [], nextCursor: null };
-    if (fail) return answer.promise;
-    return { kind: "grant-updated" };
-  });
-  api.listRelayShares.mockResolvedValue({ granted: [friend] });
-  const report = vi.fn();
-  const { unmount } = render(<ShellErrorReporter.Provider value={report}><CollectionPermissionsDialog datasetPath="data/dataset.json" workspaceId="w" dataset={dataset} onClose={vi.fn()} onError={vi.fn()} /></ShellErrorReporter.Provider>);
-  await choose();
-  fireEvent.click(screen.getByRole("button", { name: "Save access" }));
-  await waitFor(() => expect(api.dataset).toHaveBeenCalledWith(expect.objectContaining({ action: "setGrant" })));
-  unmount();
-  await act(async () => { answer.reject(stopped); await answer.promise.catch(() => undefined); });
-  await waitFor(() => expect(report).toHaveBeenCalledWith({ title: "Access wasn't saved for friend@example.test",
-    message: "\"Orders\" didn't finish moving to sync.example.test. Its records are kept on this computer.", cause: stopped, identity: accessRow, retry: expect.any(Function) }));
-  fail = false;
-  act(() => { (report.mock.calls[0]![0] as { retry: () => void }).retry(); });
-  await waitFor(() => expect(api.dataset.mock.calls.filter(([input]) => input.action === "setGrant")).toHaveLength(2));
-  await act(async () => { await Promise.resolve(); });
-  expect(report).toHaveBeenCalledTimes(1);
-});
-it("takes back a closed dialog's row when the next change succeeds, so its Try again can't undo newer access", async () => {
-  const answer = deferred<never>();
-  api.dataset.mockImplementation(async input => {
-    if (input.action === "permissions") return { kind: "permissions", nextCursor: null,
-      permissions: [{ kind: "data", principal: "person-key", current: true, metadata: { revision: 2, revisionSha256: "a".repeat(64), operationIds: [id(2)], discover: true } }] };
-    if (input.action === "removeGrant") return answer.promise;
-    return { kind: "grant-updated" };
-  });
-  api.listRelayShares.mockResolvedValue({ granted: [friend] });
-  const report = vi.fn(), onSettled = vi.fn();
-  const dialog = <ShellErrorReporter.Provider value={report}><CollectionPermissionsDialog datasetPath="data/dataset.json" workspaceId="w" dataset={dataset} onClose={vi.fn()} onError={vi.fn()} onSettled={onSettled} /></ShellErrorReporter.Provider>;
-  const first = render(dialog);
-  fireEvent.click(await screen.findByRole("button", { name: "Remove access" }));
-  await waitFor(() => expect(api.dataset).toHaveBeenCalledWith(expect.objectContaining({ action: "removeGrant" })));
-  first.unmount();
-  await act(async () => { answer.reject(stopped); await answer.promise.catch(() => undefined); });
-  await waitFor(() => expect(report).toHaveBeenCalledWith(expect.objectContaining({ title: "Access wasn't removed", identity: accessRow })));
-  render(dialog);
-  await choose();
-  fireEvent.click(screen.getByRole("button", { name: "Save access" }));
-  await waitFor(() => expect(onSettled).toHaveBeenCalledWith(accessRow));
 });

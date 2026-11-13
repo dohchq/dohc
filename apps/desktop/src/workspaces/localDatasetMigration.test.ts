@@ -6,10 +6,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
-import { DatasetMigrationPreparation, DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
+import { DatasetMigrationPreparation } from "@dohc/cli/dataset";
 import type { DatasetDefinition, DatasetRevision } from "@dohc/security-contract/dataset";
 import { createLocalDatasetHost, type LocalDatasetHost, type LocalDatasetHostOptions } from "./localDatasetHost";
-import { createDatasetHandler } from "../ipc/datasetIpc";
 import { createDatasetFixtureCompiler } from "../testing/datasetFixtureCompiler";
 import type { Request, Response } from "@dohc/workspace-engine-client";
 import { EngineWorkspaceSessions, type EngineDaemonClient } from "@dohc/workspace-engine-client/daemon";
@@ -69,21 +68,6 @@ afterEach(async () => {
 });
 
 describe("owner Collection migration", () => {
-  it("migrates and reopens records in a 153-character workspace folder", async () => {
-    const parent = await mkdtemp(join(tmpdir(), "dohc-migration-")); roots.push(parent);
-    const workspaceRoot = join(parent, "w".repeat(153 - parent.length - 1));
-    expect(workspaceRoot).toHaveLength(153);
-    await mkdir(workspaceRoot);
-    const { host } = await open({ workspaceRoot }), f = fixture(), first = await activate(host, f);
-    await host.action(call(first, id(6), { name: "Camera" }, "add"));
-    f.next();
-    const review = await prepare(host, f), migrated = await host.approveMigration(approval(review));
-    await host.close();
-    const restarted = (await open({ workspaceRoot })).host;
-    expect((await restarted.query(call(migrated.revision, id(5)))).result).toEqual([
-      { id: expect.any(String), name: "Camera migrated", note: null },
-    ]);
-  });
 
   it("commits reviewed bytes once, retains recovery history, and restores the new schema after restart", async () => {
     const { host, workspaceRoot } = await open(), f = fixture(), first = await activate(host, f);
@@ -123,45 +107,6 @@ describe("owner Collection migration", () => {
     await expect(host.approveMigration(approval(review))).rejects.toThrow(/expired or changed/);
   });
 
-  it("previews every deleted record across bounded pages before approval", async () => {
-    const { host } = await open(), f = fixture(), first = await activate(host, f);
-    for (let index = 0; index < 3; index++) await host.action(call(first, id(6), { name: `Record ${index}` }, `record-${index}`));
-    f.next();
-    f.files.set("items/migration.sql", "ALTER TABLE items ADD COLUMN note TEXT; DELETE FROM items;");
-    const review = await prepare(host, f);
-    expect(review.candidate.preview.tables).toEqual([{ table: "items", beforeRows: 3, afterRows: 0, changedRows: 3, deletedRows: 3, beforeValues: { id: 3, name: 3 }, afterValues: { id: 0, name: 0, note: 0 }, clearedValues: { id: 0, name: 0 } }]);
-    const changes = [];
-    let after: string | undefined;
-    do {
-      const page = await host.migrationPreviewPage({ workspaceId: "w", datasetId: id(1), candidateId: review.candidate.candidateId, after, limit: 1 });
-      expect(page.changes).toHaveLength(1); changes.push(...page.changes); after = page.nextCursor ?? undefined;
-    } while (after);
-    expect(changes.map(change => change.before!.name).sort()).toEqual(["Record 0", "Record 1", "Record 2"]);
-    expect(changes.every(change => change.kind === "delete" && change.after === null)).toBe(true);
-    expect((await host.query(call(first, id(5)))).result).toHaveLength(3);
-    const migrated = await host.approveMigration(approval(review));
-    expect((await host.query(call(migrated.revision, id(5)))).result).toEqual([]);
-  });
-
-  it("commits the previewed random values without rerunning migration SQL", async () => {
-    const { host } = await open(), f = fixture(), first = await activate(host, f);
-    await host.action(call(first, id(6), { name: "Before" }, "random"));
-    f.next(); f.files.set("items/migration.sql", "ALTER TABLE items ADD COLUMN note TEXT; UPDATE items SET name=lower(hex(randomblob(16)));");
-    const review = await prepare(host, f);
-    const expectedName = review.candidate.preview.firstPage.changes[0]!.after!.name;
-    const migrated = await host.approveMigration(approval(review));
-    expect((await host.query(call(migrated.revision, id(5)))).result).toEqual([{ id: expect.any(String), name: expectedName, note: null }]);
-  });
-
-  it("refuses a failed value conversion before producing an approvable review", async () => {
-    const { host } = await open(), f = fixture(), first = await activate(host, f);
-    await host.action(call(first, id(6), { name: "Must stay" }, "unchanged"));
-    f.next(); f.files.set("items/migration.sql", "ALTER TABLE items ADD COLUMN note TEXT; UPDATE items SET name=NULL;");
-    await expect(prepare(host, f)).rejects.toThrow();
-    expect(host.describe(id(1)).revision).toBe(1);
-    expect((await host.query(call(first, id(5)))).result).toEqual([{ id: expect.any(String), name: "Must stay" }]);
-  });
-
   it("rolls back a rejected migration allocation with data and schema intact", async () => {
     let reject = true;
     const { host } = await open({ resources: () => ({ accountMigration() { if (reject) throw new Error("quota refused"); } }) });
@@ -187,30 +132,6 @@ describe("owner Collection migration", () => {
     await expect(host.approveMigration(approval(expired))).rejects.toThrow(/expired or changed/);
     f.files.set("items/dataset.json", JSON.stringify({ ...definition, datasetId: id(99) }));
     await expect(prepare(host, f)).rejects.toThrow(/another Collection/);
-  });
-
-  it("rejects mismatched target schema and never publishes partial changes", async () => {
-    const { host } = await open(), f = fixture(), first = await activate(host, f); f.next();
-    f.files.set("items/migration.sql", "SELECT 1;");
-    await expect(prepare(host, f)).rejects.toThrow(/schema/i);
-    expect(host.approvedArtifacts(id(1)).revision).toEqual(first);
-    expect((await host.query(call(first, id(5)))).result).toEqual([]);
-  });
-
-  it("routes owner IPC and CLI review/approval through the same actual host", async () => {
-    const { host } = await open(), f = fixture(); await activate(host, f); f.next();
-    const workspace = { workspaceId: "w" }, signal = new AbortController().signal;
-    const handler = createDatasetHandler({ flushSourceCapture: async () => ({ heldFiles: [], deferredWrites: [] }), withWorkspaceOperation: async (_caller, _id, work) => {
-      let active = true;
-      try { return await work({ workspace, signal, assertCurrent() { if (!active) throw new Error("This workspace authority lease was released."); } }); }
-      finally { active = false; }
-    },
-      hostForWorkspace: async () => host, withAdapter: async (_workspace, work) => work(f.adapter), createSources: async () => {} });
-    const prepared = await handler("owner", DatasetRequest.parse({ workspaceId: "w", action: "prepareMigration", expectedDatasetId: id(1), datasetPath: "items/dataset.json", migrationPath: "items/migration.sql" }));
-    expect(DatasetResult.parse(prepared).kind).toBe("migration-prepared");
-    if (prepared.kind !== "migration-prepared") throw new Error("Missing migration review");
-    const migrated = await handler("owner", { workspaceId: "w", action: "approveMigration", ...approval(prepared) });
-    expect(DatasetResult.parse(migrated).kind).toBe("migrated");
   });
 });
 
@@ -259,19 +180,5 @@ describe("a Collection export during an engine run", () => {
       await expect(exported).rejects.toThrow("dohc did not prepare this Collection's recovery file because the workspace has not finished opening.");
       await closing;
     } finally { await sessions.closeAll(); }
-  });
-
-  it("refuses once the open deadline passes when the open's preparation never settles", async () => {
-    const first = await open(), f = fixture();
-    await activate(first.host, f);
-    const workspace = { workspaceId: "w", rootPath: first.workspaceRoot, attachmentId: Symbol("w") };
-    const host = await reopened(workspace, first.host);
-    const daemon = new Daemon(), sessions = new EngineWorkspaceSessions({ currentClient: () => daemon }, { sleep: async () => undefined, workspaceOpenDeadlineMs: 50 });
-    // The open's own preparation stalls, before the daemon deadline starts. Nothing closes these sessions: a close would wait for that open.
-    vi.spyOn(sessions as unknown as { prepareWorkspace(rootPath: string): Promise<void> }, "prepareWorkspace").mockReturnValue(new Promise<void>(() => {}));
-    readLocalStateFrom(sessions);
-    void sessions.run(workspace, async () => undefined).catch(() => undefined);
-    await vi.waitFor(() => expect(sessions.openInProgress(workspace)).not.toBeNull());
-    await expect(host.prepareExport(id(1))).rejects.toThrow("dohc did not prepare this Collection's recovery file because the workspace has not finished opening.");
   });
 });

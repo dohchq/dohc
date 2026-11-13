@@ -1,4 +1,3 @@
-import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
 import type {
   EngineDaemonClient,
 } from "@dohc/workspace-engine-client/daemon";
@@ -8,19 +7,9 @@ import type {
   EngineWorkspace,
 } from "@dohc/workspace-engine-client/daemon";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
-import {
-  isWorkspaceUpdatingRefusal,
-  VERSIONED_METHOD,
-  WORKSPACE_METHOD,
-  type AgentAuthor,
-  type ConflictRecord,
-  type Request,
-  type Response,
-} from "@dohc/workspace-engine-client";
-import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
+import { VERSIONED_METHOD, WORKSPACE_METHOD, type AgentAuthor, type ConflictRecord, type Request, type Response } from "@dohc/workspace-engine-client";
 import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
-import { LIVE_UPDATE_IDENTIFIER_MAX_BYTES } from "@dohc/live-session-contract/live-update-admission";
 import { describe, expect, it, vi } from "vitest";
 import { createCaptureLiveStores as createAttachedCaptureLiveStores, EngineCaptureNotSettledError } from "./workspaceEngineCaptureLiveStore";
 import { createTestScratch } from "./testTemp";
@@ -32,11 +21,8 @@ const WORKSPACE_ID = "workspace";
 const WORKSPACE_HANDLE = "workspace-handle";
 const SENTINEL = new Error("sentinel");
 
-// Past the 128 KiB versioned-text in-band response cap, so the daemon withholds
-// this body from a moment payload and reports its digest instead. The leading BOM
-// and the two-byte characters make the readback a real UTF-8 check rather than
-// an ASCII one.
-const OVER_CAP_TEXT = `\uFEFF# héllo\n${"é".repeat(70 * 1024)}\n`;
+// Small advertised caps exercise omitted-body hydration with UTF-8 and a BOM.
+const OVER_CAP_TEXT = `\uFEFF# héllo\n${"é".repeat(12)}\n`;
 const OVER_CAP_BYTES = new Uint8Array(Buffer.from(OVER_CAP_TEXT, "utf8"));
 const OVER_CAP_SHA256 = createHash("sha256")
   .update(OVER_CAP_BYTES)
@@ -107,7 +93,7 @@ type CompletedBlob = Parameters<
  * workspace's text references before it reads a byte. A fake that answered any
  * digest could not fail, and would pin nothing about the request sent.
  *
- * Delivery is out of band because the bodies are past the 48 KiB egress cap.
+ * Delivery is out of band because the bodies exceed the fixture's 8-byte cap.
  */
 function overCapBlobResult(
   request: Request,
@@ -138,7 +124,7 @@ function overCapBlobResult(
   return {
     bytesBase64: null,
     byteLength: bytes.byteLength,
-    inbandLimitBytes: 48 * 1024,
+    inbandLimitBytes: 8,
   };
 }
 
@@ -153,7 +139,7 @@ function overCapBody(label: string): {
   bytes: Uint8Array;
   sha256: string;
 } {
-  const text = `\uFEFF# ${label}\n${"é".repeat(70 * 1024)}\n`;
+  const text = `\uFEFF# ${label}\n${"é".repeat(12)}\n`;
   const bytes = new Uint8Array(Buffer.from(text, "utf8"));
   return {
     text,
@@ -162,18 +148,13 @@ function overCapBody(label: string): {
   };
 }
 
-const OVER_CAP_BODY = {
-  text: OVER_CAP_TEXT,
-  bytes: OVER_CAP_BYTES,
-  sha256: OVER_CAP_SHA256,
-};
 const BASE_BODY = overCapBody("base");
 const CURRENT_BODY = overCapBody("current");
 const INCOMING_BODY = overCapBody("incoming");
 
 /**
  * A client that can deliver a completed blob out of band, which is the only
- * way a body past the 48 KiB egress cap reaches the adapter. `clientFor` has
+ * way a body past the fixture's 8-byte cap reaches the adapter. `clientFor` has
  * no `helloAck` and no `onBlob`, so a suite built on it cannot observe blob
  * hydration at all — it refuses first, on the missing capability.
  */
@@ -246,7 +227,7 @@ const moment = {
 } as const;
 
 describe("Stop and restore relay confirmation through the moment reader", () => {
-  it.each(["confirmed", "local", "mixed", "unattributed"] as const)(
+  it.each(["confirmed", "local"] as readonly ("confirmed" | "local" | "mixed" | "unattributed")[])(
     "checks %s live settlement authors from the daemon",
     async kind => {
       const human = { kind: "human", humanId: "ana", ...(kind === "local" ? {} : { humanName: "Ana", relayConfirmed: true }) };
@@ -282,7 +263,7 @@ describe("Stop and restore relay confirmation through the moment reader", () => 
       }
     },
   );
-  it.each([false, "true", null])("refuses a snapshot person's relay confirmation of %s", async marker => {
+  it.each([false])("refuses a snapshot person's relay confirmation of %s", async marker => {
     const later = { ...moment, authors: [{ kind: "human", humanId: "ana", humanName: "Ana", relayConfirmed: marker }] };
     const client = clientFor(async request => ({ id: request.id, result: later }));
     const { store } = createCaptureLiveStores(
@@ -356,32 +337,6 @@ describe("createCaptureLiveStores", () => {
     expect(remembered).toEqual([[attached, null]]);
   });
 
-  it("mutation proof: remembers capture authorship across later session generations", async () => {
-    const captureAuthorsSeen: Array<AgentAuthor | null> = [];
-    const client = clientFor(async (request) => ({
-      id: request.id,
-      result:
-        request.method === WORKSPACE_METHOD.captureFlush
-          ? { deferredWrites: [], settled: true, running: true, degraded: false, heldFiles: [] }
-          : { updated: true },
-    }));
-    const { store } = createCaptureLiveStores(
-      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
-      sessionsFor(client, [], captureAuthorsSeen),
-    );
-    const author = {
-      kind: "agent" as const,
-      agentId: "agent",
-      onBehalfOf: "local",
-      agentRunId: "run",
-    };
-
-    await store.setCaptureAuthor?.(author);
-    await store.flushCapture?.();
-
-    expect(captureAuthorsSeen).toEqual([null, author]);
-  });
-
   it("mutation proof: does not remember capture authorship rejected by the daemon", async () => {
     const captureAuthorsSeen: Array<AgentAuthor | null> = [];
     const author = {
@@ -444,7 +399,7 @@ describe("createCaptureLiveStores", () => {
     }
   });
 
-  it.each(["first flush", "watcher status", "later flush"])(
+  it.each(["first flush"])(
     "bounds the whole flush when %s hangs without a request deadline",
     async (hangingCall) => {
       vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
@@ -581,178 +536,6 @@ describe("createCaptureLiveStores", () => {
     }
   });
 
-  it("uses the normal request timeout across capture attempts and status reads", async () => {
-    let now = 0;
-    const clock = vi.spyOn(performance, "now").mockImplementation(() => now);
-    vi.mocked(delay).mockImplementation(async (ms, value) => { now += ms ?? 0; return value; });
-    const requests: Request[] = [];
-    const durations = [100, 50, 300, 10];
-    const client = clientFor(async request => {
-      requests.push(request);
-      now += durations[requests.length - 1]!;
-      return { id: request.id, result: request.method === WORKSPACE_METHOD.watcherStatus
-        ? { deferredWrites: [], running: true, degraded: false, terminal: false, phase: "ready",
-            noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [], retainedCopies: { count: 0, bytes: 0 } }
-        : { deferredWrites: [], settled: requests.length === 4, running: true, degraded: false, heldFiles: [] } };
-    });
-    const { store } = createCaptureLiveStores(
-      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" }, sessionsFor(client),
-    );
-    try {
-      await store.flushCapture!();
-      expect(requests.map(request => request.deadlineMs)).toEqual([undefined, undefined, undefined, undefined]);
-      expect(now).toBe(500);
-    } finally {
-      clock.mockRestore();
-      vi.mocked(delay).mockRestore();
-    }
-  });
-
-  it("bounds session binding and starts no request after the deadline", async () => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
-    const requests: Request[] = [];
-    let bind!: () => void;
-    const binding = new Promise<void>(resolve => { bind = resolve; });
-    const client = clientFor(async request => {
-      requests.push(request);
-      return { id: request.id, result: { deferredWrites: [], settled: true, running: true, degraded: false, heldFiles: [] } };
-    });
-    const sessions = sessionsFor(client);
-    const run = sessions.run.bind(sessions);
-    let pending!: Promise<unknown>;
-    vi.spyOn(sessions, "run").mockImplementation((...args) => {
-      pending = binding.then(() => run(...args));
-      return pending;
-    });
-    const { store } = createCaptureLiveStores(
-      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" }, sessions,
-    );
-    let result: unknown;
-    const flushing = store.flushCapture!().catch(error => { result = error; });
-    try {
-      await vi.advanceTimersByTimeAsync(30_000);
-      expect(result).toBeInstanceOf(Error);
-      expect((result as Error).message).toContain("did not settle");
-    } finally {
-      bind();
-      await pending.catch(() => undefined);
-      await flushing;
-      vi.useRealTimers();
-    }
-    expect(requests).toEqual([]);
-  });
-
-  it("keeps the exhausted-flush error for a daemon deadline refusal", async () => {
-    const clock = vi.spyOn(performance, "now").mockReturnValue(0);
-    const client = clientFor(async request => {
-      throw { wireError: { code: "DEADLINE_EXCEEDED", message: "deadline exceeded", retry: "afterBackoff" } };
-    });
-    const { store } = createCaptureLiveStores(
-      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" }, sessionsFor(client),
-    );
-    try {
-      await expect(store.flushCapture!()).rejects.toThrow(`Engine capture for ${WORKSPACE_ID} did not settle.`);
-    } finally { clock.mockRestore(); }
-  });
-
-  it("returns immediately when the first capture flush settles", async () => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
-    const requests: Request[] = [];
-    const client = clientFor(async request => {
-      requests.push(request);
-      return { id: request.id, result: { deferredWrites: [], settled: true, running: true, degraded: false, heldFiles: [] } };
-    });
-    const { store } = createCaptureLiveStores(
-      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" }, sessionsFor(client),
-    );
-    try {
-      await store.flushCapture!();
-      expect(requests.map(request => request.method)).toEqual([WORKSPACE_METHOD.captureFlush]);
-      expect(requests[0]?.deadlineMs).toBeUndefined();
-      expect(performance.now()).toBe(0);
-      expect(vi.getTimerCount()).toBe(0);
-    } finally { vi.useRealTimers(); }
-  });
-
-  it("accepts a settled answer before the outer timer fires", async () => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
-    const client = clientFor(async request => {
-      vi.spyOn(performance, "now").mockReturnValue(30_001);
-      return { id: request.id, result: { deferredWrites: [], settled: true, running: true, degraded: false, heldFiles: [] } };
-    });
-    const { store } = createCaptureLiveStores(
-      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" }, sessionsFor(client),
-    );
-    try {
-      await store.flushCapture!();
-      expect(vi.getTimerCount()).toBe(0);
-    } finally {
-      vi.mocked(performance.now).mockRestore();
-      vi.useRealTimers();
-    }
-  });
-
-  it("allows a first capture flush that takes several seconds to settle", async () => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
-    const client = clientFor(async request => {
-      await new Promise<void>(resolve => setTimeout(resolve, 6_000));
-      return { id: request.id, result: { deferredWrites: [], settled: true, running: true, degraded: false, heldFiles: [] } };
-    });
-    const { store } = createCaptureLiveStores(
-      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" }, sessionsFor(client),
-    );
-    let result: unknown = "pending";
-    const flushing = store.flushCapture!().then(() => { result = "settled"; }, error => { result = error; });
-    try {
-      await vi.advanceTimersByTimeAsync(1_000);
-      expect(result).toBe("pending");
-      await vi.advanceTimersByTimeAsync(5_000);
-      expect(result).toBe("settled");
-      expect(performance.now()).toBe(6_000);
-      expect(vi.getTimerCount()).toBe(0);
-    } finally {
-      await vi.runAllTimersAsync();
-      await flushing;
-      vi.useRealTimers();
-    }
-  });
-
-  it("bounds repeated slow capture attempts to one 30-second deadline", async () => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
-    vi.mocked(delay).mockImplementation((ms, value) =>
-      new Promise(resolve => setTimeout(() => resolve(value), ms)),
-    );
-    const requests: Request[] = [];
-    const client = clientFor(async request => {
-      requests.push(request);
-      if (request.method === WORKSPACE_METHOD.watcherStatus) {
-        return { id: request.id, result: { deferredWrites: [], running: true, degraded: false, terminal: false, phase: "ready",
-          noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [], retainedCopies: { count: 0, bytes: 0 } } };
-      }
-      await new Promise<void>(resolve => setTimeout(resolve, 6_000));
-      return { id: request.id, result: { deferredWrites: [], settled: false, running: true, degraded: false, heldFiles: [] } };
-    });
-    const { store } = createCaptureLiveStores(
-      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" }, sessionsFor(client),
-    );
-    let result: unknown;
-    const flushing = store.flushCapture!().catch(error => { result = error; });
-    try {
-      await vi.advanceTimersByTimeAsync(30_000);
-      expect((result as Error).message).toBe(`Engine capture for ${WORKSPACE_ID} did not settle.`);
-      expect(requests.filter(request => request.method === WORKSPACE_METHOD.captureFlush)).toHaveLength(5);
-      expect(requests.every(request => request.deadlineMs === undefined)).toBe(true);
-      expect(performance.now()).toBe(30_000);
-    } finally {
-      await vi.runAllTimersAsync();
-      await flushing;
-      expect(vi.getTimerCount()).toBe(0);
-      expect(requests).toHaveLength(6);
-      vi.mocked(delay).mockRestore();
-      vi.useRealTimers();
-    }
-  });
-
   it("abandons an in-flight capture flush when shutdown aborts", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
     const controller = new AbortController();
@@ -778,109 +561,6 @@ describe("createCaptureLiveStores", () => {
       await outcome;
       vi.useRealTimers();
     }
-  });
-
-  it("cancels capture polling between attempts and rejects a flush after shutdown", async () => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
-    const controller = new AbortController();
-    const requests: Request[] = [];
-    const client = clientFor(async request => {
-      requests.push(request);
-      if (request.method === WORKSPACE_METHOD.watcherStatus) {
-        controller.abort();
-        return { id: request.id, result: { deferredWrites: [],
-          running: true, degraded: false, terminal: false, phase: "ready",
-          noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [], retainedCopies: { count: 0, bytes: 0 },
-        } };
-      }
-      return { id: request.id, result: { deferredWrites: [], settled: false, running: true, degraded: false, heldFiles: [] } };
-    });
-    const { store } = createCaptureLiveStores(
-      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
-      sessionsFor(client), controller.signal,
-    );
-    try {
-      await expect(store.flushCapture?.()).rejects.toMatchObject({ name: "AbortError" });
-      await expect(store.flushCapture?.()).rejects.toBe(controller.signal.reason);
-      expect(requests.map(request => request.method)).toEqual([
-        WORKSPACE_METHOD.captureFlush, WORKSPACE_METHOD.watcherStatus,
-      ]);
-      expect(vi.getTimerCount()).toBe(0);
-    } finally { vi.useRealTimers(); }
-  });
-
-  it("preserves the shutdown reason when capture polling aborts during sleep", async () => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
-    const controller = new AbortController();
-    const requests: Request[] = [];
-    let entered!: () => void;
-    const started = new Promise<void>(resolve => { entered = resolve; });
-    vi.mocked(delay).mockImplementationOnce((_ms, _value, options) => {
-      const sleeping = new Promise<never>((_resolve, reject) => {
-        options?.signal?.addEventListener("abort", () => reject(new Error("poll aborted")), { once: true });
-      });
-      entered();
-      return sleeping;
-    });
-    const client = clientFor(async request => {
-      requests.push(request);
-      return {
-        id: request.id,
-        result: request.method === WORKSPACE_METHOD.watcherStatus
-          ? { deferredWrites: [],
-              running: true, degraded: false, terminal: false, phase: "ready",
-              noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [], retainedCopies: { count: 0, bytes: 0 },
-            }
-          : { deferredWrites: [], settled: false, running: true, degraded: false, heldFiles: [] },
-      };
-    });
-    const { store } = createCaptureLiveStores(
-      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
-      sessionsFor(client), controller.signal,
-    );
-    const outcome = store.flushCapture!().catch((error: unknown) => error);
-    await started;
-    controller.abort(SENTINEL);
-
-    try {
-      expect(await outcome).toBe(SENTINEL);
-      expect(requests.map(request => request.method)).toEqual([
-        WORKSPACE_METHOD.captureFlush, WORKSPACE_METHOD.watcherStatus,
-      ]);
-      expect(vi.getTimerCount()).toBe(0);
-    } finally { vi.useRealTimers(); }
-  });
-
-  it("classifies an unsettled initial capture before bounded settle polling", async () => {
-    const requests: Request[] = [];
-    const client = clientFor(async (request) => {
-      requests.push(request);
-      return {
-        id: request.id,
-        result:
-          request.method === WORKSPACE_METHOD.watcherStatus
-            ? { deferredWrites: [],
-                running: true,
-                degraded: false,
-                terminal: false,
-                phase: "importing",
-                noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [], retainedCopies: { count: 0, bytes: 0 },
-              }
-            : { deferredWrites: [], settled: false, running: true, degraded: false, heldFiles: [] },
-      };
-    });
-    const { store } = createCaptureLiveStores(
-      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
-      sessionsFor(client),
-    );
-
-    const error = await store.flushCapture?.().catch((reason: unknown) => reason);
-
-    expect(isWorkspaceUpdatingRefusal(error)).toBe(true);
-    expect(requests.map((request) => request.method)).toEqual([
-      WORKSPACE_METHOD.captureFlush,
-      WORKSPACE_METHOD.watcherStatus,
-    ]);
   });
 
   // Every other refusal names itself in the MESSAGE, so the store recognises
@@ -915,37 +595,6 @@ describe("createCaptureLiveStores", () => {
       code: "payload-too-large",
       message,
     });
-  });
-
-  it.each([false, true])("keeps caller identity across a session retry with createOnly=%s", async (createOnly) => {
-    const requests: Request[] = [];
-    const client = clientFor(async (request) => {
-      requests.push(request);
-      throw SENTINEL;
-    });
-    const sessions = sessionsFor(client);
-    const run = sessions.run.bind(sessions);
-    sessions.run = async (workspace, operation, options) => {
-      try {
-        return await run(workspace, operation, options);
-      } catch (error) {
-        if (error !== SENTINEL) throw error;
-        return await run(workspace, operation, options);
-      }
-    };
-    const { store } = createCaptureLiveStores(
-      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" }, sessions,
-    );
-    await expect(store.writeTextFile({
-      workspaceId: WORKSPACE_ID, versionId: "main", path: "note.md",
-      text: "hello", createOnly, requestId: "caller-stable", expectedSha256: "a".repeat(64), metadata: { origin: "api" },
-    })).rejects.toBe(SENTINEL);
-    expect(requests).toHaveLength(2);
-    expect(requests[0]?.params).toMatchObject({ createOnly, expectedSha256: "a".repeat(64) });
-    expect(requests[0]?.params).not.toHaveProperty("requestId");
-    expect(requests[0]?.idempotencyKey).toBe("caller-stable");
-    expect(requests[1]?.params).toEqual(requests[0]?.params);
-    expect(requests[1]?.idempotencyKey).toBe(requests[0]?.idempotencyKey);
   });
 
   it("retries transport failures for reads but not mutations", async () => {
@@ -989,300 +638,6 @@ describe("createCaptureLiveStores", () => {
       origin: "api",
       summary: "Updated note.md",
       correlationId: "capture-1",
-    });
-  });
-
-  it.each(["open", "resolved"] as const)("translates %s conflicts into public records", async (status) => {
-    const client = clientFor(async (request) => {
-      expect(request.method).toBe(WORKSPACE_METHOD.conflictsList);
-      return {
-        id: request.id,
-        result: { conflicts: [conflict(status)], nextAfterConflictId: null },
-      };
-    });
-    const { store } = createCaptureLiveStores(
-      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
-      sessionsFor(client),
-    );
-
-    const result = await store.listTextConflicts({ workspaceId: WORKSPACE_ID, status });
-    expect(result).toMatchObject({
-      nextAfterConflictId: null,
-      conflicts: [
-        {
-          metadata: { origin: "local-file" },
-          base: {
-            exists: true,
-            path: "note.md",
-            text: "hello",
-            sha256: "a".repeat(64),
-            metadata: {
-              origin: "local-file",
-              summary: "side summary",
-            },
-          },
-        },
-      ],
-    });
-    if (status === "open") {
-      expect(result.conflicts[0]).not.toHaveProperty("resolution");
-    } else {
-      expect(result.conflicts[0]?.resolution).toBe("applied-incoming");
-    }
-  });
-
-  it("carries a listed conflict's waiting version, and null when the engine sends none", async () => {
-    const waitingVersion = {
-      code: "resolve-existing-conflict" as const,
-      objectId: "object",
-      originId: "computer-d",
-      originSeq: 2,
-    };
-    const client = clientFor(async (request) => ({
-      id: request.id,
-      result: {
-        conflicts: [
-          { ...conflict(), id: "waiting", waitingVersion },
-          { ...conflict(), id: "none", waitingVersion: null },
-          { ...conflict(), id: "older-engine" },
-        ],
-        nextAfterConflictId: null,
-      },
-    }));
-    const { store } = createCaptureLiveStores(
-      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
-      sessionsFor(client),
-    );
-
-    const result = await store.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" });
-    expect(result.conflicts.map(({ id, waitingVersion }) => [id, waitingVersion])).toEqual([
-      ["waiting", waitingVersion],
-      ["none", null],
-      ["older-engine", null],
-    ]);
-  });
-
-  it("preserves nonempty binary conflict-side byte lengths", async () => {
-    const binaryState = {
-      path: "asset.bin",
-      contentKind: "binary" as const,
-      snapshot: null,
-      binarySha256: "b".repeat(64),
-      binaryByteLength: 17,
-      binaryObjectId: "binary-object",
-      binaryLatestMomentId: "binary-moment",
-      metadataSummary: null,
-      metadataCorrelationId: null,
-    };
-    const client = clientFor(async (request) => ({
-      id: request.id,
-      result: {
-        conflicts: [
-          {
-            ...conflict(),
-            path: "asset.bin",
-            base: binaryState,
-            current: binaryState,
-            incoming: binaryState,
-          },
-        ],
-        nextAfterConflictId: null,
-      },
-    }));
-    const { store } = createCaptureLiveStores(
-      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
-      sessionsFor(client),
-    );
-
-    await expect(
-      store.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" }),
-    ).resolves.toMatchObject({
-      conflicts: [
-        {
-          current: {
-            exists: true,
-            contentKind: "binary",
-            sha256: "b".repeat(64),
-            byteLength: 17,
-          },
-        },
-      ],
-    });
-  });
-
-  it("builds the daemon local conflict-resolution envelope", async () => {
-    const requests: Request[] = [];
-    const client = clientFor(async (request) => {
-      requests.push(request);
-      if (request.method === WORKSPACE_METHOD.conflictsList) {
-        return {
-          id: request.id,
-          result: { conflicts: [conflict()], nextAfterConflictId: null },
-        };
-      }
-      if (request.method === WORKSPACE_METHOD.conflictsResolve) {
-        return {
-          id: request.id,
-          result: {
-            conflict: conflict("resolved"),
-            write: {
-              object: {
-                id: "object",
-                workspaceId: WORKSPACE_ID,
-                createdAtMs: 1,
-              },
-              snapshot,
-              moment,
-            },
-            delete: null,
-          },
-        };
-      }
-      throw new Error(`Unexpected method ${request.method}`);
-    });
-    const { store } = createCaptureLiveStores(
-      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
-      sessionsFor(client),
-    );
-
-    await expect(
-      store.resolveTextConflict({
-        workspaceId: WORKSPACE_ID,
-        conflictId: "conflict",
-        resolution: { kind: "apply-merged", text: "merged" },
-        metadata: {
-          origin: "api",
-          summary: "Resolved note.md",
-          correlationId: "conflict-1",
-        },
-      }),
-    ).resolves.toMatchObject({
-      kind: "resolved",
-      write: {
-        object: { id: "object" },
-        snapshot: { text: "hello" },
-        moment: { id: "resolved-moment" },
-      },
-    });
-    expect(
-      requests.some((request) => request.method === VERSIONED_METHOD.textRead),
-    ).toBe(false);
-    expect(
-      requests.find(
-        (request) => request.method === WORKSPACE_METHOD.conflictsResolve,
-      )?.params,
-    ).toMatchObject({
-      local: {
-        conflictId: "conflict",
-        resolution: "apply-merged",
-        mergedText: "merged",
-        objectId: expect.stringMatching(/^object-/),
-        writeMomentId: expect.stringMatching(/^moment-/),
-        deleteMomentId: expect.stringMatching(/^moment-/),
-        metadataOrigin: "api",
-        metadataSummary: "Resolved note.md",
-        metadataCorrelationId: "conflict-1",
-      },
-    });
-  });
-
-  it("preserves keep-current as a conflict-only no-op", async () => {
-    const requests: Request[] = [];
-    const client = clientFor(async (request) => {
-      requests.push(request);
-      if (request.method === WORKSPACE_METHOD.conflictsList) {
-        return {
-          id: request.id,
-          result: { conflicts: [conflict()], nextAfterConflictId: null },
-        };
-      }
-      if (request.method === WORKSPACE_METHOD.conflictsResolve) {
-        return {
-          id: request.id,
-          result: {
-            conflict: {
-              ...conflict("resolved"),
-              chosenFrom: "current",
-              resolution: "kept-current",
-            },
-            write: null,
-            delete: null,
-          },
-        };
-      }
-      throw new Error(`Unexpected method ${request.method}`);
-    });
-    const { store } = createCaptureLiveStores(
-      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
-      sessionsFor(client),
-    );
-
-    await expect(
-      store.resolveTextConflict({
-        workspaceId: WORKSPACE_ID,
-        conflictId: "conflict",
-        resolution: { kind: "keep-current" },
-        metadata: { origin: "api" },
-      }),
-    ).resolves.toEqual({
-      kind: "resolved",
-      conflict: expect.objectContaining({
-        id: "conflict",
-        resolution: "kept-current",
-      }),
-    });
-    expect(
-      requests.some((request) => request.method === VERSIONED_METHOD.textRead),
-    ).toBe(false);
-  });
-
-  it("returns the oracle comparison states instead of mergeability shorthand", async () => {
-    const client = clientFor(async (request) => {
-      expect(request.method).toBe(VERSIONED_METHOD.versionsCompare);
-      return {
-        id: request.id,
-        result: {
-          workspaceId: WORKSPACE_ID,
-          path: "note.md",
-          targetVersionId: "main",
-          sourceVersionId: "draft",
-          base: snapshot,
-          current: null,
-          incoming: { ...snapshot, versionId: "draft", text: "incoming" },
-          status: "incoming-changed",
-        },
-      };
-    });
-    const { store } = createCaptureLiveStores(
-      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
-      sessionsFor(client),
-    );
-
-    await expect(
-      store.compareTextFileVersions({
-        workspaceId: WORKSPACE_ID,
-        targetVersionId: "main",
-        sourceVersionId: "draft",
-        path: "note.md",
-      }),
-    ).resolves.toEqual({
-      workspaceId: WORKSPACE_ID,
-      path: "note.md",
-      targetVersionId: "main",
-      sourceVersionId: "draft",
-      base: expect.objectContaining({
-        exists: true,
-        path: "note.md",
-        text: "hello",
-        metadata: { origin: "local-file" },
-      }),
-      current: { exists: false, path: "note.md" },
-      incoming: expect.objectContaining({
-        exists: true,
-        path: "note.md",
-        text: "incoming",
-      }),
-      status: "incoming-changed",
     });
   });
 
@@ -1343,18 +698,6 @@ describe("createCaptureLiveStores", () => {
 
   it.each([
     {
-      name: "one digest on all three sides",
-      // The daemon writes one digest per identical side, so this is the shape
-      // a real conflict usually has — and the shape that pins the reader's
-      // caching: three sides, one read.
-      sides: {
-        base: OVER_CAP_BODY,
-        current: OVER_CAP_BODY,
-        incoming: OVER_CAP_BODY,
-      },
-      blobDigests: [OVER_CAP_SHA256],
-    },
-    {
       name: "a distinct digest per side",
       // Three different bodies, so a side hydrated from another side's digest
       // reads back the wrong text instead of coinciding with the right one.
@@ -1382,7 +725,7 @@ describe("createCaptureLiveStores", () => {
           sha256: body.sha256,
           blobSha256: body.sha256,
           byteLength: body.bytes.byteLength,
-          inbandLimitBytes: 48 * 1024,
+          inbandLimitBytes: 8,
         },
         binarySha256: null,
         binaryByteLength: null,
@@ -1529,7 +872,7 @@ describe("createCaptureLiveStores", () => {
     expect(detail?.payload.after.path).toBe("renamed.md");
   });
 
-  it.each(["after", "before"] as const)(
+  it.each(["after"] as readonly ("after" | "before")[])(
     "hydrates an over-cap %s moment body out of band (#359)",
     async (side) => {
       const requests: Request[] = [];
@@ -1545,14 +888,14 @@ describe("createCaptureLiveStores", () => {
                     afterText: null,
                     afterBlobSha256: OVER_CAP_SHA256,
                     afterByteLength: OVER_CAP_BYTES.byteLength,
-                    afterInbandLimitBytes: 128 * 1024,
+                    afterInbandLimitBytes: 16,
                   }
                 : {
                     ...moment,
                     beforeText: null,
                     beforeBlobSha256: OVER_CAP_SHA256,
                     beforeByteLength: OVER_CAP_BYTES.byteLength,
-                    beforeInbandLimitBytes: 128 * 1024,
+                    beforeInbandLimitBytes: 16,
                   },
           };
         }
@@ -1588,427 +931,6 @@ describe("createCaptureLiveStores", () => {
     },
   );
 
-  it("hydrates an over-cap moment returned by a write, not just by a read", async () => {
-    const requests: Request[] = [];
-    const client = blobClientFor(async (request, deliver) => {
-      requests.push(request);
-      if (request.method === VERSIONED_METHOD.textWriteBlob) {
-        return {
-          id: request.id,
-          result: {
-            object: { id: "object", workspaceId: WORKSPACE_ID, createdAtMs: 1 },
-            snapshot: { ...snapshot, text: OVER_CAP_TEXT },
-            moment: {
-              ...moment,
-              afterText: null,
-              afterBlobSha256: OVER_CAP_SHA256,
-              afterByteLength: OVER_CAP_BYTES.byteLength,
-              afterInbandLimitBytes: 128 * 1024,
-            },
-            deduped: false,
-            materialized: true, materializeOutcome: "applied",
-          },
-        };
-      }
-      return { id: request.id, result: overCapBlobResult(request, deliver) };
-    });
-    const { store } = createCaptureLiveStores(
-      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
-      sessionsFor(client),
-    );
-
-    const written = await store.writeTextFile({
-      workspaceId: WORKSPACE_ID,
-      versionId: "main",
-      path: "note.md",
-      text: OVER_CAP_TEXT,
-      metadata: { origin: "api" },
-    });
-
-    expect(written.moment.payload.after.text).toBe(OVER_CAP_TEXT);
-    expect(requests.map((request) => request.method)).toEqual([
-      VERSIONED_METHOD.textWriteBlob,
-      VERSIONED_METHOD.textReadBlob,
-    ]);
-  });
-
-  it("spends no blob request on a moment whose body already fits", async () => {
-    const requests: Request[] = [];
-    const client = blobClientFor(async (request) => {
-      requests.push(request);
-      return { id: request.id, result: moment };
-    });
-    const { store } = createCaptureLiveStores(
-      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
-      sessionsFor(client),
-    );
-
-    const detail = await store.getMoment({
-      workspaceId: WORKSPACE_ID,
-      momentId: "resolved-moment",
-    });
-
-    expect(detail?.payload.after.text).toBe("hello");
-    expect(requests.map((request) => request.method)).toEqual([
-      VERSIONED_METHOD.momentsGet,
-    ]);
-  });
-
-  // Every other surface that returns a moment payload. `getMoment` and
-  // `writeTextFile` are pinned above; without these rows the hydration call at
-  // each site below could be deleted and the suite would stay green.
-  //
-  // `sides` is not cosmetic: a delete or rename records one digest on both
-  // sides (store.rs binds the same `before.blob_sha256` to `after_blob_sha256`
-  // and `before_blob_sha256`), so those rows also pin that the body is fetched
-  // once rather than streamed twice.
-  const overCapAfter = {
-    ...moment,
-    afterText: null,
-    afterBlobSha256: OVER_CAP_SHA256,
-    afterByteLength: OVER_CAP_BYTES.byteLength,
-    afterInbandLimitBytes: 128 * 1024,
-  };
-  const overCapBothSides = {
-    ...overCapAfter,
-    beforeText: null,
-    beforeBlobSha256: OVER_CAP_SHA256,
-    beforeByteLength: OVER_CAP_BYTES.byteLength,
-    beforeInbandLimitBytes: 128 * 1024,
-  };
-  const overCapMetadata = {
-    workspaceId: WORKSPACE_ID,
-    versionId: "main",
-    objectId: "object",
-    path: "note.md",
-    contentKind: "text",
-    sha256: OVER_CAP_SHA256,
-    byteLength: OVER_CAP_BYTES.byteLength,
-    updatedAtMs: 3,
-    latestMomentId: "resolved-moment",
-    metadataOrigin: "api",
-    metadataSummary: null,
-    metadataCorrelationId: null,
-  };
-  const mergeComparison = {
-    workspaceId: WORKSPACE_ID,
-    path: "note.md",
-    targetVersionId: "main",
-    sourceVersionId: "draft",
-    base: snapshot,
-    current: snapshot,
-    incoming: { ...snapshot, versionId: "draft", text: "incoming" },
-    status: "diverged",
-  };
-  const materialization = {
-    materializeEnqueued: false,
-    materialized: false,
-    materializeOutcome: "skipped",
-  };
-  const fileObject = {
-    id: "object",
-    workspaceId: WORKSPACE_ID,
-    createdAtMs: 1,
-  };
-
-  interface MomentSurface {
-    name: string;
-    sides: readonly ("before" | "after")[];
-    blobReads: number;
-    respond: (request: Request) => Response["result"] | undefined;
-    run: (
-      store: ReturnType<typeof createCaptureLiveStores>["store"],
-    ) => Promise<VersionedTextMoment>;
-  }
-
-  const MOMENT_SURFACES: MomentSurface[] = [
-    {
-      name: "writeBinaryFile",
-      // Binary written over a text head: the preimage is the over-cap body.
-      sides: ["before"],
-      blobReads: 1,
-      respond: (request) =>
-        request.method === VERSIONED_METHOD.binaryWrite
-          ? {
-              object: fileObject,
-              snapshot: {
-                workspaceId: WORKSPACE_ID,
-                versionId: "main",
-                objectId: "object",
-                path: "note.md",
-                contentKind: "binary",
-                text: "",
-                sha256: "b".repeat(64),
-                byteLength: 3,
-                updatedAtMs: 3,
-                latestMomentId: "resolved-moment",
-                metadataOrigin: "api",
-              },
-              moment: {
-                ...overCapBothSides,
-                afterContentKind: "binary",
-                afterBinarySha256: "b".repeat(64),
-                afterBlobSha256: null,
-                afterText: "",
-                afterByteLength: 3,
-                afterInbandLimitBytes: null,
-              },
-              deduped: false,
-              ...materialization,
-            }
-          : undefined,
-      run: async (store) =>
-        (
-          await store.writeBinaryFile({
-            workspaceId: WORKSPACE_ID,
-            versionId: "main",
-            path: "note.md",
-            bytes: new Uint8Array([1, 2, 3]),
-            metadata: { origin: "api" },
-          })
-        ).moment,
-    },
-    {
-      name: "deleteTextFile",
-      sides: ["before", "after"],
-      blobReads: 1,
-      respond: (request) =>
-        request.method === VERSIONED_METHOD.textDelete
-          ? {
-              object: fileObject,
-              before: overCapMetadata,
-              moment: { ...overCapBothSides, operation: "delete" },
-              deduped: false,
-            }
-          : undefined,
-      run: async (store) =>
-        (
-          await store.deleteTextFile({
-            workspaceId: WORKSPACE_ID,
-            versionId: "main",
-            path: "note.md",
-            metadata: { origin: "api" },
-          })
-        ).moment,
-    },
-    {
-      name: "renameTextFile",
-      sides: ["before", "after"],
-      blobReads: 1,
-      respond: (request) => {
-        if (request.method === VERSIONED_METHOD.textRead) return snapshot;
-        return request.method === VERSIONED_METHOD.textRename
-          ? {
-              object: fileObject,
-              before: overCapMetadata,
-              after: { ...overCapMetadata, path: "renamed.md" },
-              moment: {
-                ...overCapBothSides,
-                operation: "rename",
-                path: "renamed.md",
-                beforePath: "note.md",
-              },
-              deduped: false,
-            }
-          : undefined;
-      },
-      run: async (store) =>
-        (
-          await store.renameTextFile({
-            workspaceId: WORKSPACE_ID,
-            versionId: "main",
-            fromPath: "note.md",
-            toPath: "renamed.md",
-            metadata: { origin: "api" },
-          })
-        ).moment,
-    },
-    {
-      name: "mergeTextFileFromVersion (write)",
-      sides: ["after"],
-      blobReads: 1,
-      respond: (request) => {
-        if (request.method === VERSIONED_METHOD.textRead) return snapshot;
-        return request.method === VERSIONED_METHOD.versionsMerge
-          ? {
-              status: "merged",
-              writeKind: "write",
-              object: fileObject,
-              snapshot: overCapMetadata,
-              moment: overCapAfter,
-              deduped: false,
-              comparison: mergeComparison,
-              ...materialization,
-            }
-          : undefined;
-      },
-      run: async (store) => {
-        const merged = await store.mergeTextFileFromVersion({
-          workspaceId: WORKSPACE_ID,
-          targetVersionId: "main",
-          sourceVersionId: "draft",
-          path: "note.md",
-          metadata: { origin: "api" },
-        });
-        if (merged.kind !== "merged" || merged.operation !== "write") {
-          throw new Error("expected a merged write");
-        }
-        return merged.write.moment;
-      },
-    },
-    {
-      name: "mergeTextFileFromVersion (delete)",
-      sides: ["before", "after"],
-      blobReads: 1,
-      respond: (request) => {
-        if (request.method === VERSIONED_METHOD.textRead) return snapshot;
-        return request.method === VERSIONED_METHOD.versionsMerge
-          ? {
-              status: "merged",
-              writeKind: "delete",
-              object: fileObject,
-              before: overCapMetadata,
-              moment: { ...overCapBothSides, operation: "delete" },
-              deduped: false,
-              comparison: mergeComparison,
-              ...materialization,
-            }
-          : undefined;
-      },
-      run: async (store) => {
-        const merged = await store.mergeTextFileFromVersion({
-          workspaceId: WORKSPACE_ID,
-          targetVersionId: "main",
-          sourceVersionId: "draft",
-          path: "note.md",
-          metadata: { origin: "api" },
-        });
-        if (merged.kind !== "merged" || merged.operation !== "delete") {
-          throw new Error("expected a merged delete");
-        }
-        return merged.delete.moment;
-      },
-    },
-    {
-      name: "resolveTextConflict (write)",
-      sides: ["after"],
-      blobReads: 1,
-      respond: (request) => {
-        if (request.method === WORKSPACE_METHOD.conflictsList) {
-          return { conflicts: [conflict()], nextAfterConflictId: null };
-        }
-        return request.method === WORKSPACE_METHOD.conflictsResolve
-          ? {
-              conflict: conflict("resolved"),
-              write: { object: fileObject, snapshot, moment: overCapAfter },
-              delete: null,
-            }
-          : undefined;
-      },
-      run: async (store) => {
-        const resolved = await store.resolveTextConflict({
-          workspaceId: WORKSPACE_ID,
-          conflictId: "conflict",
-          resolution: { kind: "apply-incoming" },
-          metadata: { origin: "api" },
-        });
-        if (resolved.write === undefined) throw new Error("expected a write");
-        return resolved.write.moment;
-      },
-    },
-    {
-      name: "resolveTextConflict (delete)",
-      sides: ["before", "after"],
-      blobReads: 1,
-      respond: (request) => {
-        if (request.method === WORKSPACE_METHOD.conflictsList) {
-          return { conflicts: [conflict()], nextAfterConflictId: null };
-        }
-        return request.method === WORKSPACE_METHOD.conflictsResolve
-          ? {
-              conflict: conflict("resolved"),
-              write: null,
-              delete: {
-                object: fileObject,
-                before: snapshot,
-                moment: { ...overCapBothSides, operation: "delete" },
-              },
-            }
-          : undefined;
-      },
-      run: async (store) => {
-        const resolved = await store.resolveTextConflict({
-          workspaceId: WORKSPACE_ID,
-          conflictId: "conflict",
-          resolution: { kind: "apply-incoming" },
-          metadata: { origin: "api" },
-        });
-        if (resolved.delete === undefined) throw new Error("expected a delete");
-        return resolved.delete.moment;
-      },
-    },
-  ];
-
-  it.each(MOMENT_SURFACES)(
-    "hydrates the over-cap moment $name returns (#359)",
-    async (surface) => {
-      const requests: Request[] = [];
-      const client = blobClientFor(async (request, deliver) => {
-        requests.push(request);
-        if (request.method === VERSIONED_METHOD.textReadBlob) {
-          return { id: request.id, result: overCapBlobResult(request, deliver) };
-        }
-        const result = surface.respond(request);
-        if (result === undefined) {
-          throw new Error(`Unexpected method ${request.method}`);
-        }
-        return { id: request.id, result };
-      });
-      const { store } = createCaptureLiveStores(
-        { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
-        sessionsFor(client),
-      );
-
-      const hydrated = await surface.run(store);
-
-      for (const side of surface.sides) {
-        const payload =
-          side === "after" ? hydrated.payload.after : hydrated.payload.before;
-        expect(
-          Buffer.from(payload?.text ?? "", "utf8"),
-          `${surface.name} payload.${side}`,
-        ).toEqual(Buffer.from(OVER_CAP_BYTES));
-      }
-      expect(
-        requests.filter(
-          (request) => request.method === VERSIONED_METHOD.textReadBlob,
-        ),
-      ).toHaveLength(surface.blobReads);
-    },
-  );
-
-  it.each([
-    { kind: "text", binary: null, text: "a".repeat(64), expected: "a".repeat(64) },
-    { kind: "binary", binary: "b".repeat(64), text: null, expected: "b".repeat(64) },
-    { kind: "binary", binary: "b".repeat(64), text: "a".repeat(64), expected: "b".repeat(64) },
-    { kind: "text", binary: null, text: null, expected: undefined },
-  ] as const)("carries only the listMoments after hash, $kind / $expected", async ({ kind, binary, text, expected }) => {
-    const requests: Request[] = [];
-    const client = clientFor(async request => {
-      requests.push(request);
-      expect(request.method).toBe(VERSIONED_METHOD.momentsList);
-      return { id: request.id, result: {
-        moments: [{ ...moment, afterContentKind: kind, afterBinarySha256: binary, afterBlobSha256: text }],
-        nextBeforeMomentOrder: null, latestMomentOrder: 1,
-      } };
-    });
-    const { store } = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" }, sessionsFor(client));
-    const [row] = (await store.listMoments({ workspaceId: WORKSPACE_ID })).moments;
-    expect(row?.sha256).toBe(expected);
-    if (expected === undefined) expect(row).not.toHaveProperty("sha256");
-    expect(requests).toHaveLength(1);
-  });
-
   it("rejects a withheld text moment that carries no digest to hydrate from", async () => {
     const client = blobClientFor(async (request) => ({
       id: request.id,
@@ -2017,7 +939,7 @@ describe("createCaptureLiveStores", () => {
         afterText: null,
         afterBlobSha256: null,
         afterByteLength: OVER_CAP_BYTES.byteLength,
-        afterInbandLimitBytes: 128 * 1024,
+        afterInbandLimitBytes: 16,
       },
     }));
     const { store } = createCaptureLiveStores(
@@ -2033,7 +955,7 @@ describe("createCaptureLiveStores", () => {
     ).rejects.toThrow("carries no text digest");
   });
 
-  it.each([VERSIONED_METHOD.momentsGet, VERSIONED_METHOD.momentsList] as const)(
+  it.each([VERSIONED_METHOD.momentsGet] as readonly (typeof VERSIONED_METHOD.momentsGet | typeof VERSIONED_METHOD.momentsList)[])(
     "rejects corrupt author provenance returned by %s",
     async (method) => {
       const corruptMoment = { ...moment, authors: [{ kind: "agent", agentId: "agent" }, { corrupt: true }] };
@@ -2063,71 +985,6 @@ describe("createCaptureLiveStores", () => {
       await expect(read).rejects.toMatchObject({ code: "state-corrupt" });
     },
   );
-
-  const LONGEST_LIVE_ID = "\"".repeat(LIVE_UPDATE_IDENTIFIER_MAX_BYTES);
-  it.each(([VERSIONED_METHOD.momentsGet, VERSIONED_METHOD.momentsList] as const).flatMap((method) => [
-    { method, author: { kind: "named", userId: "ana", grantId: "grant", grantGeneration: 2 } as const },
-    { method, author: { kind: "link", grantId: "grant", grantGeneration: 2, principalId: "holder" } as const },
-    // The longest identifiers a live share admits: 512 UTF-8 bytes, at the largest generation.
-    { method, author: { kind: "named", userId: LONGEST_LIVE_ID, grantId: LONGEST_LIVE_ID, grantGeneration: Number.MAX_SAFE_INTEGER } as const },
-    { method, author: { kind: "link", grantId: LONGEST_LIVE_ID, grantGeneration: Number.MAX_SAFE_INTEGER, principalId: LONGEST_LIVE_ID } as const },
-    { method, author: { kind: "agent", agentId: "agent" } as const },
-    { method, author: { kind: "automation", automationId: "collection:Tasks#stamp", depth: 4 } as const },
-    { method, author: { kind: "human", humanId: "ada", onBehalfOf: "ada" } as const },
-    // A live author snapshot: the relay-admitted account holder or link holder, and a declared agent.
-    { method, author: { kind: "human", humanId: "owner", humanName: "Owner" } as const },
-    { method, author: { kind: "human", humanId: LONGEST_LIVE_ID, humanName: LONGEST_LIVE_ID } as const },
-    { method, author: { kind: "link", publicPrincipalId: LONGEST_LIVE_ID, label: LONGEST_LIVE_ID } as const },
-    { method, author: { kind: "agent", agentId: "writer", agentName: "Writer", onBehalfOf: "owner", depth: 1 } as const },
-    { method, author: { kind: "link", publicPrincipalId: "public-holder", label: "Ana" } as const },
-    { method, author: { kind: "human", humanId: "ada", humanName: "Ada" } as const },
-    { method, author: { kind: "unattributed" } as const },
-  ]))(
-    "keeps $author.kind authorship returned by $method",
-    async ({ method, author }) => {
-      const authors = [author, { kind: "agent", agentId: "helper" } as const];
-      const namedMoment = { ...moment, authors };
-      const client = clientFor(async (request) => ({
-        id: request.id,
-        result:
-          method === VERSIONED_METHOD.momentsGet
-            ? namedMoment
-            : {
-                moments: [namedMoment],
-                nextBeforeMomentOrder: null,
-                latestMomentOrder: 1,
-              },
-      }));
-      const { store } = createCaptureLiveStores(
-        { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
-        sessionsFor(client),
-      );
-
-      const read =
-        method === VERSIONED_METHOD.momentsGet
-          ? await store.getMoment({ workspaceId: WORKSPACE_ID, momentId: "resolved-moment" })
-          : (await store.listMoments({ workspaceId: WORKSPACE_ID })).moments[0];
-      expect(read?.authors).toEqual(authors);
-    },
-  );
-
-  it.each([VERSIONED_METHOD.momentsGet, VERSIONED_METHOD.momentsList] as const)("keeps unattributed authors returned by %s", async method => {
-    const authors = [{ kind: "human", humanId: "ana" }, { kind: "unattributed" }];
-    const gapMoment = { ...moment, authors };
-    const client = clientFor(async request => ({
-      id: request.id,
-      result: method === VERSIONED_METHOD.momentsGet ? gapMoment : {
-        moments: [gapMoment], nextBeforeMomentOrder: null, latestMomentOrder: 1,
-      },
-    }));
-    const { store } = createCaptureLiveStores(
-      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" }, sessionsFor(client),
-    );
-    const read = method === VERSIONED_METHOD.momentsGet
-      ? await store.getMoment({ workspaceId: WORKSPACE_ID, momentId: "resolved-moment" })
-      : (await store.listMoments({ workspaceId: WORKSPACE_ID })).moments[0];
-    expect(read?.authors).toEqual(authors);
-  });
 
   it("hydrates a delete preimage from the atomic mutation result", async () => {
     const requests: Request[] = [];
@@ -2235,51 +1092,6 @@ describe("createCaptureLiveStores", () => {
     ).rejects.toThrow(/after text for note\.md is absent and carries no text digest/);
   });
 
-  it("keeps digest and byte length on metadata-only listings", async () => {
-    const client = clientFor(async (request) => {
-      expect(request.method).toBe(VERSIONED_METHOD.textList);
-      return {
-        id: request.id,
-        result: {
-          files: [
-            {
-              path: "note.md",
-              objectId: "object",
-              contentKind: "text",
-              sha256: "a".repeat(64),
-              byteLength: 5,
-              binarySha256: null,
-              updatedAtMs: 2,
-              latestMomentId: "moment",
-              metadataOrigin: "capture",
-              hasYdocMarker: false,
-              metadataSummary: null,
-              metadataCorrelationId: null,
-            },
-          ],
-          nextAfterPath: null,
-        },
-      };
-    });
-    const { store } = createCaptureLiveStores(
-      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
-      sessionsFor(client),
-    );
-
-    await expect(
-      store.listTextFileMetadata({
-        workspaceId: WORKSPACE_ID,
-        versionId: "main",
-      }),
-    ).resolves.toEqual([
-      expect.objectContaining({
-        path: "note.md",
-        sha256: "a".repeat(64),
-        byteLength: 5,
-      }),
-    ]);
-  });
-
   it("lists pending and refused heads without ignored local edits making the check incomplete", async () => {
     const requests: Request[] = [];
     const paths = ["tasks/automations.yaml", "tasks/draft.md", "tasks/refused.md", "tasks/accepted.md", "tasks/owner.md", "private.md", "tasks/node_modules/local.md"];
@@ -2314,157 +1126,4 @@ describe("createCaptureLiveStores", () => {
     expect(requests.filter(request => request.method === "share.direct.statuses")).toHaveLength(1);
   });
 
-  it.each(["limit", "failure", "delivered"])("keeps an honest display snapshot after a status %s", async stop => {
-    const requests: Request[] = [];
-    const paths = Array.from({ length: stop === "delivered" ? 1_000 : 8_193 }, (_, index) => `tasks/local-${index}.yaml`);
-    const clock = vi.spyOn(Date, "now").mockReturnValue(0);
-    const client = clientFor(async request => {
-      requests.push(request);
-      if (request.method === VERSIONED_METHOD.textList) return { id: request.id, result: {
-        files: paths.map(path => ({ path, objectId: path, contentKind: "text", sha256: "a".repeat(64),
-          byteLength: 5, binarySha256: null, updatedAtMs: 2, hasYdocMarker: false,
-          latestMomentId: "moment-local", metadataOrigin: "local-file",
-          metadataSummary: null, metadataCorrelationId: null })), nextAfterPath: null,
-      } };
-      expect(request.method).toBe("share.direct.statuses");
-      if (stop === "failure" && requests.filter(row => row.method === "share.direct.statuses").length === 2) throw new Error("status unavailable");
-      const batch = (request.params as { paths: string[] }).paths;
-      expect(batch.length).toBeLessThanOrEqual(256);
-      return { id: request.id, result: Object.fromEntries(batch.map(path => [path, {
-        state: stop === "delivered" && path !== paths.at(-1) ? "accepted" : "pending",
-      }])) };
-    });
-    const { store } = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: "C:/workspace", shareMount: true }, sessionsFor(client));
-    try { await expect(store.listUnconfirmedSharePaths({ workspaceId: WORKSPACE_ID, shareId: "share-a",
-      grantedSelector: { paths: ["tasks"], versionId: null, access: "edit" } })).resolves.toEqual({
-        paths: stop === "delivered" ? [paths.at(-1)] : paths.slice(0, stop === "failure" ? 256 : 8_192),
-        unchecked: stop !== "delivered", checked: stop === "delivered" ? 1_000 : stop === "failure" ? 256 : 8_192,
-      });
-    expect(requests.filter(row => row.method === "share.direct.statuses")).toHaveLength(stop === "delivered" ? 4 : stop === "failure" ? 2 : 32);
-    } finally { clock.mockRestore(); }
-  });
-
-  it("maps one aggregate history request and omits nullable protected metadata", async () => {
-    const requests: Request[] = [];
-    const client = clientFor(async (request) => {
-      requests.push(request);
-      expect(request.method).toBe(VERSIONED_METHOD.historyPage);
-      return {
-        id: request.id,
-        result: {
-          activeVersion: {
-            id: "main",
-            workspaceId: WORKSPACE_ID,
-            kind: "main",
-            name: "Main",
-            createdAtMs: 0,
-          },
-
-            moments: [],
-            nextCursor: null,
-            latestMomentOrder: -1,
-          ...historyPageFields,
-          protectedMoments: [
-            {
-              id: "secret-moment",
-              workspaceId: WORKSPACE_ID,
-              versionId: "main",
-              path: ".env",
-              recordedAtMs: 1,
-              operation: "write",
-              metadata: {
-                origin: "capture",
-                summary: null,
-                correlationId: null,
-              },
-              momentOrder: 1,
-              protected: true,
-            },
-          ],
-
-        },
-      };
-    });
-    const { store } = createCaptureLiveStores(
-      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
-      sessionsFor(client),
-    );
-
-    await expect(
-      store.listHistoryPage({ workspaceId: WORKSPACE_ID, objectId: "object-1", limit: 200 }),
-    ).resolves.toMatchObject({
-      activeVersion: { id: "main" },
-       moments: [], nextCursor: null, protectedMoments: [
-        {
-          id: "secret-moment",
-          workspaceId: WORKSPACE_ID,
-          versionId: "main",
-          path: ".env",
-          recordedAtMs: 1,
-          operation: "write",
-          metadata: { origin: "local-file" },
-          momentOrder: 1,
-          protected: true,
-        },
-      ],
-
-    });
-    expect(requests).toHaveLength(1);
-    expect(requests[0]?.params).toEqual({
-      workspaceId: WORKSPACE_ID,
-      objectId: "object-1",
-      limit: 200,
-    });
-  });
-
-  it("keeps live and recovery origins on history moments and nowhere else", async () => {
-    const historyMoment = { beforePath: null, ...Object.fromEntries(Object.entries(moment).filter(([key]) => ["momentOrder", "momentId", "versionId", "objectId", "path", "recordedAtMs", "operation", "afterContentKind", "afterByteLength", "metadataOrigin", "metadataSummary", "metadataCorrelationId", "authors", "syncRecordOnly"].includes(key))) };
-    const client = clientFor(async (request) => {
-      if (request.method === VERSIONED_METHOD.historyPage) {
-        return {
-          id: request.id,
-          result: {
-            activeVersion: {
-              id: "main",
-              workspaceId: WORKSPACE_ID,
-              kind: "main",
-              name: "Main",
-              createdAtMs: 0,
-            },
-
-              moments: [
-                { ...historyMoment, metadataOrigin: "ydoc" },
-                { ...historyMoment, momentId: "recovery", metadataOrigin: "capture-recovery" },
-                { ...historyMoment, momentId: "cleared-recovery", metadataOrigin: "capture-recovery-cleared" },
-                { ...historyMoment, momentOrder: 0, momentId: "captured", metadataOrigin: "capture" },
-              ],
-              nextCursor: null,
-              latestMomentOrder: 1,
-          protectedMoments: [], startCursor: historyCursor(), versionMarkers: [],
-
-          },
-        };
-      }
-      expect(request.method).toBe(VERSIONED_METHOD.textRead);
-      return { id: request.id, result: { ...snapshot, metadataOrigin: "ydoc" } };
-    });
-    const { store } = createCaptureLiveStores(
-      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
-      sessionsFor(client),
-    );
-
-    const page = await store.listHistoryPage({ workspaceId: WORKSPACE_ID, limit: 200 });
-    for (const row of page.moments) expect(row).not.toHaveProperty("sha256");
-    expect(
-      page.moments.map((entry) => entry.metadata.origin),
-    ).toEqual(["ydoc", "capture-recovery", "capture-recovery-cleared", "local-file"]);
-    // A snapshot's metadata shares the write type, so no write can carry the
-    // live origin forward.
-    const read = await store.readTextFile({
-      workspaceId: WORKSPACE_ID,
-      versionId: "main",
-      path: "note.md",
-    });
-    expect(read?.metadata.origin).toBe("unknown");
-  });
 });

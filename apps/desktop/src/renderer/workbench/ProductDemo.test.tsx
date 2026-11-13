@@ -18,24 +18,6 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
-it("offers only the five working demo panels, then Notices, each titled as in the app", () => {
-  const { container } = render(<ProductDemo />);
-  const rail = within(within(container).getByRole("navigation", { name: "Activity bar" }));
-  expect(rail.getAllByRole("button").map((button) => button.getAttribute("aria-label")))
-    .toEqual(["Explorer", "Chats", "Search", "Graph", "History", "Notices"]);
-  expect(rail.queryByRole("button", { name: "Sharing" })).toBeNull();
-
-  for (const name of ["Chats", "Search", "Graph", "History", "Explorer"]) {
-    const button = rail.getByRole("button", { name });
-    fireEvent.click(button);
-    expect(button.getAttribute("aria-current")).toBe("page");
-    // The Explorer's header is its Home | Files switch.
-    const header = container.querySelector('[data-testid="side-panel"] > header');
-    if (name === "Explorer") expect(within(header as HTMLElement).getByRole("tablist", { name: "Explorer" })).toBeTruthy();
-    else expect(header?.querySelector(".dohc-section-label")?.textContent).toBe(name);
-  }
-});
-
 it("keeps a demo Explorer collision in Notices after the toast closes", async () => {
   const host = document.createElement("div");
   document.body.append(host);

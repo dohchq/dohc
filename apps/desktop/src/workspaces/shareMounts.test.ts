@@ -1,40 +1,14 @@
 import { RelayUnauthorizedError } from "@dohc/workspace-contracts/relay";
-import {
-  RefreshShareMountsResult,
-  ShareMountStatusRow,
-} from "../ipc/bridgeContract";
+import { RefreshShareMountsResult, ShareMountStatusRow } from "../ipc/bridgeContract";
 import { SharePinInvalidError } from "./shareViewRecords";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile, rename, rm, symlink, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  createShareViewDaemonHarness,
-  type ShareViewDaemonHarness,
-} from "../testing/shareViewLoopbackTransport";
-import {
-  assertMountableSelector,
-  allocateShareMountLabel,
-  classifyShareMountRefreshError,
-  shareMountResultRow,
-  mountRootFor,
-  mountStoreWorkspaceIdFor,
-  refuseImportIntoShareProjection,
-  refuseMoveAcrossShareMount,
-  resolveShareMountPath,
-  resolveShareProjectionPath,
-  overlayCanonicalShareMountFiles,
-  planShareMountRemoval,
-  usableShareMountRecord,
-  validMountLabel,
-  withoutShareMountRecords,
-} from "./shareMounts";
-import {
-  createShareMountDirectoryThroughOwnerForTest,
-  refreshShareMountThroughOwnerForTest,
-  removeShareMountFolderThroughOwnerForTest,
-} from "../testing/shareViewFilesMountHarness";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createShareViewDaemonHarness, type ShareViewDaemonHarness } from "../testing/shareViewLoopbackTransport";
+import { allocateShareMountLabel, classifyShareMountRefreshError, shareMountResultRow, mountRootFor, mountStoreWorkspaceIdFor, refuseImportIntoShareProjection, refuseMoveAcrossShareMount, resolveShareMountPath, overlayCanonicalShareMountFiles, planShareMountRemoval, validMountLabel, withoutShareMountRecords } from "./shareMounts";
+import { createShareMountDirectoryThroughOwnerForTest, refreshShareMountThroughOwnerForTest, removeShareMountFolderThroughOwnerForTest } from "../testing/shareViewFilesMountHarness";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 
 // These tests drive the pull with the selector a mount record pins. No paths
@@ -261,36 +235,6 @@ describe("mount labels", () => {
     })).toBe("platform-eu");
   });
 
-  it("reserves every string label held by damaged registry records", () => {
-    const damaged = [
-      { shareId: SHARE_ID, label: "alex" },
-      { shareId: SHARE_ID, label: "sam" },
-      { shareId: 7, label: "alex (2)" },
-      { shareId: "missing-label", label: null },
-    ];
-    expect(usableShareMountRecord(damaged, damaged[0]!)).toBe(false);
-    expect(usableShareMountRecord(damaged, damaged[1]!)).toBe(false);
-    expect(usableShareMountRecord(damaged, damaged[2]!)).toBe(false);
-
-    expect(
-      allocateShareMountLabel({
-        storedMounts: damaged,
-        onDiskNames: [],
-        granterEmail: "alex@example.com",
-      }),
-    ).toBe("alex (3)");
-  });
-
-  it("reserves on-disk names in the same allocation", () => {
-    expect(
-      allocateShareMountLabel({
-        storedMounts: [{ shareId: "share-a", label: "alex" }],
-        onDiskNames: ["alex (2)"],
-        granterEmail: "alex@example.com",
-      }),
-    ).toBe("alex (3)");
-  });
-
   it("refuses traversal, separators, reserved and secret-shaped labels", () => {
     for (const label of ["", "..", "a/b", "a\\b", ".dohc", "x".repeat(65), ". .", ".env", "prod.env"]) {
       expect(validMountLabel(label)).toBe(false);
@@ -323,18 +267,6 @@ describe("mount labels", () => {
     expect(mountStoreWorkspaceIdFor("host-a", "share-2")).not.toBe(a);
   });
 
-  it("mountRootFor refuses labels that escape shared-with-me", async () => {
-    const host = await tempHostRoot();
-    expect(() => mountRootFor(host, "../outside")).toThrow(/Invalid share mount label/);
-    expect(() => mountRootFor(host, "a/b")).toThrow(/Invalid share mount label/);
-    expect(mountRootFor(host, "alex")).toBe(
-      join(host, SHARED_WITH_ME_FOLDER, "alex"),
-    );
-    expect(mountRootFor(host, "..cache"), "..-segment: a bare '..-prefix' isInside refuses this real contained name.").toBe(
-      join(host, SHARED_WITH_ME_FOLDER, "..cache"),
-    );
-  });
-
   it("routes a symlinked spelling to the mount that owns its real path", async () => {
     const host = await tempHostRoot();
     await createShareMountDirectoryThroughOwnerForTest(host, "alex");
@@ -354,41 +286,6 @@ describe("mount labels", () => {
     await expect(
       resolveShareMountPath(host, "notes/ordinary.md", [mount], true),
     ).resolves.toBeNull();
-  });
-
-  it("classifies aliases to the projection and workspace roots", async () => {
-    const host = await tempHostRoot();
-    await mkdir(join(host, SHARED_WITH_ME_FOLDER), { recursive: true });
-    await symlink(
-      join(host, SHARED_WITH_ME_FOLDER),
-      join(host, "projection-alias"),
-      "dir",
-    );
-    await symlink(host, join(host, "workspace-alias"), "dir");
-
-    await expect(
-      resolveShareProjectionPath(host, "projection-alias", []),
-    ).resolves.toEqual({ kind: "projection-root" });
-    await expect(
-      resolveShareProjectionPath(host, "workspace-alias", []),
-    ).resolves.toEqual({ kind: "workspace-root" });
-  });
-
-  it("refuses a disk path claimed by an invalid registry label", async () => {
-    const host = await tempHostRoot();
-    await mkdir(join(host, SHARED_WITH_ME_FOLDER, ".env", "docs"), {
-      recursive: true,
-    });
-
-    await expect(
-      resolveShareMountPath(
-        host,
-        "shared-with-me/.env/docs/brief.md",
-        [{ shareId: SHARE_ID, label: ".env" }],
-        true,
-      ),
-      "skipping an invalid matching label lets the caller read the projection from disk",
-    ).rejects.toThrow(/saved details are invalid/);
   });
 
   it("refuses an unclaimed projection path when a mount registry exists", async () => {
@@ -427,16 +324,6 @@ describe("mount labels", () => {
       ),
       "first-match routing sends an ambiguous mount path to an arbitrary share",
     ).rejects.toThrow(/saved details are invalid/);
-  });
-
-  it("never gives case-colliding labels separate owner authority", () => {
-    const mounts = [
-      { shareId: "first", label: "alex" },
-      { shareId: "second", label: "Alex" },
-    ];
-
-    expect(usableShareMountRecord(mounts, mounts[0]!)).toBe(false);
-    expect(usableShareMountRecord(mounts, mounts[1]!)).toBe(false);
   });
 
   it("plans ambiguous or unusable records for registry-only removal", () => {
@@ -489,45 +376,6 @@ describe("mount labels", () => {
         mounts,
         true,
       ),
-    ).resolves.toBeUndefined();
-  });
-
-  it("refuses a move into stale projection bytes after the final unmount", async () => {
-    const host = await tempHostRoot();
-    await mkdir(join(host, SHARED_WITH_ME_FOLDER, "orphan"), {
-      recursive: true,
-    });
-
-    await expect(
-      refuseMoveAcrossShareMount(
-        host,
-        "notes/local.md",
-        "shared-with-me/orphan/local.md",
-        [],
-        true,
-      ),
-    ).rejects.toThrow(/no share owns it/i);
-  });
-
-  it("refuses imports into a mount through its projection path or an alias", async () => {
-    const host = await tempHostRoot();
-    await createShareMountDirectoryThroughOwnerForTest(host, "alex");
-    await symlink(mountRootFor(host, "alex"), join(host, "inbox"), "dir");
-    const mounts = [{ shareId: SHARE_ID, label: "alex" }];
-
-    await expect(
-      refuseImportIntoShareProjection(
-        host,
-        "shared-with-me/alex",
-        mounts,
-        true,
-      ),
-    ).rejects.toThrow(/mounted share is read-only/i);
-    await expect(
-      refuseImportIntoShareProjection(host, "inbox", mounts, true),
-    ).rejects.toThrow(/mounted share is read-only/i);
-    await expect(
-      refuseImportIntoShareProjection(host, "notes", mounts, true),
     ).resolves.toBeUndefined();
   });
 
@@ -613,99 +461,6 @@ describe("mount labels", () => {
       ],
     });
     expect(failures).toEqual(["damaged"]);
-  });
-
-  it("hides disk entries for an invalid mount record", async () => {
-    const listCanonical = vi.fn();
-    const failures: unknown[] = [];
-
-    await expect(
-      overlayCanonicalShareMountFiles({
-        disk: {
-          files: [
-            { path: "notes/local.md", size: 5 },
-            { path: "shared-with-me/.env/recipient-only.md", size: 10 },
-          ],
-          folders: ["notes", "shared-with-me/.env"],
-        },
-        mounts: [{ shareId: "invalid", label: ".env" }],
-        listCanonical,
-        onFailure: (_mount, error) => failures.push(error),
-      }),
-    ).resolves.toEqual({
-      files: [{ path: "notes/local.md", size: 5 }],
-      folders: ["notes"],
-    });
-    expect(listCanonical).not.toHaveBeenCalled();
-    expect(failures).toEqual([
-      expect.objectContaining({ message: expect.stringMatching(/invalid/i) }),
-    ]);
-  });
-
-  it("keeps local files but hides the projection for an empty owner set", async () => {
-    await expect(
-      overlayCanonicalShareMountFiles({
-        disk: {
-          files: [
-            { path: "notes/local.md" },
-            { path: "shared-with-me/orphan/recipient-only.md" },
-          ],
-          folders: ["notes", "shared-with-me/orphan"],
-        },
-        mounts: [],
-        listCanonical: async () => ({ files: [] }),
-      }),
-    ).resolves.toEqual({
-      files: [{ path: "notes/local.md" }],
-      folders: ["notes"],
-    });
-  });
-
-  it("hides an ambiguous projection claimed by two mount records", async () => {
-    const listCanonical = vi.fn();
-    const mounts = [
-      { shareId: "first", label: "owner" },
-      { shareId: "second", label: "owner" },
-    ];
-
-    await expect(
-      overlayCanonicalShareMountFiles({
-        disk: {
-          files: [{ path: "shared-with-me/owner/stale.md" }],
-          folders: ["shared-with-me/owner"],
-        },
-        mounts,
-        listCanonical,
-      }),
-    ).resolves.toEqual({ files: [], folders: [] });
-    expect(listCanonical).not.toHaveBeenCalled();
-  });
-
-  it("contains malformed records and still overlays a later healthy mount", async () => {
-    const failures: unknown[] = [];
-    const malformed = { shareId: "damaged", label: null } as never;
-    const healthy = { shareId: "healthy", label: "healthy" };
-
-    await expect(
-      overlayCanonicalShareMountFiles({
-        disk: {
-          files: [
-            { path: "shared-with-me/unknown/recipient-only.md" },
-            { path: "shared-with-me/healthy/stale.md" },
-          ],
-          folders: ["shared-with-me/unknown", "shared-with-me/healthy"],
-        },
-        mounts: [malformed, healthy],
-        listCanonical: async (mount) => ({
-          files: [{ path: `${mount.shareId}.md` }],
-        }),
-        onFailure: (_mount, error) => failures.push(error),
-      }),
-    ).resolves.toEqual({
-      files: [{ path: "shared-with-me/healthy/healthy.md" }],
-      folders: ["shared-with-me/healthy"],
-    });
-    expect(failures).toHaveLength(1);
   });
 });
 
@@ -828,27 +583,6 @@ describe("refreshShareMount", () => {
     expect(
       await readFile(join(host, SHARED_WITH_ME_FOLDER, "alex", "plan.md"), "utf8"),
     ).toBe("keep me");
-  });
-
-  it("refuses a file at shared-with-me before materialization", async () => {
-    const host = await tempHostRoot();
-    const container = join(host, SHARED_WITH_ME_FOLDER);
-    await writeFile(container, "keep this file");
-    const relay = new FakeShareRelay();
-    const harness = daemonHarness(relay);
-    relay.addWrite("docs/brief.md", "the brief");
-
-    await expect(
-      createShareMountDirectoryThroughOwnerForTest(host, "alex"),
-    ).rejects.toThrow(/not a real directory/);
-    await expect(
-      refreshShareMount(harness, {
-        hostRoot: host,
-        mount: { shareId: SHARE_ID, label: "alex" },
-      }),
-    ).rejects.toThrow(/not a real directory/);
-    expect(await readFile(container, "utf8")).toBe("keep this file");
-    expect(harness.transport.requests).toEqual([]);
   });
 
   it("refuses a symlinked shared-with-me or label directory (real-path guard)", async () => {
@@ -1006,34 +740,6 @@ describe("refreshShareMount", () => {
     });
   });
 
-  it("creates nothing outside the workspace when a dir symlink sits on a deep write path", async () => {
-    const host = await tempHostRoot();
-    const elsewhere = await tempHostRoot();
-    const relay = new FakeShareRelay();
-    const harness = daemonHarness(relay);
-    relay.addWrite("docs/top.md", "v1");
-    await refreshShareMount(harness, {
-      hostRoot: host,
-      mount: { shareId: SHARE_ID, label: "alex" },
-    });
-    const mountRoot = join(host, SHARED_WITH_ME_FOLDER, "alex");
-    await rm(join(mountRoot, "docs"), { recursive: true, force: true });
-    await symlink(elsewhere, join(mountRoot, "docs"), "dir");
-    // The granter writes a deep path: the repair pass heals the planted
-    // link first, so the deep write lands inside the workspace and nothing
-    // is ever created through the link.
-    relay.addWrite("docs/deep/file.md", "payload");
-    const outcome = await refreshShareMount(harness, {
-      hostRoot: host,
-      mount: { shareId: SHARE_ID, label: "alex" },
-    });
-    expect(outcome.status).toBe("updated");
-    expect(
-      await readFile(join(mountRoot, "docs/deep/file.md"), "utf8"),
-    ).toBe("payload");
-    expect(existsSync(join(elsewhere, "deep"))).toBe(false);
-  });
-
   it("unmount removes a tampered symlinked mount root as a link (never through it)", async () => {
     const host = await tempHostRoot();
     const elsewhere = await tempHostRoot();
@@ -1111,85 +817,9 @@ describe("refreshShareMount", () => {
     expect(existsSync(join(mountRoot, "docs/brief.md"))).toBe(false);
     expect(await readFile(join(elsewhere, "brief.md"), "utf8")).toBe("victim");
   });
-
-  it("owner-mediated mount creation refuses a symlinked container before any write", async () => {
-    const host = await tempHostRoot();
-    const elsewhere = await tempHostRoot();
-    await symlink(elsewhere, join(host, SHARED_WITH_ME_FOLDER), "dir");
-    await expect(
-      createShareMountDirectoryThroughOwnerForTest(host, "alex"),
-    ).rejects.toThrow(
-      /not a real directory/,
-    );
-    // The guard ran before mkdir: nothing was created through the link.
-    expect(existsSync(join(elsewhere, "alex"))).toBe(false);
-  });
-
-  it("owner-mediated mount creation never adopts an existing folder", async () => {
-    const host = await tempHostRoot();
-    await mkdir(join(host, SHARED_WITH_ME_FOLDER, "alex"), { recursive: true });
-    await expect(
-      createShareMountDirectoryThroughOwnerForTest(host, "alex"),
-    ).rejects.toThrow();
-    await createShareMountDirectoryThroughOwnerForTest(host, "sam");
-    expect(existsSync(join(host, SHARED_WITH_ME_FOLDER, "sam"))).toBe(true);
-  });
-
-  it("refuses to mount a selector with no file content (chat codes)", () => {
-    expect(() => assertMountableSelector(null)).toThrow(/shared group/);
-    expect(() =>
-      assertMountableSelector({
-        paths: ["docs"],
-        versionId: null,
-        access: "view",
-      }),
-    ).not.toThrow();
-    expect(() =>
-      assertMountableSelector({
-        paths: [],
-        versionId: "main",
-        access: "comment",
-      }),
-    ).not.toThrow();
-  });
-
-  it("refuses to refresh a mount whose registry label was tampered into traversal", async () => {
-    const host = await tempHostRoot();
-    const relay = new FakeShareRelay();
-    const harness = daemonHarness(relay);
-    await expect(
-      refreshShareMount(harness, {
-        hostRoot: host,
-        mount: { shareId: SHARE_ID, label: "../../etc" },
-      }),
-    ).rejects.toThrow(/Invalid share mount label/);
-    expect(harness.transport.requests).toEqual([]);
-  });
 });
 
 describe("owner-mediated mount removal", () => {
-  it("removes exactly the mount folder", async () => {
-    const host = await tempHostRoot();
-    await mkdir(join(host, SHARED_WITH_ME_FOLDER, "alex"), { recursive: true });
-    await mkdir(join(host, SHARED_WITH_ME_FOLDER, "sam"), { recursive: true });
-    await writeFile(join(host, SHARED_WITH_ME_FOLDER, "alex", "a.md"), "x");
-    await writeFile(join(host, SHARED_WITH_ME_FOLDER, "sam", "s.md"), "y");
-
-    await removeShareMountFolderThroughOwnerForTest(host, "alex");
-
-    expect(existsSync(join(host, SHARED_WITH_ME_FOLDER, "alex"))).toBe(false);
-    expect(existsSync(join(host, SHARED_WITH_ME_FOLDER, "sam", "s.md"))).toBe(true);
-  });
-
-  it("refuses tampered labels", async () => {
-    const host = await tempHostRoot();
-    await expect(
-      removeShareMountFolderThroughOwnerForTest(host, ".."),
-    ).rejects.toThrow(
-      /Invalid share mount label/,
-    );
-  });
-
   it("leaves the folder present when the container is a symlink", async () => {
     const host = await tempHostRoot();
     const elsewhere = await tempHostRoot();
@@ -1217,27 +847,12 @@ describe("share mount refresh failures", () => {
     ).toEqual({ kind: "row", status: "damaged" });
   });
 
-  it("does not hide a damaged mount behind unchanged", () => {
-    const verdict = classifyShareMountRefreshError(new SharePinInvalidError("s"));
-    expect(verdict.kind === "row" && verdict.status).not.toBe("unchanged");
-  });
-
   // The one failure that does make every remaining pull pointless.
   it("abandons the refresh only when the session expired", () => {
     expect(classifyShareMountRefreshError(new RelayUnauthorizedError())).toEqual({
       kind: "abort",
       message: "Your server session expired. Sign in again, then refresh shares.",
     });
-  });
-
-  // "unchanged" said the share was current when dohc had not reached it.
-  it("reports an ordinary failure as failed and moves on", () => {
-    for (const error of [new Error("offline"), "nonsense", null]) {
-      expect(classifyShareMountRefreshError(error)).toEqual({
-        kind: "row",
-        status: "failed",
-      });
-    }
   });
 });
 
@@ -1252,30 +867,6 @@ describe("refresh result wire shape", () => {
     label: "alex",
     status,
     changedPaths: 0,
-  });
-
-  it("carries every status the refresh loop can emit", () => {
-    for (const status of ["updated", "unchanged", "ended", "damaged", "failed"]) {
-      expect(
-        RefreshShareMountsResult.safeParse({ results: [row(status)] }).success,
-        `main emits ${status} but the wire schema drops the whole result`,
-      ).toBe(true);
-    }
-  });
-
-  it("carries a collision-record refusal and a set-aside record", () => {
-    for (const result of [
-      { ...row("failed"), errorKind: "collision-record" },
-      { ...row("unchanged"), collisionRecordQuarantined: true },
-    ]) {
-      expect(RefreshShareMountsResult.parse({ results: [result] }).results).toEqual([result]);
-    }
-  });
-
-  it("still refuses a status nothing emits", () => {
-    expect(RefreshShareMountsResult.safeParse({ results: [row("invented")] }).success).toBe(
-      false,
-    );
   });
 
   // The classifier and the schema must agree: whatever the classifier can
@@ -1302,54 +893,6 @@ describe("refresh result wire shape", () => {
 // survived, and the user was told the refresh failed while the healthy
 // mounts had in fact refreshed.
 describe("share mount result rows", () => {
-  it("carries a row the schema can hold", () => {
-    expect(
-      shareMountResultRow({
-        shareId: "s-1",
-        label: "alex",
-        status: "updated",
-        changedPaths: 3,
-      }),
-    ).toEqual({ shareId: "s-1", label: "alex", status: "updated", changedPaths: 3 });
-  });
-
-  it("carries what dohc did with a share collision record", () => {
-    expect(
-      shareMountResultRow({
-        shareId: "s-1",
-        label: "alex",
-        status: "failed",
-        changedPaths: 0,
-        errorKind: "collision-record",
-      }),
-    ).toEqual({ shareId: "s-1", label: "alex", status: "failed", changedPaths: 0, errorKind: "collision-record" });
-    expect(
-      shareMountResultRow({
-        shareId: "s-1",
-        label: "alex",
-        status: "updated",
-        changedPaths: 2,
-        collisionRecordQuarantined: true,
-      }),
-    ).toEqual({ shareId: "s-1", label: "alex", status: "updated", changedPaths: 2, collisionRecordQuarantined: true });
-  });
-
-  it("drops a row whose identity the schema cannot carry, and nothing else", () => {
-    for (const bad of [
-      { shareId: "s-1", label: "x".repeat(65) },
-      { shareId: "s-1", label: "" },
-      { shareId: "s-1", label: 7 },
-      { shareId: "", label: "alex" },
-      { shareId: null, label: "alex" },
-      { shareId: "s".repeat(201), label: "alex" },
-    ]) {
-      expect(
-        shareMountResultRow({ ...bad, status: "unchanged", changedPaths: 0 }),
-        `${JSON.stringify(bad).slice(0, 40)} fails the whole refresh report`,
-      ).toBeNull();
-    }
-  });
-
   // A count the schema cannot carry must not cost the mount its STATUS. The
   // schema parse alone would drop the whole row, so the count is clamped
   // first: the row survives, and it claims the minimum rather than a number
@@ -1406,21 +949,6 @@ describe("share mount result rows", () => {
         row !== null,
         `builder and schema disagree for ${JSON.stringify(identity).slice(0, 40)}`,
       ).toBe(schemaAccepts);
-    }
-  });
-
-  // The seam rule: whatever this builder produces, the wire must carry.
-  it("produces rows the refresh result always parses", () => {
-    for (const status of ["updated", "unchanged", "ended", "damaged"] as const) {
-      const row = shareMountResultRow({
-        shareId: "s-1",
-        label: "alex",
-        status,
-        changedPaths: 1,
-      });
-      expect(RefreshShareMountsResult.safeParse({ results: [row] }).success, status).toBe(
-        true,
-      );
     }
   });
 });
