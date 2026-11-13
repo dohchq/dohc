@@ -592,22 +592,6 @@ async fn deliver_seen(
     (receipt, result)
 }
 
-struct PrefixRival {
-    path: PathBuf,
-    fired: std::sync::atomic::AtomicBool,
-}
-
-impl dohc_engine_storage::FaultInjector for PrefixRival {
-    fn poll(&self, point: dohc_engine_storage::FaultPoint) -> dohc_engine_storage::FaultAction {
-        if point == dohc_engine_storage::FaultPoint::MaterializeBeforePreimageRevalidate
-            && !self.fired.swap(true, std::sync::atomic::Ordering::SeqCst)
-        {
-            std::fs::write(&self.path, "rival survives").unwrap();
-        }
-        dohc_engine_storage::FaultAction::Continue
-    }
-}
-
 #[tokio::test]
 async fn configured_pending_edits_do_not_escape_through_ordinary_index_journal_or_settlement() {
     let f = Fixture::new();
