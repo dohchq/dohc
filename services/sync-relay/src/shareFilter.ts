@@ -1093,7 +1093,8 @@ function withholdIn(value: unknown, covers: (path: string) => boolean): unknown 
 // every read of every stored message. Appends are stored as written: the
 // owner reads them whole.
 function withheldLinks(decision: ShareOpDecision, opKind: string, files: ShareSelector | null): ShareOpDecision {
-  const served = decision.allowed && Object.hasOwn(CHAT_TEXT_FIELDS, opKind) ? asRecord(decision.payload) : null;
+  if (!decision.allowed || !Object.hasOwn(CHAT_TEXT_FIELDS, opKind)) return decision;
+  const served = asRecord(decision.payload);
   if (!served) return decision;
   const covers = (path: string) => shareCoversLinkPath(files, path);
   const payload = { ...served };
