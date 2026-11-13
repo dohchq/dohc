@@ -2350,6 +2350,32 @@ fn own_entry(
         )
         .optional()
         .map_err(read_sql)?;
+    // A group's frame carries the group's id; its rows share one declaration
+    // and run.
+    let entry = match entry {
+        Some(entry) => Some(entry),
+        None => crate::owner_outbox::own_group_context_in(
+            tx,
+            key,
+            &receipt.delivery_id,
+            &receipt.update_digest,
+        )
+        .map_err(|error| match error {
+            crate::owner_outbox::OwnerOutboxError::Storage(error) => {
+                ApplicationError::Storage(error)
+            }
+            _ => ApplicationError::Corrupt,
+        })?
+        .filter(|group| group.agent_run_id.is_some())
+        .map(|group| {
+            (
+                None,
+                group.declaration_json,
+                group.receipt_json,
+                group.agent_run_id,
+            )
+        }),
+    };
     let Some((source, declaration, saved, run)) = entry else {
         return Ok((None, None));
     };
@@ -5872,6 +5898,71 @@ mod tests {
             .unwrap();
         assert_eq!(stored.len(), 3);
         assert!(stored.iter().all(|json| !json.contains("agentRunId")));
+    }
+
+    #[test]
+    fn own_agent_drafts_sent_as_one_group_keep_their_run() {
+        let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
+        let mut outbox_id = String::new();
+        for (append_key, value) in [("head", "a"), ("second", "b"), ("third", "c")] {
+            let draft = crate::owner_outbox::append(
+                &mut store,
+                "workspace-1",
+                crate::owner_outbox::OwnerOutboxAppendInput {
+                    binding: binding(),
+                    base_update: Ydoc::wire().encode_full_state(),
+                    append_key: append_key.into(),
+                    update: Ydoc::wire().frontmatter_set("status", value).unwrap(),
+                    limits: crate::owner_outbox::OwnerOutboxLimits {
+                        max_pending_bytes: 100_000,
+                        max_pending_age_ms: 100_000,
+                    },
+                    created_at_ms: 1,
+                },
+            )
+            .unwrap();
+            outbox_id = draft.outbox_id;
+        }
+        // The agent's drafts as its draft appends leave them: the head alone
+        // in run-a, the two typed behind it one group in run-g.
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE owner_ydoc_outbox_entries SET agent_declaration_json=?1, \
+                     agent_run_id=CASE sequence WHEN 1 THEN 'run-a' ELSE 'run-g' END, \
+                     delivery_group=CASE sequence WHEN 1 THEN NULL ELSE 2 END",
+                    params![serde_json::to_string(&declared("trip-agent").unwrap()).unwrap()],
+                )
+                .map_err(StorageError::persist_public)?;
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+        let pending = crate::owner_outbox::read_pending(&store, "workspace-1", &outbox_id).unwrap();
+        assert_eq!(pending.entries.len(), 2);
+        for (cursor, entry) in (1..).zip(pending.entries) {
+            let mut update = event(&entry.delivery_id, cursor, entry.update);
+            snapshot(&mut update.metadata, declared("trip-agent"));
+            sees(&mut update, &Ydoc::wire());
+            ack(apply(&mut store, &mut cache, &handle, update));
+        }
+        let interval: serde_json::Value = serde_json::from_str(
+            &store
+                .read_with(|conn| crate::author_coverage::interval_in(conn, &key(), i64::MAX))
+                .unwrap()
+                .json(),
+        )
+        .unwrap();
+        let runs: Vec<&serde_json::Value> = interval
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|author| author["kind"] == "agent")
+            .map(|author| &author["agentRunId"])
+            .collect();
+        assert_eq!(
+            runs,
+            [&serde_json::json!("run-a"), &serde_json::json!("run-g")]
+        );
     }
 
     /// The person this computer records while nobody is signed in.

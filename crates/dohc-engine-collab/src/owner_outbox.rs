@@ -160,21 +160,7 @@ pub fn is_own_draft_in(
         return Ok(true);
     }
     // Only a queue's head can have been offered.
-    let outboxes = conn
-        .prepare(
-            "SELECT outbox_id FROM owner_ydoc_outboxes \
-             WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3",
-        )
-        .and_then(|mut statement| {
-            statement
-                .query_map(
-                    params![key.workspace_id, key.version_id, key.object_id],
-                    |r| r.get::<_, String>(0),
-                )?
-                .collect::<rusqlite::Result<Vec<_>>>()
-        })
-        .map_err(storage)?;
-    for outbox_id in outboxes {
+    for outbox_id in document_outboxes(conn, key).map_err(storage)? {
         let head =
             delivery_group::pending_in(conn, &outbox_id, 1).map_err(|error| match error {
                 OwnerOutboxError::Storage(error) => crate::CollabError::Storage(error),
@@ -191,6 +177,35 @@ pub fn is_own_draft_in(
         }
     }
     Ok(false)
+}
+
+fn document_outboxes(conn: &Connection, key: &crate::DocKey) -> rusqlite::Result<Vec<String>> {
+    let mut statement = conn.prepare(
+        "SELECT outbox_id FROM owner_ydoc_outboxes \
+         WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3",
+    )?;
+    let rows = statement.query_map(
+        params![key.workspace_id, key.version_id, key.object_id],
+        |r| r.get::<_, String>(0),
+    )?;
+    rows.collect()
+}
+
+/// The declaration, run and saved receipt of this document's own group that
+/// the relay accepted under this delivery, if it is one.
+pub(crate) fn own_group_context_in(
+    conn: &Connection,
+    key: &crate::DocKey,
+    delivery_id: &str,
+    update_digest: &str,
+) -> Result<Option<delivery_group::GroupContext>, OwnerOutboxError> {
+    for outbox_id in document_outboxes(conn, key).map_err(read_sql)? {
+        let context = delivery_group::context_in(conn, &outbox_id, delivery_id, update_digest)?;
+        if context.is_some() {
+            return Ok(context);
+        }
+    }
+    Ok(None)
 }
 
 /// An acknowledged group of this document by the receipt its rows keep, found

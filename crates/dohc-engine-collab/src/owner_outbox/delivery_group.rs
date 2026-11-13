@@ -214,10 +214,12 @@ fn delivery(
     })
 }
 
-/// An acknowledged group's receipt, found through migration 100's index on its
-/// digest. `+outbox_id` keeps the planner off the outbox's whole history.
+/// An acknowledged group's receipt and the author context its rows share,
+/// found through migration 100's index on its digest. `+outbox_id` keeps the
+/// planner off the outbox's whole history.
 pub(super) const ACKNOWLEDGED_GROUP: &str =
-    "SELECT accepted_receipt_json FROM owner_ydoc_outbox_entries \
+    "SELECT agent_declaration_json,agent_run_id,accepted_receipt_json \
+     FROM owner_ydoc_outbox_entries \
      WHERE delivery_group IS NOT NULL AND accepted_receipt_json IS NOT NULL \
        AND json_extract(accepted_receipt_json,'$.updateDigest')=?3 \
        AND +outbox_id=?1 AND pending=0 \
@@ -261,7 +263,9 @@ pub(super) fn find_in(
     if let Some((sequence, pending, mut known)) = own {
         if pending {
             match starting_at_in(conn, outbox_id, sequence)? {
-                Some(alone) if !alone.is_group() => known.pending = Some(alone),
+                // A row alone, or a group whose merged update is its first
+                // row's, so it carries that row's id.
+                Some(own) if own.delivery_id == delivery_id => known.pending = Some(own),
                 _ => return Ok(None),
             }
         }
@@ -281,7 +285,7 @@ pub(super) fn find_in(
         .query_row(
             ACKNOWLEDGED_GROUP,
             params![outbox_id, delivery_id, update_digest],
-            |r| r.get(0),
+            |r| r.get(2),
         )
         .optional()
         .map_err(read_sql)?;
@@ -291,6 +295,53 @@ pub(super) fn find_in(
         receipt_json: Some(receipt_json),
         terminal_reason: None,
     }))
+}
+
+/// The declaration and run a group's rows share, and the receipt they keep
+/// once acknowledged. Rows join only with the same declaration and run, so
+/// the first speaks for all of them.
+pub(crate) struct GroupContext {
+    pub declaration_json: Option<String>,
+    pub agent_run_id: Option<String>,
+    pub receipt_json: Option<String>,
+}
+
+/// The context of the group with this id and digest: the head group while it
+/// waits, or a group by the receipt its rows keep.
+pub(super) fn context_in(
+    conn: &Connection,
+    outbox_id: &str,
+    delivery_id: &str,
+    update_digest: &str,
+) -> Result<Option<GroupContext>, OwnerOutboxError> {
+    let context = |r: &rusqlite::Row<'_>| {
+        Ok(GroupContext {
+            declaration_json: r.get(0)?,
+            agent_run_id: r.get(1)?,
+            receipt_json: r.get(2)?,
+        })
+    };
+    if let Some(head) = pending_in(conn, outbox_id, 1)?.pop() {
+        if head.is_group() && head.delivery_id == delivery_id && head.update_digest == update_digest
+        {
+            return conn
+                .query_row(
+                    "SELECT agent_declaration_json,agent_run_id,accepted_receipt_json \
+                     FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND sequence=?2",
+                    params![outbox_id, head.first_sequence],
+                    context,
+                )
+                .map(Some)
+                .map_err(read_sql);
+        }
+    }
+    conn.query_row(
+        ACKNOWLEDGED_GROUP,
+        params![outbox_id, delivery_id, update_digest],
+        context,
+    )
+    .optional()
+    .map_err(read_sql)
 }
 
 /// Whether a group of two or more rows refused together for `reason` had this
