@@ -689,7 +689,12 @@ describe("a server that runs a workspace's automations", () => {
       replaces: failure,
     });
     expect(notices(storage, "outsider")).toHaveLength(0);
-    expect(s.errors.some(([context]) => context.includes("another person involved"))).toBe(true);
+    expect(
+      s.errors.some(
+        ([context]) => context === `report an automation failure in workspace "${WORKSPACE}"`,
+      ),
+    ).toBe(true);
+    expect(s.errors.some(([context]) => context.includes("Hourly"))).toBe(false);
   });
 
   it("takes the schedules, Group coverage, and reach verdicts from a computer, and hands them back", async () => {
@@ -1143,12 +1148,13 @@ describe("a server that pushes its copy of a workspace", () => {
     expect(readHead).toHaveBeenCalledWith("outbox");
     expect(capture).not.toHaveBeenCalled();
     const delivering = s.errors.filter(([context]) =>
-      context.startsWith("deliver automation record"),
+      context.startsWith("deliver an automation record"),
     );
     expect(delivering.length).toBeGreaterThan(0);
+    // The server log prints the context, so it names the workspace and not the record's path.
     expect(delivering).toEqual(
       delivering.map(() => [
-        `deliver automation record "Tasks/one.md" in workspace "${WORKSPACE}"`,
+        `deliver an automation record in workspace "${WORKSPACE}"`,
         expect.objectContaining({ message: UNDELIVERED }),
       ]),
     );
@@ -1201,7 +1207,7 @@ describe("a server that pushes its copy of a workspace", () => {
     const ended = () =>
       storage.endedAutomationServerRuns({ workspaceId: WORKSPACE, incarnation: 1 });
     const reported = () =>
-      s.errors.filter(([context]) => context.startsWith("deliver automation record")).length;
+      s.errors.filter(([context]) => context.startsWith("deliver an automation record")).length;
     // The record still resolves to the queue's binding, so the queue can recover and holds the run.
     const held = payRunRecord("claim-held");
     options.beforeEffect!(held, setStatus(0));

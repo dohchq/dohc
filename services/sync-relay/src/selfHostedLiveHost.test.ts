@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { afterEach, expect, it, vi } from "vitest";
 import { startSelfHostedLiveHost, deleteSelfHostedWorkspaceRoots } from "./selfHostedLiveHost";
 import { stopWithoutSessionHost } from "./sessionHostStop";
+import { serverLogLine } from "./serverLogWords";
 import { createServiceHostEnrollmentRoutes } from "./serviceHostEnrollmentRoutes";
 import { fenceAccount, initializeAccountDeletion } from "./storage/accountDeletion";
 import type { ServiceHostedSet } from "./serviceLiveHost";
@@ -119,6 +120,9 @@ const storeName = (workspaceId: string, replicationEpoch = "epoch", streamIdenti
   createHash("sha256")
     .update(JSON.stringify(["hosted-v1", namespace, workspaceId, replicationEpoch, streamIdentity]))
     .digest("hex");
+const recovery =
+  "Recovery is not automatic yet. The store and every edit in it are kept. Keep the store's .diverged marker beside it. " +
+  "Without it the next relay start attaches the store again and checks it against the relay before anyone can edit.";
 
 async function fixture(
   options: {
@@ -618,11 +622,15 @@ it.each([
     expect(f.enrollment()).toEqual(before);
     expect(f.storage.serviceActivationRetirement(binding)).toBeNull();
     expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding)).toBe(admission);
-    expect(log.mock.calls.filter(([line]) => String(line).includes("Session host:"))).toEqual([
+    // The log names the refusal's code: a moved document's state names its earlier path.
+    expect(
+      log.mock.calls.filter(([line]) => String(line).includes("Session host refusal:")),
+    ).toEqual([
       [
-        `Live editing Stop for workspace ${scope.workspaceId}, object ${binding.objectId}. Session host: ${test.state}`,
+        `Live editing Stop for workspace ${scope.workspaceId}, object ${binding.objectId}. Session host refusal: ${test.code}`,
       ],
     ]);
+    expect(log.mock.calls.flat().join(" ")).not.toContain(binding.currentPath);
     expect(log.mock.calls.flat().join(" ")).not.toContain(failure.message);
   } finally {
     finish.resolve();
@@ -816,9 +824,10 @@ it("keeps a diverged store in place and its workspace detached across passes and
   f.diverge();
   f.host.reconcile();
   const reported = expect.objectContaining({
-    message: expect.stringMatching(/diverged from the relay.*stays detached.*store is kept at .+/),
+    message: `The live editing copy of workspace ${scope.workspaceId} diverged from the relay. It stays detached, and its store ${storeName(scope.workspaceId)} is kept. ${recovery}`,
   });
   await vi.waitFor(() => expect(f.onError).toHaveBeenCalledWith(reported), { timeout: 10_000 });
+  expect(serverLogLine(f.onError.mock.calls[0]![0])).not.toContain(f.data);
   f.onError.mockClear();
   await f.waitPasses();
   const workspaceId = "workspace-2",
@@ -896,11 +905,16 @@ it("tells the operator a document whose history is past its budget tries again l
   expect(f.onError.mock.calls).toEqual([
     [
       expect.objectContaining({
-        message: `Live editing of docs/a.md in workspace ${scope.workspaceId} cannot start: its edit history is past what this server reads or checks. It tries again later, or when its owner resumes live editing in dohc. Its store is kept at ${join(f.data, storeName(scope.workspaceId))}.`,
+        message: `Live editing of object ${binding.objectId} in workspace ${scope.workspaceId} cannot start: its edit history is past what this server reads or checks. It tries again later, or when its owner resumes live editing in dohc. Its store ${storeName(scope.workspaceId)} is kept.`,
       }),
     ],
   ]);
   expect(f.host.blocked(binding)).toBe("history-over-budget");
+  // The server log prints the whole line, and it names neither the document's path nor the store's folder.
+  const line = serverLogLine(f.onError.mock.calls[0]![0]);
+  expect(line).toMatch(/^ServerLogError: Live editing of object /);
+  expect(line).not.toContain("docs/a.md");
+  expect(line).not.toContain(f.data);
   await f.waitPasses();
   expect(f.onError).toHaveBeenCalledTimes(1);
 });
@@ -974,7 +988,9 @@ it("retries a divergence marker that could not be written, fencing the store mea
     { timeout: 10_000 },
   );
   expect(f.onError.mock.calls.find(failed)![0]).toMatchObject({
-    message: `Could not write ${marker}. It is retried while the relay runs; a relay restart before it lands attaches the store again.`,
+    message:
+      `Could not write the .diverged marker of store ${storeName(scope.workspaceId)} for workspace ${scope.workspaceId} (Error: ENOSPC). ` +
+      "It is retried while the relay runs; a relay restart before it lands attaches the store again.",
     cause: markerFailure.error,
   });
   await f.waitPasses();

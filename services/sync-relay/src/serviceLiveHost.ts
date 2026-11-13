@@ -64,7 +64,7 @@ import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory.j
 import type { LiveHostConnectionCoordinate, SyncRelayStorage } from "./storage.js";
 import { parseLiveSettlementConfig, type LiveSettlementConfig } from "./liveSettlementConfig.js";
 import { settlementPending } from "./liveSettlement.js";
-import { activationFailureLine } from "./activationFailureLine.js";
+import { childStderrLog, codeWord, serverLogLine, ServerLogError } from "./serverLogWords.js";
 import { snapshotStopRestoreLookup } from "./liveRestoreDelivery.js";
 import { relayError } from "./errors.js";
 import type { StopRestoreLookup } from "./storage/liveRestoreOperation.js";
@@ -769,7 +769,9 @@ export async function startServiceLiveHost(options: {
   };
   const abort = () => {
     if (!closing)
-      void close().catch((error) => console.error("Service host shutdown failed.", error));
+      void close().catch((error) =>
+        console.error("Service host shutdown failed.", serverLogLine(error)),
+      );
   };
   // An operator learns which side ended the engine: the engine itself, or the relay after a request's deadline.
   const exited = (code: number | null, exitSignal: NodeJS.Signals | null) => {
@@ -994,7 +996,7 @@ export async function startServiceLiveHost(options: {
               },
               signal,
               onExit: exited,
-              onStderr: (text) => console.error("[service-live-host]", text.trimEnd()),
+              onStderr: childStderrLog("[service-live-host]"),
             }),
           ),
           (value) => Effect.promise(() => value.waitForExit()),
@@ -1425,8 +1427,7 @@ export async function startServiceLiveHost(options: {
             );
             const reply =
               result && typeof result === "object" ? (result as Record<string, unknown>) : {};
-            if (reply.status === "pending")
-              return typeof reply.reason === "string" ? reply.reason : "unload-pending";
+            if (reply.status === "pending") return codeWord(reply.reason) ?? "unload-pending";
             if (reply.status !== "unloaded")
               throw new Error("Invalid live document unload response.");
           } catch (error) {
@@ -2965,7 +2966,7 @@ export async function startServiceLiveHost(options: {
                   await work();
                 } catch (error) {
                   failed = true;
-                  const shown = activationFailureLine(error);
+                  const shown = serverLogLine(error);
                   if (!signal.aborted && shown !== lastError) {
                     lastError = shown;
                     try {
@@ -2988,7 +2989,7 @@ export async function startServiceLiveHost(options: {
                   }
                   if (waiting !== undefined) {
                     lifecycleRetries++;
-                    throw new Error(`Departing live document is waiting: ${waiting}`);
+                    throw new ServerLogError(`Departing live document is waiting: ${waiting}`);
                   }
                 });
               // A replica that has not checked its origin checks it first. Until it succeeds, its workspace's steps wait.
@@ -3194,7 +3195,7 @@ export async function startServiceLiveHost(options: {
                   sleep(key, row, state.generation, deadline),
                 );
               } catch (error) {
-                waiting = activationFailureLine(error);
+                waiting = serverLogLine(error);
               }
               if (waiting === undefined || idle.get(key)?.generation !== state.generation) continue;
               idle.set(key, {
@@ -3745,7 +3746,10 @@ export async function startServiceLiveHost(options: {
                           wire.message === "invalid-retirement-preparation")
                       ) {
                         reconnect = true;
-                        console.error("Live editing Stop preparation is unavailable.", error);
+                        console.error(
+                          "Live editing Stop preparation is unavailable.",
+                          serverLogLine(error),
+                        );
                         if (wire.code === "INVALID_PARAMS") throw error;
                         throw relayError("restore-in-progress");
                       }
@@ -3970,7 +3974,7 @@ export async function startServiceLiveHost(options: {
       await close();
     } catch (cleanupError) {
       try {
-        console.error("Service host startup cleanup failed.", cleanupError);
+        console.error("Service host startup cleanup failed.", serverLogLine(cleanupError));
       } catch {
         /* Preserve the startup failure. */
       }

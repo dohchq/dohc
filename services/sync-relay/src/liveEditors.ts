@@ -1,4 +1,5 @@
 import type { SyncRelayStorage } from "./storage.js";
+import { serverLogLine } from "./serverLogWords.js";
 
 type Document = { readonly workspaceId: string; readonly objectId: string };
 const documentKey = (document: Document) =>
@@ -43,7 +44,7 @@ export class LiveEditors {
         listener(document);
       } catch (error) {
         try {
-          console.error("Live editor listener failed.", error);
+          console.error("Live editor listener failed.", serverLogLine(error));
         } catch {
           /* Counting must not stop for reporting. */
         }

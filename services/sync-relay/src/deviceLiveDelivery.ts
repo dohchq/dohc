@@ -36,6 +36,7 @@ import { LiveRestorePreparation } from "./liveRestorePreparation.js";
 import { LiveDocumentWork } from "./liveDocumentWork.js";
 import { OwnerOutboxWake } from "./ownerOutboxWake.js";
 import { queueLiveHostRequests } from "./liveHostRequests.js";
+import { serverLogLine } from "./serverLogWords.js";
 
 export function createDeviceLiveDelivery(options: {
   ws: WebSocket;
@@ -314,7 +315,7 @@ export function createDeviceLiveDelivery(options: {
     },
     onError: (error) => {
       if (!closed && !invalidated.signal.aborted)
-        console.error("Owner outbox change delivery failed.", error);
+        console.error("Owner outbox change delivery failed.", serverLogLine(error));
     },
   });
   if (changes) stopObserving = observeRelayWrites(storage, () => changes.notify());

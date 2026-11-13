@@ -474,7 +474,7 @@ it("keeps a Decline pending when its answer cannot be recorded", async () => {
       kind: "pending",
       reason: "The host's cancellation answer was not recorded.",
     });
-    expect(log).toHaveBeenCalledWith("[sync-relay] restore cancellation not recorded:", cause);
+    expect(log).toHaveBeenCalledWith("[sync-relay] restore cancellation not recorded:", "Error");
   } finally {
     log.mockRestore();
   }

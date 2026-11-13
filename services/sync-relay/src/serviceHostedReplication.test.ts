@@ -9,6 +9,7 @@ import {
   ServiceHostedReplication,
   type ServiceHostedPullPage,
 } from "./serviceHostedReplication.js";
+import { ServerLogError } from "./serverLogWords.js";
 
 const attachment = (maxPagesPerPull = 3) => ({
   relay: { baseUrl: "https://relay.example", bearerToken: "service-credential" },
@@ -299,7 +300,7 @@ it("tells the caller of a commit that stands before the retirement after it fail
   const heard = vi.fn();
   // It names the engine's code word, never the path, so the server log never shows the file.
   await expect(f.driver.pull(undefined, heard)).rejects.toThrow(
-    new Error(
+    new ServerLogError(
       "Hosted retirement failed: hosted-file-unexpected (code INTERNAL, method sync.commitCursor)",
     ),
   );

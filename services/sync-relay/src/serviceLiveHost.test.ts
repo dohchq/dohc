@@ -3244,7 +3244,7 @@ const restartedHost = async (o: Enrolled) => {
 };
 const waiting = (reason: string) => [
   "Service activation pass failed.",
-  `Departing live document is waiting: ${reason}`,
+  `ServerLogError: Departing live document is waiting: ${reason}`,
 ];
 
 // The document moves away from its enrolled path, so another object holds it.
@@ -5237,7 +5237,7 @@ for (const c of [
       await vi.waitFor(() =>
         expect(log.mock.calls.slice(returnedAt)).toContainEqual([
           "Service activation pass failed.",
-          "Ordinary activation history replaced the live document.",
+          "ServerLogError: Ordinary activation history replaced the live document.",
         ]),
       );
       for (let pass = 0; pass < 3; pass++) {
@@ -5793,7 +5793,7 @@ for (const c of [
         expect(
           log.mock.calls.slice(returnedAt),
           "The document must explain why it cannot resume.",
-        ).toContainEqual(["Service activation pass failed.", refusal]),
+        ).toContainEqual(["Service activation pass failed.", `ServerLogError: ${refusal}`]),
       );
       for (let pass = 0; pass < 3; pass++) {
         await o.nextPull();
@@ -7062,10 +7062,7 @@ it("pushes a live document's settled edit on the next pass while another documen
   await o.host.update({ workspaces, documents: [o.sibling, o.other], ...stay });
   // The first failure retries on the next pass; the second starts a wait before the next try.
   await vi.waitFor(() => expect(captures()).toBeGreaterThanOrEqual(2));
-  expect(errors).toHaveBeenCalledWith(
-    "Service activation pass failed.",
-    expect.stringContaining("Capture failed."),
-  );
+  expect(errors).toHaveBeenCalledWith("Service activation pass failed.", "Error");
   const edit = o.acceptEdit("while-another-backs-off");
   await vi.waitFor(() => expect(o.applied.has(edit.deliveryId)).toBe(true));
   await o.host.settle(o.document);
