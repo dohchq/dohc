@@ -696,8 +696,8 @@ fn probe_projection_target_in(
     if !existing_ancestor_is_contained(canonical_root, &target) {
         return ProjectionTargetState::UntrackedContent;
     }
-    // The caps capture owns content under: text up to the text cap, anything
-    // else up to the binary cap. No head is larger, so a larger file holds none.
+    // Read each file up to the cap capture owns it under: text up to the text
+    // cap, anything else up to the binary cap. A larger file reads untracked.
     let text_media = is_text_media_type(media_type_for_path(rel), rel);
     let cap = match kind {
         ProjectionTargetKind::Plaintext if text_media => MAX_CAPTURE_TEXT_BYTES,
