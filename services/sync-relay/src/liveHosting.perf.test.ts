@@ -347,13 +347,19 @@ it.skipIf(process.env.DOHC_LIVE_HOST_MEASURE !== "1")(
 // are left out. Memory is this process's after the connections synced, less
 // before, and counts the 120 client sockets as well as the relay's side.
 //
-// Runs, 2026-11-13, Windows 11, Node 24, 32 cores:
-// - Memory: RSS 180 to 189 MiB more, heap 9 to 37 MiB more.
-// - All 10 documents change: p50 760 to 1245 ms, p95 805 to 1582 ms.
-// - Only document 1 changes: p50 138 to 145 ms, p95 179 to 194 ms.
-// Every change wakes all 120 connections, and each reads its document's
-// binding from SQLite, about 0.46 ms a read. That read, not the frames, sets
-// the fan-out time.
+// Runs, 2026-11-13, Windows 11, Node 24, 32 cores, after a change woke only
+// its own document's connections:
+// - Memory: RSS 179 to 186 MiB more, heap 8 to 9 MiB more.
+// - All 10 documents change: p50 839 to 1503 ms, p95 1117 to 1664 ms,
+//   908 to 1296 ms of CPU a round.
+// - Only document 1 changes: p50 87 to 132 ms, p95 126 to 199 ms, 107 to
+//   138 ms of CPU a round, and no standing check on another document. Before, the
+//   other 108 connections made 2268 checks over the 21 rounds, at p95 225 ms
+//   and 180 ms of CPU a round.
+// Each delivered update costs its connection 13 standing checks, one for
+// each frame sent and received and each feed read. A check reads the
+// connection's authority from SQLite, and preparing its statements is about
+// half of the CPU. That cost, not the frames, sets the fan-out time.
 it.skipIf(process.env.DOHC_LIVE_HOST_MEASURE !== "1")(
   "measures memory and fan-out for 120 named connections over 10 documents",
   async () => {
@@ -438,8 +444,19 @@ it.skipIf(process.env.DOHC_LIVE_HOST_MEASURE !== "1")(
         )
       );
     };
+    // Counts each connection's standing check, by the document it is on.
+    const reads = new Map<string, number>(),
+      resolve = f.storage.resolveCurrentLiveDocumentBinding.bind(f.storage);
+    vi.spyOn(f.storage, "resolveCurrentLiveDocumentBinding").mockImplementation(
+      (input, activation) => {
+        reads.set(input.document.objectId, (reads.get(input.document.objectId) ?? 0) + 1);
+        return resolve(input, activation);
+      },
+    );
+    const total = () => [...reads.values()].reduce((sum, count) => sum + count, 0);
     const fanOut: number[] = [],
       rounds: number[] = [];
+    let cpu = process.cpuUsage();
     for (let round = 1; round <= ROUNDS; round++) {
       const start = performance.now();
       for (let document = 1; document <= DOCUMENTS; document++)
@@ -457,10 +474,14 @@ it.skipIf(process.env.DOHC_LIVE_HOST_MEASURE !== "1")(
       );
       rounds.push(performance.now() - start);
     }
-    // Then only document 1 changes, so 12 connections have the update and the
-    // other 108 wake and find nothing.
+    const allCpu = process.cpuUsage(cpu),
+      allReads = total();
+    // Then only document 1 changes, so 12 connections have the update. The
+    // other 108 must not wake.
     const single: number[] = [],
       firsts = sockets.filter(({ document }) => document === 1);
+    reads.clear();
+    cpu = process.cpuUsage();
     for (let round = ROUNDS + 1; round <= 2 * ROUNDS; round++) {
       const start = performance.now();
       published.set("object-1", round);
@@ -475,6 +496,9 @@ it.skipIf(process.env.DOHC_LIVE_HOST_MEASURE !== "1")(
         ),
       );
     }
+    const oneCpu = process.cpuUsage(cpu),
+      changedReads = reads.get("object-1") ?? 0,
+      otherReads = total() - changedReads;
     expect(sockets.every(({ socket }) => socket.ws.readyState === WebSocket.OPEN)).toBe(true);
     const sorted = [...fanOut].sort((a, b) => a - b),
       p = (q: number) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * q))]!;
@@ -487,14 +511,20 @@ it.skipIf(process.env.DOHC_LIVE_HOST_MEASURE !== "1")(
     console.log(
       `NAMED_LIVE_FAN_OUT_MS connections=${PEOPLE} documents=${DOCUMENTS} update-bytes=${updateBytes.length} rounds=${ROUNDS} ` +
         `p50=${p(0.5).toFixed(3)} p95=${p(0.95).toFixed(3)} max=${sorted[sorted.length - 1]!.toFixed(3)} samples=${sorted.length} ` +
-        `round-${summary(rounds)}`,
+        `round-${summary(rounds)} cpu-ms-per-round=${((allCpu.user + allCpu.system) / 1000 / ROUNDS).toFixed(1)} standing-checks-per-delivery=${(allReads / (PEOPLE * ROUNDS)).toFixed(1)}`,
     );
     const one = [...single].sort((a, b) => a - b),
       q = (x: number) => one[Math.min(one.length - 1, Math.floor(one.length * x))]!;
     console.log(
       `NAMED_LIVE_FAN_OUT_ONE_DOCUMENT_MS connections=${PEOPLE} changed-document-connections=${firsts.length} rounds=${ROUNDS} ` +
-        `p50=${q(0.5).toFixed(3)} p95=${q(0.95).toFixed(3)} max=${one[one.length - 1]!.toFixed(3)} samples=${one.length}`,
+        `p50=${q(0.5).toFixed(3)} p95=${q(0.95).toFixed(3)} max=${one[one.length - 1]!.toFixed(3)} samples=${one.length} ` +
+        `cpu-ms-per-round=${((oneCpu.user + oneCpu.system) / 1000 / ROUNDS).toFixed(1)} standing-checks-changed=${changedReads} standing-checks-other=${otherReads}`,
     );
+    expect(otherReads).toBe(0);
+    expect(allReads / (PEOPLE * ROUNDS)).toBeLessThan(14);
+    // About twice the slowest run above.
+    expect(p(0.95)).toBeLessThan(3000);
+    expect(q(0.95)).toBeLessThan(400);
   },
   600_000,
 );
