@@ -172,15 +172,23 @@ function fakeComputer() {
 }
 
 /** Intents in memory, so a fake clock flushes every step between its timers. */
-function memoryIntents(): ChatWakeIntents & { readonly rows: ChatWakeIntent[] } {
+function memoryIntents(): ChatWakeIntents & { readonly rows: ChatWakeIntent[]; failNextList: boolean } {
   let rows: ChatWakeIntent[] = [];
   const same = (a: ChatWakeIntent, b: ChatWakeIntent) => a.account === b.account && a.installId === b.installId && a.wakeId === b.wakeId;
-  return {
+  const store: ChatWakeIntents & { readonly rows: ChatWakeIntent[]; failNextList: boolean } = {
+    failNextList: false,
     get rows() { return rows; },
-    list: async () => [...rows],
+    list: async () => {
+      if (store.failNextList) {
+        store.failNextList = false;
+        throw new Error("The saved wakes could not be read just now.");
+      }
+      return [...rows];
+    },
     save: async (intent) => { rows = [...rows.filter((row) => !same(row, intent)), intent]; },
     remove: async (intent) => { rows = rows.filter((row) => !same(row, intent)); },
   };
+  return store;
 }
 
 /** A backoff on the (fake) timer clock that ends early when the consumer stops. */
@@ -462,6 +470,8 @@ describe("finishing from a saved intent", () => {
     const { consumer } = await w.settled({ intents });
     expect(await w.intents()).toEqual([intentOf("won")]);
     expect(w.relay.calls.confirms).toEqual([]);
+    // The trigger is durable, so its dispatch scan was arranged although the recorded phase didn't save.
+    expect(w.mac.local.dispatches).toBe(1);
     await consumer.resume();
     expect(w.mac.local.recorded).toEqual([true, false]);
     expect(w.relay.calls.confirms).toEqual(["mac"]);
@@ -853,7 +863,10 @@ describe("fix round 1", () => {
     await consumer.stop();
   });
 
-  it("drops an unsent claim when the attachment retires during its save, and claims once it is back", async () => {
+  it.each([
+    ["succeeds", []],
+    ["fails", [intentOf("claim-pending")]],
+  ] as const)("sends no claim when the attachment retires during its save and the removal %s, until it is back", async (removal, left) => {
     const w = await setup();
     w.relay.add();
     w.relay.offer(1);
@@ -861,6 +874,7 @@ describe("fix round 1", () => {
     const reached = deferred();
     const release = deferred();
     let held = false;
+    let removeFails = removal === "fails";
     const intents: ChatWakeIntents = {
       ...real,
       save: async (intent) => {
@@ -869,6 +883,13 @@ describe("fix round 1", () => {
         held = true;
         reached.resolve();
         await release.promise;
+      },
+      remove: async (intent) => {
+        if (removeFails) {
+          removeFails = false;
+          throw new Error("rename failed");
+        }
+        await real.remove(intent);
       },
     };
     const parked = w.relay.nextPark();
@@ -879,7 +900,11 @@ describe("fix round 1", () => {
     release.resolve();
     await parked;
     expect(w.relay.calls.claims).toEqual([]);
-    expect(await w.intents()).toEqual([]);
+    expect(await w.intents()).toEqual(left);
+    // Retries while it is still retired: recovery won't claim a saved claim-pending intent from it.
+    await consumer.resume();
+    await consumer.resume();
+    expect(w.relay.calls.claims).toEqual([]);
     expect(w.relay.state()).toBe("waiting");
     w.mac.local.current = true;
     await consumer.resume();
@@ -922,4 +947,38 @@ describe("fix round 1", () => {
       await consumer.stop();
     },
   );
+
+  it("keeps owing a refused confirmation when a retry pass can't read the saved wakes, and confirms on a later pass", async () => {
+    const w = await setup();
+    vi.useFakeTimers();
+    w.relay.add();
+    w.relay.offer(1);
+    let refused = false;
+    w.relay.hooks.beforeConfirm = async () => {
+      if (refused) return;
+      refused = true;
+      throw new ChatWakeBusyError();
+    };
+    const intents = memoryIntents();
+    const { consumer, deps } = w.consumer({ sleep: timerSleep, intents });
+    consumer.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(w.relay.calls.confirms).toHaveLength(1);
+    intents.failNextList = true;
+    // The first retry fails before it reaches the intent.
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(intents.failNextList).toBe(false);
+    expect(w.relay.calls.confirms).toHaveLength(1);
+    expect(intents.rows).toEqual([intentOf("recorded")]);
+    // The next waits a longer backoff, with nothing calling resume.
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(w.relay.calls.confirms).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(w.relay.calls.confirms).toHaveLength(2);
+    expect(w.relay.state()).toBe("queued");
+    expect(intents.rows).toEqual([]);
+    expect(w.mac.local.recorded).toEqual([true]);
+    expect(deps.onError).toHaveBeenCalledWith(expect.objectContaining({ message: "The saved wakes could not be read just now." }));
+    await consumer.stop();
+  });
 });

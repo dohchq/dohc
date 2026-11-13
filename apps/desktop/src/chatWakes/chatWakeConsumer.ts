@@ -235,9 +235,10 @@ export function createChatWakeConsumer(deps: ChatWakeConsumerDeps): ChatWakeCons
       return null;
     }
     await workspace.recordTrigger({ triggerMessageId: intent.messageId, threadId: intent.threadId, agentId: intent.candidate.agentId });
+    // The trigger is durable now, so its scan is arranged whether or not the recorded phase saves.
+    if (!stopped) workspace.dispatch();
     const recorded: ChatWakeIntent = { ...intent, phase: "recorded" };
     await deps.intents.save(recorded);
-    if (!stopped) workspace.dispatch();
     return recorded;
   }
 
@@ -271,7 +272,11 @@ export function createChatWakeConsumer(deps: ChatWakeConsumerDeps): ChatWakeCons
         await deps.sleep(deps.backoffMs(failures), abort.signal);
         if (!live()) break;
         owed = false;
-        await serial(again).catch(deps.onError);
+        await serial(again).catch((error: unknown) => {
+          // A pass that failed before reaching each intent, such as a failed list, still owes them all.
+          deps.onError(error);
+          owed = true;
+        });
       }
     })().catch(deps.onError).finally(() => {
       retrying = null;
@@ -284,8 +289,18 @@ export function createChatWakeConsumer(deps: ChatWakeConsumerDeps): ChatWakeCons
     for (const intent of (await deps.intents.list()).filter(ours)) {
       if (!live()) return;
       try {
-        await deps.intents.save(intent);
-        await settle(intent);
+        if (intent.phase === "claim-pending") {
+          // It may be a claim this computer cancelled when its attachment retired, with a removal that failed.
+          // Claim only from a current attachment, and hold it through the recording.
+          await opened(intent.workspaceId, async (workspace) => {
+            if (!workspace.current()) return;
+            await deps.intents.save(intent);
+            await settle(intent, workspace);
+          });
+        } else {
+          await deps.intents.save(intent);
+          await settle(intent);
+        }
       } catch (error) {
         deps.onError(error);
         owe();
