@@ -35,10 +35,11 @@ import type { WorkspaceList, WorkspaceListStore } from "./workspaceList";
 // Show on phone. The relay leaves out rows of a workspace whose owner hid it from the phone, but nothing tells a held
 // read that the setting changed, and a cursor already past a row never serves it again. So each change to the
 // account's workspace list that shows or hides one, or adds or removes one, cancels the read and starts the whole list
-// again. Rows of a workspace hidden on this phone go at once, from memory and disk. A change made on another device is
-// seen when the phone next reads its workspace list: at launch, on a return from the background, and on Refresh. The
-// relay sends nothing when it stops showing a row for another reason, such as its file becoming secret: that row goes
-// at the next whole read, not at once.
+// again. Rows of a workspace hidden on this phone go at once, from memory and disk. So do rows naming a path, thread,
+// or message in a workspace that left the list, which the relay serves only to its owner. A change made on another
+// device is seen when the phone next reads its workspace list: at launch, on a return from the background, and on
+// Refresh. The relay sends nothing when it stops showing a row for another reason, such as its file becoming secret:
+// that row goes at the next whole read, not at once.
 //
 // Marks. Each mark waits in order, on disk, until the server takes it. One request is on its way at a time, and sends
 // the oldest waiting marks in the order they were made, so a later mark always lands after an earlier one, even when
@@ -179,13 +180,25 @@ function savedMark(item: unknown): PendingMark | TakenMark | null {
     : null;
 }
 
-/** Owned workspaces this phone hides, by the list as it stands, a change still on its way included. */
-function hiddenWorkspaces(list: WorkspaceList): ReadonlySet<string> {
-  return new Set(
-    list.status === "ready"
-      ? list.workspaces.filter((entry) => !entry.showOnPhone).map((entry) => entry.workspaceId)
-      : [],
-  );
+/**
+ * The rows this phone may not keep, by the list as it stands, a change still on its way included: a row of an owned
+ * workspace it hides, and a row naming a path, thread, or message in a workspace the list doesn't hold. The relay
+ * serves that second kind only to the workspace's owner, and the list holds every workspace the account owns. Nothing
+ * while the list isn't read.
+ */
+function withheld(list: WorkspaceList): (row: NoticeRecord) => boolean {
+  if (list.status !== "ready") return () => false;
+  const shows = new Map(list.workspaces.map((entry) => [entry.workspaceId, entry.showOnPhone]));
+  return (row) => {
+    if (row.workspaceId === null) return false;
+    const listed = shows.get(row.workspaceId);
+    if (listed !== undefined) return !listed;
+    const target = row.target;
+    return (
+      target !== null &&
+      (target.path !== undefined || target.thread !== undefined || target.message !== undefined)
+    );
+  };
 }
 
 /**
@@ -396,11 +409,11 @@ export function createNoticeStore(options: {
 
   // Reading.
 
-  /** Takes one change into `target`, unless it holds a newer one. A row of a hidden workspace isn't kept. */
+  /** Takes one change into `target`, unless it holds a newer one. A row the list withholds isn't kept. */
   function take(
     target: Map<string, NoticeRecord>,
     change: NoticeChange,
-    hidden: ReadonlySet<string>,
+    drop: (row: NoticeRecord) => boolean,
   ) {
     const id = change.gone ? change.noticeId : change.record.noticeId;
     const seq = change.gone ? change.changeSeq : change.record.changeSeq;
@@ -409,8 +422,7 @@ export function createNoticeStore(options: {
     const record = change.gone ? null : change.record;
     const mine = acked.get(id);
     if (mine && (!record || record.changeSeq > mine.seq)) acked.delete(id);
-    if (!record || (record.workspaceId !== null && hidden.has(record.workspaceId)))
-      target.delete(id);
+    if (!record || drop(record)) target.delete(id);
     else if (mine && record.changeSeq <= mine.seq) target.set(id, { ...record, ...mine.result });
     else target.set(id, record);
   }
@@ -473,8 +485,8 @@ export function createNoticeStore(options: {
       const unchanged =
         caughtUp && !page.replace && page.changes.length === 0 && page.nextCursor === cursor;
       if (page.replace || cursor === null) building = new Map();
-      const hidden = hiddenWorkspaces(list.state());
-      for (const change of page.changes) take(building ?? rows, change, hidden);
+      const drop = withheld(list.state());
+      for (const change of page.changes) take(building ?? rows, change, drop);
       if (building && !page.hasMore) {
         rows = building;
         building = null;
@@ -648,11 +660,11 @@ export function createNoticeStore(options: {
 
   function followList() {
     if (!live()) return;
-    const hidden = hiddenWorkspaces(list.state());
+    const drop = withheld(list.state());
     let dropped = false;
     for (const target of [rows, building ?? new Map<string, NoticeRecord>()]) {
       for (const [id, row] of target) {
-        if (row.workspaceId === null || !hidden.has(row.workspaceId)) continue;
+        if (!drop(row)) continue;
         target.delete(id);
         dropped = true;
       }
