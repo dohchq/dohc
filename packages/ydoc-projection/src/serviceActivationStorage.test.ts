@@ -1460,6 +1460,13 @@ it('reports why an activation keeps failing once two failures in a row have last
     expect(d.driver.failing(d.target)).toBeUndefined()
     await fail(at+wait)
     expect(d.driver.unblock(d.target)).toBe(false)
+    // A new run shows on its second failure, exactly a minute after its first, and logs once more.
+    error=new ServiceActivationRefused('docs/a.md has no lineage')
+    const again=at+wait+1000
+    await fail(again)
+    await fail(again+60_000)
+    expect(d.driver.failing(d.target)).toEqual({word:'activation-refused',since:again})
+    expect(logged).toHaveBeenCalledTimes(2)
   }finally{vi.restoreAllMocks();vi.useRealTimers();f.close()}
 })
 // A stale cut whose lease release then fails counts once, not once for the cut and again for the release.

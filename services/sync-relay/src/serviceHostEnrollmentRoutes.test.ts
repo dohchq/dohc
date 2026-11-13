@@ -605,7 +605,8 @@ it("reports a document whose live start keeps failing, after a down host, every 
   expect(await state()).toEqual({...base, status: "unavailable"});
   f.host.unavailable = false;
   // Every other hold reads as Preparing, as it did, even while an earlier failure is still shown.
-  for (const hold of ["hosted-backfill-work-waiting", "hosted-backfill-path-held", "hosted-scope-path-mismatch", "hosted-live-edit-unadmitted"] as const) {
+  for (const hold of ["hosted-backfill-work-waiting", "hosted-backfill-path-held", "hosted-scope-path-mismatch", "hosted-live-edit-unadmitted",
+    "released-lineage-unsettled"] as const) {
     f.host.holdReason.mockReturnValue(hold);
     expect(await state()).toEqual({...base, status: "preparing"});
   }
