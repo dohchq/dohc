@@ -796,6 +796,10 @@ test("@two-client a member creates a page that reaches the owner, and an admin c
     admin = null;
 
     // --- At Comment, Sam gets no New file and a read-only document --------
+    // Kai's window covered Sam's, and a hidden window does not check its
+    // access. Sam looks at the window again.
+    await member.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.show());
+    await expect.poll(() => mine.evaluate(() => document.visibilityState)).toBe("visible");
     await setLevel("comment");
     await expect(header.getByRole("button", { name: "New file" })).toHaveCount(0, { timeout: 120_000 });
     await explorerRow(mine, "notes/plan.md").click();
