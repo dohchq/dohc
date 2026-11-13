@@ -7,8 +7,6 @@ import {
   type PresenceTransport,
 } from "./presenceChannel";
 
-// A controllable fake transport: publish/leave are recorded; poll returns a
-// promise the test resolves/rejects on demand to drive the loop deterministically.
 function fakeTransport() {
   const publishes: Array<{
     topic: string;
@@ -204,7 +202,6 @@ describe("createPresenceChannel", () => {
         incarnationId: f.publishes[0]?.incarnationId,
       },
     ]);
-    // A poll that resolves after stop must not repaint.
     await f.resolvePoll({
       version: 99,
       peers: [
@@ -256,7 +253,6 @@ describe("createPresenceChannel", () => {
       retryMs: 1,
     });
     await flush();
-    // No unhandled rejection; stopping is clean.
     expect(() => void channel.stop()).not.toThrow();
   });
 
@@ -351,8 +347,6 @@ describe("createPresenceChannel", () => {
       onPeers: vi.fn(),
     });
     await flush();
-    // A second publish, in flight and hanging — e.g. a heartbeat or setState
-    // firing right as stop() is about to run.
     channel.setState({ typing: true });
     expect(publishCalls).toBe(2);
 
@@ -394,9 +388,6 @@ describe("createPresenceChannel", () => {
       initialState: { n: 0 },
       onPeers: vi.fn(),
     });
-    // The initial publish is still in flight. Rapid updates must not start
-    // concurrent requests — they coalesce into one queued publish that reads
-    // the newest state when it runs.
     channel.setState({ n: 1 });
     channel.setState({ n: 2 });
     channel.setState({ n: 3 });
@@ -464,8 +455,6 @@ describe("createRelayPresenceTransport", () => {
       scope: { kind: "workspace", workspaceId: "w" },
       fetch: fakeFetch,
     });
-    // The transport boundary: an HTTP error is a rejected promise, never a
-    // silently-parsed snapshot.
     await expect(
       transport.publish({
         topic: "t",

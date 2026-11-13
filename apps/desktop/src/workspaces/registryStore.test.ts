@@ -20,9 +20,6 @@ import {
   mergeShareSkippedOps,
   type RemoteIdentity,
 } from "./registryStore";
-// The predicate the RENDERER acts on, asserted here against the records this
-// store produces: one rule, and the surfaces that show the warning read it
-// from the same place.
 import { hasUnacknowledgedShareSkips } from "../renderer/shareSkipNotice";
 import { canonicalWorkspaceRoot } from "./createWorkspaceFolder";
 import { createTestScratch } from "./testTemp";
@@ -110,9 +107,6 @@ describe("missing workspace messages", () => {
   });
 });
 
-// A relay listing applied to the received-share records: the reconcile runs
-// on the record as the file holds it, the result is persisted, and the caller
-// learns whether anything changed.
 describe("received share reconciliation", () => {
   it("persists the reconciled entry and reports whether it changed", () => {
     store.register({
@@ -299,7 +293,6 @@ describe("share skip records", () => {
       atMs: 1000,
     };
     const recorded = mergeShareSkippedOps(undefined, [twoRefusedSnapshots]);
-    // The restart: the page is re-fetched and the identical record arrives again.
     const afterRestart = mergeShareSkippedOps(recorded, [twoRefusedSnapshots]);
 
     expect(afterRestart.ops).toHaveLength(1);
@@ -315,11 +308,6 @@ describe("share skip records", () => {
     }
   });
 
-  // Why the engine has to aggregate, stated as a fact about this function
-  // rather than a claim in a comment. Two records sharing one coordinate are
-  // not two records here: the second is dropped and never counted, so `more`
-  // does not rise to cover it either. Nothing downstream can recover what this
-  // merge discards, which is what makes the engine the only place to fix it.
   it("cannot hold two refusals that share an origin coordinate", () => {
     const perBlob = (path: string) => ({
       originId: "origin-granter",
@@ -392,10 +380,6 @@ describe("share skip records", () => {
     expect(colliding.ops).toHaveLength(1);
   });
 
-  // Idempotence has to survive the CAP. Beyond the retained list an op is
-  // dropped, so the list alone can no longer answer "have I counted this
-  // one?" — and a refetched page would re-count it on every retry, inflating
-  // the number the banner shows.
   it("counts an overflowed op once, however often its page is refetched", () => {
     const many = Array.from({ length: MAX_RETAINED_SKIPPED_OPS + 5 }, (_, index) => op(index));
     const first = mergeShareSkippedOps(undefined, many);
@@ -406,7 +390,6 @@ describe("share skip records", () => {
       "without a per-origin watermark every retry re-counts the ops the cap dropped",
     ).toBe(5);
     expect(retried.ops).toHaveLength(MAX_RETAINED_SKIPPED_OPS);
-    // A genuinely new op past the cap still counts.
     expect(mergeShareSkippedOps(retried, [op(9999)]).more).toBe(6);
   });
 
@@ -421,14 +404,9 @@ describe("share skip records", () => {
       merged.more,
       "an unbounded list lets a misbehaving relay grow the registry file without limit",
     ).toBe(5);
-    // And a later batch keeps counting rather than dropping the fact.
     expect(mergeShareSkippedOps(merged, [op(999)]).more).toBe(6);
   });
 
-  // A dismissal names the generation the user saw. So a write that adds
-  // something must move it — otherwise a refusal recorded between the render
-  // and the click is cleared unseen, and the cursor has already committed
-  // past that op.
   it("moves the generation only when a merge adds something", () => {
     const first = mergeShareSkippedOps(undefined, [op(4)]);
     expect(first.generation).toBe(1);
@@ -459,9 +437,6 @@ describe("share skip records", () => {
     ).toEqual([4]);
   });
 
-  // The race a destructive clear had to guard against does not exist here: a
-  // refusal recorded after the render has a higher generation, so the click
-  // cannot acknowledge it and the warning comes back on its own.
   it("leaves a refusal recorded after the render unacknowledged", () => {
     const seen = mergeShareSkippedOps(undefined, [op(4)]);
     const afterRefresh = mergeShareSkippedOps(seen, [op(9)]);
@@ -472,22 +447,17 @@ describe("share skip records", () => {
       hasUnacknowledgedShareSkips(acknowledged),
       "acknowledging the whole record hides a refusal the user never saw",
     ).toBe(true);
-    // Seeing it and clicking again settles it, and still keeps both ops.
     const settled = acknowledgeShareSkips(acknowledged, afterRefresh.generation);
     expect(hasUnacknowledgedShareSkips(settled)).toBe(false);
     expect(settled.ops).toHaveLength(2);
   });
 
-  // An acknowledgement never moves backwards, so a click on a stale render
-  // cannot un-see a newer one.
   it("never lowers an acknowledgement", () => {
     const record = mergeShareSkippedOps(mergeShareSkippedOps(undefined, [op(4)]), [op(9)]);
     const settled = acknowledgeShareSkips(record, record.generation);
     expect(acknowledgeShareSkips(settled, 1).acknowledgedGeneration).toBe(record.generation);
   });
 
-  // Retries stay exact far past the retained list: the record remembers the
-  // coordinates it counted, not just the ops it kept.
   it("keeps counting exact for far more ops than it retains", () => {
     const many = Array.from({ length: MAX_RETAINED_SKIPPED_OPS + 40 }, (_, index) => op(index));
     const first = mergeShareSkippedOps(undefined, many);
@@ -499,11 +469,6 @@ describe("share skip records", () => {
     expect(retried.generation).toBe(first.generation);
   });
 
-  // A per-origin high-water mark reads "everything below this is counted",
-  // which is only true while ops arrive in sequence order — and nothing
-  // checks that. A relay serving seq 100 and then a genuinely new seq 99
-  // would have had 99 dismissed as a retry, leaving newly missing content
-  // silent behind an acknowledged warning.
   it("does not read a lower sequence as a duplicate of a higher one", () => {
     const first = mergeShareSkippedOps(undefined, [op(100)]);
     const outOfOrder = mergeShareSkippedOps(first, [op(99)]);
@@ -518,10 +483,6 @@ describe("share skip records", () => {
     ).toBe(first.generation + 1);
   });
 
-  // Past the coordinate bound there is nowhere left to remember an op, so a
-  // duplicate is indistinguishable from a new one. Counting it would make the
-  // total drift upward while the copy claims a lower bound, so the count
-  // stops and says it is incomplete.
   it("stops counting where it can no longer tell a duplicate from a new op", () => {
     const many = Array.from({ length: MAX_TRACKED_SKIP_COORDINATES + 5 }, (_, index) => op(index));
     const first = mergeShareSkippedOps(undefined, many);
@@ -540,8 +501,6 @@ describe("share skip records", () => {
     ).toBe(first.generation);
   });
 
-  // The exact -> inexact transition is itself news: content is missing that
-  // the total does not name, and the cursor has committed past it.
   it("moves the generation once when the count stops being complete", () => {
     const upToCap = Array.from({ length: MAX_TRACKED_SKIP_COORDINATES }, (_, index) => op(index));
     const exact = mergeShareSkippedOps(undefined, upToCap);
@@ -567,7 +526,6 @@ describe("share skip records", () => {
     const upToCap = Array.from({ length: MAX_TRACKED_SKIP_COORDINATES }, (_, index) => op(index));
     const atCap = mergeShareSkippedOps(undefined, upToCap);
     const firstBeyond = mergeShareSkippedOps(atCap, [op(9000)]);
-    // The user sees it and dismisses it.
     const acknowledged = acknowledgeShareSkips(firstBeyond, firstBeyond.generation);
     expect(hasUnacknowledgedShareSkips(acknowledged)).toBe(false);
 
@@ -580,8 +538,6 @@ describe("share skip records", () => {
     ).toBe(true);
   });
 
-  // The retry of the same page is the one batch that is not news: the record
-  // cannot dedupe its ops, but it can tell that it just saw this exact set.
   it("stays quiet when the same unplaceable batch arrives again", () => {
     const upToCap = Array.from({ length: MAX_TRACKED_SKIP_COORDINATES }, (_, index) => op(index));
     const page = [op(9000), op(9001)];
@@ -618,8 +574,6 @@ describe("share skip records", () => {
     ).toBe(true);
   });
 
-  // A batch too large to keep the identity of records none, so the next one
-  // reads as news. Visible rather than silent is the safe side of a bound.
   it("treats the next batch as news when it could not keep the last one", () => {
     const upToCap = Array.from({ length: MAX_TRACKED_SKIP_COORDINATES }, (_, index) => op(index));
     const huge = Array.from({ length: MAX_TRACKED_BATCH_COORDINATES + 1 }, (_, index) =>
@@ -656,7 +610,6 @@ describe("share skip records", () => {
     expect(retried.inexact, "...and reports the inflated total as exact").toBeUndefined();
   });
 
-  // Two shares can serve ops from different origins at the same sequence.
   it("keys a skipped op by origin and sequence", () => {
     const merged = mergeShareSkippedOps(undefined, [op(4), { ...op(4), originId: "origin-other" }]);
     expect(merged.ops).toHaveLength(2);
@@ -789,7 +742,6 @@ describe("registry store", () => {
         rootPath: canonicalWorkspaceRoot(real),
       }),
     ).toThrow(/already attached/i);
-    // The next write saves the real path.
     reopened.markOpened("ws-1", 5);
     const saved = JSON.parse(await readFile(registryPath, "utf8")) as {
       workspaces: Array<{ rootPath: string }>;
@@ -961,13 +913,10 @@ describe("registry store", () => {
     store.setSharedChannels("ws-1", [joined]);
     expect(store.find("ws-1")?.sharedChannels).toEqual([joined]);
 
-    // Revocation stamps ended (replace-the-set write) and persists across
-    // store instances.
     store.setSharedChannels("ws-1", [{ ...joined, ended: true }]);
     const reopened = createRegistryStore(registryPath);
     expect(reopened.find("ws-1")?.sharedChannels).toEqual([{ ...joined, ended: true }]);
 
-    // Leaving the last shared channel removes the key entirely.
     store.setSharedChannels("ws-1", []);
     expect(store.find("ws-1")?.sharedChannels).toBeUndefined();
     expect(createRegistryStore(registryPath).find("ws-1")?.sharedChannels).toBeUndefined();
@@ -1078,7 +1027,6 @@ describe("registry store", () => {
     };
     store.setShareMounts("ws-1", [mount]);
 
-    // Model a rename failure while leaving the already-read cache available.
     await rm(registryPath);
     await mkdir(registryPath);
 
@@ -1094,10 +1042,8 @@ describe("registry store", () => {
     store.remove("ws-1");
     expect(store.find("ws-1")).toBeNull();
     expect(store.list()).toHaveLength(0);
-    // Unknown/already-removed ids are a no-op, never a throw.
     store.remove("ws-1");
     store.remove("ws-never-registered");
-    // The same root can be re-attached after removal (join retry).
     store.register(personal);
     expect(store.find("ws-1")?.rootPath).toBe(personal.rootPath);
   });
@@ -1116,7 +1062,6 @@ describe("registry store", () => {
       genericChatWritable: false,
       grantedSelector: { paths: ["docs"], versionId: null, access: "view" },
     });
-    // Marking ended survives a fresh read of the same file.
     store.setShareView("ws-1", {
       shareId: "share-1",
       granterEmail: "granter@dohc.test",
@@ -1391,7 +1336,6 @@ describe("registry store", () => {
     store.register(personal);
     const onDisk = JSON.parse(await readFile(registryPath, "utf8"));
     expect(onDisk.workspaces).toHaveLength(1);
-    // The temp file used during the atomic rename must not survive.
     const { readdirSync } = await import("node:fs");
     const leftovers = readdirSync(join(registryPath, "..")).filter((f) => f.includes(".tmp-"));
     expect(leftovers).toEqual([]);

@@ -115,7 +115,6 @@ describe("a notice when a share reaches a person", () => {
     });
     expect(await titles(h, "ana")).toEqual([]);
 
-    // A pull does not claim the share, and listing shares does.
     expect(await titles(h, "newbie")).toEqual([]);
     expect((await h(request("newbie", "/sync/shares"))).status).toBe(200);
     expect(await titles(h, "newbie")).toEqual([
@@ -324,7 +323,6 @@ describe("a notice when a share reaches a person", () => {
     expect(delivered).not.toHaveBeenCalled();
     expect(waiting(storage)).toHaveLength(3);
 
-    // The recipient's pull delivers both of theirs, naming the granter once.
     expect(await titles(h, "ana")).toEqual([
       "Name owner (owner@dohc.test) shared a folder or file with you",
       "Name owner (owner@dohc.test) shared a folder or file with you",
@@ -336,7 +334,6 @@ describe("a notice when a share reaches a person", () => {
   it("delivers a notice the relay stopped before writing, on the recipient's next pull", async () => {
     const { storage } = await relay();
     made(storage, { paths: ["trip"] }, "ana");
-    // The relay restarts before any delivery runs.
     const path = storagePath(storage);
     closeTestStorage(storage);
     const reopened = reopenTestStorage(path);
@@ -472,7 +469,6 @@ function made(
   return shareId;
 }
 
-// An email invite made in storage, with its waiting delivery.
 function invited(storage: SyncRelayStorage, email: string): { shareId: string; grantId: string } {
   made_ += 1;
   const shareId = `stored-share-${made_}`;
@@ -502,7 +498,6 @@ function invited(storage: SyncRelayStorage, email: string): { shareId: string; g
   return { shareId, grantId };
 }
 
-// Every waiting share notice delivery, by grant.
 function waiting(storage: SyncRelayStorage): string[] {
   const db = inspectDatabase(storagePath(storage), { readOnly: true });
   try {

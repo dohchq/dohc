@@ -184,7 +184,6 @@ describe("FileInspector engine source update scheduling", () => {
     const doc = markdownToYDoc(INITIAL_MARKDOWN);
     engineDocState = engineState(doc);
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
-    // The engine view shows once the note's check answers.
     const toggle = await screen.findByTestId("markdown-source-toggle");
     const serialize = vi.mocked(yDocToMarkdown);
     serialize.mockClear();
@@ -281,7 +280,6 @@ describe("FileInspector engine source update scheduling", () => {
       dohcMarkdownSourceProjectionSha256: sha(yDocToMarkdown(doc)),
     };
     for (const [key, value] of Object.entries(witness)) doc.getMap("meta").set(key, value);
-    // A complete safe witness stays safe when later edits expire its proof.
     const paragraph = new Y.XmlElement("paragraph");
     const text = new Y.XmlText("An unsettled edit.");
     paragraph.insert(0, [text]);

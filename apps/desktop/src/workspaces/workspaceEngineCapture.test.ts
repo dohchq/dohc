@@ -71,7 +71,6 @@ import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "./workspaceTextLimits";
 vi.mock("node:timers/promises", { spy: true });
 vi.mock("node:fs/promises", { spy: true });
 
-// The person a restore names, as desktop main reads them.
 const RESTORER = { kind: "human", humanId: "local-person" } as const;
 
 afterEach(async () => {
@@ -483,8 +482,6 @@ async function liveMoments(engine: WorkspaceEngineCapture): Promise<EngineMoment
   return rows;
 }
 
-// The authors each recorded moment carries, oldest first, with null for
-// actor-neutral.
 async function liveMomentAuthors(
   engine: WorkspaceEngineCapture,
 ): Promise<Array<MomentAuthor[] | null>> {
@@ -729,7 +726,6 @@ describe("workspaceEngineCapture batch capture", () => {
     );
     await expect(engine.flush()).rejects.toThrow("reconciliation-failed");
     healthyPending = false;
-    // Retry after capacity clears, or observe adoption completed by the owner host.
     if (transient) blocked = false;
     else pending = false;
     await engine.flush();
@@ -1542,10 +1538,6 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
   });
 
-  // Document A's draft X became obsolete, and removing it failed. Document B's
-  // next draft step retries that removal, and while it is under way A's file
-  // is deleted again: A's refused save writes the same draft X, current
-  // again. The retry must not delete it.
   it("keeps a draft that is current again while another document's retry removes its older write", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const draftDirectory = await createTestScratch("dohc-engine-capture-drafts-");
@@ -1623,16 +1615,13 @@ describe("workspaceEngineCapture batch capture", () => {
     await expect(a.settleNow()).rejects.toBe(stale);
     await vi.waitFor(() => expect(preserveUnsentState).toHaveBeenCalledOnce());
     retry.handle = await handleOf(0);
-    // A saves, and the removal of X fails.
     await write(root, "notes/a.md", "typed");
     writes.set("notes/a.md", true);
     await a.settleNow();
     await vi.waitFor(() => expect(discardUnsentState).toHaveBeenCalledOnce());
 
-    // B's draft step retries X's removal, which waits.
     await expect(b.settleNow()).rejects.toBe(stale);
     await retry.holding.promise;
-    // A's file is deleted again, and A writes X again.
     await rm(join(root, "notes/a.md"));
     writes.set("notes/a.md", false);
     await expect(a.settleNow()).rejects.toBe(stale);
@@ -1641,7 +1630,6 @@ describe("workspaceEngineCapture batch capture", () => {
     retry.held.resolve();
     await retry.done.promise;
 
-    // Notices lists X, the text A's file never got, and B's draft.
     expect(
       (await listLiveDraftRecovery(draftDirectory, WORKSPACE_ID))
         .map(({ path, text }) => `${path}: ${text}`)
@@ -1957,7 +1945,6 @@ describe("workspaceEngineCapture batch capture", () => {
         expect(watcherStatus).toHaveBeenCalledTimes(1);
         release.resolve();
         await engine.flush();
-        // One current observation, not twelve obsolete observations queued behind it.
         expect(watcherStatus).toHaveBeenCalledTimes(1);
         expect(adoptions).toHaveBeenCalledTimes(failFirst ? 2 : 3);
         expect(outcomes).toHaveLength(1);
@@ -1980,9 +1967,6 @@ describe("workspaceEngineCapture batch capture", () => {
     },
   );
 
-  // An engine still taking in a new workspace's files refuses the poll's
-  // reads. That is busy, not broken: no outcome changes, and a real error
-  // still reports a failure.
   it("keeps the capture outcome while the engine is still updating, and reports a real failure", async () => {
     vi.useFakeTimers();
     const root = await createTestScratch("dohc-engine-capture-");
@@ -2065,10 +2049,6 @@ describe("workspaceEngineCapture batch capture", () => {
     }
   });
 
-  // The engine refusing the workspace's database is not a degraded
-  // watcher. The outcome carries the fence's classification so the product
-  // offers the move-aside rebuild instead of "History paused" — and a later
-  // pass that reaches the store clears it.
   it("carries the store refusal on the health outcome and clears it on recovery", async () => {
     vi.useFakeTimers();
     try {
@@ -2460,7 +2440,6 @@ describe("workspaceEngineCapture relay sync materialization", () => {
     },
   );
 
-  // The kept copies of protected files, read as plain files.
   async function protectedCopyFiles(root: string): Promise<string[]> {
     const dir = join(root, ".dohc/local/protected-copies");
     const names = await readdir(dir).catch((error: NodeJS.ErrnoException) => {
@@ -2474,7 +2453,6 @@ describe("workspaceEngineCapture relay sync materialization", () => {
     );
   }
 
-  // Workspace files outside .dohc whose bytes hold `text`.
   async function filesOutsideDohcHolding(root: string, text: string): Promise<string[]> {
     const found: string[] = [];
     for (const name of await readdir(root, { recursive: true })) {
@@ -3099,7 +3077,6 @@ describe("workspaceEngineCapture relay sync materialization", () => {
       origin: "sync",
     });
 
-    // Block materialization: a folder that holds a file squats on the path.
     await write(root, "notes/remote.md/keep.txt", "mine\n");
     const commit = vi.fn(async () => {});
     const pullResult = () => ({
@@ -3119,7 +3096,6 @@ describe("workspaceEngineCapture relay sync materialization", () => {
     ).rejects.toThrow("Could not update notes/remote.md on disk:");
     expect(commit).not.toHaveBeenCalled();
 
-    // Unblock the path: the retry pass materializes and THEN commits.
     await rm(join(root, "notes/remote.md"), { recursive: true, force: true });
     await engine.runRelaySync(
       async (materializePage) => await deliverRelayPage(materializePage, pullResult(), commit),
@@ -3172,8 +3148,6 @@ describe("assertGeneratedMarkdownPath host-unsafe rejection (materialize boundar
 });
 
 describe("createDefaultDiskWriter symlink containment", () => {
-  // The engine's own materialization writes (switch/merge/restore) must stay
-  // inside the workspace even against adversarial symlinks on disk.
   it("refuses to write through a symlink leaf", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const outside = await createTestScratch("dohc-engine-capture-");
@@ -3184,7 +3158,6 @@ describe("createDefaultDiskWriter symlink containment", () => {
     await expect(writer.writeTextFile(join(root, "notes.md"), "engine text\n")).rejects.toThrow(
       /symlink/,
     );
-    // The symlink target outside the workspace was never touched.
     expect(await readFile(join(outside, "target.md"), "utf8")).toBe("original outside content\n");
   });
 
@@ -3197,7 +3170,6 @@ describe("createDefaultDiskWriter symlink containment", () => {
     await expect(
       writer.writeTextFile(join(root, "escape", "deep", "file.md"), "x\n"),
     ).rejects.toThrow(/escaped the workspace root/);
-    // mkdir -p never created directories on the far side of the symlink.
     expect(existsSync(join(outside, "deep"))).toBe(false);
   });
 
@@ -3221,8 +3193,6 @@ describe("createDefaultDiskWriter symlink containment", () => {
     expect(await readFile(join(outside, "keep.md"), "utf8")).toBe("must survive\n");
   });
 
-  // A device that never had the folder still receives the delete: a late join
-  // after a rename, or a folder removed on this device.
   it("deletes under an absent folder chain without creating it, twice", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const writer = createDefaultDiskWriter(root);
@@ -3368,9 +3338,6 @@ describe("createDefaultDiskWriter replaces a file whole", () => {
   );
 });
 
-// Agent-attributed capture: while a dohc-tracked agent run is active the
-// daemon stamps its captures with that author; an authored write carries its
-// own author instead.
 describe("workspaceEngineCapture agent attribution", () => {
   it("returns stable object and moment ids from authored text and binary retries", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
@@ -3649,7 +3616,6 @@ describe("workspaceEngineCapture agent attribution", () => {
   });
 });
 
-/** The loopback engine, answering `conflicts.list` with no open conflicts. */
 class ConflictFreeLoopbackEngine extends VersionedLoopbackEngine {
   override async sendRequest(request: Request): Promise<Response> {
     if (request.method === "conflicts.list") {
@@ -4035,7 +4001,6 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
     const session = await opening;
     await switching;
 
-    // Whatever the user types next belongs to the version they are looking at.
     expect(openedVersionIds).toEqual(["main"]);
     await session.close({ settle: false });
     await engine.stop();
@@ -4101,14 +4066,6 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
   });
 });
 
-// The absent-head refusal reads the disk, and that read is
-// awaited. On a shared workspace a replicated `onRemoteUpdate` can land inside
-// that await: a peer is writing this very path. Two things then stop being
-// true at once — the version does have the document, so "not in this version"
-// is false; and the lineage is dirty, so the refusal's `close({settle:false})`
-// is answered with UnsettledClose and the provider escalates it to a settling
-// close, materializing the path the refusal was about to call missing. The
-// refusal would create the phantom it exists to prevent.
 describe("workspaceEngineCapture absent-head refusal against replication", () => {
   it("binds instead of refusing when a replicated update reached the session", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
@@ -4169,7 +4126,6 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
     });
 
     expect(session.path).toBe("peer-created.md");
-    // Nothing was settled or materialized by a refusal that never happened.
     expect(settles).toEqual([]);
     expect(closedWithSettle).toBeUndefined();
     await expect(readFile(join(root, "peer-created.md"), "utf8")).rejects.toMatchObject({
@@ -4267,7 +4223,6 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
     // raced refusal safe here, where a held lease would need the unreleased one.
     expect(refusal).not.toBeInstanceOf(YDocSessionUnreleasedError);
     expect(evicts).toBe(1);
-    // And the release never escalated, so nothing was materialized.
     expect(closeCalls).toEqual([{ settle: false, settleOnRefusal: false }]);
     expect(settles).toEqual([]);
     await expect(readFile(join(root, "peer-created.md"), "utf8")).rejects.toMatchObject({
@@ -4409,7 +4364,6 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
     expect(refusal).toBeInstanceOf(YDocUncapturedArtifactError);
     expect(settles).toEqual([]);
     expect(closeCalls).toEqual([{ settle: false, settleOnRefusal: false }]);
-    // The bytes the empty bind would have erased are untouched.
     expect(await readFile(join(root, "uncaptured.md"), "utf8")).toBe(
       "bytes the watcher has not seen",
     );
@@ -4433,7 +4387,6 @@ it("records a person's own write as a local file edit, and an agent's under its 
   };
   await engine.writeAuthoredFile(join(root, "hand.md"), "hand\n", person, { createOnly: true });
   const written = engine.writeAuthoredFile(join(root, "agent.txt"), "agent text\n", agent);
-  // The caller changes its object while the write waits for its turn.
   Object.assign(agent, { onBehalfOf: "mallory", agentRunId: "run-other" });
   await written;
   expect(

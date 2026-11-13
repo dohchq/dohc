@@ -72,7 +72,6 @@ describe("graphLayout", () => {
   });
 
   it("separates two nodes that start on one point, whatever their indexes", () => {
-    // Remembered positions can put two files on one point.
     const layout = layoutOf(144, [], (i) =>
       i === 0 || i === 143 ? { x: 0, y: 0 } : { x: i * 50, y: 2000 },
     );

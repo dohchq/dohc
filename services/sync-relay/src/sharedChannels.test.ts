@@ -49,7 +49,6 @@ function channelCreate(wireId: string, name: string, kind: "channel" | "dm" | "a
       name,
       slug: name.toLowerCase(),
       kind,
-      // An ordinary channel is a group with a folder named for it.
       ...(kind === "channel" ? { type: "both", purpose: "", folderPath: name.toLowerCase() } : {}),
     }).payload,
   );
@@ -199,7 +198,6 @@ describe("a group share is one grant for the channel and its folder", () => {
     const storage = await testStorage();
     const h = handler(storage);
     await seedOwnerWorkspace(h);
-    // A file inside the group's folder and one outside it.
     const inSha = await putBlob(h, OWNER, WORKSPACE, "the plan");
     const outSha = await putBlob(h, OWNER, WORKSPACE, "SENTINEL body");
     const moment = (momentId: string, path: string, sha: string) =>
@@ -243,7 +241,6 @@ describe("a group share is one grant for the channel and its folder", () => {
     expect(fileBodies).not.toContain("SENTINEL");
     expect(fileBodies).not.toContain("private");
     expect(fileBodies).not.toContain(".env.local");
-    // The chat half is what the channel pull names.
     const chatResponse = await h(
       request(
         MEMBER_A,
@@ -260,8 +257,6 @@ describe("a group share is one grant for the channel and its folder", () => {
     expect(chatBodies).toContain("welcome to the shared channel");
     expect(chatBodies).not.toContain("SENTINEL");
     expect(chatBodies).not.toContain("team/plan.md");
-    // The group names its folder; a chat-only share of the same channel
-    // does not.
     expect(chat.find((op) => op.opKind === "chat.channel.create")).toMatchObject({
       payload: { folderPath: "team" },
     });
@@ -270,13 +265,11 @@ describe("a group share is one grant for the channel and its folder", () => {
     const create = chatOnlyPage.find((op) => op.opKind === "chat.channel.create");
     expect(create).toBeTruthy();
     expect(create!.payload).not.toHaveProperty("folderPath");
-    // Naming another channel is a miss, as it is for a channel share.
     const other = await h(
       request(MEMBER_A, `/sync/shares/${shareId}/log?since=0&limit=100&channelWireId=wire-other`),
     );
     expect(other.status).toBe(404);
 
-    // The recipient posts into the group's channel through the same grant.
     const append = await h(
       request(
         MEMBER_A,
@@ -294,7 +287,6 @@ describe("a group share is one grant for the channel and its folder", () => {
     );
     expect(append.status).toBe(200);
 
-    // Listed on both sides as one group grant.
     const owner = await json(await h(request(OWNER, "/sync/shares")));
     expect(
       (owner.granted as Array<Record<string, unknown>>).find((row) => row.shareId === shareId)
@@ -309,7 +301,6 @@ describe("a group share is one grant for the channel and its folder", () => {
       genericChatWritable: true,
     });
 
-    // One revoke ends both halves.
     const revoke = await h(request(OWNER, `/sync/shares/${shareId}/revoke`, { method: "POST" }));
     expect(revoke.status).toBe(200);
     const after = await h(request(MEMBER_A, `/sync/shares/${shareId}/log?since=0&limit=100`));
@@ -370,8 +361,6 @@ describe("a group share is one grant for the channel and its folder", () => {
     );
     expect(unknown.status).toBe(400);
     expect((await json(unknown)).code).toBe("invalid_chat");
-    // The general channel is personal to each workspace, as a chat share or
-    // as a group.
     for (const body of [
       { recipientUserId: MEMBER_A, channelWireId: GENERAL_CHANNEL_WIRE_ID },
       { recipientUserId: MEMBER_A, channelWireId: GENERAL_CHANNEL_WIRE_ID, paths: ["general"] },
@@ -393,16 +382,10 @@ describe("a group share is one grant for the channel and its folder", () => {
 });
 
 describe("shared channels (MU-C4)", () => {
-  // A damaged row loses its selector, and with it the KIND that routes it to
-  // the right manager. Without the kind surviving, a damaged chat
-  // grant surfaced in the path/version share lists as an unreadable path
-  // share — the wrong manager, offering the wrong actions.
   it("still says a damaged row is a chat grant", async () => {
     const storage = await testStorage();
     const h = handler(storage);
     await seedOwnerWorkspace(h);
-    // A stored row damaged in every dimension except its kind, written
-    // through the same API the create route uses.
     storage.createShare({
       share: {
         shareId: "share-damaged-channel",
@@ -547,7 +530,6 @@ describe("shared channels (MU-C4)", () => {
       grantId: expect.any(String),
       generation: 1,
     });
-    // The member never learns the owner's workspace id.
     expect(received[0]).not.toHaveProperty("workspaceId");
   });
 
@@ -650,8 +632,6 @@ describe("shared channels (MU-C4)", () => {
     expect(
       await denialBytes(await h(request(STRANGER, `/sync/shares/${shareId}/log?since=0`))),
     ).toBe(missingRead);
-    // The GRANTER is not a recipient either: the owner reads through their
-    // own bucket, never through the share.
     expect(await denialBytes(await h(request(OWNER, `/sync/shares/${shareId}/log?since=0`)))).toBe(
       missingRead,
     );
@@ -666,7 +646,6 @@ describe("shared channels (MU-C4)", () => {
     expect(
       await denialBytes(await h(request(STRANGER, `/sync/shares/${shareId}/log`, appendBody))),
     ).toBe(missingAppend);
-    // Nothing landed in the owner's bucket.
     const ownerLog = await json(
       await h(request(OWNER, `/sync/${WORKSPACE}/log?since=0&limit=100`)),
     );
@@ -680,8 +659,6 @@ describe("shared channels (MU-C4)", () => {
     const shareA = await createChannelShare(h, MEMBER_A);
     const shareB = await createChannelShare(h, MEMBER_B);
 
-    // Member A starts a thread and posts into it in one batch (the composer
-    // path): the intra-batch thread binding must hold.
     const append = await h(
       request(
         MEMBER_A,
@@ -705,8 +682,6 @@ describe("shared channels (MU-C4)", () => {
     expect(append.status).toBe(200);
     expect(await json(append)).toMatchObject({ ok: true, accepted: 3, inserted: 3 });
 
-    // The owner sees member A's ops in their own bucket, under a
-    // share-namespaced origin (a member can never extend an owner origin).
     const ownerLog = await json(
       await h(request(OWNER, `/sync/${WORKSPACE}/log?since=0&limit=100`)),
     );
@@ -727,7 +702,6 @@ describe("shared channels (MU-C4)", () => {
 
     expect(JSON.stringify(ownerLog)).toContain("hello from member A");
 
-    // Member B converges on the same ops through their own share.
     const opsForB = await fetchSharePage(h, MEMBER_B, shareB);
     const bodies = opsForB
       .filter((op) => op.opKind === "chat.message.append")
@@ -739,8 +713,6 @@ describe("shared channels (MU-C4)", () => {
     ]);
     const opsForA = await fetchSharePage(h, MEMBER_A, shareA);
     expect(opsForA.map((op) => op.opKind)).toEqual(opsForB.map((op) => op.opKind));
-    // A poll a member resolves names one of its choices; a choice outside
-    // them, or a resolved poll with none, is refused before it is stored.
     const decision = (messageId: string, fields: Record<string, unknown>) =>
       logOp("chat.decision.set", {
         threadId: "thread-by-a",
@@ -826,7 +798,6 @@ describe("shared channels (MU-C4)", () => {
       ),
     );
     expect(bom.status).toBe(200);
-    // The pick is compared as written: a padded pick is not one of the choices.
     const padded = await h(
       request(
         MEMBER_A,
@@ -843,7 +814,6 @@ describe("shared channels (MU-C4)", () => {
       ),
     );
     expect(padded.status).toBe(403);
-    // The engine reads null choices as absent, and refuses a null pick.
     const nullPick = await h(
       request(
         MEMBER_A,
@@ -990,7 +960,6 @@ describe("shared channels (MU-C4)", () => {
     expect(forgedReaction.status).toBe(403);
     expect((await json(forgedReaction)).code).toBe("authorship_mismatch");
 
-    // The member must send the authenticated user id in the replicated bytes.
     const missingAuthor = await h(
       request(
         MEMBER_A,
@@ -1019,13 +988,9 @@ describe("shared channels (MU-C4)", () => {
     const shareId = await createChannelShare(h, MEMBER_A);
 
     const attempts: Array<Record<string, unknown>> = [
-      // A message into the owner's PRIVATE channel thread.
       messageAppend("msg-leak-1", "thread-private-1", "SNEAK-private-post", MEMBER_A),
-      // A thread.create for the private channel.
       threadCreate("thread-sneak", PRIVATE_WIRE, "sentinel-private-channel"),
-      // A channel.create for a different wire id.
       channelCreate("wire-else", "SNEAK-new-channel"),
-      // A file write into the owner's workspace.
       {
         originSeq: 0,
         opKind: "moment.append",
@@ -1037,7 +1002,6 @@ describe("shared channels (MU-C4)", () => {
         },
         recordedAtMs: 1,
       },
-      // A message into an unknown thread (no in-log binding).
       messageAppend("msg-leak-2", "thread-nowhere", "SNEAK-unknown", MEMBER_A),
       // A prototype-chain probe. `toString` lives on Object.prototype, so an
       // `opKind in SERVED_CHAT_FIELDS` test reads a FUNCTION as this kind's
@@ -1049,8 +1013,6 @@ describe("shared channels (MU-C4)", () => {
         payload: { threadId: "thread-shared-1" },
         recordedAtMs: 1,
       },
-      // A forged re-bind: thread.create claiming the granted channel for the
-      // owner's existing private thread (earliest-binding must win).
       logOp("chat.thread.create", {
         threadId: "thread-private-1",
         title: "",
@@ -1066,7 +1028,6 @@ describe("shared channels (MU-C4)", () => {
           `/sync/shares/${shareId}/log`,
           jsonBody({
             originId: "origin-member-a",
-            // A valid op first: the invalid one must reject the whole batch.
             ops: [
               { ...messageAppend("msg-ok", "thread-shared-1", "fine", MEMBER_A), originSeq: 0 },
               { ...op, originSeq: 1 },
@@ -1077,7 +1038,6 @@ describe("shared channels (MU-C4)", () => {
       expect(response.status, JSON.stringify(op)).toBe(403);
       expect((await json(response)).code).toBe("share_op_rejected");
     }
-    // Nothing was admitted — not even the valid leading ops.
     const ownerLog = await json(
       await h(request(OWNER, `/sync/${WORKSPACE}/log?since=0&limit=100`)),
     );
@@ -1085,9 +1045,6 @@ describe("shared channels (MU-C4)", () => {
     expect(serialized).not.toContain("SNEAK");
     expect(serialized).not.toContain("msg-ok");
 
-    // And after the forged re-bind attempt, the private thread's messages are
-    // still invisible through the share (the attempt never persisted, and
-    // earliest-binding would exclude them even if it had).
     const memberView = JSON.stringify(
       await json(await h(request(MEMBER_A, `/sync/shares/${shareId}/log?since=0&limit=100`))),
     );
@@ -1204,9 +1161,6 @@ describe("shared channels (MU-C4)", () => {
     const storage = await testStorage();
     const h = handler(storage);
     await seedOwnerWorkspace(h);
-    // A stored op that grew an internal-only field (audit metadata, device
-    // id, ...): the share filter must rebuild the served payload from its
-    // per-kind allowlist instead of passing the record through verbatim.
     const extra = await h(
       request(
         OWNER,
@@ -1240,8 +1194,6 @@ describe("shared channels (MU-C4)", () => {
     const storage = await testStorage();
     const h = handler(storage);
     await seedOwnerWorkspace(h);
-    // Upload a real blob to the owner bucket and reference it from a file op
-    // so a leaking chat share would have something to reach.
     const content = "file blob content";
     const { createHash } = await import("node:crypto");
     const sha = createHash("sha256").update(content).digest("hex");
@@ -1292,7 +1244,6 @@ describe("shared channels (MU-C4)", () => {
     expect(
       await denialBytes(await h(request(MEMBER_B, `/sync/shares/${shareId}/log`, appendBody))),
     ).toBe(missingAppend);
-    // Gone from the member's received list; stamped in the owner's.
     const received = (await json(await h(request(MEMBER_A, "/sync/shares")))).received as unknown[];
     expect(received).toEqual([]);
   });
@@ -1396,7 +1347,6 @@ describe("shared channels (MU-C4)", () => {
     await seedOwnerWorkspace(h);
     const shareId = await createChannelShare(h, MEMBER_A);
 
-    // The member deliberately claims the OWNER's origin id.
     const hijack = await h(
       request(
         MEMBER_A,
@@ -1424,7 +1374,6 @@ describe("shared channels (MU-C4)", () => {
       (op) => op.originId === namedShareOrigin(shareId, MEMBER_A, "origin-owner"),
     );
     expect(hijacked).toHaveLength(1);
-    // The owner's own origin still appends contiguously where it left off.
     const nextSeq = Math.max(...ownerOps.map((op) => op.originSeq)) + 1;
     const ownerAppend = await h(
       request(

@@ -83,7 +83,6 @@ const volunteers: DatasetDefinition = {
     },
   ],
 };
-/** Ice made Email unique, then Claude Code added Due date, renamed Status and removed Notes. */
 const iceEdit = structuredClone(volunteers);
 const email = iceEdit.tables[0]!.fields[1]!;
 if (email.type !== "button") email.unique = true;

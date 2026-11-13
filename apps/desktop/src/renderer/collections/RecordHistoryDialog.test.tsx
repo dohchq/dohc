@@ -245,7 +245,6 @@ describe("RecordHistoryDialog", () => {
     expect(rows[1]!.textContent).toContain("Stamp the finish date");
     expect(within(rows[1]!).queryByTestId("record-history-run-not-here")).toBeNull();
     expect(screen.queryByRole("button", { name: "View run" })).toBeNull();
-    // Why shows as text, not only in a tooltip.
     expect(screen.getByTestId("record-history-run-not-here-why").textContent).toBe(
       RUN_NOT_HERE_WHY,
     );
@@ -271,7 +270,6 @@ describe("RecordHistoryDialog", () => {
       automationId: STAMP,
       claimId: "claim-server",
     });
-    // While main asks, the row claims nothing.
     expect(within(row!).queryByRole("button", { name: "View run" })).toBeNull();
     expect(screen.queryByTestId("record-history-run-not-here")).toBeNull();
     expect(onRunsChecked).not.toHaveBeenCalled();
@@ -310,10 +308,8 @@ describe("RecordHistoryDialog", () => {
     );
     const [row] = screen.getAllByTestId("record-history-entry");
     expect(within(row!).queryByRole("button", { name: "View run" })).toBeNull();
-    // Never read as a run that ended long ago.
     expect(screen.queryByTestId("record-history-run-not-here")).toBeNull();
     expect(screen.queryByTestId("record-history-run-not-here-why")).toBeNull();
-    // A run on the older page fails too, so Try again must read back to it.
     fireEvent.click(screen.getByRole("button", { name: "Older changes" }));
     await waitFor(() =>
       expect(onRunsUnchecked.mock.calls).toEqual([
@@ -321,7 +317,6 @@ describe("RecordHistoryDialog", () => {
         [9, offline, [`${STAMP}\nclaim-1`, `${STAMP}\nclaim-2`]],
       ]),
     );
-    // An older page with no run says nothing new.
     fireEvent.click(screen.getByRole("button", { name: "Older changes" }));
     await screen.findByText(/Owner:/);
     expect(onRunsUnchecked).toHaveBeenCalledTimes(2);
@@ -496,14 +491,12 @@ describe("RecordHistoryDialog", () => {
         return { entries: [entry(10, null)], nextBeforeHistoryId: 10 };
       return { entries: [entry(4, null, "Owner")], nextBeforeHistoryId: 4 };
     });
-    // A change arrived since the page before 10 failed, so the pages moved.
     render(dialog({ until: 10 }));
     await screen.findByText(/Owner:/);
     expect(
       bridge.getCollectionRecordHistory.mock.calls.map(([payload]) => payload.beforeHistoryId),
     ).toEqual([undefined, 12, 10]);
     expect(screen.getAllByTestId("record-history-entry")).toHaveLength(3);
-    // Older pages stay for the person to ask for.
     expect(screen.getByRole("button", { name: "Older changes" })).toBeTruthy();
   });
 
@@ -570,7 +563,6 @@ describe("RecordHistoryDialog", () => {
     );
     expect(onFailed).toHaveBeenCalledTimes(1);
     expect(onFailed).toHaveBeenCalledWith(9, expect.any(Error));
-    // Try again takes the place of Older changes, and focus with it.
     expect(screen.queryByRole("button", { name: "Older changes" })).toBeNull();
     const retry = screen.getByRole("button", { name: "Try again" });
     await waitFor(() => expect(document.activeElement).toBe(retry));

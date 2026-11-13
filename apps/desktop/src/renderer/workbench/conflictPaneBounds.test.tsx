@@ -121,7 +121,6 @@ describe("a conflict side pane", () => {
 
     const panes = screen.getAllByTestId("version-conflict-side-text");
     expect(panes).toHaveLength(2);
-    // Before the fix this was the whole 10 MiB body in one text node.
     const painted = panes[1].textContent ?? "";
     expect(painted.length).toBeLessThanOrEqual(CONFLICT_PREVIEW_MAX_CHARS);
     expect(painted.length).toBeGreaterThan(0);
@@ -167,7 +166,6 @@ describe("combine by hand", () => {
         "en-US",
       )} bytes, so this starts empty. That is the largest copy you can combine ` + `by hand.`,
     );
-    // And it can be applied: an empty combined copy is under every cap.
     expect(
       (screen.getByTestId("version-conflict-apply-combined") as HTMLButtonElement).disabled,
     ).toBe(false);
@@ -192,7 +190,6 @@ describe("combine by hand", () => {
     expect(
       (screen.getByTestId("version-conflict-combined-input") as HTMLTextAreaElement).value,
     ).toBe("main side\n");
-    // The user has to know which copy they are editing.
     expect(screen.getByTestId("version-conflict-combined-source").textContent).toBe(
       "Started from Main's copy.",
     );
@@ -227,7 +224,6 @@ describe("combine by hand", () => {
         `Add less text.`,
     );
 
-    // The next change that fits is accepted, and the refusal goes away.
     fireEvent.change(box, { target: { value: "combined\n" } });
     expect(
       (screen.getByTestId("version-conflict-combined-input") as HTMLTextAreaElement).value,
@@ -236,8 +232,6 @@ describe("combine by hand", () => {
   });
 
   it("does not carry a refusal onto a box the user reopened", async () => {
-    // The warning names a size the user TRIED. Shown above a pristine seed
-    // that fits, it describes nothing that is true.
     await openReview([conflict()]);
     fireEvent.click(screen.getByTestId("version-conflict-combine"));
     fireEvent.change(screen.getByTestId("version-conflict-combined-input"), {
@@ -271,8 +265,6 @@ describe("combine by hand", () => {
   });
 
   it("starts empty when one side has no file and the other is over the cap", async () => {
-    // A deletion against an oversized edit. The absent side is a zero-byte
-    // start the engine accepts, so removing the affordance refused work.
     await openReview([conflict({ currentText: null, incomingText: HUGE_INCOMING })]);
     fireEvent.click(screen.getByTestId("version-conflict-combine"));
     expect(
@@ -284,7 +276,6 @@ describe("combine by hand", () => {
   });
 
   it("prefers a present copy that fits over an absent side", async () => {
-    // Starting empty must never beat starting from a copy the user could edit.
     await openReview([conflict({ incomingText: null })]);
     fireEvent.click(screen.getByTestId("version-conflict-combine"));
     expect(
@@ -304,16 +295,11 @@ describe("a list of open conflicts", () => {
   it("paints two side panes however many conflicts are open", async () => {
     await openReview(many);
     expect(screen.getAllByTestId("version-conflict")).toHaveLength(40);
-    // Before the fix this was 80 panes, each holding a whole side.
     expect(screen.getAllByTestId("version-conflict-side-text")).toHaveLength(2);
     expect(screen.getAllByTestId("version-conflict-keep-current")).toHaveLength(1);
   });
 
   it("never measures a side it is not painting", async () => {
-    // Every one of these seeds is over the apply cap, so every card would
-    // count its bytes exactly if the count were not deferred to expansion.
-    // Twenty 10 MiB sides cost 750 ms on mount that way, against 79 ms here —
-    // and every other test in this file passed through that regression.
     const heavy = Array.from({ length: 20 }, (_, index) =>
       conflict({
         conflictId: `h-${index}`,
@@ -323,8 +309,6 @@ describe("a list of open conflicts", () => {
       }),
     );
     await openReview(heavy);
-    // The open card measures its two over-cap sides. The nineteen collapsed
-    // ones measure nothing.
     expect(measurements()).toBe(2);
 
     utf8ByteLengthSpy.mockClear();
@@ -335,10 +319,6 @@ describe("a list of open conflicts", () => {
   });
 
   it("never re-measures a side when a local rerender happens", async () => {
-    // `labels` is rebuilt every render, so a memo depending on it recomputed
-    // every render — and with both sides over the cap that meant rescanning
-    // every byte of both on each one. Clicking Keep sets busy, which is a
-    // local rerender.
     await openReview([conflict({ currentText: HUGE_CURRENT, incomingText: HUGE_INCOMING })]);
     expect(measurements()).toBe(2);
 
@@ -354,13 +334,10 @@ describe("a list of open conflicts", () => {
     expect(screen.getByTestId("version-conflict-busy")).not.toBeNull();
     reject(new Error("nope"));
     await screen.findByTestId("version-conflict-error");
-    // Two rerenders, no rescans.
     expect(measurements()).toBe(0);
   });
 
   it("shows a failure even when the card was collapsed while it ran", async () => {
-    // Nothing stops the user opening another conflict mid-request, and a
-    // refusal that renders only inside the expanded body tells them nothing.
     await openReview(many);
     const cards = screen.getAllByTestId("version-conflict");
     let reject: (error: Error) => void = () => {};
@@ -373,7 +350,6 @@ describe("a list of open conflicts", () => {
     fireEvent.click(within(cards[0]).getByTestId("version-conflict-keep-current"));
     expect(within(cards[0]).getByTestId("version-conflict-busy")).not.toBeNull();
 
-    // Move to another conflict while the first is still running.
     fireEvent.click(within(cards[4]).getByTestId("version-conflict-toggle"));
     expect(within(cards[0]).queryAllByTestId("version-conflict-side-text")).toHaveLength(0);
     expect(within(cards[0]).getByTestId("version-conflict-busy")).not.toBeNull();
@@ -388,15 +364,12 @@ describe("a list of open conflicts", () => {
     await openReview(many);
     const cards = screen.getAllByTestId("version-conflict");
 
-    // Closing the card that is open must close it, not hand the turn back to
-    // the first card.
     fireEvent.click(within(cards[0]).getByTestId("version-conflict-toggle"));
     expect(screen.queryAllByTestId("version-conflict-side-text")).toHaveLength(0);
     expect(
       within(cards[0]).getByTestId("version-conflict-toggle").getAttribute("aria-expanded"),
     ).toBe("false");
 
-    // And collapsing a later card must not reopen the first one.
     fireEvent.click(within(cards[5]).getByTestId("version-conflict-toggle"));
     expect(within(cards[5]).queryAllByTestId("version-conflict-side-text")).toHaveLength(2);
     fireEvent.click(within(cards[5]).getByTestId("version-conflict-toggle"));
@@ -424,8 +397,6 @@ describe("a list of open conflicts", () => {
       target: { value: "my combined copy\n" },
     });
 
-    // Collapsing must not discard the draft — the same discipline that keeps a
-    // backdrop click from unmounting this card.
     fireEvent.click(within(cards[3]).getByTestId("version-conflict-toggle"));
     expect(within(cards[0]).getByTestId("version-conflict-draft-marker").textContent).toBe(
       "Combined copy in progress",

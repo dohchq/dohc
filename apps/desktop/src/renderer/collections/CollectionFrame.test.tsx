@@ -43,7 +43,6 @@ const MENU: CollectionFrameMenuSection[] = [
   { label: "Collection", commands: [{ id: "customize", label: "Customize…", onSelect: vi.fn() }] },
 ];
 
-/** A frame that keeps which tab is open, as a page does. */
 function Frame(props: Partial<CollectionFrameProps> & { onSelect?: (id: string) => void }) {
   const { onSelect, ...rest } = props;
   const [active, setActive] = useState(props.activeTabId ?? "all");
@@ -79,7 +78,6 @@ describe("the header", () => {
       .closest("header")!;
     expect(within(header).getByTestId("collection-record-count").textContent).toBe("7 records");
     expect(within(header).getByText("Editing is paused")).toBeTruthy();
-    // Nothing sits above the name.
     expect(page.firstElementChild).toBe(header);
   });
 
@@ -122,7 +120,6 @@ describe("the view tabs", () => {
     expect(document.activeElement).toBe(tab("Schedule"));
     await user.keyboard("{Home}");
     expect(document.activeElement).toBe(tab("All tasks"));
-    // Enter opens the tab that has focus.
     await user.keyboard("{ArrowRight}{Enter}");
     expect(tab("By status").getAttribute("aria-pressed")).toBe("true");
     expect(tab("By status").tabIndex).toBe(0);
@@ -221,7 +218,6 @@ describe("adding a view", () => {
       "A calendar needs a date field. Add one first.",
     );
     expect(views.create).not.toHaveBeenCalled();
-    // The primary stays enabled, and focus goes to what fixes the problem.
     expect(document.activeElement).toBe(popover.getByRole("button", { name: "Add a date field" }));
     await user.click(popover.getByRole("button", { name: "Add a date field" }));
     expect(onAddDateField).toHaveBeenCalledOnce();
@@ -274,7 +270,6 @@ describe("adding a view", () => {
     await user.click(popover.getByRole("button", { name: "Create view" }));
     const primary = popover.getByRole<HTMLButtonElement>("button", { name: "Creating…" });
     expect(primary.disabled).toBe(true);
-    // A press outside while the view saves does not close the popover.
     fireEvent.pointerDown(screen.getByText("Records"));
     expect(screen.getByRole("dialog", { name: "Add a view" })).toBeTruthy();
     saving.resolve("dohc could not update this collection.");
@@ -305,7 +300,6 @@ describe("adding a view", () => {
       ),
     );
     expect(views.create).toHaveBeenCalledOnce();
-    // With the answer in, + closes the popover again.
     await user.click(addView());
     expect(screen.queryByRole("dialog", { name: "Add a view" })).toBeNull();
   });
@@ -431,7 +425,6 @@ describe("a tab's menu", () => {
 
   it("puts focus on the open view's tab once a deleted tab is gone", async () => {
     const user = userEvent.setup();
-    // A page that deletes the view after its write, and opens the first view when the open one goes.
     function Deleting() {
       const [tabs, setTabs] = useState(TABS);
       const [active, setActive] = useState("schedule");
@@ -455,7 +448,6 @@ describe("a tab's menu", () => {
       );
     }
     render(<Deleting />);
-    // The open tab is the last one, so its button goes with it.
     await user.click(screen.getByRole("button", { name: "View actions" }));
     await user.click(screen.getByRole("menuitem", { name: "Delete" }));
     await waitFor(() =>
@@ -511,7 +503,6 @@ describe("a tab's menu", () => {
     await user.click(screen.getByRole("button", { name: "View actions" }));
     await user.click(screen.getByRole("menuitem", { name: "Delete" }));
     expect(views.remove).not.toHaveBeenCalled();
-    // The menu stays open, and the same row now confirms.
     expect(screen.queryByRole("menuitem", { name: "Delete" })).toBeNull();
     await user.click(screen.getByRole("menuitem", { name: "Confirm delete" }));
     expect(views.remove).toHaveBeenCalledExactlyOnceWith("all");
@@ -553,7 +544,6 @@ describe("a tab's menu", () => {
     const user = userEvent.setup();
     const views = savedViews({ confirmDelete: false });
     render(<Frame views={views} />);
-    // Only the open tab shows the button.
     expect(screen.getAllByRole("button", { name: "View actions" })).toHaveLength(1);
     fireEvent.contextMenu(tab("Schedule"));
     await user.click(
@@ -678,10 +668,8 @@ describe("tabs the page holds, or takes away, while something is open", () => {
       const owner = screen.getByRole("menuitemradio", { name: "Owner" });
       page.rerender(<Frame {...props(onChange)} />);
       expect(screen.queryByRole("menu")).toBeNull();
-      // A row that was on screen as the page held the control picks nothing.
       fireEvent.click(owner);
       expect(onChange).not.toHaveBeenCalled();
-      // Nothing opens again by itself once the page lets go.
       page.rerender(<Frame viewField={{ ...GROUP, onChange }} />);
       expect(screen.queryByRole("menu")).toBeNull();
       expect(
@@ -725,7 +713,6 @@ describe("tabs the page holds, or takes away, while something is open", () => {
         within(screen.getByRole("dialog", { name: "Add a view" })).getByRole("alert").textContent,
       ).toBe("dohc could not save this view. The saved views changed elsewhere. Try again."),
     );
-    // The answer shows, and nothing more saves until the page frees the tabs.
     const create = () => screen.getByRole<HTMLButtonElement>("button", { name: "Create view" });
     expect(create().disabled).toBe(true);
     fireEvent.submit(create().closest("form")!);
@@ -747,7 +734,6 @@ describe("tabs the page holds, or takes away, while something is open", () => {
     await user.click(addView());
     page.rerender(<Frame />);
     expect(screen.queryByRole("dialog")).toBeNull();
-    // Saving views again does not bring the popover back.
     page.rerender(<Frame views={views} />);
     expect(screen.queryByRole("dialog")).toBeNull();
     await user.click(screen.getByRole("button", { name: "View actions" }));

@@ -15,7 +15,6 @@ import {
 } from "./workbenchState";
 
 const engine = fakeLocalStateOpens();
-// A workspace whose engine open prepared .dohc/local.
 async function openedWorkspace(prefix: string) {
   const workspace = { workspaceId: prefix, rootPath: await createTestScratch(prefix) };
   await engine.open(workspace);

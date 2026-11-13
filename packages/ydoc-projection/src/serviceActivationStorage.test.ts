@@ -102,7 +102,6 @@ const policy = {
 };
 const validateBaseline = createLiveMarkdownRegistrationValidator(policy),
   validateJournal = createLiveMarkdownJournalValidator(policy);
-// The pool's check, run in this process.
 const validateActivation: OrdinaryActivationValidator = async (work) =>
   validateOrdinaryActivation(work, policy);
 const host = {
@@ -295,8 +294,6 @@ it("retains the original lineage and edited ordinary cut, closing ordinary autho
   }
 });
 
-// A hosted replica's cursor passes every row of the workspace, including rows of
-// documents it may not read, so it matches the relay's newest sequence.
 it("activates at a hosted cursor that passed rows of documents outside the hosted scope", async () => {
   const f = fixture();
   try {
@@ -360,7 +357,6 @@ it("checks configured history entry and byte budgets before loading relay blobs"
     const read = vi.spyOn(f.storage, "getBlob");
     await expect(f.prepare({ ...bounds, maxHistoryEntries: 1 })).rejects.toThrow("entry budget");
     expect(read).not.toHaveBeenCalled();
-    // A baseline past the byte budget is refused before the history read, as the same over-budget history.
     await expect(
       f.prepare({ ...bounds, maxBytesPerDrain: f.capture.baselineBytes.length - 1 }),
     ).rejects.toBeInstanceOf(ServiceActivationHistoryOverBudget);
@@ -381,7 +377,6 @@ const ydocUpdate = (payload: Record<string, unknown>) => ({
   contentKind: "richdoc",
   ...payload,
 });
-// Appends one relay row, with its bytes when given, and moves the native cut to it.
 function append(
   f: ReturnType<typeof fixture>,
   origin: string,
@@ -3155,7 +3150,6 @@ it("refuses a bootstrap Stop restore of a service activation's lineage before it
           body: JSON.stringify(body),
         }),
       );
-    // The service host that adopted the lineage still offers Stop.
     const offered = await post("/options", { path: "docs/a.md" });
     expect(offered.status).toBe(200);
     expect((await offered.json()).grants).toMatchObject([{ grantId: "grant" }]);
@@ -3506,10 +3500,6 @@ const markdownOf = (f: ReturnType<typeof fixture>, state: Uint8Array) => {
   return new TextEncoder().encode(projected.evidence.projectedMarkdown);
 };
 
-// Proves: a retiring document's host may publish its baseline, its retained
-// source state and source moment as native writes it, each as a departed row
-// that moves no projection; the moment's author fields prove no authorship.
-// Anything else of the same document is refused at its coordinate.
 it("admits only a retiring document's verified Y.Doc rows and source moment", async () => {
   const f = fixture();
   try {
@@ -3668,11 +3658,9 @@ it("retries a retiring application until its owner applied it, confirms its auth
     ];
     expect(await r.push([audit], 1)).toMatchObject({ status: 200, body: { inserted: 1 } });
     expect(r.coordinate(1)).toEqual(departed("live.audit.application"));
-    // Before the owner applied it, the audit waits too.
     f.raw.exec("UPDATE sync_relay_live_delivery_owners SET tip_cursor=tip_cursor-1");
     expect(await r.push([audit], 2)).toMatchObject({ status: 503 });
     r.applyEdit();
-    // The edit is past a lower F.
     f.raw.exec(
       "UPDATE sync_relay_service_activations SET retire_accepted_cursor=retire_accepted_cursor-1",
     );
@@ -3688,8 +3676,6 @@ it("retries a retiring application until its owner applied it, confirms its auth
   }
 });
 
-// A native-complete settlement of the retiring document through the edit at
-// F, with its uploaded state and projection, as an audit or as its moment.
 async function retiringSettlement(
   f: ReturnType<typeof fixture>,
   r: Awaited<ReturnType<typeof retiringFeed>>,
@@ -3768,9 +3754,6 @@ async function retiringSettlement(
   return { record, audit, moment };
 }
 
-// Proves: a settlement audit is proved on its own, before its moment arrives
-// in a later push; both wait for the owner's applied tip; a record native
-// would refuse proves nothing, as an audit or a moment.
 it("proves a retiring settlement audit before its later moment, and refuses a settlement native would refuse", async () => {
   const f = fixture();
   try {
@@ -3862,9 +3845,6 @@ async function departedSettlementSource(
   });
   return record;
 }
-// Proves: a successor's source may be the retiring host's departed settlement
-// moment, proved by the binding the relay committed with it. The departed
-// Y.Doc row it settled counts as history: without it the states differ.
 it("verifies a capture whose source is a departed settlement moment the relay proved", async () => {
   const f = fixture();
   try {
@@ -3909,9 +3889,6 @@ it.each([
   },
 );
 
-// Proves: the relay reads the engine's own event-zero audit bytes, which the
-// engine's `update_native_audit_fixture` writes, in native's field order,
-// with native's record digest and origin stamp, and refuses one field changed.
 it("verifies the engine's own event-zero audit record digest and origin stamp", () => {
   const db = new DatabaseSync(":memory:");
   try {
@@ -3930,10 +3907,6 @@ it("verifies the engine's own event-zero audit record digest and origin stamp", 
   }
 });
 
-// Proves: while its document settles, the host may ask after and upload bytes
-// its verified output names, without the settling document joining the blob
-// reach it may read; that upload proof outlasts the release of the stopped
-// last document and ends when the activation retires.
 it("lets a settling document upload and ask after its bytes without growing the readable blob reach, until its activation retires", async () => {
   const f = fixture();
   try {
@@ -3948,7 +3921,6 @@ it("lets a settling document upload and ask after its bytes without growing the 
         );
     expect(await have(digest)).toEqual({ ok: true, missing: [digest] });
     expect((await r.request("GET", `blobs/${digest}`)).status).toBe(404);
-    // The relay holds the owner's baseline bytes, but the host could not read them, so it learns nothing.
     expect(await r.upload(f.capture.baselineBytes)).toMatchObject({ alreadyHad: false });
     expect(await have(digest)).toEqual({ ok: true, missing: [] });
     expect((await r.request("GET", `blobs/${hash(f.capture.fullState)}`)).status).toBe(404);
@@ -3997,7 +3969,6 @@ const V1_ACTIVATIONS = `CREATE TABLE sync_relay_service_activations (
   FOREIGN KEY (workspace_id,main_version_id,object_id,lineage_claim_id)
     REFERENCES sync_relay_live_documents(workspace_id,main_version_id,object_id,lineage_claim_id) ON DELETE CASCADE
 ) STRICT`;
-// Rebuilds the fixture's activation storage as the v1 layout, keeping its rows. v1 named a share on each activation.
 function downgradeActivations(f: ReturnType<typeof fixture>, sql = V1_ACTIVATIONS) {
   const columns =
     "relay_database_namespace,activation_id,workspace_id,main_version_id,object_id,lineage_claim_id,source_json,binding_json,state_digest,state_bytes,owner_user_id,completion_json,accounted_bytes";
@@ -4061,7 +4032,6 @@ it("migrates v1 activations as current ones with no obligation, and refuses dama
   }
 });
 
-// The v2 activation layout, which named the share each owner activated through.
 const V2_ACTIVATIONS = `CREATE TABLE sync_relay_service_activations (
   relay_database_namespace TEXT NOT NULL,
   activation_id TEXT NOT NULL,
@@ -4116,12 +4086,6 @@ function downgradeToV2(raw: InstanceType<typeof DatabaseSync>, sql = V2_ACTIVATI
     DELETE FROM sync_relay_migrations WHERE migration_id='service-activation-v3';COMMIT`);
 }
 
-// Proves: the v3 rebuild drops the share each v2 activation named and keeps
-// the rest of the store: retired predecessors with their archived history,
-// completed activations, the pending successor, every chain link and every
-// charge. Initialization accepts the rebuilt store, again on the next open,
-// and the pending successor's access still serves the owner its lineage's
-// binding. A v2 table that is not the shipped layout is refused.
 it("migrates v2 activations and their archived history without the share each named, and refuses damaged v2 storage", async () => {
   const f = fixture(),
     damaged = fixture();
@@ -4213,11 +4177,6 @@ it("migrates v2 activations and their archived history without the share each na
   }
 });
 
-// Proves: a lineage a folder share activated before the upgrade keeps that
-// share's selector as its recorded owner scope. After the upgrade no share is
-// consulted: the share it named is gone and no other covers the note, and the
-// owner is served its `["notes"]` binding and the owner's draft delivers. A
-// draft bound to the note's path alone is not that binding, and is refused.
 it("serves a folder-share lineage its recorded binding after the upgrade, consulting no share", () => {
   const f = registered({ currentPath: "notes/a.md" });
   let reopened: ReturnType<typeof openSyncRelayStorage> | undefined;

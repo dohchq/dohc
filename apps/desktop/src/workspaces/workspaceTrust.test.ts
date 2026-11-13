@@ -76,7 +76,6 @@ describe("workspace trust", () => {
     await rename(rootPath, moved);
     expect(await trust.isTrusted(workspace)).toBe(false);
     expect(await trust.isTrusted({ ...workspace, rootPath: moved })).toBe(false);
-    // A replacement at the old path, with the same workspace id, is another folder.
     await mkdir(rootPath);
     expect(await trust.isTrusted(workspace)).toBe(false);
   });
@@ -117,7 +116,6 @@ describe("workspace trust", () => {
     await mkdir(join(file, ".."), { recursive: true });
     await writeFile(file, "{ not json");
     expect(await createWorkspaceTrust({ file }).isTrusted(workspace)).toBe(false);
-    // A record someone wrote by hand without the folder's identity does not match.
     await writeFile(
       file,
       JSON.stringify({ version: 1, trusted: [{ ...workspace, folder: null, trustedAtMs: 1 }] }),
@@ -335,7 +333,6 @@ describe("trust against races and failed files", () => {
     expect(await trust.isTrusted(workspace)).toBe(true);
     await expect(trust.restrict("trip")).rejects.toThrow("disk full");
     expect(await trust.isTrusted(workspace)).toBe(false);
-    // The file still holds the grant, so a restart would trust it again.
     expect(await createWorkspaceTrust({ file }).isTrusted(workspace)).toBe(true);
     failWrite = false;
     await trust.restrict("trip");

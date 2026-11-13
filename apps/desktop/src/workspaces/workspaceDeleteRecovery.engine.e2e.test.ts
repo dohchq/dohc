@@ -290,7 +290,6 @@ it.skipIf(engine.missing)(
       expect(await readFile(join(rootPath, "folder/tracked.txt"), "utf8")).toBe(
         "typed after move\n",
       );
-      // The MCP Undo above gave the name "dohc-mcp". The same agent without a name is the same author.
       const replay = await history.undoHistoryOperation({
         workspaceId: workspace.workspaceId,
         operationId,

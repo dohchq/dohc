@@ -1432,7 +1432,6 @@ it("accepts HTTP presses as the verified owner or editor and never accepts calle
       })
     ).status,
   ).toBe(400);
-  // A press at the chain's limit starts nothing, so the server refuses it and records no claim.
   const capped = await request("owner", ownerPath, {
     ...body,
     pressId: "http-capped",
@@ -1466,7 +1465,6 @@ it("accepts HTTP presses as the verified owner or editor and never accepts calle
   await vi.waitFor(() => expect(f.ledger.claim(automationId, named.claimId)?.state).toBe("done"), {
     timeout: 30_000,
   });
-  // An agent's press is the verified person's, at the agent's depth.
   const byAgent = await request("owner", ownerPath, {
     ...body,
     pressId: "http-agent",

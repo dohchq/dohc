@@ -280,7 +280,6 @@ describe("formulas", () => {
       { ok: true, value: true },
       ...Array.from({ length: 10 }, () => ({ ok: false, error: refused })),
     ]);
-    // Without the list, a missing field reads as nothing, as before.
     expect(
       await evaluator.evaluate({ ...idOnly, recordKeys: undefined }, [expression("record.Status")]),
     ).toEqual([{ ok: true, value: null }]);
@@ -427,7 +426,6 @@ describe("code steps", () => {
     expect(spent.runMs).toBeGreaterThan(0);
     const [formula] = await evaluator.evaluate(scope, [expression("1")], spent);
     expect(formula).toEqual({ ok: true, value: 1 });
-    // Once the run has spent its budget in earlier requests, a later one runs nothing.
     spent.runMs = AUTOMATION_LIMITS.requestMs;
     expect(await evaluator.evaluate(scope, [expression("1")], spent)).toEqual([
       { ok: false, error: runSpent },
@@ -622,7 +620,6 @@ describe("memory between runs", () => {
     record: { Notes: marker.repeat(40) },
     bindings: { card: marker },
   };
-  // Fills freed memory with the marker: many copies of the record's text, then a large buffer of marker bytes.
   const plant = `const copies = []; for (let i = 0; i < 4000; i++) copies.push(ctx.record.Notes + i);
     const bytes = new Uint8Array(4 << 20); for (let i = 0; i < ${marker.length}; i++) bytes[i] = ctx.card.charCodeAt(i);
     for (let filled = ${marker.length}; filled < bytes.length; filled *= 2) bytes.copyWithin(filled, 0, filled);
@@ -744,7 +741,6 @@ describe("scope preparation", () => {
         ]);
       }
       expect(threads.started).toBe(0);
-      // A bound step result can nest as deeply as a result can.
       expect(
         await fresh.evaluate(
           { ...scope, bindings: { rows: nested(64) }, record: { Rows: nested(64) } },
@@ -856,7 +852,6 @@ describe("scope preparation", () => {
     expect(
       evaluateItem(quickjs, JSON.stringify(scope), expression("1 + 1"), jumping()).result,
     ).toEqual({ ok: false, error: late });
-    // A scope the guest cannot read gives an error, and a timeout past the limit.
     expect(evaluateItem(quickjs, "not JSON", expression("1"), jumping()).result).toEqual({
       ok: false,
       error: late,

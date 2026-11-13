@@ -81,7 +81,6 @@ it("keys the table's columns by field id, adds Button fields after them, and kee
     { id: "1", version: 9, values: {} },
   ];
   const table = tableRecords(rows, fields);
-  // A number and a text of the same digits are two records, and a version never enters a record.
   expect(table.records.map((record) => record.id)).toEqual(["1", '"1"']);
   expect(table.rows.get("1")).toBe(rows[0]);
   expect(table.rows.get('"1"')).toBe(rows[1]);

@@ -294,8 +294,6 @@ describe("engine Y.Doc IPC adapter", () => {
     }
   });
 
-  // Proves: an owner's open reaches owner delivery only for a note the engine
-  // holds an owner binding for, so a note never shared asks the server nothing.
   it("reports an owner's open only for a note the engine holds an owner binding for", async () => {
     for (const ownerBound of [false, true]) {
       const onOwnerOpened = vi.fn();
@@ -364,7 +362,6 @@ describe("engine Y.Doc IPC adapter", () => {
     expect(sender.sent.at(-1)?.payload).toMatchObject({
       head: { sha256: "b".repeat(64), committed: true },
     });
-    // A delta from another editor brings no head.
     opened.onRemoteUpdate(new Uint8Array([4]));
     expect(sender.sent.at(-1)?.payload).not.toHaveProperty("head");
     const sent = sender.sent.length;
@@ -413,11 +410,8 @@ describe("engine Y.Doc IPC adapter", () => {
         requestId,
       });
     expect(apply(first)).toEqual({ accepted: true });
-    // The account changes while the renderer still retries its first request.
     h.setPerson("account-bob");
     expect(apply(first)).toEqual({ accepted: true });
-    // A new request is the person main has now. What the renderer says, an
-    // old context, an earlier generation, or a person, names no one.
     expect(
       apply(second, {
         authorContext: "account-alice-context",
@@ -440,7 +434,6 @@ describe("engine Y.Doc IPC adapter", () => {
   });
 
   it("keeps the arrival person for an identical retry through a recreated session, and never for changed bytes", async () => {
-    // The engine's request ledger: a key repeats only with the same bytes and attribution.
     const ledger = new Map<string, string>();
     const outcomes: Array<{
       outcome: "recorded" | "deduped" | "refused";
@@ -489,7 +482,6 @@ describe("engine Y.Doc IPC adapter", () => {
     const reopened = { ...openPayload, sessionId: "renderer-session-2" };
     await h.ipc.open(sender, reopened);
     expect(original.close).toHaveBeenCalled();
-    // The same batch is still Alice's; other bytes under its id are Bob's.
     expect(apply(reopened.sessionId, batch)).toEqual({ accepted: true });
     expect(apply(reopened.sessionId, new Uint8Array([9]))).toEqual({ accepted: true });
     expect(outcomes).toEqual([
@@ -854,10 +846,6 @@ describe("engine Y.Doc IPC adapter", () => {
     expect(c.nativeOwner.resyncIfNeeded).toHaveBeenCalledOnce();
   });
 
-  // The resync replaced the lineage and kept the native session, and the
-  // renderer adopted the replacement before the wait ended. The new lineage
-  // happens to carry the registered claim; the owner captured before the
-  // wait is gone, so the registration refuses.
   it("refuses when the resync replaced the lineage, even once the renderer adopts it", async () => {
     const c = claimHarness(null);
     const sender = new FakeSender(7);
@@ -1039,7 +1027,6 @@ describe("engine Y.Doc IPC adapter", () => {
       h.ipc.prepareOwnerHandoff(sender, { sessionId: openPayload.sessionId, lineageGeneration: 1 }),
     ).rejects.toThrow("not requested");
   });
-  // An agent's Stop again refuses a document an editor holds, as the window closes its own editors first.
   it("changes a document's live editing for a main-side door only while no editor holds it", async () => {
     const sender = new FakeSender(7);
     const h = harness();
@@ -1053,7 +1040,6 @@ describe("engine Y.Doc IPC adapter", () => {
     await expect(h.ipc.withLiveEditingChange(AUTHORITY_ID, "notes/a.md", change)).resolves.toBe(
       "stopped",
     );
-    // The change's own failure passes through unchanged.
     await expect(
       h.ipc.withLiveEditingChange(AUTHORITY_ID, "notes/a.md", async () => {
         throw new Error("Stop live editing is waiting.");
@@ -1133,7 +1119,6 @@ describe("engine Y.Doc IPC adapter", () => {
     await expect(h.ipc.retrySave(sender, retry)).resolves.toBe("settled");
     expect(settleNow).toHaveBeenCalledOnce();
     await expect(h.ipc.retrySave(sender, { ...retry, path: "notes/b.md" })).resolves.toBe("closed");
-    // Another window in the same workspace cannot save this window's session.
     await expect(h.ipc.retrySave(new FakeSender(8), retry)).resolves.toBe("closed");
     await expect(h.ipc.retrySave(sender, { ...retry, workspaceId: "workspace-2" })).rejects.toThrow(
       "another workspace",
@@ -1256,7 +1241,6 @@ describe("engine Y.Doc IPC adapter", () => {
       h.capturedOpen()?.onSaveState?.("settling", 2, "start");
       h.capturedOpen()?.onSaveState?.("error", 2, "outcome");
       expect(failures().at(-1)).toEqual({ reason: "read-only" });
-      // An author-capacity refusal and an error no settle reported are not save failures.
       h.capturedOpen()?.onSaveState?.("settling", 3, "start");
       h.capturedOpen()?.onSaveState?.("error", 3, "outcome", true);
       expect(failures().at(-1)).toBeUndefined();
@@ -1426,8 +1410,6 @@ describe("engine Y.Doc IPC adapter", () => {
     expect(saveDeletedFileAgain).toHaveBeenCalledWith("notes/a.md");
     expect(h.session.settleNow).not.toHaveBeenCalled();
 
-    // The tab closes and the close is refused: the session still holds the
-    // text. Save it again saves it, then finishes the close.
     close.mockRejectedValueOnce(new Error("conflict-stale-target"));
     await h.ipc.close(sender, { sessionId: openPayload.sessionId });
     await expect(h.ipc.retrySave(sender, again)).resolves.toBe("settled");
@@ -1488,7 +1470,6 @@ describe("engine Y.Doc IPC adapter", () => {
     h.capturedOpen()?.onSaveState?.("settling", 9, "start");
     edit(5);
     h.capturedOpen()?.onSaveState?.("settling", 9, "outcome");
-    // An already completed token claims nothing, even if reported again.
     h.capturedOpen()?.onSaveState?.("saved", 9, "outcome");
     h.capturedOpen()?.onSaveState?.("settling", 10, "start");
     h.capturedOpen()?.onSaveState?.("saved", 10, "outcome");
@@ -2671,10 +2652,6 @@ describe("engine Y.Doc IPC adapter", () => {
       await h.ipc.shutdown();
     });
 
-    // The person turns the paragraph into a heading while the agent's text
-    // goes into it. The merge keeps the heading, and the agent's text goes
-    // with the paragraph it was typed into, so the agent must not hear the
-    // edit landed.
     it("tells the agent when a person's change to the block took the edit's text", async () => {
       const session = editableSession();
       const h = harness(session);
@@ -2695,7 +2672,6 @@ describe("engine Y.Doc IPC adapter", () => {
       await expect(lost).rejects.toBeInstanceOf(LiveDocumentEditAppliedError);
       expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toBe("# Plan\n\n## Before.\n");
 
-      // Typing elsewhere at the same moment leaves the edit's text in place.
       const typed = new Y.Doc();
       Y.applyUpdate(typed, Y.encodeStateAsUpdate(session.doc));
       const otherBlock = documentEditUpdate(
@@ -2720,9 +2696,6 @@ describe("engine Y.Doc IPC adapter", () => {
       await h.ipc.shutdown();
     });
 
-    // The person backspaces over part of the agent's text as it lands. The
-    // edit landed and was then edited, so the agent hears it landed; being
-    // told to redo it would add the text a second time.
     it("reports an edit the person then edited as landed", async () => {
       const session = editableSession();
       const h = harness(session);
@@ -2886,8 +2859,6 @@ describe("engine Y.Doc IPC adapter", () => {
     it("refuses with a retryable reason when an editor opens as the edit begins", async () => {
       const session = editableSession();
       const h = harness(session);
-      // The editor's open holds the document's reservation when the edit asks
-      // for it.
       const opening = deferred<WorkspaceEngineYDocProviderSession>();
       vi.mocked(h.capture.openYDocSession).mockImplementationOnce(
         async () => await opening.promise,
@@ -3201,7 +3172,6 @@ describe("engine Y.Doc IPC adapter", () => {
       ).resolves.toEqual({ path: "notes/b.md", state: null });
       expect(h.capture.openYDocSession).not.toHaveBeenCalled();
 
-      // The editor that holds the note answers for it, and a shared view never asks.
       await h.ipc.open(new FakeSender(7), openPayload);
       ownerDraftState.mockClear();
       expect(
@@ -3234,8 +3204,6 @@ describe("engine Y.Doc IPC adapter", () => {
   });
 });
 
-// After Forget, Open folder on the same folder opens the workspace again in a
-// new window, and the window from before Forget can stay open.
 describe("a window left from before Forget", () => {
   function forgottenAndReopened(shareView: RegistryEntry["shareView"] | null) {
     const workspace: RegistryEntry = {
@@ -3246,7 +3214,6 @@ describe("a window left from before Forget", () => {
       ...(shareView ? { shareView } : {}),
     };
     let registered: RegistryEntry | null = null;
-    // The attachment each live-document open or admission wait ran under.
     const ranUnder: symbol[] = [];
     const authorities = createWorkspaceAuthorityOwner({
       findWorkspace: () => registered,
@@ -3372,7 +3339,6 @@ describe("a window left from before Forget", () => {
     expect(r.shows(r.newWindow)).toBe(true);
     r.ranUnder.length = 0;
 
-    // The new window opens its documents under the reopened attachment.
     expect(
       (await r.ipc.open(r.newWindow, { ...openPayload, sessionId: "new", path: "notes/b.md" }))
         .available,

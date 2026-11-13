@@ -65,7 +65,6 @@ it("reads once, then changes only on pushes, with no timer", async () => {
 it("drops older revisions and other workspaces", async () => {
   const { answer, push } = stubDesktop();
   const { result } = renderHook(() => useAgentRunActive("ws-a", true, vi.fn()));
-  // A push that lands before the first read's answer outranks it.
   push({ workspaceId: "ws-a", revision: 4, active: true });
   await answer({ workspaceId: "ws-a", revision: 3, active: false });
   expect(result.current).toBe(true);
@@ -101,7 +100,6 @@ it("reads and shows nothing until the workspace is ready", async () => {
   expect(desktop.readAgentRunState).toHaveBeenCalledExactlyOnceWith({ workspaceId: "ws-a" });
   await answer({ workspaceId: "ws-a", revision: 1, active: true });
   expect(result.current).toBe(true);
-  // Leaving readiness, as a reselect does, hides the dot and stops listening.
   rerender({ ready: false });
   expect(result.current).toBe(false);
   expect(listeners.size).toBe(0);

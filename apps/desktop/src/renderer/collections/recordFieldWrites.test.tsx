@@ -126,7 +126,6 @@ it("reports queued and failed paths only for their workspace before Stop and res
   expect(retainedCollectionFieldWritePaths("ws-1")).toEqual(["tasks/Plan.md", "tasks/Second.md"]);
 });
 
-/** Walks the mounted head writer through saving → saved so it settles. */
 function settleHead(host: ReturnType<typeof render>, doc: Y.Doc) {
   docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saving" } });
   host.rerender(<CollectionFieldWriteHost />);
@@ -302,7 +301,6 @@ describe("retained failures", () => {
         expect(doc.getMap("frontmatter").get("status")).toBeUndefined();
         expect(enqueue()).toBe(false);
         expect(collectionWriteFailures()).toHaveLength(2);
-        // The restriction belongs only to the received workspace.
         expect(enqueueCollectionFieldWrite("other", "tasks", CHANGE)).toBe(true);
       } finally {
         host.unmount();
@@ -369,7 +367,6 @@ describe("retained failures", () => {
       expect(open.textContent).toBe("Open externally");
       expect(row.contains(open)).toBe(true);
       expect(screen.queryByTestId("lossy-note-open-externally")).toBeNull();
-      // The row's own controls keep their names.
       expect(screen.getByTestId("collection-write-retry").textContent).toBe("Retry");
       expect(screen.getByLabelText("Unsaved collection value")).toBeTruthy();
       host.unmount();
@@ -741,7 +738,6 @@ describe("retained failures", () => {
     render(<CollectionFieldWriteHost />);
     enqueue();
 
-    // The write left the queue but not the app: value retained whole.
     await waitFor(() => expect(collectionWriteFailures()).toHaveLength(1));
     expect(collectionWriteFailures()[0]?.change).toEqual(CHANGE);
     expect(hasPendingCollectionFieldWrites()).toBe(false);
@@ -769,7 +765,6 @@ describe("retained failures", () => {
     docMock.current = engineDocState({ available: true, doc });
     fireEvent.click(screen.getByTestId("collection-write-retry"));
 
-    // Retry replays the exact accepted value through the record's doc.
     await waitFor(() => expect(doc.getMap("frontmatter").get("status")).toBe("done"));
     expect(collectionWriteFailures()).toHaveLength(0);
     expect(screen.queryByTestId("collection-write-failures")).toBeNull();
@@ -852,7 +847,6 @@ describe("retained failures", () => {
     enqueue();
 
     await act(() => vi.advanceTimersByTimeAsync(FILE_LOCKED_REPORT_MS));
-    // Completed, not failed: no retry offer for a write that is not lost.
     expect(hasPendingCollectionFieldWrites()).toBe(false);
     expect(collectionWriteFailures()).toHaveLength(0);
     expect(screen.queryByTestId("collection-write-failures")).toBeNull();
@@ -931,7 +925,6 @@ describe("settleCollectionFieldWrites", () => {
     enqueue();
     await waitFor(() => expect(collectionWriteFailures()).toHaveLength(1));
 
-    // The queue is already empty; the unresolved failure must still count.
     await expect(settleCollectionFieldWrites()).resolves.toEqual({
       failed: 1,
       stalled: false,
@@ -1076,17 +1069,14 @@ describe("beginCollectionWriteOperation", () => {
     act(() => {
       guard = beginCollectionWriteOperation("ws-1");
     });
-    // Nothing queued and nothing failed when the operation began.
     await expect(guard.settled).resolves.toEqual({ failed: 0, stalled: false });
 
-    // An edit racing the pause is not accepted into the queue and not lost.
     expect(enqueue()).toBe(false);
     expect(hasPendingCollectionFieldWrites()).toBe(false);
     expect(collectionWriteFailures()).toHaveLength(1);
     expect(collectionWriteFailures()[0]?.change).toEqual(CHANGE);
     expect(doc.getMap("frontmatter").has("status")).toBe(false);
 
-    // Retry waits out the pause: the value stays retained, nothing writes.
     const failureId = collectionWriteFailures()[0]!.id;
     act(() => retryCollectionFieldWrite(failureId));
     expect(hasPendingCollectionFieldWrites()).toBe(false);
@@ -1138,7 +1128,6 @@ describe("beginCollectionWriteOperation", () => {
     act(() => {
       guard = beginCollectionWriteOperation("ws-1");
     });
-    // The queued head keeps settling under the pause; only NEW edits wait.
     settleHead(host, doc);
     await expect(guard.settled).resolves.toEqual({ failed: 0, stalled: false });
     act(() => guard.release());

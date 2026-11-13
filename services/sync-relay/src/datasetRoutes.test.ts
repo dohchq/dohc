@@ -380,7 +380,6 @@ it("answers a dataset read its client closed as closed, without an error line, a
     expect((await read(f.handler)).status).toBe(500);
     expect(errors).toHaveBeenCalledWith("[sync-relay] unhandled error", "AbortError");
     errors.mockClear();
-    // Only the close itself is quiet: another failure after the client left still logs and answers 500.
     const failing = createSyncRelayHandler({
       storage: f.storage,
       datasetHost: f.host,

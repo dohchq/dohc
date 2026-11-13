@@ -29,8 +29,6 @@ const notice = {
   seen: false,
 };
 
-// Outside the workspace shell, the corner notices own their own failures: a
-// copy refused from one of them is reported to the same owner.
 it("reports a copy refused from a notice to the owner it was given", async () => {
   const user = userEvent.setup();
   const refusal = new Error("Document is not focused.");
@@ -61,9 +59,6 @@ it("reports a copy refused from a notice to the owner it was given", async () =>
   });
 });
 
-// A screen with no notice owner above it, such as the one dohc shows when it
-// cannot read its workspace list, gets its own: a refused copy there becomes a
-// toast with Try again.
 it("gives a copy on a screen with no notice owner a toast and Try again", async () => {
   const user = userEvent.setup();
   const writeText = vi

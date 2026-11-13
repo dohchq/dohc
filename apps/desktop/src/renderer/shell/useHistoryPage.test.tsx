@@ -20,8 +20,6 @@ import { readNewestMomentOrder, useHistoryPage } from "./useHistoryPage";
 
 let previousBridge: DohcDesktopBridge | undefined;
 const listHistory = vi.fn<(payload: ListHistoryPayload) => Promise<ListHistoryResult>>();
-// Every read the hook issues, in issue order, with its settlement in the
-// test's hands.
 let reads: Deferred<ListHistoryResult>[] = [];
 
 beforeEach(() => {
@@ -58,7 +56,6 @@ function moment(id: string): EngineMomentRecord {
 const files = (...moments: EngineMomentRecord[]): TimelineEntry[] =>
   moments.map((entry) => ({ kind: "file", moment: entry }));
 
-// A cursor into ws-1's timeline at a file position.
 const cursorAt = (position: HistoryCursor | number) => timelineCursor(position, "ws-1");
 
 function page(id: string, overrides: Partial<TimelinePage> = {}): TimelinePage {
@@ -130,7 +127,6 @@ async function fail(read: Deferred<ListHistoryResult>, message: string) {
   });
 }
 
-// A refresh that answers at once, for the page a scenario starts from.
 async function committed(it0: ReturnType<typeof mount>, answer: ListHistoryResult) {
   const pending = it0.refresh();
   await settle(reads.at(-1)!, answer);
@@ -144,8 +140,6 @@ async function advance(ms: number) {
 }
 
 describe("history page ordering", () => {
-  // Latest COMMITTED wins: an answer older than what is displayed is dropped,
-  // and readiness belongs to the page that commits.
   it("ignores a page that resolves after a newer one committed", async () => {
     const it0 = mount();
     const older = it0.refresh();
@@ -221,8 +215,6 @@ describe("history page ordering", () => {
     expect(it0.ids()).toEqual(["retried"]);
   });
 
-  // Main also refuses replies for a retired workspace. A page that names
-  // another workspace answers nothing here, from a refresh or a pagination.
   it("drops a page that names another workspace", async () => {
     const it0 = mount();
     await committed(it0, page("other", { workspaceId: "ws-2" }));
@@ -275,7 +267,6 @@ describe("history page entries and sources", () => {
     expect(it0.ids()).toEqual(["m-2", "version", "collection", "m-1"]);
   });
 
-  // The cursor is main's. The hook hands back the very object it received.
   it("forwards the cursor unchanged and appends the earlier page", async () => {
     const it0 = mount();
     const cursor = cursorAt(1);
@@ -293,8 +284,6 @@ describe("history page entries and sources", () => {
     expect(it0.markReady).toHaveBeenCalledTimes(1);
   });
 
-  // Each page describes the whole source chain, so a later page's missing
-  // and omitted Collections stand, and a refresh starts a new chain.
   it("discloses missing and omitted Collections from the newest page of the chain", async () => {
     const it0 = mount();
     const budget = {
@@ -355,7 +344,6 @@ describe("history page entries and sources", () => {
     });
   });
 
-  // A received share has only its imported file History.
   it("keeps only file History for a received share", async () => {
     const it0 = mount({ receivedShare: true });
     const version: TimelineEntry = {
@@ -413,9 +401,6 @@ describe("history page pagination", () => {
     expect(it0.ids()).toEqual(["again", "earlier"]);
   });
 
-  // The pagination's cursor points into the displayed timeline, so an older
-  // refresh must not reset the timeline under it. Held, not dropped: the
-  // pagination may still fail.
   it("holds an older refresh behind a pagination and drops it once the page lands", async () => {
     const it0 = mount();
     await committed(it0, page("first", { nextCursor: cursorAt(1) }));
@@ -443,9 +428,6 @@ describe("history page pagination", () => {
     expect(it0.ids()).toEqual(["first", "earlier"]);
   });
 
-  // Settlement, not success, releases what the pagination held. Its failure
-  // is about the displayed timeline, so it is the caller's to report; the
-  // held answer commits first.
   it("commits a held refresh when the pagination fails, and rejects that failure", async () => {
     const it0 = mount();
     await committed(it0, page("first", { nextCursor: cursorAt(1) }));
@@ -496,8 +478,6 @@ describe("history page pagination", () => {
     expect(it0.ids()).toEqual(["refreshed"]);
   });
 
-  // A newer refresh that merely failed must not throw the asked-for page
-  // away, nor leave the button disabled.
   it("commits a pagination whose newer refresh failed, and frees the button", async () => {
     const it0 = mount();
     await committed(it0, page("first", { nextCursor: cursorAt(1) }));
@@ -514,10 +494,6 @@ describe("history page pagination", () => {
     expect(it0.hook().page?.nextCursor).toEqual(cursorAt(0));
   });
 
-  // A refresh issued after the pagination replaces the page and frees the
-  // button, but the pagination keeps its pending slot. A second pagination
-  // then takes the slot; the first, superseded, settles without releasing
-  // what the second now owns.
   it("lets a newer refresh replace the page while only the owning pagination releases the slot", async () => {
     const it0 = mount();
     await committed(it0, page("first", { nextCursor: cursorAt(1) }));
@@ -557,9 +533,6 @@ describe("history page pagination", () => {
 });
 
 describe("history page versions", () => {
-  // An answer describing the version the user left is about somewhere else.
-  // The page it contradicts is retracted, the read state is left alone, and
-  // the retraction reports itself so the caller can ask again.
   it("retracts a page the newest version statement contradicts and rejects the old version's answers", async () => {
     const it0 = mount();
     await committed(it0, page("try", { versionId: "try-1" }));
@@ -582,9 +555,6 @@ describe("history page versions", () => {
     expect(it0.ids()).toEqual(["main"]);
   });
 
-  // Main notifies the renderer before the switch invoke resolves, so a valid
-  // new-version refresh can be issued before the statement arrives. Same
-  // version, earlier token: not stale.
   it("keeps a same-version answer issued before the version statement", async () => {
     const it0 = mount();
     await committed(it0, page("try", { versionId: "try-1" }));
@@ -607,8 +577,6 @@ describe("history page versions", () => {
     expect(it0.markReady).not.toHaveBeenCalled();
   });
 
-  // A failure is an answer for the version rule: it answers about somewhere
-  // the user has left, so it is nobody's to report.
   it("says nothing about a pagination that failed for the version the user left", async () => {
     const it0 = mount();
     await committed(it0, page("try", { nextCursor: cursorAt(1), versionId: "try-1" }));
@@ -629,8 +597,6 @@ describe("history page versions", () => {
     expect(it0.ids()).toEqual(["main-first"]);
   });
 
-  // A merge or a conflict resolution names the version the page already
-  // describes, so a held refresh survives it.
   it("keeps a held refresh across a version statement that changed nothing", async () => {
     const it0 = mount();
     await committed(it0, page("first", { nextCursor: cursorAt(1) }));
@@ -697,7 +663,6 @@ describe("history page updating retries", () => {
     await settle(reads[11]!, page("ready"));
     await paging;
     expect(it0.ids()).toEqual(["ready"]);
-    // A page dropped later is not known yet, not still updating.
     expect(it0.hook().readState).toBe("loading");
   });
 
@@ -713,8 +678,6 @@ describe("history page updating retries", () => {
     expect(it0.hook().readState).toBe("loading");
   });
 
-  // A page asked for from a cursor retries from the same cursor, in the same
-  // workspace, while it is still the pagination that owns the button.
   it("retries an updating pagination from the same cursor, and stops once a refresh replaced the page", async () => {
     vi.useFakeTimers();
     const it0 = mount();
@@ -791,9 +754,6 @@ describe("history page updating retries", () => {
   });
 });
 
-// The read that tells the shell an open file may have changed. It retries
-// `updating` on the page's ladder while its refresh is current, and says so
-// when the ladder ends still updating.
 describe("newest moment order", () => {
   const ready = (latestMomentOrder: number) => ({
     moments: [],
@@ -853,8 +813,6 @@ describe("newest moment order", () => {
 });
 
 describe("history page readiness and lifetime", () => {
-  // The marker changes identity with the selection generation. A refresh
-  // marks the generation it was issued under, even when it commits late.
   it("marks readiness with the marker captured when the refresh was issued", async () => {
     const it0 = mount();
     const first = it0.refresh();
@@ -887,9 +845,6 @@ describe("history page readiness and lifetime", () => {
     expect(later).not.toHaveBeenCalled();
   });
 
-  // Unmount moves the counter past every issued token. A late answer commits
-  // nothing, a late statement retracts nothing, and the held refresh is gone
-  // before the pagination that held it settles.
   it("invalidates every read in flight on unmount and retracts nothing after", async () => {
     const it0 = mount();
     await committed(it0, page("first", { nextCursor: cursorAt(1), versionId: "try-1" }));
@@ -1239,8 +1194,6 @@ const UNREADABLE_RULES = {
   policyErrors: ["files.toml"],
 };
 
-// The rules can turn unreadable under rows already shown. A names refresh
-// that finds that hides History the way a refresh would, without a retry.
 it("hides History when a names refresh finds the rules unreadable, and recovers on refresh", async () => {
   let notify!: (event: { workspaceId: string }) => void;
   window.dohcDesktop!.onHistoryNamesChanged = (listener) => {
@@ -1323,7 +1276,6 @@ it.each([
     const it0 = mount();
     const start = { ...historyCursor(), workspaceId: "ws-1", text: null };
     const kept = { ...moment("kept"), recordedAtMs: 100, momentOrder: 1 };
-    // Old-dated sync moments can have a higher order than newer text moments.
     const missing = {
       ...moment("deleted"),
       recordedAtMs: 80,
@@ -1347,7 +1299,6 @@ it.each([
     const newer = { ...moment("unshown-newer"), recordedAtMs: 90, momentOrder: 2 };
     const afterNewer = { ...start, text: { recordedAtMs: 90, momentOrder: 2 } };
     const afterMarker = { ...afterNewer, marker: { createdAtMs: 85, versionId: "draft" } };
-    // Text at the same millisecond still precedes the protected boundary.
     const sameTimeText = {
       ...moment("unshown-same-time"),
       recordedAtMs: 80,

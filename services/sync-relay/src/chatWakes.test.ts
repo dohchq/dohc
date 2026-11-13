@@ -10,8 +10,6 @@ import {
 } from "./chatWakes";
 import type { ChatRunner } from "./storage/chatWakes";
 
-// Resolution over fixed sources: a post in a Group, and the account's own agent messages by ID.
-
 const runner = (
   installId: string,
   agentId: string,
@@ -67,7 +65,6 @@ const reply = (body: string, parentMessageId?: string): WriteCommand => ({
 });
 
 it("keeps the hint for an agent it answers that matched several computers, unless a mention names that same agent", async () => {
-  // Claude runs on two computers as `default`; a third computer's `default` is Codex.
   const runners = [
     runner("mac", "default", "Claude", "claude"),
     runner("laptop", "default", "Claude", "claude"),

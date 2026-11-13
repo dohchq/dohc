@@ -16,7 +16,6 @@ import {
 
 const SURFACES = ["bg", "panel", "panel2"] as const;
 
-// The ink alpha of a state fill, so the test can composite it on a surface.
 function inkAlpha(token: string, name: string): number {
   const alpha = /^color-mix\(in srgb, var\(--dohc-ink\) (\d+)%, transparent\)$/.exec(token);
   expect(alpha, name).not.toBeNull();
@@ -51,7 +50,6 @@ describe("the surface ladder", () => {
 });
 
 describe("state fills", () => {
-  // The decided alphas (MEGA-PLAN step 2), and a scrim with no blur.
   it("are 7% hover and 14% selected in both themes, and a 40% or 65% scrim", () => {
     for (const mode of ["light", "dark"] as const) {
       expect(inkAlpha(palette[mode].hover, "hover")).toBe(0.07);
@@ -97,9 +95,6 @@ describe("state fills", () => {
   });
 });
 
-// A focus mark is a graphical object: 3:1 against what it sits on, a surface
-// or a hover or selected fill on that surface. The halo is the accent at the
-// focus alpha; a row's line is the accent itself.
 describe("keyboard focus marks", () => {
   for (const mode of ["light", "dark"] as const) {
     it(`${mode} halo and row line clear 3:1 on every surface and fill`, () => {
@@ -149,8 +144,6 @@ describe("WCAG AA contrast, both modes", () => {
     { fg: "agent", bg: "bg", min: 4.5 },
     { fg: "agent", bg: "panel", min: 4.5 },
     { fg: "agent", bg: "panel2", min: 4.5 },
-    // State text (a strip, a pill, a failed row) sits on every surface
-    // too. Light warning on panel-2 was 4.37:1.
     ...(["success", "warning", "danger"] as const).flatMap((fg) =>
       SURFACES.map((bg) => ({ fg, bg, min: 4.5 })),
     ),
@@ -188,9 +181,6 @@ describe("WCAG AA contrast, both modes", () => {
       }
     });
 
-    // The editor tints a plain find match 22% blue and an inline atom 10%;
-    // ink sits on both. The active match is the opaque chip with paper text,
-    // inside code blocks too (styles.css forces it over the syntax colors).
     it(`${mode} text on the match tints is AA`, () => {
       for (const surface of SURFACES) {
         for (const [label, amount] of [
@@ -243,8 +233,6 @@ describe("WCAG AA contrast, both modes", () => {
       }
     });
 
-    // A destructive row (Delete, Forget) is a menu row: danger text on the
-    // menu frame's panel at rest, hovered, and focused, selected or active.
     it(`${mode} danger text is AA on every menu row fill`, () => {
       expect(MENU_FRAME.split(" ")).toContain("bg-panel");
       for (const [fill, amount] of [
@@ -263,8 +251,6 @@ describe("WCAG AA contrast, both modes", () => {
       }
     });
 
-    // Avatar initials are text: AA on every surface an avatar sits on, and
-    // on the avatar's own tinted fill, which is the tightest of the four.
     it(`${mode} identity hues read as text on paper and on their tint`, () => {
       for (const hue of IDENTITY_HUES) {
         const fg = identityHues[mode][hue];
@@ -313,7 +299,6 @@ describe("the danger confirm", () => {
       const halo = contrast(mix(t.accent, t.panel, Number(alpha![1]) / 100), t.panel);
       expect(halo, `halo on panel (${mode}) = ${halo.toFixed(2)}:1`).toBeGreaterThanOrEqual(3);
     });
-    // A danger confirmation's glyph sits on its tinted tile.
     it(`${mode} glyph clears 3:1 on its tile`, () => {
       const t = palette[mode];
       const glyph = contrast(t.danger, t.dangerTint);
@@ -367,8 +352,6 @@ describe("styles.css mirrors tokens.ts", () => {
     }
   });
 
-  // index.html's `light dark` follows the OS, so a dark app on a light OS
-  // drew white native checkboxes.
   it("native controls follow the app theme and check in the accent", () => {
     expect(blocks.light).toContain("color-scheme: light;");
     expect(blocks.dark).toContain("color-scheme: dark;");
@@ -376,9 +359,6 @@ describe("styles.css mirrors tokens.ts", () => {
   });
 });
 
-// An attenuated state fill (a bg-selected/ or bg-hover/ opacity modifier)
-// lands between hover and selected, too close to either to read; rows use
-// the full fills and carry any further meaning in weight or a ring.
 describe("renderer rows use the full state fills", () => {
   it("has no bg-selected/ or bg-hover/ opacity modifier", () => {
     const root = fileURLToPath(new URL(".", import.meta.url));

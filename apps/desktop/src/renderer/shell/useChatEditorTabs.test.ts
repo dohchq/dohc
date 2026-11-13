@@ -395,7 +395,6 @@ describe("chat editor tabs", () => {
     expect(editor.revision).toBe(before + 1);
     expect(editor.drafts).toBe(draft);
 
-    // Naming the chat lane with no message is a command too; a plain open is not.
     const lane = { ...agent, lane: "chat" } as ChatsNav;
     act(() => result.current.open(lane));
     expect(editor.nav).toEqual(lane);
@@ -493,7 +492,6 @@ describe("chat editor tabs", () => {
     expect(result.current.titles.get(chatEditorPath(scoutThread))).toBe("Scout");
     rerender({ agents: [AGENTS[0]!, { ...AGENTS[1]!, name: "Ranger" }] });
     expect(result.current.titles.get(chatEditorPath(scoutThread))).toBe("Ranger");
-    // Removed from Settings, the agent's chat keeps the name it was stored with.
     rerender({ agents: [] });
     expect(result.current.titles.get(chatEditorPath(scoutThread))).toBe("Scout");
     expect(result.current.titles.get(chatEditorPath(agent))).toBe("Your agent");
@@ -554,7 +552,6 @@ describe("chat editor tabs", () => {
     await act(async () => activity({ workspaceId: "workspace" }));
     expect(result.current.unread).toEqual(new Map([[chatEditorPath(general), 3]]));
 
-    // A read the open conversation reports asks again.
     chats = [];
     rerender({ activePaths: [chatEditorPath(agent)], readRevision: 1 });
     await waitFor(() => expect(result.current.unread.size).toBe(0));
@@ -602,14 +599,12 @@ describe("chat editor tabs", () => {
     await act(async () =>
       answers[0]!.resolve({ chats: [{ channelId: general.channel.id, unreadCount: 1 }] }),
     );
-    // Both events while the first read was out make one more read.
     expect(listChatUnread).toHaveBeenCalledTimes(2);
     await act(async () =>
       answers[1]!.resolve({ chats: [{ channelId: general.channel.id, unreadCount: 2 }] }),
     );
     expect(result.current.unread.get(path)).toBe(2);
 
-    // A workspace switch waits for the read in flight, then drops its answer.
     act(() => activity({ workspaceId: "first" }));
     rerender({ workspaceId: "second" });
     expect(answers).toHaveLength(3);
@@ -668,7 +663,6 @@ describe("chat editor tabs", () => {
       ],
     };
     await act(async () => answers[0]!.resolve(both));
-    // The answer for tabs no longer shown is dropped; one more read serves the rest.
     expect(result.current.unread.size).toBe(0);
     expect(listChatUnread).toHaveBeenCalledTimes(2);
     await act(async () => answers[1]!.resolve(both));

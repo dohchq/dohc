@@ -24,8 +24,6 @@ function historyPage(workspaceId: string, id: string, summary: string): Timeline
   return timelinePage([{ kind: "file", moment }], { workspaceId });
 }
 
-// The narrower shell test supplies the key itself. This one mounts the real
-// DesktopRoot and the real shell, so the remount on a switch is the root's.
 it("remounts the shell when main activates B and keeps A's late history answer out of B", async () => {
   const A_CONTROL = "A_CONTROL wrote the A plan";
   const A_STALE = "A_STALE answered after the switch";
@@ -68,7 +66,6 @@ it("remounts the shell when main activates B and keeps A's late history answer o
   expect(await screen.findByText(A_CONTROL)).toBeTruthy();
   const shellA = screen.getByTestId("workspace-shell");
 
-  // A asks again, and that answer is held.
   holdA = true;
   const readsBeforeHold = bridge.listHistory.mock.calls.length;
   act(() => {
@@ -81,7 +78,6 @@ it("remounts the shell when main activates B and keeps A's late history answer o
     expect.objectContaining({ workspaceId: WORKSPACE.workspaceId }),
   );
 
-  // Main activates B in this window, and B paints its own history.
   expect(bridge.onWorkspaceActivated).toHaveBeenCalled();
   act(() => {
     bridge.emitWorkspaceActivated(OTHER_WORKSPACE);
@@ -91,13 +87,11 @@ it("remounts the shell when main activates B and keeps A's late history answer o
     expect(shell).not.toBe(shellA);
     expect(shell.dataset.ready).toBe("true");
   });
-  // The root mounted a new shell for B; A's shell left the document.
   expect(shellA.isConnected).toBe(false);
   await user.click(screen.getByTestId("activity-history"));
   expect(await screen.findByText(B_ONLY)).toBeTruthy();
   expect(screen.queryByText(A_CONTROL)).toBeNull();
 
-  // Only now does A's held answer land, and the renderer consumes it.
   await act(async () => {
     heldA.resolve(historyPage(WORKSPACE.workspaceId, "m-a-stale", A_STALE));
     await heldA.promise;

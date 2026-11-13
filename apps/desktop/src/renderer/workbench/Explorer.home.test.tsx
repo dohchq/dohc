@@ -132,7 +132,6 @@ const PAGE_PATHS = Array.from(
   (_, index) => `file-${String(index).padStart(4, "0")}.md`,
 );
 
-// Home with 500 pages and 40 of them open in one group.
 function largeHome(): Partial<ExplorerProps> {
   return {
     files: PAGE_PATHS.map(file),
@@ -224,7 +223,6 @@ describe("Explorer Files", () => {
       <Explorer {...explorerProps({ mode: "files", files: [], folders: [], editorGroups: [] })} />,
     );
 
-    // An empty-state line says something, so it reads in muted, not subtle.
     for (const line of [
       within(section("Files")).getByText("No files yet."),
       screen.getByText("No files open."),
@@ -305,7 +303,6 @@ describe("Explorer Home", () => {
         .getAllByTestId("open-editor-row")
         .map((row) => row.dataset.path),
     ).toEqual(["notes.md", "budget.csv"]);
-    // A page shows its title, as Pages does, and another file its name.
     expect(within(openEditors).getByRole("button", { name: "notes" }).title).toBe("notes.md");
     expect(within(openEditors).getByRole("button", { name: "Close notes" })).toBeTruthy();
     expect(
@@ -331,7 +328,6 @@ describe("Explorer Home", () => {
       "Files",
     ]);
     expect(screen.queryByTestId("explorer-home")).toBeNull();
-    // Files names an open page by its file name, as its tree does.
     expect(within(section("Open editors")).getByRole("button", { name: "notes.md" })).toBeTruthy();
   });
 
@@ -352,7 +348,6 @@ describe("Explorer Home", () => {
       />,
     );
 
-    // Its line is the toggle's description, as Pages' line is.
     const empty = within(section("Open editors")).getByText("No files open.");
     expect(screen.getByTestId("open-editors-toggle").getAttribute("aria-describedby")).toBe(
       empty.id,
@@ -405,7 +400,6 @@ describe("Explorer Home", () => {
     await user.keyboard("{Home}");
     expect(document.activeElement).toBe(screen.getByTestId("explorer-apps-toggle"));
 
-    // A folded section shows no line, and its toggle no longer points at one.
     await user.keyboard("{ArrowLeft}");
     expect(screen.queryByTestId("explorer-apps-empty")).toBeNull();
     expect(screen.getByTestId("explorer-apps-toggle").hasAttribute("aria-describedby")).toBe(false);
@@ -436,7 +430,6 @@ describe("Explorer Home", () => {
     );
     expect(rowLabels("Apps")).toEqual(["Trip"]);
 
-    // A share that holds only an app shows no Pages either.
     view.rerender(
       <Explorer
         {...explorerProps({
@@ -453,8 +446,6 @@ describe("Explorer Home", () => {
     expect(screen.queryByTestId("explorer-pages-empty")).toBeNull();
   });
 
-  // Show archived Collections clears the list and reads it again. Until that
-  // read lands, the list is not known to be empty.
   it("holds Collections' place while its list is read again, and says nothing yet", () => {
     render(
       <Explorer
@@ -615,7 +606,6 @@ describe("Explorer Home", () => {
     );
     expect(screen.getByLabelText("24 or more Collections").textContent).toBe("24+");
     expect(screen.getByTestId("collections-more").textContent).toBe("Show more Collections");
-    // Once every Collection has loaded, the count is a total.
     view.rerender(
       <Explorer {...explorerProps({ dataCollections: loaded, collectionFolders: new Set() })} />,
     );
@@ -640,7 +630,6 @@ describe("Explorer Home", () => {
       <Explorer {...explorerProps({ onModeChange, files: many, folders: ["data"] })} />,
     );
     expect(rowLabels("Other files")).toHaveLength(FILES_SHOWN);
-    // Other files counts every file, so its count is a total, with no "+".
     expect(screen.getByLabelText(`${FILES_SHOWN + 3} files`).textContent).toBe(
       String(FILES_SHOWN + 3),
     );
@@ -665,7 +654,6 @@ describe("Explorer Home", () => {
     expect(onOpenFile).toHaveBeenCalledWith("plans/board.excalidraw");
     expect(screen.queryByTestId("sketches-show-all")).toBeNull();
 
-    // Sketches alone leave no Other files section.
     const many = Array.from({ length: FILES_SHOWN + 2 }, (_, index) =>
       file(`ideas/${String(index).padStart(2, "0")}.excalidraw`),
     );
@@ -754,7 +742,6 @@ describe("Explorer Home", () => {
       pinned: false,
     });
     expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "Rename" }));
-    // The browser's own contextmenu event for the key opens no second menu.
     fireEvent.contextMenu(target);
     await act(async () => {});
     expect(bridge.readExplorerMenu).toHaveBeenCalledOnce();
@@ -869,7 +856,6 @@ describe("selecting several rows in Home", () => {
     if (!element) throw new Error(`Missing Home row: ${key}`);
     return element;
   };
-  // The fill sits on the row's frame, around its button.
   const picked = () =>
     [...document.querySelectorAll<HTMLElement>("[data-home-key]")]
       .filter((button) => button.parentElement?.className.includes("bg-(--dohc-selection)"))
@@ -887,7 +873,6 @@ describe("selecting several rows in Home", () => {
     fireEvent.click(homeRow("apps:trip"), { ctrlKey: true });
     expect(onOpenFile).not.toHaveBeenCalled();
     expect(picked()).toEqual(["apps:trip", "pages:notes.md"]);
-    // The open page keeps its weight inside the selection and gains the edge.
     expect(homeRow("pages:notes.md").parentElement?.className).toContain("font-medium");
     expect(edged()).toEqual(["pages:notes.md"]);
     expect(bar()?.textContent).toBe("2 selected");
@@ -922,7 +907,6 @@ describe("selecting several rows in Home", () => {
     const user = userEvent.setup();
     render(<Explorer {...explorerProps()} />);
     await user.click(homeRow("pages:Plans/"));
-    // A folder clicked alone is not the open row, so it is picked.
     expect(picked()).toEqual(["pages:Plans/"]);
     await user.keyboard("{Shift>}{ArrowDown}{ArrowDown}{ArrowDown}{/Shift}");
     expect(document.activeElement).toBe(homeRow("sketches:plans/board.excalidraw"));
@@ -961,13 +945,10 @@ describe("selecting several rows in Home", () => {
     expect(homeRow("apps:trip").parentElement?.className).toContain("bg-selected font-medium");
 
     view.rerender(<Explorer {...props} />);
-    // The selection held only the app, so it goes with the app's tab.
     expect(picked()).toEqual([]);
     expect(homeRow("apps:trip").parentElement?.className).not.toContain("font-medium");
   });
 
-  // A delete goes to the trash, so the whole selection goes at once and one
-  // Undo brings every row back.
   it("deletes the whole selection without asking, with the folders of apps and Collections, under one Undo", async () => {
     const deleteWorkspacePath = vi.fn(async ({ relativePath }: { relativePath: string }) => ({
       trashed: true,
@@ -1008,8 +989,6 @@ describe("selecting several rows in Home", () => {
     );
   });
 
-  // Once the notice is gone, the trash is the way back, so the notice says
-  // which trash took each row, as main answered.
   it("says where each row of the selection went", async () => {
     const deleteWorkspacePath = vi.fn(async ({ relativePath }: { relativePath: string }) => ({
       trashed: relativePath !== "tasks",
@@ -1075,7 +1054,6 @@ describe("selecting several rows in Home", () => {
     );
   });
 
-  // A share view's delete has no trash, so it asks first, once.
   it("asks once in a share view to delete the whole selection, with the folders of apps and Collections", () => {
     render(<Explorer {...explorerProps({ shareView: { granterEmail: "sam@example.com" } })} />);
     fireEvent.click(homeRow("pages:notes.md"), { ctrlKey: true });
@@ -1140,7 +1118,6 @@ describe("selecting several rows in Home", () => {
     const deleted = bridge.deleteWorkspacePath.mock.calls.map(([input]) => input.relativePath);
     expect(deleted).toContain("Plans");
     expect(deleted.filter((path) => path.startsWith("Plans/"))).toEqual([]);
-    // The notice counts what the delete took, not every selected row.
     await waitFor(() =>
       expect(props.onNotice).toHaveBeenCalledWith(
         `Deleted ${deleted.length} items. They're in the system trash.`,

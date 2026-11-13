@@ -205,7 +205,6 @@ async function openOn(user: ReturnType<typeof userEvent.setup>, active: string) 
   await user.click(screen.getByTestId("version-menu-button"));
 }
 
-// Each row by its version name or test id, and each line between groups.
 function rows(): (string | null)[] {
   return [
     ...screen
@@ -227,7 +226,6 @@ function acrossIpc(channel: string, error: string): Error {
   return new Error(`Error invoking remote method '${channel}': ${error}`);
 }
 
-// A merge that failed after some of the version's files reached Main.
 function stoppedPartway(): Error {
   return acrossIpc("desktop:merge-workspace-version", "MergeStoppedPartwayError: Error: disk full");
 }
@@ -399,7 +397,6 @@ describe("VersionMenu", () => {
     expect(mainDot?.className).not.toContain("bg-hue-");
     expect(chipDot).toBeDefined();
     expect(draftDot?.className.split(" ")).toContain(chipDot);
-    // The dot adds nothing to the row's name.
     expect(screen.getByRole("menuitemradio", { name: "Draft" })).toBeTruthy();
   });
 
@@ -536,7 +533,6 @@ describe("VersionMenu", () => {
     expect(screen.getByTestId<HTMLInputElement>("version-new-input").value).toBe("Ideas");
     expect(screen.queryByTestId("version-menu-error")).toBeNull();
 
-    // Try again opens the dialog again after it was closed.
     await user.keyboard("{Escape}");
     expect(screen.queryByTestId("version-new-dialog")).toBeNull();
     const ideas = {
@@ -626,7 +622,6 @@ describe("VersionMenu", () => {
     expect(confirm.textContent).toBe("Merge into Main");
     expect(confirm.disabled).toBe(false);
     expect(document.activeElement).toBe(confirm);
-    // Focus reads the button and then the failure, once, with no alert on top.
     expect(confirm.getAttribute("aria-describedby")).toBe(
       within(dialog).getByTestId("version-merge-failure-words").id,
     );
@@ -764,7 +759,6 @@ describe("VersionMenu", () => {
     return { resolve, reject };
   }
 
-  // Starts a merge, then closes its dialog the way `close` says, while the merge runs.
   async function closeWhileMerging(
     user: ReturnType<typeof userEvent.setup>,
     close: "button" | "escape",

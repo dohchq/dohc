@@ -63,8 +63,6 @@ const deleteInput = {
   password: "correct horse",
 };
 
-// A harness whose session already reviewed the preview; `answer` answers the
-// delete call, the only call it records.
 async function reviewed(answer: () => Response | Promise<Response>) {
   const h = harness((path) => (path.endsWith("/deletion-preview") ? json(200, scope) : answer()));
   await h.deletion.preview();
@@ -189,7 +187,6 @@ describe("server account deletion", () => {
     await expect(h.deletion.retryDisconnect()).rejects.toThrow("store still failed");
     await expect(h.deletion.retryDisconnect()).resolves.toBeUndefined();
     expect(h.disconnect.mock.calls).toEqual([[credentials], [credentials], [credentials]]);
-    // Once disconnected, a retry has nothing left to run.
     await h.deletion.retryDisconnect();
     expect(h.disconnect).toHaveBeenCalledTimes(3);
   });

@@ -329,7 +329,6 @@ describe("ordinary admitted authorship", () => {
           () => "Alice",
         ),
       ).rejects.toMatchObject({ code: "authorship_mismatch" });
-      // The account's own agents still declare themselves.
       await expect(
         parseAuthenticatedLogOps(
           [

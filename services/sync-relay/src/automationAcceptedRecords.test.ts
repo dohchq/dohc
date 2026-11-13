@@ -97,7 +97,6 @@ it("refreshes an enrolled record after another accepted edit, without rescanning
   await f.tracker.initialize();
   await f.tracker.refreshChanged();
   expect(f.synchronize).not.toHaveBeenCalled();
-  // Between two automation writes, the reader's accepted update advances the relay.
   f.cursors.set(binding.objectId, 2);
   await f.tracker.refreshChanged();
   expect(f.accepted.get(binding.objectId)).toBe(2);

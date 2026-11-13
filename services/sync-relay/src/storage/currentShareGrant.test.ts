@@ -28,8 +28,6 @@ const named: SyncRelayShareGrantRow = {
 };
 const grantIds = ["named", "invite", "link", "dependent"];
 
-// One share holding a named grant, a pending invite, an Edit link, and a
-// dependent named grant under that link, all current.
 async function fixture() {
   const storage = await testStorage();
   storage.claimWorkspace({ workspaceId: "w", ownerUserId: "owner", createdAtMs: 1 });
@@ -293,13 +291,11 @@ describe("link transitions derived from a grant", () => {
         .prepare("UPDATE sync_relay_share_grants SET access = ? WHERE grant_id = 'link'")
         .run(access);
 
-    // The holder's Edit dependent outranks its View link at first redemption.
     setLinkAccess("view");
     expect(storage.mintLinkHandoffCode({ code, guard: () => true })).toBe(true);
     expect(redeem()).toEqual({ ok: false });
     expect(storage.hasLinkHandoffCode("held-hash")).toBe(false);
 
-    // The same drift after a successful first redemption refuses the replay.
     setLinkAccess("edit");
     expect(storage.mintLinkHandoffCode({ code, guard: () => true })).toBe(true);
     expect(redeem()).toMatchObject({ ok: true, grant: { grantId: "dependent" } });

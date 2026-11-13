@@ -20,7 +20,6 @@ const MANY: RelationFieldDefinition = { ...SINGLE, name: "blocks", many: true };
 const TARGETS = [
   makeRecord("rec-a", [indexedValue("title", "Design")]),
   makeRecord("rec-b", [indexedValue("title", "Build")]),
-  // No title or name: the label falls back to the filename without ".md".
   makeRecord("rec-c", []),
 ];
 
@@ -278,7 +277,6 @@ describe("RelationPicker", () => {
     await screen.findByRole("option", { name: "Design" });
 
     rerender(view({ ...SINGLE, collection: "projects" }));
-    // No stale tasks id is selectable for the projects field.
     expect(screen.queryByRole("option")).toBeNull();
     expect(screen.getByText("Loading records...")).toBeDefined();
     expect(emit).not.toHaveBeenCalled();

@@ -30,7 +30,6 @@ it.each(["direct", "owned"] as const)(
           JSON.stringify({ objectId: binding.objectId, ...extra }),
           index + 1,
         );
-      // Simulate a store written before this index existed, then use the same open path as each host.
       f.raw.exec(`DROP INDEX ${name}`);
       reopened = openSyncRelayStorage(
         f.path,

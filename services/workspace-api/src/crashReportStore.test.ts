@@ -26,7 +26,6 @@ async function postgresReachable(): Promise<boolean> {
 describe.skipIf(!(await postgresReachable()))("crash report store", () => {
   const schema = `crash_reports_test_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
   let client: pg.Client;
-  // The store takes a pool, as main.ts gives it, pointed at the same schema.
   let pool: pg.Pool;
 
   beforeAll(async () => {
@@ -87,7 +86,6 @@ describe.skipIf(!(await postgresReachable()))("crash report store", () => {
     const store = createPostgresCrashReportStore(pool, 3);
     await store.insert({ id: "first", appVersion: null, body: "dohc crash report" });
     await store.insert({ id: "second", appVersion: null, body: "dohc crash report" });
-    // Eight connections race for the one place left.
     const results = await Promise.all(
       Array.from({ length: 8 }, (_, index) =>
         store.insert({ id: `racer-${index}`, appVersion: null, body: "dohc crash report" }),

@@ -112,7 +112,6 @@ async function resetWorkspaceSettings(): Promise<WorkspaceSettingsResult> {
   return { settings: workspaceSettingsOnDisk, source: "stored" };
 }
 
-// The Sharing view's lists, as Settings search reads them.
 function sharingAnswer(lane: "granted" | "received"): AccessAnswer {
   const row: AccessShareRow =
     lane === "granted"
@@ -315,7 +314,6 @@ const listAgentYouRun = () =>
     },
     source: "stored",
   }));
-// A row opens its agent's page, where its controls are.
 const openAgent = async (name: string) =>
   fireEvent.click(await screen.findByRole("button", { name }));
 const copyMcpConfig = () =>
@@ -373,12 +371,10 @@ describe("SettingsDialog", () => {
     const restricted = within(control).getByRole("radio", { name: "Restricted Mode" });
     await waitFor(() => expect(restricted.getAttribute("aria-checked")).toBe("true"));
 
-    // The person chose Stay in Restricted Mode in main's dialog.
     await userEvent.click(within(control).getByRole("radio", { name: "Trusted" }));
     expect(bridge.requestWorkspaceTrust).toHaveBeenCalledWith({ workspaceId: "ws-1" });
     await waitFor(() => expect(restricted.getAttribute("aria-checked")).toBe("true"));
 
-    // The person chose Trust workspace.
     workspaceTrusted = true;
     await userEvent.click(within(control).getByRole("radio", { name: "Trusted" }));
     await waitFor(() =>
@@ -563,7 +559,6 @@ describe("SettingsDialog", () => {
       expect(bridge.setUserSettings).not.toHaveBeenCalled();
     });
 
-    // Applies a look with this accent, and answers the accent the window shows.
     const look = (accentColor: string) => {
       applyLookSettings({
         ...DEFAULT_USER_SETTINGS,
@@ -619,7 +614,6 @@ describe("SettingsDialog", () => {
       const cause = new Error("The settings file is read-only.");
       await act(async () => save.reject(cause));
 
-      // The workspace open when the save fails shows it, even after a switch.
       await waitFor(() => expect(report).toHaveBeenCalledOnce());
       expect(onError).not.toHaveBeenCalled();
       const [{ cause: reported, retry }] = report.mock.lastCall!;
@@ -801,9 +795,7 @@ describe("SettingsDialog", () => {
       />,
     );
 
-    // A full save is now awaiting main's response…
     await user.click(await screen.findByRole("radio", { name: "Dark" }));
-    // …when a zoom broadcast lands with a newer result.
     pushUserSettings?.({
       settings: {
         ...DEFAULT_USER_SETTINGS,
@@ -850,8 +842,6 @@ describe("SettingsDialog", () => {
     await waitFor(() =>
       expect(screen.getByTestId("settings-save-state").getAttribute("data-state")).toBe("error"),
     );
-    // The chip must not borrow the document's "your edits are still here",
-    // and it owes a next step.
     expect(screen.getByTestId("settings-save-state").getAttribute("title")).toBe(
       "dohc could not save this setting. Try changing it again.",
     );
@@ -1152,7 +1142,6 @@ describe("SettingsDialog", () => {
     );
     const retry = screen.getByRole("button", { name: "Retry" });
     expect(retry.hasAttribute("disabled")).toBe(true);
-    // A newer read lands while the recovery is still pending.
     runActive = false;
     await user.click(retry);
     await act(async () => {});
@@ -1231,8 +1220,6 @@ describe("SettingsDialog", () => {
   });
 
   it("ignores in-flight MCP config responses after switching workspaces", async () => {
-    // Delay ws-old and resolve it only after rerendering ws-new; if cancellation
-    // fails, the old config overwrites the one Copy MCP config copies.
     const user = userEvent.setup();
     stubClipboard();
     listAgentYouRun();
@@ -1445,7 +1432,6 @@ describe("SettingsDialog", () => {
     expect(report).not.toHaveBeenCalled();
   });
 
-  // The text of the path that describes one attachment location radio.
   const examplePath = (location: string) =>
     document.getElementById(
       screen.getByTestId(`attachment-location-${location}`).getAttribute("aria-describedby")!,
@@ -1466,21 +1452,16 @@ describe("SettingsDialog", () => {
     const group = await screen.findByRole("radiogroup", { name: "Attachment location" });
     const radio = (name: string) => within(group).getByRole("radio", { name });
     expect(radio("In a folder beside the document").getAttribute("aria-checked")).toBe("true");
-    // Each choice is described by the path a paste writes.
     expect(examplePath("per-document")).toBe("Trips/Lisbon/assets/photo.png");
     expect(examplePath("global-folder")).toBe("assets/photo.png");
     expect(examplePath("same-folder")).toBe("Trips/Lisbon/photo.png");
 
     await user.click(radio("In one folder for the whole workspace"));
-    // The save carries the changed control only — main merges it onto the
-    // file, so the dialog's copy of the other fields never rides along.
     expect(bridge.setWorkspaceSettings).toHaveBeenCalledWith({
       workspaceId: "ws-1",
       patch: { files: { attachmentLocation: "global-folder" } },
     });
 
-    // The arrow keys move the choice. Beside the document uses no folder, so
-    // the folder name stays in place but cannot be edited.
     await user.keyboard("{ArrowDown}");
     expect(bridge.setWorkspaceSettings).toHaveBeenLastCalledWith({
       workspaceId: "ws-1",
@@ -1530,10 +1511,6 @@ describe("SettingsDialog", () => {
     });
   });
 
-  // Over a settings file dohc cannot read, the dialog's resolved copy is the
-  // defaults, so saving one unrelated control would write them over the
-  // file. main refuses; the dialog must say so and must not claim a save
-  // happened.
   it("shows the refusal when the settings file cannot be read, and never says Saved", async () => {
     const warning =
       "Workspace settings could not be read. dohc records no history for this workspace. Fix /x/.dohc/local/settings.local.json. Then restart dohc.";
@@ -1567,8 +1544,6 @@ describe("SettingsDialog", () => {
     );
     expect(screen.getByTestId("settings-save-state").getAttribute("data-state")).toBe("error");
     expect(screen.getByTestId("settings-save-state").textContent).not.toContain("Saved");
-    // The control snaps back to what is really on disk instead of showing an
-    // edit that never landed.
     await waitFor(() =>
       expect(
         screen.getByTestId("attachment-location-per-document").getAttribute("aria-checked"),
@@ -1576,9 +1551,6 @@ describe("SettingsDialog", () => {
     );
   });
 
-  // Each control saves on its own, and main merges each patch onto the file.
-  // An earlier edit must therefore survive the next one — the assertion that
-  // keeps the fake settings file above honest about what the real save does.
   it("keeps an earlier edit when the next control is saved", async () => {
     const user = userEvent.setup();
     render(
@@ -1621,9 +1593,6 @@ describe("SettingsDialog", () => {
     expect(screen.getByTestId("settings-row-theme").dataset.highlighted).toBeUndefined();
   });
 
-  // Main refuses a save or reset until this workspace's engine open has
-  // prepared .dohc/local. The person reads why, the control shows what is on
-  // disk, and Try again sends the same change.
   it("says why a workspace settings save was refused, and Try again sends it again", async () => {
     const words =
       "dohc did not save this workspace's settings because it can't keep this computer's settings out of iCloud Drive. Restart dohc to try again.";

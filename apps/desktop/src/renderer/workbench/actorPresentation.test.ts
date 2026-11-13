@@ -72,7 +72,6 @@ it("colors your agent's run by its own agent in Settings, and a removed agent's 
   expect(agentTextClass(codex)).toBe("text-hue-blue");
   expect(presentationClasses(nova, "agent")).toContain("text-agent");
   expect(canChooseAgentColor(codex)).toBe(false);
-  // A message from your agent that names no agent keeps your first agent's olive.
   expect(presentationClasses(ownAgentPresentation, "agent")).toContain("text-agent");
 
   const repaint = vi.fn();
@@ -85,7 +84,6 @@ it("colors your agent's run by its own agent in Settings, and a removed agent's 
   expect(presentationClasses(codex, "agent")).toContain("text-hue-rose");
   unsubscribe();
 
-  // Settings wins over a color chosen for the author from a post.
   let changed: Parameters<
     import("../../ipc/bridgeContract").DohcDesktopBridge["onAgentColorChanged"]
   >[0] = () => undefined;
@@ -201,7 +199,6 @@ it("repaints from a scoped event without a bridge read and keeps overrides until
   changed({ workspaceId: "w", group: "agent", hue: "blue" });
   expect(repaint).toHaveBeenCalledOnce();
   expect(presentationClasses(token, "agent")).toContain("text-hue-blue");
-  // A late chat read still holds the old token. The event wins.
   expect(presentationClasses({ ...token }, "agent")).toContain("text-hue-blue");
   changed({ workspaceId: "w", group: "agent", hue: null });
   expect(presentationClasses(token, "agent")).toContain("text-hue-teal");

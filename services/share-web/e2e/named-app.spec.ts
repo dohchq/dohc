@@ -6,7 +6,6 @@ import { fileURLToPath } from "node:url";
 import { getCookies } from "better-auth/cookies";
 import { createShareWebApplication } from "../src/server";
 
-// Real viewer, auth proxy, HTTPS handoff, sandbox, and backend transport; auth and relay responses are fixtures.
 test("signed-in organizer opens an isolated app and loses backend access when revoked", async ({}, testInfo) => {
   const viewer = "https://viewer.example.com",
     workspaceId = "workspace-1",

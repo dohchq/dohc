@@ -68,7 +68,6 @@ describe("scanWorkspaceFilesTolerant", () => {
           { path: "locked", reason: expect.stringContaining(deniedReadCode) },
         ]);
 
-        // The strict default is unchanged: the same tree still throws.
         await expect(scanWorkspaceFiles(root)).rejects.toThrow(new RegExp(deniedReadCode));
       } finally {
         await restoreRead(join(root, "locked"), 0o755);
@@ -103,7 +102,6 @@ describe("scanWorkspaceFilesTolerant", () => {
         { path: "notes/ghost.md", reason: expect.stringContaining("ENOENT") },
       ]);
 
-      // Strict mode still surfaces the race as a thrown scan.
       await expect(scanWorkspaceFiles(root)).rejects.toThrow(/ENOENT/);
     } finally {
       midScanDelete.suffix = null;

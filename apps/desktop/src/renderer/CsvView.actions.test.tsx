@@ -25,7 +25,6 @@ const writeWorkspaceText = vi.fn<DohcDesktopBridge["writeWorkspaceText"]>();
 const releases: Array<() => void> = [];
 const buffers: Array<ReturnType<typeof acquireSharedLocalDocument>["buffer"]> = [];
 
-// A CSV as FileInspector hands it to its view.
 function csvFile(workspaceId: string, path: string, body: string) {
   const { buffer, release } = acquireSharedLocalDocument(
     documentVersionKey(workspaceId, path, undefined),
@@ -50,7 +49,6 @@ function csvFile(workspaceId: string, path: string, body: string) {
   };
 }
 
-// The shell's error list and notice center, handing its error hook to the view.
 function Shell(props: {
   children: (onError: ReturnType<typeof useShellError>["reportButtonError"]) => ReactNode;
 }) {
@@ -131,8 +129,6 @@ describe("CSV view actions", () => {
     const actions = screen.getAllByTestId("view-actions");
     expect(actions).toHaveLength(1);
     expect(within(actions[0]!).getByTestId("csv-save-state").dataset.state).toBe("saved");
-    // A calm save state is for screen readers only; no language word or
-    // second bar is drawn.
     expect(screen.getByTestId("csv-save-state").className).toContain("sr-only");
     expect(screen.queryByText("Import to SQLite")).toBeNull();
 
@@ -189,7 +185,6 @@ describe("CSV view actions", () => {
     expect(screen.getByLabelText("Row 2 column 1")).toBeTruthy();
     await user.click(addColumn);
     expect((screen.getByLabelText("Header column 3") as HTMLInputElement).value).toBe("column_3");
-    // In Raw, the table and its add controls are gone.
     await user.click(mode("Raw"));
     expect(screen.queryByTestId("csv-add-row")).toBeNull();
     expect(screen.queryByTestId("csv-add-column")).toBeNull();
@@ -259,7 +254,6 @@ describe("CSV view actions", () => {
     expect(button.getAttribute("aria-busy")).toBe("true");
     expect(button.disabled).toBe(false);
     expect(document.activeElement).toBe(button);
-    // The button keeps its name; a polite status says the import started.
     expect(button.getAttribute("aria-label")).toBe("Import to SQLite");
     expect(status.getAttribute("aria-live")).toBe("polite");
     expect(status.textContent).toBe("Importing to SQLite…");
@@ -297,8 +291,6 @@ describe("CSV view actions", () => {
 
     await user.click(screen.getByTestId("csv-import-sqlite"));
     const toast = await screen.findByTestId("workspace-shell-error");
-    // What happened, naming the database, then the next step; the raw
-    // message stays for Copy details.
     expect(
       within(toast).getByText(
         "dohc could not import this file to data.sqlite. That file already exists. Rename or move it, then try again.",
@@ -352,7 +344,6 @@ describe("CSV view actions", () => {
     expect(importToDatabase).toHaveBeenCalledTimes(2);
     expect(button.getAttribute("aria-busy")).toBe("true");
 
-    // The header's view and the joined retry both answer with the one result.
     await act(async () => running.resolve(importResult("data.sqlite")));
     expect(onOpenPath).toHaveBeenCalledWith("data.sqlite");
     expect(onOpenPath.mock.calls.every(([path]) => path === "data.sqlite")).toBe(true);

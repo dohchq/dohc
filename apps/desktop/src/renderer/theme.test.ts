@@ -37,7 +37,6 @@ describe("applying the settings file's look", () => {
     expect(document.documentElement.dataset.theme).toBe("dark");
     expect(property("--dohc-accent")).toBe(readableAccent("#ffd400", "dark"));
 
-    // Back to dohc's own accent: the stylesheet's value applies again.
     applyLookSettings(settings({ appearance: { themeMode: "dark" } }));
     expect(property("--dohc-accent")).toBe("");
   });
@@ -52,14 +51,12 @@ describe("applying the settings file's look", () => {
     applyLookSettings(settings({ editor: { fontFamily: "mono" } }));
     expect(property("--dohc-editor-number-suffix")).toBe("2");
 
-    // An installed font falls back to dohc's sans when this computer lacks it.
     applyLookSettings(settings({ editor: { fontFamily: "Iowan Old Style" } }));
     expect(property("--dohc-editor-font")).toBe('"Iowan Old Style", var(--font-sans)');
     expect(property("--dohc-editor-number-suffix")).toBe("");
   });
 
   it("measures whether an installed editor font is monospaced", () => {
-    // A canvas where a period is as wide as a zero only in Consolas.
     vi.stubGlobal(
       "OffscreenCanvas",
       class {
@@ -104,7 +101,6 @@ describe("applying the settings file's look", () => {
     expect(
       differsOnlyInLook(base, read(settings({ editor: { fontSize: 20, fontFamily: "mono" } }))),
     ).toBe(true);
-    // Line wrap and spellcheck change how the editor behaves, not how it looks.
     expect(differsOnlyInLook(base, read(settings({ editor: { lineWrap: false } })))).toBe(false);
     expect(differsOnlyInLook(base, read(settings({ editor: { spellcheck: false } })))).toBe(false);
     expect(differsOnlyInLook(base, read(settings({ profile: { preferredName: "Ada" } })))).toBe(
@@ -138,8 +134,6 @@ describe("the startup read of the settings file", () => {
     editor: { fontFamily: "serif", fontSize: 18 },
   });
 
-  // Starts the theme with the startup read held open and the system
-  // preference under the test's control.
   function start(systemDark: boolean) {
     const startup = deferred<DesktopUserSettingsResult>();
     const setTitlebarTheme = vi.fn(async (_request: { theme: "light" | "dark" }) => undefined);

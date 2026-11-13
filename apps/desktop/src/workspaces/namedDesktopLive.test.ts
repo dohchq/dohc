@@ -252,7 +252,6 @@ it("reports no file head with the note and each update, so the note check still 
     onRemoteUpdate,
   });
   expect(provider.headSha256).toBeNull();
-  // A teammate's update records another source.
   f.session.doc.getMap("meta").set("dohcMarkdownSourceSha256", "c".repeat(64));
   expect(
     onRemoteUpdate,

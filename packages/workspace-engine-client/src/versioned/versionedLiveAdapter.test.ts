@@ -775,13 +775,10 @@ describe("VersionedLiveAdapter", () => {
     });
     const applied = (requestId: string, momentId: string) =>
       adapter.publicationApplied({ workspaceId: WORKSPACE, requestId, momentId });
-    // A published write and a checked delete reach disk inside the engine.
     expect(await applied("published", published.moment.momentId)).toBe(true);
     expect(await applied("checked", checked.moment.momentId)).toBe(true);
-    // A recorded-only write and an unchecked delete never confirm publication.
     expect(await applied("recorded", recorded.moment.momentId)).toBe(false);
     expect(await applied("unchecked", unchecked.moment.momentId)).toBe(false);
-    // A request binds only to the moment it recorded.
     expect(await applied("published", checked.moment.momentId)).toBe(false);
     expect(await applied("missing", published.moment.momentId)).toBe(false);
     await expect(applied("", published.moment.momentId)).rejects.toThrow();
@@ -905,7 +902,6 @@ describe("VersionedLiveAdapter", () => {
       }
     }
     expect((await adapter.listMoments({ workspaceId: WORKSPACE })).moments).toHaveLength(before);
-    // The refusals recorded nothing under the key they named.
     const written = await adapter.writeTextFile({
       workspaceId: WORKSPACE,
       versionId: "main",
@@ -988,8 +984,6 @@ describe("VersionedLiveAdapter", () => {
   );
 
   it("passes one conflicts.list page through with the daemon's continuation", async () => {
-    // The drain that undid the daemon's paging lived here. One call is
-    // one page — a second request from a single call is the drain coming back.
     const requests: Request[] = [];
     const second = { ...conflict, id: "conflict-2", createdAtMs: 2 };
     const client: MinimalDaemonClient = {
@@ -1027,7 +1021,6 @@ describe("VersionedLiveAdapter", () => {
     });
     expect(requests.map((request) => request.params)).toEqual([{ status: "open" }]);
 
-    // The caller continues by handing the token back, one page per call.
     await expect(
       adapter.listTextConflicts({
         workspaceId: WORKSPACE,
@@ -1128,8 +1121,6 @@ describe("VersionedLiveAdapter", () => {
   });
 
   it("hydrates a withheld conflict side through the text blob route", async () => {
-    // The daemon degrades a conflicts.list row past its frame cap: the side
-    // body arrives as `text: null` beside `inbandLimitBytes` and `blobSha256`.
     const body = "an over-cap side body";
     const bodySha = createHash("sha256").update(body, "utf8").digest("hex");
     const withheld: ConflictRecord = {
@@ -1174,10 +1165,7 @@ describe("VersionedLiveAdapter", () => {
     expect(listed.conflicts).toHaveLength(1);
     const hydrated = listed.conflicts[0]!.current.snapshot;
     expect(hydrated?.text).toBe(body);
-    // The hydration hint does not outlive the hydration.
     expect(hydrated?.inbandLimitBytes).toBeUndefined();
-    // Sides that carried their bodies in band are returned as served, with
-    // no extra blob round trips.
     expect(listed.conflicts[0]!.base.snapshot?.text).toBe("hello");
     expect(listed.conflicts[0]!.incoming.snapshot?.text).toBe("hello");
     expect(
@@ -1186,7 +1174,6 @@ describe("VersionedLiveAdapter", () => {
   });
 
   it("reads no bodies for a metadata-only conflict listing", async () => {
-    // A metadata-only conflict listing must not fetch bodies it will not use.
     const withheld: ConflictRecord = {
       ...conflict,
       current: {
@@ -1215,7 +1202,6 @@ describe("VersionedLiveAdapter", () => {
       bodies: "withheld",
     });
     expect(listed.conflicts).toHaveLength(1);
-    // Served exactly as the daemon sent it: still withheld, not an empty body.
     expect(listed.conflicts[0]!.current.snapshot?.text).toBeNull();
     expect(
       requests.filter((request) => request.method === VERSIONED_METHOD.textReadBlob),
@@ -1223,12 +1209,6 @@ describe("VersionedLiveAdapter", () => {
   });
 
   it("cuts a hydrated conflict page to its byte budget before fetching bodies", async () => {
-    // The concurrency limit bounds simultaneous reads, not retained bytes. A
-    // page of degraded conflicts whose sides approach the daemon's text limit
-    // is kilobytes of metadata on the wire and hundreds of megabytes once
-    // rebuilt. The page is cut by the `byteLength` each withheld side already
-    // carries, so the bodies past the budget are never transferred.
-    //
     const body = "rebuilt";
     const bodySha = createHash("sha256").update(body, "utf8").digest("hex");
     const huge = (id: string): ConflictRecord => ({
@@ -1279,16 +1259,12 @@ describe("VersionedLiveAdapter", () => {
     // The caller continues from the row the cut stopped at, not the daemon's
     // own continuation, or the dropped conflict would never be served.
     expect(listed.nextAfterConflictId).toBe("conflict-a");
-    // The body past the budget was never fetched.
     expect(
       requests.filter((request) => request.method === VERSIONED_METHOD.textReadBlob),
     ).toHaveLength(1);
   });
 
   it("refuses a withheld conflict side whose blob the daemon cannot serve", async () => {
-    // A withheld side names its body by digest. When the daemon then cannot
-    // serve that digest, silently returning the null-bodied record would hand
-    // readers an empty document that looks like an edit.
     const withheld: ConflictRecord = {
       ...conflict,
       current: {
@@ -2225,12 +2201,6 @@ describe("VersionedLiveAdapter", () => {
   );
 
   it("decodes a withheld conflict body from either surface as a hydration hint", () => {
-    // `conflicts.resolve` withholds over-cap sides to keep its answer inside
-    // one control frame (`settled_conflict_json`, lib.rs), and `conflicts.list`
-    // withholds the sides of a row past the conflict row frame cap.
-    // The null is a hint, not content: `blobSha256` names the body, and
-    // `listTextConflicts` hydrates it — or throws — before any reader sees
-    // the record.
     const withheld = {
       ...conflict,
       base: {
@@ -2254,7 +2224,6 @@ describe("VersionedLiveAdapter", () => {
     expect(resolved.conflict.base.snapshot?.text).toBeNull();
     expect(resolved.conflict.base.snapshot?.inbandLimitBytes).toBe(131072);
 
-    // A body is a string or an explicit withholding — never anything else.
     expect(() =>
       decodeWorkspaceResult(WORKSPACE_METHOD.conflictsList, {
         conflicts: [

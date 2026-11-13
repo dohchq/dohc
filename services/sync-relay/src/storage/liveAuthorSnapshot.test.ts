@@ -141,7 +141,6 @@ it.each<[string, ServerDerivedLiveUpdateAuthority, (publicId: string) => LiveAut
     expect(() =>
       storage.tx(() => deriveLiveAuthorSnapshot(storage, authority, context(publicId), account)),
     ).toThrow(/personal agent/);
-    // The same context naming one of the account's own agents still earns its snapshot.
     const own = { ...context(publicId), agent } as LiveAuthorContext;
     expect(claimsPersonalAgent(own)).toBe(false);
     expect(
@@ -326,7 +325,6 @@ it("admits a personal agent's update only on behalf of the workspace's owner", (
     ]),
   ).toBe(false);
   expect(admitsWorkspaceLiveAuthorship(storage, "missing-workspace", helper, [built])).toBe(false);
-  // Another account's agent acts on behalf of that account, so it can't edit here.
   const other = withHelper("other-owner");
   expect(
     admitsWorkspaceLiveAuthorship(
@@ -336,7 +334,6 @@ it("admits a personal agent's update only on behalf of the workspace's owner", (
       personalLiveAuthorSnapshot(other, helper),
     ),
   ).toBe(false);
-  // Other authorities keep the contract's rule.
   expect(
     admitsWorkspaceLiveAuthorship(storage, "workspace", owner, [{ kind: "agent", ...agent }]),
   ).toBe(true);

@@ -197,7 +197,6 @@ describe("registered workspace registry handlers", () => {
     expect(h.trusted).toEqual([{ workspaceId: "workspace", folder: "7:42" }]);
     expect(h.steps.slice(-4)).toEqual(["measure", "trust", "register", "refresh"]);
 
-    // A folder with files in it, chosen in New workspace, is an existing folder.
     await h.invoke(CHANNELS.createLocalWorkspace, {
       rootPath: join(root, "cloned"),
       kind: "personal",

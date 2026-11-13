@@ -185,7 +185,6 @@ it("returns messages with an opaque cursor that resumes from where the relay sto
   ]);
   expect(second.cursor).not.toBe(first.cursor);
 
-  // A cursor from other filters, or one that is not a cursor, never reaches the relay.
   for (const args of [
     { cursor: first.cursor },
     { cursor: first.cursor, thread: "thread-other" },
@@ -277,7 +276,6 @@ it("ends the relay wait with this request, and answers a refusal like any other 
   });
   const pending = (await f.connect()).callTool({ name: "dohc_wait_for_messages", arguments: {} });
   await called;
-  // The relay call holds this request's own signal, so ending the request ends the wait.
   const controller = f.controllers.find((candidate) => candidate.signal === f.waits[0]!.signal);
   expect(controller).toBeDefined();
   controller!.abort();

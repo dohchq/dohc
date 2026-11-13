@@ -100,7 +100,6 @@ describe("schema mutations", () => {
       colors: { Doing: "amber", Done: "rose" },
     });
     expect(setOptionColor(FULL, "Status", "Gone", "rose")).toEqual(FULL);
-    // An option named like an Object member has no color until one is set.
     const odd = setFieldOptions(FULL, "Status", ["constructor"]);
     expect(odd.fields[4]).toEqual({ name: "Status", type: "select", options: ["constructor"] });
     expect(
@@ -117,7 +116,6 @@ describe("schema mutations", () => {
 
   it("setFieldOptions replaces options only on select fields", () => {
     const next = setFieldOptions(FULL, "Status", ["Todo", "Done"]);
-    // A removed option takes its color with it.
     expect(next.fields[4]).toEqual({
       name: "Status",
       type: "select",
@@ -130,7 +128,6 @@ describe("schema mutations", () => {
       options: ["Todo"],
       colors: { Todo: "gray" },
     });
-    // A chosen color lands over the colors already in the file.
     expect(
       setFieldOptions(FULL, "Status", ["Todo", "Done"], { Todo: "gray" }).fields[4],
     ).toMatchObject({

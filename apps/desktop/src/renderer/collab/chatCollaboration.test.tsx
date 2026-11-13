@@ -40,9 +40,7 @@ describe("buildChatCollaboration", () => {
     });
     expect(collaboration).not.toBeNull();
     expect(collaboration?.clientId).toBe("device-1");
-    // Display name comes from the email, trimmed.
     expect(collaboration?.displayName).toBe("ada@x.com");
-    // The factory yields a real transport for either scope kind.
     const wsTransport = collaboration?.transportForScope({
       kind: "workspace",
       workspaceId: "ws-a",
@@ -172,7 +170,6 @@ describe("workspace-switch no-repaint (through the IPC transport)", () => {
       <Harness collaboration={collabA} topic="chat:channel:1" workspaceId="ws-a" />,
     );
     await flush();
-    // A registered exactly one poll, scoped to ws-a.
     const pollIdA = pollIdForWorkspace("ws-a");
 
     // Switch to workspace B: the collaboration is rebuilt per workspace, so the
@@ -187,12 +184,10 @@ describe("workspace-switch no-repaint (through the IPC transport)", () => {
     view.rerender(<Harness collaboration={collabB} topic="chat:channel:1" workspaceId="ws-b" />);
     await flush();
 
-    // The switch aborted A's in-flight poll over IPC (abort → presenceCancel).
     expect(cancelledPollIds).toContain(pollIdA);
     const pollIdB = pollIdForWorkspace("ws-b");
     expect(pollIdB).not.toBe(pollIdA);
 
-    // A slow response for the old workspace A now arrives with a ghost peer…
     act(() => {
       pollControls.get(pollIdA)?.resolve({
         ok: true,
@@ -213,11 +208,9 @@ describe("workspace-switch no-repaint (through the IPC transport)", () => {
       });
     });
     await flush();
-    // …and it must never repaint B: no ghost, still zero others.
     expect(screen.queryByLabelText("Ghost is here")).toBeNull();
     expect(screen.getByTestId("count").textContent).toBe("0");
 
-    // B's own presence still works: a real B peer renders.
     act(() => {
       pollControls.get(pollIdB)?.resolve({
         ok: true,
@@ -251,14 +244,6 @@ describe("workspace-switch no-repaint (through the IPC transport)", () => {
     expect(screen.getByTestId("count").textContent).toBe("1"); // self filtered out
   });
 });
-
-// ---------------------------------------------------------------------------
-// Scope-switch no-repaint: the same workspace, but a conversation switches
-// scope (a joined/shared channel in a SHARE scope -> a plain channel in the
-// WORKSPACE scope). Both the transport and the topic change, and the old
-// scope's parked poll must be aborted and its late response dropped — the same
-// invariant as the ws->ws switch, mirrored for a scope change.
-// ---------------------------------------------------------------------------
 
 // Mirrors ChatsView: the transport is memoized on the SCOPE identity (kind +
 // shareId/workspaceId), built from primitive props so a real scope switch tears
@@ -321,8 +306,6 @@ describe("scope-switch no-repaint (joined share -> plain workspace)", () => {
     const sharePollId = pollIdForScopeKind("share");
     expect(pollControls.get(sharePollId)?.topic).toBe("wire-joined");
 
-    // Switch to a plain owned channel: WORKSPACE scope, on that channel's own
-    // topic — both the scope and the topic change at once.
     view.rerender(
       <ScopeHarness
         collaboration={collab}
@@ -333,15 +316,12 @@ describe("scope-switch no-repaint (joined share -> plain workspace)", () => {
     );
     await flush();
 
-    // The scope switch aborted the share scope's in-flight poll over IPC.
     expect(cancelledPollIds).toContain(sharePollId);
     const wsPollId = pollIdForScopeKind("workspace");
     expect(wsPollId).not.toBe(sharePollId);
-    // The new poll runs under the new scope and the new topic.
     expect(pollControls.get(wsPollId)?.scope.kind).toBe("workspace");
     expect(pollControls.get(wsPollId)?.topic).toBe("wire-owned");
 
-    // A slow response for the old share scope arrives with a ghost peer…
     act(() => {
       pollControls.get(sharePollId)?.resolve({
         ok: true,
@@ -362,11 +342,9 @@ describe("scope-switch no-repaint (joined share -> plain workspace)", () => {
       });
     });
     await flush();
-    // …and it must never repaint the workspace-scoped view.
     expect(screen.queryByLabelText("Ghost is here")).toBeNull();
     expect(screen.getByTestId("count").textContent).toBe("0");
 
-    // The new workspace scope still works: a real peer renders.
     act(() => {
       pollControls.get(wsPollId)?.resolve({
         ok: true,

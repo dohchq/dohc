@@ -67,7 +67,6 @@ describe("SearchView", () => {
     expect(screen.queryByTestId("search-empty-state")).toBeNull();
   });
 
-  // A finished search that found nothing, under whatever the input holds now.
   function emptySearch(criteria: Partial<WorkspaceSearchApi["criteria"]>): WorkspaceSearchApi {
     return {
       model: { ...beginSearch("search-1", "agnet"), status: "complete" },
@@ -121,8 +120,6 @@ describe("SearchView", () => {
     });
   });
 
-  // The shell's search state, held for real: run() moves the model to a new
-  // search, which replaces the empty state and the button in it.
   function LiveSearch(props: { criteria: SearchCriteria }) {
     const [model, setModel] = useState<SearchModel>({
       ...beginSearch("search-1", "agnet"),

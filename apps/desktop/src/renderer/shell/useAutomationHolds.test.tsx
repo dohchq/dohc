@@ -50,7 +50,6 @@ it("never lets an Allow that finishes after a workspace switch repaint the new w
   await act(async () => undefined);
   expect(result.current.automationHolds).toEqual([hold("Home")]);
 
-  // Trip's Allow finishes now. It must not read Trip's holds into Home.
   await act(async () => {
     confirmed.resolve({ status: "confirmed" });
     await confirmed.promise;
@@ -78,7 +77,6 @@ it("keeps the newest list when an older read in the same workspace answers last"
     confirmCollectionAutomationStep: vi.fn(),
   });
   const { result } = renderHook(() => useAutomationHolds("Trip", true, vi.fn(), ""));
-  // A poke asks again while the first read is still out.
   act(() => listeners[0]!({ workspaceId: "Trip" }));
   await act(async () => {
     answers[1]!([]);
@@ -210,7 +208,6 @@ it("lists the steps the server holds beside this computer's, reads them again wh
   );
   await act(async () => undefined);
   expect(result.current.automationHolds).toEqual([{ ...held, onServer: true }]);
-  // The server's notice about a new hold arrived.
   rerender({ key: "automation-held:1" });
   await act(async () => undefined);
   expect(listServerAutomationHolds).toHaveBeenCalledTimes(2);

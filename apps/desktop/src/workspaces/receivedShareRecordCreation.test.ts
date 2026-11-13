@@ -83,7 +83,6 @@ describe("received-share record drafts", () => {
     const f = fixture();
     f.host.checkAuthority = vi.fn(async () => null) as typeof f.host.checkAuthority;
     await createReceivedShareRecord(input, f.host);
-    // A fresh handler sees the same durable canonical files after restart.
     const reopened = { ...f.host, shareViewEdited: vi.fn() };
     expect(await createReceivedShareRecord(input, reopened)).toMatchObject({
       recordId: id,

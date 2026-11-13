@@ -16,7 +16,6 @@ afterEach(() => {
 const option = (name: string | RegExp) => screen.getByRole("option", { name });
 const picked = (name: string) => option(name).getAttribute("aria-selected") === "true";
 const search = () => screen.getByRole<HTMLInputElement>("combobox");
-/** The option the search box's keys act on. */
 const highlighted = () =>
   document.getElementById(search().getAttribute("aria-activedescendant") ?? "")?.textContent;
 /**
@@ -71,10 +70,8 @@ it.each(["relation", "multi-select"] as const)(
     await toggle(names[0]!);
     await toggle(names[1]!);
     expect(emit.mock.calls[1]?.[0]).toEqual(names.slice(0, 2));
-    // The queue retains failed write 1 while the full value of write 2 waits.
     act(() => discard(1));
     expect(chosen(names[0]!)).toBe(true);
-    // An external selection must still survive replay of the remaining write.
     view.rerender(editor([names[2]!]));
     expect(chosen(names[2]!)).toBe(true);
     await toggle(names[2]!);
@@ -198,7 +195,6 @@ describe("FieldCell display", () => {
     expect(alpha).toBeDefined();
     expect(screen.getByText("gamma").parentElement?.dataset.optionColor).toBeDefined();
     cleanup();
-    // The same name keeps its color in another field, so reordering never recolors it.
     const other: FieldDefinition = {
       name: "labels",
       type: "multi-select",
@@ -339,13 +335,11 @@ describe("FieldCell editing", () => {
     );
     fireEvent.click(screen.getByRole("link", { name: "https://dohc.dev" }));
     expect(onOpenLink).toHaveBeenCalledExactlyOnceWith("https://dohc.dev");
-    // The table edits a cell from a click that reaches it. The link's click does not.
     expect(onCellClick).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Edit link" }));
     expect(onCellClick).toHaveBeenCalledOnce();
     expect(onOpenLink).toHaveBeenCalledOnce();
 
-    // A cell nobody can edit still opens its link.
     view.rerender(<FieldCell field={field("link")} indexed={link} onOpenLink={onOpenLink} />);
     expect(screen.getByRole("link")).toBeDefined();
     expect(screen.queryByRole("button")).toBeNull();
@@ -687,7 +681,6 @@ describe("CellEditor", () => {
     );
     const view = render(editor(["alpha"]));
     fireEvent.click(option("gamma"));
-    // Someone else adds beta while the picker is open, with gamma picked and not saved.
     view.rerender(editor(["alpha", "beta"]));
     expect([picked("beta"), picked("gamma")]).toEqual([true, true]);
     fireEvent.keyDown(search(), { key: "Tab" });
@@ -778,9 +771,7 @@ describe("CellEditor", () => {
     setTag("beta");
     expect(emit.mock.calls.at(-1)?.[0]).toEqual(["alpha"]);
 
-    // Both writes finish before one coalesced index query returns.
     view.rerender(editor(["alpha"], 2));
-    // A later external addition must not match and revive the retired add.
     view.rerender(editor(["alpha", "beta"], 2));
     expect(picked("beta")).toBe(true);
     setTag("gamma");
@@ -981,13 +972,11 @@ describe("option picker", () => {
     const close = vi.fn();
     renderEditor({ fieldName: "status", value: "todo", emit, close });
     expect(document.activeElement).toBe(search());
-    // The highlight starts on the current value, so Enter alone changes nothing.
     expect(highlighted()).toBe("todo");
     expect(fireEvent.keyDown(search(), { key: "ArrowDown" })).toBe(false);
     expect(highlighted()).toBe("doing");
     fireEvent.keyDown(search(), { key: "ArrowUp" });
     fireEvent.keyDown(search(), { key: "ArrowUp" });
-    // Past the first row the highlight wraps to the last.
     expect(highlighted()).toBe("Clear");
     fireEvent.keyDown(search(), { key: "ArrowUp" });
     expect(highlighted()).toBe("shipped");
@@ -1024,7 +1013,6 @@ describe("option picker", () => {
     const view = renderEditor({ fieldName: "status", value: "todo", emit, close, onCreateOption });
     fireEvent.change(search(), { target: { value: " later " } });
     expect(options()).toEqual(["Create later"]);
-    // The new option shows as the pill it will be.
     expect(option("Create later").querySelector("[data-option-color]")?.textContent).toBe("later");
     fireEvent.keyDown(search(), { key: "Enter" });
     expect(onCreateOption).toHaveBeenCalledExactlyOnceWith("later", "later");
@@ -1034,7 +1022,6 @@ describe("option picker", () => {
 
     renderEditor({ fieldName: "status", value: "todo", onCreateOption });
     fireEvent.change(search(), { target: { value: "ship" } });
-    // A partial match still offers the new name, after the option it matches.
     expect(options()).toEqual(["shipped", "Create ship"]);
     fireEvent.click(option("Create ship"));
     expect(onCreateOption).toHaveBeenLastCalledWith("ship", "ship");
@@ -1078,7 +1065,6 @@ describe("option picker", () => {
     fireEvent.click(menu);
     const colors = screen.getByRole("radiogroup", { name: "Color for todo" });
     expect(colors.querySelector('[aria-checked="true"]')?.getAttribute("aria-label")).toBe("Teal");
-    // Choosing the color it has changes nothing.
     fireEvent.click(screen.getByRole("radio", { name: "Teal" }));
     expect(onOptionColorChange).not.toHaveBeenCalled();
     expect(screen.queryByRole("radiogroup")).toBeNull();
@@ -1087,7 +1073,6 @@ describe("option picker", () => {
     fireEvent.click(screen.getByRole("radio", { name: "Amber" }));
     expect(onOptionColorChange).toHaveBeenCalledExactlyOnceWith("todo", "amber");
     expect(screen.queryByRole("radiogroup")).toBeNull();
-    // The picker stays open on the search box.
     expect(document.activeElement).toBe(search());
   });
 
@@ -1131,7 +1116,6 @@ describe("option picker", () => {
     expect(screen.queryByRole("radiogroup")).toBeNull();
     expect(close).not.toHaveBeenCalled();
     expect(document.activeElement).toBe(search());
-    // The right arrow moves the caret while it is inside the typed text.
     fireEvent.change(search(), { target: { value: "to" } });
     search().setSelectionRange(0, 0);
     expect(fireEvent.keyDown(search(), { key: "ArrowRight" })).toBe(true);
@@ -1180,7 +1164,6 @@ describe("tags picker", () => {
     tags(["alpha"], { emit, close });
     fireEvent.click(option("gamma"));
     fireEvent.click(option("beta"));
-    // The picker stays open and shows the picks in the order they were made.
     expect(chips()).toEqual(["alpha", "gamma", "beta"]);
     expect(emit).not.toHaveBeenCalled();
     expect(close).not.toHaveBeenCalled();
@@ -1231,14 +1214,12 @@ describe("tags picker", () => {
     fireEvent.click(option("beta"));
     expect(chips()).toEqual(["gamma"]);
 
-    // Backspace edits typed text first, and removes a chip only from an empty box.
     fireEvent.change(search(), { target: { value: "a" } });
     expect(fireEvent.keyDown(search(), { key: "Backspace" })).toBe(true);
     expect(chips()).toEqual(["gamma"]);
     fireEvent.change(search(), { target: { value: "" } });
     expect(fireEvent.keyDown(search(), { key: "Backspace" })).toBe(false);
     expect(screen.queryByRole("button", { name: /^Remove / })).toBeNull();
-    // With no chip left, Backspace has nothing to remove.
     fireEvent.keyDown(search(), { key: "Backspace" });
 
     fireEvent.keyDown(search(), { key: "Tab" });
@@ -1279,7 +1260,6 @@ describe("tags picker", () => {
     fireEvent.change(search(), { target: { value: "delta" } });
     fireEvent.keyDown(search(), { key: "Enter" });
     expect(chips()).toEqual(["alpha", "beta", "delta"]);
-    // The new option joins the list, where a second pick removes it again.
     expect(picked("delta")).toBe(true);
     expect(onCreateOption).not.toHaveBeenCalled();
 
@@ -1315,7 +1295,6 @@ describe("tags picker", () => {
     const held = option(/^Create epsilon/);
     expect(held.getAttribute("aria-disabled")).toBe("true");
     expect(held.textContent).toContain('Click away to save "delta" first.');
-    // Enter has no row to pick, so the search text stays.
     fireEvent.keyDown(search(), { key: "Enter" });
     expect(chips()).toEqual(["alpha", "delta"]);
     expect(search().value).toBe("epsilon");
@@ -1337,7 +1316,6 @@ describe("tags picker", () => {
     expect(emit).toHaveBeenLastCalledWith(["beta"], [["alpha"], ["alpha", "beta"]]);
     second.unmount();
 
-    // Once the index shows both saves, the cell's value stands alone.
     render(
       <CellEditor
         acknowledgedWriteId={2}
@@ -1453,7 +1431,6 @@ describe("date picker", () => {
     fireEvent.click(screen.getByRole("button", { name: "Previous month" }));
     fireEvent.click(screen.getByRole("button", { name: "Previous month" }));
     expect(screen.getByText("October 2026")).toBeDefined();
-    // The stored day stays marked in a month that still shows it.
     fireEvent.click(screen.getByRole("button", { name: "Next month" }));
     expect(day("November 20, 2026").getAttribute("aria-selected")).toBe("true");
     expect(emit).not.toHaveBeenCalled();
@@ -1482,7 +1459,6 @@ describe("date picker", () => {
     press("PageUp");
     expect(cursor()).toBe("October 27, 2026");
     expect(emit).not.toHaveBeenCalled();
-    // A key the calendar does not use stays with the browser.
     expect(press("a")).toBe(true);
 
     press("Enter");
@@ -1516,7 +1492,6 @@ describe("people picker", () => {
     renderEditor({ fieldName: "owner", value: "user-9", people });
     expect(screen.getByRole("combobox", { name: "Search people" })).toBe(document.activeElement);
     expect(screen.getByRole("listbox", { name: "People for owner" })).toBeDefined();
-    // Each row starts with the person's initial.
     expect(names()).toEqual(["AAda", "GGrace", "No one"]);
     expect([picked("Ada"), picked("Grace")]).toEqual([false, true]);
     expect(highlighted()).toBe("GGrace");
@@ -1557,7 +1532,6 @@ describe("people picker", () => {
     renderEditor({ fieldName: "owner", value: "user-x", people, emit, close });
     expect(names()).toEqual(["Uuser-x", "AAda", "GGrace", "No one"]);
     expect(picked("user-x")).toBe(true);
-    // Enter keeps it, and so does every way of closing without a pick.
     fireEvent.keyDown(search(), { key: "Enter" });
     fireEvent.keyDown(search(), { key: "Tab" });
     fireEvent.keyDown(search(), { key: "Escape" });

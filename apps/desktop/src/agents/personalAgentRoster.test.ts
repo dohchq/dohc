@@ -26,9 +26,7 @@ interface FakeRelay {
   revision: number;
   agents: RelayAgent[];
   requests: string[];
-  // The status every change answers with, instead of applying it.
   refuse: number | null;
-  // Roster reads wait here until released.
   holdReads: boolean;
   held: Array<() => void>;
   offline: boolean;
@@ -133,7 +131,6 @@ describe("the personal agents roster in main", () => {
     roster.revisionSeen(KEY, 3);
     expect(reads(relay)).toBe(1);
 
-    // Another computer renames the agent, and the next notice pull says so.
     relay.agents[0]!.name = "Iris";
     relay.revision = 4;
     roster.revisionSeen(KEY, 4);

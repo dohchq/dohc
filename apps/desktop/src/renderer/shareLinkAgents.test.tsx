@@ -26,7 +26,6 @@ vi.mock("./bridge", () => ({ bridge: () => api }));
 
 const SECRET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJ0123-_6";
 const AT_MS = Date.UTC(2026, 10, 9, 10, 30);
-// A reported name that opens with a right-to-left override.
 const REVERSED_NAME = `${String.fromCodePoint(0x202e)}Claude`;
 const LINK = { workspaceId: "ws-1", shareId: "share-1", grantId: "grant-1" };
 
@@ -54,14 +53,12 @@ function controllable<T>() {
   return { promise, resolve, reject };
 }
 
-// What the shell's notices were asked to do.
 const shell = {
   failed: vi.fn<(failure: ShareRemovalFailure) => void>(),
   agentDisconnected: vi.fn<(agent: DisconnectedLinkAgent) => void>(),
 };
 
 type View = {
-  // The Share dialog is open, and which time it was opened.
   open: boolean;
   dialog: number;
   // The link's row is on screen, so the list is mounted.
@@ -69,7 +66,6 @@ type View = {
   revision: number;
 };
 
-// The Share dialog's link pane, reduced to its Disconnects and one link's list.
 function Dialog(props: {
   notices: ShareRemovalNotices;
   disconnected: ReadonlySet<string>;
@@ -82,7 +78,6 @@ function Dialog(props: {
   ) : null;
 }
 
-// The shell, which outlives each Share dialog.
 function Shell(props: View) {
   const [disconnected, agentDisconnected] = useDisconnectedLinkAgents();
   const notices = useMemo<ShareRemovalNotices>(
@@ -172,7 +167,6 @@ describe("LinkAgentsList", () => {
     renderList();
     const list = await screen.findByRole("region", { name: "Agents" });
     const named = within(list).getByTestId("share-link-agent-c1");
-    // The reported name is isolated, so its direction cannot reorder the note.
     expect(named.querySelector("bdi")?.textContent).toBe(REVERSED_NAME);
     expect(named.textContent).toContain("Name reported by the agent");
     expect(named.textContent).toContain("Last action");
@@ -180,7 +174,6 @@ describe("LinkAgentsList", () => {
     expect(unnamed.querySelector("bdi")?.textContent).toBe("Agent");
     expect(unnamed.textContent).toContain("The agent reported no name");
     expect(unnamed.textContent).toContain("Signed in");
-    // The avatar is the link agent's square, and only decoration.
     expect(named.querySelector("[data-link-agent]")?.getAttribute("aria-hidden")).toBe("true");
   });
 
@@ -201,7 +194,6 @@ describe("LinkAgentsList", () => {
     await act(async () => pending.resolve({ connectionId: "c1" }));
     await waitFor(() => expect(screen.queryByTestId("share-link-agent-c1")).toBeNull());
     expect(screen.getByTestId("share-link-agent-c2")).toBeTruthy();
-    // The shell takes back any failure an earlier, closed Share dialog filed.
     expect(shell.agentDisconnected).toHaveBeenCalledExactlyOnceWith({
       workspaceId: "ws-1",
       grantId: "grant-1",
@@ -241,7 +233,6 @@ describe("LinkAgentsList", () => {
     renderList();
     const list = await screen.findByRole("region", { name: "Agents" });
     expect(within(list).queryAllByRole("listitem")).toHaveLength(0);
-    // No count yet: none is known.
     expect(list.textContent).not.toMatch(/\d/u);
     await user.click(within(list).getByRole("button", { name: "Show more agents" }));
     expect(await within(list).findByTestId("share-link-agent-c1")).toBeTruthy();
@@ -321,12 +312,10 @@ describe("LinkAgentsList", () => {
       identity: agentDisconnectIdentity("grant-1", "c1"),
     });
 
-    // Opened again, the dialog reads the agent the relay still lists.
     set({ open: true, dialog: 2 });
     expect(await screen.findByTestId("share-link-agent-c1")).toBeTruthy();
     expect(screen.queryByTestId("share-link-agent-error-c1")).toBeNull();
 
-    // Try again in Notices succeeds, and the open list drops the agent.
     await act(async () => failure.retry!());
     expect(api.disconnectRelayShareLinkAgent).toHaveBeenLastCalledWith({
       ...LINK,
@@ -348,7 +337,6 @@ describe("LinkAgentsList", () => {
     renderList();
     const retry = await screen.findByTestId("share-link-agents-retry-grant-1");
     expect(retry.textContent).toContain(LINK_AGENTS_FAILED);
-    // The cause stays out of the list.
     expect(retry.textContent).not.toContain("Relay unavailable");
     expect(shell.failed).not.toHaveBeenCalled();
 
@@ -392,7 +380,6 @@ describe("LinkAgentsList", () => {
       false,
     );
 
-    // A page that failed waits the same way.
     const again = controllable<ListRelayShareLinkAgentsResult>();
     api.listRelayShareLinkAgents
       .mockRejectedValueOnce(new Error("Relay unavailable"))

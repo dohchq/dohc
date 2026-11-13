@@ -45,7 +45,6 @@ async function flushAnimationFrames(count = 2): Promise<void> {
   });
 }
 
-/** The Tiptap editor behind a mounted MarkdownEditor surface. */
 function editorBehind(surface: HTMLElement): Editor {
   const { editor } = surface as TiptapEditorHTMLElement;
   if (!editor) throw new Error("The editor surface has no Tiptap editor mounted.");
@@ -362,7 +361,6 @@ describe("MarkdownEditor code block continuation", () => {
     const before = editor.getJSON();
 
     expect(pressAtEndOfCode(editor, { key: "ArrowDown" })).toBe(false);
-    // The doc must not be mutated by a pure navigation keypress.
     expect(editor.getJSON()).toEqual(before);
     editor.destroy();
   });
@@ -379,10 +377,6 @@ describe("MarkdownEditor code block continuation", () => {
   });
 });
 
-// The live editor registers its own extension list, and the collaboration
-// binding converts the Y.Doc through that schema. A `paragraph+` task item
-// makes the indented list schema-invalid, so binding drops the whole task list
-// and the document opens empty.
 describe.each(["local", "collaboration"])(
   "MarkdownEditor nested list interactions (%s)",
   (mode) => {
@@ -1089,10 +1083,6 @@ describe("MarkdownEditor dirty tracking", () => {
     };
   }
 
-  // The rebuild case, and the more dangerous one: the user is already in the
-  // document when the engine session ends and the view falls back to the local
-  // editor. `collab` drops, the extensions change, and tiptap builds a new
-  // editor underneath a user who never stopped typing.
   it("reports an edit that lands after the editor is rebuilt mid-session", async () => {
     holdAnimationFrames();
     const onDirty = vi.fn();
@@ -1202,7 +1192,6 @@ it("hands Edit > Find to the editor that has focus, including its find bar", asy
   });
   const find = (surface: HTMLElement) => findReplaceKey.getState(editorBehind(surface!).state);
 
-  // With focus outside every editor, the command does nothing.
   act(() => sendToFocusedEditor("editor-find"));
   expect(screen.queryByRole("search", { name: "find and replace" })).toBeNull();
 

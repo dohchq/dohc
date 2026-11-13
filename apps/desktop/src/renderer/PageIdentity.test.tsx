@@ -49,7 +49,6 @@ describe("PageIdentity", () => {
       expect(input.placeholder).toBe("2026-plan");
     });
 
-    // Untitled is a file name too, so a new page's draws the same way.
     it("draws the file name in the secondary voice, and a folded Add title in the hint voice", () => {
       const placeholder = (body: string, stem: string) => {
         const view = render(<PageIdentity body={body} onChange={() => {}} filenameStem={stem} />);
@@ -187,8 +186,6 @@ describe("PageIdentity", () => {
 
       await user.clear(screen.getByTestId("page-title"));
 
-      // Dropping the last frontmatter key strips the block and the blank
-      // line that separated it from the body.
       expect(screen.getByTestId("current-body").textContent).toBe("# Body\n");
     });
 
@@ -203,7 +200,6 @@ describe("PageIdentity", () => {
 
       const body = screen.getByTestId("current-body").textContent ?? "";
       expect(parseFrontmatter(body).meta.icon).toBe("🚀");
-      // title stays ahead of icon (id, title, icon priority order).
       expect(body.indexOf("title:")).toBeLessThan(body.indexOf("icon:"));
     });
 
@@ -263,7 +259,6 @@ describe("PageIdentity", () => {
       expect(held?.disabled).toBe(true);
       expect(held?.tabIndex).toBe(-1);
 
-      // A read-only page shows no Add icon once open either, so it holds none.
       view.rerender(
         <PageIdentity body={"# Body\n"} onChange={() => {}} filenameStem="note" readOnly opening />,
       );
@@ -282,8 +277,6 @@ describe("PageIdentity", () => {
       expect(document.activeElement).toBe(screen.getByLabelText("Use 📄"));
     });
 
-    // A toast sits above the picker. F6 reaches it and comes back to the
-    // emoji it left; Escape in the toast comes back without closing.
     it("moves between the picker and a toast above it on F6", async () => {
       const user = userEvent.setup();
       render(
@@ -359,8 +352,6 @@ describe("PageIdentity", () => {
       vi.unstubAllGlobals();
     });
 
-    // The picker is a dialog without an Overlay. Opening it from the
-    // keyboard closes Notices, as a click outside Notices does.
     it("closes Notices when the picker opens from the keyboard", async () => {
       vi.stubGlobal("dohcDesktop", {
         platform: "win32",
@@ -528,8 +519,6 @@ describe("PageIdentity", () => {
 
   describe("one title", () => {
     const titleField = () => screen.getByTestId("page-title") as HTMLTextAreaElement;
-    // Folded, the field says "Add title" beside "Add icon"; open, it shows
-    // the title, or the file name in its place.
     const folded = () => titleField().placeholder === "Add title";
 
     // A paragraph with a setext underline is read with the editor's lexer,
@@ -541,7 +530,6 @@ describe("PageIdentity", () => {
       cleanup();
     });
 
-    // A long first block with no blank line: 5,000 lines of one paragraph.
     const longLines = (word: string) =>
       Array.from({ length: 5_000 }, (_, line) => `${word} ${line}`).join("\n");
 

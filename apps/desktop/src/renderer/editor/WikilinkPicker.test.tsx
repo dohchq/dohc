@@ -140,13 +140,11 @@ describe("WikilinkPicker — dismiss leaves the literal text intact", () => {
       }),
     );
 
-    // The picker is open and showing the match.
     expect(screen.getByRole("option", { name: /Roadmap/ })).toBeTruthy();
 
     fireEvent.keyDown(window, { key: "Escape" });
 
     expect(onDismiss).toHaveBeenCalledTimes(1);
-    // No transaction was dispatched — the raw "@road" text is untouched.
     expect(editor.getText()).toBe("@road");
     expect(firstWikilinkNode(editor.getJSON())).toBeUndefined();
     editor.destroy();
@@ -240,8 +238,6 @@ describe("WikilinkPicker during IME composition", () => {
   });
 });
 
-// Twelve matches fill more than the picker's height. The editor keeps focus
-// and the typed keys, so only the arrows move the active option.
 describe("WikilinkPicker on the Menu part's recipe", () => {
   it("keeps the active option in the list's view as the arrows move it, scrolling only the list", () => {
     const restore = mockListLayout(200);

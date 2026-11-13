@@ -116,7 +116,6 @@ function reverseKeys<T>(value: T): T {
   return value;
 }
 
-// Every trigger and step kind, in the writer's own form.
 const EVERY_KIND = `version: 1
 automations:
   - id: stamp-finish-date
@@ -405,7 +404,6 @@ automations:
   });
 });
 
-// One automation whose add-record step holds fields of these lengths.
 function fieldsOfLengths(lengths: number[]): AutomationEntry[] {
   return [
     valid({
@@ -1080,7 +1078,6 @@ function stepsItem(steps: string[]): string {
   return `id: a\nname: A\nwhen: record-added\ndo: [${steps.join(", ")}]`;
 }
 
-// `depth` if steps inside one another, with one set step in the innermost.
 function nestedIfs(depth: number): string {
   let steps = "{set: {X: 1}}";
   for (let level = 0; level < depth; level += 1) steps = `{if: "true", do: [${steps}]}`;
@@ -1103,7 +1100,6 @@ const BOUND_CASES: AutomationCase[] = [
   },
 ];
 
-// Steps and triggers on dataset Collections, in the writer's own form.
 const DATASET_KINDS = `version: 1
 automations:
   - id: close-invoice

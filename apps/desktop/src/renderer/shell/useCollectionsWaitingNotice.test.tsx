@@ -25,7 +25,6 @@ const HEALTHY: SyncStatusResult = {
   liveSessionsGeneration: 0,
 };
 
-// A retry whose answer the test sends when it chooses.
 function pendingRetry() {
   let settle: {
     resolve: (status: SyncStatusResult) => void;
@@ -45,7 +44,6 @@ function pendingRetry() {
   };
 }
 
-// The shell's error hook and the notice together, as the shell wires them.
 function renderNotice(
   initial: { workspaceId?: string; waiting: Waiting | undefined },
   retryCloudSync = vi.fn(
@@ -112,7 +110,6 @@ describe("useCollectionsWaitingNotice", () => {
       view.result.current.notice.noteDismissed();
       view.result.current.errors.dismissShellError(view.rows()[0]!.id);
     });
-    // Each pass reports the same wait it found.
     for (let pass = 0; pass < 3; pass += 1) {
       view.rerender({ workspaceId: "ws-a", waiting: "sync" });
     }
@@ -175,7 +172,6 @@ describe("useCollectionsWaitingNotice", () => {
     first.unmount();
     const second = renderNotice({ waiting: "sync" });
     expect(second.rows()).toEqual([]);
-    // The reopen after a pause failing is news.
     second.rerender({ workspaceId: "ws-a", waiting: "reopen" });
     expect(second.toasts()).toHaveLength(1);
     expect(second.rows()[0]!.message).toBe(collectionsWaitingMessage("reopen"));

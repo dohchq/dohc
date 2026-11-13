@@ -34,7 +34,6 @@ function unreachable(sinceMs: number, attempts: number): Failure {
   };
 }
 
-// A person's retry whose failed answer the test sends when it chooses.
 function pendingRetry() {
   let resolve: ((status: SyncStatusResult) => void) | null = null;
   const retryCloudSync = vi.fn(
@@ -50,7 +49,6 @@ function pendingRetry() {
   };
 }
 
-// The shell's two hooks together, as the shell wires them.
 function renderNotice(
   initial: { workspaceId?: string; failure: Failure | null | undefined },
   retryCloudSync = vi.fn(
@@ -129,7 +127,6 @@ describe("useSyncFailureNotice", () => {
     expect(view.retryCloudSync).toHaveBeenCalledWith("ws-a", "person");
   });
 
-  // A blip costs one toast, and recovery takes it away with the row.
   it("toasts each failure once and clears its toast and row on recovery", () => {
     const view = renderNotice({ failure: null });
     for (let round = 1; round <= 3; round += 1) {
@@ -152,7 +149,6 @@ describe("useSyncFailureNotice", () => {
     expect(view.toasts()).toEqual([]);
     view.rerender({ workspaceId: "ws-a", failure: unreachable(100, 3) });
     expect(view.toasts()).toEqual([]);
-    // The row carries the newest failure, so its copied detail is current.
     expect(view.rows()).toHaveLength(1);
     expect(view.rows()[0]!.details).toEqual([["Detail", "RelayUnreachableError: attempt 3"]]);
   });
@@ -168,7 +164,6 @@ describe("useSyncFailureNotice", () => {
         sinceMs,
         attempts,
       });
-      // A busy answer that a later pass clears never reaches a toast or row.
       const view = renderNotice({ failure: busy(50_000, 1) });
       act(() => vi.advanceTimersByTime(5_000));
       view.rerender({ workspaceId: "ws-a", failure: busy(50_000, 2) });
@@ -178,7 +173,6 @@ describe("useSyncFailureNotice", () => {
       act(() => vi.advanceTimersByTime(20_000));
       expect(view.rows()).toEqual([]);
 
-      // One that lasts toasts once its 15 s are up, counted from its first pass.
       view.rerender({ workspaceId: "ws-a", failure: busy(Date.now(), 1) });
       act(() => vi.advanceTimersByTime(14_999));
       expect(view.rows()).toEqual([]);
@@ -199,7 +193,6 @@ describe("useSyncFailureNotice", () => {
       expect(view.toasts()).toHaveLength(1);
       expect(view.toasts()[0]!.message).toBe("dohc could not sync this workspace.");
 
-      // When its next pass finds the server busy, the row and toast say so at once.
       act(() => vi.advanceTimersByTime(1_000));
       view.rerender({ workspaceId: "ws-a", failure: busy(since, 2) });
       expect(view.rows()).toHaveLength(1);
@@ -221,10 +214,8 @@ describe("useSyncFailureNotice", () => {
     });
     first.unmount();
 
-    // Back to this workspace: the same failure shows neither toast nor row.
     const second = renderNotice({ failure: unreachable(100, 3) });
     expect(second.rows()).toEqual([]);
-    // A new failure after recovery is news again.
     second.rerender({ workspaceId: "ws-a", failure: null });
     second.rerender({ workspaceId: "ws-a", failure: unreachable(900, 1) });
     expect(second.rows()).toHaveLength(1);
@@ -361,8 +352,6 @@ describe("useSyncFailureNotice", () => {
     expect(view.toasts()[0]!.id).toBe(toastId);
   });
 
-  // The status files the failed pass quietly, because this failure already
-  // toasted; the answer then raises the toast the person asked for, once.
   it("files a failed retry once when the status reports it before the answer", async () => {
     const retry = pendingRetry();
     const view = renderNotice({ failure: unreachable(100, 1) }, retry.retryCloudSync);
@@ -402,8 +391,6 @@ describe("useSyncFailureNotice", () => {
     expect(view.retryCloudSync).toHaveBeenCalledWith("ws-a", "reconnect");
   });
 
-  // A failed sync pass proves nothing about this machine's copy, so no
-  // message claims the changes are saved here.
   it("never claims the changes are saved", () => {
     expect(syncFailureNotice(unreachable(1, 1))).toEqual({
       message: "dohc could not reach the server.",

@@ -264,9 +264,6 @@ describe("assertSyncEnrollmentCredentials", () => {
   });
 });
 
-// A share view's chat identity. A share view is not an enrolled
-// workspace: it has no `remote` and no owner id to write as, so the account
-// that holds the grant is the one it writes under.
 describe("share view chat identity", () => {
   const credentials = {
     serverUrl: "https://cloud.dohc.test",

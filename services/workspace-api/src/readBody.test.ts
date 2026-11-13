@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { readBodyAtMost } from "./readBody";
 
-/** A reader over `chunks`, one per read. */
 function reader(chunks: Uint8Array[]): ReadableStreamDefaultReader<Uint8Array> {
   return new ReadableStream<Uint8Array>({
     start(controller) {

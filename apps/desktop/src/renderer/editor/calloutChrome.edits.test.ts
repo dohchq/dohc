@@ -19,7 +19,6 @@ function headers(state: EditorState, plugin: Plugin) {
     .sort((a, b) => a.pos - b.pos);
 }
 
-// Each header's position and type/fold, without the owner part of its key.
 function shown(state: EditorState, plugin: Plugin) {
   return headers(state, plugin).map(({ pos, key, owner }) => ({
     pos,
@@ -125,8 +124,6 @@ describe("makeCalloutChromePlugin — edits", () => {
     let [ownerB, ownerA] = headers(start, plugin).map(({ owner }) => owner);
     const [posB] = calloutPositions(start.doc);
 
-    // A's title has focus. In one edit, C and a copy of A come before B, A
-    // goes, and the paragraph before them changes. The copy is second, as A was.
     let tr = start.tr.insert(posB!, [c, a]);
     const moved = posB! + c.nodeSize + a.nodeSize + b.nodeSize;
     tr = tr.delete(moved, moved + a.nodeSize);

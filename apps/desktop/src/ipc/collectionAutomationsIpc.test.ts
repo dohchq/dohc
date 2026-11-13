@@ -297,7 +297,6 @@ describe("steps a share stops", () => {
       access: "edit",
       recipientEmail: "ana@dohc.test",
     });
-    // A link names nobody yet.
     await f.call(CHANNELS.automationShareImpact, {
       recipientEmail: null,
       paths: ["Trip"],
@@ -356,7 +355,6 @@ describe("field marks", () => {
       marks: [],
     });
     expect(shared.datasetFieldMarks).not.toHaveBeenCalled();
-    // A payload that names both, or a dataset by something other than its id, is refused.
     await expect(
       f.call(CHANNELS.listCollectionFieldMarks, { ...input, collectionPath: "Budget" }),
     ).rejects.toThrow();
@@ -550,7 +548,6 @@ describe("writing automations.yaml from the panel", () => {
     });
     expect(f.draftCannotRun).toHaveBeenCalledWith("Tasks", { ...stamp, if: "record.Status ==" });
     const removed = { ...stamp, when: { kind: "record-removed", table: null } };
-    // A draft the file contract refuses has no run status to check.
     await expect(f.check({ collectionPath: "Tasks", automation: removed })).resolves.toMatchObject({
       diagnostics: [{ code: "step-needs-record" }],
       cannotRun: null,
@@ -559,7 +556,6 @@ describe("writing automations.yaml from the panel", () => {
     await expect(
       fixture({ sharedView: true }).check({ collectionPath: "Tasks", automation: stamp }),
     ).resolves.toMatchObject({ cannotRun: null });
-    // An executor that is not open yet gives no status, and the rest of the check still answers.
     f.draftCannotRun.mockRejectedValueOnce(new Error("The executor is not open."));
     await expect(
       f.check({ collectionPath: "Tasks", automation: { ...stamp, if: "record.Status ==" } }),
@@ -570,14 +566,12 @@ describe("writing automations.yaml from the panel", () => {
       cannotRun: null,
       missingFiles: [],
     });
-    // Main names the code files the executor cannot find, and a failed look names none.
     const coded = { ...stamp, do: [{ kind: "run-file", file: "total.js", as: null }] };
     f.missingCodeFiles.mockResolvedValueOnce(["total.js"]);
     await expect(f.check({ collectionPath: "Tasks", automation: coded })).resolves.toMatchObject({
       missingFiles: ["total.js"],
     });
     expect(f.missingCodeFiles).toHaveBeenLastCalledWith("Tasks", coded);
-    // Other problems in the draft do not hide a missing file.
     f.missingCodeFiles.mockResolvedValueOnce(["total.js"]);
     await expect(
       f.check({
@@ -685,7 +679,6 @@ describe("listing the people the builder offers", () => {
       shared.call(CHANNELS.listAutomationPeople, { collectionPath: "Tasks" }),
     ).resolves.toEqual({ status: "unavailable" });
     expect(shared.peopleFor).not.toHaveBeenCalled();
-    // A path outside the workspace, or no path, is refused before anything is read.
     await expect(
       f.call(CHANNELS.listAutomationPeople, { collectionPath: "../Other" }),
     ).rejects.toThrow();

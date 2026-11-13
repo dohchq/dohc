@@ -32,7 +32,6 @@ it("raises the toasts above the highest shown message box, and drops the room wh
       <Box top={bottom - 90} height={0} />
     </>,
   );
-  // The second box is hidden: it has no height.
   expect(room()).toBe("60px");
   rerender(
     <>
@@ -61,7 +60,6 @@ it("tells the toast stack when the room changes, and only then", () => {
     </>,
   );
   expect(changed).toHaveBeenCalledTimes(1);
-  // A lower box comes and goes under the highest one: the room stays.
   rerender(
     <>
       <Box top={bottom - 60} height={60} />

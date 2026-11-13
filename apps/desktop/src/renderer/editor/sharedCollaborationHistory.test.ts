@@ -90,7 +90,6 @@ it("answers the menu's Undo and Redo, which arrive as beforeinput, from the docu
     expect(input("historyRedo").defaultPrevented).toBe(true);
     expect(editor.getText()).toBe("Hello");
 
-    // Typing stays with the browser and ProseMirror.
     expect(input("insertText").defaultPrevented).toBe(false);
   } finally {
     editor.destroy();

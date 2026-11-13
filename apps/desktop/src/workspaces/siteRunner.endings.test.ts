@@ -105,7 +105,6 @@ async function app(files: Record<string, string>) {
 const SERVER =
   "require('node:http').createServer((q, r) => r.end('ok')).listen(0, '127.0.0.1', function () { console.log('http://127.0.0.1:' + this.address().port + '/'); });";
 const IDLE = "setInterval(() => {}, 1000);";
-// A build that writes its output and exits 0.
 const BUILT =
   "const fs = require('node:fs'); fs.mkdirSync('dist', { recursive: true }); fs.writeFileSync('dist/index.html', '<h1>ok</h1>');";
 
@@ -263,7 +262,6 @@ describe("each way an app command ends counts what it left running", () => {
     const left = orphan();
     const workspaceRoot = await app({ "build.js": BUILT });
     const controller = new AbortController();
-    // The exit's cleanup reaches the helper; the person cancels right then.
     duringHelperKill = async (pids) => {
       if (!pids.includes(left.pid!)) return;
       duringHelperKill = null;
@@ -346,7 +344,6 @@ describe("each way an app command ends counts what it left running", () => {
     onPlatform("linux");
     await handle.stop();
     const wrapperPid = posixRoots[0]!;
-    // The SIGTERM round ends the wrapper; the SIGKILL round roots at the helper.
     expect(posixRoots).toEqual([wrapperPid, left.pid]);
     posixRoots.length = 0;
     await handle.stop();
@@ -365,7 +362,6 @@ describe("each way an app command ends counts what it left running", () => {
       args: ["server.js"],
       descendantsReader: async () => [first.pid!, second.pid!],
     });
-    // The first helper's tree kill also ends the second.
     duringHelperKill = async (pids) => {
       if (!pids.includes(first.pid!)) return;
       second.kill("SIGKILL");

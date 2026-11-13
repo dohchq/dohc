@@ -280,7 +280,6 @@ it("upgrades existing pins, clocks and stale floors once without resetting match
   replacementEvidence(f.db, "log");
   f.at(140_000);
   f.save(f.view("next"));
-  // Recreate the previous migration's grant trigger and remove only this migration's schema.
   f.db.exec(`ALTER TABLE sync_relay_replica_cuts ADD COLUMN omitted_json TEXT NOT NULL DEFAULT '[]';
     DROP TABLE sync_relay_replica_cut_omitted; DELETE FROM sync_relay_migrations WHERE migration_id='replica-current-incremental-v1';
     DROP TRIGGER replica_current_view_grant_update;
@@ -523,7 +522,6 @@ async function fixture(seedBaseline = true) {
     texts: [{ sha256: sha256(text), text }],
     omitted: [],
   });
-  // Most policy tests start with an edit of an established clean baseline.
   if (seedBaseline) storage.storeReplicaCurrentView(lease, view("baseline"));
   let latest = view();
   const save = (v = latest) => {

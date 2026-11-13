@@ -29,7 +29,6 @@ describe("stripMarkdown", () => {
       "*not bold* & A &bogus; https://example.com <b>",
     );
     expect(strip("&constructor; &toString;")).toBe("&constructor; &toString;");
-    // A run with nothing to pair keeps its characters.
     expect(strip("file_ and a* b and ~c and __init__")).toBe("file_ and a* b and ~c and init");
   });
 
@@ -92,7 +91,6 @@ describe("stripMarkdown", () => {
     expect(strip("Run this:\n\n    notify **@sam** now\n\n\tand *this*\nthen **stop**")).toBe(
       "Run this:\n\nnotify **@sam** now\n\nand *this*\nthen stop",
     );
-    // An indented line inside a paragraph continues it.
     expect(strip("text\n    more **words**")).toBe("text\nmore words");
   });
 

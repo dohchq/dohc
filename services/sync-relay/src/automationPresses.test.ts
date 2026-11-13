@@ -411,7 +411,6 @@ describe("relayed Button presses", () => {
     const r = await relay();
     await host(r);
     const response = await press(r, { pressedBy: "someone-else" });
-    // A field the relay does not know is not read, and never names who pressed.
     expect(response.status).toBe(400);
     const accepted = await press(r);
     expect(accepted.status, await accepted.clone().text()).toBe(200);
@@ -450,7 +449,6 @@ describe("relayed Button presses", () => {
     expect(await settled.json()).toMatchObject({ ok: true, state: "settled", outcome: "done" });
     expect(await list(r)).toEqual([]);
 
-    // The same press sent again answers the same press; another target is refused.
     expect(await (await press(r)).json()).toMatchObject({
       pressId: "press-1",
       state: "settled",
@@ -603,7 +601,6 @@ describe("relayed Button presses", () => {
     expect(await (await post(r, "accept", { hostPressIds: [listed!.hostPressId] })).json()).toEqual(
       { ok: true, accepted: [] },
     );
-    // The expired press does not wake a held list: it waits until a new press arrives.
     let answered = false;
     const waiting = list(r, "laptop", OWNER, 20_000).then((presses) => {
       answered = true;
@@ -651,7 +648,6 @@ describe("relayed Button presses", () => {
     ).toBe(200);
     expect(await list(r, "desktop")).toEqual([]);
     expect(await (await press(r)).json()).toMatchObject({ state: "settled", outcome: "ended" });
-    // The old computer's late answer is refused rather than taken.
     await expectCode(
       await post(r, "settle", {
         installId: "laptop",
@@ -697,7 +693,6 @@ describe("relayed Button presses", () => {
         jsonBody({ installId: "desktop", generation: 1 }),
       ),
     );
-    // The owner chose the laptop back, so it runs again, at a new generation.
     await r.h(
       request(
         OWNER,

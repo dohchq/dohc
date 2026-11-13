@@ -45,7 +45,6 @@ const RELAY_AUTHORS = [
   // Only the relay writes a personal agent's moments, from its own origin.
   { kind: "agent", agentId: PERSONAL_AGENT, onBehalfOf: "owner" },
   { kind: "agent", agentId: PERSONAL_AGENT, agentName: "Helper", onBehalfOf: "owner", depth: 0 },
-  // A kind this relay does not know yet is refused, not passed through.
   { kind: "future", grantId: "grant" },
   { kind: "unattributed", humanId: "forged" },
   { kind: "unattributed", label: "Owner" },
@@ -185,7 +184,6 @@ describe("client log provenance", () => {
       expect(
         storage.fetchLogPage({ workspaceId: "workspace", sinceRelaySeq: 0, limit: 100 }).rows,
       ).toEqual([]);
-      // The account's own agents still sync their posts.
       expect(() =>
         assertChatAuthorship(
           [
@@ -246,7 +244,6 @@ describe("client log provenance", () => {
       expect(
         storage.fetchLogPage({ workspaceId: "workspace", sinceRelaySeq: 0, limit: 100 }).rows,
       ).toEqual([]);
-      // The account's own agents still resolve and edit.
       for (const op of [resolve("helper"), update(agent, "helper")]) {
         expect(() =>
           assertClientLogProvenance("device", [op], { deferMomentRefusal: true }),

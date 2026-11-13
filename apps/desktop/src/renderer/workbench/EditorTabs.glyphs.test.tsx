@@ -17,7 +17,6 @@ import {
   versionCompareTabPath,
 } from "./workbenchState";
 
-// Counts file-glyph renders, so a test can see which tabs re-rendered.
 const fileGlyphs = vi.hoisted(() => ({ renders: 0 }));
 vi.mock("../ui/KindGlyph", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../ui/KindGlyph")>();
@@ -64,7 +63,6 @@ function strip(
   );
 }
 
-// The tab's own glyph: every svg but the close button's.
 function glyphOf(path: string): Element | null {
   return screen.getByTestId(editorTabTestId(path)).querySelector("svg:not(.lucide-x)");
 }
@@ -87,7 +85,6 @@ const KIND_GLYPHS: Array<[string, string]> = [
   [versionCompareTabPath("try"), "layers"],
   [momentDiffTabPath("moment"), "file-diff"],
   [GRAPH_TAB_PATH, "workflow"],
-  // lucide's History, the rail's glyph.
   [HISTORY_TAB_PATH, "rotate-ccw-clock"],
 ];
 
@@ -144,8 +141,6 @@ describe("EditorTabs glyphs", () => {
     expect(glyphs[0]).toContain("lucide-file-spreadsheet");
     expect(glyphs[1]).toContain("lucide-app-window");
     expect(glyphs[2]).toContain("lucide-hash");
-    // Ink on the current row's selected fill, subtle on the rest, as
-    // Explorer's open editors tone the same glyph.
     expect(glyphs[0]).toContain("text-ink");
     expect(glyphs[1]).toContain("text-subtle");
     expect(glyphs[2]).toContain("text-subtle");
@@ -204,7 +199,6 @@ describe("EditorTabs glyphs", () => {
     });
     expect(groupPill.textContent).toBe("99+");
     expect(groupPill.className).not.toContain("bg-ink");
-    // The open conversation is reading them, so its tab shows no count.
     rerender(strip(["plan.md", person, group], { active: person, unread }));
     expect(
       within(screen.getByTestId(editorTabTestId(person))).queryByTestId("tab-unread"),

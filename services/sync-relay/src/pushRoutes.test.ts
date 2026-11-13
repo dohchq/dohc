@@ -56,7 +56,6 @@ const endpoint = (name: string) => `https://push.example.test/send/${name}`;
 const fingerprint = (value: string) => createHash("sha256").update(value).digest("hex");
 const browserKeys = { p256dh: p256Point(), auth: Buffer.alloc(16, 7).toString("base64url") };
 
-// Cookie `session=<token>` names a sign-in; the test decides which are valid.
 function sessions() {
   const valid = new Map<string, AccountSession>();
   const resolve = vi.fn<ResolveAccountSession>(async (request) => {
@@ -393,7 +392,6 @@ describe("push subscriptions", () => {
     });
     expect((await f.unsubscribe("bob-1")).status).toBe(200);
     expect(rows(f.storage)).toEqual(before);
-    // An endpoint moves only once its installation lets it go.
     await f.unsubscribe("alice-1");
     expect(
       await body(await f.subscribe("bob-1", { installationId: installation(2) })),
@@ -409,7 +407,6 @@ describe("push subscriptions", () => {
     await f.subscribe("alice-1");
     if (signsOut) f.auth.valid.delete("alice-1");
     f.auth.signIn("bob-1", "bob");
-    // The installation alone, or the endpoint alone, still moves nothing.
     expect((await f.subscribe("bob-1", { endpoint: endpoint("bob") })).status).toBe(409);
     expect((await f.subscribe("bob-1", { installationId: installation(2) })).status).toBe(409);
     expect(rows(f.storage)).toEqual([
@@ -529,7 +526,6 @@ describe("push subscriptions", () => {
     expect(rows(f.storage)).toEqual([
       expect.objectContaining({ session_id: "sign-in-alice-2", generation: 2 }),
     ]);
-    // Another account signing in on the same browser sees alerts off until it binds them itself.
     f.auth.signIn("bob-1", "bob");
     expect(await body(await f.status("bob-1"))).toMatchObject({
       enabled: false,
@@ -562,7 +558,6 @@ describe("push subscriptions", () => {
     const first = await body(await f.subscribe("alice-1"));
     expect(await body(await f.subscribe("alice-1"))).toEqual(first);
     expect(rows(f.storage)).toEqual([expect.objectContaining({ generation: 1 })]);
-    // A new browser subscription on the same installation is a new binding.
     expect(await body(await f.subscribe("alice-1", { endpoint: endpoint("two") }))).toMatchObject({
       generation: 2,
       fingerprint: fingerprint(endpoint("two")),
@@ -571,7 +566,6 @@ describe("push subscriptions", () => {
     expect(off).toMatchObject({ enabled: false, generation: null });
     expect(await body(await f.unsubscribe("alice-1"))).toEqual(off);
     expect(rows(f.storage)).toEqual([]);
-    // A generation is never reused.
     expect(await body(await f.subscribe("alice-1"))).toMatchObject({ generation: 3 });
   });
 
@@ -656,7 +650,6 @@ describe("push subscriptions", () => {
       }),
     ).toThrow(expect.objectContaining({ code: "not_found" }));
     expect(rows(f.storage)).toEqual([expect.objectContaining({ account_user_id: "bob" })]);
-    // The final purge removes whatever an account still binds.
     purgeAccountRows(context, "bob", "bob@dohc.test", {
       workspaces: [],
       shareIds: [],

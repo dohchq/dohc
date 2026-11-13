@@ -25,7 +25,6 @@ vi.mock("./dev/StatesPage", () => ({
   StatesPage: () => <div data-testid="states-page" />,
 }));
 
-// The reaction store each mounted shell received from DesktopRoot's owner.
 const shellReactions = vi.hoisted(() => ({ current: null as ReactionStore | null }));
 
 vi.mock("./WorkspaceManager", () => ({
@@ -126,9 +125,6 @@ vi.mock("./DesktopWorkspaceShell", async () => {
   };
 });
 
-// What DesktopRoot keeps for the window: the notice list, folders a launch
-// could not open, and menu commands while no shell answers them. Empty
-// unless a test says otherwise.
 function windowBridge() {
   return {
     listNotices: vi.fn(async () => ({ account: null, notices: [] })),
@@ -466,7 +462,6 @@ describe("a settings file save", () => {
     expect(style.getPropertyValue("--dohc-editor-font-size")).toBe("18px");
     expect(shellRenders.count).toBe(settled);
 
-    // A setting the shell reads renders it.
     await save({ ...onDisk.settings, profile: { preferredName: "Ada" } });
     expect(shellRenders.count).toBeGreaterThan(settled);
   });
@@ -508,7 +503,6 @@ describe("startup selection", () => {
     });
     expect((await screen.findByTestId("active-workspace")).textContent).toBe("a");
 
-    // The mount read lands late and stale: it must not reselect.
     await act(async () => {
       startupRead.resolve({ workspaces: [workspace("b"), workspace("a")] });
     });
@@ -589,8 +583,6 @@ describe("registry grows under an idle first-run window", () => {
     render(<DesktopRoot />);
     expect(await screen.findByTestId("first-run")).toBeTruthy();
 
-    // Main registers the joined workspace and broadcasts before populate
-    // finishes. The join screen must survive that broadcast.
     registry = { workspaces: [workspace("joined")] };
     await act(async () => {
       emitActivity?.({});
@@ -598,7 +590,6 @@ describe("registry grows under an idle first-run window", () => {
     expect(await screen.findByRole("button", { name: "Open joined" })).toBeTruthy();
     expect(screen.queryByTestId("workspace-shell")).toBeNull();
 
-    // Only an explicit selection activates it.
     fireEvent.click(screen.getByRole("button", { name: "Open joined" }));
     expect((await screen.findByTestId("active-workspace")).textContent).toBe("joined");
   });
@@ -711,7 +702,6 @@ describe("reaction writes across first run", () => {
     const returned = await reopen();
     expect(returned).toBe(first);
     toggle(returned, "removed");
-    // The remove waits for the add still out from before first run.
     expect(setChatReaction).toHaveBeenCalledTimes(1);
     await act(async () => {
       writes[0]!.resolve({});
@@ -842,7 +832,6 @@ describe("the window's title and menu commands", () => {
       render(<DesktopRoot />);
       await screen.findByText("dohc couldn't read its workspace registry");
       expect(document.title).toBe("dohc");
-      // The screen subscribes to menu commands in an effect after it paints.
       await waitFor(() => expect(root.listening()).toBe(true));
 
       root.send("check-updates");

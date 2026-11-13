@@ -11,8 +11,6 @@ describe("code highlighting", () => {
     vi.unstubAllGlobals();
   });
 
-  // Each theme sets these variables, so one style reads in light and dark.
-  // A literal color here is what painted #00f on the dark page.
   it("colors tokens only with theme variables", () => {
     const rules = CODE_HIGHLIGHT_STYLE.module?.getRules() ?? "";
     const colors = [...rules.matchAll(/color:\s*([^;}]+)/g)].map((match) => match[1]?.trim());

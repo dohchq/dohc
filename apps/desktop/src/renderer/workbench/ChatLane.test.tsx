@@ -190,7 +190,6 @@ describe("ChatLane", () => {
     await act(async () => again());
     await screen.findByText("Reply");
 
-    // Once the lane shows another workspace, Try again reads nothing.
     bridgeMock.listChatMessages.mockResolvedValue({
       messages: [message({ body: "Other workspace" })],
     });
@@ -493,8 +492,6 @@ describe("ChatLane", () => {
     });
     await act(async () => activity({ workspaceId: "workspace-a" }));
     const failed = await screen.findByTestId("chats-lane-run-failed");
-    // In Nova's own chat a message asks it: the button focuses the composer
-    // and adds nothing to the draft.
     expect(
       within(failed)
         .getAllByRole("status")
@@ -588,7 +585,6 @@ describe("ChatLane", () => {
 
     view.rerender(lane("agent-dm", "workspace-a", "agent", "nova", [], true));
     expect(screen.queryByTestId("chats-lane-waiting")).toBeNull();
-    // While paused, main names no request waiting on Nova, and another joins the queue.
     bridgeMock.chatDispatchStateForThread.mockResolvedValue({ ...queued, pendingCount: 2 });
     await act(async () => activity({ workspaceId: "workspace-a" }));
     await waitFor(() =>
@@ -611,7 +607,6 @@ describe("ChatLane", () => {
     bridgeMock.stopAgentRun.mockReturnValueOnce(stop.promise);
     const view = render(lane("agent-dm", "workspace-a", "agent"));
     fireEvent.click(await screen.findByRole("button", { name: "Stop agent run" }));
-    // Workspace B has its own run, and its Stop is pressed and still going.
     bridgeMock.chatDispatchStateForThread.mockResolvedValue({
       ...working,
       liveRunId: "run-b",
@@ -740,7 +735,6 @@ describe("ChatLane", () => {
     expect(recorded).not.toBe(proposalPath);
     expect(JSON.parse(place.files[recorded]!).revisionSha256).toBe(place.head().revisionSha256);
     expect(await screen.findByText("Applied")).toBeTruthy();
-    // Ada's part of the applied change names her.
     expect(
       within(screen.getByText("Added the field Phone").closest("li")!).getByText(/^Ada · /u),
     ).toBeTruthy();
@@ -898,7 +892,6 @@ describe("ChatLane", () => {
         resolves: { messageId: "question" },
       }),
     );
-    // Answer covers one reply. The next is a plain reply.
     await waitFor(() => expect((reply as HTMLTextAreaElement).value).toBe(""));
     fireEvent.change(reply, { target: { value: "Thanks" } });
     fireEvent.keyDown(reply, { key: "Enter" });

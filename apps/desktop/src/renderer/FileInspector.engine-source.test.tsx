@@ -48,12 +48,6 @@ import { forgedSources } from "../../../../packages/ydoc-projection/src/artifact
 
 setupFileInspectorTests();
 
-// "View markdown as source" on the ENGINE path: the toggle shows a READ-ONLY
-// projection of the canonical Y.Doc (the same yDocToMarkdown the settle uses)
-// — never an editable raw-markdown surface (the derived-cache invariant). The
-// engine session is mocked at the bridge seam exactly like production wires
-// it: openEngineYDocSession seeds the mirror doc, onEngineYDocRemoteUpdate
-// forwards CRDT deltas.
 describe("engine markdown source view", () => {
   const DOC_MARKDOWN = "---\ntitle: Plan\nstatus: draft\n---\n\n# Plan\n\nBase paragraph.\n";
 
@@ -85,7 +79,6 @@ describe("engine markdown source view", () => {
   }
 
   function makeEngineBridge(markdown: string) {
-    // The engine's projection, which keeps the frontmatter text as written.
     const serverDoc = markdownToYDoc(markdown);
     const remoteListeners = new Set<
       (event: { sessionId: string; update: Uint8Array; lineageGeneration: number }) => void
@@ -103,7 +96,6 @@ describe("engine markdown source view", () => {
     const bridgeMock = {
       platform: "linux" as const,
       onWorkspaceActivity: vi.fn(() => () => undefined),
-      // A lossy note's band asks the engine whether it holds a change.
       readHeldChange: vi.fn(async () => ({ change: null })),
       onNoticesChanged: vi.fn(() => () => undefined),
       readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(async () => ({
@@ -179,8 +171,6 @@ describe("engine markdown source view", () => {
         },
       ),
     };
-    // Simulates a remote writer (co-editor / agent) landing in the live doc:
-    // mutate the engine-side doc and forward the delta like main does.
     const pushRemoteMarkdown = (next: string) => {
       const before = Y.encodeStateVector(serverDoc);
       replaceYDocWithMarkdown(serverDoc, next);
@@ -231,8 +221,6 @@ describe("engine markdown source view", () => {
         registerSourceToggle={options?.registerSourceToggle}
       />,
     );
-    // The engine session takes over once bound: the legacy Edit toggle gives
-    // way to the engine header's Source toggle.
     const toggle = await screen.findByTestId("markdown-source-toggle");
     return { bridgeMock, pushRemoteMarkdown, toggle, view };
   }
@@ -344,8 +332,6 @@ describe("engine markdown source view", () => {
 
     await user.click(toggle);
     const sourceView = await screen.findByTestId("markdown-source-view");
-    // Raw markdown, not rendered document: frontmatter and heading markup are
-    // visible as text.
     await waitFor(() => {
       expect(sourceView.textContent).toContain("# Plan");
       expect(sourceView.textContent).toContain("title: Plan");
@@ -358,7 +344,6 @@ describe("engine markdown source view", () => {
     expect(screen.getByTestId("view-markdown").hidden).toBe(true);
     expect(screen.getByTestId("markdown-source-toggle").textContent).toBe("Editor");
 
-    // Toggling back restores the document surface.
     await user.click(screen.getByTestId("markdown-source-toggle"));
     expect(screen.getByTestId("view-markdown").hidden).toBe(false);
     expect(screen.queryByTestId("markdown-source-view")).toBeNull();
@@ -390,7 +375,6 @@ describe("engine markdown source view", () => {
     );
     expect(screen.getByTestId("markdown-save-state").dataset.state).toBe("read-only");
     expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
-    // The pills stay, with no + or × and no edits.
     expect(screen.getAllByTestId("properties-panel")).toHaveLength(1);
     expect(screen.getByLabelText("Property status value")).toHaveProperty("readOnly", true);
     expect(screen.queryByTestId("property-add")).toBeNull();
@@ -442,7 +426,6 @@ describe("engine markdown source view", () => {
   }
 
   it("keeps an unsaved edit copyable and explained after access ends", async () => {
-    // An older draft keeps its own words beside the new one.
     const { user } = await endAccessAfterTyping();
 
     expect(screen.getByTestId("markdown-save-state").dataset.state).toBe("recovery");
@@ -512,7 +495,6 @@ describe("engine markdown source view", () => {
     expect(screen.queryByTestId("deleted-while-editing-notice")).toBeNull();
     expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
     expect((screen.getByTestId("page-title") as HTMLTextAreaElement).readOnly).toBe(true);
-    // Read-only, the pills show with no + and no edits.
     expect(await screen.findByLabelText("Property status value")).toHaveProperty("readOnly", true);
     expect(screen.queryByTestId("property-add")).toBeNull();
     removalInProgress = false;
@@ -585,7 +567,6 @@ describe("engine markdown source view", () => {
     const notice = await screen.findByTestId("engine-may-hold-document-notice");
     expect(notice.textContent).toContain("dohc could not open this document for editing.");
     expect(notice.textContent).toContain("You can still read it.");
-    // The content still renders — read-only, not replaced.
     expect(screen.getByTestId("view-markdown")).toBeTruthy();
     expect(
       screen.getByTestId("markdown-edit-toggle").hasAttribute("disabled") ||
@@ -594,15 +575,10 @@ describe("engine markdown source view", () => {
     ).toBe(true);
     expect(opens).toBe(1);
 
-    // Try again is a fresh open (a new request key), not a repaint.
     await user.click(screen.getByText("Try again"));
     await waitFor(() => expect(opens).toBe(2));
   });
 
-  // When the content read itself failed, the inspector returns from its
-  // loading/error branch before MarkdownView mounts. That branch must offer a
-  // way back. A note no read has checked opens no session, so the way back is
-  // reading it again.
   it("offers Try again when the content read failed, and opens no session for unchecked bytes", async () => {
     const user = userEvent.setup();
     const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
@@ -760,11 +736,6 @@ describe("engine markdown source view", () => {
     ).toHaveBeenCalledTimes(1);
   });
 
-  // Unlike a consumed search jump, a heading target survives the editor
-  // remount a version switch causes. See HeadingNavigationTarget for why.
-  // Scope is that switch. Clicking another file tab and back does not replay:
-  // activateEditorTab routes a file path through openFile, which clears the
-  // target.
   it("re-applies a heading navigation when the version switches under it", async () => {
     const revealedTargets: Array<{
       connected: boolean;
@@ -1004,8 +975,6 @@ describe("engine markdown source view", () => {
     expect(pendingEditor.classList.contains("dohc-code-editor")).toBe(false);
     await user.type(pendingEditor, "Pending switch edit. ");
 
-    // The pending WYSIWYG autosave must answer to the same switch window as
-    // the source timer and both long-lived flush callers.
     await advanceAutosaveDebounce();
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
 
@@ -1039,13 +1008,6 @@ describe("engine markdown source view", () => {
     });
   });
 
-  // The sibling of the test above, with one difference that decides
-  // everything: the replacement read lands before the 800ms debounce, so the
-  // WYSIWYG draft is still LAZY when the resync runs. The 900ms wait above
-  // materializes it first, which is why that test cannot see this. A lazy
-  // draft the resync leaves armed carries the FROZEN pre-switch editor, and
-  // the next materialize — the shell's flush before an explorer op — would
-  // merge it over the new version's baseline and write it.
   it("retires a lazy WYSIWYG draft when the switch reread lands before its debounce", async () => {
     const firstBody = "# Old version\n\nOld paragraph.";
     const secondBody = "# New version\n\nReplacement paragraph.";
@@ -1208,7 +1170,6 @@ describe("engine markdown source view", () => {
       await typeIntoSourceEditor(`${DOC_MARKDOWN}phantom`);
       expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
 
-      // The version switch. Same mount, same pending draft, same armed timer.
       view.rerender(<FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={1} />);
       await act(async () => {
         refuse();
@@ -1216,7 +1177,6 @@ describe("engine markdown source view", () => {
       });
       const notice = await screen.findByTestId("file-not-in-version");
 
-      // Route 1: the read-only transition must not have written.
       expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
       // Route 2: the armed autosave must not write either, now that the
       // document is read-only. Past 800ms it would have, on a stale closure.
@@ -1254,7 +1214,6 @@ describe("engine markdown source view", () => {
       onOpenRecordHistory: () => undefined,
     };
     const view = render(<FileInspector workspaceId="ws-1" path="a.md" {...reports} recordBody />);
-    // The body is the file's live document, with the document's own controls.
     const editor = await screen.findByTestId("markdown-editor");
     await waitFor(() => expect(editor.textContent).toContain("Base paragraph."));
     expect(screen.getByTestId("markdown-source-toggle")).toBeTruthy();

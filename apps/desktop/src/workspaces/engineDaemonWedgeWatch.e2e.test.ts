@@ -159,7 +159,6 @@ describe("engine.ping against a real daemon", () => {
         .toEqual({ failures: [], spannedTwoExpiries: true });
       expect(probes.every(({ request }) => (request.deadlineMs ?? null) === null)).toBe(true);
       expect(failures.map((error) => error.message)).toEqual([]);
-      // Same daemon throughout: a kill would have ended or replaced it.
       expect(() => lifecycle.currentClient()).not.toThrow();
     },
     REAL_DAEMON_TEST_TIMEOUT_MS,

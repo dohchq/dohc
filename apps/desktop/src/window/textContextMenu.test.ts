@@ -34,7 +34,6 @@ function actions() {
   return { replaceMisspelling: vi.fn(), addToDictionary: vi.fn(), lookUp: vi.fn() };
 }
 
-// Each item as one readable word: its label, its role, or "-".
 function shape(template: MenuItemConstructorOptions[]): string[] {
   return template.map((item) =>
     item.type === "separator" ? "-" : (item.label ?? `role:${item.role}`),

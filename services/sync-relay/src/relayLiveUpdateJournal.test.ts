@@ -165,7 +165,6 @@ it("rebuilds an older journal for personal agents and keeps its rows, dependents
       .prepare(`INSERT INTO ${cuts} VALUES (?, ?, ?, 1, 0)`)
       .run(link, "d".repeat(64), "e".repeat(64));
     f.raw.prepare("UPDATE sqlite_sequence SET seq=seq+17 WHERE name=?").run(journal);
-    // Restore the journal an older relay created, which refuses personal authority.
     const current = String(
       f.raw.prepare("SELECT sql FROM sqlite_schema WHERE name=?").get(journal)!.sql,
     );

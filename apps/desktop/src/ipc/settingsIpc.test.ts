@@ -440,7 +440,6 @@ describe("registered settings IPC", () => {
       expect(writes.mock.calls.map(([, settings]) => settings.appearance.zoomLevel)).toEqual([
         1, -2,
       ]);
-      // Every change puts the whole file into effect, the zoom step included.
       expect(h.setCachedNames.mock.calls).toEqual([
         ["First", []],
         ["Next", []],
@@ -599,7 +598,6 @@ describe("registered settings IPC", () => {
       agents: { ...one.agents, codex: testAgent({ name: "Codex", enabled: false }) },
     };
     await h.invoke(settingsOperations.setUserSettings.channel, { settings: off, base: one });
-    // An agent that is off does not change what dohc starts.
     expect(h.scanWorkspace).not.toHaveBeenCalled();
     const on = { ...off, agents: { ...off.agents, codex: testAgent({ name: "Codex" }) } };
     await h.invoke(settingsOperations.setUserSettings.channel, { settings: on, base: off });
@@ -741,7 +739,6 @@ describe("registered settings IPC", () => {
       base: DEFAULT_USER_SETTINGS,
     });
     h.broadcastUserSettings.mockClear();
-    // An edit the watcher has not applied yet: zoom 3 and a name.
     await writeFile(
       path,
       JSON.stringify({
@@ -764,7 +761,6 @@ describe("registered settings IPC", () => {
         settings: expect.objectContaining({ profile: { preferredName: "Ada" } }),
       }),
     );
-    // The zoom save already applied the edit; the watcher finds nothing new.
     await h.reload();
     expect(h.broadcastUserSettings).toHaveBeenCalledOnce();
   });
@@ -900,7 +896,6 @@ describe("registered settings IPC", () => {
       [join(h.root, ".dohc", "visibility.toml")],
       [join(h.root, ".dohc", "files.toml")],
     ]);
-    // The renderer chooses one of the two files, never a path.
     for (const file of [
       ".dohc",
       ".dohc/settings.json",
@@ -1153,7 +1148,6 @@ describe("registered workspace settings and UI state", () => {
 
   it("refuses a workspace settings save or reset until .dohc/local is ready, with words, and makes nothing", async () => {
     const h = await harness();
-    // The window is admitted, but this workspace's engine open has not answered.
     await expect(
       h.invoke(settingsOperations.getWorkspaceSettings.channel, workspacePayload),
     ).resolves.toEqual({ settings: DEFAULT_WORKSPACE_SETTINGS, source: "default" });
@@ -1266,7 +1260,6 @@ describe("registered workspace settings and UI state", () => {
 
   it("refuses a UI-state write the engine has not prepared .dohc/local for, and makes nothing", async () => {
     const h = await harness();
-    // The renderer is admitted, but this workspace's engine open has not answered.
     await expect(
       h.invoke(settingsOperations.setWorkspaceUiState.channel, uiPayload),
     ).rejects.toThrow("dohc has not finished opening this workspace. Try again when it opens.");
@@ -1275,7 +1268,6 @@ describe("registered workspace settings and UI state", () => {
       h.invoke(settingsOperations.getWorkspaceUiState.channel, workspacePayload),
     ).resolves.toBeNull();
 
-    // The open could not keep the folder out of iCloud Drive.
     await h.prepareLocalState(false);
     await expect(
       h.invoke(settingsOperations.setWorkspaceUiState.channel, uiPayload),
@@ -1290,7 +1282,6 @@ describe("registered workspace settings and UI state", () => {
       h.invoke(settingsOperations.getWorkspaceUiState.channel, workspacePayload),
     ).resolves.toEqual(state);
 
-    // Once the engine closes the workspace, writes stop and the saved layout stays.
     h.closeLocalState();
     await expect(
       h.invoke(settingsOperations.setWorkspaceUiState.channel, {

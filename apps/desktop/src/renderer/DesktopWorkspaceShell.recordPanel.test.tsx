@@ -70,7 +70,6 @@ function collectionShell(state: WorkspaceUiState) {
     throw new Error(`Unexpected dataset action: ${request.action}`);
   });
   renderShell(bridge);
-  /** The layout the shell last asked main to save. */
   const saved = () => bridge.setWorkspaceUiState.mock.calls.at(-1)?.[0].state;
   return { saved };
 }

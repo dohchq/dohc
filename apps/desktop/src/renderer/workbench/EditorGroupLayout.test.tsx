@@ -148,8 +148,6 @@ describe("EditorGroupLayout", () => {
     );
   });
 
-  // EditorTabs reads the data attributes to mark the active group's strip,
-  // and aria-current says the same to a screen reader.
   it("marks a split and its active group, and leaves a single group unmarked", () => {
     renderLayout();
     expect(screen.getByTestId("editor-group-layout").dataset.split).toBe("true");
@@ -174,7 +172,6 @@ describe("EditorGroupLayout", () => {
     expect(screen.getByTestId("editor-group-layout").dataset.split).toBeUndefined();
     const only = screen.getByRole("region", { name: "Editor group 1" });
     expect(only.getAttribute("aria-current")).toBeNull();
-    // No frame around the group: the strip carries the mark in a split.
     expect(only.className).not.toContain("ring");
   });
 
@@ -226,7 +223,6 @@ describe("EditorGroupLayout", () => {
     expect(screen.getByTestId("editor-group-layout").dataset.split).toBe("true");
     expect(middle.getAttribute("aria-current")).toBe("true");
     expect(left.getAttribute("aria-current")).toBeNull();
-    // The empty group keeps its strip, which carries the active mark.
     expect(middle.querySelector('[data-testid="editor-tabs-active-group"]')).not.toBeNull();
   });
 

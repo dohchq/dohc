@@ -307,7 +307,6 @@ for (const status of ["degraded", "unavailable"] as const) {
         },
       });
       expect(index.query("host")).toEqual([]);
-      // Selector narrowing and Remove/Leave arrive through the canonical listing.
       update(index, {
         listing: { ...snapshot, files: snapshot.files.slice(0, 1), receivedRoots: [] },
       });
@@ -846,7 +845,6 @@ it("discards unpublished file entries when rebuilding after interruption", () =>
   drain(index.update({ listing: source }));
   expect(index.query("unpublished")).toEqual([]);
   update(index, { listing: added });
-  // An entry from a cancelled run is not a retained prepared row.
   expect(index.lastPreparationCount).toBe(1);
   expect(index.query("unpublished")).toHaveLength(1);
 });

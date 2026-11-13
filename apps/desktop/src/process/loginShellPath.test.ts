@@ -173,7 +173,6 @@ describe("adoptLoginShellPath", () => {
   });
 });
 
-// A shell whose output, exit and close the test drives.
 function fakeShell() {
   const events = new EventEmitter();
   const stdout = new PassThrough();
@@ -320,7 +319,6 @@ describe.skipIf(process.platform === "win32")("readLoginShellPath", () => {
     const started = Date.now();
     const entries = await readProfile(dir, 10_000);
     expect(entries?.[0]).toBe("/opt/dohc-test/bin");
-    // The PATH arriving ended it; the deadline did not.
     expect(Date.now() - started).toBeLessThan(10_000);
     await vi.waitFor(() => groupGone(join(dir, "shell.pid")));
   });

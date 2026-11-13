@@ -577,10 +577,8 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     const binding = await bindEngineYDoc(mock.transport, batches.scheduler);
     const doc = binding.doc!;
 
-    // The seed apply happened under the engine origin: nothing shipped yet.
     expect(mock.shipped.length).toBe(0);
 
-    // A real editor edit is staged immediately, then waits for its batch.
     typeIntoBody(doc, "Local edit.");
     expect(mock.staged()).toBe(1);
     expect(mock.shipped.length).toBe(0);
@@ -967,12 +965,10 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     expect(mock.closed()).toBe(true);
     expect(mock.events).toEqual(["apply:1", "close"]);
 
-    // A post-destroy edit (e.g. a late transaction) must not ship.
     const shippedBefore = mock.shipped.length;
     typeIntoBody(doc, "After destroy.");
     expect(mock.shipped.length).toBe(shippedBefore);
 
-    // Idempotent.
     await binding.destroy();
     expect(mock.events).toEqual(["apply:1", "close"]);
   });
@@ -1129,7 +1125,6 @@ describe("engine Y.Doc provider — renderer bridge", () => {
       },
     });
     typeIntoBody(binding.doc!, "Unacknowledged edit.");
-    // Flush the batch so its delivery is genuinely in flight — and held.
     await batches.runNext();
     expect(mock.shipped).toHaveLength(1);
 
@@ -1244,7 +1239,6 @@ describe("engine Y.Doc provider — renderer bridge", () => {
       saved: "b".repeat(64),
     });
 
-    // A delta that keeps the source keeps its head.
     push(() => typeIntoBody(remote, "More."));
     expect(seen).toHaveLength(2);
     expect(binding.headSha256).toBe("b".repeat(64));
@@ -1252,10 +1246,8 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     push(() => remote.getMap("meta").set("dohcMarkdownSourceSha256", "c".repeat(64)));
     expect(seen).toHaveLength(3);
     expect(binding.headSha256).toBeUndefined();
-    // The save's receipt outlasts the head it wrote.
     expect(binding.lastSave).toEqual({ sha256: "b".repeat(64), pairedInstalls: 1 });
 
-    // Another lineage's pair is not this doc's.
     push(() => typeIntoBody(remote, "Stale."), 2, { sha256: "d".repeat(64) });
     expect(seen).toHaveLength(3);
     expect(binding.headSha256).toBeUndefined();
@@ -1273,7 +1265,6 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     mock.pushRemote(new Uint8Array([0, 0]), 1, {});
     expect(binding.headSha256).toBeUndefined();
     expect(changes).toHaveBeenCalledTimes(2);
-    // The read that pairs a head with it counts the install.
     expect(binding.pairedInstalls).toBe(1);
     await binding.destroy();
   });
@@ -1392,7 +1383,6 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     expect(changes).toHaveBeenCalledTimes(2);
     mock.pushRemote(new Uint8Array([0, 0]), 1, { sha256: "b".repeat(64), committed: true });
     mock.pushRemote(new Uint8Array([0, 0]));
-    // A read of the head the save wrote is that save.
     mock.pushRemote(new Uint8Array([0, 0]), 1, { sha256: "b".repeat(64) });
     expect(binding.pairedInstalls).toBe(2);
     expect(binding.lastSave).toEqual({ sha256: "b".repeat(64), pairedInstalls: 2 });
@@ -1479,7 +1469,6 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     };
 
     await expect(mock.replaceLineage(replacement)).rejects.toThrow("storage refused");
-    // No acknowledgement, no winner, and nothing of the losing document sent.
     expect(mock.acknowledgedGenerations).toEqual([]);
     expect(binding.doc).toBe(losingDoc);
     typeIntoBody(losingDoc, "Typed while frozen.");
@@ -1496,7 +1485,6 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     expect(bodyText(binding.doc!)).not.toContain("Typed before the refusal.");
     expect(mock.shipped).toHaveLength(shippedBefore);
 
-    // Trying the installed generation again does nothing.
     await retries[0]!();
     expect(preserved).toHaveLength(2);
     expect(mock.acknowledgedGenerations).toEqual([2]);

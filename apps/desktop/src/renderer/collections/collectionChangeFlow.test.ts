@@ -73,8 +73,6 @@ it("shows a collaborator's unapplied edit as its own row with its author", async
 it("names each row's author as History does, and nobody where History names only where a change came from", async () => {
   const place = world();
   ask(place);
-  // History names an Edit link's write by its holder, calls an agent that gave no name "Agent",
-  // and credits a change written straight to disk to nobody.
   const link = {
     kind: "link" as const,
     grantId: "grant-1",

@@ -130,7 +130,6 @@ describe("usePersonalChatFeed with the reaction store", () => {
     await waitFor(() => expect(store.pending("thread-1", "message-1")).toBe(false));
     expect(shown()).toEqual([row()]);
 
-    // The page began before the write and lands last, without the like.
     await act(async () => {
       olderRead.resolve({ items: [item("message-1")] });
       await olderRead.promise;

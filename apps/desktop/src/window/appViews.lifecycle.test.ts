@@ -172,7 +172,6 @@ it("creates no launch or guest authorization without an active approval", async 
   f.owner.emit("will-attach-webview", event, {}, { src: "http://127.0.0.1:43000/bootstrap" });
   expect(event.preventDefault).toHaveBeenCalledOnce();
 });
-// dohc's tab session is the only one that credits a person's click, so main opens it only for a window's own page.
 it("opens dohc's tab session only for a workspace window's own page, never for an app's view or a frame inside one", async () => {
   const f = fixture();
   const request = {
@@ -394,7 +393,6 @@ it("gives the app's frame dohc's theme before it starts, follows each change, an
   expect(
     calls.some((call) => call[0] === "Emulation.setEmulatedMedia" && call[2] === "worker"),
   ).toBe(false);
-  // A change reaches the guest's page and the app's frame, and not a frame that has gone.
   debug.emit("message", {}, "Target.detachedFromTarget", { sessionId: "gone" }, "");
   debug.sendCommand.mockClear();
   await f.invoke({ action: "colorScheme", workspaceId: "w", colorScheme: "light" });

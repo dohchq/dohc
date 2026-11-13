@@ -608,7 +608,6 @@ it("redeems a personal agent's ticket only from the connection it names", async 
   }
 });
 
-// The v2 table, before personal agents.
 const V2_TICKET_TABLE = `CREATE TABLE ${table} (
   ticket_id TEXT NOT NULL CHECK (length(CAST(ticket_id AS BLOB)) BETWEEN 1 AND 512),
   token_hash TEXT NOT NULL CHECK (length(token_hash) = 43 AND length(CAST(token_hash AS BLOB)) = 43 AND token_hash NOT GLOB '*[^A-Za-z0-9_-]*'),

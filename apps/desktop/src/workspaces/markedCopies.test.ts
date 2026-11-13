@@ -38,8 +38,6 @@ const unmarked = (profile: string) => ({
   mark: async () => undefined,
 });
 
-// What the toast and its Notices row say, and what Copy details keep, once
-// main's error has crossed to the renderer.
 function shown(error: unknown, platform: NodeJS.Platform) {
   const wire = String(ipcWireError(withPrivacyDenial(error, platform)));
   const received = new Error(

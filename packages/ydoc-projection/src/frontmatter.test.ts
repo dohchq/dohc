@@ -38,7 +38,6 @@ const SHARED_BLOCK = [
 // The same values with a comment, so a document keeps the text as written.
 const KEPT_SHARED_BLOCK = SHARED_BLOCK.replace("---\n", "---\n# Keep this note\n");
 
-/** The document as a replica receives it over the Yjs wire. */
 function received(markdown: string): Y.Doc {
   const written = markdownToYDoc(markdown);
   const doc = new Y.Doc();
@@ -93,14 +92,12 @@ const MOVED_KEYS = [
   "status",
 ];
 
-/** Another replica of the document, through the Yjs wire. */
 function replica(doc: Y.Doc): Y.Doc {
   const copy = new Y.Doc();
   Y.applyUpdate(copy, Y.encodeStateAsUpdate(doc));
   return copy;
 }
 
-/** The frontmatter keys an action changes, including changes inside a shared value. */
 function changedKeys(doc: Y.Doc, action: () => void): Set<string> {
   const frontmatter = doc.getMap<unknown>("frontmatter");
   const changed = new Set<string>();
@@ -190,8 +187,6 @@ describe("shared frontmatter edit candidates", () => {
 });
 
 describe("shared frontmatter values a patch writes", () => {
-  // A rename removes the old key and writes the value read from it under the
-  // new one. The value arrives decoded, with null-prototype maps.
   it.each(MOVED_KEYS)("moves %s to a new key as the canonical writer keeps it", (key) => {
     const doc = received(`${MOVED_BLOCK}Body`);
     const frontmatter = doc.getMap<unknown>("frontmatter");

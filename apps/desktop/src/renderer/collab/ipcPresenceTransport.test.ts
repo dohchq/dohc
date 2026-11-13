@@ -31,7 +31,6 @@ describe("createIpcPresenceTransport", () => {
   it("publish forwards scope/topic/clientId/state and normalizes the snapshot", async () => {
     bridgeMock.presencePublish.mockResolvedValue({
       ok: true,
-      // A peer with NO state exercises the optional→null normalization.
       snapshot: {
         version: 3,
         peers: [

@@ -115,8 +115,6 @@ const contributionsPath =
   `${scope.workspaceId}/held-documents/${held.objectId}/contributions` +
   `?bindingDigest=${held.bindingDigest}&sha256=${sha256(contributions)}`;
 
-// Each bearer names one account: the owner, a named Edit recipient, a View
-// recipient, and the owners of two other workspaces.
 const accounts: Record<string, string> = {
   "Bearer owner": "owner-1",
   "Bearer editor": scope.userId,
@@ -432,7 +430,6 @@ describe("held document routes", () => {
     ).toBe(true);
     expect(Buffer.from(await artifact.arrayBuffer())).toEqual(contributions);
     expect([markdownAsked, contributionsAsked]).toEqual([[], ["contributions"]]);
-    // The Markdown route asks for the text alone, and the details for neither.
     const text = await f.get(markdownPath);
     expect(text.status).toBe(200);
     await text.arrayBuffer();
@@ -571,7 +568,6 @@ describe("held document read admission", () => {
       expect(await response.json()).toMatchObject({ code: "held_read_busy" });
     }
     expect(h.reads).toHaveLength(1);
-    // Another owner reading their own workspace is admitted beside it.
     const other = f.get("workspace-2/held-documents", { authorization: "Bearer stranger" });
     await h.asked(2);
     h.reads[1]!.answer();
@@ -579,7 +575,6 @@ describe("held document read admission", () => {
     h.reads[0]!.answer();
     const answered = await first;
     expect(answered.status).toBe(200);
-    // Reading the answer frees the slot.
     await answered.json();
     const next = f.get(details);
     await h.asked(3);
@@ -672,7 +667,6 @@ describe("held document read admission", () => {
     await next.json();
   });
 
-  /** The details paths of more workspaces `ownerUserId` owns, beside the fixture's. */
   function owned(
     f: Awaited<ReturnType<typeof relay>>,
     ownerUserId: string,
@@ -748,14 +742,11 @@ describe("held document read admission", () => {
     const [answered, refused] = (await Promise.all(both)).sort((a, b) => a.status - b.status);
     expect([answered!.status, refused!.status]).toEqual([200, 429]);
     expect(await refused!.json()).toMatchObject({ code: "held_read_busy" });
-    // While the owner's answer holds its bytes, another artifact read is refused before the host reads it.
     const early = await artifact("workspace-4");
     expect(early.status).toBe(429);
     expect(await early.json()).toMatchObject({ code: "held_read_busy" });
     expect(asked).toHaveLength(2);
-    // A caller who doesn't own the workspace learns nothing about the owner's share.
     expect((await artifact("workspace-4", "Bearer editor")).status).toBe(404);
-    // Another owner fits beside it.
     const other = await artifact("workspace-2", "Bearer stranger");
     expect(other.status).toBe(200);
     await other.body!.cancel();
@@ -792,7 +783,6 @@ describe("held document read admission", () => {
     const { answered, strangers, large } = await fullBudget();
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
-      // Both clients read the headers, then take nothing.
       const stalled = answered.map(sending);
       await vi.waitFor(() => {
         for (const { outgoing } of stalled) expect(outgoing.written).toBeGreaterThan(0);

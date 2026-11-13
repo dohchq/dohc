@@ -264,7 +264,6 @@ it("waits out an open whose daemon request starts late but finishes within its o
   await sessions.closeAll();
 });
 
-// Opens whose first attempts are refused: a busy store, then a dropped transport.
 function refuseOpens(client: MockClient, refusals: unknown[]): void {
   const request = client.sendRequest.bind(client);
   vi.spyOn(client, "sendRequest").mockImplementation(async (input) => {
@@ -421,7 +420,6 @@ it("ends the wait for an open under way after two open deadlines in all, however
   );
   vi.useFakeTimers();
   try {
-    // Each run's attempt is refused at once and its run pauses for good.
     const startAttempt = async () => {
       void sessions.run(workspace, async () => undefined).catch(() => undefined);
       await vi.advanceTimersByTimeAsync(0);
@@ -601,7 +599,6 @@ it("ends a wait on a close that keeps the workspace once a close for good starts
   const waited = sessions.openInProgress(workspace);
   expect(waited).not.toBeNull();
   const retiring = sessions.closeWorkspace(workspace);
-  // Before the first close settles.
   await waited;
   held.resolve();
   await closing;
@@ -657,7 +654,6 @@ it("removes the workspace on a close for good when the close it waited for fails
   await expect(closing).rejects.toThrow("close failed");
   await retiring;
   client.holdClose = null;
-  // A later run opens the workspace again instead of finding it retiring.
   await sessions.run(workspace, async () => undefined);
   expect(sessions.currentBinding(workspace)?.localStateReady).toBe(true);
   await sessions.closeAll();
@@ -677,7 +673,6 @@ it("reports the current binding's .dohc/local readiness only while that open sta
   expect(readiness()).toBeNull();
   await sessions.run(workspace, async () => undefined);
   expect(readiness()).toBe(true);
-  // A new client makes the old binding stale before any reopen starts.
   client = unmarked;
   expect(readiness()).toBeNull();
   await sessions.run(workspace, async () => undefined);
@@ -701,7 +696,6 @@ it("reports the current binding's .dohc/local readiness only while that open sta
   await reopening;
   expect(readiness()).toBe(true);
 
-  // A reopen that fails leaves nothing current.
   await sessions.closeWorkspaceBinding(workspace);
   ready.failOpen = true;
   await expect(sessions.run(workspace, async () => undefined)).rejects.toThrow("open refused");
@@ -1678,11 +1672,6 @@ describe("EngineWorkspaceSessions", () => {
     },
   );
 
-  // The squat shapes an errno allowlist gets wrong. mkdir raises EEXIST for a
-  // file and ENOENT for a dangling link, so the old `isAlreadyExists` check
-  // rethrew the dangling case as a bare errno and answered the file case with
-  // "must not be a symlink" -- about a plain file. Presence decides now, and
-  // both name what is actually there.
   it.each([
     [
       "a file",
@@ -1731,7 +1720,6 @@ describe("EngineWorkspaceSessions", () => {
     await expect(
       sessions.run({ workspaceId: "workspace", rootPath }, async (binding) => binding.workspace),
     ).rejects.toThrow(refusal);
-    // Nothing opened, and the refusal never printed the absolute host path.
     expect(requests).toBe(0);
   });
 
@@ -2656,10 +2644,6 @@ describe("EngineWorkspaceSessions", () => {
     expect(clientLookups).toBeGreaterThanOrEqual(3);
   });
 
-  // The pacing tests above pin the growth of the transport backoff; nothing
-  // pinned its ceiling, so the delay could double without limit and the whole
-  // suite stayed green. Three capped delays distinguish a ceiling from
-  // a slower uncapped curve, and eight attempts is what it takes to see them.
   it("stops doubling the transport backoff at its ceiling", async () => {
     const workspace = await tempWorkspace("workspace-backoff-ceiling");
     const client = new MockClient("handle-backoff-ceiling");
@@ -2692,9 +2676,6 @@ describe("EngineWorkspaceSessions", () => {
     ).toEqual([100, 200, 400, 800, 1_000, 1_000, 1_000]);
   });
 
-  // The retry deadline bounds how long one run may keep waiting on
-  // transport recovery. It gates retries only — a healthy first attempt is
-  // never rejected, however small the deadline.
   describe("retryDeadlineMs", () => {
     it("never rejects a healthy open, however small the deadline", async () => {
       const workspace = await tempWorkspace("workspace-healthy-deadline");
@@ -2795,10 +2776,6 @@ describe("EngineWorkspaceSessions", () => {
     });
 
     it("does not start attempt N+1 on a budget the backoff spent", async () => {
-      // The deadline was checked only before the backoff. An
-      // attempt ending just inside it could ride the backoff over the line
-      // and still start a fresh 2 s open on a spent budget (~8 s observed on
-      // a 6 s contract). The clock is re-checked after the backoff.
       const workspace = await tempWorkspace("workspace-overshoot");
       const client = new MockClient("handle-overshoot");
       let nowMs = 0;
@@ -2842,8 +2819,6 @@ describe("EngineWorkspaceSessions", () => {
     });
 
     it("bounds the client-churn open ladder the same way", async () => {
-      // Churning client generations held a caller through six
-      // full opens — the ladder consulted neither the deadline nor shutdown.
       const workspace = await tempWorkspace("workspace-churn-deadline");
       const first = new MockClient("handle-churn-a");
       const second = new MockClient("handle-churn-b");
@@ -2919,10 +2894,6 @@ describe("EngineWorkspaceSessions", () => {
     });
 
     it("bounds an open that keeps refusing with afterReconnect", async () => {
-      // The open ladder's gate only recognised transport and
-      // daemon-unavailable errors, so a `workspace.open` refusing with the
-      // afterReconnect disposition — which the shipping daemon does — ran
-      // six full opens past a spent budget.
       const workspace = await tempWorkspace("workspace-open-reconnect");
       let nowMs = 0;
       let opens = 0;
@@ -2957,12 +2928,6 @@ describe("EngineWorkspaceSessions", () => {
     });
 
     it("calls an exhausted ladder past its budget a deadline, not a transport failure", async () => {
-      // The last allowed attempt can start inside the budget
-      // and finish outside it. That branch threw the transport error, and
-      // main maps only EngineWorkspaceRetryDeadlineError to `engineMayHoldDocument` —
-      // so an exhausted ladder downgraded an engine-owned document to the
-      // writable plain editor. Same failure as the unbounded-task blocker,
-      // through a different door.
       const workspace = await tempWorkspace("workspace-exhausted");
       const client = new MockClient("handle-exhausted");
       let nowMs = 0;
@@ -3226,7 +3191,6 @@ describe("EngineWorkspaceSessions", () => {
               workspace,
               async () => {
                 nowMs += 3_000;
-                // Quit arrives while the last allowed attempt is in flight.
                 if (nowMs >= 6_000) sessions.beginShutdown();
                 throw transportFailure();
               },
@@ -3290,10 +3254,6 @@ describe("EngineWorkspaceSessions", () => {
     });
 
     it("counts attempts across the whole budget, not one ladder's share", async () => {
-      // The refusal reported the LOCAL ladder's counter, which
-      // each `run` resets — so a wait covering several daemon attempts could
-      // say "across 1 attempts". False diagnostic data in an error whose job
-      // is to tell an agent what happened.
       const workspace = await tempWorkspace("workspace-cumulative");
       const client = new MockClient("handle-cumulative");
       let nowMs = 0;
@@ -3304,10 +3264,6 @@ describe("EngineWorkspaceSessions", () => {
 
       const outcome = await sessions
         .withRetryBudget(4_000, async () => {
-          // Two runs inside one budget. The first is not a retry ladder, so
-          // it spends one attempt and rejects on its own; the second retries
-          // and trips the budget on its second attempt. Three attempts have
-          // happened by then — one ladder can only see two.
           await sessions
             .run(workspace, async () => {
               nowMs += 2_000;
@@ -3330,7 +3286,6 @@ describe("EngineWorkspaceSessions", () => {
         (outcome as Error).message,
         "report the local `attempt` -> 'across 1 attempts', a number the reader would take for the whole wait.",
       ).toContain("across 3 failed attempts");
-      // The constraint named is the one the caller set.
       expect((outcome as Error).message).toContain("withRetryBudget budgetMs limit of 4000ms");
       // The budget's clock starts at the first failure (t=2,000) and the
       // region started at t=0, so the two durations differ by that first
@@ -3364,8 +3319,6 @@ describe("EngineWorkspaceSessions", () => {
             await sessions.run(
               workspace,
               async () => {
-                // A slow first attempt (2s) the budget must not charge, then
-                // failures that spend it.
                 nowMs += 2_000;
                 throw transportFailure();
               },
@@ -3376,8 +3329,6 @@ describe("EngineWorkspaceSessions", () => {
 
       expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
       const deadline = outcome as EngineWorkspaceRetryDeadlineError;
-      // The chain was held for 8s; the recovery window that the limit bounds
-      // opened 2s in.
       expect(deadline.measuredMs).toBe(6_000);
       expect(deadline.totalWaitedMs).toBe(8_000);
       expect(deadline.message).toContain("6000ms since the first failure");
@@ -3406,8 +3357,6 @@ describe("EngineWorkspaceSessions", () => {
             workspace,
             async () => {
               attempts += 1;
-              // Attempt 1 works for 10 s — five times the budget — and then
-              // hits one transport blip. Attempt 2 binds immediately.
               if (attempts === 1) {
                 nowMs += 10_000;
                 throw transportFailure();
@@ -3443,8 +3392,6 @@ describe("EngineWorkspaceSessions", () => {
       const outcome = await sessions
         .withRetryBudget(2_000, async () => {
           let attempts = 0;
-          // Call 1 fails once — starting the clock — waits out the whole
-          // budget, and then SUCCEEDS. Nothing on this path throws.
           await sessions.run(
             workspace,
             async () => {
@@ -3470,15 +3417,10 @@ describe("EngineWorkspaceSessions", () => {
       const deadline = outcome as EngineWorkspaceRetryDeadlineError;
       expect(deadline.constraint).toBe("withRetryBudget budgetMs");
       expect(deadline.limitMs).toBe(2_000);
-      // The failure that started the clock rides along, so the refusal says
-      // what the region was recovering from.
       expect(deadline.cause).toMatchObject({ code: "transport-error" });
     });
 
     it("refuses the next call when quit arrives between two calls", async () => {
-      // The same gap, reached the other way: `withRetryBudget` checks
-      // `shuttingDown` at region entry, so a flag that flips between two calls
-      // was never consulted and the region went on holding the chain.
       const workspace = await tempWorkspace("workspace-quit-between");
       const client = new MockClient("handle-quit-between");
       let secondCall = 0;
@@ -3518,8 +3460,6 @@ describe("EngineWorkspaceSessions", () => {
         close: () => undefined,
         async sendRequest(request) {
           opens += 1;
-          // The first open fails, which starts the clock, and the retry
-          // succeeds — after the whole window has gone by.
           if (opens === 1) {
             nowMs += 100;
             throw transportFailure();
@@ -3555,16 +3495,6 @@ describe("EngineWorkspaceSessions", () => {
       expect(operations).toBe(0);
     });
 
-    // The third await found holding this hole, which is why the check moved to
-    // the doors instead of gaining a third caller. A run that arrives while the
-    // entry is closing waits for that close — and a `workspace.close` is a
-    // daemon round trip, so the window can go by inside it. The run then walked
-    // on into a 2 s `workspace.open` with nothing left to stop it.
-    //
-    // What it costs is the open, not the answer: the gate after the rebind
-    // still refuses the operation, so the run fails either way. It fails after
-    // holding the capture chain through a 2 s `workspace.open` that had no
-    // business starting — which is the hold, and the thing to count.
     function closingEntryHarness(options: {
       onClose: (advance: () => void) => void;
       nowRef: { ms: number };
@@ -3596,7 +3526,6 @@ describe("EngineWorkspaceSessions", () => {
       const client = closingEntryHarness({
         nowRef,
         opensAfterClose,
-        // The close IS the wait: the budget goes by inside it.
         onClose: (advance) => advance(),
       });
       const sessions = new EngineWorkspaceSessions(
@@ -3606,8 +3535,6 @@ describe("EngineWorkspaceSessions", () => {
 
       const outcome = await sessions
         .withRetryBudget(2_000, async () => {
-          // One failure starts the clock, and the retry succeeds well inside
-          // the window — so the gate at the top of `run` has nothing to refuse.
           let attempts = 0;
           await sessions.run(
             workspace,
@@ -3645,8 +3572,6 @@ describe("EngineWorkspaceSessions", () => {
       const client = closingEntryHarness({
         nowRef,
         opensAfterClose,
-        // Quit arrives while the close is in flight, so nothing this run has
-        // already checked knows about it.
         onClose: () => sessions.beginShutdown(),
       });
       sessions = new EngineWorkspaceSessions(
@@ -3669,7 +3594,6 @@ describe("EngineWorkspaceSessions", () => {
 
       expect(outcome).toBeInstanceOf(EngineWorkspaceShuttingDownError);
       expect(operations).toBe(0);
-      // Nothing new starts during teardown, whatever it waited on.
       expect(opensAfterClose.count).toBe(0);
     });
 
@@ -3688,8 +3612,6 @@ describe("EngineWorkspaceSessions", () => {
       let nowMs = 5_000;
       let reads = 0;
       let closeStarted = 0;
-      // Every open answers and then finds the client changed under it, so the
-      // ladder churns — and every loser's cleanup close hangs.
       const churning = (): EngineDaemonClient => ({
         close: () => undefined,
         async sendRequest(request) {
@@ -3697,7 +3619,6 @@ describe("EngineWorkspaceSessions", () => {
             closeStarted += 1;
             return await new Promise<never>(() => {});
           }
-          // Each open costs 4,000 ms against a 2,000 ms window.
           nowMs += 4_000;
           return { id: request.id, result: { workspace: "churning" } };
         },
@@ -3751,7 +3672,6 @@ describe("EngineWorkspaceSessions", () => {
           workspace,
           async () => {
             attempts += 1;
-            // One failure starts the budget's clock, and the retry binds.
             if (attempts === 1) throw transportFailure();
             return "bound";
           },
@@ -3759,11 +3679,9 @@ describe("EngineWorkspaceSessions", () => {
         );
         settle = new Promise((resolve, reject) => {
           setTimeout(() => {
-            // The accepted edit's settle, on the live session.
             sessions.run(workspace, async () => "settled").then(resolve, reject);
           }, 0);
         });
-        // The open spends the rest of its window before returning.
         nowMs += 5_000;
       });
 
@@ -3771,9 +3689,6 @@ describe("EngineWorkspaceSessions", () => {
     });
 
     it("lets a settle armed during the open survive quit", async () => {
-      // The same leak, reached through `beginShutdown` instead of the clock:
-      // an abandonable region stops retrying at quit, and a live document's
-      // settle is not abandonable.
       const workspace = await tempWorkspace("workspace-settle-after-quit");
       const client = new MockClient("handle-settle-quit");
       const sessions = new EngineWorkspaceSessions({
@@ -3791,8 +3706,6 @@ describe("EngineWorkspaceSessions", () => {
                 workspace,
                 async () => {
                   attempts += 1;
-                  // The daemon blips once; an accepted write retries through
-                  // it even at quit.
                   if (attempts === 1) throw transportFailure();
                   return "settled";
                 },
@@ -3808,9 +3721,6 @@ describe("EngineWorkspaceSessions", () => {
     });
 
     it("keeps running a region whose budget clock never started", async () => {
-      // The invariant the gate must not break: a healthy attempt costs the
-      // budget nothing, however long it takes, so a region that has not
-      // failed yet is never refused for time alone.
       const workspace = await tempWorkspace("workspace-healthy-region");
       const client = new MockClient("handle-healthy-region");
       let nowMs = 5_000;
@@ -3842,9 +3752,6 @@ describe("EngineWorkspaceSessions", () => {
     });
   });
 
-  // App quit. Retry waiting ends now — an armed backoff resolves, the
-  // failure that caused it surfaces, and the capture chain behind the run is
-  // free within one attempt instead of the full ladder.
   describe("beginShutdown", () => {
     // Quit ends retry waiting for a bounded region, and only for one. Every
     // test below therefore runs its ladder inside `withRetryBudget`, because
@@ -3986,9 +3893,6 @@ describe("EngineWorkspaceSessions", () => {
     });
 
     it("exits the client-churn open ladder", async () => {
-      // beginShutdown resolved the churn ladder's sleep, but
-      // the loop continued without checking — churning generations could
-      // hold the chain into the forced-exit timer.
       const workspace = await tempWorkspace("workspace-churn-shutdown");
       const first = new MockClient("handle-churn-c");
       const second = new MockClient("handle-churn-d");
@@ -4091,9 +3995,6 @@ describe("EngineWorkspaceSessions", () => {
     });
 
     it("makes a later afterReconnect refusal final too", async () => {
-      // Same gap from the shutdown side: an afterReconnect storm at quit
-      // never consulted `shuttingDown`, so it kept reopening the workspace
-      // while the teardown waited on the chain behind it.
       const workspace = await tempWorkspace("workspace-reconnect-shutdown");
       const client = new MockClient("handle-reconnect-quit");
       let attempts = 0;
@@ -4229,7 +4130,6 @@ describe("EngineWorkspaceSessions", () => {
       let attempts = 0;
       const sleep = vi.fn(async () => {});
       const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { sleep });
-      // An accepted write implies an open workspace.
       await sessions.run(workspace, async () => undefined);
       sessions.beginShutdown();
 
@@ -4249,8 +4149,6 @@ describe("EngineWorkspaceSessions", () => {
         attempts,
         "consult `shuttingDown` for every run, not just a bounded region -> one attempt, the write is abandoned, and the edit is gone.",
       ).toBe(3);
-      // It keeps its pacing. Quit ends the waiting of abandonable work only,
-      // and the test below is why.
       expect(sleep).toHaveBeenCalled();
     });
 

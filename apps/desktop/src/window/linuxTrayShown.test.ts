@@ -2,7 +2,6 @@ import type { execFile } from "node:child_process";
 import { describe, expect, it, vi } from "vitest";
 import { linuxTrayShown } from "./linuxTrayShown";
 
-// Answers each gdbus call in turn: stdout, or an error.
 function runner(...answers: Array<string | Error>) {
   return vi.fn(
     (

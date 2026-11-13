@@ -518,7 +518,6 @@ describe("stop one workspace's sync", () => {
     try {
       const h = await fixture(true, true);
       h.daemon.openFails = true;
-      // The activity still opens, but the open that abandons the pull did not.
       await expect(h.stop(h.operation())).resolves.toMatchObject({ workspaceSynced: false });
       expect(h.openActivity).toHaveBeenCalledOnce();
       expect(h.cleanupFailed).toHaveBeenCalledWith(
@@ -527,7 +526,6 @@ describe("stop one workspace's sync", () => {
       );
       expect(h.service.getStatus(h.workspace, h.state).collectionsWaitingForSync).toBe("reopen");
       expect(h.daemon.pullUnfinished).toBe(true);
-      // Try again repeats the reopen, and stays while the engine refuses it.
       const again = await reopenWithoutSync(h.reopen, h.operation().workspace);
       expect(again).toMatchObject({
         reopened: false,

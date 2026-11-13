@@ -42,7 +42,6 @@ afterEach(async () => {
   for (const close of cleanups.splice(0).reverse()) await close();
   vi.clearAllMocks();
 });
-// The next start of dohc, with the same record.
 function restart(record: string, workspaces: string[] = [], onLeftover = vi.fn()) {
   const registry = createOwnerDatasetCopyRegistry({
     record,
@@ -143,12 +142,10 @@ it("keeps each copy in .dohc/local/dataset-copies, private, and ignores the old 
       expect((await lstat(folder)).mode & 0o777).toBe(0o700);
   expect(await readdir(old)).toEqual(["replica.sqlite"]);
   expect(await readFile(join(old, "replica.sqlite"), "utf8")).toBe("old");
-  // The Collections this computer keeps sit beside the copies, and stay.
   const store = join(f.input.rootPath, ".dohc", "local", "datasets");
   await mkdir(store);
   await writeFile(join(store, "state.sqlite"), "the Collections");
   const removedBefore = files.removed.length;
-  // Signing out removes the copy at its new path, and the old folder with the account's data.
   await f.registry.credentialsChanged(null);
   expect(await readdir(dirname(directory))).toEqual([]);
   expect(await readdir(join(f.input.rootPath, ".dohc"))).toEqual(["local"]);
@@ -177,7 +174,6 @@ it.skipIf(process.platform === "win32").each(["writable by others", "hard-linked
     );
     expect(mocks.open).toHaveBeenCalledOnce();
     expect(await readFile(planted, "utf8")).toBe("planted");
-    // Once the folder is gone, the next request opens a copy.
     await rm(directory, { recursive: true });
     await f.registry.get(f.input);
     expect(mocks.open).toHaveBeenCalledTimes(2);
@@ -241,7 +237,6 @@ it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
     await expect(next.credentialsChanged(null)).rejects.toThrow("EACCES");
     expect(next.leftover()).toEqual({ ...nothing, recordUnreadable: true });
     expect(onLeftover).toHaveBeenCalledOnce();
-    // Leaving an account meanwhile names folders of its own, and still writes nothing over the record.
     await next.credentialsChanged(f.input.ownerKey).catch(() => undefined);
     await expect(next.credentialsChanged(null)).rejects.toThrow("EACCES");
     await chmod(f.record, 0o600);
@@ -266,7 +261,6 @@ it("records what a sign-out will remove before any copy closes, so a stop part w
   const removal = f.registry.credentialsChanged(null);
   try {
     await closeCalled.promise;
-    // dohc stops while the copy closes. The next start removes it.
     await restart(f.record).credentialsChanged(null);
     expect(await readdir(dirname(directory))).toEqual([]);
   } finally {
@@ -291,7 +285,6 @@ it.skipIf(process.platform === "win32")(
     await symlink(outside, f.directory, "dir");
     await writeFile(f.record, JSON.stringify({ folders: [f.directory, stray] }));
     const next = restart(f.record);
-    // An unchanged owner answers with the start's own removal.
     await expect(next.credentialsChanged(null)).rejects.toThrow(
       "Collection copy storage changed. Its files were not removed.",
     );
@@ -345,7 +338,6 @@ it("removes only the copies of accounts that left in a look still owed, never th
   const long = join(copies, `${basename(mine[0]!).slice(0, 16)}-${"3".repeat(64)}`);
   await mkdir(long);
   await writeFile(join(long, "replica.sqlite"), "B's data");
-  // dohc starts again, able to list them, with B still signed in.
   listing = true;
   await restart(f.record, [f.input.rootPath, earlier]).credentialsChanged(null);
   for (const copy of mine) expect(await readdir(copy)).toEqual(["owned.sqlite"]);
@@ -369,7 +361,6 @@ it("removes the copies of an account cleared outside dohc once another account s
   const next = restart(f.record, [f.input.rootPath]);
   await next.credentialsChanged(null);
   expect(await readdir(directory)).toEqual(["owned.sqlite"]);
-  // B signs in: A's copy goes, though this run never opened it.
   const b = datasetCopyOwnerKey({ serverUrl: "https://account", userId: "b" });
   await next.credentialsChanged(b);
   await expect(lstat(directory)).rejects.toThrow("ENOENT");

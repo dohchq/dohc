@@ -35,7 +35,6 @@ const UNDONE: UndoResult = { trashed: true };
 const rejected = (channel: string, text: string) =>
   new Error(`Error invoking remote method '${channel}': Error: ${text}`);
 
-// A CSV as FileInspector hands it to its view: a workspace's own file.
 function csvFile(path: string, body: string) {
   const { buffer, release } = acquireSharedLocalDocument(
     documentVersionKey("ws-1", path, undefined),
@@ -60,8 +59,6 @@ function csvFile(path: string, body: string) {
   };
 }
 
-// The shell's notices, as it shows them: toasts and Notices rows, with a
-// notice's action (Undo) and Try again.
 function Shell(props: {
   workspaceId?: string;
   children: (shell: ReturnType<typeof useShellError>) => ReactNode;

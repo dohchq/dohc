@@ -43,11 +43,6 @@ function summary(samples: number[]): string {
   return `median=${sorted[10]!.toFixed(3)} p95=${sorted[19]!.toFixed(3)} samples=${SAMPLES}`;
 }
 
-// A host reconciliation reads the relay through two production calls: one
-// page of discovery when the relay was written since its last scan, then the
-// selection. Left out: the 100 ms the host waits to gather changes, the
-// membership update to the native daemon with the store folders it makes, and
-// the running daemon's answers for each document (blocked, retained, drained).
 it.skipIf(process.env.DOHC_LIVE_HOST_MEASURE !== "1")(
   "measures a host reconciliation's relay reads with 16 attached workspaces while the owner opens and edits live",
   async () => {
@@ -73,7 +68,6 @@ it.skipIf(process.env.DOHC_LIVE_HOST_MEASURE !== "1")(
       nowMs: 10,
       guard() {},
     });
-    // Fifteen more workspaces of four documents each, hosted at their owner's demand.
     const others = SERVICE_HOST_MAX_WORKSPACES - 1;
     f.write((db) => {
       for (let workspace = 0; workspace < others; workspace++) {
@@ -120,7 +114,6 @@ it.skipIf(process.env.DOHC_LIVE_HOST_MEASURE !== "1")(
       let start = performance.now();
       expect(select().targets).toHaveLength(documents);
       idle.push(performance.now() - start);
-      // The owner opens the document again, and the relay admits a live edit of theirs through the journal.
       start = performance.now();
       f.storage.ensureOwnedLiveDocument({
         intent: "owner-open",
@@ -167,7 +160,6 @@ for (const count of [1, 48])
         f.seed(path, `measure-object-${document}`);
         paths.push(path);
       }
-      // Each agent holds its limit, until the relay holds its limit.
       const agents = HELD_OPEN_MAX_WAITERS / HELD_OPEN_MAX_PER_AGENT;
       for (let index = 0; index < agents; index++) {
         const agent = f.agent(`measure-${index}`);
@@ -188,7 +180,6 @@ for (const count of [1, 48])
         f.route.evaluateWaiting();
         samples.push(performance.now() - start);
       }
-      // No evaluation answered any of them.
       expect(f.route.held()).toEqual({ waiters: HELD_OPEN_MAX_WAITERS, documents: count });
       console.log(
         `HELD_EVALUATE_MS waiters=${HELD_OPEN_MAX_WAITERS} documents=${count} ${summary(samples)}`,
@@ -254,7 +245,6 @@ it.skipIf(process.env.DOHC_LIVE_HOST_MEASURE !== "1")(
     cleanup.push(() => state.close());
     const resource = `${SHARE_WEB_ORIGIN}/mcp/agent/w/${scope.workspaceId}`;
     const MAX_SESSIONS = 16;
-    // The owner's agents, each signed in at fence 1 and editing the document in its own session.
     const requests = Array.from({ length: MAX_SESSIONS }, (_, index) => {
       const name = `measure-${index}`,
         connectionId = `connection-${name}`;

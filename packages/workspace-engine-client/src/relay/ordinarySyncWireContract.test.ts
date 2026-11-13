@@ -465,8 +465,6 @@ describe("hosted native sync contract", () => {
 });
 
 const sha = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).digest("hex");
-// The first artifact vector names the first binding vector, the work of its
-// one valid tail, relay-a, and one contribution merged.
 const [listedArtifact, emptyArtifact] = vectors.artifacts as [
   (typeof vectors.artifacts)[number],
   (typeof vectors.artifacts)[number],
@@ -484,7 +482,6 @@ const [carried, outbox] = vectors.commitments[0]!.contributions as unknown as [
   Record<string, unknown>,
   Record<string, unknown>,
 ];
-// Where each is, as a finding names it.
 const { authors: _carriedAuthors, ...carriedAt } = carried;
 const { authors: _outboxAuthors, ...outboxAt } = outbox;
 const artifactBytes = Buffer.from(listedArtifact.canonical, "utf8");
@@ -501,10 +498,7 @@ const complete = {
   inbandLimitBytes: 49152,
 };
 const inspected = { ...held, status: "current", preservation: complete, resolution: null };
-// What no merged contributions commit to.
 const nothingMerged = emptyArtifact.mergedContributions;
-// Complete preservation whose artifact is past what one blob streams: its
-// merged commitment still answers.
 const tooLarge = {
   ...complete,
   contributionsSha256: null,
@@ -532,13 +526,11 @@ describe("held document inspection contract", () => {
 
   it("keeps complete preservation, its artifact's digest and length, its merged commitment and its exact text", () => {
     expect(decodeHostedSyncResult("sync.heldDocument", inspected)).toEqual(inspected);
-    // Text the engine streams instead; its digest and length still name it.
     const streamed = { ...complete, markdown: null };
     expect(
       decodeHostedSyncResult("sync.heldDocument", { ...inspected, preservation: streamed })
         ?.preservation,
     ).toEqual(streamed);
-    // Merging added nothing: the empty list's commitment names that.
     const contained = { ...complete, mergedContributions: nothingMerged };
     expect(
       decodeHostedSyncResult("sync.heldDocument", { ...inspected, preservation: contained })
@@ -566,7 +558,6 @@ describe("held document inspection contract", () => {
     ).toEqual(contained);
   });
 
-  // One reason with its total, and the examples listed of it.
   const reason = (code: string, status: string, total: number, ...examples: unknown[]) => ({
     reason: code,
     status,
@@ -606,7 +597,6 @@ describe("held document inspection contract", () => {
         at("relay-b", carriedAt),
       ),
       reason("digest-mismatch", "invalid-evidence", 1, at("relay-a", carriedAt)),
-      // Authorship that does not read names where its work is, and nothing else.
       reason("malformed-authorship", "invalid-evidence", 1, at("relay-b", outboxAt)),
     ]) {
       const preservation = incomplete(found.status, found);
@@ -865,7 +855,6 @@ describe("held document inspection contract", () => {
 
 describe("held document contribution artifact", () => {
   const artifact = JSON.parse(listedArtifact.canonical);
-  // `bytes` under an inspection that names exactly them.
   const namedBytes = (bytes: Buffer) =>
     [
       bytes,
@@ -878,7 +867,6 @@ describe("held document contribution artifact", () => {
         },
       },
     ] as const;
-  // `value` as the engine encodes it, or `text`, so named.
   const named = (value: unknown, text = canonicalJson(value)) =>
     namedBytes(Buffer.from(text, "utf8"));
   const current = (value: unknown) => decodeHostedSyncResult("sync.heldDocument", value)!;

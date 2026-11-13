@@ -69,7 +69,6 @@ describe("share-view file operations through the real store", () => {
       await writeFile(join(sourceDir, "added.md"), "imported\n", "utf8");
       await writeFile(join(sourceDir, "note.md"), "collides\n", "utf8");
       await writeFile(join(sourceDir, "picture.png"), Buffer.from([0x89, 0x50, 0x00, 0x01]));
-      // A local addition whose name an import would otherwise take.
       await writeFile(join(sourceDir, "mine.md"), "imported mine\n", "utf8");
       await writeFile(join(view.rootPath, "docs", "mine.md"), "mine\n", "utf8");
       // A directory: nothing the engine can own, and nothing that may land on

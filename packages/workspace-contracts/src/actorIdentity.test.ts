@@ -341,7 +341,6 @@ describe("ActorKey derivation", () => {
       deriveMomentActor(author, { ...local, source: "own-store", origin: "renderer" }, "Alice")
         .assurance,
     ).toBe("owner-asserted");
-    // An old owner-asserted agent declaration cannot borrow the relay's identity verification.
     expect(
       deriveMomentActor({ kind: "agent", agentId: "Opus", onBehalfOf: "alice" }, received, "Agent")
         .assurance,
@@ -358,7 +357,6 @@ describe("ActorKey derivation", () => {
       expect(actor.key).toEqual({ kind: "link", publicPrincipalId: "public_1" });
       expect(actor.assurance).toBe(assurance);
     }
-    // The same identifier as a grant's link participant is another identity.
     const grantLink = deriveMomentActor(
       { kind: "link", grantId: "grant", grantGeneration: 1, principalId: "public_1" },
       received,

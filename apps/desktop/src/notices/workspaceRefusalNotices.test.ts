@@ -326,7 +326,6 @@ describe("workspace refusal notices", () => {
       const held = f.holdRefusalRead();
       const running = store.list();
       await held.started.promise;
-      // The open observer's refresh and another list wait behind the running read.
       const opened = store.refreshRefusals("workspace");
       const queuedList = store.list();
       const drain = store.stopWorkspaceRefusals();
@@ -338,7 +337,6 @@ describe("workspace refusal notices", () => {
       expect((await queuedList).notices).toEqual([row]);
       const acquired = f.acquisitions.length;
 
-      // A late open, list, or dismissal reaches no engine.
       await f.closeEditor();
       await f.openEditor();
       await expect(store.mark([row!], "dismissed", null)).rejects.toMatchObject({

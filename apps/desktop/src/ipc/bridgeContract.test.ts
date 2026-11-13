@@ -2624,10 +2624,6 @@ describe("workspace UI state IPC contract", () => {
   });
 });
 
-// The preload boundary for main→renderer events. These cases are the review
-// attack set: a schema must accept only exact primitive members of its closed
-// set — not String objects, toString tricks, case variants, or lookalikes —
-// because the parse is all that stands between an ipc payload and renderer code.
 describe("menu command boundaries", () => {
   it("accept every member of their closed tuples", () => {
     for (const command of MENU_COMMANDS) expect(MenuCommand.parse(command)).toBe(command);
@@ -3246,7 +3242,6 @@ describe("site IPC contract", () => {
       holderId: "tab",
       restart: false,
     });
-    // A start names the surface that shows the preview.
     expect(
       StartSitePreviewPayload.safeParse({
         workspaceId: "ws-sites",
@@ -3455,7 +3450,6 @@ describe("workspace versions IPC contract", () => {
         resolution: { kind: "keep-combined", text: "combined\n" },
       }).resolution.kind,
     ).toBe("keep-combined");
-    // Conflict sides may be null (file only exists on one side).
     expect(
       WorkspaceVersionConflict.parse({
         conflictId: "conflict-1",
@@ -3557,7 +3551,6 @@ describe("sync status IPC contract", () => {
       ).toBe(reason);
       expect(OwnerLiveDocument.parse({ ...row, reason }).reason).toBe(reason);
     }
-    // The server's reason is a word from its list, never its message or a path.
     const failure = { word: "engine-refused", since: "2026-11-13T01:00:00.000Z" };
     expect(
       OwnerLiveDocument.parse({ ...row, reason: "live-start-failing", failure }).failure,
@@ -3644,8 +3637,6 @@ describe("sync status IPC contract", () => {
     );
   });
 
-  // The engine refuses a store a newer build migrated and leaves it intact.
-  // Rebuild would move that store aside, so the only recovery is an update.
   it("asks for an update when a newer build migrated the store", () => {
     const refused = SyncStatusResult.parse({
       state: "synced",
@@ -3791,8 +3782,6 @@ describe("engine history and linked Chats IPC contract", () => {
       },
     });
     expect(result).toMatchObject({ message: { authorKind: "human" } });
-    // The agent author kind is a first-class wire value (rendered as
-    // "the agent name" in the UI).
     expect(
       SendChatMessageResult.parse({
         message: {
@@ -3872,10 +3861,6 @@ describe("chat reaction emoji trust boundary (WS-MU-C2)", () => {
   });
 
   it("rejects non-emoji strings the length bound alone would let through", () => {
-    // A URL, plain text, a bare letter/digit, whitespace-padded emoji, and an
-    // oversized string must all be refused — this schema is the trust boundary
-    // for replicated reaction writes, so arbitrary strings must never render as
-    // pills.
     for (const bad of [
       "hello",
       "http://evil.com",
@@ -4010,7 +3995,6 @@ describe("presence state size cap (MU-C5 DoS boundary)", () => {
     // bigint isn't JSON-serializable.
     expect(presenceStateWithinCap({ n: 1n })).toBe(false);
 
-    // Pathologically deep nesting is rejected without a full walk to the leaf.
     let deep: unknown = 0;
     for (let i = 0; i < 200; i += 1) deep = { deep };
     expect(presenceStateWithinCap(deep)).toBe(false);
@@ -4382,10 +4366,6 @@ describe("joined workspace passphrase boundary", () => {
   });
 });
 
-// The share-changes channels cross a boundary between two
-// accounts: one side's relay body becomes the other side's review screen, and
-// accepting writes into the reviewer's own workspace. Every field is checked
-// rather than coerced, and a malformed one is refused whole.
 describe("share changes IPC contract", () => {
   const proposal = () => ({
     proposalId: "proposal-1",
@@ -4395,8 +4375,6 @@ describe("share changes IPC contract", () => {
     ops: 2,
   });
 
-  // The listing a timer polls. It says who and how many; the file rows come
-  // from the one proposal a granter opens.
   it("carries a granter's review listing as counts, with no file rows", () => {
     const parsed = ListShareProposalsResult.parse({ proposals: [proposal()] });
     expect(parsed.proposals[0]?.ops).toBe(2);
@@ -4543,7 +4521,6 @@ describe("share changes IPC contract", () => {
     ).toEqual(["proposalId", "workspaceId"]);
   });
 
-  // Zero is the honest answer for "nothing was pending", not an error.
   it("carries an empty submit", () => {
     const empty = {
       ok: true as const,
@@ -4630,8 +4607,6 @@ describe("share changes IPC contract", () => {
     ).toThrow();
   });
 
-  // Withdraw has exactly one successful outcome. A result that could carry
-  // `accepted` would let the reverse path report the forward one.
   it("refuses any withdraw result but withdrawn", () => {
     expect(WithdrawShareChangesResult.parse({ state: "withdrawn" }).state).toBe("withdrawn");
     expect(

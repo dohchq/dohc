@@ -63,11 +63,6 @@ describe("conflictPreview", () => {
     expect(preview.text.endsWith(lineBreak)).toBe(true);
   });
 
-  // The other side of that measurement. A character that only soft wraps is
-  // not a line box, so a body full of them is one line to the line window and
-  // the character window is what holds it. Bounded either way — and cutting
-  // these at the line window would have shown far less of the file than it
-  // safely could.
   it.each([
     ["CR", "\r"],
     ["U+2028 LINE SEPARATOR", "\u2028"],
@@ -107,7 +102,6 @@ describe("conflictPreview", () => {
     expect(lastUnit >= 0xd800 && lastUnit < 0xdc00).toBe(false);
     expect(preview.text).toHaveLength(CONFLICT_PREVIEW_MAX_CHARS - 1);
     expect(preview.text.length + preview.hiddenChars).toBe(body.length);
-    // The whole preview still decodes: no replacement character anywhere.
     expect(preview.text).not.toContain("�");
     expect([...preview.text]).toHaveLength(CONFLICT_PREVIEW_MAX_CHARS / 2);
   });

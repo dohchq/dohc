@@ -104,7 +104,6 @@ describe("sidebar resize guards", () => {
     fireEvent.pointerMove(handle, { buttons: 0, clientX: 480, pointerId: 3 });
     expect(onWidthChange).toHaveBeenCalledOnce();
     expect(onWidthChange).toHaveBeenCalledWith(480);
-    // Still ended: a later left-down-less move does nothing either.
     fireEvent.pointerMove(handle, { buttons: 1, clientX: 600, pointerId: 3 });
     expect(onWidthChange).toHaveBeenCalledTimes(1);
   });

@@ -30,7 +30,6 @@ describe("createWorkspaceFileOpens", () => {
     expect(h.send).not.toHaveBeenCalled();
     h.opens.shown(loading, "ws-notes");
     expect(h.send).toHaveBeenCalledWith(loading, notes, "a.md");
-    // It goes once.
     h.opens.shown(loading, "ws-notes");
     expect(h.send).toHaveBeenCalledTimes(1);
   });

@@ -23,13 +23,9 @@ async function harness(
     answer?: boolean;
     sharedView?: boolean;
     failWrites?: { value: boolean };
-    // Stands in for the workspace's stop, when a test holds it.
     stop?: () => Promise<void>;
-    // Stands in for the stop of the workspace's agent.
     stopAgents?: (workspaceId: string) => Promise<void>;
-    // Hears the dialog open.
     onAsk?: (workspaceId: string) => void;
-    // Hears every trust change.
     onChange?: (workspaceId: string, trusted: boolean) => void;
     // Keeps whether the dialog was shown, as dispatch does.
     asked?: Set<string>;
@@ -204,7 +200,6 @@ describe("main's workspace trust operations", () => {
     await stopReached.promise;
     // The save does not wait for the stop, so a quit meanwhile keeps it.
     expect(persisting).toHaveBeenCalledWith("trip");
-    // The Trust from another window is writing its grant when the stop ends.
     const writing = deferred<void>();
     const releaseWrite = deferred<void>();
     writeGate.hold = async () => {
@@ -287,7 +282,6 @@ describe("main's workspace trust operations", () => {
     await expect(trust.request()).resolves.toEqual({ workspaceId: "trip", trusted: true });
     await expect(trust.read()).resolves.toEqual({ workspaceId: "trip", trusted: true });
     expect(trust.notified).toEqual([["trip", true]]);
-    // Asking again does not ask the person again.
     await trust.request();
     expect(trust.confirm).toHaveBeenCalledTimes(1);
   });
@@ -298,7 +292,6 @@ describe("main's workspace trust operations", () => {
         workspaceId: "trip",
       });
     }
-    // No agent tool reaches trust.
     for (const id of [
       "workspace.trust.read",
       "workspace.trust.request",
@@ -395,7 +388,6 @@ describe("main's workspace trust operations", () => {
     const h = await harness({ answer: true, stopAgents: () => agentStopping.promise });
     await h.request();
     const restricting = h.restrict();
-    // The agent is still stopping, and a restart would already find the workspace restricted.
     await vi.waitFor(async () =>
       expect(await createWorkspaceTrust({ file: h.file }).isTrusted(h.workspace)).toBe(false),
     );

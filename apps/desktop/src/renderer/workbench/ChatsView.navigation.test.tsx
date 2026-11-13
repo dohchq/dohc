@@ -18,10 +18,6 @@ import {
   renderView,
 } from "./ChatsView.testHarness";
 
-// Expand-to-tab (chats/expand-to-tab): the panel reports where it is via
-// onNavChange, and a freshly expanded tab (variant "page") starts at that
-// conversation via initialNav — consumed once, loaded through the same
-// openChannel/openThread path a click would take.
 describe("ChatsView expand-to-tab", () => {
   it("shows the overview error while a restored DM cannot sync", async () => {
     bridgeMock.listChatChannels.mockRejectedValue(new Error("Engine unavailable"));
@@ -332,8 +328,6 @@ describe("ChatsView expand-to-tab", () => {
     ).toEqual(["Thursday", "Friday"]);
   });
 
-  // The tab went back to the group before the handoff, so the seed is the
-  // group, not the thread the poll was drafted in.
   it("keeps a handed-off poll with its thread when the tab returns to the group", async () => {
     const user = userEvent.setup();
     bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
@@ -384,7 +378,6 @@ describe("ChatsView expand-to-tab", () => {
     });
 
     await screen.findByTestId("chats-thread-view");
-    // The answer is also the reply, so one bar shows, and the send carries both.
     expect(await screen.findByTestId("chats-resolving-mode")).toBeTruthy();
     expect(screen.queryByTestId("chats-replying-mode")).toBeNull();
     await user.click(screen.getByTestId("chats-send"));

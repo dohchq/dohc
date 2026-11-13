@@ -131,7 +131,6 @@ test("real HTTPS top-level handoff keeps app authority outside its opaque child"
       )
       .toBe(true);
     expect(events.some((e) => e.path === "/document" && e.status === 200 && e.cookie)).toBe(true);
-    // A plain link to another site opens it in a new tab, and the app stays.
     const [opened] = await Promise.all([
       context.waitForEvent("page"),
       child.locator("#out").click(),

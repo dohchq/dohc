@@ -37,7 +37,6 @@ const record = (id = "rec-a", title = "Task a"): CollectionRecord =>
     indexedValue("notes", null),
   ]);
 
-/** A host's unconfirmed cells, by `record:field`. */
 function statusStore(initial: Record<string, TableCellStatus> = {}) {
   let statuses = new Map(Object.entries(initial));
   const listeners = new Set<() => void>();
@@ -69,7 +68,6 @@ function renderProperties(props: Partial<RecordPropertiesProps> = {}) {
 }
 
 const row = (name: string) => screen.getByRole("group", { name });
-/** The control that opens a row's editor. */
 const value = (name: string) => within(row(name)).getAllByRole("button")[0]!;
 const editor = (name: string) => row(name).querySelector<HTMLElement>("[data-cell-editor]");
 const openEditor = (name: string) => {
@@ -93,7 +91,6 @@ describe("a record's properties", () => {
     expect(row("tags").textContent).toContain("alpha");
     expect(row("owner").textContent).toContain("Ada");
     expect(within(row("done")).getByRole<HTMLInputElement>("checkbox").checked).toBe(false);
-    // An empty value says so, and still opens its editor.
     expect(value("notes").textContent).toBe("Empty");
   });
 
@@ -132,7 +129,6 @@ describe("a record's properties", () => {
       "This value is not a number. Enter a number.",
     );
     expect(changes).toEqual([]);
-    // The editor holds what it cannot save, so a press on another value comes back to it.
     fireEvent.click(value("title"));
     expect(editor("title")).toBeNull();
     expect(document.activeElement).toBe(input);
@@ -211,7 +207,6 @@ describe("a record's properties", () => {
     fireEvent.click(row("estimate").querySelector("[data-property-value]")!);
     expect(editor("estimate")).toBeNull();
 
-    // An open editor stays, with what it holds, while editing is paused.
     const input = within(openEditor("title")).getByRole<HTMLInputElement>("textbox");
     fireEvent.change(input, { target: { value: "Held" } });
     view.rerender({
@@ -234,7 +229,6 @@ describe("a record's properties", () => {
       dismiss = vi.fn();
     const { store, set } = statusStore({ "rec-a:title": { state: "pending", value: "Sending" } });
     renderProperties({ cellStatuses: store });
-    // The value the person gave shows in place of the stored one, and the editor opens on it.
     expect(value("title").textContent).toBe("Sending");
     expect(row("title").querySelector('[data-cell-status="pending"]')?.textContent).toBe("Saving");
     expect(within(openEditor("title")).getByRole<HTMLInputElement>("textbox").value).toBe(
@@ -269,7 +263,6 @@ describe("a record's properties", () => {
     );
     fireEvent.click(note.getByRole("button", { name: "Try again" }));
     expect(retry).toHaveBeenCalledOnce();
-    // The note goes with the action, so focus moves to the value first.
     expect(document.activeElement).toBe(value("title"));
     fireEvent.click(note.getByRole("button", { name: "Discard" }));
     expect(discard).toHaveBeenCalledOnce();
@@ -317,7 +310,6 @@ describe("a record's properties", () => {
         ["owner", readOnly],
       ]),
     });
-    // The host's control is the row's Tab stop, and the row still says the value is empty.
     const control = within(row("notes")).getByRole("button", { name: "File of rec-a" });
     expect(control.tabIndex).toBe(0);
     expect(row("notes").textContent).toContain("Empty");
@@ -326,10 +318,8 @@ describe("a record's properties", () => {
     fireEvent.click(within(editor("notes")!).getByRole("button", { name: "Choose a file" }));
     expect(close).toHaveBeenCalledExactlyOnceWith("rec-a");
     expect(editor("notes")).toBeNull();
-    // A typed character changes a host's value only in the host's editor.
     fireEvent.keyDown(control, { key: "x" });
     expect(editor("notes")).toBeNull();
-    // A host cell with no editor opens nothing.
     fireEvent.click(within(row("owner")).getByText("Related"));
     expect(editor("owner")).toBeNull();
   });
@@ -339,30 +329,25 @@ describe("a record's properties", () => {
       canEditCell: (_record, field) => field.name !== "estimate",
       onOpenLink: () => undefined,
     });
-    // Every control that edits is in the Tab order. A row that cannot change has none.
     expect(value("title").tabIndex).toBe(0);
     expect(within(row("done")).getByRole<HTMLInputElement>("checkbox").tabIndex).toBe(0);
     expect(within(row("link")).getByRole("link").tabIndex).toBe(0);
     expect(within(row("estimate")).queryByRole("button")).toBeNull();
 
-    // A typed character replaces the text and starts the edit.
     fireEvent.keyDown(value("title"), { key: "N" });
     const input = within(editor("title")!).getByRole<HTMLInputElement>("textbox");
     expect(input.value).toBe("N");
     fireEvent.change(input, { target: { value: "New" } });
-    // Tab saves and goes to the next row's value, past the row with nothing to focus.
     fireEvent.keyDown(input, { key: "Tab" });
     expect(changes).toEqual([expect.objectContaining({ field: "title", value: "New" })]);
     expect(editor("title")).toBeNull();
     expect(document.activeElement).toBe(within(row("done")).getByRole("checkbox"));
 
-    // Shift+Tab from an editor goes back.
     const due = openEditor("due");
     fireEvent.keyDown(within(due).getByRole("grid"), { key: "Tab", shiftKey: true });
     expect(editor("due")).toBeNull();
     expect(document.activeElement).toBe(within(row("done")).getByRole("checkbox"));
 
-    // A shortcut and Space are not typing.
     fireEvent.keyDown(value("title"), { key: "a", ctrlKey: true });
     fireEvent.keyDown(value("title"), { key: " " });
     expect(editor("title")).toBeNull();
@@ -380,7 +365,6 @@ describe("a record's properties", () => {
     fireEvent.keyDown(within(openEditor("status")).getByRole("combobox"), { key: "Escape" });
     expect(editor("status")).toBeNull();
     expect(onKeyDown).not.toHaveBeenCalled();
-    // With no editor open, Escape is the holder's.
     fireEvent.keyDown(value("title"), { key: "Escape" });
     expect(onKeyDown).toHaveBeenCalledOnce();
   });
@@ -393,7 +377,6 @@ describe("a record's properties", () => {
     view.rerender({ onDraftAbandoned, record: record("rec-a", "Changed elsewhere") });
     expect(within(editor("title")!).getByRole<HTMLInputElement>("textbox")).toBe(input);
     expect(input.value).toBe("Half typed");
-    // Another record in the same place has no editor open, and the host keeps the text.
     view.rerender({ onDraftAbandoned, record: record("rec-b", "Task b") });
     expect(editor("title")).toBeNull();
     expect(onDraftAbandoned).toHaveBeenCalledExactlyOnceWith({
@@ -406,7 +389,6 @@ describe("a record's properties", () => {
   });
 
   it("starts another record's tags from that record's own value, not from picks saved on the record before it", () => {
-    // The host numbers its saves, and its index shows none of them yet.
     const view = renderProperties();
     fireEvent.click(
       within(within(openEditor("tags")).getByRole("listbox", { name: "tags options" })).getByRole(
@@ -418,7 +400,6 @@ describe("a record's properties", () => {
     expect(view.changes).toEqual([
       expect.objectContaining({ recordId: "rec-a", field: "tags", value: ["alpha", "beta"] }),
     ]);
-    // Another record takes the first one's place, with no remount.
     view.rerender({ record: record("rec-b", "Task b") });
     fireEvent.click(
       within(within(openEditor("tags")).getByRole("listbox", { name: "tags options" })).getByRole(
@@ -432,7 +413,6 @@ describe("a record's properties", () => {
       field: "tags",
       value: ["alpha", "gamma"],
     });
-    // The first record still starts its next edit from what it saved.
     view.rerender({ record: record() });
     fireEvent.click(
       within(within(openEditor("tags")).getByRole("listbox", { name: "tags options" })).getByRole(

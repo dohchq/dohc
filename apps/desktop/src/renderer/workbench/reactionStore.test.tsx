@@ -43,7 +43,6 @@ const listing = (reactions: ChatReactionRecord[], viewerAuthorId = "you@x") => (
 });
 type Listing = ReturnType<typeof listing>;
 
-// One controlled promise per call of the bridge method, in call order.
 function controlled<T>(method: Mock) {
   const calls: Deferred<T>[] = [];
   method.mockImplementation(() => {
@@ -54,7 +53,6 @@ function controlled<T>(method: Mock) {
   return calls;
 }
 
-// A surface's visit: where its errors go while it is still open.
 function visit() {
   let open = true;
   const report = vi.fn();
@@ -69,11 +67,9 @@ function visit() {
   };
 }
 
-// One store, read the way a surface reads thread-1, viewed live.
 function setup(initial: ChatReactionRecord[] = [], workspaceId = "ws") {
   const store = createReactionStore(workspaceId);
   let current = visit();
-  // A read starts now and lands when the returned function runs.
   const beginRead = (threadId = "thread-1") => {
     const ticket = store.ticket();
     return (reactions: ChatReactionRecord[], viewerAuthorId = "you@x") =>
@@ -86,7 +82,6 @@ function setup(initial: ChatReactionRecord[] = [], workspaceId = "ws") {
     store,
     beginRead,
     read,
-    // Leave the thread and come back to it with a fresh read.
     reopen(reactions: ChatReactionRecord[], viewerAuthorId = "you@x") {
       current.leave();
       current = visit();
@@ -194,7 +189,6 @@ describe("reaction store: one chain per cell", () => {
     const party = you({ reactionId: "r-party", messageId: "m2", emoji: "🎉" });
     listings[1]!.resolve(listing([thumbs, party]));
     await waitFor(() => expect(h.reactions).toEqual([thumbs, party]));
-    // The first cell's listing began earlier, before the party was accepted.
     listings[0]!.resolve(listing([thumbs]));
     await settled(h.store);
     expect(h.reactions).toEqual([thumbs, party]);
@@ -212,7 +206,6 @@ describe("reaction store: one chain per cell", () => {
     h.toggle("added", { messageId: "m1", emoji: "🎉" });
     h.toggle("added", { messageId: "m2", emoji: "👍" });
     other.toggle("added");
-    // None waits for another: the same ids in another workspace are another cell.
     expect(writes).toHaveLength(4);
     expect(bridgeMock.setChatReaction.mock.calls.map(([payload]) => payload.workspaceId)).toEqual([
       "ws",
@@ -230,7 +223,6 @@ describe("reaction store: one chain per cell", () => {
 
 describe("reaction store: one confirmed state from every read", () => {
   it("rolls back to the newest state another surface read, not the toggling surface's older read", async () => {
-    // Surface A read the reaction present; surface B read later and found it gone.
     const h = setup([you()]);
     h.read([]);
     expect(h.reactions).toEqual([]);
@@ -260,7 +252,6 @@ describe("reaction store: one confirmed state from every read", () => {
     await settled(h.store);
     staleAfterListing([]);
     expect(h.reactions).toEqual([you()]);
-    // A read begun after the write is the newer truth.
     h.read([]);
     expect(h.reactions).toEqual([]);
   });
@@ -269,18 +260,15 @@ describe("reaction store: one confirmed state from every read", () => {
     const other = you({ reactionId: "r-other", messageId: "m2", authorId: "peer@x" });
     const h = setup([you(), other]);
     const staleThread = h.beginRead();
-    // Home read message m1 and found nothing; it says nothing about m2.
     h.store.ingest([
       { threadId: "thread-1", messageIds: ["m1"], reactions: [], ticket: h.store.ticket() },
     ]);
     expect(h.reactions).toEqual([other]);
     expect(h.store.view("thread-1", "m1").reactions).toEqual([]);
     expect(h.store.view("thread-1", "m2").reactions).toEqual([other]);
-    // A whole-thread read that began before it cannot undo that message.
     const fresher = you({ reactionId: "r-fresher", messageId: "m2", authorId: "peer@x" });
     staleThread([you(), fresher]);
     expect(h.reactions).toEqual([fresher]);
-    // A preview with no opening message covers nothing.
     h.store.ingest([
       { threadId: "thread-1", messageIds: [], reactions: [], ticket: h.store.ticket() },
     ]);
@@ -347,11 +335,9 @@ describe("reaction store: visits and accounts", () => {
     );
     h.toggle("added", { messageId: "m1", emoji: "👍" });
     h.toggle("removed", { messageId: "m2", emoji: "👍" });
-    // The first cell's listing renames the viewer while the remove is out.
     writes[0]!.resolve(undefined);
     await waitFor(() => expect(h.viewerAuthorId).toBe("you@normalized"));
     expect(h.reactions).toEqual([you({ authorId: "you@normalized" })]);
-    // The remove is rejected: the row comes back under the new name, once.
     writes[1]!.reject(new TypeError("offline"));
     await waitFor(() => expect(h.onError).toHaveBeenCalledOnce());
     expect(h.reactions).toEqual([
@@ -360,8 +346,6 @@ describe("reaction store: visits and accounts", () => {
     ]);
   });
 
-  // Main lists a local fallback's rows under the signed-in account, and under
-  // the fallback again after sign-out, keeping each row's stable id.
   describe("a fallback name that signs in and back out", () => {
     const fallback = "local-person";
     const account = "alice@example.com";
@@ -397,8 +381,6 @@ describe("reaction store: visits and accounts", () => {
       expect(store.view("thread-1")).toEqual({ reactions: [stored], viewerAuthorId: fallback });
     });
 
-    // R is the fallback's row, listed under the account while signed in. S was
-    // stored under the account, so main lists it there even after sign-out.
     describe("beside a row the account itself stored", () => {
       function signedOut(sameCell: boolean) {
         const store = createReactionStore("ws");
@@ -470,7 +452,6 @@ describe("reaction store: visits and accounts", () => {
     h.toggle("added", { messageId: "m2", emoji: "👍" });
     writes[1]!.resolve(undefined);
     await waitFor(() => expect(lists).toHaveLength(1));
-    // Before any read covers the accepted add, it paints under its own author.
     expect(
       h.reactions
         .filter((row) => row.messageId === "m2")
@@ -491,7 +472,6 @@ describe("reaction store: visits and accounts", () => {
   });
 });
 
-// DesktopRoot keeps the owner outside the shell it remounts per workspace.
 describe("reaction store: session owner", () => {
   function Consumer(props: { capture: (store: ReactionStore) => void }) {
     props.capture(useReactions());
@@ -542,7 +522,6 @@ describe("reaction store: session owner", () => {
       await writes[0]!.promise;
     });
     await waitFor(() => expect(lists).toHaveLength(1));
-    // Its listing is still out, so a return finds the same store.
     shell.open("workspace-a");
     expect(shell.store).toBe(a);
     shell.open("workspace-b");
@@ -551,12 +530,10 @@ describe("reaction store: session owner", () => {
       await lists[0]!.promise;
     });
     await settled(a);
-    // Settled while away: the next visit starts a new store.
     shell.open("workspace-a");
     const next = shell.store;
     expect(next).not.toBe(a);
     expect(next.view("thread-1").reactions).toEqual([]);
-    // The open workspace keeps its store while idle.
     shell.open("workspace-a");
     expect(shell.store).toBe(next);
   });

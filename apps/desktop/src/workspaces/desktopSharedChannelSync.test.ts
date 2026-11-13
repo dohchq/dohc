@@ -187,9 +187,6 @@ describe("desktop shared-channel pass composition", () => {
     );
   });
 
-  // An ended row the relay ended may be one the owner has since restored. The
-  // pass asks before deciding the row is not its work, and syncs a row the
-  // recheck resumed. A row the person left is theirs to rejoin, not rechecked.
   it("rechecks a relay-ended row before the pass and syncs it once it resumes", async () => {
     let workspaceRows: JoinedSharedChannel[] = [];
     const recheck = vi.fn(async () => {
@@ -296,7 +293,6 @@ describe("desktop shared-channel pass composition", () => {
       failed: false,
     });
     expect(h.notify).toHaveBeenCalledTimes(2);
-    // Nothing new after the failure: the applied pages were reported already.
     await expect(h.rendererPassForChannel()).resolves.toEqual({
       unrefreshed: 0,
       changed: false,
@@ -308,7 +304,6 @@ describe("desktop shared-channel pass composition", () => {
   it("reports a failed pass only when it stops before its rows finish", async () => {
     const h = harness([joined("one"), joined("two")]);
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    // One failing share leaves the other fresh and holds nothing.
     h.pull.mockRejectedValueOnce(new Error("relay answered 500"));
     await expect(h.rendererPassForChannel()).resolves.toEqual({
       unrefreshed: 1,

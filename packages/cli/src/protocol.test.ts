@@ -407,7 +407,6 @@ describe("collection request schemas", () => {
         name: "task",
         fields: { id: "rec_impostor" },
       }),
-      // A record name is one file name, not a path.
       request("collectionCreateRecord", {
         collectionPath: "tasks",
         name: "nested/name",

@@ -43,7 +43,6 @@ function cloneSnapshot(snapshot = baseSnapshot): DatabaseSnapshotResult {
   return JSON.parse(JSON.stringify(snapshot)) as DatabaseSnapshotResult;
 }
 
-// The wallet's first page after an edit set txn_001's category.
 function walletPage(category: string, path = baseSnapshot.path): DatabaseEditResult {
   return {
     path,
@@ -107,7 +106,6 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
-  // Also drops one-time answers a failed test left queued.
   vi.resetAllMocks();
 });
 
@@ -152,7 +150,6 @@ describe("DatabaseStudioView", () => {
       "dohc could not save the change to the category column for id txn_001 in the wallet table.",
       failure,
       expect.any(Function),
-      // The cell's identity: workspace, database, table, row key and column.
       [
         "database-cell",
         "ws-1",
@@ -165,7 +162,6 @@ describe("DatabaseStudioView", () => {
     );
     expect(screen.queryByTestId("db-edit-error")).toBeNull();
 
-    // Try again writes the same change, and shows it at once again.
     const retry = deferred<DatabaseEditResult>();
     bridgeMock.applyDatabaseEdit.mockClear();
     bridgeMock.applyDatabaseEdit.mockImplementationOnce(() => retry.promise);
@@ -191,7 +187,6 @@ describe("DatabaseStudioView", () => {
     await act(async () => failed!.reject(new Error("database is locked")));
     expect(onError).toHaveBeenCalledTimes(1);
 
-    // Another database with a table and a row of the same names.
     const other = cloneSnapshot();
     other.path = "imports/other.sqlite";
     other.tables[0]!.rows[0]!.category = "Rent";
@@ -222,7 +217,6 @@ describe("DatabaseStudioView", () => {
       );
       await screen.findByTestId("db-cell-category-txn_001");
 
-      // Food to Groceries, then Groceries to Travel, before either answers.
       await user.click(cell("category", "txn_001"));
       await user.clear(editor());
       await user.keyboard("Groceries{Enter}");
@@ -259,7 +253,6 @@ describe("DatabaseStudioView", () => {
     await user.keyboard("Travel{Enter}");
     expect(bridgeMock.applyDatabaseEdit).toHaveBeenCalledTimes(1);
 
-    // Travel's success is ready first; Groceries' answers after it.
     await act(async () => travel!.resolve(walletPage("Travel")));
     await act(async () => groceries!.resolve(walletPage("Groceries")));
     await waitFor(() => expect(bridgeMock.applyDatabaseEdit).toHaveBeenCalledTimes(2));
@@ -283,7 +276,6 @@ describe("DatabaseStudioView", () => {
     await user.keyboard("{Enter}");
     await user.keyboard("{F2}");
     expect(screen.queryByTestId("db-cell-input")).toBeNull();
-    // The keyboard still moves through it.
     await user.keyboard("{ArrowDown}");
     expect(document.activeElement).toBe(cell("category", "txn_002"));
     expect(cell("category", "txn_001").className).not.toContain("cursor-text");

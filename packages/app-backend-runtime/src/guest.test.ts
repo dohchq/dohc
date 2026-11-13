@@ -291,7 +291,6 @@ describe("reusable guest evaluator", () => {
 
 describe("guest memory", () => {
   const marker = "dohc-marker-4111111111111111";
-  // Fills memory with a record: many copies of its text, then a large buffer of its bytes.
   const plant = `const notes = ctx.db.query('SELECT value FROM items')[0].value;
     const copies = []; for (let i = 0; i < 4000; i++) copies.push(notes + i);
     const bytes = new Uint8Array(4 << 20); for (let i = 0; i < ${marker.length}; i++) bytes[i] = notes.charCodeAt(i);
@@ -367,7 +366,6 @@ describe("guest memory", () => {
       await expect(
         evaluate(db, request(many(16), lowered), { persistentConnection: true }),
       ).rejects.toThrow("App operation needed more than its 16 MiB memory limit, so it stopped.");
-      // An operation that runs out of memory can still refuse, and one that recovers returns normally.
       await expect(
         evaluate(db, request(`try { ${many(64)} } catch { ctx.refuse('full', 'No memory.'); }`), {
           persistentConnection: true,
@@ -397,7 +395,6 @@ describe("guest memory", () => {
           persistent,
         ),
       ).rejects.toThrow("App operation took longer than its 0.1-second time limit, so it stopped.");
-      // A host check keeps its own error.
       await expect(
         evaluate(
           db,

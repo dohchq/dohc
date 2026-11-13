@@ -31,7 +31,6 @@ describe("run details", () => {
       expect(value.querySelector("span")?.classList.contains("text-muted")).toBe(true);
       expect(value.querySelector("span")?.textContent).toBe("(as reported)");
     }
-    // Product and Model are rows of their own, like Command, not one row split in two.
     for (const id of ["chats-run-command", "chats-run-product", "chats-run-model"]) {
       expect(screen.getByTestId(id).parentElement?.parentElement).toBe(container);
     }

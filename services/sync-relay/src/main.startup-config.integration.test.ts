@@ -67,7 +67,6 @@ describe("sync relay startup guards", () => {
       async () => {
         const response = await fetch(`${relay.baseUrl}/ready`);
         expect(response.status, `relay stayed unready\nstderr:\n${relay.stderr()}`).toBe(200);
-        // The self-host profile runs automations by default.
         expect(await response.json()).toEqual({
           ok: true,
           service: "sync-relay",

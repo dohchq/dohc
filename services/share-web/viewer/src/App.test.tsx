@@ -1910,7 +1910,6 @@ describe("App", () => {
         container.querySelector("article.markdown")?.textContent?.includes("Back again.") === true,
     );
     expect(blobSignals).toHaveLength(2);
-    // Try again replaces the failed read's controller, as a new selection does.
     expect(blobSignals.map((signal) => signal.aborted)).toEqual([true, false]);
     expect(container.querySelector("main.content [role=alert]")).toBeNull();
   });
@@ -2163,7 +2162,6 @@ describe("App", () => {
       await renderApp();
       const entry = () => container.querySelector('section[aria-labelledby="link-agent-title"]');
       expect(entry()?.querySelector("code")?.textContent).toBe(address);
-      // The address text is the only place the secret appears on the page.
       expect(container.innerHTML.split(secret).length).toBe(2);
       expect(entry()?.textContent).not.toContain("Replace <secret>");
       expect(entry()?.textContent).toContain(
@@ -2268,7 +2266,6 @@ describe("App", () => {
         () => container.querySelector("main.state")?.textContent === VERSION_MISMATCH,
       );
 
-      // The follower stopped: past its longest retry delay, nothing reads again.
       const reads = logRequests + metaRequests;
       await act(async () => {
         await vi.advanceTimersByTimeAsync(RETRY_MAX_MS * 2);

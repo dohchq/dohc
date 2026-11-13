@@ -68,7 +68,6 @@ describe("resolveWorkspaceFile containment", () => {
     await expect(resolveWorkspaceFile(root, "notes/link.txt")).rejects.toThrow(
       /escapes the workspace/,
     );
-    // And the read paths built on it refuse too — nothing leaks via media/text.
     await expect(
       prepareWorkspaceFileRead(root, "notes/link.txt").then((read) => read.readAsset()),
     ).rejects.toThrow(/escapes the workspace/);
@@ -166,7 +165,6 @@ describe("size caps", () => {
     await expect(
       writeWorkspaceText(root, "notes/a.md", "x".repeat(2 * 1024 * 1024 + 1), INITIAL_CONTENT_HASH),
     ).rejects.toThrow(/editor limit/);
-    // The file is untouched by the refused write.
     expect(await readFile(join(root, "notes", "a.md"), "utf8")).toBe("# A\n");
   });
 

@@ -211,7 +211,6 @@ it("paints an agent's name and sparkle in its avatar's hue, olive by default, an
   expect(badge("orbit")).toContain("text-hue-plum");
   expect(screen.getByText("Nova name").className).toBe("text-agent");
   expect(badge("nova")).toContain("text-agent");
-  // A person's name keeps its own row's ink; no hue span wraps it.
   expect(screen.getByText("Sam name").tagName).not.toBe("SPAN");
   // An agent that joined with a link has no hue of its own: olive, like an agent left at the default.
   expect(screen.getByText("Link agent name").className).toBe("text-agent");

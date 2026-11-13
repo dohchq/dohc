@@ -63,14 +63,12 @@ describe("MentionComposer autocomplete", () => {
     const composer = screen.getByTestId("chats-composer");
     await userEvent.type(composer, "hey @");
     const menu = await screen.findByTestId("chats-mention-menu");
-    // Both candidates offered; the agent leads.
     const options = within(menu).getAllByTestId("chats-mention-option");
     expect(options.map((el) => el.getAttribute("data-candidate-id"))).toEqual([
       "agent:default",
       "user:you",
     ]);
 
-    // "@agent" filters to exactly the agent (the user handle shares no prefix).
     await userEvent.type(composer, "gent");
     expect(
       within(screen.getByTestId("chats-mention-menu"))
@@ -85,7 +83,6 @@ describe("MentionComposer autocomplete", () => {
     const options = within(screen.getByTestId("chats-mention-menu")).getAllByTestId(
       "chats-mention-option",
     );
-    // Both share the "you" prefix; the exact user handle leads.
     expect(options[0]!.getAttribute("data-candidate-id")).toBe("user:you");
   });
 
@@ -407,15 +404,12 @@ describe("MentionComposer autocomplete", () => {
     // height. It shortens inside the border and the tooltip carries it.
     expect(within(pill).getByText("Write a message…").className).toContain("truncate");
     expect(pill.getAttribute("title")).toBe("Write a message…");
-    // Shortening the text costs the pill neither its name nor its job.
     expect(pill.getAttribute("aria-label")).toBe("Write a post");
     await userEvent.click(pill);
     expect(document.activeElement).toBe(screen.getByTestId("chats-composer"));
   });
 });
 
-// Two people and six files fill more than the menu's height. The textarea
-// keeps focus while the arrows move the active option.
 describe("MentionComposer menu on the Menu part's recipe", () => {
   const files = Array.from({ length: 6 }, (_, index) => ({
     path: `docs/file-${index + 1}.md`,
@@ -441,8 +435,6 @@ describe("MentionComposer menu on the Menu part's recipe", () => {
     }
   });
 
-  // The @ shows as an icon; a screen reader still hears it, so a person or
-  // an agent never reads like a file.
   it("keeps @ in a person's or agent's name", async () => {
     render(<Harness />);
     await userEvent.type(screen.getByTestId("chats-composer"), "@");

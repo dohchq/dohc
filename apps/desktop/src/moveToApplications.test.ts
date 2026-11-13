@@ -92,7 +92,6 @@ describe("guardedMoveToApplications", () => {
     installed = "0.1.0";
     await attempt();
     expect(move).toHaveBeenCalledTimes(2);
-    // A newer copy arrived since, as before a Try again.
     installed = "0.3.0";
     await expect(attempt()).rejects.toThrow(
       "Applications already has dohc 0.3.0. Open that copy instead.",

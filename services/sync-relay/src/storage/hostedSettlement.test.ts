@@ -13,7 +13,6 @@ import nativeAuthoredSettlement from "../testing/fixtures/nativeAuthoredSettleme
 const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
 afterEach(() => logged.mockClear());
 afterEach(cleanupLiveDeliveryFixtures);
-/** Each logged refusal as "<stage> <check>", in order. */
 const refusedChecks = () =>
   logged.mock.calls.flatMap(
     ([line]) =>
@@ -441,7 +440,6 @@ it.each([true])(
       let delivery = consumer();
       if (restart) {
         await expect(delivery.drain(f.input.evidence.document)).rejects.toThrow("relay restarted");
-        // Only the seed check read the queue; the pass drained nothing.
         expect(methods.filter((method) => method === "liveApplication.ownerOutbox")).toHaveLength(
           1,
         );
@@ -452,7 +450,6 @@ it.each([true])(
         kind: "done",
         terminalReceipt: { journalCursor: 8 },
       });
-      // A seedless adoption still settles its cut, between the seed check and the drain.
       const settledAt = methods.lastIndexOf("liveApplication.settle");
       expect(methods[settledAt - 1]).toBe("liveApplication.ownerOutbox");
       expect(methods.slice(settledAt + 1)).toContain("liveApplication.ownerOutbox");

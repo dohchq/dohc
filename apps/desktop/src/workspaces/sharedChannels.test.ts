@@ -158,9 +158,6 @@ describe("syncJoinedSharedChannels", () => {
     expect(third).toEqual({ pulled: ["share-5", "share-1"], cursor: "wire-1" });
   });
 
-  // A share revoked exactly on the window boundary must not cost the rotation a
-  // lap: the cursor row is gone from the live rows, and resolving it there would
-  // send this pass back to the front and re-cover the prefix it just did.
   it("steps past a cursor row that ended between passes instead of restarting", async () => {
     const pull = vi.fn(async (_input: { shareId: string }) => pullResult(0));
     const rows = Array.from({ length: 32 }, (_, index) =>
@@ -177,7 +174,6 @@ describe("syncJoinedSharedChannels", () => {
     });
     expect(first.resumeAfterChannelWireId).toBe("wire-16");
 
-    // The granter revokes share-16 between the two passes.
     const afterRevoke = rows.map((row) =>
       row.shareId === "share-16" ? { ...row, ended: true } : row,
     );
@@ -196,14 +192,9 @@ describe("syncJoinedSharedChannels", () => {
       Array.from({ length: 16 }, (_, index) => `share-${index + 17}`),
     );
     expect(second.resumeAfterChannelWireId).toBe("wire-32");
-    // 31 live rows, 16 covered.
     expect(second.uncovered).toBe(15);
   });
 
-  // Worse than a plain revoke: the channel is revoked and re-granted before the
-  // next pass, so mergeJoinedChannel replaces its row and the old share id is
-  // gone from the registry entirely. The rotation survives it because its cursor
-  // names the CHANNEL, and the merge keeps that channel in its place.
   it("steps past a cursor channel revoked and re-granted between passes", async () => {
     const pull = vi.fn(async (_input: { shareId: string }) => pullResult(0));
     const rows = Array.from({ length: 32 }, (_, index) =>
@@ -273,22 +264,16 @@ describe("syncJoinedSharedChannels", () => {
       pull,
       push,
     });
-    // The written share pushes in this pass, first, and it does not eat a
-    // rotation slot: the rotation still gets its full 16 rows.
     expect(calls.slice(0, 2)).toEqual(["push:share-1", "pull:share-1"]);
     expect(calls).toHaveLength(34);
     expect(pull.mock.calls.map(([input]) => input.shareId)).toEqual([
       "share-1",
       ...Array.from({ length: 16 }, (_, index) => `share-${index + 5}`),
     ]);
-    // The cursor follows the rotation, not the out-of-order priority row.
     expect(result.resumeAfterChannelWireId).toBe("wire-20");
     expect(result.uncovered).toBe(3);
   });
 
-  // The coverage promise must not depend on write traffic. A share written on
-  // every pass would, if it spent a rotation slot each time, push the tail of
-  // the registry past ceil(live / passRows) forever.
   it("keeps the rotation whole under a share written on every pass", async () => {
     const pull = vi.fn(async (_input: { shareId: string }) => pullResult(0));
     const rows = Array.from({ length: 32 }, (_, index) =>
@@ -313,7 +298,6 @@ describe("syncJoinedSharedChannels", () => {
       cursor = result.resumeAfterChannelWireId ?? undefined;
       covered.push(...pull.mock.calls.map(([input]) => input.shareId));
     }
-    // Two rotations of 16 reach every row, priority or no priority.
     expect(new Set(covered).size).toBe(32);
   });
 
@@ -426,9 +410,6 @@ describe("syncJoinedSharedChannels", () => {
     expect(result.resumeAfterChannelWireId).toBe("wire-2");
   });
 
-  // Offline, with fewer rows than the window: the rotation reached every row and
-  // refreshed none. Counting those as covered makes the pass report a clean
-  // sweep, and the snapshot built on it reads as fully fresh.
   it("reports every row a failed pass could not refresh, even when it reached them all", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const pull = vi.fn(async () => {
@@ -446,11 +427,8 @@ describe("syncJoinedSharedChannels", () => {
       pull,
       push: vi.fn(async () => ({ pushed: 0 })),
     });
-    // The rotation still covered the window, and still advanced: a failure must
-    // not stall it.
     expect(result.uncovered).toBe(0);
     expect(result.resumeAfterChannelWireId).toBe("wire-4");
-    // But nothing was refreshed, and the result says so.
     expect(result.failedRows).toBe(4);
     errorSpy.mockRestore();
   });
@@ -575,11 +553,9 @@ describe("syncJoinedSharedChannels", () => {
       readOnlyShareIds: [],
       changed: false,
       uncovered: 0,
-      // The flaky row was reached and not refreshed: in the rotation, not fresh.
       failedRows: 1,
       resumeAfterChannelWireId: "wire-ok",
     });
-    // Only the healthy share pulled; the flaky one logged and moved on.
     expect(pull).toHaveBeenCalledTimes(1);
     expect(errorSpy).toHaveBeenCalled();
     errorSpy.mockRestore();
@@ -780,7 +756,6 @@ describe("relayApiFetch", () => {
         settled = true;
       });
       await vi.waitFor(() => expect(cancelled).toHaveLength(1));
-      // The refused response the caller never sees is the one released.
       expect(cancelled[0]).toBe(refusals[0]!.body);
       await Promise.resolve();
       expect(settled).toBe(false);
@@ -795,7 +770,6 @@ describe("relayApiFetch", () => {
     } finally {
       cancel.mockRestore();
     }
-    // Unmocked, the refused body ends up released.
     await expect(relayApiFetch(refusing)("http://relay.test/sync/shares")).rejects.toBeInstanceOf(
       RelayApiVersionError,
     );
@@ -820,7 +794,6 @@ describe("mergeJoinedChannel", () => {
     );
     expect(rejoined.map((row) => row.shareId)).toEqual(["share-new", "share-other"]);
 
-    // Same share id (plain idempotent re-join) also keeps its place.
     const rejoinedSameShare = mergeJoinedChannel(
       existing,
       joined({ shareId: "share-old", channelWireId: "wire-1", access: "read-only" }),
@@ -849,8 +822,6 @@ describe("mergeJoinedChannel", () => {
 // registry's history, so nothing about the read needs a join to be refused,
 // and tombstones can stay for as long as the write gate needs them.
 describe("scopeJoinedChannels", () => {
-  // A registry that has seen far more channels than any caller shows: half
-  // live, half tombstones from channels this workspace has left.
   function historicLane(size: number): JoinedSharedChannel[] {
     return Array.from({ length: size }, (_, index) =>
       joined({
@@ -873,7 +844,6 @@ describe("scopeJoinedChannels", () => {
       expect(answers).toHaveLength(shown.length);
       expect(answers.map((answer) => answer.channelWireId)).toEqual(shown);
     }
-    // Identical at every history size: the response is a function of the view.
     expect(answered[1]).toEqual(answered[0]);
     expect(answered[2]).toEqual(answered[0]);
   });
@@ -923,10 +893,6 @@ describe("scopeJoinedChannels", () => {
     ]);
   });
 
-  // The unit distinction the lanes are easy to get wrong on: the RELAY lanes
-  // hold one row per grant, the joined lane one row per CHANNEL. A DM with
-  // several recipients is one channel, so a caller showing it names one wire
-  // id and gets one answer — however many people the grant fanned out to.
   it("answers once for a multi-recipient DM, not once per grant", () => {
     const recipients = 4097;
     const shownByTheSharingSurface = Array.from({ length: recipients }, () => "wire-dm");
@@ -966,8 +932,6 @@ describe("tombstones outlive every revoke-and-grant cycle", () => {
 
   it("keeps one tombstone per channel through any number of cycles, and still refuses writes", async () => {
     let rows: JoinedSharedChannel[] = [];
-    // One channel, revoked and re-granted a thousand times. A re-grant
-    // replaces the row for that wire, so it leaves one tombstone.
     for (let cycle = 0; cycle < 1_000; cycle += 1) {
       rows = mergeJoinedChannel(
         rows,
@@ -977,7 +941,6 @@ describe("tombstones outlive every revoke-and-grant cycle", () => {
     }
     expect(rows).toHaveLength(1);
     expect(rows[0]!.ended).toBe(true);
-    // And that tombstone is still the write gate.
     await expect(
       assertSharedChannelWritable({
         workspaceId: "ws-1",
@@ -987,7 +950,6 @@ describe("tombstones outlive every revoke-and-grant cycle", () => {
       }),
     ).rejects.toBeInstanceOf(SharedChannelReadOnlyError);
 
-    // Distinct channels each keep their own tombstone; nothing reaps them.
     for (let index = 0; index < 500; index += 1) {
       rows = mergeJoinedChannel(
         rows,
@@ -997,7 +959,6 @@ describe("tombstones outlive every revoke-and-grant cycle", () => {
     }
     expect(rows).toHaveLength(501);
     expect(rows.every((row) => row.ended === true)).toBe(true);
-    // And the lane a caller reads is still the size of its view.
     expect(scopeJoinedChannels(rows, ["wire-left-42"])).toHaveLength(1);
   });
 });
@@ -1036,7 +997,6 @@ describe("a failed join keeps its reservation", () => {
       joined({ shareId: "share-regranted", channelWireId: "wire-1" }),
     );
     expect(rejoined).toHaveLength(1);
-    // Whatever happens to the pull, some row still answers for wire-1.
     expect(rejoined.filter((entry) => entry.channelWireId === "wire-1")).toHaveLength(1);
   });
 });
@@ -1101,8 +1061,6 @@ describe("assertSharedChannelWritable", () => {
       });
 
       const readOnlyRows = [joined({ channelWireId: teamWire!, access: "read-only" })];
-      // All three write shapes gate: send/reaction target a thread, the
-      // composer targets a CHANNEL.
       await expect(
         assertSharedChannelWritable({
           workspaceId: "ws-1",
@@ -1119,11 +1077,9 @@ describe("assertSharedChannelWritable", () => {
           target: { channelId: "team" },
         }),
       ).rejects.toBeInstanceOf(SharedChannelReadOnlyError);
-      // Nothing durable landed: the seeded message is still alone.
       const messages = await chats.listMessages({ workspaceId: "ws-1", threadId: "team-thread" });
       expect(messages).toHaveLength(1);
 
-      // The same channel under a read-write grant stays writable…
       await expect(
         assertSharedChannelWritable({
           workspaceId: "ws-1",
@@ -1152,8 +1108,6 @@ describe("assertSharedChannelWritable", () => {
           target: { threadId: "team-thread" },
         }),
       ).rejects.toBeInstanceOf(SharedChannelReadOnlyError);
-      // …a plain local channel is unaffected even while a read-only grant
-      // exists elsewhere…
       await expect(
         assertSharedChannelWritable({
           workspaceId: "ws-1",
@@ -1201,7 +1155,6 @@ describe("assertSharedChannelWritable", () => {
           target: { channelId: "team" },
         }),
       ).rejects.toBeInstanceOf(SharedChannelReadOnlyError);
-      // Nothing durable landed for the ended channel either.
       const afterEnded = await chats.listMessages({
         workspaceId: "ws-1",
         threadId: "team-thread",

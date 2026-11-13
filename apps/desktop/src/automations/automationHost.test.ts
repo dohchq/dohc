@@ -31,9 +31,7 @@ const host = (
   releasedThroughMs: number | null,
 ): RelayAutomationHost => ({ installId, generation, handoverFrom, releasedThroughMs });
 
-// The Group handover this computer's engine answers when it releases.
 const GROUPS = { floorMs: 1, automations: [] };
-// This computer's reach verdicts, released with it.
 const REACH = { version: 1, verdicts: [] };
 
 const answer = (row: RelayAutomationHost | null): HostAnswer => ({
@@ -41,8 +39,6 @@ const answer = (row: RelayAutomationHost | null): HostAnswer => ({
   body: { ok: true, host: row, computers: [] },
 });
 
-// A relay that records one host and answers as the routes do, and a record
-// of everything the module asked and told.
 function world(options: { stored?: unknown; synced?: boolean } = {}) {
   let clock = 0;
   let relay: RelayAutomationHost | null = null;
@@ -52,7 +48,6 @@ function world(options: { stored?: unknown; synced?: boolean } = {}) {
   let signedIn = true;
   let finish: number | null = 5_000;
   let finishes = 0;
-  // Runs while this computer finishes, with the handover's own check.
   let whileFinishing: ((stillHandingOver: () => boolean) => void) | null = null;
   const requests: HostRequest[] = [];
   const started: Array<number | null> = [];
@@ -60,7 +55,6 @@ function world(options: { stored?: unknown; synced?: boolean } = {}) {
   const stored: Array<RelayAutomationHost | null> = [];
   let hostChanges = 0;
   const errors: unknown[] = [];
-  // The timer that reads again while a handover waits, driven by the test.
   const timers: Array<{ wake: () => void; delayMs: number; done: boolean }> = [];
   let releaseAnswer: ((request: HostRequest) => HostAnswer) | null = null;
   const hosts = createAutomationHosts({
@@ -139,7 +133,6 @@ function world(options: { stored?: unknown; synced?: boolean } = {}) {
     settle,
     hostChanges: () => hostChanges,
     armed,
-    /** Fires the one armed timer and lets its read land. */
     fire: async () => {
       const pending = timers.filter((timer) => !timer.done);
       expect(pending).toHaveLength(1);
@@ -258,7 +251,6 @@ describe("automation hosts", () => {
     const release = w.hosts.hold("ws");
     expect(release).not.toBeNull();
 
-    // The owner moves the schedules while a relayed press still runs here.
     w.setRelay(host(OTHER, 3, ME, null));
     w.advance(HOST_FRESH_MS + 1);
     expect(await w.hosts.runsHere("ws")).toBe(false);
@@ -306,7 +298,6 @@ describe("automation hosts", () => {
     await w.hosts.runsHere("ws");
     expect(w.hostChanges(), "the handover began").toBe(1);
 
-    // Chosen back while the held press still runs.
     w.setRelay(host(ME, 4, null, null));
     w.advance(HOST_FRESH_MS + 1);
     expect(await w.hosts.runsHere("ws"), "the host is this computer again").toBe(true);
@@ -328,7 +319,6 @@ describe("automation hosts", () => {
     const seen: boolean[] = [];
     w.whileFinishing((stillHandingOver) => {
       seen.push(stillHandingOver());
-      // Settings chose this computer back.
       w.hosts.learned("ws", host(ME, 4, null, null));
       seen.push(stillHandingOver());
     });
@@ -349,7 +339,6 @@ describe("automation hosts", () => {
     await w.settle();
     expect(w.requests.length, "a fresh copy stands").toBe(reads);
 
-    // Settings on the other computer chose this one, and the other released.
     w.setRelay(host(ME, 4, null, 8_000));
     w.advance(HOST_FRESH_MS + 1);
     w.hosts.relayAnswered("ws");
@@ -381,7 +370,6 @@ describe("automation hosts", () => {
     const w = world({ stored: host(ME, 2, null, null) });
     w.setRelay(host(OTHER, 3, ME, null));
     w.setReleaseAnswer(() => {
-      // The owner chose this computer back first.
       w.setRelay(host(ME, 4, null, null));
       return { status: 409, body: { ok: false, code: "conflict" } };
     });
@@ -429,11 +417,9 @@ describe("automation hosts", () => {
     await w.settle();
     const release = w.hosts.hold("ws");
     expect(release).not.toBeNull();
-    // Closed while a relayed press still writes: nothing new is admitted.
     w.hosts.close("ws");
     expect(w.hosts.stillRuns("ws")).toBe(false);
     expect(w.hosts.hold("ws")).toBeNull();
-    // Reopened, and the owner moves the automations: the handover waits for the write.
     w.setRelay(host(OTHER, 3, ME, null));
     w.hosts.open("ws");
     await w.settle();
@@ -452,7 +438,6 @@ describe("automation hosts", () => {
     w.hosts.close("ws");
     release!();
     expect(await w.hosts.runsHere("ws")).toBe(false);
-    // A fresh open starts from the stored copy, with nothing held.
     w.hosts.open("ws");
     await w.settle();
     expect(w.hosts.hold("ws")).not.toBeNull();
@@ -463,11 +448,8 @@ describe("automation hosts", () => {
     w.setRelay(host(ME, 2, null, null));
     w.hosts.open("ws");
     await w.settle();
-    // Settings chose another computer and this one released.
     w.hosts.learned("ws", host(OTHER, 4, null, 3_000));
     expect(w.hosts.stillRuns("ws")).toBe(false);
-    // A check-in that was still out answers with the older host, then a
-    // stale answer says no host at all: neither turns running back on.
     expect(
       w.hosts.learned("ws", host(ME, 2, null, null)),
       "the host it holds, not the stale answer",
@@ -491,7 +473,6 @@ describe("automation hosts", () => {
     await w.settle();
     expect(w.armed(), "no handover, so no timer").toEqual([]);
 
-    // The owner chose this computer; the other one has not released yet.
     w.setRelay(host(ME, 3, OTHER, null));
     w.hosts.learned("ws", host(ME, 3, OTHER, null));
     expect(w.armed()).toEqual([HANDOVER_READ_FIRST_MS]);
@@ -504,7 +485,6 @@ describe("automation hosts", () => {
     await w.fire();
     expect(w.armed(), "never longer than the cap").toEqual([HANDOVER_READ_MAX_MS]);
 
-    // The other computer released: the next read starts this one at once.
     const changes = w.hostChanges();
     w.setRelay(host(ME, 4, null, 9_000));
     await w.fire();
@@ -525,18 +505,15 @@ describe("automation hosts", () => {
     w.hosts.open("ws");
     await w.settle();
     expect(w.armed()).toEqual([HANDOVER_READ_FIRST_MS]);
-    // Offline, the timer keeps reading at longer waits.
     await w.fire();
     expect(w.armed()).toEqual([2 * HANDOVER_READ_FIRST_MS]);
 
-    // Back online: the owner chose the other computer back, so no handover waits.
     w.setReachable(true);
     w.setRelay(host(OTHER, 5, null, null));
     await w.fire();
     expect(w.armed()).toEqual([]);
     expect(w.hosts.stillRuns("ws")).toBe(false);
 
-    // A new handover starts its reads short again.
     w.hosts.learned("ws", host(ME, 6, OTHER, null));
     expect(w.armed()).toEqual([HANDOVER_READ_FIRST_MS]);
   });
@@ -704,7 +681,6 @@ describe("the automation host", () => {
           );
         },
       });
-      // The next 15-minute read, as its timer fires.
       const recheck = async () => {
         const timer = timers.shift();
         expect(timer?.delayMs).toBe(MAX_TIMER_MS);
@@ -720,7 +696,6 @@ describe("the automation host", () => {
       expect(await hosts.groupHost("ws")).toBe(0);
       expect(changes).toEqual([]);
       await runSchedulesOn(root, desk);
-      // A Group read finds it first, so the Group subscriptions go too.
       expect(await hosts.groupHost("ws")).toBeNull();
       expect(changes).toEqual(["host ws", "elsewhere ws"]);
       expect(await schedules.runsHere()).toBe(false);
@@ -739,7 +714,6 @@ describe("the automation host", () => {
       await runSchedulesOn(root, desk);
       expect(await hosts.groupHost("ws")).toBeNull();
       expect(hosts.waitsElsewhere("ws")).toBe(true);
-      // The last schedule was removed: the scheduler asks no more.
       triggers.here = false;
       hosts.automationsChanged("ws");
       expect(hosts.waitsElsewhere("ws")).toBe(false);
@@ -751,11 +725,9 @@ describe("the automation host", () => {
 
     it("reads the folder again every 15 minutes, so a read that works again restores this computer", async () => {
       const { root, changes, triggers, hosts, recheck } = await copied();
-      // Group triggers only: the scheduler never asks for this workspace.
       triggers.here = true;
       hosts.open("ws");
       expect(await hosts.groupHost("ws")).toBe(0);
-      // The record is out of reach for a while, as when the folder is evicted offline.
       const record = join(root, ".dohc", "sync-history.json");
       await rename(record, `${record}.away`);
       expect(await hosts.groupHost("ws")).toBeNull();
@@ -823,7 +795,6 @@ describe("the automation host", () => {
     w.hosts.open("ws");
     await w.settle();
     expect(w.hosts.runsAt("ws")).toBe(2);
-    // The owner chose the other computer: this one hands over.
     w.setRelay(host(OTHER, 3, ME, null));
     w.hosts.learned("ws", host(OTHER, 3, ME, null));
     expect(w.hosts.runsAt("ws"), "handing over").toBeNull();

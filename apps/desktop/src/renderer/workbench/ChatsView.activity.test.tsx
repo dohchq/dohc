@@ -182,9 +182,6 @@ describe("ChatsView live activity refresh", () => {
     });
   });
 
-  // The write lands in a chat the user does not have open, so the roll-up
-  // badge on the channel list is the only place it shows. Without the list's
-  // own subscription the count waits for a navigation or a relaunch.
   it("raises the channel list's roll-up badge while the list stays on screen", async () => {
     let unreadCount = 0;
     bridgeMock.listChatChannels.mockImplementation(() =>
@@ -200,13 +197,10 @@ describe("ChatsView live activity refresh", () => {
     unreadCount = 3;
     act(() => emitWorkspaceActivity());
 
-    // A group the user only follows shows no count: its name goes bold, and
-    // the count is there for a screen reader.
     const unread = await screen.findByTestId("chats-channel-unread");
     expect(unread.textContent).toBe("3 unread");
     expect(unread.className).toBe("sr-only");
     expect(screen.getByTestId("chats-channel-name").className).toContain("font-medium");
-    // Nothing navigated: the badge appeared on the list itself.
     expect(screen.getByTestId("chats-channels-heading")).toBeTruthy();
     expect(screen.getByTestId("chats-channel-name").textContent).toBe("general");
   });
@@ -215,10 +209,6 @@ describe("ChatsView live activity refresh", () => {
   // 5-second poll — a DM badge lagging beside a live channel badge reads as
   // "no new DMs".
 
-  // The activity signal fires for every settled file batch and run update,
-  // and syncDms is a relay sync, not a local read. The rule (badgeRead
-  // precedent): one sync in flight, and a burst arriving mid-sync runs
-  // exactly one trailing pass when it settles.
   it("coalesces an activity burst into one in-flight DM sync plus one trailing pass", async () => {
     bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [dm()] });
     renderView();
@@ -233,7 +223,6 @@ describe("ChatsView live activity refresh", () => {
     act(() => emitWorkspaceActivity());
     await waitFor(() => expect(bridgeMock.syncDms.mock.calls.length).toBe(syncsBefore + 1));
 
-    // The burst lands while that sync is in flight.
     act(() => {
       emitWorkspaceActivity();
       emitWorkspaceActivity();
@@ -244,7 +233,6 @@ describe("ChatsView live activity refresh", () => {
       "revert refreshDms to a plain un-coalesced sync. Each of these starts its own relay sync and the count below reads syncsBefore + 4.",
     ).toBe(syncsBefore + 1);
 
-    // One trailing pass when the held sync settles — not one per event.
     await act(async () => {
       release();
       await held;
@@ -254,10 +242,6 @@ describe("ChatsView live activity refresh", () => {
     expect(bridgeMock.syncDms.mock.calls.length).toBe(syncsBefore + 2);
   });
 
-  // The dead-era yield: a workspace switch during a stalled old-workspace
-  // sync must steal the drain's slot, not queue onto it — a queued pass on a
-  // sync that never settles would leave the new workspace's DM list empty
-  // forever.
   it("never queues the new workspace's DM sync onto the stalled one it left", async () => {
     // Fake timers, never advanced: the 5s poll cannot fire, so only the
     // switch can start the new workspace's sync. A 2 s real-time wait made
@@ -314,11 +298,6 @@ describe("ChatsView live activity refresh", () => {
       vi.useRealTimers();
     }
   });
-
-  // The switch happens while a badge read for the old workspace is still in
-  // flight. Activity in the new workspace must not queue a pass onto it: that
-  // pass carries the old workspace's id and the new workspace's liveToken, and
-  // the guard would pass while the wrong workspace's channels repaint.
 
   it("drops a slow list refresh from the workspace the user left", async () => {
     type ChannelListPage = {
@@ -405,7 +384,6 @@ describe("ChatsView live activity refresh", () => {
     await waitFor(() =>
       expect(screen.getByTestId("chats-channel-name").textContent).toBe("general"),
     );
-    // A badge read for the old workspace is now in flight.
     act(() => emitWorkspaceActivity());
     expect(oldWorkspaceReads).toBe(2);
 
@@ -415,9 +393,6 @@ describe("ChatsView live activity refresh", () => {
     await waitFor(() =>
       expect(screen.getByTestId("chats-channel-name").textContent).toBe("planning"),
     );
-    // A write lands in the workspace the user switched TO. It is not swallowed
-    // by the read still in flight for the workspace the user left: the new
-    // workspace gets its own badge read (its mount read, then this one).
     act(() => emitWorkspaceActivity());
     expect(newWorkspaceReads).toBe(2);
 
@@ -433,9 +408,6 @@ describe("ChatsView live activity refresh", () => {
     expect(oldWorkspaceReads).toBe(2);
   });
 
-  // The editor marks a thread read and the shell bumps readRevision, whose
-  // refresh does not change liveToken. A badge read issued before it must not
-  // put the count it already cleared back on screen.
   it("cannot restore an unread count the editor already cleared", async () => {
     type ChannelListPage = {
       channels: ChatChannelRecord[];
@@ -452,7 +424,6 @@ describe("ChatsView live activity refresh", () => {
         return Promise.resolve({ channels: [channel({ unreadCount: 2 })], fileThreads: [] });
       }
       if (reads === 2) return staleBadge;
-      // The read the editor's mark-read triggers: the count is gone.
       return Promise.resolve({ channels: [channel({ unreadCount: 0 })], fileThreads: [] });
     });
     const navigator = (readRevision: number) =>
@@ -460,13 +431,11 @@ describe("ChatsView live activity refresh", () => {
     const view = render(navigator(0));
     expect((await screen.findByTestId("chats-channel-unread")).textContent).toBe("2 unread");
 
-    // A badge read is in flight when the read lands.
     act(() => emitWorkspaceActivity());
     expect(reads).toBe(2);
     view.rerender(navigator(1));
     await waitFor(() => expect(screen.queryByTestId("chats-channel-unread")).toBeNull());
 
-    // The older badge read answers with the count as it was.
     await act(async () => {
       resolveStaleBadge({ channels: [channel({ unreadCount: 2 })], fileThreads: [] });
       await staleBadge;
@@ -474,9 +443,6 @@ describe("ChatsView live activity refresh", () => {
     expect(screen.queryByTestId("chats-channel-unread")).toBeNull();
   });
 
-  // A joined-only correction answers one question. It must not take the other
-  // one's place: a full share read still in flight carries the invitations and
-  // member rows nothing else in this refresh can produce.
   it("does not let a joined-only correction swallow a full share read", async () => {
     const joinedRow = {
       shareId: "share-joined",
@@ -503,7 +469,6 @@ describe("ChatsView live activity refresh", () => {
       if (shareReads === 1) {
         return Promise.resolve(shareListing({ joined: [joinedRow] }));
       }
-      // The readRevision refresh's full lookup: it stalls.
       return new Promise((resolve) => {
         answerFullRead = resolve;
       });
@@ -518,7 +483,6 @@ describe("ChatsView live activity refresh", () => {
     await screen.findByTestId("chats-channel-shared");
     expect(screen.queryByTestId("chats-join-shared")).toBeNull();
 
-    // The full lookup is in flight when a write starts a badge pass.
     view.rerender(navigator(1));
     await waitFor(() => expect(shareReads).toBe(2));
     act(() => emitWorkspaceActivity());
@@ -526,14 +490,11 @@ describe("ChatsView live activity refresh", () => {
       expect(screen.getByTestId("chats-channel-shared").textContent).toContain("no longer shared"),
     );
 
-    // The full lookup answers, carrying an invitation only it can report.
     await act(async () => {
       answerFullRead(shareListing({ received: [invitation], joined: [joinedRow] }));
       await Promise.resolve();
     });
 
-    // Both answers stand: the invitation lands, and the newer joined row is
-    // not undone by the older listing that carried it.
     expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
     expect(screen.getByTestId("chats-channel-shared").textContent).toContain("no longer shared");
   });
@@ -542,10 +503,6 @@ describe("ChatsView live activity refresh", () => {
   // grant side lives on the relay behind an unbounded fetch; what this reader
   // needs — which channels this machine joined — is local.
 
-  // Another mounted Chats view joins this workspace's first shared channel.
-  // The listing then carries a channel this view has no grant row for, and a
-  // channel with no grant row reads as this workspace's own: sharing offered
-  // on someone else's channel, and a composer on a read-only grant.
   it("resolves the first shared channel a view learns about from a write", async () => {
     const sharedChannel = channel({
       id: "channel-shared",
@@ -565,8 +522,6 @@ describe("ChatsView live activity refresh", () => {
     renderView();
     await screen.findByTestId("chats-channel-name");
 
-    // The other view joins, so the registry now has a read-only grant and the
-    // channel is pulled locally. This view hears about it as workspace activity.
     channelsIncludeShared = true;
     bridgeMock.listJoinedSharedChannels.mockResolvedValue({
       joined: [
@@ -588,7 +543,6 @@ describe("ChatsView live activity refresh", () => {
       ),
     );
 
-    // Opening it is honest: read-only, and no composer to post with.
     await user.click(screen.getAllByTestId("chats-channel")[1]);
     expect((await screen.findByTestId("chats-readonly-note")).textContent).toContain(
       "read-only for you",
@@ -596,9 +550,6 @@ describe("ChatsView live activity refresh", () => {
     expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
   });
 
-  // A refresh nobody asked for must not take the surface down to a spinner
-  // before it knows anything: it commits nothing on failure, so the error card
-  // and its Try again would never come back.
   it("leaves the retry on screen when a background refresh fails over an error", async () => {
     bridgeMock.listChatChannels.mockRejectedValue(new Error("offline"));
     const navigator = (readRevision: number) =>
@@ -607,11 +558,9 @@ describe("ChatsView live activity refresh", () => {
     // The mount refresh is the user's, so it reports its failure.
     expect(await screen.findByText("Try again")).toBeTruthy();
 
-    // A read lands; that background refresh fails too, and says nothing.
     view.rerender(navigator(1));
     await waitFor(() => expect(bridgeMock.listChatChannels).toHaveBeenCalledTimes(2));
 
-    // The way out is still on screen, and it still works.
     expect(screen.getByText("Try again")).toBeTruthy();
     bridgeMock.listChatChannels.mockResolvedValue({
       channels: [channel()],
@@ -621,9 +570,6 @@ describe("ChatsView live activity refresh", () => {
     expect((await screen.findByTestId("chats-channel-name")).textContent).toBe("general");
   });
 
-  // A failed lookup learned nothing. "Unknown" is a state of the whole share
-  // listing, so a response that no longer owns both lanes must not write it:
-  // doing so throws away a newer joined-grant answer and locks every channel.
   it("does not let a failed share lookup undo a newer joined correction", async () => {
     const joinedRow = {
       shareId: "share-joined",
@@ -650,7 +596,6 @@ describe("ChatsView live activity refresh", () => {
       if (shareReads === 1) {
         return Promise.resolve(shareListing({ joined: [joinedRow] }));
       }
-      // The refresh the user's back-navigation owns. It stalls, then fails.
       return new Promise((_resolve, reject) => {
         failFullRead = () => reject(new Error("signed out"));
       });
@@ -662,36 +607,27 @@ describe("ChatsView live activity refresh", () => {
     const user = userEvent.setup();
     renderView();
 
-    // Back out of a channel: goBack owns a foreground overview refresh, whose
-    // share lookup is the one that will fail.
     await waitFor(() => expect(screen.getAllByTestId("chats-channel")).toHaveLength(2));
     await user.click(screen.getAllByTestId("chats-channel")[0]);
     await user.click(await screen.findByTestId("chats-channel-back"));
     await waitFor(() => expect(shareReads).toBe(2));
 
-    // A write lands, and the badge pass corrects the joined grant.
     act(() => emitWorkspaceActivity());
     await waitFor(() =>
       expect(screen.getByTestId("chats-channel-shared").textContent).toContain("no longer shared"),
     );
 
-    // Now the older lookup fails.
     await act(async () => {
       failFullRead();
       await Promise.resolve();
     });
 
-    // The correction stands, and nothing locked behind a response that
-    // learned nothing: the owned channel still has its composer.
     expect(screen.getByTestId("chats-channel-shared").textContent).toContain("no longer shared");
     await user.click(screen.getAllByTestId("chats-channel")[0]);
     expect(await screen.findByTestId("chats-new-thread-composer")).toBeTruthy();
     expect(screen.queryByTestId("chats-readonly-note")).toBeNull();
   });
 
-  // The other half of the same rule: a failed lookup that does own both lanes
-  // must still settle the state, or the share controls wait forever. Unknown
-  // fails closed.
   it("commits unknown when the share lookup fails with nothing newer to keep", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({
       channels: [channel()],
@@ -701,11 +637,9 @@ describe("ChatsView live activity refresh", () => {
     const user = userEvent.setup();
     renderView();
 
-    // The mount resolved the share metadata: the owned channel is writable.
     await user.click(await screen.findByTestId("chats-channel"));
     expect(await screen.findByTestId("chats-new-thread-composer")).toBeTruthy();
 
-    // Back out: that refresh owns both lanes, and its lookup fails.
     bridgeMock.listChatChannelShares.mockRejectedValue(new Error("signed out"));
     await user.click(await screen.findByTestId("chats-channel-back"));
     await waitFor(() => expect(bridgeMock.listChatChannelShares).toHaveBeenCalledTimes(2));
@@ -746,8 +680,6 @@ describe("ChatsView live activity refresh", () => {
       "no longer shared",
     );
 
-    // The sync finds the grant revoked and records it in the registry, which
-    // is what the local read reports.
     bridgeMock.listJoinedSharedChannels.mockResolvedValue({
       joined: [{ ...joinedRow, ended: true }],
     });
@@ -759,8 +691,6 @@ describe("ChatsView live activity refresh", () => {
     expect(screen.getByTestId("chats-join-shared")).toBeTruthy();
   });
 
-  // Activity fires for every settled file batch and run update, and the
-  // channel listing syncs shared channels over the relay before it reads.
   it("keeps one channel listing in flight through an activity storm, then catches up once", async () => {
     type ChannelListPage = {
       channels: ChatChannelRecord[];
@@ -783,14 +713,12 @@ describe("ChatsView live activity refresh", () => {
       emitWorkspaceActivity();
       emitWorkspaceActivity();
     });
-    // Three unrelated writes, one relay-backed listing.
     expect(bridgeMock.listChatChannels).toHaveBeenCalledTimes(2);
 
     await act(async () => {
       deferred[0]({ channels: [channel({ unreadCount: 1 })], fileThreads: [] });
       await Promise.resolve();
     });
-    // The events that arrived mid-read are not lost — they cost one catch-up.
     await waitFor(() => expect(bridgeMock.listChatChannels).toHaveBeenCalledTimes(3));
     await act(async () => {
       deferred[1]({ channels: [channel({ unreadCount: 5 })], fileThreads: [] });

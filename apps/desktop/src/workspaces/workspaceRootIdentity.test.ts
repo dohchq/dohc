@@ -121,7 +121,6 @@ describe("deepestRootSync", () => {
         unknown.names,
       ),
     ).toBeNull();
-    // Spelling still matches as it always has.
     expect(deepestRootSync("/home/sam/Notes", roots("/home/sam/Notes"), () => null)).toMatchObject({
       entry: "/home/sam/Notes",
     });

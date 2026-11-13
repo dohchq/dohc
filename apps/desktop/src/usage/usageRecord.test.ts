@@ -123,7 +123,6 @@ describe("usage record bridge", () => {
         automation: { count: 1, counted: false },
       },
     });
-    // The other doors this build does not count stay marked, never a plain zero.
     expect(read.rows.find((row) => row.capabilityId === "chat.post")!.doors).toMatchObject({
       renderer: { counted: false },
       cli: { counted: true },
@@ -227,7 +226,6 @@ describe("usage record bridge", () => {
     expect(disk.get(FILE)).toBe(raw);
     expect(io.writeFile).not.toHaveBeenCalled();
     expect(io.rename).not.toHaveBeenCalled();
-    // A launch clears only a leftover swap beside the record.
     expect(io.rm.mock.calls.filter(([file]) => !file.startsWith(`${FILE}.incoming`))).toEqual([]);
   });
 

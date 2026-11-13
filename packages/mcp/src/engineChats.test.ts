@@ -230,8 +230,6 @@ describe("desktop CLI proxy", () => {
         body: "Shipping.",
       });
 
-      // The bare call carries the CLI's own defaults: no attachments, no
-      // decision, no run. Nothing is invented on the agent's behalf.
       expect(requests.map((request) => [request.verb, request.args])).toEqual([
         [
           "post",
@@ -322,7 +320,6 @@ describe("desktop CLI proxy", () => {
         messageId: "message-2",
         title: "Agenda review",
       });
-      // A partial success (posted, provenance still pending) stays visible.
       await expect(replyToChat(ctx, { threadId: thread.id, body: "On it." })).resolves.toEqual({
         ok: true,
         threadId: "thread-1",
@@ -415,7 +412,6 @@ describe("desktop CLI proxy", () => {
         ok: false,
         reason: expect.stringContaining("invalid_union"),
       });
-      // A malformed write response is never widened into a success.
       await expect(
         startGroupChat(ctx, { group: "general", body: "On it." }),
       ).resolves.toMatchObject({ ok: false, reason: expect.any(String) });

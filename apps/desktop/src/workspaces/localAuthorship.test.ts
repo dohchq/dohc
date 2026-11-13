@@ -19,7 +19,6 @@ describe("local authorship", () => {
   it("reads a settled account when the request arrives, while a later load is still held", async () => {
     const { local, load, loads } = authorship();
     local.credentialsSettled("account-alice");
-    // A sign-in reload is under way and its cleanup has not finished.
     const request = local.person();
     local.credentialsSettled("account-bob");
     load.resolve(undefined);

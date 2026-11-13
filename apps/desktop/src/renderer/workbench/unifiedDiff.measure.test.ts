@@ -15,7 +15,6 @@ function readRepoDoc(relativePath: string): string {
   return readFileSync(repoRoot + relativePath, "utf8");
 }
 
-// Change one line in ten thousand characters, the way a small real edit lands.
 function editEveryNthLine(text: string, every: number): string {
   return splitDiffLines(text)
     .map((line, index) => (index % every === 0 ? line + " (edited)" : line))
@@ -48,7 +47,6 @@ function measure(scenario: string, before: string, after: string): Row {
   const beforeLines = splitDiffLines(before);
   const afterLines = splitDiffLines(after);
   const work = diffWorkEstimate(beforeLines, afterLines);
-  // One render pass: diff the bodies, then build the lines the page draws.
   const started = performance.now();
   const diff = computeTextDiff(before, after, 800);
   buildUnifiedDiffLines(diff);
@@ -89,7 +87,6 @@ describe.skipIf(!measuring)("history diff work measurement", () => {
   it("reports the cost of one render pass across representative bodies", () => {
     const rows: Row[] = [];
 
-    // Healthy work: real repository documents, small edits.
     for (const doc of [
       "AGENTS.md",
       "README.md",
@@ -100,8 +97,6 @@ describe.skipIf(!measuring)("history diff work measurement", () => {
       rows.push(measure(doc, before, editEveryNthLine(before, 50)));
     }
 
-    // Healthy work: one long unwrapped paragraph per line, the shape a pasted
-    // or generated body takes.
     for (const [lines, lineChars] of [
       [200, 500],
       [499, 500],
@@ -111,8 +106,6 @@ describe.skipIf(!measuring)("history diff work measurement", () => {
       rows.push(measure(`${lines} x ${lineChars} chars`, before, editEveryNthLine(before, 50)));
     }
 
-    // The reported failures: line counts parked at the cell ceiling with huge
-    // lines, and bodies whose line COUNT is the problem.
     for (const [lines, lineChars, label] of [
       [499, 3_990, "at the bound (largest body the limit admits)"],
       [499, 4_008, "cell ceiling, 2,000,000 chars"],

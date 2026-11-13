@@ -65,9 +65,6 @@ describe("engineOriginLabel", () => {
   });
 });
 
-// Agent-authored moments display as "the agent name" — the
-// same formatting rule the chat rail uses — while everything else keeps its
-// actor-neutral origin label.
 describe("momentDescription", () => {
   it.each(["drop", "undo"])("names the local person who performed held-change %s", (action) => {
     const change = moment({
@@ -81,8 +78,6 @@ describe("momentDescription", () => {
     expect(engineMomentSourceLabel(change)).toBe("Ice");
     expect(momentDescription(change)).toContain(", Ice,");
   });
-  // A change several wrote lists each author; an agent or an automation
-  // among them says what it is, so it never reads as another person.
   it("names each of several authors by their own kind", () => {
     const description = momentDescription(
       moment({
@@ -271,7 +266,6 @@ describe("engineMomentSourceLabel", () => {
 
   it("keeps unattributed moments on their actor-neutral origin label", () => {
     expect(engineMomentSourceLabel(moment({ id: "m1" }))).toBe("Local file edit");
-    // A record a person made or deleted by hand reads as their file edit.
     expect(
       engineMomentSourceLabel(
         moment({
@@ -336,7 +330,6 @@ describe("groupAgentAuthorName", () => {
   });
 });
 
-// The file groups `groupTimeline` builds, for entries that are all files.
 function groupEngineMoments(moments: EngineMomentRecord[]) {
   return groupTimeline(moments.map((entry) => ({ kind: "file" as const, moment: entry }))).flatMap(
     (item) => (item.kind === "files" ? [item.group] : []),
@@ -380,7 +373,6 @@ describe("groupTimeline", () => {
     expect(items.map((item) => [item.kind, item.key])).toEqual([
       ["files", "m2"],
       ["version", "version:draft"],
-      // A row between two moments of one pass ends their group.
       ["files", "m1"],
       ["collection", "collection:00000000-0000-4000-8000-000000000001:4"],
     ]);
@@ -438,7 +430,6 @@ describe("groupTimeline", () => {
     expect(groups).toHaveLength(2);
   });
 
-  // An edit by the agent `agentId`, which shows as `name`.
   const byAgent = (
     id: string,
     overrides: Partial<EngineMomentRecord> = {},
@@ -452,7 +443,6 @@ describe("groupTimeline", () => {
         byAgent("m6"),
         byAgent("m5"),
         byAgent("m4"),
-        // Each of these ends the run before it.
         byAgent("m3", { path: "notes/other.md" }),
         byAgent("m2", { path: "notes/other.md" }, "pat", "Pat"),
         moment({ id: "m1", path: "notes/other.md" }),
@@ -470,7 +460,6 @@ describe("groupTimeline", () => {
       ["m2", false, ["m2"]],
       ["m1", false, ["m1"]],
     ]);
-    // A new edit on top keeps the run's row.
     expect(
       groupTimeline(
         [byAgent("m7"), byAgent("m6")].map((entry) => ({ kind: "file" as const, moment: entry })),
@@ -478,14 +467,12 @@ describe("groupTimeline", () => {
     ).toBe("m6");
   });
 
-  // A name is what an agent calls itself; its id is who it is.
   it("never folds two agents that share a name", () => {
     expect(
       groupEngineMoments([byAgent("m2"), byAgent("m1", {}, "another-nova")]).map(
         (group) => group.moments.length,
       ),
     ).toEqual([1, 1]);
-    // A name with no agent identity behind it never folds either.
     expect(
       groupEngineMoments([
         moment({ id: "m2", agentAuthorName: "Nova" }),
@@ -494,7 +481,6 @@ describe("groupTimeline", () => {
     ).toEqual([1, 1]);
   });
 
-  // Another account can write your personal agent's id and name on its own edit.
   it("never folds your personal agent's edits with another account's that claim its id", () => {
     const grok = `p-${"g".repeat(26)}`;
     const edit = (id: string, self: boolean) => ({
@@ -518,7 +504,6 @@ describe("groupTimeline", () => {
     ]);
   });
 
-  // Every connected agent is the unnamed agent; the name it gave tells them apart.
   it("folds a connected agent's edits only under the name it gave", () => {
     const connected = (id: string, agentName: string) =>
       moment({
@@ -535,7 +520,6 @@ describe("groupTimeline", () => {
     ).toEqual([["m3", "m2"], ["m1"]]);
   });
 
-  // An agent's file write is its own one-moment operation.
   it("folds an agent's writes that each carry their own operation", () => {
     const groups = groupEngineMoments(
       ["op-3", "op-2", "op-1"].map((correlationId, index) =>
@@ -547,7 +531,6 @@ describe("groupTimeline", () => {
     ]);
   });
 
-  // An edit by the person `humanId`.
   const byPerson = (id: string, overrides: Partial<EngineMomentRecord> = {}, humanId = "maya") =>
     moment({ id, authors: [{ kind: "human", humanId }], ...overrides });
 
@@ -558,13 +541,11 @@ describe("groupTimeline", () => {
         group.moments.map((entry) => entry.id),
       ]),
     ).toEqual([[true, ["m3", "m2", "m1"]]]);
-    // Another person, or an agent, starts a new row.
     expect(
       groupEngineMoments([byPerson("m3"), byPerson("m2", {}, "jun"), byAgent("m1")]).map(
         (group) => group.moments.length,
       ),
     ).toEqual([1, 1, 1]);
-    // A person the owner shared with, writing directly, folds by their user id.
     const byNamed = (id: string, userId = "ana") =>
       moment({ id, authors: [{ kind: "named", userId, grantId: "g-1", grantGeneration: 1 }] });
     expect(
@@ -589,7 +570,6 @@ describe("groupTimeline", () => {
         ],
         [1, 1, 1],
       ],
-      // The pass's first file stays with the pass, and the pass stays whole.
       [
         [
           byAgent("a"),
@@ -636,9 +616,6 @@ describe("groupTimeline", () => {
       expect(groupEngineMoments(moments).map((group) => group.moments.length)).toEqual(sizes);
   });
 
-  // The history view never re-sorts: the order the merge in
-  // workspaceEngineCapture hands over is the order the user reads. Moments
-  // that share a millisecond would be free to move if it did.
   it("shows same-millisecond moments in the order it is given", () => {
     const tied = [
       moment({ id: "later", momentOrder: 2, recordedAtMs: 500 }),

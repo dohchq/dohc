@@ -1147,7 +1147,6 @@ describe("relay link grants", () => {
     const h = handler(storage);
     await seedFileShare(h);
 
-    // Create user and create email both start active at generation 1.
     expect(storage.getShareGrant("grant-0")).toMatchObject({
       principalKind: "user",
       generation: 1,
@@ -1217,7 +1216,6 @@ describe("relay link grants", () => {
     expect(firstCredential.secretHash).toBe(hmac(firstSecret));
     expect(firstCredential.secretHash).not.toContain(firstSecret);
 
-    // Convert makes a dependent named grant at the link's current access.
     const converted = seedDependentGrant(storage, {
       shareId: "share-existing",
       parentGrantId: linkGrantId,
@@ -1234,7 +1232,6 @@ describe("relay link grants", () => {
       },
     });
 
-    // Narrow keeps the URL and generation while narrowing an over-wide dependent.
     expect(
       storage.retuneShareGrant({
         shareId: "share-existing",
@@ -1269,7 +1266,6 @@ describe("relay link grants", () => {
       effectiveSelector: { access: "comment" },
     });
 
-    // Widen link rotates the URL and bumps dependent bindings without widening them.
     const widenedSecret = Buffer.alloc(32, 2).toString("base64url");
     expect(
       storage.retuneShareGrant({
@@ -1301,7 +1297,6 @@ describe("relay link grants", () => {
       (await h(request(null, "/sync/link-exchange", jsonBody({ secret: widenedSecret })))).status,
     ).toBe(404);
 
-    // Rotate preserves access, replaces the URL, and bumps dependent bindings.
     const rotatedSecret = Buffer.alloc(32, 3).toString("base64url");
     expect(
       storage.rotateLinkGrant({
@@ -1341,7 +1336,6 @@ describe("relay link grants", () => {
       }),
     ).toMatchObject({ ok: true, grant: { generation: 1, parentGrantId: linkGrantId } });
 
-    // Revoke one link retires its credential and revokes only attached dependents.
     const revokedResponse = await h(
       request(
         OWNER,
@@ -1370,7 +1364,6 @@ describe("relay link grants", () => {
       parentGrantId: null,
     });
 
-    // A share may hold several independent links. Deleting it revokes all grants.
     const secondLink = await createLink(h);
     const thirdLink = await createLink(h);
     expect(secondLink.grantId).not.toBe(thirdLink.grantId);
@@ -2072,8 +2065,6 @@ describe("relay link grants", () => {
       ),
     ).toBe(missing);
 
-    // A Group link serves only an ordinary channel: never a direct message
-    // or an agent channel.
     storage.appendLogBatch({
       workspaceId: WORKSPACE,
       originId: "channels",
@@ -2348,7 +2339,6 @@ describe("named share origin isolation", () => {
     const originB = rows.find((row) => row.payload.threadId === "member-b-replica-0")!.originId;
     expect(originA).not.toBe(originB);
     expect(originA).not.toBe("replica");
-    // A served origin is not a capability to append to its coordinates.
     const injection = await append("member-b", originA, 1);
     expect(injection.status).toBe(400);
     expect((await append("member-a", "replica", 1)).status).toBe(200);
@@ -2454,7 +2444,6 @@ it("gives no URL to a creation retry after the link's access changed", async () 
   );
   expect(retry).toMatchObject({ grantId: first.grantId, access: "view", urlUnavailable: true });
   expect(retry).not.toHaveProperty("url");
-  // Narrowed back, the link has the access asked for again, at the address it has now.
   expect((await h(request(OWNER, path, jsonBody({ ...transition, access: "view" })))).status).toBe(
     200,
   );

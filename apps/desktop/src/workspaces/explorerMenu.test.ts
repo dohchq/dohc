@@ -132,8 +132,6 @@ describe("a share view", () => {
         "a share view offers Share… for files this account cannot grant",
       ).not.toContain("share");
     }
-    // And an ordinary workspace still gets it, so the guard above is not
-    // simply switching the item off everywhere.
     expect(commands({ kind: "file", shareView: null, canShare: true })).toContain("share");
   });
 });

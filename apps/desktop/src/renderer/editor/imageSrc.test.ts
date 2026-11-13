@@ -129,7 +129,6 @@ describe("resolveWorkspaceImageSrc", () => {
     // the APP directory and decode whatever it found. Blocked → no src at all.
     expect(resolveWorkspaceImageSrc(ctx, "../../outside.png")).toBe(BLOCKED_IMAGE_SRC);
     expect(resolveWorkspaceImageSrc(ctx, "../../../../etc/pic.png")).toBe(BLOCKED_IMAGE_SRC);
-    // A root-level document: even a single `..` already escapes.
     expect(
       resolveWorkspaceImageSrc({ workspaceId: "ws1", docPath: "plan.md" }, "../outside.png"),
     ).toBe(BLOCKED_IMAGE_SRC);

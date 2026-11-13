@@ -46,7 +46,6 @@ describe("where automations write", () => {
         group("trip", "Trip"),
         group("a", "Plans", "plans"),
         group("b", "Plans", "plans-2"),
-        // One Group's name is another's slug: the slug names the Group.
         group("named", "ops", "ops-team"),
         group("slugged", "Ops", "ops"),
         { ...group("board", "Board"), readOnly: true, ended: true },
@@ -78,7 +77,6 @@ describe("where automations write", () => {
     const directory = chatDirectoryOf(
       [
         dm("dm-ana"),
-        // Ana and Bob together, and Cara with a pending invite beside her.
         dm("dm-pair"),
         dm("dm-cara"),
         dm("dm-joined", "wire-elsewhere"),

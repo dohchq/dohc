@@ -160,8 +160,6 @@ function chatOps(
   return ops.filter((op) => op.opKind.startsWith("chat."));
 }
 
-// The whole world every serving case reads from: two files, one thread on
-// each, one message on each.
 async function seedWorkspace(h: SyncRelayHandler): Promise<OwnerLog> {
   await claimWorkspace(h);
   const log = new OwnerLog(h);
@@ -248,14 +246,11 @@ describe("chat over a file share", () => {
     const response = await h(request(RECIPIENT, `/sync/shares/${shareId}/log?since=0&limit=500`));
     expect(response.status).toBe(200);
     const body = await response.text();
-    // The leak shape, stated literally: nothing about the outside file may
-    // appear anywhere in the response bytes.
     for (const sentinel of [
       "SENTINEL-OUT-OF-SELECTOR",
       "SENTINEL-OUT-OF-SELECTOR-BODY",
       "notes/out.md",
       "thread-out",
-      // The granter's object id and the display-only hint never cross.
       "object-in",
       "docs/hint-captured-once.md",
     ]) {
@@ -463,7 +458,6 @@ describe("chat over a file share", () => {
     );
     expect(push.status).toBe(403);
     expect((await json(push)).code).toBe("share_op_rejected");
-    // Atomic: the acceptable op did not land either.
     const served = chatOps(await readShareLog(h, shareId));
     expect(served.map((op) => op.payload.messageId)).not.toContain("m-ok");
   });
@@ -757,7 +751,6 @@ describe("chat over a file share", () => {
     expect(push.status, await push.clone().text()).toBe(200);
     expect(chatOps(await readShareLog(h, shareId)).length).toBeGreaterThan(0);
 
-    // The granter renames the file out of the selector.
     await log.append(log.rename("object-in", "docs/in.md", "private/moved.md"));
 
     const served = chatOps(await readShareLog(h, shareId));
@@ -766,8 +759,6 @@ describe("chat over a file share", () => {
       "a path-bound thread must follow the file out, not serve its create-time path forever",
     ).toHaveLength(0);
 
-    // And the lane closes in the other direction too: a further message on
-    // that thread is refused rather than accepted into the granter's log.
     const after = await h(
       request(
         RECIPIENT,
@@ -797,8 +788,6 @@ describe("chat over a file share", () => {
     expect((await json(after)).code).toBe("share_op_rejected");
   });
 
-  // The same rule, one step further: a DELETED file takes its recipient
-  // thread with it. The reverse lookup answers "no object here" for both.
   it("stops a RECIPIENT-created thread when its file is deleted", async () => {
     const storage = await testStorage();
     const h = handler(storage);
@@ -867,13 +856,11 @@ describe("chat over a file share", () => {
     );
     expect(push.status, await push.clone().text()).toBe(200);
 
-    // Both threads are about docs/in.md before the rename.
     const before = chatOps(await readShareLog(h, shareId))
       .filter((op) => op.opKind === "chat.thread.create")
       .map((op) => op.payload.linkedPathHint);
     expect(before).toEqual(["docs/in.md", "docs/in.md"]);
 
-    // A rename that stays inside the shared folder.
     await log.append(log.rename("object-in", "docs/in.md", "docs/renamed.md"));
 
     const after = chatOps(await readShareLog(h, shareId))
@@ -884,7 +871,6 @@ describe("chat over a file share", () => {
       "a recipient's thread must follow its file inside the share, exactly as the granter's does",
     ).toEqual(["docs/renamed.md", "docs/renamed.md"]);
 
-    // And a further message on the recipient's thread still lands.
     const more = await h(
       request(
         RECIPIENT,
@@ -913,9 +899,6 @@ describe("chat over a file share", () => {
     expect(more.status, await more.clone().text()).toBe(200);
   });
 
-  // The stored shape, asserted directly: the accept door persists the
-  // GRANTER's object id, never the recipient's path. This is what makes the
-  // granter's own apply take the ordinary object lane.
   it("stores a recipient's create bound to the granter's object, not to a path", async () => {
     const storage = await testStorage();
     const h = handler(storage);
@@ -953,9 +936,6 @@ describe("chat over a file share", () => {
     });
   });
 
-  // A selector can name both dimensions. The paths-only rule must key on
-  // "names no paths", not on "names a version" — otherwise a share of
-  // docs/ pinned to a version would silently carry no conversation.
   it("carries chat on the paths a selector names, even when it also pins a version", async () => {
     const storage = await testStorage();
     const h = handler(storage);
@@ -983,7 +963,6 @@ describe("chat over a file share", () => {
       "a paths+version share must carry its paths' chat, not fall into the version-share deny",
     ).toEqual(["chat.thread.create", "chat.message.append"]);
 
-    // And it accepts, which the version-only share does not.
     const push = await h(
       request(
         RECIPIENT,
@@ -994,12 +973,6 @@ describe("chat over a file share", () => {
     expect(push.status).toBe(200);
   });
 
-  // The accept door's own refusal. The filter admits a create by proving an
-  // object sits at the path, and the door then reads that object to bind the
-  // thread — so the only way to reach the refusal is for the object to leave
-  // between the two reads. That is a real race (a delete landing mid-request),
-  // and the batch is refused whole rather than stored as a thread bound to
-  // nothing.
   it("refuses the batch when the file leaves between the filter and the accept", async () => {
     const storage = await testStorage();
     const h = handler(storage);
@@ -1064,17 +1037,6 @@ describe("chat over a file share", () => {
   });
 });
 
-// The append route accepts chat only.
-//
-// A file share at `comment` or `edit` accepts appends, and the route used
-// to filter them with `filterOpForShare` — the read filter. That filter admits
-// every in-selector `moment.append`, plus `workspace.init` and a matching
-// `version.create`. So a modified client could push a delete, a rename, or a
-// revert into the GRANTER's log, and the owner lane replayed it.
-//
-// Every case here drives the real POST route and then reads the GRANTER's own
-// log back through the owner route. The status alone proves nothing: a refusal
-// that still inserted is the defect, so the log is the assertion.
 describe("the append gate accepts chat only", () => {
   const LEVELS = ["comment", "edit"] as const;
 
@@ -1152,7 +1114,6 @@ describe("the append gate accepts chat only", () => {
       expect(await ownerLog(h), "a recipient's delete must never reach the granter's log").toEqual(
         before,
       );
-      // And the file is still where it was: the delete did not apply.
       expect(storage.objectCurrentPath(WORKSPACE, "object-in")).toBe("docs/in.md");
     });
 

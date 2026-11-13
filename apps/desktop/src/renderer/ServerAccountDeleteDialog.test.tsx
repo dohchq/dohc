@@ -27,7 +27,6 @@ const bridgeMock = {
   },
 };
 
-// What main broadcasts when another window signs in, switches, or disconnects.
 function changeSession(sessionKey: string | null) {
   act(() => {
     for (const listener of [...sessionListeners]) listener({ sessionKey, phase: "ready" });
@@ -125,8 +124,6 @@ describe("ServerAccountDeleteDialog", () => {
     expect(confirm.disabled).toBe(false);
   });
 
-  // The panel takes focus as the warning opens, so it is the dialog a screen
-  // reader names. Its buttons take the arrows, as in every confirmation.
   it("opens on a panel named by its title, and moves between its buttons with the arrows", async () => {
     renderDialog();
     await screen.findByTestId("server-account-delete-scope");
@@ -139,7 +136,6 @@ describe("ServerAccountDeleteDialog", () => {
     cancel.focus();
     fireEvent.keyDown(cancel, { key: "ArrowRight" });
     expect(document.activeElement).toBe(confirm);
-    // A held Enter never deletes the account.
     expect(fireEvent.keyDown(confirm, { key: "Enter", repeat: true })).toBe(false);
   });
 
@@ -398,8 +394,6 @@ describe("ServerAccountDeleteDialog", () => {
   });
 });
 
-// The join, open share, and share handoff screens show a session they find
-// with the same account row. Deleting the account is a Settings task.
 it("offers no deletion in the connect panel's account row", async () => {
   render(<CloudLogin />);
   await screen.findByTestId("settings-row-account");

@@ -64,7 +64,6 @@ vi.mock("./collab/useEngineDoc", () => ({
     return docMock.current;
   },
 }));
-// The write queue is real. Each change the page hands it is also kept here, so a test can count them.
 const enqueued = vi.hoisted(() => ({ changes: [] as CollectionCellChange[] }));
 vi.mock("./collections/recordFieldWrites", async (original) => {
   const actual = await original<typeof import("./collections/recordFieldWrites")>();
@@ -130,7 +129,6 @@ function engineDoc(partial: Partial<UseEngineDoc>): UseEngineDoc {
     ...partial,
   } as UseEngineDoc;
 }
-/** The live document of record `id`, which the page's writes reach. */
 function liveDoc(id = "rec-1"): Y.Doc {
   const doc = new Y.Doc();
   doc.getMap("frontmatter").set("id", id);
@@ -201,9 +199,7 @@ function makeBridge(
 ) {
   const listeners = new Set<(event: WorkspaceActivityEvent) => void>();
   return {
-    /** The Collection's records, which a test changes in place. */
     records,
-    /** Tells the page the Collection's files changed. */
     changed: () => {
       for (const listener of [...listeners])
         listener({ workspaceId: "ws-1", paths: ["tasks/Plan.md"] });
@@ -259,7 +255,6 @@ const lookups = (bridge: ReturnType<typeof makeBridge>) =>
     params.limit === undefined ? [] : [params.limit],
   );
 
-/** What the shell draws as a record's body: the file's text, where a caret can be, and a control of the file's view. */
 const body = (path: string) => (
   <div data-testid="record-body" data-path={path}>
     <div data-testid="body-text" contentEditable suppressContentEditableWarning tabIndex={0} />
@@ -301,7 +296,6 @@ function renderPage(
 const grid = () => screen.getByRole("grid");
 const rowAt = (row: number) =>
   grid().querySelector<HTMLElement>(`[role="row"][data-index="${row}"]`)!;
-/** The cell of the record in row `row` under the column named `field`. */
 function cell(field: string, row = 0): HTMLElement {
   const column = within(grid())
     .getAllByRole("columnheader")
@@ -311,16 +305,13 @@ function cell(field: string, row = 0): HTMLElement {
   if (!found) throw new Error(`no ${field} cell in row ${row}`);
   return found;
 }
-/** The rows the table marks as the open record's. */
 const marked = () =>
   [...grid().querySelectorAll('[role="row"][aria-current="true"]')].map((row) =>
     row.getAttribute("data-index"),
   );
-/** The record panel. A test that also shows the ⚡ panel names the one it means. */
 const panel = () => screen.getByRole("complementary");
 const sides = () =>
   screen.queryAllByRole("complementary").map((side) => side.getAttribute("aria-label"));
-/** Opens a record from its row, as a person does, with focus on what they pressed. */
 function open(name: string): HTMLElement {
   const control = screen.getByRole("button", { name: `Open ${name}` });
   control.focus();
@@ -335,7 +326,6 @@ const propertyInput = (field: string) =>
   propertyEditor(field)!.querySelector<HTMLInputElement>("input")!;
 const nameButton = () => within(within(panel()).getByRole("heading")).getByRole("button");
 const nameInput = () => within(panel()).getByRole<HTMLInputElement>("textbox", { name: "title" });
-/** The input of the table's open cell editor. */
 const cellInput = () => grid().querySelector<HTMLInputElement>("[data-cell-editor] input")!;
 /** Takes the Collection's page off the screen with no press, as closing its tab from the keyboard does. The write host stays. */
 const closePage = (view: ReturnType<typeof renderPage>) =>
@@ -364,19 +354,16 @@ describe("a document record's panel", () => {
     const record = screen.getByRole("complementary", { name: "Plan" });
     expect(document.activeElement).toBe(record);
     expect(within(record).getByRole("heading", { name: "Plan" })).toBeTruthy();
-    // The record's file opens in no tab, and the shell keeps the record by its id.
     expect(onOpenRecord).not.toHaveBeenCalled();
     expect(onOpenRecordChange).toHaveBeenLastCalledWith("rec-1");
     expect(marked()).toEqual(["0"]);
 
-    // Opening and resizing the panel built no row of the table again.
     fireEvent.keyDown(within(record).getByRole("separator", { name: "Resize record" }), {
       key: "ArrowLeft",
     });
     expect(rowAt(0)).toBe(row);
     expect(within(rowAt(0)).getByRole("checkbox")).toBe(tick);
 
-    // The table stays in use: a selected cell's record opens in place of the first, and a cell still takes a change.
     fireEvent.click(cell("done", 1));
     fireEvent.keyDown(grid(), { key: "Enter", ctrlKey: true });
     expect(sides()).toEqual(["Socks"]);
@@ -518,7 +505,6 @@ describe("a document record's panel", () => {
   });
 
   it("shows a change from the panel that dohc did not save where the table's cell shows it", async () => {
-    // The record's live document does not open, so the write fails.
     docMock.current = engineDoc({ available: false });
     renderPage(makeBridge([task("rec-1", "Plan")]));
     await screen.findByRole("button", { name: "Open Plan" });
@@ -594,7 +580,6 @@ describe("a document record's panel", () => {
     expect(within(record).queryByRole("textbox")).toBeNull();
     expect(panel()).toBe(record);
 
-    // The caret is in the body's text: Escape is the editor's, however often it is pressed.
     const text = within(record).getByTestId("body-text");
     text.focus();
     fireEvent.keyDown(text, { key: "Escape" });
@@ -606,7 +591,6 @@ describe("a document record's panel", () => {
     fireEvent.keyDown(record, { key: "Escape", keyCode: 229 });
     expect(panel()).toBe(record);
 
-    // From a control of the body that types no text, Escape closes the record.
     fireEvent.keyDown(within(record).getByRole("button", { name: "Source" }), { key: "Escape" });
     expect(sides()).toEqual([]);
     expect(document.activeElement).toBe(opener);
@@ -636,7 +620,6 @@ describe("a document record's panel", () => {
     expect(marked()).toEqual(["0"]);
     expect(shownBody().dataset.path).toBe("tasks/Plan.md");
 
-    // The file moves and takes another name. The record is the same one, so its panel stays and shows the file where it is now.
     bridge.records[0] = task("rec-1", "Plan", "tasks/archive/Plan 2026.md");
     act(() => bridge.changed());
     await waitFor(() => expect(shownBody().dataset.path).toBe("tasks/archive/Plan 2026.md"));
@@ -683,14 +666,12 @@ describe("a document record's panel", () => {
     renderPage(bridge, { initialOpenRecord: "rec-550" });
     const record = await screen.findByRole("complementary", { name: "Task 550" });
     expect(shownBody().dataset.path).toBe("tasks/Task 550.md");
-    // The table holds its first records only. The search read the Collection a page at a time, up to the record's.
     expect(screen.queryByRole("button", { name: "Open Task 550" })).toBeNull();
     expect(lookups(bridge)).toEqual([FIND_RECORD_PAGE, FIND_RECORD_PAGE]);
 
     records[550] = task("rec-550", "Task 550, done", "tasks/Task 550.md");
     act(() => bridge.changed());
     await screen.findByRole("complementary", { name: "Task 550, done" });
-    // The record kept its panel through the read. A refresh costs one read of one record, from where the record was.
     expect(panel()).toBe(record);
     expect(lookups(bridge)).toEqual([FIND_RECORD_PAGE, FIND_RECORD_PAGE, 1]);
     expect(bridge.queryCollectionRecords).toHaveBeenLastCalledWith({
@@ -701,7 +682,6 @@ describe("a document record's panel", () => {
       cursor: { sortValues: [], recordPath: "tasks/Task 549.md", recordId: "rec-549" },
     });
 
-    // A record that takes the place before it moves it. The search finds it again, and the next refresh reads it where it is now.
     records.splice(550, 0, task("rec-new", "Task 549a"));
     act(() => bridge.changed());
     await waitFor(() =>
@@ -722,7 +702,6 @@ describe("a document record's panel", () => {
   });
 
   it("keeps where a record was while the table holds it, so a refresh that drops its row reads one record", async () => {
-    // The record is found outside the table's rows, then the table loads it, then a refresh drops its row again.
     const records = Array.from({ length: 150 }, (_, index) =>
       task(`rec-${index}`, `Task ${index}`),
     );
@@ -730,7 +709,6 @@ describe("a document record's panel", () => {
     renderPage(bridge, { initialOpenRecord: "rec-120" });
     await screen.findByRole("complementary", { name: "Task 120" });
     expect(lookups(bridge)).toEqual([FIND_RECORD_PAGE]);
-    // The table reads its next page, which holds the record.
     grid().scrollTop = 2800;
     fireEvent.scroll(grid());
     await waitFor(() => expect(grid().getAttribute("aria-rowcount")).toBe("152"));
@@ -754,14 +732,12 @@ describe("a document record's panel", () => {
     });
     renderPage(bridge, { initialOpenRecord: "rec-1100" });
     await waitFor(() => expect(searches(bridge)).toHaveLength(1));
-    // The person closes the record while its first page of records is still being read.
     fireEvent.click(within(panel()).getByRole("button", { name: "Close record" }));
     expect(sides()).toEqual([]);
     await act(async () => {
       firstPage.resolve();
       await firstPage.promise;
     });
-    // A whole refresh of the table later, the search has read no second page.
     records[0] = task("rec-0", "Task 0, done", "tasks/Task 0.md");
     act(() => bridge.changed());
     await screen.findByRole("button", { name: "Open Task 0, done" });
@@ -783,7 +759,6 @@ describe("a document record's panel", () => {
     expect(screen.getByText("This record is no longer in this Collection.")).toBeTruthy();
     expect(lookups(bridge)).toEqual([FIND_RECORD_PAGE, FIND_RECORD_PAGE]);
 
-    // Another record takes the panel, and a refresh drops its row from the table: it is looked for.
     open("Task 3");
     records.push(...records.splice(3, 1));
     act(() => bridge.changed());
@@ -814,7 +789,6 @@ describe("a document record's panel", () => {
     });
     renderPage(bridge, { initialOpenRecord: "rec-550" });
     await waitFor(() => expect(searches(bridge)).toHaveLength(2));
-    // Record 550 is still being looked for when the person opens record 3 from its row.
     open("Task 3");
     const shown = () => ({
       name: within(panel()).getByRole("heading").textContent,
@@ -828,7 +802,6 @@ describe("a document record's panel", () => {
       lastPage.resolve();
       await lastPage.promise;
     });
-    // A whole refresh of the table later, the panel still shows only record 3.
     records[0] = task("rec-0", "Task 0, done", "tasks/Task 0.md");
     act(() => bridge.changed());
     await screen.findByRole("button", { name: "Open Task 0, done" });
@@ -839,7 +812,6 @@ describe("a document record's panel", () => {
   it("stops looking for a kept record after the search's limit, and says so", async () => {
     const bridge = makeBridge([task("rec-1", "Plan")]);
     const read = bridge.queryCollectionRecords.getMockImplementation()!;
-    // A Collection with more records than the search reads, none of them the kept one.
     bridge.queryCollectionRecords.mockImplementation(async (params) =>
       params.limit === FIND_RECORD_PAGE
         ? {
@@ -858,7 +830,6 @@ describe("a document record's panel", () => {
     ).toBeTruthy();
     expect(searches(bridge)).toHaveLength(FIND_RECORD_LIMIT / FIND_RECORD_PAGE);
 
-    // A later refresh of the table does not look for it again.
     bridge.records[0] = task("rec-1", "Plan, done", "tasks/Plan.md");
     act(() => bridge.changed());
     await screen.findByRole("button", { name: "Open Plan, done" });
@@ -893,7 +864,6 @@ describe("a document record's panel", () => {
     fireEvent.click(copy("Right").getByRole("button", { name: "Open Socks" }));
     expect(kept()).toBe("rec-2");
     expect(copy("Left").getByRole("complementary", { name: "Plan" })).toBeTruthy();
-    // The right copy closes its record. The left one still shows a record, so the entry holds that one.
     fireEvent.click(
       within(copy("Right").getByRole("complementary")).getByRole("button", {
         name: "Close record",
@@ -918,23 +888,19 @@ describe("a document record's panel", () => {
     automations();
     expect(sides()).toEqual(["Automations"]);
 
-    // The ⚡ panel holds a draft the person keeps: no record opens, and the draft's panel stays.
     fireEvent.click(screen.getByRole("checkbox", { name: "Holds a draft" }));
     open("Plan");
     expect(sides()).toEqual(["Automations"]);
     expect(onOpenRecordChange).not.toHaveBeenCalled();
-    // The refused record does not open later, when the ⚡ panel closes for another reason.
     fireEvent.click(screen.getByRole("checkbox", { name: "Holds a draft" }));
     automations();
     expect(sides()).toEqual([]);
     expect(onOpenRecordChange).not.toHaveBeenCalled();
 
-    // With no draft to keep, the ⚡ panel closes and the record takes its place.
     automations();
     open("Plan");
     expect(sides()).toEqual(["Plan"]);
     expect(onOpenRecordChange).toHaveBeenLastCalledWith("rec-1");
-    // The ⚡ panel opens again and takes the place back.
     automations();
     expect(sides()).toEqual(["Automations"]);
     expect(onOpenRecordChange).toHaveBeenLastCalledWith(null);
@@ -947,7 +913,6 @@ describe("a document record's panel", () => {
       renderPage(makeBridge([task("rec-1", "Plan")]), { readOnly: true, accessEnded });
       await screen.findByRole("button", { name: "Open Plan" });
       open("Plan");
-      // The name is text, a value opens no editor, and a tick changes nothing.
       expect(
         within(within(panel()).getByRole("heading", { name: "Plan" })).queryByRole("button"),
       ).toBeNull();
@@ -997,12 +962,10 @@ describe("a document record's panel", () => {
       onOpenRecord,
     });
     await screen.findByRole("button", { name: "Open Plan" });
-    // With no record open there is nothing to save, so the first record opens at once.
     const opener = open("Plan");
     expect(sides()).toEqual(["Plan"]);
     expect(waiting).toHaveLength(0);
 
-    // Another record waits for the save, and one that fails leaves the first record open.
     open("Socks");
     expect(sides()).toEqual(["Plan"]);
     expect(waiting).toHaveLength(1);
@@ -1012,7 +975,6 @@ describe("a document record's panel", () => {
     saved();
     expect(sides()).toEqual(["Socks"]);
 
-    // Close waits too, and so does Escape.
     fireEvent.click(within(panel()).getByRole("button", { name: "Close record" }));
     fireEvent.keyDown(panel(), { key: "Escape" });
     expect(sides()).toEqual(["Socks"]);
@@ -1020,7 +982,6 @@ describe("a document record's panel", () => {
     saved();
     expect(sides()).toEqual([]);
 
-    // The record's file opens in a tab only once the body is saved, and so does the ⚡ panel in the record's place.
     opener.focus();
     open("Plan");
     fireEvent.click(within(panel()).getByRole("button", { name: "Open as page" }));
@@ -1047,7 +1008,6 @@ describe("a document record's panel", () => {
     open("Plan");
     fireEvent.click(within(panel()).getByRole("button", { name: "Open as page" }));
     expect(waiting).toHaveLength(1);
-    // The tab closes before the save ends. The save then ends, and the page that asked is gone.
     closePage(view);
     act(() => waiting.shift()!());
     expect(onOpenRecord).not.toHaveBeenCalled();
@@ -1071,7 +1031,6 @@ describe("text left in an editor that goes away with no press", () => {
     await screen.findByRole("button", { name: "Open Plan" });
     fireEvent.click(cell("estimate"));
     fireEvent.change(cellInput(), { target: { value: "12 apples" } });
-    // The window switches workspaces: this workspace's shell closes before the page's editors go.
     closeCollectionChangeShellsForTests();
     closePage(view);
     expect(onError).not.toHaveBeenCalled();
@@ -1102,7 +1061,6 @@ describe("text left in an editor that goes away with no press", () => {
 
   const typeInto = (input: HTMLInputElement, text: string) =>
     fireEvent.change(input, { target: { value: text } });
-  /** Opens one of the three editors on the record "Plan", and answers its input. */
   const editors = {
     "the table's cell": () => {
       fireEvent.click(cell("notes"));
@@ -1141,7 +1099,6 @@ describe("text left in an editor that goes away with no press", () => {
       expect(enqueued.changes).toEqual([
         { recordId: "rec-1", recordPath: "tasks/Plan.md", field: field(editor), value: "Buy wool" },
       ]);
-      // The write host outlives the page, and writes what the page handed it as it closed.
       await waitFor(() => expect(doc.getMap("frontmatter").get(field(editor))).toBe("Buy wool"));
     },
   );
@@ -1215,14 +1172,12 @@ describe("text left in an editor that goes away with no press", () => {
       const view = renderPage(makeBridge([task("rec-1", "Plan")]), { onError });
       await screen.findByRole("button", { name: "Open Plan" });
       typeInto(editors[editor](), "Half typed");
-      // The owner ends the share under the open editor, which goes with the right to edit.
       view.rerender(page({ onError, readOnly: true, accessEnded: true }));
       const words = `dohc did not save what you typed in the ${field(editor)} field of Plan. Your access to this share ended. You typed: Half typed`;
       expect(onError).toHaveBeenCalledExactlyOnceWith(words, expect.any(TextNotSavedError));
       expect((onError.mock.calls[0]![1] as TextNotSavedError).typed).toBe(
         words.slice(words.indexOf("You typed: ") + "You typed: ".length),
       );
-      // The page closing later has nothing more to report.
       closePage(view);
       expect(onError).toHaveBeenCalledOnce();
       expect(enqueued.changes).toEqual([]);
@@ -1235,7 +1190,6 @@ describe("text left in an editor that goes away with no press", () => {
     const view = renderPage(makeBridge([task("rec-1", "Plan")]), { onError });
     await screen.findByRole("button", { name: "Open Plan" });
     typeInto(editors["the table's cell"](), "Half typed");
-    // A file operation pauses the workspace's edits. The editor stays open, and its text is not sent.
     const operation = beginCollectionWriteOperation("ws-1");
     await screen.findByTestId("collection-writes-paused");
     closePage(view);

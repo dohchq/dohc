@@ -212,7 +212,6 @@ it("replaces sharing declines with the set a watched push reports, before the ne
   f.edit();
   await vi.advanceTimersByTimeAsync(0);
   expect(f.sync.snapshot().sharingDeclined).toEqual([decline, next]);
-  // The engine cleared a.md's decline, and b.md was renamed.
   const renamed = { ...next, path: "c.md" };
   f.push.mockResolvedValueOnce({
     pushed: 1,

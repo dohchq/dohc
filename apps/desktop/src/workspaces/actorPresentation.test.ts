@@ -19,7 +19,6 @@ import {
   ownActorPresentation,
 } from "./actorPresentation";
 
-// Count issuer construction while keeping its behavior.
 vi.mock("@dohc/workspace-contracts/actor-identity", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@dohc/workspace-contracts/actor-identity")>();
   return { ...actual, createActorIssuer: vi.fn(actual.createActorIssuer) };
@@ -155,7 +154,6 @@ describe("chat presentation admission", () => {
   });
   it("keeps a connected agent that uses your agent's name out of that agent's group on another device", async () => {
     const r = request();
-    // The posts as this device wrote them, with their keys, and as another device reads them.
     const written = (claimedName: string) =>
       message({
         author: { kind: "agent", displayName: "Nova" },
@@ -246,7 +244,6 @@ describe("chat presentation admission", () => {
     }
     // This device's own agent posts in a joined channel keep the key it wrote.
     expect(await shares[1][0].present(local("agent"), "shared")).not.toHaveProperty("connected");
-    // The same posts in the workspace's own thread keep their kind.
     expect(await shares[1][0].present(post, "t")).toMatchObject({ connected: true });
     expect(await shares[1][0].present(runPost, "t")).not.toHaveProperty("connected");
     // A received edit names its agent's id, so it keeps its kind with no key.
@@ -293,7 +290,6 @@ describe("chat presentation admission", () => {
         ...(authorAgentId === undefined ? {} : { authorAgentId }),
       });
     const first = await request().present(bob("Nova", "nova"), "t");
-    // A color chosen for Bob's agent Nova stays with that agent.
     const r = request(true, "w", { [agentKeyForGroup("w", first.group)]: "rose" });
     const run = await r.present(bob("Nova", "nova"), "t");
     const connected = [
@@ -476,10 +472,8 @@ describe("chat presentation admission", () => {
     const first = await r.present(link("p1"), "t");
     expect(first).toMatchObject({ hue: null, self: false });
     expect(first.group.startsWith("unknown:")).toBe(false);
-    // The same principal in another thread, under a new name, is the same link holder.
     expect((await r.present(link("p1", "Renamed"), "other")).group).toBe(first.group);
     expect((await r.present(link("p2"), "t")).group).not.toBe(first.group);
-    // A link holder named after you, on your account's server, is still not you.
     expect(await r.present(link("p3", "alice"), "t")).toMatchObject({ self: false });
     expect((await r.present(message(), "t")).group).not.toBe(first.group);
     const entry = {
@@ -536,7 +530,6 @@ describe("History presentation", () => {
         "t",
       ),
     );
-    // Installation and account self stay apart.
     expect(account!.group).not.toBe(installation!.group);
     expect([account!.self, installation!.self, sam!.self]).toEqual([true, true, false]);
     expect(sam!.hue).toBe(ACTOR_HUES[actorHueSlot("sam")]);
@@ -594,7 +587,6 @@ describe("History presentation", () => {
       false,
     ]);
     expect(tokens[8]!.group).toMatch(/^unknown:/);
-    // The token names nobody.
     expect(JSON.stringify(tokens)).not.toMatch(/alice|device|sam|someone|grant|holder|public|Pat/);
   });
 
@@ -629,7 +621,6 @@ describe("History presentation", () => {
     expect(agentOf).toMatchObject({ hue: null, self: false });
     expect(installation!.self).toBe(true);
     expect(sam).toMatchObject({ hue: "rose", self: false });
-    // The same id on your own server is you.
     expect(history("https://account.test/")([{ kind: "human", humanId: "alice" }])[0]!.self).toBe(
       true,
     );

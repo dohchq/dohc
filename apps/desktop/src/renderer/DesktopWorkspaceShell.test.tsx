@@ -35,10 +35,7 @@ import {
 import { useWorkspaceListing } from "./shell/useWorkspaceListing";
 vi.mock("./shell/useWorkspaceListing", { spy: true });
 
-// A new page titled Lisbon with "Day one" typed in its body, as its file
-// would hold it.
 const LISBON = "---\ntitle: Lisbon\n---\n\nDay one\n";
-// What recovery holds for the workspace, as a restart brings it back.
 function recovered() {
   return loadStoredDrafts(Date.now(), { bindHandles: false })
     .filter((draft) => draft.workspaceId === WORKSPACE.workspaceId)
@@ -152,7 +149,6 @@ describe("collection folders", () => {
     });
     fireEvent.click(row);
     const editor = () => document.querySelector<HTMLInputElement>("[data-cell-editor] input");
-    /** Saves the new row with Enter, with `title` typed in its first field, or `notes` in its second. */
     const saveRow = async (title: string | null, notes?: string) => {
       fireEvent.click(
         await screen.findByTestId("collection-new-record", undefined, { timeout: 15_000 }),
@@ -166,7 +162,6 @@ describe("collection folders", () => {
       fireEvent.keyDown(editor()!, { key: "Enter" });
     };
 
-    // Characters a file name cannot hold become spaces, as in a new page's name.
     await saveRow("Plan: Q4/Launch");
     await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(1));
     expect(bridge.createCollectionRecord.mock.calls[0]![0]).toMatchObject({
@@ -185,7 +180,6 @@ describe("collection folders", () => {
     await saveRow("Plan: Q4/Launch");
     await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(2));
     expect(bridge.createCollectionRecord.mock.calls[1]![0].name).toBe("Plan Q4 Launch 2");
-    // A record with no name is Untitled.
     await saveRow(null, "Remember the milk");
     await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(3));
     expect(bridge.createCollectionRecord.mock.calls[2]![0].name).toBe("Untitled");
@@ -193,7 +187,6 @@ describe("collection folders", () => {
       expect(screen.queryByTestId(editorTabTestId(`tasks/${name}.md`))).toBeNull();
   });
 
-  /** Opens the tasks Collection, whose records have a title, and answers what types a title in its new row and saves the row. */
   async function openTasksWithTitle(bridge: ReturnType<typeof makeBridge>, render: () => unknown) {
     bridge.listWorkspaceFiles = vi.fn(async () => ({
       visibility: { status: "ready" as const, rules: [] },
@@ -253,7 +246,6 @@ describe("collection folders", () => {
   it("keeps the name of a record that exists in part, and of one just made, from the next rows until the listing shows its file", async () => {
     resetCollectionFieldWritesForTests();
     const bridge = makeBridge(Promise.resolve(null));
-    // The first record's file is made and the record is not finished. The others are made. The listing shows none of their files yet.
     bridge.createCollectionRecord
       .mockResolvedValueOnce({
         kind: "partial",
@@ -290,7 +282,6 @@ describe("collection folders", () => {
     resetCollectionFieldWritesForTests();
     const bridge = makeBridge(Promise.resolve(null));
     const typeRow = await openTasksWithTitle(bridge, () => renderShell(bridge));
-    // The creation succeeds, and the listing that follows it does not.
     bridge.createCollectionRecord.mockImplementationOnce(async (payload) => {
       bridge.listWorkspaceFiles = vi.fn(async () => {
         throw new Error("The listing is not ready.");
@@ -312,7 +303,6 @@ describe("collection folders", () => {
     );
     expect(document.querySelector("[data-new-record-status]")).toBeNull();
     expect(screen.queryByText(/could not create this record/)).toBeNull();
-    // Nothing offers a second file for it.
     expect(bridge.createCollectionRecord).toHaveBeenCalledOnce();
     resetCollectionFieldWritesForTests();
   });
@@ -329,7 +319,6 @@ describe("collection folders", () => {
       .mockImplementationOnce(() => answers[1]!.promise);
     const typeRow = await openTasksWithTitle(bridge, () => renderShell(bridge));
     await typeRow("Acme", "Enter");
-    // The next key is typed in the next row, with no wait for the first creation.
     const editor = document.querySelector<HTMLInputElement>("[data-cell-editor] input")!;
     fireEvent.change(editor, { target: { value: "acme" } });
     fireEvent.keyDown(editor, { key: "Enter" });
@@ -339,14 +328,12 @@ describe("collection folders", () => {
       "Acme",
       "acme 2",
     ]);
-    // They answer out of order.
     await act(async () =>
       answers[1]!.resolve({ path: "tasks/acme 2.md", recordId: "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb" }),
     );
     await act(async () =>
       answers[0]!.resolve({ path: "tasks/Acme.md", recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa" }),
     );
-    // Each title is with the field writes of its own file.
     await waitFor(() =>
       expect([...retainedCollectionFieldWritePaths(WORKSPACE.workspaceId)].sort()).toEqual([
         "tasks/Acme.md",
@@ -389,18 +376,15 @@ describe("collection folders", () => {
     fireEvent.click(screen.getByTestId("workspace-shell-error-retry"));
     await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(notice().textContent).toContain("already exists"));
-    // The words still say the record's file exists, so nobody takes the record for one that was never made.
     expect(notice().textContent).toContain(
       "dohc created the record file but could not finish the record.",
     );
     expect(notice().textContent).not.toContain("could not create this record");
     expect(notice().textContent).toContain("You typed: title: Milk");
-    // The row on screen is the next one, with nothing typed: Enter in it starts no creation beside the unfinished one.
     fireEvent.keyDown(document.querySelector<HTMLInputElement>("[data-cell-editor] input")!, {
       key: "Enter",
     });
     expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(2);
-    // Its one retry is the same resume, for the same record, however often that fails.
     fireEvent.click(screen.getByTestId("workspace-shell-error-retry"));
     await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(3));
     await waitFor(() => expect(notice().textContent).toContain("The shared file session changed."));
@@ -423,7 +407,6 @@ describe("collection folders", () => {
       view = renderShell(bridge, WORKSPACE, [WORKSPACE, OTHER_WORKSPACE]);
     });
     const listing = deferred<Awaited<ReturnType<typeof bridge.listWorkspaceFiles>>>();
-    // The record's file is kept on this computer as a draft the relay refused, and the listing that follows waits.
     const refused = {
       path: "tasks/Milk.md",
       recordId: "rec_abcdefghijklmnopqrstuvwxyz",
@@ -446,7 +429,6 @@ describe("collection folders", () => {
     });
     await typeRow("Milk", "Enter");
     await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledOnce());
-    // The root mounts a new shell for the workspace switched to, and only then does the listing answer.
     view.rerender(otherWorkspaceShell(bridge));
     await act(async () =>
       listing.resolve({
@@ -455,7 +437,6 @@ describe("collection folders", () => {
         folders: ["tasks"],
       }),
     );
-    // The refusal still reaches what kept the row: its own workspace's list has it, with why and what was typed.
     await waitFor(() =>
       expect(
         collectionWriteFailures().map((failure) => [
@@ -484,7 +465,6 @@ describe("collection folders", () => {
     });
     await typeRow("Milk", "Enter");
     await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledOnce());
-    // The same shell takes the other workspace before main answers that it made the record.
     view.rerender(
       <>
         <CollectionFieldWriteHost />
@@ -499,12 +479,10 @@ describe("collection folders", () => {
     await act(async () =>
       pending.resolve({ path: "tasks/Milk.md", recordId: "rec_abcdefghijklmnopqrstuvwxyz" }),
     );
-    // The title is with the field writes of the workspace the record was made in, as a cell edit made before the switch is.
     await waitFor(() =>
       expect(retainedCollectionFieldWritePaths(WORKSPACE.workspaceId)).toEqual(["tasks/Milk.md"]),
     );
     expect(retainedCollectionFieldWritePaths(OTHER_WORKSPACE.workspaceId)).toEqual([]);
-    // Nothing of that record is painted in the workspace the window shows now.
     expect(screen.queryByTestId(editorTabTestId("tasks/Milk.md"))).toBeNull();
     expect(document.querySelector("[data-new-record]")).toBeNull();
     resetCollectionFieldWritesForTests();
@@ -535,7 +513,6 @@ describe("collection folders", () => {
             new Error("Record creation stopped because this window changed workspaces."),
           ),
         );
-      // The row could not be created at all. The list that outlives the shell keeps it, with its Collection and what was typed.
       await waitFor(() =>
         expect(
           collectionWriteFailures().map((failure) => [
@@ -552,7 +529,6 @@ describe("collection folders", () => {
       expect(
         within(kept).getByLabelText<HTMLTextAreaElement>("Unsaved collection value").value,
       ).toContain('"title": "Milk"');
-      // A row never sent asks main for nothing once the window shows another workspace.
       expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(sending ? 1 : 0);
       // Nothing of it is painted in the workspace the window shows now.
       expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
@@ -560,9 +536,6 @@ describe("collection folders", () => {
     },
   );
 
-  // The queue behind cell edits must outlive the page: the shell renders only
-  // a group's ACTIVE tab, so opening a file unmounts CollectionPage. An edit
-  // the cell already accepted must still reach its record's live document.
   it("keeps a queued record edit when a file opens while the first save is pending", async () => {
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(null));
@@ -629,7 +602,6 @@ describe("collection folders", () => {
     const updatesBySession = new Map<string, Uint8Array[]>();
     const saveStateListeners = new Set<(event: EngineYDocSaveStateEvent) => void>();
     const openEngineYDocSession = vi.fn(async (payload: { path: string; sessionId: string }) => {
-      // Record files get live sessions; notes.md stays a plain editor.
       if (!payload.path.startsWith("tasks/")) return { available: false };
       sessionsByPath.set(payload.path, payload.sessionId);
       return {
@@ -673,8 +645,6 @@ describe("collection folders", () => {
     const checkboxes = await collectionPage.findAllByRole("checkbox", {}, { timeout: 15_000 });
     expect(checkboxes).toHaveLength(2);
 
-    // First edit: the record's session opens and the update is delivered, but
-    // the save never settles — the head write is still pending.
     await user.click(checkboxes[0]!);
     await waitFor(() => expect(sessionsByPath.has("tasks/one.md")).toBe(true));
     await waitFor(() =>
@@ -683,10 +653,8 @@ describe("collection folders", () => {
       ).toBeGreaterThan(0),
     );
 
-    // Second edit queues behind the pending head.
     await user.click(collectionPage.getAllByRole("checkbox")[1]!);
 
-    // Ordinary navigation: open a plain file; the collection page unmounts.
     const fileRow = screen
       .getAllByTestId("tree-row")
       .find((entry) => entry.dataset.path === "notes.md")!;
@@ -694,7 +662,6 @@ describe("collection folders", () => {
     await screen.findByTestId("tab-notes.md");
     await waitFor(() => expect(screen.queryByTestId("collection-page")).toBeNull());
 
-    // The pending head settles only now, after the page is gone.
     act(() => {
       const sessionId = sessionsByPath.get("tasks/one.md")!;
       for (const listener of [...saveStateListeners]) {
@@ -708,7 +675,6 @@ describe("collection folders", () => {
       }
     });
 
-    // The second accepted edit still reaches its record's live document.
     await waitFor(() => expect(sessionsByPath.has("tasks/two.md")).toBe(true));
     await waitFor(() => {
       const updates = updatesBySession.get(sessionsByPath.get("tasks/two.md")!) ?? [];

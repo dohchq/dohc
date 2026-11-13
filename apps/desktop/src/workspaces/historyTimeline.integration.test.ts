@@ -1230,13 +1230,11 @@ it("reads the Collections a server lists, on a computer that doesn't keep the wo
   const first = await f.page({ limit: 2 });
   expect(first.entries.map(label)).toEqual([b + ":1", "file"]);
   expect(first).toMatchObject({ completeness: "complete", omittedSources: 0 });
-  // A later page reads the sources its cursor names, without listing again.
   expect((await f.page({ cursor: first.nextCursor! })).entries.map(label)).toEqual([
     a + ":1",
     "main",
   ]);
   expect(list).toHaveBeenCalledTimes(2);
-  // A server that doesn't answer leaves the files.
   list.mockRejectedValue(new Error("offline"));
   const files = await f.page();
   expect(files.entries.map(label)).toEqual(["file", "main"]);

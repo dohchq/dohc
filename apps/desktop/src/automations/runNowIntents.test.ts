@@ -20,7 +20,6 @@ describe("Run now intents", () => {
     await first.save(intent("b"));
     await first.save({ ...intent("a"), account: null });
 
-    // As after a crash: a new start reads the same file.
     const restarted = createRunNowIntents(file);
     expect(await restarted.list()).toEqual([intent("b"), { ...intent("a"), account: null }]);
     await restarted.remove({ store: "account", noticeId: "b" });

@@ -111,7 +111,6 @@ describe("runInKeyedLane", () => {
       events.push("b1:end");
     });
 
-    // A different key is not blocked by ws-a's in-flight pass.
     await other;
     expect(events).toEqual(["a1:start", "b1:start", "b1:end"]);
 

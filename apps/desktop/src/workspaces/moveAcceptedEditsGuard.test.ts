@@ -25,7 +25,6 @@ function harness(options: { live?: readonly LiveDocumentPath[]; offline?: boolea
   const relay: Array<{ workspaceId: string; signal: AbortSignal; reply: Deferred<void> }> = [];
   const live = options.live === undefined ? pages : options.live;
   const offline = vi.fn(() => options.offline ?? false);
-  // Moves the guard's clock without running any timer.
   let skew = 0;
   const guard = createMoveAcceptedEditsGuard({
     now: () => Date.now() + skew,
@@ -42,7 +41,6 @@ function harness(options: { live?: readonly LiveDocumentPath[]; offline?: boolea
       return reply.promise;
     },
   });
-  // A move's wait, with whether it has gone ahead yet.
   const reads: string[] = [];
   const move = (path: string, workspaceId = "workspace") => {
     const state = { done: false };
@@ -76,7 +74,6 @@ it("runs nothing for a path that is not live, or before the first live list", as
   const unknown = h.move("Notes/Page.md", "elsewhere");
   await h.settle();
   expect(plain.done && unknown.done).toBe(true);
-  // With live pages, the path is read; with no list, nothing is.
   expect(h.reads).toEqual(["Notes/Plain.md"]);
   expect(h.owner).toEqual([]);
   expect(h.relay).toEqual([]);
@@ -221,7 +218,6 @@ it.each([
     h.relay[0]!.reply.resolve();
     await h.settle();
     expect(first.done).toBe(true);
-    // The second move is not released by the first attempt.
     expect(second.done).toBe(false);
     expect(h.owner).toHaveLength(2);
     expect(h.owner[1]!.objectIds).toEqual(["trip"]);
@@ -277,7 +273,6 @@ it("a later move that joins a pending attempt keeps it alive only for itself", a
   await h.at(1500);
   const third = h.move("Notes/Other.md");
   await h.at(1500);
-  // The second move still goes ahead 3 s after it arrived.
   expect(second.done).toBe(true);
   expect(third.done).toBe(false);
   // Released before the third move's deadline, the pending attempt starts with both pages.

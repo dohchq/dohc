@@ -692,7 +692,6 @@ describe("owner app publication", () => {
       sourcePaths: ["trip/app.publish.json", "trip/main.tsx", "shared/theme.css"],
     };
     const secondApproval = "0f6d2c1e-4b8a-4c3e-9d2f-1a2b3c4d5e6f";
-    // This device's answers: its approvals, the source revision now, and the candidate prepareLocal returns.
     function local(
       rows: LocalRow[] = [],
       options: { revision?: string; capabilities?: Capability[] } = {},
@@ -740,10 +739,8 @@ describe("owner app publication", () => {
     const stateText = async () => (await screen.findByTestId("app-review-state")).textContent;
     const approveButton = () => screen.getByTestId("app-publication-approve") as HTMLButtonElement;
     const ready = () => waitFor(() => expect(approveButton().disabled).toBe(false));
-    // The text beside Reads or Changes in the access box.
     const reach = (term: "Reads" | "Changes") =>
       within(screen.getByTestId("app-access")).getByText(term).nextElementSibling?.textContent;
-    // Each line beside Reads or Changes.
     const lines = (term: "Reads" | "Changes") =>
       Array.from(
         within(screen.getByTestId("app-access")).getByText(term).nextElementSibling?.children ?? [],
@@ -777,7 +774,6 @@ describe("owner app publication", () => {
       expect(within(access).queryByText("New")).toBeNull();
       expect(access.textContent).toContain("It can send what it receives to other websites.");
       expect(screen.getByRole("heading", { name: "What it can reach" })).toBeTruthy();
-      // Publishing on a link does not wait for approval here.
       expect(await screen.findByRole("heading", { name: "Share links" })).toBeTruthy();
       expect(screen.getByText("Not on a link")).toBeTruthy();
       expect(screen.queryByRole("button", { name: "Remove approval" })).toBeNull();
@@ -794,7 +790,6 @@ describe("owner app publication", () => {
         },
       ]);
       expect(onLocalChange).toHaveBeenCalled();
-      // The approval spent the candidate, and an app in a tab reopens there on its own.
       expect(actions("cancel")).toEqual([]);
       expect(actions("launchLocal")).toEqual([]);
       expect(api.openExternalUrl).not.toHaveBeenCalled();
@@ -812,7 +807,6 @@ describe("owner app publication", () => {
       await ready();
       expect(approveButton().textContent).toBe("Approve changes");
       expect(reach("Reads")).toBe("Item, Status");
-      // One line for each operation, and the New pill stays on the line it marks.
       expect(lines("Changes")).toEqual([
         "Adds records with Item, Quantity",
         'Runs "Cancel order"New',
@@ -872,7 +866,6 @@ describe("owner app publication", () => {
         undefined,
         expect.any(Function),
       );
-      // One response settled meanwhile. A Collection row says nothing about Dataset moves.
       await screen.findByText("1 response not yet confirmed");
       const rowRetry = () =>
         within(screen.getByText("1 response not yet confirmed").parentElement!).getByRole(
@@ -880,7 +873,6 @@ describe("owner app publication", () => {
           { name: "Try again" },
         ) as HTMLButtonElement;
       expect(screen.queryByText(/Its data is not active here/)).toBeNull();
-      // Both the error's Try again and the row's retry at the revision the removal ended at.
       await act(async () => reportError.mock.calls[0]![2]!());
       await waitFor(() => expect(actions("withdraw")).toHaveLength(2));
       expect(actions("withdraw").at(-1)).toEqual({
@@ -889,7 +881,6 @@ describe("owner app publication", () => {
         publicationId: collectionRow.publicationId,
         expectedAuthorityRevision: 2,
       });
-      // The row's Try again waits until that retry settles.
       await waitFor(() => expect(rowRetry().disabled).toBe(false));
       await userEvent.setup().click(rowRetry());
       await waitFor(() => expect(actions("withdraw")).toHaveLength(3));
@@ -928,14 +919,12 @@ describe("owner app publication", () => {
       expect(alert.getAttribute("title")).toBe(
         "This app preparation expired. Prepare the app again.",
       );
-      // It sits right above the button that retries.
       expect(alert.nextElementSibling?.tagName).toBe("FOOTER");
       expect(reportError).not.toHaveBeenCalled();
       expect(dialog()).toBeTruthy();
       expect(await stateText()).toContain("Approve it to run this version on this device.");
       await waitFor(() => expect(actions("prepareLocal")).toHaveLength(2));
       await ready();
-      // The spent candidate is never cancelled; the fresh one is approved.
       expect(actions("cancel")).toEqual([]);
       await userEvent.setup().click(approveButton());
       await waitFor(() => expect(dialog()).toBeNull());
@@ -999,7 +988,6 @@ describe("owner app publication", () => {
       );
     });
 
-    // The shell's workspace server connection: signed out of sync.example.org, or connected to it.
     const accessFor = (connected: boolean, connect: () => void = vi.fn()) => ({
       server: "https://sync.example.org",
       context: {
@@ -1049,7 +1037,6 @@ describe("owner app publication", () => {
         )
           return stale.promise;
         const answer = await local([localRow])(request);
-        // This device approved whichever app the dialog shows.
         if (answer.kind === "localListed" && request.action === "listLocal")
           return { ...answer, publications: [{ ...localRow, appRoot: request.appRoot }] };
         if (answer.kind === "localChecked" && request.action === "checkLocal")
@@ -1111,7 +1098,6 @@ describe("owner app publication", () => {
         expect.any(Error),
         expect.any(Function),
       );
-      // Try again in Notices opens the app itself, now through a good address.
       api.publishOwnerApp.mockImplementation(local([localRow]));
       await act(async () => reportError.mock.calls[0]![2]!());
       await waitFor(() =>
@@ -1141,7 +1127,6 @@ describe("owner app publication", () => {
             },
           ]),
         );
-        // Still busy, so a second press does nothing and the dialog cannot close mid-approval.
         expect(approveButton().disabled).toBe(true);
         fireEvent.keyDown(document, { key: "Escape" });
         expect(dialog()).toBeTruthy();

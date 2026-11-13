@@ -35,7 +35,6 @@ import {
 
 import { createTestScratch } from "./testTemp";
 
-// The person a restore names, as desktop main reads them.
 const RESTORER = { kind: "human", humanId: "local-person" } as const;
 
 // Named-version desktop orchestration: active-version capture routing,
@@ -666,7 +665,6 @@ describe("mergeVersionIntoMain", () => {
     await engine.flush();
     await engine.createVersion("Draft");
     await write(root, "plan.md", "draft text\n");
-    // Second version to stay on while merging Draft.
     await engine.switchVersion("main");
     await engine.createVersion("Other");
     await write(root, "plan.md", "other text\n");
@@ -674,22 +672,17 @@ describe("mergeVersionIntoMain", () => {
     const draftId = await versionIdByName(engine, "Draft");
     const result = await engine.mergeVersionIntoMain(draftId);
     expect(result.mergedFileCount).toBe(1);
-    // Disk still shows the active version (Other), not Main's merged state.
     expect(await readText(root, "plan.md")).toBe("other text\n");
-    // ...but Main's engine state has the merge.
     const moments = await readDaemonMoments(loopback);
     const mainTip = moments
       .filter((moment) => moment.versionId === "main" && moment.path === "plan.md")
       .at(-1);
     expect(mainTip?.text).toBe("draft text\n");
-    // Data durability: the merge captured Other's unsettled edit into
-    // Other's own tip first — a later switch away can't lose "other text".
     const otherId = await versionIdByName(engine, "Other");
     const otherTip = moments
       .filter((moment) => moment.versionId === otherId && moment.path === "plan.md")
       .at(-1);
     expect(otherTip?.text).toBe("other text\n");
-    // Switching away and back materializes exactly that captured edit.
     await engine.switchVersion("main");
     expect(await readText(root, "plan.md")).toBe("draft text\n");
     await engine.switchVersion(otherId);
@@ -740,7 +733,6 @@ describe("mergeVersionIntoMain", () => {
       kind: "apply-incoming",
     });
     expect(incoming.conflict.resolution).toBe("applied-incoming");
-    // Main is active: applying the incoming side updates the disk.
     expect(await readText(root, "b.md")).toBe("draft b.md\n");
 
     const merged = await engine.resolveConflict(byPath.get("c.md")!.id, {
@@ -753,7 +745,6 @@ describe("mergeVersionIntoMain", () => {
     expect(await readText(root, "c.md")).toBe("combined c\n");
     expect((await engine.listOpenConflictsPage()).conflicts).toHaveLength(0);
 
-    // Resolution disk writes never re-capture.
     const momentsBefore = (await readDaemonMoments(loopback)).length;
     engine.observeFileEvents([
       { path: "b.md", operation: "update" },

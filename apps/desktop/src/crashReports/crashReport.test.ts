@@ -203,7 +203,6 @@ describe("crash report messages", () => {
         ),
       ),
     ).toContain("in the last 10 minutes. The limit is 10 restarts per 10 minutes.");
-    // A class that is not the supervisor's keeps no message, even a template.
     expect(
       mainError(
         Object.assign(new Error("Rust engine restart limit exceeded after 3 attempts."), {
@@ -520,7 +519,6 @@ describe("crash report messages", () => {
       "Caused by: EngineDaemonUnavailableError: Rust engine daemon exited unexpectedly with code 101.",
     );
     expect(text).not.toContain("    at ");
-    // The one supervisor message with a path in it is withheld.
     expect(
       mainError(engineError("Rust engine binary not found: C:\\Users\\sam\\dohc.exe")),
     ).toContain("EngineDaemonUnavailableError: <message withheld>");

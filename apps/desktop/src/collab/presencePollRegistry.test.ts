@@ -11,12 +11,9 @@ describe("createPresencePollRegistry", () => {
     const registry = createPresencePollRegistry();
     const a = registry.begin(WINDOW_A, "p", "key-a");
 
-    // Window B cancels using window A's pollId: it owns no such poll, so A's
-    // long-poll keeps running.
     registry.cancel(WINDOW_B, "p");
     expect(a.signal.aborted).toBe(false);
 
-    // The owning window's cancel does abort it.
     registry.cancel(WINDOW_A, "p");
     expect(a.signal.aborted).toBe(true);
   });
@@ -26,8 +23,6 @@ describe("createPresencePollRegistry", () => {
     const a = registry.begin(WINDOW_A, "p", "key-a");
     const b = registry.begin(WINDOW_B, "p", "key-b");
 
-    // A finishing (release) must not remove B's controller: each handle only
-    // ever deletes its own entry, so B stays cancellable.
     a.release();
     expect(b.signal.aborted).toBe(false);
     registry.cancel(WINDOW_B, "p");
@@ -39,7 +34,6 @@ describe("createPresencePollRegistry", () => {
     const first = registry.begin(WINDOW_A, "p1", "same-key");
     const second = registry.begin(WINDOW_A, "p2", "same-key");
 
-    // One long-poll per scope+topic per window: the new poll aborts the old.
     expect(first.signal.aborted).toBe(true);
     expect(second.signal.aborted).toBe(false);
     expect(registry.activeCount()).toBe(1);
@@ -50,8 +44,6 @@ describe("createPresencePollRegistry", () => {
     const first = registry.begin(WINDOW_A, "p1", "same-key");
     const second = registry.begin(WINDOW_A, "p2", "same-key");
 
-    // The old poll's finally runs after it was superseded; it must be a no-op
-    // for the map so the new poll stays cancellable.
     first.release();
     registry.cancel(WINDOW_A, "p2");
     expect(second.signal.aborted).toBe(true);
@@ -84,7 +76,6 @@ describe("createPresencePollRegistry", () => {
 
     expect(one.signal.aborted).toBe(true);
     expect(two.signal.aborted).toBe(true);
-    // A different window is untouched.
     expect(other.signal.aborted).toBe(false);
     expect(registry.activeCount()).toBe(1);
   });

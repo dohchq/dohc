@@ -53,7 +53,6 @@ describe("a POSIX stop whose wrapper exits during the process-table read", () =>
     });
     const exited = new Promise<void>((resolve) => handle.onExit(resolve));
 
-    // Every signal dohc sends once the wrapper's exit is observed.
     const kill = process.kill.bind(process);
     let watching = false;
     const signalsAfterExit: Array<[number, string | number | undefined]> = [];

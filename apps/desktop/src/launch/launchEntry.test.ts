@@ -133,7 +133,6 @@ describe("launch entry", () => {
     await launch("B");
     expect(marker()).toEqual({ version: "1.0.0", unfinished: 2, checked: pass });
 
-    // A's relaunch uses its pass, loads main, and finishes; B still changes nothing.
     holder = null;
     await launch("A2", {
       argv: ["dohc.exe", `${LAUNCH_CHECKED_FLAG}=${pass}`],
@@ -162,7 +161,6 @@ describe("launch entry", () => {
     const { recovery } = await f.run();
     await recovery;
     expect(f.dependencies.loadMain).not.toHaveBeenCalled();
-    // Nothing found: this build opens again, without checking twice.
     expect(f.log).toEqual(["lock", "count", "check:unfinished-launch", "relaunch"]);
   });
 

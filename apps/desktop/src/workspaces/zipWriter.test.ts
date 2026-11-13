@@ -19,7 +19,6 @@ function readZip(zip: Buffer): Array<{ path: string; data: Buffer; crc: number }
     const commentLength = zip.readUInt16LE(cursor + 32);
     const localOffset = zip.readUInt32LE(cursor + 42);
     const path = zip.subarray(cursor + 46, cursor + 46 + nameLength).toString("utf8");
-    // Follow the offset to the local header and read the stored bytes.
     expect(zip.readUInt32LE(localOffset)).toBe(0x04034b50);
     const localNameLength = zip.readUInt16LE(localOffset + 26);
     const localExtraLength = zip.readUInt16LE(localOffset + 28);

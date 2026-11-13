@@ -56,7 +56,6 @@ const commit = (patch: Partial<HostedSyncMethodResultMap["sync.commitCursor"]> =
   sharingDeclined: [],
   ...patch,
 });
-// What a page says of a departed document: whether it is, or undefined past its list's window.
 const says = (page: ServiceHostedPullPage, objectId: string) =>
   hostedWindowCovers(page.departed.window, objectId)
     ? page.departed.listed.includes(objectId)
@@ -182,10 +181,6 @@ it("pulls again after a pass that adopted a new scope, without materializing or 
   ]);
 });
 
-// Proves: however many documents are held, each pass asks after where the last
-// one's list stopped, so every hold is named within a few passes, and tells
-// its page where its list speaks. A list that reached the last starts the next
-// from the first, and one listing a document before where it was asked is refused.
 it("asks each pass for the held documents after where the last list stopped", async () => {
   const f = fixture(),
     work = (objectId: string) => ({ objectId, reason: "hosted-backfill-work-waiting" as const });
@@ -322,7 +317,6 @@ it("keeps each departed document the engine still holds until a reply that read 
     message: "hosted-file-unexpected: docs/b.md holds bytes other than its document's head",
     retry: "no",
   };
-  // The rows retired but the file did not go; then the departed list went unread; then the file went.
   const commits = [
     commit({ hasMore: true, retirement: failed, departed: ["doc-b"] }),
     commit({ hasMore: true, departed: null }),

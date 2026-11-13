@@ -48,10 +48,7 @@ describe("resolveFloatingMenuPosition", () => {
       gap: 6,
     });
     expect(position.placement).toBe("above");
-    // Bottom edge sits `gap` above the cursor regardless of content height:
-    // a menu shorter than maxHeight must grow upward, not hang detached.
     expect(position.bottom).toBe(600 - (500 - 6));
-    // The described box is the same one `y` + maxHeight describes.
     expect(600 - (position.y + position.maxHeight)).toBe(position.bottom);
   });
 

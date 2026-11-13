@@ -78,9 +78,7 @@ vi.mock("./bridge", () => ({ bridge: () => backend }));
 const pageInvoke = vi.hoisted(() => ({
   current: null as TransactionalCollectionPageProps["invoke"] | null,
 }));
-// The form dialog only approves public choices here, and records how that ended.
 const formDialog = vi.hoisted(() => ({ outcomes: [] as string[] }));
-// What the stand-in page did once the ⚡ panel closed at its asking, as the page opens a record.
 const handoff = vi.hoisted(() => ({ opened: 0 }));
 vi.mock("./CreateDatasetFormDialog", () => ({
   CreateDatasetFormDialog: (props: {
@@ -340,7 +338,6 @@ describe("a dataset table's saved views", () => {
       workspaceId: "workspace-a",
       relativePath: viewsPath,
     });
-    // No view was open on this computer before, so the page starts on All records.
     expect(screen.getByLabelText("Open view").textContent).toBe("All records");
     fireEvent.click(open);
     expect(screen.getByLabelText("Open view").textContent).toBe("Unpaid");
@@ -350,7 +347,6 @@ describe("a dataset table's saved views", () => {
     expect(editor.getByLabelText<HTMLInputElement>("View search").value).toBe("Pending");
     fireEvent.click(editor.getByRole("button", { name: "Done" }));
     expect(screen.queryByRole("region", { name: "Collection views" })).toBeNull();
-    // Views opens the same list of views.
     fireEvent.click(screen.getByRole("button", { name: "Views" }));
     expect(
       within(screen.getByRole("region", { name: "Collection views" })).getByRole("button", {
@@ -916,7 +912,6 @@ it("closes the form after its public choices apply, though the page read the Col
       backend.dataset.mock.calls.some(([request]) => request.action === "approveMigration"),
     ).toBe(true),
   );
-  // Main says the rules changed before it answers the approval.
   act(() => {
     for (const listener of rulesChanged) listener({ workspaceId: "workspace-a", datasetId: id(1) });
   });
@@ -1423,7 +1418,6 @@ it("does not report permanent deletion in a different workspace", async () => {
   expect(screen.queryByText("Collection deleted")).toBeNull();
 });
 
-// A dataset whose Registrations table has a Confirm action, and the approval that adds a Confirm button.
 function buttonApproval() {
   const CONFIRM = {
     operationId: id(7),
@@ -1600,10 +1594,8 @@ describe("a dataset table's ⚡ panel", () => {
     const customize = await screen.findByRole("button", { name: "Customize…" });
     customize.focus();
     fireEvent.click(customize);
-    // The tab shows the table, so the dialog names it too.
     const dialog = await screen.findByRole("dialog", { name: "Customize Registrations" });
     expect(within(dialog).getByText("Fundraiser/automations.yaml")).toBeTruthy();
-    // No automation yet, so no file to open.
     expect(within(dialog).getByText("Made with the first automation.")).toBeTruthy();
     expect(within(dialog).queryByRole("button", { name: "Open automations.yaml" })).toBeNull();
     fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
@@ -1754,7 +1746,6 @@ describe("a dataset table's ⚡ panel", () => {
       ],
     });
     renderPage();
-    // With the panel closed, the page opens its record at once.
     fireEvent.click(await screen.findByRole("button", { name: "Open a record" }));
     expect(handoff.opened).toBe(1);
     fireEvent.click(await screen.findByRole("button", { name: "Fields and names" }));
@@ -1763,7 +1754,6 @@ describe("a dataset table's ⚡ panel", () => {
     fireEvent.change(within(panel).getByRole("textbox", { name: "Name" }), {
       target: { value: "Confirm twice" },
     });
-    // The builder holds a draft, so it asks. The person keeps editing: no record opens, and the draft stays.
     fireEvent.click(screen.getByRole("button", { name: "Open a record" }));
     fireEvent.click(
       within(await screen.findByTestId("automation-unsaved")).getByRole("button", {
@@ -1778,7 +1768,6 @@ describe("a dataset table's ⚡ panel", () => {
         }) as HTMLInputElement
       ).value,
     ).toBe("Confirm twice");
-    // The panel closes later for another reason. The record asked for earlier does not open then.
     fireEvent.click(screen.getByTestId("collection-automations-button"));
     fireEvent.click(
       within(await screen.findByTestId("automation-unsaved")).getByRole("button", {
@@ -1787,7 +1776,6 @@ describe("a dataset table's ⚡ panel", () => {
     );
     await waitFor(() => expect(screen.queryByTestId("collection-automations-panel")).toBeNull());
     expect(handoff.opened).toBe(1);
-    // Open with no draft, the panel closes for the record, which then opens.
     fireEvent.click(screen.getByTestId("collection-automations-button"));
     await screen.findByTestId("collection-automations-panel");
     fireEvent.click(screen.getByRole("button", { name: "Open a record" }));
@@ -2020,8 +2008,6 @@ describe("a dataset table's ⚡ panel", () => {
         expect.any(Function),
       ),
     );
-    // While Try again reads the Collection, its rules change and the page reads it again.
-    // Try again's read answers first, though the newer read replaced it.
     holding = true;
     act(() => {
       (onError.mock.calls[0]![2] as () => void)();
@@ -2230,7 +2216,6 @@ describe("a dataset table's ⚡ panel", () => {
         onOpenScheduleSettings={vi.fn()}
       />,
     );
-    // A new Collection's automations change while its page still reads the dataset.
     await waitFor(() => expect(automationsChanged.length).toBeGreaterThan(0));
     act(() => {
       for (const listener of automationsChanged) listener({ workspaceId: "workspace-a" });

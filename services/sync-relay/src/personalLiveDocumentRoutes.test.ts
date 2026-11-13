@@ -67,7 +67,6 @@ it("refuses a document with no native history at once, and holds one with no sha
   await expectCode(await a.open(), 409, "live-document-without-lineage");
   expect(f.route.held()).toEqual({ waiters: 0, documents: 0 });
   f.blocked.clear();
-  // One whose start keeps failing ends at once too, and says the server keeps trying.
   f.host.failing.mockReturnValue({ word: "relay-error", since: 0 });
   expect(await body(await a.open(), 409)).toEqual({
     ok: false,
@@ -85,8 +84,6 @@ it("refuses a document with no native history at once, and holds one with no sha
   expect(f.route.held()).toEqual({ waiters: 0, documents: 0 });
 });
 
-// Proves: an agent's open never undoes the owner's Stop. A document that
-// retired without one, as revoked access leaves it, is enrolled again.
 it("answers live_paused_by_owner for a Stopped document, and enrolls one retired without a Stop again", async () => {
   const stopped = await fixture();
   stopped.storage.ensureOwnedLiveDocument({ intent: "share", ...stopped.input });
@@ -118,8 +115,6 @@ it("answers live_paused_by_owner for a Stopped document, and enrolls one retired
   expect(await body(await held, 200)).toEqual(ready);
 });
 
-// Proves: agents alone keep at most 48 documents hosted. The owner's Resume
-// of a document no share covers is not one of them.
 it("refuses an agent's open once agents alone keep 48 documents, and hosts the owner's Resume of a shareless one", async () => {
   const f = await fixture(),
     a = f.agent("editor");
@@ -135,8 +130,6 @@ it("refuses an agent's open once agents alone keep 48 documents, and hosts the o
   ).toMatchObject({ enabled: true, retired: false, ownerDemand: true, demandAtMs: 30 });
 });
 
-// Proves: agents alone keep documents in at most 12 workspaces. A share in
-// another workspace still fits, within the host's 16.
 it("refuses an agent's open in a 13th workspace only agents keep, and fits a share there", async () => {
   const f = await fixture(),
     a = f.agent("editor");
@@ -155,7 +148,6 @@ it("refuses an agent's open in a 13th workspace only agents keep, and fits a sha
   });
 });
 
-/** The fixture's docs/a.md, retired without a Stop once its only Edit grant ended, for an agent's open to enroll again. */
 function retireShared(f: Awaited<ReturnType<typeof fixture>>) {
   f.storage.ensureOwnedLiveDocument({ intent: "share", ...f.input });
   f.revoke();
@@ -167,10 +159,6 @@ const retiredObjects = (f: Awaited<ReturnType<typeof fixture>>) =>
     .all()
     .map((row) => row.object_id);
 
-// Proves: at the agent-only cap, an agent's open reclaims the least recently
-// used document only agents keep once it is idle past the minimum hold, and
-// is held until its own document is ready. Within the hold, the same open
-// gets live_host_full and writes nothing.
 it("reclaims the least recently used agent-only document idle past the hold for an agent's open at the agent-only cap", async () => {
   let now = RECLAIM_MIN_HOLD_MS;
   const f = await fixture({ nowMs: () => now }),
@@ -202,10 +190,6 @@ it("reclaims the least recently used agent-only document idle past the hold for 
   expect(await body(await held, 200)).toEqual(ready);
 });
 
-// Proves: an agent's open never reclaims a document its owner opened. With
-// only those at the host's 64, it gets live_host_full and writes nothing.
-// When one of them is kept only by agents, idle past the hold, the same open
-// reclaims it.
 it("never reclaims an owner-opened document for an agent's open, and reclaims one only agents keep", async () => {
   const f = await fixture({ nowMs: () => RECLAIM_MIN_HOLD_MS + 2 }),
     a = f.agent("editor");
@@ -232,9 +216,6 @@ it("never reclaims an owner-opened document for an agent's open, and reclaims on
   expect(await body(await held, 200)).toEqual(ready);
 });
 
-// Proves: an agent's open of a note refused for having no native history
-// leaves demand on its enrollment. The sweep keeps it through the retention
-// period and clears it once the note is idle past it.
 it("clears the demand a refused note's open left once it is idle past retention, and keeps it until then", async () => {
   const f = await fixture(),
     a = f.agent("editor");
@@ -262,8 +243,6 @@ it("clears the demand a refused note's open left once it is idle past retention,
   ]);
 });
 
-// Proves: the owner's Sign out ends a held open as it commits, releasing its
-// waiter and slot. An agent still signed in waits until the document is ready.
 it("ends a held open when its owner signs the agent out, and answers one whose agent stays signed in", async () => {
   const f = await fixture(),
     leaving = f.agent("leaving"),
@@ -286,8 +265,6 @@ it("ends a held open when its owner signs the agent out, and answers one whose a
   expect(f.route.held()).toEqual({ waiters: 0, documents: 0 });
 });
 
-// Proves: the owner narrowing an agent's reach below Edit ends its held open
-// as the change commits, at Comment and at View. Edit set again keeps it held.
 it("ends a held open when its agent's reach drops to Comment or to View, and keeps one whose agent stays at Edit", async () => {
   const f = await fixture(),
     commenter = f.agent("to-comment"),
@@ -349,8 +326,6 @@ it("answers preparing at once while the running-work registry is down, and holds
   expect(await body(await held, 200)).toEqual(ready);
 });
 
-// Proves: a path with no current document is a terminal answer that writes
-// nothing. The document's own path answers with its binding.
 it("answers document-unavailable for a path with no current document without writing, and ready at the document's path", async () => {
   const f = await fixture(),
     a = f.agent("editor");
@@ -364,8 +339,6 @@ it("answers document-unavailable for a path with no current document without wri
   expect(await body(await a.open(), 200)).toEqual(ready);
 });
 
-// Proves: past the relay's held-open limit, an open has still committed and
-// answers at once. Below it, the open waits for the document.
 it("answers at once past the relay's held-open limit, and holds an open below it", async () => {
   const f = await fixture({ limits: { waiters: 1 } }),
     first = f.agent("first"),
@@ -379,8 +352,6 @@ it("answers at once past the relay's held-open limit, and holds an open below it
   expect(await body(await held, 200)).toEqual(ready);
 });
 
-// Proves: one agent holds at most its own limit of opens. Another agent's
-// open of the same document joins the same waiters, and one read answers both.
 it("answers an agent at once past its own held-open limit, and holds another agent's open of the same document", async () => {
   const f = await fixture({ limits: { perAgent: 1 } }),
     first = f.agent("first"),
@@ -396,8 +367,6 @@ it("answers an agent at once past its own held-open limit, and holds another age
     expect(await body(response, 200)).toEqual(ready);
 });
 
-// Proves: a client that leaves takes its waiter and counts with it. One
-// that stays gets the answer.
 it("releases a held open's waiter and counts when its client leaves, and answers one that stays", async () => {
   const f = await fixture(),
     leaving = f.agent("leaving"),
@@ -415,8 +384,6 @@ it("releases a held open's waiter and counts when its client leaves, and answers
   expect(f.route.held()).toEqual({ waiters: 0, documents: 0 });
 });
 
-// Proves: only a relay running the self-hosted live host hosts documents for
-// agents. Elsewhere every open refuses before any write.
 it("refuses an open without the self-hosted live host before any write, and answers it with one", async () => {
   for (const options of [{ live: false }, { control: "device" }] as const) {
     const f = await fixture(options);
@@ -429,8 +396,6 @@ it("refuses an open without the self-hosted live host before any write, and answ
   expect(await body(await f.agent("editor").open(), 200)).toEqual(ready);
 });
 
-// Proves: two agents opening one document at once enroll it once, and both
-// get the same binding.
 it("enrolls a document once when two agents open it at once, and gives both the same binding", async () => {
   const f = await fixture(),
     first = f.agent("first"),
@@ -441,8 +406,6 @@ it("enrolls a document once when two agents open it at once, and gives both the 
   expect(f.storage.listServiceHostEnrollments()).toEqual([f.read()]);
 });
 
-// Proves: an open never follows a rename to a different enrollment. At the
-// document's new path it is a conflict; at its enrolled path it is ready.
 it("refuses an open at a renamed document's new path, and answers ready at the path it is enrolled at", async () => {
   const f = await fixture(),
     a = f.agent("editor");

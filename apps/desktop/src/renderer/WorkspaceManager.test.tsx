@@ -57,7 +57,6 @@ const bridge = {
     checked: true,
     state: { status: "checking", message: "Checking for updates" },
   })),
-  // The notice dock the connection surfaces raise their failures into.
   getUpdateState: vi.fn(async () => ({ status: "idle" as const, message: "Up to date" })),
   onUpdateState: vi.fn(() => () => undefined),
   readCrashReport: vi.fn(async (): Promise<ReadCrashReportResult> => ({
@@ -75,7 +74,6 @@ const bridge = {
   platform: "linux" as NodeJS.Platform,
 };
 
-// The location line: the parent folder, then the new workspace's own folder.
 const location = () => screen.getByTestId("new-workspace-location").textContent;
 const locationReads = (path: string) => waitFor(() => expect(location()).toBe(path));
 const nameField = () => screen.getByRole<HTMLInputElement>("textbox", { name: "Workspace name" });
@@ -112,8 +110,6 @@ afterEach(() => {
 });
 
 describe("workspace manager", () => {
-  // A first join that fails leaves no workspace, so the manager is the only
-  // place its kept typing can show.
   it("offers typing kept from a workspace no longer listed, with no workspace open", async () => {
     const kept = {
       workspaceId: "joined-then-failed",
@@ -195,7 +191,6 @@ describe("workspace manager", () => {
     );
   });
 
-  // The name's error, under the folder tab and above the location line.
   const expectNameError = (message: string) => {
     const alert = screen.getByRole("alert");
     expect(alert.textContent).toBe(message);
@@ -339,8 +334,6 @@ describe("workspace manager", () => {
     expect(location()).toBe("/home/sam/projects/research/Personal");
   });
 
-  // A folder that can never be a workspace: the toast leads with why and
-  // offers another folder, not Try again. The folder is in Details.
   it.each([
     [
       "reserved id link",
@@ -420,8 +413,6 @@ describe("workspace manager", () => {
     expect(screen.queryByTestId("join-synced-workspace")).toBeNull();
     expect(screen.getByTestId("workspace-shell-error")).toBeTruthy();
 
-    // Try again reopens the route the failure came from, with the address
-    // that attempt used.
     await user.click(screen.getByTestId("workspace-shell-error-retry"));
     expect(await screen.findByTestId("join-synced-workspace")).toBeTruthy();
     await waitFor(() =>
@@ -534,8 +525,6 @@ describe("workspace manager with registered workspaces", () => {
     expect(confirm.textContent).toBe("Remove from list");
     expect(confirm.className).not.toContain("danger");
     expect(bridge.forgetWorkspace).not.toHaveBeenCalled();
-    // Focus starts on the confirm button, as in every confirm dialog, and the
-    // left arrow reaches Cancel.
     expect(document.activeElement).toBe(confirm);
     await user.keyboard("{ArrowLeft}");
     expect(document.activeElement).toBe(screen.getByTestId("workspace-remove-cancel"));

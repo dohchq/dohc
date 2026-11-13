@@ -144,8 +144,6 @@ it("refuses unexpected metadata fields and responses arriving after selection ca
   );
   await expect(openLinkDocument("abcdefghijkl", "docs/a.md", controller.signal)).rejects.toThrow();
 });
-// The share service answers 404 when the owner's device cannot serve the file
-// yet. The server answered, so the viewer must not blame the connection.
 it("reports a refused link ticket as unavailable, not as a failed connection", async () => {
   vi.stubGlobal("location", { origin: "https://share.example.test" });
   vi.stubGlobal(

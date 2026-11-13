@@ -376,8 +376,6 @@ describe("Rust engine daemon lifecycle", () => {
       maxRestartsPerWindow: 3,
       launch: async (options) => {
         launchCount += 1;
-        // Every crash costs two attempts: the first replacement fails its
-        // handshake, the second one takes.
         if (launchCount > 1 && launchCount % 2 === 0) {
           throw new Error("replacement handshake failed");
         }
@@ -429,7 +427,6 @@ describe("Rust engine daemon lifecycle", () => {
       pingExpiryMs: 10,
       maxPingExpiries: 2,
       launch: async (options) => {
-        // Only the first generation wedges; its replacement answers.
         const client = new SelfExitingClient(clients.length === 0 ? silentPing : healthyPing);
         client.exit = options.onExit;
         clients.push(client);
@@ -489,8 +486,6 @@ describe("Rust engine daemon lifecycle", () => {
     const clients: SelfExitingClient[] = [];
     let published = 0;
     const terminalFailures: Error[] = [];
-    // Driven arrival time of every probe, per generation, for the cadence
-    // assertion below.
     const probeArrivals: number[][] = [];
     const lifecycle = new EngineDaemonLifecycle({
       command: fakeBinary(),
@@ -569,7 +564,6 @@ describe("Rust engine daemon lifecycle", () => {
           spacings.push((arrivals[i] ?? 0) - (arrivals[i - 1] ?? 0));
         }
       }
-      // Two generations, three probes each: at least four spacings.
       expect(spacings.length).toBeGreaterThanOrEqual(4);
       for (const spacing of spacings) {
         expect(spacing).toBeGreaterThanOrEqual(75_000);
@@ -619,7 +613,6 @@ describe("Rust engine daemon lifecycle", () => {
 
     try {
       await lifecycle.start();
-      // Four generations means three wedge kills survived without terminating.
       await vi.waitFor(() => expect(clients.length).toBeGreaterThanOrEqual(4), WAIT);
       expect(failures.filter(({ terminal }) => terminal)).toEqual([]);
     } finally {
@@ -687,8 +680,6 @@ describe("Rust engine daemon lifecycle", () => {
       onFailure: (error) => failures.push(error),
     });
 
-    // Output keeps arriving for other callers throughout, exactly as it would
-    // while the daemon writes down a queued backlog. No probe is ever answered.
     const traffic = setInterval(() => {
       for (const client of clients) client.inbound += 1;
     }, 2);
@@ -888,8 +879,6 @@ describe("Rust engine daemon lifecycle", () => {
 
     try {
       await lifecycle.start();
-      // The smoke has not completed — its workspace.open is unsent or held —
-      // yet the lifecycle is already running and serving its client.
       expect(client.requests.filter((request) => request.method === "workspace.close")).toEqual([]);
       expect(lifecycle.currentClient()).toBe(client);
       await vi.waitFor(() => expect(openRequest).toBeDefined(), WAIT);
@@ -925,7 +914,6 @@ describe("Rust engine daemon lifecycle", () => {
       command: fakeBinary(),
       initialBackoffMs: 0,
       launch: async (options) => {
-        // Only the first generation fails its smoke; the replacement passes.
         const failing = clients.length === 0;
         const client = new SelfExitingClient((request) => {
           if (failing && request.method === "versions.active") {
@@ -982,7 +970,6 @@ describe("Rust engine daemon lifecycle", () => {
       }
       if (request.method === "engine.ping") {
         pings += 1;
-        // The first probe expires while the host is suspended for a minute.
         if (pings === 1) {
           now += 60_000;
           return new Promise<Response>(() => {});
@@ -1045,7 +1032,6 @@ describe("Rust engine daemon lifecycle", () => {
     );
     expect(read?.deadlineMs).toBeLessThanOrEqual(100);
     expect(client.cancelledRequestIds).toEqual([read?.id]);
-    // The attachment is still released, and the engine stays.
     expect(client.requests.some(({ method }) => method === "workspace.close")).toBe(true);
     expect(client.closed).toBe(false);
     expect(failures).toEqual([]);
@@ -1093,7 +1079,6 @@ describe("Rust engine daemon lifecycle", () => {
       await expect(read("second")).rejects.toThrow("did not start within its 50ms budget");
       const third = read("third");
       await expect(third).rejects.toThrow("did not start within its 50ms budget");
-      // Neither later read reached the engine while the first still held the root.
       expect(client.requests.filter(({ method }) => method === "workspace.open")).toHaveLength(1);
       releaseClose!();
       await expect(first).resolves.toBeNull();

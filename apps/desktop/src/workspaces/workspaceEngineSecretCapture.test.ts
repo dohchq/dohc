@@ -23,11 +23,7 @@ import {
 
 import { createTestScratch } from "./testTemp";
 
-// The person a restore names, as desktop main reads them.
 const RESTORER = { kind: "human", humanId: "local-person" } as const;
-
-// Secret-backed files through the desktop daemon pipeline: protected moments
-// stay metadata-only while switch, merge, and restore materialize disk state.
 
 const MARKER = "DESKTOP_SECRET_MARKER_31337";
 const ENV_A = `API_KEY=${MARKER}\n`;
@@ -51,8 +47,6 @@ async function readText(root: string, path: string): Promise<string | null> {
   }
 }
 
-// The daemon path holds real secret, version, and moment state in the loopback.
-// The request log proves which live adapter calls ran.
 function daemonCapture(
   root: string,
   loopback: VersionedLoopbackEngine,
@@ -114,8 +108,6 @@ describe("secret capture through the desktop pipeline (daemon path)", () => {
     engine.start();
     await engine.flush();
 
-    // The chain opens the daemon workspace; the daemon writes the secret
-    // into its own store, never the chain.
     const methods = requests.map((request) => request.method);
     expect(methods).toContain("workspace.open");
     expect(methods).not.toContain(VERSIONED_METHOD.secretsWrite);
@@ -123,7 +115,6 @@ describe("secret capture through the desktop pipeline (daemon path)", () => {
       VERSIONED_METHOD.secretsWrite,
     );
 
-    // Same content again: no second moment (content-equality no-op).
     engine.observeFileEvents([{ path: ".env", operation: "update" }]);
     await engine.flush();
     let page = await engine.listMoments();
@@ -138,14 +129,12 @@ describe("secret capture through the desktop pipeline (daemon path)", () => {
     expect(JSON.stringify(detail).includes(MARKER)).toBe(false);
     expect(requests.map((request) => request.method)).toContain(VERSIONED_METHOD.secretsMomentsGet);
 
-    // Real change: one more metadata-only moment.
     await write(root, ".env", ENV_B);
     engine.observeFileEvents([{ path: ".env", operation: "update" }]);
     await engine.flush();
     page = await engine.listMoments();
     expect(page.moments.filter((moment) => moment.protected)).toHaveLength(2);
 
-    // Deletion retires the protected state with a moment.
     await rm(join(root, ".env"));
     engine.observeFileEvents([{ path: ".env", operation: "delete" }]);
     await engine.flush();
@@ -167,10 +156,8 @@ describe("secret capture through the desktop pipeline (daemon path)", () => {
     const engine = daemonCapture(root, loopback, requests);
     engine.start();
     await engine.flush();
-    // Fork Experiment while no secret exists.
     const created = await engine.createVersion("Experiment");
     const experimentId = created.activeVersionId;
-    // Back on Main, gain a secret.
     await engine.switchVersion("main");
     await write(root, ".env", ENV_A);
     engine.observeFileEvents([{ path: ".env", operation: "update" }]);
@@ -336,7 +323,6 @@ describe("secret version operations through the desktop daemon path", () => {
     expect(result.path).toBe(".env");
     expect(await readText(root, ".env")).toBe(ENV_A);
 
-    // The materialized write consumes its expected event: no re-capture.
     engine.observeFileEvents([{ path: ".env", operation: "update" }]);
     await engine.flush();
     const after = await engine.listMoments();

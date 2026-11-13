@@ -82,8 +82,6 @@ function memberAppend(
   return h(request(MEMBER, `/sync/shares/${shareId}/log`, jsonBody({ originId, ops })));
 }
 
-// ---------------------------------------------------------------------------
-
 describe("MU-C5 · byte-identical denial across every share-scoped route", () => {
   it("denies a non-recipient identically to an absent share, on path, chat, AND DM shares", async () => {
     const storage = await testStorage();
@@ -128,7 +126,6 @@ describe("MU-C5 · byte-identical denial across every share-scoped route", () =>
       access: "read-write",
     });
 
-    // The baseline: the same routes against a share id that never existed.
     const absentId = "never-existed";
     const absent = {
       read: await denialBytes(await h(request(STRANGER, `/sync/shares/${absentId}`))),
@@ -199,13 +196,9 @@ describe("MU-C5 · byte-identical denial across every share-scoped route", () =>
       ).toBe(absent.presence);
     }
 
-    // The granter probing the recipient routes of their own share is a
-    // non-recipient too — same generic 404, no self-leak.
     expect(
       await denialBytes(await h(request(OWNER, `/sync/shares/${chatShare}/log?since=0`))),
     ).toBe(absent.log);
-    // Unauthenticated probes stay 401 (auth precedes the share lookup); the 404
-    // invariant is specifically about AUTHENTICATED non-recipients.
     expect((await h(request(null, `/sync/shares/${chatShare}/log?since=0`))).status).toBe(401);
   });
 
@@ -405,8 +398,6 @@ describe("MU-C5 · no-forge authorship at the member-append gate (MU-C0)", () =>
       access: "read-write",
     });
 
-    // A message forged to speak as the OWNER: rejected at the authorship gate
-    // (server-derived pusher is member, payload claims OWNER).
     const forgedMessage = await memberAppend(h, shareId, [
       memberOp(0, "chat.message.append", {
         messageId: "forge-1",
@@ -421,8 +412,6 @@ describe("MU-C5 · no-forge authorship at the member-append gate (MU-C0)", () =>
     expect(forgedMessage.status).toBe(403);
     expect((await json(forgedMessage)).code).toBe("authorship_mismatch");
 
-    // A reaction forged to another author: authorId is required and must equal
-    // the pusher, so a forged (and a missing) author id both fail closed.
     const forgedReaction = await memberAppend(h, shareId, [
       memberOp(0, "chat.reaction.set", {
         reactionId: "forge-r",
@@ -443,8 +432,6 @@ describe("MU-C5 · no-forge authorship at the member-append gate (MU-C0)", () =>
     const page = await json(await h(request(MEMBER, `/sync/shares/${shareId}/log?since=0`)));
     expect(JSON.stringify(page)).not.toContain("SENTINEL-FORGED-MESSAGE");
 
-    // The honest path (author == pusher) still lands, proving the gate rejects
-    // only the forgery, not the member's own authored writes.
     const honest = await memberAppend(h, shareId, [
       memberOp(0, "chat.message.append", {
         messageId: "honest-1",
@@ -475,7 +462,6 @@ describe("MU-C5 · revocation closes read and append with a recipient removal me
       access: "read-write",
     });
 
-    // Live: read and append both work.
     expect((await h(request(MEMBER, `/sync/shares/${shareId}/log?since=0`))).status).toBe(200);
     expect(
       (
@@ -727,9 +713,6 @@ describe("MU-C5 · served payloads leak no planted sentinel across every op kind
       },
     ]);
 
-    // Two shares to the same member, covering all served op kinds:
-    //   - a version share (workspace.init, version.create, moment.append)
-    //   - a chat share (channel/thread/message/reaction for one channel)
     const versionShare = await createShare(h, {
       recipientUserId: MEMBER,
       paths: ["docs"],
@@ -741,9 +724,6 @@ describe("MU-C5 · served payloads leak no planted sentinel across every op kind
       access: "read-write",
     });
 
-    // Every planted internal value. None may appear in either served view —
-    // cross-checking the full set against both proves no kind of leak crosses
-    // any share kind.
     const SENTINELS = [
       "SENTINEL-INIT-NOTE",
       "SENTINEL-VERSION-NAME",
@@ -833,7 +813,6 @@ describe("MU-C5 · presence is never journaled to any durable table", () => {
     const shareId = await createShare(h, { recipientUserId: MEMBER, paths: ["notes/a.md"] });
 
     const PRESENCE_SENTINEL = "SENTINEL-PRESENCE-STATE";
-    // Owner publishes + polls on the workspace scope.
     await h(
       request(
         OWNER,
@@ -846,7 +825,6 @@ describe("MU-C5 · presence is never journaled to any durable table", () => {
         method: "GET",
       }),
     );
-    // Member publishes + polls on the SHARE scope (same underlying scope).
     const topic = encodeURIComponent("notes/a.md");
     await h(
       request(
@@ -893,7 +871,6 @@ describe("MU-C5 · presence is never journaled to any durable table", () => {
       raw.close();
     }
 
-    // Leaving drops the ephemeral state entirely — no residue anywhere.
     await h(
       request(
         OWNER,
@@ -950,8 +927,6 @@ describe("MU-C5 · in-request revoke race is closed by the in-transaction guard"
         createdAtMs: 5000,
       }),
     ]);
-    // The guard sees the revoke and rolls the whole batch back as the generic
-    // 404 — the write never lands.
     expect(response.status).toBe(404);
     const ownerLog = await json(
       await h(request(OWNER, `/sync/${WORKSPACE}/log?since=0&limit=500`)),
@@ -959,8 +934,6 @@ describe("MU-C5 · in-request revoke race is closed by the in-transaction guard"
     expect(JSON.stringify(ownerLog)).not.toContain("SENTINEL-RACE-BODY");
   });
 });
-
-// --- chat op builders (shared across the sentinel + gate tests) --------------
 
 function chatChannelCreate(
   wireId: string,

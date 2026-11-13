@@ -27,7 +27,6 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-/** An authenticated native registration as service and device capture return it. Native sync is not exercised here. */
 function nativeHost(
   change: Partial<Pick<NamedFrameNativeHost, "binding" | "coordinate" | "invalidated">> = {},
 ): NamedFrameNativeHost {
@@ -92,7 +91,6 @@ const secondBinding = {
   selectorPaths: ["docs/b.md"],
 };
 
-/** Adds a second current document and a second named editor the way the shared fixture adds the first. */
 function addSecondDocumentAndEditor(f: Fixture) {
   f.raw
     .prepare(`INSERT INTO sync_relay_object_moments (workspace_id, object_id, relay_seq, moment_id, version_id, path, blob_sha256, content_kind, byte_length, recorded_at_ms)

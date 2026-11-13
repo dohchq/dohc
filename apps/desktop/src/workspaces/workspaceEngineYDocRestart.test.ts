@@ -109,9 +109,7 @@ async function reconnectFailureCapture(prefix: string) {
     moveRefusalAt: null as "preflight" | "native" | null,
     adoptOnClose: false,
     moveRequests: [] as string[],
-    // A page this computer owns: only a folder check over it refuses.
     ownedUnder: null as string | null,
-    // A page this computer owns: only a page move of it refuses.
     ownedPage: null as string | null,
     checkedFolders: [] as Array<{ path: string; folder: boolean }>,
     releaseCalls: [] as Array<{ generation: number; settle?: boolean }>,
@@ -393,9 +391,6 @@ async function failRendererUpdate(
   await expect(session.settleNow()).rejects.toThrow(/closed/i);
 }
 
-// A dead live session keeps History paused past Try again, so Try again names
-// the page of each one; closing a page releases its session, and History runs
-// once none is left.
 it("names every page whose live editing stopped when Try again leaves History paused, until those pages close", async () => {
   const { capture, outcomes } = await reconnectFailureCapture("dohc-ydoc-history-retry-dead-");
   const plan = await capture.openYDocSession({
@@ -432,9 +427,6 @@ it("names every page whose live editing stopped when Try again leaves History pa
   await capture.stop();
 });
 
-// Try again that outlasts the settle budget reads as catching up while
-// capture runs or a replacement is still on its first scan; a driver that
-// stopped again keeps History paused.
 it("keeps History paused when Try again finds capture stopped again, and catching up while it still runs", async () => {
   const { capture, state } = await reconnectFailureCapture("dohc-ydoc-history-retry-unsettled-");
   state.captureAnswer = "unsettled";
@@ -451,9 +443,6 @@ it("keeps History paused when Try again finds capture stopped again, and catchin
   state.captureAnswer = null;
   await capture.stop();
 });
-
-// A deliberate rescan right after Try again reads not running while ready,
-// and neither degraded nor terminal. History runs.
 
 it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", async () => {
   const rootPath = await createTestScratch("dohc-ydoc-restart-");
@@ -702,7 +691,6 @@ async function typeIntoLostGeneration(input: {
   base: string;
   claimedState: (base: Uint8Array) => Uint8Array;
   originatedHere: boolean;
-  // The object the path names after the generation is lost.
   claimedObjectId?: string;
   edit: (text: Y.Text) => void;
 }) {
@@ -845,11 +833,6 @@ async function typeIntoLostGeneration(input: {
   };
 }
 
-// Enabling sync dropped the generation, and the sync pass claimed the
-// lineage from what it had recorded, which lacks the word the lost
-// generation could not record. The full-state hash cannot match, so the
-// engine's report that it made this claim from this history is what keeps
-// the word.
 it("keeps typing the lost generation could not record when the engine claimed its history", async () => {
   const typed = await typeIntoLostGeneration({
     base: "recorded",
@@ -867,10 +850,6 @@ it("keeps typing the lost generation could not record when the engine claimed it
   await typed.close();
 });
 
-// Another machine forked the same base and its claim reached this engine
-// first. The claim's deletion of "a" is inside the local deletion of "ab",
-// so containment would call it the same document. It is not, and the local
-// word must not be replayed into it.
 it("replaces the document when a foreign fork claims it while the generation is lost", async () => {
   const typed = await typeIntoLostGeneration({
     base: "abcdef",
@@ -895,9 +874,6 @@ it("replaces the document when a foreign fork claims it while the generation is 
   await typed.close();
 });
 
-// The object was renamed away while the generation was gone, and another
-// document this device claimed moved onto the path. The reopen names the
-// object this session opened, so it is refused rather than merged.
 it("refuses to reopen onto another object that moved onto the path", async () => {
   const typed = await typeIntoLostGeneration({
     base: "old document",
@@ -916,8 +892,6 @@ it("refuses to reopen onto another object that moved onto the path", async () =>
   expect(typed.replacements).toEqual([]);
   expect(typed.claimedRecords).toEqual([]);
   expect(typed.session.doc.getText("plainText").toString()).toBe("old document typed");
-  // Reported once, and the session stops reopening: later typing and saves
-  // meet the same refusal, so they are not tried at all.
   expect(typed.objectChanges()).toBe(1);
   const before = Y.encodeStateVector(typed.rendererDoc);
   typed.rendererDoc.getText("plainText").insert(0, "more ");
@@ -961,7 +935,6 @@ for (const order of ["settle failure first", "drop first"] as const) {
       { currentClient: () => currentClient },
       { sleep: async () => undefined },
     );
-    // What the engine holds for this lineage.
     const engineDoc = new Y.Doc();
     engineDoc.getText("plainText").insert(0, "recorded");
     let recorded!: () => void;
@@ -1044,7 +1017,6 @@ for (const order of ["settle failure first", "drop first"] as const) {
     session.applyLocalUpdate(Y.encodeStateAsUpdate(rendererDoc, before));
     await wordRecorded;
 
-    // Sync turns on: the binding closes and the generation's own settle fails.
     currentClient = claimedClient;
     const lost = Object.assign(new Error("workspace handle is unavailable"), {
       code: "transport-error",
@@ -1054,8 +1026,6 @@ for (const order of ["settle failure first", "drop first"] as const) {
       lostOptions?.onSessionError?.(lost);
     } else {
       lostOptions?.onSessionError?.(lost);
-      // The lost generation's delayed settle fails only once the rebind has
-      // already adopted the replacement.
       await expect.poll(() => claimedOpens, { timeout: 5_000 }).toBe(1);
       await new Promise((resolve) => setImmediate(resolve));
       lostOptions?.onSettleStart?.(1);
@@ -1226,7 +1196,6 @@ it("an over-cap settle (content omitted from the response) leaves the engine's f
     currentClient: () => daemonClient,
   });
 
-  // What the engine already wrote to disk when it materialized the settle.
   const onDiskBody = "pasted load-test paragraph.\n".repeat(4_000);
   await writeFile(join(rootPath, "load.md"), onDiskBody);
 
@@ -1254,7 +1223,6 @@ it("an over-cap settle (content omitted from the response) leaves the engine's f
         const result = {
           momentId: "moment-overcap",
           path: options.path,
-          // The engine's over-cap answer.
           content: null,
           sha256: createHash("sha256").update(onDiskBody).digest("hex"),
           materialized: true,
@@ -1288,7 +1256,6 @@ it("an over-cap settle (content omitted from the response) leaves the engine's f
   });
   await session.settleNow();
 
-  // The load-bearing assertion: the engine's file is untouched, not truncated.
   const onDisk = await readFile(join(rootPath, "load.md"), "utf8");
   expect(onDisk).toBe(onDiskBody);
   expect(onDisk.length).toBeGreaterThan(48 * 1024);
@@ -1351,7 +1318,6 @@ it("a settle whose materialization was blocked reports an error, never Saved", a
           path: options.path,
           content: null,
           sha256: createHash("sha256").update("never landed").digest("hex"),
-          // Committed, but the disk did not move.
           materialized: false,
           projection: {
             contentKind: "plaintext" as const,
@@ -1383,12 +1349,10 @@ it("a settle whose materialization was blocked reports an error, never Saved", a
   });
   await session.settleNow();
 
-  // The load-bearing assertion: the document must not read Saved.
   expect(states).not.toContain("saved");
   expect(states).toContain("error");
   expect(onError).toHaveBeenCalled();
   expect(String(onError.mock.calls.at(-1)?.[0])).toContain("note.md");
-  // And the disk really is still the old artifact.
   expect(await readFile(join(rootPath, "note.md"), "utf8")).toBe(stale);
 
   await session.close({ settle: false });
@@ -1451,7 +1415,6 @@ async function daemonDeathCapture(
     lineage: "present" as "present" | "absent",
     durableUpdates: [] as Uint8Array[],
     recoveryBases: [] as Uint8Array[],
-    // The idempotency key each journal write carried, null for none.
     journalKeys: [] as Array<string | null>,
     // What the next journal writes meet, one fault per write. "drop": the
     // daemon died before recording, and is already back for the rebind.
@@ -1659,7 +1622,6 @@ async function daemonDeathCapture(
     state,
     generations,
     backoff,
-    // A crash that took the durable CRDT lineage with it; only the .md survives.
     loseDurableLineage: () => {
       state.lineage = "absent";
       state.durableUpdates = [];
@@ -1713,7 +1675,6 @@ it("keeps every keystroke typed while the daemon is dead and replays them into t
   await session.settleNow();
   expect(generations[0]?.getText("plainText").toString()).toBe("alive ");
 
-  // taskkill /F: the generation's writes fail and no replacement can open.
   state.daemonAlive = false;
   typeInto(rendererDoc, session, "PRE_KILL ");
   typeInto(rendererDoc, session, "DURING_OUTAGE ");
@@ -1721,8 +1682,6 @@ it("keeps every keystroke typed while the daemon is dead and replays them into t
   expect(state.generation).toBe(1);
   expect(outcomes.at(-1)).toBe(false);
 
-  // The supervisor relaunches. The very next keystroke must heal the session
-  // and carry both outage keystrokes into the replacement generation.
   state.daemonAlive = true;
   typeInto(rendererDoc, session, "AFTER_RESTART");
   await expect.poll(() => state.generation).toBe(2);
@@ -1732,11 +1691,9 @@ it("keeps every keystroke typed while the daemon is dead and replays them into t
   expect(generations[1]?.getText("plainText").toString()).toBe(
     "alive PRE_KILL DURING_OUTAGE AFTER_RESTART",
   );
-  // The canonical doc — the renderer's truth — never lost a keystroke either.
   expect(session.doc.getText("plainText").toString()).toBe(
     "alive PRE_KILL DURING_OUTAGE AFTER_RESTART",
   );
-  // And the session is honestly live again, not still reported dead.
   expect(outcomes.at(-1)).toBe(true);
 
   await session.close({ settle: false });
@@ -1859,8 +1816,6 @@ it("retires an unanswered deletion whose clocks are durable but whose delete set
   await capture.stop();
 });
 
-// "frozen": typing after the server refused this file's earlier edits. The
-// engine refuses it, the notice says why, and the recovery row keeps it.
 it.each(["definitive", "frozen", "uncertain", "uncertain-after-busy"])(
   "reports one %s replay refusal batch and preserves an independent client",
   async (kind) => {
@@ -2009,7 +1964,6 @@ it("sends a keyed write again under its key after its daemon died, so the key st
   ).rejects.toThrow("idempotency-key-reuse-mismatch");
   expect(session.doc.getText("plainText").toString()).toBe("FIRST ");
 
-  // A fresh key that meets a dead daemon lands once, under that key.
   state.applyFaults.push("drop");
   await session.applyDecidedLocalUpdate((doc) => keyedUpdate(doc, "NEXT"), undefined, {
     idempotencyKey: "claim/1/1",
@@ -2047,7 +2001,6 @@ it("says a keyed write may have been recorded when its retry's answer is lost wi
   ).rejects.toThrow("may have been recorded");
   expect(errors).toContain("Y.Doc rebind of note.md");
 
-  // It was: the daemon's lineage holds it once the daemon is back.
   state.daemonAlive = true;
   expect((await session.settleNow())?.content).toBe("KEYED");
   expect(state.journalKeys).toEqual(["claim/1/0"]);
@@ -2055,8 +2008,6 @@ it("says a keyed write may have been recorded when its retry's answer is lost wi
   await capture.stop();
 });
 
-// A close that couldn't save the outage text fails, so Forget stops before it
-// deletes the only copy.
 it("a workspace close fails while the daemon is still down, and reopens nothing", async () => {
   const reported: string[] = [];
   const { rootPath, sessions, openProvider, state } = await daemonDeathCapture(
@@ -2093,8 +2044,6 @@ it("a workspace close fails while the daemon is still down, and reopens nothing"
   expect(reported).toContain("Y.Doc close recovery of note.md");
 });
 
-// The reconcile half of adoptGeneration: a replacement generation carrying
-// daemon-side work the canonical doc never saw must be merged in, exactly once.
 it("merges a daemon-side edit made during the outage into the canonical doc once", async () => {
   const { rootPath, sessions, openProvider, state, applyDaemonSideEdit } = await daemonDeathCapture(
     "dohc-ydoc-death-merge-",
@@ -2122,7 +2071,6 @@ it("merges a daemon-side edit made during the outage into the canonical doc once
   typeInto(rendererDoc, session, "TYPED_IN_OUTAGE ");
   await expect(session.settleNow()).rejects.toThrow(/closed/i);
 
-  // An agent writes through the daemon while the editor session is dead.
   state.daemonAlive = true;
   applyDaemonSideEdit("AGENT_EDIT ");
 
@@ -2134,17 +2082,10 @@ it("merges a daemon-side edit made during the outage into the canonical doc once
   expect(merged.match(/AGENT_EDIT/g)).toHaveLength(1);
   expect(merged.match(/TYPED_IN_OUTAGE/g)).toHaveLength(1);
   expect(merged.match(/alive/g)).toHaveLength(1);
-  // The renderer is told about the daemon-side work rather than silently
-  // diverging from the canonical doc.
   expect(remoteUpdates.length).toBeGreaterThan(0);
   await capture.stop();
 });
 
-// A hard kill can take the object's durable CRDT lineage with it. The client
-// normally seeds an absent lineage from the.md — a fresh client id whose state
-// does not overlap the canonical doc, so merging it would append a second copy
-// of the whole file. Every generation after the first must therefore open
-// without seeding and let the replay re-establish the content.
 it("does not duplicate the document when the reopen finds no durable lineage", async () => {
   const { rootPath, sessions, openProvider, state, loseDurableLineage } = await daemonDeathCapture(
     "dohc-ydoc-death-absent-",
@@ -2272,11 +2213,9 @@ it("a settling close of a DEAD session against a down daemon takes one bounded b
 
   // Only the close is priced: the set-up's own retries are not the subject.
   backoff.delays.length = 0;
-  // The user quits before the supervisor's replacement is up.
   await session.close({ shuttingDown: true }).catch(() => undefined);
 
   expect(backoff.delays).toEqual(BOUNDED_CLOSE_BACKOFF_MS);
-  // And it never opened a generation it could not have reached.
   expect(state.generation).toBe(1);
 });
 
@@ -2823,12 +2762,9 @@ it("absorbs a busy journal refusal instead of rebinding the generation", async (
   typeInto(mirror, session, "fourth ");
   await new Promise((resolve) => setTimeout(resolve, 200));
 
-  // The assertion: no rebind, no reopen. The retry lives one layer down.
   expect(state.generation).toBe(1);
   expect(state.openAttempts).toBe(1);
 
-  // The contention clears and the session — never torn down — settles the
-  // text it was holding the whole time.
   state.recordFailure = null;
   await session.settleNow();
   const settled = state.settledContents.at(-1) ?? "";
@@ -2861,15 +2797,11 @@ it("re-arms a pending locked settle on the generation that replaces a dead one",
   await expect(session.settleNow()).rejects.toThrow("file-locked");
   expect(state.settleCalls).toEqual([1]);
 
-  // The daemon dies and the lock releases while the shell reconnects. No
-  // further edit happens.
   state.locked = false;
   state.generationOptions[0]!.onSessionError?.(
     Object.assign(new Error("daemon exited"), { code: "transport-error" }),
   );
 
-  // The replacement generation settles BY ITSELF, and the settle carries the
-  // journaled edit the lock blocked.
   await expect.poll(() => state.settleCalls).toEqual([1, 2]);
   await expect.poll(() => state.settledContents).toEqual(["locked edit"]);
 
@@ -2924,8 +2856,6 @@ it("pays a locked close debt by itself once the lock releases", async () => {
   state.locked = true;
   await expect(session.close()).rejects.toThrow("file-locked");
 
-  // The lock releases after the renderer already gave up. No reopen and no
-  // restart: the capture layer's own retry pays the debt.
   state.locked = false;
   await expect.poll(() => state.settledContents, { timeout: 15_000 }).toEqual(["closing edit"]);
   await capture.stop();
@@ -3005,8 +2935,6 @@ it("a rename after a version-switch stand-down refuses instead of saving stale c
     })
     .toHaveLength(1);
 
-  // RED against current main: absence read as landed, so this resolved and
-  // recorded renamed.md from the stale pre-lock text instead of refusing.
   await expect(capture.beginFileRename("note.md", "renamed.md")).rejects.toThrow(
     "dohc could not rename note.md. dohc gave up on writing note.md earlier, so its last edits never reached disk. The edits stay in the document's history. Open note.md to write them again. Then rename note.md again.",
   );
@@ -3023,8 +2951,6 @@ it("a reopen before the timer fires receives the locked debt, not silence", asyn
   state.replicated = true;
   await expect(session.close()).rejects.toThrow(/released, but its pre-close settle failed/);
 
-  // The user reopens the document before the retry fires, then the lock
-  // releases. No edit ever happens in the reopened session.
   const reopened = await capture.openYDocSession({
     path: "note.md",
     onRemoteUpdate: () => undefined,
@@ -3033,7 +2959,6 @@ it("a reopen before the timer fires receives the locked debt, not silence", asyn
   state.locked = false;
 
   await expect.poll(() => state.settledContents, { timeout: 15_000 }).toEqual(["transferred edit"]);
-  // The debt was paid through the live session — no detached reopen.
   expect(state.generation).toBe(2);
   await reopened.close({ settle: false });
   await capture.stop();
@@ -3053,11 +2978,8 @@ it("a rename drains the detached locked debt before touching disk", async () => 
   state.replicated = true;
   await expect(session.close()).rejects.toThrow(/released, but its pre-close settle failed/);
 
-  // The lock releases; before the timer fires, the user renames the file.
   state.locked = false;
   const finish = await capture.beginFileRename("note.md", "renamed.md");
-  // The debt was paid before the rename proceeded: the pending write settled
-  // through a detached reopen, not left targeting a dead path.
   expect(state.settledContents).toEqual(["renamed edit"]);
   expect(state.generation).toBe(2);
   await finish(true);
@@ -3072,13 +2994,10 @@ it("a destructive delete cancels the detached locked debt instead of recreating 
   state.replicated = true;
   await expect(session.close()).rejects.toThrow(/released, but its pre-close settle failed/);
 
-  // The user deletes the file, then the lock releases.
   const finishDelete = await capture.settleAndCloseLiveSessionsForPath("note.md");
   finishDelete(true); // the delete succeeded: the path is provably gone
   state.locked = false;
 
-  // The cancel left a trace, and the retry window passes with no reopen and
-  // no settle: the deleted file is not recreated.
   await expect
     .poll(() => state.errors.filter((context) => context.includes("close retry")))
     .toHaveLength(1);
@@ -3107,15 +3026,12 @@ it("an external delete observed before a debt registers cancels it at the door i
   await expect(session.close()).rejects.toThrow(/released, but its pre-close settle failed/);
   state.locked = false;
 
-  // The cancel trace names the absence, not a fabricated lock.
   expect(
     state.errorMessages.some((message) =>
       message.includes("an external delete of note.md removed the path"),
     ),
   ).toBe(true);
 
-  // And the ladder never armed: no reopen, no settle, ever — the deleted
-  // path stays deleted.
   await pastRetryRungs();
   expect(state.generation).toBe(1);
   expect(state.settledContents).toEqual([]);
@@ -3135,15 +3051,11 @@ it("a recreated path's own session arms its debt normally instead of being cance
   // cancel.
   const { capture, state } = await lockedRebindCapture("dohc-ydoc-tombstone-recreate-");
 
-  // The path is deleted (no debt exists yet, so the tombstone is set),
-  // then recreated — both before this test's own session ever opens.
   capture.observeFileEvents([{ path: "note.md", operation: "delete" }]);
   await capture.flush();
   capture.observeFileEvents([{ path: "note.md", operation: "update" }]);
   await capture.flush();
 
-  // A new session — opened after both events — hits a genuine transient
-  // lock on close.
   const { session } = await openWithOneEdit(capture, "a real pending edit");
   state.locked = true;
   state.replicated = true;
@@ -3157,7 +3069,6 @@ it("a recreated path's own session arms its debt normally instead of being cance
     ),
   ).toBe(false);
 
-  // The lock releases, and the ladder — armed normally — lands the write.
   state.locked = false;
   await expect
     .poll(() => state.settledContents, { timeout: 15_000 })
@@ -3242,7 +3153,6 @@ it("a suppressed retry's dirty-session refusal discharges through evict instead 
   // A non-orphaned entry must evict too, or the terminal refusal stops the
   // ladder with the lease still held.
   await expect.poll(() => state.evicts, { timeout: 15_000 }).toBe(1);
-  // The refusal never escalated into a write: the deleted path stays gone.
   expect(state.settledContents).toEqual([]);
 
   // No busy-wedge: a fresh open of the same path succeeds outright. Clear
@@ -3352,15 +3262,12 @@ it("a delete refuses the open that could register a debt while disk work is in f
   const generationAtDelete = state.generation;
   await expectRemovalOpenRefused(capture, "note.md", "dohc is still deleting note.md.");
 
-  // The delete succeeded. Both debts are cancelled: the path is provably gone.
   finishDelete(true);
   state.locked = false;
 
-  // The fact: the deleted path is not reopened and nothing is settled onto it.
   await pastRetryRungs();
   expect(state.generation).toBe(generationAtDelete);
   expect(state.settledContents).toEqual([]);
-  // The one debt that existed before the window said so out loud.
   expect(state.errors.filter((context) => context.includes("close retry"))).toHaveLength(1);
   await capture.stop();
 });
@@ -3382,7 +3289,6 @@ it("a failed delete restores the detached locked debt instead of cancelling it",
   finishDelete(false);
   state.locked = false;
 
-  // The debt survived the failed attempt and pays itself once the lock goes.
   await expect
     .poll(() => state.settledContents, { timeout: 15_000 })
     .toEqual(["survives a failed delete"]);
@@ -3404,14 +3310,11 @@ it("a rename refuses while its debt payment is still locked", async () => {
   state.replicated = true;
   await expect(session.close()).rejects.toThrow(/released, but its pre-close settle failed/);
 
-  // The lock still holds when the rename runs: it must refuse, naming the
-  // blocker and the way out, and nothing may be written.
   await expect(capture.beginFileRename("note.md", "renamed.md")).rejects.toThrow(
     /Another program still has note\.md open/,
   );
   expect(state.settledContents).toEqual([]);
 
-  // The debt survived the refusal: releasing the lock still lands the write.
   state.locked = false;
   await expect.poll(() => state.settledContents, { timeout: 15_000 }).toEqual(["must not be lost"]);
   await capture.stop();
@@ -3575,7 +3478,6 @@ it("refused renames never stack more than one retry ladder", async () => {
     state.replicated = true;
     await expect(session.close()).rejects.toThrow(/released, but its pre-close settle failed/);
 
-    // Four refused renames while the lock holds: each pays, fails, and arms.
     for (let attempt = 0; attempt < 4; attempt += 1) {
       await expect(capture.beginFileRename("note.md", "renamed.md")).rejects.toThrow(
         /Another program still has note\.md open/,
@@ -3623,7 +3525,6 @@ it("a failing active-version read re-arms instead of stranding the debt", async 
   state.replicated = true;
   await expect(session.close()).rejects.toThrow(/released, but its pre-close settle failed/);
 
-  // The active-version read fails while the retry ladder runs.
   const realSend = loopback.sendRequest.bind(loopback);
   let failVersionReads = true;
   loopback.sendRequest = async (request) => {
@@ -3667,7 +3568,6 @@ it("cancelling a debt releases the session whose close was refused", async () =>
     .toBeGreaterThan(0);
   const releasesBeforeCancel = state.closesWithSettleFalse;
 
-  // The user deletes the path: the debt is cancelled — and must release.
   state.closeFailure = null;
   const finishDelete = await capture.settleAndCloseLiveSessionsForPath("note.md");
   finishDelete(true);
@@ -3700,7 +3600,6 @@ it("a cancelled debt whose release is refused keeps retrying that release", asyn
   const generationBeforeCancel = state.generation;
   const settlesBeforeCancel = state.settledContents.length;
 
-  // The user deletes the path while the release is still refused.
   const finishDelete = await capture.settleAndCloseLiveSessionsForPath("note.md");
   finishDelete(true);
   await expect
@@ -3749,8 +3648,6 @@ it("a settle the engine refuses for good stops the ladder and says why", async (
   state.replicated = true;
   await expect(session.close()).rejects.toThrow(/released, but its pre-close settle failed/);
 
-  // The lock releases, but the file it guarded is no longer the one the
-  // pending write was built against.
   state.locked = false;
   state.settleFailure = new DaemonRefusalError(
     { code: "INVALID_PARAMS", message: "conflict-stale-target", retry: "no" },
@@ -3821,7 +3718,6 @@ it("a settle that committed but wrote nothing stops the ladder and names the sym
   expect(stopMessage).toContain("real file");
   expect(stopMessage).toContain("real folder");
 
-  // Nothing was ever reported as written. A stand-down must not read as a save.
   expect(state.settledContents).toHaveLength(0);
 
   // The liveness proof: the ladder is done. Left armed, its next two rungs
@@ -3876,7 +3772,6 @@ it("a materialized settle after reopening a stood-down path clears the marker an
   // session's seed, per the fake's own replay of durable state.)
   expect(state.settledContents.some((text) => text.includes("recovered edit"))).toBe(true);
 
-  // The marker is gone: the rename now proceeds like any ordinary one.
   const finish = await capture.beginFileRename("note.md", "renamed.md");
   await finish(true);
   await reopened.close({ settle: false });
@@ -3938,8 +3833,6 @@ it("a release the daemon refuses terminally still keeps the write ladder alive",
     })
     .toBeGreaterThan(0);
 
-  // The ladder is still alive, and it retries the retained session rather
-  // than opening new ones.
   const closesAtRefusal = state.closeCalls.length;
   const generationAtRefusal = state.generation;
   await expect

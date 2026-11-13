@@ -96,7 +96,6 @@ describe("ChatMembersDialog", () => {
     expect(field().value).toBe("");
     expect(screen.queryByTestId("chats-share-suggestions")).toBeNull();
 
-    // A click picks too, and a picked person leaves the suggestions.
     await userEvent.type(field(), "b");
     expect(
       screen.getAllByTestId("chats-share-suggestion").map((option) => option.textContent),
@@ -104,7 +103,6 @@ describe("ChatMembersDialog", () => {
     fireEvent.mouseDown(screen.getByTestId("chats-share-suggestion"));
     expect(chips()).toEqual(["Ccy@example.org", "Bben@example.com"]);
 
-    // Backspace in the empty field takes the last chip back.
     await userEvent.keyboard("{Backspace}");
     expect(chips()).toEqual(["Ccy@example.org"]);
   });
@@ -244,7 +242,6 @@ describe("ChatMembersDialog", () => {
     await userEvent.type(field(), "ana{Enter}ben{Enter}cy{Enter}");
     expect(chips()).toEqual(["Aana@example.com", "Bben@example.com", "Ccy@example.org"]);
     await userEvent.keyboard("{Enter}");
-    // Ana went in; Ben failed and reported it; Cy waits with him.
     await waitFor(() => expect(chips()).toEqual(["Bben@example.com", "Ccy@example.org"]));
     expect(onAdd.mock.calls.map(([input]) => input.email)).toEqual([
       "ana@example.com",

@@ -185,18 +185,13 @@ describe("Explorer render cost", () => {
     expect(vi.mocked(parseTab)).toHaveBeenCalledTimes(calls);
   });
 
-  // Selection state lives in the Explorer, so a click re-renders the tree —
-  // but the row callbacks read selection through refs, so only the rows whose
-  // flags changed re-render, never the whole tree via new callback identities.
   it("re-renders only the rows a selection change touches", () => {
     render(<Explorer {...explorerProps()} />);
     const baseline = basenameOfCalls();
 
-    // First selection: a.md loses the tab stop; b.md gains selection and focus.
     fireEvent.click(rowButton("b.md"));
     expect(basenameOfCalls()).toBe(baseline + 2);
 
-    // Moving the selection: b.md clears, d.md gains — two rows, not four.
     fireEvent.click(rowButton("d.md"));
     expect(basenameOfCalls()).toBe(baseline + 4);
   });
@@ -215,7 +210,6 @@ describe("Explorer render cost", () => {
     const baseline = basenameOfCalls();
     act(() => marks.set(["file-0003.md"], []));
     expect(basenameOfCalls()).toBe(baseline + 1);
-    // The same answer again, as a status poll brings, renders nothing.
     act(() => marks.set(["file-0003.md"], []));
     expect(basenameOfCalls()).toBe(baseline + 1);
     act(() => marks.set([], []));

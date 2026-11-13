@@ -131,7 +131,6 @@ function stubResizeObservers() {
       }
     },
   );
-  // The elements watched by the observers that watch the note's pane content.
   const watched = () => {
     const pane = screen.getByTestId("view-markdown");
     return observers
@@ -197,8 +196,6 @@ describe("a live note whose editor code loads after it opens", () => {
     const { bridge, bind } = heldOpenBridge();
     vi.stubGlobal("dohcDesktop", bridge);
 
-    // Every frame from the read view to the editor: the note's text, and
-    // never the loading rows.
     const frames: Array<{ text: boolean; rows: boolean; editor: boolean; top: number }> = [];
     const observer = new MutationObserver(() => {
       const pane = document.querySelector("[data-testid='view-markdown']");
@@ -217,7 +214,6 @@ describe("a live note whose editor code loads after it opens", () => {
         expect(screen.getByTestId("view-markdown").textContent).toContain("Base paragraph."),
       );
       await waitFor(() => expect(bridge.openEngineYDocSession).toHaveBeenCalledTimes(1));
-      // The person reads partway down while the note opens.
       act(() => {
         const pane = screen.getByTestId("view-markdown");
         pane.scrollTop = 600;
@@ -228,7 +224,6 @@ describe("a live note whose editor code loads after it opens", () => {
       await act(async () => {});
       expect(screen.getByTestId("view-markdown").textContent).toContain("Base paragraph.");
 
-      // The editor's code arrives; the collaboration code is still loading.
       code.editor.release();
       await act(async () => {
         await import("./editor/MarkdownEditor");
@@ -249,7 +244,6 @@ describe("a live note whose editor code loads after it opens", () => {
     const shown = frames.findIndex((frame) => frame.text);
     expect(shown).toBeGreaterThanOrEqual(0);
     expect(frames.slice(shown).filter((frame) => frame.rows || !frame.text)).toEqual([]);
-    // The editor's first frame opens where the person was reading.
     expect(frames.find((frame) => frame.editor)?.top).toBe(600);
   });
 
@@ -280,7 +274,6 @@ describe("a live note whose editor code loads after it opens", () => {
         pane.scrollTop = 50;
         pane.dispatchEvent(new Event("scroll"));
       });
-      // Later edits make the content tall enough for the old position.
       layout.tall = true;
       await act(async () => {
         pane.appendChild(document.createElement("div"));

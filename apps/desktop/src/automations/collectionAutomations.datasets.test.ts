@@ -218,7 +218,6 @@ describe("Collection automations on a dataset", () => {
     await f.executor.open();
     const { id: invoice } = await f.create({ [STATUS]: "Open" });
     await f.executor.dispose();
-    // No executor hears this commit.
     const deep = async (paid: boolean, key: string) => {
       const current = await f.record(invoice);
       await f.host.action({
@@ -239,7 +238,6 @@ describe("Collection automations on a dataset", () => {
     await f.until(async () =>
       (await store.readReportedFailures()).some((entry) => entry.generation === 1 && entry.open),
     );
-    // After a restart, only the next stop sends a notice.
     await f.executor.dispose();
     f.makeExecutor();
     await f.executor.open();
@@ -269,7 +267,6 @@ describe("Collection automations on a dataset", () => {
   it("sends a stale edit again at the record's new version, and keeps a field someone else changed", async () => {
     let interfere: (() => Promise<void>) | null = null;
     const base = sharedEvaluator.forWorkspace("workspace");
-    // Someone edits the record after the run read it and before it writes.
     const evaluator: AutomationFormulaEvaluator = {
       runCode: base.runCode,
       evaluate: async (automationId, scope, formulas) => {
@@ -398,7 +395,6 @@ describe("Collection automations on a dataset", () => {
     await f.edit(invoice, { [PAID]: true });
     await f.until(() => f.claims()[0]?.state === "done");
     const claimId = f.claims()[0]!.claimId;
-    // The run recorded the delete an Undo may use on the record it added.
     const [listed] = (await f.executor.runs(AUTOMATION)).runs;
     expect(listed!.writes).toEqual([
       expect.objectContaining({
@@ -409,7 +405,6 @@ describe("Collection automations on a dataset", () => {
       }),
       expect.objectContaining({ kind: "dataset-created", deletes: [REMOVE] }),
     ]);
-    // Someone changes Notes after the run: Undo keeps it, and puts Status back.
     await f.edit(invoice, { [NOTES]: "mine" });
     const trash = async () => {
       throw new Error("A dataset keeps no trash.");
@@ -466,7 +461,6 @@ describe("Collection automations on a dataset", () => {
       [PAID]: true,
     });
     expect((await f.records()).some((row) => row.values[NOTES] === "Log")).toBe(false);
-    // The owner undid it, not the automation.
     expect(f.host.history({ datasetId: definition.datasetId }).entries[0]).not.toHaveProperty(
       "automation",
     );

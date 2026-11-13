@@ -105,7 +105,6 @@ describe("CollectionActionDialog", () => {
       .mockResolvedValue({ result: null });
     setup({ invoke });
     fireEvent.click(screen.getByRole("button", { name: "Run action" }));
-    // The cause stays readable and copyable beside the uncertainty warning.
     await screen.findByText("connection closed");
     expect(screen.getByRole("button", { name: "Copy details" })).toBeTruthy();
     fireEvent.click(await screen.findByRole("button", { name: "Try again" }));

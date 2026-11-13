@@ -35,15 +35,12 @@ async function collected(ref: WeakRef<object>): Promise<boolean> {
   return false;
 }
 
-// The Try again of a filed failure, the last one unless told otherwise.
 function retryOf(report: Mock<ReportShellFailure>, call = -1): () => void {
   const retry = report.mock.calls.at(call)?.[0].retry;
   if (!retry) throw new Error("the failure has no Try again");
   return retry;
 }
 
-// A share link's copy that fails and then closes. Only a weak reference to
-// its source leaves this function.
 async function failThenClose(report: Mock<ReportShellFailure>): Promise<WeakRef<object>> {
   const source = { link: "https://share.example.test/s/secret" };
   const view = render(
@@ -160,8 +157,6 @@ describe("CopyButton feedback", () => {
     expect(writeText.mock.calls).toEqual([["old"], ["new"]]);
     await act(async () => second.resolve());
     expect(button.textContent).toBe("Copied");
-    // The older write fails after the newer one answered: the newer one
-    // speaks for the click the person made last.
     await act(async () => first.reject(new Error("late")));
     expect(button.textContent).toBe("Copied");
     expect(report).not.toHaveBeenCalled();
@@ -203,7 +198,6 @@ describe("CopyButton feedback", () => {
     expect(screen.getAllByRole("button", { name: "Copy details" })).toEqual([icon, words]);
     expect(icon.getAttribute("title")).toBe("Copied");
     expect(words.textContent).toBe("Copied");
-    // Without a pinned name, the name is the answer.
     expect(unnamed.getAttribute("aria-label")).toBe("Copied");
   });
 
@@ -248,7 +242,6 @@ describe("CopyButton feedback", () => {
 });
 
 describe("CopyButton tone", () => {
-  // Every class on the control and inside it.
   const classes = (id: string) =>
     [screen.getByTestId(id), ...screen.getByTestId(id).querySelectorAll("*")]
       .map((el) => el.getAttribute("class") ?? "")
@@ -334,8 +327,6 @@ describe("CopyButton failure", () => {
     expect(screen.getByTestId("copy").getAttribute("title")).toBe("Could not copy");
   });
 
-  // A secret's failure names it. While its button is on screen, Try again is
-  // the only next step, so the words stop at the reason.
   it("names a secret in its failure and offers Try again while its button is on screen", async () => {
     const writeText = vi.spyOn(navigator.clipboard, "writeText").mockRejectedValueOnce(refusal());
     const report = vi.fn<ReportShellFailure>();
@@ -399,8 +390,6 @@ describe("CopyButton after it is gone", () => {
     expect(writeText).toHaveBeenLastCalledWith("details");
   });
 
-  // The failure's own toast can replace the toast the button sat in, so the
-  // button is gone by the time the person presses Try again.
   it("copies the text that failed when Try again comes after the button closed", async () => {
     const writeText = vi.spyOn(navigator.clipboard, "writeText").mockRejectedValueOnce(refusal());
     const report = vi.fn<ReportShellFailure>();
@@ -416,7 +405,6 @@ describe("CopyButton after it is gone", () => {
     expect(writeText).toHaveBeenLastCalledWith("error details");
     expect(report).toHaveBeenCalledTimes(1);
 
-    // A second refusal files again, with the same text behind its Try again.
     const again = new Error("The clipboard is in use.");
     writeText.mockRejectedValueOnce(again);
     await act(async () => retry());
@@ -430,8 +418,6 @@ describe("CopyButton after it is gone", () => {
     expect(writeText).toHaveBeenLastCalledWith("error details");
   });
 
-  // A secret, such as a share link, is never kept: once its button is gone,
-  // Try again cannot copy it, and the notice says where to get it again.
   it("files the failure again without Try again when the button closed before the retry", async () => {
     const writeText = vi.spyOn(navigator.clipboard, "writeText").mockRejectedValueOnce(refusal());
     const report = vi.fn<ReportShellFailure>();
@@ -475,8 +461,6 @@ describe("CopyButton after it is gone", () => {
     });
   });
 
-  // A field is keyed by its text: a reset link is a new control, so Try
-  // again from the old one never copies the link it replaced.
   it("copies a secret on Try again only while its field still shows the same value", async () => {
     const writeText = vi.spyOn(navigator.clipboard, "writeText").mockRejectedValueOnce(refusal());
     const report = vi.fn<ReportShellFailure>();

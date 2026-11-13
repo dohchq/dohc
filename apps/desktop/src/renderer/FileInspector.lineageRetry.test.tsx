@@ -75,8 +75,6 @@ function refuseDraftStorage() {
   });
 }
 
-// An edit main has not settled, then a replaced history whose earlier edits
-// storage refuses to keep.
 async function failReplacement() {
   await screen.findByTestId("markdown-source-toggle");
   harness.emit("settling", 0);
@@ -149,7 +147,6 @@ it("keeps Try again on the frozen editor after its row is dismissed", async () =
   expect(loadStoredDrafts(Date.now(), { bindHandles: false }).map((draft) => draft.path)).toEqual([
     PATH,
   ]);
-  // Storage kept the edits, so the document's row no longer asks for a copy to keep them.
   expect(screen.getByTestId("orphaned-draft-notice").textContent).toContain(
     REPLACED_HISTORY_DRAFT_NOTICE,
   );

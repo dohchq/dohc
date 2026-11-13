@@ -124,7 +124,6 @@ describe("usage record in Privacy", () => {
       "usage-record-row-chat.export",
     ]);
     const created = within(rows[0]!).getAllByRole("cell");
-    // An earlier version's count from a door this one does not count keeps its number and the mark.
     expect(created.map((c) => c.textContent)).toEqual([
       "3",
       `1${NOT_COUNTED}`,
@@ -133,7 +132,6 @@ describe("usage record in Privacy", () => {
       "today",
     ]);
     expect(within(created[1]!).getByTitle(NOT_COUNTED)).toBeTruthy();
-    // A counted door at zero says 0; one this build does not count is marked.
     expect(
       within(rows[1]!)
         .getAllByRole("cell")
@@ -215,7 +213,6 @@ describe("usage record in Privacy", () => {
     expect(bridge.setUsageRecordEnabled).toHaveBeenCalledWith({ enabled: false });
     expect(toggle().hasAttribute("disabled")).toBe(false);
 
-    // Main keeps the old setting when its write fails, so the next read is still Off.
     bridge.setUsageRecordEnabled.mockRejectedValueOnce(new Error("disk full"));
     bridge.readUsageRecord.mockResolvedValueOnce({ ...RECORD, enabled: false });
     fireEvent.click(toggle());
@@ -270,7 +267,6 @@ describe("usage record in Privacy", () => {
     render(<UsageRecordSettings />);
     fireEvent.click(await screen.findByTestId("usage-record-clear"));
     const confirm = screen.getByTestId("usage-record-clear-confirm");
-    // The panel that holds the card is the dialog, named by its title.
     expect(screen.getByRole("dialog", { name: "Clear the usage record?" }).contains(confirm)).toBe(
       true,
     );
@@ -292,7 +288,6 @@ describe("usage record in Privacy", () => {
 
   it("reports a Clear that failed and keeps the counts", async () => {
     const onError = vi.fn();
-    // Main keeps the counts when its write fails, so the next read still has them.
     bridge.clearUsageRecord.mockRejectedValueOnce(new Error("file in use"));
     bridge.readUsageRecord.mockResolvedValueOnce(RECORD).mockResolvedValueOnce(RECORD);
     render(<UsageRecordSettings onError={onError} />);
@@ -426,7 +421,6 @@ describe("usage record in Privacy", () => {
       fireEvent.click(await screen.findByTestId(testId));
       view.unmount();
       await act(async () => running.reject(new Error("file in use")));
-      // The unreadable read's own notice comes first.
       const failure = onError.mock.calls.find((call) => call[0] === words)!;
       expect(failure).toEqual([words, expect.any(Error), expect.any(Function)]);
       await act(failure[2]);

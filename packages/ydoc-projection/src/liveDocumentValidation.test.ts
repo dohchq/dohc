@@ -764,8 +764,6 @@ describe("private journal refusal attribution and cleanup", () => {
     }
   });
 
-  // A projection that throws is a validator failure, never a refusal of the
-  // owner's candidate: the relay retries it.
   it.each(["throw"] as const)(
     "finalizes once on projection %s, rethrows, and never diagnoses",
     () => {
@@ -886,11 +884,8 @@ it("never projects a preserved source that holds text the document lacks", () =>
     // A header with a pipe inside a code span makes the importer read the
     // table from the raw text, where the row's code span splits too.
     [codeTable, "| `a|b` | c |\n|---|---|---|\n| x | `y|z` | hidden |\n"],
-    // An unused link reference definition.
     ["Hello\n", 'Hello\n\n[x]: https://h.example "hidden"\n'],
-    // A link with no text.
     ["Hello\n", 'Hello[](https://h.example "hidden")\n'],
-    // A second definition of the same label.
     ["[x]: https://a.example\n", '[x]: https://a.example\n[x]: https://b.example "hidden"\n'],
   ]) {
     const canonical = projection.yDocToMarkdown(markdownToYDoc(document));

@@ -5,14 +5,6 @@ import { describe, it, expect } from "vitest";
 import { codeBlock, codeMarkText, doc, paragraph, randomEdit, seededRandom } from "./testDocs";
 import { computeAtomRanges, inlineAtomKey, makeInlineAtomPlugin } from "./inlineAtomPlugin";
 
-// Range logic over real ProseMirror documents built through the shared dohc
-// schema (testDocs.ts). Positions below are hand-computed from node sizes:
-// a paragraph is text length + 2, and a block's text starts one position
-// after the block itself.
-
-// A CommonMark-style schema carrying the *other* code spellings pmHelpers
-// must recognize: a `code_block` node name, an `inlineCode` mark name, and
-// a mark whose spec sets `code: true` under a different name.
 const commonmark = new Schema({
   nodes: {
     doc: { content: "block+" },
@@ -91,8 +83,6 @@ describe("computeAtomRanges — code is verbatim", () => {
   });
 
   it("makeInlineAtomPlugin builds a ProseMirror plugin keyed by inlineAtomKey", () => {
-    // Smoke test of the editor-facing factory: it constructs lazily (state.init
-    // only runs once added to an EditorState), so we can build it without a DOM.
     const plugin = makeInlineAtomPlugin();
     expect(plugin).toBeInstanceOf(Plugin);
     expect(inlineAtomKey).toBeInstanceOf(PluginKey);

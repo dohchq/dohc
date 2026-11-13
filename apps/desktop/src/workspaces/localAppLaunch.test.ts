@@ -315,7 +315,6 @@ it("takes a click from the bootstrap's header and never from the app's request",
       (await f.post("/backend", body, { ...headers, "x-dohc-app-activated": "0" })).status,
     ).toBe(400);
   expect(f.backend.request).toHaveBeenCalledTimes(calls);
-  // The script sends the header only from the broker's own reading.
   const html = await (await fetch(f.origin + "/bootstrap")).text();
   expect(html).toContain("'x-dohc-app-activated':request.activated?'1':'0'");
   expect(html).toContain("navigator.userActivation?.isActive");

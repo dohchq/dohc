@@ -45,8 +45,6 @@ it.each(["INVALID_PARAMS", "LIMIT_EXCEEDED"] as const)(
   },
 );
 
-// The engine names these collaboration refusals by their code words. A
-// lineage that moved does not prove the edit itself was refused.
 it.each([
   "ydoc-lineage-stale",
   "lineage-write-stale",

@@ -163,7 +163,6 @@ describe("makeEmojiPlugin — appendTransaction auto-insert gating", () => {
   });
 
   it("does not replace a pre-existing literal shortcode on an unrelated doc change with the cursor after it", () => {
-    // "hi :smile: yo" — the literal is intentionally left in prose.
     const editor = makeEditor("<p>hi :smile: yo</p>");
 
     // Cursor sits right after the literal ':smile:' (absolute pos 11: para

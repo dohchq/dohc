@@ -65,7 +65,6 @@ function automation(yaml: string): Automation {
   return parsed.entries[0].automation;
 }
 
-/** A request's formulas, for a run without code steps. */
 const formulasOf = (request: EvaluationRequest) =>
   request.items.filter((item): item is AutomationFormula => item.kind !== "code");
 
@@ -163,7 +162,6 @@ describe("find conditions", () => {
     expect(findQueryOf("record.Status == today()")).toMatchObject({
       value: { kind: "formula", expression: "today()" },
     });
-    // The record a Find checks is no value to compare with, even as a property name's neighbor.
     for (const condition of [
       "record.Status == record.Other",
       "record.Status == ({ record }).record.Other",
@@ -296,7 +294,6 @@ describe("what the executor can run", () => {
     ).toBeNull();
     expect(unsupportedReason(withStep("{run: 'return {}'}"))).toBeNull();
     expect(unsupportedReason(withStep("{run-file: scripts/total.js, as: total}"))).toBeNull();
-    // A Group message starts an automation dohc can run.
     const fromGroup = (step: string) =>
       automation(`id: a\nname: A\nwhen: {group-message: Trip}\ndo: [${step}]`);
     expect(unsupportedReason(fromGroup("{add-record: {Title: x}}"))).toBeNull();
@@ -347,7 +344,6 @@ describe("what the executor can run", () => {
         automation("id: a\nname: A\nwhen: {group-message: Team}\ndo: [{post: Hi, group: Team}]"),
       ),
     ).toBeNull();
-    // A Find's formula can read the message, and an earlier step's result.
     expect(
       unsupportedReason(fromGroup("{find: 'record.ID == message.body.slice(6)', as: done}")),
     ).toBeNull();
@@ -585,7 +581,6 @@ const inputsOf = (
   bound: ReadonlyMap<string, Bound> = new Map(),
 ): StepInputs => ({ record, bound, unavailable: {} });
 
-/** The step at `ordinal`, as the executor walks it. */
 function entryAt(definition: Automation, ordinal: number): OrderedStep {
   const walk = (entries: readonly OrderedStep[]): OrderedStep | undefined => {
     for (const entry of entries) {
@@ -603,7 +598,6 @@ function entryAt(definition: Automation, ordinal: number): OrderedStep {
 const ok = (...values: JsonValue[]): AutomationOutcome<JsonValue>[] =>
   values.map((value) => ({ ok: true, value }));
 
-/** Plans the step at `ordinal` from the evaluator's answers to its request. */
 function planAt(
   ctx: RunContext,
   ordinal: number,
@@ -794,7 +788,6 @@ describe("who a change came through", () => {
     };
     expect(scope({ sharedAuthor: named }).trigger).toMatchObject({ author: named });
     expect(scope({ sharedAuthor: named }).person).toBeNull();
-    // The owner's own change names no shared author.
     expect(scope({}).trigger).toMatchObject({ author: null });
   });
 });
@@ -1049,7 +1042,6 @@ describe("steps", () => {
         ],
       },
     });
-    // An added record someone removed since leaves nothing to change.
     expect(
       planAt(ctx, 1, inputsOf(task, new Map([["follow", { kind: "add", record: null }]])), ok("x")),
     ).toEqual({ step: { ordinal: 1, effects: [] } });
@@ -1184,7 +1176,6 @@ describe("steps", () => {
   });
 
   it("fails a Set with no record to change", () => {
-    // Someone removed the trigger record after an earlier step ran.
     const definition = automation("id: a\nname: A\nwhen: record-added\ndo: [{set: {X: 1}}]");
     expect(planAt(context(definition), 0, inputsOf(null), [])).toEqual({
       problem: "The record was removed, so the automation has no record to change.",
@@ -1229,7 +1220,6 @@ describe("what a step can read", () => {
       team: "team is step 1's result, and a formula gets it only by naming it. Write team in the formula.",
     });
     expect(unavailableTo(1, bindingsIn(indirect), new Set(["team"]), "all")).toEqual({});
-    // A result named __proto__ is kept as a name of its own.
     const odd = automation(
       [
         "id: o",

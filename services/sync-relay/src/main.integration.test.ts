@@ -164,7 +164,6 @@ describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
         headers: authHeaders(),
       });
       expect(((await withdrawn.json()) as { active: boolean }).active).toBe(false);
-      // Deployment opt-in alone grants neither collection authority nor public Edit.
       const collectionRefusal = await postJson(
         enabled,
         `/sync/link/app-publications/${published.publicationId}/collection`,
@@ -247,12 +246,9 @@ describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
       writeMore();
     });
 
-    // The stream was cut off before the client could deliver the full body
-    // (pre-fix, the server buffered all 48MB and only then rejected).
     expect(outcome.sentAll).toBe(false);
     if (outcome.status !== null) expect(outcome.status).toBe(413);
 
-    // The server survived: still answering, and a normal-sized blob works.
     const health = await fetch(`${baseUrl}/health`);
     expect(health.status).toBe(200);
     // High bytes on purpose. main.ts hand-rolls the node:http<->fetch adapter

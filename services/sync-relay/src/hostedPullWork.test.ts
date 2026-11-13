@@ -104,7 +104,6 @@ async function enrolled() {
   return { ...f, append, state, shared };
 }
 
-// Proves: writes that change nothing the hosted feed answers from leave the reading unchanged, so they schedule no pull.
 it("reads the same relay state across writes to another workspace", async () => {
   const f = await enrolled(),
     before = f.state();

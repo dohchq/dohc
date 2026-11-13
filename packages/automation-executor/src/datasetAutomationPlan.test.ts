@@ -358,7 +358,6 @@ describe("dataset automation steps", () => {
     }
   });
 
-  // Each chat step alone, then inside an If, then in its otherwise branch.
   const everywhere = (chat: Automation["do"], base: Automation["do"]) => [
     chat,
     [{ kind: "if" as const, if: "true", do: chat, otherwise: [] }],
@@ -425,7 +424,6 @@ describe("dataset automation steps", () => {
       null,
     )!.flatMap((step) => (step.kind === "dataset-operation" ? [step.operation.name] : []));
     expect(reached.sort()).toEqual([...all].sort());
-    // Without a code step, only what the steps name and read.
     const set = automation(
       "      - set:\n          Status: Done\n        operation: invoices.status\n",
     );

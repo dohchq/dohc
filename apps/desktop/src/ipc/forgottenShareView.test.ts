@@ -49,8 +49,6 @@ const opened: ShareViewIdentity = {
   recipientUserId: "user-sam",
 };
 
-// What opening a share leaves in its folder: its manifest under the view's
-// own id, the engine's store, and the shared files.
 async function shareFolder(
   home: string,
   name: string,
@@ -72,8 +70,6 @@ async function shareFolder(
   return workspace;
 }
 
-// Every file and folder under a root outside `.dohc/engine`, with each file's
-// contents and modification time.
 async function folderContents(root: string): Promise<Record<string, string | null>> {
   const contents: Record<string, string | null> = {};
   for (const name of (await readdir(root, { recursive: true })).sort()) {
@@ -164,7 +160,6 @@ async function harness(home: string) {
   return { registry, profileFile, openFolder, forget, records };
 }
 
-// A share view opened into a folder, then forgotten there.
 async function forgottenShare(prefix: string, shareView: ShareViewIdentity = opened) {
   const home = await createTestScratch(prefix);
   const share = await shareFolder(home, "trip-from-alex", "ws-share-view");
@@ -173,7 +168,6 @@ async function forgottenShare(prefix: string, shareView: ShareViewIdentity = ope
   return { home, share, h };
 }
 
-// What the registry holds for a share reopened from this computer's record.
 const reopened = (shareView: Partial<ShareViewIdentity> = {}): ShareViewIdentity => ({
   shareId: "share-1",
   granterUserId: "user-alex",
@@ -308,7 +302,6 @@ describe("Open folder on a forgotten share's folder", () => {
     expect(attached).toMatchObject({ workspaceId, rootPath: canonicalWorkspaceRoot(folder) });
     expect(attached.shareView).toBeUndefined();
     expect(h.registry.find(workspaceId)).not.toHaveProperty("shareView");
-    // The record still names the folder it was saved for.
     expect(await h.records()).toEqual([expect.objectContaining({ workspaceId: "ws-share-view" })]);
   });
 
@@ -373,7 +366,6 @@ describe("Open folder on a forgotten share's folder", () => {
     const copy = join(home, "trip-copy");
     await cp(share.rootPath, copy, { recursive: true });
     await h.openFolder(share.rootPath);
-    // One id names one root: the registry refuses the second root.
     await expect(h.openFolder(copy)).rejects.toThrow(
       "carries the identity of an already attached workspace (ws-share-view)",
     );

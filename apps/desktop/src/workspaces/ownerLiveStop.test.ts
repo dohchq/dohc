@@ -358,7 +358,6 @@ it.each([true, false])(
       expect(onError).not.toHaveBeenCalled();
       expect(release).toHaveBeenCalledOnce();
     } else {
-      // A release that did not commit is still owed: reported, and sent again on the next pass.
       expect(onComplete).not.toHaveBeenCalled();
       expect(onError).toHaveBeenCalledTimes(2);
       expect(release).toHaveBeenCalledTimes(2);

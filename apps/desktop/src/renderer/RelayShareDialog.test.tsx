@@ -34,8 +34,6 @@ const SYNCED: AccessFacts["cloud"] = {
 };
 const CAN_SHARE = accessContextFor(SYNCED);
 
-// The shell's Access context, for a workspace that can share unless a test
-// says otherwise.
 type DialogProps = ComponentProps<typeof ProductionRelayShareDialog>;
 function RelayShareDialog(
   props: Omit<DialogProps, "accessContext" | "server"> &
@@ -435,7 +433,6 @@ afterEach(() => {
 
 type User = ReturnType<typeof userEvent.setup>;
 
-// With a matching share on screen, a separate share is one step away.
 async function openSeparateLink(user: User) {
   await user.click(screen.getByRole("button", { name: "Create separate link" }));
 }
@@ -1233,7 +1230,6 @@ describe("RelayShareDialog", () => {
     await user.click(copy);
     expect(writeText).toHaveBeenCalledExactlyOnceWith(agentAddress);
     expect(await screen.findByRole("button", { name: "Copied" })).toBeTruthy();
-    // The same address as the commands one named agent takes, still never shown.
     await user.click(screen.getByTestId("share-link-agent-apps"));
     await user.click(screen.getByTestId("share-link-agent-apps-codex"));
     expect(writeText).toHaveBeenLastCalledWith(`codex mcp add dohc-share --url ${agentAddress}
@@ -1331,7 +1327,6 @@ codex mcp login dohc-share`);
     await screen.findByTestId("share-link-row-grant-link-1");
     await waitFor(() => expect(bridgeMock.listRelayShareLinkAgents).toHaveBeenCalled());
     await act(async () => {});
-    // An ended link has no agents to read.
     expect(
       bridgeMock.listRelayShareLinkAgents.mock.calls.every(
         ([input]) => (input as { grantId: string }).grantId === "grant-link-1",
@@ -1471,8 +1466,6 @@ codex mcp login dohc-share`);
     });
   });
 
-  // The shell owns the notice and its Undo, so the pane hands over the
-  // receipt and the words. A link and a person's access are two removals.
   it("reports an ended link and an ended named grant with their undo receipts", async () => {
     const link = readableLink("link-1", {
       shareId: "share-1",
@@ -1528,7 +1521,6 @@ codex mcp login dohc-share`);
       restoredMessage: "Restored the link to docs/plan.md.",
     });
 
-    // Restoring reads the inventory again while the dialog is open.
     const reads = bridgeMock.listRelayShareLinks.mock.calls.length;
     await act(async () => shareRemovals.removed.mock.calls[1]![0].restored());
     await vi.waitFor(() =>
@@ -1537,8 +1529,6 @@ codex mcp login dohc-share`);
     expect(shareRemovals.failed).not.toHaveBeenCalled();
   });
 
-  // A refused removal goes where the removal's own notice would have gone:
-  // the shell, with Try again. No second copy of it inside the dialog.
   it("hands a refused End access and End link to the shell instead of an inline error", async () => {
     const link = readableLink("link-1", {
       shareId: "share-1",
@@ -1586,7 +1576,6 @@ codex mcp login dohc-share`);
       message: "dohc could not end friend@example.test's access to docs/plan.md.",
     });
     expect(within(group).queryByText("dohc could not complete that change.")).toBeNull();
-    // Try again runs the removal itself and reports it like a first attempt.
     await act(async () => shareRemovals.failed.mock.calls[0]![0].retry());
     await vi.waitFor(() => expect(shareRemovals.removed).toHaveBeenCalledTimes(1));
     expect(bridgeMock.revokeRelayShareGrant).toHaveBeenCalledTimes(2);
@@ -1618,8 +1607,6 @@ codex mcp login dohc-share`);
     });
   });
 
-  // The link is a credential: after Reset link, Try again from a failed copy
-  // of the old link must not put the old link on the clipboard.
   it("never copies a link that Reset link retired when Try again comes later", async () => {
     const row = readableLink("grant-link-1", { shareId: "share-link-1", dependents: [] });
     bridgeMock.listRelayShareLinks.mockResolvedValue({ links: [row] });
@@ -2611,7 +2598,6 @@ codex mcp login dohc-share`);
     await openMoreLinks(user);
     expect(screen.getByTestId("share-link-group-share-second")).toBeTruthy();
     await openSeparateLink(user);
-    // Focus moves into what the button opened.
     expect(document.activeElement?.getAttribute("role")).toBe("radio");
     expect(document.activeElement?.getAttribute("aria-checked")).toBe("true");
     const create = screen.getByTestId("share-link-create");
@@ -2628,7 +2614,6 @@ codex mcp login dohc-share`);
       paths: ["docs/plan.md"],
       access: "comment",
     });
-    // The new link takes focus at its Copy link, and the separate link folds away.
     await vi.waitFor(() => {
       expect(document.activeElement?.getAttribute("data-testid")).toBe("share-link-copy");
     });
@@ -2788,8 +2773,6 @@ codex mcp login dohc-share`);
     ).toBe("true");
     expect(bridgeCalls()).toBe(callsBefore);
 
-    // A link's own access is a menu: arrowing through it moves only focus,
-    // and picking a level opens a confirmation, never a bridge call.
     const trigger = within(screen.getByTestId("share-link-row-view-link")).getByRole("button", {
       name: "Can view",
     });
@@ -3209,7 +3192,6 @@ codex mcp login dohc-share`);
     const retune = within(row).getByRole("button", { name: "Can view" });
     retune.focus();
     expect(document.activeElement).toBe(retune);
-    // Enter opens the menu on the current level, an arrow moves, and Enter picks.
     await user.keyboard("{Enter}");
     expect(screen.getByRole("menu", { hidden: true }).getAttribute("aria-label")).toBe(
       "Access for this link",
@@ -5034,7 +5016,6 @@ codex mcp login dohc-share`);
     );
     await openOwnerComments(user, "share-1");
     const dependentRow = await screen.findByTestId("share-dependent-dependent-1");
-    // Each person shows what they can do, not only how they joined.
     expect(dependentRow.textContent).toContain("Can comment · Joined through a link");
     await user.click(within(dependentRow).getByRole("button", { name: "Make independent" }));
     let confirmation = screen.getByTestId("owner-comments-confirmation");
@@ -6091,7 +6072,6 @@ codex mcp login dohc-share`);
     for (const name of ["Can view", "Link options", "Add link", "Pause link comments", "Post"]) {
       expect(within(group).getByRole("button", { name })).toBeTruthy();
     }
-    // The row's ••• menu opens from the keyboard and moves with the arrows.
     const options = within(group).getByRole("button", { name: "Link options" });
     options.focus();
     await user.keyboard("{Enter}");
@@ -6671,9 +6651,6 @@ describe("advertised public Edit release", () => {
   });
 });
 
-// Sharing that cannot work yet says why before anyone fills in a share, with
-// the one action that changes it, and holds the forms. The cause is About's
-// rule for the workspace's own shares.
 describe("sharing that cannot work yet", () => {
   const PLAN: RelayShareTarget = { kind: "paths", paths: ["docs/plan.md"] };
   // The controls a person would fill in.
@@ -6725,7 +6702,6 @@ describe("sharing that cannot work yet", () => {
     expect(setup.closest("[inert]")).toBeNull();
     for (const control of formControls()) expect(control.closest("[inert]")).not.toBeNull();
 
-    // The dialog gives way to the place the action opens.
     await user.click(within(setup).getByRole("button", { name: held.action }));
     expect(context[held.runs]).toHaveBeenCalledOnce();
     expect(onClose).toHaveBeenCalledOnce();

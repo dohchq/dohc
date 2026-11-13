@@ -130,7 +130,6 @@ function fixture() {
       changed: true,
     })),
     checkGeneratedTextArchive: vi.fn(async (_path: string): Promise<void> => undefined),
-    // The engine moved nothing unless a test says so.
     generatedTextArchiveMoved: vi.fn(async (_input: MovedInput): Promise<boolean> => false),
   };
   const disposed = vi.fn();
@@ -294,7 +293,6 @@ describe("desktop chat bookmarks", () => {
     expect(test.store.archiveBookmark).not.toHaveBeenCalled();
     expect(test.capture.archiveGeneratedTextFile).not.toHaveBeenCalled();
     expect(test.store.markBookmarkFailed).not.toHaveBeenCalled();
-    // Try again after Stop archives it.
     await test.owner.archiveChatBookmark(test.workspace, test.capture, "owner", "bookmark");
     expect(test.store.archiveBookmark).toHaveBeenCalledTimes(1);
     expect(test.capture.archiveGeneratedTextFile).toHaveBeenCalledTimes(1);
@@ -313,7 +311,6 @@ describe("desktop chat bookmarks", () => {
     ).rejects.toBe(refused);
     const failed = await test.store.findBookmark();
     expect(failed).toMatchObject({ state: "archived", projectionState: "failed" });
-    // The worker and its timer never move the page again by themselves.
     test.owner.start();
     test.owner.queueChatBookmarkProjection("workspace");
     await vi.advanceTimersByTimeAsync(90_000);
@@ -325,8 +322,6 @@ describe("desktop chat bookmarks", () => {
       state: "archived",
       projectionState: "failed",
     });
-    // Try again after Stop finds the page unmoved, checks it again, and
-    // archives it at a new generation.
     await expect(
       test.owner.archiveChatBookmark(test.workspace, test.capture, "owner", "bookmark"),
     ).resolves.toMatchObject({ state: "archived", projectionState: "ready", generation: 3 });

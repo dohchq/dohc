@@ -114,7 +114,6 @@ function change(
 
 function view(props: Partial<Parameters<typeof EngineHistoryView>[0]> = {}) {
   const calls = { open: vi.fn(), retry: vi.fn(), openHistory: vi.fn() };
-  // Budget's definition is loaded and labels its operation; Guests' is not.
   const collections: HistoryCollections = new Map([
     [
       BUDGET,
@@ -141,7 +140,6 @@ function view(props: Partial<Parameters<typeof EngineHistoryView>[0]> = {}) {
   return calls;
 }
 
-// A part's flex-shrink factor from its class; 1 when it sets none.
 const shrinkOf = (el: Element) => Number(el.className.match(/shrink-\[(\d+)\]/)?.[1] ?? 1);
 // How much sooner each part of a History line gives way than the next.
 const STEP = 1e6;
@@ -160,7 +158,6 @@ describe("History timeline rows", () => {
     expect(calls.open).toHaveBeenCalledWith("m-1", "notes/plan.md");
     expect(rows[1]!.textContent).toContain("Created version Draft");
     expect(rows[1]!.querySelector("button")).toBeNull();
-    // A file's row opens its change, and so does a Collection's: its History.
     const collection = screen.getByRole("button", { name: "Open Collection history for Budget" });
     expect(collection.textContent).toContain("Automation Stamp the date");
     fireEvent.click(collection);
@@ -183,7 +180,6 @@ describe("History timeline rows", () => {
           : { group: "g-claude", hue: null, self: true },
       ],
     });
-    // A file write by each, then a move by each.
     const moved = (id: string, connected: boolean) =>
       file(id, { ...claude(connected), operation: "rename", path: `trip/${id}.md` });
     view({
@@ -199,7 +195,6 @@ describe("History timeline rows", () => {
       rows.map((row) => row.querySelector("[data-agent-mark]")?.getAttribute("data-agent-mark")),
     ).toEqual(["connected", "agent", "connected", "agent"]);
     cleanup();
-    // One request's files fold into a pass, which names its connected agent with the plug too.
     const pass = (id: string) =>
       file(id, { ...claude(true), path: `notes/${id}.md`, correlationId: "request-1" });
     view({ entries: [pass("a"), pass("b")] });
@@ -241,8 +236,6 @@ describe("History timeline rows", () => {
     ).toBe("addRow");
     // The title already names the Collection, so the line does not again.
     expect(unlabelled!.querySelector('[data-testid="history-collection-name"]')).toBeNull();
-    // The row's name says what it opens; the change describes it, as its
-    // line reads, then when.
     const button = screen.getByRole("button", { name: "Open Collection history for Budget" });
     const description = document.getElementById(button.getAttribute("aria-describedby")!);
     expect(description?.hidden).toBe(true);
@@ -251,10 +244,6 @@ describe("History timeline rows", () => {
     );
   });
 
-  // As the line runs short, the operation's name gives way first, then who
-  // made the change, then what changed; the Collection's name goes last.
-  // Each step's factor is a million times the next's, so the part that
-  // should hold loses nothing; the states page measures the floors.
   it("cuts a Collection change's line from its end inward, keeping the Collection's name", () => {
     view({
       entries: [
@@ -276,7 +265,6 @@ describe("History timeline rows", () => {
     expect(shrinkOf(title!) / shrinkOf(name!)).toBeGreaterThanOrEqual(STEP);
     expect(shrinkOf(agent!) / shrinkOf(title!)).toBeGreaterThanOrEqual(STEP);
     expect(line.className).toContain("overflow-hidden");
-    // An undated change is one line, and its parts share all of it.
     const undatedLine = within(undated!).getByTestId("history-collection-line");
     expect(undatedLine.className.split(" ")).toEqual(
       expect.arrayContaining(["flex-1", "overflow-hidden"]),
@@ -286,7 +274,6 @@ describe("History timeline rows", () => {
     ).toBeGreaterThanOrEqual(STEP);
   });
 
-  // The name stays in the line's ink; colour belongs to faces.
   it("names the agent that approved a Collection's rules first, in the line's ink", () => {
     view({
       entries: [
@@ -297,14 +284,11 @@ describe("History timeline rows", () => {
     const agents = screen.getAllByTestId("history-collection-agent");
     expect(agents.map((agent) => agent.textContent)).toEqual(["trip-agent", "Agent"]);
     expect(agents[0]!.className).not.toContain("text-agent");
-    // Who made it follows what changed.
     expect(agents[0]!.previousElementSibling!.getAttribute("data-testid")).toBe(
       "history-collection-title",
     );
   });
 
-  // The engine names every rules change "Fields and rules". That is not an
-  // ID to show in mono, and no definition labels it.
   it("titles a rules change in words and names its Collection, without an operation", () => {
     view({
       entries: [change(4, DAY - 2_000, GUESTS, "Guests", { rulesApprovedBy: "trip-agent" })],
@@ -328,9 +312,6 @@ describe("History timeline rows", () => {
     expect(marker.textContent).not.toContain("Created version");
   });
 
-  // Main reaches an undated change three ways: with its Collection's
-  // previous time to sort by, with no time at all so it sorts last, and
-  // holding its Collection's older dated changes back behind it.
   it("lists dated days in order, then one Date unknown heading with every undated change", () => {
     view({
       entries: [
@@ -357,14 +338,12 @@ describe("History timeline rows", () => {
     expect(
       screen.getAllByTestId("engine-history-day-heading").at(-1)!.hasAttribute("datetime"),
     ).toBe(false);
-    // An undated change is one line with no time.
     const guests = screen
       .getAllByRole("listitem")
       .find((row) => row.dataset.historyKey === `collection:${GUESTS}:5`)!;
     expect(guests.querySelector("time")).toBeNull();
     expect(guests.textContent).not.toContain("Date unknown");
     expect(guests.firstElementChild!.className.split(" ")).toContain("h-7");
-    // A Collection this computer cannot open is a row, not a control.
     expect(screen.queryByRole("button", { name: "Open Collection history for Guests" })).toBeNull();
   });
 
@@ -414,7 +393,6 @@ function dayKey(ms: number): string {
   return `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, "0")}-${String(day.getDate()).padStart(2, "0")}`;
 }
 
-// The list from top to bottom: each day heading by its date, then each row by its key.
 function listOrder(): string[] {
   return screen.getAllByRole("listitem").flatMap((row) => {
     if (row.dataset.historyKey) return [row.dataset.historyKey];
@@ -437,13 +415,9 @@ describe("History timeline changes", () => {
   it("draws each change on two lines: who and when, then the file and its folder", () => {
     view({ entries: [agentEdit("m-2", 0), file("m-1", { recordedAtMs: DAY - 3_600_000 })] });
     const [agent, local] = screen.getAllByTestId("engine-moment-open");
-    // The agent's square avatar leads, and its name follows in the agent voice.
     expect(agent!.querySelector('[title="Nova"]')?.className).toContain("rounded");
     expect(agent!.querySelector('[title="Nova"]')?.className).not.toContain("rounded-full");
     expect(screen.getAllByTestId("engine-moment-source")[0]!.textContent).toBe("Nova");
-    // A local edit leads with its origin's mark and names it, then says
-    // its file and folder.
-    // An edit made outside dohc draws a file being edited.
     expect(local!.querySelector('[title="Local file edit"] .lucide-file-pen')).not.toBeNull();
     expect(local!.textContent).toContain("plan.mdnotes");
     expect(local!.textContent).not.toContain("Edited");
@@ -497,9 +471,6 @@ describe("History timeline changes", () => {
     expect(shrinkOf(summary) / shrinkOf(actor)).toBeGreaterThanOrEqual(STEP);
     expect(within(summarized).queryByTestId("engine-moment-folder")).toBeNull();
 
-    // A summary that names the file takes the name's place and keeps the
-    // name whole longest: the words before it cut first, down to their floor,
-    // and the name cuts in its middle, in a name's ink.
     const deleted = row({ operation: "delete" });
     const named = within(deleted).getByTestId("engine-moment-summary");
     expect(named.textContent).toBe("Deleted product-planning-notes.md");
@@ -515,7 +486,6 @@ describe("History timeline changes", () => {
     expect(fileName!.firstElementChild!.textContent).toBe("product-planning-notes");
     expect(fileName!.lastElementChild!.textContent).toBe(".md");
     expect(fileName!.lastElementChild!.className).toContain("shrink-0");
-    // What follows the name gives way before the words that lead to it.
     const moved = row({ summary: "Moved product-planning-notes.md to the archive" });
     const [, , rest] = [...within(moved).getByTestId("engine-moment-summary").children];
     expect(rest!.textContent).toBe(" to the archive");
@@ -530,8 +500,6 @@ describe("History timeline changes", () => {
       entries: [agentEdit("m-3", 0), agentEdit("m-2", 5), agentEdit("m-1", 9)],
     });
     expect(screen.getAllByTestId("engine-moment-open")).toHaveLength(1);
-    // The run's head leads with its time, then names the agent and its file;
-    // each edit's summary is listed under it.
     const head = screen.getByTestId("engine-moment-open");
     expect(head.firstElementChild!.tagName).toBe("TIME");
     expect(head.textContent).toMatch(/Nova.*plan\.mdnotes$/);
@@ -550,9 +518,6 @@ describe("History timeline changes", () => {
     expect(calls.open).toHaveBeenLastCalledWith("m-1", "notes/plan.md");
   });
 
-  // History loads a page at a time. While earlier changes remain, the oldest
-  // loaded row may continue on the next page, so it counts what has loaded as
-  // a lower bound, and only it does.
   it("counts the oldest loaded pass or run as a lower bound while earlier changes remain", () => {
     // Main sends changes newest first, so a pass listed after the run is older.
     const pass = (id: string, minutes = 0) =>
@@ -597,7 +562,6 @@ describe("History timeline changes", () => {
     ).toBe("2 files");
     cleanup();
 
-    // Once nothing earlier remains, every count is the total.
     view({
       entries: [pass("p-2"), pass("p-1"), agentEdit("m-2", 0), agentEdit("m-1", 5)],
       hasMore: false,
@@ -628,8 +592,6 @@ describe("History timeline changes", () => {
     return id === null ? null : document.getElementById(id)?.textContent;
   };
 
-  // The open change may be one a collapsed row hides. The row shows it holds
-  // it without opening; aria-current stays on the change itself.
   it("marks a collapsed run that holds the open change, until it opens", () => {
     view({ entries: [agentEdit("m-2", 0), agentEdit("m-1", 5)], openMomentId: "m-1" });
     const row = screen.getByTestId("engine-moment-run").firstElementChild!;
@@ -663,8 +625,6 @@ describe("History timeline changes", () => {
     );
   });
 
-  // The name says what a row opens. Its description tells one edit of the
-  // file from the next: what it did, who made it, and when.
   it("describes each change by what it did, who made it, and when", () => {
     view({
       entries: [
@@ -694,8 +654,6 @@ describe("History timeline changes", () => {
     };
     expect(row({})).toMatch(/Local file edit$/);
     expect(row({ origin: "ydoc" })).toMatch(/Live edit$/);
-    // A real summary, another operation, a source that is not an action, and
-    // a person's name all keep their words.
     expect(row({ summary: "Added the Sintra day trip" })).toMatch(
       /Local file editAdded the Sintra day trip$/,
     );
@@ -722,8 +680,6 @@ describe("History timeline sources", () => {
     expect(screen.getByTestId("engine-moment-open")).toBeTruthy();
   });
 
-  // A warning, not one more row: the warning's mark, the words in ink that
-  // wrap rather than cut a name, and the small bordered Try again.
   it("shows a Collection that did not load as a warning row", () => {
     view({ entries: [file("m-1")], unavailableSources: [{ datasetId: GUESTS }] });
     const words = screen.getByTestId("history-sources-unavailable-words");
@@ -746,9 +702,6 @@ describe("History timeline sources", () => {
     );
   });
 
-  // A limit, not one more row: a filled band whose whole sentence shows and
-  // wraps, says how many Collections History includes and how to see the
-  // rest, and offers no retry that cannot help.
   it("shows the Collections the source limit left out as a band with its whole sentence", () => {
     view({ entries: [file("m-1")], omittedSources: 12, hasMore: true });
     const band = screen.getByTestId("history-sources-limit");
@@ -792,7 +745,6 @@ describe("History timeline sources", () => {
       "text-danger",
     );
     expect(screen.queryByText("No changes yet.")).toBeNull();
-    // The standard Try again, not the small one a row uses.
     const retry = within(state).getByRole("button", { name: "Try again" });
     expect(retry.dataset.testid).toBe("history-sources-retry");
     expect(retry.className.split(" ")).toContain("h-8");
@@ -833,7 +785,6 @@ describe("History timeline sources", () => {
   it("says No changes yet only for a complete page", () => {
     view();
     const line = screen.getByText("No changes yet.");
-    // The picture is decorative and there is no second line or action.
     expect(line.parentElement!.textContent).toBe("No changes yet.");
     expect(line.previousElementSibling!.getAttribute("aria-hidden")).toBe("true");
     expect(screen.queryByTestId("history-sources-notice")).toBeNull();

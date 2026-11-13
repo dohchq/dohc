@@ -232,7 +232,6 @@ describe("materialization keeps outside bytes before replacement", () => {
       "A file is at .dohc/local/outside-write-copies, which must be a real folder.",
     );
     await rm(folder);
-    // The records went with the folder; the copy itself stays beside n.md.
     expect(await copies.list()).toEqual([]);
     expect(await readFile(join(rootPath, "n (kept copy).md"), "utf8")).toBe("outside");
   });

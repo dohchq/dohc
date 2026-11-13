@@ -307,7 +307,6 @@ it("keeps a board's failure when a table read from before the switch answers lat
   );
   const result = setup(invoke, table);
   await screen.findByText("Task");
-  // An automation run starts a read in place, which is still out when the page switches to Board.
   result.rerender(<TransactionalCollectionPage {...result.props} recordsChanged={1} />);
   await waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
   result.rerender(
@@ -383,7 +382,6 @@ it("opens a board card's record in the panel, marks its card, and changes its fi
   await viewIdle("board");
   fireEvent.click(screen.getByRole("button", { name: "Show 4" }));
   const record = screen.getByRole("complementary", { name: "Task" });
-  // The board stays beside the panel, with the open record's card marked.
   expect(screen.getByTestId("board").getAttribute("data-open-record")).toBe("4");
   expect(document.activeElement).toBe(record);
   fireEvent.click(
@@ -440,7 +438,6 @@ it("moves a board's card through the approved edit with the record's version, wi
     revision: 1,
     input: { id: 4, expectedVersion: 7, values: { status: "Done" } },
   });
-  // The page does not lock while the move waits to be confirmed.
   expect(screen.queryByText("Loading view…")).toBeNull();
   expect((screen.getByRole("button", { name: "Move 4" }) as HTMLButtonElement).disabled).toBe(
     false,
@@ -537,7 +534,6 @@ it("does not move offline records and refuses an authored read that ignores boar
     true,
   );
 });
-/** The same Collection with a create action that takes every field. */
 const creating = (fieldIds = ["name", "status", "date"]): TransactionalDatasetDescription => ({
   ...dataset,
   operations: [
@@ -577,7 +573,6 @@ it("opens a board column's new record in the panel with the column's value fille
   const view = setup(invoke);
   view.rerender(<TransactionalCollectionPage {...view.props} dataset={creating()} />);
   fireEvent.click(await screen.findByRole("button", { name: "New in Done" }));
-  // The record does not exist yet: the panel holds it, with the column's value, and the board stays beside it.
   expect(within(draftPanel()).getByRole("heading", { name: "New record" })).toBeTruthy();
   expect(draftValue("Status")).toBe("Done");
   expect(screen.getByTestId("board")).toBeTruthy();
@@ -603,7 +598,6 @@ it("opens the no value column's new record with the group field empty, over the 
   );
   const view = setup(invoke);
   const base = creating();
-  // Status starts as Todo in a new record, unless the column says it has no value.
   const defaulted = {
     ...base,
     tables: [
@@ -622,7 +616,6 @@ it("opens the no value column's new record with the group field empty, over the 
   fireEvent.click(screen.getByRole("button", { name: "New with no value" }));
   expect(draftValue("Status")).toBe("Empty");
   fireEvent.click(within(draftPanel()).getByRole("button", { name: "Cancel" }));
-  // New record beside the board fills nothing in, so the default shows.
   fireEvent.click(screen.getByTestId("collection-new-record"));
   expect(draftValue("Status")).toBe("Todo");
 });
@@ -633,11 +626,9 @@ it("opens New record beside a board in the panel with no value filled in, and of
     }),
   );
   const view = setup(invoke);
-  // No create action: nothing offers a new record.
   await screen.findByTestId("board");
   expect(screen.queryByRole("button", { name: "New in Done" })).toBeNull();
   expect(screen.queryByTestId("collection-new-record")).toBeNull();
-  // A create that does not take the group field: the frame's button, and no column's.
   view.rerender(
     <TransactionalCollectionPage {...view.props} dataset={creating(["name", "date"])} />,
   );
@@ -666,7 +657,6 @@ it("opens a calendar day's new record in the panel with the day in the calendar'
     },
   );
   const view = setup(invoke, calendar);
-  // A create that does not take the date field offers no day.
   view.rerender(
     <TransactionalCollectionPage {...view.props} dataset={creating(["name", "status"])} />,
   );
@@ -681,7 +671,6 @@ it("opens a calendar day's new record in the panel with the day in the calendar'
   fireEvent.click(await screen.findByRole("button", { name: "New on November 20" }));
   expect(draftValue("Date")).toBe(shortDate("2026-11-20"));
   typeDraft("Name", "Launch");
-  // Status is required and has no default, so Create record says so and sends nothing.
   fireEvent.click(screen.getByRole("button", { name: "Create record" }));
   expect(within(draftPanel()).getByRole("alert").textContent).toBe("Enter Status.");
   expect(invoke.mock.calls.some(([request]) => request.operationId === "create")).toBe(false);
@@ -829,7 +818,6 @@ it("offers layout changes to readers without owner view-source controls", async 
     );
   const tab = (name: string) => tabs().find((tab) => tab.textContent === name)!;
   await waitFor(() => expect(tab("Calendar").disabled).toBe(false));
-  // The layouts are tabs that change what this computer shows. None is a saved view.
   expect(tabs().map((tab) => [tab.textContent, tab.getAttribute("aria-pressed")])).toEqual([
     ["Table", "true"],
     ["Board", "false"],
@@ -891,7 +879,6 @@ it("saves the field a saved board groups by, and changes nothing here until its 
   fireEvent.click(screen.getByRole("menuitemradio", { name: "Name" }));
   expect(views.setField).toHaveBeenCalledExactlyOnceWith("board", { groupBy: "name" });
   expect(screen.getByRole("button", { name: "Group by Status" })).toBeTruthy();
-  // The saved view's tab is the open one, among All records and the saved views.
   expect(
     within(screen.getByTestId("collection-view-switcher"))
       .getAllByRole("button")
@@ -1057,7 +1044,6 @@ it("finishes a board read and a read in place asked for in one render, and shows
   expect(await screen.findByText("Loading view…")).toBeTruthy();
   await act(async () => held.resolve());
   await screen.findByText("Second task");
-  // Neither read is left holding the view.
   await waitFor(() =>
     expect((screen.getByRole("button", { name: "Move 4" }) as HTMLButtonElement).disabled).toBe(
       false,
@@ -1139,7 +1125,6 @@ it("reads an open Calendar record by its id once an automation moves it out of t
   await viewIdle("calendar");
   fireEvent.click(screen.getByRole("button", { name: "Show 7" }));
   const details = () => screen.getByRole("complementary");
-  // A calendar entry opens its record in the panel, and the calendar marks the entry.
   expect(screen.getByTestId("calendar").getAttribute("data-open-record")).toBe("7");
   expect(details().textContent).toContain(shortDate(inMonth));
   date = later;
@@ -1231,7 +1216,6 @@ it("drops a by-id read of an open Calendar record once a newer read finds it bac
   await viewIdle("calendar");
   fireEvent.click(screen.getByRole("button", { name: "Show 7" }));
   const details = () => screen.getByRole("complementary");
-  // Out of the month: the page reads the record by its id, and that read waits.
   date = later;
   version = 2;
   rerender(<TransactionalCollectionPage {...props} recordsChanged={1} />);
@@ -1242,7 +1226,6 @@ it("drops a by-id read of an open Calendar record once a newer read finds it bac
       ),
     ).toBe(true),
   );
-  // Back in the month before it answers: the newer read in place shows the record.
   date = back;
   version = 3;
   rerender(<TransactionalCollectionPage {...props} recordsChanged={2} />);

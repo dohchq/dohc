@@ -30,7 +30,6 @@ function table(rows: number, cols: number, label = ""): PMNode {
   );
 }
 
-// Each control's range and key, or the node class for a table's own decoration.
 function shown(state: EditorState, plugin: Plugin) {
   return (plugin.getState(state) as DecorationSet)
     .find()

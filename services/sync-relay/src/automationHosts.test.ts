@@ -39,7 +39,6 @@ const REACH = {
   verdicts: [{ automationId: "collection:Trip#task", step: "0", verdict: "stopped" }],
 };
 
-// A Group handover as the engine of the computer handing over answers it.
 const GROUPS = {
   floorMs: 1,
   automations: [
@@ -113,7 +112,6 @@ describe("automation hosts", () => {
       { installId: "laptop", kind: "computer", label: "laptop", lastSeenMs: 11_000 },
     ]);
 
-    // A later claim finds a host and changes nothing but its own last seen.
     clock = 13_000;
     const again = await checkIn(h, "laptop", true, "Ice's laptop");
     expect(again.host).toEqual(claimed.host);
@@ -276,7 +274,6 @@ describe("automation hosts", () => {
     expect((await groups(h, 3, "stranger")).status, "only the owner").toBe(404);
     expect((await send(h, "groups", {})).status, "a read").toBe(405);
 
-    // The owner moves on, and the desktop takes over: that handover is the laptop's.
     await send(h, "choose", { installId: "desktop", generation: 3 });
     expect((await groups(h, 3)).status).toBe(409);
     await send(h, "take-over", { generation: 4 });
@@ -300,7 +297,6 @@ describe("automation hosts", () => {
       everShared: false,
     });
 
-    // Once it watched after the take over, its release goes on as it is.
     await send(h, "choose", { installId: "laptop", generation: 7 });
     const afterTakeOver = { floorMs: 9, automations: [] };
     await send(h, "release", {
@@ -339,7 +335,6 @@ describe("automation hosts", () => {
     const large = { verdicts: "x".repeat(AUTOMATION_HOST_REACH_MAX_BYTES) };
     expect((await release({ reach: large })).status).toBe(413);
 
-    // A computer that could not read its verdicts releases none.
     expect((await release({ reach: null })).status).toBe(200);
     expect(await (await groups(h, 3)).json()).toEqual({
       ok: true,
@@ -360,7 +355,6 @@ describe("automation hosts", () => {
     });
     expect(((await (await groups(h, 5)).json()) as { reach: unknown }).reach).toEqual(REACH);
 
-    // Once the workspace was shared, the answer says so, even after the share ends.
     await createShare(h, "owner", WORKSPACE, {
       paths: ["trip"],
       recipientUserId: "ana",
@@ -418,7 +412,6 @@ describe("automation hosts", () => {
       groupsWatched: 0,
       reach: REACH,
     });
-    // Before the laptop read it, the owner chose the studio, then the laptop again.
     await send(h, "choose", { installId: "studio", generation: 3 });
     const back = await state(await send(h, "choose", { installId: "laptop", generation: 4 }));
     expect(back.host).toMatchObject({ installId: "laptop", generation: 5, handoverFrom: null });
@@ -463,7 +456,6 @@ describe("automation hosts", () => {
       everShared: false,
     });
 
-    // A computer that took it hands over its own, which carries it on.
     await send(h, "choose", { installId: "laptop", generation: 5 });
     const taken = { floorMs: 4, automations: [] };
     await send(h, "release", {
@@ -559,7 +551,6 @@ describe("automation hosts", () => {
       releasedThroughMs: 9_000,
     });
 
-    // Neither a take-over nor choosing back loses it.
     await send(h, "choose", { installId: "desktop", generation: 5 });
     const taken = await state(await send(h, "take-over", { generation: 6 }));
     expect(taken.host?.releasedThroughMs).toBe(9_000);
@@ -679,7 +670,6 @@ describe("automation hosts", () => {
       expect(isAutomationHostPath(path), path).toBe(false);
     }
 
-    // The router reaches the check-in for each spelling that names it.
     const { h } = await relay();
     for (const path of spellings.slice(1)) {
       const response = await h(
@@ -744,8 +734,6 @@ describe("automation hosts", () => {
 describe("a server that runs automations", () => {
   const SERVER = { label: "My dohc server" };
 
-  // One store with two handlers: `off` as the relay runs with automations
-  // off, `on` as it runs with them on.
   async function relays(): Promise<{
     off: SyncRelayHandler;
     on: SyncRelayHandler;
@@ -907,7 +895,6 @@ describe("a server that runs automations", () => {
       releasedThroughMs: 9_000,
     });
 
-    // Choosing the host it already has is a choice too.
     const { off: other, on: otherOn } = await relays();
     await checkIn(other, "desktop", true);
     await state(await send(other, "choose", { installId: "desktop", generation: 1 }));
@@ -969,7 +956,6 @@ describe("a server that runs automations", () => {
         releasedThroughMs: 20_000,
       });
 
-      // The progress never goes back, even when the relay's clock does.
       await checkIn(on, "laptop");
       await state(
         await send(on, "release", {
@@ -994,7 +980,6 @@ describe("a server that runs automations", () => {
     it("starts the next computer after the latest schedule the server ran, when the relay's clock went back", async () => {
       const { off, on, storage } = await relays();
       await checkIn(on, "desktop", true);
-      // The server's schedules ran through 30,000 before a restart set the clock back.
       storage.recordAutomationServerProgress({ workspaceId: WORKSPACE, throughMs: 30_000 });
       storage.recordAutomationServerProgress({ workspaceId: WORKSPACE, throughMs: 25_000 });
       clock = 20_000;

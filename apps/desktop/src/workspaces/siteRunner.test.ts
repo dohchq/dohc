@@ -437,8 +437,6 @@ describe("package manager helpers", () => {
     expect(() =>
       packageManagerValidatedScriptCommand("pnpm", "dev", "export HOST=0.0.0.0; vite"),
     ).toThrow(/loopback/);
-    // A HOST rebind hidden behind an earlier, unrelated statement must be
-    // caught too — not just one glued directly onto the body's first word.
     expect(() =>
       packageManagerValidatedScriptCommand("pnpm", "dev", "true && HOST=0.0.0.0 vite"),
     ).toThrow(/loopback/);
@@ -546,15 +544,12 @@ describe("package manager helpers", () => {
     expect(() =>
       assertLoopbackOnlyDevServerCommand("HOSTNAME=0.0.0.0", ["node", "server.cjs"]),
     ).toThrow(/loopback/);
-    // A loopback value, or a non-host assignment entirely, is unaffected.
     expect(() =>
       assertLoopbackOnlyDevServerCommand("HOST=127.0.0.1", ["node", "server.cjs"]),
     ).not.toThrow();
     expect(() =>
       assertLoopbackOnlyDevServerCommand("NODE_ENV=production", ["node", "server.cjs"]),
     ).not.toThrow();
-    // Multiple leading assignments, and an assignment inside a lifecycle
-    // hook's own command string, are covered too.
     expect(() =>
       assertLoopbackOnlyDevServerCommand("NODE_ENV=production", [
         "HOST=0.0.0.0",
@@ -594,7 +589,6 @@ describe("package manager helpers", () => {
     expect(() =>
       assertLoopbackOnlyDevServerCommand("export", ["KEEP", "HOST=0.0.0.0", "vite"]),
     ).toThrow(/loopback/);
-    // Multiple assignment operands are all checked, not just the first.
     expect(() =>
       assertLoopbackOnlyDevServerCommand("export", ["NODE_ENV=production", "HOST=0.0.0.0"]),
     ).toThrow(/loopback/);
@@ -607,7 +601,6 @@ describe("package manager helpers", () => {
       expect(() =>
         assertLoopbackOnlyDevServerCommand(command, ["FOO=1", "HOST=0.0.0.0"]),
       ).not.toThrow();
-      // The exported form must still catch a later operand too.
       expect(() =>
         assertLoopbackOnlyDevServerCommand(command, ["-x", "FOO=1", "HOST=0.0.0.0"]),
       ).toThrow(/loopback/);
@@ -650,8 +643,6 @@ describe("package manager helpers", () => {
     expect(() =>
       assertLoopbackOnlyDevServerCommand("env", ["-i", "HOST=127.0.0.1", "vite"]),
     ).not.toThrow();
-    // An option this scanner does not recognize refuses outright rather
-    // than silently skipping past it and missing an assignment beyond it.
     expect(() =>
       assertLoopbackOnlyDevServerCommand("env", ["--made-up-option", "HOST=0.0.0.0", "vite"]),
     ).toThrow(/env/);
@@ -668,21 +659,15 @@ describe("package manager helpers", () => {
     expect(() =>
       assertLoopbackOnlyDevServerCommand("env", ["sh", "-c", "HOST=0.0.0.0 vite"]),
     ).toThrow(/loopback/);
-    // env's own OPTIONs can precede the wrapped command too.
     expect(() =>
       assertLoopbackOnlyDevServerCommand("env", ["-i", "sh", "-c", "HOST=0.0.0.0 vite"]),
     ).toThrow(/loopback/);
-    // A path-qualified env is the identical wrapper.
     expect(() =>
       assertLoopbackOnlyDevServerCommand("/usr/bin/env", ["sh", "-c", "HOST=0.0.0.0 vite"]),
     ).toThrow(/loopback/);
-    // Every shell nestedShellCommand already recognizes is reachable
-    // through env, not just sh.
     expect(() =>
       assertLoopbackOnlyDevServerCommand("env", ["bash", "-c", "HOST=0.0.0.0 vite"]),
     ).toThrow(/loopback/);
-    // A genuinely safe wrapped shell command must still work — env's own
-    // recursion doesn't turn into a blanket refusal.
     expect(() =>
       assertLoopbackOnlyDevServerCommand("env", ["sh", "-c", "vite --host 127.0.0.1"]),
     ).not.toThrow();
@@ -697,12 +682,9 @@ describe("package manager helpers", () => {
     expect(() => assertLoopbackOnlyDevServerCommand("cross-env", ["HOST=0.0.0.0", "vite"])).toThrow(
       /loopback/,
     );
-    // A non-host assignment must still be accepted — cross-env's own
-    // recursion doesn't turn into a blanket refusal.
     expect(() =>
       assertLoopbackOnlyDevServerCommand("cross-env", ["FOO=bar", "vite"]),
     ).not.toThrow();
-    // Reaches a shell cross-env wraps too, the same as env sh -c does.
     expect(() =>
       assertLoopbackOnlyDevServerCommand("cross-env", ["sh", "-c", "HOST=0.0.0.0 vite"]),
     ).toThrow(/loopback/);
@@ -823,8 +805,6 @@ describe("siteCommandEnvironment", () => {
   });
 });
 
-// Prints what a site command sees of the variables dohc must not pass on,
-// and of one that dohc's own caller sets.
 const REPORT_SITE_ENVIRONMENT =
   "const names=['HOST','HOSTNAME','DOHC_SITE_TEST_SECRET','ELECTRON_RUN_AS_NODE','DOHC_SITE_TEST_TRUSTED'];" +
   "console.log('ENV:'+JSON.stringify(Object.fromEntries(names.map((n)=>[n,process.env[n]??null]))));";
@@ -938,8 +918,6 @@ describe("startSiteDevServer", () => {
       const descendantPid = Number(/CHILD:(\d+)/.exec(childLog?.text ?? "")?.[1]);
       expect(descendantPid).toBeGreaterThan(0);
 
-      // Wait for the wrapper to have actually exited on its own before
-      // calling stop() — the scenario this pin exercises.
       await new Promise<void>((resolve) => handle.onExit(resolve));
 
       try {
@@ -1008,9 +986,6 @@ describe("startSiteDevServer", () => {
     async () => {
       await mkdir(join(root, "site"), { recursive: true });
 
-      // A real, independent throwaway process this test controls
-      // directly — simulates "a descendant only the slow capture will
-      // ever reveal."
       const descendant = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], {
         stdio: "ignore",
       });
@@ -1059,10 +1034,7 @@ describe("startSiteDevServer", () => {
       } finally {
         try {
           process.kill(descendantPid!, "SIGKILL");
-        } catch {
-          // Already dead — either the fixed teardown reached it, or it
-          // never needed killing.
-        }
+        } catch {}
       }
     },
   );
@@ -1605,8 +1577,6 @@ describe("buildSite", () => {
     expect(await detectBuildOutput(join(root, "site"), "../outside")).toBeNull();
     expect(await detectBuildOutput(join(root, "site"))).toBeNull();
     await mkdir(join(root, "site", "out"), { recursive: true });
-    // A directory alone isn't a servable build output — nothing was
-    // actually built there yet.
     expect(await detectBuildOutput(join(root, "site"))).toBeNull();
     await writeFile(join(root, "site", "out", "index.html"), "<h1>Out</h1>");
     expect(await detectBuildOutput(join(root, "site"))).toBe(join(root, "site", "out"));

@@ -138,7 +138,6 @@ describe("useBoundNoteCheck", () => {
     expect(view.result.current).toBe("checking");
     await waitFor(() => expect(view.result.current).toBe("clear"));
 
-    // The note reopens after an edit in dohc: a new document, the same witness.
     const reopened = witnessed();
     const paragraph = new Y.XmlElement("paragraph");
     paragraph.insert(0, [new Y.XmlText("Typed.")]);
@@ -147,7 +146,6 @@ describe("useBoundNoteCheck", () => {
     await waitFor(() => expect(view.result.current).toBe("clear"));
   });
 
-  // As in a teammate's shared session, which has no file head on their device.
   it("judges the witnessed source of a session with no file head", async () => {
     const source = "Title\n=====\n\n* one\n";
     const keeping = markdownToYDoc(source);
@@ -165,7 +163,6 @@ describe("useBoundNoteCheck", () => {
     await waitFor(() => expect(lossy.result.current).toBe("lossy"));
   });
 
-  // A teammate's update brings no new head, so the source it records is checked from the document.
   it("checks again when a session with no file head records another source", async () => {
     const doc = seeded();
     const { result } = renderHook(() => useBoundNoteCheck({ open: "a", doc, headSha256: null }));
@@ -184,7 +181,6 @@ describe("useBoundNoteCheck", () => {
     await waitFor(() => expect(result.current).toBe("clear"));
   });
 
-  // The engine holds a larger source without checking it.
   it("checks a witnessed source up to the engine's size limit, and holds a larger one", async () => {
     const respelled = "Title\n=====\n\n";
     const atLimit = respelled + "a".repeat(LIVE_MARKDOWN_MAX_BYTES - respelled.length);
@@ -231,9 +227,6 @@ describe("useBoundNoteCheck", () => {
     });
   });
 
-  // A change outside dohc resyncs a lossy source into the same document. Its
-  // state comes with its head; a source that arrives without one reads as an
-  // unknown head until the pair does.
   it.each(["before the new head arrives", "after the new source is answered"])(
     "waits for the head of a new lossy source, and ignores an older answer that lands %s",
     async (when) => {
@@ -314,7 +307,6 @@ describe("useBoundNoteCheck", () => {
     });
     await waitFor(() => expect(first.result.current).toBe("clear"));
 
-    // Another session that records the lossy source still gets its check.
     const other = seeded();
     const second = renderHook(() => useBoundNoteCheck({ open: "b", doc: other, headSha256: null }));
     expect(second.result.current).toBe("checking");

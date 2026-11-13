@@ -33,7 +33,6 @@ describe("ErrorBoundary (scoped)", () => {
     );
     expect(screen.getByTestId("error-boundary-editor")).toBeTruthy();
     expect(screen.getByText("kaboom in a view")).toBeTruthy();
-    // The rest of the tree is untouched.
     expect(screen.getByTestId("sibling")).toBeTruthy();
     expect(
       vi
@@ -54,12 +53,7 @@ describe("ErrorBoundary (scoped)", () => {
     }
     render(<Harness />);
     expect(screen.getByTestId("error-boundary-side-panel")).toBeTruthy();
-    // The crash state is owned by the boundary; retry re-renders children.
-    // (The bomb is disarmed by remount-free state living outside the boundary
-    // in real usage — here we simulate recovery by retrying a now-safe tree.)
     fireEvent.click(screen.getByTestId("error-boundary-side-panel-retry"));
-    // Children render again; the bomb still throws, so the card comes back —
-    // proving retry actually re-attempts rather than freezing.
     expect(screen.getByTestId("error-boundary-side-panel")).toBeTruthy();
   });
 
@@ -110,8 +104,6 @@ describe("AppErrorBoundary", () => {
     expect(reloadRenderer).toHaveBeenCalledOnce();
   });
 
-  // The window has no OS title bar, so the crash screen draws its own drag
-  // strip over its top edge without moving the message.
   it("keeps the window movable", () => {
     vi.stubGlobal("dohcDesktop", { reloadRenderer: vi.fn(async () => undefined) });
     render(

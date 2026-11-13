@@ -174,8 +174,6 @@ describe("Titlebar", () => {
     expect(group.contains(screen.getByTestId("titlebar-quick-open"))).toBe(false);
   });
 
-  // The breadcrumb: the mark, the workspace's own name, then its version and
-  // one saved dot. The product word shows only before a workspace is open.
   it("reads mark, workspace, version, then the saved dot, with no product word", () => {
     render(
       <Titlebar
@@ -201,7 +199,6 @@ describe("Titlebar", () => {
     expect(version.compareDocumentPosition(status) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(name.textContent).toBe("dohc");
     expect(group.textContent).toBe("dohcMain");
-    // The separator hides with its version while the picker has nothing to name.
     expect(version.parentElement?.className).toContain("empty:hidden");
     expect(version.parentElement?.className).toContain("before:content-['/']");
   });
@@ -240,7 +237,6 @@ describe("Titlebar", () => {
     // ends it in an ellipsis instead of pushing the status out of the window.
     expect(name.className).toContain("min-w-0");
     expect(name.className).toContain("truncate");
-    // A shortened name stays readable on hover.
     expect(screen.getByTestId("workspace-switcher").getAttribute("title")).toBe(
       "launch-readiness-and-self-hosting",
     );

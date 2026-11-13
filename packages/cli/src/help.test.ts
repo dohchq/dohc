@@ -15,7 +15,6 @@ async function help(...argv: string[]): Promise<string> {
 
 const flat = (text: string) => text.replace(/\s+/g, " ");
 
-/** Whether a path such as entries[].schema.revisionHash names a field of the schema. */
 function hasPath(schema: z.ZodType, path: readonly string[]): boolean {
   if (schema instanceof z.ZodOptional || schema instanceof z.ZodNullable)
     return hasPath(schema.unwrap() as z.ZodType, path);

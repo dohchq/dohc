@@ -108,7 +108,6 @@ describe("reach check", () => {
     expect(check(roster, personal(OWNER))).toEqual(
       stopped("This step acts as you, and ana@dohc.test can also edit Trip."),
     );
-    // Edit on another file in the Collection does not make an editor.
     expect(
       check(
         owner(grant(ana, { paths: ["Trip/collection.yaml"], access: "edit" })),
@@ -133,7 +132,6 @@ describe("reach check", () => {
       stopped("ana@dohc.test cannot view Trip."),
     );
     expect(check(codeOnly, change(budget), trip, [])).toEqual(allowed);
-    // View on the Collection is enough to read its records.
     const withView = owner(
       grant(ana, { paths: ["Trip/automations.yaml", "Budget"], access: "edit" }),
       grant(ana, { paths: ["Trip"], access: "view" }),
@@ -329,7 +327,6 @@ describe("reach check", () => {
     expect(check(owner(grant(ana, { paths: ["Trip"], access: "edit" })), readGroup)).toEqual(
       stopped("ana@dohc.test cannot read Trip chat."),
     );
-    // Reading is enough; a read-only Group grant counts.
     expect(
       check(
         owner(
@@ -441,7 +438,6 @@ describe("reach check", () => {
     expect(check(signedIn, personal("install-elsewhere", "Cai"))).toEqual(
       stopped("This step acts as Cai, and you can also edit Trip."),
     );
-    // Another editor still stops it, as for an account.
     expect(
       check(
         { ...signedOut, grants: [grant(ana, { paths: ["Trip"], access: "edit" })] },
@@ -567,7 +563,6 @@ describe("share links as editors", () => {
   });
 
   it("never lets a link lend its reach to another link, its creator, or a person who opened it", () => {
-    // Each link reaches one of the Collections; together they reach both.
     const two = owner(
       linkGrant("g-trip", ["Trip", "Notes"]),
       linkGrant("g-trip-budget", ["Trip", "Budget"]),
@@ -578,7 +573,6 @@ describe("share links as editors", () => {
     expect(check(two, find({ path: "Notes", name: "Notes" }))).toEqual(
       stopped("Anyone with your share link to Trip cannot view Notes."),
     );
-    // Ana opened the link in dohc and holds her own grant beside it.
     const opened = owner(
       linkGrant("g-link", ["Trip"]),
       grant(ana, { paths: ["Trip", "Budget"], access: "edit" }),
@@ -698,7 +692,6 @@ describe("a link that wrote automations directly and stopped editing", () => {
     const roster: ReachRoster = {
       kind: "owner",
       ownerUserId: OWNER,
-      // Ana still edits Budget through another grant.
       grants: [grant(ana, { paths: ["Budget"], access: "edit" })],
       formerEditors: [
         {

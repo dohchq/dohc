@@ -124,7 +124,6 @@ describe("markdown WYSIWYG frontmatter seam", () => {
       "---\njust a divider\n---\n# Body\n",
       "---\nnull\n---\n# Body\n",
       "---\n- one\n---\n# Body\n",
-      // Text after a closing delimiter means it does not close the block.
       "---\ntitle: Plan # hidden\n---Body\n",
     ]) {
       expect(markdownEditorBody(markdown)).toBe(markdown);

@@ -53,7 +53,6 @@ const TABLE = ["| A |", "| --- |", "| a |", "| b |"];
 const lines = (...parts: (string | string[])[]) => parts.flat().join("\n");
 const prefixed = (prefix: string, rows: string[]) => rows.map((row) => prefix + row);
 
-// Whether the editor reads the comment, and the text it reads it in.
 const CASES: [string, boolean, string][] = [
   ["right above its table", true, lines(COMMENT, TABLE)],
   ["an empty blank line", true, lines(COMMENT, "", TABLE)],

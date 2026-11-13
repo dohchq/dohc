@@ -384,7 +384,6 @@ describe("relayed press host", () => {
 
   it("admits nothing once a handover begins, even after the relay accepted", async () => {
     const host = fakeHost();
-    // The handover begins while the accept is on its way.
     const relay = fakeRelay({
       lists: [[press("p1")]],
       accept: (ids) => {
@@ -569,7 +568,6 @@ describe("relayed press host", () => {
     first.loop.start();
     await relay.until(() => first.presses.length === 1);
     first.loop.stop();
-    // The run settles after the close; the closed loop tells no one.
     first.loop.runSettled({ claimId: "claim-p1", outcome: "done", error: null });
 
     const reopened = fakeRelay({ lists: [[press("p1", "accepted")]] });

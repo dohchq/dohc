@@ -115,7 +115,6 @@ async function refusal(promise: Promise<unknown>): Promise<string> {
 describe("this computer's automation store", () => {
   it("keeps everything in .dohc/local/automations and reads nothing from an old .dohc/automations", async () => {
     const { opened, store } = await workspace();
-    // What an earlier build left, which this one neither reads nor moves.
     const old = join(opened.rootPath, ".dohc", "automations");
     await mkdir(join(old, "runs"), { recursive: true });
     await writeFile(join(old, "reach.json"), `${JSON.stringify({ version: 3, ...allowed })}\n`, {
@@ -161,7 +160,6 @@ describe("this computer's automation store", () => {
       written.saveEnabledAutomations(new Map()),
       written.savePendingRestore({ id: "restore", claims: [] }),
     ];
-    // Before any open, and with reads first, which make nothing.
     await expect(store().readReachVerdicts()).resolves.toMatchObject({ missing: true });
     await expect(store().runsOf(AUTOMATION, "atc_one")).resolves.toEqual({
       runs: [],
@@ -174,7 +172,6 @@ describe("this computer's automation store", () => {
     // An open that could not keep the folder out of iCloud Drive.
     await engine.open(opened, false);
     for (const write of writes(store())) expect(await refusal(write)).toBe(NOT_EXCLUDED);
-    // An open that stands while its folder is gone.
     engine.close(opened);
     await engine.open(opened);
     await rm(join(opened.rootPath, ".dohc", "local"), { recursive: true });
@@ -207,7 +204,6 @@ describe("this computer's automation store", () => {
       ),
     );
 
-    // The workspace closes, or the engine restarts, part way through.
     engine.close(opened);
     const effect = {
       ordinal: 0,
@@ -331,7 +327,6 @@ describe("this computer's automation store", () => {
       await expect(reader.unfinishedUndos()).resolves.toBeNull();
     };
 
-    // The same files, reached through a link.
     const local = join(opened.rootPath, ".dohc", "local");
     const elsewhere = join(await createTestScratch("dohc-local-automations-"), "local");
     await rename(local, elsewhere);

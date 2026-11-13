@@ -55,7 +55,6 @@ async function harness() {
     remote: { serverUrl: credentials.serverUrl, ownerUserId: credentials.userId },
     sharedChannels: [],
   };
-  // Another workspace open in a second window of the same account.
   const second: RegistryEntry = {
     ...workspace,
     workspaceId: "second",

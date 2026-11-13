@@ -367,7 +367,6 @@ describe("the automation run store", () => {
     const { runs, unreadable } = await store.runsOf(AUTOMATION, "atc_one");
     expect(unreadable).toBe(false);
     expect(runs).toHaveLength(2);
-    // A field named __proto__ stays a field.
     expect(runs[0]!.applied[0]!.writes[0]).toMatchObject({
       field: "__proto__",
       before: 1,
@@ -377,7 +376,6 @@ describe("the automation run store", () => {
       runs: [],
       unreadable: false,
     });
-    // A dataset Undo's request is read back, and a whole save keeps it.
     const request = {
       datasetId: "d",
       tableId: "t",
@@ -479,7 +477,6 @@ describe("the automation run store", () => {
       },
     ];
     await store.updateState(read, { undo: "started" });
-    // An Undo that started keeps its claim in run history, as a save that starts one does.
     await expect(store.unfinishedUndos()).resolves.toEqual(new Set(["atc_one"]));
     await store.recordUndoCalls(read, [read.keySeed], deletes);
     await store.updateState(read, { settled: true });
@@ -609,7 +606,6 @@ describe("the automation run store", () => {
     }
     expect(batches).toBe(1);
     await expect(readdir(join(root, ".dohc", "local", "automations", "runs"))).resolves.toEqual([]);
-    // A workspace with no saved runs has nothing to expire, and gains no folder.
     const empty = await createTestScratch("dohc-automation-runs-");
     await expect(
       createAutomationRunStore(testStoreFolder(empty)).expire(1000, async () => "gone", null),
@@ -622,7 +618,6 @@ describe("the automation run store", () => {
     const store = createAutomationRunStore(testStoreFolder(root));
     const saved = { ...run("atc_one", null, 1), steps: [], applied: [] };
     await store.save(saved);
-    // A Find leaves the records it found; an If, the branch it took.
     const found = {
       ordinal: 0,
       effects: [],

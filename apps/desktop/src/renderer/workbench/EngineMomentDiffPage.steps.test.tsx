@@ -99,8 +99,6 @@ it("steps to the older and newer change of the file with its arrows and [ and ]"
   expect(open).toHaveBeenLastCalledWith("m-2", "docs/a.md");
 });
 
-// A name can resolve while the next change loads, and the page reads the
-// change it shows again. Focus still waits for the change the step opened.
 it("returns focus to the arrow when a name resolves before the next change loads", async () => {
   let notify!: (event: { workspaceId: string }) => void;
   let label = "Someone you shared with";
@@ -133,8 +131,6 @@ it("returns focus to the arrow when a name resolves before the next change loads
   );
 });
 
-// If the tab opens another change before the step's change, a later visit to
-// the step's change leaves focus where it is.
 it.each([
   ["another change", "workspace", "m-5"],
   ["the same change in another workspace", "other", "m-1"],

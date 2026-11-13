@@ -86,7 +86,6 @@ describe("automation steps a share would stop", () => {
     );
     expect(screen.getByTestId("share-create").textContent).toBe("Invite anyway");
 
-    // Another access level is another share: its own check, and no warning for View.
     await chooseAccess(user, "view");
     expect(screen.queryByTestId("share-automation-warning")).toBeNull();
     await chooseAccess(user, "edit");

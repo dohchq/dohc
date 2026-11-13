@@ -262,7 +262,6 @@ describe("share grants", () => {
       principalKind: "user",
       generation: 1,
     });
-    // The recipient never learns the granter's workspace id.
     expect(received[0]).not.toHaveProperty("workspaceId");
 
     const metadata = await json(await h(request(RECIPIENT, "/sync/shares/share-0")));
@@ -341,8 +340,6 @@ describe("share grants", () => {
     expect(self.status).toBe(400);
     expect((await json(self)).code).toBe("self_share");
 
-    // A self-share addressed by the granter's own email is refused with the
-    // same code (the email resolves to the granter's account).
     const selfByEmail = await h(
       request(
         GRANTER,
@@ -377,14 +374,10 @@ describe("share grants", () => {
     expect(known.status).toBe(200);
     const knownBody = await json(known);
     const unknownBody = await json(unknown);
-    // Neither reply leaks the recipient's account existence: same shape, same
-    // keys, and neither carries a recipientUserId.
     expect(knownBody).not.toHaveProperty("recipientUserId");
     expect(unknownBody).not.toHaveProperty("recipientUserId");
     expect(Object.keys(knownBody).sort()).toEqual(Object.keys(unknownBody).sort());
 
-    // The unknown email is recorded as a pending invite: unclaimed, it is not
-    // yet readable by anyone, but it survives as an honest grant.
     const pendingShareId = unknownBody.shareId as string;
     const beforeClaim = await h(request(RECIPIENT, `/sync/shares/${pendingShareId}/log?since=0`));
     expect(beforeClaim.status).toBe(404);
@@ -483,12 +476,8 @@ describe("share grants", () => {
     expect(serialized).not.toContain("private/hidden.md");
     expect(serialized).not.toContain("secret chat");
     expect(serialized).not.toContain(sha256("ciphertext"));
-    // workspace.init's stored payload is served as an empty object — nothing
-    // from the granter's payload rides along.
     expect((ops[0] as unknown as { payload: unknown }).payload).toEqual({});
 
-    // Non-recipient users (including the granter on the recipient route and
-    // a stranger) are indistinguishable from a nonexistent share.
     const missing = await denialBytes(
       await h(request(STRANGER, "/sync/shares/share-404/log?since=0")),
     );
@@ -500,7 +489,6 @@ describe("share grants", () => {
     );
     expect(await denialBytes(await h(request(STRANGER, "/sync/shares/share-0")))).toBe(missing);
 
-    // Unauthenticated probes stay 401 (auth precedes share lookups).
     expect((await h(request(null, "/sync/shares/share-0/log?since=0"))).status).toBe(401);
   });
 
@@ -545,7 +533,6 @@ describe("share grants", () => {
     expect(
       await denialBytes(await h(request(RECIPIENT, `/sync/shares/share-0/blobs/${cipherSha}`))),
     ).toBe(unknown);
-    // A stranger probing an allowed hash gets the same denial too.
     expect(
       await denialBytes(await h(request(STRANGER, `/sync/shares/share-0/blobs/${sharedSha}`))),
     ).toBe(unknown);
@@ -648,7 +635,6 @@ describe("share grants", () => {
       revokedAtMs: null,
     });
 
-    // The recipient cannot revoke; only the granter can.
     const recipientRevoke = await h(
       request(RECIPIENT, "/sync/shares/share-0/revoke", { method: "POST" }),
     );
@@ -656,7 +642,6 @@ describe("share grants", () => {
 
     const revoke = await h(request(GRANTER, "/sync/shares/share-0/revoke", { method: "POST" }));
     expect(revoke.status).toBe(200);
-    // Idempotent for the granter.
     expect(
       (await h(request(GRANTER, "/sync/shares/share-0/revoke", { method: "POST" }))).status,
     ).toBe(200);
@@ -677,8 +662,6 @@ describe("share grants", () => {
       expect(await denialBytes(await h(request(STRANGER, path)))).toContain('"code":"not_found"');
     }
 
-    // Revoked shares vanish from the recipient's list but stay (stamped) in
-    // the granter's management list.
     const recipientList = await json(await h(request(RECIPIENT, "/sync/shares")));
     expect(recipientList.received).toEqual([]);
     const granterList = await json(await h(request(GRANTER, "/sync/shares")));
@@ -763,7 +746,6 @@ describe("share grants", () => {
     await appendOps(h, ops);
     await createShare(h);
 
-    // Page size 2: first pages are all filtered out but nextCursor advances.
     const refusedPage = await json(
       await h(request(RECIPIENT, "/sync/shares/share-0/log?since=0&limit=2")),
     );

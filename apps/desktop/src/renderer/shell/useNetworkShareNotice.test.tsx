@@ -14,8 +14,6 @@ afterEach(() => {
   localStorage.clear();
 });
 
-// The shell's error hook and the network-share notice, as the workspace
-// shell wires them.
 function mountShell(
   workspaceId: string,
   onNetworkShare: boolean,
@@ -60,14 +58,12 @@ describe("useNetworkShareNotice", () => {
     });
     first.unmount();
 
-    // A workspace switch remounts the shell: the row again, no second toast.
     const second = mountShell("ws-nas", true);
     expect(second.result.current.shell.shellErrors).toMatchObject([
       { kind: "network-share", seen: true },
     ]);
     second.unmount();
 
-    // Another workspace gets its own toast.
     const other = mountShell("ws-team", true);
     expect(other.result.current.shell.shellErrors).toMatchObject([
       { ...networkShareNotice("darwin"), seen: false },

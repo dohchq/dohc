@@ -25,8 +25,6 @@ describe("deriveSyncStatus", () => {
     );
   });
 
-  // A retry in flight does not undo a failure: the pass that is running is
-  // the one that has not worked yet.
   it("shows a failed sync over a pass in flight, and a conflict over both", () => {
     const failing = { ...base, inFlight: true, syncFailed: true };
     expect(deriveSyncStatus(failing).state).toBe("sync-failed");

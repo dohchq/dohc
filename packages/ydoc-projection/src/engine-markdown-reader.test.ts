@@ -142,7 +142,6 @@ it("positively proves body expiry while metadata-only staleness still refuses", 
   try {
     bind(doc, source);
     doc.getMap("meta").set("dohcMarkdownSourceReader", 1);
-    // Exercise a body edit that retains all source metadata.
     updateYFragment(doc, doc.getXmlFragment("body"), tree(edited), {
       mapping: new Map(),
       isOMark: new Map(),

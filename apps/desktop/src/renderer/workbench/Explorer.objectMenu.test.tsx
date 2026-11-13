@@ -6,11 +6,6 @@ import type { DohcDesktopBridge, ExplorerMenuEntry } from "../../ipc/bridgeContr
 import { deferred } from "../../testing/deferred";
 import { Explorer, type ExplorerProps } from "./Explorer";
 
-// The Explorer's menu draws what main returns and nothing else, opens from
-// the pointer and from the keyboard, and gives focus back to its row. A
-// rename, move or delete main recorded says so with Undo, and a menu never
-// outlives its workspace.
-
 const RENAME: ExplorerMenuEntry = { kind: "item", label: "Rename", id: "rename" };
 const DELETE: ExplorerMenuEntry = { kind: "item", label: "Delete", id: "delete" };
 const PIN: ExplorerMenuEntry = { kind: "item", label: "Pin", id: "pin" };
@@ -122,7 +117,6 @@ function shownPaths(): (string | undefined)[] {
   return screen.getAllByTestId("tree-row").map((candidate) => candidate.dataset.path);
 }
 
-// Each row's label, without the shortcut drawn after it.
 function labels(): (string | null | undefined)[] {
   return screen.getAllByRole("menuitem").map((item) => item.firstElementChild?.textContent);
 }
@@ -157,7 +151,6 @@ describe("the Explorer's menu", () => {
     expect(screen.getAllByRole("separator")).toHaveLength(1);
     expect(menu.style.left).toBe("30px");
     expect(menu.style.top).toBe("40px");
-    // The tree's own keys, shown beside the rows that run them.
     expect(screen.getByRole("menuitem", { name: "Rename" }).getAttribute("aria-keyshortcuts")).toBe(
       "F2",
     );
@@ -232,7 +225,6 @@ describe("the Explorer's menu", () => {
       expect(menu.style.left).toBe("12px");
       expect(menu.style.top).toBe("128px");
       expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "Rename" }));
-      // The browser's own contextmenu event for the key opens no second menu.
       fireEvent.contextMenu(target);
       await act(async () => {});
       expect(bridge.readExplorerMenu).toHaveBeenCalledOnce();
@@ -249,7 +241,6 @@ describe("the Explorer's menu", () => {
       expect(screen.queryByRole("menu")).toBeNull();
       await waitFor(() => expect(document.activeElement).toBe(row("plan.md")));
 
-      // A right-click after the key presses its pointer first, and opens.
       fireEvent.pointerDown(row("notes.md"));
       fireEvent.contextMenu(row("notes.md"));
       await screen.findByRole("menu", { name: "notes.md" });
@@ -368,8 +359,6 @@ describe("Undo after a rename, a move or a delete", () => {
     await waitFor(() => expect(props.onNotice).toHaveBeenCalledWith("Restored plan.md"));
   });
 
-  // Each Undo runs before a listing has shown its change, so the next
-  // listing looks as it did before the change.
   it("shows what an immediate Undo put back once the next listing lands", async () => {
     const props = explorerProps();
     const view = render(<Explorer {...props} />);
@@ -487,8 +476,6 @@ describe("Undo after a rename, a move or a delete", () => {
     );
   });
 
-  // The renamed file went back, so its tabs follow it. Only another page's
-  // links stayed behind, and they report on their own.
   it("finishes a rename's Undo that left only another page's links, and names that page", async () => {
     const reason = "dohc could not restore links in source.md. Update those links yourself.";
     bridge.undoHistoryOperation.mockResolvedValueOnce({
@@ -531,7 +518,6 @@ describe("Undo after a rename, a move or a delete", () => {
     expect(props.onPathsChanged).not.toHaveBeenCalled();
   });
 
-  // Main's text stays in the cause, for Copy.
   it.each([
     [
       { code: "old-path-occupied", path: "notes.md" } as const,
@@ -643,8 +629,6 @@ describe("Undo after a rename, a move or a delete", () => {
   });
 });
 
-// After main answers, the Explorer asks for a listing. That listing settles
-// the change whatever paths it holds; one already in flight does not.
 describe("a listing after main's answer", () => {
   const settling = (overrides: Partial<ExplorerProps> = {}) =>
     explorerProps({ listingRequest: 1, onRefresh: vi.fn(() => 2), ...overrides });

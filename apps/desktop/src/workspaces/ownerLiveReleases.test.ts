@@ -67,7 +67,6 @@ it("keeps a damaged record without Try again, skips an unreadable one, and sets 
         retry: false,
       },
     ]);
-    // A second start with the same content keeps no second copy.
     await createUnwrittenReleases(() => file).list("owner");
     const aside = await asideFiles(file);
     expect(aside).toHaveLength(1);
@@ -205,7 +204,6 @@ it("keeps each record's recovery package until that record is removed by its own
   });
   await reopened.remove("owner", "plan", { ...release("plan"), snapshot: "6".repeat(64) });
   expect(await reopened.recovery("owner", "plan")).toBe("plan package");
-  // Another document at the same path keeps its own record.
   await reopened.remove("owner", "plan", release("plan"));
   expect((await reopened.list("owner")).map((row) => row.objectId)).toEqual(["notes"]);
   expect(await reopened.recovery("owner", "plan")).toBeNull();
@@ -240,7 +238,6 @@ it("keeps a record the engine no longer holds, without Try again, and no later r
   expect(await reopened.list("owner")).toEqual([{ ...release("plan"), retry: false }]);
 });
 
-// An engine store reset can rebuild a document with the identical binding; its new queue has another head.
 it("refuses a package from another queue under the identical binding, even while Try again remains", async () => {
   const file = join(await createTestScratch("dohc-unwritten-rebuilt-"), "owner-live-releases.json");
   const releases = createUnwrittenReleases(() => file);
@@ -252,7 +249,6 @@ it("refuses a package from another queue under the identical binding, even while
   expect(await createUnwrittenReleases(() => file).list("owner")).toEqual([release("plan")]);
 });
 
-// Restoring an earlier engine state can repeat the binding and the head with fewer edits behind it.
 it("refuses a package of other edits under the identical binding and head, and keeps the stored one", async () => {
   const file = join(
     await createTestScratch("dohc-unwritten-restored-"),
@@ -272,7 +268,6 @@ it("refuses a package of other edits under the identical binding and head, and k
   const reopened = createUnwrittenReleases(() => file);
   expect(await reopened.recovery("owner", "plan")).toBe("package of E1 and E2");
   expect(await reopened.list("owner")).toEqual([both]);
-  // Save's removal of a record of other edits ends nothing.
   await reopened.remove("owner", "plan", first);
   expect(await reopened.list("owner")).toEqual([both]);
   await reopened.remove("owner", "plan", both);

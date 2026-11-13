@@ -316,8 +316,6 @@ describe("conflictCountCopy", () => {
   it("states the exact count only when the listing is complete", () => {
     expect(conflictCountCopy(1, false)).toBe("One file has two copies.");
     expect(conflictCountCopy(3, false)).toBe("3 files have two copies.");
-    // A continuation means more conflicts exist past the window, so an exact
-    // "3 files" would be under the truth.
     expect(conflictCountCopy(1, true)).toBe("More than one file has two copies.");
     expect(conflictCountCopy(3, true)).toBe("More than 3 files have two copies.");
   });
@@ -368,7 +366,6 @@ describe("ConflictReviewDialog paging", () => {
     await settle();
     screen.getByText("2 files have two copies.", { exact: false });
     expect(screen.getAllByTestId("version-conflict")).toHaveLength(2);
-    // The window is complete now: the affordance goes away.
     expect(screen.queryByTestId("conflict-list-show-more")).toBeNull();
     expect(bridgeMock.listWorkspaceVersionConflicts.mock.calls).toEqual([
       [{ workspaceId: "ws-1" }],
@@ -455,9 +452,6 @@ describe("ConflictReviewDialog paging", () => {
   });
 
   it("a replaced window does not inherit the abandoned page's Loading state", async () => {
-    // Show more hangs; a resolution replaces the window with a continuation.
-    // The new window's button must be usable immediately — not "Loading…"
-    // until a request that may never settle does.
     bridgeMock.listWorkspaceVersionConflicts.mockImplementation(
       async (payload: { afterConflictId?: string }) => {
         if (payload.afterConflictId === undefined) {
@@ -518,7 +512,6 @@ describe("ConflictReviewDialog paging", () => {
     fireEvent.click(screen.getByTestId("conflict-list-show-more"));
     await settle();
     screen.getByRole("alert");
-    // The window is unchanged and the button remains for a retry.
     expect(screen.getAllByTestId("version-conflict")).toHaveLength(1);
     const showMore = screen.getByTestId("conflict-list-show-more") as HTMLButtonElement;
     expect(
@@ -806,9 +799,6 @@ describe("VersionComparePage paging", () => {
     await settle();
     screen.getByTestId("version-compare-file");
 
-    // The replaced window must not inherit the abandoned page's pending
-    // flag: the stale request is still unsettled here, and the button must
-    // already be usable.
     const showMore = screen.getByTestId("version-compare-show-more") as HTMLButtonElement;
     expect(showMore.textContent).toBe("Show more files");
     expect(showMore.disabled).toBe(false);
@@ -1125,7 +1115,6 @@ describe("ConflictReviewDialog waiting version", () => {
         .compareDocumentPosition(screen.getAllByTestId("version-conflict-side-text")[0]!) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
-    // Coordinates stay out of the card.
     expect(screen.getByTestId("conflict-review-dialog").textContent).not.toMatch(
       /computer-d|object-1/,
     );
@@ -1168,7 +1157,6 @@ describe("ConflictReviewDialog waiting version", () => {
     expect(bridgeMock.listWorkspaceVersionConflicts).toHaveBeenLastCalledWith({
       workspaceId: "ws-1",
     });
-    // No toast or Notices row: the card is the only place it shows.
     expect(onError).not.toHaveBeenCalled();
   });
 
@@ -1250,7 +1238,6 @@ describe("ConflictReviewDialog waiting version", () => {
           ? { conflicts: [syncConflict("c-1")], nextAfterConflictId: "c-1" }
           : { conflicts: [waiting("c-2")], nextAfterConflictId: null },
     );
-    // The reread started with one row; its answer must not shrink the list.
     await act(async () => {
       answer({ conflicts: [syncConflict("c-1")], nextAfterConflictId: "c-1" });
     });

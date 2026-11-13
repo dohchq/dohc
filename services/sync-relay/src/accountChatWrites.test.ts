@@ -48,7 +48,6 @@ async function fixture() {
     text: "# Trip\n",
     objectId: "object-readme",
   });
-  // What the relay does with what the copy pushes.
   let relay: "accept" | "refuse" | "hold" = "accept";
   const pushed = (row: PhoneWriteRow) => {
     if (relay === "accept") {
@@ -100,7 +99,6 @@ async function fixture() {
     },
   };
   const chats = new ChatsLiveAdapter(engine.chats, WORKSPACE, { workspaceId: WORKSPACE });
-  // A clock that moves only while publication waits between attempts.
   let ms = 0;
   const authorize = vi.fn(async () => undefined);
   const run = (write: PhoneWrite, displayName = "Ana") =>
@@ -140,7 +138,6 @@ async function fixture() {
     failSync: (error: Error | null) => {
       syncError = error;
     },
-    /** Holds the next syncs. `reached` resolves once one is waiting. */
     holdSync: () => {
       let reached!: () => void, release!: () => void;
       const waiting = new Promise<void>((resolve) => {
@@ -176,7 +173,6 @@ const react = (operationId: string, messageId: string): PhoneWrite => ({
   args: { operationId, messageId, emoji: "👍", state: "added" },
 });
 const missing = (reason: string) => ({ ok: false, reason, refusal: "missing" });
-// An answer with the ID it names put aside, to compare a hidden target's answer with a missing one's.
 const shape = (answer: PhoneWriteAnswer, id: string) =>
   JSON.stringify(answer).replaceAll(id, "<id>");
 
@@ -240,7 +236,6 @@ describe("a phone's chat write through the server's copy", () => {
       "access is checked before the row, each stage, and the answer",
     ).toBeGreaterThanOrEqual(4);
 
-    // A retry answers from the row and writes nothing, whatever the account is called now.
     expect(await f.run(post, "Ana Maria")).toEqual(answer);
     expect(f.engine.writes).toHaveLength(1);
   });
@@ -332,7 +327,6 @@ describe("a phone's chat write through the server's copy", () => {
     });
     f.relay("accept");
 
-    // The engine's refusal of the first stage: nothing of the write can publish, and its words stay on the server.
     f.engine.failing.set(
       CHATS_METHOD.messageSend,
       new EngineRequestError(
@@ -351,7 +345,6 @@ describe("a phone's chat write through the server's copy", () => {
     expect(f.operation("op-engine")).toMatchObject({ stage: "refused" });
     f.engine.failing.clear();
 
-    // Another reply answered the poll first: this reply stays, and the answer names the winner.
     await f.chats.sendMessage({
       workspaceId: WORKSPACE,
       threadId: "thread-stay",
@@ -454,7 +447,6 @@ describe("a phone's chat write through the server's copy", () => {
       expect(answered, label).toEqual(missing(reason(hiddenId)));
       expect(shape(answered, hiddenId), label).toBe(shape(await f.run(absent), absentId));
     }
-    // A Group no ID names answers as the read of one does.
     for (const write of [
       { operation: "post", args: { operationId: "op-9", groupId: "channel-nowhere", body: "Hi" } },
       {
@@ -509,7 +501,6 @@ describe("a phone's chat write through the server's copy", () => {
     for (const hide of [false, true]) {
       const f = await fixture();
       await seed(f.chats);
-      // A thread on a page, with an agent's question.
       const onPage = await f.chats.createThread({
         workspaceId: WORKSPACE,
         title: "Plan",
@@ -540,7 +531,6 @@ describe("a phone's chat write through the server's copy", () => {
         message_state: "published",
       });
       f.engine.failing.clear();
-      // The relay last saw the page's file at a secret path.
       if (hide)
         f.raw
           .prepare(`INSERT INTO sync_relay_object_moments (workspace_id, object_id, relay_seq, moment_id, version_id, path, recorded_at_ms)
@@ -743,7 +733,6 @@ describe("a phone's chat write through the server's copy", () => {
     await seed(f.chats);
     const write = reply("op-locked", "thread-stay");
     const ids = phoneWriteIds(OWNER, WORKSPACE, "op-locked");
-    // The first attempt's send is lost.
     f.engine.failing.set(CHATS_METHOD.messageSend, new Error("the engine went away"));
     expect(await f.run(write)).toMatchObject({ ok: true, state: "pending" });
     const errors: unknown[] = [];
@@ -759,7 +748,6 @@ describe("a phone's chat write through the server's copy", () => {
         }),
       });
 
-    // The phone retries while the engine still fails, and the retry holds the write while its copy syncs.
     const held = f.holdSync();
     const retry = f.run(write);
     await held.reached;
@@ -1037,14 +1025,12 @@ describe("an answer whose decision the engine refused", () => {
       stage: "publishing",
       message_state: "pending",
     });
-    // Another write on the same copy, unpublished too.
     expect(await f.run(reply("op-other", "thread-stay"))).toMatchObject({
       ok: true,
       state: "pending",
     });
     expect(resolves(f)).toBe(1);
 
-    // A background replay, then a retry, while the engine would take the decision now: neither asks for it.
     f.engine.failing.clear();
     expect(await replay()).toBe(true);
     expect(resolves(f)).toBe(1);
@@ -1059,7 +1045,6 @@ describe("an answer whose decision the engine refused", () => {
     expect(resolves(f)).toBe(1);
     expect(errors).toEqual([]);
 
-    // The other write is still unfinished, and saves.
     expect(
       f.storage
         .listUnfinishedAccountOperations({ workspaceId: WORKSPACE })

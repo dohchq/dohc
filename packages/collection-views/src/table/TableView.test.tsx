@@ -120,7 +120,6 @@ describe("paused table editing", () => {
     view.rerender(table(true));
     expect(screen.getByRole("combobox")).toBe(input);
     expect(input.matches(":disabled")).toBe(true);
-    // A paused picker takes no pick, no key, and no press outside.
     fireEvent.click(screen.getByRole("option", { name: "Create delta" }));
     fireEvent.keyDown(input, { key: "Enter" });
     fireEvent.keyDown(input, { key: "Tab" });
@@ -280,7 +279,6 @@ describe("field marks", () => {
     act(() => done.blur());
     act(() => done.focus());
     expect(words.hidden).toBe(false);
-    // Escape on the sort control closes the words and nothing around them.
     const outer = vi.fn();
     document.addEventListener("keydown", outer);
     fireEvent.keyDown(done, { key: "Escape" });
@@ -289,8 +287,6 @@ describe("field marks", () => {
     expect(outer).not.toHaveBeenCalled();
     act(() => done.blur());
 
-    // Words the pointer opened close on Escape wherever focus is, and
-    // leaving focus does not close words the pointer holds open.
     fireEvent.mouseEnter(header);
     act(() => done.focus());
     act(() => done.blur());
@@ -322,13 +318,11 @@ describe("field marks", () => {
     fireEvent.keyDown(title, { key: "Escape" });
     document.removeEventListener("keydown", outer);
     expect([words(title).hidden, words(done).hidden]).toEqual([true, true]);
-    // The focused mark still keeps the key from the surface around it.
     expect(outer).not.toHaveBeenCalled();
   });
 });
 
 describe("selection and keys", () => {
-  // Column order: title 0, estimate 1, done 2, status 3, tags 4, blocks 5, Mark paid 6.
   const schema = makeSchema([
     { name: "title", type: "text" },
     { name: "estimate", type: "number" },
@@ -372,7 +366,6 @@ describe("selection and keys", () => {
       if (!found) throw new Error(`no cell at row ${row}, column ${column}`);
       return found;
     };
-    /** The selected cell as [row, column], read from the grid as assistive technology reads it. */
     const selection = () => {
       const active = grid.querySelector<HTMLElement>('[aria-selected="true"]');
       if (!active) return null;
@@ -387,7 +380,6 @@ describe("selection and keys", () => {
       modifiers: { shiftKey?: boolean; ctrlKey?: boolean; metaKey?: boolean } = {},
     ) => fireEvent.keyDown(grid, { key, ...modifiers });
     const editorInput = () => grid.querySelector<HTMLInputElement>("[data-cell-editor] input");
-    // A click on the checkbox cell's own padding selects it and opens nothing.
     const selectDone = (row = 0) => fireEvent.click(cell(row, DONE));
     return { view, table, grid, cell, selection, press, editorInput, selectDone, onCellChange };
   }
@@ -431,7 +423,6 @@ describe("selection and keys", () => {
 
   it("moves the selection with the arrow keys and stops at the edges", () => {
     const { selection, press, selectDone, grid } = setup();
-    // With nothing selected, an arrow key starts at the first cell.
     expect(press("ArrowDown")).toBe(false);
     expect(selection()).toEqual([0, 0]);
     expect(document.activeElement).toBe(grid);
@@ -448,7 +439,6 @@ describe("selection and keys", () => {
     expect(selection()).toEqual([2, 0]);
     for (let step = 0; step < 4; step += 1) press("ArrowUp");
     expect(selection()).toEqual([0, 0]);
-    // A shortcut that uses an arrow key stays with the app.
     expect(press("ArrowDown", { ctrlKey: true })).toBe(true);
     expect(selection()).toEqual([0, 0]);
   });
@@ -471,7 +461,6 @@ describe("selection and keys", () => {
     press("ArrowLeft");
     expect(grid.scrollLeft).toBe(256);
     press("ArrowLeft");
-    // The first field brings the Open gutter back with it.
     expect(grid.scrollLeft).toBe(0);
     expect(selection()).toEqual([0, 0]);
   });
@@ -483,7 +472,6 @@ describe("selection and keys", () => {
     fireEvent.keyDown(editorInput()!, { key: "Escape" });
     expect(editorInput()).toBeNull();
     expect(onCellChange).not.toHaveBeenCalled();
-    // One Escape closed the editor only. The grid has the keys again.
     expect(selection()).toEqual([0, 0]);
     expect(document.activeElement).toBe(grid);
 
@@ -553,7 +541,6 @@ describe("selection and keys", () => {
     for (let step = 0; step < 4; step += 1) press("Tab");
     expect(selection()).toEqual([2, 6]);
     expect(press("Tab")).toBe(true);
-    // With nothing selected, Tab passes through the grid.
     press("Escape");
     expect(press("Tab")).toBe(true);
     expect(selection()).toBeNull();
@@ -562,7 +549,6 @@ describe("selection and keys", () => {
   it("replaces a text-like value with a typed character, and leaves other cells and shortcuts alone", () => {
     const { press, selectDone, selection, editorInput, onCellChange } = setup();
     selectDone();
-    // A checkbox takes no text.
     press("x");
     expect(editorInput()).toBeNull();
     press("ArrowLeft");
@@ -575,7 +561,6 @@ describe("selection and keys", () => {
     );
     expect(selection()).toEqual([1, 1]);
 
-    // Ctrl+V is the app's key.
     expect(press("v", { ctrlKey: true })).toBe(true);
     expect(document.querySelector("[data-cell-editor]")).toBeNull();
   });
@@ -612,7 +597,6 @@ describe("selection and keys", () => {
       value: null,
     });
 
-    // An empty cell has nothing to clear, and a paused table changes nothing.
     onCellChange.mockClear();
     view.rerender(table({ records: [makeRecord("rec-a", [indexedValue("tags", [])])] }));
     press("Delete");
@@ -646,7 +630,6 @@ describe("selection and keys", () => {
     expect(press(" ")).toBe(false);
     expect(onCellChange).toHaveBeenCalledTimes(2);
 
-    // On any other cell Space changes nothing, and never scrolls the table.
     press("ArrowLeft");
     expect(press(" ")).toBe(false);
     expect(onCellChange).toHaveBeenCalledTimes(2);
@@ -674,7 +657,6 @@ describe("selection and keys", () => {
     expect(selection()).toEqual([0, 1]);
     expect(onCellChange).not.toHaveBeenCalled();
 
-    // Escape still cancels, from the input or from the grid.
     act(() => grid.focus());
     press("Escape");
     expect(editorInput()).toBeNull();
@@ -702,14 +684,12 @@ describe("selection and keys", () => {
     const rowB = cell(1, 0).firstElementChild;
     press("ArrowLeft");
     press("ArrowLeft");
-    // Moving the selection redraws the ring. The cells stay the same nodes.
     expect(cell(1, 0).firstElementChild).toBe(rowB);
     expect(selection()).toEqual([1, 0]);
 
     view.rerender(table({ records: taskRecords(["c", "a", "b"]) }));
     expect(selection()).toEqual([2, 0]);
     expect(cell(2, 0).textContent).toBe("Task b");
-    // A record that leaves takes the selection with it.
     view.rerender(table({ records: taskRecords(["c", "a"]) }));
     expect(selection()).toBeNull();
     expect(grid.hasAttribute("aria-activedescendant")).toBe(false);
@@ -771,7 +751,6 @@ describe("selection and keys", () => {
     ]);
     expect(screen.queryByText(/^f-\d$/)).toBeNull();
     expect(screen.getByRole("checkbox", { name: "Shipped" })).toBeDefined();
-    // The button cell's fallback text is the name too: once in the header, once in the cell.
     expect(screen.getAllByText("Mark paid")).toHaveLength(2);
     expect(screen.getByRole("button", { name: "Open Invoice for rec-1" })).toBeDefined();
 
@@ -837,7 +816,6 @@ describe("pickers", () => {
       if (!found) throw new Error(`no cell at row ${row}, column ${column}`);
       return found;
     };
-    /** Opens a cell's editor as one click does. */
     const open = (row: number, column: number) => fireEvent.click(cell(row, column));
     const selection = () => {
       const active = grid.querySelector<HTMLElement>('[aria-selected="true"][role="gridcell"]');
@@ -884,7 +862,6 @@ describe("pickers", () => {
     expect(editor()?.style.width).toBe("250px");
     expect(editor()?.style.top).toBe("32px");
     fireEvent.keyDown(screen.getByRole("grid", { name: "due" }), { key: "Escape" });
-    // A text cell is edited in the cell, at the column's width.
     open(0, 0);
     expect(editor()?.className).not.toContain("dohc-pop-in");
     expect(editor()?.style.width).toBe("260px");
@@ -901,7 +878,6 @@ describe("pickers", () => {
     open(0, TAGS);
     expect(editor()?.style.left).toBe("352px");
     fireEvent.keyDown(search(), { key: "Escape" });
-    // Scrolled right, the visible part of the table moves with it.
     grid.scrollLeft = 300;
     open(0, DUE);
     expect(editor()?.style.left).toBe("620px");
@@ -994,7 +970,6 @@ describe("pickers", () => {
     open(0, TAGS);
     fireEvent.keyDown(search(), { key: "Tab", shiftKey: true });
     expect(selection()).toEqual([0, STATUS]);
-    // Nothing changed in the second edit, so nothing saved.
     expect(onCellChange).toHaveBeenCalledOnce();
   });
 
@@ -1012,7 +987,6 @@ describe("pickers", () => {
     const { open, option, selection, editor, saved } = setup();
     open(0, TAGS);
     fireEvent.click(option("beta"));
-    // A press on the picker itself is not a press away.
     fireEvent.pointerDown(screen.getByRole("combobox"));
     expect(editor()).not.toBeNull();
     fireEvent.pointerDown(document.body);
@@ -1038,7 +1012,6 @@ describe("pickers", () => {
     open(0, TAGS);
     fireEvent.click(option("beta"));
     fireEvent.pointerDown(document.body);
-    // The cell still shows the indexed ["alpha"]. The reopened picker shows the save.
     open(0, TAGS);
     expect(chips()).toEqual(["alpha", "beta"]);
     fireEvent.click(option("alpha"));
@@ -1050,7 +1023,6 @@ describe("pickers", () => {
       value: ["beta"],
       previousValues: [["alpha"], ["alpha", "beta"]],
     });
-    // Another record's cell has its own saves.
     open(1, TAGS);
     expect(chips()).toEqual(["alpha"]);
   });
@@ -1060,7 +1032,6 @@ describe("pickers", () => {
     open(0, TAGS);
     fireEvent.click(option("beta"));
     fireEvent.keyDown(search(), { key: "Escape" });
-    // Nothing saved yet: Escape dropped the pick, so Delete clears the indexed ["alpha"].
     press("Delete");
     expect(onCellChange).toHaveBeenLastCalledWith({
       recordId: "rec-a",
@@ -1069,7 +1040,6 @@ describe("pickers", () => {
       value: [],
       previousValues: [["alpha"]],
     });
-    // The index still shows ["alpha"], and the picker opens on the clear.
     open(0, TAGS);
     expect(chips()).toEqual([]);
     fireEvent.click(option("gamma"));
@@ -1081,7 +1051,6 @@ describe("pickers", () => {
       value: ["gamma"],
       previousValues: [["alpha"], []],
     });
-    // A saved pick the index lacks is cleared too, and an empty selection has nothing to clear.
     press("Escape");
     open(0, TAGS);
     fireEvent.keyDown(search(), { key: "Escape" });
@@ -1207,7 +1176,6 @@ describe("pickers", () => {
     expect(onOpenLink).toHaveBeenCalledOnce();
     cleanup();
 
-    // Without a way to open links, the whole cell edits, as before.
     const plain = setup();
     expect(within(plain.cell(0, LINK)).queryByRole("link")).toBeNull();
     plain.open(0, LINK);

@@ -79,7 +79,6 @@ it("flags a note the editor cannot import", () => {
 
 it("remembers a verdict by the digest it was given", () => {
   expect(isLossyMarkdownCached("digest-a", "<details>\n\nHidden.\n</details>\n")).toBe(true);
-  // The same digest answers from memory, whatever text comes with it.
   expect(isLossyMarkdownCached("digest-a", "Plain text.\n")).toBe(true);
   expect(isLossyMarkdownCached("digest-b", "Plain text.\n")).toBe(false);
 });
@@ -164,7 +163,6 @@ it("checks a note up to the engine's size limit, and holds a larger one without 
   const respelled = "Title\n=====\n\n";
   const atLimit = respelled + "a".repeat(LIVE_MARKDOWN_MAX_BYTES - respelled.length);
   const overLimit = `${atLimit}a`;
-  // Fewer characters than the limit, and one byte over it in UTF-8.
   const multibyte = respelled + "é".repeat((LIVE_MARKDOWN_MAX_BYTES + 1 - respelled.length) / 2);
   expect(multibyte.length).toBeLessThan(LIVE_MARKDOWN_MAX_BYTES);
   expect(new TextEncoder().encode(multibyte).length).toBe(LIVE_MARKDOWN_MAX_BYTES + 1);

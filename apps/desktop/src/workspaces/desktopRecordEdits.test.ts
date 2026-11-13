@@ -138,7 +138,6 @@ it("names main's person on a hand-made record and the run's person on an automat
     onCaptureSettled: () => () => undefined,
     signal: new AbortController().signal,
   });
-  // A run Bob's synced edit started, a scheduled run, and an agent working for this person.
   const forBob = { ...automation, onBehalfOf: "bob" };
   const scheduled = {
     kind: "automation",

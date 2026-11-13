@@ -121,7 +121,6 @@ function sha256(content: string): string {
   return createHash("sha256").update(content).digest("hex");
 }
 
-// Same minimal share-route double as sharedView.test.ts.
 class FakeShareRelay {
   ops: Array<Record<string, unknown>> = [];
   blobs = new Map<string, Buffer>();
@@ -233,7 +232,6 @@ describe("mount labels", () => {
     // classifier would suppress (prod.env -> secret).
     expect(allocate("prod.env@example.com")).toBe("prod-env");
     expect(allocate(".env@example.com")).toBe("env");
-    // A group's folder is labeled by its channel name.
     expect(
       allocateShareMountLabel({
         storedMounts: [],
@@ -290,7 +288,6 @@ describe("mount labels", () => {
       mountStoreWorkspaceIdFor("host", "a-s"),
     );
 
-    // Two different shares in one host stay distinct too.
     expect(mountStoreWorkspaceIdFor("host-a", "share-2")).not.toBe(a);
   });
 
@@ -585,7 +582,6 @@ describe("refreshShareMount", () => {
     ).rejects.toThrow(/not a real directory/);
     expect(existsSync(join(elsewhere, "alex"))).toBe(false);
 
-    // Symlinked label directory inside a real shared-with-me.
     const hostB = await tempHostRoot();
     await mkdir(join(hostB, SHARED_WITH_ME_FOLDER), { recursive: true });
     await symlink(elsewhere, join(hostB, SHARED_WITH_ME_FOLDER, "alex"), "dir");
@@ -611,8 +607,6 @@ describe("refreshShareMount", () => {
     });
     const mountRoot = join(host, SHARED_WITH_ME_FOLDER, "alex");
 
-    // A planted FILE symlink at a materialized path is deleted, not
-    // followed: the update lands as a fresh regular file.
     await writeFile(join(elsewhere, "victim.md"), "untouched");
     await rm(join(mountRoot, "docs/brief.md"));
     await symlink(join(elsewhere, "victim.md"), join(mountRoot, "docs/brief.md"), "file");
@@ -624,9 +618,6 @@ describe("refreshShareMount", () => {
     expect(await readFile(join(elsewhere, "victim.md"), "utf8")).toBe("untouched");
     expect(await readFile(join(mountRoot, "docs/brief.md"), "utf8")).toBe("v2");
 
-    // A planted DIRECTORY symlink on the write path SELF-HEALS: the repair
-    // pass removes the link (as a link), rebuilds the real tree, and the
-    // pull lands v3 inside the workspace — never a byte through the link.
     await rm(join(mountRoot, "docs"), { recursive: true, force: true });
     await symlink(elsewhere, join(mountRoot, "docs"), "dir");
     relay.addWrite("docs/brief.md", "v3");
@@ -662,7 +653,6 @@ describe("refreshShareMount", () => {
     expect(momentIdsBefore.length).toBeGreaterThan(0);
     await storeBefore.close();
 
-    // A rogue tool edits the mounted file directly; the relay is unchanged.
     await writeFile(mounted, "defaced");
     const repaired = await refreshShareMount(harness, {
       hostRoot: host,
@@ -679,7 +669,6 @@ describe("refreshShareMount", () => {
     ).toEqual(momentIdsBefore);
     await storeAfter.close();
 
-    // Deleting the file locally is repaired the same way.
     const storeBeforeDelete = harness.openStore(target);
     const momentIdsBeforeDelete = (
       await storeBeforeDelete.listMoments({
@@ -708,7 +697,6 @@ describe("refreshShareMount", () => {
     ).toEqual(momentIdsBeforeDelete);
     await storeAfterDelete.close();
 
-    // An untouched projection stays "unchanged" — no busy repainting.
     const quiet = await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
@@ -796,9 +784,6 @@ describe("refreshShareMount", () => {
     });
     const mountRoot = join(host, SHARED_WITH_ME_FOLDER, "alex");
 
-    // Plant a directory symlink where the granter's delete will point: the
-    // repair pass heals the link first, the delete lands on the real tree,
-    // and the file behind the link is never touched.
     await writeFile(join(elsewhere, "brief.md"), "victim");
     await rm(join(mountRoot, "docs"), { recursive: true, force: true });
     await symlink(elsewhere, join(mountRoot, "docs"), "dir");
@@ -840,7 +825,6 @@ describe("share mount refresh failures", () => {
     ).toEqual({ kind: "row", status: "damaged" });
   });
 
-  // The one failure that does make every remaining pull pointless.
   it("abandons the refresh only when the session expired", () => {
     expect(classifyShareMountRefreshError(new RelayUnauthorizedError())).toEqual({
       kind: "abort",
@@ -849,11 +833,6 @@ describe("share mount refresh failures", () => {
   });
 });
 
-// The wire schema is the seam a status has to survive, and it is where the
-// mount handler bug hid too: main built a value the schema could not carry,
-// unit suites tested each side alone, and nothing drove one through the
-// other. A status main can emit but the result cannot parse is containment
-// that defeats itself at the boundary.
 describe("refresh result wire shape", () => {
   const row = (status: string) => ({
     shareId: "share-1",
@@ -881,10 +860,6 @@ describe("refresh result wire shape", () => {
 // the user would be told the refresh failed while the healthy mounts had in
 // fact refreshed.
 describe("share mount result rows", () => {
-  // A count the schema cannot carry must not cost the mount its STATUS. The
-  // schema parse alone would drop the whole row, so the count is clamped
-  // first: the row survives, and it claims the minimum rather than a number
-  // nobody can trust.
   it("keeps a mount's status when its changed count is unusable", () => {
     for (const changedPaths of [
       Number.NaN,

@@ -128,7 +128,6 @@ describe("buildStandaloneDocumentHtml", () => {
 
   it("typesets inline math with KaTeX instead of emitting raw TeX", () => {
     const withMath = buildStandaloneDocumentHtml("Euler: $x^2$ done.", "fallback");
-    // Rendered KaTeX markup, not the literal `$x^2$` source.
     expect(withMath).toContain('class="katex"');
     expect(withMath).not.toContain("$x^2$");
     // The KaTeX layout CSS is inlined (self-contained, no <link>/font url()).
@@ -145,14 +144,10 @@ describe("buildStandaloneDocumentHtml", () => {
   });
 
   it("omits the KaTeX stylesheet when the document has no math", () => {
-    // The base fixture carries no math — the large KaTeX CSS must not be shipped.
     expect(html).not.toContain(".katex");
     expect(html).not.toContain("katex-display");
   });
 
-  // The export reads Markdown with the projection's parser, which keeps the
-  // lines Tiptap's own reader drops, so the exported page shows what the file
-  // holds.
   it("exports raw HTML as the text the file holds, never as elements", () => {
     const exported = buildStandaloneDocumentHtml(
       '<script>alert(1)</script>\n\nText <b onclick="steal()">bold</b> <!-- note -->',
@@ -175,8 +170,6 @@ describe("buildStandaloneDocumentHtml", () => {
 });
 
 describe("markdownBodyToHtml", () => {
-  // Counting newline splits alone missed the block-marker searches, which read
-  // the rest of the document for every paragraph.
   it("reads a linear amount of text when rejecting block tokenizers for paragraphs", async () => {
     const measure = (paragraphs: number) =>
       measureParseWork(() => {

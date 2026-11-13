@@ -47,7 +47,6 @@ describe("macOS privacy refusals", () => {
     expect(isPrivacyDenial(errno("EACCES", "/Users/me/Documents/Trip/notes.md"), "darwin")).toBe(
       false,
     );
-    // A worker hands back the message alone.
     expect(
       isPrivacyDenial(
         new Error("EPERM: operation not permitted, scandir '/Users/me/Documents/Trip'"),

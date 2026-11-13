@@ -1094,7 +1094,6 @@ describe("an app preview shown by more than one surface", () => {
       notifyReplaced,
     });
     const handles: StaticSitePreview[] = [];
-    // A start waits here when a test holds it.
     let gate: Promise<void> = Promise.resolve();
     let failNext = false;
     let failNextPrepare = false;
@@ -1117,8 +1116,6 @@ describe("an app preview shown by more than one surface", () => {
       };
     });
     const current = new Map<number, boolean>();
-    // What a surface is answered: its preview, or that a newer start
-    // replaced its own.
     const answer = (
       holderId: string,
       input: { mode?: string; restart?: boolean; senderId?: number } = {},
@@ -1148,8 +1145,6 @@ describe("an app preview shown by more than one surface", () => {
         workspaceId: "workspace-1",
         siteRoot: "site",
       });
-    // A window closes: its session stops being current, and main lets go of
-    // what it showed.
     const close = (senderId: number) => {
       current.set(senderId, false);
       lifecycle.cancelSender(senderId);
@@ -1238,7 +1233,6 @@ describe("an app preview shown by more than one surface", () => {
         generation: restarted.generation,
         preview: restarted,
       });
-      // Both still hold the new preview.
       await s.hide(restarting);
       expect(s.handles[1]!.stop).not.toHaveBeenCalled();
       await s.hide(other);
@@ -1259,7 +1253,6 @@ describe("an app preview shown by more than one surface", () => {
         preview: expect.objectContaining({ url: s.handles[1]!.url }),
       }),
     );
-    // The tab asking for build now shares it instead of starting again.
     await expect(s.show("tab", { mode: "build" })).resolves.toEqual(built);
     expect(s.prepare).toHaveBeenCalledTimes(2);
   });
@@ -1278,7 +1271,6 @@ describe("an app preview shown by more than one surface", () => {
         preview: null,
       }),
     );
-    // The surfaces still count: the last to let go stops what is left.
     await s.hide("tab");
     await s.hide("pin");
     expect(s.lifecycle.status("workspace-1", "site").running).toBe(false);
@@ -1302,8 +1294,6 @@ describe("an app preview shown by more than one surface", () => {
         preview: built,
       }),
     );
-    // Whether the tab's start was cancelled or ran first, only the newer
-    // preview is left running.
     for (const handle of s.handles) {
       if (handle.url === built.url) expect(handle.stop).not.toHaveBeenCalled();
       else expect(handle.stop).toHaveBeenCalledOnce();
@@ -1318,7 +1308,6 @@ describe("an app preview shown by more than one surface", () => {
     await expect(s.show("pin", { senderId: 2, restart: true })).rejects.toThrow("no build script");
     expect(s.handles[0]!.stop).not.toHaveBeenCalled();
     expect(s.notifyReplaced).not.toHaveBeenCalled();
-    // Both surfaces still hold the preview that runs.
     await s.hide("tab");
     expect(s.lifecycle.status("workspace-1", "site").running).toBe(true);
     await s.hide("pin");
@@ -1332,8 +1321,6 @@ describe("an app preview shown by more than one surface", () => {
     s.hold(release.promise);
     const tab = s.answer("tab", { mode: "dev", senderId: 1 });
     await s.prepared();
-    // The tab's start is on its way when the pinned panel asks for a build
-    // that cannot be prepared.
     s.failNextPrepare();
     await expect(s.show("pin", { mode: "build", senderId: 2 })).rejects.toThrow("no build script");
     expect(s.notifyReplaced).not.toHaveBeenCalled();
@@ -1343,7 +1330,6 @@ describe("an app preview shown by more than one surface", () => {
     expect(shown.url).toBe(s.handles[0]!.url);
     expect(s.lifecycle.status("workspace-1", "site").running).toBe(true);
     expect(s.notifyReplaced).not.toHaveBeenCalled();
-    // The tab is the one surface holding it, so letting go stops it.
     await s.hide("tab");
     expect(s.handles[0]!.stop).toHaveBeenCalledOnce();
   });
@@ -1360,8 +1346,6 @@ describe("an app preview shown by more than one surface", () => {
     const isCurrent = s.prepare.mock.calls[0]![0];
     expect(isCurrent()).toBe(true);
     s.close(1);
-    // Execution asks this after a build finishes; the pinned panel still
-    // holds the start.
     expect(isCurrent()).toBe(true);
     s.close(2);
     expect(isCurrent()).toBe(false);

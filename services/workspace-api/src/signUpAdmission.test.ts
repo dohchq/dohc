@@ -7,7 +7,6 @@ const RELAY = "http://sync-relay:1788";
 
 afterEach(() => vi.restoreAllMocks());
 
-/** A relay stand-in that knows one pending invite and records what it was asked. */
 function relay(invites: string[]) {
   const asked: Array<{ url: string; key: string | null; email: unknown }> = [];
   const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
@@ -49,7 +48,6 @@ describe("closed sign-up", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     const failing = [
       async () => new Response("not found", { status: 404 }),
-      // A relay that retired its storage answers every request this way.
       async () => Response.json({ ok: false, error: "service unavailable" }, { status: 503 }),
       async () => Response.json({ invited: "yes" }),
       async () => {

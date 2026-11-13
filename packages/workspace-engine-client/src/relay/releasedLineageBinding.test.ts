@@ -36,7 +36,6 @@ describe("released-lineage binding contract", () => {
       expect(mergedContributionsCommitment(artifact.mergedContributionIds)).toEqual(
         vector.mergedContributions,
       );
-      // The same encoding a tail commits to, the empty list's included.
       if (artifact.mergedContributionIds.length > 0) {
         expect(releasedTailContributionsCommitment(artifact.mergedContributionIds)).toEqual(
           vector.mergedContributions,
@@ -68,7 +67,6 @@ describe("released-lineage binding contract", () => {
       [carried, outbox, { ...outbox, sequence: 4 }],
       [carried, outbox, carried],
       [carried],
-      // Only who made the work changes.
       [{ ...carried, authors: [{ ...agent, agentId: "other-agent" }] }, outbox],
       [{ ...carried, authors: [{ ...agent, onBehalfOf: "someone" }] }, outbox],
       [{ ...carried, authors: [{ ...agent, depth: 2 }] }, outbox],
@@ -173,7 +171,6 @@ describe("released-lineage binding contract", () => {
     const binding = releasedLineageBindingFromCanonical(vector.canonical);
     expect(canonicalReleasedLineageBinding(binding)).toBe(vector.canonical);
     expect(releasedLineageBindingDigest(binding)).toBe(vector.digest);
-    // A binding decoded from the wire's parsed object names the same digest.
     expect(
       releasedLineageBindingDigest(decodeReleasedLineageBinding(JSON.parse(vector.canonical))),
     ).toBe(vector.digest);

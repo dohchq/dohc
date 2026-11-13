@@ -418,7 +418,6 @@ describe("desktop workspace reads", () => {
     },
   );
 
-  // The view's collision record, readable as when the engine has opened it.
   async function holdBack(test: Awaited<ReturnType<typeof fixture>>, paths: string[]) {
     readLocalStateFrom({
       currentBinding: () => ({ localStateReady: true }),
@@ -480,8 +479,6 @@ describe("desktop workspace reads", () => {
     expect(view.allowPath("notes.md")).toBe(true);
   });
 
-  // In a mount the held spelling resolves on disk to the spelling that owns
-  // its file, so opening it is refused by the spelling asked for.
   it("refuses to open a mounted spelling held behind another", async (context) => {
     const { test, ignoresCase } = await holdSpellingBehindOwner("mount");
     if (!ignoresCase) context.skip("this disk keeps case apart");

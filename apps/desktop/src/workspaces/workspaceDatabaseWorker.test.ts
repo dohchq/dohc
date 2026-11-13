@@ -374,7 +374,6 @@ describe("workspace database worker", () => {
     expect(await readFile(databasePath)).toEqual(before);
     expect(await readFile(paths.logPath, "utf8")).toBe(`${kept}{"version":9007199254740992}\n`);
 
-    // Once the line is gone, the counter's 5 is the highest number.
     await writeFile(paths.logPath, kept);
     expect((await edit()).version).toBe(6);
   });

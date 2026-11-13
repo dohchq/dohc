@@ -15,10 +15,6 @@ import {
   testStorage,
 } from "./testing";
 
-// Server-level tests for the ephemeral awareness transport: authenticated,
-// scoped, server-derived identity, and — the load-bearing invariant — never
-// journaled to the durable log.
-
 afterEach(closeTestStorages);
 
 function makeHandler(storage: SyncRelayStorage, presence: PresenceHub): SyncRelayHandler {
@@ -91,12 +87,10 @@ describe("presence transport (workspace-owned)", () => {
       await h(post("owner", "/sync/w/presence?topic=general", { clientId: "phone", state: {} })),
     );
     expect((second.peers as unknown[]).length).toBe(2);
-    // Immediate long-poll read reflects both.
     const read = await json(
       await h(req("owner", "/sync/w/presence?topic=general&since=0&hold=0", { method: "GET" })),
     );
     expect((read.peers as unknown[]).length).toBe(2);
-    // Phone leaves.
     const afterLeave = await json(
       await h(post("owner", "/sync/w/presence?topic=general", { clientId: "phone", leave: true })),
     );
@@ -111,13 +105,11 @@ describe("presence transport (workspace-owned)", () => {
       await h(
         post("owner", "/sync/w/presence?topic=general", {
           clientId: "c",
-          // Attempt to impersonate: put a fake userId in the payload.
           state: { userId: "victim", displayName: "Victim" },
         }),
       ),
     );
     const peers = body.peers as Array<Record<string, unknown>>;
-    // Attribution is the authenticated actor, never the payload.
     expect(peers[0]?.displayName).toBe("Owner");
     expect(peers[0]?.state).toEqual({});
   });
@@ -147,7 +139,6 @@ describe("presence transport (workspace-owned)", () => {
     const h = makeHandler(storage, presence);
     await claimWorkspace(h, "owner", "a");
 
-    // A workspace id with an embedded NUL can never be claimed…
     const claim = await h(post("owner", "/sync/workspaces", { workspaceId: "a\u0000b" }));
     expect(claim.status).toBe(400);
     // …or addressed: workspace `a\0b` + topic `c` must not collide with
@@ -164,7 +155,6 @@ describe("presence transport (workspace-owned)", () => {
     expect(clientNul.status).toBe(400);
     const clientCtl = await h(post("owner", "/sync/a/presence?topic=b", { clientId: "c\u0001d" }));
     expect(clientCtl.status).toBe(400);
-    // Nothing above leaked into the hub.
     expect(presence.stats().entries).toBe(0);
     presence.dispose();
   });
@@ -178,7 +168,6 @@ describe("presence transport (workspace-owned)", () => {
     const seed = await json(
       await h(req("owner", "/sync/w/presence?topic=general&since=0&hold=0", { method: "GET" })),
     );
-    // First poll parks…
     const parked = h(
       req("owner", `/sync/w/presence?topic=general&since=${seed.version}&hold=10000`, {
         method: "GET",
@@ -186,7 +175,6 @@ describe("presence transport (workspace-owned)", () => {
     );
     await waitForWaiters(presence, 1);
     expect(presence.stats().waiters).toBe(1);
-    // …the second (same actor) is refused with 429, not parked.
     const second = await h(
       req("owner", `/sync/w/presence?topic=general&since=${seed.version}&hold=10000`, {
         method: "GET",
@@ -249,14 +237,12 @@ describe("presence over a share (cross-user, gated)", () => {
     const h = makeHandler(storage, presence);
     const shareId = await shareFile(h);
 
-    // Owner publishes presence on the shared doc via the workspace route.
     await h(
       post("owner", "/sync/w/presence?topic=notes/a.md", {
         clientId: "o",
         state: { displayName: "Owner" },
       }),
     );
-    // Guest publishes via the SHARE route — same underlying scope.
     const guestView = await json(
       await h(
         post(
@@ -279,7 +265,6 @@ describe("presence over a share (cross-user, gated)", () => {
     const storage = await testStorage();
     const h = makeHandler(storage, new PresenceHub());
     const shareId = await shareFile(h);
-    // The grant is for notes/a.md; presence for notes/b.md is fail-closed.
     const r = await h(
       post("guest", `/sync/shares/${shareId}/presence?topic=${encodeURIComponent("notes/b.md")}`, {
         clientId: "g",
@@ -311,7 +296,6 @@ describe("presence over a share (cross-user, gated)", () => {
     const shareId = await shareFile(h);
     const topic = encodeURIComponent("notes/a.md");
 
-    // Guest joins and reads the current version.
     await h(
       post("guest", `/sync/shares/${shareId}/presence?topic=${topic}`, {
         clientId: "g",
@@ -343,7 +327,6 @@ describe("presence over a share (cross-user, gated)", () => {
     await h(req("owner", `/sync/shares/${shareId}/revoke`, { method: "POST" }));
     await h(post("owner", "/sync/w/presence?topic=notes/a.md", { clientId: "o2", state: {} }));
 
-    // The woken poll re-runs authorization and fails closed.
     const response = await parked;
     expect(response.status).toBe(404);
     presence.dispose();

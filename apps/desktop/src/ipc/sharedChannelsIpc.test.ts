@@ -259,7 +259,6 @@ describe("registered shared-channel handlers", () => {
     registry.register(h.workspace);
     h.acknowledge.mockImplementation(
       (workspaceId: string, shareId: string | undefined, generation: number) => {
-        // The registry no longer holds the workspace when the write runs.
         registry.remove(workspaceId);
         registry.acknowledgeShareSkips(workspaceId, shareId, generation);
       },
@@ -482,9 +481,6 @@ describe("registered shared-channel handlers", () => {
     expect(h.cache.size).toBe(0);
   });
 
-  // The listing is applied to this machine's records before the joined lane
-  // is answered, so a row the owner restored answers as live in the same
-  // read. Its removed lane rides with the relay answer.
   it("applies the listing to the registry before answering the joined lane, and carries the removed lane", async () => {
     const h = await harness();
     h.workspace.sharedChannels = [joined("shown"), { ...joined("gone"), ended: true }];
@@ -600,7 +596,6 @@ describe("registered shared-channel handlers", () => {
     // The group's channel must already be on the relay, so the share pushes
     // first; a chat-only share leaves that to the next sync pass.
     expect(h.push).toHaveBeenCalledOnce();
-    // Each new grant refreshes the workspace's share roster.
     expect(h.sharesChanged.mock.calls).toEqual([["workspace"], ["workspace"]]);
   });
 
@@ -736,7 +731,6 @@ describe("registered shared-channel handlers", () => {
       shareId: "share-c",
     });
     expect(h.mount).toHaveBeenCalledOnce();
-    // The folder failing leaves the channel joined and names the failure.
     vi.mocked(fetchSharedChannelInfo).mockResolvedValueOnce({
       ...info,
       shareId: "share-h",
@@ -830,10 +824,6 @@ describe("registered shared-channel handlers", () => {
   });
 });
 
-// Acceptance: the joined-lane response size must be independent of how
-// many channels the account has ever joined. A source-text pin cannot observe
-// a response size, so this drives the real handler — parse, scope, and the
-// contract parse the answer actually crosses IPC through.
 describe("joined Group operation", () => {
   // The registry as main holds it: one row per channel ever joined, most of
   // them tombstones from channels the workspace has left.
@@ -864,8 +854,6 @@ describe("joined Group operation", () => {
     };
   }
 
-  // The mutation test at the layer that crosses IPC. Make the handler answer
-  // from the full registry and this fails on the response size.
   it("answers a small named scope out of a huge registry, at the size of the scope", async () => {
     const shown = ["wire-3", "wire-7", "wire-9"];
     const answered = [];
@@ -876,8 +864,6 @@ describe("joined Group operation", () => {
       expect(result.joined).toHaveLength(shown.length);
       expect(result.joined.map((answer) => answer.channelWireId)).toEqual(shown);
       answered.push(result.joined);
-      // The serialized payload is what actually crosses IPC, and it does not
-      // grow with the registry either.
       expect(JSON.stringify(result).length).toBeLessThan(1_000);
     }
     expect(answered[1]).toEqual(answered[0]);

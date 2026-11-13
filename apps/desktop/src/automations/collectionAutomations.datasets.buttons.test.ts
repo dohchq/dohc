@@ -301,14 +301,12 @@ ${step}`;
     expect((await f.record(invoice))?.values[STATUS]).toBe(
       `Settled by ${BUTTON_AUTOMATION}: pressed`,
     );
-    // The same key sent again answers the first run, and asks nothing.
     await expect(pressNamed(input, caller)).resolves.toEqual({
       busy: false,
       claimId: pressed.claimId,
       settled: { outcome: "done", error: null },
     });
     expect(f.host.automations.claims(BUTTON_AUTOMATION).claims).toHaveLength(1);
-    // A button that runs only a reversible action presses with nothing to confirm.
     await f.writeAutomations(markPaid(hold));
     f.executor.handleWatcherEvents([{ operation: "update", path: "Budget/automations.yaml" }]);
     const { id: other } = await f.create({ [STATUS]: "Open" });
@@ -382,7 +380,6 @@ ${step}`;
       ),
     ).resolves.toMatchObject({ undone: 1, left: 0 });
     expect((await f.record(first))?.values[STATUS]).toBe("On hold");
-    // A full Undo sends it.
     expect(await undo()).toMatchObject({ status: "undone", actionsReversed: 2 });
     expect((await f.record(first))?.values[STATUS]).toBe("Open");
     await f.executor.dispose();

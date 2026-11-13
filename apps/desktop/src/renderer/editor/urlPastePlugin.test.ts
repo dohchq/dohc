@@ -44,8 +44,6 @@ function offer(target: Editor) {
   return urlPasteOfferKey.getState(target.state) ?? null;
 }
 
-// The editor's paste: the handler sees the clipboard, then the transaction
-// ProseMirror dispatches for it.
 function paste(target: Editor, text = URL_TEXT) {
   const event = {
     clipboardData: { files: [], getData: (type: string) => (type === "text/plain" ? text : "") },
@@ -55,7 +53,6 @@ function paste(target: Editor, text = URL_TEXT) {
   target.view.dispatch(tr.setMeta("paste", true).setMeta("uiEvent", "paste"));
 }
 
-// Each linked text in the document, in order.
 function linkedTexts(target: Editor): string[] {
   const texts: string[] = [];
   target.state.doc.descendants((node) => {
@@ -71,8 +68,6 @@ function key(target: Editor, init: KeyboardEventInit) {
 }
 
 describe("URL paste offer", () => {
-  // The link extension's paste rule links a pasted URL in the transaction it
-  // appends, so the current form follows the document, not the paste.
   it("appears under a URL pasted on its own line, with the current form marked", () => {
     const { editor, changes } = setup();
     paste(editor);
@@ -125,7 +120,6 @@ describe("URL paste offer", () => {
     expect(handled).toBe(true);
     expect(focusRow).toHaveBeenCalledOnce();
     expect(offer(editor)).not.toBeNull();
-    // With no offer, Mod+K stays the link menu's.
     editor.view.dispatch(editor.state.tr.setMeta(urlPasteOfferKey, { type: "dismiss" }));
     expect(key(editor, { key: "k", ctrlKey: true }).handled).toBe(false);
   });
@@ -157,7 +151,6 @@ describe("URL paste offer", () => {
     editor.view.dispatch(editor.state.tr.insertText("Earlier ", 1).setMeta("addToHistory", false));
     expect(offer(editor)).toMatchObject({ from: 17, to: 17 + URL_TEXT.length, chosen: true });
 
-    // Undo is the editor's own: the link returns, and the paste stays.
     editor.chain().undo().run();
     expect(editor.getHTML()).toContain(`href="${URL_TEXT}">${URL_TEXT}</a>`);
     expect(editor.getHTML()).toContain("Earlier");
@@ -173,8 +166,6 @@ describe("URL paste offer", () => {
     expect(offer(editor)).toBeNull();
   });
 
-  // Without a Y.Doc nothing replaces the whole document but the editor's own
-  // setContent, and mapping is exact: the span is gone, so the offer is.
   it("leaves when the whole document is replaced in an editor without a Y.Doc", () => {
     const { editor } = setup();
     paste(editor);
@@ -218,7 +209,6 @@ describe("URL paste offer in a shared document", () => {
     for (const doc of docs.splice(0)) doc.destroy();
   });
 
-  // The editor on one Y.Doc, and a collaborator's Y.Doc synced both ways.
   function setupShared(content: string) {
     const ydoc = new Y.Doc();
     const peer = new Y.Doc();
@@ -292,7 +282,6 @@ describe("URL paste offer in a shared document", () => {
     expect(linkedTexts(editor)).toEqual([URL_TEXT, URL_TEXT]);
     expect(offer(editor)).toMatchObject({ from: 9, to: 9 + URL_TEXT.length });
     chooseUrlForm(editor.view, "plain");
-    // The collaborator's copy keeps its link.
     expect(linkedTexts(editor)).toEqual([URL_TEXT]);
     expect(editor.state.doc.textBetween(9 + URL_TEXT.length + 1, 9 + 2 * URL_TEXT.length + 1)).toBe(
       URL_TEXT,
@@ -309,7 +298,6 @@ describe("URL paste offer in a shared document", () => {
   it("leaves when the caret moves into another paragraph with the URL", () => {
     const { editor, fragment } = setupShared("<p>Before</p><p></p><p>After</p>");
     paste(editor);
-    // A collaborator adds a last paragraph holding a linked copy.
     const text = new Y.XmlText();
     const copy = new Y.XmlElement("paragraph");
     copy.insert(0, [text]);

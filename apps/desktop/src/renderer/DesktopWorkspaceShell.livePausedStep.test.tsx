@@ -32,8 +32,6 @@ vi.mock("./collab/useEngineDoc", async (importOriginal) => {
   return { ...actual, useEngineDoc: () => engine };
 });
 
-// A refused note's chip opens Live documents at its row, where Try again,
-// Stop and Save recovery copy are.
 describe("the step beside a refused note's chip", () => {
   const ROW: OwnerLiveQuarantine = {
     objectId: "object-a",
@@ -86,7 +84,6 @@ describe("the step beside a refused note's chip", () => {
     expect(
       dialog.getByTestId("live-document-row-other.md").getAttribute("aria-current"),
     ).toBeNull();
-    // It opens the list, and retries, stops or copies nothing itself.
     expect(bridge.retryOwnerLiveQuarantine).not.toHaveBeenCalled();
     expect(bridge.saveOwnerLiveRecoveryCopy).not.toHaveBeenCalled();
   });
@@ -112,7 +109,6 @@ describe("the step beside a refused note's chip", () => {
     const user = await openNote();
     await user.click(await screen.findByTestId("markdown-save-state-action"));
     expect(await screen.findByTestId("live-documents-dialog")).toBeTruthy();
-    // The first workspace asks again, and its answer is still out at the switch.
     bridge.getSyncStatus.mockImplementationOnce(
       () =>
         new Promise((resolve) => {

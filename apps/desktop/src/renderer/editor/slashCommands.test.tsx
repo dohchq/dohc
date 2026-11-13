@@ -58,9 +58,6 @@ const OPEN_STATE_BASE = {
   placement: "below" as const,
 };
 
-// Minimal replica of MarkdownEditor's slash wiring: useState + ref-sync +
-// plugin extension, rendering the real SlashCommandMenu. `onState` observes
-// every committed state so tests can assert on the stream.
 function Harness({
   onEditor,
   onState,
@@ -142,8 +139,6 @@ describe("slash menu render stability", () => {
     // (a remount replays the pop-in animation, which reads as flicker).
     expect(menuAfterTyping).toBe(menuAfterOpen);
 
-    // The observed state stream must never pass through a closed state
-    // between two open ones while the slash query is being typed.
     const openFlags = states.map((state) => state.open);
     const firstOpen = openFlags.indexOf(true);
     expect(firstOpen).toBeGreaterThanOrEqual(0);
@@ -155,8 +150,6 @@ describe("slash menu render stability", () => {
   });
 });
 
-// The plugin alone, on a plain ref, as blockExit.test wires it. With a Y.Doc,
-// the editor is bound to it as MarkdownEditor binds a shared document.
 function makeSlashEditor(ydoc?: Y.Doc) {
   const stateRef: { current: SlashCommandState } = { current: CLOSED_SLASH_COMMAND_STATE };
   const editor = new Editor({
@@ -204,7 +197,6 @@ describe("Escape on the slash menu", () => {
     editor.commands.insertContent("d");
     expect(editor.state.doc.textContent).toBe("/head");
     expect(stateRef.current.open).toBe(false);
-    // With the menu closed, Escape is no longer the menu's.
     expect(press("Escape").defaultPrevented).toBe(false);
     editor.destroy();
   });
@@ -225,7 +217,6 @@ describe("Escape on the slash menu", () => {
     const { editor, stateRef, press } = makeSlashEditor();
     editor.commands.insertContent("/head");
     press("Escape");
-    // Inside the trigger, the caret keeps it dismissed.
     editor.commands.setTextSelection(4);
     expect(stateRef.current.open).toBe(false);
 
@@ -245,7 +236,6 @@ describe("Escape on the slash menu in a shared document", () => {
     for (const doc of docs.splice(0)) doc.destroy();
   });
 
-  // The editor on one Y.Doc, and a collaborator's Y.Doc synced both ways.
   function makeSharedSlashEditor() {
     const ydoc = new Y.Doc();
     const peer = new Y.Doc();
@@ -346,16 +336,11 @@ describe("SlashCommandMenu placement anchoring", () => {
       }),
     );
     const menu = container.querySelector<HTMLElement>(".dohc-slash-menu")!;
-    // The box hangs from its bottom edge (`gap` above the cursor): when the
-    // query filters the list and the menu gets shorter, it grows upward while
-    // the edge next to the cursor stays put — no per-keystroke leaping.
     expect(menu.style.bottom).toBe("106px");
     expect(menu.style.top).toBe("");
   });
 });
 
-// The menu is taller than its cap, and the editor keeps focus while its keys
-// move the active option.
 describe("SlashCommandMenu on the Menu part's recipe", () => {
   it("marks the active option and scrolls only the list to show it", () => {
     const restore = mockListLayout(200);

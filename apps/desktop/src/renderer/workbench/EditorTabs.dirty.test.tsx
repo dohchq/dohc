@@ -63,10 +63,8 @@ describe("EditorTabs unsaved dot", () => {
     const dot = within(tab).getByTestId("tab-dirty");
     const close = closeOf("plan.md");
     expect(classes(tab)).toContain("group/tab");
-    // Both fill the slot's one cell.
     expect(classes(dot)).toContain("[grid-area:1/1]");
     expect(classes(close)).toContain("[grid-area:1/1]");
-    // The close starts hidden, and each state that shows it hides the dot.
     expect(classes(close)).toContain("opacity-0");
     for (const state of ["group-hover/tab", "keyboard:group-focus-visible/tab"]) {
       expect(classes(dot)).toContain(`${state}:opacity-0`);
@@ -74,14 +72,10 @@ describe("EditorTabs unsaved dot", () => {
     }
     expect(classes(close)).toContain("focus:opacity-100");
     expect(classes(dot)).toContain("group-has-[:focus]/tab:opacity-0");
-    // The pointer on the close still fills it, and the swap is instant.
     expect(classes(close)).toContain("hover:bg-hover");
     expect(`${dot.className} ${close.className}`).not.toContain("transition");
-    // The dot takes no press, so the close under it gets the click.
     expect(classes(dot)).toContain("pointer-events-none");
 
-    // A saved tab is as it was: the active one shows its close, and an
-    // inactive one shows it on hover or focus.
     cleanup();
     render(strip());
     expect(classes(closeOf("plan.md"))).not.toContain("opacity-0");
