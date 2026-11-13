@@ -1,3 +1,4 @@
+import { accountDisplayName, type LookupUserDisplayName } from "./accountDisplayName";
 import { recoverPublicLinkUrl } from "./linkSecurity";
 import { createReceivedIdentity } from "./receivedIdentity";
 import { readCurrentShareGrant } from "./storage/currentShareGrant";
@@ -75,6 +76,7 @@ export function createShareInventoryRoutes(
   lookupUserEmails?: (userIds: readonly string[]) => Promise<ReadonlyMap<string, string>>,
   linkKey?: string | Uint8Array,
   shareWebOrigin?: string,
+  lookupUserDisplayName?: LookupUserDisplayName,
 ) {
   async function granterEmailFor(share: {
     granterUserId: string;
@@ -184,6 +186,8 @@ export function createShareInventoryRoutes(
         role !== "member"
       )
         throw notFound();
+      // Opening a joined workspace keeps the member's name current, so mentions find them.
+      if (role !== undefined) await accountDisplayName(lookupUserDisplayName, actor.userId);
       return jsonResponse(
         {
           status: "current",

@@ -151,6 +151,7 @@ import * as appCollectionStorage from "./storage/appCollections";
 import * as noticeStorage from "./storage/notices";
 import * as pushStorage from "./storage/pushSubscriptions";
 import * as pushDeviceStorage from "./storage/pushDevices";
+import { recordAccountName } from "./storage/accountNames";
 import * as automationHostStorage from "./storage/automationHosts";
 import * as automationWorkspaceStorage from "./storage/automationWorkspaces";
 import * as accountWorkspaceStorage from "./storage/accountWorkspaces";
@@ -1104,6 +1105,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     input: pushStorage.BindPushSubscriptionInput,
   ): pushStorage.PushSubscriptionRow {
     return pushStorage.bindPushSubscription(this, input);
+  }
+  recordAccountName(userId: string, name: string | null): void {
+    recordAccountName(this, userId, name);
   }
 
   removePushSubscription(input: { installationId: string; userId: string }): void {

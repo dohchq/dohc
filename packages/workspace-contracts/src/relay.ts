@@ -455,6 +455,9 @@ export const NOTICE_KINDS = {
   // One of your personal agents signed in. The relay writes it from the
   // agent when a sign-in is redeemed.
   "personal-agent-signed-in": { senderKind: "agent", recipients: "relay" },
+  // Someone mentioned you, or replied in a thread you wrote in. The relay
+  // writes it from the message's author when the message arrives.
+  "chat-message": { senderKind: "person", recipients: "relay" },
 } as const satisfies Record<
   string,
   {

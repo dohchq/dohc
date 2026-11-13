@@ -972,6 +972,8 @@ export interface SyncRelayStorage {
   bindPushSubscription(
     input: import("./pushSubscriptions").BindPushSubscriptionInput,
   ): import("./pushSubscriptions").PushSubscriptionRow;
+  // The account's current display name, which mentions match (storage/accountNames.ts).
+  recordAccountName(userId: string, name: string | null): void;
   removePushSubscription(input: { installationId: string; userId: string }): void;
   readPushDevice(input: {
     userId: string;

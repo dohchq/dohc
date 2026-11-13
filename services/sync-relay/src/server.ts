@@ -306,7 +306,7 @@ export function createSyncRelayHandler({
   lookupVerifiedUserEmail,
   lookupUserEmail,
   lookupUserEmails,
-  lookupUserDisplayName,
+  lookupUserDisplayName: lookupAccountDisplayName,
   newShareId = () => randomUUID(),
   newGrantId = () => randomUUID(),
   newId = () => randomUUID(),
@@ -411,6 +411,15 @@ export function createSyncRelayHandler({
       ? Promise.resolve(actor).then(requireUnfencedActor)
       : requireUnfencedActor(actor as Awaited<ReturnType<ResolveActor>>);
   };
+  // Each name the relay looks up becomes the account's current name, which
+  // mentions match when a message arrives.
+  const lookupUserDisplayName =
+    lookupAccountDisplayName &&
+    (async (userId: string) => {
+      const name = await lookupAccountDisplayName(userId);
+      storage.recordAccountName(userId, name);
+      return name;
+    });
   const publicEditRelease = parsePublicEditRelease(releaseInput);
   const respondToDataset = datasetHost
     ? createDatasetRoutes(datasetHost, storage, {
@@ -869,6 +878,7 @@ export function createSyncRelayHandler({
       lookupUserEmails,
       linkKey,
       shareWebOrigin,
+      lookupUserDisplayName,
     );
   const { respondToShareInventory, respondToWorkspaceLinkInventory } =
     shareInventoryRoutes(claimPendingShares);

@@ -36,7 +36,7 @@ import {
 } from "@dohc/live-session-contract/live-authorship";
 import { SHARE_MEMBER_ORIGIN_PREFIX } from "../relayLogInputs";
 import { stableJsonStringify } from "../canonicalJson";
-import { recordPushDeliveries } from "./pushDeliveries";
+import { recordChatMessageAlerts } from "./chatMessageAlerts";
 
 function withAdmittedChatName(
   op: SyncRelayLogInput,
@@ -317,7 +317,7 @@ export function appendLogBatchInTransaction(
   const objectMomentStmt = storage.db.prepare(OBJECT_MOMENT_INSERT_SQL);
   const versionSnapshotBlobStmt = storage.db.prepare(VERSION_SNAPSHOT_BLOB_INSERT_SQL);
   const currentFileStmt = currentFileStatements(storage.db);
-  const pushMessages: number[] = [];
+  const chatMessages: number[] = [];
   for (const op of newOps) {
     const result = insertStmt.run(
       input.workspaceId,
@@ -340,7 +340,7 @@ export function appendLogBatchInTransaction(
       redundant.has(op.originSeq)
     )
       continue;
-    if (op.opKind === "chat.message.append") pushMessages.push(Number(result.lastInsertRowid));
+    if (op.opKind === "chat.message.append") chatMessages.push(Number(result.lastInsertRowid));
     // Keep "where is this object now?" answerable by primary
     // key. The relay_seq this row just took IS the order the guard in the
     // upsert compares, so a later moment always wins and an out-of-order
@@ -419,7 +419,7 @@ export function appendLogBatchInTransaction(
       Number(result.lastInsertRowid),
     );
   }
-  for (const relaySeq of pushMessages) recordPushDeliveries(storage, relaySeq);
+  for (const relaySeq of chatMessages) recordChatMessageAlerts(storage, relaySeq);
   const settlementRefusals = input.ops
     .filter((op) => op.settlementAdmission?.status === "refused")
     .map((op) => ({
