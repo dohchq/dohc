@@ -3,6 +3,8 @@ import { readFile } from "node:fs/promises";
 import { Client, Pool } from "pg";
 import { afterEach, expect, it, vi } from "vitest";
 import { createPostgresCredentialFence } from "@dohc/workspace-auth/credentialFence";
+import { WebSocket } from "ws";
+import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import {
   cleanupLiveDeliveryFixtures,
   registered,
@@ -13,10 +15,18 @@ import {
   HELD_OPEN_MAX_WAITERS,
   SERVICE_HOST_MAX_WORKSPACES,
 } from "./liveHostingLimits";
-import { binding, fixture as ticketFixture, key, scope } from "./liveTickets.test-helper";
+import { binding, host, fixture as ticketFixture, key, scope } from "./liveTickets.test-helper";
 import { singleFlightFenceReads } from "./personalAgents";
+import { createLiveConnectionAdmission } from "./liveConnectionAdmission";
+import type { NamedFrameNativeHost } from "./namedLiveFrameHost";
+import {
+  cleanups as namedLiveCleanups,
+  fixture as namedLiveFixture,
+  openProductionSync,
+} from "./namedLiveRoutes.test-helper";
 import { personalRouteFixture } from "./personalLiveDocumentRoutes.test-helper";
 import { selectHostedDocuments } from "./selfHostedLiveHost";
+import { selfHostLiveProfile } from "./selfHostLiveProfile";
 import { discoverServiceHostDocuments } from "./serviceHostEnrollmentRoutes";
 import { SERVICE_HOST_ENROLLMENTS } from "./storage/serviceHostEnrollment";
 import { SHARE_WEB_ORIGIN } from "./testing";
@@ -28,6 +38,7 @@ const cleanup: Array<() => Promise<void> | void> = [];
 afterEach(async () => {
   vi.restoreAllMocks();
   for (const close of cleanup.splice(0).reverse()) await close();
+  for (const close of namedLiveCleanups.splice(0).reverse()) await close();
 });
 const fixture = (limits?: { maxMs?: number }) =>
   personalRouteFixture(
@@ -325,6 +336,165 @@ it.skipIf(process.env.DOHC_LIVE_HOST_MEASURE !== "1")(
         );
       }
     }
+  },
+  600_000,
+);
+// 120 members at Edit, 12 on each of 10 documents, each over its own named
+// live connection under the shipped profile. One round publishes an applied
+// update on all 10 documents at once, and fan-out is the time from the host's
+// wake until each connection has the update's first chunk. The native daemon
+// is a stand-in that answers each read at once, so its own read and memory
+// are left out. Memory is this process's after the connections synced, less
+// before, and counts the 120 client sockets as well as the relay's side.
+//
+// Runs, 2026-11-13, Windows 11, Node 24, 32 cores:
+// - Memory: RSS 180 to 189 MiB more, heap 9 to 37 MiB more.
+// - All 10 documents change: p50 760 to 1245 ms, p95 805 to 1582 ms.
+// - Only document 1 changes: p50 138 to 145 ms, p95 179 to 194 ms.
+// Every change wakes all 120 connections, and each reads its document's
+// binding from SQLite, about 0.46 ms a read. That read, not the frames, sets
+// the fan-out time.
+it.skipIf(process.env.DOHC_LIVE_HOST_MEASURE !== "1")(
+  "measures memory and fan-out for 120 named connections over 10 documents",
+  async () => {
+    const PEOPLE = 120,
+      DOCUMENTS = 10,
+      ROUNDS = SAMPLES;
+    const profile = selfHostLiveProfile(),
+      admission = createLiveConnectionAdmission();
+    const f = await namedLiveFixture(
+      profile.namedLive.transport,
+      false,
+      { maxSessions: 128, maxMembers: 128, maxSnapshotBytes: 4096 },
+      false,
+      false,
+      admission,
+      0,
+      0,
+      true,
+      scope.workspaceId,
+      scope.shareId,
+      { people: PEOPLE, documents: DOCUMENTS },
+    );
+    const published = new Map<string, number>();
+    const updateBytes = Buffer.alloc(1024, 42),
+      updateDigest = createHash("sha256").update(updateBytes).digest("hex");
+    f.captureNative.mockImplementation(async (current?: LiveObjectBinding) => {
+      const native = { ...current!, selectorPaths: [current!.currentPath] };
+      return {
+        ...f.native,
+        binding: native,
+        client: {
+          openLiveAppliedSync: async () => ({
+            binding: native,
+            hostVector: Buffer.from([0]),
+            missingStateUpdate: Buffer.from([0, 0]),
+            observedLocalYDocHeadSequence: 100,
+            position: { eventCount: 0, journalCursor: 0, evidenceDigest: "ab".repeat(32) },
+          }),
+          readNextLiveApplied: async (_request: unknown, after: { eventCount: number }) => {
+            const next = after.eventCount + 1;
+            if (next > (published.get(native.objectId) ?? 0)) return null;
+            return {
+              position: { eventCount: next, journalCursor: next, evidenceDigest: "cd".repeat(32) },
+              updateBytes,
+              ack: {
+                deliveryId: `edit-${next}`,
+                updateDigest,
+                journalCursor: next,
+                acceptingHostEpoch: host.hostEpoch,
+                localYDocSequence: next,
+                applicationReplayed: false,
+              },
+            };
+          },
+          readLiveApplicationAck: async () => null,
+        },
+      } as NamedFrameNativeHost;
+    });
+    const before = process.memoryUsage();
+    const sockets: Array<{ document: number; socket: ReturnType<typeof f.connect> }> = [];
+    for (let person = 1; person <= PEOPLE; person++) {
+      const document = ((person - 1) % DOCUMENTS) + 1;
+      const peer = await f.peer(person, document),
+        socket = peer.connect((await peer.mint()).token);
+      expect(await socket.status).toBe(101);
+      await openProductionSync(f, socket);
+      sockets.push({ document, socket });
+    }
+    const after = process.memoryUsage();
+    const arrived = (socket: ReturnType<typeof f.connect>, round: number) => {
+      const begin = socket.received.find(
+        (frame) =>
+          frame.kind === "begin" &&
+          frame.purpose === "applied-update" &&
+          frame.journalCursor === round,
+      );
+      return (
+        begin !== undefined &&
+        begin.kind === "begin" &&
+        socket.received.some(
+          (frame) => frame.kind === "chunk" && frame.transferId === begin.transferId,
+        )
+      );
+    };
+    const fanOut: number[] = [],
+      rounds: number[] = [];
+    for (let round = 1; round <= ROUNDS; round++) {
+      const start = performance.now();
+      for (let document = 1; document <= DOCUMENTS; document++)
+        published.set(`object-${document}`, round);
+      for (let document = 1; document <= DOCUMENTS; document++)
+        f.changes.notify({ ...f.binding, objectId: `object-${document}` });
+      await Promise.all(
+        sockets.map(({ socket }) =>
+          socket
+            .until(() => arrived(socket, round), `applied update ${round}`)
+            .then(() => {
+              fanOut.push(performance.now() - start);
+            }),
+        ),
+      );
+      rounds.push(performance.now() - start);
+    }
+    // Then only document 1 changes, so 12 connections have the update and the
+    // other 108 wake and find nothing.
+    const single: number[] = [],
+      firsts = sockets.filter(({ document }) => document === 1);
+    for (let round = ROUNDS + 1; round <= 2 * ROUNDS; round++) {
+      const start = performance.now();
+      published.set("object-1", round);
+      f.changes.notify({ ...f.binding, objectId: "object-1" });
+      await Promise.all(
+        firsts.map(({ socket }) =>
+          socket
+            .until(() => arrived(socket, round), `applied update ${round}`)
+            .then(() => {
+              single.push(performance.now() - start);
+            }),
+        ),
+      );
+    }
+    expect(sockets.every(({ socket }) => socket.ws.readyState === WebSocket.OPEN)).toBe(true);
+    const sorted = [...fanOut].sort((a, b) => a - b),
+      p = (q: number) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * q))]!;
+    const MiB = 1024 * 1024;
+    console.log(
+      `NAMED_LIVE_MEMORY connections=${PEOPLE} documents=${DOCUMENTS} rss-delta-mib=${((after.rss - before.rss) / MiB).toFixed(1)} ` +
+        `heap-delta-mib=${((after.heapUsed - before.heapUsed) / MiB).toFixed(1)} external-delta-mib=${((after.external - before.external) / MiB).toFixed(1)} ` +
+        `rss-mib=${(after.rss / MiB).toFixed(1)} buffered-bytes=${admission.buffers(profile.namedLive.transport.maxBufferedBytes).usage()}`,
+    );
+    console.log(
+      `NAMED_LIVE_FAN_OUT_MS connections=${PEOPLE} documents=${DOCUMENTS} update-bytes=${updateBytes.length} rounds=${ROUNDS} ` +
+        `p50=${p(0.5).toFixed(3)} p95=${p(0.95).toFixed(3)} max=${sorted[sorted.length - 1]!.toFixed(3)} samples=${sorted.length} ` +
+        `round-${summary(rounds)}`,
+    );
+    const one = [...single].sort((a, b) => a - b),
+      q = (x: number) => one[Math.min(one.length - 1, Math.floor(one.length * x))]!;
+    console.log(
+      `NAMED_LIVE_FAN_OUT_ONE_DOCUMENT_MS connections=${PEOPLE} changed-document-connections=${firsts.length} rounds=${ROUNDS} ` +
+        `p50=${q(0.5).toFixed(3)} p95=${q(0.95).toFixed(3)} max=${one[one.length - 1]!.toFixed(3)} samples=${one.length}`,
+    );
   },
   600_000,
 );
