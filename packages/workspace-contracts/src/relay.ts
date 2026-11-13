@@ -688,7 +688,8 @@ export interface RelayNotice {
   // When the relay lets the row go. Each mark starts the row's retention
   // again, so a computer keeps its copy until this time and no longer.
   expiresAtMs: number;
-  // The relay removed the row to make room in the list. Drop it; its body
+  // The relay removed the row to make room in the list, or, on the phone's
+  // scope, the recipient lost a share-received row's share. Drop it; its body
   // and target are gone.
   removed: boolean;
 }
@@ -697,8 +698,9 @@ export interface RelayNotice {
 // turned off "Show on phone", rows whose target is a secret or ignored file or
 // a thread on one, and every row whose kind's words the relay can't confirm:
 // an automation's rows without their Collection's path, a mention or agent run
-// naming no place, an automation wake, and any kind it doesn't know. A removed
-// row carries no title. The cursor still
+// naming no place, an automation wake, and any kind it doesn't know. A
+// share-received row whose share the recipient lost arrives as removed. A
+// removed row carries no title, body, sender name, or target. The cursor still
 // moves past what it left out, so a page can be empty with `hasMore`. With
 // `wait`, a read whose cursor is caught up waits for the next change.
 export interface RelayNoticePage {
