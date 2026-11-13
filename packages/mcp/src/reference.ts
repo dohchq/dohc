@@ -121,6 +121,9 @@ export const VERSION_RESULTS: Record<string, CliSocketVerb> = {
 export const SYNC_RESULTS: Record<string, CliSocketVerb> = { stop: "stopSync" };
 export const NOTICES_RESULTS: Record<string, CliSocketVerb> = { list: "notices" };
 const SHARE_RESULTS: Record<string, CliSocketVerb> = { copy: "shareCopy", agents: "shareAgents", disconnect: "shareDisconnect" };
+const MEMBERS_RESULTS: Record<string, CliSocketVerb> = {
+  list: "members", invite: "members", remove: "members", level: "members", admin: "members", member: "members", "let-back-in": "members", link: "members", end: "members",
+};
 
 export const ACCESS_RESULTS: Record<string, CliSocketVerb> = {
   refresh: "accessRefresh",
@@ -204,6 +207,7 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_links_in: { cli: "linksIn" },
   dohc_links_resolve: { cli: "linksResolve" },
   dohc_read_share_copy: { cli: "shareCopy" },
+  dohc_members: { cli: "members" },
   dohc_list_link_agents: { cli: "shareAgents" },
   dohc_disconnect_link_agent: { cli: "shareDisconnect" },
   dohc_dataset: "what that verb returns, listed under [`dohc dataset`](#dohc-dataset).",
@@ -439,6 +443,7 @@ const NOT_SHARED_READS: Record<string, string> = {
   dohc_read_operation: "Operation reads require the owning workspace. Shared profiles do not offer this read.",
   dohc_read_share_copy: "The code and invite link belong to the owner's sharing. Shared profiles do not offer this read.",
   dohc_list_link_agents: "A link's agents belong to the owner's sharing. Shared profiles do not offer this read.",
+  dohc_members: "Members belong to the original workspace and its owner. Shared profiles do not offer this tool.",
   dohc_list_live_documents: "Live editing belongs to the owner's sharing. Shared profiles do not offer this read.",
   dohc_list_automation_runs: "A shared view keeps no automation runs, so it does not offer this tool.",
   dohc_read_automation_run: "A shared view keeps no automation runs, so it does not offer this tool.",
@@ -523,7 +528,7 @@ function verbReturns(command: string, name: string): string {
         ? DOCUMENT_RESULTS[name]
         : command === "automation" ? AUTOMATION_RESULTS[name]
           : command === "access" ? ACCESS_RESULTS[name]
-            : command === "sync" ? SYNC_RESULTS[name] : command === "notices" ? NOTICES_RESULTS[name] : command === "share" ? SHARE_RESULTS[name]
+            : command === "sync" ? SYNC_RESULTS[name] : command === "notices" ? NOTICES_RESULTS[name] : command === "share" ? SHARE_RESULTS[name] : command === "members" ? MEMBERS_RESULTS[name]
               : command === "version" ? VERSION_RESULTS[name]
               : command === "account" ? ACCOUNT_RESULTS[name] : undefined;
   if (socketVerb !== undefined) {
@@ -574,6 +579,7 @@ function commandSection(name: string, command: CliCommandSpec): string {
   if (name === "version") checkCovered(name, Object.keys(command.verbs), Object.keys(VERSION_RESULTS));
   if (name === "sync") checkCovered(name, Object.keys(command.verbs), Object.keys(SYNC_RESULTS));
   if (name === "share") checkCovered(name, Object.keys(command.verbs), Object.keys(SHARE_RESULTS));
+  if (name === "members") checkCovered(name, Object.keys(command.verbs), Object.keys(MEMBERS_RESULTS));
   if (name === "access") checkCovered(name, Object.keys(command.verbs), Object.keys(ACCESS_RESULTS));
   if (name === "account") checkCovered(name, Object.keys(command.verbs), Object.keys(ACCOUNT_RESULTS));
   const jsonOperands = [...new Set(verbs.filter(([, verb]) => verb.fields).map(([, verb]) => verb.operands))];

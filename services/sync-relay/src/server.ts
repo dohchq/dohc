@@ -104,13 +104,14 @@ import {
   verifyRelayExchangeKey,
 } from "./linkSecurity";
 import { DiscussionActivityHub } from "./discussionActivity";
+import { createWorkspaceMemberRoutes, isWorkspaceMemberRoute } from "./workspaceMemberRoutes";
 import { PresenceHub } from "./presence";
 import { ReplicaWatches } from "./replicaWatches";
 import type {DevelopmentReplicaReads} from "./replicaLinkReadService";
 import { createPresenceRoutes } from "./presenceRoutes";
 import { createProposalRoutes } from "./proposalRoutes";
 import { parseShareId, parseWorkspaceId } from "./requestInputs";
-import type { ShareSelector } from "./shareFilter";
+import { parseStoredAnyShareSelectorJson, type ShareSelector } from "./shareFilter";
 import { type SyncRelayStorage } from "./storage";
 import type { AutomationServer } from "./storage/automationHosts";
 import {
@@ -220,6 +221,11 @@ export interface CreateSyncRelayHandlerOptions {
 }
 
 const MAX_LINK_CURRENT_FILES = 5_000;
+
+const MEMBERSHIP_MANAGED_SHARE_ROUTES: ReadonlySet<string> = new Set([
+  "share-copy", "share-undo", "share-revoke", "share-grant-revoke", "share-grant-promote",
+  "share-link-create", "share-link-rotate", "share-link-retune", "share-link-agents", "share-link-agent-disconnect",
+]);
 
 export function createSyncRelayHandler({
   appPublicationLimits,
@@ -386,15 +392,16 @@ export function createSyncRelayHandler({
   // address has an account.
   const deliverPendingShareNotices = async (userId: string): Promise<void> => {
     const labels = new Map<string, Promise<{senderLabel: string; senderEmail: string | null}>>();
-    for (const { grantId, granterUserId } of storage.pendingShareNotices(userId)) {
+    for (const { grantId, granterUserId, showsGranterEmail } of storage.pendingShareNotices(userId)) {
       try {
-        let label = labels.get(granterUserId);
+        const key = `${showsGranterEmail ? "email" : "name"}:${granterUserId}`;
+        let label = labels.get(key);
         if (label === undefined) {
           label = (async () => {
-            const senderEmail = await lookupUserEmail?.(granterUserId) ?? null;
+            const senderEmail = showsGranterEmail ? await lookupUserEmail?.(granterUserId) ?? null : null;
             return {senderLabel: await shareSenderLabel(granterUserId, senderEmail), senderEmail};
           })();
-          labels.set(granterUserId, label);
+          labels.set(key, label);
         }
         storage.noticeShareReceived({ grantId, ...await label, nowMs: nowMs() });
       } catch (error) {
@@ -508,6 +515,10 @@ export function createSyncRelayHandler({
     storage, nowMs, newId, claimPendingShares, activity: discussionActivity, rateLimiters: automationPressRateLimiters,
   });
 
+  const respondToWorkspaceMembers = createWorkspaceMemberRoutes({
+    storage, nowMs, newId, newShareId, newGrantId, claimPendingShares, resolveUserIdByEmail,
+    lookupUserEmail, lookupUserDisplayName, linkKey, shareWebOrigin, discussionActivity,
+  });
   const respondToNamedShareTransport = createNamedShareTransportRoutes(
     storage,
     nowMs,
@@ -566,7 +577,11 @@ export function createSyncRelayHandler({
     independentGrantSummary,
     linkInventorySummary,
     namedBrowserInvitation,
-  } = createShareSummaries(storage, (shareId) => storage.getShareLabels(shareId), lookupUserEmail, namedBrowser ? shareWebOrigin : undefined);
+  } = createShareSummaries(storage, (shareId) => {
+    // A workspace share is named by its workspace.
+    const membership = storage.getWorkspaceMembershipByShare(shareId);
+    return membership ? { subjectName: membership.workspaceName } : storage.getShareLabels(shareId);
+  }, lookupUserEmail, namedBrowser ? shareWebOrigin : undefined);
 
   const shareInventoryRoutes = (claim: (userId: string) => Promise<void>) => createShareInventoryRoutes(
     storage,
@@ -1124,6 +1139,16 @@ export function createSyncRelayHandler({
         return await respondToWorkspaceRegistration(request, actor);
       }
 
+      // People join and leave a workspace share through its members routes.
+      // The generic share changes would end, restore, copy, or link a member
+      // grant behind the membership's back. Only the owner may make them, so
+      // anyone else gets their usual 404 and learns nothing about the share.
+      if (MEMBERSHIP_MANAGED_SHARE_ROUTES.has(route.route) && "shareId" in route) {
+        const stored = storage.getShare(route.shareId);
+        const selector = stored?.granterUserId === actor.userId ? parseStoredAnyShareSelectorJson(stored.selectorJson) : null;
+        if (selector && "kind" in selector && selector.kind === "workspace") throw relayError("workspace_share_managed");
+      }
+
       if (route.route === "shares-list" || route.route === "share" || route.route === "share-access" || route.route === "share-copy") {
         return await respondToShareInventory(request, route, actor);
       }
@@ -1164,6 +1189,12 @@ export function createSyncRelayHandler({
 
       if (route.route === "share-presence") {
         return await respondToSharePresence(request, route.shareId, actor.userId);
+      }
+
+      // Members routes check the caller's role themselves. They sit before
+      // the ownership check below, which stays owner-only.
+      if (isWorkspaceMemberRoute(route)) {
+        return await respondToWorkspaceMembers(request, route, actor);
       }
 
       if (!storage.workspaceIsOwnedBy(route.workspaceId, actor.userId)) throw notFound();

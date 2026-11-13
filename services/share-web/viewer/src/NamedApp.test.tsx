@@ -58,7 +58,7 @@ it("explains an unavailable link without calling the account endpoints", async (
 });
 it.each([
   [403, "EMAIL_NOT_VERIFIED", "Choose a password from an emailed link before you sign in. Use Forgot your password? to get a link."],
-  [401, "INVALID_EMAIL_OR_PASSWORD", "dohc could not sign you in. Check your email and password, then retry."],
+  [401, "INVALID_EMAIL_OR_PASSWORD", "dohc could not sign you in. Check your email and password, then try again."],
 ])("explains upstream sign-in refusal %s %s and keeps the form", async (status, code, message) => {
   const origin = "https://share.example.test";
   const serve = createAccountAuthHandler({publicOrigin: origin, upstreamUrl: "http://workspace-api:1786",

@@ -45,17 +45,25 @@ export function accessPage<Row>(rows: readonly Row[], rowKey: (row: Row) => stri
     ? encodeAccessCursor(query, rowKey(selected.at(-1)!)) : null };
 }
 
-/** A parsed observation owns one index. Queries walk slash-delimited ancestors, not all grants. */
-export function createAccessIndex(input: readonly AccessShareRow[]) {
-  const rows = [...input].sort((a, b) => key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0);
-  const fingerprint = digest(JSON.stringify(rows));
+const byKey = (a: AccessShareRow, b: AccessShareRow) => key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0;
+
+/**
+ * A parsed observation owns one index. Queries walk slash-delimited ancestors, not all grants.
+ * `members` are the owner's workspace memberships: they reach every tracked file on main, and
+ * the Members page lists them, not the Sharing list.
+ */
+export function createAccessIndex(input: readonly AccessShareRow[], members: readonly AccessShareRow[] = []) {
+  const rows = [...input].sort(byKey);
+  const memberRows = members.filter(row => row.status === "active");
+  const fingerprint = digest(JSON.stringify([rows, memberRows]));
   const paths = new Map<string, AccessShareRow[]>(), whole = new Map<string, AccessShareRow[]>(), chats = new Map<string, AccessShareRow[]>();
   function add(map: Map<string, AccessShareRow[]>, id: string, row: AccessShareRow) {
     const bucket = map.get(id); if (bucket) bucket.push(row); else map.set(id, [row]);
   }
   for (const row of rows) {
     const selector = row.selector;
-    if (!selector || row.status !== "active") continue;
+    // A membership covers another workspace, never a path or chat of this one.
+    if (!selector || row.status !== "active" || selector.kind === "workspace") continue;
     if (selector.kind === "chat" || selector.kind === "group") add(chats, selector.channelWireId, row);
     if (selector.kind === "chat" || selector.kind === "group" && row.fileScope !== "served") continue;
     if (selector.paths.length === 0) add(whole, version(selector.versionId), row);
@@ -73,34 +81,46 @@ export function createAccessIndex(input: readonly AccessShareRow[]) {
       const collect = (bucket: readonly AccessShareRow[] | undefined) => {
         for (const row of bucket ?? []) {
           const selector = row.selector;
-          if (selector && selector.kind !== "chat" && visibleSharePath(selector, input.path) !== null) found.set(key(row), row);
+          if (selector && selector.kind !== "chat" && selector.kind !== "workspace" && visibleSharePath(selector, input.path) !== null) found.set(key(row), row);
         }
       };
       collect(whole.get(version(input.versionId)));
+      if (version(input.versionId) === "main") for (const row of memberRows) found.set(key(row), row);
       let path = input.path;
       while (path) { collect(paths.get(`${version(input.versionId)}\0${path}`)); const slash = path.lastIndexOf("/"); if (slash < 0) break; path = path.slice(0, slash); }
-      const result = [...found.values()].sort((a, b) => key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0);
+      const result = [...found.values()].sort(byKey);
       if (matched.size === 256) matched.delete(matched.keys().next().value!);
       matched.set(cacheKey, result);
       return result;
     },
-    forChat(channelWireId: string): AccessShareRow[] { return chats.get(channelWireId) ?? []; },
+    /** `members` when the chat is an ordinary Group of this workspace, which every member reaches. */
+    forChat(channelWireId: string, members = false): AccessShareRow[] {
+      const shared = chats.get(channelWireId) ?? [];
+      return members && memberRows.length ? [...shared, ...memberRows].sort(byKey) : shared;
+    },
   };
 }
 
-function grantedRows(listing: RosterListing): AccessShareRow[] {
-  if (listing.grants === null) return [];
+function grantedRows(listing: RosterListing): { rows: AccessShareRow[]; members: AccessShareRow[] } {
+  if (listing.grants === null) return { rows: [], members: [] };
   const linkShares = new Set(listing.links.map(link => link.grant.shareId));
   const rows = new Map<string, AccessShareRow>();
-  const add = (grant: unknown, via: AccessShareRow["via"]) => {
-    const row = AccessShareRow.parse({ ...(grant as object), kind: "share", via });
+  const members: AccessShareRow[] = [];
+  const isMembership = (grant: object) => "selector" in grant && (grant.selector as { kind?: unknown } | null)?.kind === "workspace";
+  const add = (grant: object, via: AccessShareRow["via"]) => {
+    // A workspace membership is listed on the Members page, not as a share.
+    if (isMembership(grant)) return;
+    const row = AccessShareRow.parse({ ...grant, kind: "share", via });
     if (!rows.has(key(row))) rows.set(key(row), row);
   };
-  for (const grant of listing.grants) add(grant, linkShares.has(grant.shareId) ? "dependent" : "named");
+  for (const grant of listing.grants) {
+    if (isMembership(grant)) members.push(AccessShareRow.parse({ ...grant, kind: "share", via: "named" }));
+    else add(grant, linkShares.has(grant.shareId) ? "dependent" : "named");
+  }
   for (const link of listing.links) add({ ...link.grant, status: link.ended ? "revoked" : link.grant.status }, "link");
   for (const former of listing.formerGrants) add(former.grant, linkShares.has(former.grant.shareId) ? "dependent" : "named");
   for (const ended of listing.endedGrants) add({ ...ended, selector: null, access: null }, "named");
-  return [...rows.values()];
+  return { rows: [...rows.values()], members };
 }
 
 function receivedRows(observation: ReceivedObservation, recipientUserId: string): AccessShareRow[] {
@@ -122,7 +142,11 @@ export function createAccessQuery() {
     if ("listing" in observation) {
       if (!observation.listing || observation.listing.grants === null) return null;
       let index = granted.get(observation.listing);
-      if (!index) { index = createAccessIndex(grantedRows(observation.listing)); granted.set(observation.listing, index); }
+      if (!index) {
+        const { rows, members } = grantedRows(observation.listing);
+        index = createAccessIndex(rows, members);
+        granted.set(observation.listing, index);
+      }
       return index;
     }
     if (!observation.inventory) return null;
@@ -134,7 +158,7 @@ export function createAccessQuery() {
   }
   return {
     answer(input: { observation: AccessRosterObservation | ReceivedObservation; recipientUserId: string; cursorScope: string;
-      ref: AccessObjectRef | null; coverage: "granted" | "received-own-grant" | "received-account"; shareId?: string; shareRoot?: boolean; cursor?: string }): AccessAnswer {
+      ref: AccessObjectRef | null; coverage: "granted" | "received-own-grant" | "received-account"; shareId?: string; shareRoot?: boolean; members?: boolean; cursor?: string }): AccessAnswer {
       if ("listing" in input.observation && input.observation.visibility === "hidden") return unknownAccess(input.ref, null, "hidden");
       const index = indexFor(input.observation, input.recipientUserId);
       if (!index) {
@@ -144,12 +168,12 @@ export function createAccessQuery() {
         return unknownAccess(input.ref, reason, input.ref === null ? "unknown" : "visible");
       }
       let rows = input.shareRoot ? index.rows : input.ref?.kind === "path" ? index.forPath(input.ref)
-        : input.ref?.kind === "chat" ? index.forChat(input.ref.channelWireId) : index.rows;
+        : input.ref?.kind === "chat" ? index.forChat(input.ref.channelWireId, input.members) : index.rows;
       if (input.shareId) {
         const matching = new Set(rows.map(key));
         rows = index.rows.filter(row => row.shareId === input.shareId && (matching.has(key(row)) || row.status === "removed" || row.status === "damaged"));
       }
-      const query = digest(JSON.stringify([index.fingerprint, input.cursorScope, input.ref, input.coverage, input.shareId, input.shareRoot]));
+      const query = digest(JSON.stringify([index.fingerprint, input.cursorScope, input.ref, input.coverage, input.shareId, input.shareRoot, input.members]));
       const page = accessPage(rows, key, query, input.cursor);
       if (!page) return unknownAccess(input.ref, "changed");
       return { ref: input.ref, ...page, visibility: "visible", unknownReason: null,

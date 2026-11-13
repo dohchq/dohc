@@ -1,9 +1,9 @@
 import { Client, Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { createWorkspaceAuth, type WorkspaceAuth } from "./betterAuth";
+import { createWorkspaceAuth, emailedLinkNextPage, type WorkspaceAuth } from "./betterAuth";
 import { createPostgresCredentialFence } from "./credentialFence";
 import { actorFromSession, createPostgresAccountSessions, createSessionActorResolver, UnauthorizedError, type ResolveActor } from "./session";
-import type { SignUpAdmission } from "./signUp";
+import { SIGN_UP_INVITE_LINK_HEADER, type SignUpAdmission } from "./signUp";
 import type { EmailMessage } from "./smtp";
 
 // Runs against the live dev Postgres (same requirement as workspace-postgres
@@ -57,6 +57,18 @@ try {
 }
 
 const describeWithPostgres = describe.skipIf(!pgAvailable);
+
+describe("the page an emailed link returns to", () => {
+  const link = (callbackURL: string) => `http://localhost:1786/api/auth/verify?token=t&callbackURL=${encodeURIComponent(callbackURL)}`;
+  it("keeps a device sign-in and the join page, and nothing else", () => {
+    expect(emailedLinkNextPage(link("/device?user_code=ABCD-EFGH"))).toBe("/device?user_code=ABCD-EFGH");
+    expect(emailedLinkNextPage(link("/join"))).toBe("/join");
+    for (const refused of ["//join", "/join?x", "/joinx", "/join#token", "/join/", "https://evil.example/join", "/account"]) {
+      expect(emailedLinkNextPage(link(refused)), refused).toBeNull();
+    }
+    expect(emailedLinkNextPage("http://localhost:1786/api/auth/verify?token=t")).toBeNull();
+  });
+});
 
 const PASSWORD = "a-real-password-123";
 const unique = () => `ba-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
@@ -145,7 +157,7 @@ describeWithPostgres("email/password against Postgres", () => {
 });
 
 describeWithPostgres("closed sign-up", () => {
-  function closedAuth(admission: SignUpAdmission, asked: string[] = []): WorkspaceAuth {
+  function closedAuth(admission: SignUpAdmission, asked: string[] = [], tokens: Array<string | null> = []): WorkspaceAuth {
     return createWorkspaceAuth({
       pool,
       baseURL: "http://localhost:1786",
@@ -153,12 +165,24 @@ describeWithPostgres("closed sign-up", () => {
       sendEmail: async (message) => {
         sent.push(message);
       },
-      admitAccount: async (email) => {
+      admitAccount: async (email, inviteToken) => {
         asked.push(email);
+        tokens.push(inviteToken);
         return admission;
       },
     });
   }
+
+  it("hands the server the invite-link token the sign-up presented", async () => {
+    const tokens: Array<string | null> = [];
+    const auth = closedAuth("admitted", [], tokens);
+    await auth.api.signUpEmail({
+      body: { email: `${unique()}@dohc.test`, password: PASSWORD, name: "Test User" },
+      headers: new Headers({ [SIGN_UP_INVITE_LINK_HEADER]: "invite-token-0123456789" }),
+    });
+    await auth.api.signUpEmail({ body: { email: `${unique()}@dohc.test`, password: PASSWORD, name: "Test User" } });
+    expect(tokens).toEqual(["invite-token-0123456789", null]);
+  });
 
   async function accountExists(email: string): Promise<boolean> {
     return ((await pool.query('SELECT 1 FROM "user" WHERE email = $1', [email])).rowCount ?? 0) > 0;

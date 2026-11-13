@@ -108,8 +108,8 @@ export function verifyEmailPage(options: { token?: string; email?: string; next?
     page: "verify-email",
     data: { token, next, "sign-up": closed ? CLOSED : undefined },
     main: `<h1>${heading}</h1>
-<p>${token ? "dohc is checking your link." : "Open the link dohc sent to your email. It works for one hour."}</p>
-<p id="verified" hidden><a href="${escapeHtml(next ?? "/account")}">${next?.startsWith("/device?") ? "Continue connecting your device" : "Go to your account"}</a></p>
+<p>${token ? "dohc is checking your link." : `Open the link dohc sent to your email. It works for one hour.${next === "/join" ? " Then open your invite link again to join the workspace." : ""}`}</p>
+<p id="verified" hidden><a href="${escapeHtml(next ?? "/account")}">${next?.startsWith("/device?") ? "Continue connecting your device" : next === "/join" ? "Continue joining the workspace" : "Go to your account"}</a></p>
 <form id="form"${token ? " hidden" : ""}>
 ${field("email", "Email", `type="email" name="email" autocomplete="username" required value="${escapeHtml(email ?? "")}"`)}
 <button type="submit">Send a new link</button>

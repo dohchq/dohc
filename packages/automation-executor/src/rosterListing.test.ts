@@ -201,6 +201,46 @@ describe("the owner's roster from a listing", () => {
 });
 
 
+describe("workspace members on the roster", () => {
+  const membership = (access: string, overrides: Record<string, unknown> = {}) =>
+    row({ grantId: `g-${access}`, recipientUserId: `u-${access}`, recipientEmail: `${access}@dohc.test`, selector: { kind: "workspace" }, access, ...overrides });
+  const trip = { path: "Trip", name: "Trip" };
+  const actsAsOwner: ReachStep = { kind: "personal", person: { userId: "u-owner", name: "Owner" } };
+
+  async function rosterOf(granted: unknown[]) {
+    const answer = await listRosterGrants(WORKSPACE, relay({
+      "/sync/shares?workspaceId=ws-trip": { status: 200, body: { granted } },
+      "/sync/ws-trip/shares/links": { status: 200, body: { links: [] } },
+    }));
+    if (answer.kind !== "answered" || answer.listing.grants === null) throw new Error(`expected grants: ${JSON.stringify(answer)}`);
+    expect(readStoredRoster(answer.listing)).toEqual(answer.listing);
+    return ownerRoster("u-owner", answer.listing, "");
+  }
+
+  it("counts an Edit member as an editor of every file, and a View member as none", async () => {
+    const edit = await rosterOf([membership("edit"), membership("view")]);
+    if (edit.kind !== "owner") throw new Error("expected an owner roster");
+    expect(edit.grants.map((grant) => grant.files)).toEqual([
+      { paths: [], versionId: null, access: "edit", wholeWorkspace: true },
+      { paths: [], versionId: null, access: "view", wholeWorkspace: true },
+    ]);
+    expect(checkAutomationReach(edit, { id: "a", collection: trip, codeFiles: [], steps: [
+      { kind: "change-records", collection: { path: "Budget", name: "Budget" } }, actsAsOwner,
+    ] })).toEqual([
+      { allowed: true },
+      { allowed: false, reason: "This step acts as you, and edit@dohc.test can also edit Trip." },
+    ]);
+    const view = await rosterOf([membership("view")]);
+    expect(checkAutomationReach(view, { id: "a", collection: trip, codeFiles: [], steps: [actsAsOwner] })).toEqual([{ allowed: true }]);
+  });
+
+  it("keeps a member who wrote automations and dropped to View as a former editor of every file", async () => {
+    const roster = await rosterOf([membership("view", { automationsGeneration: 2 })]);
+    expect(checkAutomationReach(roster, { id: "a", collection: trip, codeFiles: [], steps: [actsAsOwner] }))
+      .toEqual([{ allowed: true, formerStops: [{ evidence: "g-view#2", name: "view@dohc.test" }] }]);
+  });
+});
+
 describe("Group scope on the saved roster", () => {
   it.each([null, 2])("keeps an unserved Group usable with automation generation %s", async (automationsGeneration) => {
     const answer = await listRosterGrants(WORKSPACE, relay({

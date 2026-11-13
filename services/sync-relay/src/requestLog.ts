@@ -2,6 +2,7 @@ import { createRequestLog } from "@dohc/service-http";
 import { AUTOMATION_REPLICA_BEARER_PREFIX } from "./automationReplicaCredential";
 import type { SyncRelayRoute } from "./relayRoute";
 import { isServiceHostEnrollmentPath } from "./serviceHostEnrollmentRoutes";
+import { WORKSPACE_MEMBER_ROUTE_PATTERNS } from "./workspaceMemberRoutes";
 
 // The pattern each parsed route logs as. Ids in a path are placeholders; a
 // path's tail that can hold more than one id is `*`.
@@ -92,6 +93,7 @@ export const RELAY_ROUTE_PATTERNS = {
   "workspace-proposal": "/sync/:workspaceId/proposals/:proposalId",
   "workspace-proposal-op": "/sync/:workspaceId/proposals/:proposalId/ops/:opIndex",
   "workspace-proposal-settle": "/sync/:workspaceId/proposals/:proposalId/:decision",
+  ...WORKSPACE_MEMBER_ROUTE_PATTERNS,
 } as const satisfies Record<SyncRelayRoute["route"], string>;
 
 // Routes answered before or around the route parser: in main.ts and at the top of dispatch.

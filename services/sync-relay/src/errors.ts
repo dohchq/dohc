@@ -68,6 +68,12 @@ export const RELAY_ERROR_STATUSES = Object.freeze({
   stream_identity_mismatch: 409,
   too_many_paths: 400,
   unknown_chat_op: 403,
+  member_exists: 409,
+  member_removed: 409,
+  members_forbidden: 403,
+  workspace_full: 409,
+  workspace_name_required: 400,
+  workspace_share_managed: 409,
 } as const);
 
 export type RelayErrorCode = keyof typeof RELAY_ERROR_STATUSES;
@@ -157,6 +163,12 @@ export const RELAY_ERROR_MESSAGES: Readonly<Record<RelayErrorCode, string>> = Ob
   stream_identity_mismatch: "stream identity does not match",
   too_many_paths: "too many paths",
   unknown_chat_op: "unrecognized chat op cannot be authorship-verified",
+  member_exists: "That person is already in this workspace or has an invite.",
+  member_removed: "That account was removed from this workspace. Let it back in from the Members page.",
+  members_forbidden: "Only the owner or an admin can do this.",
+  workspace_full: "This workspace has as many people as it can hold.",
+  workspace_name_required: "Name the workspace before inviting people.",
+  workspace_share_managed: "Change who is in this workspace on its Members page.",
 });
 
 export type SessionHostState = "running without this document (server copy diverged)" | "running without this document (paused)" |

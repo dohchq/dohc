@@ -328,6 +328,14 @@ describe("SettingsDialog", () => {
     expect(screen.getByTestId("settings-empty-search")).toBeTruthy();
   });
 
+  it("leaves Members out of a shared view's nav and search", async () => {
+    render(<SettingsDialog workspaceIsReady sharedView workspaceId="ws-1" workspacePath="/shared/trip" onClose={() => {}} />);
+    await screen.findByTestId("settings-sidebar");
+    expect(screen.queryByTestId("settings-nav-members")).toBeNull();
+    fireEvent.change(screen.getByTestId("settings-search"), { target: { value: "invite" } });
+    expect(screen.queryByTestId("settings-nav-members")).toBeNull();
+  });
+
   it("groups the nav by where settings apply, under the workspace's folder", async () => {
     render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath={"C:\\Users\\sam\\dohc\\trip"} onClose={() => {}} />);
 
@@ -344,6 +352,7 @@ describe("SettingsDialog", () => {
       "settings-nav-apps",
       "settings-nav-privacy",
       "settings-nav-cloud",
+      "settings-nav-members",
       "hairline",
       "settings-nav-advanced",
     ]);

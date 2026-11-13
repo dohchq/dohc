@@ -17,11 +17,26 @@ class PreparedSharePath {
 /** Validate immutable inventory paths once. This carries no selector decision. */
 export const prepareSharePath = (path: string) => PreparedSharePath.prepare(path);
 
+/**
+ * A file scope. `wholeWorkspace` selects every tracked path on main, current
+ * and future. Only the relay builds it, for a workspace member's reach; it
+ * never comes from a stored or sent selector. It names no paths and no
+ * version, or it selects nothing.
+ */
+export interface ShareFileScope {
+  paths: readonly string[];
+  versionId: string | null;
+  wholeWorkspace?: boolean;
+}
+
 /** The normalized tracked path selected by a file scope, or null. Versions are checked by the caller. */
-export function visibleSharePath(selector: { paths: readonly string[]; versionId: string | null }, path: string | PreparedSharePath): string | null {
+export function visibleSharePath(selector: ShareFileScope, path: string | PreparedSharePath): string | null {
   const prepared = typeof path === "string" ? prepareSharePath(path) : preparedPaths.has(path) ? path : null;
   if (!prepared) return null;
   const normalized = prepared.path;
+  if (selector.wholeWorkspace === true) {
+    return selector.paths.length === 0 && selector.versionId === null ? normalized : null;
+  }
   const selected = selector.paths.length === 0
     ? selector.versionId !== null
     : selector.paths.some(granted => normalized === granted || normalized.startsWith(`${granted}/`));

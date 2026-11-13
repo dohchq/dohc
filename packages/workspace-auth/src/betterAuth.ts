@@ -6,7 +6,7 @@ import {
 import { APIError, createAuthEndpoint, createAuthMiddleware, sessionMiddleware } from "better-auth/api";
 import { bearer, deviceAuthorization, organization } from "better-auth/plugins";
 import type { Pool } from "pg";
-import type { SignUpAdmission } from "./signUp";
+import { SIGN_UP_INVITE_LINK_HEADER, type AdmitAccount, type SignUpAdmission } from "./signUp";
 import type { SendEmail } from "./smtp";
 
 // dohc server auth: Better Auth mounted on the same Postgres the workspace
@@ -42,7 +42,7 @@ interface WorkspaceAuthOptions {
   // Admission trusts the typed address, and anyone could have typed the
   // sign-up password, so on a closed server no password works until someone
   // opens the emailed link and chooses one there.
-  admitAccount?: (email: string) => Promise<SignUpAdmission>;
+  admitAccount?: AdmitAccount;
   accountDeletion?: {
     preview(user: { id: string; email: string }): Promise<Record<string, unknown>>;
     delete(user: { id: string; email: string }, token: string, confirmPassword: () => Promise<void>): Promise<Record<string, unknown>>;
@@ -89,8 +89,9 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
           databaseHooks: {
             user: {
               create: {
-                before: async (user: { email: string }) => {
-                  refuseUnadmitted(await admitAccount(user.email));
+                before: async (user: { email: string }, context: { headers?: Headers; request?: Request } | null) => {
+                  const headers = context?.headers ?? context?.request?.headers;
+                  refuseUnadmitted(await admitAccount(user.email, headers?.get(SIGN_UP_INVITE_LINK_HEADER) || null));
                 },
               },
             },
@@ -109,7 +110,7 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
       resetPasswordTokenExpiresIn: EMAIL_LINK_TTL_SECONDS,
       revokeSessionsOnPasswordReset: true,
       sendResetPassword: async ({ user, token, url: originalUrl }) => {
-        const next = nextPage(originalUrl);
+        const next = emailedLinkNextPage(originalUrl);
         // Until the address is verified, nobody has chosen a password yet.
         const settingUp = closed && !user.emailVerified;
         // The flag only makes the page ask for a name; the server applies one
@@ -150,7 +151,7 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
       sendOnSignUp: true,
       expiresIn: EMAIL_LINK_TTL_SECONDS,
       sendVerificationEmail: async ({ user, token, url: originalUrl }) => {
-        const next = nextPage(originalUrl);
+        const next = emailedLinkNextPage(originalUrl);
         if (closed) return sendPasswordLink(user.email, next);
         const url = page(`/account/verify-email?token=${encodeURIComponent(token)}&next=${encodeURIComponent(next ?? "/account")}`);
         await send({
@@ -257,10 +258,14 @@ export async function signOutUnverifiedAccounts(pool: Pool): Promise<void> {
     delete from "deviceCode" where "userId" in (select "id" from unverified)`);
 }
 
-/** The device sign-in an emailed link should continue, if Better Auth's link carries one. */
-function nextPage(betterAuthUrl: string): string | null {
+/**
+ * The page an emailed link should continue, if Better Auth's link carries one:
+ * a device sign-in, or the join page. The invite token never rides in the
+ * link; the join page asks for the invite link again when its tab lost it.
+ */
+export function emailedLinkNextPage(betterAuthUrl: string): string | null {
   const callback = new URL(betterAuthUrl).searchParams.get("callbackURL");
-  return callback && /^\/device\?user_code=[A-Za-z0-9%_-]+$/.test(callback) ? callback : null;
+  return callback && (callback === "/join" || /^\/device\?user_code=[A-Za-z0-9%_-]+$/.test(callback)) ? callback : null;
 }
 
 /** The name other people see, normalized as the relay shows it. */

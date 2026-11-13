@@ -1,4 +1,5 @@
 import { visibleSharePath } from "@dohc/security-contract/share-selector";
+import { getWorkspaceMembershipByShare } from "./workspaceMembers";
 import {shareAccessLabel, shareSubjectFallback} from "@dohc/security-contract/share-labels";
 import { automationFailureBodyForPermission, isSwitchedOffBody } from "@dohc/automation-executor/automation-failed-notice";
 import { createHash } from "node:crypto";
@@ -27,6 +28,7 @@ import { cutText } from "@dohc/workspace-contracts/names";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { badRequest, relayError, RelayError } from "../errors";
 import { authorizeShareGrantAction } from "../shareAuthorization";
+import { showsGranterEmail } from "../shareSummaries";
 import {
   fileSideOf,
   parseStoredAnyShareSelectorJson,
@@ -266,15 +268,16 @@ function shareNoticeState(storage: StorageContext, grantId: string): ShareNotice
 }
 
 /**
- * The share notices `recipientUserId` can receive now, with each granter.
- * Only these need the granter's name. Waiting rows whose grant ended are
- * settled here; the rest stay for a later pull. A grant writes its waiting
- * row in the transaction that makes it, and revoking it removes the row.
+ * The share notices `recipientUserId` can receive now, with each granter
+ * and whether the recipient sees the granter's email. Only these need the
+ * granter's name. Waiting rows whose grant ended are settled here; the rest
+ * stay for a later pull. A grant writes its waiting row in the transaction
+ * that makes it, and revoking it removes the row.
  */
 export function pendingShareNotices(
   storage: StorageContext,
   recipientUserId: string,
-): { grantId: string; granterUserId: string }[] {
+): { grantId: string; granterUserId: string; showsGranterEmail: boolean }[] {
   const waiting = () => storage.db.prepare(
     `SELECT d.grant_id FROM sync_relay_share_notice_deliveries AS d
      JOIN sync_relay_share_grants AS g ON g.grant_id = d.grant_id
@@ -290,7 +293,7 @@ export function pendingShareNotices(
     for (const row of again) if (row.state === "ended") settle.run(row.grantId);
     return again;
   }) : now).flatMap((row) => row.state === "deliver"
-    ? [{ grantId: row.grantId, granterUserId: row.share.granterUserId }]
+    ? [{ grantId: row.grantId, granterUserId: row.share.granterUserId, showsGranterEmail: showsGranterEmail(row.share.selectorJson) }]
     : []);
 }
 
@@ -406,6 +409,15 @@ function shareNoticeSender(full: string, email: string | null): string {
 function shareReceivedTitle(storage: StorageContext, share: SyncRelayShareRow): ((senderLabel: string) => string) | null {
   const selector = parseStoredAnyShareSelectorJson(share.selectorJson);
   if (!selector) return null;
+  if ("kind" in selector && selector.kind === "workspace") {
+    // "Ana added you to Community". A share without its membership names nothing.
+    const name = getWorkspaceMembershipByShare(storage, share.shareId)?.workspaceName;
+    if (name === undefined) return null;
+    return (senderLabel) => {
+      const room = NOTICE_TITLE_MAX_CHARS - [...`${senderLabel} added you to `].length;
+      return `${senderLabel} added you to ${cutText(name, room)}`;
+    };
+  }
   if (!("paths" in selector)) {
     const kind = storage.findChannelCreateKind(share.workspaceId, selector.channelWireId);
     if (kind === "dm") return senderLabel => `${senderLabel} sent you a message request`;

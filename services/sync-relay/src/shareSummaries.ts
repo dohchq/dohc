@@ -16,11 +16,11 @@ import type {
 // manager owns it; `undefined` means even that could not be read.
 function storedSelectorKind(
   selectorJson: string,
-): { selectorKind: "chat" | "group" } | Record<string, never> {
+): { selectorKind: "chat" | "group" | "workspace" } | Record<string, never> {
   try {
     const parsed: unknown = JSON.parse(selectorJson);
     const kind = (parsed as { kind?: unknown } | null)?.kind;
-    if (typeof parsed === "object" && parsed !== null && (kind === "chat" || kind === "group")) {
+    if (typeof parsed === "object" && parsed !== null && (kind === "chat" || kind === "group" || kind === "workspace")) {
       return { selectorKind: kind };
     }
   } catch {
@@ -29,8 +29,20 @@ function storedSelectorKind(
   return {};
 }
 
+// Whether a recipient sees the granter's email. A member sees the owner by
+// name only; the owner and admins see emails on the Members page.
+export function showsGranterEmail(selectorJson: string): boolean {
+  const kind: { selectorKind?: string } = storedSelectorKind(selectorJson);
+  return kind.selectorKind !== "workspace";
+}
+
+// A workspace share's grants carry a file level; chat and Group grants carry a chat level.
+function readableAccess(selector: StoredAnyShareSelector, access: string): boolean {
+  return "kind" in selector && selector.kind !== "workspace" ? isChatShareAccessValue(access) : isShareAccessValue(access);
+}
+
 export function createShareSummaries(
-  storage: Pick<SyncRelayStorage, "findChannelCreateKind">,
+  storage: Pick<SyncRelayStorage, "findChannelCreateKind" | "workspaceRoleOf">,
   labels: (shareId: string) => import("@dohc/security-contract/share-labels").ShareLabels,
   lookupUserEmail?: (userId: string) => Promise<string | null> | string | null,
   namedBrowserOrigin?: string,
@@ -61,12 +73,7 @@ export function createShareSummaries(
     // stored selector and grant access form a readable row. Every listing
     // caller gets the same damage classification.
     const selector =
-      storedSelector &&
-      ("kind" in storedSelector
-        ? isChatShareAccessValue(grant.access)
-        : isShareAccessValue(grant.access))
-        ? storedSelector
-        : null;
+      storedSelector && readableAccess(storedSelector, grant.access) ? storedSelector : null;
     return {
       shareId: share.shareId,
       ...labels(share.shareId),
@@ -122,6 +129,17 @@ export function createShareSummaries(
     };
   };
 
+  // A received membership says which role the recipient holds. The level
+  // alone cannot tell an admin from a member at Edit.
+  const workspaceRoleOfRow = (row: SyncRelayShareWithGrantRow, selector: unknown) => {
+    if (!selector || typeof selector !== "object" || (selector as { kind?: unknown }).kind !== "workspace") return {};
+    const userId = row.grant.principalUserId;
+    const role = userId ? storage.workspaceRoleOf(row.share.workspaceId, userId)?.role : undefined;
+    return role === "admin" || role === "member"
+      ? { selector: { kind: "workspace", role } }
+      : { selector: null, damaged: true as const, selectorKind: "workspace" };
+  };
+
   const receivedShareSummary = (
     row: SyncRelayShareWithGrantRow,
     granterEmail: string | null,
@@ -131,8 +149,10 @@ export function createShareSummaries(
     // Received summaries deliberately omit the workspace id: the recipient's
     // access is share-scoped, and the granter's workspace identity is not
     // theirs to see. Only the detail route adds a recipient source handle.
+    const base = shareSummaryBase(row);
     return {
-      ...shareSummaryBase(row),
+      ...base,
+      ...workspaceRoleOfRow(row, base.selector),
       granterUserId: row.share.granterUserId,
       granterEmail,
       sharerName,
@@ -225,12 +245,7 @@ export function createShareSummaries(
     const { share, grant } = row;
     const storedSelector = parseStoredAnyShareSelectorJson(share.selectorJson);
     const selector =
-      storedSelector &&
-      ("kind" in storedSelector
-        ? isChatShareAccessValue(grant.access)
-        : isShareAccessValue(grant.access))
-        ? storedSelector
-        : null;
+      storedSelector && readableAccess(storedSelector, grant.access) ? storedSelector : null;
     return {
       shareId: share.shareId,
       grantId: grant.grantId,

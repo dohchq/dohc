@@ -1,7 +1,7 @@
 import {createHash} from "node:crypto";
 import type {ReplicaCurrentView, ReplicaCurrentViewSelector} from "@dohc/workspace-engine-client/daemon";
 import {visibleSharePath} from "@dohc/security-contract/share-selector";
-import {parseStoredAnyShareSelectorJson, targetVersionId} from "../shareFilter";
+import {MAIN_VERSION_ID, parseStoredAnyShareSelectorJson, targetVersionId} from "../shareFilter";
 import {selectorTargetsBlockedChannel} from "../shareAuthorization";
 import type {ReplicaReadLease} from "../replicaReadPrincipal";
 import type {StorageContext} from "./context";
@@ -48,6 +48,9 @@ export function replicaCurrentViewSelectors(storage: StorageContext, workspace: 
   return statement(storage,`SELECT DISTINCT s.selector_json FROM sync_relay_shares s JOIN sync_relay_share_grants g ON g.share_id=s.share_id
     WHERE s.workspace_id=? AND ${currentShareGrantSql("g", "s")} ORDER BY s.selector_json`).all(workspace).flatMap(row => {
     const selector = parseStoredAnyShareSelectorJson(String(row.selector_json));
+    // The engine reads a version with no paths as every tracked path in that
+    // version, so the main version with no paths is a workspace share's files.
+    if (selector && "kind" in selector && selector.kind === "workspace") return [{versionId: MAIN_VERSION_ID, paths: []}];
     if (!selector || "kind" in selector && selector.kind === "chat" ||
         selectorTargetsBlockedChannel(storage, workspace, selector) ||
         selector.paths.length === 0 && selector.versionId === null) return [];

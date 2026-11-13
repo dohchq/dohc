@@ -26,10 +26,18 @@ export interface RosterGrant {
   recipientEmail: string | null;
   // The files the grant covers. A path covers itself and everything beneath
   // it. A grant with no paths covers a whole saved version, and no files
-  // anyone can change. Null for a grant on a chat alone.
-  files: { paths: readonly string[]; versionId: string | null; access: ShareAccess } | null;
+  // anyone can change. A workspace membership covers every file on main.
+  // Null for a grant on a chat alone.
+  files: (FileScope & { access: ShareAccess }) | null;
   // The chat a Group or chat grant covers.
   channel: { wireId: string; canPost: boolean } | null;
+}
+
+/** The files a grant covers: its paths, or with `wholeWorkspace` every file on main. */
+export interface FileScope {
+  paths: readonly string[];
+  versionId: string | null;
+  wholeWorkspace?: true;
 }
 
 /** Why the owner's computer does not know who can edit the workspace. */
@@ -62,7 +70,7 @@ export interface FormerEditor {
   generation: number;
   holder: "person" | "link";
   recipientEmail: string | null;
-  files: { paths: readonly string[]; versionId: string | null };
+  files: FileScope;
 }
 
 /** What this computer knows about who can edit and reach what in a workspace. */
@@ -226,7 +234,8 @@ function looseKey(path: string): string {
 function canEdit(person: Person, path: string): boolean {
   const key = looseKey(path);
   return person.grants.some(
-    (grant) => grant.files?.access === "edit" && grant.files.paths.some((granted) => within(key, looseKey(granted))),
+    (grant) => grant.files?.access === "edit" &&
+      (grant.files.wholeWorkspace === true || grant.files.paths.some((granted) => within(key, looseKey(granted)))),
   );
 }
 
@@ -236,7 +245,7 @@ function reaches(person: Person, path: string, access: "edit" | "view"): boolean
       grant.files !== null &&
       grant.files.versionId === null &&
       (access === "view" || grant.files.access === "edit") &&
-      grant.files.paths.some((granted) => within(path, granted)),
+      (grant.files.wholeWorkspace === true || grant.files.paths.some((granted) => within(path, granted))),
   );
 }
 

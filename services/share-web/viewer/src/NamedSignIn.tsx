@@ -1,7 +1,7 @@
 import type {FormEvent, ReactNode} from "react";
 import {AccountSetupRequiredError} from "./namedRecipient";
 
-const SIGN_IN_FAILED = "dohc could not sign you in. Check your email and password, then retry.";
+const SIGN_IN_FAILED = "dohc could not sign you in. Check your email and password, then try again.";
 const ACCOUNT_SETUP_REQUIRED = "Choose a password from an emailed link before you sign in.";
 const ACCOUNT_SETUP_HELP = `${ACCOUNT_SETUP_REQUIRED} Use Forgot your password? to get a link.`;
 export function signInErrorMessage(error: unknown): string {

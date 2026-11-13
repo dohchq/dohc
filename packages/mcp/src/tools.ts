@@ -24,6 +24,7 @@ import { databaseSyncStrategy, DOHC_METADATA_GUARD, frameworkConfigName, hasIgno
 import { sendCliRequest } from "@dohc/cli/client";
 import { DohcCliError } from "@dohc/cli/errors";
 import { OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
+import { MEMBERS_CAPABILITIES, OwnerMembersRequest } from "@dohc/cli/members";
 import { DATASET_CAPABILITIES, DatasetRequest } from "@dohc/cli/dataset";
 import {
   CLI_PROTOCOL_VERSION,
@@ -75,6 +76,7 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_switch_automation: ["automation.switch"],
   dohc_dataset: Object.values(DATASET_CAPABILITIES),
   dohc_publish_app: Object.values(APP_PUBLICATION_CAPABILITIES),
+  dohc_members: Object.values(MEMBERS_CAPABILITIES).filter(id => id !== MEMBERS_CAPABILITIES.leave),
   dohc_list_workspaces: ["workspace.list"],
   dohc_workspace_status: ["workspace.status"],
   dohc_stop_workspace_sync: ["workspace.sync.stop"],
@@ -2056,6 +2058,15 @@ export async function publishApp(ctx: ToolContext, input: unknown) {
   const parsed = OwnerAppPublicationRequest.safeParse(input);
   if (!parsed.success) return {ok:false as const,reason:"Invalid app publication request."};
   return requestCli(ctx,"appPublication",{request:parsed.data});
+}
+
+// The Members page for the owner's agents. The desktop names the workspace
+// and the signed-in owner account; the relay decides.
+export async function members(ctx: ToolContext, input: unknown) {
+  if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "Members requires the original workspace and its signed-in owner account." };
+  const parsed = OwnerMembersRequest.safeParse(input);
+  if (!parsed.success) return { ok: false as const, reason: parsed.error.issues[0]?.message ?? "Invalid members request." };
+  return requestCli(ctx, "members", { request: parsed.data });
 }
 
 /** Dataset authority comes from the owning desktop attachment, never a folder share. */

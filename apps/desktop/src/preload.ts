@@ -5,6 +5,7 @@ import { chatOperations } from "./ipc/chatOperations";
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import { shareCopyOperations } from "./ipc/shareCopyOperations";
 import { accessOperations } from "./ipc/accessOperations";
+import { memberOperations } from "./ipc/memberOperations";
 import { settingsOperations } from "./ipc/settingsOperations";
 import { workspaceFileOperations } from "./ipc/workspaceFileOperations";
 import { explorerMenuOperations } from "./ipc/explorerMenuOperations";
@@ -179,6 +180,7 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(linksOperations, invoke),
   ...operationBridge(heldChangeOperations, invoke),
   ...operationBridge(accessOperations, invoke),
+  ...operationBridge(memberOperations, invoke),
   platform: process.platform,
   devTools: devToolsGranted(process.argv),
   releaseChannel: releaseChannelFromArgv(process.argv),

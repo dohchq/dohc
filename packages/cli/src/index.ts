@@ -15,6 +15,7 @@ import {
   type CliResultByVerb,
 } from "./protocol";
 import { renderCliResult } from "./render";
+import { MEMBERS_REFUSED } from "./members";
 import { readPassword, readStdinText } from "./stdin";
 import {
   CHAT_MESSAGE_TOO_LONG,
@@ -128,6 +129,8 @@ function buildCliRequest(
         ...(command.cursor ? { cursor: command.cursor } : {}) } };
     case "shareDisconnect":
       return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, shareId: command.shareId, grantId: command.grantId, connectionId: command.connectionId } };
+    case "members":
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, request: command.request } };
     case "accountDeletePreview":
       return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor } };
     case "accountDelete":
@@ -413,7 +416,8 @@ function buildCliRequest(
 
 // A verb that could not do what was asked exits with its reason. A refused
 // Try again for another computer's run adds the notice that names it.
-function refusal(result: CliResultByVerb[keyof CliResultByVerb]): string | null {
+function refusal(verb: string, result: CliResultByVerb[keyof CliResultByVerb]): string | null {
+  if (verb === "members") return (result as CliResultByVerb["members"]).status === "refused" ? MEMBERS_REFUSED : null;
   // A Collections list this computer can't give fails, as it did when main threw the refusal.
   if (result !== null && "kind" in result && result.kind === "collections-refused") {
     const { refusal } = result;
@@ -425,7 +429,7 @@ function refusal(result: CliResultByVerb[keyof CliResultByVerb]): string | null 
     : result.reason;
 }
 
-const REFUSING_VERBS = new Set(["heldNoteChange", "dataset", "fileDuplicate","historyOperation", "historyUndo", "versionList", "versionCompare", "versionConflicts", "versionCreate", "versionSwitch", "versionMerge", "versionResolve", "accountDelete", "moments", "moment", "documentRead", "documentHeld", "documentEdit", "documentCreate", "collectionSetFields", "fileChats", "fileChatStart", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "liveDocuments", "liveStop", "liveResume", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "chatRetry"]);
+const REFUSING_VERBS = new Set(["members", "heldNoteChange", "dataset", "fileDuplicate","historyOperation", "historyUndo", "versionList", "versionCompare", "versionConflicts", "versionCreate", "versionSwitch", "versionMerge", "versionResolve", "accountDelete", "moments", "moment", "documentRead", "documentHeld", "documentEdit", "documentCreate", "collectionSetFields", "fileChats", "fileChatStart", "liveKeptEdits", "saveRecoveryCopy", "retryKeptEdits", "stopAgain", "liveDocuments", "liveStop", "liveResume", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "chatRetry"]);
 
 function jsonOutput(result: CliResultByVerb[keyof CliResultByVerb]): string {
   return JSON.stringify({ schemaVersion: CLI_JSON_SCHEMA_VERSION, ...result }, null, 2);
@@ -473,7 +477,7 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
         });
       }
       if (options.signal?.aborted) return { exitCode: 0, stdout: "", stderr: "" };
-      const refused = REFUSING_VERBS.has(command.verb) ? refusal(result) : null;
+      const refused = REFUSING_VERBS.has(command.verb) ? refusal(command.verb, result) : null;
       if (refused !== null) throw new DohcCliError(refused);
       const output = command.json
         ? result === null ? "null" : jsonOutput(result)

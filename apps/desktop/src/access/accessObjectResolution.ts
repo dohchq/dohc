@@ -1,4 +1,6 @@
 import type { AccessObjectRef } from "@dohc/workspace-contracts/access";
+import type { ChatChannelKind } from "@dohc/workspace-contracts/engine";
+import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
 import { isShareablePath, visibleSharePath } from "@dohc/security-contract/share-selector";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import { classifyResolvedShareProjectionPath } from "../workspaces/shareMounts";
@@ -15,16 +17,18 @@ export async function locateAccessVersionPath(workspaceId: string, path: string,
   return { path, exists: page.files.length !== 0 };
 }
 
-export async function hasAccessChat(workspaceId: string, channelWireId: string,
-  store: Pick<DesktopLinkedChatStore, "listChannelsPage" | "getChannelWireId">): Promise<boolean> {
+/** The kind of this workspace's chat with that wire id, or null when it has none. */
+export async function accessChatKind(workspaceId: string, channelWireId: string,
+  store: Pick<DesktopLinkedChatStore, "listChannelsPage" | "getChannelWireId">): Promise<ChatChannelKind | null> {
   const page = await store.listChannelsPage({ workspaceId, limit: 100 });
   if (page.channels.length > 100) throw new Error("Chat resolution exceeded its page bound.");
   for (let start = 0; start < page.channels.length; start += 8) {
     const ids = await Promise.all(page.channels.slice(start, start + 8).map(channel => store.getChannelWireId({ workspaceId, channelId: channel.id })));
-    if (ids.includes(channelWireId)) return true;
+    const found = ids.indexOf(channelWireId);
+    if (found >= 0) return page.channels[start + found]!.kind;
   }
   if (page.nextCursor) throw new Error("Chat resolution needs more than one page.");
-  return false;
+  return null;
 }
 
 export async function resolveAccessFileObject(workspace: Pick<RegistryEntry, "workspaceId">, objectId: string,
@@ -40,15 +44,18 @@ export async function resolveAccessFileObject(workspace: Pick<RegistryEntry, "wo
 export async function resolveAccessObject(workspace: RegistryEntry, ref: AccessObjectRef, ports: {
   filePathForObjectId(objectId: string): Promise<{ path: string; versionId: string } | null>;
   locatePath(path: string, versionId: string | null): Promise<{ path: string; exists: boolean } | null>;
-  hasChat(channelWireId: string): Promise<boolean>;
+  chatKind(channelWireId: string): Promise<ChatChannelKind | null>;
 }): Promise<ResolvedAccessObject> {
   if (ref.kind === "collection") return workspace.shareView
     ? { ref, visibility: "unknown" } : { ref, visibility: "visible" };
   if (ref.kind === "chat") {
-    if (!await ports.hasChat(ref.channelWireId)) return { ref, visibility: "missing" };
     const channel = workspace.sharedChannels?.find(row => row.channelWireId === ref.channelWireId);
-    return { ref, visibility: "visible", ...(channel ? { shareId: channel.shareId, relayUrl: channel.relayUrl,
-      recipientUserId: channel.recipientUserId, ended: channel.ended } : {}) };
+    const kind = channel ? "channel" : await ports.chatKind(ref.channelWireId);
+    if (kind === null) return { ref, visibility: "missing" };
+    if (channel) return { ref, visibility: "visible", shareId: channel.shareId, relayUrl: channel.relayUrl,
+      recipientUserId: channel.recipientUserId, ended: channel.ended };
+    // The relay's workspace Group rule: every Group of this workspace except General.
+    return { ref, visibility: "visible", ...(kind === "channel" && ref.channelWireId !== GENERAL_CHANNEL_WIRE_ID ? { members: true as const } : {}) };
   }
   let pathRef: Extract<AccessObjectRef, { kind: "path" }>;
   if (ref.kind === "file") {

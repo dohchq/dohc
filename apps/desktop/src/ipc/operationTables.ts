@@ -44,6 +44,7 @@ import { settingsOperations } from "./settingsOperations";
 import type { OperationTable } from "./operationTable";
 import { shareCopyOperations } from "./shareCopyOperations";
 import { accessOperations } from "./accessOperations";
+import { memberOperations } from "./memberOperations";
 import { workspaceFileOperations } from "./workspaceFileOperations";
 import { explorerMenuOperations } from "./explorerMenuOperations";
 
@@ -69,6 +70,7 @@ export const OPERATION_TABLES = [
   systemPrivacySettingsOperations,
   serverAccountOperations,
   accessOperations,
+  memberOperations,
   updateDownloadOperations,
   workspaceVersionOperations,
   historyOperations,

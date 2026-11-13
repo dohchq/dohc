@@ -6,7 +6,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
 import type { ChatFileMentionsPage } from "@dohc/workspace-contracts/chat-file-mentions";
 import type { LinksInResult } from "@dohc/workspace-contracts/links";
+import { readStoredRoster } from "@dohc/automation-executor/roster-listing";
 import { DaemonRefusalError } from "@dohc/workspace-engine-client";
+import { createAccessQuery } from "../../access/accessQuery";
 import type { ActorPresentation, ChatFileMentionRecord, DohcDesktopBridge, EngineMomentRecord, ListEngineMomentsResponse } from "../../ipc/bridgeContract";
 import { ipcWireError } from "../../ipc/errorWords";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
@@ -240,6 +242,24 @@ describe("About Access", () => {
     render(<Access />);
     expect((await screen.findByTestId("about-access-empty")).textContent).toBe("Only you");
     expect(screen.queryByTestId("about-access-count")).toBeNull();
+  });
+
+  it("lists the workspace's members, not Only you, for a tracked file with no share", async () => {
+    const member = (grantId: string, recipientEmail: string, access: "comment" | "edit") => ({
+      shareId: "membership", grantId, granterUserId: "owner", granterEmail: "owner@example.com", recipientUserId: grantId,
+      recipientEmail, subjectName: null, sharerName: null, generation: 1, status: "active" as const, selector: { kind: "workspace" as const }, access,
+    });
+    const listing = readStoredRoster({ grants: [member("ana", "ana@example.com", "comment"), member("ben", "ben@example.com", "edit")],
+      links: [], formerGrants: [], endedGrants: [] })!;
+    bridgeMock.getObjectAccess.mockResolvedValue(createAccessQuery().answer({
+      observation: { listing, checkedAtMs: CHECKED_AT, freshness: "fresh" }, recipientUserId: "owner", cursorScope: "scope",
+      ref: { kind: "path", path: "docs/plan.md", versionId: null }, coverage: "granted",
+    }));
+    render(<Access />);
+    const rows = await screen.findAllByTestId("about-access-row");
+    expect(rows.map((row) => row.textContent)).toEqual(["Aana@example.comCan comment", "Bben@example.comCan edit"]);
+    expect(screen.queryByTestId("about-access-empty")).toBeNull();
+    expect(screen.queryByText("Only you")).toBeNull();
   });
 
   it("claims nothing for a listing that did not finish, and shows only its freshness", async () => {

@@ -51,6 +51,7 @@ import { pinnedAppsFor } from "../../settings/pinnedApps";
 import { CloudSyncSettings, type CloudSettings } from "./CloudSyncSettings";
 import type { CustomizeTarget } from "./customize";
 import { KeyboardSettings } from "./KeyboardSettings";
+import { MembersSettings } from "./MembersSettings";
 import { ProfileHeader } from "./ProfileHeader";
 import { ScheduleHostRow } from "./ScheduleHostRow";
 import {
@@ -329,9 +330,14 @@ export function SettingsDialog(props: {
     };
   }, [props.workspaceId, props.workspaceIsReady]);
 
+  // A shared view lists no Members: the workspace it came from does.
+  const sections = useMemo(
+    () => (props.sharedView ? SETTINGS_SECTIONS.filter((section) => section.id !== "members") : SETTINGS_SECTIONS),
+    [props.sharedView],
+  );
   const filteredSections = useMemo(
-    () => SETTINGS_SECTIONS.filter((section) => sectionMatches(section, query)),
-    [query],
+    () => sections.filter((section) => sectionMatches(section, query)),
+    [query, sections],
   );
   const sharingResults = useSharingSearch(props.workspaceId, !!props.sharedView, props.workspaceIsReady && props.onOpenSharing ? query : "");
 
@@ -828,6 +834,25 @@ export function SettingsDialog(props: {
             </SettingsSection>
           </div>
         );
+      case "members":
+        return (
+          <div data-testid={settingsSectionPin("members")}>
+            {/* A shared view has no Members of its own: the original workspace lists them. */}
+            {props.sharedView ? null : (
+              <MembersSettings
+                workspaceId={props.workspaceId}
+                workspaceName={props.workspaceName ?? workspaceName({ rootPath: props.workspacePath })}
+                {...(props.cloud ? { cloud: props.cloud } : {})}
+                onOpenSync={() => {
+                  setQuery("");
+                  setActiveSection("cloud");
+                }}
+                {...(props.onError ? { onError: props.onError } : {})}
+                {...(props.onClearError ? { onClearError: props.onClearError } : {})}
+              />
+            )}
+          </div>
+        );
       case "apps":
         return (
           <div data-testid={settingsSectionPin("apps")}>
@@ -1168,7 +1193,7 @@ export function SettingsDialog(props: {
     }
   };
 
-  const visibleSections = query.trim() ? filteredSections : SETTINGS_SECTIONS;
+  const visibleSections = query.trim() ? filteredSections : sections;
 
   // Toasts don't move Settings. The panel gives back the room Overlay leaves
   // for them, and its content leaves that room instead, so the last controls

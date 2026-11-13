@@ -27,6 +27,7 @@
     "./share-discussion": "./src/shareDiscussion.ts",
     "./share-proposal-bound": "./src/shareProposalBound.ts",
     "./wire-patterns": "./src/wirePatterns.ts",
+    "./workspace-members": "./src/workspaceMembers.ts",
     "./app-collection-checks": "./src/appCollectionChecks.ts"
   },
   "scripts": {

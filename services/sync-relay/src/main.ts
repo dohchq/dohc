@@ -98,6 +98,11 @@ const nodeEnv = process.env.NODE_ENV;
 const isDevOrTest = nodeEnv === "development" || nodeEnv === "test";
 const testAuthSeam = process.env.SYNC_RELAY_TEST_AUTH === "1" && isDevOrTest;
 const linkKey = process.env.DOHC_RELAY_LINK_KEY;
+// A workspace invite link lets a new person create an account to join that
+// workspace. DOHC_INVITE_LINK_SIGN_UP=off keeps sign-up to listed and invited
+// addresses only; the links still let existing accounts join.
+if (process.env.DOHC_INVITE_LINK_SIGN_UP !== undefined && !["on", "off"].includes(process.env.DOHC_INVITE_LINK_SIGN_UP)) fatal("FATAL: DOHC_INVITE_LINK_SIGN_UP must be on or off.");
+const inviteLinkSignUp = process.env.DOHC_INVITE_LINK_SIGN_UP !== "off";
 const relayExchangeKey = process.env.DOHC_RELAY_EXCHANGE_KEY;
 const relayExchangeKeyHash =
   relayExchangeKey === undefined ? undefined : hashRelayExchangeKey(relayExchangeKey);
@@ -499,7 +504,7 @@ const deletions = createAccountDeletionRoute({storage: storage as StorageContext
   },
 });
 const pendingDeletions = pool ? await fencePendingAccountDeletions(pool, deletions) : [];
-const signUpInvites = secret.length >= 32 ? createSignUpInviteRoute({storage, key: signUpInviteKey(secret)}) : undefined;
+const signUpInvites = secret.length >= 32 ? createSignUpInviteRoute({storage, key: signUpInviteKey(secret), inviteLinkKey: inviteLinkSignUp ? linkKey ?? null : null}) : undefined;
 const fetchHandler = async (request: Request): Promise<Response> => {
   const entry = relayEntryPattern(request.headers.get("authorization"), new URL(request.url).pathname);
   if (entry) SYNC_RELAY_REQUEST_LOG.mark(request, entry);

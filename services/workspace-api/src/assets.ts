@@ -220,7 +220,7 @@ function errorText(status, data) {
   return "The server could not complete this request. Try again.";
 }
 
-async function call(path, payload, method) {
+async function call(path, payload, method, extraHeaders) {
   const verb = method || "POST";
   let response;
   try {
@@ -229,7 +229,7 @@ async function call(path, payload, method) {
       credentials: "same-origin",
       signal: AbortSignal.timeout(60000),
       redirect: "error",
-      headers: verb === "POST" ? { "content-type": "application/json" } : { accept: "application/json" },
+      headers: { ...(verb === "POST" ? { "content-type": "application/json" } : { accept: "application/json" }), ...(extraHeaders || {}) },
       body: verb === "POST" ? JSON.stringify(payload || {}) : undefined,
     });
   } catch {
@@ -283,6 +283,20 @@ function unusedPassword() {
   return Array.from(crypto.getRandomValues(new Uint8Array(32)), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+// The /join page keeps a workspace invite link's token in this tab while the
+// person creates an account. A closed server admits them only with it.
+function joinInviteHeader() {
+  const next = samePath(document.body.dataset.next);
+  if (!next || !/^\\/join(?:[?#]|$)/.test(next)) return {};
+  let token = null;
+  try {
+    token = sessionStorage.getItem("dohc.join.token");
+  } catch {
+    token = null;
+  }
+  return typeof token === "string" && /^[A-Za-z0-9_-]{16,128}$/.test(token) ? { "x-dohc-invite-link": token } : {};
+}
+
 if (page === "sign-up") {
   const form = byId("form");
   onSubmit(form, "Creating your account\\u2026", async () => {
@@ -291,7 +305,7 @@ if (page === "sign-up") {
       email: byId("email").value.trim(),
       password: byId("password") ? byId("password").value : unusedPassword(),
       callbackURL: samePath(document.body.dataset.next) || "/account",
-    });
+    }, "POST", joinInviteHeader());
     location.assign("/account/verify-email?next=" + encodeURIComponent(samePath(document.body.dataset.next) || "/account"));
   });
 }

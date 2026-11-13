@@ -1,9 +1,9 @@
 import { fileURLToPath } from "node:url";
 import { build, type Rolldown } from "vite";
 import { expect, it } from "vitest";
-import { VIEWER_PAGES } from "./pages";
+import { VIEWER_PAGES, viewerPage } from "./pages";
 
-const ROUTES = ["App.tsx", "NamedRecipientApp.tsx", "NamedChatApp.tsx", "NamedApp.tsx"];
+const ROUTES = ["App.tsx", "NamedRecipientApp.tsx", "NamedChatApp.tsx", "NamedApp.tsx", "JoinApp.tsx"];
 const EDITOR = ["NamedDocumentEditor.tsx", "DiscardDraft.tsx"];
 
 it("loads only each route's own code before it renders", async () => {
@@ -37,7 +37,14 @@ it("loads only each route's own code before it renders", async () => {
     "edit.html": ["NamedRecipientApp.tsx"],
     "chat.html": ["NamedChatApp.tsx"],
     "apps.html": ["NamedApp.tsx"],
+    "join.html": ["JoinApp.tsx"],
   });
   expect(loads(pages["chat.html"]!, EDITOR)).toEqual([]);
   expect(loads(pages["apps.html"]!, EDITOR)).toEqual([]);
+  expect(loads(pages["join.html"]!, EDITOR)).toEqual([]);
+});
+
+it("serves the invite link page only at /join", () => {
+  expect(viewerPage("/join")).toBe("join.html");
+  expect(viewerPage("/s/join/")).toBe("index.html");
 });
