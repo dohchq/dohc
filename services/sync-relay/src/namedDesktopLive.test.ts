@@ -14,6 +14,7 @@ const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {for (const close of cleanups.splice(0).reverse()) await close(); vi.restoreAllMocks();});
 
 async function fixture(options: {level?: "view" | "comment" | "edit"; hostsMemberDocuments?: boolean} = {}) {
+  const hostBlocked = vi.fn((_document: {workspaceId: string; objectId: string}): string | undefined => undefined);
   const f = await ticketFixture(); cleanups.push(f.close);
   f.storage.claimWorkspaceIdentity({workspaceId: scope.workspaceId, replicationEpoch: "epoch", streamIdentity: "stream"});
   expect(f.storage.inviteWorkspaceMember({workspaceId: scope.workspaceId, actorUserId: "owner-1", workspaceName: "Plans", email: "sam@example.test",
@@ -28,6 +29,7 @@ async function fixture(options: {level?: "view" | "comment" | "edit"; hostsMembe
     resolveActor: async (request: Request, workspaceId: string) =>
       ({userId: request.headers.get("authorization") === "Bearer member" ? "member-1" : scope.userId, workspaceId}) as never,
     hostsMemberDocuments: () => options.hostsMemberDocuments ?? true,
+    hostBlocked,
     readinessLimits: {maxPendingRequests: 8, maxPendingPerUser: 4, timeoutMs: 5000},
     limits: {maxSessions: 10, retentionMs: 60000, maxPendingRequests: 4, maxRequestBytes: 16384, maxResponseBytes: 16384, timeoutMs: 5000},
     editorLimits: {provider: {frames: {receive: {maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
@@ -42,7 +44,7 @@ async function fixture(options: {level?: "view" | "comment" | "edit"; hostsMembe
       method: "POST", headers: {host: relayHost, authorization: `Bearer ${who}`, "content-type": "application/json"}, body: JSON.stringify(body), signal,
     }));
   }
-  return {...f, live, tickets, changes, enroll, post};
+  return {...f, live, tickets, changes, enroll, post, hostBlocked};
 }
 
 it("enrolls a member's document once before waiting for its host, then admits once the host is ready", async () => {
@@ -89,4 +91,51 @@ it.each([
   cancel.abort();
   expect((await waiting).status).toBe(404);
   expect(f.enroll).not.toHaveBeenCalled();
+});
+
+// A document with no live-editing history waits for its owner's desktop to
+// start one. The member's open says so at once, even when the host blocks it
+// while the open waits, and the readiness wait keeps waiting for the host.
+it("answers a member's open at once when the host is blocked for lack of lineage", async () => {
+  const f = await fixture();
+  f.hostBlocked.mockReturnValue("without-lineage");
+  const response = await f.post("open");
+  expect(response.status).toBe(409);
+  expect(await response.json()).toEqual({ok: false, code: "live-document-without-lineage"});
+  expect(f.hostBlocked).toHaveBeenCalledWith({workspaceId: scope.workspaceId, objectId: binding.objectId});
+  expect(f.tickets.mint).not.toHaveBeenCalled();
+});
+
+it("wakes a waiting open when its host blocks the document for lack of lineage", async () => {
+  const f = await fixture();
+  const waiting = f.post("open");
+  await vi.waitFor(() => expect(f.tickets.mint).toHaveBeenCalledTimes(1));
+  f.hostBlocked.mockReturnValue("without-lineage");
+  f.changes.notifyHost([scope.workspaceId]);
+  const response = await waiting;
+  expect(response.status).toBe(409);
+  expect(await response.json()).toEqual({ok: false, code: "live-document-without-lineage"});
+});
+
+it("keeps a readiness wait open while the host is blocked for lack of lineage, and answers ready once it hosts", async () => {
+  const f = await fixture();
+  f.hostBlocked.mockReturnValue("without-lineage");
+  const response = await f.post("ready");
+  const reader = response.body!.getReader(), decoder = new TextDecoder();
+  expect(decoder.decode((await reader.read()).value)).toBe(`waiting${"\n"}`);
+  await vi.waitFor(() => expect(f.tickets.mint).toHaveBeenCalledTimes(1));
+  f.hostBlocked.mockReturnValue(undefined);
+  f.tickets.mint.mockResolvedValue({token: "ab".repeat(32), expiresAtMs: 61_000});
+  f.changes.notifyHost([scope.workspaceId]);
+  expect(decoder.decode((await reader.read()).value)).toBe(`ready${"\n"}`);
+});
+
+it.each(["refused", "live-edit-unadmitted", "history-over-budget"])("keeps waiting on a host blocked as %s", async block => {
+  const f = await fixture();
+  f.hostBlocked.mockReturnValue(block);
+  const cancel = new AbortController();
+  const waiting = f.post("open", undefined, "member", cancel.signal);
+  await vi.waitFor(() => expect(f.tickets.mint).toHaveBeenCalledTimes(1));
+  cancel.abort();
+  expect((await waiting).status).toBe(404);
 });

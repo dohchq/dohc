@@ -1453,6 +1453,10 @@ if (namedLiveConfig) {
           control.configuredHostId === selfHostedLiveHostId(deployment.history.namespace)
         );
       },
+      hostBlocked: (document) =>
+        storage.getLiveHostControl()?.configuredMode === "service"
+          ? selfHost?.blocked(document)
+          : undefined,
     });
     desktopLive = createNamedLiveRoutes({
       kind: "named",

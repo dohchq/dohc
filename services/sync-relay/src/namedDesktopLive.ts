@@ -37,6 +37,8 @@ export function createNamedDesktopLive(options: {
   readinessLimits: { maxPendingRequests: number; maxPendingPerUser: number; timeoutMs: number };
   /** Whether this server's own live host hosts the documents workspace members open. */
   hostsMemberDocuments(): boolean;
+  /** Why this server's live host stopped trying to host the document, if it did. */
+  hostBlocked?(document: { workspaceId: string; objectId: string }): string | undefined;
 }) {
   const { storage } = options,
     limits = parseNamedLiveBrowserHttpLimits(options.limits);
@@ -70,9 +72,9 @@ export function createNamedDesktopLive(options: {
       { status: 404, headers: { "cache-control": "private, no-store" } },
     );
   // The host's answer to hosting the document, which the desktop shows instead of waiting.
-  const hostRefused = (refusal: LiveHostingRefusal) =>
+  const hostRefused = (code: LiveHostingRefusal["reason"] | "live-document-without-lineage") =>
     Response.json(
-      { ok: false, code: refusal.reason },
+      { ok: false, code },
       { status: 409, headers: { "cache-control": "private, no-store" } },
     );
   let pending = 0;
@@ -175,7 +177,7 @@ export function createNamedDesktopLive(options: {
               },
             });
           } catch (error) {
-            if (error instanceof LiveHostingRefusal) return hostRefused(error);
+            if (error instanceof LiveHostingRefusal) return hostRefused(error.reason);
             throw error;
           }
         }
@@ -220,6 +222,15 @@ export function createNamedDesktopLive(options: {
               )
                 continue;
               authorized = true;
+              // A document with no live-editing history waits for its owner's desktop to start one.
+              // The open says so at once. The readiness wait keeps waiting for the host.
+              if (
+                !readiness &&
+                options.hostBlocked?.({ workspaceId: share.workspaceId, objectId }) ===
+                  "without-lineage"
+              ) {
+                return hostRefused("live-document-without-lineage");
+              }
               const context = {
                 kind: "named" as const,
                 userId: actor.userId,
