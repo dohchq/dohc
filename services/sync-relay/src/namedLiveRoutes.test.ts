@@ -796,6 +796,28 @@ it.each([false, true])(
   },
 );
 
+// Tabs that keep reconnecting fill a caller's share of tickets until those tickets expire.
+it.each([false, true])(
+  "asks a link holder to try again while its share of tickets is full; link=%s",
+  async (link) => {
+    const f = await fixture(limits, link);
+    const ask = async () => {
+      const response = await f.post(`/sync/live/${link ? "link" : "named"}-tickets`, {
+        discriminator: f.discriminator,
+        objectId: binding.objectId,
+      });
+      return [response.status, await response.json()];
+    };
+    expect((await ask())[0]).toBe(200);
+    expect((await ask())[0]).toBe(200);
+    expect(await ask()).toEqual(
+      link
+        ? [503, linkRefusalBody("link_live_unavailable")]
+        : [404, { ok: false, error: "not found" }],
+    );
+  },
+);
+
 it.each([false, true])(
   "mints through actual HTTP auth and redeems once before exposing only live frames; link=%s",
   async (link) => {
