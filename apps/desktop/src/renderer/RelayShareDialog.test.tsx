@@ -6422,6 +6422,27 @@ describe("people and links on one surface", () => {
     expect(screen.getByTestId("share-links-more").getAttribute("aria-expanded")).toBe("true");
   });
 
+  it("says a link could not be added without opening a list the person never opened", async () => {
+    const only = readableLink("only", { shareId: "share-only" });
+    bridgeMock.listRelayShareLinks
+      .mockResolvedValueOnce({ links: [only] })
+      .mockResolvedValueOnce({ links: [only] })
+      .mockResolvedValue({ links: [{ ...only, status: "revoked", revokedAtMs: CREATED_MS + 20 }] });
+    bridgeMock.addRelayShareLink.mockRejectedValue(new Error("The sync relay is unavailable."));
+    const user = userEvent.setup();
+    render(<RelayShareDialog workspaceId="ws-1" target={PLAN} onClose={() => {}} />);
+
+    await addLinkWith(user, await screen.findByTestId("share-link-group-share-only"), "Can comment");
+    expect((await screen.findByTestId("share-link-error")).textContent).toBe("The sync relay is unavailable.");
+    expect(screen.queryByTestId("share-links-more")).toBeNull();
+
+    // A link ended afterwards still waits under a closed list.
+    await chooseLinkOption(user, screen.getByTestId("share-link-row-only"), "End link");
+    await user.click(within(screen.getByTestId("share-link-confirmation")).getByRole("button", { name: "End link" }));
+    expect((await screen.findByTestId("share-links-more")).getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByTestId("share-link-row-only")).toBeNull();
+  });
+
   it("keeps the shown share in place when its oldest link ends", async () => {
     const olderA = readableLink("a-old", { shareId: "share-a", createdAtMs: CREATED_MS });
     const newerA = readableLink("a-new", { shareId: "share-a", createdAtMs: CREATED_MS + 9 });

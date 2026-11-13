@@ -1595,8 +1595,8 @@ export function useRelayShareLinkPane(props: {
       }
       setLinkError(ipcErrorMessage(cause));
       // The error shows beside the separate link, which may sit in that list.
-      // A link made all the same shows there too.
-      setMoreOpen(true);
+      // A separate link made all the same shows there too.
+      if (action.kind === "create" || createInMore) setMoreOpen(true);
       void refreshLinks(scopeGeneration);
     } finally {
       if (
