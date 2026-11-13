@@ -5082,6 +5082,7 @@ const shareLinkAgentsForCli = createShareLinkAgentActions<RegistryEntry>({
 const workspaceMembers = createWorkspaceMembersActions<RegistryEntry, CloudSessionCredentials>({
   remoteForWorkspace, currentCredentialGeneration: () => credentialCacheGeneration,
   relayResponse: (credentials, path, init) => relayShareResponseWithCredentials(credentials, path, init),
+  sharesChanged: (workspaceId) => { receivedShareAcquisition.invalidate(); invalidateHistoryLabels(workspaceId); shareRosters.sharesChanged(workspaceId); },
 });
 // The desktop window and the CLI delete the account through this one client.
 // Afterwards this computer forgets every session of the deleted account, even

@@ -11,6 +11,8 @@ interface MembersDependencies<Workspace, Credentials> {
   currentCredentialGeneration(): number;
   /** One relay request with the signed-in account's bearer. Resolves with any status; rejects when the server is unreachable. */
   relayResponse(credentials: Credentials, path: string, init: RequestInit): Promise<Response>;
+  /** The relay accepted a change, so this computer's grant listings refresh now. */
+  sharesChanged(workspaceId: string): void;
 }
 
 export const MEMBERS_UNREACHABLE = "dohc could not reach your server. Check your connection, then try again.";
@@ -123,15 +125,20 @@ export function createWorkspaceMembersActions<Workspace extends MembersWorkspace
         return match.memberId;
       };
 
+      const changed = (status: number) => {
+        if (status !== 200) throw failure(request.action, status);
+        dependencies.sharesChanged(workspaceId);
+      };
+
       const change = async (path: string, body: unknown): Promise<MembersResult> => {
         const { status, data } = await call(path, body);
-        if (status !== 200) throw failure(request.action, status);
+        changed(status);
         return MembersResult.parse({ status: "ready", view: readView(data) });
       };
 
       const finish = async (path: string): Promise<MembersResult> => {
         const { status, data } = await call(path, {});
-        if (status !== 200) throw failure(request.action, status);
+        changed(status);
         if (typeof data !== "object" || data === null || (data as { ok?: unknown }).ok !== true) {
           throw new Error("dohc could not read your server's answer. Reload Members to check what changed.");
         }
@@ -143,7 +150,7 @@ export function createWorkspaceMembersActions<Workspace extends MembersWorkspace
           return list();
         case "invite": {
           const { status, data } = await call(route(WORKSPACE_MEMBER_ROUTES.invite, workspaceId), { email: request.email, workspaceName });
-          if (status !== 200) throw failure("invite", status);
+          changed(status);
           if (typeof data !== "object" || data === null || (data as { ok?: unknown }).ok !== true) {
             throw new Error("dohc could not read your server's answer. Reload Members to check whether the invite was sent.");
           }

@@ -24,8 +24,9 @@ function harness(options: { shareView?: unknown } = {}) {
   const relay = vi.fn(async (_credentials: Credentials, _path: string, _init: RequestInit): Promise<Response> => json(view()));
   const remote = vi.fn(async (_workspace: typeof workspace, _options?: { allowPaused: boolean }) =>
     ({ credentials: { userId: "owner", token: "secret" }, credentialGeneration: generation }));
+  const sharesChanged = vi.fn<(workspaceId: string) => void>();
   const members = createWorkspaceMembersActions<typeof workspace, Credentials>({
-    remoteForWorkspace: remote, currentCredentialGeneration: () => generation, relayResponse: relay,
+    remoteForWorkspace: remote, currentCredentialGeneration: () => generation, relayResponse: relay, sharesChanged,
   });
   const listeners = new Map<string, (event: unknown, payload: unknown) => Promise<unknown>>();
   registerOperations({
@@ -40,7 +41,7 @@ function harness(options: { shareView?: unknown } = {}) {
     },
   }, memberOperations, { workspaceMembers: ({ request }, { operation }) => members(operation as Parameters<typeof members>[0], request) });
   const bridge = operationBridge(memberOperations, (channel, payload) => listeners.get(channel)!({}, payload));
-  return { bridge, relay, remote, rotate: () => { generation++; }, close: () => { open = false; } };
+  return { bridge, relay, remote, sharesChanged, rotate: () => { generation++; }, close: () => { open = false; } };
 }
 
 const calls = (relay: ReturnType<typeof harness>["relay"]) =>
@@ -140,6 +141,22 @@ describe("workspace members actions", () => {
       'POST /sync/ws-1/members/invite-link {"action":"turn-off"}',
       'POST /sync/ws-1/members/invite-link {"action":"reset","workspaceName":"Community"}',
     ]);
+  });
+
+  it("refreshes this computer's grants after each change the relay accepts, and not after a list or a refusal", async () => {
+    const h = harness();
+    await h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "list" } });
+    h.relay.mockResolvedValueOnce(json({ error: "forbidden" }, 403));
+    await expect(h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "remove", person: "m-ana" } })).rejects.toThrow();
+    expect(h.sharesChanged).not.toHaveBeenCalled();
+
+    await h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "level", level: "view" } });
+    await h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "remove", person: "m-ana" } });
+    h.relay.mockResolvedValueOnce(json({ ok: true, memberId: "m-bo" }));
+    await h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "invite", email: "bo@test" } });
+    h.relay.mockResolvedValueOnce(json({ ok: true }));
+    await h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "end" } });
+    expect(h.sharesChanged.mock.calls).toEqual([["ws-1"], ["ws-1"], ["ws-1"], ["ws-1"]]);
   });
 
   it("finds a person by email for the owner's tools, and says so when no one has it", async () => {
