@@ -47,6 +47,7 @@
     "check:brand": "node scripts/check-brand.mjs",
     "check:ui-rules": "node scripts/check-ui-rules.mjs",
     "check:type-libs": "node scripts/check-type-libs.mjs",
+    "write:operation-pins": "pnpm --filter @dohc/cli exec tsx ../../apps/desktop/src/ipc/rewriteDeclaredPins.ts",
     "check:exports": "knip --workspace @dohc/workspace-engine-client --workspace @dohc/cli --workspace @dohc/workspace-core --workspace @dohc/workspace-contracts --exports --include-entry-exports",
     "verify:ordered-delivery": "node scripts/verification/ordered-delivery.mjs",
     "verify:configured-hosts": "node scripts/verification/configured-hosts.mjs",
