@@ -52,6 +52,7 @@ import type { LocalDatasetAgent } from "../workspaces/localDatasetHost";
 import type { WorkspaceAuthorityOperation } from "../workspaces/workspaceAuthorityOwner";
 import type { LocalPersonAuthor } from "../workspaces/desktopRecordEdits";
 import { captureRefusal } from "../workspaces/engineCaptureGate";
+import { resolveEngineFileTargets } from "../workspaces/resolveEngineFiles";
 import { assertOriginalWorkspace } from "../ipc/ownerRelayShareHandler";
 import type {
   OwnerLiveDocumentsResult,
@@ -99,6 +100,9 @@ import {
 
 // The engine reads at most this many accounts for one agent you run.
 const MAX_AGENT_REQUESTERS = 64;
+
+// A joined workspace keeps no History of its own on this computer.
+export const JOINED_HISTORY_REFUSAL = "Read a joined workspace's History in the app.";
 
 // The accounts this computer's person posts as in a workspace, as its
 // registry entry records them: the owner account sync started with, or the
@@ -286,7 +290,9 @@ interface DesktopCliServerDependencies<State> {
   agentDispatchStoreHandleFor(
     workspace: RegistryEntry,
   ): Pick<LiveAgentDispatchStoreHandle, "store">;
-  sharedViewOf(workspaceId: string): unknown;
+  // A share view's scope, or null for a workspace this computer owns. A
+  // membership is a view of a whole workspace: a joined workspace.
+  sharedViewOf(workspaceId: string): { membership?: boolean } | null;
   // A shared view's projection status, or undefined for any other workspace.
   shareProjection(workspace: RegistryEntry): Promise<SyncStatusResult["shareProjection"]>;
   withPhysicalWorkspaceOperation<Result>(
@@ -390,10 +396,22 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
       throw new Error("dohc: not inside a dohc workspace");
     }
     await openWorkspaceActivity(workspace);
-    const capture = activity.engineCaptureFor(workspace.workspaceId);
-    if (!capture) {
+    // A share view has no capture. Its files resolve through the view's own
+    // engine session, and History stays in the app.
+    const shareView = sharedViewOf(workspace.workspaceId) !== null;
+    const capture = shareView ? null : activity.engineCaptureFor(workspace.workspaceId);
+    if (!capture && !shareView) {
       throw new Error(captureRefusal("Chats"));
     }
+    const resolveViewFile = async (target: { path: string } | { objectId: string }) => {
+      const [found] =
+        (await withEngineAdapter(
+          workspace,
+          async (adapter) =>
+            await resolveEngineFileTargets(adapter, workspace.workspaceId, [target]),
+        )) ?? [];
+      return found?.status === "found" ? found : null;
+    };
     const store = linkedChatStoreFor(workspace);
     const daemon = currentDaemon();
     if (!daemon) throw new Error("The workspace engine is not running.");
@@ -631,6 +649,7 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
       accountReadOwner: (threadId) => dependencies.accountReadOwner(workspace, store, threadId),
       dispatchStore: agentDispatchStoreHandleFor(workspace).store,
       readOnly: Boolean(sharedViewOf(workspace.workspaceId)),
+      joined: sharedViewOf(workspace.workspaceId)?.membership === true,
       makeWorkReference: async (target) => {
         const made = await withEngineAdapter(workspace, (adapter) =>
           adapter.makeWorkReference({
@@ -657,7 +676,10 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
             { workspaceId: workspace.workspaceId, ...input },
           );
         }),
-      fileObjectIdForPath: (path) => capture.fileObjectIdForPath(path),
+      fileObjectIdForPath: async (path) =>
+        capture
+          ? await capture.fileObjectIdForPath(path)
+          : ((await resolveViewFile({ path }))?.objectId ?? null),
       sharedFilesHeld: async () => {
         const projection = await shareProjection(workspace);
         if (!projection) return null;
@@ -881,7 +903,7 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
           return { path };
         },
       },
-      ...(sharedViewOf(workspace.workspaceId)
+      ...(capture === null
         ? {}
         : {
             versions: {
@@ -1129,8 +1151,12 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
                 }
               : {}),
           }),
-      filePathForObjectId: (objectId) => capture.filePathForObjectId(objectId),
+      filePathForObjectId: async (objectId) =>
+        capture
+          ? await capture.filePathForObjectId(objectId)
+          : ((await resolveViewFile({ objectId }))?.path ?? null),
       listMoments: async ({ limit, objectId }) => {
+        if (!capture) throw new Error(JOINED_HISTORY_REFUSAL);
         // Unreadable rules hide every change, as the desktop's History does.
         const policy = await readWorkspaceEnginePolicy(workspace.rootPath);
         if (policy.errors.length)
@@ -1158,6 +1184,7 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
           }));
       },
       readMoment: async (momentId) => {
+        if (!capture) throw new Error(JOINED_HISTORY_REFUSAL);
         // Unreadable rules hide every change, as the desktop's History does,
         // so the answer says nothing about this change.
         const policy = await readWorkspaceEnginePolicy(workspace.rootPath);
@@ -1195,6 +1222,7 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
           workspaceId,
           rootPath,
           readOnly: Boolean(sharedViewOf(workspaceId)),
+          joined: sharedViewOf(workspaceId)?.membership === true,
         })),
       openWorkspace: openCliWorkspace,
       notices: dependencies.notices,

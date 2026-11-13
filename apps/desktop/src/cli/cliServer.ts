@@ -223,7 +223,11 @@ type CliUnreadFileThread = Pick<
 export interface CliRegistryWorkspace {
   workspaceId: string;
   rootPath: string;
+  // A share view: the owner's surfaces refuse.
   readOnly?: boolean;
+  // A share view of a whole workspace, at the member level. Its agents post
+  // in Groups and create pages as the person does there.
+  joined?: boolean;
 }
 
 // The desktop's one collection write seam. The shapes mirror
@@ -521,6 +525,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   accountReadOwner?(threadId: string): Promise<string | undefined>;
   dispatchStore: AwaitableAgentDispatchStore;
   readOnly: boolean;
+  joined?: boolean;
   // Makes, or finds, the work reference that names `target` in this workspace.
   makeWorkReference?(target: WorkTargetInput): Promise<string>;
   // The shared files this shared view holds back, or null outside a shared view.
@@ -4352,7 +4357,7 @@ async function dispatchWorkspace(
       const shown = await showChat(chats, request.args);
       if ("stream" in shown) return shown;
       if (!request.args.peek) {
-        if (context.readOnly) {
+        if (context.readOnly && !context.joined) {
           throw new CliCommandError("show requires --peek in a read-only workspace");
         }
         // A read from the run dohc started is its agent's, whatever actor it
@@ -4958,7 +4963,10 @@ async function workspaceContextForRequest(
     request.verb === "export" ||
     request.verb === "watch" ||
     (request.verb === "show" && !request.args.peek);
-  if (workspace.readOnly && writeRequest) {
+  if (workspace.readOnly && writeRequest && workspace.joined) {
+    const refusal = joinedWorkspaceWriteRefusal(request.verb, fileRequest, collectionWriteRequest);
+    if (refusal) throw new CliCommandError(refusal);
+  } else if (workspace.readOnly && writeRequest) {
     throw new CliCommandError(
       fileRequest
         ? "This workspace is read-only. Write in the owning workspace."
@@ -4975,6 +4983,28 @@ async function workspaceContextForRequest(
     await notifyRead(options, context, chatReadTarget(request));
   }
   return run === undefined ? context : { ...context, run };
+}
+
+// What an agent may write in a joined workspace is what the person may: a
+// post or reply in a Group, a reaction, a page at Edit, and a Group for an
+// admin. Each verb's own path and the relay decide the level and the role.
+// Every other write refuses here with its reason.
+function joinedWorkspaceWriteRefusal(verb: CliVerb, fileRequest: boolean, collectionWriteRequest: boolean): string | null {
+  if (fileRequest) return "In a joined workspace agents add pages with dohc document create.";
+  if (collectionWriteRequest) return "Agents can't change Collection records in a joined workspace yet. Change them in the app.";
+  switch (verb) {
+    case "post": case "reply": case "react": case "show":
+    case "documentCreate": case "groupCreate": case "fileChatStart":
+      return null;
+    case "documentEdit":
+      return "Agents can't edit pages in a joined workspace yet. Edit them in the app.";
+    case "export":
+      return "Export chats from the owner's workspace.";
+    case "watch":
+      return "Chat waits need a workspace you own.";
+    default:
+      return "Only the owner's computer does this.";
+  }
 }
 
 // The run dohc dispatched in the workspace, when the request carries that

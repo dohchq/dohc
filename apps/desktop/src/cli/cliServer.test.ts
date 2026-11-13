@@ -56,6 +56,7 @@ import { CHATS_METHOD, DaemonRefusalError, type Request } from "@dohc/workspace-
 import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
 import { LiveDocumentEditAppliedError } from "../workspaces/engineYDocSessionIpc";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
 import type { QuietRunRefusal } from "../agents/chatDispatchService";
@@ -2561,6 +2562,122 @@ describe("CLI socket server", () => {
     expect(
       await store.listMessages({ workspaceId: WORKSPACE_ID, threadId: existing.thread.id }),
     ).toHaveLength(1);
+  });
+
+  // A joined workspace: the person's view of a whole workspace someone else
+  // owns. Agents post in its Groups at Comment and Edit, as the person does,
+  // and every other write refuses with one reason.
+  describe("in a joined workspace", () => {
+    function joinAs(access: "view" | "comment" | "edit") {
+      chatRow = {
+        shareView: {
+          shareId: "share",
+          granterUserId: "owner",
+          granterEmail: null,
+          genericChatWritable: false,
+          recipientUserId: "verified-user-id",
+          relayUrl: "https://relay.test",
+          grantedSelector: { paths: [], versionId: null, access, wholeWorkspace: true },
+        } as unknown as NonNullable<RegistryEntry["shareView"]>,
+      };
+      registryWorkspace = { ...registryWorkspace, readOnly: true, joined: true };
+      context = { ...context, ...registryWorkspace, readOnly: true, joined: true };
+    }
+    const args = () => ({ cwd: workspaceRoot, actor: "agent" as const });
+
+    it("posts and replies in a Group at Comment, and refuses General and View", async () => {
+      const group = await store!.createChannel({
+        workspaceId: WORKSPACE_ID,
+        name: "Launch team",
+        kind: "channel",
+        type: "both",
+      });
+      const general = await store!.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+      // The engine names General by its fixed wire id; this store numbers it.
+      const wireId = store!.getChannelWireId.bind(store);
+      vi.spyOn(store!, "getChannelWireId").mockImplementation(async (input) =>
+        input.channelId === general.id ? GENERAL_CHANNEL_WIRE_ID : await wireId(input),
+      );
+      joinAs("comment");
+      const posted = await invoke("post", {
+        ...args(),
+        group: "Launch team",
+        attachments: [],
+        needsDecision: false,
+        body: "Agent here",
+      });
+      expect(posted.group).toMatchObject({ name: "Launch team" });
+      const replied = await invoke("reply", {
+        ...args(),
+        thread: posted.threadId,
+        attachments: [],
+        needsDecision: false,
+        body: "And a reply",
+      });
+      expect(replied.threadId).toBe(posted.threadId);
+      expect(
+        (await store!.listChannelThreads({ workspaceId: WORKSPACE_ID, channelId: group.id }))
+          .length,
+      ).toBe(1);
+      await expect(
+        invoke("post", {
+          ...args(),
+          group: "general",
+          attachments: [],
+          needsDecision: false,
+          body: "Hi all",
+        }),
+      ).rejects.toThrow("In a joined workspace you can post in Groups only.");
+      expect(
+        await store!.listChannelThreads({ workspaceId: WORKSPACE_ID, channelId: general.id }),
+      ).toEqual([]);
+      joinAs("view");
+      await expect(
+        invoke("post", {
+          ...args(),
+          group: "Launch team",
+          attachments: [],
+          needsDecision: false,
+          body: "At View",
+        }),
+      ).rejects.toThrow("Only people who can comment post here.");
+      // Reading stays open at every level, and marks the thread read.
+      await expect(
+        invoke("show", { ...args(), target: posted.threadId, peek: false }),
+      ).resolves.toMatchObject({ thread: { id: posted.threadId } });
+    });
+
+    it("refuses the writes a member cannot make with one reason each", async () => {
+      joinAs("edit");
+      const refusals: [CliVerb, Record<string, unknown>, string][] = [
+        [
+          "fileWrite",
+          { requestId: "joined", files: [{ path: "notes/a.md", contentBase64: "eA==" }] },
+          "In a joined workspace agents add pages with dohc document create.",
+        ],
+        [
+          "documentEdit",
+          { path: "notes/plan.md", replacement: "Done." },
+          "Agents can't edit pages in a joined workspace yet. Edit them in the app.",
+        ],
+        [
+          "collectionSetFields",
+          { recordPath: "tasks/a.md", fields: { status: "done" } },
+          "Agents can't change Collection records in a joined workspace yet. Change them in the app.",
+        ],
+        [
+          "export",
+          { outDir: join(tempRoot, "out"), scope: { kind: "all" } },
+          "Export chats from the owner's workspace.",
+        ],
+        ["watch", { timeoutMs: 0 }, "Chat waits need a workspace you own."],
+      ];
+      for (const [verb, extra, reason] of refusals) {
+        await expect(invokeAny(verb, { ...args(), ...extra } as never), verb).rejects.toThrow(
+          reason,
+        );
+      }
+    });
   });
 
   // Only the run itself says it has nothing to report, and the chat's own

@@ -825,7 +825,7 @@ describe("desktop CLI workspace context", () => {
         "  Main · main\n* Draft · draft · made from Main\n",
       );
 
-      vi.mocked(f.dependencies.sharedViewOf).mockReturnValue({});
+      vi.mocked(f.dependencies.sharedViewOf).mockReturnValue({ membership: false });
       expect(await mcp("versionList")).toEqual({
         ok: false,
         reason: "Versions belong to the owning workspace. Open it to continue.",
@@ -1072,7 +1072,7 @@ describe("desktop CLI workspace context", () => {
         stderr: "dohc: A Collection write failed. Try again.\n",
       });
 
-      vi.mocked(f.dependencies.sharedViewOf).mockReturnValue({});
+      vi.mocked(f.dependencies.sharedViewOf).mockReturnValue({ membership: false });
       expect(await mcp("versionCreate", { name: "Ideas" })).toEqual({
         ok: false,
         reason: "Versions belong to the owning workspace. Open it to continue.",
@@ -2513,7 +2513,7 @@ describe.each(["cli", "mcp"] as const)("live documents through %s", (door) => {
   it("refuses a received share, a received workspace, and a received marker before reaching the server", async () => {
     const shared = await liveDocumentsFixture({ caller: "shared-with-me/received" });
     const received = await liveDocumentsFixture();
-    vi.mocked(received.dependencies.sharedViewOf).mockReturnValue({});
+    vi.mocked(received.dependencies.sharedViewOf).mockReturnValue({ membership: false });
     const marked = await liveDocumentsFixture();
     marked.workspace.shareView = {} as RegistryEntry["shareView"];
     for (const f of [shared, received, marked]) {
@@ -2601,8 +2601,7 @@ it("gives CLI and MCP the IPC link answer in a share without Chats capture", asy
   const f = fixture(await createTestScratch("links-share-cli-"));
   f.setCapture(null);
   f.setDaemon(null);
-  f.dependencies.sharedViewOf = () =>
-    ({ shareId: "share" }) as ReturnType<Dependencies["sharedViewOf"]>;
+  f.dependencies.sharedViewOf = () => ({ membership: false });
   const resolved = {
     versionId: "main",
     results: [{ path: "target.md", fragment: "heading" }],
@@ -2660,7 +2659,7 @@ it("refuses a held change read in a shared view instead of answering that nothin
   const f = fixture(await createTestScratch("held-change-shared-"));
   const read = vi.fn(async () => null);
   f.dependencies.heldChanges.change = read;
-  vi.mocked(f.dependencies.sharedViewOf).mockReturnValue({});
+  vi.mocked(f.dependencies.sharedViewOf).mockReturnValue({ membership: false });
   await f.create().startDesktopCliServer();
   const token = "a".repeat(64);
   const send = async (request: CliRequestWithoutToken) => {
@@ -2749,4 +2748,65 @@ it("lists and keeps a live note's outside change for the CLI and the MCP, only i
   const refused = await cli("document", "keep-outside-change", "notes.md");
   expect(refused.exitCode).not.toBe(0);
   expect(f.capture.keepOutsideChange).toHaveBeenCalledTimes(3);
+});
+
+// A joined workspace: a share view of a whole workspace, at the member level.
+// It has no capture; its files resolve through the view's own engine session.
+function joinedFixture(access: "view" | "comment" | "edit" = "comment") {
+  const f = fixture();
+  const shareView = {
+    shareId: "share-1",
+    granterUserId: "owner",
+    recipientUserId: "me",
+    relayUrl: "https://relay.test",
+    granterEmail: null,
+    genericChatWritable: false,
+    grantedSelector: { paths: [], versionId: null, access, wholeWorkspace: true as const },
+  } as unknown as NonNullable<RegistryEntry["shareView"]>;
+  const joined: RegistryEntry = { ...f.workspace, remote: undefined, shareView };
+  f.rows.set(joined.workspaceId, joined);
+  f.dependencies.sharedViewOf = vi.fn(() => ({ membership: true }));
+  f.setCapture(null);
+  const resolveFiles = vi.fn(
+    async ({ targets }: { targets: ({ path: string } | { objectId: string })[] }) => ({
+      versionId: "main",
+      results: targets.map((target) =>
+        "path" in target
+          ? target.path === "notes/plan.md"
+            ? { status: "found" as const, objectId: "object-share-plan", path: target.path }
+            : { status: "absent" as const }
+          : target.objectId === "object-share-plan"
+            ? { status: "found" as const, objectId: target.objectId, path: "notes/plan.md" }
+            : { status: "absent" as const },
+      ),
+    }),
+  );
+  f.dependencies.withEngineAdapter = (async (
+    _workspace: unknown,
+    work: (adapter: VersionedLiveAdapter) => Promise<unknown>,
+  ) =>
+    await work({
+      resolveFiles,
+    } as unknown as VersionedLiveAdapter)) as Dependencies["withEngineAdapter"];
+  return { ...f, joined, shareView, resolveFiles };
+}
+
+describe("a joined workspace through the CLI", () => {
+  it("opens without a capture and finds its files through the view's engine", async () => {
+    const f = joinedFixture();
+    const context = await f.create().openCliWorkspace(f.joined);
+    expect(context.readOnly).toBe(true);
+    expect(context.joined).toBe(true);
+    expect(await context.fileObjectIdForPath("notes/plan.md")).toBe("object-share-plan");
+    expect(await context.fileObjectIdForPath("notes/missing.md")).toBeNull();
+    expect(await context.filePathForObjectId("object-share-plan")).toBe("notes/plan.md");
+    // History stays in the app, with one reason.
+    await expect(context.listMoments({ limit: 5 })).rejects.toThrow(
+      "Read a joined workspace's History in the app.",
+    );
+    await expect(context.readMoment("moment")).rejects.toThrow(
+      "Read a joined workspace's History in the app.",
+    );
+    expect(context.versions).toBeUndefined();
+  });
 });
