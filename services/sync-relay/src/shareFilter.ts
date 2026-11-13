@@ -1075,7 +1075,7 @@ function filterFileChatOpForPathShare(
 // read to their strings.
 const CHAT_TEXT_FIELDS: Readonly<Record<string, readonly string[]>> = {
   "chat.channel.create": ["name", "slug", "purpose"],
-  "chat.thread.create": ["title"],
+  "chat.thread.create": ["title", "channelSlug"],
   "chat.message.append": ["body", "authorDisplayName", "authorOwnerDisplayName", "authorReported", "work"],
   "chat.reaction.set": ["emoji", "authorDisplayName"],
   "chat.decision.set": ["options", "chosenOption"],
@@ -1102,6 +1102,17 @@ function withheldLinks(decision: ShareOpDecision, opKind: string, files: ShareSe
     if (payload[field] !== undefined) payload[field] = withholdIn(payload[field], covers);
   }
   return { ...decision, payload };
+}
+
+// A Group's name is also its share's label, which everyone it is shared with
+// reads. The label keeps only the file links its share's files cover, as the
+// name does in the chat. A selector that does not parse covers none.
+export function withheldShareLabel(selectorJson: string, label: string | null): string | null {
+  if (label === null) return null;
+  const selector = parseStoredAnyShareSelectorJson(selectorJson);
+  if (selector && !("kind" in selector)) return label;
+  const files = selector?.kind === "group" ? { paths: selector.paths, versionId: null } : null;
+  return withholdChatFileLinks(label, path => shareCoversLinkPath(files, path));
 }
 
 // The single decision point for what a share recipient may read. Strict

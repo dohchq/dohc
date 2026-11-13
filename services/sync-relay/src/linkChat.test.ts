@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { CHAT_FILE_LINK_WITHHELD } from "@dohc/workspace-contracts/chat-mentions";
 import { sha256Hex } from "@dohc/workspace-core/hash";
 import { DiscussionActivityHub } from "./discussionActivity";
 import { MAX_LINK_CHAT_FOLLOWS_PER_GRANT } from "./linkChatRoutes";
@@ -57,11 +58,11 @@ function appendOwnerOps(storage: SyncRelayStorage, originId: string, ops: ChatOp
   });
 }
 
-async function fixture(overrides: HandlerOverrides = released, activity = new DiscussionActivityHub(), options?: OpenSyncRelayStorageOptions) {
+async function fixture(overrides: HandlerOverrides = released, activity = new DiscussionActivityHub(), options?: OpenSyncRelayStorageOptions, folder = "team") {
   const storage = await testStorage(options);
   storage.claimWorkspace({ workspaceId, ownerUserId: OWNER, createdAtMs: 1 });
   appendOwnerOps(storage, "owner", [
-    chatChannelCreate(channelWireId, { name: "Team", type: "both", folderPath: "team" }),
+    chatChannelCreate(channelWireId, { name: "Team", type: "both", folderPath: folder }),
     chatThreadCreate("thread-team", channelWireId),
     chatMessageAppend("owner-first", "thread-team", "welcome", { authorUserId: OWNER, authorDisplayName: "Ada" }),
     chatMessageAppend("agent-reply", "thread-team", "on it", {
@@ -80,7 +81,7 @@ async function fixture(overrides: HandlerOverrides = released, activity = new Di
   ]);
   const h = testHandler(storage, { discussionActivity: activity, ...overrides });
   const created = await h(request(OWNER, `/sync/${workspaceId}/shares`, jsonBody({
-    recipientUserId: MEMBER, channelWireId, paths: ["team"], access: "read-write", subjectName: "Team",
+    recipientUserId: MEMBER, channelWireId, paths: [folder], access: "read-write", subjectName: "Team",
   })));
   expect(created.status, await created.clone().text()).toBe(200);
   const shareId = String((await json(created)).shareId);
@@ -192,6 +193,18 @@ describe("link chat on a Group share", () => {
     }
     expect((await readChat(f, capability, history.replace(channelWireId, "wire-private"))).status).toBe(404);
     expect((await readChat(f, capability, `channels?shareId=${f.shareId}`)).status).toBe(400);
+  });
+
+  it("reads a file link by the path the link's files show it at", async () => {
+    const f = await fixture(released, undefined, undefined, "clients/acme/team");
+    appendOwnerOps(f.storage, "owner-later", [chatMessageAppend("file-links", "thread-team",
+      "see @[clients/acme/team/plan.md#Goals] and @[clients/acme/budget.md]", { authorUserId: OWNER, authorDisplayName: "Ada" })]);
+    const capability = String((await groupLink(f)).exchanged.capabilityToken);
+    const page = await json(await readChat(f, capability, history));
+    expect(page.messages).toContainEqual(expect.objectContaining({
+      messageId: "file-links", body: `see @[team/plan.md#Goals] and ${CHAT_FILE_LINK_WITHHELD}`,
+    }));
+    expect(JSON.stringify(page)).not.toContain("acme");
   });
 
   it("creates read-write Group links only where Edit links are released", async () => {

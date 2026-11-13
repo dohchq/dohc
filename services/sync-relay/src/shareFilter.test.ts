@@ -1103,7 +1103,7 @@ describe("chat share op filter", () => {
     const linked = "@[finance/budget.md]";
     const served = [
       filterOpForShare(group, "chat.thread.create", JSON.stringify({ threadId: "thread-new", title: linked, createdAtMs: 1,
-        channelSlug: "team", channelWireId: "wire-shared", lane: "chat" }), resolver),
+        channelSlug: linked, channelWireId: "wire-shared", lane: "chat" }), resolver),
       filterOpForShare(group, "chat.decision.set", JSON.stringify({ threadId: "thread-in", messageId: "m1", state: "open", atMs: 1,
         options: [linked, "Keep"], chosenOption: linked }), resolver),
       filterOpForShare(group, "chat.reaction.set", JSON.stringify({ reactionId: "r1", messageId: "m1", threadId: "thread-in", emoji: linked,

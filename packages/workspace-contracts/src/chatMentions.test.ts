@@ -10,6 +10,7 @@ import {
   findMentions,
   formatChatWorkReferenceToken,
   matchMentionCandidates,
+  projectChatFileLinks,
   scanMentionTokens,
   withholdChatFileLinks,
   type MentionCandidate,
@@ -203,5 +204,11 @@ describe("withholding file links", () => {
     expect(once).toBe(`a ${out} b\n${out}\r\nnext ${out}`);
     expect(withholdChatFileLinks(once, () => false)).toBe(once);
     expect(withholdChatFileLinks("no links here", () => false)).toBe("no links here");
+  });
+
+  it("names a kept file link by the path its reader knows, with its heading", () => {
+    const fromTeam = (path: string) => (path.startsWith("acme/team/") ? path.slice("acme/".length) : null);
+    expect(projectChatFileLinks(`@[acme/team/a.md#Goals] @[work:${ref}] @[acme/b.md]`, fromTeam))
+      .toBe(`@[team/a.md#Goals] @[work:${ref}] ${out}`);
   });
 });

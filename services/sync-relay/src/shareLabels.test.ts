@@ -1,3 +1,4 @@
+import {CHAT_FILE_LINK_WITHHELD} from "@dohc/workspace-contracts/chat-mentions";
 import {afterEach, expect, it} from "vitest";
 import {seedLinkGrant, seedDependentGrant} from "./testing";
 import {claimWorkspace, closeTestStorages, createShare, inspectDatabase, storagePath, testStorage, testHandler, request, jsonBody, json} from "./testing";
@@ -60,6 +61,27 @@ it("leaves old shares neutral until the owner refreshes them", async () => {
   storage.setShareLabels(shareId, {subjectName: "😀".repeat(200)}, 99);
   expect(Array.from(storage.getShareLabels(shareId).subjectName!)).toHaveLength(160);
   expect(storage.getShareLabels(shareId)).not.toHaveProperty("sharerName");
+});
+
+it("keeps only the file links a Group's files cover in its label, which its members read as its name", async () => {
+  const storage = await testStorage(), handler = testHandler(storage);
+  await claimWorkspace(handler, "owner", "workspace");
+  const name = "Q3 @[team/plan.md] @[finance/budget.md]";
+  const share = (shareId: string, selector: object, subjectName: string) => storage.createShare({
+    share: {shareId, workspaceId: "workspace", granterUserId: "owner", selectorJson: JSON.stringify(selector), createdAtMs: 1, labels: {subjectName}},
+    grant: {grantId: `${shareId}-grant`, shareId, principalKind: "user", principalUserId: "ana", principalEmail: null, access: "read-only",
+      generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null}});
+  share("group", {kind: "group", channelWireId: "wire-group", paths: ["team"], versionId: null}, name);
+  share("chat", {kind: "chat", channelWireId: "wire-chat"}, name);
+  share("files", {paths: ["finance"], versionId: null}, "@[finance/budget.md]");
+  expect(storage.getShareLabels("group").subjectName).toBe(`Q3 @[team/plan.md] ${CHAT_FILE_LINK_WITHHELD}`);
+  // A Group shared without files covers none.
+  expect(storage.getShareLabels("chat").subjectName).toBe(`Q3 ${CHAT_FILE_LINK_WITHHELD} ${CHAT_FILE_LINK_WITHHELD}`);
+  // A file share's label is no Group's name.
+  expect(storage.getShareLabels("files").subjectName).toBe("@[finance/budget.md]");
+  // A rename reads the same way, cut short or not.
+  expect((await handler(request("owner", "/sync/shares/group", {...jsonBody({subjectName: `Q4 @[finance/${"x".repeat(200)}.md]`}), method: "PUT"}))).status).toBe(200);
+  expect(storage.getShareLabels("group").subjectName).toBe(`Q4 ${CHAT_FILE_LINK_WITHHELD}`);
 });
 
 it("stores labels with an atomic link share and refuses former or replacement owners", async () => {

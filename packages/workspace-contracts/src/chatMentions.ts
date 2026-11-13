@@ -295,6 +295,12 @@ export const CHAT_FILE_LINK_WITHHELD = "(a file not shared here)";
 // or not: a malformed, nested or unclosed one too, which runs to its line's
 // end. So no path or heading the reader may not read survives.
 export function withholdChatFileLinks(text: string, covers: (path: string) => boolean): string {
+  return projectChatFileLinks(text, path => (covers(path) ? path : null));
+}
+
+// As withholdChatFileLinks, but a file link is kept under the path `project`
+// gives it, the one its reader knows the file by, and withheld when that is null.
+export function projectChatFileLinks(text: string, project: (path: string) => string | null): string {
   if (!text.includes("@[")) return text;
   let kept = "";
   let at = 0;
@@ -304,9 +310,13 @@ export function withholdChatFileLinks(text: string, covers: (path: string) => bo
     const end = text[stop] === "]" ? stop + 1 : stop;
     const span = text.slice(start, end);
     const { files, works } = scanChatLinks(span);
-    const follows = files.length + works.length === 1 &&
-      (works[0]?.text === span || (files[0]?.text === span && covers(files[0].path)));
-    kept += text.slice(at, start) + (follows ? span : CHAT_FILE_LINK_WITHHELD);
+    const file = files.length === 1 && works.length === 0 && files[0]!.text === span ? files[0]! : null;
+    const path = file ? project(file.path) : null;
+    const read = works.length === 1 && files.length === 0 && works[0]!.text === span ? span
+      : file === null || path === null ? CHAT_FILE_LINK_WITHHELD
+      : path === file.path ? span
+      : formatChatFileReferenceToken({ ...file, path });
+    kept += text.slice(at, start) + read;
     at = end;
   }
   return kept + text.slice(at);

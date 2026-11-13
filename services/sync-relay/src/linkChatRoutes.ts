@@ -7,6 +7,9 @@ import { isAgentRequest, type LinkAuthorityResolver, type LinkJsonResponse } fro
 import { hashLinkProfileSecret } from "./linkSecurity";
 import { MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE, messageFromOp, readSharedChannelPage, type NamedChatMessage } from "./namedRecipientChat";
 import { parseString } from "./requestInputs";
+import { projectChatFileLinks } from "@dohc/workspace-contracts/chat-mentions";
+import { createAccountlessPathProjection } from "./accountlessPathProjection";
+import { fileSideOf, type AnyShareSelector } from "./shareFilter";
 import { authorizeLinkChatAction } from "./shareAuthorization";
 import type { createShareReadQueries } from "./shareReadQueries";
 import type { SyncRelayStorage } from "./storage";
@@ -38,6 +41,22 @@ export function linkChatMessage(message: NamedChatMessage): LinkChatMessage {
     body: message.body,
     bodyTooLarge: message.bodyTooLarge,
   };
+}
+
+// A link reader's files show each path from the shared folder down, so the
+// folders above it stay hidden. A file link its share covers reads the same
+// way; filterOpForShare has already withheld the rest.
+export function linkReaderChatMessage(selector: AnyShareSelector): (message: NamedChatMessage) => LinkChatMessage {
+  const files = fileSideOf(selector);
+  const projection = files ? createAccountlessPathProjection(files) : null;
+  const read = (text: string) => projectChatFileLinks(text, path => projection?.projectPath(path) ?? null);
+  const readOrNull = (text: string | null) => (text === null ? null : read(text));
+  return message => ({
+    ...linkChatMessage(message),
+    authorDisplayName: read(message.authorDisplayName),
+    authorOwnerDisplayName: readOrNull(message.authorOwnerDisplayName),
+    body: readOrNull(message.body),
+  });
 }
 
 export function refusePost(reason: Exclude<AppendLinkChatPostResult, { ok: true }>["reason"]): Response {
@@ -200,7 +219,7 @@ export function createLinkChatRoutes(options: {
         },
         activity: options.activity, waiter: `link:${capability.callerKey}`, signal: request.signal,
         maxResponseBytes: options.maxResponseBytes ?? LINK_CHAT_MAX_RESPONSE_BYTES, busyCode: "link_read_rate_limited",
-        project: linkChatMessage,
+        project: linkReaderChatMessage(authority.effectiveSelector),
       }));
     } finally {
       if (following) {
