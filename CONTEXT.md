@@ -59,7 +59,7 @@ A Markdown file in a workspace, shown with its title and icon. The Explorer's Ho
 _Avoid_: document (in the interface), doc
 
 **Lossy note**:
-A Markdown note whose meaning would change if dohc saved it from its editor, because the editor can't hold some of its parts, such as raw HTML or link reference definitions. dohc checks each note's current bytes when it opens and opens a lossy note read-only.
+A Markdown note that dohc's editor cannot save without changing its meaning, because it cannot hold parts such as raw HTML or link reference definitions. dohc checks each note's current bytes when it opens, and opens a lossy note read-only.
 _Avoid_: reader-built note (a note the engine's reader built, marked by `dohcMarkdownSourceReader`), unsupported note
 
 ### Collections
@@ -89,7 +89,7 @@ One item in a person's Notices: a problem or finished task on this computer, or 
 _Avoid_: notification (for the item), inbox, alert
 
 **Automation**:
-A rule on a Collection: one trigger, optional conditions, and steps that run in order. It belongs to the Collection, so anyone who can edit the Collection can change it, and it reaches only what all of those people can reach.
+A rule on a Collection: one trigger, optional conditions, and steps that run in order. It belongs to the Collection, so anyone who can edit the Collection can change it, and it reaches only what all of them can reach.
 _Avoid_: workflow, zap
 
 **Personal step**:
@@ -108,11 +108,11 @@ A relay-derived identity for one source workspace within a recipient namespace. 
 A relay-derived file identity within the same recipient namespace. It survives source renames and never exposes the source object id.
 
 **Work link**:
-A web link to one message, `<server origin>/l/<reference>`, on the server the workspace syncs with. It carries no credential and grants nothing. dohc opens it in the workspace on this computer that holds the message. In a browser, the server's page shows only an Open in dohc button. Messages are the only work that has one so far.
+A web link to one message, `<server origin>/l/<reference>`, on the server the workspace syncs with. It carries no credential and grants nothing. dohc opens it in the workspace on this computer that holds the message. A browser shows only an Open in dohc button.
 _Avoid_: share link (that is the URL grant), message URL
 
 **Work reference**:
-A lasting id for one chat, thread, message, file, app, Collection, or record. It survives renames and moves. In a chat message, `@[work:<reference>]` shows as a chip that opens what it names; `dohc chat link` and `dohc_link` make one. It grants nothing: someone who cannot see the work sees the chip as unavailable.
+A lasting id for one chat, thread, message, file, app, Collection, or record. It survives renames and moves. In a chat message, `@[work:<reference>]` shows as a chip that opens what it names. It grants nothing: someone who cannot see the work sees the chip as unavailable.
 _Avoid_: chat link (`dohc chat links` lists the files a chat mentions)
 
 ### Chat
@@ -171,11 +171,11 @@ The durable object that owns a shared scope of a workspace: its selector, discus
 _Avoid_: export, publish (for grants)
 
 **Grant**:
-One grantee's authority on a share, with its own level, generation, and revocation. A named user, a pending email invite, and a share link each hold one. A link's browser principals derive from the link grant; they are provenance, not grants.
+One grantee's authority on a share, with its own level, generation, and revocation. A named user, a pending email invite, and a share link each hold one. A link's browser principals derive from its grant; they are provenance, not grants.
 _Avoid_: permission, membership
 
 **Share access**:
-The level a file-share grant carries: View, Comment, or Edit. Comment adds the share's discussion. Edit adds live co-editing of the share's live documents, attributed and reversible through history. Named recipients and share links with Edit can also change a shared Collection's schema and automations, and create records in document Collections and Collections in a shared folder. Named recipients with Edit can also send change proposals. A Group or direct message grant carries read-only or read-write instead, typed by its selector kind.
+The level a file-share grant carries: View, Comment, or Edit. Comment adds the share's discussion. Edit adds live co-editing of the share's live documents, attributed and reversible through history, and the direct Collection changes listed under Change proposal. Named recipients with Edit can also send change proposals. A Group or direct message grant carries read-only or read-write instead.
 _Avoid_: permission level, role
 
 **Change proposal**:
@@ -187,11 +187,11 @@ The paste-into-dohc handle that names a share and its relay. Carries no authorit
 _Avoid_: share link (that is the URL grant), invite code
 
 **Share link**:
-A URL carrying the credential that authenticates a link grant: anyone holding it gets the grant's access level in a browser, no account needed. The owner can revoke the grant, change its level, or rotate the credential. Raising the level mints a new URL.
+A URL carrying a link grant's credential: anyone holding it gets the grant's access level in a browser, no account needed. The owner can revoke the grant, change its level, or rotate the credential. Raising the level mints a new URL.
 _Avoid_: public link, web share, share URL
 
 **Link holder**:
-Whoever uses a share link without a server account: a person in a browser, or an agent that signs in with the link. The relay records each one as a link principal with an optional unverified name. For an agent, it also records the agent connection it signed in with. The agent's name is the one its client reported, under the rules for a person's name, or "Agent". Its chat posts, discussion messages, and Collection writes all show that name.
+Whoever uses a share link without a server account: a person in a browser, or an agent that signs in with the link. The relay records each one as a link principal with an optional unverified name. For an agent, it also records the agent connection it signed in with.
 _Avoid_: guest (means sandboxed code in the app runtime), anonymous user, visitor
 
 **Link principal**:
@@ -199,7 +199,7 @@ The server-minted identity for one browser or one agent connection holding one s
 _Avoid_: anonymous id, device id
 
 **Agent connection**:
-One agent signed in through MCP with a share link, after a person allowed it on the consent page. It acts with the link's access under its own link principal. The owner sees it in the link's Agents list and can disconnect it alone. Reset link and End link end every connection on the link.
+One agent signed in through MCP with a share link, after a person allowed it on the consent page. It acts with the link's access under its own link principal. The owner can disconnect it alone. Reset link and End link end every connection on the link.
 _Avoid_: agent session, OAuth client
 
 **Received share**:

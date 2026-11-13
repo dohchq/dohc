@@ -38,7 +38,7 @@ The sandbox cannot retain receipt bytes across a page close before that save.
 After a reload, the retained response uses its uploaded receipt reference; it does not download the receipt into browser storage.
 To resume in another browser profile, import a recovery file saved before the reload.
 The backend recognizes that submission after a browser profile changes and returns its existing confirmation.
-A wrong secret or changed details refuse. Receipt identity is bound to its bytes, so reuploading the same receipt does not reserve slots twice.
+The backend refuses a retry with a different secret or changed details. Uploading the same receipt again does not reserve more slots.
 Organizer lists omit these recovery secrets.
 
 Organizers can search registrations, inspect receipts, update payment status, and enter manual or ReClub registrations.
@@ -72,18 +72,4 @@ Changing the descriptor, schema, or backend requires a new approval and an updat
 Collection reads return `{ rows: [{ id, version, values }], nextCursor }`, with values keyed by field ID.
 They support bounded SQL pagination, search, sorting, and field filters. Recovery secrets are absent from these reads and field metadata.
 
-## Verification
-
-The example tests execute the source in the actual isolated runtime with SQLite.
-They cover both-session rollback, capacity release and restoration, stale edits, private lookup, receipt attachment,
-manual entries, organizer checks, server-calculated totals, the ReClub checklist, and the maximum 272-attendee roster.
-
-From the repository root, run:
-
-```sh
-pnpm --filter @dohc/app-backend-runtime test src/examples.test.ts src/dataset-examples.test.ts
-```
-
-The dataset-host acceptance suite uses the actual compiled source, worker, SQLite journal, app bindings, and data grants.
-It proves shared Collection/app records, durable request replay, transactional receipt references, rule-preserving status edits, helper permissions, and revocation.
-The fixture supplies receipt metadata; browser upload transport and desktop publication require their own integration tests.
+The tests for this example are `examples.test.ts` and `dataset-examples.test.ts` in `packages/app-backend-runtime/src`.

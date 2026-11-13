@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Checks, starts and moves the dohc Drive server through the self-host release's own commands. See docs/how-to/drive.md.
+// Checks, starts and moves the dohc Drive server through the self-host release's own commands. See docs/engineering/drive.md.
 import { spawn } from "node:child_process";
 import { lstatSync, readdirSync, readFileSync, statfsSync } from "node:fs";
 import { posix } from "node:path";
@@ -441,7 +441,7 @@ async function checkNoAccounts(options, settings, config, host) {
     throw new Error(
       `Database ${database} already holds dohc accounts, so this is not the deployment's first start. ` +
         "If an earlier first start on this volume created the deployment, run start without --first-start. " +
-        'Otherwise a first start needs a database that has never held dohc. If the volume is lost, follow "Recover from total loss" in docs/how-to/drive.md.',
+        'Otherwise a first start needs a database that has never held dohc. If the volume is lost, follow "Recover from total loss" in docs/engineering/drive.md.',
     );
   }
   if (state !== "missing")
@@ -533,7 +533,7 @@ export async function runDrive(options, host = systemHost) {
     if (!(await mountState(mount, options.volumeUuid, host))) {
       if (options.command !== "move") {
         throw new Error(
-          `Volume ${options.volumeUuid} is not mounted at ${mount}. Mount it as described in docs/how-to/drive.md, then try again.`,
+          `Volume ${options.volumeUuid} is not mounted at ${mount}. Mount it as described in docs/engineering/drive.md, then try again.`,
         );
       }
       await mountVolume(mount, options.volumeUuid, isAttached, host);

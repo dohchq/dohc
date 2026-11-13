@@ -41,6 +41,13 @@ For docs, specs, plans, PR bodies, and code comments, follow the six rules from 
 5. Never use a foreign phrase, a scientific word, or a jargon word if you can think of an everyday English equivalent.
 6. Break any of these rules sooner than say anything outright barbarous.
 
+## Code comments
+
+Write the current constraint and what breaks without it.
+Leave the reviewer, the review round, the PR or issue number, and the plan label to git and the pull request.
+Keep a link to another project's issue when it explains a workaround.
+If a test holds the measurements, name the test.
+
 ## House style
 
 - Write "dohc" in lowercase, even at the start of a sentence.

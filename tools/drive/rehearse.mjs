@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Rehearses the Drive recipe without provider accounts, on a new server before its deployment exists. See "Rehearse on the new server" in docs/how-to/drive.md.
+// Rehearses the Drive recipe without provider accounts, on a new server before its deployment exists. See "Rehearse on the new server" in docs/engineering/drive.md.
 // It needs root, Docker, the release bundle, and its image. It changes only resources it creates, and removes them at the end.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -180,7 +180,7 @@ function volume(name) {
   run("mkfs.ext4", ["-q", "-F", image]);
   const device = attach(image),
     uuid = run("blkid", ["--match-tag", "UUID", "--output", "value", device]).output.trim();
-  // The operator's one-time preparation in docs/how-to/drive.md.
+  // The operator's one-time preparation in docs/engineering/drive.md.
   run("mount", ["-o", "nodev,nosuid,noexec", `UUID=${uuid}`, mount]);
   run("install", [
     "-d",

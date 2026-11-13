@@ -20,9 +20,9 @@ judged:
 node tools/rust-engine-program/run-rust-checks.mjs
 ```
 
-Do not run the cargo steps by hand and call the result a gate verdict. The
-gate's evidence line is the only artifact the verifier
-(`tools/rust-engine-program/require-ci-pass-verdict.mjs`) accepts.
+Run the gate for a verdict. The verifier
+(`tools/rust-engine-program/require-ci-pass-verdict.mjs`) accepts only the
+gate's evidence line.
 
 The test steps run through cargo-nextest. If the `test --workspace` step
 fails with "no such command: nextest", install the version CI pins
@@ -41,20 +41,14 @@ regressions with it.
 
 ## What the gate does for you
 
-On a host with a build-slot root, the gate enforces a shared build budget so
-several worktrees can build at once without exhausting the machine. The root
-comes from `DOHC_BUILD_SLOT_ROOT`. Outside CI it defaults to `C:\w\_locks`
-on Windows, and to `~/dev/worktrees/.locks` on a Mac where that folder exists.
-A host with no slot root, such as a CI runner, runs uncapped.
-You do not set these up:
-
-- It refuses to start below 40 GB free disk. The error names the floor;
-  `DOHC_GATE_DISK_FLOOR_GB` overrides it.
-- It takes one of 4 build slots before any cargo runs. If all slots are
-  held, it waits and prints who holds them.
-- It caps cargo's build and test parallelism to its share of the cores,
-  and turns incremental compilation off for the run.
-- It records the caps it ran under in the evidence line.
+On a host with a build-slot root, the gate keeps to a shared build budget, so
+several worktrees can build at once without exhausting the machine. It checks
+free disk, takes a build slot before any cargo runs, caps cargo's parallelism,
+and records the caps in the evidence line. You set none of this up.
+[`build-slot.mjs`](../../../tools/rust-engine-program/build-slot.mjs) holds the
+slot count, the caps, and each host's default slot root, which
+`DOHC_BUILD_SLOT_ROOT` overrides. A host with no slot root, such as a CI runner,
+runs uncapped.
 
 ## Read the verdict correctly
 
@@ -69,9 +63,12 @@ the numbers in the PR.
 ## When the gate waits or refuses
 
 - `waiting for a build slot` means other worktrees are building. Let it queue.
-  Do not delete another worktree's slot directory while its owner is alive.
-- A disk-floor refusal names the free space it saw. Prune stale out-of-repo
-  cargo target directories and stale worktree `target/` directories, then rerun.
+  It prints who holds the slots. Do not delete another worktree's slot
+  directory while its owner is alive.
+- The gate refuses to start below 40 GB free disk, and the refusal names the
+  free space it saw. Prune stale out-of-repo cargo target directories and stale
+  worktree `target/` directories, then rerun. `DOHC_GATE_DISK_FLOOR_GB`
+  overrides the floor.
 - If the gate's output goes quiet for more than 30 minutes inside one step,
   the step may be deadlocked. Investigate the step; do not kill unrelated
   processes.

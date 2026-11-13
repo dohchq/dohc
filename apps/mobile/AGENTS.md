@@ -1,18 +1,19 @@
 # dohc phone app
 
-Read this before changing anything a person sees in the phone app. The phone uses the desktop's words and
-behaviour (`.agents/skills/dohc-interface/SKILL.md`), from `@dohc/interface-words` where they're shared. A
-phone word or behaviour that differs from the desktop goes in the skill's phone section, with its reason, in the PR
-that introduces it. A difference that changes what another surface shows needs Ice's decision first.
+Read this before changing anything a person sees in the phone app.
 
 ## Platform differences
 
-What the phone does differently from the desktop is listed in the dohc-interface skill's phone section (`.agents/skills/dohc-interface/SKILL.md`, "The phone app"). Add a new difference there, with its reason, in the PR that introduces it.
+The phone uses the desktop's words and behaviour, which the dohc-interface skill gives (`.agents/skills/dohc-interface/SKILL.md`).
+Take shared words from `@dohc/interface-words`. Never copy them.
+[The phone app](../../.agents/skills/dohc-interface/phone.md#the-phone-app) in the skill lists what the phone does differently from the desktop.
+If a phone word or behaviour differs from the desktop, add it to that list, with its reason, in the PR that introduces it.
+If a difference changes what another surface shows, get Ice's decision first.
 
 ## Screenshot comparisons
 
-A page's last pixel row at the screen's bottom edge, under the home indicator, can differ by a third of a point from
-the approved frames. It's a known difference; look again only if it shows on another page or grows.
+A page's last pixel row at the screen's bottom edge, under the home indicator, can differ by a third of a point from the approved frames.
+Accept that difference. Look again only if it shows on another page or grows.
 
 ## Android
 
@@ -26,33 +27,28 @@ Android has been run since the host was added.
 
 ## Controls that act
 
-The app shows its sample data only in a sample build: a development build, or one made with
-`EXPO_PUBLIC_DOHC_SAMPLE=1`, as the simulator tests are (`src/sampleBuild.ts`). Any other build signs in to a
-server first (`src/account/Connect.tsx`), then reads the open workspace from it, read-only: Home, Chats, a chat and a
-page (`src/server/workspaceData.ts`). Search shows "Not built yet". An installable build never presents sample data
-as someone's work, and its bundle holds none: a sample module (`sample.ts`, or a screen in `Sample*.tsx`) is imported
-elsewhere only as a type, or required behind the exact test `src/sampleBuild.ts` gives. A sample build may keep a
-control the server will drive later. A link can open any route, so a route for one kind of build exports its screen
-through `sampleOnly` or `signedInOnly` (`src/sampleOnly.tsx`), and `src/routes.test.ts` fails on a route that does
-neither, and on a sample module imported any other way. `src/notices/rowAccessibility.test.ts` holds that each action a Notices row offers
-has a handler.
+The app shows its sample data only in a sample build: a development build, or one made with `EXPO_PUBLIC_DOHC_SAMPLE=1`, as the simulator tests are (`src/sampleBuild.ts`).
+Any other build signs in to a server first (`src/account/Connect.tsx`), then reads the open workspace from it, read-only: Home, Chats, a chat and a page (`src/server/workspaceData.ts`).
+Search shows "Not built yet".
 
-The server client (`src/server`) gives each sign-in a generation, which changes at sign-out, at a 401 and when
-another sign-in starts. A change aborts that sign-in's requests. Check `SignIn.isCurrent()` before applying anything
-a request answered, and use `requestGenerations()` for results that replace each other. The open workspace's reads
-live in one store per sign-in and workspace, which stops when either changes, so a late answer can't reach another
-workspace's screen. A 404 for the workspace, as when another device hides it from the phone, clears and stops its
-store, and the phone reads its workspace list again (`src/server/openWorkspace.ts`). If the list still shows it and
-the server can open it, it stays open as a failed read until Try again; otherwise the phone opens the next one. The
-phone opens only workspaces the list marks `canOpen`. The read cache keeps a copy on disk in Caches
-(`src/server/cacheFiles.ts`): one file per server, account and workspace, and one for the account's workspace list, so
-a relaunch opens the last workspace from disk before the server answers. A store with nothing in memory shows the
-loading state until it has read its file. In the foreground, a workspace's file is written at most once every 30 s;
-going to the background writes at once. The cache empties, files too, when the sign-in changes or ends. It loses a
-workspace when the phone hides it, the server answers 404 for it, or the server's list no longer has it as one the
-phone can open. Deletes run after any write in flight, and a delete overtakes a file still being read. Raise
-`CACHE_FORMAT` when a view's value changes shape. Ending a token deletes it from the keychain first,
-then revokes its session, so a phone closed between the two keeps no token.
+- An installable build never presents sample data as someone's work, and its bundle holds none. Import a sample module (`sample.ts`, or a screen in `Sample*.tsx`) elsewhere only as a type, or require it behind the exact test `src/sampleBuild.ts` gives.
+- A sample build may keep a control the server will drive later.
+- A link can open any route. Export build-specific screens through `sampleOnly` or `signedInOnly` (`src/sampleOnly.tsx`). `src/routes.test.ts` checks this and rejects other sample-module imports.
+- `src/notices/rowAccessibility.test.ts` holds that each action a Notices row offers has a handler.
 
-Copy uses React Native's core `Clipboard`, which React Native marks deprecated. Switch `src/copy.ts` to
-expo-clipboard before an upgrade removes it.
+## Server reads
+
+The server client is in `src/server`. Its files hold how each part works.
+
+- Check `SignIn.isCurrent()` before applying anything a request answered. A sign-in's generation changes at sign-out, at a 401 and when another sign-in starts, and the change aborts that sign-in's requests (`src/server/account.ts`).
+- Use `requestGenerations()` for results that replace each other (`src/server/client.ts`).
+- The open workspace's reads live in one store per sign-in and workspace. The store stops when either changes, so a late answer can't reach another workspace's screen (`src/server/workspaceData.ts`).
+- The phone opens only workspaces the list marks `canOpen`. A 404 for the open workspace clears and stops its store, and the phone reads its workspace list again (`src/server/openWorkspace.ts`).
+- The read cache keeps a copy on disk in Caches, so a relaunch opens the last workspace from disk before the server answers. `src/server/cacheFiles.ts` and the `ReadCache` in `src/server/workspaceData.ts` hold when it writes and deletes its files.
+- Raise `CACHE_FORMAT` when a view's value changes shape.
+- Ending a token deletes it from the keychain first, then revokes its session, so a phone closed between the two keeps no token (`src/server/account.ts`).
+
+## Copy
+
+`src/copy.ts` uses React Native's core `Clipboard`, which React Native marks deprecated.
+Before an upgrade removes it, switch `src/copy.ts` to expo-clipboard.

@@ -121,7 +121,8 @@ Do not weaken authorization, ownership, isolation, or configured controls for co
   Raw full-body Markdown patches cannot be the source of truth for live editing.
 - Give reversible state changes a visible reverse path. Warn before irreversible actions.
 - Show a top bar only for whole-workspace degradation. Other errors belong in bottom-right toasts and durable Notices rows.
-  Include Try again and copy. Put copy beside its text. Follow [dohc-interface](.agents/skills/dohc-interface/SKILL.md).
+  Include Try again and copy. Put copy beside its text.
+  [dohc-interface](.agents/skills/dohc-interface/SKILL.md) names the errors that show in place instead, such as a control's own input or an open dialog's action.
 - A slow workspace A response must never repaint workspace B.
   In a renderer component or hook, read workspace data with `useWorkspaceQuery`.
   Guard any other async result with a request token or abort signal before it changes workspace-scoped state.
@@ -304,8 +305,8 @@ Only `verify:pr` holds the verification lane. Run focused checks, benchmarks, an
   Combine correctness and simplification; provide the diff, relevant source, and required behavior.
 - Authorization, isolation, security, privacy, migration, durability, and major integrations need a second independent risk reviewer.
   Disputed blockers also need a second reviewer. Name reviewers and scopes in the PR.
-- Keep appointed reviewers through fix rounds. Replace an unavailable reviewer once and record why.
-  The replacement owns remaining review; the original reviewer's return adds no extra pass.
+- Keep appointed reviewers through fix rounds. Replace an unavailable reviewer once.
+  The replacement owns the remaining review; the original reviewer's return adds no extra pass.
 
 ### Review findings
 
@@ -322,7 +323,7 @@ Further rounds need a new verified blocker or unresolved high-risk concern.
 Unchanged rebases need a recorded comparison, not restarted review. Review conflict resolutions and substantive integration changes.
 Before merge, account for the full diff, later deltas, and every known finding on the final head. Resolve all verified blockers.
 Optional bot approval and reviewer unanimity are not merge conditions.
-Maintain one PR review note with reviewed commits, delta coverage, dispositions, round count, useful fixes, and reviewer/verification delays.
-Use local step durations; mark unknown times as unknown.
-Use these records to identify repeated delays and overlapping tests before changing coverage.
+Maintain one PR review note with reviewed commits, delta coverage, dispositions, and round count.
+Record reviewer and verification delays only when investigating a process problem. Use local step durations; mark unknown times as unknown.
+Use those records to identify repeated delays and overlapping tests before changing coverage.
 Narrower gates must account for shared dependencies in both the runner and workflow filters.
