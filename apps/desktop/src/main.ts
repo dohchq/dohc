@@ -271,7 +271,7 @@ import {
   refreshAccessObservations,
 } from "./access/accessOwner";
 import {
-  hasAccessChat,
+  accessChatKind,
   locateAccessVersionPath,
   resolveAccessFileObject,
   resolveAccessObject,
@@ -2571,10 +2571,8 @@ const accessOwner = createAccessOwner<AccessWorkspaceOperation>({
           return null;
         }
       },
-      hasChat: async (channelWireId) =>
-        workspace.sharedChannels?.some((channel) => channel.channelWireId === channelWireId) ===
-          true ||
-        (await hasAccessChat(workspace.workspaceId, channelWireId, linkedChatStoreFor(workspace))),
+      chatKind: (channelWireId) =>
+        accessChatKind(workspace.workspaceId, channelWireId, linkedChatStoreFor(workspace)),
     });
   },
   permissions: async (operation, datasetId, after) => {
@@ -6847,8 +6845,10 @@ const shareLinkAgentsForCli = createShareLinkAgentActions<RegistryEntry>({
 });
 // The Members page, and the owner's CLI and MCP, through one set of actions.
 const workspaceMembers = createWorkspaceMembersActions<RegistryEntry, CloudSessionCredentials>({
-  remoteForWorkspace, currentCredentialGeneration: () => credentialCacheGeneration,
-  relayResponse: (credentials, path, init) => relayShareResponseWithCredentials(credentials, path, init),
+  remoteForWorkspace,
+  currentCredentialGeneration: () => credentialCacheGeneration,
+  relayResponse: (credentials, path, init) =>
+    relayShareResponseWithCredentials(credentials, path, init),
 });
 // The desktop window and the CLI delete the account through this one client.
 // Afterwards this computer forgets every session of the deleted account, even

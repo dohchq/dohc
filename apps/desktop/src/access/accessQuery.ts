@@ -165,8 +165,10 @@ export function createAccessIndex(
       matched.set(cacheKey, result);
       return result;
     },
-    forChat(channelWireId: string): AccessShareRow[] {
-      return chats.get(channelWireId) ?? [];
+    /** `members` when the chat is an ordinary Group of this workspace, which every member reaches. */
+    forChat(channelWireId: string, members = false): AccessShareRow[] {
+      const shared = chats.get(channelWireId) ?? [];
+      return members && memberRows.length ? [...shared, ...memberRows].sort(byKey) : shared;
     },
   };
 }
@@ -279,6 +281,7 @@ export function createAccessQuery() {
       coverage: "granted" | "received-own-grant" | "received-account";
       shareId?: string;
       shareRoot?: boolean;
+      members?: boolean;
       cursor?: string;
     }): AccessAnswer {
       if ("listing" in input.observation && input.observation.visibility === "hidden")
@@ -297,7 +300,7 @@ export function createAccessQuery() {
         : input.ref?.kind === "path"
           ? index.forPath(input.ref)
           : input.ref?.kind === "chat"
-            ? index.forChat(input.ref.channelWireId)
+            ? index.forChat(input.ref.channelWireId, input.members)
             : index.rows;
       if (input.shareId) {
         const matching = new Set(rows.map(key));
@@ -315,6 +318,7 @@ export function createAccessQuery() {
           input.coverage,
           input.shareId,
           input.shareRoot,
+          input.members,
         ]),
       );
       const page = accessPage(rows, key, query, input.cursor);
