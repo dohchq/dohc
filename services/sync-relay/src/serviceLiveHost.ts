@@ -1352,19 +1352,24 @@ export async function startServiceLiveHost(options: {
       // Whether this update left lifecycle work for a pass, which it then wakes, even when it fails partway, as
       // when another workspace's attach fails. A later attempt finds that work already begun and leaves this unset.
       let lifecycle = false;
+      // The documents this daemon tracks: hosted, moved, waiting for a restore, or retained for a recovery copy.
+      const trackedKeys = () => new Set([...hosted.values(), ...movedDepartures.values(), ...movedRestores.values(), ...retained.values()]
+        .map(row => documentKey({workspaceId: row.target.workspaceId, objectId: row.objectId})));
       // A departing document is confirmed gone only by a pull that starts after its announcement here. A workspace
-      // that stays attached announces before any detach or attach, so another workspace's failure cannot hold its
-      // departures back. Updates and pulls take turns, so the next pull's number is the same before and after them.
-      const announce = (now: (workspaceId: string) => boolean) => {
+      // that stays attached announces its tracked departures before any detach or attach, so another workspace's
+      // failure cannot hold them back. One this update takes up announces only once it has, so an update that fails
+      // first cannot leave it confirmed gone with nothing kept. Updates and pulls take turns, so the next pull's number
+      // is the same before and after them.
+      const announce = (now: (workspaceId: string) => boolean, taken: Set<string> | undefined) => {
         for (const [workspaceId, attached] of attachments) {
           if (!now(workspaceId)) continue;
           for (const objectId of attached.announced.keys()) {
             if (!departing.has(documentKey({workspaceId, objectId}))) attached.announced.delete(objectId);
           }
         }
-        for (const document of departing.values()) {
+        for (const [key, document] of departing) {
           const workspaceId = document.target.workspaceId, attached = attachments.get(workspaceId);
-          if (attached && now(workspaceId) && !attached.announced.has(document.objectId)) {attached.announced.set(document.objectId, attached.pulls + 1); lifecycle = true;}
+          if (attached && now(workspaceId) && (!taken || taken.has(key)) && !attached.announced.has(document.objectId)) {attached.announced.set(document.objectId, attached.pulls + 1); lifecycle = true;}
         }
       };
       try {
@@ -1383,7 +1388,7 @@ export async function startServiceLiveHost(options: {
             leaving.add(key);
           }
         }
-        announce(workspaceId => !changed.includes(workspaceId));
+        announce(workspaceId => !changed.includes(workspaceId), trackedKeys());
         // A workspace stays wanted while anything of it may remain in its replica, so one that is not has nothing left to drain.
         for (const workspaceId of [...members.keys()]) if (!desired.has(workspaceId) || changed.includes(workspaceId)) await detach(workspaceId, joined);
         for (const workspace of workspaces) if (!members.has(workspace.workspaceId) && !diverged.has(workspace.root)) await attach(workspace, joined);
@@ -1394,8 +1399,7 @@ export async function startServiceLiveHost(options: {
         // A fresh daemon also resumes departures still at their enrolled paths,
         // settling, publishing and unloading work an earlier daemon left there.
         // Moved documents use their frozen targets for retirement, restore or a recovery copy.
-        const tracked = new Set([...hosted.values(), ...movedDepartures.values(), ...movedRestores.values(), ...retained.values()]
-          .map(row => documentKey({workspaceId: row.target.workspaceId, objectId: row.objectId})));
+        const tracked = trackedKeys();
         for (const document of departing.values()) {
           const {workspaceId, path} = document.target, key = JSON.stringify([workspaceId, path]);
           if (!members.has(workspaceId) || tracked.has(documentKey({workspaceId, objectId: document.objectId}))) continue;
@@ -1413,7 +1417,7 @@ export async function startServiceLiveHost(options: {
           }
         }
         // A workspace this update attached announces once installed.
-        announce(() => true);
+        announce(() => true, undefined);
         registerRetained();
         listedDepartures = new Set(departing.keys());
         updated = true;

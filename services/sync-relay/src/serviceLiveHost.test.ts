@@ -7668,6 +7668,40 @@ it("retires a stopped document while another workspace's update keeps failing, w
   expect(o.host.automationLedger("workspace-2")).toBeNull();
 });
 
+// Proves: a departure that a failing membership update has not taken up yet gets no announcement, so no pull can
+// confirm it gone while the daemon keeps nothing for it. Here a fresh daemon would resume a departure an earlier one
+// left, but another workspace's attach keeps failing first. Once an update succeeds, it resumes and is confirmed gone.
+it("keeps a departure a fresh daemon has not taken up while another workspace's attach keeps failing", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace];
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const second = {...o.workspace, root: join(o.f.root, "workspace-2"), workspaceId: "workspace-2"};
+  await mkdir(second.root);
+  const {restarted} = await restartEmpty(o);
+  let creates = 0;
+  // The first workspace attaches and checks its origin; every create after that fails.
+  const failLaterCreates = (method: string) => {
+    if (method === "sync.createHostedReplica" && ++creates === 2) o.replies.create = new Error("Relay unreachable.");
+  };
+  o.requestListeners.add(failLaterCreates);
+  const update = () => restarted.update({workspaces: [o.workspace, second], documents: [o.other], departing: [o.sibling]});
+  try {
+    await expect(update()).rejects.toThrow("Relay unreachable.");
+    // The first workspace stays attached, so this attempt reaches it before the other's attach fails again.
+    await expect(update()).rejects.toThrow("Relay unreachable.");
+    expect(restarted.automationLedger("workspace")).not.toBeNull();
+    expect(restarted.automationLedger("workspace-2")).toBeNull();
+    await afterPasses(o.f, 3);
+    expect(restarted.retains(o.sibling)).toBe(true);
+  } finally {
+    o.requestListeners.delete(failLaterCreates);
+    o.replies.create = undefined;
+  }
+  await update();
+  await vi.waitFor(() => expect(restarted.retains(o.sibling)).toBe(false), {timeout: 10_000});
+});
+
 // Proves: a ready workspace whose push keeps failing, here while it waits for owner admission, still pulls after
 // each refused push. Those pulls confirm a stopped document left, so the relay asks for its release while the push
 // still fails. The engine keeps the release pending while the document's settled output is unpushed; once a push
